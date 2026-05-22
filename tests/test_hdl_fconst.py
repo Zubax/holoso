@@ -27,21 +27,20 @@ from hdl_float_oracle import (
     sources,
 )
 
-
 # (case_name, VALUE, INF, expected_bits)
 CONST_CASES: list[tuple[str, float, int, int]] = [
-    ("zero",       0.0,                0, f32_to_bits(0.0)),
-    ("one",        1.0,                0, f32_to_bits(1.0)),
-    ("neg_one",   -1.0,                0, f32_to_bits(-1.0)),
-    ("half",       0.5,                0, f32_to_bits(0.5)),
-    ("neg_quart", -0.25,               0, f32_to_bits(-0.25)),
-    ("three_half", 1.5,                0, f32_to_bits(1.5)),
-    ("pi",         math.pi,            0, f32_to_bits(np.float32(np.pi))),
-    ("neg_pi",    -math.pi,            0, f32_to_bits(np.float32(-np.pi))),
-    ("pinf",       0.0,                1, F32_PINF),
-    ("pinf_big",   0.0,             1000, F32_PINF),
-    ("ninf",       0.0,               -1, F32_NINF),
-    ("ninf_big",   0.0,            -1000, F32_NINF),
+    ("zero", 0.0, 0, f32_to_bits(0.0)),
+    ("one", 1.0, 0, f32_to_bits(1.0)),
+    ("neg_one", -1.0, 0, f32_to_bits(-1.0)),
+    ("half", 0.5, 0, f32_to_bits(0.5)),
+    ("neg_quart", -0.25, 0, f32_to_bits(-0.25)),
+    ("three_half", 1.5, 0, f32_to_bits(1.5)),
+    ("pi", math.pi, 0, f32_to_bits(np.float32(np.pi))),
+    ("neg_pi", -math.pi, 0, f32_to_bits(np.float32(-np.pi))),
+    ("pinf", 0.0, 1, F32_PINF),
+    ("pinf_big", 0.0, 1000, F32_PINF),
+    ("ninf", 0.0, -1, F32_NINF),
+    ("ninf_big", 0.0, -1000, F32_NINF),
 ]
 
 
@@ -50,9 +49,7 @@ async def holoso_fconst_cocotb(dut) -> None:
     expected = int(os.environ["HOLOSO_TEST_EXPECTED"], 0)
     await Timer(1, unit="ns")
     actual = int(dut.y.value)
-    assert actual == expected, (
-        f"holoso_fconst output mismatch: got 0x{actual:08x}, want 0x{expected:08x}"
-    )
+    assert actual == expected, f"holoso_fconst output mismatch: got 0x{actual:08x}, want 0x{expected:08x}"
 
 
 @pytest.mark.parametrize("case", CONST_CASES, ids=[c[0] for c in CONST_CASES])

@@ -1,4 +1,5 @@
-from iir1_lpf import IIR1LPF    # Ideally, the synthesizer should follow the import and inline the implementation.
+from iir1_lpf import IIR1LPF  # Ideally, the synthesizer should follow the import and inline the implementation.
+
 
 class IIR1HPF:
     """
@@ -10,7 +11,7 @@ class IIR1HPF:
     The LPF state `m` is the estimated low-frequency/DC bias.
     """
 
-    def __init__(self, *, ALPHA: float = 2**-16):   # Alpha is an instantiation time parameter.
+    def __init__(self, *, ALPHA: float = 2**-16):  # Alpha is an instantiation time parameter.
         # If the implementation of IIR1LPF is not available to the synthesizer, it will instantiate its Verilog module
         # blindly, but then the user has to provide the signature.
         self.lpf = IIR1LPF(ALPHA=ALPHA)

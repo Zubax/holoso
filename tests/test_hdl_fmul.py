@@ -30,7 +30,6 @@ from hdl_float_oracle import (
     start_clock,
 )
 
-
 STAGE_PRODUCT_VALUES = (0, 1)
 
 
@@ -73,8 +72,7 @@ async def holoso_fmul_cocotb(dut) -> None:
     await sb.drain()
 
     sample_pairs = [
-        (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))],
-         DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
+        (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))], DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
         for _ in range(8)
     ]
     for y_op in SGNOP_OPS:

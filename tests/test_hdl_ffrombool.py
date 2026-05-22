@@ -23,9 +23,7 @@ async def holoso_ffrombool_cocotb(dut) -> None:
         dut.x.value = x
         await Timer(1, unit="ns")
         actual = int(dut.y.value)
-        assert actual == expected, (
-            f"x={x}: got 0x{actual:08x}, want 0x{expected:08x}"
-        )
+        assert actual == expected, f"x={x}: got 0x{actual:08x}, want 0x{expected:08x}"
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)

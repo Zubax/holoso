@@ -34,8 +34,6 @@ from hdl_float_oracle import (
 )
 
 
-
-
 @cocotb.test()
 async def holoso_fadd_cocotb(dut) -> None:
     await start_clock(dut)
@@ -78,8 +76,7 @@ async def holoso_fadd_cocotb(dut) -> None:
     # Phase B: sgnop sweep grouped by y_sgnop (so y_sgnop is stable per group). Within a group, all 4x4
     # (a_sgnop, b_sgnop) combinations are exercised on a small sample of operand pairs.
     sample_pairs = [
-        (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))],
-         DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
+        (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))], DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
         for _ in range(8)
     ]
     for y_op in SGNOP_OPS:

@@ -29,9 +29,7 @@ async def holoso_fisfinite_cocotb(dut) -> None:
         await Timer(1, unit="ns")
         expected = 0 if (x_bits & F32_EXP_MASK) == F32_EXP_MASK else 1
         actual = int(dut.y.value)
-        assert actual == expected, (
-            f"x=0x{x_bits:08x}: got {actual}, want {expected}"
-        )
+        assert actual == expected, f"x=0x{x_bits:08x}: got {actual}, want {expected}"
 
     for x in DIRECTED_F32:
         await check(x)

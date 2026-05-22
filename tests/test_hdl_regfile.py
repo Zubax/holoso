@@ -9,7 +9,6 @@ from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HDL = REPO_ROOT / "hdl" / "holoso_support.v"
 TESTS_DIR = REPO_ROOT / "tests"

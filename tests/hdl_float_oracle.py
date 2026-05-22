@@ -21,7 +21,6 @@ import numpy as np
 from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, RisingEdge, Timer
 
-
 # ---------------------------------------------------------------------------
 # Paths and build helpers
 # ---------------------------------------------------------------------------
@@ -131,7 +130,7 @@ def random_zkf_f32(rng: np.random.Generator) -> int:
 
 
 DIRECTED_F32: tuple[int, ...] = (
-    0,                                                       # +0
+    0,  # +0
     f32_to_bits(1.0),
     f32_to_bits(-1.0),
     f32_to_bits(0.5),
@@ -142,8 +141,8 @@ DIRECTED_F32: tuple[int, ...] = (
     f32_to_bits(np.float32(-np.pi)),
     f32_to_bits(np.float32(1e-30)),
     f32_to_bits(np.float32(-1e-30)),
-    f32_to_bits(np.finfo(np.float32).tiny),                  # smallest normal +
-    f32_to_bits(-np.finfo(np.float32).tiny),                 # smallest normal -
+    f32_to_bits(np.finfo(np.float32).tiny),  # smallest normal +
+    f32_to_bits(-np.finfo(np.float32).tiny),  # smallest normal -
     F32_MAX_FIN,
     F32_MIN_FIN,
     F32_PINF,
@@ -238,6 +237,7 @@ def _flush_to_zkf(bits: int) -> int:
 # Test parameter knobs (env vars)
 # ---------------------------------------------------------------------------
 
+
 def get_seed(default: int = 0x9E3779B97F4A7C15) -> int:
     return int(os.environ.get("HOLOSO_TEST_SEED", hex(default)), 0)
 
@@ -249,6 +249,7 @@ def get_random_count(default: int = 256) -> int:
 # ---------------------------------------------------------------------------
 # Cocotb scaffolding
 # ---------------------------------------------------------------------------
+
 
 async def start_clock(dut, period_ns: int = 10) -> None:
     cocotb.start_soon(Clock(dut.clk, period_ns, unit="ns").start())
@@ -294,10 +295,7 @@ class PipelineScoreboard:
                 continue
             actual = int(getattr(self.dut, sig_name).value)
             exp = expected[key]
-            assert actual == exp, (
-                f"{sig_name} mismatch in case {desc!r}: "
-                f"got 0x{actual:x}, expected 0x{exp:x}"
-            )
+            assert actual == exp, f"{sig_name} mismatch in case {desc!r}: " f"got 0x{actual:x}, expected 0x{exp:x}"
 
     async def drain(self, max_cycles: int = 512) -> None:
         """Hold in_valid=0 until the queue empties or max_cycles elapses."""
@@ -308,6 +306,4 @@ class PipelineScoreboard:
             await RisingEdge(self.dut.clk)
             await Timer(1, unit="ns")
             self.sample()
-        assert not self.queue, (
-            f"queue did not drain in {max_cycles} cycles ({len(self.queue)} left)"
-        )
+        assert not self.queue, f"queue did not drain in {max_cycles} cycles ({len(self.queue)} left)"

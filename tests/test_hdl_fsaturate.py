@@ -34,9 +34,7 @@ async def holoso_fsaturate_cocotb(dut) -> None:
         else:
             expected = x_bits
         actual = int(dut.y.value)
-        assert actual == expected, (
-            f"x=0x{x_bits:08x}: got 0x{actual:08x}, want 0x{expected:08x}"
-        )
+        assert actual == expected, f"x=0x{x_bits:08x}: got 0x{actual:08x}, want 0x{expected:08x}"
 
     for x in DIRECTED_F32:
         await check(x)

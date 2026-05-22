@@ -33,7 +33,6 @@ from hdl_float_oracle import (
     start_clock,
 )
 
-
 K_VALUES = (-5, -1, 0, 1, 5)
 
 

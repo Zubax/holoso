@@ -33,7 +33,6 @@ from hdl_float_oracle import (
     start_clock,
 )
 
-
 STAGE_INPUT_VALUES = (0, 1)
 
 
@@ -93,12 +92,11 @@ async def holoso_fdiv_cocotb(dut) -> None:
     # Sgnop sweep grouped by y_sgnop. Include a zero-divisor case in each sample
     # to ensure div0 is exercised under each y_sgnop too.
     sample_pairs = [
-        (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))],
-         DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
+        (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))], DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
         for _ in range(6)
     ]
-    sample_pairs.append((f32_to_bits(1.0), 0))      # div by +0
-    sample_pairs.append((f32_to_bits(-1.0), 0))     # also div by +0
+    sample_pairs.append((f32_to_bits(1.0), 0))  # div by +0
+    sample_pairs.append((f32_to_bits(-1.0), 0))  # also div by +0
 
     for y_op in SGNOP_OPS:
         dut.y_sgnop.value = y_op

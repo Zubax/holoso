@@ -37,11 +37,14 @@ async def holoso_fcmp_cocotb(dut) -> None:
     await start_clock(dut)
     await drive_reset(dut)
 
-    sb = PipelineScoreboard(dut, [
-        ("a_gt_b", "gt"),
-        ("a_eq_b", "eq"),
-        ("a_lt_b", "lt"),
-    ])
+    sb = PipelineScoreboard(
+        dut,
+        [
+            ("a_gt_b", "gt"),
+            ("a_eq_b", "eq"),
+            ("a_lt_b", "lt"),
+        ],
+    )
     rng = np.random.default_rng(get_seed())
 
     async def step_idle() -> None:
@@ -61,10 +64,14 @@ async def holoso_fcmp_cocotb(dut) -> None:
         dut.a_sgnop.value = a_op
         dut.b_sgnop.value = b_op
         dut.in_valid.value = 1
-        sb.push({
-            "gt": gt, "eq": eq, "lt": lt,
-            "_desc": f"a=0x{a:08x} b=0x{b:08x} ops={a_op}{b_op}",
-        })
+        sb.push(
+            {
+                "gt": gt,
+                "eq": eq,
+                "lt": lt,
+                "_desc": f"a=0x{a:08x} b=0x{b:08x} ops={a_op}{b_op}",
+            }
+        )
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
         # Also assert one-hot invariant on the DUT itself when it pulses.
@@ -83,8 +90,7 @@ async def holoso_fcmp_cocotb(dut) -> None:
 
     # 2) Sgnop sweep on a sample of operand pairs (varying sgnops per cycle is fine).
     sample_pairs = [
-        (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))],
-         DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
+        (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))], DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
         for _ in range(8)
     ]
     for a, b in sample_pairs:
@@ -94,8 +100,8 @@ async def holoso_fcmp_cocotb(dut) -> None:
     await sb.drain()
 
     # 3) Cases that test equality after sgnop normalization (e.g., +3 vs -3 with neg).
-    pi_p = DIRECTED_F32[7]   # +pi
-    pi_n = DIRECTED_F32[8]   # -pi
+    pi_p = DIRECTED_F32[7]  # +pi
+    pi_n = DIRECTED_F32[8]  # -pi
     await step(pi_p, pi_n, 0, 1)  # +pi vs neg(-pi)=+pi  -> equal
     await step(pi_p, pi_p, 0, 2)  # +pi vs abs(+pi)=+pi  -> equal
     await step(pi_p, pi_n, 0, 2)  # +pi vs abs(-pi)=+pi  -> equal

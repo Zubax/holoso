@@ -67,10 +67,13 @@ async def holoso_fsort_cocotb(dut) -> None:
         dut.min_sgnop.value = mn_op
         dut.max_sgnop.value = mx_op
         dut.in_valid.value = 1
-        sb.push({
-            "min": mn_exp, "max": mx_exp,
-            "_desc": f"a=0x{a:08x} b=0x{b:08x} ops={a_op}{b_op}{mn_op}{mx_op}",
-        })
+        sb.push(
+            {
+                "min": mn_exp,
+                "max": mx_exp,
+                "_desc": f"a=0x{a:08x} b=0x{b:08x} ops={a_op}{b_op}{mn_op}{mx_op}",
+            }
+        )
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
         sb.sample()
@@ -83,8 +86,7 @@ async def holoso_fsort_cocotb(dut) -> None:
 
     # 2) Full sgnop sweep grouped by output sgnops (mn_op, mx_op).
     sample_pairs = [
-        (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))],
-         DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
+        (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))], DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
         for _ in range(4)
     ]
     for mn_op in SGNOP_OPS:

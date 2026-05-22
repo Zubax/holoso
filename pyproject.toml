@@ -16,6 +16,9 @@ test = [
     "cocotb~=2.0",
     "pytest~=8.0",
 ]
+format = [
+    "black~=26.5",
+]
 
 [tool.setuptools.dynamic]
 version = {attr = "holoso.__version__"}
@@ -26,3 +29,7 @@ include = ["holoso*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-p", "no:mypy"]
+
+[tool.black]
+line-length = 120
+target-version = ["py314"]

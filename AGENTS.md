@@ -28,7 +28,7 @@ References:
 
 ### Language
 
-Verilog style: 4-space indentation, concise module names, snake_case files and directories, and uppercase parameter/localparam names where practical.
+Python and Verilog style: 4-space indentation, concise names, snake_case files and directories, uppercase Verilog `parameter`/`localparam`.
 Keep line length at or below 120 columns. Comment block lines should utilize the 120 column limit well, avoiding overly short lines.
 
 Testbenches are written in Python using Cocotb or similar tools.
