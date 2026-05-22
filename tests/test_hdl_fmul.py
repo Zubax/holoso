@@ -1,10 +1,12 @@
 """Tests for holoso_fmul (pipelined; sgnop on a, b, y; y = sgnop(sgnop(a)*sgnop(b))).
 
-Same wrapper-property considerations as holoso_fadd: y_sgnop is combinational on the output, so stimulus is grouped
-by y_sgnop with a drain between groups, while a_sgnop and b_sgnop can vary every cycle.
+The wrapper delays y_sgnop through the same number of stages as zkf_mul, so all sgnop controls are allowed to vary
+every input cycle. The scoreboard verifies the documented wrapper latency against actual out_valid timing.
 """
 
 from __future__ import annotations
+
+import os
 
 import cocotb
 import numpy as np
@@ -38,7 +40,7 @@ async def holoso_fmul_cocotb(dut) -> None:
     await start_clock(dut)
     await drive_reset(dut)
 
-    sb = PipelineScoreboard(dut, [("y", "y")])
+    sb = PipelineScoreboard(dut, [("y", "y")], latency=int(os.environ["HOLOSO_EXPECTED_LATENCY"]))
     rng = np.random.default_rng(get_seed())
 
     async def step_idle() -> None:
@@ -75,27 +77,24 @@ async def holoso_fmul_cocotb(dut) -> None:
         (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))], DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
         for _ in range(8)
     ]
-    for y_op in SGNOP_OPS:
-        dut.y_sgnop.value = y_op
-        for a_op in SGNOP_OPS:
-            for b_op in SGNOP_OPS:
-                for a, b in sample_pairs:
+    for a_op in SGNOP_OPS:
+        for b_op in SGNOP_OPS:
+            for a, b in sample_pairs:
+                for y_op in SGNOP_OPS:
                     await step(a, b, a_op, b_op, y_op)
-        await sb.drain()
+    await sb.drain()
 
-    n_per_group = max(1, get_random_count() // len(SGNOP_OPS))
-    for y_op in SGNOP_OPS:
-        dut.y_sgnop.value = y_op
-        for _ in range(n_per_group):
-            if rng.random() < 0.2:
-                await step_idle()
-                continue
-            a = random_zkf_f32(rng)
-            b = random_zkf_f32(rng)
-            a_op = int(rng.integers(0, 4))
-            b_op = int(rng.integers(0, 4))
-            await step(a, b, a_op, b_op, y_op)
-        await sb.drain()
+    for _ in range(get_random_count()):
+        if rng.random() < 0.2:
+            await step_idle()
+            continue
+        a = random_zkf_f32(rng)
+        b = random_zkf_f32(rng)
+        a_op = int(rng.integers(0, 4))
+        b_op = int(rng.integers(0, 4))
+        y_op = int(rng.integers(0, 4))
+        await step(a, b, a_op, b_op, y_op)
+    await sb.drain()
 
     await drive_reset(dut)
     for _ in range(8):
@@ -125,5 +124,6 @@ def test_holoso_fmul(sim: str, stage_product: int) -> None:
         test_module="test_hdl_fmul",
         test_dir=TESTS_DIR,
         build_dir=build_dir,
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(3 + int(bool(stage_product)))},
         results_xml=str(build_dir / "results.xml"),
     )
