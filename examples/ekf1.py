@@ -118,8 +118,7 @@ def main() -> None:
 
     # Generated Verilog module name defaults to the function name, unless overridden explicitly.
     result = holoso.synthesize(update_x_P, float_format=float_format)
-    verilog_path, cocotb_path = holoso.write_artifacts(result, out_dir)
-    print("Output:", verilog_path, "Testbench:", cocotb_path)
+    # ... to be defined ...
 
 
 if __name__ == "__main__":
