@@ -9,6 +9,7 @@ requires-python = ">=3.14"
 description = "A narrow Python-to-Verilog synthesizer for numeric kernels."
 dependencies = [
     "numpy~=2.4",
+    "sympy~=1.14",
 ]
 
 [project.optional-dependencies]

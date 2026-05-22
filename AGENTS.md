@@ -40,7 +40,9 @@ The following constructs are banned in synthesizable Verilog (fine in reference 
 
 In synthesizable code, prefer `case` statements over nested ternary operators unless there are contraindications.
 
-In complex modules, it is best to avoid a large number of named nets that are only used once; this does not help readability but rather the opposite.
+In complex Verilog modules, it is best to avoid a large number of named nets that are only used once; this does not help readability but rather the opposite.
+
+The Python version to target is 3.14 and newer. No need to ensure compatibility with older versions.
 
 ### Other
 
