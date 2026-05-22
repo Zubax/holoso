@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  nox:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/zubax/zubax-fpga-toolchain:2026-05-18
+      options: --user root
+    env:
+      # cocotb 2.0.1 has a hard upper bound of Python 3.13 in its sdist metadata, but it works fine on
+      # the container's Python 3.14; this opt-out skips the install-time version check.
+      COCOTB_IGNORE_PYTHON_REQUIRES: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run nox
+        run: nox

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "holoso"
+dynamic = ["version"]
+requires-python = ">=3.14"
+description = "A narrow Python-to-Verilog synthesizer for numeric kernels."
+dependencies = [
+    "numpy~=2.4",
+]
+
+[project.optional-dependencies]
+test = [
+    "cocotb~=2.0",
+    "pytest~=8.0",
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "holoso.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["holoso*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-p", "no:mypy"]
