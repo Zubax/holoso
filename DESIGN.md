@@ -5,6 +5,8 @@ See `README.md` for scope and `PRIOR_ART.md` for why existing tools don't fit. T
 we are building toward; it is expected to change frequently.
 Exploratory notes live in `DESIGN.draft.md` (not up to date).
 
+One must read the representative use-case examples under the `examples/` directory to understand the motivation.
+
 ## Direction
 
 - Build our own compiler. The differentiating work is the front/mid-end: partial evaluation of Python, shape
