@@ -125,6 +125,7 @@ Terminators: `jump(target)`, `branch(cond_bool, t, f)`, `ret` (commit state-writ
 State. Persistent state = class attributes; `__init__` gives initial values (folded, or kw-only params -> Verilog
 `parameter`s). An unwritten persistent register holds its value. Reset reaches only state regs that are live-in at reset
 before any dominating write (in practice the boolean control flags); pure datapath state stays out of the reset cone.
+Registers that hold values assigned in `__init__` are explicitly assigned initial values at module reset.
 
 Branch vs. select (the core control-flow decision):
 
@@ -140,6 +141,9 @@ const-fold + algebraic simplify (SymPy-assisted) - CSE - strength reduction (`x*
 `x/c` -> `x*(1/c)` to avoid true dividers; `x**n` -> multiply chain) - operator selection + latency annotation -
 optional if-conversion - DCE.
 
+Note: it is understood that FP math is non-associative and some of these optimizations may result in non-bit-exact
+results, which is accepted.
+
 ## LIR
 
 ```
@@ -154,7 +158,7 @@ step k:
   term:   next = k+1 | branch(bool_reg, t, f) | done
 ```
 
-- Reads are free (multiport FF), so binding is constrained only by operator-instance count and writes.
+- Reads are cheap (multiport FF), so binding is constrained only by operator-instance count and writes.
 - Register allocation = liveness + phi-coalescing; widen `N` rather than spill at these sizes.
 - `branch` is the real control transfer: the microprogram counter jumps, untaken steps never run, and II is whatever the
   executed path costs.
@@ -192,9 +196,9 @@ dynamic dispatch) rather than the flat barrier FSM -- so it is out of the first 
 
 Mechanical from LIR: FF register bank (per-reg input mux + `we`), operator instances with input muxes, all driven by a
 control word; the controller is a `case(state)` emitting the control word + next-state (conditional on a bool reg).
-A step advances when all of its issued operators assert `out_valid` (the FSM drives their `out_ready` to latch the
-results). Module-level valid/ready handshake + `done` at `ret`; `diag_error` OR-aggregated from operators on the
-executed path. Nonblocking assignment only, `case` not functions.
+A step advances when all of its issued operators assert `out_valid` (the FSM drives their `out_ready`, where available,
+to latch the results). Module-level valid/ready handshake + `done` at `ret`; `diag_error` OR-aggregated from operators
+on the executed path. Nonblocking assignment only, `case` not functions.
 The control word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
 
 ## Decisions

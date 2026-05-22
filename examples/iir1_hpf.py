@@ -18,5 +18,5 @@ class IIR1HPF:
 
     def step(self, x: float) -> float:
         x = float(x)
-        bias = self.lpf.step(x)
+        bias = self.lpf(x)
         return x - bias
