@@ -1,17 +1,27 @@
-"""Render a self-contained, light-themed single-page HTML report for a synthesized module."""
+"""Render a self-contained, light-themed single-page HTML report for a synthesized module.
+
+The stylesheet and the interactive layer live alongside this module as ``html.css`` and ``html.js`` (declared as
+package data in ``pyproject.toml``); they are inlined into the self-contained report so it has no external dependency
+beyond the web font.
+"""
 
 from __future__ import annotations
 
 import html
 import json
 from datetime import datetime
+from importlib import resources
 
 from ..format import FloatFormat
-from ..lir import ConstRef, InputLoad, Issue, Lir, Operand, OutputWire, RegRef
+from ..lir import Issue, Lir, Operand, RegRef
 from ..operators import OpKind, Sgnop, latency_of
 from ..result import ModuleInterface, SynthesisMetrics
 
 _GITHUB_URL = "https://github.com/Zubax/holoso"
+
+_CSS = resources.files(__package__).joinpath("html.css").read_text(encoding="utf-8")
+# Interactive layer; ``__DATA__`` is replaced by the per-module payload in ``_sched_script``.
+_SCHED_JS = resources.files(__package__).joinpath("html.js").read_text(encoding="utf-8")
 
 # Reserved, high-contrast operator colors (white text legible on each) for a light background.
 _KIND_COLOR: dict[OpKind, str] = {
@@ -26,229 +36,6 @@ _KIND_LABEL: dict[OpKind, str] = {
     OpKind.FDIV: "/",
     OpKind.FMUL_ILOG2: "<<",
 }
-
-_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Ubuntu+Mono:wght@400;700&display=swap');
-* { box-sizing: border-box; }
-body { font-family: "Ubuntu Mono", ui-monospace, monospace; margin: 0; background: #ffffff; color: #111827; font-size: 14px; }
-header { padding: 16px 28px; background: #111827; color: #f9fafb; }
-header h1 { margin: 0; font-size: 22px; }
-header .sub { color: #cbd5e1; font-size: 13px; margin-top: 3px; }
-header .sub a { color: #93c5fd; text-decoration: underline; }
-main { padding: 14px 28px 70px; }
-/* Compact summary sections share one wrapping row; the utilization and register-grid schedule are full-width below. */
-.toprow { display: flex; flex-wrap: wrap; gap: 0 40px; align-items: flex-start; }
-.toprow .sec { min-width: 0; }
-.scrollx { overflow-x: auto; }
-h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: #111827; font-weight: 700; margin: 26px 0 8px; border-bottom: 1px solid #000; padding-bottom: 4px; }
-.cards { display: flex; flex-wrap: wrap; gap: 10px; }
-.card { border: 1px solid #cbd5e1; border-radius: 6px; padding: 7px 13px; min-width: 110px; }
-.card .v { font-size: 18px; font-weight: 700; }
-.card .l { font-size: 11px; color: #4b5563; }
-.note { color: #4b5563; font-size: 12px; margin: 6px 0 0; }
-.ifaces { display: flex; gap: 30px; flex-wrap: wrap; }
-.iface h3 { font-size: 12px; color: #111827; margin: 0 0 4px; text-transform: uppercase; letter-spacing: 0.05em; }
-.iface table { border-collapse: collapse; font-size: 12px; }
-.iface th, .iface td { text-align: left; padding: 2px 12px 2px 0; border-bottom: 1px solid #c2c7cf; white-space: nowrap; }
-.iface th { color: #4b5563; font-weight: 700; }
-.const { display: inline-block; background: #f3f4f6; color: #92400e; border: 1px solid #cbd5e1; margin: 2px; padding: 1px 7px; border-radius: 3px; font-size: 12px; }
-/* Schedule: a register grid beside a flowing operation list. Rows = clock cycles (height proportional to step
-   latency); columns = registers then constants (black divider between). A result column is filled with its operator
-   color over its compute cycles; an SVG overlay links each result to its operand cells. Bold rules separate steps. */
-#schedwrap { position: relative; display: inline-block; }
-.edges { position: absolute; top: 0; left: 0; pointer-events: none; overflow: visible; }
-.grid { border-collapse: collapse; table-layout: fixed; }
-.grid th.gh { width: 14px; font-size: 9px; color: #4b5563; font-weight: 700; padding: 0 1px; border-bottom: 1px solid #000; vertical-align: bottom; }
-.grid th.clkh { width: 42px; border-right: 1px solid #000; }
-.grid th.steph { width: 52px; border-right: 1px solid #000; }
-.grid th.gh span { writing-mode: vertical-rl; }
-.grid th.gh.k span { color: #92400e; }
-.grid td { height: 13px; font-size: 11px; line-height: 1; white-space: nowrap; border-top: 1px solid #d7dbe0; }
-.grid tr.sstart td { border-top: 1px solid #000; }
-.grid tr.band td.gc { background: #fafbfc; }
-.grid td.gc { width: 13px; padding: 0; text-align: center; border-right: 1px solid #eef0f2; overflow: hidden; }
-/* The black structural dividers: same width/style as the faint inter-cell line, so they must out-specify .grid td.gc
-   (equal specificity, declared later) and sit on the left cell's right edge -- the side border-collapse keeps. */
-.grid td.rbk, .grid th.rbk { border-right: 1px solid #000; }
-.clk { color: #9aa1ab; text-align: right; font-size: 10px; padding: 0 5px; border-right: 1px solid #000; }
-.stepn { font-weight: 700; color: #111827; padding: 0 6px; border-right: 1px solid #000; white-space: nowrap; }
-.rd { display: inline-block; font-size: 9px; line-height: 11px; border: 1px solid; border-radius: 2px; padding: 0 1px; }
-.wr { display: inline-block; font-size: 9px; line-height: 11px; border-radius: 2px; padding: 0 1px; color: #fff; font-weight: 700; }
-.wl { color: #fff; font-size: 9px; font-weight: 700; line-height: 11px; }
-/* Operations column: one cell per step (rowspan over its cycles), so the list is step-aligned and grows to hold all
-   operator chips no matter how many issue in a step -- the contingency for many parallel operators. */
-.grid th.oph { width: 250px; text-align: left; vertical-align: bottom; padding: 0 6px 2px 8px; border-bottom: 1px solid #000; font-size: 10px; color: #4b5563; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
-.grid td.opcell { vertical-align: top; padding: 1px 4px 2px 8px; white-space: normal; }
-.opf { display: inline-block; background: #374151; color: #fff; font-size: 10px; font-weight: 700; border-radius: 3px; padding: 0 4px; margin: 1px 3px 1px 0; white-space: nowrap; }
-/* Hover-focus: only the hovered operation's own elements get the .hl class (its edges, result cells and ops chip),
-   so no per-hover sweep of the rest of the grid. They turn black with a soft glow to stand out among the colors. */
-.edges line.hl { stroke: #000; stroke-width: 2px; stroke-opacity: 1; }
-.edges circle.hl { fill: #000; }
-.grid td.gc.hl { background: #111 !important; }
-.opf.hl { background: #111 !important; box-shadow: 0 0 0 2px rgba(17, 17, 17, 0.35); }
-.gridkey { display: flex; flex-wrap: wrap; gap: 18px; font-size: 12px; color: #374151; margin: 0 0 8px; align-items: center; }
-.gridkey .rd, .gridkey .wr { font-size: 11px; }
-.gridkey .sw { display: inline-block; width: 14px; height: 13px; border: 1px solid #cbd5e1; vertical-align: middle; margin-right: 5px; }
-.gridkey .lk { vertical-align: middle; margin-right: 5px; }
-.util { border-collapse: collapse; margin-top: 4px; }
-.util td, .util th { border: 1px solid #c2c7cf; padding: 0; text-align: center; }
-.util .name { padding: 1px 8px; text-align: left; color: #111827; border: none; font-size: 11px; }
-.util .st { writing-mode: vertical-rl; font-size: 9px; color: #6b7280; font-weight: 400; padding: 3px 0; }
-.cell { width: 11px; height: 15px; background: #fff; position: relative; }
-.fill { position: absolute; bottom: 0; left: 0; right: 0; }
-.legend { display: flex; flex-wrap: wrap; gap: 22px; font-size: 12px; color: #374151; margin-top: 8px; align-items: center; }
-.legend .box { display: inline-block; width: 12px; height: 15px; border: 1px solid #94a3b8; vertical-align: middle; margin-right: 5px; position: relative; }
-"""
-
-# Interactive layer for the schedule grid. ``__DATA__`` is replaced by the per-module payload in ``_sched_script``.
-# Kept deliberately readable (the report is a tool, not a minified asset); without JS the grid still renders fully.
-_SCHED_JS = """
-(function () {
-    "use strict";
-    var data = __DATA__;
-    var edges = data.edges;          // [writeCellId, operandCellId, color, operationGroup]
-    var columns = data.columns;      // label per grid column, indexed by (cell index - 2)
-    var constants = data.constants;  // { "c0": "1.0", ... }
-    var liveness = data.liveness;    // { "<registerIndex>": [[start, end], ...] } live-row intervals
-    var lastRow = data.lastRow;      // grid row id of the "out" bookend
-
-    var wrap = document.getElementById("schedwrap");
-    if (!wrap) {
-        return;
-    }
-    var svg = wrap.querySelector("svg.edges");
-    var SVG_NS = "http://www.w3.org/2000/svg";
-
-    // Elements grouped by operation, so a hover can light up just one operation's nodes. The result cells and the ops
-    // chip are static (tagged with data-op); the edges are rebuilt on every redraw and tracked separately.
-    var nodesByGroup = {};
-    wrap.querySelectorAll("[data-op]").forEach(function (element) {
-        var group = element.dataset.op;
-        (nodesByGroup[group] = nodesByGroup[group] || []).push(element);
-    });
-    var edgesByGroup = {};
-
-    // Draw each dataflow edge (result cell -> operand cell) by measuring the rendered cell centres, so the overlay
-    // stays aligned no matter the exact cell metrics or a late web-font swap.
-    function drawEdges() {
-        edgesByGroup = {};
-        while (svg.firstChild) {
-            svg.removeChild(svg.firstChild);
-        }
-        var origin = wrap.getBoundingClientRect();
-        svg.setAttribute("width", wrap.scrollWidth);
-        svg.setAttribute("height", wrap.scrollHeight);
-        edges.forEach(function (edge) {
-            var fromCell = document.getElementById(edge[0]);
-            var toCell = document.getElementById(edge[1]);
-            if (!fromCell || !toCell || fromCell === toCell) {
-                return;
-            }
-            var from = fromCell.getBoundingClientRect();
-            var to = toCell.getBoundingClientRect();
-            var x1 = from.left - origin.left + from.width / 2;
-            var y1 = from.top - origin.top + from.height / 2;
-            var x2 = to.left - origin.left + to.width / 2;
-            var y2 = to.top - origin.top + to.height / 2;
-            var color = edge[2];
-            var group = edge[3];
-
-            var line = document.createElementNS(SVG_NS, "line");
-            line.setAttribute("x1", x1);
-            line.setAttribute("y1", y1);
-            line.setAttribute("x2", x2);
-            line.setAttribute("y2", y2);
-            line.setAttribute("stroke", color);
-            line.setAttribute("stroke-width", "1");
-            line.setAttribute("stroke-opacity", "0.85");
-            svg.appendChild(line);
-
-            var dot = document.createElementNS(SVG_NS, "circle");
-            dot.setAttribute("cx", x2);
-            dot.setAttribute("cy", y2);
-            dot.setAttribute("r", "1.7");
-            dot.setAttribute("fill", color);
-            svg.appendChild(dot);
-
-            (edgesByGroup[group] = edgesByGroup[group] || []).push(line, dot);
-        });
-    }
-
-    drawEdges();
-    window.addEventListener("resize", drawEdges);
-    if (document.fonts && document.fonts.ready) {
-        document.fonts.ready.then(drawEdges);
-    }
-
-    // Hovering an operation (its result column or its ops chip) makes only that one operation stand out: we toggle a
-    // class on its own handful of elements rather than restyling every other operation, so there is no per-hover
-    // sweep of the grid. The .hl class blackens its edges, result cells and chip.
-    var focused = null;  // currently focused group (a "data-op" string), or null
-
-    function setHighlighted(group, on) {
-        [nodesByGroup[group], edgesByGroup[group]].forEach(function (list) {
-            if (list) {
-                list.forEach(function (element) {
-                    element.classList.toggle("hl", on);
-                });
-            }
-        });
-    }
-
-    function focus(group) {
-        if (group === focused) {
-            return;
-        }
-        if (focused !== null) {
-            setHighlighted(focused, false);
-        }
-        focused = group;
-        if (group !== null) {
-            setHighlighted(group, true);
-        }
-    }
-
-    // Whether register `label` (e.g. "r41") holds a live value on `cycle`, from its residence intervals.
-    function isAlive(label, cycle) {
-        var intervals = liveness[label.slice(1)];
-        if (!intervals) {
-            return false;
-        }
-        for (var i = 0; i < intervals.length; i++) {
-            if (cycle >= intervals[i][0] && cycle <= intervals[i][1]) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    wrap.addEventListener("mouseover", function (event) {
-        var owner = event.target.closest("[data-op]");  // a result cell or an ops chip
-        focus(owner ? owner.dataset.op : null);
-
-        var cell = event.target.closest("td");
-        if (!cell || !cell.classList.contains("gc")) {
-            return;
-        }
-        var label = columns[cell.cellIndex - 2];
-        if (label === undefined) {
-            return;
-        }
-        var clk = cell.parentNode.cells[0].textContent.trim();
-        if (label.charAt(0) === "c") {
-            cell.title = label + " = " + constants[label];
-        } else {
-            var cycle = clk === "in" ? -1 : (clk === "out" ? lastRow : parseInt(clk, 10));
-            cell.title = label + "@" + clk + " " + (isAlive(label, cycle) ? "alive" : "dead");
-        }
-    });
-    wrap.addEventListener("mouseout", function (event) {
-        if (!wrap.contains(event.relatedTarget)) {
-            focus(null);
-        }
-    });
-})();
-"""
 
 
 def _esc(text: str) -> str:
@@ -301,7 +88,7 @@ def build_report_html(lir: Lir, interface: ModuleInterface, metrics: SynthesisMe
 def _metrics(interface: ModuleInterface, metrics: SynthesisMetrics, fmt: FloatFormat) -> str:
     instances = " ".join(f"{count}×{kind}" for kind, count in metrics.operator_instances.items())
     cards = [
-        _card(f"e{fmt.wexp}+m{fmt.wman} = {fmt.width}-bit", f"ZKF floating point format"),
+        _card(f"e{fmt.wexp}+m{fmt.wman} = {fmt.width}-bit", "ZKF floating point format"),
         _card(instances or "-", "operator instances"),
         _card(metrics.n_float_regs, "float registers"),
         _card(f"{metrics.read_ports} / {metrics.write_ports}", "regfile R/W ports"),
@@ -470,7 +257,7 @@ def _schedule(lir: Lir, fmt: FloatFormat) -> str:
     if not lir.steps:
         return ""
     nreg, nconst = lir.regfile.nreg, len(lir.consts)
-    columns: list[ColKey] = [("r", i) for i in range(nreg)] + [("c", i) for i in range(nconst)]
+    columns = _columns_of(lir)
     col_ord = {col: ordinal for ordinal, col in enumerate(columns)}
     dividers = {len(columns) - 1}  # black right-border columns: last data column | operations ...
     if nconst:
@@ -559,7 +346,7 @@ def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[i
     ``out`` row id -- enough for the script to draw the dataflow overlay and synthesize hover tooltips on demand without
     a per-cell attribute. Without JS the grid still renders fully; only these behaviors are absent.
     """
-    cols = [f"{kind}{index}" for kind, index in columns_of(lir)]
+    cols = [f"{kind}{index}" for kind, index in _columns_of(lir)]
     data = {
         "edges": edges,
         "columns": cols,
@@ -570,7 +357,7 @@ def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[i
     return "<script>\n" + _SCHED_JS.replace("__DATA__", json.dumps(data)) + "\n</script>"
 
 
-def columns_of(lir: Lir) -> list[ColKey]:
+def _columns_of(lir: Lir) -> list[ColKey]:
     """The grid columns: one per float register, then one per constant (matches the order rendered in the table)."""
     return [("r", i) for i in range(lir.regfile.nreg)] + [("c", i) for i in range(len(lir.consts))]
 
