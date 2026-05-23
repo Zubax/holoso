@@ -33,9 +33,7 @@ Keep line length at or below 120 columns. Comment block lines should utilize the
 
 Testbenches are written in Python using Cocotb or similar tools.
 
-Blocking register assignment is banned in synthesizable Verilog (fine in reference models or testbenches).
 Functions can be used in synthesizable Verilog but only if avoiding them is unduly burdensome.
-
 In synthesizable code, prefer `case` statements over nested ternary operators unless there are contraindications.
 
 In complex Verilog modules, it is best to avoid a large number of named nets that are only used once; this does not help readability but rather the opposite.

@@ -20,6 +20,9 @@ test = [
 format = [
     "black~=26.5",
 ]
+typecheck = [
+    "mypy~=1.18",
+]
 
 [tool.setuptools.dynamic]
 version = {attr = "holoso.__version__"}
@@ -30,7 +33,18 @@ include = ["holoso*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-p", "no:mypy"]
+markers = ["slow: long-running synthesis cosimulation (run via nox -s synth_examples)"]
 
 [tool.black]
 line-length = 120
 target-version = ["py314"]
+
+[tool.mypy]
+# mypy may not yet recognize 3.14 as a target; analyze under 3.13 semantics (we avoid 3.14-only syntax in typed code).
+python_version = "3.13"
+strict = true
+files = ["holoso"]
+
+[[tool.mypy.overrides]]
+module = ["sympy.*"]
+ignore_missing_imports = true

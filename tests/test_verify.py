@@ -1,0 +1,126 @@
+"""Unit tests for the pure-Python verification core."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+
+from holoso.format import FloatFormat
+from holoso.frontend import lower
+from holoso.passes import run
+from holoso.verify import opgraph_eval, reference, sampling, zkf_codec
+from holoso.verify.tolerance import default_tolerance, unit_roundoff, within
+
+F32 = FloatFormat(8, 24)
+FMT = FloatFormat(6, 18)
+
+
+def test_codec_known_binary32_values() -> None:
+    assert zkf_codec.encode(F32, 1.0) == 0x3F800000
+    assert zkf_codec.encode(F32, 2.0) == 0x40000000
+    assert zkf_codec.encode(F32, 0.5) == 0x3F000000
+    assert zkf_codec.encode(F32, -1.0) == 0xBF800000
+    assert zkf_codec.encode(F32, 0.0) == 0
+    assert zkf_codec.decode(F32, 0x3F800000) == 1.0
+    assert zkf_codec.decode(F32, 0) == 0.0
+
+
+def test_codec_round_trip_within_unit_roundoff() -> None:
+    rng = np.random.default_rng(1)
+    for fmt in (F32, FMT):
+        u = unit_roundoff(fmt)
+        for _ in range(500):
+            x = float(rng.uniform(-100.0, 100.0))
+            y = zkf_codec.decode(fmt, zkf_codec.encode(fmt, x))
+            assert abs(y - x) <= u * abs(x) + 1e-30
+
+
+def test_codec_exact_powers_and_simple_fractions() -> None:
+    for value in (3.0, 0.25, -7.5, 16.0, 0.125):
+        assert zkf_codec.decode(FMT, zkf_codec.encode(FMT, value)) == value
+
+
+def test_is_legal_rejects_subnormal_and_negative_zero() -> None:
+    # exp == 0 with nonzero fraction is subnormal; sign bit with zero magnitude is negative zero.
+    assert not zkf_codec.is_legal(FMT, 0b1)  # subnormal
+    neg_zero = 1 << (FMT.width - 1)
+    assert not zkf_codec.is_legal(FMT, neg_zero)
+    assert zkf_codec.is_legal(FMT, zkf_codec.encode(FMT, 1.0))
+
+
+def test_reference_evaluates_and_flattens() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        return [a + b, a * b]
+
+    assert reference.evaluate(f, {"a": 2.0, "b": 3.0}) == [5.0, 6.0]
+
+
+def test_opgraph_matches_original_small_kernels() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        return (a - b) * 0.25 + a * b
+
+    hir = run(lower(f, FMT))
+    inputs = {"a": 1.25, "b": -3.5}
+    ref = reference.evaluate(f, inputs)
+    got = opgraph_eval.evaluate(hir, inputs)
+    assert all(within(g, r, 1e-12, 1e-15) for g, r in zip(got, ref))
+
+
+def test_opgraph_matches_original_ekf1() -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import ekf1
+
+    rng = np.random.default_rng(12345)
+    cov = sampling.spd_matrix(rng, 3, 0.5, 2.0)
+    inputs = {
+        "P00": float(cov[0, 0]),
+        "P01": float(cov[0, 1]),
+        "P02": float(cov[0, 2]),
+        "P11": float(cov[1, 1]),
+        "P12": float(cov[1, 2]),
+        "P22": float(cov[2, 2]),
+        "Q_R": sampling.log_uniform_positive(rng, 1e-3, 1e-1),
+        "Q_g": sampling.log_uniform_positive(rng, 1e-3, 1e-1),
+        "Q_i": sampling.log_uniform_positive(rng, 1e-3, 1e-1),
+        "R_ct": sampling.log_uniform_positive(rng, 1e-1, 1.0),
+        "R_shunt": sampling.log_uniform_positive(rng, 1e-1, 1.0),
+        "dt": sampling.bounded(rng, 1e-3, 1e-2),
+        "x_R": sampling.bounded(rng, -1.0, 1.0),
+        "x_g": sampling.bounded(rng, -1.0, 1.0),
+        "x_i": sampling.bounded(rng, -1.0, 1.0),
+        "z_ct": sampling.bounded(rng, -1.0, 1.0),
+        "z_shunt": sampling.bounded(rng, -1.0, 1.0),
+    }
+    hir = run(lower(ekf1.update_x_P, FMT))
+    ref = reference.evaluate(ekf1.update_x_P, inputs)
+    got = opgraph_eval.evaluate(hir, inputs)
+    assert len(ref) == 9 and all(np.isfinite(ref))
+    assert all(within(g, r, 1e-9, 1e-12) for g, r in zip(got, ref))
+
+
+def test_tolerance_predicate() -> None:
+    assert within(1.0, 1.0, 0.0, 0.0)
+    assert within(1.001, 1.0, 0.01, 0.0)
+    assert not within(1.1, 1.0, 0.01, 0.0)
+    assert within(float("inf"), float("inf"), 1.0, 1.0)
+    assert not within(float("inf"), 1.0, 1.0, 1.0)
+
+
+def test_default_tolerance_scales_with_format_and_size() -> None:
+    coarse = default_tolerance(FMT, 100)[0]
+    fine = default_tolerance(F32, 100)[0]
+    assert coarse > fine  # 6/18 has a larger unit roundoff than 8/24
+    assert default_tolerance(FMT, 200)[0] > default_tolerance(FMT, 10)[0]
+
+
+def test_sampling_legal_and_spd() -> None:
+    rng = np.random.default_rng(7)
+    for _ in range(200):
+        bits = sampling.random_legal_bits(FMT, rng)
+        assert zkf_codec.is_legal(FMT, bits) and zkf_codec.is_finite(FMT, bits)
+    cov = sampling.spd_matrix(rng, 3)
+    assert np.all(np.linalg.eigvalsh(cov) > 0.0)
+    encoded = sampling.encode_inputs(FMT, {"a": 1.0, "b": 2.0})
+    assert set(encoded) == {"a", "b"} and encoded["a"] == zkf_codec.encode(FMT, 1.0)
