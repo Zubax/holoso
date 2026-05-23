@@ -18,7 +18,7 @@ from holoso.passes import run
 from holoso.schedule import build, metrics_of
 from holoso.verify.cosim import Sampler, build_vectors, generic_sampler
 
-from hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, TESTS_DIR, build_args, sources
+from hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, BENCH_DIR, build_args, sources
 
 
 def _run_cosim(
@@ -42,6 +42,7 @@ def _run_cosim(
         count=count,
         rng=np.random.default_rng(0xC0FFEE),
         timeout_cycles=max(64, metrics.ii_estimate * 4),
+        cycles=metrics.ii_estimate,  # == schedule.cycle_count(lir); the driver asserts the DUT matches it exactly
         sampler=sampler,
     )
     vectors_path = gen_dir / "vectors.json"
@@ -61,7 +62,7 @@ def _run_cosim(
     runner.test(
         hdl_toplevel=name,
         test_module="cosim_driver",
-        test_dir=str(TESTS_DIR),
+        test_dir=str(BENCH_DIR),
         build_dir=str(build_dir),
         extra_env={"HOLOSO_VECTORS": str(vectors_path)},
         results_xml=str(build_dir / "results.xml"),

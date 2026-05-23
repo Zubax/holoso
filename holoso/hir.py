@@ -12,7 +12,7 @@ import enum
 from dataclasses import dataclass
 
 from .format import FloatFormat
-from .operators import OpKind
+from .operators import OpKind, Sgnop
 
 type ValueId = int
 
@@ -70,14 +70,14 @@ class Fmul2K:
 @dataclass(frozen=True, slots=True)
 class OpNode:
     """A selected hardware operator use with folded sign-ops. ``b`` is ``None`` for unary ``FMUL_ILOG2``;
-    ``k`` is the exponent for ``FMUL_ILOG2`` (else ``None``). Sign-ops use the 2-bit ``SGNOP_*`` encoding."""
+    ``k`` is the exponent for ``FMUL_ILOG2`` (else ``None``)."""
 
     kind: OpKind
     a: ValueId
     b: ValueId | None
-    a_sgnop: int
-    b_sgnop: int
-    y_sgnop: int
+    a_sgnop: Sgnop
+    b_sgnop: Sgnop
+    y_sgnop: Sgnop
     k: int | None
     latency: int
 
@@ -89,7 +89,7 @@ type Node = InPort | Const | Arith | SignFix | Fmul2K | OpNode
 class OutputPort:
     name: str
     value: ValueId
-    sgnop: int = 0  # combinational sign-op applied to the output wire (folded residual sign)
+    sgnop: Sgnop = Sgnop.NONE  # combinational sign-op applied to the output wire (folded residual sign)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +123,7 @@ class Hir:
         for vid in sorted(self.nodes):
             lines.append(f"  v{vid} = {self.nodes[vid]}")
         for out in self.outputs:
-            suffix = "" if out.sgnop == 0 else f" (sgnop={out.sgnop})"
+            suffix = "" if out.sgnop is Sgnop.NONE else f" (sgnop={out.sgnop.name})"
             lines.append(f"  {out.name} <- v{out.value}{suffix}")
         return "\n".join(lines)
 
@@ -173,15 +173,15 @@ class HirBuilder:
         kind: OpKind,
         a: ValueId,
         b: ValueId | None,
-        a_sgnop: int,
-        b_sgnop: int,
-        y_sgnop: int,
+        a_sgnop: Sgnop,
+        b_sgnop: Sgnop,
+        y_sgnop: Sgnop,
         k: int | None,
         latency: int,
     ) -> ValueId:
         return self._interned(OpNode(kind, a, b, a_sgnop, b_sgnop, y_sgnop, k, latency))
 
-    def output(self, name: str, value: ValueId, sgnop: int = 0) -> None:
+    def output(self, name: str, value: ValueId, sgnop: Sgnop = Sgnop.NONE) -> None:
         self._outputs.append(OutputPort(name, value, sgnop))
 
     def finish(self) -> Hir:

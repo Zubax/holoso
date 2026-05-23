@@ -22,7 +22,7 @@ from hdl_float_oracle import (
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    TESTS_DIR,
+    BENCH_DIR,
     apply_sgnop,
     build_args,
     drive_reset,
@@ -137,8 +137,8 @@ def test_holoso_fsort(sim: str) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fsort",
-        test_module="test_hdl_fsort",
-        test_dir=TESTS_DIR,
+        test_module="test_fsort",
+        test_dir=BENCH_DIR,
         build_dir=build_dir,
         extra_env={"HOLOSO_EXPECTED_LATENCY": "1"},
         results_xml=str(build_dir / "results.xml"),

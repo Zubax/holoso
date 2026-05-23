@@ -34,9 +34,13 @@ def build_vectors(
     count: int,
     rng: np.random.Generator,
     timeout_cycles: int,
+    cycles: int,
     sampler: Sampler = generic_sampler,
 ) -> dict[str, Any]:
-    """Produce ``count`` ``(input-bits, expected-floats, tolerance)`` records for the cosim driver."""
+    """Produce ``count`` ``(input-bits, expected-floats, tolerance)`` records for the cosim driver.
+
+    ``cycles`` is the model's exact in_valid->out_valid latency; the driver asserts the DUT matches it on every vector.
+    """
     vectors: list[dict[str, Any]] = []
     for _ in range(count):
         values = sampler(fmt, input_names, rng)
@@ -52,5 +56,6 @@ def build_vectors(
         "inputs": list(input_names),
         "outputs": list(output_names),
         "timeout_cycles": timeout_cycles,
+        "cycles": cycles,
         "vectors": vectors,
     }

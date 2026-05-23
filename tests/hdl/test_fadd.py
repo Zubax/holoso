@@ -20,7 +20,7 @@ from hdl_float_oracle import (
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    TESTS_DIR,
+    BENCH_DIR,
     add_oracle_bits,
     apply_sgnop,
     build_args,
@@ -127,8 +127,8 @@ def test_holoso_fadd(sim: str, stages: tuple[int, int]) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fadd",
-        test_module="test_hdl_fadd",
-        test_dir=TESTS_DIR,
+        test_module="test_fadd",
+        test_dir=BENCH_DIR,
         build_dir=build_dir,
         extra_env={"HOLOSO_EXPECTED_LATENCY": str(6 + int(bool(stage_decode)) + int(bool(stage_align)))},
         results_xml=str(build_dir / "results.xml"),

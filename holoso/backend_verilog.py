@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from .emit import VerilogWriter
 from .lir import ConstRef, Issue, Lir, OperatorInstance, Operand, RegRef
-from .operators import MODULE_NAMES, OpKind, arity, has_div0
+from .operators import MODULE_NAMES, OpKind, Sgnop, arity, has_div0
 
 
 def _base(inst: OperatorInstance) -> str:
@@ -195,7 +195,7 @@ def _emit_operators(w: VerilogWriter, lir: Lir) -> None:
 
 def _operand_name(operand: Operand) -> str:
     base = f"r{operand.source.index}" if isinstance(operand.source, RegRef) else f"c{operand.source.index}"
-    return {0: base, 1: f"-{base}", 2: f"|{base}|", 3: f"-|{base}|"}[operand.sgnop]
+    return operand.sgnop.decorate(base)
 
 
 def _issue_summary(issue: Issue) -> str:
@@ -247,10 +247,10 @@ def _emit_datapath(w: VerilogWriter, lir: Lir, read_lanes: list[dict[int, int]],
             sig = _sig(issue.inst)
             base = _base(issue.inst)
             w.line(f"{sig}_iv = ~started;")
-            w.line(f"{sig}_a = {_operand_value(issue.a, lanes)}; {sig}_as = 2'd{issue.a.sgnop};")
+            w.line(f"{sig}_a = {_operand_value(issue.a, lanes)}; {sig}_as = 2'd{int(issue.a.sgnop)};")
             if issue.b is not None:
-                w.line(f"{sig}_b = {_operand_value(issue.b, lanes)}; {sig}_bs = 2'd{issue.b.sgnop};")
-            w.line(f"{sig}_ys = 2'd{issue.y_sgnop};")
+                w.line(f"{sig}_b = {_operand_value(issue.b, lanes)}; {sig}_bs = 2'd{int(issue.b.sgnop)};")
+            w.line(f"{sig}_ys = 2'd{int(issue.y_sgnop)};")
             w.line(f"rf_wr_en[{port}] = {sig}_ov & ~done_{base};")
             w.line(f"rf_wr_addr[`HOLOSO_REGFILE_LANE(WADDR, {port})] = {issue.dst.index};")
             w.line(f"rf_wr_data[`HOLOSO_REGFILE_LANE(W, {port})] = {sig}_y;")
@@ -338,8 +338,10 @@ def _emit_outputs(w: VerilogWriter, lir: Lir, out_lanes: dict[int, int]) -> None
             raw = f"const_{wire.source.index}"
         else:
             raw = f"rf_rd_data[`HOLOSO_REGFILE_LANE(W, {out_lanes[wire.source.index]})]"
-        if wire.sgnop == 0:
+        if wire.sgnop is Sgnop.NONE:
             w.line(f"assign {wire.name} = {raw};")
         else:
-            w.line(f"holoso_fsgnop #(.WFULL(W)) u_outsgn_{index} (.x({raw}), .op(2'd{wire.sgnop}), .y({wire.name}));")
+            w.line(
+                f"holoso_fsgnop #(.WFULL(W)) u_outsgn_{index} (.x({raw}), .op(2'd{int(wire.sgnop)}), .y({wire.name}));"
+            )
     w.line("")

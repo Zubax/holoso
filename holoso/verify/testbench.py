@@ -13,6 +13,7 @@ import numpy as np
 
 from ..format import FloatFormat
 from ..lir import Lir
+from ..schedule import cycle_count
 from .cosim import build_vectors, generic_sampler
 
 _TEMPLATE = '''\
@@ -53,6 +54,7 @@ def _within(actual, expected, rtol, atol):
 async def cosim(dut):
     wexp, wman = _SPEC["wexp"], _SPEC["wman"]
     timeout = int(_SPEC["timeout_cycles"])
+    expected_cycles = int(_SPEC["cycles"])
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await FallingEdge(dut.clk)
     dut.rst.value = 1
@@ -73,12 +75,17 @@ async def cosim(dut):
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
         dut.in_valid.value = 0
-        cycles = 0
+        elapsed = 1
         while int(dut.out_valid.value) != 1:
             await RisingEdge(dut.clk)
             await Timer(1, unit="ns")
-            cycles += 1
-            assert cycles < timeout, "timeout on vector %d" % index
+            elapsed += 1
+            assert elapsed <= timeout, "timeout on vector %d" % index
+        assert elapsed == expected_cycles, "vector %d cycle count: got %d expected %d" % (
+            index,
+            elapsed,
+            expected_cycles,
+        )
         for name, expected in vec["exp"].items():
             got = _decode(wexp, wman, int(getattr(dut, name).value))
             assert _within(got, expected, vec["rtol"], vec["atol"]), (
@@ -103,6 +110,7 @@ def render_testbench(
         count=count,
         rng=np.random.default_rng(seed),
         timeout_cycles=timeout,
+        cycles=cycle_count(lir),
         sampler=generic_sampler,
     )
     return _TEMPLATE.replace("@@MODULE@@", lir.module_name).replace("@@SPEC@@", json.dumps(spec))

@@ -12,11 +12,26 @@ from typing import assert_never
 
 from .format import FloatFormat
 
-# Sign-op encoding -- must match HOLOSO_FSGNOP_* in holoso_support.vh.
-SGNOP_NONE = 0
-SGNOP_NEG = 1
-SGNOP_ABS = 2
-SGNOP_ABS_NEG = 3
+
+class Sgnop(enum.IntFlag):
+    """Folded sign manipulation applied to an operator operand or output.
+
+    A 2-bit field: bit 0 = negate, bit 1 = absolute value (so ``ABS | NEG`` means ``-|x|``). The integer values match
+    ``HOLOSO_FSGNOP_*`` in ``holoso_support.vh`` (NONE=0, NEG=1, ABS=2, ABS|NEG=3), which is why ``IntFlag`` is used:
+    ``int(op)`` yields the Verilog encoding while membership tests (``Sgnop.ABS in op``) express the bit semantics.
+    """
+
+    NONE = 0
+    NEG = 1
+    ABS = 2
+
+    def decorate(self, text: str) -> str:
+        """Wrap a value's name to show this sign-op: NEG -> ``-x``, ABS -> ``|x|``, ABS|NEG -> ``-|x|``."""
+        if Sgnop.ABS in self:
+            text = f"|{text}|"
+        if Sgnop.NEG in self:
+            text = f"-{text}"
+        return text
 
 
 class OpKind(enum.Enum):

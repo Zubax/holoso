@@ -16,7 +16,7 @@ from hdl_float_oracle import (
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    TESTS_DIR,
+    BENCH_DIR,
     apply_sgnop,
     build_args,
     get_random_count,
@@ -81,8 +81,8 @@ def test_holoso_fsgnop(sim: str, wfull: int) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fsgnop",
-        test_module="test_hdl_fsgnop",
-        test_dir=TESTS_DIR,
+        test_module="test_fsgnop",
+        test_dir=BENCH_DIR,
         build_dir=build_dir,
         extra_env={"HOLOSO_TEST_WFULL": str(wfull)},
         results_xml=str(build_dir / "results.xml"),

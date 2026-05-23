@@ -10,7 +10,7 @@ from cocotb_tools.runner import get_runner
 from hdl_float_oracle import (
     REPO_ROOT,
     SIMULATORS,
-    TESTS_DIR,
+    BENCH_DIR,
     build_args,
     f32_to_bits,
     sources,
@@ -42,8 +42,8 @@ def test_holoso_ffrombool(sim: str) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_ffrombool",
-        test_module="test_hdl_ffrombool",
-        test_dir=TESTS_DIR,
+        test_module="test_ffrombool",
+        test_dir=BENCH_DIR,
         build_dir=build_dir,
         results_xml=str(build_dir / "results.xml"),
     )

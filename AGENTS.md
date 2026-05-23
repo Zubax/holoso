@@ -38,6 +38,8 @@ In synthesizable code, prefer `case` statements over nested ternary operators un
 
 In complex Verilog modules, it is best to avoid a large number of named nets that are only used once; this does not help readability but rather the opposite.
 
+In Python, use strongly typed primitives. Instead of int constants, prefer enums; instead of dicts, prefer dataclasses; instead of existence/vaidity flags, prefer optional type or unions, etc.
+
 The Python version to target is 3.14 and newer. No need to ensure compatibility with older versions.
 
 ### Other

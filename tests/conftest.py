@@ -1,9 +1,9 @@
-"""Make `tests/` importable as a flat directory.
+"""Make `tests/` and `tests/hdl/` importable as flat directories.
 
-This lets bare-name imports like `from hdl_float_oracle import ...` work the same way in two contexts: pytest, which
-would normally resolve them through the `tests` package, and the cocotb subprocess, which puts its `test_dir` on
-sys.path directly. The existing `tests` package (used by `from tests import kernels`) still works because the
-package itself is untouched.
+This lets bare-name imports like `from hdl_float_oracle import ...` work the same way in two contexts: pytest (where
+the root-level `test_cosim.py`/`test_backend.py` import the shared oracle that now lives in `tests/hdl/`), and the
+cocotb subprocess (which puts only its `test_dir` -- `tests/hdl/` -- on sys.path). Adding both keeps the flat
+bare-name import style consistent in either context.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-_TESTS_DIR = str(Path(__file__).resolve().parent)
-if _TESTS_DIR not in sys.path:
-    sys.path.insert(0, _TESTS_DIR)
+_HERE = Path(__file__).resolve().parent
+for _path in (_HERE, _HERE / "hdl"):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))

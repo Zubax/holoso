@@ -21,7 +21,7 @@ from hdl_float_oracle import (
     F32_PINF,
     REPO_ROOT,
     SIMULATORS,
-    TESTS_DIR,
+    BENCH_DIR,
     build_args,
     f32_to_bits,
     sources,
@@ -70,8 +70,8 @@ def test_holoso_fconst(sim: str, case: tuple[str, float, int, int]) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fconst",
-        test_module="test_hdl_fconst",
-        test_dir=TESTS_DIR,
+        test_module="test_fconst",
+        test_dir=BENCH_DIR,
         build_dir=build_dir,
         extra_env={"HOLOSO_TEST_EXPECTED": hex(expected)},
         results_xml=str(build_dir / "results.xml"),

@@ -9,9 +9,9 @@ from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 HDL = REPO_ROOT / "hdl" / "holoso_support.v"
-TESTS_DIR = REPO_ROOT / "tests"
+BENCH_DIR = REPO_ROOT / "tests" / "hdl"
 
 
 CASES = {
@@ -229,8 +229,8 @@ def test_holoso_regfile(case_name: str, sim: str) -> None:
     results_xml = build_dir / f"results_{case_name}.xml"
     runner.test(
         hdl_toplevel="holoso_regfile",
-        test_module="test_hdl_regfile",
-        test_dir=TESTS_DIR,
+        test_module="test_regfile",
+        test_dir=BENCH_DIR,
         build_dir=build_dir,
         extra_env={"HOLOSO_REGFILE_CASE": case_name},
         results_xml=str(results_xml),

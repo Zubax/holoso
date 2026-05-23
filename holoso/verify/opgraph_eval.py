@@ -12,13 +12,13 @@ from collections.abc import Mapping
 from typing import assert_never
 
 from ..hir import Const, Hir, InPort, OpNode, ValueId
-from ..operators import OpKind
+from ..operators import OpKind, Sgnop
 
 
-def _apply_sgnop(x: float, sgnop: int) -> float:
-    if sgnop & 2:
+def _apply_sgnop(x: float, sgnop: Sgnop) -> float:
+    if Sgnop.ABS in sgnop:
         x = abs(x)
-    if sgnop & 1:
+    if Sgnop.NEG in sgnop:
         x = -x
     return x
 

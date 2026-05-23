@@ -25,7 +25,8 @@ from cocotb.triggers import FallingEdge, RisingEdge, Timer
 # Paths and build helpers
 # ---------------------------------------------------------------------------
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+BENCH_DIR = Path(__file__).resolve().parent  # tests/hdl -- the cocotb test_dir for the benches and cosim driver
+REPO_ROOT = BENCH_DIR.parents[1]
 HDL_DIR = REPO_ROOT / "hdl"
 HOLOSO_HDL = HDL_DIR / "holoso_support.v"
 KULIBIN_HDL_DIR = REPO_ROOT / "lib" / "kulibin" / "float" / "hdl"

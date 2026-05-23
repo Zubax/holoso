@@ -28,6 +28,7 @@ async def cosim(dut) -> None:
     spec = json.loads(open(os.environ["HOLOSO_VECTORS"], encoding="utf-8").read())
     fmt = FloatFormat(spec["wexp"], spec["wman"])
     timeout = int(spec["timeout_cycles"])
+    expected_cycles = int(spec["cycles"])
 
     await start_clock(dut)
     await drive_reset(dut)
@@ -39,14 +40,18 @@ async def cosim(dut) -> None:
         for name, bits in vec["in"].items():
             getattr(dut, f"in_{name}").value = int(bits)
         dut.in_valid.value = 1
-        await _settle(dut)
+        await _settle(dut)  # accept edge: inputs latched, FSM leaves idle
         dut.in_valid.value = 0
 
-        cycles = 0
+        elapsed = 1  # the accept cycle counts toward the in_valid->out_valid latency
         while int(dut.out_valid.value) != 1:
             await _settle(dut)
-            cycles += 1
-            assert cycles < timeout, f"vector {index}: timeout after {cycles} cycles waiting for out_valid"
+            elapsed += 1
+            assert elapsed <= timeout, f"vector {index}: timeout after {elapsed} cycles waiting for out_valid"
+        assert elapsed == expected_cycles, (
+            f"vector {index}: cycle count mismatch -- DUT asserted out_valid after {elapsed} cycles "
+            f"(in_valid->out_valid), model predicted {expected_cycles}"
+        )
 
         for name, expected in vec["exp"].items():
             got = decode(fmt, int(getattr(dut, name).value))

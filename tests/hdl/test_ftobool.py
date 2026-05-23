@@ -13,7 +13,7 @@ from hdl_float_oracle import (
     F32_EXP_MASK,
     REPO_ROOT,
     SIMULATORS,
-    TESTS_DIR,
+    BENCH_DIR,
     build_args,
     get_random_count,
     get_seed,
@@ -70,8 +70,8 @@ def test_holoso_ftobool(sim: str) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_ftobool",
-        test_module="test_hdl_ftobool",
-        test_dir=TESTS_DIR,
+        test_module="test_ftobool",
+        test_dir=BENCH_DIR,
         build_dir=build_dir,
         results_xml=str(build_dir / "results.xml"),
     )

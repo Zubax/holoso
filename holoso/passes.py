@@ -25,7 +25,7 @@ from .hir import (
     SignOp,
     ValueId,
 )
-from .operators import SGNOP_ABS, SGNOP_NEG, SGNOP_NONE, OpKind, latency_of
+from .operators import OpKind, Sgnop, latency_of
 
 _ARITH_TO_OPKIND: dict[ArithOp, OpKind] = {
     ArithOp.ADD: OpKind.FADD,
@@ -68,28 +68,25 @@ def _ilog2_exact(c: float) -> int | None:
     return exponent - 1 if mantissa == 0.5 else None
 
 
-def _compose_sgnop(inner: int, outer: int) -> int:
-    """Combine two 2-bit sign-ops where ``inner`` is applied first (closest to the value) and ``outer`` after."""
-    inner_abs, inner_neg = inner >> 1, inner & 1
-    outer_abs, outer_neg = outer >> 1, outer & 1
-    if outer_abs:
-        result_abs, result_neg = 1, outer_neg
-    else:
-        result_abs, result_neg = inner_abs, inner_neg ^ outer_neg
-    return (result_abs << 1) | result_neg
+def _compose_sgnop(inner: Sgnop, outer: Sgnop) -> Sgnop:
+    """Combine two sign-ops where ``inner`` is applied first (closest to the value) and ``outer`` after."""
+    if Sgnop.ABS in outer:  # abs erases everything underneath
+        return Sgnop.ABS | (outer & Sgnop.NEG)
+    negated = (Sgnop.NEG in inner) ^ (Sgnop.NEG in outer)
+    return (inner & Sgnop.ABS) | (Sgnop.NEG if negated else Sgnop.NONE)
 
 
-def _collapse_signs(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, int]:
-    """Peel a chain of ``SignFix`` nodes, returning the non-``SignFix`` base value and the combined 2-bit sign-op."""
+def _collapse_signs(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, Sgnop]:
+    """Peel a chain of ``SignFix`` nodes, returning the non-``SignFix`` base value and the combined sign-op."""
     chain: list[SignOp] = []
     node = nodes[vid]
     while isinstance(node, SignFix):
         chain.append(node.op)
         vid = node.a
         node = nodes[vid]
-    sgnop = SGNOP_NONE
+    sgnop = Sgnop.NONE
     for op in reversed(chain):  # innermost first
-        sgnop = _compose_sgnop(sgnop, SGNOP_NEG if op is SignOp.NEG else SGNOP_ABS)
+        sgnop = _compose_sgnop(sgnop, Sgnop.NEG if op is SignOp.NEG else Sgnop.ABS)
     return vid, sgnop
 
 
@@ -209,7 +206,7 @@ def lower_to_operators(hir: Hir) -> Hir:
                 base_b, sgn_b = _collapse_signs(hir.nodes, b)
                 kind = _ARITH_TO_OPKIND[op]
                 remap[old_id] = builder.opnode(
-                    kind, remap[base_a], remap[base_b], sgn_a, sgn_b, SGNOP_NONE, None, latency_of(kind, hir.fmt)
+                    kind, remap[base_a], remap[base_b], sgn_a, sgn_b, Sgnop.NONE, None, latency_of(kind, hir.fmt)
                 )
             case Fmul2K(a=a, k=k):
                 base_a, sgn_a = _collapse_signs(hir.nodes, a)
@@ -218,8 +215,8 @@ def lower_to_operators(hir: Hir) -> Hir:
                     remap[base_a],
                     None,
                     sgn_a,
-                    SGNOP_NONE,
-                    SGNOP_NONE,
+                    Sgnop.NONE,
+                    Sgnop.NONE,
                     k,
                     latency_of(OpKind.FMUL_ILOG2, hir.fmt),
                 )

@@ -8,7 +8,7 @@ from pathlib import Path
 from holoso.format import FloatFormat
 from holoso.frontend import lower
 from holoso.hir import Const, Hir, InPort, OpNode
-from holoso.operators import SGNOP_NEG, OpKind
+from holoso.operators import OpKind, Sgnop
 from holoso.passes import run
 
 FMT = FloatFormat(6, 18)
@@ -72,7 +72,7 @@ def test_subtraction_folds_into_b_sgnop_neg() -> None:
 
     ops = _ops(run(lower(f, FMT)))
     assert len(ops) == 1
-    assert ops[0].kind is OpKind.FADD and ops[0].b_sgnop == SGNOP_NEG
+    assert ops[0].kind is OpKind.FADD and ops[0].b_sgnop is Sgnop.NEG
 
 
 def test_operand_negation_folds_into_operator() -> None:
@@ -81,7 +81,7 @@ def test_operand_negation_folds_into_operator() -> None:
 
     ops = _ops(run(lower(f, FMT)))
     assert len(ops) == 1
-    assert ops[0].kind is OpKind.FMUL and ops[0].b_sgnop == SGNOP_NEG
+    assert ops[0].kind is OpKind.FMUL and ops[0].b_sgnop is Sgnop.NEG
 
 
 def test_lowered_hir_has_only_inport_const_opnode() -> None:

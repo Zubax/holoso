@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .format import FloatFormat
-from .operators import OpKind
+from .operators import OpKind, Sgnop
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,23 +42,22 @@ class ConstRef:
 
 @dataclass(frozen=True, slots=True)
 class Operand:
-    """An operator input: a register read or a constant immediate, with a folded 2-bit sign-op."""
+    """An operator input: a register read or a constant immediate, with a folded sign-op."""
 
     source: RegRef | ConstRef
-    sgnop: int
+    sgnop: Sgnop
 
 
 @dataclass(frozen=True, slots=True)
 class Issue:
-    """One operator started in a step: its instance, operands, result sign-op, dest register, and div0 flag."""
+    """One operator started in a step: its instance, operands, result sign-op, and destination register."""
 
     inst: OperatorInstance
     a: Operand
     b: Operand | None  # None for unary FMUL_ILOG2
-    y_sgnop: int
+    y_sgnop: Sgnop
     k: int | None  # exponent for FMUL_ILOG2
     dst: RegRef
-    has_div0: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +83,7 @@ class OutputWire:
 
     name: str
     source: RegRef | ConstRef
-    sgnop: int
+    sgnop: Sgnop
 
 
 @dataclass(frozen=True, slots=True)

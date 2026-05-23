@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import enum
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 from .format import FloatFormat
 
-Direction = Literal["in", "out", "ctrl"]
+
+class Direction(enum.Enum):
+    IN = "in"
+    OUT = "out"
+
+
+class PortRole(enum.Enum):
+    DATA = "data"  # a float scalar carried in/out of the module
+    CONTROL = "control"  # clock, reset, the valid/ready handshake, diagnostics
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +26,7 @@ class Port:
 
     name: str
     direction: Direction
+    role: PortRole
     width: int  # bits; 1 for control ports
 
 
@@ -45,11 +54,15 @@ class ModuleInterface:
 
     @property
     def input_ports(self) -> tuple[Port, ...]:
-        return tuple(p for p in self.ports if p.direction == "in")
+        return tuple(p for p in self.ports if p.role is PortRole.DATA and p.direction is Direction.IN)
 
     @property
     def output_ports(self) -> tuple[Port, ...]:
-        return tuple(p for p in self.ports if p.direction == "out")
+        return tuple(p for p in self.ports if p.role is PortRole.DATA and p.direction is Direction.OUT)
+
+    @property
+    def control_ports(self) -> tuple[Port, ...]:
+        return tuple(p for p in self.ports if p.role is PortRole.CONTROL)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +72,8 @@ class SynthesisMetrics:
     operator_instances: Mapping[str, int]
     n_float_regs: int
     n_bool_regs: int
+    read_ports: int  # register-file combinational read ports (NRD)
+    write_ports: int  # register-file synchronous write ports (NWR)
     step_count: int
     ii_estimate: int
     op_count: int

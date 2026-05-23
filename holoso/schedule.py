@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 
 from .hir import Const, Hir, InPort, OpNode, ValueId
@@ -18,9 +17,9 @@ from .lir import (
     RegRef,
     Step,
 )
-from .operators import OpKind, has_div0
+from .operators import OpKind, Sgnop
 from .regalloc import Allocation, allocate
-from .result import IIModel, ModuleInterface, Port, SynthesisMetrics
+from .result import Direction, IIModel, ModuleInterface, Port, PortRole, SynthesisMetrics
 from .scheduler import resolve_pool, schedule_ops
 
 
@@ -115,7 +114,7 @@ def _build_instances(
     return tuple(instances)
 
 
-def _operand(hir: Hir, vid: ValueId, sgnop: int, alloc: Allocation, const_index: dict[ValueId, int]) -> Operand:
+def _operand(hir: Hir, vid: ValueId, sgnop: Sgnop, alloc: Allocation, const_index: dict[ValueId, int]) -> Operand:
     node = hir.nodes[vid]
     if isinstance(node, Const):
         return Operand(ConstRef(const_index[vid]), sgnop)
@@ -151,7 +150,6 @@ def _build_steps(
                     y_sgnop=op.y_sgnop,
                     k=op.k,
                     dst=RegRef(alloc.assign[vid]),
-                    has_div0=has_div0(op.kind),
                 )
             )
             latency = max(latency, op.latency)
@@ -205,27 +203,36 @@ def _max_chain_len(hir: Hir) -> int:
     return max(depth.values(), default=0)
 
 
+def cycle_count(lir: Lir) -> int:
+    """Exact in_valid->out_valid latency (== II; data-independent for a combinational module).
+
+    One cycle to accept the inputs, then for each FSM step one launch cycle plus the step's barrier latency (the
+    slowest issued operator). The barrier means a step costs its max operator latency regardless of co-issued faster
+    operators, so the total is fully determined by the schedule.
+    """
+    return 1 + sum(step.latency + 1 for step in lir.steps)
+
+
 def _ii_model(lir: Lir) -> IIModel:
-    load_cycles = math.ceil(len(lir.inputs) / lir.regfile.nwr) if lir.inputs else 0
-    compute_cycles = sum(step.latency for step in lir.steps)
-    total = load_cycles + compute_cycles + 2
-    formula = f"{load_cycles} load + {compute_cycles} compute (sum of per-step max operator latency) + 2 handshake"
-    return IIModel(step_count=len(lir.steps), cycle_estimate=total, formula=formula)
+    steps = len(lir.steps)
+    compute = sum(step.latency for step in lir.steps)
+    formula = f"1 accept + {steps} step launches + {compute} operator cycles"
+    return IIModel(step_count=steps, cycle_estimate=cycle_count(lir), formula=formula)
 
 
 def interface_of(lir: Lir) -> ModuleInterface:
     fmt = lir.fmt
     ports: list[Port] = [
-        Port("clk", "ctrl", 1),
-        Port("rst", "ctrl", 1),
-        Port("in_valid", "ctrl", 1),
-        Port("in_ready", "ctrl", 1),
-        Port("out_valid", "ctrl", 1),
-        Port("out_ready", "ctrl", 1),
+        Port("clk", Direction.IN, PortRole.CONTROL, 1),
+        Port("rst", Direction.IN, PortRole.CONTROL, 1),
+        Port("in_valid", Direction.IN, PortRole.CONTROL, 1),
+        Port("in_ready", Direction.OUT, PortRole.CONTROL, 1),
+        Port("out_valid", Direction.OUT, PortRole.CONTROL, 1),
+        Port("out_ready", Direction.IN, PortRole.CONTROL, 1),
     ]
-    ports.extend(Port(f"in_{load.name}", "in", fmt.width) for load in lir.inputs)
-    ports.extend(Port(wire.name, "out", fmt.width) for wire in lir.outputs)
-    ports.append(Port("diag_error", "ctrl", 1))  # status output, grouped with control signals
+    ports.extend(Port(f"in_{load.name}", Direction.IN, PortRole.DATA, fmt.width) for load in lir.inputs)
+    ports.extend(Port(wire.name, Direction.OUT, PortRole.DATA, fmt.width) for wire in lir.outputs)
+    ports.append(Port("diag_error", Direction.OUT, PortRole.CONTROL, 1))
     return ModuleInterface(lir.module_name, fmt, tuple(ports), _ii_model(lir))
 
 
@@ -237,8 +244,10 @@ def metrics_of(lir: Lir) -> SynthesisMetrics:
         operator_instances=counts,
         n_float_regs=lir.regfile.nreg,
         n_bool_regs=0,
+        read_ports=lir.regfile.nrd,
+        write_ports=lir.regfile.nwr,
         step_count=len(lir.steps),
-        ii_estimate=_ii_model(lir).cycle_estimate,
+        ii_estimate=cycle_count(lir),
         op_count=lir.op_count,
         max_chain_len=lir.max_chain_len,
     )
