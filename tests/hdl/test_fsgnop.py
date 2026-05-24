@@ -13,6 +13,7 @@ from cocotb_tools.runner import get_runner
 
 from hdl_float_oracle import (
     DIRECTED_F32,
+    HDL_DIR,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
@@ -71,7 +72,7 @@ def test_holoso_fsgnop(sim: str, wfull: int) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fsgnop_w{wfull}"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fsgnop",
         parameters={"WFULL": wfull},
         build_args=build_args(sim),

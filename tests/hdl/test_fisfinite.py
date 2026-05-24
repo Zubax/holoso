@@ -11,6 +11,7 @@ from cocotb_tools.runner import get_runner
 from hdl_float_oracle import (
     DIRECTED_F32,
     F32_EXP_MASK,
+    HDL_DIR,
     REPO_ROOT,
     SIMULATORS,
     BENCH_DIR,
@@ -48,7 +49,7 @@ def test_holoso_fisfinite(sim: str) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / "fisfinite"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fisfinite",
         parameters={"WEXP": 8, "WMAN": 24},
         build_args=build_args(sim),

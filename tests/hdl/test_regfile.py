@@ -4,13 +4,15 @@ import os
 from pathlib import Path
 
 import cocotb
+import holoso
 import pytest
 from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-HDL = REPO_ROOT / "hdl" / "holoso_support.v"
+HDL_DIR = Path(holoso.__file__).resolve().parent / "hdl"  # packaged support RTL (holoso/hdl/)
+HDL = HDL_DIR / "holoso_support.v"
 BENCH_DIR = REPO_ROOT / "tests" / "hdl"
 
 
@@ -218,7 +220,7 @@ def test_holoso_regfile(case_name: str, sim: str) -> None:
 
     runner.build(
         sources=[HDL],
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_regfile",
         parameters=params,
         build_args=build_args,

@@ -19,6 +19,7 @@ from cocotb_tools.runner import get_runner
 from hdl_float_oracle import (
     F32_NINF,
     F32_PINF,
+    HDL_DIR,
     REPO_ROOT,
     SIMULATORS,
     BENCH_DIR,
@@ -60,7 +61,7 @@ def test_holoso_fconst(sim: str, case: tuple[str, float, int, int]) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fconst_{name}"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fconst",
         parameters={"WEXP": 8, "WMAN": 24, "VALUE": value, "INF": inf},
         build_args=build_args(sim),

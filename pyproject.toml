@@ -33,6 +33,8 @@ include = ["holoso*"]
 [tool.setuptools.package-data]
 # The report's stylesheet and interactive layer are loaded at runtime via importlib.resources.
 "holoso.report" = ["*.css", "*.js"]
+# The shared support RTL (operator wrappers, regfile, sign-op macros) is read at runtime via importlib.resources.
+"holoso" = ["hdl/*.v", "hdl/*.vh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

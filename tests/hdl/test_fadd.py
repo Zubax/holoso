@@ -20,6 +20,7 @@ from holoso.operators import OpKind, StageConfig, latency_of
 from hdl_float_oracle import (
     DIRECTED_F32,
     PipelineScoreboard,
+    HDL_DIR,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
@@ -120,7 +121,7 @@ def test_holoso_fadd(sim: str, stages: tuple[int, int]) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fadd_d{stage_decode}a{stage_align}"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fadd",
         parameters={"WEXP": 8, "WMAN": 24, "STAGE_DECODE": stage_decode, "STAGE_ALIGN": stage_align},
         build_args=build_args(sim),

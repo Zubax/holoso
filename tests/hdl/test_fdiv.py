@@ -23,6 +23,7 @@ from hdl_float_oracle import (
     DIRECTED_F32,
     F32_EXP_MASK,
     PipelineScoreboard,
+    HDL_DIR,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
@@ -139,7 +140,7 @@ def test_holoso_fdiv(sim: str, stage_input: int) -> None:
     latency = latency_of(OpKind.FDIV, FloatFormat(8, 24), StageConfig(fdiv_input=stage_input))
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fdiv",
         parameters={"WEXP": 8, "WMAN": 24, "STAGE_INPUT": stage_input},
         build_args=build_args(sim),

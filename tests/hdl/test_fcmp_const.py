@@ -13,6 +13,7 @@ from cocotb_tools.runner import get_runner
 from hdl_float_oracle import (
     DIRECTED_F32,
     PipelineScoreboard,
+    HDL_DIR,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
@@ -113,7 +114,7 @@ def test_holoso_fcmp_const(sim: str, case: tuple[str, float, int]) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fcmp_const_{name}"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fcmp_const",
         parameters={"WEXP": 8, "WMAN": 24, "B": b_value},
         build_args=build_args(sim),

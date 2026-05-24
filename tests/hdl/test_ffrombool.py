@@ -8,6 +8,7 @@ from cocotb.triggers import Timer
 from cocotb_tools.runner import get_runner
 
 from hdl_float_oracle import (
+    HDL_DIR,
     REPO_ROOT,
     SIMULATORS,
     BENCH_DIR,
@@ -32,7 +33,7 @@ def test_holoso_ffrombool(sim: str) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / "ffrombool"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_ffrombool",
         parameters={"WEXP": 8, "WMAN": 24},
         build_args=build_args(sim),

@@ -21,6 +21,7 @@ from holoso.operators import OpKind, StageConfig, latency_of
 from hdl_float_oracle import (
     DIRECTED_F32,
     PipelineScoreboard,
+    HDL_DIR,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
@@ -115,7 +116,7 @@ def test_holoso_fmul_ilog2_const(sim: str, config: tuple[int, int]) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fmlog_k{k}_d{stage_decode}"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fmul_ilog2_const",
         parameters={"WEXP": 8, "WMAN": 24, "K": k, "STAGE_DECODE": stage_decode},
         build_args=build_args(sim),

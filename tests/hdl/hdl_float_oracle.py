@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Iterable
 
 import cocotb
+import holoso
 import numpy as np
 from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, RisingEdge, Timer
@@ -27,7 +28,7 @@ from cocotb.triggers import FallingEdge, RisingEdge, Timer
 
 BENCH_DIR = Path(__file__).resolve().parent  # tests/hdl -- the cocotb test_dir for the benches and cosim driver
 REPO_ROOT = BENCH_DIR.parents[1]
-HDL_DIR = REPO_ROOT / "hdl"
+HDL_DIR = Path(holoso.__file__).resolve().parent / "hdl"  # packaged support RTL (holoso/hdl/) -- single source
 HOLOSO_HDL = HDL_DIR / "holoso_support.v"
 KULIBIN_HDL_DIR = REPO_ROOT / "lib" / "kulibin" / "float" / "hdl"
 TESTS_DIR = REPO_ROOT / "tests"
