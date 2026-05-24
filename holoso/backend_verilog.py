@@ -1,7 +1,7 @@
 """Render a :class:`Lir` into a synthesizable Verilog ZISC module.
 
 Datapath: a ``holoso_regfile`` flip-flop bank, one operator-wrapper instance per :class:`OperatorInstance`, and one
-``holoso_fconst`` per pooled constant. Controller: a cycle counter ``cyc`` driving a ``case(cyc)`` microprogram that
+ZKF-encoded literal per pooled constant. Controller: a cycle counter ``cyc`` driving a ``case(cyc)`` microprogram that
 replays the static software-pipelined schedule. ``cyc==0`` is idle/accept (inputs are written when ``in_valid``),
 ``cyc`` then advances every clock through the compute cycles ``1..makespan``, and ``cyc==LAST`` (``makespan+1``)
 presents the outputs and asserts ``out_valid``. On each compute cycle the microprogram asserts ``in_valid`` to the
@@ -19,6 +19,7 @@ from __future__ import annotations
 from .emit import VerilogWriter
 from .lir import ConstRef, Lir, OperatorInstance, Operand, RegRef, ScheduledOp
 from .operators import MODULE_NAMES, OpKind, Sgnop, arity, has_div0, stage_params
+from .verify.zkf_codec import encode
 
 _KIND_ORDER = {kind: index for index, kind in enumerate(OpKind)}
 
@@ -208,11 +209,13 @@ def _emit_declarations(w: VerilogWriter, lir: Lir) -> None:
 
 
 def _emit_consts(w: VerilogWriter, lir: Lir) -> None:
+    # Encode each pooled constant to its ZKF bit pattern here (exact, round-to-nearest-ties-to-even) and emit a
+    # literal, rather than instantiating holoso_fconst -> zkf_const, whose elaboration uses real-valued functions
+    # that the open-source Verilog frontends (e.g. Yosys) cannot parse. The bits are frozen for the synthesized
+    # format; the module is generated for one FloatFormat, so WEXP/WMAN are not meant to be overridden.
+    width = lir.fmt.width
     for index, value in enumerate(lir.consts):
-        w.line(
-            f"holoso_fconst #(.WEXP(WEXP), .WMAN(WMAN), .VALUE({value!r}), .INF(0)) u_const_{index} "
-            f"(.y(const_{index}));"
-        )
+        w.line(f"assign const_{index} = {width}'h{encode(lir.fmt, value):0{(width + 3) // 4}x}; // {value!r}")
     if lir.consts:
         w.line("")
 
