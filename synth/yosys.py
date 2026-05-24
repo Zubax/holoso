@@ -7,12 +7,9 @@ from pathlib import Path
 from typing import Sequence
 import json
 import os
-import selectors
 import shlex
 import shutil
 import subprocess
-import sys
-import time
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BUILD_ROOT = REPO_ROOT / "build" / "synth"
@@ -91,49 +88,26 @@ def write_synthesis_script(
 
 def run_logged(command: Sequence[str | Path], log_path: Path, *, timeout_s: float) -> None:
     rendered = [str(item) for item in command]
+    print("$ " + " ".join(shlex.quote(item) for item in rendered), flush=True)
+    print(f"  log: {log_path}", flush=True)
     with log_path.open("w") as log:
         command_line = "$ " + " ".join(shlex.quote(item) for item in rendered) + "\n\n"
-        sys.stdout.write(command_line)
-        sys.stdout.flush()
         log.write(command_line)
         log.flush()
-
-        process = subprocess.Popen(
-            rendered,
-            cwd=REPO_ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-        assert process.stdout is not None
-
-        selector = selectors.DefaultSelector()
-        selector.register(process.stdout, selectors.EVENT_READ)
-        deadline = time.monotonic() + timeout_s
-
-        while selector.get_map():
-            remaining_s = deadline - time.monotonic()
-            if remaining_s <= 0:
-                process.kill()
-                process.wait()
-                selector.close()
-                log.write(f"\n\n[holoso synth] command exceeded {timeout_s:g}s timeout and was killed\n")
-                log.flush()
-                raise AssertionError(f"{rendered[0]} timed out after {timeout_s:g}s; see {log_path}")
-
-            for key, _mask in selector.select(min(0.5, remaining_s)):
-                chunk = key.fileobj.read1(65536)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                text = chunk.decode(errors="replace")
-                sys.stdout.write(text)
-                sys.stdout.flush()
-                log.write(text)
-                log.flush()
-
-        return_code = process.wait()
-        if return_code:
-            raise AssertionError(f"{rendered[0]} failed with exit code {return_code}; see {log_path}")
+        try:
+            subprocess.run(
+                rendered,
+                cwd=REPO_ROOT,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                check=True,
+                timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            log.write(f"\n\n[holoso synth] command exceeded {timeout_s:g}s timeout and was killed\n")
+            raise AssertionError(f"{rendered[0]} timed out after {timeout_s:g}s; see {log_path}") from exc
+        except subprocess.CalledProcessError as exc:
+            raise AssertionError(f"{rendered[0]} failed with exit code {exc.returncode}; see {log_path}") from exc
 
 
 def run_yosys(script: Path, log_path: Path) -> None:
