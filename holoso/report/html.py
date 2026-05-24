@@ -16,7 +16,7 @@ from importlib import resources
 
 from ..format import FloatFormat
 from ..lir import Lir, Operand, OperatorInstance, RegRef, ScheduledOp
-from ..operators import OpKind, Sgnop, latency_of
+from ..operators import _STAGE_KNOBS, OpKind, Sgnop, latency_of
 from ..result import ModuleInterface, SynthesisMetrics
 
 _GITHUB_URL = "https://github.com/Zubax/holoso"
@@ -76,6 +76,7 @@ def build_report_html(lir: Lir, interface: ModuleInterface, metrics: SynthesisMe
     # do not waste page height; the wide register-grid schedule follows below.
     out.append("<div class='toprow'>")
     out.append(f"<div class='sec'>{_metrics(interface, metrics, fmt)}</div>")
+    out.append(f"<div class='sec'>{_stage_config(lir)}</div>")
     constants = _constants(lir)
     if constants:
         out.append(f"<div class='sec'>{constants}</div>")
@@ -107,6 +108,20 @@ def _metrics(interface: ModuleInterface, metrics: SynthesisMetrics, fmt: FloatFo
     body = "".join(f"<tr><th>{_esc(label)}</th><td>{_esc(str(value))}</td></tr>" for label, value in rows)
     note = f"Initiation interval = in_valid&rarr;out_valid latency: {_esc(interface.ii.formula)}."
     return f"<h2>Metrics</h2><table class='metrics'>{body}</table><p class='note'>{note}</p>"
+
+
+def _stage_config(lir: Lir) -> str:
+    out = ["<h2>Stage Config</h2><table class='metrics cfg'>"]
+    out.append("<tr><th>operator</th><th>config</th><th>HDL param</th><th>value</th></tr>")
+    for kind, knobs in _STAGE_KNOBS.items():
+        for hdl_param, field in knobs:
+            value = int(getattr(lir.stages, field))
+            out.append(
+                f"<tr><td>{_esc(kind.value)}</td><td>{_esc(field)}</td>"
+                f"<td>{_esc(hdl_param)}</td><td>{value}</td></tr>"
+            )
+    out.append("</table><p class='note'>Pipeline-stage knobs used by the scheduler and emitted operator instances.</p>")
+    return "".join(out)
 
 
 def _interface(interface: ModuleInterface) -> str:
