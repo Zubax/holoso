@@ -21,7 +21,9 @@ One must read the representative use-case examples under the `examples/` directo
 
 - The target is a specialized program, not a pipeline. We synthesize a sequential FSM (a zero-instruction-set
   computer, ZISC) that time-multiplexes a few shared operators over a register file.
-  The initiation interval is data-dependent; we do not pursue constant II or II~1.
+  We do not pursue a constant II or II~1 like a streaming pipeline: the initiation interval is whatever the scheduled
+  program costs. For a fixed control path it is an exact, statically known cycle count derived from the per-operator
+  latency model (data-independent in v0); it varies across programs and, later, across branch paths.
   This is a compiler problem more than a circuit-design one.
 
 ## Pipeline
@@ -55,7 +57,7 @@ class SynthesisResult:
     support:     str                 # holoso_support contents (shareable across modules)
     testbench:   str                 # Cocotb
     report_html: str
-    metrics:     SynthesisMetrics    # operator instances, N float / M bool regs, makespan, II estimate
+    metrics:     SynthesisMetrics    # operator instances, N float / M bool regs, makespan, exact II (cycles)
     hir: Hir;  lir: Lir              # kept for inspection
 ```
 
@@ -161,15 +163,20 @@ makespan: the last commit cycle (the in_valid->out_valid latency is makespan + 1
 
 - Reads are cheap (multiport FF), so binding is constrained only by operator-instance count and writes.
 - Register allocation = liveness + phi-coalescing; widen `N` rather than spill at these sizes.
-- `branch` is the real control transfer: the microprogram counter jumps, untaken steps never run, and II is whatever the
-  executed path costs.
+- `branch` is the real control transfer: the microprogram counter jumps, untaken ops never run, and the II is whatever
+  the executed path costs (each path's count is itself exact).
 
 ## Scheduler
 
-The scheduler is **software-pipelined (zero-bubble) list scheduling** over the lowered single-block HIR. Operators are
+The scheduler is software-pipelined (zero-bubble) list scheduling over the lowered single-block HIR. Operators are
 fully pipelined (throughput 1) and their latencies are static and data-independent, so the entire schedule is computed
-at compile time: each op is assigned an *issue cycle* and a bound instance, and the backend just replays it with a
-cycle counter -- no runtime scoreboard. Annotated operator latency drives both the schedule and the (exact) II.
+at compile time: each op is assigned an issue cycle and a bound instance, and the backend just replays it with a
+cycle counter.
+
+The per-operator latency model is therefore exact and load-bearing: the backend commits each result on
+`issue + latency` without watching `out_valid`, so the model (`operators.latency_of`, mirroring the RTL wrappers) must
+match the hardware cycle-for-cycle. An inaccurate latency is a *correctness* bug, not a bad estimate -- the consumer
+would read a stale register. The resulting cycle count is exact, never an estimate.
 
 We issue each op on the earliest cycle its operands are ready and a free instance exists -- without waiting for
 unrelated ops (no barrier), so a fast `fmul` no longer idles behind a co-scheduled `fdiv`. The register file is
@@ -213,7 +220,9 @@ The control word and datapath skeleton are the only ZISC-specific part -- LIR it
 2. Split float and bool register banks.
 3. If-conversion is conservative -- trivial pure diamonds only; real branches otherwise.
 4. SymPy-assisted algebra (fold/CSE/simplify); hardware strength reduction in-house.
-5. Operator completion is by valid/ready handshake. Annotated latency is a scheduling input only (issue priority + II estimate).
+5. The per-operator latency model is exact and must match the RTL wrappers cycle-for-cycle: the static schedule commits
+   each result on `issue + latency` without watching `out_valid`, so an inaccurate latency is a correctness bug, not a
+   bad estimate. (Module I/O still uses a valid/ready handshake; `div0` is the only data-dependent runtime signal.)
 6. Software-pipelined (zero-bubble) static list scheduling over a read-first register file; the controller is a static
    `case(cycle)` microprogram (no runtime scoreboard), since v0 operator latencies are data-independent.
 7. API takes the function/class object (not source files); synthesis is in-memory, returning `SynthesisResult`; disk

@@ -32,15 +32,15 @@ class Port:
 
 @dataclass(frozen=True, slots=True)
 class IIModel:
-    """The module's initiation interval. For a combinational v0 module it is a fixed cycle count.
+    """The module's initiation interval -- an exact, statically known cycle count, not an estimate.
 
-    ``makespan`` is the schedule's last commit cycle; ``cycle_estimate`` is the exact in_valid->out_valid latency
-    (``makespan + 1``). ``formula`` is a human-readable expression of the cycle count, since the true figure depends
-    on the operators' instantiation parameters (``WEXP``/``WMAN``/stage knobs).
+    v0 operator latencies are data-independent, so the scheduler computes the schedule's length precisely. ``makespan``
+    is the last commit cycle; ``cycles`` is the exact in_valid->out_valid latency (``makespan + 1``). ``formula`` renders
+    how that count arises; it is fixed once ``WEXP``/``WMAN`` and the stage knobs pin each operator's latency.
     """
 
     makespan: int
-    cycle_estimate: int
+    cycles: int
     formula: str
 
 
@@ -76,7 +76,7 @@ class SynthesisMetrics:
     read_ports: int  # register-file combinational read ports (NRD)
     write_ports: int  # register-file synchronous write ports (NWR)
     makespan: int  # schedule's last commit cycle
-    ii_estimate: int
+    ii_cycles: int  # exact in_valid->out_valid latency (makespan + 1)
     op_count: int
     max_chain_len: int
 

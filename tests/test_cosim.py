@@ -41,8 +41,8 @@ def _run_cosim(
         metrics.op_count,
         count=count,
         rng=np.random.default_rng(0xC0FFEE),
-        timeout_cycles=max(64, metrics.ii_estimate * 4),
-        cycles=metrics.ii_estimate,  # == schedule.cycle_count(lir); the driver asserts the DUT matches it exactly
+        timeout_cycles=max(64, metrics.ii_cycles * 4),
+        cycles=metrics.ii_cycles,  # == schedule.cycle_count(lir); the driver asserts the DUT matches it exactly
         sampler=sampler,
     )
     vectors_path = gen_dir / "vectors.json"

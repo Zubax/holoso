@@ -6,9 +6,10 @@ replays the static software-pipelined schedule. ``cyc==0`` is idle/accept (input
 ``cyc`` then advances every clock through the compute cycles ``1..makespan``, and ``cyc==LAST`` (``makespan+1``)
 presents the outputs and asserts ``out_valid``. On each compute cycle the microprogram asserts ``in_valid`` to the
 operators issued that cycle (driving their operand reads) and writes back the operators that commit that cycle (whose
-result lands at the next edge). Because operator latencies are static the controller needs no scoreboard; the only
-data-dependent signal is ``div0``, latched at each ``fdiv``'s commit cycle. The register file is read-first
-(``RWPASS=0``). Reset covers only the control registers (``cyc``, ``diag_q``).
+result lands at the next edge). Because operator latencies are static the controller needs no scoreboard, so each
+operator's ``out_valid`` is left unconnected; the only data-dependent signal is ``div0``, latched at each ``fdiv``'s
+commit cycle. The register file is read-first (``RWPASS=0``). Reset covers only the control registers (``cyc``,
+``diag_q``).
 """
 
 from __future__ import annotations
@@ -175,7 +176,6 @@ def _emit_declarations(w: VerilogWriter, lir: Lir) -> None:
         if _is_binary(inst):
             w.line(f"reg  [1:0]   {sig}_bs;")
             w.line(f"reg  [W-1:0] {sig}_b;")
-        w.line(f"wire         {sig}_ov;")  # unused at runtime (the schedule is static); kept for the operator port
         w.line(f"wire [W-1:0] {sig}_y;")
         if has_div0(inst.kind):
             w.line(f"wire         {sig}_div0;")
@@ -223,7 +223,8 @@ def _emit_operators(w: VerilogWriter, lir: Lir) -> None:
         else:
             w.line(f".a_sgnop({sig}_as), .y_sgnop({sig}_ys),")
             w.line(f".a({sig}_a),")
-        tail = f".out_valid({sig}_ov), .y({sig}_y)"
+        # out_valid is left unconnected: the static schedule already knows when each result is ready.
+        tail = f".out_valid(), .y({sig}_y)"
         if has_div0(inst.kind):
             tail += f", .div0({sig}_div0)"
         w.line(tail)

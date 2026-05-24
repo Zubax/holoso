@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -50,6 +51,17 @@ def test_report_has_expected_sections() -> None:
     report = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24)).report_html
     for token in ("Metrics", "Interface", "Schedule", "_kernel"):
         assert token in report
+
+
+def test_report_schedule_displays_exact_ii_cycle_rows() -> None:
+    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24))
+    grid = result.report_html.split("<table class='grid'>", 1)[1].split("</table>", 1)[0]
+    cycle_labels = re.findall(r"<td class='clk'>([^<]+)</td>", grid)
+
+    assert len(cycle_labels) == result.metrics.ii_cycles
+    assert cycle_labels[0] == "in"
+    assert cycle_labels[-1] == str(result.metrics.makespan)
+    assert "out" not in cycle_labels
 
 
 def test_synthesize_ekf1() -> None:

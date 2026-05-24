@@ -1,7 +1,9 @@
 """Operator kinds, their latency model (mirroring ``holoso_support.v``), and sign-op encoding.
 
-This module is the single source of truth shared by the passes (latency annotation), the scheduler (issue priority),
-and the Verilog backend (instantiation), so the latency formulas cannot drift from the HDL wrappers.
+This module is the single source of truth for operator latency, shared by the passes (latency annotation), the
+scheduler (exact issue/commit timing), and the Verilog backend (instantiation). The latency formulas MUST match the
+HDL wrappers cycle-for-cycle: the static schedule commits each result on ``issue + latency`` without watching
+``out_valid``, so any drift is a correctness bug, not merely a bad estimate.
 """
 
 from __future__ import annotations
@@ -73,7 +75,11 @@ def has_div0(kind: OpKind) -> bool:
 
 
 def latency_of(kind: OpKind, fmt: FloatFormat, stages: StageConfig = DEFAULT_STAGES) -> int:
-    """Replicate the ``LATENCY`` localparam of each ``holoso_support.v`` wrapper (used for scheduling only)."""
+    """The exact ``LATENCY`` of each ``holoso_support.v`` wrapper, in clocks -- load-bearing, not a hint.
+
+    The schedule commits each result on ``issue + latency`` and the backend trusts that timing without watching
+    ``out_valid``, so this must replicate the RTL wrapper's ``LATENCY`` localparam exactly.
+    """
     match kind:
         case OpKind.FADD:
             return 6 + stages.fadd_decode + stages.fadd_align

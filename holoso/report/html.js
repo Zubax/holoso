@@ -5,10 +5,9 @@
     "use strict";
     var data = __DATA__;
     var edges = data.edges;          // [writeCellId, operandCellId, color, operationGroup]
-    var columns = data.columns;      // label per grid column, indexed by (cell index - 2)
+    var columns = data.columns;      // label per grid column, indexed by (cell index - 1)
     var constants = data.constants;  // { "c0": "1.0", ... }
     var liveness = data.liveness;    // { "<registerIndex>": [[start, end], ...] } live-row intervals
-    var lastRow = data.lastRow;      // grid row id of the "out" bookend
 
     var wrap = document.getElementById("schedwrap");
     if (!wrap) {
@@ -128,7 +127,7 @@
         if (!cell || !cell.classList.contains("gc")) {
             return;
         }
-        var label = columns[cell.cellIndex - 2];
+        var label = columns[cell.cellIndex - 1];
         if (label === undefined) {
             return;
         }
@@ -136,7 +135,7 @@
         if (label.charAt(0) === "c") {
             cell.title = label + " = " + constants[label];
         } else {
-            var cycle = clk === "in" ? -1 : (clk === "out" ? lastRow : parseInt(clk, 10));
+            var cycle = clk === "in" ? 0 : parseInt(clk, 10);
             cell.title = label + "@" + clk + " " + (isAlive(label, cycle) ? "alive" : "dead");
         }
     });

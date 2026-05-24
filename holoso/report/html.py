@@ -77,7 +77,12 @@ def build_report_html(lir: Lir, interface: ModuleInterface, metrics: SynthesisMe
         out.append(f"<div class='sec'>{constants}</div>")
     out.append(f"<div class='sec'>{_interface(interface)}</div>")
     out.append("</div>")
-    out.append(_schedule(lir, fmt))
+    if interface.ii.cycles != metrics.ii_cycles:
+        raise RuntimeError(
+            f"report timing mismatch: interface II is {interface.ii.cycles} cycles, "
+            f"metrics II is {metrics.ii_cycles} cycles"
+        )
+    out.append(_schedule(lir, fmt, interface.ii.cycles))
     out.append("</main></body></html>")
     return "".join(out)
 
@@ -91,7 +96,7 @@ def _metrics(interface: ModuleInterface, metrics: SynthesisMetrics, fmt: FloatFo
         ("regfile R/W ports", f"{metrics.read_ports} / {metrics.write_ports}"),
         ("schedule makespan", metrics.makespan),
         ("operations", metrics.op_count),
-        ("II (cycles)", metrics.ii_estimate),
+        ("II (cycles)", metrics.ii_cycles),
         ("longest op chain", metrics.max_chain_len),
     ]
     body = "".join(f"<tr><th>{_esc(label)}</th><td>{_esc(str(value))}</td></tr>" for label, value in rows)
@@ -132,12 +137,6 @@ ColKey = tuple[str, int]  # ("r", reg index) or ("c", constant index)
 def _is_live(col: ColKey, row_id: int, live: dict[int, set[int]]) -> bool:
     """Whether register column ``col`` holds a live value on grid row ``row_id`` (constants are never tinted)."""
     return col[0] == "r" and col[1] in live and row_id in live[col[1]]
-
-
-def _sgn_prefix(sgnop: Sgnop) -> str:
-    """Compact operand/result sign-op marker for a chip: ``-`` negate, ``|`` abs (``-|`` for both); ``""`` for none."""
-    prefix = "-" if Sgnop.NEG in sgnop else ""
-    return prefix + ("|" if Sgnop.ABS in sgnop else "")
 
 
 def _write_label(index: int, tip: str) -> str:
@@ -208,9 +207,7 @@ def _bookend_row(
     n_stage: int,
     dv: _Dividers,
 ) -> str:
-    """A grid row outside the compute cycles: the ``in`` input-load row (cycle 0) or the ``out`` output-present row
-    (cycle makespan+1). No operator is in flight at the I/O boundary, so the operator-stage cells and the ops cell are
-    empty."""
+    """The input-load row (cycle 0). No operator is in flight yet, so the operator-stage cells and ops cell are empty."""
     out = [f"<tr><td class='clk'>{label}</td>"]
     for ordinal, col in enumerate(columns):
         extra = " live" if _is_live(col, row_id, live) else ""
@@ -222,12 +219,13 @@ def _bookend_row(
 
 
 def _liveness(lir: Lir) -> dict[int, set[int]]:
-    """Map each register to the grid rows (clock cycles) on which it holds a live value.
+    """Map each register to the clock cycles on which it holds a live value.
 
     A value is written on its definition cycle -- the accept cycle 0 for an input, the operator's commit cycle
     (``issue + latency``) for a result -- and read on each consumer's issue cycle, or on the output-present cycle
-    ``makespan + 1`` if it drives an output. It lives from its definition through its last read. Liveness is per value,
-    so a register reused for several values yields several disjoint residence intervals with dead gaps between them.
+    ``makespan + 1`` if it drives an output. The report displays cycles 0..makespan; retaining the present cycle in the
+    intervals keeps the final visible row live for output values. Liveness is per value, so a register reused for
+    several values yields several disjoint residence intervals with dead gaps between them.
     """
     present = lir.makespan + 1
     defs: dict[int, list[int]] = {}
@@ -286,12 +284,17 @@ def _cell_style(
     return "", ""
 
 
-def _schedule(lir: Lir, fmt: FloatFormat) -> str:
-    if not lir.ops:
-        return ""
+def _schedule(lir: Lir, fmt: FloatFormat, expected_ii: int) -> str:
     nreg, nconst = lir.regfile.nreg, len(lir.consts)
     columns = _columns_of(lir)
     col_ord = {col: ordinal for ordinal, col in enumerate(columns)}
+    compute_cycles = list(range(1, lir.makespan + 1))
+    displayed_cycles = 1 + len(compute_cycles)  # input-load cycle 0 plus compute/writeback cycles 1..makespan
+    if displayed_cycles != expected_ii:
+        raise RuntimeError(
+            f"schedule grid displays {displayed_cycles} cycle rows, but computed II is {expected_ii} cycles "
+            f"(makespan={lir.makespan})"
+        )
 
     # The operator-stage block: one square column per pipeline stage of each operator, in instance order.
     stage_cols = _stage_columns(lir, fmt)
@@ -306,14 +309,13 @@ def _schedule(lir: Lir, fmt: FloatFormat) -> str:
     # Column seams: 2px at the two block boundaries (constants | pipeline and pipeline | OPERATIONS); 1px at the lighter
     # registers | constants seam and between operator groups.
     dv = _Dividers(
-        data_thin={nreg - 1} if nconst else set(),
-        data_thick={len(columns) - 1},
+        data_thin={nreg - 1} if nreg and nconst else set(),
+        data_thick={len(columns) - 1} if columns else set(),
         stage_thin=group_ends - {n_stage - 1},
         stage_thick={n_stage - 1} if n_stage else set(),
     )
 
     live = _liveness(lir)
-    present = lir.makespan + 1
     edges: list[tuple[str, str, str, int]] = []  # (commit id, operand id, color, operation group) for the overlay
     # Operator pipeline occupancy: instance ``inst`` is in stage ``k`` on cycle ``issue + k``. Keyed to the operation
     # group so a hover lights the whole pipeline trail together with the result cell, its chip and its edges.
@@ -394,16 +396,12 @@ def _schedule(lir: Lir, fmt: FloatFormat) -> str:
         out.append(f"<th class='{cls}'><span>s{k}</span></th>")
     out.append("</tr>")
 
-    # Bookend the compute cycles with the I/O boundary: inputs are written into registers on cycle 0 (accept); outputs
-    # are read from registers on cycle makespan+1 (present). Neutral chips distinguish the boundary from operator activity.
-    in_cells = {("r", load.dst.index): _bookend_chip(False, f"in_{load.name}") for load in lir.inputs}
-    out_cells: dict[ColKey, str] = {}
-    for wire in lir.outputs:
-        wcol: ColKey = ("r", wire.source.index) if isinstance(wire.source, RegRef) else ("c", wire.source.index)
-        out_cells[wcol] = out_cells.get(wcol, "") + _bookend_chip(True, f"out_{wire.name}", wire.sgnop)
+    # The grid has exactly one displayed row per II cycle: the input-load cycle (0), then the compute/writeback cycles
+    # 1..makespan. The output-present boundary is not an extra cycle row; out_valid rises after these II cycles.
+    in_cells = {("r", load.dst.index): _input_chip(f"in_{load.name}") for load in lir.inputs}
     out.append(_bookend_row("in", in_cells, columns, live, 0, n_stage, dv))
 
-    for cyc in range(1, lir.makespan + 1):  # one row per compute cycle; idle cycles show only pipeline advance
+    for cyc in compute_cycles:  # one row per compute cycle; idle cycles show only pipeline advance
         out.append("<tr>")
         out.append(f"<td class='clk'>{cyc}</td>")
         for ordinal, col in enumerate(columns):
@@ -417,9 +415,8 @@ def _schedule(lir: Lir, fmt: FloatFormat) -> str:
             out.append(_stage_cell(sidx, cyc, dv, stage_fill, stage_tip, conflicts))
         out.append(f"<td class='opcell'>{''.join(chips_at.get(cyc, []))}</td>")
         out.append("</tr>")
-    out.append(_bookend_row("out", out_cells, columns, live, present, n_stage, dv))
     out.append("</table><svg class='edges'></svg></div>")
-    out.append(_sched_script(lir, edges, live, present))
+    out.append(_sched_script(lir, edges, live))
     return "".join(out)
 
 
@@ -443,12 +440,12 @@ def _stage_cell(
     return f"<td class='{cls}' data-op='{group}' title='{stage_tip[(sidx, cyc)]}' style='background:{color}'></td>"
 
 
-def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[int, set[int]], last_row: int) -> str:
+def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[int, set[int]]) -> str:
     """Build the interactive layer: substitute the per-module data into the readable script template (:data:`_SCHED_JS`).
 
-    The data is the edge list, the column labels, the constant values, the per-register live-row intervals, and the
-    ``out`` row id -- enough for the script to draw the dataflow overlay and synthesize hover tooltips on demand without
-    a per-cell attribute. Without JS the grid still renders fully; only these behaviors are absent.
+    The data is the edge list, the column labels, the constant values, and the per-register live-row intervals. This is
+    enough for the script to draw the dataflow overlay and synthesize hover tooltips on demand without a per-cell
+    attribute. Without JS the grid still renders fully; only these behaviors are absent.
     """
     cols = [f"{kind}{index}" for kind, index in _columns_of(lir)]
     data = {
@@ -456,7 +453,6 @@ def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[i
         "columns": cols,
         "constants": {f"c{i}": repr(value) for i, value in enumerate(lir.consts)},
         "liveness": {str(reg): _live_intervals(rows) for reg, rows in live.items()},
-        "lastRow": last_row,
     }
     return "<script>\n" + _SCHED_JS.replace("__DATA__", json.dumps(data)) + "\n</script>"
 
@@ -466,10 +462,8 @@ def _columns_of(lir: Lir) -> list[ColKey]:
     return [("r", i) for i in range(lir.regfile.nreg)] + [("c", i) for i in range(len(lir.consts))]
 
 
-def _bookend_chip(read: bool, tip: str, sgnop: Sgnop = Sgnop.NONE) -> str:
-    """A neutral input (write) or output (read) marker for the I/O boundary rows."""
-    if read:
-        return f"<span class='rd' style='border-color:{_NEUTRAL};color:{_NEUTRAL}' title='{tip}'>{_sgn_prefix(sgnop)}&#9652;</span>"
+def _input_chip(tip: str) -> str:
+    """A neutral input-write marker for the cycle-0 latch row."""
     return f"<span class='wr' style='background:{_NEUTRAL}' title='{tip}'>&#9662;</span>"
 
 
@@ -491,7 +485,6 @@ def _schedule_key(lir: Lir) -> str:
         + "<span><span class='sw' style='background:#374151'></span> operator-stage block: s0..sN occupancy as the "
         "pipeline advances</span>"
         + f"<span><span class='sw' style='background:{_LIVE_BG}'></span> register holds a live value</span>"
-        + f"<span><span class='wr' style='background:{_NEUTRAL}'>&#9662;</span>"
-        + f"<span class='rd' style='border-color:{_NEUTRAL};color:{_NEUTRAL}'>&#9652;</span> module in / out</span>"
+        + f"<span><span class='wr' style='background:{_NEUTRAL}'>&#9662;</span> module input latch</span>"
         + "</div>"
     )

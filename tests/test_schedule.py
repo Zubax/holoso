@@ -108,7 +108,7 @@ def test_build_lir_small_kernel() -> None:
         "diag_error",
     ):
         assert expected in names
-    assert iface.ii.cycle_estimate == lir.makespan + 1 == cycle_count(lir)
+    assert iface.ii.cycles == lir.makespan + 1 == cycle_count(lir)
 
     metrics = metrics_of(lir)
     assert metrics.makespan == lir.makespan

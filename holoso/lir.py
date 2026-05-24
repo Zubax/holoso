@@ -1,6 +1,6 @@
 """The low-level IR (LIR): the scheduled, bound, register-allocated microprogram for the synthesized ZISC machine.
 
-A :class:`Lir` is controller-agnostic -- it describes which operators run in which step, reading/writing which
+A :class:`Lir` is controller-agnostic -- it describes which operators issue on which cycle, reading/writing which
 registers, with which folded sign-ops. The backend renders it to Verilog; this is the seam where a second controller
 could be added.
 """
@@ -17,8 +17,10 @@ from .operators import OpKind, Sgnop
 class OperatorInstance:
     """One physical operator module, e.g. ``u_fadd_0``.
 
-    ``fadd``/``fmul``/``fdiv`` instances are shared across steps (bound by step position). ``fmul_ilog2_const`` takes
-    its exponent ``K`` as an elaboration-time parameter, so each such op gets a dedicated instance carrying its ``k``.
+    ``fadd``/``fmul``/``fdiv`` instances are shared across the schedule (the scheduler binds each op to a free instance
+    of its kind, at most one issue per instance per cycle, and a fully pipelined instance may carry several ops in
+    flight). ``fmul_ilog2_const`` takes its exponent ``K`` as an elaboration-time parameter, so each such op gets a
+    dedicated instance carrying its ``k``.
     """
 
     kind: OpKind

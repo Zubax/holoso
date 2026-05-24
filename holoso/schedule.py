@@ -174,7 +174,7 @@ def cycle_count(lir: Lir) -> int:
 
 def _ii_model(lir: Lir) -> IIModel:
     formula = f"makespan {lir.makespan} + 1 present cycle"
-    return IIModel(makespan=lir.makespan, cycle_estimate=cycle_count(lir), formula=formula)
+    return IIModel(makespan=lir.makespan, cycles=cycle_count(lir), formula=formula)
 
 
 def interface_of(lir: Lir) -> ModuleInterface:
@@ -204,7 +204,7 @@ def metrics_of(lir: Lir) -> SynthesisMetrics:
         read_ports=lir.regfile.nrd,
         write_ports=lir.regfile.nwr,
         makespan=lir.makespan,
-        ii_estimate=cycle_count(lir),
+        ii_cycles=cycle_count(lir),
         op_count=lir.op_count,
         max_chain_len=lir.max_chain_len,
     )
