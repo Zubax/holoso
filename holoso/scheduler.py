@@ -11,9 +11,9 @@ cycle ``c`` reads its register operands at ``c`` and commits at ``c + L``. The d
 ``c_consumer >= c_producer + L_producer + 1``.
 
 A fast op co-issued with a slow one is no longer gated on the slow one: each consumer advances on its own producer's
-commit. Operator-instance count bounds how many ops of a kind may *issue* per cycle (a pipelined instance accepts one
-new op per cycle). Optional read/write port budgets (default unbounded) further gate admission and lengthen the
-makespan to fit.
+commit. Instances are pooled by *resource key* -- ``(kind, elaboration params)``: ops sharing a key (all ``fadd``, or
+all ``fmul_ilog2_const`` with the same ``K``) time-share ``pool[kind]`` instances, at most one issue per instance per
+cycle. Optional read/write port budgets (default unbounded) further gate admission and lengthen the makespan to fit.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 from .hir import Const, Hir, OpNode, ValueId
 from .lir import OperatorInstance
-from .operators import OpKind
+from .operators import OpKind, ResourceKey
 
 _KIND_ORDER = {kind: index for index, kind in enumerate(OpKind)}
 
@@ -68,15 +68,13 @@ def present_kinds(hir: Hir) -> set[OpKind]:
 
 
 def resolve_pool(hir: Hir, instances: Mapping[OpKind, int] | None) -> dict[OpKind, int]:
-    """The per-kind issue-width budget: at least one of every shared kind present in the graph.
+    """The per-kind instance budget: at least one of every kind present in the graph (default 1).
 
-    ``FMUL_ILOG2`` is excluded -- each such op gets its own dedicated instance (its ``K`` is an elaboration-time
-    parameter), so its issue width is effectively unlimited and the scheduler never gates on it.
+    The budget is applied per *resource key* of that kind, so ``fmul_ilog2_const`` gets ``pool[FMUL_ILOG2]`` instances
+    per distinct ``K``. Raising a kind's budget lets that many ops of any one resource key co-issue.
     """
     pool: dict[OpKind, int] = {}
     for kind in present_kinds(hir):
-        if kind is OpKind.FMUL_ILOG2:
-            continue
         requested = 1 if instances is None else instances.get(kind, 1)
         pool[kind] = max(1, requested)
     return pool
@@ -108,9 +106,8 @@ def schedule_ops(hir: Hir, pool: Mapping[OpKind, int], *, nrd: int | None = None
 
     height = _critical_path(hir, op_ids)
     issue_cycle: dict[ValueId, int] = {}
-    inst_of: dict[ValueId, OperatorInstance] = {}
-    inst_count: dict[OpKind, int] = {}  # high-water issue width per shared kind -> instance count
-    ilog2: list[OperatorInstance] = []  # dedicated FMUL_ILOG2 instances, in mint order
+    inst_count: dict[ResourceKey, int] = {}  # resource key -> instances needed (peak concurrent use of that module)
+    slot_of: dict[ValueId, tuple[ResourceKey, int]] = {}  # op -> (its resource key, its 0-based instance slot)
     writes_used: dict[int, int] = {}  # commit cycle -> write ports already claimed (forward-indexed; budget only)
 
     def commit_cycle(vid: ValueId) -> int:
@@ -127,39 +124,48 @@ def schedule_ops(hir: Hir, pool: Mapping[OpKind, int], *, nrd: int | None = None
             if all(x in issue_cycle and cycle >= commit_cycle(x) + 1 for x in _operator_operands(hir, vid))
         ]
         ready.sort(key=lambda vid: (-height[vid], vid))
-        free = dict(pool)
+        used: dict[ResourceKey, int] = {}  # resource key -> instances busy this cycle
         cycle_reads: set[int] = set()
         for vid in ready:
             op = _opnode(hir, vid)
-            kind = op.kind
+            rk = ResourceKey.of(op.kind, op.k)
             new_reads = {r for r in _register_operands(hir, vid) if r not in cycle_reads}
             commit = cycle + op.latency
             if nrd is not None and len(cycle_reads) + len(new_reads) > nrd:
                 continue
             if nwr is not None and writes_used.get(commit, 0) + 1 > nwr:
                 continue
-            if kind is OpKind.FMUL_ILOG2:
-                inst = OperatorInstance(kind, len(ilog2), op.k)
-                ilog2.append(inst)
-            else:
-                if free.get(kind, 0) <= 0:
-                    continue
-                index = pool[kind] - free[kind]  # 0-based issue slot this cycle
-                free[kind] -= 1
-                inst_count[kind] = max(inst_count.get(kind, 0), index + 1)
-                inst = OperatorInstance(kind, index)
+            slot = used.get(rk, 0)
+            if slot >= pool[op.kind]:  # every copy of this module is busy this cycle -> the op waits
+                continue
+            used[rk] = slot + 1
+            inst_count[rk] = max(inst_count.get(rk, 0), slot + 1)
+            slot_of[vid] = (rk, slot)
             issue_cycle[vid] = cycle
-            inst_of[vid] = inst
             cycle_reads |= new_reads
             writes_used[commit] = writes_used.get(commit, 0) + 1
             unscheduled.discard(vid)
         cycle += 1
 
-    instances: list[OperatorInstance] = []
-    for kind in OpKind:  # deterministic definition order
-        if kind is OpKind.FMUL_ILOG2:
-            continue
-        instances.extend(OperatorInstance(kind, index) for index in range(inst_count.get(kind, 0)))
-    instances.extend(ilog2)
+    inst_of, instances = _bind_instances(inst_count, slot_of)
     makespan = max((commit_cycle(vid) for vid in op_ids), default=0)
-    return Schedule(issue_cycle=issue_cycle, inst_of=inst_of, instances=tuple(instances), makespan=makespan)
+    return Schedule(issue_cycle=issue_cycle, inst_of=inst_of, instances=instances, makespan=makespan)
+
+
+def _bind_instances(
+    inst_count: dict[ResourceKey, int], slot_of: dict[ValueId, tuple[ResourceKey, int]]
+) -> tuple[dict[ValueId, OperatorInstance], tuple[OperatorInstance, ...]]:
+    """Give each resource key a contiguous block of instance indices within its kind, then bind every op.
+
+    Indices are 0-based within a kind and run over the kind's resource keys in a deterministic order, so a kind with
+    several elaboration variants (e.g. ``fmul_ilog2_const`` with multiple ``K``) gets uniquely-named modules.
+    """
+    keys = sorted(inst_count, key=lambda rk: (_KIND_ORDER[rk.kind], rk.params))
+    base: dict[ResourceKey, int] = {}
+    per_kind_next: dict[OpKind, int] = {}
+    for rk in keys:
+        base[rk] = per_kind_next.get(rk.kind, 0)
+        per_kind_next[rk.kind] = base[rk] + inst_count[rk]
+    inst_of = {vid: OperatorInstance(rk, base[rk] + slot) for vid, (rk, slot) in slot_of.items()}
+    instances = tuple(OperatorInstance(rk, base[rk] + s) for rk in keys for s in range(inst_count[rk]))
+    return inst_of, instances

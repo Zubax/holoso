@@ -10,22 +10,29 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .format import FloatFormat
-from .operators import OpKind, Sgnop
+from .operators import OpKind, ResourceKey, Sgnop
 
 
 @dataclass(frozen=True, slots=True)
 class OperatorInstance:
-    """One physical operator module, e.g. ``u_fadd_0``.
+    """One physical operator module, e.g. ``u_fadd_0`` or ``u_fmul_ilog2_const_2``.
 
-    ``fadd``/``fmul``/``fdiv`` instances are shared across the schedule (the scheduler binds each op to a free instance
-    of its kind, at most one issue per instance per cycle, and a fully pipelined instance may carry several ops in
-    flight). ``fmul_ilog2_const`` takes its exponent ``K`` as an elaboration-time parameter, so each such op gets a
-    dedicated instance carrying its ``k``.
+    ``key`` names the module type (kind + elaboration params); ``index`` numbers the copies of that type. The
+    scheduler pools ops onto instances by ``key``: ops sharing a key may time-share one instance (at most one issue
+    per instance per cycle, a fully pipelined instance carrying several ops in flight), bounded by the per-kind
+    instance budget. So ``fadd``/``fmul``/``fdiv`` share by kind, and ``fmul_ilog2_const`` shares by ``(kind, K)``.
     """
 
-    kind: OpKind
-    index: int  # 0-based within its kind
-    k: int | None = None  # elaboration-time exponent for FMUL_ILOG2 instances
+    key: ResourceKey
+    index: int  # 0-based within its kind (contiguous across the kind's resource keys)
+
+    @property
+    def kind(self) -> OpKind:
+        return self.key.kind
+
+    @property
+    def k(self) -> int | None:
+        return self.key.params[0] if self.key.params else None
 
 
 @dataclass(frozen=True, slots=True)

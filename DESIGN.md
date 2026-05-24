@@ -192,8 +192,10 @@ for cycle = 1, 2, ...:                         # cycle 0 accepts/loads inputs; t
 regalloc: linear scan over commit cycles; share a register when last_use <= def (sound under read-first); no spill
 ```
 
-- Operator pool: configurable instances per kind (default 1) bounds how many ops of a kind may *issue* per cycle.
-  `fmul_ilog2_const` gets a dedicated instance per op (its `K` is elaboration-time), so it is never pool-capped.
+- Instances are pooled by resource key `(kind, elaboration params)` -- ops that elaborate to the same hardware share
+  instances. E.g., `fadd`/`fmul`/`fdiv` have no params (one key per kind); `fmul_ilog2_const` keys on its exponent
+  `K`, so same-`K` ops pool while different `K` are distinct modules. The configurable per-kind budget (default 1)
+  caps instances *per key*: same-key ops time-share, serializing when more than the budget would co-issue.
 - Read/write ports auto-size to the schedule's peak; an optional NRD/NWR budget (default unbounded) instead gates
   admission and lengthens the makespan to fit -- the knob for trading latency against register-file area.
 - `signfix` folds into operand sign-mods, `fconst` is an immediate on the input mux; both are free.

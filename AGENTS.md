@@ -3,6 +3,8 @@
 Holoso converts a small subset of Python functions and expressions into synthesizable and verifiable Verilog.
 Read the `README.md`.
 
+Whenever introducing changes, update `DESIGN.md` as well to keep it reasonably up-to-date and non-conflicting with the implementation.
+
 ## Conventions
 
 ### Reset strategy
@@ -26,9 +28,18 @@ References:
 - Intel Hyperflex Architecture High-Performance Design Handbook, "Reset Strategies":
   <https://docs.altera.com/r/docs/683353/25.1.1/hyperflex-architecture-high-performance-design-handbook/reset-strategies?contentId=gzd92HdsL40qZGHurB0ezg>
 
-### Language
+### Python
 
-Python and Verilog style: 4-space indentation, concise names, snake_case files and directories, uppercase Verilog `parameter`/`localparam`.
+Follow PEP8 with one exception: the maximum line length is 120 columns. This is already configured in Black.
+Comment block lines should utilize the 120 column limit well, avoiding overly short lines.
+
+Use strongly typed primitives. Instead of int constants, prefer enums; instead of dicts, prefer dataclasses; instead of existence/vaidity flags, prefer optional type or unions, etc.
+
+The Python version to target is 3.14 and newer. No need to ensure compatibility with older versions.
+
+### Verilog
+
+Verilog style: 4-space indentation, concise names, snake_case files and directories, uppercase `parameter`/`localparam`.
 Keep line length at or below 120 columns. Comment block lines should utilize the 120 column limit well, avoiding overly short lines.
 
 Testbenches are written in Python using Cocotb or similar tools.
@@ -36,15 +47,15 @@ Testbenches are written in Python using Cocotb or similar tools.
 Functions can be used in synthesizable Verilog but only if avoiding them is unduly burdensome.
 In synthesizable code, prefer `case` statements over nested ternary operators unless there are contraindications.
 
-In complex Verilog modules, it is best to avoid a large number of named nets that are only used once; this does not help readability but rather the opposite.
+In complex modules, it is best to avoid a large number of named nets that are only used once; this does not help readability but rather the opposite.
 
-In Verilog, leave unused module outputs unconnected, like `.out_foo()`, instead of creating unused wires.
-
-In Python, use strongly typed primitives. Instead of int constants, prefer enums; instead of dicts, prefer dataclasses; instead of existence/vaidity flags, prefer optional type or unions, etc.
-
-The Python version to target is 3.14 and newer. No need to ensure compatibility with older versions.
+Leave unused module outputs unconnected, like `.out_foo()`, instead of creating unused wires.
 
 ### Other
+
+In Markdown, it is best to avoid bold `**` and italics `*` for emphasis; prefer plain text instead.
+Prefer prose over lists, and avoid excessive formatting in general.
+These are not hard rules but rather soft suggestions.
 
 Generated reports must be written in rich and colorful human-friendly HTML format, not Markdown.
 

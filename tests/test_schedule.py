@@ -68,17 +68,52 @@ def test_pipelined_issue_overlaps_a_slow_op() -> None:
     assert any(sched.issue_cycle[vid] < div_commit for vid in adds)
 
 
-def test_fmul_ilog2_instances_are_dedicated_and_unlimited() -> None:
-    # Power-of-two scalings get one dedicated instance each and may co-issue freely (never pool-capped).
+def _ilog2(hir):  # type: ignore[no-untyped-def]
+    return [vid for vid, n in hir.nodes.items() if isinstance(n, OpNode) and n.kind is OpKind.FMUL_ILOG2]
+
+
+def test_fmul_ilog2_same_k_shares_one_instance() -> None:
+    # Two K=2 scalings that never run on the same cycle (the second waits on a multiply) pool onto one instance.
     def f(a, b):  # type: ignore[no-untyped-def]
-        return a * 4.0 + b * 8.0  # two independent fmul_ilog2_const
+        return (a * b) * 4.0, b * 4.0
 
     hir = run(lower(f, FMT))
-    ilog2 = [vid for vid, n in hir.nodes.items() if isinstance(n, OpNode) and n.kind is OpKind.FMUL_ILOG2]
-    assert len(ilog2) == 2
+    il = _ilog2(hir)
+    assert len(il) == 2
     sched = schedule_ops(hir, resolve_pool(hir, None))
-    assert sched.issue_cycle[ilog2[0]] == sched.issue_cycle[ilog2[1]]  # co-issue despite the default pool of 1
-    assert sched.inst_of[ilog2[0]].index != sched.inst_of[ilog2[1]].index  # ...on dedicated instances
+    assert sched.issue_cycle[il[0]] != sched.issue_cycle[il[1]]  # not concurrent
+    assert sched.inst_of[il[0]] == sched.inst_of[il[1]]  # ...so they share the one instance
+    assert sum(1 for i in sched.instances if i.kind is OpKind.FMUL_ILOG2) == 1
+
+
+def test_fmul_ilog2_same_k_serializes_by_default_parallelizes_with_budget() -> None:
+    # Two independent K=2 scalings are both ready at cycle 1; the per-kind budget governs them like any other kind.
+    def f(a, b):  # type: ignore[no-untyped-def]
+        return a * 4.0, b * 4.0
+
+    hir = run(lower(f, FMT))
+    il = _ilog2(hir)
+    assert len(il) == 2
+
+    one = schedule_ops(hir, resolve_pool(hir, None))  # default budget 1 -> serialize onto a single instance
+    assert one.issue_cycle[il[0]] != one.issue_cycle[il[1]]
+    assert sum(1 for i in one.instances if i.kind is OpKind.FMUL_ILOG2) == 1
+
+    two = schedule_ops(hir, resolve_pool(hir, {OpKind.FMUL_ILOG2: 2}))  # budget 2 -> co-issue on two instances
+    assert two.issue_cycle[il[0]] == two.issue_cycle[il[1]]
+    assert two.inst_of[il[0]].index != two.inst_of[il[1]].index
+
+
+def test_fmul_ilog2_different_k_never_shares() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        return a * 4.0 + b * 8.0  # K=2 and K=3 -- distinct hardware modules
+
+    hir = run(lower(f, FMT))
+    il = _ilog2(hir)
+    assert len(il) == 2
+    sched = schedule_ops(hir, resolve_pool(hir, None))
+    assert sched.inst_of[il[0]] != sched.inst_of[il[1]]  # different K -> different instances
+    assert {sched.inst_of[v].k for v in il} == {2, 3}
 
 
 def test_build_lir_small_kernel() -> None:
@@ -124,6 +159,8 @@ def test_build_lir_ekf1() -> None:
     assert len(lir.outputs) == 9
     fdivs = [inst for inst in lir.instances if inst.kind is OpKind.FDIV]
     assert len(fdivs) == 1
+    # The two K=1 power-of-two scalings are non-concurrent, so they pool onto a single shared instance.
+    assert sum(1 for inst in lir.instances if inst.kind is OpKind.FMUL_ILOG2) == 1
     # Register reuse: not every distinct value occupies its own register.
     assert lir.regfile.nreg < lir.op_count + len(lir.inputs)
     # The 1/x21 numerator survives as a constant immediate.

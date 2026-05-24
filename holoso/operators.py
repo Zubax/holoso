@@ -52,6 +52,25 @@ MODULE_NAMES: dict[OpKind, str] = {
 
 
 @dataclass(frozen=True, slots=True)
+class ResourceKey:
+    """A distinct physical operator module that ops may share.
+
+    Two ops share a key iff they elaborate to identical hardware: same ``kind`` and same elaboration-time
+    ``params``. ``params`` are the parameters baked into the module at elaboration -- today only
+    ``fmul_ilog2_const``'s exponent ``K`` -- and is empty for ``fadd``/``fmul``/``fdiv``. The scheduler pools and
+    caps operator instances by this key, so ops sharing a key can time-share one instance.
+    """
+
+    kind: OpKind
+    params: tuple[int, ...] = ()
+
+    @staticmethod
+    def of(kind: OpKind, k: int | None) -> "ResourceKey":
+        """Derive the key from a kind and its optional exponent (``k`` is set iff ``kind`` is ``FMUL_ILOG2``)."""
+        return ResourceKey(kind, () if k is None else (k,))
+
+
+@dataclass(frozen=True, slots=True)
 class StageConfig:
     """Optional pipeline-stage knobs per operator (default off). They affect latency and instantiation parameters."""
 
