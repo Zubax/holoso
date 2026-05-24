@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 import sys
 from pathlib import Path
@@ -48,9 +49,31 @@ def test_write_artifacts(tmp_path: Path) -> None:
 
 
 def test_report_has_expected_sections() -> None:
-    report = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24)).report_html
-    for token in ("Metrics", "Interface", "Schedule", "_kernel"):
+    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24))
+    report = result.report_html
+    header_html = report.split("<pre class='modhdr'", 1)[1].split("</code></pre>", 1)[0]
+    header_html = header_html.split("<code>", 1)[1]
+    header_text = html.unescape(re.sub(r"<[^>]+>", "", header_html))
+
+    for token in ("Metrics", "Module Header", "Interface", "Schedule", "_kernel"):
         assert token in report
+    for token in ("// CONTROL PORTS", "// INPUT PORTS", "// OUTPUT PORTS", "// DIAGNOSTIC PORTS"):
+        assert token in result.verilog
+        assert token in header_text
+    for token in (
+        "module _kernel #(",
+        "parameter WEXP = 8,  // ZKF exponent bits",
+        "parameter WMAN = 24  // ZKF mantissa bits",
+        "input  wire [WEXP+WMAN-1:0] in_a",
+        "output wire [WEXP+WMAN-1:0] out_0",
+        "output reg  [4:0] err_cyc",
+    ):
+        assert token in result.verilog
+        assert token in header_text
+    assert report.index("<h2>Interface</h2>") < report.index("<h2>Module Header</h2>")
+    assert "--modhdr-width:" not in report
+    assert "Runtime diagnostics available while the module is running." in header_text
+    assert "vh-keyword" in report and "vh-comment" in report and "vh-number" in report
 
 
 def test_report_schedule_displays_exact_ii_cycle_rows() -> None:

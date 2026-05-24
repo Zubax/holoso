@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
@@ -37,6 +38,9 @@ _KIND_LABEL: dict[OpKind, str] = {
     OpKind.FDIV: "/",
     OpKind.FMUL_ILOG2: "<<",
 }
+_MODULE_HEADER_RE = re.compile(r"(?ms)^module\b.*?^\);")
+_VERILOG_TOKEN_RE = re.compile(r"(?P<space>\s+)|(?P<ident>[A-Za-z_]\w*)|(?P<number>\d+)|(?P<other>.)")
+_VERILOG_KEYWORDS = frozenset({"module", "parameter", "input", "output", "wire", "reg"})
 
 
 def _esc(text: str) -> str:
@@ -58,7 +62,7 @@ def _op_text(op: ScheduledOp) -> str:
     return op.y_sgnop.decorate(f"r{op.dst.index}={body}")
 
 
-def build_report_html(lir: Lir, interface: ModuleInterface, metrics: SynthesisMetrics) -> str:
+def build_report_html(lir: Lir, interface: ModuleInterface, metrics: SynthesisMetrics, module_verilog: str) -> str:
     fmt = lir.fmt
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     link = f"<a href='{_GITHUB_URL}'>Holoso</a>"
@@ -76,6 +80,7 @@ def build_report_html(lir: Lir, interface: ModuleInterface, metrics: SynthesisMe
     if constants:
         out.append(f"<div class='sec'>{constants}</div>")
     out.append(f"<div class='sec'>{_interface(interface)}</div>")
+    out.append(f"<div class='sec modhdrsec'>{_module_header(module_verilog)}</div>")
     out.append("</div>")
     if interface.ii.cycles != metrics.ii_cycles:
         raise RuntimeError(
@@ -117,6 +122,43 @@ def _interface(interface: ModuleInterface) -> str:
             out.append(f"<tr><td>{_esc(port.name)}</td><td>{port.width}</td></tr>")
         out.append("</table></div>")
     out.append("</div>")
+    return "".join(out)
+
+
+def _module_header(module_verilog: str) -> str:
+    header = _extract_module_header(module_verilog)
+    return f"<h2>Module Header</h2><pre class='modhdr'><code>{_highlight_verilog(header)}</code></pre>"
+
+
+def _extract_module_header(module_verilog: str) -> str:
+    match = _MODULE_HEADER_RE.search(module_verilog)
+    if match is None:
+        raise RuntimeError("cannot find generated Verilog module header")
+    return match.group(0)
+
+
+def _highlight_verilog(text: str) -> str:
+    return "\n".join(_highlight_verilog_line(line) for line in text.splitlines())
+
+
+def _highlight_verilog_line(line: str) -> str:
+    code, sep, comment = line.partition("//")
+    highlighted = _highlight_verilog_code(code)
+    if sep:
+        highlighted += f"<span class='vh-comment'>{_esc(sep + comment)}</span>"
+    return highlighted
+
+
+def _highlight_verilog_code(code: str) -> str:
+    out: list[str] = []
+    for match in _VERILOG_TOKEN_RE.finditer(code):
+        token = match.group(0)
+        if match.lastgroup == "ident" and token in _VERILOG_KEYWORDS:
+            out.append(f"<span class='vh-keyword'>{_esc(token)}</span>")
+        elif match.lastgroup == "number":
+            out.append(f"<span class='vh-number'>{token}</span>")
+        else:
+            out.append(_esc(token))
     return "".join(out)
 
 

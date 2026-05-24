@@ -21,6 +21,12 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
 .iface th, .iface td { text-align: left; padding: 2px 12px 2px 0; border-bottom: 1px solid #c2c7cf; white-space: nowrap; }
 .iface th { color: #4b5563; font-weight: 700; }
 .const { display: inline-block; background: #f3f4f6; color: #92400e; border: 1px solid #cbd5e1; margin: 2px; padding: 1px 7px; border-radius: 3px; font-size: 12px; }
+.modhdrsec { flex: 0 1 auto; max-width: 100%; }
+.modhdr { display: inline-block; max-width: 100%; overflow-x: auto; margin: 0; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 3px; background: #f8fafc; color: #111827; font-size: 10px; line-height: 1.25; }
+.modhdr code { display: inline-block; min-width: max-content; font: inherit; }
+.vh-comment { color: #64748b; }
+.vh-keyword { color: #2456a6; font-weight: 700; }
+.vh-number { color: #92400e; }
 /* Schedule: a register grid, an operator-stage block, and the operations list. Rows = clock cycles; columns =
    registers, then constants, then one square column per pipeline stage of each operator (black dividers between
    groups). The destination cell on a result's completion cycle is filled with its operator color, the operator-stage

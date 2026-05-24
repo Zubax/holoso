@@ -59,6 +59,8 @@ These are not hard rules but rather soft suggestions.
 
 Generated reports must be written in rich and colorful human-friendly HTML format, not Markdown.
 
+No need to add tests nor update the design docs for report-generation-related changes.
+
 ## Verification
 
 Entirely driven by `nox`; read the `noxfile.py` for details.

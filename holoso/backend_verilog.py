@@ -128,10 +128,14 @@ def _emit_header(w: VerilogWriter, lir: Lir, cycw: int) -> None:
     w.lines('`include "holoso_support.vh"', "`timescale 1ns/1ps", "")
     w.line(f"module {lir.module_name} #(")
     w.push()
-    w.lines(f"parameter WEXP = {lir.fmt.wexp},", f"parameter WMAN = {lir.fmt.wman}")
+    w.lines(
+        f"parameter WEXP ={lir.fmt.wexp:3},  // ZKF exponent bits",
+        f"parameter WMAN ={lir.fmt.wman:3}   // ZKF mantissa bits",
+    )
     w.pop()
     w.line(") (")
     w.push()
+    _emit_port_group(w, "CONTROL PORTS", "Clock/reset and ready/valid handshake for one scheduled invocation.")
     ports = [
         "input  wire clk,",
         "input  wire rst,",
@@ -142,14 +146,21 @@ def _emit_header(w: VerilogWriter, lir: Lir, cycw: int) -> None:
     ]
     for line in ports:
         w.line(line)
+    _emit_port_group(w, "INPUT PORTS", "Latched when in_valid && in_ready.")
     for load in lir.inputs:
         w.line(f"input  wire [WEXP+WMAN-1:0] in_{load.name},")
+    _emit_port_group(w, "OUTPUT PORTS", "Valid when out_valid is pulsed.")
     for wire in lir.outputs:
         w.line(f"output wire [WEXP+WMAN-1:0] {wire.name},")
+    _emit_port_group(w, "DIAGNOSTIC PORTS", "Runtime diagnostics available while the module is running.")
     # err_cyc: 0 = no error; otherwise the (last) cycle an error was detected. |err_cyc answers "any error?".
     w.line(f"output reg  [{cycw - 1}:0] err_cyc")
     w.pop()
     w.lines(");", "")
+
+
+def _emit_port_group(w: VerilogWriter, title: str, comment: str) -> None:
+    w.lines(f"// {title}", f"// {comment}")
 
 
 def _emit_localparams(w: VerilogWriter, lir: Lir, waddr: int, cycw: int) -> None:

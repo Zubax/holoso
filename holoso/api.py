@@ -39,15 +39,16 @@ def synthesize(
     lir = build(hir, module_name, instances=operator_instances)
     interface = interface_of(lir)
     metrics = metrics_of(lir)
+    verilog = generate(lir)
     testbench = render_testbench(lir, float_format, target) if callable(target) else ""
     return SynthesisResult(
         module_name=module_name,
         interface=interface,
-        verilog=generate(lir),
+        verilog=verilog,
         support=support_verilog(),
         support_header=support_header(),
         testbench=testbench,
-        report_html=build_report_html(lir, interface, metrics),
+        report_html=build_report_html(lir, interface, metrics, verilog),
         metrics=metrics,
         hir=hir,
         lir=lir,
