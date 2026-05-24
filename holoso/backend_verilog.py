@@ -43,6 +43,10 @@ def _rf_addr(port: int) -> str:
     return f"`REGF_ADDR({port})"
 
 
+def _rf_view(reg: int) -> str:
+    return f"`REGF_VIEW({reg})"
+
+
 def _operand_value(operand: Operand, lanes: dict[int, int]) -> str:
     if isinstance(operand.source, ConstRef):
         return f"const_{operand.source.index}"
@@ -95,32 +99,23 @@ def _read_lanes_for(issues: list[ScheduledOp]) -> dict[int, int]:
     return lanes
 
 
-def _output_lanes(lir: Lir) -> dict[int, int]:
-    lanes: dict[int, int] = {}
-    for wire in lir.outputs:
-        if isinstance(wire.source, RegRef) and wire.source.index not in lanes:
-            lanes[wire.source.index] = len(lanes)
-    return lanes
-
-
 def generate(lir: Lir) -> str:
     w = VerilogWriter()
     waddr = max(1, (lir.regfile.nreg - 1).bit_length())
     cycw = lir.cyc_width
     issues_by_cycle, commits_by_cycle = _group_by_cycle(lir)
     read_lanes = {cycle: _read_lanes_for(issues) for cycle, issues in issues_by_cycle.items()}
-    out_lanes = _output_lanes(lir)
 
     _emit_header(w, lir, cycw)
     _emit_localparams(w, lir, waddr, cycw)
     _emit_declarations(w, lir)
     _emit_consts(w, lir)
-    _emit_regfile(w)
+    _emit_regfile(w, lir)
     _emit_operators(w, lir)
-    _emit_datapath(w, lir, issues_by_cycle, commits_by_cycle, read_lanes, out_lanes)
+    _emit_datapath(w, lir, issues_by_cycle, commits_by_cycle, read_lanes)
     _emit_fsm(w)
-    _emit_outputs(w, lir, out_lanes)
-    w.lines("endmodule", "", "`undef REGF_DATA", "`undef REGF_ADDR")
+    _emit_outputs(w, lir)
+    w.lines("endmodule", "", "`undef REGF_DATA", "`undef REGF_ADDR", "`undef REGF_VIEW")
     return w.render()
 
 
@@ -169,12 +164,14 @@ def _emit_localparams(w: VerilogWriter, lir: Lir, waddr: int, cycw: int) -> None
     w.line(f"localparam WADDR = {waddr};")
     w.line(f"localparam NRD   = {lir.regfile.nrd};")
     w.line(f"localparam NWR   = {lir.regfile.nwr};")
+    w.line(f"localparam NLOAD = {lir.regfile.nload};")
     w.line(f"localparam CYCW  = {cycw};")
     w.line(f"localparam [CYCW-1:0] LAST = {lir.makespan + 1};")
     compute = f"1..{lir.makespan} = pipelined compute, " if lir.makespan else ""
     w.line(f"// cyc: 0 = idle/accept, {compute}LAST = present outputs")
     w.lines("", "`define REGF_DATA(PORT) `HOLOSO_REGFILE_LANE(W, PORT)")
     w.line("`define REGF_ADDR(PORT) `HOLOSO_REGFILE_LANE(WADDR, PORT)")
+    w.line("`define REGF_VIEW(REG)  `HOLOSO_REGFILE_LANE(W, REG)")
     w.line("")
 
 
@@ -186,8 +183,15 @@ def _emit_declarations(w: VerilogWriter, lir: Lir) -> None:
         "reg  [NWR*W-1:0]     rf_wr_data;",
         "reg  [NRD*WADDR-1:0] rf_rd_addr;",
         "wire [NRD*W-1:0]     rf_rd_data;",
+        "wire [NREG*W-1:0]    rf_view;",
         "",
     )
+    if lir.regfile.nload:
+        w.lines(
+            "reg                  rf_load_en;",
+            "reg  [NLOAD*W-1:0]   rf_load_data;",
+            "",
+        )
     for value in range(len(lir.consts)):
         w.line(f"wire [W-1:0] const_{value};")
     if lir.consts:
@@ -217,16 +221,23 @@ def _emit_consts(w: VerilogWriter, lir: Lir) -> None:
         w.line("")
 
 
-def _emit_regfile(w: VerilogWriter) -> None:
+def _emit_regfile(w: VerilogWriter, lir: Lir) -> None:
     w.line("// Read-first register file (RWPASS=0): a value written on a cycle is readable only on the next cycle.")
     w.line("// The scheduler's +1 dependency latency and the allocator's last_use<=def register sharing both rely")
     w.line("// on this; do NOT switch to write-through (RWPASS=1) without revisiting holoso/regalloc.py.")
-    w.line("holoso_regfile #(.W(W), .WADDR(WADDR), .NRD(NRD), .NWR(NWR), .NREG(NREG), .RWPASS(0)) u_rf (")
+    w.line(
+        "holoso_regfile #(.W(W), .WADDR(WADDR), .NRD(NRD), .NWR(NWR), .NLOAD(NLOAD), .NREG(NREG), .RWPASS(0)) u_rf ("
+    )
     w.push()
+    w.line(".clk(clk),")
+    if lir.regfile.nload:
+        w.line(".load_en(rf_load_en), .load_data(rf_load_data),")
+    else:
+        w.line(".load_en(1'b0), .load_data(1'b0),  // no inputs: load port disabled (NLOAD=0)")
     w.lines(
-        ".clk(clk),",
         ".wr_en(rf_wr_en), .wr_addr(rf_wr_addr), .wr_data(rf_wr_data),",
-        ".rd_addr(rf_rd_addr), .rd_data(rf_rd_data)",
+        ".rd_addr(rf_rd_addr), .rd_data(rf_rd_data),",
+        ".view(rf_view)",
     )
     w.pop()
     w.lines(");", "")
@@ -267,7 +278,6 @@ def _emit_datapath(
     issues_by_cycle: dict[int, list[ScheduledOp]],
     commits_by_cycle: dict[int, list[ScheduledOp]],
     read_lanes: dict[int, dict[int, int]],
-    out_lanes: dict[int, int],
 ) -> None:
     # One combinational block: per cycle, set the operand reads + in_valid for issuing operators and the write ports
     # for committing operators. `always @*` over `reg` targets is pure combinational logic; the only flip-flops are
@@ -286,16 +296,21 @@ def _emit_datapath(
         "rf_wr_data = {(NWR*W){1'b0}};",
         "err        = 1'b0;",
     )
+    if lir.regfile.nload:
+        w.lines(
+            "rf_load_en = 1'b0;",
+            "rf_load_data  = {(NLOAD*W){1'b0}};",
+        )
     w.line("case (cyc)")
     w.push()
-    w.line("0: if (in_valid) begin  // sample input ports into their registers")
-    w.push()
-    for port, load in enumerate(lir.inputs):
-        w.line(f"rf_wr_en[{port}] = 1'b1;")
-        w.line(f"rf_wr_addr[{_rf_addr(port)}] = {load.dst.index};")
-        w.line(f"rf_wr_data[{_rf_data(port)}] = in_{load.name};")
-    w.pop()
-    w.line("end")
+    if lir.regfile.nload:
+        w.line("0: if (in_valid) begin  // parallel-load the input ports into registers 0..NLOAD-1 in one cycle")
+        w.push()
+        w.line("rf_load_en = 1'b1;")
+        for load in lir.inputs:
+            w.line(f"rf_load_data[{_rf_view(load.dst.index)}] = in_{load.name};")
+        w.pop()
+        w.line("end")
     for cycle in sorted(set(issues_by_cycle) | set(commits_by_cycle)):
         issues = issues_by_cycle.get(cycle, [])
         commits = commits_by_cycle.get(cycle, [])
@@ -319,13 +334,6 @@ def _emit_datapath(
         err_terms = [f"{_sig(op.inst)}_div0" for op in commits if has_div0(op.inst.kind)]
         if err_terms:
             w.line(f"err = {' | '.join(err_terms)};  // error(s) detected as these operators commit")
-        w.pop()
-        w.line("end")
-    if out_lanes:
-        w.line("LAST: begin  // present output registers on the read ports")
-        w.push()
-        for reg, lane in out_lanes.items():
-            w.line(f"rf_rd_addr[{_rf_addr(lane)}] = {reg};")
         w.pop()
         w.line("end")
     w.line("default: ;")
@@ -372,14 +380,14 @@ def _emit_fsm(w: VerilogWriter) -> None:
     w.lines("end", "")
 
 
-def _emit_outputs(w: VerilogWriter, lir: Lir, out_lanes: dict[int, int]) -> None:
+def _emit_outputs(w: VerilogWriter, lir: Lir) -> None:
     w.line("assign in_ready  = (cyc == 0);")
     w.line("assign out_valid = (cyc == LAST);")
     for index, wire in enumerate(lir.outputs):
         if isinstance(wire.source, ConstRef):
             raw = f"const_{wire.source.index}"
         else:
-            raw = f"rf_rd_data[{_rf_data(out_lanes[wire.source.index])}]"
+            raw = f"rf_view[{_rf_view(wire.source.index)}]"
         if wire.sgnop is Sgnop.NONE:
             w.line(f"assign {wire.name} = {raw};")
         else:

@@ -126,6 +126,7 @@ def test_build_lir_small_kernel() -> None:
     assert lir.module_name == "kernel"
     assert lir.regfile.nreg >= 1
     assert {i.name for i in lir.inputs} == {"a", "b"}
+    assert lir.regfile.nload == 2  # both inputs are preloaded via the regfile load port (registers 0..1)
     assert [o.name for o in lir.outputs] == ["out_0"]
     assert all(isinstance(o.source, RegRef) for o in lir.outputs)
     assert lir.makespan == max(op.commit_cycle for op in lir.ops)
@@ -165,6 +166,12 @@ def test_build_lir_ekf1() -> None:
     assert sum(1 for inst in lir.instances if inst.kind is OpKind.FMUL_ILOG2) == 1
     # Register reuse: not every distinct value occupies its own register.
     assert lir.regfile.nreg < lir.op_count + len(lir.inputs)
+    # Inputs preload through the regfile's load port (registers 0..nload-1), so nload spans the input block.
+    assert lir.regfile.nload == 17
+    # Port counts now track internal parallelism, not I/O width: write ports collapse to peak commits (was the
+    # 17-wide input load) and read ports to peak operand reads (was the 9-wide output presentation).
+    assert lir.regfile.nwr == 3
+    assert lir.regfile.nrd == 5
     # The 1/x21 numerator survives as a constant immediate.
     assert any(abs(c - 1.0) < 1e-12 for c in lir.consts)
 

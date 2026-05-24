@@ -7,11 +7,13 @@
 // PORT is zero-based. WIDTH is the width of one lane on the selected flattened bus.
 // Use it inside an indexed part-select:
 //
-//     rd_addr[`HOLOSO_REGFILE_LANE(WADR, 0)]
-//     rd_data[`HOLOSO_REGFILE_LANE(W,    0)]
-//     wr_addr[`HOLOSO_REGFILE_LANE(WADR, 1)]
-//     wr_data[`HOLOSO_REGFILE_LANE(W,    1)]
+//     rd_addr[`HOLOSO_REGFILE_LANE(WADDR, 0)]
+//     rd_data[`HOLOSO_REGFILE_LANE(W,     0)]
+//     wr_addr[`HOLOSO_REGFILE_LANE(WADDR, 1)]
+//     wr_data[`HOLOSO_REGFILE_LANE(W,     1)]
 //     wr_en[1]
+//     load_data[`HOLOSO_REGFILE_LANE(W,  0)]   // lane i drives register i (only for i < NLOAD)
+//     view[`HOLOSO_REGFILE_LANE(W,       0)]   // lane i mirrors register i (all NREG registers)
 `define HOLOSO_REGFILE_LANE(WIDTH, PORT) ((PORT) * (WIDTH)) +: (WIDTH)
 
 

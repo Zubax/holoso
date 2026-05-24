@@ -63,6 +63,7 @@ def build(
             nreg=alloc.nreg,
             nrd=_compute_nrd(hir, sched, alloc),
             nwr=_compute_nwr(hir, sched),
+            nload=_compute_nload(hir, alloc),
         ),
         inputs=_build_inputs(hir, alloc),
         ops=_build_ops(hir, sched, alloc, const_index),
@@ -152,7 +153,11 @@ def _build_outputs(hir: Hir, alloc: Allocation, const_index: dict[ValueId, int])
 
 
 def _compute_nrd(hir: Hir, sched: Schedule, alloc: Allocation) -> int:
-    """Combinational read ports: the peak distinct register reads in any issue cycle, or the output presentation."""
+    """Combinational read ports: the peak distinct register reads in any issue cycle.
+
+    Outputs are presented from the register file's passive ``view`` bus (wired by fixed register index in the
+    backend), so they no longer consume read ports -- this counts operand reads only.
+    """
     per_cycle: dict[int, set[int]] = {}
     for vid, cycle in sched.issue_cycle.items():
         op = _opnode(hir, vid)
@@ -161,18 +166,33 @@ def _compute_nrd(hir: Hir, sched: Schedule, alloc: Allocation) -> int:
             if operand is not None and not isinstance(hir.nodes[operand], Const):
                 regs.add(alloc.assign[operand])
     max_reads = max((len(regs) for regs in per_cycle.values()), default=0)
-    output_regs = {alloc.assign[o.value] for o in hir.outputs if not isinstance(hir.nodes[o.value], Const)}
-    return max(max_reads, len(output_regs), 1)
+    return max(max_reads, 1)
 
 
 def _compute_nwr(hir: Hir, sched: Schedule) -> int:
-    """Synchronous write ports: the single-cycle input load, and the peak operator commits landing on one cycle."""
+    """Synchronous write ports: the peak operator commits landing on one cycle.
+
+    Inputs are preloaded through the register file's immediate ``load`` port on cycle 0, not the write ports, so the
+    input count no longer inflates this -- the write ports carry operator commits only.
+    """
     per_commit: dict[int, int] = {}
     for vid, cycle in sched.issue_cycle.items():
         commit = cycle + _opnode(hir, vid).latency
         per_commit[commit] = per_commit.get(commit, 0) + 1
     peak_commits = max(per_commit.values(), default=0)
-    return max(len(hir.input_ids), peak_commits, 1)
+    return max(peak_commits, 1)
+
+
+def _compute_nload(hir: Hir, alloc: Allocation) -> int:
+    """Immediate parallel-load lanes: enough to cover the highest register any input occupies (registers 0..nload-1).
+
+    Inputs commit at cycle 0 and read back from cycle 1; they are loaded in one shot via the register file's ``load``
+    port rather than through write ports. Sized from the max occupied input register, not ``len(inputs)``: an unused
+    input (never read) is freed at cycle 0 by the linear-scan allocator and may share a low register, so the input
+    count can exceed the highest input register index. A *used* input is never freed at cycle 0, so it uniquely owns
+    its register; registers 0..nload-1 are exactly the input block.
+    """
+    return max((alloc.assign[vid] for vid in hir.input_ids), default=-1) + 1
 
 
 def _max_chain_len(hir: Hir) -> int:

@@ -104,6 +104,7 @@ class RegFileLayout:
     nreg: int  # number of float registers (N)
     nrd: int  # combinational read ports
     nwr: int  # synchronous write ports
+    nload: int  # immediate parallel-load lanes: registers 0..nload-1 are loaded from load_data at in_valid
 
 
 @dataclass(frozen=True, slots=True)

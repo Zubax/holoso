@@ -35,15 +35,25 @@
 // Writes are synchronous. On the rising edge of clk, each addressed register with an active matching write
 // port is updated to the matching write-data lanes.
 //
+// An optional immediate parallel load preloads registers 0..NLOAD-1 from the load_data lanes in a single cycle when
+// load_valid is asserted, bypassing the write ports (lane i drives register i, no address needed). It is folded into
+// the synchronous write-data OR on those registers, so it is synchronous and read-first like a normal write.
+//
+// The combinational view port mirrors every register (view[i*W +: W] == regs[i]); like the read ports under RWPASS=0
+// it is read-first, so a value written or loaded on a cycle appears on view only on the following cycle. It lets a
+// client tap results from fixed register indices without consuming read ports.
+//
 // There is no reset input and stored data is not initialized. Accesses are unchecked; the client must only use
-// addresses below NREG. Out-of-range behavior is unspecified. Conflicting write behavior is unspecified.
+// addresses below NREG and load lanes below NLOAD. Out-of-range behavior is unspecified. Conflicting write behavior,
+// and a load conflicting with a write to the same register on the same cycle, are unspecified.
 module holoso_regfile#(
-    parameter W      = 32,           // width of one data word
-    parameter WADDR  = 5,            // width of one address lane
-    parameter NRD    = 1,            // number of combinational read ports
-    parameter NWR    = 1,            // number of synchronous write ports
-    parameter NREG   = (1 << WADDR), // number of stored registers; defaults to the full addressable range
-    parameter RWPASS = 0             // enables same-cycle read/write combinational pass-through
+    parameter W       = 32,           // width of one data word
+    parameter WADDR   = 5,            // width of one address lane
+    parameter NRD     = 1,            // number of combinational read ports
+    parameter NWR     = 1,            // number of synchronous write ports
+    parameter NLOAD   = 0,            // number of low registers (0..NLOAD-1) served by the immediate load port
+    parameter NREG    = (1 << WADDR), // number of stored registers; defaults to the full addressable range
+    parameter RWPASS  = 0             // enables same-cycle read/write combinational pass-through
 )(
     input wire clk,
 
@@ -52,7 +62,12 @@ module holoso_regfile#(
     input wire     [NWR*W-1:0] wr_data,
 
     input  wire [NRD*WADDR-1:0] rd_addr,
-    output wire     [NRD*W-1:0] rd_data
+    output wire     [NRD*W-1:0] rd_data,
+
+    input  wire                               load_en,
+    input  wire [((NLOAD>0)?(NLOAD*W):1)-1:0] load_data,
+
+    output wire  [NREG*W-1:0] view
 );
     reg [W-1:0] regs [0:NREG-1];
 
@@ -71,7 +86,8 @@ module holoso_regfile#(
     genvar rd_idx;
     genvar wr_idx;
     generate
-        if ((W <= 0) || (WADDR <= 0) || (NRD <= 0) || (NWR <= 0) || (NREG <= 0) || (NREG > (1 << WADDR))) begin : g_bad
+        if ((W <= 0) || (WADDR <= 0) || (NRD <= 0) || (NWR <= 0) || (NREG <= 0) || (NREG > (1 << WADDR))
+                || (NLOAD < 0) || (NLOAD > NREG)) begin : g_bad
             _holoso_regfile_bad_parameters_invalid_usage bad_parameters();
         end else begin : g_ok
             // WRITE PORTS
@@ -88,12 +104,24 @@ module holoso_regfile#(
                     assign wr_data_masked[(wr_idx * W) +: W] = match ? wr_data[(wr_idx * W) +: W] : {W{1'b0}};
                 end
 
-                always @(posedge clk) begin
-                    if (|wr_match) begin
-                        regs[reg_idx] <= wr_data_or;
+                if (reg_idx < NLOAD) begin : g_load
+                    // The load is one more masked term ORed into the write data; lane reg_idx drives this register with
+                    // no address comparator or series mux. load_en and a write to this reg are normally disjoint.
+                    wire [W-1:0] load_masked = load_en ? load_data[(reg_idx * W) +: W] : {W{1'b0}};
+                    always @(posedge clk) begin
+                        if (|wr_match || load_en) begin
+                            regs[reg_idx] <= wr_data_or | load_masked;
+                        end
+                    end
+                end else begin : g_plain
+                    always @(posedge clk) begin
+                        if (|wr_match) begin
+                            regs[reg_idx] <= wr_data_or;
+                        end
                     end
                 end
             end
+
             // READ PORTS
             for (rd_idx = 0; rd_idx < NRD; rd_idx = rd_idx + 1) begin : g_rd
                 wire  [WADDR-1:0] rd_addr_lane = rd_addr[(rd_idx * WADDR) +: WADDR];
@@ -111,6 +139,11 @@ module holoso_regfile#(
                 end else begin : g_no_passthrough
                     assign rd_data[(rd_idx * W) +: W] = regs[rd_addr_lane];
                 end
+            end
+
+            // PASSIVE VIEW: combinational mirror of every register; view[i*W +: W] == regs[i]
+            for (reg_idx = 0; reg_idx < NREG; reg_idx = reg_idx + 1) begin : g_view
+                assign view[(reg_idx * W) +: W] = regs[reg_idx];
             end
         end
     endgenerate

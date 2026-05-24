@@ -199,8 +199,14 @@ regalloc: linear scan over commit cycles; share a register when last_use <= def 
   instances. E.g., `fadd`/`fmul`/`fdiv` have no params (one key per kind); `fmul_ilog2_const` keys on its exponent
   `K`, so same-`K` ops pool while different `K` are distinct modules. The configurable per-kind budget (default 1)
   caps instances *per key*: same-key ops time-share, serializing when more than the budget would co-issue.
-- Read/write ports auto-size to the schedule's peak; an optional NRD/NWR budget (default unbounded) instead gates
-  admission and lengthens the makespan to fit -- the knob for trading latency against register-file area.
+- Read/write ports auto-size to the schedule's peak internal parallelism (independent of I/O width).
+  Inputs preload through the register file's immediate `load` port on cycle 0 instead of write ports.
+  Outputs are tapped from the register file's passive `view` bus by fixed register index instead of read ports.
+  An optional NRD/NWR budget (default unbounded) instead gates admission and lengthens the makespan to fit --
+  the knob for trading latency against register-file area.
+- The `load` port folds into each low register's write-data OR (one masked term, no address comparator), so a
+  single-cycle preload of registers `0..nload-1` costs far less than the per-register comparators that one write
+  port per input would add. `nload` spans the input block (the highest input register index plus one).
 - `signfix` folds into operand sign-mods, `fconst` is an immediate on the input mux; both are free.
 
 Why not write-through forwarding? A write-through register file (`RWPASS=1`) would erase the +1 dependency cycle, but
@@ -211,10 +217,12 @@ pipelined overlap, is the better trade.
 
 Mechanical from LIR: a `holoso_regfile` flop bank, one operator instance per `OperatorInstance`, and one `fconst` per
 pooled constant, all driven by a control word. The controller is a cycle counter `cyc` driving a `case(cyc)`
-microprogram that replays the static schedule: `cyc==0` accepts and writes the inputs, `cyc` advances every clock
-through the compute cycles `1..makespan`, and `cyc==makespan+1` presents the outputs and asserts `out_valid`. Each
-compute cycle asserts `in_valid` to the operators issued that cycle (driving their operand reads) and writes back the
-operators that commit that cycle. No scoreboard is needed because latencies are static. Errors are non-fatal and
+microprogram that replays the static schedule: `cyc==0` accepts and parallel-loads the inputs through the register
+file's `load` port (registers `0..nload-1` in one cycle), `cyc` advances every clock through the compute cycles
+`1..makespan`, and `cyc==makespan+1` asserts `out_valid` while the outputs are driven combinationally from the
+register file's `view` bus (wired by fixed register index, so no read ports and no read-address work that cycle).
+Each compute cycle asserts `in_valid` to the operators issued that cycle (driving their operand reads) and writes
+back the operators that commit that cycle. No scoreboard is needed because latencies are static. Errors are non-fatal and
 informative: a combinational `err` flag in the `case(cyc)` block ORs the error signals (today only `fdiv`'s `div0`) of
 the operators committing that cycle, and the control block latches `err_cyc <= cyc` whenever `err` -- so `err_cyc` is
 0 if the run hit no errors (reset at every accept; `|err_cyc` means "any error"), else the last cycle one occurred.
