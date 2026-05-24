@@ -28,7 +28,7 @@ def test_synthesize_small_kernel_result() -> None:
     assert "<html" in result.report_html.lower()
     assert result.metrics.op_count >= 3
     names = [p.name for p in result.interface.ports]
-    assert "in_a" in names and "out_0" in names and "diag_error" in names
+    assert "in_a" in names and "out_0" in names and "err_cyc" in names
 
 
 def test_generated_testbench_is_valid_python() -> None:

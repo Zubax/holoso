@@ -135,7 +135,7 @@ Branch vs. select (the core control-flow decision):
 
 - A real `if`/`else` lowers to a `branch` terminator + a `phi` at the merge. Only one side executes; the merge is
   resolved at register allocation by coalescing both definitions onto one register -- no runtime mux, the untaken
-  arm is never computed, and no spurious `diag_error`. Branches are the default.
+  arm is never computed, and no spurious error is recorded. Branches are the default.
 - `select` (a mux, both inputs live) is reserved for data multiplexing (one-hot lookup, `where`-style picks) and for an
   optional if-conversion peephole that collapses a tiny, pure, cheap diamond. Conservative by default.
 
@@ -211,9 +211,11 @@ pooled constant, all driven by a control word. The controller is a cycle counter
 microprogram that replays the static schedule: `cyc==0` accepts and writes the inputs, `cyc` advances every clock
 through the compute cycles `1..makespan`, and `cyc==makespan+1` presents the outputs and asserts `out_valid`. Each
 compute cycle asserts `in_valid` to the operators issued that cycle (driving their operand reads) and writes back the
-operators that commit that cycle. No scoreboard is needed because latencies are static; the only data-dependent signal
-is `div0`, latched at each `fdiv`'s commit cycle and OR-aggregated into `diag_error`. Reset covers only the control
-registers (`cyc`, `diag_q`). Nonblocking assignment only, `case` not functions.
+operators that commit that cycle. No scoreboard is needed because latencies are static. Errors are non-fatal and
+informative: a combinational `err` flag in the `case(cyc)` block ORs the error signals (today only `fdiv`'s `div0`) of
+the operators committing that cycle, and the control block latches `err_cyc <= cyc` whenever `err` -- so `err_cyc` is
+0 if the run hit no errors (reset at every accept; `|err_cyc` means "any error"), else the last cycle one occurred.
+Reset covers only the control registers (`cyc`, `err_cyc`). Nonblocking assignment only, `case` not functions.
 The control word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
 
 ## Decisions

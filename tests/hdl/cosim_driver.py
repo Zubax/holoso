@@ -52,6 +52,10 @@ async def cosim(dut) -> None:
             f"vector {index}: cycle count mismatch -- DUT asserted out_valid after {elapsed} cycles "
             f"(in_valid->out_valid), model predicted {expected_cycles}"
         )
+        # These vectors never divide by zero (or otherwise error), so the error record must be clear.
+        assert (
+            int(dut.err_cyc.value) == 0
+        ), f"vector {index}: unexpected error latched at cycle {int(dut.err_cyc.value)}"
 
         for name, expected in vec["exp"].items():
             got = decode(fmt, int(getattr(dut, name).value))

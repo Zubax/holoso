@@ -189,7 +189,7 @@ def interface_of(lir: Lir) -> ModuleInterface:
     ]
     ports.extend(Port(f"in_{load.name}", Direction.IN, PortRole.DATA, fmt.width) for load in lir.inputs)
     ports.extend(Port(wire.name, Direction.OUT, PortRole.DATA, fmt.width) for wire in lir.outputs)
-    ports.append(Port("diag_error", Direction.OUT, PortRole.CONTROL, 1))
+    ports.append(Port("err_cyc", Direction.OUT, PortRole.CONTROL, lir.cyc_width))
     return ModuleInterface(lir.module_name, fmt, tuple(ports), _ii_model(lir))
 
 

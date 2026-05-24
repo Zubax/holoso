@@ -140,7 +140,7 @@ def test_build_lir_small_kernel() -> None:
         "in_a",
         "in_b",
         "out_0",
-        "diag_error",
+        "err_cyc",
     ):
         assert expected in names
     assert iface.ii.cycles == lir.makespan + 1 == cycle_count(lir)

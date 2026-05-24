@@ -28,9 +28,9 @@
 //     wr_en[1]
 //
 // Reads are combinational. With RWPASS=0, each read port returns the selected stored register only.
-// With RWPASS!=0, if an active write targets the selected read address, the read port returns the matching
-// write-data lanes before the clock edge; this intentional write-to-read combinational path implements write-through
-// same-cycle behavior. Enabling RWPASS adds one W-bit wide binary mux on the read path.
+// With RWPASS!=0, if an active write targets the selected read address, the read port returns the matching write-data
+// lanes before the clock edge; this write-to-read combinational path implements write-through same-cycle behavior.
+// Enabling RWPASS adds NRD*NWR W-bit wide muxes, significantly enlarging the fabric area and combinational paths.
 //
 // Writes are synchronous. On the rising edge of clk, each addressed register with an active matching write
 // port is updated to the matching write-data lanes.

@@ -119,3 +119,8 @@ class Lir:
     makespan: int  # last commit cycle (0 if no ops); the in_valid->out_valid latency is makespan + 1
     op_count: int
     max_chain_len: int  # longest dependency chain in operators (for verification tolerance)
+
+    @property
+    def cyc_width(self) -> int:
+        """Bit width of the cycle counter (and ``err_cyc``): enough to hold ``0..makespan+1``."""
+        return max(1, (self.makespan + 1).bit_length())

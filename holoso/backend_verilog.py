@@ -7,9 +7,11 @@ replays the static software-pipelined schedule. ``cyc==0`` is idle/accept (input
 presents the outputs and asserts ``out_valid``. On each compute cycle the microprogram asserts ``in_valid`` to the
 operators issued that cycle (driving their operand reads) and writes back the operators that commit that cycle (whose
 result lands at the next edge). Because operator latencies are static the controller needs no scoreboard, so each
-operator's ``out_valid`` is left unconnected; the only data-dependent signal is ``div0``, latched at each ``fdiv``'s
-commit cycle. The register file is read-first (``RWPASS=0``). Reset covers only the control registers (``cyc``,
-``diag_q``).
+operator's ``out_valid`` is left unconnected. Errors are non-fatal and informative: a combinational ``err`` flag in the
+``case(cyc)`` block ORs the error signals (today only ``fdiv``'s ``div0``) of the operators committing that cycle, and
+the control block latches ``err_cyc <= cyc`` whenever ``err`` -- so ``err_cyc`` holds the (last) cycle an error was
+detected, or 0 when there were none (it is reset at every accept; ``|err_cyc`` answers "any error?"). The register file
+is read-first (``RWPASS=0``). Reset covers only the control registers (``cyc``, ``err_cyc``).
 """
 
 from __future__ import annotations
@@ -104,25 +106,25 @@ def _output_lanes(lir: Lir) -> dict[int, int]:
 def generate(lir: Lir) -> str:
     w = VerilogWriter()
     waddr = max(1, (lir.regfile.nreg - 1).bit_length())
-    cycw = max(1, (lir.makespan + 1).bit_length())
+    cycw = lir.cyc_width
     issues_by_cycle, commits_by_cycle = _group_by_cycle(lir)
     read_lanes = {cycle: _read_lanes_for(issues) for cycle, issues in issues_by_cycle.items()}
     out_lanes = _output_lanes(lir)
 
-    _emit_header(w, lir)
+    _emit_header(w, lir, cycw)
     _emit_localparams(w, lir, waddr, cycw)
     _emit_declarations(w, lir)
     _emit_consts(w, lir)
     _emit_regfile(w)
     _emit_operators(w, lir)
     _emit_datapath(w, lir, issues_by_cycle, commits_by_cycle, read_lanes, out_lanes)
-    _emit_fsm(w, lir, commits_by_cycle)
+    _emit_fsm(w)
     _emit_outputs(w, lir, out_lanes)
     w.lines("endmodule", "", "`undef REGF_DATA", "`undef REGF_ADDR")
     return w.render()
 
 
-def _emit_header(w: VerilogWriter, lir: Lir) -> None:
+def _emit_header(w: VerilogWriter, lir: Lir, cycw: int) -> None:
     w.lines('`include "holoso_support.vh"', "`timescale 1ns/1ps", "")
     w.line(f"module {lir.module_name} #(")
     w.push()
@@ -144,7 +146,8 @@ def _emit_header(w: VerilogWriter, lir: Lir) -> None:
         w.line(f"input  wire [WEXP+WMAN-1:0] in_{load.name},")
     for wire in lir.outputs:
         w.line(f"output wire [WEXP+WMAN-1:0] {wire.name},")
-    w.line("output wire diag_error")
+    # err_cyc: 0 = no error; otherwise the (last) cycle an error was detected. |err_cyc answers "any error?".
+    w.line(f"output reg  [{cycw - 1}:0] err_cyc")
     w.pop()
     w.lines(");", "")
 
@@ -164,7 +167,7 @@ def _emit_localparams(w: VerilogWriter, lir: Lir, waddr: int, cycw: int) -> None
 
 
 def _emit_declarations(w: VerilogWriter, lir: Lir) -> None:
-    w.lines("reg [CYCW-1:0] cyc;", "reg diag_q;", "")
+    w.lines("reg [CYCW-1:0] cyc;", "reg err;  // combinational: an error is detected on the current cycle", "")
     w.lines(
         "reg  [NWR-1:0]       rf_wr_en;",
         "reg  [NWR*WADDR-1:0] rf_wr_addr;",
@@ -265,6 +268,7 @@ def _emit_datapath(
         "rf_wr_en   = {NWR{1'b0}};",
         "rf_wr_addr = {(NWR*WADDR){1'b0}};",
         "rf_wr_data = {(NWR*W){1'b0}};",
+        "err        = 1'b0;",
     )
     w.line("case (cyc)")
     w.push()
@@ -296,6 +300,9 @@ def _emit_datapath(
             w.line(f"rf_wr_en[{lane}] = 1'b1;")
             w.line(f"rf_wr_addr[{_rf_addr(lane)}] = {op.dst.index};")
             w.line(f"rf_wr_data[{_rf_data(lane)}] = {sig}_y;")
+        err_terms = [f"{_sig(op.inst)}_div0" for op in commits if has_div0(op.inst.kind)]
+        if err_terms:
+            w.line(f"err = {' | '.join(err_terms)};  // error(s) detected as these operators commit")
         w.pop()
         w.line("end")
     if out_lanes:
@@ -312,18 +319,15 @@ def _emit_datapath(
     w.lines("end", "")
 
 
-def _emit_fsm(w: VerilogWriter, lir: Lir, commits_by_cycle: dict[int, list[ScheduledOp]]) -> None:
-    div0_by_cycle: dict[int, list[OperatorInstance]] = {}
-    for cycle, ops in commits_by_cycle.items():
-        insts = [op.inst for op in ops if has_div0(op.inst.kind)]
-        if insts:
-            div0_by_cycle[cycle] = insts
-    # Sequential control: a plain up-counter replaying the static schedule; only control registers are reset.
+def _emit_fsm(w: VerilogWriter) -> None:
+    # Sequential control: a plain up-counter replaying the static schedule, plus the generic error latch. All
+    # cycle-indexed logic -- including which operator's error matters when -- lives in the combinational block above;
+    # here we only advance the counter and, every cycle, latch err_cyc <= cyc whenever the combinational `err` is set.
     w.line("always @(posedge clk) begin")
     w.push()
     w.line("if (rst) begin")
     w.push()
-    w.lines("cyc    <= 0;", "diag_q <= 1'b0;")
+    w.lines("cyc     <= 0;", "err_cyc <= 0;")
     w.pop()
     w.line("end else begin")
     w.push()
@@ -331,7 +335,8 @@ def _emit_fsm(w: VerilogWriter, lir: Lir, commits_by_cycle: dict[int, list[Sched
     w.push()
     w.line("if (in_valid) begin")
     w.push()
-    w.lines("cyc    <= 1;", "diag_q <= 1'b0;")
+    w.line("cyc     <= 1;")
+    w.line("err_cyc <= 0;  // clear the error record at every initiation")
     w.pop()
     w.line("end")
     w.pop()
@@ -344,15 +349,7 @@ def _emit_fsm(w: VerilogWriter, lir: Lir, commits_by_cycle: dict[int, list[Sched
     w.line("cyc <= cyc + 1'b1;")
     w.pop()
     w.line("end")
-    if div0_by_cycle:
-        w.line("case (cyc)  // latch divide-by-zero at each fdiv's commit cycle")
-        w.push()
-        for cycle in sorted(div0_by_cycle):
-            terms = " | ".join(f"{_sig(inst)}_div0" for inst in div0_by_cycle[cycle])
-            w.line(f"{cycle}: if ({terms}) diag_q <= 1'b1;")
-        w.line("default: ;")
-        w.pop()
-        w.line("endcase")
+    w.line("if (err) err_cyc <= cyc;  // latch the cycle of any error (last one wins); `err` is set in the case block")
     w.pop()
     w.line("end")
     w.pop()
@@ -362,7 +359,6 @@ def _emit_fsm(w: VerilogWriter, lir: Lir, commits_by_cycle: dict[int, list[Sched
 def _emit_outputs(w: VerilogWriter, lir: Lir, out_lanes: dict[int, int]) -> None:
     w.line("assign in_ready  = (cyc == 0);")
     w.line("assign out_valid = (cyc == LAST);")
-    w.line("assign diag_error = diag_q;")
     for index, wire in enumerate(lir.outputs):
         if isinstance(wire.source, ConstRef):
             raw = f"const_{wire.source.index}"
