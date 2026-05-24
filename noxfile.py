@@ -2,7 +2,7 @@ import nox
 
 nox.options.reuse_existing_virtualenvs = True
 nox.options.sessions = ["tests", "typecheck", "black"]
-PYTHON_PATHS = ("holoso", "tests", "examples", "noxfile.py")
+PYTHON_PATHS = ("holoso", "tests", "synth", "examples", "noxfile.py")
 
 
 @nox.session
@@ -30,11 +30,8 @@ def black(session: nox.Session) -> None:
     session.run("python", "-m", "black", *(session.posargs or ("--check", *PYTHON_PATHS)))
 
 
-@nox.session(venv_backend="none")
+@nox.session
 def synth(session: nox.Session) -> None:
-    """
-    TODO: set up validation example synthesis and pnr using Yosys for different platforms:
-        - ECP5, speed grade 6
-        - Spartan 7
-    To ensure synthesizability and verify timings and resource usage.
-    """
+    """Run external FPGA synthesis/place-and-route checks."""
+    session.install("-e", ".[test]")
+    session.run("python", "-m", "pytest", "-q", "-s", *(session.posargs or ("synth",)))

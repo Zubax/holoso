@@ -44,3 +44,4 @@ hdr_log
 *.history
 *.coverage
 *.egg-info
+.idea/
