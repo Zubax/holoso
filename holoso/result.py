@@ -34,11 +34,12 @@ class Port:
 class IIModel:
     """The module's initiation interval. For a combinational v0 module it is a fixed cycle count.
 
-    ``formula`` is a human-readable expression of the cycle count in terms of operator latencies, since the true
-    figure depends on the operators' instantiation parameters (``WEXP``/``WMAN``/stage knobs).
+    ``makespan`` is the schedule's last commit cycle; ``cycle_estimate`` is the exact in_valid->out_valid latency
+    (``makespan + 1``). ``formula`` is a human-readable expression of the cycle count, since the true figure depends
+    on the operators' instantiation parameters (``WEXP``/``WMAN``/stage knobs).
     """
 
-    step_count: int
+    makespan: int
     cycle_estimate: int
     formula: str
 
@@ -74,7 +75,7 @@ class SynthesisMetrics:
     n_bool_regs: int
     read_ports: int  # register-file combinational read ports (NRD)
     write_ports: int  # register-file synchronous write ports (NWR)
-    step_count: int
+    makespan: int  # schedule's last commit cycle
     ii_estimate: int
     op_count: int
     max_chain_len: int

@@ -31,7 +31,7 @@ Python -front-end-> HIR -passes-> HIR(lowered) -schedule/bind/regalloc-> LIR -ba
 ```
 
 - HIR -- "what to compute": SSA dataflow inside a control-flow graph with real branches. Target-independent.
-- LIR -- "the microprogram": scheduled, bound, register-allocated steps for the synthesized machine.
+- LIR -- "the microprogram": the scheduled, bound, register-allocated op stream for the synthesized machine.
   Controller-agnostic; this is the seam where a second controller backend can be added later.
 
 Mental model: HIR is the compiler IR; LIR is the instruction stream of a tiny specialized processor; the backend is its
@@ -55,7 +55,7 @@ class SynthesisResult:
     support:     str                 # holoso_support contents (shareable across modules)
     testbench:   str                 # Cocotb
     report_html: str
-    metrics:     SynthesisMetrics    # operator instances, N float / M bool regs, step count, II estimate
+    metrics:     SynthesisMetrics    # operator instances, N float / M bool regs, makespan, II estimate
     hir: Hir;  lir: Lir              # kept for inspection
 ```
 
@@ -154,10 +154,9 @@ resources:
   regfile:   N float regs + M bool regs     # FF bank, multiport -- parallel reads are free
   constants: [fconst(value), ...]
 
-step k:
-  issue:  [ (inst, src_regs, dst_reg), ... ]
-  commit: [ writes whose operator has signalled out_valid ]
-  term:   next = k+1 | branch(bool_reg, t, f) | done
+scheduled op:
+  (inst, src_regs+sgnops, dst_reg, issue_cycle)   # the op commits its result at issue_cycle + latency
+makespan: the last commit cycle (the in_valid->out_valid latency is makespan + 1)
 ```
 
 - Reads are cheap (multiport FF), so binding is constrained only by operator-instance count and writes.
@@ -167,40 +166,45 @@ step k:
 
 ## Scheduler
 
-v0 is barrier-step multi-issue list scheduling over the lowered single-block HIR. Each step issues every independent
-ready op to a distinct free operator instance; the FSM waits for all issued operators to complete (their `out_valid`),
-latches the results, and advances. Annotated operator latency is a scheduling input only -- issue priority and the II
-estimate -- and never appears in the RTL.
+The scheduler is **software-pipelined (zero-bubble) list scheduling** over the lowered single-block HIR. Operators are
+fully pipelined (throughput 1) and their latencies are static and data-independent, so the entire schedule is computed
+at compile time: each op is assigned an *issue cycle* and a bound instance, and the backend just replays it with a
+cycle counter -- no runtime scoreboard. Annotated operator latency drives both the schedule and the (exact) II.
+
+We issue each op on the earliest cycle its operands are ready and a free instance exists -- without waiting for
+unrelated ops (no barrier), so a fast `fmul` no longer idles behind a co-scheduled `fdiv`. The register file is
+read-first (`RWPASS=0`): a result written on cycle `c+L` lands in the flop on the next edge and is readable from
+`c+L+1`, so a data-dependent consumer is held one cycle past the producer's latency.
 
 ```
-ready = ops with all operands available
-while unscheduled:
-    free = pool.copy(); issue = []
+for cycle = 1, 2, ...:                         # cycle 0 accepts/loads inputs; they read back from cycle 1
+    ready = unscheduled ops whose every operator-operand has committed (issue + L + 1 <= cycle)
     for op in ready by critical_path desc:
-        inst = free.take(op.kind)              # if an instance of that kind is free
-        if inst: bind(op, inst); issue.append(op)
-    emit step(issue, term=next)                # FSM: assert in_valid to each; wait AND(out_valid); latch all
-    mark issue results available; update ready
-regalloc: linear scan over steps (multiple commits per step); no spill (widen N); reads free
+        if an instance of op.kind is free this cycle (and ports permit):
+            bind op to that instance; issue_cycle[op] = cycle
+regalloc: linear scan over commit cycles; share a register when last_use <= def (sound under read-first); no spill
 ```
 
-- Operator pool: configurable instances per kind (default 1); concurrency is across kinds and across any extra
-  instances of a kind. Auto-sizing the pool is deferred.
-- `signfix` folds into operand sign-mods, `fconst` is an immediate on the input mux; both are free (no step).
+- Operator pool: configurable instances per kind (default 1) bounds how many ops of a kind may *issue* per cycle.
+  `fmul_ilog2_const` gets a dedicated instance per op (its `K` is elaboration-time), so it is never pool-capped.
+- Read/write ports auto-size to the schedule's peak; an optional NRD/NWR budget (default unbounded) instead gates
+  admission and lengthens the makespan to fit -- the knob for trading latency against register-file area.
+- `signfix` folds into operand sign-mods, `fconst` is an immediate on the input mux; both are free.
 
-Self-timed multi-issue is the first scheduler target after v0. The v0 barrier gates every op in an issue group on the
-slowest one to finish -- a fast `fmul` sits idle until a co-issued `fdiv` completes. Self-timed mode drops the barrier:
-each operator restarts on its own `out_valid`, and a freed instance immediately picks up the next ready op instead of
-waiting for its step-mates. It consumes the same LIR but needs a scoreboard (per-instance busy/ready tracking and
-dynamic dispatch) rather than the flat barrier FSM -- so it is out of the first delivery, not out of scope.
+Why not write-through forwarding? A write-through register file (`RWPASS=1`) would erase the +1 dependency cycle, but
+its forwarding muxes cost O(NRD*NWR) and we need many ports -- unsustainable. Read-first plus the +1, hidden under
+pipelined overlap, is the better trade.
 
 ## Backend (ZISC)
 
-Mechanical from LIR: FF register bank (per-reg input mux + `we`), operator instances with input muxes, all driven by a
-control word; the controller is a `case(state)` emitting the control word + next-state (conditional on a bool reg).
-A step advances when all of its issued operators assert `out_valid` (the FSM drives their `out_ready`, where available,
-to latch the results). Module-level valid/ready handshake + `done` at `ret`; `diag_error` OR-aggregated from operators
-on the executed path. Nonblocking assignment only, `case` not functions.
+Mechanical from LIR: a `holoso_regfile` flop bank, one operator instance per `OperatorInstance`, and one `fconst` per
+pooled constant, all driven by a control word. The controller is a cycle counter `cyc` driving a `case(cyc)`
+microprogram that replays the static schedule: `cyc==0` accepts and writes the inputs, `cyc` advances every clock
+through the compute cycles `1..makespan`, and `cyc==makespan+1` presents the outputs and asserts `out_valid`. Each
+compute cycle asserts `in_valid` to the operators issued that cycle (driving their operand reads) and writes back the
+operators that commit that cycle. No scoreboard is needed because latencies are static; the only data-dependent signal
+is `div0`, latched at each `fdiv`'s commit cycle and OR-aggregated into `diag_error`. Reset covers only the control
+registers (`cyc`, `diag_q`). Nonblocking assignment only, `case` not functions.
 The control word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
 
 ## Decisions
@@ -210,7 +214,8 @@ The control word and datapath skeleton are the only ZISC-specific part -- LIR it
 3. If-conversion is conservative -- trivial pure diamonds only; real branches otherwise.
 4. SymPy-assisted algebra (fold/CSE/simplify); hardware strength reduction in-house.
 5. Operator completion is by valid/ready handshake. Annotated latency is a scheduling input only (issue priority + II estimate).
-6. Barrier-step multi-issue list scheduling for v0; self-timed multi-issue is the first post-v0 upgrade (same LIR).
+6. Software-pipelined (zero-bubble) static list scheduling over a read-first register file; the controller is a static
+   `case(cycle)` microprogram (no runtime scoreboard), since v0 operator latencies are data-independent.
 7. API takes the function/class object (not source files); synthesis is in-memory, returning `SynthesisResult`; disk
    I/O is an opt-in helper.
 

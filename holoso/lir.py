@@ -49,8 +49,15 @@ class Operand:
 
 
 @dataclass(frozen=True, slots=True)
-class Issue:
-    """One operator started in a step: its instance, operands, result sign-op, and destination register."""
+class ScheduledOp:
+    """One operator firing in the software-pipelined schedule.
+
+    ``inst`` is the bound physical instance (decided by the scheduler), ``issue_cycle`` is the cycle its ``in_valid``
+    is asserted (operands read combinationally that cycle), and the result commits to ``dst`` at ``commit_cycle ==
+    issue_cycle + latency`` (readable one cycle later, since the register file is read-first). Operators are fully
+    pipelined, so one instance may carry several ops in flight; same-kind ops share a latency so two ops on one
+    instance never commit on the same cycle.
+    """
 
     inst: OperatorInstance
     a: Operand
@@ -58,15 +65,12 @@ class Issue:
     y_sgnop: Sgnop
     k: int | None  # exponent for FMUL_ILOG2
     dst: RegRef
+    issue_cycle: int
+    latency: int
 
-
-@dataclass(frozen=True, slots=True)
-class Step:
-    """One FSM step: a set of operators issued in parallel; the controller waits for all to complete (barrier)."""
-
-    index: int
-    issues: tuple[Issue, ...]
-    latency: int  # max issued-operator latency -- the barrier wait, used only for the II estimate
+    @property
+    def commit_cycle(self) -> int:
+        return self.issue_cycle + self.latency
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +105,8 @@ class Lir:
     consts: tuple[float, ...]  # constant pool: index -> value
     regfile: RegFileLayout
     inputs: tuple[InputLoad, ...]  # ordered as the function parameters
-    steps: tuple[Step, ...]
+    ops: tuple[ScheduledOp, ...]  # the pipelined schedule, ordered by (issue_cycle, instance)
     outputs: tuple[OutputWire, ...]
+    makespan: int  # last commit cycle (0 if no ops); the in_valid->out_valid latency is makespan + 1
     op_count: int
     max_chain_len: int  # longest dependency chain in operators (for verification tolerance)

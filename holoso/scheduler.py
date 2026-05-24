@@ -1,16 +1,41 @@
-"""Barrier-step multi-issue list scheduling over a lowered HIR.
+"""Software-pipelined (zero-bubble) list scheduling over a lowered HIR.
 
-Each step issues every ready operator it can onto a distinct free instance of the right kind, ordered by critical-path
-(latency) priority. The controller waits for all issued operators in a step to complete before advancing, so an
-operator is ready for the next step once all of its operator operands have been scheduled.
+The operators are fully pipelined (throughput 1) and their latencies are static and data-independent, so the whole
+schedule is computed here at compile time and the backend controller is just a cycle counter replaying it. We issue
+each operator as soon as its operands are *ready* -- without waiting for unrelated ops to finish (no barrier). The
+register file is read-first (``RWPASS=0``): a result written on cycle ``c+L`` lands in the FF on the next edge and is
+readable from ``c+L+1``, so a data-dependent consumer is held one extra cycle past the producer's latency.
+
+Cycle 0 is the input-load/accept cycle; inputs are readable from cycle 1. Compute cycles start at 1. An op issued at
+cycle ``c`` reads its register operands at ``c`` and commits at ``c + L``. The dependency constraint is therefore
+``c_consumer >= c_producer + L_producer + 1``.
+
+A fast op co-issued with a slow one is no longer gated on the slow one: each consumer advances on its own producer's
+commit. Operator-instance count bounds how many ops of a kind may *issue* per cycle (a pipelined instance accepts one
+new op per cycle). Optional read/write port budgets (default unbounded) further gate admission and lengthen the
+makespan to fit.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
-from .hir import Hir, OpNode, ValueId
+from .hir import Const, Hir, OpNode, ValueId
+from .lir import OperatorInstance
 from .operators import OpKind
+
+_KIND_ORDER = {kind: index for index, kind in enumerate(OpKind)}
+
+
+@dataclass(frozen=True, slots=True)
+class Schedule:
+    """The scheduler's output: per-op issue cycle and bound instance, the full instance set, and the makespan."""
+
+    issue_cycle: dict[ValueId, int]
+    inst_of: dict[ValueId, OperatorInstance]
+    instances: tuple[OperatorInstance, ...]
+    makespan: int  # max commit cycle (issue_cycle + latency), or 0 if there are no ops
 
 
 def _opnode(hir: Hir, vid: ValueId) -> OpNode:
@@ -23,11 +48,19 @@ def _op_ids(hir: Hir) -> list[ValueId]:
     return [vid for vid, node in hir.nodes.items() if isinstance(node, OpNode)]
 
 
-def _operator_operands(hir: Hir, vid: ValueId) -> list[ValueId]:
-    """Operand values that are themselves operators (the scheduling dependencies). Inputs/consts are always ready."""
+def _operands(hir: Hir, vid: ValueId) -> list[ValueId]:
     op = _opnode(hir, vid)
-    operands = [op.a] if op.b is None else [op.a, op.b]
-    return [x for x in operands if isinstance(hir.nodes[x], OpNode)]
+    return [op.a] if op.b is None else [op.a, op.b]
+
+
+def _operator_operands(hir: Hir, vid: ValueId) -> list[ValueId]:
+    """Operand values that are themselves operators (the scheduling dependencies). Inputs/consts are ready at cycle 1."""
+    return [x for x in _operands(hir, vid) if isinstance(hir.nodes[x], OpNode)]
+
+
+def _register_operands(hir: Hir, vid: ValueId) -> list[ValueId]:
+    """Operand values backed by a register (inputs or operator results); constants are immediates, no read port."""
+    return [x for x in _operands(hir, vid) if not isinstance(hir.nodes[x], Const)]
 
 
 def present_kinds(hir: Hir) -> set[OpKind]:
@@ -35,16 +68,22 @@ def present_kinds(hir: Hir) -> set[OpKind]:
 
 
 def resolve_pool(hir: Hir, instances: Mapping[OpKind, int] | None) -> dict[OpKind, int]:
-    """The per-kind instance budget for scheduling: at least one of every kind present in the graph."""
+    """The per-kind issue-width budget: at least one of every shared kind present in the graph.
+
+    ``FMUL_ILOG2`` is excluded -- each such op gets its own dedicated instance (its ``K`` is an elaboration-time
+    parameter), so its issue width is effectively unlimited and the scheduler never gates on it.
+    """
     pool: dict[OpKind, int] = {}
     for kind in present_kinds(hir):
+        if kind is OpKind.FMUL_ILOG2:
+            continue
         requested = 1 if instances is None else instances.get(kind, 1)
         pool[kind] = max(1, requested)
     return pool
 
 
 def _critical_path(hir: Hir, op_ids: list[ValueId]) -> dict[ValueId, int]:
-    """Latency-weighted longest path from each operator to any sink (priority: schedule the long pole first)."""
+    """Priority height: the latency-weighted longest path to a sink, counting the +1 writeback per dependency edge."""
     consumers: dict[ValueId, list[ValueId]] = {vid: [] for vid in op_ids}
     for vid in op_ids:
         for operand in _operator_operands(hir, vid):
@@ -52,29 +91,75 @@ def _critical_path(hir: Hir, op_ids: list[ValueId]) -> dict[ValueId, int]:
     height: dict[ValueId, int] = {}
     for vid in sorted(op_ids, reverse=True):  # consumers have larger ids; process them first
         op = _opnode(hir, vid)
-        height[vid] = op.latency + max((height[c] for c in consumers[vid]), default=0)
+        height[vid] = op.latency + max((1 + height[c] for c in consumers[vid]), default=0)
     return height
 
 
-def schedule_ops(hir: Hir, pool: Mapping[OpKind, int]) -> list[list[ValueId]]:
-    """Return the schedule as a list of steps, each a list of operator value-ids issued in parallel."""
+def schedule_ops(hir: Hir, pool: Mapping[OpKind, int], *, nrd: int | None = None, nwr: int | None = None) -> Schedule:
+    """Greedily place every operator on the earliest cycle its operands are ready and a free instance/port exists.
+
+    ``nrd``/``nwr`` are optional read/write port budgets; ``None`` means unbounded (sized to the schedule's peak
+    afterwards). With budgets set, an op that cannot claim a read slot at its issue cycle or a write slot at its
+    commit cycle waits, lengthening the makespan.
+    """
     op_ids = _op_ids(hir)
+    if not op_ids:
+        return Schedule(issue_cycle={}, inst_of={}, instances=(), makespan=0)
+
     height = _critical_path(hir, op_ids)
-    scheduled: set[ValueId] = set()
-    unscheduled: set[ValueId] = set(op_ids)
-    steps: list[list[ValueId]] = []
+    issue_cycle: dict[ValueId, int] = {}
+    inst_of: dict[ValueId, OperatorInstance] = {}
+    inst_count: dict[OpKind, int] = {}  # high-water issue width per shared kind -> instance count
+    ilog2: list[OperatorInstance] = []  # dedicated FMUL_ILOG2 instances, in mint order
+    writes_used: dict[int, int] = {}  # commit cycle -> write ports already claimed (forward-indexed; budget only)
+
+    def commit_cycle(vid: ValueId) -> int:
+        return issue_cycle[vid] + _opnode(hir, vid).latency
+
+    unscheduled = set(op_ids)
+    cap = sum(_opnode(hir, vid).latency for vid in op_ids) + 2 * len(op_ids) + 64
+    cycle = 1
     while unscheduled:
-        ready = [vid for vid in unscheduled if all(x in scheduled for x in _operator_operands(hir, vid))]
+        assert cycle <= cap, "scheduler made no progress (infeasible port budget?)"
+        ready = [
+            vid
+            for vid in unscheduled
+            if all(x in issue_cycle and cycle >= commit_cycle(x) + 1 for x in _operator_operands(hir, vid))
+        ]
         ready.sort(key=lambda vid: (-height[vid], vid))
         free = dict(pool)
-        issue: list[ValueId] = []
+        cycle_reads: set[int] = set()
         for vid in ready:
-            kind = _opnode(hir, vid).kind
-            if free.get(kind, 0) > 0:
+            op = _opnode(hir, vid)
+            kind = op.kind
+            new_reads = {r for r in _register_operands(hir, vid) if r not in cycle_reads}
+            commit = cycle + op.latency
+            if nrd is not None and len(cycle_reads) + len(new_reads) > nrd:
+                continue
+            if nwr is not None and writes_used.get(commit, 0) + 1 > nwr:
+                continue
+            if kind is OpKind.FMUL_ILOG2:
+                inst = OperatorInstance(kind, len(ilog2), op.k)
+                ilog2.append(inst)
+            else:
+                if free.get(kind, 0) <= 0:
+                    continue
+                index = pool[kind] - free[kind]  # 0-based issue slot this cycle
                 free[kind] -= 1
-                issue.append(vid)
-        assert issue, "no progress: a ready operator must always be issuable since every present kind has an instance"
-        steps.append(issue)
-        scheduled.update(issue)
-        unscheduled.difference_update(issue)
-    return steps
+                inst_count[kind] = max(inst_count.get(kind, 0), index + 1)
+                inst = OperatorInstance(kind, index)
+            issue_cycle[vid] = cycle
+            inst_of[vid] = inst
+            cycle_reads |= new_reads
+            writes_used[commit] = writes_used.get(commit, 0) + 1
+            unscheduled.discard(vid)
+        cycle += 1
+
+    instances: list[OperatorInstance] = []
+    for kind in OpKind:  # deterministic definition order
+        if kind is OpKind.FMUL_ILOG2:
+            continue
+        instances.extend(OperatorInstance(kind, index) for index in range(inst_count.get(kind, 0)))
+    instances.extend(ilog2)
+    makespan = max((commit_cycle(vid) for vid in op_ids), default=0)
+    return Schedule(issue_cycle=issue_cycle, inst_of=inst_of, instances=tuple(instances), makespan=makespan)

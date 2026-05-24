@@ -100,7 +100,7 @@ def render_testbench(
     lir: Lir, fmt: FloatFormat, fn: Callable[..., object], *, count: int = 16, seed: int = 0xC0FFEE
 ) -> str:
     """Build embedded vectors with the generic sampler and splice them into the testbench template."""
-    timeout = 4 * (sum(step.latency for step in lir.steps) + len(lir.inputs) + 8) + 64
+    timeout = 4 * (lir.makespan + len(lir.inputs) + 8) + 64
     spec = build_vectors(
         fn,
         fmt,
