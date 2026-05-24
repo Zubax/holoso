@@ -278,11 +278,10 @@ def _live_intervals(rows: set[int]) -> list[list[int]]:
 def _cell_style(
     col: ColKey, row_id: int, offset: int, live: dict[int, set[int]], fills: dict[tuple[int, ColKey], str]
 ) -> tuple[str, str]:
-    """Background for a grid cell, as ``(extra_class, inline_style)``. The single cycle on which a result lands is
-    filled solid with its operator color via an inline style (this takes precedence, and being inline it survives the
-    row-hover tint); otherwise a live register gets the faint residence tint via the ``live`` class, so a row-hover can
-    override it. Pipelined operators may carry several values in flight at once, so the grid no longer paints a
-    per-operator occupancy column -- only the destination cell on the result's completion cycle is highlighted.
+    """Background for a register/constant cell, as ``(extra_class, inline_style)``. The single cycle on which a result
+    lands is filled solid with its operator color via an inline style (this takes precedence, and being inline it
+    survives the row-hover tint); otherwise a live register gets the faint residence tint via the ``live`` class, so a
+    row-hover can override it. The operators' cycle-by-cycle occupancy lives in the separate operator-stage block.
     """
     color = fills.get((offset, col))
     if color is not None:

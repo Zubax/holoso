@@ -6,7 +6,7 @@ header h1 { margin: 0; font-size: 22px; }
 header .sub { color: #cbd5e1; font-size: 13px; margin-top: 3px; }
 header .sub a { color: #93c5fd; text-decoration: underline; }
 main { padding: 14px 28px 70px; }
-/* Compact summary sections share one wrapping row; the utilization and register-grid schedule are full-width below. */
+/* Compact summary sections share one wrapping row; the full-width register-grid schedule follows below. */
 .toprow { display: flex; flex-wrap: wrap; gap: 0 40px; align-items: flex-start; }
 .toprow .sec { min-width: 0; }
 h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: #111827; font-weight: 700; margin: 26px 0 8px; border-bottom: 1px solid #000; padding-bottom: 4px; }
