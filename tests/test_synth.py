@@ -20,6 +20,9 @@ def test_synthesize_small_kernel_result() -> None:
     assert result.module_name == "_kernel"
     assert "module _kernel" in result.verilog
     assert "holoso_regfile" in result.support
+    assert '`include "holoso_support.vh"' in result.support
+    assert "`ifndef HOLOSO_REGFILE_VH" not in result.support
+    assert "`HOLOSO_REGFILE_LANE" in result.support_header
     assert "@cocotb.test()" in result.testbench
     assert "<html" in result.report_html.lower()
     assert result.metrics.op_count >= 3
@@ -35,11 +38,12 @@ def test_generated_testbench_is_valid_python() -> None:
 def test_write_artifacts(tmp_path: Path) -> None:
     result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24))
     paths = result.write(tmp_path)
-    assert set(paths) == {"verilog", "support", "testbench", "report"}
+    assert set(paths) == {"verilog", "support", "support_header", "testbench", "report"}
     assert (tmp_path / "_kernel.v").exists()
     assert (tmp_path / "test__kernel.py").exists()
     assert (tmp_path / "_kernel.html").exists()
     assert (tmp_path / "holoso_support.v").exists()
+    assert (tmp_path / "holoso_support.vh").exists()
 
 
 def test_report_has_expected_sections() -> None:
