@@ -42,6 +42,6 @@ hdr_log
 *.vcd
 *.lock
 *.history
-*.coverage
+*.coverage*
 *.egg-info
 .idea/
