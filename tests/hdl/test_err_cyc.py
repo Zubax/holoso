@@ -79,7 +79,6 @@ def test_err_cyc(sim: str) -> None:
         sources=[verilog_path, *sources()],
         includes=[HDL_DIR],
         hdl_toplevel="divide",
-        parameters={"WEXP": FMT.wexp, "WMAN": FMT.wman},
         build_args=build_args(sim),
         build_dir=str(build_dir),
         clean=True,

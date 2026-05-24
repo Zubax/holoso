@@ -126,14 +126,10 @@ def generate(lir: Lir) -> str:
 
 def _emit_header(w: VerilogWriter, lir: Lir, cycw: int) -> None:
     w.lines('`include "holoso_support.vh"', "`timescale 1ns/1ps", "")
-    w.line(f"module {lir.module_name} #(")
-    w.push()
-    w.lines(
-        f"parameter WEXP ={lir.fmt.wexp:3},  // Float exponent bits",
-        f"parameter WMAN ={lir.fmt.wman:3}   // Float mantissa bits",
+    w.line(
+        f"// Float format: exponent {lir.fmt.wexp} bits, significand {lir.fmt.wman} bits, total {lir.fmt.width} bits."
     )
-    w.pop()
-    w.line(") (")
+    w.line(f"module {lir.module_name} (")
     w.push()
     _emit_port_group(w, "CONTROL PORTS", "Clock/reset and ready/valid handshake for one scheduled invocation.")
     ports = [
@@ -148,10 +144,10 @@ def _emit_header(w: VerilogWriter, lir: Lir, cycw: int) -> None:
         w.line(line)
     _emit_port_group(w, "INPUT PORTS", "Latched when in_valid && in_ready.")
     for load in lir.inputs:
-        w.line(f"input  wire [WEXP+WMAN-1:0] in_{load.name},")
+        w.line(f"input  wire [{lir.fmt.width - 1}:0] in_{load.name},")
     _emit_port_group(w, "OUTPUT PORTS", "Valid when out_valid is pulsed.")
     for wire in lir.outputs:
-        w.line(f"output wire [WEXP+WMAN-1:0] {wire.name},")
+        w.line(f"output wire [{lir.fmt.width - 1}:0] {wire.name},")
     _emit_port_group(w, "DIAGNOSTIC PORTS", "Runtime diagnostics available while the module is running.")
     # err_cyc: 0 = no error; otherwise the (last) cycle an error was detected. |err_cyc answers "any error?".
     w.line(f"output reg  [{cycw - 1}:0] err_cyc")
@@ -164,6 +160,8 @@ def _emit_port_group(w: VerilogWriter, title: str, comment: str) -> None:
 
 
 def _emit_localparams(w: VerilogWriter, lir: Lir, waddr: int, cycw: int) -> None:
+    w.line(f"localparam WEXP  = {lir.fmt.wexp};  // Float exponent bits fixed by the static schedule")
+    w.line(f"localparam WMAN  = {lir.fmt.wman};  // Float mantissa bits fixed by the static schedule")
     w.line("localparam W     = WEXP + WMAN;")
     w.line(
         f"localparam NREG  = {max(1, lir.regfile.nreg)};  // >= 1; the bank is unused when no value needs a register"

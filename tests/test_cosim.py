@@ -60,7 +60,6 @@ def _run_cosim(
         sources=[verilog_path, *sources()],
         includes=[HDL_DIR],
         hdl_toplevel=name,
-        parameters={"WEXP": fmt.wexp, "WMAN": fmt.wman},
         build_args=build_args(sim),
         build_dir=str(build_dir),
         clean=True,

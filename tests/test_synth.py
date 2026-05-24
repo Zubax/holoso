@@ -83,15 +83,18 @@ def test_report_has_expected_sections() -> None:
         assert token in result.verilog
         assert token in header_text
     for token in (
-        "module _kernel #(",
-        "parameter WEXP =  8,  // Float exponent bits",
-        "parameter WMAN = 24   // Float mantissa bits",
-        "input  wire [WEXP+WMAN-1:0] in_a",
-        "output wire [WEXP+WMAN-1:0] out_0",
+        "module _kernel (",
+        "input  wire [31:0] in_a",
+        "output wire [31:0] out_0",
         "output reg  [4:0] err_cyc",
     ):
         assert token in result.verilog
         assert token in header_text
+    assert "module _kernel #(" not in result.verilog
+    assert "parameter WEXP" not in result.verilog
+    assert "parameter WMAN" not in result.verilog
+    assert "localparam WEXP  = 8;" in result.verilog
+    assert "localparam WMAN  = 24;" in result.verilog
     assert report.index("<h2>Interface</h2>") < report.index("<h2>Module Header</h2>")
     assert "--modhdr-width:" not in report
     assert "Runtime diagnostics available while the module is running." in header_text

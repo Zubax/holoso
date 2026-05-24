@@ -93,6 +93,9 @@ Runtime values are only:
 
 - `float` -- one ZKF format, `WEXP`/`WMAN` fixed per build.
 Typical FPGA-friendly formats: WEXP=8 WMAN=36 (44 bits) for precision; WEXP=6 WMAN=18 (24 bits) for simpler targets.
+Generated top-level modules are not parameterizable by `WEXP`/`WMAN`: port widths are hardcoded and the selected float
+format is recorded as internal localparams. Changing the float format requires re-running synthesis because operator
+latencies, the static schedule, and register widths are all tied to that choice.
 - `bool` -- 1 bit.
 
 Compile-time ints/shapes/structure are resolved in the front-end and never reach HIR. A dynamic integer only ever
