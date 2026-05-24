@@ -2,8 +2,8 @@
 
 Holoso lowers a small subset of Python (numerical control/DSP kernels) into vendor-neutral, synthesizable Verilog.
 See `README.md` for scope and `PRIOR_ART.md` for why existing tools don't fit. This document records the architecture
-we are building toward; it is expected to change frequently.
-Exploratory notes live in `DESIGN.draft.md` (not up to date).
+we are building toward; it is expected to change frequently, and often may not be up to date.
+Initial exploratory notes live in `DESIGN.draft.md` (outdated, superseded by this document).
 
 One must read the representative use-case examples under the `examples/` directory to understand the motivation.
 

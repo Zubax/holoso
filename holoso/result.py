@@ -88,6 +88,7 @@ class SynthesisResult:
     interface: ModuleInterface
     verilog: str
     support: str
+    support_header: str
     testbench: str
     report_html: str
     metrics: SynthesisMetrics
@@ -107,6 +108,7 @@ def write_artifacts(result: SynthesisResult, out_dir: Path | str) -> dict[str, P
     files: dict[str, tuple[str, str]] = {
         "verilog": (f"{name}.v", result.verilog),
         "support": ("holoso_support.v", result.support),
+        "support_header": ("holoso_support.vh", result.support_header),
         "testbench": (f"test_{name}.py", result.testbench),
         "report": (f"{name}.html", result.report_html),
     }

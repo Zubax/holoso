@@ -9,6 +9,8 @@
 //
 // Modules named with an underscore are internal implementation details.
 
+`include "holoso_support.vh"
+
 `timescale 1ns/1ps
 
 // ====================================================================================================================
