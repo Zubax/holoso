@@ -1,8 +1,8 @@
 """Tests for holoso_fmul_ilog2_const (pipelined; y = sgnop(sgnop(a) * 2^K)).
 
 K is a compile-time signed integer exponent shift. The test rebuilds the DUT for several K values to cover negative,
-zero, and positive scales, and separately sweeps EXTRA_STAGES at K=0. Same y_sgnop-stability constraint as fadd/fmul
-applies; stimulus is grouped by y_sgnop with a drain between groups.
+zero, and positive scales, and separately sweeps STAGE_DECODE at K=0. The wrapper delays y_sgnop through the same
+number of stages as zkf_mul_ilog2_const, and the scoreboard verifies the documented latency against out_valid timing.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from hdl_float_oracle import (
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    TESTS_DIR,
+    BENCH_DIR,
     apply_sgnop,
     build_args,
     drive_reset,
@@ -33,7 +33,6 @@ from hdl_float_oracle import (
     start_clock,
 )
 
-
 K_VALUES = (-5, -1, 0, 1, 5)
 
 
@@ -44,7 +43,7 @@ async def holoso_fmul_ilog2_const_cocotb(dut) -> None:
     await start_clock(dut)
     await drive_reset(dut)
 
-    sb = PipelineScoreboard(dut, [("y", "y")])
+    sb = PipelineScoreboard(dut, [("y", "y")], latency=int(os.environ["HOLOSO_EXPECTED_LATENCY"]))
     rng = np.random.default_rng(get_seed())
 
     async def step_idle() -> None:
@@ -74,26 +73,23 @@ async def holoso_fmul_ilog2_const_cocotb(dut) -> None:
         await step(a, 0, 0)
     await sb.drain()
 
-    # 2) Sgnop sweep on directed values, grouped by y_sgnop.
-    for y_op in SGNOP_OPS:
-        dut.y_sgnop.value = y_op
-        for a_op in SGNOP_OPS:
-            for a in DIRECTED_F32:
+    # 2) Sgnop sweep on directed values. Output sign control changes every cycle to verify sideband pipelining.
+    for a_op in SGNOP_OPS:
+        for a in DIRECTED_F32:
+            for y_op in SGNOP_OPS:
                 await step(a, a_op, y_op)
-        await sb.drain()
+    await sb.drain()
 
-    # 3) Random bulk grouped by y_sgnop.
-    n_per_group = max(1, get_random_count() // len(SGNOP_OPS))
-    for y_op in SGNOP_OPS:
-        dut.y_sgnop.value = y_op
-        for _ in range(n_per_group):
-            if rng.random() < 0.2:
-                await step_idle()
-                continue
-            a = random_zkf_f32(rng)
-            a_op = int(rng.integers(0, 4))
-            await step(a, a_op, y_op)
-        await sb.drain()
+    # 3) Random bulk.
+    for _ in range(get_random_count()):
+        if rng.random() < 0.2:
+            await step_idle()
+            continue
+        a = random_zkf_f32(rng)
+        a_op = int(rng.integers(0, 4))
+        y_op = int(rng.integers(0, 4))
+        await step(a, a_op, y_op)
+    await sb.drain()
 
     # 4) Reset.
     await drive_reset(dut)
@@ -126,9 +122,9 @@ def test_holoso_fmul_ilog2_const(sim: str, config: tuple[int, int]) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fmul_ilog2_const",
-        test_module="test_hdl_fmul_ilog2_const",
-        test_dir=TESTS_DIR,
+        test_module="test_fmul_ilog2_const",
+        test_dir=BENCH_DIR,
         build_dir=build_dir,
-        extra_env={"HOLOSO_TEST_K": str(k)},
+        extra_env={"HOLOSO_TEST_K": str(k), "HOLOSO_EXPECTED_LATENCY": str(1 + int(bool(stage_decode)))},
         results_xml=str(build_dir / "results.xml"),
     )

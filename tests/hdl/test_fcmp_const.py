@@ -16,7 +16,7 @@ from hdl_float_oracle import (
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    TESTS_DIR,
+    BENCH_DIR,
     apply_sgnop,
     build_args,
     cmp_oracle,
@@ -29,14 +29,12 @@ from hdl_float_oracle import (
     start_clock,
 )
 
-
 FCMP_CONST_CASES: list[tuple[str, float, int]] = [
     ("zero", 0.0, f32_to_bits(0.0)),
     ("one", 1.0, f32_to_bits(1.0)),
     ("neg_one", -1.0, f32_to_bits(-1.0)),
     ("pi", float(np.float32(np.pi)), f32_to_bits(np.float32(np.pi))),
-    ("neg_tiny", float(np.float32(-np.finfo(np.float32).tiny)),
-     f32_to_bits(np.float32(-np.finfo(np.float32).tiny))),
+    ("neg_tiny", float(np.float32(-np.finfo(np.float32).tiny)), f32_to_bits(np.float32(-np.finfo(np.float32).tiny))),
 ]
 
 
@@ -47,11 +45,14 @@ async def holoso_fcmp_const_cocotb(dut) -> None:
     await start_clock(dut)
     await drive_reset(dut)
 
-    sb = PipelineScoreboard(dut, [
-        ("a_gt_b", "gt"),
-        ("a_eq_b", "eq"),
-        ("a_lt_b", "lt"),
-    ])
+    sb = PipelineScoreboard(
+        dut,
+        [
+            ("a_gt_b", "gt"),
+            ("a_eq_b", "eq"),
+            ("a_lt_b", "lt"),
+        ],
+    )
     rng = np.random.default_rng(get_seed())
 
     async def step_idle() -> None:
@@ -67,10 +68,14 @@ async def holoso_fcmp_const_cocotb(dut) -> None:
         dut.a.value = a
         dut.a_sgnop.value = a_op
         dut.in_valid.value = 1
-        sb.push({
-            "gt": gt, "eq": eq, "lt": lt,
-            "_desc": f"a=0x{a:08x} a_op={a_op} b=0x{b_bits:08x}",
-        })
+        sb.push(
+            {
+                "gt": gt,
+                "eq": eq,
+                "lt": lt,
+                "_desc": f"a=0x{a:08x} a_op={a_op} b=0x{b_bits:08x}",
+            }
+        )
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
         if int(dut.out_valid.value):
@@ -118,8 +123,8 @@ def test_holoso_fcmp_const(sim: str, case: tuple[str, float, int]) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fcmp_const",
-        test_module="test_hdl_fcmp_const",
-        test_dir=TESTS_DIR,
+        test_module="test_fcmp_const",
+        test_dir=BENCH_DIR,
         build_dir=build_dir,
         extra_env={"HOLOSO_TEST_B_BITS": hex(b_bits)},
         results_xml=str(build_dir / "results.xml"),

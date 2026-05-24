@@ -28,19 +28,19 @@ References:
 
 ### Language
 
-Verilog style: 4-space indentation, concise module names, snake_case files and directories, and uppercase parameter/localparam names where practical.
+Python and Verilog style: 4-space indentation, concise names, snake_case files and directories, uppercase Verilog `parameter`/`localparam`.
 Keep line length at or below 120 columns. Comment block lines should utilize the 120 column limit well, avoiding overly short lines.
 
 Testbenches are written in Python using Cocotb or similar tools.
 
-The following constructs are banned in synthesizable Verilog (fine in reference models or testbenches):
-
-- Blocking register assignment.
-- Functions.
-
+Functions can be used in synthesizable Verilog but only if avoiding them is unduly burdensome.
 In synthesizable code, prefer `case` statements over nested ternary operators unless there are contraindications.
 
-In complex modules, it is best to avoid a large number of named nets that are only used once; this does not help readability but rather the opposite.
+In complex Verilog modules, it is best to avoid a large number of named nets that are only used once; this does not help readability but rather the opposite.
+
+In Python, use strongly typed primitives. Instead of int constants, prefer enums; instead of dicts, prefer dataclasses; instead of existence/vaidity flags, prefer optional type or unions, etc.
+
+The Python version to target is 3.14 and newer. No need to ensure compatibility with older versions.
 
 ### Other
 

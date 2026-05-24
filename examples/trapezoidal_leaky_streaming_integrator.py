@@ -15,6 +15,6 @@ class TrapezoidalLeakyStreamingIntegrator:
         self._x_prev: float = 0.0
 
     def __call__(self, x: float, /) -> float:
-        self.y = (1.0 - self.k) * self.y + 0.5 * (x + self.x_prev)
-        self.x_prev = x
+        self.y = (1.0 - self.k) * self.y + 0.5 * (x + self._x_prev)
+        self._x_prev = x
         return self.y

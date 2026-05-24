@@ -10,7 +10,7 @@ from cocotb_tools.runner import get_runner
 from hdl_float_oracle import (
     REPO_ROOT,
     SIMULATORS,
-    TESTS_DIR,
+    BENCH_DIR,
     build_args,
     f32_to_bits,
     sources,
@@ -23,9 +23,7 @@ async def holoso_ffrombool_cocotb(dut) -> None:
         dut.x.value = x
         await Timer(1, unit="ns")
         actual = int(dut.y.value)
-        assert actual == expected, (
-            f"x={x}: got 0x{actual:08x}, want 0x{expected:08x}"
-        )
+        assert actual == expected, f"x={x}: got 0x{actual:08x}, want 0x{expected:08x}"
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -44,8 +42,8 @@ def test_holoso_ffrombool(sim: str) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_ffrombool",
-        test_module="test_hdl_ffrombool",
-        test_dir=TESTS_DIR,
+        test_module="test_ffrombool",
+        test_dir=BENCH_DIR,
         build_dir=build_dir,
         results_xml=str(build_dir / "results.xml"),
     )

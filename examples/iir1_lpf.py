@@ -3,7 +3,7 @@ class IIR1LPF:
     A single-pole low-pass IIR filter. Difference equation: y[n] = y[n-1] + alpha * (x[n] - y[n-1])
     """
 
-    def __init__(self, *, ALPHA: float = 2**-16):   # Alpha is an instantiation-time parameter.
+    def __init__(self, *, ALPHA: float = 2**-16):  # Alpha is an instantiation-time parameter.
         self.alpha: float = ALPHA
         self.y: float = 0.0
         self._first: bool = True

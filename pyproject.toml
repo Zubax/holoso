@@ -9,12 +9,19 @@ requires-python = ">=3.14"
 description = "A narrow Python-to-Verilog synthesizer for numeric kernels."
 dependencies = [
     "numpy~=2.4",
+    "sympy~=1.14",
 ]
 
 [project.optional-dependencies]
 test = [
     "cocotb~=2.0",
     "pytest~=8.0",
+]
+format = [
+    "black~=26.5",
+]
+typecheck = [
+    "mypy~=1.18",
 ]
 
 [tool.setuptools.dynamic]
@@ -23,6 +30,25 @@ version = {attr = "holoso.__version__"}
 [tool.setuptools.packages.find]
 include = ["holoso*"]
 
+[tool.setuptools.package-data]
+# The report's stylesheet and interactive layer are loaded at runtime via importlib.resources.
+"holoso.report" = ["*.css", "*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-p", "no:mypy"]
+markers = ["slow: long-running synthesis cosimulation (run via nox -s synth_examples)"]
+
+[tool.black]
+line-length = 120
+target-version = ["py314"]
+
+[tool.mypy]
+# mypy may not yet recognize 3.14 as a target; analyze under 3.13 semantics (we avoid 3.14-only syntax in typed code).
+python_version = "3.13"
+strict = true
+files = ["holoso"]
+
+[[tool.mypy.overrides]]
+module = ["sympy.*"]
+ignore_missing_imports = true

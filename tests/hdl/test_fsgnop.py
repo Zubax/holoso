@@ -16,14 +16,13 @@ from hdl_float_oracle import (
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    TESTS_DIR,
+    BENCH_DIR,
     apply_sgnop,
     build_args,
     get_random_count,
     get_seed,
     sources,
 )
-
 
 WFULL_VALUES = (6, 12, 24, 32)
 
@@ -38,9 +37,7 @@ async def holoso_fsgnop_cocotb(dut) -> None:
         await Timer(1, unit="ns")
         actual = int(dut.y.value)
         expected = apply_sgnop(x, op, wfull)
-        assert actual == expected, (
-            f"WFULL={wfull} x=0x{x:x} op={op}: got 0x{actual:x}, want 0x{expected:x}"
-        )
+        assert actual == expected, f"WFULL={wfull} x=0x{x:x} op={op}: got 0x{actual:x}, want 0x{expected:x}"
 
     if wfull <= 8:
         # Exhaustive over all input bit patterns + all opcodes.
@@ -84,8 +81,8 @@ def test_holoso_fsgnop(sim: str, wfull: int) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fsgnop",
-        test_module="test_hdl_fsgnop",
-        test_dir=TESTS_DIR,
+        test_module="test_fsgnop",
+        test_dir=BENCH_DIR,
         build_dir=build_dir,
         extra_env={"HOLOSO_TEST_WFULL": str(wfull)},
         results_xml=str(build_dir / "results.xml"),
