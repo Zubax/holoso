@@ -33,10 +33,18 @@ def _is_binary(inst: OperatorInstance) -> bool:
     return arity(inst.kind) == 2
 
 
+def _rf_data(port: int) -> str:
+    return f"`REGF_DATA({port})"
+
+
+def _rf_addr(port: int) -> str:
+    return f"`REGF_ADDR({port})"
+
+
 def _operand_value(operand: Operand, lanes: dict[int, int]) -> str:
     if isinstance(operand.source, ConstRef):
         return f"const_{operand.source.index}"
-    return f"rf_rd_data[`HOLOSO_REGFILE_LANE(W, {lanes[operand.source.index]})]"
+    return f"rf_rd_data[{_rf_data(lanes[operand.source.index])}]"
 
 
 def _operand_name(operand: Operand) -> str:
@@ -110,7 +118,7 @@ def generate(lir: Lir) -> str:
     _emit_datapath(w, lir, issues_by_cycle, commits_by_cycle, read_lanes, out_lanes)
     _emit_fsm(w, lir, commits_by_cycle)
     _emit_outputs(w, lir, out_lanes)
-    w.line("endmodule")
+    w.lines("endmodule", "", "`undef REGF_DATA", "`undef REGF_ADDR")
     return w.render()
 
 
@@ -150,6 +158,8 @@ def _emit_localparams(w: VerilogWriter, lir: Lir, waddr: int, cycw: int) -> None
     w.line(f"localparam CYCW  = {cycw};")
     w.line(f"localparam [CYCW-1:0] LAST = {lir.makespan + 1};")
     w.line(f"// cyc: 0 = idle/accept, 1..{lir.makespan} = pipelined compute, LAST = present outputs")
+    w.lines("", "`define REGF_DATA(PORT) `HOLOSO_REGFILE_LANE(W, PORT)")
+    w.line("`define REGF_ADDR(PORT) `HOLOSO_REGFILE_LANE(WADDR, PORT)")
     w.line("")
 
 
@@ -262,8 +272,8 @@ def _emit_datapath(
     w.push()
     for port, load in enumerate(lir.inputs):
         w.line(f"rf_wr_en[{port}] = 1'b1;")
-        w.line(f"rf_wr_addr[`HOLOSO_REGFILE_LANE(WADDR, {port})] = {load.dst.index};")
-        w.line(f"rf_wr_data[`HOLOSO_REGFILE_LANE(W, {port})] = in_{load.name};")
+        w.line(f"rf_wr_addr[{_rf_addr(port)}] = {load.dst.index};")
+        w.line(f"rf_wr_data[{_rf_data(port)}] = in_{load.name};")
     w.pop()
     w.line("end")
     for cycle in sorted(set(issues_by_cycle) | set(commits_by_cycle)):
@@ -273,7 +283,7 @@ def _emit_datapath(
         w.line(f"{cycle}: begin  // {_cycle_summary(issues, commits)}")
         w.push()
         for reg, lane in lanes.items():
-            w.line(f"rf_rd_addr[`HOLOSO_REGFILE_LANE(WADDR, {lane})] = {reg};")
+            w.line(f"rf_rd_addr[{_rf_addr(lane)}] = {reg};")
         for op in issues:
             sig = _sig(op.inst)
             w.line(f"{sig}_iv = 1'b1;")
@@ -284,15 +294,15 @@ def _emit_datapath(
         for lane, op in enumerate(commits):
             sig = _sig(op.inst)
             w.line(f"rf_wr_en[{lane}] = 1'b1;")
-            w.line(f"rf_wr_addr[`HOLOSO_REGFILE_LANE(WADDR, {lane})] = {op.dst.index};")
-            w.line(f"rf_wr_data[`HOLOSO_REGFILE_LANE(W, {lane})] = {sig}_y;")
+            w.line(f"rf_wr_addr[{_rf_addr(lane)}] = {op.dst.index};")
+            w.line(f"rf_wr_data[{_rf_data(lane)}] = {sig}_y;")
         w.pop()
         w.line("end")
     if out_lanes:
         w.line("LAST: begin  // present output registers on the read ports")
         w.push()
         for reg, lane in out_lanes.items():
-            w.line(f"rf_rd_addr[`HOLOSO_REGFILE_LANE(WADDR, {lane})] = {reg};")
+            w.line(f"rf_rd_addr[{_rf_addr(lane)}] = {reg};")
         w.pop()
         w.line("end")
     w.line("default: ;")
@@ -357,7 +367,7 @@ def _emit_outputs(w: VerilogWriter, lir: Lir, out_lanes: dict[int, int]) -> None
         if isinstance(wire.source, ConstRef):
             raw = f"const_{wire.source.index}"
         else:
-            raw = f"rf_rd_data[`HOLOSO_REGFILE_LANE(W, {out_lanes[wire.source.index]})]"
+            raw = f"rf_rd_data[{_rf_data(out_lanes[wire.source.index])}]"
         if wire.sgnop is Sgnop.NONE:
             w.line(f"assign {wire.name} = {raw};")
         else:
