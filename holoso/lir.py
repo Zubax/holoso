@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .format import FloatFormat
-from .operators import OpKind, ResourceKey, Sgnop
+from .operators import OpKind, ResourceKey, Sgnop, StageConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +109,7 @@ class RegFileLayout:
 @dataclass(frozen=True, slots=True)
 class Lir:
     fmt: FloatFormat
+    stages: StageConfig  # operator pipeline-stage knobs baked into this build (drive the STAGE_* instance params)
     module_name: str
     instances: tuple[OperatorInstance, ...]
     consts: tuple[float, ...]  # constant pool: index -> value

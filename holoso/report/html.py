@@ -236,7 +236,7 @@ def _stage_columns(lir: Lir, fmt: FloatFormat) -> list[tuple[OperatorInstance, i
     """
     cols: list[tuple[OperatorInstance, int]] = []
     for inst in lir.instances:
-        cols.extend((inst, k) for k in range(latency_of(inst.kind, fmt)))
+        cols.extend((inst, k) for k in range(latency_of(inst.kind, fmt, lir.stages)))
     return cols
 
 
@@ -345,7 +345,7 @@ def _schedule(lir: Lir, fmt: FloatFormat, expected_ii: int) -> str:
     for sidx, (inst, _k) in enumerate(stage_cols):
         stage_base.setdefault(inst, sidx)
     group_ends = {
-        stage_base[inst] + latency_of(inst.kind, fmt) - 1 for inst in lir.instances
+        stage_base[inst] + latency_of(inst.kind, fmt, lir.stages) - 1 for inst in lir.instances
     }  # last stage per operator
 
     # Column seams: 2px at the two block boundaries (constants | pipeline and pipeline | OPERATIONS); 1px at the lighter
@@ -423,7 +423,7 @@ def _schedule(lir: Lir, fmt: FloatFormat, expected_ii: int) -> str:
         cls = "gh k" + _border_suffix(nreg + index, dv.data_thin, dv.data_thick)
         out.append(f"<th class='{cls}' rowspan='2'><span>c{index}</span></th>")
     for inst in lir.instances:
-        lat = latency_of(inst.kind, fmt)
+        lat = latency_of(inst.kind, fmt, lir.stages)
         name = f"{inst.kind.value}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
         seam = _border_suffix(stage_base[inst] + lat - 1, dv.stage_thin, dv.stage_thick)
         out.append(

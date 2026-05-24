@@ -15,7 +15,7 @@ from .lir import (
     RegRef,
     ScheduledOp,
 )
-from .operators import OpKind, Sgnop
+from .operators import DEFAULT_STAGES, OpKind, Sgnop, StageConfig
 from .regalloc import Allocation, allocate
 from .result import Direction, IIModel, ModuleInterface, Port, PortRole, SynthesisMetrics
 from .scheduler import Schedule, resolve_pool, schedule_ops
@@ -27,14 +27,24 @@ def _opnode(hir: Hir, vid: ValueId) -> OpNode:
     return node
 
 
-def build(hir: Hir, module_name: str, instances: Mapping[OpKind, int] | None = None) -> Lir:
-    """Schedule, bind, and register-allocate a lowered HIR into a pipelined microprogram."""
+def build(
+    hir: Hir,
+    module_name: str,
+    instances: Mapping[OpKind, int] | None = None,
+    stages: StageConfig = DEFAULT_STAGES,
+) -> Lir:
+    """Schedule, bind, and register-allocate a lowered HIR into a pipelined microprogram.
+
+    ``stages`` must match the configuration used to annotate latencies in :func:`passes.run`, so the schedule and the
+    emitted ``STAGE_*`` instance params agree; it is recorded on the :class:`Lir` for the backend and report.
+    """
     pool = resolve_pool(hir, instances)
     sched = schedule_ops(hir, pool)
     alloc = allocate(hir, sched.issue_cycle, sched.makespan)
     consts, const_index = _build_const_pool(hir)
     return Lir(
         fmt=hir.fmt,
+        stages=stages,
         module_name=module_name,
         instances=sched.instances,
         consts=consts,

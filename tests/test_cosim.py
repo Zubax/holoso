@@ -14,6 +14,7 @@ from cocotb_tools.runner import get_runner
 from holoso.backend_verilog import generate
 from holoso.format import FloatFormat
 from holoso.frontend import lower
+from holoso.operators import DEFAULT_STAGES, StageConfig
 from holoso.passes import run
 from holoso.schedule import build, metrics_of
 from holoso.verify.cosim import Sampler, build_vectors, generic_sampler
@@ -22,9 +23,15 @@ from hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, BENCH_DIR, build_ar
 
 
 def _run_cosim(
-    sim: str, fn: Callable[..., object], fmt: FloatFormat, name: str, count: int, sampler: Sampler = generic_sampler
+    sim: str,
+    fn: Callable[..., object],
+    fmt: FloatFormat,
+    name: str,
+    count: int,
+    sampler: Sampler = generic_sampler,
+    stages: StageConfig = DEFAULT_STAGES,
 ) -> None:
-    lir = build(run(lower(fn, fmt)), name)
+    lir = build(run(lower(fn, fmt), stages), name, stages=stages)
     metrics = metrics_of(lir)
     # Generated sources live outside the cocotb build dir, which the runner wipes on clean=True.
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"{name}_w{fmt.wexp}_{fmt.wman}"
@@ -121,3 +128,14 @@ def test_cosim_ekf1(sim: str) -> None:
     import ekf1
 
     _run_cosim(sim, ekf1.update_x_P, FloatFormat(6, 18), "update_x_P", count=24, sampler=_ekf1_sampler)
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_staged_kernel(sim: str) -> None:
+    def kernel(a, b):  # type: ignore[no-untyped-def]
+        return (a - b) * 0.25 + a * b
+
+    # A pipeline stage on each operator kind the kernel uses; the exact-cycle cosim proves the staged latencies --
+    # threaded from annotation through the schedule into the generated STAGE_* params -- all agree with the RTL.
+    stages = StageConfig(fadd_decode=1, fmul_product=1, fmul_ilog2_decode=1)
+    _run_cosim(sim, kernel, FloatFormat(8, 24), "kernel_staged", count=64, stages=stages)

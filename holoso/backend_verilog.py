@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from .emit import VerilogWriter
 from .lir import ConstRef, Lir, OperatorInstance, Operand, RegRef, ScheduledOp
-from .operators import MODULE_NAMES, OpKind, Sgnop, arity, has_div0
+from .operators import MODULE_NAMES, OpKind, Sgnop, arity, has_div0, stage_params
 
 _KIND_ORDER = {kind: index for index, kind in enumerate(OpKind)}
 
@@ -129,8 +129,8 @@ def _emit_header(w: VerilogWriter, lir: Lir, cycw: int) -> None:
     w.line(f"module {lir.module_name} #(")
     w.push()
     w.lines(
-        f"parameter WEXP ={lir.fmt.wexp:3},  // ZKF exponent bits",
-        f"parameter WMAN ={lir.fmt.wman:3}   // ZKF mantissa bits",
+        f"parameter WEXP ={lir.fmt.wexp:3},  // Float exponent bits",
+        f"parameter WMAN ={lir.fmt.wman:3}   // Float mantissa bits",
     )
     w.pop()
     w.line(") (")
@@ -235,9 +235,13 @@ def _emit_operators(w: VerilogWriter, lir: Lir) -> None:
     for inst in lir.instances:
         sig = _sig(inst)
         module = MODULE_NAMES[inst.kind]
-        params = "#(.WEXP(WEXP), .WMAN(WMAN))"
+        parts = [".WEXP(WEXP)", ".WMAN(WMAN)"]
         if inst.kind is OpKind.FMUL_ILOG2:
-            params = f"#(.WEXP(WEXP), .WMAN(WMAN), .K({inst.k}))"
+            parts.append(f".K({inst.k})")
+        # Only the enabled stage knobs are emitted; the wrappers default each STAGE_* to 0, and the schedule's
+        # latency for this op was annotated with the same `lir.stages`, so RTL and schedule stay in lockstep.
+        parts += [f".{param}({value})" for param, value in stage_params(inst.kind, lir.stages).items() if value]
+        params = "#(" + ", ".join(parts) + ")"
         w.line(f"{module} {params} u_{_base(inst)} (")
         w.push()
         w.line(".clk(clk), .rst(rst), .in_valid(" + sig + "_iv),")

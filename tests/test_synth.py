@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import holoso
-from holoso import FloatFormat
+from holoso import FloatFormat, StageConfig
 
 
 def _kernel(a, b):  # type: ignore[no-untyped-def]  # module-level so inspect.getsource works
@@ -30,6 +30,16 @@ def test_synthesize_small_kernel_result() -> None:
     assert result.metrics.op_count >= 3
     names = [p.name for p in result.interface.ports]
     assert "in_a" in names and "out_0" in names and "err_cyc" in names
+
+
+def test_synthesize_threads_pipeline_stages() -> None:
+    base = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24))
+    staged = holoso.synthesize(
+        _kernel, float_format=FloatFormat(8, 24), stages=StageConfig(fadd_decode=1, fmul_product=1)
+    )
+    assert "STAGE_" not in base.verilog  # default stages emit no STAGE_* instance params
+    assert ".STAGE_DECODE(1)" in staged.verilog and ".STAGE_PRODUCT(1)" in staged.verilog
+    assert staged.metrics.ii_cycles > base.metrics.ii_cycles  # the added stages lengthen the schedule
 
 
 def test_generated_testbench_is_valid_python() -> None:
@@ -62,8 +72,8 @@ def test_report_has_expected_sections() -> None:
         assert token in header_text
     for token in (
         "module _kernel #(",
-        "parameter WEXP = 8,  // ZKF exponent bits",
-        "parameter WMAN = 24  // ZKF mantissa bits",
+        "parameter WEXP =  8,  // Float exponent bits",
+        "parameter WMAN = 24   // Float mantissa bits",
         "input  wire [WEXP+WMAN-1:0] in_a",
         "output wire [WEXP+WMAN-1:0] out_0",
         "output reg  [4:0] err_cyc",

@@ -11,7 +11,7 @@ from .errors import (
     UnsupportedConstruct,
 )
 from .format import FloatFormat
-from .operators import OpKind
+from .operators import OpKind, StageConfig
 from .result import (
     IIModel,
     ModuleInterface,
@@ -32,6 +32,7 @@ __all__ = [
     "OpKind",
     "Port",
     "SourceUnavailable",
+    "StageConfig",
     "SynthesisError",
     "SynthesisMetrics",
     "SynthesisResult",

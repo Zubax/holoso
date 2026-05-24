@@ -218,6 +218,14 @@ the operators committing that cycle, and the control block latches `err_cyc <= c
 Reset covers only the control registers (`cyc`, `err_cyc`). Nonblocking assignment only, `case` not functions.
 The control word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
 
+Each operator instance is parameterized by the build's pipeline-stage knobs (`StageConfig` -> the wrappers' `STAGE_*`
+params, threaded from `synthesize`). Their latency contribution is the same `latency_of` the scheduler annotated with,
+so the emitted RTL and the static schedule stay in lockstep -- a single source (`operators._STAGE_KNOBS`) drives both.
+
+**Microcode ROM (deferred, keep on the radar):** the per-cycle `case(cyc)` is a wide mux; for large kernels it could
+instead be emitted as a microcode ROM indexed by `cyc` (one packed control word per active cycle), which should
+synthesize far better at scale. This is to be confirmed empirically.
+
 ## Decisions
 
 1. Phi merges are resolved by register coalescing, not materialized selects.
@@ -259,4 +267,5 @@ follow in later milestones.
 ## Deferred
 
 Operator-pool auto-sizing, optional ILP mode, dynamic-trip loops, second controller backend, FloPoCo backend, OOC
-synthesis scaffolding, intrinsics (`sqrt`, `sincos`, `exp`, ... -- pending ZKF support).
+synthesis scaffolding, **microcode-ROM controller** (a packed control word per cycle indexed by `cyc`, replacing the
+`case(cyc)` mux -- important for large kernels), intrinsics (`sqrt`, `sincos`, `exp`, ... -- pending ZKF support).

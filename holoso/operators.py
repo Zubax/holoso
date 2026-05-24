@@ -9,7 +9,7 @@ HDL wrappers cycle-for-cycle: the static schedule commits each result on ``issue
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import assert_never
 
 from .format import FloatFormat
@@ -72,7 +72,11 @@ class ResourceKey:
 
 @dataclass(frozen=True, slots=True)
 class StageConfig:
-    """Optional pipeline-stage knobs per operator (default off). They affect latency and instantiation parameters."""
+    """Optional pipeline-stage knobs per operator (default off). They affect latency and instantiation parameters.
+
+    Each knob is 0 or 1: the HDL wrappers gate every stage as ``(STAGE_X ? 1 : 0)``, so a value above 1 would lengthen
+    ``latency_of`` without changing the RTL -- silently desyncing the static schedule from the hardware.
+    """
 
     fadd_decode: int = 0
     fadd_align: int = 0
@@ -80,8 +84,24 @@ class StageConfig:
     fdiv_input: int = 0
     fmul_ilog2_decode: int = 0
 
+    def __post_init__(self) -> None:
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if value not in (0, 1):
+                raise ValueError(f"StageConfig.{f.name} must be 0 or 1 (RTL gates each stage ?:1:0); got {value!r}")
+
 
 DEFAULT_STAGES = StageConfig()
+
+# kind -> ((HDL wrapper param, StageConfig field), ...): the optional pipeline stages and what drives each. The single
+# source for both the latency contribution (latency_of) and the instantiation parameters (stage_params), so they cannot
+# drift; adding a stage to an operator is a one-line edit here.
+_STAGE_KNOBS: dict["OpKind", tuple[tuple[str, str], ...]] = {
+    OpKind.FADD: (("STAGE_DECODE", "fadd_decode"), ("STAGE_ALIGN", "fadd_align")),
+    OpKind.FMUL: (("STAGE_PRODUCT", "fmul_product"),),
+    OpKind.FDIV: (("STAGE_INPUT", "fdiv_input"),),
+    OpKind.FMUL_ILOG2: (("STAGE_DECODE", "fmul_ilog2_decode"),),
+}
 
 
 def arity(kind: OpKind) -> int:
@@ -99,15 +119,21 @@ def latency_of(kind: OpKind, fmt: FloatFormat, stages: StageConfig = DEFAULT_STA
     The schedule commits each result on ``issue + latency`` and the backend trusts that timing without watching
     ``out_valid``, so this must replicate the RTL wrapper's ``LATENCY`` localparam exactly.
     """
+    extra = sum(int(getattr(stages, field)) for _, field in _STAGE_KNOBS[kind])
     match kind:
         case OpKind.FADD:
-            return 6 + stages.fadd_decode + stages.fadd_align
+            return 6 + extra
         case OpKind.FMUL:
-            return 3 + stages.fmul_product
+            return 3 + extra
         case OpKind.FMUL_ILOG2:
-            return 1 + stages.fmul_ilog2_decode
+            return 1 + extra
         case OpKind.FDIV:
             w = fmt.wman
-            return 4 + ((w + 2 + ((w + 2) % 2)) // 2) + stages.fdiv_input
+            return 4 + ((w + 2 + ((w + 2) % 2)) // 2) + extra
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def stage_params(kind: OpKind, stages: StageConfig) -> dict[str, int]:
+    """The ``STAGE_*`` instantiation parameters for an operator of ``kind``, from the same table as ``latency_of``."""
+    return {param: int(getattr(stages, field)) for param, field in _STAGE_KNOBS[kind]}

@@ -16,6 +16,9 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
+from holoso.format import FloatFormat
+from holoso.operators import OpKind, StageConfig, latency_of
+
 from hdl_float_oracle import (
     DIRECTED_F32,
     F32_EXP_MASK,
@@ -133,7 +136,7 @@ async def holoso_fdiv_cocotb(dut) -> None:
 def test_holoso_fdiv(sim: str, stage_input: int) -> None:
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fdiv_si{stage_input}"
-    latency = 4 + ((24 + 2 + ((24 + 2) % 2)) // 2) + int(bool(stage_input))
+    latency = latency_of(OpKind.FDIV, FloatFormat(8, 24), StageConfig(fdiv_input=stage_input))
     runner.build(
         sources=sources(),
         includes=[REPO_ROOT / "hdl"],

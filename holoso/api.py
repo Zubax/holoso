@@ -9,7 +9,7 @@ from .backend_support import support_header, support_verilog
 from .backend_verilog import generate
 from .format import FloatFormat
 from .frontend import lower
-from .operators import OpKind
+from .operators import DEFAULT_STAGES, OpKind, StageConfig
 from .passes import run
 from .report import build_report_html
 from .result import SynthesisResult
@@ -27,16 +27,19 @@ def synthesize(
     entry: str = "__call__",
     name: str | None = None,
     operator_instances: Mapping[OpKind, int] | None = None,
+    stages: StageConfig = DEFAULT_STAGES,
 ) -> SynthesisResult:
     """Synthesize ``target`` (a function or class object) into a Verilog ZISC FSM, returned in memory.
 
     ``parameters`` overrides a class's keyword-only ``__init__`` defaults; ``entry`` selects the analyzed method for a
     class (default ``__call__``); ``name`` overrides the generated module name; ``operator_instances`` sets the number
-    of instances per operator kind for scheduling (default one each).
+    of instances per operator kind for scheduling (default one each); ``stages`` selects the per-operator pipeline-stage
+    knobs (default off) -- they lengthen operator latency to ease timing closure and are baked into both the schedule
+    and the emitted ``STAGE_*`` instance parameters.
     """
-    hir = run(lower(target, float_format))
+    hir = run(lower(target, float_format), stages)
     module_name: str = name if name is not None else str(getattr(target, "__name__", "holoso_module"))
-    lir = build(hir, module_name, instances=operator_instances)
+    lir = build(hir, module_name, instances=operator_instances, stages=stages)
     interface = interface_of(lir)
     metrics = metrics_of(lir)
     verilog = generate(lir)

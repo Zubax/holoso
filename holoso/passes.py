@@ -25,7 +25,7 @@ from .hir import (
     SignOp,
     ValueId,
 )
-from .operators import OpKind, Sgnop, latency_of
+from .operators import DEFAULT_STAGES, OpKind, Sgnop, StageConfig, latency_of
 
 _ARITH_TO_OPKIND: dict[ArithOp, OpKind] = {
     ArithOp.ADD: OpKind.FADD,
@@ -188,8 +188,12 @@ def _reduce_div(builder: HirBuilder, na: ValueId, nb: ValueId, cval: dict[ValueI
     return builder.arith(ArithOp.DIV, na, nb)
 
 
-def lower_to_operators(hir: Hir) -> Hir:
-    """Select hardware operators and fold sign manipulations onto operator/output sign-op ports."""
+def lower_to_operators(hir: Hir, stages: StageConfig = DEFAULT_STAGES) -> Hir:
+    """Select hardware operators and fold sign manipulations onto operator/output sign-op ports.
+
+    ``stages`` annotates each operator's latency for the chosen pipeline-stage configuration; the backend must
+    instantiate the matching ``STAGE_*`` params so the static schedule agrees with the RTL.
+    """
     builder = HirBuilder(hir.fmt)
     remap: dict[ValueId, ValueId] = {}
     for old_id in sorted(hir.nodes):
@@ -206,7 +210,14 @@ def lower_to_operators(hir: Hir) -> Hir:
                 base_b, sgn_b = _collapse_signs(hir.nodes, b)
                 kind = _ARITH_TO_OPKIND[op]
                 remap[old_id] = builder.opnode(
-                    kind, remap[base_a], remap[base_b], sgn_a, sgn_b, Sgnop.NONE, None, latency_of(kind, hir.fmt)
+                    kind,
+                    remap[base_a],
+                    remap[base_b],
+                    sgn_a,
+                    sgn_b,
+                    Sgnop.NONE,
+                    None,
+                    latency_of(kind, hir.fmt, stages),
                 )
             case Fmul2K(a=a, k=k):
                 base_a, sgn_a = _collapse_signs(hir.nodes, a)
@@ -218,7 +229,7 @@ def lower_to_operators(hir: Hir) -> Hir:
                     Sgnop.NONE,
                     Sgnop.NONE,
                     k,
-                    latency_of(OpKind.FMUL_ILOG2, hir.fmt),
+                    latency_of(OpKind.FMUL_ILOG2, hir.fmt, stages),
                 )
             case OpNode():
                 remap[old_id] = _copy(builder, node, remap)
@@ -263,6 +274,6 @@ def dce(hir: Hir) -> Hir:
     return builder.finish()
 
 
-def run(hir: Hir) -> Hir:
+def run(hir: Hir, stages: StageConfig = DEFAULT_STAGES) -> Hir:
     """Run the full pass pipeline, returning a fully lowered HIR (only InPort/Const/OpNode)."""
-    return dce(lower_to_operators(strength_reduce(const_fold(hir))))
+    return dce(lower_to_operators(strength_reduce(const_fold(hir)), stages))
