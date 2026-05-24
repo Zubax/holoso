@@ -44,7 +44,7 @@ def test_write_artifacts(tmp_path: Path) -> None:
 
 def test_report_has_expected_sections() -> None:
     report = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24)).report_html
-    for token in ("Metrics", "Interface", "Schedule", "Operator utilization", "_kernel"):
+    for token in ("Metrics", "Interface", "Schedule", "_kernel"):
         assert token in report
 
 

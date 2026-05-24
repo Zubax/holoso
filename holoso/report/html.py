@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import html
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
 
 from ..format import FloatFormat
-from ..lir import Issue, Lir, Operand, RegRef
+from ..lir import Issue, Lir, Operand, OperatorInstance, RegRef
 from ..operators import OpKind, Sgnop, latency_of
 from ..result import ModuleInterface, SynthesisMetrics
 
@@ -48,16 +49,13 @@ def _operand(operand: Operand) -> str:
 
 
 def _issue_text(issue: Issue) -> str:
+    # Spaceless (``r1=r1+r3``): many operations can complete on one clock now, so the operations column packs tightly.
     if issue.inst.kind is OpKind.FMUL_ILOG2:
         body = f"{_operand(issue.a)}*2^{issue.k}"
     else:
         assert issue.b is not None
-        body = f"{_operand(issue.a)} {_KIND_LABEL[issue.inst.kind]} {_operand(issue.b)}"
-    return issue.y_sgnop.decorate(f"r{issue.dst.index} = {body}")
-
-
-def _card(value: object, label: str) -> str:
-    return f'<div class="card"><div class="v">{_esc(str(value))}</div><div class="l">{_esc(label)}</div></div>'
+        body = f"{_operand(issue.a)}{_KIND_LABEL[issue.inst.kind]}{_operand(issue.b)}"
+    return issue.y_sgnop.decorate(f"r{issue.dst.index}={body}")
 
 
 def build_report_html(lir: Lir, interface: ModuleInterface, metrics: SynthesisMetrics) -> str:
@@ -71,7 +69,7 @@ def build_report_html(lir: Lir, interface: ModuleInterface, metrics: SynthesisMe
         f"<div class='sub'>Synthesized by {link} at {generated}</div></header><main>",
     ]
     # The compact summary sections share one wrapping row (metrics, then the narrow constants and interface) so they
-    # do not waste page height; the full-width utilization and the wide register-grid schedule follow below.
+    # do not waste page height; the wide register-grid schedule follows below.
     out.append("<div class='toprow'>")
     out.append(f"<div class='sec'>{_metrics(interface, metrics, fmt)}</div>")
     constants = _constants(lir)
@@ -79,7 +77,6 @@ def build_report_html(lir: Lir, interface: ModuleInterface, metrics: SynthesisMe
         out.append(f"<div class='sec'>{constants}</div>")
     out.append(f"<div class='sec'>{_interface(interface)}</div>")
     out.append("</div>")
-    out.append(_utilization(lir, fmt))
     out.append(_schedule(lir, fmt))
     out.append("</main></body></html>")
     return "".join(out)
@@ -87,21 +84,19 @@ def build_report_html(lir: Lir, interface: ModuleInterface, metrics: SynthesisMe
 
 def _metrics(interface: ModuleInterface, metrics: SynthesisMetrics, fmt: FloatFormat) -> str:
     instances = " ".join(f"{count}×{kind}" for kind, count in metrics.operator_instances.items())
-    cards = [
-        _card(f"e{fmt.wexp}+m{fmt.wman} = {fmt.width}-bit", "ZKF floating point format"),
-        _card(instances or "-", "operator instances"),
-        _card(metrics.n_float_regs, "float registers"),
-        _card(f"{metrics.read_ports} / {metrics.write_ports}", "regfile R/W ports"),
-        _card(metrics.step_count, "FSM steps"),
-        _card(metrics.op_count, "operations"),
-        _card(metrics.ii_estimate, "II (cycles)"),
-        _card(metrics.max_chain_len, "longest op chain"),
+    rows: list[tuple[str, object]] = [
+        ("ZKF format", f"e{fmt.wexp}+m{fmt.wman} = {fmt.width}-bit"),
+        ("operator instances", instances or "-"),
+        ("float registers", metrics.n_float_regs),
+        ("regfile R/W ports", f"{metrics.read_ports} / {metrics.write_ports}"),
+        ("FSM steps", metrics.step_count),
+        ("operations", metrics.op_count),
+        ("II (cycles)", metrics.ii_estimate),
+        ("longest op chain", metrics.max_chain_len),
     ]
-    note = (
-        f"Initiation interval = in_valid&rarr;out_valid latency, data-independent and verified cycle-exact in "
-        f"simulation: {_esc(interface.ii.formula)}."
-    )
-    return f"<h2>Metrics</h2><div class='cards'>{''.join(cards)}</div><p class='note'>{note}</p>"
+    body = "".join(f"<tr><th>{_esc(label)}</th><td>{_esc(str(value))}</td></tr>" for label, value in rows)
+    note = f"Initiation interval = in_valid&rarr;out_valid latency: {_esc(interface.ii.formula)}."
+    return f"<h2>Metrics</h2><table class='metrics'>{body}</table><p class='note'>{note}</p>"
 
 
 def _interface(interface: ModuleInterface) -> str:
@@ -130,7 +125,7 @@ def _constants(lir: Lir) -> str:
 
 
 _NEUTRAL = "#6b7280"  # input/output bookend chips (port boundary, not an operator)
-_LIVE_BG = "#edf2fb"  # faint tint over the cycles a register holds a live value (its write down to its last read)
+_LIVE_BG = "#edf2fb"  # legend swatch for the liveness tint; the grid cells use the ``.live`` CSS class (same color)
 ColKey = tuple[str, int]  # ("r", reg index) or ("c", constant index)
 
 
@@ -158,28 +153,68 @@ def _operand_col(operand: Operand) -> ColKey:
     return ("r", operand.source.index) if isinstance(operand.source, RegRef) else ("c", operand.source.index)
 
 
-def _gc_class(ordinal: int, dividers: set[int]) -> str:
-    """Grid-cell class for column ``ordinal``. A column in ``dividers`` carries a black divider as its *right* border:
-    under ``border-collapse`` the left cell of a pair wins an equal-width conflict, so the divider must live on the left
-    column's right edge (e.g. the last register before the constants) to actually show -- hence ``rbk`` here, not a left
-    border on the constant column."""
-    return "gc rbk" if ordinal in dividers else "gc"
+@dataclass(frozen=True, slots=True)
+class _Dividers:
+    """Right-border seams between grid columns, kept on the *left* cell's right edge (under ``border-collapse`` the left
+    cell wins an equal-width conflict, so a left border on the right column would not show). A ``thick`` 2px seam marks
+    the two block boundaries (constants | operator-pipeline and operator-pipeline | OPERATIONS); a ``thin`` 1px seam
+    marks the lighter ones (registers | constants and between operator groups). Data and stage columns index separately.
+    """
+
+    data_thin: set[int]
+    data_thick: set[int]
+    stage_thin: set[int]
+    stage_thick: set[int]
+
+
+def _border_suffix(idx: int, thin: set[int], thick: set[int]) -> str:
+    if idx in thick:
+        return " rbk2"
+    if idx in thin:
+        return " rbk"
+    return ""
+
+
+def _gc_class(ordinal: int, dv: _Dividers) -> str:
+    """Class for a register/constant data cell in column ``ordinal`` (with its right-border divider, if any)."""
+    return "gc" + _border_suffix(ordinal, dv.data_thin, dv.data_thick)
+
+
+def _oc_class(sidx: int, dv: _Dividers) -> str:
+    """Class for an operator-stage cell in stage column ``sidx`` (with its right-border divider, if any)."""
+    return "oc" + _border_suffix(sidx, dv.stage_thin, dv.stage_thick)
+
+
+def _stage_columns(lir: Lir, fmt: FloatFormat) -> list[tuple[OperatorInstance, int]]:
+    """The operator-stage columns, in instance order: ``(instance, stage)`` for each pipeline stage of each operator.
+
+    One column per stage, so an L-cycle operator contributes L columns labeled ``s0..s(L-1)``. As an operation flows
+    through its operator, stage ``k`` is occupied on cycle ``launch + k``; the result lands at the last stage. This
+    makes the pipeline's advance directly visible -- and, once multiple-issue lands, exposes any structural hazard.
+    """
+    cols: list[tuple[OperatorInstance, int]] = []
+    for inst in lir.instances:
+        cols.extend((inst, k) for k in range(latency_of(inst.kind, fmt)))
+    return cols
 
 
 def _bookend_row(
-    cls: str,
     label: str,
     cells: dict[ColKey, str],
     columns: list[ColKey],
     live: dict[int, set[int]],
     row_id: int,
-    dividers: set[int],
+    n_stage: int,
+    dv: _Dividers,
 ) -> str:
-    """A grid row outside the FSM steps: the ``in`` input-load row or the ``out`` output-read row (empty ops cell)."""
-    out = [f"<tr class='{cls}'><td class='clk'>{label}</td><td class='stepn'></td>"]
+    """A grid row outside the FSM steps: the ``in`` input-load row or the ``out`` output-read row. No operator is in
+    flight at the I/O boundary, so the operator-stage cells and the ops cell are empty."""
+    out = [f"<tr><td class='clk'>{label}</td><td class='stepn'></td>"]
     for ordinal, col in enumerate(columns):
-        bg = f" style='background:{_LIVE_BG}'" if _is_live(col, row_id, live) else ""
-        out.append(f"<td class='{_gc_class(ordinal, dividers)}'{bg}>{cells.get(col, '')}</td>")
+        extra = " live" if _is_live(col, row_id, live) else ""
+        out.append(f"<td class='{_gc_class(ordinal, dv)}{extra}'>{cells.get(col, '')}</td>")
+    for sidx in range(n_stage):
+        out.append(f"<td class='{_oc_class(sidx, dv)}'></td>")
     out.append("<td class='opcell'></td></tr>")
     return "".join(out)
 
@@ -241,16 +276,20 @@ def _live_intervals(rows: set[int]) -> list[list[int]]:
 
 
 def _cell_style(
-    col: ColKey, row_id: int, offset: int, live: dict[int, set[int]], bars: dict[ColKey, tuple[str, int]]
-) -> str:
-    """Inline background for a grid cell. A result column in flight is filled solid with its operator color for the
-    compute cycles (this takes precedence); otherwise a live register gets the faint residence tint."""
-    bar = bars.get(col)
-    if bar is not None and offset < bar[1]:  # the result column is "in flight" for the operator's compute cycles
-        return f" style='background:{bar[0]}'"
+    col: ColKey, row_id: int, offset: int, live: dict[int, set[int]], fills: dict[tuple[int, ColKey], str]
+) -> tuple[str, str]:
+    """Background for a grid cell, as ``(extra_class, inline_style)``. The single cycle on which a result lands is
+    filled solid with its operator color via an inline style (this takes precedence, and being inline it survives the
+    row-hover tint); otherwise a live register gets the faint residence tint via the ``live`` class, so a row-hover can
+    override it. Pipelined operators may carry several values in flight at once, so the grid no longer paints a
+    per-operator occupancy column -- only the destination cell on the result's completion cycle is highlighted.
+    """
+    color = fills.get((offset, col))
+    if color is not None:
+        return "", f" style='background:{color}'"
     if _is_live(col, row_id, live):
-        return f" style='background:{_LIVE_BG}'"
-    return ""
+        return " live", ""
+    return "", ""
 
 
 def _schedule(lir: Lir, fmt: FloatFormat) -> str:
@@ -259,20 +298,75 @@ def _schedule(lir: Lir, fmt: FloatFormat) -> str:
     nreg, nconst = lir.regfile.nreg, len(lir.consts)
     columns = _columns_of(lir)
     col_ord = {col: ordinal for ordinal, col in enumerate(columns)}
-    dividers = {len(columns) - 1}  # black right-border columns: last data column | operations ...
-    if nconst:
-        dividers.add(nreg - 1)  # ... and registers | constants
+
+    # The operator-stage block: one square column per pipeline stage of each operator, in instance order.
+    stage_cols = _stage_columns(lir, fmt)
+    n_stage = len(stage_cols)
+    stage_base: dict[OperatorInstance, int] = {}
+    for sidx, (inst, _k) in enumerate(stage_cols):
+        stage_base.setdefault(inst, sidx)
+    group_ends = {
+        stage_base[inst] + latency_of(inst.kind, fmt) - 1 for inst in lir.instances
+    }  # last stage per operator
+
+    # Column seams: 2px at the two block boundaries (constants | pipeline and pipeline | OPERATIONS); 1px at the lighter
+    # registers | constants seam and between operator groups.
+    dv = _Dividers(
+        data_thin={nreg - 1} if nconst else set(),
+        data_thick={len(columns) - 1},
+        stage_thin=group_ends - {n_stage - 1},
+        stage_thick={n_stage - 1} if n_stage else set(),
+    )
+
     live = _liveness(lir, fmt)
     total = sum(step.latency for step in lir.steps)
     edges: list[tuple[str, str, str, int]] = []  # (write id, operand id, color, operation group) for the overlay
+    # Operator pipeline occupancy, accumulated across all steps (a trail can cross step boundaries once issues overlap):
+    # instance ``inst`` is in stage ``k`` on cycle ``launch + k``. Keyed to the operation group so a hover lights the
+    # whole pipeline trail together with the result cell, its chip and its edges. ``conflicts`` flags any cell two
+    # operations claim at once -- impossible under today's barrier schedule, the alarm for a future multiple-issue bug.
+    stage_fill: dict[tuple[int, int], tuple[str, int]] = {}  # (stage column, cycle) -> (operator color, group)
+    stage_tip: dict[tuple[int, int], str] = {}
+    conflicts: set[tuple[int, int]] = set()
+
     out = [_schedule_key(lir), "<div id='schedwrap'><table class='grid'>"]
-    out.append("<tr><th class='gh clkh'><span>clk</span></th><th class='gh steph'><span>step</span></th>")
-    for ordinal, (kind, index) in enumerate(columns):
-        cls = "gh k" if kind == "c" else "gh"
-        if ordinal in dividers:
-            cls += " rbk"
-        out.append(f"<th class='{cls}'><span>{kind}{index}</span></th>")
-    out.append("<th class='oph'>operations</th></tr>")
+    # Header row 0: group bands over the register, constant and operator-pipeline blocks (each band clips to its span,
+    # so a single constant just reads "C"). clk/step/operations span all three header rows.
+    out.append("<tr><th class='gh clkh' rowspan='3'><span>clk</span></th>")
+    out.append("<th class='gh steph' rowspan='3'><span>step</span></th>")
+    if nreg:
+        reg_seam = _border_suffix(nreg - 1, dv.data_thin, dv.data_thick)
+        out.append(f"<th class='gband{reg_seam}' colspan='{nreg}'><span>registers</span></th>")
+    if nconst:
+        const_seam = _border_suffix(nreg + nconst - 1, dv.data_thin, dv.data_thick)
+        out.append(f"<th class='gband{const_seam}' colspan='{nconst}'><span>constants</span></th>")
+    if n_stage:
+        seam = _border_suffix(n_stage - 1, dv.stage_thin, dv.stage_thick)
+        out.append(f"<th class='gband{seam}' colspan='{n_stage}'><span>operator pipelines</span></th>")
+    out.append("<th class='oph' rowspan='3'>operations</th></tr>")
+    # Header row 1: register and constant column labels, and one group cell per operator spanning its stages.
+    out.append("<tr>")
+    for index in range(nreg):
+        cls = "gh" + _border_suffix(index, dv.data_thin, dv.data_thick)
+        out.append(f"<th class='{cls}' rowspan='2'><span>r{index}</span></th>")
+    for index in range(nconst):
+        cls = "gh k" + _border_suffix(nreg + index, dv.data_thin, dv.data_thick)
+        out.append(f"<th class='{cls}' rowspan='2'><span>c{index}</span></th>")
+    for inst in lir.instances:
+        lat = latency_of(inst.kind, fmt)
+        name = f"{inst.kind.value}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
+        seam = _border_suffix(stage_base[inst] + lat - 1, dv.stage_thin, dv.stage_thick)
+        out.append(
+            f"<th class='ohgrp{seam}' colspan='{lat}' style='color:{_KIND_COLOR[inst.kind]}'>"
+            f"<span>{_esc(name)}</span></th>"
+        )
+    out.append("</tr>")
+    # Header row 2: the per-stage labels (s0, s1, ...) under each operator group.
+    out.append("<tr>")
+    for sidx, (_inst, k) in enumerate(stage_cols):
+        cls = "gh" + _border_suffix(sidx, dv.stage_thin, dv.stage_thick)
+        out.append(f"<th class='{cls}'><span>s{k}</span></th>")
+    out.append("</tr>")
 
     # Bookend the FSM with the I/O boundary: inputs are defined (written) into registers at accept; outputs are read
     # from registers at completion. Neutral chips distinguish the module boundary from operator activity.
@@ -281,62 +375,89 @@ def _schedule(lir: Lir, fmt: FloatFormat) -> str:
     for wire in lir.outputs:
         wcol: ColKey = ("r", wire.source.index) if isinstance(wire.source, RegRef) else ("c", wire.source.index)
         out_cells[wcol] = out_cells.get(wcol, "") + _bookend_chip(True, f"out_{wire.name}", wire.sgnop)
-    out.append(_bookend_row("sstart", "in", in_cells, columns, live, -1, dividers))
+    out.append(_bookend_row("in", in_cells, columns, live, -1, n_stage, dv))
 
-    group = 0  # global per-operation id, used to cross-link a result block with its edges for the hover-focus behavior
+    group = 0  # global per-operation id, used to cross-link a result cell with its edges for the hover-focus behavior
     cycle = 0
     for step in lir.steps:
-        # The result column is filled solid with the operator color over its compute cycles, with the instance label on
-        # the completion cycle (offset = its latency - 1) -- so the filled height shows the operator latency, and the
-        # blank gap from the completion to the bold step rule is the barrier idle. Operands are not drawn as chips: the
-        # overlay draws an operator-colored edge from each write cell up to its operand cells on the step's first cycle.
-        # We tag edge endpoints with ids and every in-flight result cell with its operation group (data-op).
+        # Only the destination cell on a result's completion cycle is highlighted with the operator color; the operand
+        # cells are linked by the overlay's edges, and the operation's chip is placed on the row where its result
+        # completes, so the operations column reads in lock-step with the highlighted cells (many chips may share a row).
+        # Each issue also stamps its operator's pipeline trail into the stage block above (handled in stage_fill).
         writes_at: dict[tuple[int, ColKey], str] = {}
-        bars: dict[ColKey, tuple[str, int]] = {}
+        fills: dict[tuple[int, ColKey], str] = {}  # (offset within step, column) -> operator color, completion cells
         endpoints: set[tuple[int, int]] = set()
         cell_group: dict[tuple[int, int], int] = {}  # (column ordinal, cycle) -> operation group, for result cells
-        chips: list[str] = []  # filled operator chips for this step's operations column (rowspan over the step)
+        chips_at: dict[int, list[str]] = {}  # offset within step -> chips for the operations completing on that row
         for issue in step.issues:
             tip = _esc(_issue_text(issue))
             color = _KIND_COLOR[issue.inst.kind]
-            busy = min(latency_of(issue.inst.kind, fmt), step.latency)
+            lat = latency_of(issue.inst.kind, fmt)
+            busy = min(lat, step.latency)
             completion = cycle + busy - 1
             dcol: ColKey = ("r", issue.dst.index)
             dord = col_ord[dcol]
             writes_at[(busy - 1, dcol)] = writes_at.get((busy - 1, dcol), "") + _write_label(issue.inst.index, tip)
-            bars[dcol] = (color, busy)
+            fills[(busy - 1, dcol)] = color
             endpoints.add((dord, completion))
-            for off in range(busy):
-                cell_group[(dord, cycle + off)] = group
+            cell_group[(dord, completion)] = group
             for operand in (issue.a, issue.b):
                 if operand is not None:
                     oord = col_ord[_operand_col(operand)]
                     endpoints.add((oord, cycle))
                     edges.append((f"g{dord}_{completion}", f"g{oord}_{cycle}", color, group))
-            chips.append(f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>")
+            chips_at.setdefault(busy - 1, []).append(
+                f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
+            )
+            base = stage_base[issue.inst]
+            for k in range(lat):  # stamp the pipeline trail: stage k of this operator is busy on cycle launch + k
+                key = (base + k, cycle + k)
+                if key in stage_fill and stage_fill[key][1] != group:
+                    conflicts.add(key)
+                stage_fill[key] = (color, group)
+                stage_tip[key] = f"{issue.inst.kind.value}_{issue.inst.index} s{k}: {tip}"
             group += 1
-        band = " band" if step.index % 2 else ""
         for offset in range(step.latency):  # one row per clock cycle of the step
             cyc = cycle + offset
-            cls = "sstart" if offset == 0 else ""
-            out.append(f"<tr class='{(cls + band).strip()}'>")
+            out.append("<tr>")
             out.append(f"<td class='clk'>{cyc}</td>")
             out.append(f"<td class='stepn'>{'S' + str(step.index) if offset == 0 else ''}</td>")
             for ordinal, col in enumerate(columns):
                 content = writes_at.get((offset, col), "")
-                style = _cell_style(col, cyc, offset, live, bars)
+                extra, style = _cell_style(col, cyc, offset, live, fills)
                 attrs = f" id='g{ordinal}_{cyc}'" if (ordinal, cyc) in endpoints else ""
                 if (ordinal, cyc) in cell_group:
                     attrs += f" data-op='{cell_group[(ordinal, cyc)]}'"
-                out.append(f"<td class='{_gc_class(ordinal, dividers)}'{attrs}{style}>{content}</td>")
-            if offset == 0:  # one ops cell per step, spanning its cycles, so the list stays step-aligned
-                out.append(f"<td class='opcell' rowspan='{step.latency}'>{''.join(chips)}</td>")
+                out.append(f"<td class='{_gc_class(ordinal, dv)}{extra}'{attrs}{style}>{content}</td>")
+            for sidx in range(n_stage):
+                out.append(_stage_cell(sidx, cyc, dv, stage_fill, stage_tip, conflicts))
+            out.append(f"<td class='opcell'>{''.join(chips_at.get(offset, []))}</td>")
             out.append("</tr>")
         cycle += step.latency
-    out.append(_bookend_row("sstart", "out", out_cells, columns, live, total, dividers))
+    out.append(_bookend_row("out", out_cells, columns, live, total, n_stage, dv))
     out.append("</table><svg class='edges'></svg></div>")
     out.append(_sched_script(lir, edges, live, total))
     return "".join(out)
+
+
+def _stage_cell(
+    sidx: int,
+    cyc: int,
+    dv: _Dividers,
+    stage_fill: dict[tuple[int, int], tuple[str, int]],
+    stage_tip: dict[tuple[int, int], str],
+    conflicts: set[tuple[int, int]],
+) -> str:
+    """One operator-stage cell: empty unless an operation occupies this stage on this cycle, in which case it is filled
+    with the operator color and tagged with the operation group (so a hover lights the whole pipeline trail)."""
+    cls = _oc_class(sidx, dv)
+    occ = stage_fill.get((sidx, cyc))
+    if occ is None:
+        return f"<td class='{cls}'></td>"
+    color, group = occ
+    if (sidx, cyc) in conflicts:
+        cls += " conflict"
+    return f"<td class='{cls}' data-op='{group}' title='{stage_tip[(sidx, cyc)]}' style='background:{color}'></td>"
 
 
 def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[int, set[int]], total: int) -> str:
@@ -375,64 +496,19 @@ def _schedule_key(lir: Lir) -> str:
     for inst in lir.instances:
         seen.setdefault(inst.kind, None)
     kinds = [
-        f"<span class='wr' style='background:{_KIND_COLOR[kind]}'>{kind.value} {_KIND_LABEL[kind]}</span>"
+        f"<span class='wr' style='background:{_KIND_COLOR[kind]}'>{kind.value} {_esc(_KIND_LABEL[kind])}</span>"
         for kind in seen
     ]
     return (
         "<h2>Schedule</h2><div class='gridkey'>"
         + " ".join(kinds)
-        + "<span><span class='sw' style='background:#374151'></span> filled column = operator n result (height = latency)</span>"
+        + "<span><span class='sw' style='background:#374151'></span> filled cell = result available (operator n)</span>"
         + "<span><svg class='lk' width='24' height='12'><line x1='2' y1='3' x2='21' y2='10' stroke='#374151' "
         "stroke-width='1'/><circle cx='21' cy='10' r='1.8' fill='#374151'/></svg> edge: result &rarr; its operands</span>"
+        + "<span><span class='sw' style='background:#374151'></span> operator-stage block: s0..sN occupancy as the "
+        "pipeline advances</span>"
         + f"<span><span class='sw' style='background:{_LIVE_BG}'></span> register holds a live value</span>"
         + f"<span><span class='wr' style='background:{_NEUTRAL}'>&#9662;</span>"
         + f"<span class='rd' style='border-color:{_NEUTRAL};color:{_NEUTRAL}'>&#9652;</span> module in / out</span>"
         + "</div>"
-    )
-
-
-def _utilization(lir: Lir, fmt: FloatFormat) -> str:
-    if not lir.steps:
-        return ""
-    util: dict[tuple[OpKind, int], dict[int, float]] = {}
-    for step in lir.steps:
-        for issue in step.issues:
-            fraction = min(1.0, latency_of(issue.inst.kind, fmt) / max(step.latency, 1))
-            util.setdefault((issue.inst.kind, issue.inst.index), {})[step.index] = fraction
-    out = [
-        "<h2>Operator utilization</h2><div class='scrollx'><table class='util'><tr><th class='name'>operator \\ state</th>"
-    ]
-    for step in lir.steps:
-        out.append(f"<th class='st'>{step.index + 1}</th>")  # the generated Verilog state number
-    out.append("</tr>")
-    for inst in lir.instances:
-        color = _KIND_COLOR[inst.kind]
-        out.append(f"<tr><td class='name'>{inst.kind.value}_{inst.index}</td>")
-        cells = util.get((inst.kind, inst.index), {})
-        for step in lir.steps:
-            frac = cells.get(step.index)
-            if frac is None:
-                out.append("<td><div class='cell'></div></td>")
-            else:
-                height = max(2, round(frac * 15))
-                out.append(
-                    f"<td><div class='cell'><div class='fill' style='height:{height}px;background:{color}'></div></div></td>"
-                )
-        out.append("</tr>")
-    out.append("</table></div>")
-    out.append(_legend())
-    return "".join(out)
-
-
-def _legend() -> str:
-    full = "<span class='box' style='background:#374151'></span>"
-    partial = "<span class='box'><span class='fill' style='height:6px;background:#374151'></span></span>"
-    empty = "<span class='box'></span>"
-    return (
-        "<div class='legend'>"
-        f"<span>{empty}idle &mdash; operator not issued this state</span>"
-        f"<span>{full}full &mdash; active and on the step's critical path (busy the whole step)</span>"
-        f"<span>{partial}partial &mdash; active but finished early and idled at the barrier "
-        "(fill = its latency &divide; step latency)</span>"
-        "</div>"
     )
