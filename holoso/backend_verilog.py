@@ -165,13 +165,16 @@ def _emit_port_group(w: VerilogWriter, title: str, comment: str) -> None:
 
 def _emit_localparams(w: VerilogWriter, lir: Lir, waddr: int, cycw: int) -> None:
     w.line("localparam W     = WEXP + WMAN;")
-    w.line(f"localparam NREG  = {lir.regfile.nreg};")
+    w.line(
+        f"localparam NREG  = {max(1, lir.regfile.nreg)};  // >= 1; the bank is unused when no value needs a register"
+    )
     w.line(f"localparam WADDR = {waddr};")
     w.line(f"localparam NRD   = {lir.regfile.nrd};")
     w.line(f"localparam NWR   = {lir.regfile.nwr};")
     w.line(f"localparam CYCW  = {cycw};")
     w.line(f"localparam [CYCW-1:0] LAST = {lir.makespan + 1};")
-    w.line(f"// cyc: 0 = idle/accept, 1..{lir.makespan} = pipelined compute, LAST = present outputs")
+    compute = f"1..{lir.makespan} = pipelined compute, " if lir.makespan else ""
+    w.line(f"// cyc: 0 = idle/accept, {compute}LAST = present outputs")
     w.lines("", "`define REGF_DATA(PORT) `HOLOSO_REGFILE_LANE(W, PORT)")
     w.line("`define REGF_ADDR(PORT) `HOLOSO_REGFILE_LANE(WADDR, PORT)")
     w.line("")

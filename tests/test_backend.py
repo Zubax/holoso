@@ -58,6 +58,17 @@ def test_kernel_with_division_elaborates(tmp_path: Path) -> None:
 
 
 @requires_iverilog
+def test_constant_only_module_elaborates(tmp_path: Path) -> None:
+    # No inputs and an all-constant output => zero registers; NREG must floor to >=1 so the regfile parameter
+    # guard does not instantiate its error stub (BUG1 regression).
+    def const_only():  # type: ignore[no-untyped-def]
+        return 3.5
+
+    lir = build(run(lower(const_only, FloatFormat(8, 24))), "const_only")
+    _elaborate("const_only", generate(lir), tmp_path)
+
+
+@requires_iverilog
 def test_ekf1_elaborates(tmp_path: Path) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1

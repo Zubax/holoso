@@ -42,6 +42,18 @@ def test_synthesize_threads_pipeline_stages() -> None:
     assert staged.metrics.ii_cycles > base.metrics.ii_cycles  # the added stages lengthen the schedule
 
 
+def test_rejects_non_finite_constants() -> None:
+    def overflow(a):  # type: ignore[no-untyped-def]
+        return a + 1e400  # overflows to +inf, not representable in the ZKF format
+
+    def folds_to_nan(a):  # type: ignore[no-untyped-def]
+        return a + (1e400 - 1e400)  # inf - inf const-folds to NaN
+
+    for fn in (overflow, folds_to_nan):
+        with pytest.raises(holoso.UnsupportedConstruct):
+            holoso.synthesize(fn, float_format=FloatFormat(8, 24))
+
+
 def test_generated_testbench_is_valid_python() -> None:
     result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24))
     compile(result.testbench, "<generated-testbench>", "exec")

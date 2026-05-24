@@ -115,7 +115,7 @@ class Lir:
     consts: tuple[float, ...]  # constant pool: index -> value
     regfile: RegFileLayout
     inputs: tuple[InputLoad, ...]  # ordered as the function parameters
-    ops: tuple[ScheduledOp, ...]  # the pipelined schedule, ordered by (issue_cycle, instance)
+    ops: tuple[ScheduledOp, ...]  # the pipelined schedule, ordered by (issue_cycle, value-id)
     outputs: tuple[OutputWire, ...]
     makespan: int  # last commit cycle (0 if no ops); the in_valid->out_valid latency is makespan + 1
     op_count: int

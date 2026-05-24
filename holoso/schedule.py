@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 
+from .errors import UnsupportedConstruct
 from .hir import Const, Hir, InPort, OpNode, ValueId
 from .lir import (
     ConstRef,
@@ -15,7 +17,7 @@ from .lir import (
     RegRef,
     ScheduledOp,
 )
-from .operators import DEFAULT_STAGES, OpKind, Sgnop, StageConfig
+from .operators import DEFAULT_STAGES, OpKind, Sgnop, StageConfig, latency_of
 from .regalloc import Allocation, allocate
 from .result import Direction, IIModel, ModuleInterface, Port, PortRole, SynthesisMetrics
 from .scheduler import Schedule, resolve_pool, schedule_ops
@@ -38,6 +40,15 @@ def build(
     ``stages`` must match the configuration used to annotate latencies in :func:`passes.run`, so the schedule and the
     emitted ``STAGE_*`` instance params agree; it is recorded on the :class:`Lir` for the backend and report.
     """
+    # Guard the load-bearing contract: the schedule commits each op at issue + OpNode.latency (annotated by run()),
+    # while the backend emits STAGE_* params from `stages`. If they disagree the RTL and schedule desync silently.
+    for node in hir.nodes.values():
+        if isinstance(node, OpNode) and node.latency != latency_of(node.kind, hir.fmt, stages):
+            raise ValueError(
+                f"operator latency for {node.kind.value} ({node.latency}) disagrees with build()'s stages "
+                f"(expected {latency_of(node.kind, hir.fmt, stages)}); pass the same StageConfig to run() and "
+                f"build() -- synthesize() does this for you"
+            )
     pool = resolve_pool(hir, instances)
     sched = schedule_ops(hir, pool)
     alloc = allocate(hir, sched.issue_cycle, sched.makespan)
@@ -83,6 +94,8 @@ def _build_const_pool(hir: Hir) -> tuple[tuple[float, ...], dict[ValueId, int]]:
     for vid in ids:
         node = hir.nodes[vid]
         assert isinstance(node, Const)
+        if not math.isfinite(node.value):
+            raise UnsupportedConstruct(f"non-finite constant {node.value!r} is not representable in the ZKF format")
         values.append(node.value)
     return tuple(values), {vid: index for index, vid in enumerate(ids)}
 

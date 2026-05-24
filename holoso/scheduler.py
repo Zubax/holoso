@@ -93,6 +93,26 @@ def _critical_path(hir: Hir, op_ids: list[ValueId]) -> dict[ValueId, int]:
     return height
 
 
+def _check_port_budget(hir: Hir, op_ids: list[ValueId], nrd: int | None, nwr: int | None) -> None:
+    """Reject read/write port budgets no schedule can meet, with a clear message rather than a 'no progress' stall.
+
+    A binary op must read its (up to two) distinct register operands in one cycle, and the output-presentation cycle
+    reads every distinct output register at once -- both are hard floors on ``nrd``. The single-cycle input load is the
+    floor on ``nwr``. (Operator commits can always be spread across cycles, so they impose no extra floor.)
+    """
+    max_op_reads = max((len(set(_register_operands(hir, vid))) for vid in op_ids), default=0)
+    output_regs = len({out.value for out in hir.outputs if not isinstance(hir.nodes[out.value], Const)})
+    floor_nrd = max(max_op_reads, output_regs, 1)
+    floor_nwr = max(len(hir.input_ids), 1)
+    if nrd is not None and nrd < floor_nrd:
+        raise ValueError(
+            f"nrd={nrd} read ports is infeasible: need >= {floor_nrd} "
+            f"(an operator reads up to {max_op_reads} registers; output presentation reads {output_regs})"
+        )
+    if nwr is not None and nwr < floor_nwr:
+        raise ValueError(f"nwr={nwr} write ports is infeasible: need >= {floor_nwr} for the single-cycle input load")
+
+
 def schedule_ops(hir: Hir, pool: Mapping[OpKind, int], *, nrd: int | None = None, nwr: int | None = None) -> Schedule:
     """Greedily place every operator on the earliest cycle its operands are ready and a free instance/port exists.
 
@@ -101,6 +121,8 @@ def schedule_ops(hir: Hir, pool: Mapping[OpKind, int], *, nrd: int | None = None
     commit cycle waits, lengthening the makespan.
     """
     op_ids = _op_ids(hir)
+    if nrd is not None or nwr is not None:
+        _check_port_budget(hir, op_ids, nrd, nwr)
     if not op_ids:
         return Schedule(issue_cycle={}, inst_of={}, instances=(), makespan=0)
 

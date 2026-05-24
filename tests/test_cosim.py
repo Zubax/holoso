@@ -139,3 +139,13 @@ def test_cosim_staged_kernel(sim: str) -> None:
     # threaded from annotation through the schedule into the generated STAGE_* params -- all agree with the RTL.
     stages = StageConfig(fadd_decode=1, fmul_product=1, fmul_ilog2_decode=1)
     _run_cosim(sim, kernel, FloatFormat(8, 24), "kernel_staged", count=64, stages=stages)
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_staged_division(sim: str) -> None:
+    def blend(a, b, c):  # type: ignore[no-untyped-def]
+        return a / b + (a - c)
+
+    # Exercise the STAGE_ALIGN (fadd) and STAGE_INPUT (fdiv) knobs end-to-end -- the combos the staged-kernel misses.
+    stages = StageConfig(fadd_decode=1, fadd_align=1, fdiv_input=1)
+    _run_cosim(sim, blend, FloatFormat(6, 18), "blend_staged", count=64, sampler=_positive_sampler, stages=stages)

@@ -5,11 +5,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 from holoso.format import FloatFormat
 from holoso.frontend import lower
 from holoso.hir import OpNode
 from holoso.lir import RegRef
-from holoso.operators import OpKind
+from holoso.operators import OpKind, StageConfig
 from holoso.passes import run
 from holoso.schedule import build, cycle_count, interface_of, metrics_of
 from holoso.scheduler import resolve_pool, schedule_ops
@@ -170,3 +172,25 @@ def test_build_lir_ekf1() -> None:
     assert metrics.operator_instances.get("fdiv") == 1
     assert metrics.op_count == lir.op_count
     assert metrics.max_chain_len >= 1
+
+
+def test_build_rejects_stage_mismatch() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        return a + b
+
+    hir = run(lower(f, FMT))  # latency annotated with default stages
+    with pytest.raises(ValueError):
+        build(hir, "f", stages=StageConfig(fadd_decode=1))  # build's stages disagree -> would desync RTL/schedule
+
+
+def test_port_budget_feasibility() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        return a * b + a
+
+    hir = run(lower(f, FMT))
+    pool = resolve_pool(hir, None)
+    n_ops = sum(1 for n in hir.nodes.values() if isinstance(n, OpNode))
+    with pytest.raises(ValueError):
+        schedule_ops(hir, pool, nrd=1)  # a binary operator needs 2 read ports in its issue cycle
+    sched = schedule_ops(hir, pool, nrd=2, nwr=4)  # feasible budget still schedules every op
+    assert len(sched.issue_cycle) == n_ops
