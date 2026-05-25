@@ -21,7 +21,7 @@ KULIBIN_HDL = sorted((REPO_ROOT / "lib" / "kulibin" / "float" / "hdl").glob("*.v
 
 
 def kern(a: float, b: float) -> float:
-    # fadd + fmul + multiply-by-2^-2 (no real-constant fconst, so the Yosys frontend never sees zkf_const.v).
+    # fadd + fmul + multiply-by-2^-2.
     return (a - b) * 0.25 + a * b
 
 

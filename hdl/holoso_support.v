@@ -382,40 +382,9 @@ module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18) (
                                               .a_gt_b(a_gt_b), .a_eq_b(a_eq_b), .a_lt_b(a_lt_b));
 endmodule
 
-// Like holoso_fcmp but the second operand "b" is a constant. Signop only on a.
-module holoso_fcmp_const#(parameter WEXP = 6, parameter WMAN = 18, parameter real B = 0.0) (
-    input  wire clk,
-    input  wire rst,
-    input  wire                 in_valid,
-    input  wire           [1:0] a_sgnop,
-    input  wire [WEXP+WMAN-1:0] a,
-    output wire                 out_valid,
-    output wire                 a_gt_b,
-    output wire                 a_eq_b,
-    output wire                 a_lt_b
-);
-    localparam WFULL = WEXP + WMAN;
-    wire [WFULL-1:0] b;
-    wire [WFULL-1:0] a1;
-    holoso_fconst#(.WEXP(WEXP), .WMAN(WMAN), .VALUE(B), .INF(0)) u_b (.y(b));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
-    zkf_cmp#(.WEXP(WEXP), .WMAN(WMAN)) u_cmp (.clk(clk), .rst(rst),
-                                              .in_valid(in_valid), .a(a1), .b(b),
-                                              .out_valid(out_valid),
-                                              .a_gt_b(a_gt_b), .a_eq_b(a_eq_b), .a_lt_b(a_lt_b));
-endmodule
-
 // Combinational predicate: y=1 iff x is finite (i.e., x is not an infinity).
 module holoso_fisfinite#(parameter WEXP = 6, parameter WMAN = 18) (input  wire [WEXP+WMAN-1:0] x, output wire y);
     zkf_is_finite#(.WEXP(WEXP), .WMAN(WMAN)) u_is_finite (.x(x), .y(y));
-endmodule
-
-// Elaboration-time floating-point constant generator. If INF != 0, y is a signed infinity with the sign of INF and
-// VALUE is ignored; otherwise y encodes the IEEE 754 binary64 real literal VALUE in Kulibin float format.
-module holoso_fconst#(parameter WEXP = 6, parameter WMAN = 18, parameter real VALUE = 0.0, parameter integer INF = 0) (
-    output wire [WEXP+WMAN-1:0] y
-);
-    zkf_const#(.WEXP(WEXP), .WMAN(WMAN), .VALUE(VALUE), .INF(INF)) u_const (.y(y));
 endmodule
 
 // Combinational mapping from float to boolean: a zero or a subnormal (if supported) float is false, otherwise true.
@@ -426,7 +395,7 @@ endmodule
 
 // Combinational mapping from boolean to float: falsity is zero, truth is one.
 module holoso_ffrombool#(parameter WEXP = 6, parameter WMAN = 18) (input wire x, output wire [WEXP+WMAN-1:0] y);
-    wire [WEXP+WMAN-1:0] one;
-    holoso_fconst#(.WEXP(WEXP), .WMAN(WMAN), .VALUE(1.0), .INF(0)) u_one (.y(one));
-    assign y = x ? one : {(WEXP+WMAN){1'b0}};
+    // ZKF 1.0 is sign 0, biased exponent BIAS = 2^(WEXP-1)-1, fraction 0.
+    localparam [WEXP+WMAN-1:0] ONE = (((1 << (WEXP-1)) - 1) << (WMAN-1));
+    assign y = x ? ONE : {(WEXP+WMAN){1'b0}};
 endmodule

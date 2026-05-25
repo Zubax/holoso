@@ -9,7 +9,6 @@ configurations and keep the tolerance band meaningful.
 import numpy as np
 
 from ..format import FloatFormat
-from .zkf_codec import encode, is_finite, is_legal
 
 
 def bounded(rng: np.random.Generator, lo: float, hi: float) -> float:
@@ -26,7 +25,7 @@ def random_legal_bits(fmt: FloatFormat, rng: np.random.Generator) -> int:
     span = 1 << fmt.width
     while True:
         bits = int(rng.integers(0, span, dtype=np.uint64))
-        if is_legal(fmt, bits) and is_finite(fmt, bits):
+        if fmt.is_legal(bits) and fmt.is_finite(bits):
             return bits
 
 
@@ -41,4 +40,4 @@ def spd_matrix(rng: np.random.Generator, n: int, diag_lo: float = 0.5, diag_hi: 
 
 def encode_inputs(fmt: FloatFormat, values: dict[str, float]) -> dict[str, int]:
     """Encode a name->float mapping to name->ZKF-bits (the bit pattern the DUT receives)."""
-    return {name: encode(fmt, value) for name, value in values.items()}
+    return {name: fmt.encode(value) for name, value in values.items()}

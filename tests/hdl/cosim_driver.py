@@ -12,7 +12,6 @@ from cocotb.triggers import RisingEdge, Timer
 
 from holoso.format import FloatFormat
 from holoso.verify.tolerance import within
-from holoso.verify.zkf_codec import decode
 
 from hdl_float_oracle import drive_reset, start_clock
 
@@ -57,7 +56,7 @@ async def cosim(dut) -> None:
         ), f"vector {index}: unexpected error latched at cycle {int(dut.err_cyc.value)}"
 
         for name, expected in vec["exp"].items():
-            got = decode(fmt, int(getattr(dut, name).value))
+            got = fmt.decode(int(getattr(dut, name).value))
             assert within(got, expected, vec["rtol"], vec["atol"]), (
                 f"vector {index} port {name}: got {got!r}, expected {expected!r} "
                 f"(rtol={vec['rtol']:.3e}, atol={vec['atol']:.3e})"

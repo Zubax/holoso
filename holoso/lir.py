@@ -2,8 +2,7 @@
 The low-level IR (LIR): the scheduled, bound, register-allocated microprogram for the synthesized ZISC machine.
 
 A :class:`Lir` is controller-agnostic -- it describes which operators issue on which cycle, reading/writing which
-registers, with which folded sign-ops. The backend renders it to Verilog; this is the seam where a second controller
-could be added.
+registers, with which folded sign-ops.
 """
 
 from dataclasses import dataclass

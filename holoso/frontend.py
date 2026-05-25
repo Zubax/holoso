@@ -1,10 +1,4 @@
-"""
-Lower a Python function object into HIR.
-
-v0 accepts a single-block, straight-line scalar-float function: parameters become input ports, assignments build a
-local SSA environment, and the ``return`` (a scalar or an arbitrarily nested list/tuple of scalar expressions) becomes
-the ordered output ports. Anything outside this subset raises a located, actionable error.
-"""
+"""Lower a Python function object into HIR."""
 
 import ast
 import inspect

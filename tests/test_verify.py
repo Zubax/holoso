@@ -8,7 +8,7 @@ import numpy as np
 from holoso.format import FloatFormat
 from holoso.frontend import lower
 from holoso.passes import run
-from holoso.verify import opgraph_eval, reference, sampling, zkf_codec
+from holoso.verify import opgraph_eval, reference, sampling
 from holoso.verify.tolerance import default_tolerance, unit_roundoff, within
 
 F32 = FloatFormat(8, 24)
@@ -16,13 +16,13 @@ FMT = FloatFormat(6, 18)
 
 
 def test_codec_known_binary32_values() -> None:
-    assert zkf_codec.encode(F32, 1.0) == 0x3F800000
-    assert zkf_codec.encode(F32, 2.0) == 0x40000000
-    assert zkf_codec.encode(F32, 0.5) == 0x3F000000
-    assert zkf_codec.encode(F32, -1.0) == 0xBF800000
-    assert zkf_codec.encode(F32, 0.0) == 0
-    assert zkf_codec.decode(F32, 0x3F800000) == 1.0
-    assert zkf_codec.decode(F32, 0) == 0.0
+    assert F32.encode(1.0) == 0x3F800000
+    assert F32.encode(2.0) == 0x40000000
+    assert F32.encode(0.5) == 0x3F000000
+    assert F32.encode(-1.0) == 0xBF800000
+    assert F32.encode(0.0) == 0
+    assert F32.decode(0x3F800000) == 1.0
+    assert F32.decode(0) == 0.0
 
 
 def test_codec_round_trip_within_unit_roundoff() -> None:
@@ -31,21 +31,21 @@ def test_codec_round_trip_within_unit_roundoff() -> None:
         u = unit_roundoff(fmt)
         for _ in range(500):
             x = float(rng.uniform(-100.0, 100.0))
-            y = zkf_codec.decode(fmt, zkf_codec.encode(fmt, x))
+            y = fmt.decode(fmt.encode(x))
             assert abs(y - x) <= u * abs(x) + 1e-30
 
 
 def test_codec_exact_powers_and_simple_fractions() -> None:
     for value in (3.0, 0.25, -7.5, 16.0, 0.125):
-        assert zkf_codec.decode(FMT, zkf_codec.encode(FMT, value)) == value
+        assert FMT.decode(FMT.encode(value)) == value
 
 
 def test_is_legal_rejects_subnormal_and_negative_zero() -> None:
     # exp == 0 with nonzero fraction is subnormal; sign bit with zero magnitude is negative zero.
-    assert not zkf_codec.is_legal(FMT, 0b1)  # subnormal
+    assert not FMT.is_legal(0b1)  # subnormal
     neg_zero = 1 << (FMT.width - 1)
-    assert not zkf_codec.is_legal(FMT, neg_zero)
-    assert zkf_codec.is_legal(FMT, zkf_codec.encode(FMT, 1.0))
+    assert not FMT.is_legal(neg_zero)
+    assert FMT.is_legal(FMT.encode(1.0))
 
 
 def test_reference_evaluates_and_flattens() -> None:
@@ -117,8 +117,8 @@ def test_sampling_legal_and_spd() -> None:
     rng = np.random.default_rng(7)
     for _ in range(200):
         bits = sampling.random_legal_bits(FMT, rng)
-        assert zkf_codec.is_legal(FMT, bits) and zkf_codec.is_finite(FMT, bits)
+        assert FMT.is_legal(bits) and FMT.is_finite(bits)
     cov = sampling.spd_matrix(rng, 3)
     assert np.all(np.linalg.eigvalsh(cov) > 0.0)
     encoded = sampling.encode_inputs(FMT, {"a": 1.0, "b": 2.0})
-    assert set(encoded) == {"a", "b"} and encoded["a"] == zkf_codec.encode(FMT, 1.0)
+    assert set(encoded) == {"a", "b"} and encoded["a"] == FMT.encode(1.0)

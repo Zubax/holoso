@@ -1,25 +1,36 @@
 """
 Render a :class:`Lir` into a synthesizable Verilog ZISC module.
-
-Datapath: a ``holoso_regfile`` flip-flop bank, one operator-wrapper instance per :class:`OperatorInstance`, and one
-``holoso_fconst`` per pooled constant. Controller: a cycle counter ``cyc`` driving a ``case(cyc)`` microprogram that
-replays the static software-pipelined schedule. ``cyc==0`` is idle/accept (inputs are written when ``in_valid``),
-``cyc`` then advances every clock through the compute cycles ``1..makespan``, and ``cyc==LAST`` (``makespan+1``)
-presents the outputs and asserts ``out_valid``. On each compute cycle the microprogram asserts ``in_valid`` to the
-operators issued that cycle (driving their operand reads) and writes back the operators that commit that cycle (whose
-result lands at the next edge). Because operator latencies are static the controller needs no scoreboard, so each
-operator's ``out_valid`` is left unconnected. Errors are non-fatal and informative: a combinational ``err`` flag in the
-``case(cyc)`` block ORs the error signals (today only ``fdiv``'s ``div0``) of the operators committing that cycle, and
-the control block latches ``err_cyc <= cyc`` whenever ``err`` -- so ``err_cyc`` holds the (last) cycle an error was
-detected, or 0 when there were none (it is reset at every accept; ``|err_cyc`` answers "any error?"). The register file
-is read-first (``RWPASS=0``). Reset covers only the control registers (``cyc``, ``err_cyc``).
 """
 
-from .emit import VerilogWriter
 from .lir import ConstRef, Lir, OperatorInstance, Operand, RegRef, ScheduledOp
 from .operators import MODULE_NAMES, OpKind, Sgnop, arity, has_div0, stage_params
 
 _KIND_ORDER = {kind: index for index, kind in enumerate(OpKind)}
+
+
+class VerilogWriter:
+    """Accumulates 4-space-indented lines. Use :meth:`line` for content and :meth:`push`/:meth:`pop` for nesting."""
+
+    def __init__(self) -> None:
+        self._lines: list[str] = []
+        self._depth = 0
+
+    def line(self, text: str = "") -> None:
+        self._lines.append(("    " * self._depth + text) if text else "")
+
+    def lines(self, *texts: str) -> None:
+        for text in texts:
+            self.line(text)
+
+    def push(self) -> None:
+        self._depth += 1
+
+    def pop(self) -> None:
+        assert self._depth > 0
+        self._depth -= 1
+
+    def render(self) -> str:
+        return "\n".join(self._lines) + "\n"
 
 
 def _base(inst: OperatorInstance) -> str:
@@ -191,10 +202,6 @@ def _emit_declarations(w: VerilogWriter, lir: Lir) -> None:
             "reg  [NLOAD*W-1:0]   rf_load_data;",
             "",
         )
-    for value in range(len(lir.consts)):
-        w.line(f"wire [W-1:0] const_{value};")
-    if lir.consts:
-        w.line("")
     for inst in lir.instances:
         sig = _sig(inst)
         w.line(f"reg          {sig}_iv;")
@@ -211,11 +218,10 @@ def _emit_declarations(w: VerilogWriter, lir: Lir) -> None:
 
 
 def _emit_consts(w: VerilogWriter, lir: Lir) -> None:
+    width = lir.fmt.width
+    digits = (width + 3) // 4
     for index, value in enumerate(lir.consts):
-        w.line(
-            f"holoso_fconst #(.WEXP(WEXP), .WMAN(WMAN), .VALUE({value!r}), .INF(0)) u_const_{index} "
-            f"(.y(const_{index}));"
-        )
+        w.line(f"wire [W-1:0] const_{index} = {width}'h{lir.fmt.encode(value):0{digits}x};  // {value!r}")
     if lir.consts:
         w.line("")
 

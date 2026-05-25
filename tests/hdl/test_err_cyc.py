@@ -19,7 +19,6 @@ from holoso.format import FloatFormat
 from holoso.frontend import lower
 from holoso.passes import run
 from holoso.schedule import build, cycle_count
-from holoso.verify.zkf_codec import encode
 
 from hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, BENCH_DIR, build_args, drive_reset, sources, start_clock
 
@@ -38,7 +37,7 @@ async def _settle(dut) -> None:  # type: ignore[no-untyped-def]
 @cocotb.test()
 async def err_cyc_latches_div0(dut) -> None:
     cycles = int(json.loads(os.environ["HOLOSO_ERRCYC"])["cycles"])
-    a_bits = encode(FMT, 1.0)
+    a_bits = FMT.encode(1.0)
 
     await start_clock(dut)
     await drive_reset(dut)
@@ -48,7 +47,7 @@ async def err_cyc_latches_div0(dut) -> None:
         while int(dut.in_ready.value) != 1:
             await _settle(dut)
         dut.in_a.value = a_bits
-        dut.in_b.value = encode(FMT, b)
+        dut.in_b.value = FMT.encode(b)
         dut.in_valid.value = 1
         await _settle(dut)
         dut.in_valid.value = 0

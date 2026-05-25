@@ -1,8 +1,5 @@
 """
 Build cosimulation vector sets: sample inputs, encode to ZKF bits, and compute the float64 reference + tolerance.
-
-The result is a JSON-serializable spec that a cocotb driver replays against the generated module, checking each output
-against its reference within the tolerance band.
 """
 
 from collections.abc import Callable, Sequence
@@ -13,7 +10,6 @@ import numpy as np
 from ..format import FloatFormat
 from . import reference
 from .tolerance import default_tolerance
-from .zkf_codec import decode, encode
 
 Sampler = Callable[[FloatFormat, Sequence[str], np.random.Generator], dict[str, float]]
 
@@ -44,8 +40,8 @@ def build_vectors(
     vectors: list[dict[str, Any]] = []
     for _ in range(count):
         values = sampler(fmt, input_names, rng)
-        bits = {name: encode(fmt, value) for name, value in values.items()}
-        decoded = {name: decode(fmt, pattern) for name, pattern in bits.items()}  # the values the DUT actually sees
+        bits = {name: fmt.encode(value) for name, value in values.items()}
+        decoded = {name: fmt.decode(pattern) for name, pattern in bits.items()}  # the values the DUT actually sees
         expected = reference.evaluate(fn, decoded)
         magnitude = max((abs(v) for v in decoded.values()), default=1.0)
         rtol, atol = default_tolerance(fmt, op_count, magnitude=magnitude)

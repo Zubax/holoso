@@ -86,6 +86,12 @@ Leave unused module outputs unconnected, like `.out_foo()`, instead of creating 
 
 Keep in-code documentation brief. Long-form belongs in design docs and other non-code files.
 
+When altering code behavior, do not comment on the changes; e.g., avoid constructs like "this used to be such and such"
+or "this is done like this -- no longer like so". Document only the current state.
+
+Do not add comments that add no new information, such as describing code behavior that is already clear from the code itself.
+Only add comments that explain the rationale or any non-obvious implications or considerations.
+
 In all source code and documentation, units of measure are given in the correct SI-compliant capitalization
 regardless of any coding style. For example, `target_frequency_MHz` is correct as a lowercase snake_case name
 despite having capital letters because conventional unit spelling requires so; `_mhz` would be incorrect

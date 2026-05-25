@@ -215,8 +215,9 @@ pipelined overlap, is the better trade.
 
 ## Backend (ZISC)
 
-Mechanical from LIR: a `holoso_regfile` flop bank, one operator instance per `OperatorInstance`, and one `fconst` per
-pooled constant, all driven by a control word. The controller is a cycle counter `cyc` driving a `case(cyc)`
+Mechanical from LIR: a `holoso_regfile` flop bank, one operator instance per `OperatorInstance`, and one continuous
+assignment per pooled constant -- its ZKF bit pattern precomputed in Python by `FloatFormat.encode` --
+all driven by a control word. The controller is a cycle counter `cyc` driving a `case(cyc)`
 microprogram that replays the static schedule: `cyc==0` accepts and parallel-loads the inputs through the register
 file's `load` port (registers `0..nload-1` in one cycle), `cyc` advances every clock through the compute cycles
 `1..makespan`, and `cyc==makespan+1` asserts `out_valid` while the outputs are driven combinationally from the

@@ -11,10 +11,9 @@ Cycle 0 is the input-load/accept cycle; inputs are readable from cycle 1. Comput
 cycle ``c`` reads its register operands at ``c`` and commits at ``c + L``. The dependency constraint is therefore
 ``c_consumer >= c_producer + L_producer + 1``.
 
-A fast op co-issued with a slow one is no longer gated on the slow one: each consumer advances on its own producer's
-commit. Instances are pooled by *resource key* -- ``(kind, elaboration params)``: ops sharing a key (all ``fadd``, or
-all ``fmul_ilog2_const`` with the same ``K``) time-share ``pool[kind]`` instances, at most one issue per instance per
-cycle. Optional read/write port budgets (default unbounded) further gate admission and lengthen the makespan to fit.
+Instances are pooled by *resource key* -- ``(kind, elaboration params)``: ops sharing a key (all ``fadd``, or all
+``fmul_ilog2_const`` with the same ``K``) time-share ``pool[kind]`` instances, at most one issue per instance per cycle.
+Optional read/write port budgets (default unbounded) further gate admission and lengthen the makespan to fit.
 """
 
 from collections.abc import Mapping
