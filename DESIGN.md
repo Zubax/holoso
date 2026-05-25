@@ -145,8 +145,8 @@ Branch vs. select (the core control-flow decision):
 ## Passes (HIR -> HIR)
 
 const-fold + algebraic simplify (SymPy-assisted) - CSE - strength reduction (`x*2^k`, `x/2^k` -> `fmul_ilog2_const`;
-`x/c` -> `x*(1/c)` to avoid true dividers; `x**n` -> multiply chain) - operator selection + latency annotation -
-optional if-conversion - DCE.
+`x/c` -> `x*(1/c)` to avoid true dividers; `x**n` -> multiply chain) - operator selection (each program op picks its
+configured operator from the `OpConfig`) - optional if-conversion - DCE.
 
 Note: it is understood that FP math is non-associative and some of these optimizations may result in non-bit-exact
 results, which is accepted.
@@ -155,7 +155,7 @@ results, which is accepted.
 
 ```
 resources:
-  operators: [inst(kind, latency), ...]    # e.g. 1x fmul(3), 1x fdiv(18), 1x fadd(3)
+  operators: [inst(op), ...]                # each inst binds a fully-specified Op (its params + latency baked in)
   regfile:   N float regs + M bool regs     # FF bank, multiport -- parallel reads are free
   constants: [fconst(value), ...]
 
@@ -169,6 +169,20 @@ makespan: the last commit cycle (the in_valid->out_valid latency is makespan + 1
 - `branch` is the real control transfer: the microprogram counter jumps, untaken ops never run, and the II is whatever
   the executed path costs (each path's count is itself exact).
 
+## Operators
+
+Operators are instances of a small class hierarchy under `OperatorDef` (kind-level metadata: `mnemonic`, `arity`,
+`error_ports`, `module_name`). A concrete `Op` is a frozen dataclass whose fields are its parameters;
+each operator owns its own timing, reference semantics, notation, and instantiation params.
+Nothing downstream branches on operator identity.
+
+Generic, per-node-parameterized operators are factories: a `ParameterizedOp` whose
+`instantiate(k)` returns a concrete `Op`. The fully-specified `Op` instance is itself the resource-sharing key (equal
+ops time-share one module).
+
+The available operators are chosen by an `OpConfig`, constructed explicitly by the caller and passed into
+`synthesize`; each field fixes one operator's parameters. There is no implicit default configuration.
+
 ## Scheduler
 
 The scheduler is software-pipelined (zero-bubble) list scheduling over the lowered single-block HIR. Operators are
@@ -177,9 +191,9 @@ at compile time: each op is assigned an issue cycle and a bound instance, and th
 cycle counter.
 
 The per-operator latency model is therefore exact and load-bearing: the backend commits each result on
-`issue + latency` without watching `out_valid`, so the model (`operators.latency_of`, mirroring the RTL wrappers) must
-match the hardware cycle-for-cycle. An inaccurate latency is a *correctness* bug, not a bad estimate -- the consumer
-would read a stale register. The resulting cycle count is exact, never an estimate.
+`issue + op.latency(fmt)` without watching `out_valid`, so each operator's `latency` method (mirroring its RTL
+wrapper) must match the hardware cycle-for-cycle. An inaccurate latency is a *correctness* bug, not a bad estimate --
+the consumer would read a stale register. The resulting cycle count is exact, never an estimate.
 
 We issue each op on the earliest cycle its operands are ready and a free instance exists -- without waiting for
 unrelated ops (no barrier), so a fast `fmul` no longer idles behind a co-scheduled `fdiv`. The register file is
@@ -190,15 +204,16 @@ read-first (`RWPASS=0`): a result written on cycle `c+L` lands in the flop on th
 for cycle = 1, 2, ...:                         # cycle 0 accepts/loads inputs; they read back from cycle 1
     ready = unscheduled ops whose every operator-operand has committed (issue + L + 1 <= cycle)
     for op in ready by critical_path desc:
-        if an instance of op.kind is free this cycle (and ports permit):
+        if an instance of op's class is free this cycle (and ports permit):
             bind op to that instance; issue_cycle[op] = cycle
 regalloc: linear scan over commit cycles; share a register when last_use <= def (sound under read-first); no spill
 ```
 
-- Instances are pooled by resource key `(kind, elaboration params)` -- ops that elaborate to the same hardware share
-  instances. E.g., `fadd`/`fmul`/`fdiv` have no params (one key per kind); `fmul_ilog2_const` keys on its exponent
-  `K`, so same-`K` ops pool while different `K` are distinct modules. The configurable per-kind budget (default 1)
-  caps instances *per key*: same-key ops time-share, serializing when more than the budget would co-issue.
+- Instances are pooled by the fully-specified operator instance itself (a frozen, equal-by-value `Op`): ops that
+  elaborate to the same hardware are equal and share instances. E.g., all `fadd`/`fmul`/`fdiv` of a given config are
+  equal; `fmul_ilog2_const` differs by its exponent `K`, so same-`K` ops pool while different `K` are distinct
+  modules. The configurable per-class budget (default 1) caps instances of each operator class: equal ops time-share,
+  serializing when more than the budget would co-issue.
 - Read/write ports auto-size to the schedule's peak internal parallelism (independent of I/O width).
   Inputs preload through the register file's immediate `load` port on cycle 0 instead of write ports.
   Outputs are tapped from the register file's passive `view` bus by fixed register index instead of read ports.
@@ -230,9 +245,10 @@ the operators committing that cycle, and the control block latches `err_cyc <= c
 Reset covers only the control registers (`cyc`, `err_cyc`). Nonblocking assignment only, `case` not functions.
 The control word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
 
-Each operator instance is parameterized by the build's pipeline-stage knobs (`StageConfig` -> the wrappers' `STAGE_*`
-params, threaded from `synthesize`). Their latency contribution is the same `latency_of` the scheduler annotated with,
-so the emitted RTL and the static schedule stay in lockstep -- a single source (`operators._STAGE_KNOBS`) drives both.
+Each operator instance carries its own parameters, fixed at construction from the
+`OpConfig` threaded through `synthesize`. The wrappers' instantiation params come from `op.hdl_params()` and the
+scheduler's timing from `op.latency(fmt)` -- both read the same operator instance, so the emitted RTL and the static
+schedule cannot drift; emitting only enabled `STAGE_*` keeps a default build's wrappers parameter-free.
 
 **Microcode ROM (deferred, keep on the radar):** the per-cycle `case(cyc)` is a wide mux; for large kernels it could
 instead be emitted as a microcode ROM indexed by `cyc` (one packed control word per active cycle), which should

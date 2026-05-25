@@ -45,4 +45,4 @@ def synth_examples(session: nox.Session) -> None:
         session.run("python", "-m", "synth", *args, "--rtl", "lib/kulibin/float/hdl")
 
     # TODO: the frequency is currently set to a very low setting; we will focus on timing closure a bit later.
-    syn("examples/ekf1.py", "update_x_P", "--name", "ekf1", "--freq", "39.0")
+    syn("examples/ekf1.py", "update_x_P", "--name", "ekf1", "--freq", "44.0")

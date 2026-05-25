@@ -15,7 +15,7 @@ from .lir import (
     RegRef,
     ScheduledOp,
 )
-from .operators import DEFAULT_STAGES, OpKind, Sgnop, StageConfig, latency_of
+from .operators import Op, Sgnop
 from .regalloc import Allocation, allocate
 from .result import Direction, IIModel, ModuleInterface, Port, PortRole, SynthesisMetrics
 from .scheduler import Schedule, resolve_pool, schedule_ops
@@ -27,34 +27,16 @@ def _opnode(hir: Hir, vid: ValueId) -> OpNode:
     return node
 
 
-def build(
-    hir: Hir,
-    module_name: str,
-    instances: Mapping[OpKind, int] | None = None,
-    stages: StageConfig = DEFAULT_STAGES,
-) -> Lir:
+def build(hir: Hir, module_name: str, instances: Mapping[type[Op], int] | None = None) -> Lir:
     """
     Schedule, bind, and register-allocate a lowered HIR into a pipelined microprogram.
-
-    ``stages`` must match the configuration used to annotate latencies in :func:`passes.run`, so the schedule and the
-    emitted ``STAGE_*`` instance params agree; it is recorded on the :class:`Lir` for the backend and report.
     """
-    # Guard the load-bearing contract: the schedule commits each op at issue + OpNode.latency (annotated by run()),
-    # while the backend emits STAGE_* params from `stages`. If they disagree the RTL and schedule desync silently.
-    for node in hir.nodes.values():
-        if isinstance(node, OpNode) and node.latency != latency_of(node.kind, hir.fmt, stages):
-            raise ValueError(
-                f"operator latency for {node.kind.value} ({node.latency}) disagrees with build()'s stages "
-                f"(expected {latency_of(node.kind, hir.fmt, stages)}); pass the same StageConfig to run() and "
-                f"build() -- synthesize() does this for you"
-            )
     pool = resolve_pool(hir, instances)
     sched = schedule_ops(hir, pool)
     alloc = allocate(hir, sched.issue_cycle, sched.makespan)
     consts, const_index = _build_const_pool(hir)
     return Lir(
         fmt=hir.fmt,
-        stages=stages,
         module_name=module_name,
         instances=sched.instances,
         consts=consts,
@@ -120,10 +102,9 @@ def _build_ops(
                 a=_operand(hir, op.a, op.a_sgnop, alloc, const_index),
                 b=operand_b,
                 y_sgnop=op.y_sgnop,
-                k=op.k,
                 dst=RegRef(alloc.assign[vid]),
                 issue_cycle=sched.issue_cycle[vid],
-                latency=op.latency,
+                latency=op.op.latency(hir.fmt),
             )
         )
     return tuple(ops)
@@ -178,7 +159,7 @@ def _compute_nwr(hir: Hir, sched: Schedule) -> int:
     """
     per_commit: dict[int, int] = {}
     for vid, cycle in sched.issue_cycle.items():
-        commit = cycle + _opnode(hir, vid).latency
+        commit = cycle + _opnode(hir, vid).op.latency(hir.fmt)
         per_commit[commit] = per_commit.get(commit, 0) + 1
     peak_commits = max(per_commit.values(), default=0)
     return max(peak_commits, 1)
@@ -242,7 +223,7 @@ def interface_of(lir: Lir) -> ModuleInterface:
 def metrics_of(lir: Lir) -> SynthesisMetrics:
     counts: dict[str, int] = {}
     for inst in lir.instances:
-        counts[inst.kind.value] = counts.get(inst.kind.value, 0) + 1
+        counts[inst.op.mnemonic] = counts.get(inst.op.mnemonic, 0) + 1
     return SynthesisMetrics(
         operator_instances=counts,
         n_float_regs=lir.regfile.nreg,

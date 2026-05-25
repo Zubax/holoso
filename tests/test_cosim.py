@@ -12,12 +12,14 @@ from cocotb_tools.runner import get_runner
 from holoso.backend_verilog import generate
 from holoso.format import FloatFormat
 from holoso.frontend import lower
-from holoso.operators import DEFAULT_STAGES, StageConfig
+from holoso.operators import FAddOp, FDivOp, FMulILog2GenericOp, FMulOp, OpConfig
 from holoso.passes import run
 from holoso.schedule import build, metrics_of
 from holoso.verify.cosim import Sampler, build_vectors, generic_sampler
 
 from hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, BENCH_DIR, build_args, sources
+
+OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())
 
 
 def _run_cosim(
@@ -27,9 +29,9 @@ def _run_cosim(
     name: str,
     count: int,
     sampler: Sampler = generic_sampler,
-    stages: StageConfig = DEFAULT_STAGES,
+    ops: OpConfig = OPS,
 ) -> None:
-    lir = build(run(lower(fn, fmt), stages), name, stages=stages)
+    lir = build(run(lower(fn, fmt), ops), name)
     metrics = metrics_of(lir)
     # Generated sources live outside the cocotb build dir, which the runner wipes on clean=True.
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"{name}_w{fmt.wexp}_{fmt.wman}"
@@ -134,8 +136,8 @@ def test_cosim_staged_kernel(sim: str) -> None:
 
     # A pipeline stage on each operator kind the kernel uses; the exact-cycle cosim proves the staged latencies --
     # threaded from annotation through the schedule into the generated STAGE_* params -- all agree with the RTL.
-    stages = StageConfig(fadd_decode=1, fmul_product=1, fmul_ilog2_decode=1)
-    _run_cosim(sim, kernel, FloatFormat(8, 24), "kernel_staged", count=64, stages=stages)
+    ops = OpConfig(FAddOp(decode=1), FMulOp(product=1), FDivOp(), FMulILog2GenericOp(decode=1))
+    _run_cosim(sim, kernel, FloatFormat(8, 24), "kernel_staged", count=64, ops=ops)
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -144,5 +146,5 @@ def test_cosim_staged_division(sim: str) -> None:
         return a / b + (a - c)
 
     # Exercise the STAGE_ALIGN (fadd) and STAGE_INPUT (fdiv) knobs end-to-end -- the combos the staged-kernel misses.
-    stages = StageConfig(fadd_decode=1, fadd_align=1, fdiv_input=1)
-    _run_cosim(sim, blend, FloatFormat(6, 18), "blend_staged", count=64, sampler=_positive_sampler, stages=stages)
+    ops = OpConfig(FAddOp(decode=1, align=1), FMulOp(), FDivOp(input_stage=1), FMulILog2GenericOp())
+    _run_cosim(sim, blend, FloatFormat(6, 18), "blend_staged", count=64, sampler=_positive_sampler, ops=ops)

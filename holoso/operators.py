@@ -1,15 +1,13 @@
 """
-Operator kinds, their latency model (mirroring ``holoso_support.v``), and sign-op encoding.
-
-This module is the single source of truth for operator latency, shared by the passes (latency annotation), the
-scheduler (exact issue/commit timing), and the Verilog backend (instantiation). The latency formulas MUST match the
-HDL wrappers cycle-for-cycle: the static schedule commits each result on ``issue + latency`` without watching
-``out_valid``, so any drift is a correctness bug, not merely a bad estimate.
+The operator model -- a class hierarchy whose instances are operators built from the synthesis configuration -- and
+the sign-op encoding.
 """
 
 import enum
-from dataclasses import dataclass, fields
-from typing import assert_never
+import math
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import ClassVar
 
 from .format import FloatFormat
 
@@ -36,107 +34,183 @@ class Sgnop(enum.IntFlag):
         return text
 
 
-class OpKind(enum.Enum):
-    FADD = "fadd"
-    FMUL = "fmul"
-    FDIV = "fdiv"
-    FMUL_ILOG2 = "fmul_ilog2_const"
+# ----------------------------------------------------------------------------------------------------------------------
+# Operator type hierarchy. Each operator is a frozen, equal-by-value instance constructed from the synthesis config.
+# The fully-specified instance is itself the resource-sharing key, so equal ops time-share one physical module.
+# Nothing downstream branches on operator identity.
 
 
-MODULE_NAMES: dict[OpKind, str] = {
-    OpKind.FADD: "holoso_fadd",
-    OpKind.FMUL: "holoso_fmul",
-    OpKind.FDIV: "holoso_fdiv",
-    OpKind.FMUL_ILOG2: "holoso_fmul_ilog2_const",
-}
+class OperatorDef(ABC):
+    """Kind-level metadata shared by concrete operators and parameterized (generic) operators."""
+
+    mnemonic: ClassVar[str]
+    arity: ClassVar[int]
+    error_ports: ClassVar[list[str]] = []
+
+    @property
+    def module_name(self) -> str:
+        return f"holoso_{self.mnemonic}"
+
+
+@dataclass(frozen=True)
+class Op(OperatorDef, ABC):
+    """
+    A fully-specified operator: one concrete module configuration. Frozen-dataclass equality makes the instance
+    itself the resource-sharing key, so equal ops time-share one physical module. Every per-operator behavior is a
+    method here; the uniform ``*operands`` signatures keep the abstract methods LSP-compatible while concrete bodies
+    unpack per their arity. A field-less frozen-dataclass base lets the concrete ops (and the deterministic
+    ``dataclasses.astuple`` sort over them) be recognized uniformly.
+    """
+
+    @abstractmethod
+    def latency(self, fmt: FloatFormat) -> int: ...
+
+    @abstractmethod
+    def evaluate(self, *operands: float) -> float: ...
+
+    @abstractmethod
+    def render(self, *operands: str) -> str:
+        """Human-friendly expression for the report and trace comments (never parsed). Best to keep it compact."""
+
+    @abstractmethod
+    def hdl_params(self) -> dict[str, int]:
+        """Operator-specific ``#(.NAME(v))`` params; the backend prepends ``WEXP``/``WMAN``."""
+
+
+class ParameterizedOp(OperatorDef, ABC):
+    """A family of operators needing per-node parameters; a factory producing concrete :class:`Op` instances."""
+
+    @abstractmethod
+    def instantiate(self, *params: int) -> Op: ...
 
 
 @dataclass(frozen=True, slots=True)
-class ResourceKey:
-    """
-    A distinct physical operator module that ops may share.
+class FAddOp(Op):
+    mnemonic: ClassVar[str] = "fadd"
+    arity: ClassVar[int] = 2
+    decode: int = 0
+    align: int = 0
 
-    Two ops share a key iff they elaborate to identical hardware: same ``kind`` and same elaboration-time
-    ``params``. ``params`` are the parameters baked into the module at elaboration -- today only
-    ``fmul_ilog2_const``'s exponent ``K`` -- and is empty for ``fadd``/``fmul``/``fdiv``. The scheduler pools and
-    caps operator instances by this key, so ops sharing a key can time-share one instance.
-    """
+    def latency(self, fmt: FloatFormat) -> int:
+        return 6 + self.decode + self.align
 
-    kind: OpKind
-    params: tuple[int, ...] = ()
+    def evaluate(self, *operands: float) -> float:
+        a, b = operands
+        return a + b
 
-    @staticmethod
-    def of(kind: OpKind, k: int | None) -> "ResourceKey":
-        """Derive the key from a kind and its optional exponent (``k`` is set iff ``kind`` is ``FMUL_ILOG2``)."""
-        return ResourceKey(kind, () if k is None else (k,))
+    def render(self, *operands: str) -> str:
+        a, b = operands
+        return f"{a}+{b}"
+
+    def hdl_params(self) -> dict[str, int]:
+        params: dict[str, int] = {}
+        if self.decode:
+            params["STAGE_DECODE"] = 1
+        if self.align:
+            params["STAGE_ALIGN"] = 1
+        return params
 
 
 @dataclass(frozen=True, slots=True)
-class StageConfig:
+class FMulOp(Op):
+    mnemonic: ClassVar[str] = "fmul"
+    arity: ClassVar[int] = 2
+    product: int = 0
+
+    def latency(self, fmt: FloatFormat) -> int:
+        return 3 + self.product
+
+    def evaluate(self, *operands: float) -> float:
+        a, b = operands
+        return a * b
+
+    def render(self, *operands: str) -> str:
+        a, b = operands
+        return f"{a}×{b}"
+
+    def hdl_params(self) -> dict[str, int]:
+        return {"STAGE_PRODUCT": 1} if self.product else {}
+
+
+@dataclass(frozen=True, slots=True)
+class FDivOp(Op):
+    mnemonic: ClassVar[str] = "fdiv"
+    arity: ClassVar[int] = 2
+    error_ports: ClassVar[list[str]] = ["div0"]
+    input_stage: int = 0
+
+    def latency(self, fmt: FloatFormat) -> int:
+        w = fmt.wman
+        return 4 + ((w + 2 + ((w + 2) % 2)) // 2) + self.input_stage
+
+    def evaluate(self, *operands: float) -> float:
+        a, b = operands
+        return a / b if b else math.copysign(math.inf, a)
+
+    def render(self, *operands: str) -> str:
+        a, b = operands
+        return f"{a}/{b}"
+
+    def hdl_params(self) -> dict[str, int]:
+        return {"STAGE_INPUT": 1} if self.input_stage else {}
+
+
+class _ILog2(OperatorDef):
+    """Shared ilog2 metadata, inherited by both the concrete op and its generic factory."""
+
+    mnemonic: ClassVar[str] = "fmul_ilog2_const"
+    arity: ClassVar[int] = 1
+
+
+@dataclass(frozen=True, slots=True)
+class FMulILog2Op(_ILog2, Op):
+    """Exact scaling by a power of two, ``a * 2**k``; the concrete op the factory returns."""
+
+    k: int
+    decode: int = 0
+
+    def latency(self, fmt: FloatFormat) -> int:
+        return 1 + self.decode
+
+    def evaluate(self, *operands: float) -> float:
+        (a,) = operands
+        return math.ldexp(a, self.k)
+
+    def render(self, *operands: str) -> str:
+        (a,) = operands
+        return f"{a}×2^{self.k}"
+
+    def hdl_params(self) -> dict[str, int]:
+        params: dict[str, int] = {"K": self.k}
+        if self.decode:
+            params["STAGE_DECODE"] = 1
+        return params
+
+
+@dataclass(frozen=True, slots=True)
+class FMulILog2GenericOp(_ILog2, ParameterizedOp):
+    """The ilog2 family: a factory whose ``decode`` knob is baked into every concrete op it instantiates."""
+
+    produces: ClassVar[type[Op]] = FMulILog2Op
+    decode: int = 0
+
+    def instantiate(self, *params: int) -> FMulILog2Op:
+        (k,) = params
+        return FMulILog2Op(k=k, decode=self.decode)
+
+
+# Order is load-bearing: it reproduces the operator-instance numbering the scheduler and backend emit.
+ALL_OP_CLASSES: list[type[Op]] = [FAddOp, FMulOp, FDivOp, FMulILog2Op]
+
+
+@dataclass(frozen=True)
+class OpConfig:
     """
-    Optional pipeline-stage knobs per operator (default off). They affect latency and instantiation parameters.
-
-    Each knob is 0 or 1: the HDL wrappers gate every stage as ``(STAGE_X ? 1 : 0)``, so a value above 1 would lengthen
-    ``latency_of`` without changing the RTL -- silently desyncing the static schedule from the hardware.
+    The operator configuration threaded into synthesis; each field fixes one operator's parameters. Constructed
+    explicitly by the caller (no defaults), held on the pipeline and never hashed.
     """
 
-    fadd_decode: int = 0
-    fadd_align: int = 0
-    fmul_product: int = 0
-    fdiv_input: int = 0
-    fmul_ilog2_decode: int = 0
-
-    def __post_init__(self) -> None:
-        for f in fields(self):
-            value = getattr(self, f.name)
-            if value not in (0, 1):
-                raise ValueError(f"StageConfig.{f.name} must be 0 or 1 (RTL gates each stage ?:1:0); got {value!r}")
-
-
-DEFAULT_STAGES = StageConfig()
-
-# kind -> ((HDL wrapper param, StageConfig field), ...): the optional pipeline stages and what drives each. The single
-# source for both the latency contribution (latency_of) and the instantiation parameters (stage_params), so they cannot
-# drift; adding a stage to an operator is a one-line edit here.
-_STAGE_KNOBS: dict["OpKind", tuple[tuple[str, str], ...]] = {
-    OpKind.FADD: (("STAGE_DECODE", "fadd_decode"), ("STAGE_ALIGN", "fadd_align")),
-    OpKind.FMUL: (("STAGE_PRODUCT", "fmul_product"),),
-    OpKind.FDIV: (("STAGE_INPUT", "fdiv_input"),),
-    OpKind.FMUL_ILOG2: (("STAGE_DECODE", "fmul_ilog2_decode"),),
-}
-
-
-def arity(kind: OpKind) -> int:
-    """Number of operand inputs (``fmul_ilog2_const`` is unary; the rest are binary)."""
-    return 1 if kind is OpKind.FMUL_ILOG2 else 2
-
-
-def has_div0(kind: OpKind) -> bool:
-    return kind is OpKind.FDIV
-
-
-def latency_of(kind: OpKind, fmt: FloatFormat, stages: StageConfig = DEFAULT_STAGES) -> int:
-    """
-    The exact ``LATENCY`` of each ``holoso_support.v`` wrapper, in clocks -- load-bearing, not a hint.
-
-    The schedule commits each result on ``issue + latency`` and the backend trusts that timing without watching
-    ``out_valid``, so this must replicate the RTL wrapper's ``LATENCY`` localparam exactly.
-    """
-    extra = sum(int(getattr(stages, field)) for _, field in _STAGE_KNOBS[kind])
-    match kind:
-        case OpKind.FADD:
-            return 6 + extra
-        case OpKind.FMUL:
-            return 3 + extra
-        case OpKind.FMUL_ILOG2:
-            return 1 + extra
-        case OpKind.FDIV:
-            w = fmt.wman
-            return 4 + ((w + 2 + ((w + 2) % 2)) // 2) + extra
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-def stage_params(kind: OpKind, stages: StageConfig) -> dict[str, int]:
-    """The ``STAGE_*`` instantiation parameters for an operator of ``kind``, from the same table as ``latency_of``."""
-    return {param: int(getattr(stages, field)) for param, field in _STAGE_KNOBS[kind]}
+    fadd: FAddOp
+    fmul: FMulOp
+    fdiv: FDivOp
+    fmul_ilog2: FMulILog2GenericOp

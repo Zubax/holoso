@@ -14,7 +14,7 @@ from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
 from holoso.format import FloatFormat
-from holoso.operators import OpKind, StageConfig, latency_of
+from holoso.operators import FAddOp
 
 from hdl_float_oracle import (
     DIRECTED_F32,
@@ -133,11 +133,7 @@ def test_holoso_fadd(sim: str, stages: tuple[int, int]) -> None:
         test_dir=BENCH_DIR,
         build_dir=build_dir,
         extra_env={
-            "HOLOSO_EXPECTED_LATENCY": str(
-                latency_of(
-                    OpKind.FADD, FloatFormat(8, 24), StageConfig(fadd_decode=stage_decode, fadd_align=stage_align)
-                )
-            )
+            "HOLOSO_EXPECTED_LATENCY": str(FAddOp(decode=stage_decode, align=stage_align).latency(FloatFormat(8, 24)))
         },
         results_xml=str(build_dir / "results.xml"),
     )

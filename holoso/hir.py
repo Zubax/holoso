@@ -1,23 +1,38 @@
 """The high-level IR (HIR): an SSA value DAG of scalar floating-point operations."""
 
-import enum
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .format import FloatFormat
-from .operators import OpKind, Sgnop
+from .operators import Op, Sgnop
 
 type ValueId = int
 
 
-class ArithOp(enum.Enum):
-    ADD = "add"
-    MUL = "mul"
-    DIV = "div"
+@dataclass(frozen=True, slots=True)
+class ArithOp:
+    """A binary arithmetic operator before hardware selection. ``evaluate`` returns None on /0 so const-fold aborts."""
+
+    name: str
+    evaluate: Callable[[float, float], float | None]
 
 
-class SignOp(enum.Enum):
-    NEG = "neg"
-    ABS = "abs"
+ADD = ArithOp("add", lambda a, b: a + b)
+MUL = ArithOp("mul", lambda a, b: a * b)
+DIV = ArithOp("div", lambda a, b: a / b if b != 0 else None)
+
+
+@dataclass(frozen=True, slots=True)
+class SignOp:
+    """A combinational sign manipulation; ``sgnop`` is the folded 2-bit encoding it contributes to a consumer."""
+
+    name: str
+    evaluate: Callable[[float], float]
+    sgnop: Sgnop
+
+
+NEG = SignOp("neg", lambda x: -x, Sgnop.NEG)
+ABS = SignOp("abs", abs, Sgnop.ABS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,18 +77,27 @@ class Fmul2K:
 @dataclass(frozen=True, slots=True)
 class OpNode:
     """
-    A selected hardware operator use with folded sign-ops. ``b`` is ``None`` for unary ``FMUL_ILOG2``;
-    ``k`` is the exponent for ``FMUL_ILOG2`` (else ``None``).
+    A selected hardware operator use with folded sign-ops. ``op`` is the fully-specified operator;
+    ``b`` is ``None`` for a unary operator. ``operands``/``operand_sgnops`` expose the filled positions
+    (length ``op.arity``) so consumers iterate positionally without branching on operator identity.
+    Latency is ``op.latency(fmt)``.
     """
 
-    kind: OpKind
+    op: Op
     a: ValueId
     b: ValueId | None
     a_sgnop: Sgnop
     b_sgnop: Sgnop
     y_sgnop: Sgnop
-    k: int | None
-    latency: int
+
+    @property
+    def operands(self) -> list[ValueId]:
+        b = self.b
+        return [self.a] if b is None else [self.a, b]
+
+    @property
+    def operand_sgnops(self) -> list[Sgnop]:
+        return [self.a_sgnop] if self.b is None else [self.a_sgnop, self.b_sgnop]
 
 
 type Node = InPort | Const | Arith | SignFix | Fmul2K | OpNode
@@ -107,10 +131,10 @@ class Hir:
         return sum(1 for node in self.nodes.values() if isinstance(node, predicate))
 
     def arith_count(self, op: ArithOp) -> int:
-        return sum(1 for node in self.nodes.values() if isinstance(node, Arith) and node.op == op)
+        return sum(1 for node in self.nodes.values() if isinstance(node, Arith) and node.op is op)
 
-    def op_count(self, kind: OpKind) -> int:
-        return sum(1 for node in self.nodes.values() if isinstance(node, OpNode) and node.kind == kind)
+    def op_count(self, cls: type[Op]) -> int:
+        return sum(1 for node in self.nodes.values() if isinstance(node, OpNode) and isinstance(node.op, cls))
 
     def dump(self) -> str:
         lines = [f"hir {self.fmt}"]
@@ -164,16 +188,14 @@ class HirBuilder:
 
     def opnode(
         self,
-        kind: OpKind,
+        op: Op,
         a: ValueId,
         b: ValueId | None,
         a_sgnop: Sgnop,
         b_sgnop: Sgnop,
         y_sgnop: Sgnop,
-        k: int | None,
-        latency: int,
     ) -> ValueId:
-        return self._interned(OpNode(kind, a, b, a_sgnop, b_sgnop, y_sgnop, k, latency))
+        return self._interned(OpNode(op, a, b, a_sgnop, b_sgnop, y_sgnop))
 
     def output(self, name: str, value: ValueId, sgnop: Sgnop = Sgnop.NONE) -> None:
         self._outputs.append(OutputPort(name, value, sgnop))

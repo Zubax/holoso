@@ -6,9 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from holoso.api import synthesize
-from holoso.format import FloatFormat
-from holoso.result import SynthesisResult
+from holoso import synthesize, SynthesisResult, FloatFormat
+from holoso import FAddOp, FDivOp, FMulILog2GenericOp, FMulOp, OpConfig
 
 from synth import SynthReport, build_ooc_wrapper
 from synth.flows.diamond import DiamondEcp5Flow
@@ -30,8 +29,9 @@ def wide(a: float, b: float, c: float, d: float, e: float, f: float) -> list[flo
     return [a * b + c, d - e * f, a + d]
 
 
-KERN: SynthesisResult = synthesize(kern, float_format=FMT, name="kern")
-WIDE: SynthesisResult = synthesize(wide, float_format=FMT, name="wide")
+OPS = OpConfig(fadd=FAddOp(), fmul=FMulOp(), fdiv=FDivOp(), fmul_ilog2=FMulILog2GenericOp())
+KERN: SynthesisResult = synthesize(kern, float_format=FMT, ops=OPS, name="kern")
+WIDE: SynthesisResult = synthesize(wide, float_format=FMT, ops=OPS, name="wide")
 
 requires_diamond = pytest.mark.skipif(not DiamondEcp5Flow().available(), reason="Lattice Diamond not found")
 requires_vivado = pytest.mark.skipif(not VivadoFlow().available(), reason="Vivado not found")

@@ -3,9 +3,10 @@ Render a :class:`Lir` into a synthesizable Verilog ZISC module.
 """
 
 from .lir import ConstRef, Lir, OperatorInstance, Operand, RegRef, ScheduledOp
-from .operators import MODULE_NAMES, OpKind, Sgnop, arity, has_div0, stage_params
+from .operators import ALL_OP_CLASSES, Sgnop
 
-_KIND_ORDER = {kind: index for index, kind in enumerate(OpKind)}
+_CLASS_ORDER = {cls: index for index, cls in enumerate(ALL_OP_CLASSES)}
+_PORT_LETTERS = "abcdefgh"  # operand position -> wrapper port letter (a, b, ...)
 
 
 class VerilogWriter:
@@ -34,15 +35,11 @@ class VerilogWriter:
 
 
 def _base(inst: OperatorInstance) -> str:
-    return f"{inst.kind.value}_{inst.index}"
+    return f"{inst.op.mnemonic}_{inst.index}"
 
 
 def _sig(inst: OperatorInstance) -> str:
     return f"s_{_base(inst)}"
-
-
-def _is_binary(inst: OperatorInstance) -> bool:
-    return arity(inst.kind) == 2
 
 
 def _rf_data(port: int) -> str:
@@ -69,12 +66,7 @@ def _operand_name(operand: Operand) -> str:
 
 
 def _op_expr(op: ScheduledOp) -> str:
-    dst = f"r{op.dst.index}"
-    if op.inst.kind is OpKind.FMUL_ILOG2:
-        return f"{dst}={_operand_name(op.a)}*2^{op.k}"
-    symbol = {OpKind.FADD: "+", OpKind.FMUL: "*", OpKind.FDIV: "/"}[op.inst.kind]
-    assert op.b is not None
-    return f"{dst}={_operand_name(op.a)}{symbol}{_operand_name(op.b)}"
+    return f"r{op.dst.index}={op.inst.op.render(*[_operand_name(o) for o in op.operands])}"
 
 
 def _cycle_summary(issues: list[ScheduledOp], commits: list[ScheduledOp]) -> str:
@@ -95,7 +87,7 @@ def _group_by_cycle(lir: Lir) -> tuple[dict[int, list[ScheduledOp]], dict[int, l
         commits.setdefault(op.commit_cycle, []).append(op)
     for group in (issues, commits):
         for ops in group.values():
-            ops.sort(key=lambda op: (_KIND_ORDER[op.inst.kind], op.inst.index))
+            ops.sort(key=lambda op: (_CLASS_ORDER[type(op.inst.op)], op.inst.index))
     return issues, commits
 
 
@@ -103,8 +95,8 @@ def _read_lanes_for(issues: list[ScheduledOp]) -> dict[int, int]:
     """Assign a read-port lane to each distinct register operand read by a cycle's issues (shared reads dedup)."""
     lanes: dict[int, int] = {}
     for op in issues:
-        for operand in (op.a, op.b):
-            if operand is not None and isinstance(operand.source, RegRef) and operand.source.index not in lanes:
+        for operand in op.operands:
+            if isinstance(operand.source, RegRef) and operand.source.index not in lanes:
                 lanes[operand.source.index] = len(lanes)
     return lanes
 
@@ -205,15 +197,13 @@ def _emit_declarations(w: VerilogWriter, lir: Lir) -> None:
     for inst in lir.instances:
         sig = _sig(inst)
         w.line(f"reg          {sig}_iv;")
-        w.line(f"reg  [1:0]   {sig}_as;")
+        for letter in _PORT_LETTERS[: inst.op.arity]:
+            w.line(f"reg  [1:0]   {sig}_{letter}s;")
+            w.line(f"reg  [W-1:0] {sig}_{letter};")
         w.line(f"reg  [1:0]   {sig}_ys;")
-        w.line(f"reg  [W-1:0] {sig}_a;")
-        if _is_binary(inst):
-            w.line(f"reg  [1:0]   {sig}_bs;")
-            w.line(f"reg  [W-1:0] {sig}_b;")
         w.line(f"wire [W-1:0] {sig}_y;")
-        if has_div0(inst.kind):
-            w.line(f"wire         {sig}_div0;")
+        for port in inst.op.error_ports:
+            w.line(f"wire         {sig}_{port};")
     w.line("")
 
 
@@ -251,27 +241,22 @@ def _emit_regfile(w: VerilogWriter, lir: Lir) -> None:
 def _emit_operators(w: VerilogWriter, lir: Lir) -> None:
     for inst in lir.instances:
         sig = _sig(inst)
-        module = MODULE_NAMES[inst.kind]
-        parts = [".WEXP(WEXP)", ".WMAN(WMAN)"]
-        if inst.kind is OpKind.FMUL_ILOG2:
-            parts.append(f".K({inst.k})")
-        # Only the enabled stage knobs are emitted; the wrappers default each STAGE_* to 0, and the schedule's
-        # latency for this op was annotated with the same `lir.stages`, so RTL and schedule stay in lockstep.
-        parts += [f".{param}({value})" for param, value in stage_params(inst.kind, lir.stages).items() if value]
+        letters = _PORT_LETTERS[: inst.op.arity]
+        # WEXP/WMAN frame the float format; hdl_params() adds K (ilog2) and any enabled STAGE_* (defaults omitted),
+        # so the schedule's op.latency and the emitted instantiation params always describe the same module.
+        parts = [".WEXP(WEXP)", ".WMAN(WMAN)"] + [f".{param}({value})" for param, value in inst.op.hdl_params().items()]
         params = "#(" + ", ".join(parts) + ")"
-        w.line(f"{module} {params} u_{_base(inst)} (")
+        w.line(f"{inst.op.module_name} {params} u_{_base(inst)} (")
         w.push()
-        w.line(".clk(clk), .rst(rst), .in_valid(" + sig + "_iv),")
-        if _is_binary(inst):
-            w.line(f".a_sgnop({sig}_as), .b_sgnop({sig}_bs), .y_sgnop({sig}_ys),")
-            w.line(f".a({sig}_a), .b({sig}_b),")
-        else:
-            w.line(f".a_sgnop({sig}_as), .y_sgnop({sig}_ys),")
-            w.line(f".a({sig}_a),")
+        w.line(f".clk(clk), .rst(rst), .in_valid({sig}_iv),")
+        sgn_ports = ", ".join(f".{letter}_sgnop({sig}_{letter}s)" for letter in letters)
+        w.line(f"{sgn_ports}, .y_sgnop({sig}_ys),")
+        data_ports = ", ".join(f".{letter}({sig}_{letter})" for letter in letters)
+        w.line(f"{data_ports},")
         # out_valid is left unconnected: the static schedule already knows when each result is ready.
         tail = f".out_valid(), .y({sig}_y)"
-        if has_div0(inst.kind):
-            tail += f", .div0({sig}_div0)"
+        for port in inst.op.error_ports:
+            tail += f", .{port}({sig}_{port})"
         w.line(tail)
         w.pop()
         w.lines(");", "")
@@ -291,9 +276,9 @@ def _emit_datapath(
     w.push()
     for inst in lir.instances:
         sig = _sig(inst)
-        w.line(f"{sig}_iv = 1'b0; {sig}_a = {{W{{1'b0}}}}; {sig}_as = 2'd0; {sig}_ys = 2'd0;")
-        if _is_binary(inst):
-            w.line(f"{sig}_b = {{W{{1'b0}}}}; {sig}_bs = 2'd0;")
+        w.line(f"{sig}_iv = 1'b0; {sig}_ys = 2'd0;")
+        for letter in _PORT_LETTERS[: inst.op.arity]:
+            w.line(f"{sig}_{letter} = {{W{{1'b0}}}}; {sig}_{letter}s = 2'd0;")
     w.lines(
         "rf_rd_addr = {(NRD*WADDR){1'b0}};",
         "rf_wr_en   = {NWR{1'b0}};",
@@ -327,16 +312,15 @@ def _emit_datapath(
         for op in issues:
             sig = _sig(op.inst)
             w.line(f"{sig}_iv = 1'b1;")
-            w.line(f"{sig}_a = {_operand_value(op.a, lanes)}; {sig}_as = 2'd{int(op.a.sgnop)};")
-            if op.b is not None:
-                w.line(f"{sig}_b = {_operand_value(op.b, lanes)}; {sig}_bs = 2'd{int(op.b.sgnop)};")
+            for letter, operand in zip(_PORT_LETTERS, op.operands):
+                w.line(f"{sig}_{letter} = {_operand_value(operand, lanes)}; {sig}_{letter}s = 2'd{int(operand.sgnop)};")
             w.line(f"{sig}_ys = 2'd{int(op.y_sgnop)};")
         for lane, op in enumerate(commits):
             sig = _sig(op.inst)
             w.line(f"rf_wr_en[{lane}] = 1'b1;")
             w.line(f"rf_wr_addr[{_rf_addr(lane)}] = {op.dst.index};")
             w.line(f"rf_wr_data[{_rf_data(lane)}] = {sig}_y;")
-        err_terms = [f"{_sig(op.inst)}_div0" for op in commits if has_div0(op.inst.kind)]
+        err_terms = [f"{_sig(op.inst)}_{port}" for op in commits for port in op.inst.op.error_ports]
         if err_terms:
             w.line(f"err = {' | '.join(err_terms)};  // error(s) detected as these operators commit")
         w.pop()
@@ -365,7 +349,7 @@ def _emit_fsm(w: VerilogWriter) -> None:
     w.line("if (in_valid) begin")
     w.push()
     w.line("cyc     <= 1;")
-    w.line("err_cyc <= 0;  // clear the error record at every initiation")
+    w.line("err_cyc <= 0;")
     w.pop()
     w.line("end")
     w.pop()
@@ -378,7 +362,7 @@ def _emit_fsm(w: VerilogWriter) -> None:
     w.line("cyc <= cyc + 1'b1;")
     w.pop()
     w.line("end")
-    w.line("if (err) err_cyc <= cyc;  // latch the cycle of any error (last one wins); `err` is set in the case block")
+    w.line("if (err) err_cyc <= cyc;")
     w.pop()
     w.line("end")
     w.pop()

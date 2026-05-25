@@ -15,7 +15,7 @@ from importlib import resources
 
 from ..format import FloatFormat
 from ..lir import Lir, Operand, OperatorInstance, RegRef, ScheduledOp
-from ..operators import _STAGE_KNOBS, OpKind, Sgnop, latency_of
+from ..operators import FAddOp, FDivOp, FMulILog2Op, FMulOp, Op
 from ..result import ModuleInterface, SynthesisMetrics
 
 _GITHUB_URL = "https://github.com/Zubax/holoso"
@@ -25,17 +25,11 @@ _CSS = resources.files(__package__).joinpath("html.css").read_text(encoding="utf
 _SCHED_JS = resources.files(__package__).joinpath("html.js").read_text(encoding="utf-8")
 
 # Reserved, high-contrast operator colors (white text legible on each) for a light background.
-_KIND_COLOR: dict[OpKind, str] = {
-    OpKind.FADD: "#2456a6",
-    OpKind.FMUL: "#1f7a3d",
-    OpKind.FDIV: "#b3261e",
-    OpKind.FMUL_ILOG2: "#6d4c9f",
-}
-_KIND_LABEL: dict[OpKind, str] = {
-    OpKind.FADD: "+",
-    OpKind.FMUL: "*",
-    OpKind.FDIV: "/",
-    OpKind.FMUL_ILOG2: "<<",
+_KIND_COLOR: dict[type[Op], str] = {
+    FAddOp: "#2456a6",
+    FMulOp: "#1f7a3d",
+    FDivOp: "#b3261e",
+    FMulILog2Op: "#6d4c9f",
 }
 _MODULE_HEADER_RE = re.compile(r"(?ms)^module\b.*?^\);")
 _VERILOG_TOKEN_RE = re.compile(r"(?P<space>\s+)|(?P<ident>[A-Za-z_]\w*)|(?P<number>\d+)|(?P<other>.)")
@@ -52,12 +46,7 @@ def _operand(operand: Operand) -> str:
 
 
 def _op_text(op: ScheduledOp) -> str:
-    # Spaceless (``r1=r1+r3``): many operations can commit on one clock now, so the operations column packs tightly.
-    if op.inst.kind is OpKind.FMUL_ILOG2:
-        body = f"{_operand(op.a)}*2^{op.k}"
-    else:
-        assert op.b is not None
-        body = f"{_operand(op.a)}{_KIND_LABEL[op.inst.kind]}{_operand(op.b)}"
+    body = op.inst.op.render(*[_operand(o) for o in op.operands])
     return op.y_sgnop.decorate(f"r{op.dst.index}={body}")
 
 
@@ -110,16 +99,19 @@ def _metrics(interface: ModuleInterface, metrics: SynthesisMetrics, fmt: FloatFo
 
 
 def _stage_config(lir: Lir) -> str:
-    out = ["<h2>Stage Config</h2><table class='metrics cfg'>"]
-    out.append("<tr><th>operator</th><th>config</th><th>HDL param</th><th>value</th></tr>")
-    for kind, knobs in _STAGE_KNOBS.items():
-        for hdl_param, field in knobs:
-            value = int(getattr(lir.stages, field))
-            out.append(
-                f"<tr><td>{_esc(kind.value)}</td><td>{_esc(field)}</td>"
-                f"<td>{_esc(hdl_param)}</td><td>{value}</td></tr>"
-            )
-    out.append("</table><p class='note'>Pipeline-stage knobs used by the scheduler and emitted operator instances.</p>")
+    out = ["<h2>Operator Params</h2><table class='metrics cfg'>"]
+    out.append("<tr><th>operator</th><th>HDL param</th><th>value</th></tr>")
+    seen: dict[Op, None] = {}  # distinct operators present, in instance order
+    for inst in lir.instances:
+        seen.setdefault(inst.op, None)
+    rows = 0
+    for op in seen:
+        for param, value in op.hdl_params().items():
+            out.append(f"<tr><td>{_esc(op.mnemonic)}</td><td>{_esc(param)}</td><td>{value}</td></tr>")
+            rows += 1
+    if rows == 0:
+        out.append("<tr><td colspan='3'>(defaults)</td></tr>")
+    out.append("</table><p class='note'>Instantiation params per operator: K and any enabled pipeline stages.</p>")
     return "".join(out)
 
 
@@ -253,7 +245,7 @@ def _stage_columns(lir: Lir, fmt: FloatFormat) -> list[tuple[OperatorInstance, i
     """
     cols: list[tuple[OperatorInstance, int]] = []
     for inst in lir.instances:
-        cols.extend((inst, k) for k in range(latency_of(inst.kind, fmt, lir.stages)))
+        cols.extend((inst, k) for k in range(inst.op.latency(fmt)))
     return cols
 
 
@@ -294,8 +286,8 @@ def _liveness(lir: Lir) -> dict[int, set[int]]:
         defs.setdefault(load.dst.index, []).append(0)
     for op in lir.ops:
         defs.setdefault(op.dst.index, []).append(op.commit_cycle)
-        for operand in (op.a, op.b):
-            if operand is not None and isinstance(operand.source, RegRef):
+        for operand in op.operands:
+            if isinstance(operand.source, RegRef):
                 uses.setdefault(operand.source.index, []).append(op.issue_cycle)
     for wire in lir.outputs:
         if isinstance(wire.source, RegRef):
@@ -365,9 +357,7 @@ def _schedule(lir: Lir, fmt: FloatFormat, expected_ii: int) -> str:
     stage_base: dict[OperatorInstance, int] = {}
     for sidx, (inst, _k) in enumerate(stage_cols):
         stage_base.setdefault(inst, sidx)
-    group_ends = {
-        stage_base[inst] + latency_of(inst.kind, fmt, lir.stages) - 1 for inst in lir.instances
-    }  # last stage per operator
+    group_ends = {stage_base[inst] + inst.op.latency(fmt) - 1 for inst in lir.instances}  # last stage per operator
 
     # Column seams: 2px at the two block boundaries (constants | pipeline and pipeline | OPERATIONS); 1px at the lighter
     # registers | constants seam and between operator groups.
@@ -397,7 +387,7 @@ def _schedule(lir: Lir, fmt: FloatFormat, expected_ii: int) -> str:
     group = 0  # global per-operation id, linking a commit cell with its edges/chip for the hover-focus behavior
     for op in lir.ops:
         tip = _esc(_op_text(op))
-        color = _KIND_COLOR[op.inst.kind]
+        color = _KIND_COLOR[type(op.inst.op)]
         issue, commit = op.issue_cycle, op.commit_cycle
         dcol: ColKey = ("r", op.dst.index)
         dord = col_ord[dcol]
@@ -405,11 +395,10 @@ def _schedule(lir: Lir, fmt: FloatFormat, expected_ii: int) -> str:
         fills[(commit, dcol)] = color
         endpoints.add((dord, commit))
         cell_group[(dord, commit)] = group
-        for operand in (op.a, op.b):
-            if operand is not None:
-                oord = col_ord[_operand_col(operand)]
-                endpoints.add((oord, issue))  # operands are read on the issue cycle
-                edges.append((f"g{dord}_{commit}", f"g{oord}_{issue}", color, group))
+        for operand in op.operands:
+            oord = col_ord[_operand_col(operand)]
+            endpoints.add((oord, issue))  # operands are read on the issue cycle
+            edges.append((f"g{dord}_{commit}", f"g{oord}_{issue}", color, group))
         chips_at.setdefault(commit, []).append(
             f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
         )
@@ -419,7 +408,7 @@ def _schedule(lir: Lir, fmt: FloatFormat, expected_ii: int) -> str:
             if key in stage_fill and stage_fill[key][1] != group:
                 conflicts.add(key)
             stage_fill[key] = (color, group)
-            stage_tip[key] = f"{op.inst.kind.value}_{op.inst.index} s{k}: {tip}"
+            stage_tip[key] = f"{op.inst.op.mnemonic}_{op.inst.index} s{k}: {tip}"
         group += 1
 
     out = [_schedule_key(lir), "<div id='schedwrap'><table class='grid'>"]
@@ -444,11 +433,11 @@ def _schedule(lir: Lir, fmt: FloatFormat, expected_ii: int) -> str:
         cls = "gh k" + _border_suffix(nreg + index, dv.data_thin, dv.data_thick)
         out.append(f"<th class='{cls}' rowspan='2'><span>c{index}</span></th>")
     for inst in lir.instances:
-        lat = latency_of(inst.kind, fmt, lir.stages)
-        name = f"{inst.kind.value}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
+        lat = inst.op.latency(fmt)
+        name = f"{inst.op.mnemonic}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
         seam = _border_suffix(stage_base[inst] + lat - 1, dv.stage_thin, dv.stage_thick)
         out.append(
-            f"<th class='ohgrp{seam}' colspan='{lat}' style='color:{_KIND_COLOR[inst.kind]}'>"
+            f"<th class='ohgrp{seam}' colspan='{lat}' style='color:{_KIND_COLOR[type(inst.op)]}'>"
             f"<span>{_esc(name)}</span></th>"
         )
     out.append("</tr>")
@@ -535,13 +524,10 @@ def _input_chip(tip: str) -> str:
 
 def _schedule_key(lir: Lir) -> str:
     """A small legend above the grid: operator-kind colors plus the read/write chip shapes."""
-    seen: dict[OpKind, None] = {}  # operator kinds present, in instance order, de-duplicated
+    seen: dict[type[Op], None] = {}  # operator classes present, in instance order, de-duplicated
     for inst in lir.instances:
-        seen.setdefault(inst.kind, None)
-    kinds = [
-        f"<span class='wr' style='background:{_KIND_COLOR[kind]}'>{kind.value} {_esc(_KIND_LABEL[kind])}</span>"
-        for kind in seen
-    ]
+        seen.setdefault(type(inst.op), None)
+    kinds = [f"<span class='wr' style='background:{_KIND_COLOR[cls]}'>{cls.mnemonic}</span>" for cls in seen]
     return (
         "<h2>Schedule</h2><div class='gridkey'>"
         + " ".join(kinds)

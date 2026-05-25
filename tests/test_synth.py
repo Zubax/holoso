@@ -8,15 +8,18 @@ from pathlib import Path
 import pytest
 
 import holoso
-from holoso import FloatFormat, StageConfig
+from holoso import FAddOp, FDivOp, FloatFormat, FMulILog2GenericOp, FMulOp, OpConfig
 
 
 def _kernel(a, b):  # type: ignore[no-untyped-def]  # module-level so inspect.getsource works
     return (a - b) * 0.25 + a * b
 
 
+OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())
+
+
 def test_synthesize_small_kernel_result() -> None:
-    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24))
+    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
     assert result.module_name == "_kernel"
     assert "module _kernel" in result.verilog
     assert "holoso_regfile" in result.support
@@ -31,9 +34,11 @@ def test_synthesize_small_kernel_result() -> None:
 
 
 def test_synthesize_threads_pipeline_stages() -> None:
-    base = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24))
+    base = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
     staged = holoso.synthesize(
-        _kernel, float_format=FloatFormat(8, 24), stages=StageConfig(fadd_decode=1, fmul_product=1)
+        _kernel,
+        float_format=FloatFormat(8, 24),
+        ops=OpConfig(FAddOp(decode=1), FMulOp(product=1), FDivOp(), FMulILog2GenericOp()),
     )
     assert "STAGE_" not in base.verilog  # default stages emit no STAGE_* instance params
     assert ".STAGE_DECODE(1)" in staged.verilog and ".STAGE_PRODUCT(1)" in staged.verilog
@@ -49,16 +54,16 @@ def test_rejects_non_finite_constants() -> None:
 
     for fn in (overflow, folds_to_nan):
         with pytest.raises(holoso.UnsupportedConstruct):
-            holoso.synthesize(fn, float_format=FloatFormat(8, 24))
+            holoso.synthesize(fn, float_format=FloatFormat(8, 24), ops=OPS)
 
 
 def test_generated_testbench_is_valid_python() -> None:
-    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24))
+    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
     compile(result.testbench, "<generated-testbench>", "exec")
 
 
 def test_write_artifacts(tmp_path: Path) -> None:
-    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24))
+    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
     paths = result.write(tmp_path)
     assert set(paths) == {"verilog", "support", "support_header", "testbench", "report"}
     assert (tmp_path / "_kernel.v").exists()
@@ -69,7 +74,7 @@ def test_write_artifacts(tmp_path: Path) -> None:
 
 
 def test_report_has_expected_sections() -> None:
-    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24))
+    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
     report = result.report_html
     header_html = report.split("<pre class='modhdr'", 1)[1].split("</code></pre>", 1)[0]
     header_html = header_html.split("<code>", 1)[1]
@@ -100,7 +105,7 @@ def test_report_has_expected_sections() -> None:
 
 
 def test_report_schedule_displays_exact_ii_cycle_rows() -> None:
-    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24))
+    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
     grid = result.report_html.split("<table class='grid'>", 1)[1].split("</table>", 1)[0]
     cycle_labels = re.findall(r"<td class='clk'>([^<]+)</td>", grid)
 
@@ -114,7 +119,7 @@ def test_synthesize_ekf1() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1
 
-    result = holoso.synthesize(ekf1.update_x_P, float_format=FloatFormat(6, 18))
+    result = holoso.synthesize(ekf1.update_x_P, float_format=FloatFormat(6, 18), ops=OPS)
     assert result.module_name == "update_x_P"
     assert len(result.interface.output_ports) == 9
     assert result.metrics.operator_instances.get("fdiv") == 1
@@ -127,4 +132,4 @@ def test_class_target_is_unsupported() -> None:
             return x
 
     with pytest.raises(holoso.UnsupportedConstruct):
-        holoso.synthesize(Stateful, float_format=FloatFormat(6, 18))
+        holoso.synthesize(Stateful, float_format=FloatFormat(6, 18), ops=OPS)

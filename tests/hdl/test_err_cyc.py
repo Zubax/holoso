@@ -17,12 +17,14 @@ from cocotb_tools.runner import get_runner
 from holoso.backend_verilog import generate
 from holoso.format import FloatFormat
 from holoso.frontend import lower
+from holoso.operators import FAddOp, FDivOp, FMulILog2GenericOp, FMulOp, OpConfig
 from holoso.passes import run
 from holoso.schedule import build, cycle_count
 
 from hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, BENCH_DIR, build_args, drive_reset, sources, start_clock
 
 FMT = FloatFormat(6, 18)
+OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())
 
 
 def _divide(a, b):  # type: ignore[no-untyped-def]
@@ -65,7 +67,7 @@ async def err_cyc_latches_div0(dut) -> None:
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_err_cyc(sim: str) -> None:
-    lir = build(run(lower(_divide, FMT)), "divide")
+    lir = build(run(lower(_divide, FMT), OPS), "divide")
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"divide_w{FMT.wexp}_{FMT.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     verilog_path = gen_dir / "divide.v"

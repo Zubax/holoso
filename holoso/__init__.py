@@ -9,7 +9,13 @@ from .errors import (
     UnsupportedConstruct as UnsupportedConstruct,
 )
 from .format import FloatFormat as FloatFormat
-from .operators import OpKind as OpKind, StageConfig as StageConfig
+from .operators import (
+    FAddOp as FAddOp,
+    FDivOp as FDivOp,
+    FMulILog2GenericOp as FMulILog2GenericOp,
+    FMulOp as FMulOp,
+    OpConfig as OpConfig,
+)
 from .result import (
     IIModel as IIModel,
     ModuleInterface as ModuleInterface,

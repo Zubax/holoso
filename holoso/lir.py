@@ -8,7 +8,7 @@ registers, with which folded sign-ops.
 from dataclasses import dataclass
 
 from .format import FloatFormat
-from .operators import OpKind, ResourceKey, Sgnop, StageConfig
+from .operators import Op, Sgnop
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,22 +16,14 @@ class OperatorInstance:
     """
     One physical operator module, e.g. ``u_fadd_0`` or ``u_fmul_ilog2_const_2``.
 
-    ``key`` names the module type (kind + elaboration params); ``index`` numbers the copies of that type. The
-    scheduler pools ops onto instances by ``key``: ops sharing a key may time-share one instance (at most one issue
-    per instance per cycle, a fully pipelined instance carrying several ops in flight), bounded by the per-kind
-    instance budget. So ``fadd``/``fmul``/``fdiv`` share by kind, and ``fmul_ilog2_const`` shares by ``(kind, K)``.
+    ``op`` is the fully-specified operator it elaborates (its parameters baked in); ``index`` numbers the copies of
+    that operator class. The scheduler pools ops onto instances by the ``op`` instance: equal ops may time-share one
+    instance (at most one issue per instance per cycle, a fully pipelined instance carrying several ops in flight),
+    bounded by the per-class instance budget. E.g., all ``fadd`` share, while ``fmul_ilog2_const`` shares by exponent.
     """
 
-    key: ResourceKey
-    index: int  # 0-based within its kind (contiguous across the kind's resource keys)
-
-    @property
-    def kind(self) -> OpKind:
-        return self.key.kind
-
-    @property
-    def k(self) -> int | None:
-        return self.key.params[0] if self.key.params else None
+    op: Op
+    index: int  # 0-based within its operator class (contiguous across that class's distinct ops)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,12 +62,16 @@ class ScheduledOp:
 
     inst: OperatorInstance
     a: Operand
-    b: Operand | None  # None for unary FMUL_ILOG2
+    b: Operand | None  # None for a unary operator
     y_sgnop: Sgnop
-    k: int | None  # exponent for FMUL_ILOG2
     dst: RegRef
     issue_cycle: int
     latency: int
+
+    @property
+    def operands(self) -> list[Operand]:
+        b = self.b
+        return [self.a] if b is None else [self.a, b]
 
     @property
     def commit_cycle(self) -> int:
@@ -110,7 +106,6 @@ class RegFileLayout:
 @dataclass(frozen=True, slots=True)
 class Lir:
     fmt: FloatFormat
-    stages: StageConfig  # operator pipeline-stage knobs baked into this build (drive the STAGE_* instance params)
     module_name: str
     instances: tuple[OperatorInstance, ...]
     consts: tuple[float, ...]  # constant pool: index -> value

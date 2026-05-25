@@ -37,6 +37,8 @@ Use strongly typed primitives. Instead of int constants, prefer enums; instead o
 instead of existence/vaidity flags, prefer optional type or unions, etc.
 
 If a design calls for a leaky abstraction, discard it and redesign from scratch, even if it involves breaking changes.
+This means that even implementing a seemingly minor change may warrant a deep refactor if the change doesn't fit
+cleanly into the existing architecture.
 An acceptable design will not involve special-casing. Do not bypass existing abstractions to get the job done.
 Work will not be accepted unless architected cleanly.
 
@@ -48,6 +50,8 @@ Do not use `Protocol`, prefer `ABC`/`@abstractmethod` instead for interfaces and
 Prefer explicit `from X import Y as Y` instead of using `__all__` in `__init__.py` files.
 
 Public APIs can only include items that are required to use the API and nothing else.
+All non-public items are hidden in underscore-prefixed submodules.
+Minimize the public API surface.
 
 If a docstring comment doesn't fit on one line, add an initial line break like this:
 

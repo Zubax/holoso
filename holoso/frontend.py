@@ -8,7 +8,7 @@ import types
 from ._shape import Path, port_name
 from .errors import MissingIntrinsic, SourceLocation, SourceUnavailable, UnsupportedConstruct
 from .format import FloatFormat
-from .hir import ArithOp, Hir, HirBuilder, SignOp, ValueId
+from .hir import ABS, ADD, DIV, MUL, NEG, Hir, HirBuilder, ValueId
 
 # Standard numeric operators that are recognized but not yet implemented; calling them fails with a clear message.
 _KNOWN_INTRINSICS = frozenset(
@@ -127,7 +127,7 @@ class _Lowerer:
             case ast.UnaryOp(op=ast.USub(), operand=ast.Constant(value=(int() | float()) as value)):
                 return self._builder.const(-float(value))
             case ast.UnaryOp(op=ast.USub(), operand=operand):
-                return self._builder.signfix(SignOp.NEG, self._lower_expr(operand))
+                return self._builder.signfix(NEG, self._lower_expr(operand))
             case ast.UnaryOp(op=ast.UAdd(), operand=operand):
                 return self._lower_expr(operand)
             case ast.BinOp(left=left, op=ast.Pow(), right=right):
@@ -147,7 +147,7 @@ class _Lowerer:
         elif isinstance(func, ast.Attribute):
             name = func.attr
         if name == "abs" and len(node.args) == 1 and not node.keywords:
-            return self._builder.signfix(SignOp.ABS, self._lower_expr(node.args[0]))
+            return self._builder.signfix(ABS, self._lower_expr(node.args[0]))
         if name in _KNOWN_INTRINSICS:
             raise MissingIntrinsic(f"implement this operator: {name}", self._loc(node))
         raise UnsupportedConstruct(f"unsupported call to {name or '<expr>'!r}", self._loc(node))
@@ -160,7 +160,7 @@ class _Lowerer:
                     return self._builder.const(1.0)
                 result = base_id
                 for _ in range(n - 1):
-                    result = self._builder.arith(ArithOp.MUL, result, base_id)
+                    result = self._builder.arith(MUL, result, base_id)
                 return result
             case _:
                 raise UnsupportedConstruct("exponent must be a non-negative integer literal in v0", self._loc(exponent))
@@ -168,13 +168,13 @@ class _Lowerer:
     def _apply_binop(self, op: ast.operator, a: ValueId, b: ValueId, loc: SourceLocation) -> ValueId:
         match op:
             case ast.Add():
-                return self._builder.arith(ArithOp.ADD, a, b)
+                return self._builder.arith(ADD, a, b)
             case ast.Sub():
-                return self._builder.arith(ArithOp.ADD, a, self._builder.signfix(SignOp.NEG, b))
+                return self._builder.arith(ADD, a, self._builder.signfix(NEG, b))
             case ast.Mult():
-                return self._builder.arith(ArithOp.MUL, a, b)
+                return self._builder.arith(MUL, a, b)
             case ast.Div():
-                return self._builder.arith(ArithOp.DIV, a, b)
+                return self._builder.arith(DIV, a, b)
             case _:
                 raise UnsupportedConstruct(f"unsupported binary operator {type(op).__name__}", loc)
 

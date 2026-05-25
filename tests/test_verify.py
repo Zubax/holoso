@@ -7,12 +7,14 @@ import numpy as np
 
 from holoso.format import FloatFormat
 from holoso.frontend import lower
+from holoso.operators import FAddOp, FDivOp, FMulILog2GenericOp, FMulOp, OpConfig
 from holoso.passes import run
 from holoso.verify import opgraph_eval, reference, sampling
 from holoso.verify.tolerance import default_tolerance, unit_roundoff, within
 
 F32 = FloatFormat(8, 24)
 FMT = FloatFormat(6, 18)
+OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())
 
 
 def test_codec_known_binary32_values() -> None:
@@ -59,7 +61,7 @@ def test_opgraph_matches_original_small_kernels() -> None:
     def f(a, b):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
-    hir = run(lower(f, FMT))
+    hir = run(lower(f, FMT), OPS)
     inputs = {"a": 1.25, "b": -3.5}
     ref = reference.evaluate(f, inputs)
     got = opgraph_eval.evaluate(hir, inputs)
@@ -91,7 +93,7 @@ def test_opgraph_matches_original_ekf1() -> None:
         "z_ct": sampling.bounded(rng, -1.0, 1.0),
         "z_shunt": sampling.bounded(rng, -1.0, 1.0),
     }
-    hir = run(lower(ekf1.update_x_P, FMT))
+    hir = run(lower(ekf1.update_x_P, FMT), OPS)
     ref = reference.evaluate(ekf1.update_x_P, inputs)
     got = opgraph_eval.evaluate(hir, inputs)
     assert len(ref) == 9 and all(np.isfinite(ref))
