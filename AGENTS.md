@@ -66,6 +66,8 @@ comment string.
 """
 ```
 
+It is encouraged to use rich formatting and emojis in the output of command-line utilities.
+
 ### Verilog
 
 Verilog style: 4-space indentation, concise names, snake_case files and directories, uppercase `parameter`/`localparam`.

@@ -29,6 +29,7 @@ hdr_log
 *.*-swp
 .*.ini
 *.log
+*.jou
 *.xml
 *.zip
 *.rpt

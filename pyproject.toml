@@ -37,7 +37,7 @@ include = ["holoso*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-p", "no:mypy"]
-markers = ["slow: long-running synthesis cosimulation (run via nox -s synth_examples)"]
+markers = ["slow: long-running synthesis cosimulation (run via nox -s cosim_examples)"]
 
 [tool.black]
 line-length = 120

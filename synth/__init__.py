@@ -9,6 +9,9 @@ does not require the others; the caller supplies the DUT's RTL dependencies (e.g
     artifact = YosysEcp5Flow(device=Ecp5Device(), target_frequency_MHz=100.0).prepare(result, extra_rtl)
     report = artifact.synthesize()
     print(report.fmax_MHz, report.slack_ns, report.resources["DSP"].used)
+
+Tool availability is discovered at runtime by checking the `$PATH` and searching a few predefined locations such as
+`/usr` and `/opt`. To ensure predictable results it is recommended to ensure the tool of interest is on `$PATH`.
 """
 
 from ._ooc import build_ooc_wrapper as build_ooc_wrapper
