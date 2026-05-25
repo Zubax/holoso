@@ -10,10 +10,9 @@ import os
 import cocotb
 from cocotb.triggers import RisingEdge, Timer
 
-from holoso.format import FloatFormat
-from holoso.verify.tolerance import within
+from holoso import FloatFormat
 
-from hdl_float_oracle import drive_reset, start_clock
+from hdl_float_oracle import drive_reset, start_clock, within
 
 
 async def _settle(dut) -> None:

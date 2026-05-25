@@ -6,9 +6,9 @@ import textwrap
 import types
 
 from ._shape import Path, port_name
-from .errors import MissingIntrinsic, SourceLocation, SourceUnavailable, UnsupportedConstruct
-from .format import FloatFormat
-from .hir import ABS, ADD, DIV, MUL, NEG, Hir, HirBuilder, ValueId
+from .._errors import MissingIntrinsic, SourceLocation, SourceUnavailable, UnsupportedConstruct
+from .._format import FloatFormat
+from .._hir import ABS, ADD, DIV, MUL, NEG, Hir, HirBuilder, ValueId
 
 # Standard numeric operators that are recognized but not yet implemented; calling them fails with a clear message.
 _KNOWN_INTRINSICS = frozenset(

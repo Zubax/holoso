@@ -10,15 +10,25 @@ Subnormals, NaN, and -0 are excluded from stimulus because ZKF does not define t
 those classes are mapped through ZKF's zero/MIN_NORMAL boundary rule and canonical-zero rule.
 """
 
+import math
 import os
 from collections import deque
 from pathlib import Path
 from typing import Iterable
 
 import cocotb
+import holoso
 import numpy as np
 from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, RisingEdge, Timer
+
+
+def within(actual: float, expected: float, rtol: float, atol: float) -> bool:
+    """Whether ``actual`` is within ``atol + rtol*|expected|`` of ``expected`` (infinities must match exactly)."""
+    if math.isinf(expected) or math.isinf(actual) or math.isnan(expected) or math.isnan(actual):
+        return actual == expected
+    return abs(actual - expected) <= atol + rtol * abs(expected)
+
 
 # ---------------------------------------------------------------------------
 # Paths and build helpers
@@ -26,7 +36,7 @@ from cocotb.triggers import FallingEdge, RisingEdge, Timer
 
 BENCH_DIR = Path(__file__).resolve().parent  # tests/hdl -- the cocotb test_dir for the benches and cosim driver
 REPO_ROOT = BENCH_DIR.parents[1]
-HDL_DIR = REPO_ROOT / "hdl"
+HDL_DIR = Path(holoso.__file__).resolve().parent / "_hdl"  # holoso/_hdl -- support .v/.vh ship as package data
 HOLOSO_HDL = HDL_DIR / "holoso_support.v"
 KULIBIN_HDL_DIR = REPO_ROOT / "lib" / "kulibin" / "float" / "hdl"
 TESTS_DIR = REPO_ROOT / "tests"

@@ -17,7 +17,7 @@ count simply grows.
 import heapq
 from dataclasses import dataclass
 
-from .hir import Const, Hir, OpNode, ValueId
+from ._hir import Const, Hir, OpNode, ValueId
 
 
 @dataclass(frozen=True, slots=True)

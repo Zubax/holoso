@@ -1,8 +1,10 @@
-"""Unit tests for holoso._shape output flattening and port naming."""
+"""Unit tests for the frontend output-flattening / port-naming convention."""
 
 import dataclasses
 
-from holoso._shape import flatten_value, output_names, port_name
+from holoso._frontend import flatten_value, port_name
+
+from _modelref import output_names
 
 
 def test_scalar_is_output_zero() -> None:

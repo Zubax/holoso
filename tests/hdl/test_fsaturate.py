@@ -10,6 +10,7 @@ from hdl_float_oracle import (
     DIRECTED_F32,
     F32_MAX_FIN,
     F32_SIGN_MASK,
+    HDL_DIR,
     REPO_ROOT,
     SIMULATORS,
     BENCH_DIR,
@@ -48,7 +49,7 @@ def test_holoso_fsaturate(sim: str) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / "fsaturate"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fsaturate",
         parameters={"WEXP": 8, "WMAN": 24},
         build_args=build_args(sim),

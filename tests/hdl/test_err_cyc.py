@@ -14,12 +14,11 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso.backend_verilog import generate
-from holoso.format import FloatFormat
-from holoso.frontend import lower
-from holoso.operators import FAddOp, FDivOp, FMulILog2GenericOp, FMulOp, OpConfig
-from holoso.passes import run
-from holoso.schedule import build, cycle_count
+from holoso import FAddOp, FDivOp, FloatFormat, FMulILog2GenericOp, FMulOp, OpConfig
+from holoso._backend_verilog import generate
+from holoso._frontend import lower
+from holoso._passes import run
+from holoso._schedule import build, cycle_count
 
 from hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, BENCH_DIR, build_args, drive_reset, sources, start_clock
 
@@ -71,7 +70,7 @@ def test_err_cyc(sim: str) -> None:
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"divide_w{FMT.wexp}_{FMT.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     verilog_path = gen_dir / "divide.v"
-    verilog_path.write_text(generate(lir))
+    verilog_path.write_text(generate(lir).verilog)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"errcyc_divide_w{FMT.wexp}_{FMT.wman}"
 
     runner = get_runner(sim)

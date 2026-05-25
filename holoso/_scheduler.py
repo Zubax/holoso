@@ -19,9 +19,9 @@ port budgets (default unbounded) further gate admission and lengthen the makespa
 from collections.abc import Mapping
 from dataclasses import astuple, dataclass
 
-from .hir import Const, Hir, OpNode, ValueId
-from .lir import OperatorInstance
-from .operators import ALL_OP_CLASSES, Op
+from ._hir import Const, Hir, OpNode, ValueId
+from ._lir import OperatorInstance
+from ._operators import ALL_OP_CLASSES, Op
 
 _CLASS_ORDER = {cls: index for index, cls in enumerate(ALL_OP_CLASSES)}
 

@@ -10,7 +10,7 @@ FP math is non-associative; these passes may change results in the last bits, wh
 import math
 from typing import assert_never
 
-from .hir import (
+from ._hir import (
     ADD,
     DIV,
     MUL,
@@ -26,7 +26,7 @@ from .hir import (
     SignOp,
     ValueId,
 )
-from .operators import OpConfig, Sgnop
+from ._operators import OpConfig, Sgnop
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Small numeric helpers

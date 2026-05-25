@@ -5,12 +5,20 @@ from pathlib import Path
 
 import numpy as np
 
-from holoso.format import FloatFormat
-from holoso.frontend import lower
-from holoso.operators import FAddOp, FDivOp, FMulILog2GenericOp, FMulOp, OpConfig
-from holoso.passes import run
-from holoso.verify import opgraph_eval, reference, sampling
-from holoso.verify.tolerance import default_tolerance, unit_roundoff, within
+from holoso import FAddOp, FDivOp, FloatFormat, FMulILog2GenericOp, FMulOp, OpConfig
+from holoso._frontend import lower
+from holoso._passes import run
+from holoso._verify import default_tolerance, evaluate_reference, unit_roundoff
+
+from _modelref import (
+    bounded,
+    encode_inputs,
+    evaluate_opgraph,
+    log_uniform_positive,
+    random_legal_bits,
+    spd_matrix,
+    within,
+)
 
 F32 = FloatFormat(8, 24)
 FMT = FloatFormat(6, 18)
@@ -54,7 +62,7 @@ def test_reference_evaluates_and_flattens() -> None:
     def f(a, b):  # type: ignore[no-untyped-def]
         return [a + b, a * b]
 
-    assert reference.evaluate(f, {"a": 2.0, "b": 3.0}) == [5.0, 6.0]
+    assert evaluate_reference(f, {"a": 2.0, "b": 3.0}) == [5.0, 6.0]
 
 
 def test_opgraph_matches_original_small_kernels() -> None:
@@ -63,8 +71,8 @@ def test_opgraph_matches_original_small_kernels() -> None:
 
     hir = run(lower(f, FMT), OPS)
     inputs = {"a": 1.25, "b": -3.5}
-    ref = reference.evaluate(f, inputs)
-    got = opgraph_eval.evaluate(hir, inputs)
+    ref = evaluate_reference(f, inputs)
+    got = evaluate_opgraph(hir, inputs)
     assert all(within(g, r, 1e-12, 1e-15) for g, r in zip(got, ref))
 
 
@@ -73,7 +81,7 @@ def test_opgraph_matches_original_ekf1() -> None:
     import ekf1
 
     rng = np.random.default_rng(12345)
-    cov = sampling.spd_matrix(rng, 3, 0.5, 2.0)
+    cov = spd_matrix(rng, 3, 0.5, 2.0)
     inputs = {
         "P00": float(cov[0, 0]),
         "P01": float(cov[0, 1]),
@@ -81,21 +89,21 @@ def test_opgraph_matches_original_ekf1() -> None:
         "P11": float(cov[1, 1]),
         "P12": float(cov[1, 2]),
         "P22": float(cov[2, 2]),
-        "Q_R": sampling.log_uniform_positive(rng, 1e-3, 1e-1),
-        "Q_g": sampling.log_uniform_positive(rng, 1e-3, 1e-1),
-        "Q_i": sampling.log_uniform_positive(rng, 1e-3, 1e-1),
-        "R_ct": sampling.log_uniform_positive(rng, 1e-1, 1.0),
-        "R_shunt": sampling.log_uniform_positive(rng, 1e-1, 1.0),
-        "dt": sampling.bounded(rng, 1e-3, 1e-2),
-        "x_R": sampling.bounded(rng, -1.0, 1.0),
-        "x_g": sampling.bounded(rng, -1.0, 1.0),
-        "x_i": sampling.bounded(rng, -1.0, 1.0),
-        "z_ct": sampling.bounded(rng, -1.0, 1.0),
-        "z_shunt": sampling.bounded(rng, -1.0, 1.0),
+        "Q_R": log_uniform_positive(rng, 1e-3, 1e-1),
+        "Q_g": log_uniform_positive(rng, 1e-3, 1e-1),
+        "Q_i": log_uniform_positive(rng, 1e-3, 1e-1),
+        "R_ct": log_uniform_positive(rng, 1e-1, 1.0),
+        "R_shunt": log_uniform_positive(rng, 1e-1, 1.0),
+        "dt": bounded(rng, 1e-3, 1e-2),
+        "x_R": bounded(rng, -1.0, 1.0),
+        "x_g": bounded(rng, -1.0, 1.0),
+        "x_i": bounded(rng, -1.0, 1.0),
+        "z_ct": bounded(rng, -1.0, 1.0),
+        "z_shunt": bounded(rng, -1.0, 1.0),
     }
     hir = run(lower(ekf1.update_x_P, FMT), OPS)
-    ref = reference.evaluate(ekf1.update_x_P, inputs)
-    got = opgraph_eval.evaluate(hir, inputs)
+    ref = evaluate_reference(ekf1.update_x_P, inputs)
+    got = evaluate_opgraph(hir, inputs)
     assert len(ref) == 9 and all(np.isfinite(ref))
     assert all(within(g, r, 1e-9, 1e-12) for g, r in zip(got, ref))
 
@@ -118,9 +126,9 @@ def test_default_tolerance_scales_with_format_and_size() -> None:
 def test_sampling_legal_and_spd() -> None:
     rng = np.random.default_rng(7)
     for _ in range(200):
-        bits = sampling.random_legal_bits(FMT, rng)
+        bits = random_legal_bits(FMT, rng)
         assert FMT.is_legal(bits) and FMT.is_finite(bits)
-    cov = sampling.spd_matrix(rng, 3)
+    cov = spd_matrix(rng, 3)
     assert np.all(np.linalg.eigvalsh(cov) > 0.0)
-    encoded = sampling.encode_inputs(FMT, {"a": 1.0, "b": 2.0})
+    encoded = encode_inputs(FMT, {"a": 1.0, "b": 2.0})
     assert set(encoded) == {"a", "b"} and encoded["a"] == FMT.encode(1.0)

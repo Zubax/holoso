@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from holoso.result import SynthesisResult
+from holoso import SynthesisResult
 
 from ._ooc import OocWrapper
 
@@ -124,9 +124,9 @@ def assemble(result: SynthesisResult, wrapper: OocWrapper, extra_rtl: list[Path]
     include directory needed is the artifact root, which holds ``holoso_support.vh``.
     """
     files = [
-        SourceFile(Path("holoso_support.vh"), result.support_header),
-        SourceFile(Path("holoso_support.v"), result.support),
-        SourceFile(Path(f"{result.module_name}.v"), result.verilog),
+        SourceFile(Path("holoso_support.vh"), result.verilog_output.support_files["holoso_support.vh"]),
+        SourceFile(Path("holoso_support.v"), result.verilog_output.support_files["holoso_support.v"]),
+        SourceFile(Path(f"{result.module_name}.v"), result.verilog_output.verilog),
         SourceFile(Path(f"{wrapper.top}.v"), wrapper.verilog),
     ]
     files += [SourceFile(RTL_SUBDIR / path.name, path.read_text(encoding="utf-8")) for path in extra_rtl]

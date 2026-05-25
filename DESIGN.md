@@ -45,20 +45,19 @@ assembler and datapath generator.
 nothing touches the filesystem unless the caller asks.
 
 ```python
-def synthesize(target, *, float_format: FloatFormat,
+def synthesize(target, *, float_format: FloatFormat, ops: OpConfig,
                parameters: Mapping[str, object] | None = None,
-               entry: str = "__call__", name: str | None = None) -> SynthesisResult: ...
+               entry: str = "__call__", name: str | None = None,
+               operator_instances: Mapping[type[Op], int] | None = None) -> SynthesisResult: ...
 
 @dataclass(frozen=True)
 class SynthesisResult:
     module_name: str
-    interface:   ModuleInterface     # ports (name/dir/width), float format, II model -- the composition contract
-    verilog:     str                 # generated module
-    support:     str                 # holoso_support contents (shareable across modules)
-    testbench:   str                 # Cocotb
-    report_html: str
-    metrics:     SynthesisMetrics    # operator instances, N float / M bool regs, makespan, exact II (cycles)
-    hir: Hir;  lir: Lir              # kept for inspection
+    interface:      ModuleInterface       # ports (name/dir/width), float format, II model -- the composition contract
+    verilog_output: VerilogOutput  # generated module text + support_files (the shared holoso_support .v/.vh)
+    testbench:      str                   # Cocotb testbench
+    report_html:    str
+    metrics:        SynthesisMetrics      # operator instances, N float / M bool regs, makespan, exact II (cycles)
 ```
 
 Passing the object is more ergonomic and strictly more capable than a file: it carries the runtime environment the
@@ -68,8 +67,8 @@ boundary ("what to ignore") falls out of reachability + binding-time analysis, n
 via `inspect.getsource` + `ast`; when unavailable (REPL/`exec`/notebook-defined, some lambdas) synthesis fails with an
 explicit error. For a class, `__init__` runs with `parameters` (overriding the kw-only defaults that otherwise map to
 Verilog parameters), attributes written by `entry` become state registers, and `entry` (default `__call__`) is analysed
-with the ports dynamic; a plain function is analysed directly. `write_artifacts(result, out_dir)` (or
-`result.write(out_dir)`) is the only operation that touches the filesystem.
+with the ports dynamic; a plain function is analysed directly. `result.write(out_dir)` is the only operation that
+touches the filesystem.
 
 ## Front-end
 

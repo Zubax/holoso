@@ -16,7 +16,7 @@ registers are reset-unconditional.
 
 from dataclasses import dataclass
 
-from holoso.result import Port, SynthesisResult
+from holoso import Port, SynthesisResult
 
 # Marks the boundary flops so synthesis keeps them as real register-to-register IO boundaries.
 KEEP_ATTR = '(* keep = "true", syn_preserve = "true", dont_touch = "true" *)'

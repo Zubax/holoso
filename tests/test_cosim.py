@@ -9,13 +9,12 @@ import numpy as np
 import pytest
 from cocotb_tools.runner import get_runner
 
-from holoso.backend_verilog import generate
-from holoso.format import FloatFormat
-from holoso.frontend import lower
-from holoso.operators import FAddOp, FDivOp, FMulILog2GenericOp, FMulOp, OpConfig
-from holoso.passes import run
-from holoso.schedule import build, metrics_of
-from holoso.verify.cosim import Sampler, build_vectors, generic_sampler
+from holoso import FAddOp, FDivOp, FloatFormat, FMulILog2GenericOp, FMulOp, OpConfig
+from holoso._backend_verilog import generate
+from holoso._frontend import lower
+from holoso._passes import run
+from holoso._schedule import build, metrics_of
+from holoso._verify import Sampler, build_vectors, generic_sampler
 
 from hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, BENCH_DIR, build_args, sources
 
@@ -38,7 +37,7 @@ def _run_cosim(
     gen_dir.mkdir(parents=True, exist_ok=True)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"synth_{name}_w{fmt.wexp}_{fmt.wman}"
     verilog_path = gen_dir / f"{name}.v"
-    verilog_path.write_text(generate(lir))
+    verilog_path.write_text(generate(lir).verilog)
 
     spec = build_vectors(
         fn,
@@ -80,7 +79,7 @@ def _positive_sampler(fmt: FloatFormat, names: object, rng: np.random.Generator)
 
 
 def _ekf1_sampler(fmt: FloatFormat, names: object, rng: np.random.Generator) -> dict[str, float]:
-    from holoso.verify.sampling import bounded, log_uniform_positive, spd_matrix
+    from _modelref import bounded, log_uniform_positive, spd_matrix
 
     cov = spd_matrix(rng, 3, 0.5, 2.0)
     return {

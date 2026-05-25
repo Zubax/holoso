@@ -14,11 +14,12 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso.format import FloatFormat
-from holoso.operators import FMulILog2Op
+from holoso import FloatFormat
+from holoso._operators import FMulILog2Op
 
 from hdl_float_oracle import (
     DIRECTED_F32,
+    HDL_DIR,
     PipelineScoreboard,
     REPO_ROOT,
     SGNOP_OPS,
@@ -114,7 +115,7 @@ def test_holoso_fmul_ilog2_const(sim: str, config: tuple[int, int]) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fmlog_k{k}_d{stage_decode}"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fmul_ilog2_const",
         parameters={"WEXP": 8, "WMAN": 24, "K": k, "STAGE_DECODE": stage_decode},
         build_args=build_args(sim),

@@ -13,10 +13,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
 
-from ..format import FloatFormat
-from ..lir import Lir, Operand, OperatorInstance, RegRef, ScheduledOp
-from ..operators import FAddOp, FDivOp, FMulILog2Op, FMulOp, Op
-from ..result import ModuleInterface, SynthesisMetrics
+from .._format import FloatFormat
+from .._lir import Lir, Operand, OperatorInstance, RegRef, ScheduledOp
+from .._operators import FAddOp, FDivOp, FMulILog2Op, FMulOp, Op
+from .._result import ModuleInterface, SynthesisMetrics
 
 _GITHUB_URL = "https://github.com/Zubax/holoso"
 

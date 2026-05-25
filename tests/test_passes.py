@@ -3,14 +3,18 @@
 import sys
 from pathlib import Path
 
-from holoso.format import FloatFormat
-from holoso.frontend import lower
-from holoso.hir import Const, Hir, InPort, OpNode
-from holoso.operators import FAddOp, FDivOp, FMulILog2GenericOp, FMulILog2Op, FMulOp, OpConfig, Sgnop
-from holoso.passes import run
+from holoso import FAddOp, FDivOp, FloatFormat, FMulILog2GenericOp, FMulOp, OpConfig
+from holoso._frontend import lower
+from holoso._hir import Const, Hir, InPort, OpNode
+from holoso._operators import FMulILog2Op, Sgnop
+from holoso._passes import run
 
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())
+
+
+def _op_count(hir: Hir, cls: type) -> int:
+    return sum(1 for n in hir.nodes.values() if isinstance(n, OpNode) and isinstance(n.op, cls))
 
 
 def _ops(hir: Hir) -> list[OpNode]:
@@ -97,7 +101,7 @@ def test_ekf1_lowering() -> None:
 
     hir = run(lower(ekf1.update_x_P, FMT), OPS)
     assert all(isinstance(n, (InPort, Const, OpNode)) for n in hir.nodes.values())
-    assert hir.op_count(FDivOp) == 1  # only x22 = 1 / x21
-    assert hir.op_count(FMulILog2Op) >= 1  # the "2 * ..." terms
+    assert _op_count(hir, FDivOp) == 1  # only x22 = 1 / x21
+    assert _op_count(hir, FMulILog2Op) >= 1  # the "2 * ..." terms
     assert len(hir.input_ids) == 17
     assert len(hir.outputs) == 9

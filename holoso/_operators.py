@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import ClassVar
 
-from .format import FloatFormat
+from ._format import FloatFormat
 
 
 class Sgnop(enum.IntFlag):

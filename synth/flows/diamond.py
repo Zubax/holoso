@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from holoso.result import SynthesisResult
+from holoso import SynthesisResult
 
 from .._detect import find_tool
 from .._ooc import build_ooc_wrapper

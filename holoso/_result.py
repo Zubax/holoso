@@ -5,7 +5,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .format import FloatFormat
+from ._backend_verilog import VerilogOutput
+from ._format import FloatFormat
 
 
 class Direction(enum.Enum):
@@ -86,35 +87,28 @@ class SynthesisResult:
 
     module_name: str
     interface: ModuleInterface
-    verilog: str
-    support: str
-    support_header: str
+    verilog_output: VerilogOutput
     testbench: str
     report_html: str
     metrics: SynthesisMetrics
-    hir: object  # holoso.hir.Hir -- tightened once the IR lands (M2/M4)
-    lir: object  # holoso.lir.Lir
 
     def write(self, out_dir: Path | str) -> dict[str, Path]:
-        """Write the artifacts to ``out_dir`` and return the written paths."""
-        return write_artifacts(self, out_dir)
+        """
+        Write every artifact to ``out_dir`` and return the written paths keyed by filename.
 
-
-def write_artifacts(result: SynthesisResult, out_dir: Path | str) -> dict[str, Path]:
-    """Write the generated artifacts to ``out_dir`` (the only Holoso operation that touches the filesystem)."""
-    directory = Path(out_dir)
-    directory.mkdir(parents=True, exist_ok=True)
-    name = result.module_name
-    files: dict[str, tuple[str, str]] = {
-        "verilog": (f"{name}.v", result.verilog),
-        "support": ("holoso_support.v", result.support),
-        "support_header": ("holoso_support.vh", result.support_header),
-        "testbench": (f"test_{name}.py", result.testbench),
-        "report": (f"{name}.html", result.report_html),
-    }
-    written: dict[str, Path] = {}
-    for key, (filename, content) in files.items():
-        path = directory / filename
-        path.write_text(content, encoding="utf-8")
-        written[key] = path
-    return written
+        This is the only Holoso operation that touches the filesystem.
+        """
+        directory = Path(out_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        files: dict[str, str] = {
+            f"{self.module_name}.v": self.verilog_output.verilog,
+            **self.verilog_output.support_files,
+            f"test_{self.module_name}.py": self.testbench,
+            f"{self.module_name}.html": self.report_html,
+        }
+        written: dict[str, Path] = {}
+        for filename, content in files.items():
+            path = directory / filename
+            path.write_text(content, encoding="utf-8")
+            written[filename] = path
+        return written

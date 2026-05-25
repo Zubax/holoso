@@ -5,14 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from holoso.format import FloatFormat
-from holoso.frontend import lower
-from holoso.hir import OpNode
-from holoso.lir import RegRef
-from holoso.operators import FAddOp, FDivOp, FMulILog2GenericOp, FMulILog2Op, FMulOp, OpConfig
-from holoso.passes import run
-from holoso.schedule import build, cycle_count, interface_of, metrics_of
-from holoso.scheduler import resolve_pool, schedule_ops
+from holoso import FAddOp, FDivOp, FloatFormat, FMulILog2GenericOp, FMulOp, OpConfig
+from holoso._frontend import lower
+from holoso._hir import OpNode
+from holoso._lir import RegRef
+from holoso._operators import FMulILog2Op
+from holoso._passes import run
+from holoso._schedule import build, cycle_count, interface_of, metrics_of
+from holoso._scheduler import resolve_pool, schedule_ops
 
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())

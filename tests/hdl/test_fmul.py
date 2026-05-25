@@ -13,11 +13,11 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso.format import FloatFormat
-from holoso.operators import FMulOp
+from holoso import FloatFormat, FMulOp
 
 from hdl_float_oracle import (
     DIRECTED_F32,
+    HDL_DIR,
     PipelineScoreboard,
     REPO_ROOT,
     SGNOP_OPS,
@@ -113,7 +113,7 @@ def test_holoso_fmul(sim: str, stage_product: int) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fmul_sp{stage_product}"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fmul",
         parameters={"WEXP": 8, "WMAN": 24, "STAGE_PRODUCT": stage_product},
         build_args=build_args(sim),

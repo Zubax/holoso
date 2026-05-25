@@ -16,8 +16,7 @@ Convention (matches the examples in ``DESIGN.md`` / ``DESIGN.draft.md``):
 import dataclasses
 from typing import Any
 
-PathKey = int | str
-Path = list[PathKey]
+Path = list[int | str]
 
 
 def port_name(path: Path) -> str:
@@ -46,8 +45,3 @@ def flatten_value(root: object) -> list[tuple[Path, Any]]:
     else:
         leaves.append(([0], root))
     return leaves
-
-
-def output_names(root: object) -> list[str]:
-    """The ordered output-port names for a runtime return value."""
-    return [port_name(path) for path, _ in flatten_value(root)]

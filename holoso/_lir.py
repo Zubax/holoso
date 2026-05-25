@@ -7,8 +7,8 @@ registers, with which folded sign-ops.
 
 from dataclasses import dataclass
 
-from .format import FloatFormat
-from .operators import Op, Sgnop
+from ._format import FloatFormat
+from ._operators import Op, Sgnop
 
 
 @dataclass(frozen=True, slots=True)

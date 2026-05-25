@@ -7,12 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from holoso.backend_verilog import generate
-from holoso.format import FloatFormat
-from holoso.frontend import lower
-from holoso.operators import FAddOp, FDivOp, FMulILog2GenericOp, FMulOp, OpConfig
-from holoso.passes import run
-from holoso.schedule import build
+from holoso import FAddOp, FDivOp, FloatFormat, FMulILog2GenericOp, FMulOp, OpConfig
+from holoso._backend_verilog import generate
+from holoso._frontend import lower
+from holoso._passes import run
+from holoso._schedule import build
 
 from hdl_float_oracle import HDL_DIR, sources
 
@@ -45,7 +44,7 @@ def test_small_kernel_elaborates(tmp_path: Path) -> None:
         return (a - b) * 0.25 + a * b
 
     lir = build(run(lower(kernel, FloatFormat(8, 24)), OPS), "kernel")
-    _elaborate("kernel", generate(lir), tmp_path)
+    _elaborate("kernel", generate(lir).verilog, tmp_path)
 
 
 @requires_iverilog
@@ -54,7 +53,7 @@ def test_kernel_with_division_elaborates(tmp_path: Path) -> None:
         return a / b + c * 2.0
 
     lir = build(run(lower(blend, FloatFormat(6, 18)), OPS), "blend")
-    _elaborate("blend", generate(lir), tmp_path)
+    _elaborate("blend", generate(lir).verilog, tmp_path)
 
 
 @requires_iverilog
@@ -65,7 +64,7 @@ def test_constant_only_module_elaborates(tmp_path: Path) -> None:
         return 3.5
 
     lir = build(run(lower(const_only, FloatFormat(8, 24)), OPS), "const_only")
-    _elaborate("const_only", generate(lir), tmp_path)
+    _elaborate("const_only", generate(lir).verilog, tmp_path)
 
 
 @requires_iverilog
@@ -74,4 +73,4 @@ def test_ekf1_elaborates(tmp_path: Path) -> None:
     import ekf1
 
     lir = build(run(lower(ekf1.update_x_P, FloatFormat(6, 18)), OPS), "update_x_P")
-    _elaborate("update_x_P", generate(lir), tmp_path)
+    _elaborate("update_x_P", generate(lir).verilog, tmp_path)

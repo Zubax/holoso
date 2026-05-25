@@ -3,9 +3,9 @@
 import math
 from collections.abc import Mapping
 
-from .errors import UnsupportedConstruct
-from .hir import Const, Hir, InPort, OpNode, ValueId
-from .lir import (
+from ._errors import UnsupportedConstruct
+from ._hir import Const, Hir, InPort, OpNode, ValueId
+from ._lir import (
     ConstRef,
     InputLoad,
     Lir,
@@ -15,10 +15,10 @@ from .lir import (
     RegRef,
     ScheduledOp,
 )
-from .operators import Op, Sgnop
-from .regalloc import Allocation, allocate
-from .result import Direction, IIModel, ModuleInterface, Port, PortRole, SynthesisMetrics
-from .scheduler import Schedule, resolve_pool, schedule_ops
+from ._operators import Op, Sgnop
+from ._regalloc import Allocation, allocate
+from ._result import Direction, IIModel, ModuleInterface, Port, PortRole, SynthesisMetrics
+from ._scheduler import Schedule, resolve_pool, schedule_ops
 
 
 def _opnode(hir: Hir, vid: ValueId) -> OpNode:

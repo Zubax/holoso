@@ -21,11 +21,11 @@ OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())
 def test_synthesize_small_kernel_result() -> None:
     result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
     assert result.module_name == "_kernel"
-    assert "module _kernel" in result.verilog
-    assert "holoso_regfile" in result.support
-    assert '`include "holoso_support.vh"' in result.support
-    assert "`ifndef HOLOSO_REGFILE_VH" not in result.support
-    assert "`HOLOSO_REGFILE_LANE" in result.support_header
+    assert "module _kernel" in result.verilog_output.verilog
+    assert "holoso_regfile" in result.verilog_output.support_files["holoso_support.v"]
+    assert '`include "holoso_support.vh"' in result.verilog_output.support_files["holoso_support.v"]
+    assert "`ifndef HOLOSO_REGFILE_VH" not in result.verilog_output.support_files["holoso_support.v"]
+    assert "`HOLOSO_REGFILE_LANE" in result.verilog_output.support_files["holoso_support.vh"]
     assert "@cocotb.test()" in result.testbench
     assert "<html" in result.report_html.lower()
     assert result.metrics.op_count >= 3
@@ -40,8 +40,8 @@ def test_synthesize_threads_pipeline_stages() -> None:
         float_format=FloatFormat(8, 24),
         ops=OpConfig(FAddOp(decode=1), FMulOp(product=1), FDivOp(), FMulILog2GenericOp()),
     )
-    assert "STAGE_" not in base.verilog  # default stages emit no STAGE_* instance params
-    assert ".STAGE_DECODE(1)" in staged.verilog and ".STAGE_PRODUCT(1)" in staged.verilog
+    assert "STAGE_" not in base.verilog_output.verilog  # default stages emit no STAGE_* instance params
+    assert ".STAGE_DECODE(1)" in staged.verilog_output.verilog and ".STAGE_PRODUCT(1)" in staged.verilog_output.verilog
     assert staged.metrics.ii_cycles > base.metrics.ii_cycles  # the added stages lengthen the schedule
 
 
@@ -65,7 +65,7 @@ def test_generated_testbench_is_valid_python() -> None:
 def test_write_artifacts(tmp_path: Path) -> None:
     result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
     paths = result.write(tmp_path)
-    assert set(paths) == {"verilog", "support", "support_header", "testbench", "report"}
+    assert set(paths) == {"_kernel.v", "holoso_support.v", "holoso_support.vh", "test__kernel.py", "_kernel.html"}
     assert (tmp_path / "_kernel.v").exists()
     assert (tmp_path / "test__kernel.py").exists()
     assert (tmp_path / "_kernel.html").exists()
@@ -83,7 +83,7 @@ def test_report_has_expected_sections() -> None:
     for token in ("Metrics", "Module Header", "Interface", "Schedule", "_kernel"):
         assert token in report
     for token in ("// CONTROL PORTS", "// INPUT PORTS", "// OUTPUT PORTS", "// DIAGNOSTIC PORTS"):
-        assert token in result.verilog
+        assert token in result.verilog_output.verilog
         assert token in header_text
     for token in (
         "module _kernel (",
@@ -91,13 +91,13 @@ def test_report_has_expected_sections() -> None:
         "output wire [31:0] out_0",
         "output reg  [4:0] err_cyc",
     ):
-        assert token in result.verilog
+        assert token in result.verilog_output.verilog
         assert token in header_text
-    assert "module _kernel #(" not in result.verilog
-    assert "parameter WEXP" not in result.verilog
-    assert "parameter WMAN" not in result.verilog
-    assert "localparam WEXP  = 8;" in result.verilog
-    assert "localparam WMAN  = 24;" in result.verilog
+    assert "module _kernel #(" not in result.verilog_output.verilog
+    assert "parameter WEXP" not in result.verilog_output.verilog
+    assert "parameter WMAN" not in result.verilog_output.verilog
+    assert "localparam WEXP  = 8;" in result.verilog_output.verilog
+    assert "localparam WMAN  = 24;" in result.verilog_output.verilog
     assert report.index("<h2>Interface</h2>") < report.index("<h2>Module Header</h2>")
     assert "--modhdr-width:" not in report
     assert "Runtime diagnostics available while the module is running." in header_text

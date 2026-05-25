@@ -5,7 +5,7 @@ Tool-specific synthesis flows for the OOC evaluation harness, plus the abstract 
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from holoso.result import SynthesisResult
+from holoso import SynthesisResult
 
 from .._synth import SynthArtifact
 

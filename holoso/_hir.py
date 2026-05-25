@@ -3,8 +3,8 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .format import FloatFormat
-from .operators import Op, Sgnop
+from ._format import FloatFormat
+from ._operators import Op, Sgnop
 
 type ValueId = int
 
@@ -126,25 +126,6 @@ class Hir:
             assert isinstance(node, InPort)
             names.append(node.name)
         return names
-
-    def count(self, predicate: type[Node] | list[type[Node]]) -> int:
-        classes = (predicate,) if isinstance(predicate, type) else tuple(predicate)
-        return sum(1 for node in self.nodes.values() if isinstance(node, classes))
-
-    def arith_count(self, op: ArithOp) -> int:
-        return sum(1 for node in self.nodes.values() if isinstance(node, Arith) and node.op is op)
-
-    def op_count(self, cls: type[Op]) -> int:
-        return sum(1 for node in self.nodes.values() if isinstance(node, OpNode) and isinstance(node.op, cls))
-
-    def dump(self) -> str:
-        lines = [f"hir {self.fmt}"]
-        for vid in sorted(self.nodes):
-            lines.append(f"  v{vid} = {self.nodes[vid]}")
-        for out in self.outputs:
-            suffix = "" if out.sgnop is Sgnop.NONE else f" (sgnop={out.sgnop.name})"
-            lines.append(f"  {out.name} <- v{out.value}{suffix}")
-        return "\n".join(lines)
 
 
 class HirBuilder:
