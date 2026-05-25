@@ -116,8 +116,8 @@ class Hir:
 
     fmt: FloatFormat
     nodes: dict[ValueId, Node]
-    input_ids: tuple[ValueId, ...]
-    outputs: tuple[OutputPort, ...]
+    input_ids: list[ValueId]
+    outputs: list[OutputPort]
 
     def input_names(self) -> list[str]:
         names: list[str] = []
@@ -127,8 +127,9 @@ class Hir:
             names.append(node.name)
         return names
 
-    def count(self, predicate: type[Node] | tuple[type[Node], ...]) -> int:
-        return sum(1 for node in self.nodes.values() if isinstance(node, predicate))
+    def count(self, predicate: type[Node] | list[type[Node]]) -> int:
+        classes = (predicate,) if isinstance(predicate, type) else tuple(predicate)
+        return sum(1 for node in self.nodes.values() if isinstance(node, classes))
 
     def arith_count(self, op: ArithOp) -> int:
         return sum(1 for node in self.nodes.values() if isinstance(node, Arith) and node.op is op)
@@ -204,6 +205,6 @@ class HirBuilder:
         return Hir(
             fmt=self.fmt,
             nodes=dict(self._nodes),
-            input_ids=tuple(self._input_ids),
-            outputs=tuple(self._outputs),
+            input_ids=list(self._input_ids),
+            outputs=list(self._outputs),
         )

@@ -186,14 +186,14 @@ def _flatten_return(node: ast.expr) -> list[tuple[Path, ast.expr]]:
     def walk(expr: ast.expr, path: Path) -> None:
         if isinstance(expr, (ast.List, ast.Tuple)):
             for index, item in enumerate(expr.elts):
-                walk(item, (*path, index))
+                walk(item, [*path, index])
         else:
             leaves.append((path, expr))
 
     if isinstance(node, (ast.List, ast.Tuple)):
-        walk(node, ())
+        walk(node, [])
     else:
-        leaves.append(((0,), node))
+        leaves.append(([0], node))
     return leaves
 
 

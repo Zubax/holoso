@@ -49,20 +49,20 @@ class ModuleInterface:
 
     module_name: str
     float_format: FloatFormat
-    ports: tuple[Port, ...]
+    ports: list[Port]
     ii: IIModel
 
     @property
-    def input_ports(self) -> tuple[Port, ...]:
-        return tuple(p for p in self.ports if p.role is PortRole.DATA and p.direction is Direction.IN)
+    def input_ports(self) -> list[Port]:
+        return [p for p in self.ports if p.role is PortRole.DATA and p.direction is Direction.IN]
 
     @property
-    def output_ports(self) -> tuple[Port, ...]:
-        return tuple(p for p in self.ports if p.role is PortRole.DATA and p.direction is Direction.OUT)
+    def output_ports(self) -> list[Port]:
+        return [p for p in self.ports if p.role is PortRole.DATA and p.direction is Direction.OUT]
 
     @property
-    def control_ports(self) -> tuple[Port, ...]:
-        return tuple(p for p in self.ports if p.role is PortRole.CONTROL)
+    def control_ports(self) -> list[Port]:
+        return [p for p in self.ports if p.role is PortRole.CONTROL]
 
 
 @dataclass(frozen=True, slots=True)

@@ -94,6 +94,12 @@ class FAddOp(Op):
     decode: int = 0
     align: int = 0
 
+    def __post_init__(self) -> None:
+        if self.decode not in (0, 1):
+            raise ValueError(f"decode must be 0 or 1; got {self.decode!r}")
+        if self.align not in (0, 1):
+            raise ValueError(f"align must be 0 or 1; got {self.align!r}")
+
     def latency(self, fmt: FloatFormat) -> int:
         return 6 + self.decode + self.align
 
@@ -120,6 +126,10 @@ class FMulOp(Op):
     arity: ClassVar[int] = 2
     product: int = 0
 
+    def __post_init__(self) -> None:
+        if self.product not in (0, 1):
+            raise ValueError(f"product must be 0 or 1; got {self.product!r}")
+
     def latency(self, fmt: FloatFormat) -> int:
         return 3 + self.product
 
@@ -141,6 +151,10 @@ class FDivOp(Op):
     arity: ClassVar[int] = 2
     error_ports: ClassVar[list[str]] = ["div0"]
     input_stage: int = 0
+
+    def __post_init__(self) -> None:
+        if self.input_stage not in (0, 1):
+            raise ValueError(f"input_stage must be 0 or 1; got {self.input_stage!r}")
 
     def latency(self, fmt: FloatFormat) -> int:
         w = fmt.wman
@@ -167,6 +181,11 @@ class FMulILog2Op(Op):
     k: int
     decode: int = 0
 
+    def __post_init__(self) -> None:
+        # k's range is format-dependent (|k| < 2**(WEXP-1)) and is enforced during lowering, not here.
+        if self.decode not in (0, 1):
+            raise ValueError(f"decode must be 0 or 1; got {self.decode!r}")
+
     def latency(self, fmt: FloatFormat) -> int:
         return 1 + self.decode
 
@@ -190,6 +209,10 @@ class FMulILog2GenericOp(ParameterizedOp):
     """The ilog2 family: a factory whose ``decode`` knob is baked into every concrete op it instantiates."""
 
     decode: int = 0
+
+    def __post_init__(self) -> None:
+        if self.decode not in (0, 1):
+            raise ValueError(f"decode must be 0 or 1; got {self.decode!r}")
 
     def instantiate(self, *params: int) -> FMulILog2Op:
         (k,) = params

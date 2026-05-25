@@ -107,12 +107,12 @@ class RegFileLayout:
 class Lir:
     fmt: FloatFormat
     module_name: str
-    instances: tuple[OperatorInstance, ...]
-    consts: tuple[float, ...]  # constant pool: index -> value
+    instances: list[OperatorInstance]
+    consts: list[float]  # constant pool: index -> value
     regfile: RegFileLayout
-    inputs: tuple[InputLoad, ...]  # ordered as the function parameters
-    ops: tuple[ScheduledOp, ...]  # the pipelined schedule, ordered by (issue_cycle, value-id)
-    outputs: tuple[OutputWire, ...]
+    inputs: list[InputLoad]  # ordered as the function parameters
+    ops: list[ScheduledOp]  # the pipelined schedule, ordered by (issue_cycle, value-id)
+    outputs: list[OutputWire]
     makespan: int  # last commit cycle (0 if no ops); the in_valid->out_valid latency is makespan + 1
     op_count: int
     max_chain_len: int  # longest dependency chain in operators (for verification tolerance)

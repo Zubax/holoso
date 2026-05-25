@@ -32,7 +32,7 @@ class Schedule:
 
     issue_cycle: dict[ValueId, int]
     inst_of: dict[ValueId, OperatorInstance]
-    instances: tuple[OperatorInstance, ...]
+    instances: list[OperatorInstance]
     makespan: int  # max commit cycle (issue_cycle + latency), or 0 if there are no ops
 
 
@@ -125,7 +125,7 @@ def schedule_ops(hir: Hir, pool: Mapping[type[Op], int], *, nrd: int | None = No
     if nrd is not None or nwr is not None:
         _check_port_budget(hir, op_ids, nrd, nwr)
     if not op_ids:
-        return Schedule(issue_cycle={}, inst_of={}, instances=(), makespan=0)
+        return Schedule(issue_cycle={}, inst_of={}, instances=[], makespan=0)
 
     height = _critical_path(hir, op_ids)
     issue_cycle: dict[ValueId, int] = {}
@@ -178,7 +178,7 @@ def schedule_ops(hir: Hir, pool: Mapping[type[Op], int], *, nrd: int | None = No
 
 def _bind_instances(
     inst_count: dict[Op, int], slot_of: dict[ValueId, tuple[Op, int]]
-) -> tuple[dict[ValueId, OperatorInstance], tuple[OperatorInstance, ...]]:
+) -> tuple[dict[ValueId, OperatorInstance], list[OperatorInstance]]:
     """
     Give each operator a contiguous block of instance indices within its class, then bind every op.
 
@@ -193,5 +193,5 @@ def _bind_instances(
         base[op] = per_class_next.get(type(op), 0)
         per_class_next[type(op)] = base[op] + inst_count[op]
     inst_of = {vid: OperatorInstance(op, base[op] + slot) for vid, (op, slot) in slot_of.items()}
-    instances = tuple(OperatorInstance(op, base[op] + s) for op in keys for s in range(inst_count[op]))
+    instances = [OperatorInstance(op, base[op] + s) for op in keys for s in range(inst_count[op])]
     return inst_of, instances

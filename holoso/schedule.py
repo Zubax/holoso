@@ -55,7 +55,7 @@ def build(hir: Hir, module_name: str, instances: Mapping[type[Op], int] | None =
     )
 
 
-def _build_const_pool(hir: Hir) -> tuple[tuple[float, ...], dict[ValueId, int]]:
+def _build_const_pool(hir: Hir) -> tuple[list[float], dict[ValueId, int]]:
     ids: list[ValueId] = []
     seen: set[ValueId] = set()
 
@@ -79,7 +79,7 @@ def _build_const_pool(hir: Hir) -> tuple[tuple[float, ...], dict[ValueId, int]]:
         if not math.isfinite(node.value):
             raise UnsupportedConstruct(f"non-finite constant {node.value!r} is not representable in the ZKF format")
         values.append(node.value)
-    return tuple(values), {vid: index for index, vid in enumerate(ids)}
+    return values, {vid: index for index, vid in enumerate(ids)}
 
 
 def _operand(hir: Hir, vid: ValueId, sgnop: Sgnop, alloc: Allocation, const_index: dict[ValueId, int]) -> Operand:
@@ -89,9 +89,7 @@ def _operand(hir: Hir, vid: ValueId, sgnop: Sgnop, alloc: Allocation, const_inde
     return Operand(RegRef(alloc.assign[vid]), sgnop)
 
 
-def _build_ops(
-    hir: Hir, sched: Schedule, alloc: Allocation, const_index: dict[ValueId, int]
-) -> tuple[ScheduledOp, ...]:
+def _build_ops(hir: Hir, sched: Schedule, alloc: Allocation, const_index: dict[ValueId, int]) -> list[ScheduledOp]:
     ops: list[ScheduledOp] = []
     for vid in sorted(sched.issue_cycle, key=lambda v: (sched.issue_cycle[v], v)):
         op = _opnode(hir, vid)
@@ -107,19 +105,19 @@ def _build_ops(
                 latency=op.op.latency(hir.fmt),
             )
         )
-    return tuple(ops)
+    return ops
 
 
-def _build_inputs(hir: Hir, alloc: Allocation) -> tuple[InputLoad, ...]:
+def _build_inputs(hir: Hir, alloc: Allocation) -> list[InputLoad]:
     loads: list[InputLoad] = []
     for vid in hir.input_ids:
         node = hir.nodes[vid]
         assert isinstance(node, InPort)
         loads.append(InputLoad(node.name, RegRef(alloc.assign[vid])))
-    return tuple(loads)
+    return loads
 
 
-def _build_outputs(hir: Hir, alloc: Allocation, const_index: dict[ValueId, int]) -> tuple[OutputWire, ...]:
+def _build_outputs(hir: Hir, alloc: Allocation, const_index: dict[ValueId, int]) -> list[OutputWire]:
     wires: list[OutputWire] = []
     for out in hir.outputs:
         node = hir.nodes[out.value]
@@ -129,7 +127,7 @@ def _build_outputs(hir: Hir, alloc: Allocation, const_index: dict[ValueId, int])
         else:
             source = RegRef(alloc.assign[out.value])
         wires.append(OutputWire(out.name, source, out.sgnop))
-    return tuple(wires)
+    return wires
 
 
 def _compute_nrd(hir: Hir, sched: Schedule, alloc: Allocation) -> int:
@@ -217,7 +215,7 @@ def interface_of(lir: Lir) -> ModuleInterface:
     ports.extend(Port(f"in_{load.name}", Direction.IN, PortRole.DATA, fmt.width) for load in lir.inputs)
     ports.extend(Port(wire.name, Direction.OUT, PortRole.DATA, fmt.width) for wire in lir.outputs)
     ports.append(Port("err_cyc", Direction.OUT, PortRole.CONTROL, lir.cyc_width))
-    return ModuleInterface(lir.module_name, fmt, tuple(ports), _ii_model(lir))
+    return ModuleInterface(lir.module_name, fmt, ports, _ii_model(lir))
 
 
 def metrics_of(lir: Lir) -> SynthesisMetrics:

@@ -17,7 +17,7 @@ import dataclasses
 from typing import Any
 
 PathKey = int | str
-Path = tuple[PathKey, ...]
+Path = list[PathKey]
 
 
 def port_name(path: Path) -> str:
@@ -32,19 +32,19 @@ def flatten_value(root: object) -> list[tuple[Path, Any]]:
     def walk(node: object, path: Path) -> None:
         if isinstance(node, (list, tuple)) and not isinstance(node, str):
             for index, item in enumerate(node):
-                walk(item, (*path, index))
+                walk(item, [*path, index])
         elif dataclasses.is_dataclass(node) and not isinstance(node, type):
             for field in dataclasses.fields(node):
-                walk(getattr(node, field.name), (*path, field.name))
+                walk(getattr(node, field.name), [*path, field.name])
         else:
             leaves.append((path, node))
 
     if (isinstance(root, (list, tuple)) and not isinstance(root, str)) or (
         dataclasses.is_dataclass(root) and not isinstance(root, type)
     ):
-        walk(root, ())
+        walk(root, [])
     else:
-        leaves.append(((0,), root))
+        leaves.append(([0], root))
     return leaves
 
 
