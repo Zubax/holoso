@@ -36,7 +36,7 @@ def synth(session: nox.Session) -> None:
     session.run("python", "-m", "pytest", "-q", "-s", *(session.posargs or ("synth",)))
 
 
-@nox.session(default=False)
+@nox.session
 def synth_examples(session: nox.Session) -> None:
     """Out-of-context FPGA synthesis (f_max/fabric) of the bundled examples across the available tools."""
     session.install("-e", ".[test]")
@@ -45,4 +45,4 @@ def synth_examples(session: nox.Session) -> None:
         session.run("python", "-m", "synth", *args, "--rtl", "lib/kulibin/float/hdl")
 
     # TODO: the frequency is currently set to a very low setting; we will focus on timing closure a bit later.
-    syn("examples/ekf1.py", "update_x_P", "--name", "ekf1", "--freq", "35.0")
+    syn("examples/ekf1.py", "update_x_P", "--name", "ekf1", "--freq", "39.0")
