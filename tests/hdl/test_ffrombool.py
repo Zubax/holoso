@@ -1,7 +1,5 @@
 """Tests for holoso_ffrombool (combinational; false -> +0, true -> +1.0)."""
 
-from __future__ import annotations
-
 import cocotb
 import pytest
 from cocotb.triggers import Timer

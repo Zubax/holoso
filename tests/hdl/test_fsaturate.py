@@ -1,7 +1,5 @@
 """Tests for holoso_fsaturate (combinational; +inf -> +max, -inf -> -max, finite passes through)."""
 
-from __future__ import annotations
-
 import cocotb
 import numpy as np
 import pytest

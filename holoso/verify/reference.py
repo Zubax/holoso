@@ -1,7 +1,5 @@
 """The verification reference: run the original Python function in float64 and flatten its return to ordered outputs."""
 
-from __future__ import annotations
-
 from collections.abc import Callable, Mapping
 
 from .._shape import flatten_value

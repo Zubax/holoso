@@ -1,7 +1,5 @@
 """Unit tests for the pure-Python verification core."""
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 

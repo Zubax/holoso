@@ -1,11 +1,10 @@
-"""Tests for holoso_fcmp (pipelined; comparison with input sgnops only).
+"""
+Tests for holoso_fcmp (pipelined; comparison with input sgnops only).
 
 Outputs a_gt_b, a_eq_b, a_lt_b are mutually-exclusive one-hot flags. There is no output sgnop, so no drain on
 sgnop change is needed; a_sgnop and b_sgnop can vary every cycle. The DUT's one-hot invariant is also checked
 on every out_valid pulse in addition to the per-flag comparison.
 """
-
-from __future__ import annotations
 
 import cocotb
 import numpy as np

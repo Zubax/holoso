@@ -1,7 +1,5 @@
 """Unit tests for pipelined scheduling, register allocation, and LIR construction."""
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 

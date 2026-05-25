@@ -1,7 +1,5 @@
 """Unit tests for the HIR optimization/lowering passes."""
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 

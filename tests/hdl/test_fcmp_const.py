@@ -1,7 +1,5 @@
 """Tests for holoso_fcmp_const (pipelined; compares sign-conditioned a against constant b)."""
 
-from __future__ import annotations
-
 import os
 
 import cocotb

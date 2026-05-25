@@ -1,12 +1,11 @@
-"""The high-level IR (HIR): an SSA value DAG of scalar floating-point operations.
+"""
+The high-level IR (HIR): an SSA value DAG of scalar floating-point operations.
 
 v0 targets a single basic block (no control flow, no state), so the HIR is just a hash-consed DAG of value nodes plus
 an ordered list of named outputs. The frontend emits ``InPort``/``Const``/``Arith``/``SignFix``; passes introduce
 ``Fmul2K`` (power-of-two strength reduction) and finally ``OpNode`` (operator selection with folded sign-ops). A fully
 lowered HIR contains only ``InPort``, ``Const``, and ``OpNode``.
 """
-
-from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
@@ -69,8 +68,10 @@ class Fmul2K:
 
 @dataclass(frozen=True, slots=True)
 class OpNode:
-    """A selected hardware operator use with folded sign-ops. ``b`` is ``None`` for unary ``FMUL_ILOG2``;
-    ``k`` is the exponent for ``FMUL_ILOG2`` (else ``None``)."""
+    """
+    A selected hardware operator use with folded sign-ops. ``b`` is ``None`` for unary ``FMUL_ILOG2``;
+    ``k`` is the exponent for ``FMUL_ILOG2`` (else ``None``).
+    """
 
     kind: OpKind
     a: ValueId

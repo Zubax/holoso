@@ -1,9 +1,8 @@
-"""Generic cocotb driver that replays a vector spec against a generated Holoso module and checks tolerances.
+"""
+Generic cocotb driver that replays a vector spec against a generated Holoso module and checks tolerances.
 
 The vector-spec JSON path is passed via the ``HOLOSO_VECTORS`` environment variable.
 """
-
-from __future__ import annotations
 
 import json
 import os

@@ -1,11 +1,10 @@
-"""The low-level IR (LIR): the scheduled, bound, register-allocated microprogram for the synthesized ZISC machine.
+"""
+The low-level IR (LIR): the scheduled, bound, register-allocated microprogram for the synthesized ZISC machine.
 
 A :class:`Lir` is controller-agnostic -- it describes which operators issue on which cycle, reading/writing which
 registers, with which folded sign-ops. The backend renders it to Verilog; this is the seam where a second controller
 could be added.
 """
-
-from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -15,7 +14,8 @@ from .operators import OpKind, ResourceKey, Sgnop, StageConfig
 
 @dataclass(frozen=True, slots=True)
 class OperatorInstance:
-    """One physical operator module, e.g. ``u_fadd_0`` or ``u_fmul_ilog2_const_2``.
+    """
+    One physical operator module, e.g. ``u_fadd_0`` or ``u_fmul_ilog2_const_2``.
 
     ``key`` names the module type (kind + elaboration params); ``index`` numbers the copies of that type. The
     scheduler pools ops onto instances by ``key``: ops sharing a key may time-share one instance (at most one issue
@@ -59,7 +59,8 @@ class Operand:
 
 @dataclass(frozen=True, slots=True)
 class ScheduledOp:
-    """One operator firing in the software-pipelined schedule.
+    """
+    One operator firing in the software-pipelined schedule.
 
     ``inst`` is the bound physical instance (decided by the scheduler), ``issue_cycle`` is the cycle its ``in_valid``
     is asserted (operands read combinationally that cycle), and the result commits to ``dst`` at ``commit_cycle ==

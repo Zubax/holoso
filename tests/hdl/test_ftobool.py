@@ -1,7 +1,5 @@
 """Tests for holoso_ftobool (combinational; exponent-zero values map to false)."""
 
-from __future__ import annotations
-
 import cocotb
 import numpy as np
 import pytest

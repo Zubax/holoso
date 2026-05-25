@@ -1,7 +1,5 @@
 """Access to the shared ``holoso_support`` HDL that generated modules instantiate."""
 
-from __future__ import annotations
-
 from functools import cache
 from pathlib import Path
 

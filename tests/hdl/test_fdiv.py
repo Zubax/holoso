@@ -1,12 +1,11 @@
-"""Tests for holoso_fdiv (pipelined; y = sgnop(sgnop(a)/sgnop(b)); div0 alongside out_valid).
+"""
+Tests for holoso_fdiv (pipelined; y = sgnop(sgnop(a)/sgnop(b)); div0 alongside out_valid).
 
 div0 is asserted when the post-sgnop divisor has exp=0 (i.e., the divisor is zero in either sign form). When div0=1
 the y output is unspecified by the wrapper contract, so the test skips the y comparison for those cases but still
 checks that div0 itself is correct. The wrapper delays y_sgnop through the same number of stages as zkf_div, and the
 scoreboard verifies the documented latency against actual out_valid timing.
 """
-
-from __future__ import annotations
 
 import os
 

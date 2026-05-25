@@ -1,7 +1,5 @@
 """Tests for holoso_fsgnop (combinational, format-independent)."""
 
-from __future__ import annotations
-
 import os
 from pathlib import Path
 

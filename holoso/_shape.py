@@ -1,4 +1,5 @@
-"""Shared flattening of a function's return into ordered, named output ports.
+"""
+Shared flattening of a function's return into ordered, named output ports.
 
 Both the code generator (which walks the return AST) and the verification reference (which walks the runtime return
 value) must agree on output-port order and naming. The naming convention lives here, expressed over a *path* of keys
@@ -11,8 +12,6 @@ Convention (matches the examples in ``DESIGN.md`` / ``DESIGN.draft.md``):
 - a dataclass yields its fields by name          -> ``out_<field>``
 - nesting concatenates                           -> ``out_0_0`` (matrices), ``out_0_foo_bar`` (nested dataclasses)
 """
-
-from __future__ import annotations
 
 import dataclasses
 from typing import Any

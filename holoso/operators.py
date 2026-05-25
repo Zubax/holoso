@@ -1,12 +1,11 @@
-"""Operator kinds, their latency model (mirroring ``holoso_support.v``), and sign-op encoding.
+"""
+Operator kinds, their latency model (mirroring ``holoso_support.v``), and sign-op encoding.
 
 This module is the single source of truth for operator latency, shared by the passes (latency annotation), the
 scheduler (exact issue/commit timing), and the Verilog backend (instantiation). The latency formulas MUST match the
 HDL wrappers cycle-for-cycle: the static schedule commits each result on ``issue + latency`` without watching
 ``out_valid``, so any drift is a correctness bug, not merely a bad estimate.
 """
-
-from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, fields
@@ -16,7 +15,8 @@ from .format import FloatFormat
 
 
 class Sgnop(enum.IntFlag):
-    """Folded sign manipulation applied to an operator operand or output.
+    """
+    Folded sign manipulation applied to an operator operand or output.
 
     A 2-bit field: bit 0 = negate, bit 1 = absolute value (so ``ABS | NEG`` means ``-|x|``). The integer values match
     ``HOLOSO_FSGNOP_*`` in ``holoso_support.vh`` (NONE=0, NEG=1, ABS=2, ABS|NEG=3), which is why ``IntFlag`` is used:
@@ -53,7 +53,8 @@ MODULE_NAMES: dict[OpKind, str] = {
 
 @dataclass(frozen=True, slots=True)
 class ResourceKey:
-    """A distinct physical operator module that ops may share.
+    """
+    A distinct physical operator module that ops may share.
 
     Two ops share a key iff they elaborate to identical hardware: same ``kind`` and same elaboration-time
     ``params``. ``params`` are the parameters baked into the module at elaboration -- today only
@@ -72,7 +73,8 @@ class ResourceKey:
 
 @dataclass(frozen=True, slots=True)
 class StageConfig:
-    """Optional pipeline-stage knobs per operator (default off). They affect latency and instantiation parameters.
+    """
+    Optional pipeline-stage knobs per operator (default off). They affect latency and instantiation parameters.
 
     Each knob is 0 or 1: the HDL wrappers gate every stage as ``(STAGE_X ? 1 : 0)``, so a value above 1 would lengthen
     ``latency_of`` without changing the RTL -- silently desyncing the static schedule from the hardware.
@@ -114,7 +116,8 @@ def has_div0(kind: OpKind) -> bool:
 
 
 def latency_of(kind: OpKind, fmt: FloatFormat, stages: StageConfig = DEFAULT_STAGES) -> int:
-    """The exact ``LATENCY`` of each ``holoso_support.v`` wrapper, in clocks -- load-bearing, not a hint.
+    """
+    The exact ``LATENCY`` of each ``holoso_support.v`` wrapper, in clocks -- load-bearing, not a hint.
 
     The schedule commits each result on ``issue + latency`` and the backend trusts that timing without watching
     ``out_valid``, so this must replicate the RTL wrapper's ``LATENCY`` localparam exactly.

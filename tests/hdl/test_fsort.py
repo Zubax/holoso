@@ -1,12 +1,11 @@
-"""Tests for holoso_fsort (pipelined; min/max with input + output sgnops).
+"""
+Tests for holoso_fsort (pipelined; min/max with input + output sgnops).
 
 The wrapper delays min_sgnop and max_sgnop through the same number of stages as zkf_sort, so output sign controls are
 allowed to vary every input cycle. The test also skips any case where applying sgnop to an input would produce a
 non-canonical -0, since sort preserves the input bit pattern through to its outputs and -0 is outside the ZKF input
 contract.
 """
-
-from __future__ import annotations
 
 import os
 

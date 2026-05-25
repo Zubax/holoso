@@ -1,7 +1,5 @@
 """End-to-end tests of the public synthesize() API, the report, artifact writing, and the generated testbench."""
 
-from __future__ import annotations
-
 import html
 import re
 import sys

@@ -1,11 +1,10 @@
-"""Round-trip codec between Python floats and Zubax Kulibin float (ZKF) bit patterns, for any ``FloatFormat``.
+"""
+Round-trip codec between Python floats and Zubax Kulibin float (ZKF) bit patterns, for any ``FloatFormat``.
 
 Layout (matches ``holoso_support.v`` / the Kulibin model): ``[sign | exponent(wexp) | stored-fraction(wman-1)]`` with a
 hidden leading significand bit. ``exp == 0`` is zero (ZKF has no subnormals and no negative zero); the all-ones
 exponent is infinity. Encoding rounds to nearest, ties to even, using exact rational arithmetic.
 """
-
-from __future__ import annotations
 
 import math
 from fractions import Fraction

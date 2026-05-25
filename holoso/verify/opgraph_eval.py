@@ -1,11 +1,10 @@
-"""Evaluate a fully lowered HIR op-graph in float64.
+"""
+Evaluate a fully lowered HIR op-graph in float64.
 
 This mirrors exactly the operators and folded sign-ops the generated RTL instantiates, so comparing it against the
 original Python function (both in float64) checks that the front-end and passes preserve the computation -- a
 simulator-free correctness net for everything upstream of the backend.
 """
-
-from __future__ import annotations
 
 import math
 from collections.abc import Mapping

@@ -1,4 +1,5 @@
-"""Software-pipelined (zero-bubble) list scheduling over a lowered HIR.
+"""
+Software-pipelined (zero-bubble) list scheduling over a lowered HIR.
 
 The operators are fully pipelined (throughput 1) and their latencies are static and data-independent, so the whole
 schedule is computed here at compile time and the backend controller is just a cycle counter replaying it. We issue
@@ -15,8 +16,6 @@ commit. Instances are pooled by *resource key* -- ``(kind, elaboration params)``
 all ``fmul_ilog2_const`` with the same ``K``) time-share ``pool[kind]`` instances, at most one issue per instance per
 cycle. Optional read/write port budgets (default unbounded) further gate admission and lengthen the makespan to fit.
 """
-
-from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -68,7 +67,8 @@ def present_kinds(hir: Hir) -> set[OpKind]:
 
 
 def resolve_pool(hir: Hir, instances: Mapping[OpKind, int] | None) -> dict[OpKind, int]:
-    """The per-kind instance budget: at least one of every kind present in the graph (default 1).
+    """
+    The per-kind instance budget: at least one of every kind present in the graph (default 1).
 
     The budget is applied per *resource key* of that kind, so ``fmul_ilog2_const`` gets ``pool[FMUL_ILOG2]`` instances
     per distinct ``K``. Raising a kind's budget lets that many ops of any one resource key co-issue.
@@ -94,7 +94,8 @@ def _critical_path(hir: Hir, op_ids: list[ValueId]) -> dict[ValueId, int]:
 
 
 def _check_port_budget(hir: Hir, op_ids: list[ValueId], nrd: int | None, nwr: int | None) -> None:
-    """Reject read/write port budgets no schedule can meet, with a clear message rather than a 'no progress' stall.
+    """
+    Reject read/write port budgets no schedule can meet, with a clear message rather than a 'no progress' stall.
 
     A binary op must read its (up to two) distinct register operands in one cycle, and the output-presentation cycle
     reads every distinct output register at once -- both are hard floors on ``nrd``. The single-cycle input load is the
@@ -114,7 +115,8 @@ def _check_port_budget(hir: Hir, op_ids: list[ValueId], nrd: int | None, nwr: in
 
 
 def schedule_ops(hir: Hir, pool: Mapping[OpKind, int], *, nrd: int | None = None, nwr: int | None = None) -> Schedule:
-    """Greedily place every operator on the earliest cycle its operands are ready and a free instance/port exists.
+    """
+    Greedily place every operator on the earliest cycle its operands are ready and a free instance/port exists.
 
     ``nrd``/``nwr`` are optional read/write port budgets; ``None`` means unbounded (sized to the schedule's peak
     afterwards). With budgets set, an op that cannot claim a read slot at its issue cycle or a write slot at its
@@ -177,7 +179,8 @@ def schedule_ops(hir: Hir, pool: Mapping[OpKind, int], *, nrd: int | None = None
 def _bind_instances(
     inst_count: dict[ResourceKey, int], slot_of: dict[ValueId, tuple[ResourceKey, int]]
 ) -> tuple[dict[ValueId, OperatorInstance], tuple[OperatorInstance, ...]]:
-    """Give each resource key a contiguous block of instance indices within its kind, then bind every op.
+    """
+    Give each resource key a contiguous block of instance indices within its kind, then bind every op.
 
     Indices are 0-based within a kind and run over the kind's resource keys in a deterministic order, so a kind with
     several elaboration variants (e.g. ``fmul_ilog2_const`` with multiple ``K``) gets uniquely-named modules.

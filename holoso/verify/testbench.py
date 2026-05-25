@@ -1,10 +1,9 @@
-"""Render a self-contained cocotb testbench string for a generated module.
+"""
+Render a self-contained cocotb testbench string for a generated module.
 
 The testbench embeds precomputed (input-bits, expected-float, tolerance) vectors and a minimal inline ZKF decoder, so
 it runs standalone against the generated ``.v`` + ``holoso_support`` + Kulibin sources with only cocotb as a dependency.
 """
-
-from __future__ import annotations
 
 import json
 from collections.abc import Callable

@@ -1,11 +1,10 @@
-"""Tests for holoso_fmul_ilog2_const (pipelined; y = sgnop(sgnop(a) * 2^K)).
+"""
+Tests for holoso_fmul_ilog2_const (pipelined; y = sgnop(sgnop(a) * 2^K)).
 
 K is a compile-time signed integer exponent shift. The test rebuilds the DUT for several K values to cover negative,
 zero, and positive scales, and separately sweeps STAGE_DECODE at K=0. The wrapper delays y_sgnop through the same
 number of stages as zkf_mul_ilog2_const, and the scoreboard verifies the documented latency against out_valid timing.
 """
-
-from __future__ import annotations
 
 import os
 

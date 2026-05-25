@@ -1,7 +1,5 @@
 """The public synthesis entry point."""
 
-from __future__ import annotations
-
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -29,7 +27,8 @@ def synthesize(
     operator_instances: Mapping[OpKind, int] | None = None,
     stages: StageConfig = DEFAULT_STAGES,
 ) -> SynthesisResult:
-    """Synthesize ``target`` (a function or class object) into a Verilog ZISC FSM, returned in memory.
+    """
+    Synthesize ``target`` (a function or class object) into a Verilog ZISC FSM, returned in memory.
 
     ``parameters`` overrides a class's keyword-only ``__init__`` defaults; ``entry`` selects the analyzed method for a
     class (default ``__call__``); ``name`` overrides the generated module name; ``operator_instances`` sets the number

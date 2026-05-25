@@ -1,12 +1,11 @@
-"""HIR -> HIR optimization and lowering passes.
+"""
+HIR -> HIR optimization and lowering passes.
 
 Pipeline (:func:`run`): constant folding -> strength reduction -> operator selection with sign folding -> dead-code
 elimination. The result is a fully lowered HIR (only ``InPort``/``Const``/``OpNode``), ready for scheduling.
 
 FP math is non-associative; these passes may change results in the last bits, which is accepted (see DESIGN.md).
 """
-
-from __future__ import annotations
 
 import math
 from typing import assert_never
@@ -189,7 +188,8 @@ def _reduce_div(builder: HirBuilder, na: ValueId, nb: ValueId, cval: dict[ValueI
 
 
 def lower_to_operators(hir: Hir, stages: StageConfig = DEFAULT_STAGES) -> Hir:
-    """Select hardware operators and fold sign manipulations onto operator/output sign-op ports.
+    """
+    Select hardware operators and fold sign manipulations onto operator/output sign-op ports.
 
     ``stages`` annotates each operator's latency for the chosen pipeline-stage configuration; the backend must
     instantiate the matching ``STAGE_*`` params so the static schedule agrees with the RTL.

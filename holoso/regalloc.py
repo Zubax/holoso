@@ -1,4 +1,5 @@
-"""Linear-scan register allocation over the software-pipelined (cycle-accurate) schedule.
+"""
+Linear-scan register allocation over the software-pipelined (cycle-accurate) schedule.
 
 Register-needing values are the input ports and operator results (constants are immediates, not registers). A value
 is *defined* (written into its register) at its commit cycle -- ``issue_cycle + latency`` for an op, cycle 0 for an
@@ -12,8 +13,6 @@ same register on cycle X, the combinational read returns the old (stored) V and 
 corruption. Under a write-through file this would forward W into the read and break. We never spill -- the register
 count simply grows.
 """
-
-from __future__ import annotations
 
 import heapq
 from dataclasses import dataclass

@@ -1,10 +1,9 @@
-"""Tests for holoso_fadd (pipelined; sgnop on a, b, y; y = sgnop(sgnop(a)+sgnop(b))).
+"""
+Tests for holoso_fadd (pipelined; sgnop on a, b, y; y = sgnop(sgnop(a)+sgnop(b))).
 
 The wrapper delays y_sgnop through the same number of stages as zkf_add, so all sgnop controls are allowed to vary
 every input cycle. The scoreboard verifies the documented wrapper latency against actual out_valid timing.
 """
-
-from __future__ import annotations
 
 import os
 

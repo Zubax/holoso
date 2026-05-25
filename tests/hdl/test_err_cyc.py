@@ -1,11 +1,10 @@
-"""Directed cosim: a divide-by-zero latches ``err_cyc`` to the fdiv's commit cycle, and it resets each run.
+"""
+Directed cosim: a divide-by-zero latches ``err_cyc`` to the fdiv's commit cycle, and it resets each run.
 
 Builds the tiny module ``a / b``, then drives three back-to-back invocations: a normal one (err_cyc stays 0), a
 zero-divisor one (err_cyc latches the fdiv commit cycle, == cycle_count-1, which is nonzero), and a normal one again
 (the per-initiation reset must have cleared the prior error).
 """
-
-from __future__ import annotations
 
 import json
 import os

@@ -1,4 +1,5 @@
-"""Render a :class:`Lir` into a synthesizable Verilog ZISC module.
+"""
+Render a :class:`Lir` into a synthesizable Verilog ZISC module.
 
 Datapath: a ``holoso_regfile`` flip-flop bank, one operator-wrapper instance per :class:`OperatorInstance`, and one
 ``holoso_fconst`` per pooled constant. Controller: a cycle counter ``cyc`` driving a ``case(cyc)`` microprogram that
@@ -13,8 +14,6 @@ the control block latches ``err_cyc <= cyc`` whenever ``err`` -- so ``err_cyc`` 
 detected, or 0 when there were none (it is reset at every accept; ``|err_cyc`` answers "any error?"). The register file
 is read-first (``RWPASS=0``). Reset covers only the control registers (``cyc``, ``err_cyc``).
 """
-
-from __future__ import annotations
 
 from .emit import VerilogWriter
 from .lir import ConstRef, Lir, OperatorInstance, Operand, RegRef, ScheduledOp

@@ -1,11 +1,10 @@
-"""Render a self-contained, light-themed single-page HTML report for a synthesized module.
+"""
+Render a self-contained, light-themed single-page HTML report for a synthesized module.
 
 The stylesheet and the interactive layer live alongside this module as ``html.css`` and ``html.js`` (declared as
 package data in ``pyproject.toml``); they are inlined into the self-contained report so it has no external dependency
 beyond the web font.
 """
-
-from __future__ import annotations
 
 import html
 import json
@@ -197,7 +196,8 @@ def _is_live(col: ColKey, row_id: int, live: dict[int, set[int]]) -> bool:
 
 
 def _write_label(index: int, tip: str) -> str:
-    """The result marker on the operator's commit cell: its instance index, white text on the filled result cell.
+    """
+    The result marker on the operator's commit cell: its instance index, white text on the filled result cell.
 
     Operands are no longer chips; the dataflow edges (drawn by the overlay) connect this cell to its operand cells, so
     the cell only needs to identify the operator instance. The tooltip carries the full expression with operand signs.
@@ -211,7 +211,8 @@ def _operand_col(operand: Operand) -> ColKey:
 
 @dataclass(frozen=True, slots=True)
 class _Dividers:
-    """Right-border seams between grid columns, kept on the *left* cell's right edge (under ``border-collapse`` the left
+    """
+    Right-border seams between grid columns, kept on the *left* cell's right edge (under ``border-collapse`` the left
     cell wins an equal-width conflict, so a left border on the right column would not show). A ``thick`` 2px seam marks
     the two block boundaries (constants | operator-pipeline and operator-pipeline | OPERATIONS); a ``thin`` 1px seam
     marks the lighter ones (registers | constants and between operator groups). Data and stage columns index separately.
@@ -242,7 +243,8 @@ def _oc_class(sidx: int, dv: _Dividers) -> str:
 
 
 def _stage_columns(lir: Lir, fmt: FloatFormat) -> list[tuple[OperatorInstance, int]]:
-    """The operator-stage columns, in instance order: ``(instance, stage)`` for each pipeline stage of each operator.
+    """
+    The operator-stage columns, in instance order: ``(instance, stage)`` for each pipeline stage of each operator.
 
     One column per stage, so an L-cycle operator contributes L columns labeled ``s0..s(L-1)``. As an operation flows
     through its operator, stage ``k`` is occupied on cycle ``issue + k``; the result commits to its register on cycle
@@ -276,7 +278,8 @@ def _bookend_row(
 
 
 def _liveness(lir: Lir) -> dict[int, set[int]]:
-    """Map each register to the clock cycles on which it holds a live value.
+    """
+    Map each register to the clock cycles on which it holds a live value.
 
     A value is written on its definition cycle -- the accept cycle 0 for an input, the operator's commit cycle
     (``issue + latency``) for a result -- and read on each consumer's issue cycle, or on the output-present cycle
@@ -311,8 +314,10 @@ def _liveness(lir: Lir) -> dict[int, set[int]]:
 
 
 def _live_intervals(rows: set[int]) -> list[list[int]]:
-    """Collapse a register's set of live rows into sorted ``[start, end]`` intervals for compact hand-off to the hover
-    script (so it can answer alive/dead for any cycle without shipping a per-cell flag)."""
+    """
+    Collapse a register's set of live rows into sorted ``[start, end]`` intervals for compact hand-off to the hover
+    script (so it can answer alive/dead for any cycle without shipping a per-cell flag).
+    """
     if not rows:
         return []
     ordered = sorted(rows)
@@ -328,7 +333,8 @@ def _live_intervals(rows: set[int]) -> list[list[int]]:
 def _cell_style(
     col: ColKey, cyc: int, live: dict[int, set[int]], fills: dict[tuple[int, ColKey], str]
 ) -> tuple[str, str]:
-    """Background for a register/constant cell, as ``(extra_class, inline_style)``. The single cycle on which a result
+    """
+    Background for a register/constant cell, as ``(extra_class, inline_style)``. The single cycle on which a result
     commits is filled solid with its operator color via an inline style (this takes precedence, and being inline it
     survives the row-hover tint); otherwise a live register gets the faint residence tint via the ``live`` class, so a
     row-hover can override it. The operators' cycle-by-cycle occupancy lives in the separate operator-stage block.
@@ -485,8 +491,10 @@ def _stage_cell(
     stage_tip: dict[tuple[int, int], str],
     conflicts: set[tuple[int, int]],
 ) -> str:
-    """One operator-stage cell: empty unless an operation occupies this stage on this cycle, in which case it is filled
-    with the operator color and tagged with the operation group (so a hover lights the whole pipeline trail)."""
+    """
+    One operator-stage cell: empty unless an operation occupies this stage on this cycle, in which case it is filled
+    with the operator color and tagged with the operation group (so a hover lights the whole pipeline trail).
+    """
     cls = _oc_class(sidx, dv)
     occ = stage_fill.get((sidx, cyc))
     if occ is None:
@@ -498,7 +506,8 @@ def _stage_cell(
 
 
 def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[int, set[int]]) -> str:
-    """Build the interactive layer: substitute the per-module data into the readable script template (:data:`_SCHED_JS`).
+    """
+    Build the interactive layer: substitute the per-module data into the readable script template (:data:`_SCHED_JS`).
 
     The data is the edge list, the column labels, the constant values, and the per-register live-row intervals. This is
     enough for the script to draw the dataflow overlay and synthesize hover tooltips on demand without a per-cell

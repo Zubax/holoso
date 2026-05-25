@@ -1,11 +1,10 @@
-"""Input-vector sampling for verification.
+"""
+Input-vector sampling for verification.
 
 Provides ZKF-legal random bit patterns and well-conditioned building blocks (bounded values, log-uniform positives,
 symmetric-positive-definite matrices) so that test vectors avoid catastrophic cancellation / near-singular
 configurations and keep the tolerance band meaningful.
 """
-
-from __future__ import annotations
 
 import numpy as np
 

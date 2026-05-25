@@ -1,7 +1,5 @@
 """Functional cosimulation: drive generated modules and check outputs against the float64 reference within tolerance."""
 
-from __future__ import annotations
-
 import json
 import sys
 from collections.abc import Callable

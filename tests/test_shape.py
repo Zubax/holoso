@@ -1,7 +1,5 @@
 """Unit tests for holoso._shape output flattening and port naming."""
 
-from __future__ import annotations
-
 import dataclasses
 
 from holoso._shape import flatten_value, output_names, port_name

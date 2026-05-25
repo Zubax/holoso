@@ -1,4 +1,5 @@
-"""Shared scaffolding for the holoso_f* HDL wrapper test suite.
+"""
+Shared scaffolding for the holoso_f* HDL wrapper test suite.
 
 Provides build helpers (source list, verilator flags, simulator selection); a bit-level oracle (binary32 <-> bits,
 sgnop emulation, classification); a directed corner-case battery and a ZKF-legal random sampler; and cocotb
@@ -8,8 +9,6 @@ The oracle deliberately mirrors numpy.float32 (IEEE 754 binary32) so the DUT mus
 Subnormals, NaN, and -0 are excluded from stimulus because ZKF does not define them; arithmetic results that fall into
 those classes are mapped through ZKF's zero/MIN_NORMAL boundary rule and canonical-zero rule.
 """
-
-from __future__ import annotations
 
 import os
 from collections import deque
@@ -179,7 +178,8 @@ def mul_oracle_bits(a_bits: int, b_bits: int) -> int | None:
 
 
 def div_oracle_bits(a_bits: int, b_bits: int) -> int | None:
-    """ZKF-compatible float32 divide; returns None whenever the wrapper's y is unspecified.
+    """
+    ZKF-compatible float32 divide; returns None whenever the wrapper's y is unspecified.
 
     Division by +0 is a separately-signalled condition (the div0 flag); the wrapper contract leaves y unspecified
     there, so callers should skip the value check when b == +0 and verify div0 instead.
@@ -225,7 +225,8 @@ def mul_ilog2_oracle_bits(a_bits: int, k: int) -> int | None:
 
 
 def _flush_to_zkf(bits: int) -> int:
-    """Map a float32 result to a ZKF-legal bit pattern.
+    """
+    Map a float32 result to a ZKF-legal bit pattern.
 
     ZKF has no subnormals and no negative zero. Tiny finite magnitudes below 0.5*MIN_NORMAL round to canonical +0;
     magnitudes at or above that boundary round to signed MIN_NORMAL.
@@ -274,7 +275,8 @@ async def drive_reset(dut, cycles: int = 4) -> None:
 
 
 class PipelineScoreboard:
-    """Checker for in_valid / out_valid pipelines.
+    """
+    Checker for in_valid / out_valid pipelines.
 
     Workflow per case: drive inputs and set in_valid=1, then `push({...})` the expected payload, then
     `await RisingEdge(dut.clk)` and `await Timer(1, "ns")`, then `sample()`. The invariant is that out_valid

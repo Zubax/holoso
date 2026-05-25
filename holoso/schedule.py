@@ -1,7 +1,5 @@
 """Orchestrate scheduling + register allocation into a finished :class:`Lir`, and derive interface/metrics from it."""
 
-from __future__ import annotations
-
 import math
 from collections.abc import Mapping
 
@@ -35,7 +33,8 @@ def build(
     instances: Mapping[OpKind, int] | None = None,
     stages: StageConfig = DEFAULT_STAGES,
 ) -> Lir:
-    """Schedule, bind, and register-allocate a lowered HIR into a pipelined microprogram.
+    """
+    Schedule, bind, and register-allocate a lowered HIR into a pipelined microprogram.
 
     ``stages`` must match the configuration used to annotate latencies in :func:`passes.run`, so the schedule and the
     emitted ``STAGE_*`` instance params agree; it is recorded on the :class:`Lir` for the backend and report.
@@ -153,7 +152,8 @@ def _build_outputs(hir: Hir, alloc: Allocation, const_index: dict[ValueId, int])
 
 
 def _compute_nrd(hir: Hir, sched: Schedule, alloc: Allocation) -> int:
-    """Combinational read ports: the peak distinct register reads in any issue cycle.
+    """
+    Combinational read ports: the peak distinct register reads in any issue cycle.
 
     Outputs are presented from the register file's passive ``view`` bus (wired by fixed register index in the
     backend), so they no longer consume read ports -- this counts operand reads only.
@@ -170,7 +170,8 @@ def _compute_nrd(hir: Hir, sched: Schedule, alloc: Allocation) -> int:
 
 
 def _compute_nwr(hir: Hir, sched: Schedule) -> int:
-    """Synchronous write ports: the peak operator commits landing on one cycle.
+    """
+    Synchronous write ports: the peak operator commits landing on one cycle.
 
     Inputs are preloaded through the register file's immediate ``load`` port on cycle 0, not the write ports, so the
     input count no longer inflates this -- the write ports carry operator commits only.
@@ -184,7 +185,8 @@ def _compute_nwr(hir: Hir, sched: Schedule) -> int:
 
 
 def _compute_nload(hir: Hir, alloc: Allocation) -> int:
-    """Immediate parallel-load lanes: enough to cover the highest register any input occupies (registers 0..nload-1).
+    """
+    Immediate parallel-load lanes: enough to cover the highest register any input occupies (registers 0..nload-1).
 
     Inputs commit at cycle 0 and read back from cycle 1; they are loaded in one shot via the register file's ``load``
     port rather than through write ports. Sized from the max occupied input register, not ``len(inputs)``: an unused
@@ -206,7 +208,8 @@ def _max_chain_len(hir: Hir) -> int:
 
 
 def cycle_count(lir: Lir) -> int:
-    """Exact in_valid->out_valid latency: the schedule makespan (last commit cycle) plus one cycle to present.
+    """
+    Exact in_valid->out_valid latency: the schedule makespan (last commit cycle) plus one cycle to present.
 
     Cycle 0 accepts and writes the inputs; compute cycles 1..makespan run the pipelined schedule (the last operator
     commits on the makespan cycle); the result lands in the register file on the next edge and is presented on cycle

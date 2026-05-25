@@ -1,10 +1,9 @@
-"""Build cosimulation vector sets: sample inputs, encode to ZKF bits, and compute the float64 reference + tolerance.
+"""
+Build cosimulation vector sets: sample inputs, encode to ZKF bits, and compute the float64 reference + tolerance.
 
 The result is a JSON-serializable spec that a cocotb driver replays against the generated module, checking each output
 against its reference within the tolerance band.
 """
-
-from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -37,7 +36,8 @@ def build_vectors(
     cycles: int,
     sampler: Sampler = generic_sampler,
 ) -> dict[str, Any]:
-    """Produce ``count`` ``(input-bits, expected-floats, tolerance)`` records for the cosim driver.
+    """
+    Produce ``count`` ``(input-bits, expected-floats, tolerance)`` records for the cosim driver.
 
     ``cycles`` is the model's exact in_valid->out_valid latency; the driver asserts the DUT matches it on every vector.
     """

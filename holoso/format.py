@@ -1,13 +1,12 @@
 """The single scalar floating-point format used throughout a synthesized module."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
 class FloatFormat:
-    """A Zubax Kulibin float (ZKF) format: ``wexp`` exponent bits and ``wman`` significand bits.
+    """
+    A Zubax Kulibin float (ZKF) format: ``wexp`` exponent bits and ``wman`` significand bits.
 
     ``wman`` counts the significand *including* the hidden leading bit, matching the ``WMAN`` convention of
     ``holoso_support.v``. The total port width is ``wexp + wman`` (a sign bit, ``wexp`` exponent bits, and

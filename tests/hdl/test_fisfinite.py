@@ -1,7 +1,5 @@
 """Tests for holoso_fisfinite (combinational; y=1 iff exponent != all-ones)."""
 
-from __future__ import annotations
-
 import cocotb
 import numpy as np
 import pytest

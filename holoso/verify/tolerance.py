@@ -1,11 +1,10 @@
-"""The numerical tolerance model for equivalence checking.
+"""
+The numerical tolerance model for equivalence checking.
 
 The generated FSM is allowed to differ from the original Python in the last bits (ZKF rounding plus fast-math
 reassociation), so equivalence is checked with a combined relative + absolute band. The relative term scales with the
 format's unit roundoff and the operation count; the absolute term guards values near zero.
 """
-
-from __future__ import annotations
 
 import math
 

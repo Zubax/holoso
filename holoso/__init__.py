@@ -1,43 +1,22 @@
 """Holoso: a narrow Python-to-Verilog synthesizer for numeric kernels."""
 
-from __future__ import annotations
-
-from .api import synthesize
+from .api import synthesize as synthesize
 from .errors import (
-    HolosoError,
-    MissingIntrinsic,
-    SourceUnavailable,
-    SynthesisError,
-    UnsupportedConstruct,
+    HolosoError as HolosoError,
+    MissingIntrinsic as MissingIntrinsic,
+    SourceUnavailable as SourceUnavailable,
+    SynthesisError as SynthesisError,
+    UnsupportedConstruct as UnsupportedConstruct,
 )
-from .format import FloatFormat
-from .operators import OpKind, StageConfig
+from .format import FloatFormat as FloatFormat
+from .operators import OpKind as OpKind, StageConfig as StageConfig
 from .result import (
-    IIModel,
-    ModuleInterface,
-    Port,
-    SynthesisMetrics,
-    SynthesisResult,
-    write_artifacts,
+    IIModel as IIModel,
+    ModuleInterface as ModuleInterface,
+    Port as Port,
+    SynthesisMetrics as SynthesisMetrics,
+    SynthesisResult as SynthesisResult,
+    write_artifacts as write_artifacts,
 )
 
 __version__ = "0.1.0"
-
-__all__ = [
-    "FloatFormat",
-    "HolosoError",
-    "IIModel",
-    "MissingIntrinsic",
-    "ModuleInterface",
-    "OpKind",
-    "Port",
-    "SourceUnavailable",
-    "StageConfig",
-    "SynthesisError",
-    "SynthesisMetrics",
-    "SynthesisResult",
-    "UnsupportedConstruct",
-    "__version__",
-    "synthesize",
-    "write_artifacts",
-]

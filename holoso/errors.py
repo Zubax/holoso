@@ -1,7 +1,5 @@
 """Exception hierarchy for Holoso synthesis, with optional source locations."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 
 

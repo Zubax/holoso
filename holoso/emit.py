@@ -1,7 +1,5 @@
 """A tiny indentation-aware text builder for emitting Verilog."""
 
-from __future__ import annotations
-
 
 class VerilogWriter:
     """Accumulates 4-space-indented lines. Use :meth:`line` for content and :meth:`push`/:meth:`pop` for nesting."""

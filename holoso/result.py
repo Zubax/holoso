@@ -1,7 +1,5 @@
 """The in-memory result of a synthesis run, plus the only filesystem-touching helpers."""
 
-from __future__ import annotations
-
 import enum
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -32,7 +30,8 @@ class Port:
 
 @dataclass(frozen=True, slots=True)
 class IIModel:
-    """The module's initiation interval -- an exact, statically known cycle count, not an estimate.
+    """
+    The module's initiation interval -- an exact, statically known cycle count, not an estimate.
 
     v0 operator latencies are data-independent, so the scheduler computes the schedule's length precisely. ``makespan``
     is the last commit cycle; ``cycles`` is the exact in_valid->out_valid latency (``makespan + 1``). ``formula`` renders

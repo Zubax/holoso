@@ -1,11 +1,10 @@
-"""Tests for holoso_fconst (elaboration-time constant generator).
+"""
+Tests for holoso_fconst (elaboration-time constant generator).
 
 Each parametrize case rebuilds the DUT with a different (VALUE, INF) pair and checks the static `y` output against
 the float32 bit pattern of the encoded value. There is no clock and no inputs; a single Timer step lets `y` settle
 before the comparison.
 """
-
-from __future__ import annotations
 
 import math
 import os
