@@ -171,14 +171,14 @@ makespan: the last commit cycle (the in_valid->out_valid latency is makespan + 1
 
 ## Operators
 
-Operators are instances of a small class hierarchy under `OperatorDef` (kind-level metadata: `mnemonic`, `arity`,
-`error_ports`, `module_name`). A concrete `Op` is a frozen dataclass whose fields are its parameters;
-each operator owns its own timing, reference semantics, notation, and instantiation params.
-Nothing downstream branches on operator identity.
+Concrete operators are instances of a small class hierarchy under `OperatorDef` (kind-level metadata: `mnemonic`,
+`arity`, `error_ports`, `module_name`). A concrete `Op` is a frozen dataclass whose fields are its parameters; each
+operator owns its own timing, reference semantics, notation, and instantiation params. Nothing downstream branches
+on operator identity.
 
-Generic, per-node-parameterized operators are factories: a `ParameterizedOp` whose
-`instantiate(k)` returns a concrete `Op`. The fully-specified `Op` instance is itself the resource-sharing key (equal
-ops time-share one module).
+Generic, per-node-parameterized operators are factories: a standalone `ParameterizedOp` (separate from `OperatorDef`,
+carrying only its config-time knobs) whose `instantiate(k)` returns a concrete `Op`. The fully-specified `Op`
+instance is itself the resource-sharing key (equal ops time-share one module).
 
 The available operators are chosen by an `OpConfig`, constructed explicitly by the caller and passed into
 `synthesize`; each field fixes one operator's parameters. There is no implicit default configuration.

@@ -41,7 +41,7 @@ class Sgnop(enum.IntFlag):
 
 
 class OperatorDef(ABC):
-    """Kind-level metadata shared by concrete operators and parameterized (generic) operators."""
+    """Kind-level metadata and naming common to the concrete operators."""
 
     mnemonic: ClassVar[str]
     arity: ClassVar[int]
@@ -77,8 +77,11 @@ class Op(OperatorDef, ABC):
         """Operator-specific ``#(.NAME(v))`` params; the backend prepends ``WEXP``/``WMAN``."""
 
 
-class ParameterizedOp(OperatorDef, ABC):
-    """A family of operators needing per-node parameters; a factory producing concrete :class:`Op` instances."""
+class ParameterizedOp(ABC):
+    """
+    A family of operators needing per-node parameters; a factory producing concrete :class:`Op` instances. It carries
+    only its config-time knobs, not operator metadata -- the concrete :class:`Op` it produces owns that.
+    """
 
     @abstractmethod
     def instantiate(self, *params: int) -> Op: ...
@@ -155,17 +158,12 @@ class FDivOp(Op):
         return {"STAGE_INPUT": 1} if self.input_stage else {}
 
 
-class _ILog2(OperatorDef):
-    """Shared ilog2 metadata, inherited by both the concrete op and its generic factory."""
+@dataclass(frozen=True, slots=True)
+class FMulILog2Op(Op):
+    """Exact scaling by a power of two, ``a * 2**k``; the concrete op the factory returns."""
 
     mnemonic: ClassVar[str] = "fmul_ilog2_const"
     arity: ClassVar[int] = 1
-
-
-@dataclass(frozen=True, slots=True)
-class FMulILog2Op(_ILog2, Op):
-    """Exact scaling by a power of two, ``a * 2**k``; the concrete op the factory returns."""
-
     k: int
     decode: int = 0
 
@@ -188,10 +186,9 @@ class FMulILog2Op(_ILog2, Op):
 
 
 @dataclass(frozen=True, slots=True)
-class FMulILog2GenericOp(_ILog2, ParameterizedOp):
+class FMulILog2GenericOp(ParameterizedOp):
     """The ilog2 family: a factory whose ``decode`` knob is baked into every concrete op it instantiates."""
 
-    produces: ClassVar[type[Op]] = FMulILog2Op
     decode: int = 0
 
     def instantiate(self, *params: int) -> FMulILog2Op:
