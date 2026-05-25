@@ -43,7 +43,7 @@ Work will not be accepted unless architected cleanly.
 The Python version to target is 3.14 and newer. No need to ensure compatibility with older versions.
 
 Do not use `from __future__ import annotations`.
-Prefer `list` over `tuple[X, ...]` for homogeneous sequences.
+Prefer `list` over `tuple[X, ...]` for homogeneous sequences (unless immutability is required).
 Do not use `Protocol`, prefer `ABC`/`@abstractmethod` instead for interfaces and abstract base classes.
 Prefer explicit `from X import Y as Y` instead of using `__all__` in `__init__.py` files.
 
