@@ -17,18 +17,6 @@ def cosim_examples(session: nox.Session) -> None:
 
 
 @nox.session
-def synth_examples(session: nox.Session) -> None:
-    """Out-of-context FPGA synthesis (f_max/fabric) of the bundled examples across the available tools."""
-    session.install("-e", ".[test]")
-
-    def syn(*args: str) -> None:
-        session.run("python", "-m", "synth", *args, "--rtl", "lib/kulibin/float/hdl")
-
-    # TODO: the frequency is currently set to a very low setting; we will focus on timing closure a bit later.
-    syn("examples/ekf1.py", "update_x_P", "--name", "ekf1", "--freq", "30.0")
-
-
-@nox.session
 def typecheck(session: nox.Session) -> None:
     session.install("-e", ".[typecheck]")
     session.run("mypy", *session.posargs)
@@ -46,3 +34,15 @@ def synth(session: nox.Session) -> None:
     """Run external FPGA synthesis/place-and-route checks."""
     session.install("-e", ".[test]")
     session.run("python", "-m", "pytest", "-q", "-s", *(session.posargs or ("synth",)))
+
+
+@nox.session(default=False)
+def synth_examples(session: nox.Session) -> None:
+    """Out-of-context FPGA synthesis (f_max/fabric) of the bundled examples across the available tools."""
+    session.install("-e", ".[test]")
+
+    def syn(*args: str) -> None:
+        session.run("python", "-m", "synth", *args, "--rtl", "lib/kulibin/float/hdl")
+
+    # TODO: the frequency is currently set to a very low setting; we will focus on timing closure a bit later.
+    syn("examples/ekf1.py", "update_x_P", "--name", "ekf1", "--freq", "30.0")
