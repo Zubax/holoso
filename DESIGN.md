@@ -277,6 +277,6 @@ follow in later milestones.
 
 ## Deferred
 
-Operator-pool auto-sizing, optional ILP mode, dynamic-trip loops, second controller backend, FloPoCo backend, OOC
-synthesis scaffolding, **microcode-ROM controller** (a packed control word per cycle indexed by `cyc`, replacing the
-`case(cyc)` mux -- important for large kernels), intrinsics (`sqrt`, `sincos`, `exp`, ... -- pending ZKF support).
+Operator-pool auto-sizing, optional ILP mode, dynamic-trip loops, second controller backend, FloPoCo backend,
+**microcode-ROM controller** (a packed control word per cycle indexed by `cyc`, replacing the `case(cyc)` mux --
+important for large kernels), intrinsics (`sqrt`, `sincos`, `exp`, ... -- pending ZKF support).

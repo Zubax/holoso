@@ -24,6 +24,13 @@ Just say `nox`.
 You may find the [zubax-fpga-toolchain](https://github.com/Zubax/fpga-toolchain-docker/pkgs/container/zubax-fpga-toolchain)
 container useful as it comes with all of the required tools out of the box.
 
+### OOC synthesis
+
+The `synth/` directory holds an out-of-context synthesis harness that measures the real post-route f_max and fabric
+usage of a generated module on an FPGA target. It is verification/evaluation tooling and deliberately not part of the
+library API. A flow for one of the supported toolchains takes a `SynthesisResult`, wraps the generated module for
+measurement, and produces a parsed result with a tool-independent $f_\max$ plus tool-specific resource figures.
+
 ## Prior art
 
 Projects in the same domain (Python-source HLS aimed at numerical/algorithmic kernels):
