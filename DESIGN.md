@@ -83,6 +83,8 @@ such as `lower`, `run`, `build`, and backend `generate`; this is fine because th
 Purely module-local helpers and type aliases inside those private modules are underscore-prefixed.
 Same applies to nested subpackages: their internals are private to the subpackage, each has its own API.
 
+The library should not contain entities that are only used in the unit test suite; those belong in the suite.
+
 Passing the object is more ergonomic and strictly more capable than a file: it carries the runtime environment the
 binding-time front-end needs -- `__globals__`, closure cells, default args, and the result of running `__init__` --
 which is what evaluates compile-time tables and follows/inlines imported callables. The object is the compile root; the
