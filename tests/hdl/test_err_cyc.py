@@ -18,7 +18,7 @@ from holoso import FAddOp, FDivOp, FloatFormat, FMulILog2GenericOp, FMulOp, OpCo
 from holoso._backend.verilog import generate
 from holoso._frontend import lower
 from holoso._passes import run
-from holoso._schedule import build, cycle_count
+from holoso._schedule import build
 
 from hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, BENCH_DIR, build_args, drive_reset, sources, start_clock
 
@@ -59,7 +59,7 @@ async def err_cyc_latches_div0(dut) -> None:
         return latched
 
     assert await invoke(2.0) == 0, "no-error run must leave err_cyc clear"
-    # Divide by zero: the fdiv asserts div0 at its commit cycle, the last compute cycle (cycle_count-1).
+    # Divide by zero: the fdiv asserts div0 at its commit cycle, the last compute cycle.
     assert await invoke(0.0) == cycles - 1, "div0 must latch err_cyc to the fdiv commit cycle"
     assert await invoke(2.0) == 0, "the per-initiation reset must clear the previous run's error"
 
@@ -88,6 +88,6 @@ def test_err_cyc(sim: str) -> None:
         test_module="test_err_cyc",
         test_dir=str(BENCH_DIR),
         build_dir=str(build_dir),
-        extra_env={"HOLOSO_ERRCYC": json.dumps({"cycles": cycle_count(lir)})},
+        extra_env={"HOLOSO_ERRCYC": json.dumps({"cycles": lir.initiation_interval})},
         results_xml=str(build_dir / "results.xml"),
     )

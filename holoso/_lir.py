@@ -121,3 +121,13 @@ class Lir:
     def cyc_width(self) -> int:
         """Bit width of the cycle counter (and ``err_cyc``): enough to hold ``0..makespan+1``."""
         return max(1, (self.makespan + 1).bit_length())
+
+    @property
+    def initiation_interval(self) -> int:
+        """
+        Exact in_valid->out_valid latency: the schedule makespan (last commit cycle) plus one cycle to present.
+        Cycle 0 accepts and writes the inputs; compute cycles 1..makespan run the pipelined schedule (the last operator
+        commits on the makespan cycle); the result lands in the register file on the next edge and is presented on cycle
+        makespan+1. Data-independent, so this is exact. Zero-op (pure passthrough) modules present on cycle 1.
+        """
+        return self.makespan + 1

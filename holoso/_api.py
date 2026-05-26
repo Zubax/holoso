@@ -14,8 +14,8 @@ from ._format import FloatFormat
 from ._frontend import lower
 from ._operators import Op, OpConfig
 from ._passes import run
-from ._schedule import build, interface_of, metrics_of
-from ._interface import ModuleInterface, SynthesisMetrics
+from ._schedule import build, interface_of
+from ._interface import ModuleInterface
 
 type Target = Callable[..., Any] | type[object]
 
@@ -26,7 +26,6 @@ class SynthesisResult:
 
     module_name: str
     interface: ModuleInterface
-    metrics: SynthesisMetrics
 
     verilog_output: VerilogOutput
     numerical_model: NumericalModel
@@ -77,15 +76,13 @@ def synthesize(
     module_name: str = name if name is not None else str(getattr(target, "__name__", "holoso_module"))
     lir = build(hir, module_name, instances=operator_instances)
     interface = interface_of(lir)
-    metrics = metrics_of(lir)
     verilog_output = generate_verilog(lir)
-    html_output = generate_html(lir, interface, metrics, verilog_output)
+    html_output = generate_html(lir, interface, verilog_output)
     model = generate_model(lir)
     cocotb_output = generate_testbench(model, interface)
     return SynthesisResult(
         module_name=module_name,
         interface=interface,
-        metrics=metrics,
         verilog_output=verilog_output,
         numerical_model=model,
         cocotb_output=cocotb_output,

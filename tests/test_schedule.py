@@ -11,7 +11,7 @@ from holoso._hir import OpNode
 from holoso._lir import RegRef
 from holoso._operators import FMulILog2Op
 from holoso._passes import run
-from holoso._schedule import build, cycle_count, interface_of, metrics_of
+from holoso._schedule import build, interface_of
 from holoso._scheduler import resolve_pool, schedule_ops
 
 FMT = FloatFormat(6, 18)
@@ -145,11 +145,6 @@ def test_build_lir_small_kernel() -> None:
         "err_cyc",
     ):
         assert expected in names
-    assert iface.ii.cycles == lir.makespan + 1 == cycle_count(lir)
-
-    metrics = metrics_of(lir)
-    assert metrics.makespan == lir.makespan
-    assert metrics.n_float_regs == lir.regfile.nreg
 
 
 def test_build_lir_ekf1() -> None:
@@ -173,11 +168,6 @@ def test_build_lir_ekf1() -> None:
     assert lir.regfile.nrd == 5
     # The 1/x21 numerator survives as a constant immediate.
     assert any(abs(c - 1.0) < 1e-12 for c in lir.consts)
-
-    metrics = metrics_of(lir)
-    assert metrics.operator_instances.get("fdiv") == 1
-    assert metrics.op_count == lir.op_count
-    assert metrics.max_chain_len >= 1
 
 
 def test_port_budget_feasibility() -> None:

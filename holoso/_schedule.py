@@ -17,7 +17,7 @@ from ._lir import (
 )
 from ._operators import Op, Sgnop
 from ._regalloc import Allocation, allocate
-from ._interface import Direction, IIModel, ModuleInterface, Port, PortRole, SynthesisMetrics
+from ._interface import Direction, ModuleInterface, Port, PortRole
 from ._scheduler import Schedule, resolve_pool, schedule_ops
 
 
@@ -186,22 +186,6 @@ def _max_chain_len(hir: Hir) -> int:
     return max(depth.values(), default=0)
 
 
-def cycle_count(lir: Lir) -> int:
-    """
-    Exact in_valid->out_valid latency: the schedule makespan (last commit cycle) plus one cycle to present.
-
-    Cycle 0 accepts and writes the inputs; compute cycles 1..makespan run the pipelined schedule (the last operator
-    commits on the makespan cycle); the result lands in the register file on the next edge and is presented on cycle
-    makespan+1. Data-independent, so this is exact. Zero-op (pure passthrough) modules present on cycle 1.
-    """
-    return lir.makespan + 1
-
-
-def _ii_model(lir: Lir) -> IIModel:
-    formula = f"makespan {lir.makespan} + 1 present cycle"
-    return IIModel(makespan=lir.makespan, cycles=cycle_count(lir), formula=formula)
-
-
 def interface_of(lir: Lir) -> ModuleInterface:
     fmt = lir.fmt
     ports: list[Port] = [
@@ -215,21 +199,4 @@ def interface_of(lir: Lir) -> ModuleInterface:
     ports.extend(Port(f"in_{load.name}", Direction.IN, PortRole.DATA, fmt.width) for load in lir.inputs)
     ports.extend(Port(wire.name, Direction.OUT, PortRole.DATA, fmt.width) for wire in lir.outputs)
     ports.append(Port("err_cyc", Direction.OUT, PortRole.CONTROL, lir.cyc_width))
-    return ModuleInterface(lir.module_name, fmt, ports, _ii_model(lir))
-
-
-def metrics_of(lir: Lir) -> SynthesisMetrics:
-    counts: dict[str, int] = {}
-    for inst in lir.instances:
-        counts[inst.op.mnemonic] = counts.get(inst.op.mnemonic, 0) + 1
-    return SynthesisMetrics(
-        operator_instances=counts,
-        n_float_regs=lir.regfile.nreg,
-        n_bool_regs=0,
-        read_ports=lir.regfile.nrd,
-        write_ports=lir.regfile.nwr,
-        makespan=lir.makespan,
-        ii_cycles=cycle_count(lir),
-        op_count=lir.op_count,
-        max_chain_len=lir.max_chain_len,
-    )
+    return ModuleInterface(lir.module_name, fmt, ports)

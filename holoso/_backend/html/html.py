@@ -13,8 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
 
-from ..._format import FloatFormat
-from ..._interface import ModuleInterface, SynthesisMetrics
+from ..._interface import ModuleInterface
 from ..._lir import Lir, Operand, OperatorInstance, RegRef, ScheduledOp
 from ..._operators import FAddOp, FDivOp, FMulILog2Op, FMulOp, Op
 from ..verilog import VerilogOutput
@@ -59,10 +58,7 @@ def _op_text(op: ScheduledOp) -> str:
     return op.y_sgnop.decorate(f"r{op.dst.index}={body}")
 
 
-def generate(
-    lir: Lir, interface: ModuleInterface, metrics: SynthesisMetrics, verilog_output: VerilogOutput
-) -> HtmlOutput:
-    fmt = lir.fmt
+def generate(lir: Lir, interface: ModuleInterface, verilog_output: VerilogOutput) -> HtmlOutput:
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     link = f"<a href='{_GITHUB_URL}'>Holoso</a>"
     out: list[str] = [
@@ -74,7 +70,7 @@ def generate(
     # The compact summary sections share one wrapping row (metrics, then the narrow constants and interface) so they
     # do not waste page height; the wide register-grid schedule follows below.
     out.append("<div class='toprow'>")
-    out.append(f"<div class='sec'>{_metrics(interface, metrics, fmt)}</div>")
+    out.append(f"<div class='sec'>{_metrics(lir)}</div>")
     out.append(f"<div class='sec'>{_stage_config(lir)}</div>")
     constants = _constants(lir)
     if constants:
@@ -82,31 +78,27 @@ def generate(
     out.append(f"<div class='sec'>{_interface(interface)}</div>")
     out.append(f"<div class='sec modhdrsec'>{_module_header(verilog_output.verilog)}</div>")
     out.append("</div>")
-    if interface.ii.cycles != metrics.ii_cycles:
-        raise RuntimeError(
-            f"report timing mismatch: interface II is {interface.ii.cycles} cycles, "
-            f"metrics II is {metrics.ii_cycles} cycles"
-        )
-    out.append(_schedule(lir, fmt, interface.ii.cycles))
+    out.append(_schedule(lir))
     out.append("</main></body></html>")
     return HtmlOutput(html="".join(out))
 
 
-def _metrics(interface: ModuleInterface, metrics: SynthesisMetrics, fmt: FloatFormat) -> str:
-    instances = " ".join(f"{count}×{kind}" for kind, count in metrics.operator_instances.items())
+def _metrics(lir: Lir) -> str:
+    op_counts: dict[str, int] = {}
+    for inst in lir.instances:
+        op_counts[inst.op.mnemonic] = op_counts.get(inst.op.mnemonic, 0) + 1
     rows: list[tuple[str, object]] = [
-        ("ZKF format", f"e{fmt.wexp}+m{fmt.wman} = {fmt.width}-bit"),
-        ("operator instances", instances or "-"),
-        ("float registers", metrics.n_float_regs),
-        ("regfile R/W ports", f"{metrics.read_ports} / {metrics.write_ports}"),
-        ("schedule makespan", metrics.makespan),
-        ("operations", metrics.op_count),
-        ("II (cycles)", metrics.ii_cycles),
-        ("longest op chain", metrics.max_chain_len),
+        ("ZKF format", f"e{lir.fmt.wexp}+m{lir.fmt.wman} = {lir.fmt.width}-bit"),
+        ("operator instances", " ".join(f"{count}×{kind}" for kind, count in op_counts.items())),
+        ("registers", lir.regfile.nreg),
+        ("regfile R/W ports", f"{lir.regfile.nrd} / {lir.regfile.nwr}"),
+        ("schedule makespan", lir.makespan),
+        ("operations", lir.op_count),
+        ("II (cycles)", lir.initiation_interval),
+        ("longest op chain", lir.max_chain_len),
     ]
     body = "".join(f"<tr><th>{_esc(label)}</th><td>{_esc(str(value))}</td></tr>" for label, value in rows)
-    note = f"Initiation interval = in_valid&rarr;out_valid latency: {_esc(interface.ii.formula)}."
-    return f"<h2>Metrics</h2><table class='metrics'>{body}</table><p class='note'>{note}</p>"
+    return f"<h2>Metrics</h2><table class='metrics'>{body}</table>"
 
 
 def _stage_config(lir: Lir) -> str:
@@ -122,7 +114,7 @@ def _stage_config(lir: Lir) -> str:
             rows += 1
     if rows == 0:
         out.append("<tr><td colspan='3'>(defaults)</td></tr>")
-    out.append("</table><p class='note'>Instantiation params per operator: K and any enabled pipeline stages.</p>")
+    out.append("</table>")
     return "".join(out)
 
 
@@ -245,7 +237,7 @@ def _oc_class(sidx: int, dv: _Dividers) -> str:
     return "oc" + _border_suffix(sidx, dv.stage_thin, dv.stage_thick)
 
 
-def _stage_columns(lir: Lir, fmt: FloatFormat) -> list[tuple[OperatorInstance, int]]:
+def _stage_columns(lir: Lir) -> list[tuple[OperatorInstance, int]]:
     """
     The operator-stage columns, in instance order: ``(instance, stage)`` for each pipeline stage of each operator.
 
@@ -256,7 +248,7 @@ def _stage_columns(lir: Lir, fmt: FloatFormat) -> list[tuple[OperatorInstance, i
     """
     cols: list[tuple[OperatorInstance, int]] = []
     for inst in lir.instances:
-        cols.extend((inst, k) for k in range(inst.op.latency(fmt)))
+        cols.extend((inst, k) for k in range(inst.op.latency(lir.fmt)))
     return cols
 
 
@@ -350,25 +342,25 @@ def _cell_style(
     return "", ""
 
 
-def _schedule(lir: Lir, fmt: FloatFormat, expected_ii: int) -> str:
+def _schedule(lir: Lir) -> str:
     nreg, nconst = lir.regfile.nreg, len(lir.consts)
     columns = _columns_of(lir)
     col_ord = {col: ordinal for ordinal, col in enumerate(columns)}
     compute_cycles = list(range(1, lir.makespan + 1))
     displayed_cycles = 1 + len(compute_cycles)  # input-load cycle 0 plus compute/writeback cycles 1..makespan
-    if displayed_cycles != expected_ii:
+    if displayed_cycles != lir.initiation_interval:
         raise RuntimeError(
-            f"schedule grid displays {displayed_cycles} cycle rows, but computed II is {expected_ii} cycles "
+            f"schedule grid displays {displayed_cycles} cycle rows, but computed II is {lir.initiation_interval} cycles "
             f"(makespan={lir.makespan})"
         )
 
     # The operator-stage block: one square column per pipeline stage of each operator, in instance order.
-    stage_cols = _stage_columns(lir, fmt)
+    stage_cols = _stage_columns(lir)
     n_stage = len(stage_cols)
     stage_base: dict[OperatorInstance, int] = {}
     for sidx, (inst, _k) in enumerate(stage_cols):
         stage_base.setdefault(inst, sidx)
-    group_ends = {stage_base[inst] + inst.op.latency(fmt) - 1 for inst in lir.instances}  # last stage per operator
+    group_ends = {stage_base[inst] + inst.op.latency(lir.fmt) - 1 for inst in lir.instances}  # last stage per operator
 
     # Column seams: 2px at the two block boundaries (constants | pipeline and pipeline | OPERATIONS); 1px at the lighter
     # registers | constants seam and between operator groups.
@@ -444,7 +436,7 @@ def _schedule(lir: Lir, fmt: FloatFormat, expected_ii: int) -> str:
         cls = "gh k" + _border_suffix(nreg + index, dv.data_thin, dv.data_thick)
         out.append(f"<th class='{cls}' rowspan='2'><span>c{index}</span></th>")
     for inst in lir.instances:
-        lat = inst.op.latency(fmt)
+        lat = inst.op.latency(lir.fmt)
         name = f"{inst.op.mnemonic}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
         seam = _border_suffix(stage_base[inst] + lat - 1, dv.stage_thin, dv.stage_thick)
         out.append(

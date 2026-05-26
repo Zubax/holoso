@@ -50,6 +50,9 @@ class NumericalModel:
     Call it with the input scalars in module-port order; it returns the output scalars in module-port order. The result
     matches the generated Verilog bit-for-bit because every operator's result is rounded to the ZKF format just as the
     hardware rounds it. The model holds the scheduled ``Lir`` and is picklable, so a generated testbench can embed it.
+
+    TODO: When branching is implemented, the numerical model will need to be extended such that it also predicts the
+          cycle latency of each transaction. This is necessary for cycle-accurate verification.
     """
 
     lir: Lir
