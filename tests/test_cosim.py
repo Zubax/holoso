@@ -72,7 +72,6 @@ def test_cosim_division(sim: str) -> None:
     _run_cosim(sim, blend, FloatFormat(6, 18), "blend", count=64)
 
 
-@pytest.mark.slow
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_ekf1(sim: str) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))

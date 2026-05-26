@@ -6,7 +6,7 @@ nox.options.reuse_existing_virtualenvs = True
 @nox.session
 def tests(session: nox.Session) -> None:
     session.install("-e", ".[test]")
-    session.run("python", "-m", "pytest", "-q", *(session.posargs or ("-m", "not slow", "tests")))
+    session.run("python", "-m", "pytest", "-q", "tests")
 
 
 @nox.session

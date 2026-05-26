@@ -26,11 +26,12 @@ class SynthesisResult:
 
     module_name: str
     interface: ModuleInterface
+    metrics: SynthesisMetrics
+
     verilog_output: VerilogOutput
-    model: NumericalModel
+    numerical_model: NumericalModel
     cocotb_output: CocotbOutput
     html_output: HtmlOutput
-    metrics: SynthesisMetrics
 
     def write(self, out_dir: Path | str) -> dict[str, Path]:
         """
@@ -84,9 +85,9 @@ def synthesize(
     return SynthesisResult(
         module_name=module_name,
         interface=interface,
+        metrics=metrics,
         verilog_output=verilog_output,
-        model=model,
+        numerical_model=model,
         cocotb_output=cocotb_output,
         html_output=html_output,
-        metrics=metrics,
     )
