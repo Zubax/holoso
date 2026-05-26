@@ -140,10 +140,9 @@ def generate(lir: Lir) -> VerilogOutput:
 
 
 def _emit_header(w: _Writer, lir: Lir, cycw: int) -> None:
+    fmt = lir.regfile.fmt
     w.lines('`include "holoso_support.vh"', "`timescale 1ns/1ps", "")
-    w.line(
-        f"// Float format: exponent {lir.fmt.wexp} bits, significand {lir.fmt.wman} bits, total {lir.fmt.width} bits."
-    )
+    w.line(f"// Float format: exponent {fmt.wexp} bits, significand {fmt.wman} bits, total {fmt.width} bits.")
     w.line(f"module {lir.module_name} (")
     w.push()
     _emit_port_group(w, "CONTROL PORTS", "Clock/reset and ready/valid handshake for one scheduled invocation.")
@@ -159,10 +158,10 @@ def _emit_header(w: _Writer, lir: Lir, cycw: int) -> None:
         w.line(line)
     _emit_port_group(w, "INPUT PORTS", "Latched when in_valid && in_ready.")
     for load in lir.inputs:
-        w.line(f"input  wire [{lir.fmt.width - 1}:0] in_{load.name},")
+        w.line(f"input  wire [{fmt.width - 1}:0] in_{load.name},")
     _emit_port_group(w, "OUTPUT PORTS", "Valid when out_valid is pulsed.")
     for wire in lir.outputs:
-        w.line(f"output wire [{lir.fmt.width - 1}:0] {wire.name},")
+        w.line(f"output wire [{fmt.width - 1}:0] {wire.name},")
     _emit_port_group(w, "DIAGNOSTIC PORTS", "Runtime diagnostics available while the module is running.")
     # err_cyc: 0 = no error; otherwise the (last) cycle an error was detected. |err_cyc answers "any error?".
     w.line(f"output reg  [{cycw - 1}:0] err_cyc")
@@ -175,8 +174,9 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
 
 
 def _emit_localparams(w: _Writer, lir: Lir, waddr: int, cycw: int) -> None:
-    w.line(f"localparam WEXP  = {lir.fmt.wexp};  // Float exponent bits fixed by the static schedule")
-    w.line(f"localparam WMAN  = {lir.fmt.wman};  // Float mantissa bits fixed by the static schedule")
+    fmt = lir.regfile.fmt
+    w.line(f"localparam WEXP  = {fmt.wexp};  // Float exponent bits fixed by the static schedule")
+    w.line(f"localparam WMAN  = {fmt.wman};  // Float mantissa bits fixed by the static schedule")
     w.line("localparam W     = WEXP + WMAN;")
     w.line(
         f"localparam NREG  = {max(1, lir.regfile.nreg)};  // >= 1; the bank is unused when no value needs a register"
@@ -226,10 +226,11 @@ def _emit_declarations(w: _Writer, lir: Lir) -> None:
 
 
 def _emit_consts(w: _Writer, lir: Lir) -> None:
-    width = lir.fmt.width
+    fmt = lir.regfile.fmt
+    width = fmt.width
     digits = (width + 3) // 4
     for index, value in enumerate(lir.consts):
-        w.line(f"wire [W-1:0] const_{index} = {width}'h{lir.fmt.encode(value):0{digits}x};  // {value!r}")
+        w.line(f"wire [W-1:0] const_{index} = {width}'h{fmt.encode(value):0{digits}x};  // {value!r}")
     if lir.consts:
         w.line("")
 

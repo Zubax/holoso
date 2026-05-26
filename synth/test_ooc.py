@@ -29,9 +29,9 @@ def wide(a: float, b: float, c: float, d: float, e: float, f: float) -> list[flo
     return [a * b + c, d - e * f, a + d]
 
 
-OPS = OpConfig(fadd=FAddOp(), fmul=FMulOp(), fdiv=FDivOp(), fmul_ilog2=FMulILog2GenericOp())
-KERN: SynthesisResult = synthesize(kern, float_format=FMT, ops=OPS, name="kern")
-WIDE: SynthesisResult = synthesize(wide, float_format=FMT, ops=OPS, name="wide")
+OPS = OpConfig(fadd=FAddOp(FMT), fmul=FMulOp(FMT), fdiv=FDivOp(FMT), fmul_ilog2=FMulILog2GenericOp(FMT))
+KERN: SynthesisResult = synthesize(kern, ops=OPS, name="kern")
+WIDE: SynthesisResult = synthesize(wide, ops=OPS, name="wide")
 
 requires_diamond = pytest.mark.skipif(not DiamondEcp5Flow().available(), reason="Lattice Diamond not found")
 requires_vivado = pytest.mark.skipif(not VivadoFlow().available(), reason="Vivado not found")

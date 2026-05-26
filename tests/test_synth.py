@@ -15,11 +15,15 @@ def _kernel(a, b):  # type: ignore[no-untyped-def]  # module-level so inspect.ge
     return (a - b) * 0.25 + a * b
 
 
-OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())
+FMT32 = FloatFormat(8, 24)
+
+
+def _ops(fmt: FloatFormat = FMT32) -> OpConfig:
+    return OpConfig(FAddOp(fmt), FMulOp(fmt), FDivOp(fmt), FMulILog2GenericOp(fmt))
 
 
 def test_synthesize_small_kernel_result() -> None:
-    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
+    result = holoso.synthesize(_kernel, ops=_ops())
     assert result.module_name == "_kernel"
     assert "module _kernel" in result.verilog_output.verilog
     assert "holoso_regfile" in result.verilog_output.support_files["holoso_support.v"]
@@ -30,14 +34,43 @@ def test_synthesize_small_kernel_result() -> None:
     assert "<html" in result.html_output.html.lower()
     names = [p.name for p in result.interface.ports]
     assert "in_a" in names and "out_0" in names and "err_cyc" in names
+    assert all(isinstance(p, holoso.DataInputPort) for p in result.interface.input_ports)
+    assert all(isinstance(p, holoso.DataOutputPort) for p in result.interface.output_ports)
+    assert any(isinstance(p, holoso.ControlOutputPort) and p.name == "err_cyc" for p in result.interface.control_ports)
+    assert all(
+        isinstance(p.scalar_type, holoso.FloatType) and p.scalar_type.fmt == FMT32 for p in result.interface.input_ports
+    )
+
+
+def test_op_config_rejects_mixed_float_formats() -> None:
+    fmt24 = FloatFormat(6, 18)
+    ops = OpConfig(FAddOp(FMT32), FMulOp(fmt24), FDivOp(FMT32), FMulILog2GenericOp(FMT32))
+    with pytest.raises(ValueError, match="same format"):
+        _ = ops.float_format
+
+
+def test_constant_only_module_keeps_operator_configured_format() -> None:
+    def const_only():  # type: ignore[no-untyped-def]
+        return 3.5
+
+    fmt = FloatFormat(6, 18)
+    result = holoso.synthesize(const_only, ops=_ops(fmt))
+    assert result.numerical_model.float_format == fmt
+    assert "localparam WEXP  = 6;" in result.verilog_output.verilog
+    assert "localparam WMAN  = 18;" in result.verilog_output.verilog
+    assert all(p.width == fmt.width for p in result.interface.output_ports)
 
 
 def test_synthesize_threads_pipeline_stages() -> None:
-    base = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
+    base = holoso.synthesize(_kernel, ops=_ops())
     staged = holoso.synthesize(
         _kernel,
-        float_format=FloatFormat(8, 24),
-        ops=OpConfig(FAddOp(decode=1), FMulOp(product=1), FDivOp(), FMulILog2GenericOp()),
+        ops=OpConfig(
+            FAddOp(FMT32, stage_decode=1),
+            FMulOp(FMT32, stage_product=1),
+            FDivOp(FMT32),
+            FMulILog2GenericOp(FMT32),
+        ),
     )
     assert "STAGE_" not in base.verilog_output.verilog  # default stages emit no STAGE_* instance params
     assert ".STAGE_DECODE(1)" in staged.verilog_output.verilog and ".STAGE_PRODUCT(1)" in staged.verilog_output.verilog
@@ -52,16 +85,16 @@ def test_rejects_non_finite_constants() -> None:
 
     for fn in (overflow, folds_to_nan):
         with pytest.raises(holoso.UnsupportedConstruct):
-            holoso.synthesize(fn, float_format=FloatFormat(8, 24), ops=OPS)
+            holoso.synthesize(fn, ops=_ops())
 
 
 def test_generated_testbench_is_valid_python() -> None:
-    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
+    result = holoso.synthesize(_kernel, ops=_ops())
     compile(result.cocotb_output.testbench, "<generated-testbench>", "exec")
 
 
 def test_write_artifacts(tmp_path: Path) -> None:
-    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
+    result = holoso.synthesize(_kernel, ops=_ops())
     paths = result.write(tmp_path)
     assert set(paths) == {"_kernel.v", "holoso_support.v", "holoso_support.vh", "test__kernel.py", "_kernel.html"}
     assert (tmp_path / "_kernel.v").exists()
@@ -72,7 +105,7 @@ def test_write_artifacts(tmp_path: Path) -> None:
 
 
 def test_report_has_expected_sections() -> None:
-    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
+    result = holoso.synthesize(_kernel, ops=_ops())
     report = result.html_output.html
     header_html = report.split("<pre class='modhdr'", 1)[1].split("</code></pre>", 1)[0]
     header_html = header_html.split("<code>", 1)[1]
@@ -103,7 +136,7 @@ def test_report_has_expected_sections() -> None:
 
 
 def test_report_schedule_displays_exact_ii_cycle_rows() -> None:
-    result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
+    result = holoso.synthesize(_kernel, ops=_ops())
     grid = result.html_output.html.split("<table class='grid'>", 1)[1].split("</table>", 1)[0]
     cycle_labels = re.findall(r"<td class='clk'>([^<]+)</td>", grid)
 
@@ -116,7 +149,8 @@ def test_synthesize_ekf1() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1
 
-    result = holoso.synthesize(ekf1.update_x_P, float_format=FloatFormat(6, 18), ops=OPS)
+    fmt = FloatFormat(6, 18)
+    result = holoso.synthesize(ekf1.update_x_P, ops=_ops(fmt))
     assert result.module_name == "update_x_P"
     assert len(result.interface.output_ports) == 9
     compile(result.cocotb_output.testbench, "<generated-testbench>", "exec")
@@ -128,4 +162,4 @@ def test_class_target_is_unsupported() -> None:
             return x
 
     with pytest.raises(holoso.UnsupportedConstruct):
-        holoso.synthesize(Stateful, float_format=FloatFormat(6, 18), ops=OPS)
+        holoso.synthesize(Stateful, ops=_ops(FloatFormat(6, 18)))

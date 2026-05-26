@@ -3,7 +3,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ._format import FloatFormat
 from ._operators import Op, Sgnop
 
 type ValueId = int
@@ -80,7 +79,7 @@ class OpNode:
     A selected hardware operator use with folded sign-ops. ``op`` is the fully-specified operator;
     ``b`` is ``None`` for a unary operator. ``operands``/``operand_sgnops`` expose the filled positions
     (length ``op.arity``) so consumers iterate positionally without branching on operator identity.
-    Latency is ``op.latency(fmt)``.
+    Latency is ``op.latency``.
     """
 
     op: Op
@@ -114,7 +113,6 @@ class OutputPort:
 class Hir:
     """A complete single-block HIR: the value DAG, ordered inputs, and ordered named outputs."""
 
-    fmt: FloatFormat
     nodes: dict[ValueId, Node]
     input_ids: list[ValueId]
     outputs: list[OutputPort]
@@ -131,8 +129,7 @@ class Hir:
 class HirBuilder:
     """Builds an :class:`Hir`, interning pure nodes so identical subexpressions share one value id (structural CSE)."""
 
-    def __init__(self, fmt: FloatFormat) -> None:
-        self.fmt = fmt
+    def __init__(self) -> None:
         self._nodes: dict[ValueId, Node] = {}
         self._intern: dict[Node, ValueId] = {}
         self._input_ids: list[ValueId] = []
@@ -184,7 +181,6 @@ class HirBuilder:
 
     def finish(self) -> Hir:
         return Hir(
-            fmt=self.fmt,
             nodes=dict(self._nodes),
             input_ids=list(self._input_ids),
             outputs=list(self._outputs),

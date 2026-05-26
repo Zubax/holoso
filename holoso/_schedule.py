@@ -7,18 +7,19 @@ from ._errors import UnsupportedConstruct
 from ._hir import Const, Hir, InPort, OpNode, ValueId
 from ._lir import (
     ConstRef,
+    FloatRegFileLayout,
     InputLoad,
     Lir,
     Operand,
     OutputWire,
-    RegFileLayout,
     RegRef,
     ScheduledOp,
 )
-from ._operators import Op, Sgnop
+from ._operators import FloatOp, Op, Sgnop
 from ._regalloc import Allocation, allocate
-from ._interface import Direction, ModuleInterface, Port, PortRole
+from ._interface import ControlInputPort, ControlOutputPort, DataInputPort, DataOutputPort, ModuleInterface, Port
 from ._scheduler import Schedule, resolve_pool, schedule_ops
+from ._type import FloatFormat, FloatType
 
 
 def _opnode(hir: Hir, vid: ValueId) -> OpNode:
@@ -27,20 +28,21 @@ def _opnode(hir: Hir, vid: ValueId) -> OpNode:
     return node
 
 
-def build(hir: Hir, module_name: str, instances: Mapping[type[Op], int] | None = None) -> Lir:
+def build(hir: Hir, module_name: str, *, fmt: FloatFormat, instances: Mapping[type[Op], int] | None = None) -> Lir:
     """
     Schedule, bind, and register-allocate a lowered HIR into a pipelined microprogram.
     """
+    _check_float_ops_match(hir, fmt)
     pool = resolve_pool(hir, instances)
     sched = schedule_ops(hir, pool)
     alloc = allocate(hir, sched.issue_cycle, sched.makespan)
     consts, const_index = _build_const_pool(hir)
     return Lir(
-        fmt=hir.fmt,
         module_name=module_name,
         instances=sched.instances,
         consts=consts,
-        regfile=RegFileLayout(
+        regfile=FloatRegFileLayout(
+            fmt=fmt,
             nreg=alloc.nreg,
             nrd=_compute_nrd(hir, sched, alloc),
             nwr=_compute_nwr(hir, sched),
@@ -53,6 +55,12 @@ def build(hir: Hir, module_name: str, instances: Mapping[type[Op], int] | None =
         op_count=sum(1 for node in hir.nodes.values() if isinstance(node, OpNode)),
         max_chain_len=_max_chain_len(hir),
     )
+
+
+def _check_float_ops_match(hir: Hir, fmt: FloatFormat) -> None:
+    for node in hir.nodes.values():
+        if isinstance(node, OpNode) and isinstance(node.op, FloatOp) and node.op.fmt != fmt:
+            raise ValueError(f"operator {node.op.mnemonic} uses {node.op.fmt}, but the float regfile uses {fmt}")
 
 
 def _build_const_pool(hir: Hir) -> tuple[list[float], dict[ValueId, int]]:
@@ -102,7 +110,7 @@ def _build_ops(hir: Hir, sched: Schedule, alloc: Allocation, const_index: dict[V
                 y_sgnop=op.y_sgnop,
                 dst=RegRef(alloc.assign[vid]),
                 issue_cycle=sched.issue_cycle[vid],
-                latency=op.op.latency(hir.fmt),
+                latency=op.op.latency,
             )
         )
     return ops
@@ -153,7 +161,7 @@ def _compute_nwr(hir: Hir, sched: Schedule) -> int:
     """
     per_commit: dict[int, int] = {}
     for vid, cycle in sched.issue_cycle.items():
-        commit = cycle + _opnode(hir, vid).op.latency(hir.fmt)
+        commit = cycle + _opnode(hir, vid).op.latency
         per_commit[commit] = per_commit.get(commit, 0) + 1
     peak_commits = max(per_commit.values(), default=0)
     return max(peak_commits, 1)
@@ -183,16 +191,16 @@ def _max_chain_len(hir: Hir) -> int:
 
 
 def interface_of(lir: Lir) -> ModuleInterface:
-    fmt = lir.fmt
+    scalar_type = FloatType(lir.regfile.fmt)
     ports: list[Port] = [
-        Port("clk", Direction.IN, PortRole.CONTROL, 1),
-        Port("rst", Direction.IN, PortRole.CONTROL, 1),
-        Port("in_valid", Direction.IN, PortRole.CONTROL, 1),
-        Port("in_ready", Direction.OUT, PortRole.CONTROL, 1),
-        Port("out_valid", Direction.OUT, PortRole.CONTROL, 1),
-        Port("out_ready", Direction.IN, PortRole.CONTROL, 1),
+        ControlInputPort("clk", 1),
+        ControlInputPort("rst", 1),
+        ControlInputPort("in_valid", 1),
+        ControlOutputPort("in_ready", 1),
+        ControlOutputPort("out_valid", 1),
+        ControlInputPort("out_ready", 1),
     ]
-    ports.extend(Port(f"in_{load.name}", Direction.IN, PortRole.DATA, fmt.width) for load in lir.inputs)
-    ports.extend(Port(wire.name, Direction.OUT, PortRole.DATA, fmt.width) for wire in lir.outputs)
-    ports.append(Port("err_cyc", Direction.OUT, PortRole.CONTROL, lir.cyc_width))
-    return ModuleInterface(lir.module_name, fmt, ports)
+    ports.extend(DataInputPort(f"in_{load.name}", scalar_type) for load in lir.inputs)
+    ports.extend(DataOutputPort(wire.name, scalar_type) for wire in lir.outputs)
+    ports.append(ControlOutputPort("err_cyc", lir.cyc_width))
+    return ModuleInterface(lir.module_name, ports)

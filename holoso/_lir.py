@@ -7,8 +7,8 @@ registers, with which folded sign-ops.
 
 from dataclasses import dataclass
 
-from ._format import FloatFormat
 from ._operators import Op, Sgnop
+from ._type import FloatFormat
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +96,10 @@ class OutputWire:
 
 
 @dataclass(frozen=True, slots=True)
-class RegFileLayout:
+class FloatRegFileLayout:
+    """The floating-point register file resource and its scalar format."""
+
+    fmt: FloatFormat
     nreg: int  # number of float registers (N)
     nrd: int  # combinational read ports
     nwr: int  # synchronous write ports
@@ -105,11 +108,10 @@ class RegFileLayout:
 
 @dataclass(frozen=True, slots=True)
 class Lir:
-    fmt: FloatFormat
     module_name: str
     instances: list[OperatorInstance]
     consts: list[float]  # constant pool: index -> value
-    regfile: RegFileLayout
+    regfile: FloatRegFileLayout
     inputs: list[InputLoad]  # ordered as the function parameters
     ops: list[ScheduledOp]  # the pipelined schedule, ordered by (issue_cycle, value-id)
     outputs: list[OutputWire]

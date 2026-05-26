@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import ClassVar
 
-from ._format import FloatFormat
+from ._type import FloatFormat
 
 
 class Sgnop(enum.IntFlag):
@@ -62,8 +62,10 @@ class Op(OperatorDef, ABC):
     ``dataclasses.astuple`` sort over them) be recognized uniformly.
     """
 
+    @property
     @abstractmethod
-    def latency(self, fmt: FloatFormat) -> int: ...
+    def latency(self) -> int:
+        """Exact cycle latency of this fully-specified operator instance."""
 
     @abstractmethod
     def evaluate(self, *operands: float) -> float: ...
@@ -80,7 +82,7 @@ class Op(OperatorDef, ABC):
 class ParameterizedOp(ABC):
     """
     A family of operators needing per-node parameters; a factory producing concrete :class:`Op` instances. It carries
-    only its config-time knobs, not operator metadata -- the concrete :class:`Op` it produces owns that.
+    only config-time values, not operator metadata -- the concrete :class:`Op` it produces owns that.
     """
 
     @abstractmethod
@@ -88,20 +90,35 @@ class ParameterizedOp(ABC):
 
 
 @dataclass(frozen=True, slots=True)
-class FAddOp(Op):
+class FloatOp(Op, ABC):
+    """A fully-specified floating-point operator bound to one ZKF format."""
+
+    fmt: FloatFormat
+
+
+@dataclass(frozen=True, slots=True)
+class FloatParameterizedOp(ParameterizedOp, ABC):
+    """A floating-point operator family bound to one ZKF format."""
+
+    fmt: FloatFormat
+
+
+@dataclass(frozen=True, slots=True)
+class FAddOp(FloatOp):
     mnemonic: ClassVar[str] = "fadd"
     arity: ClassVar[int] = 2
-    decode: int = 0
-    align: int = 0
+    stage_decode: int = 0
+    stage_align: int = 0
 
     def __post_init__(self) -> None:
-        if self.decode not in (0, 1):
-            raise ValueError(f"decode must be 0 or 1; got {self.decode!r}")
-        if self.align not in (0, 1):
-            raise ValueError(f"align must be 0 or 1; got {self.align!r}")
+        if self.stage_decode not in (0, 1):
+            raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
+        if self.stage_align not in (0, 1):
+            raise ValueError(f"stage_align must be 0 or 1; got {self.stage_align!r}")
 
-    def latency(self, fmt: FloatFormat) -> int:
-        return 6 + self.decode + self.align
+    @property
+    def latency(self) -> int:
+        return 6 + self.stage_decode + self.stage_align
 
     def evaluate(self, *operands: float) -> float:
         a, b = operands
@@ -113,25 +130,26 @@ class FAddOp(Op):
 
     def hdl_params(self) -> dict[str, int]:
         params: dict[str, int] = {}
-        if self.decode:
+        if self.stage_decode:
             params["STAGE_DECODE"] = 1
-        if self.align:
+        if self.stage_align:
             params["STAGE_ALIGN"] = 1
         return params
 
 
 @dataclass(frozen=True, slots=True)
-class FMulOp(Op):
+class FMulOp(FloatOp):
     mnemonic: ClassVar[str] = "fmul"
     arity: ClassVar[int] = 2
-    product: int = 0
+    stage_product: int = 0
 
     def __post_init__(self) -> None:
-        if self.product not in (0, 1):
-            raise ValueError(f"product must be 0 or 1; got {self.product!r}")
+        if self.stage_product not in (0, 1):
+            raise ValueError(f"stage_product must be 0 or 1; got {self.stage_product!r}")
 
-    def latency(self, fmt: FloatFormat) -> int:
-        return 3 + self.product
+    @property
+    def latency(self) -> int:
+        return 3 + self.stage_product
 
     def evaluate(self, *operands: float) -> float:
         a, b = operands
@@ -142,23 +160,24 @@ class FMulOp(Op):
         return f"{a}×{b}"
 
     def hdl_params(self) -> dict[str, int]:
-        return {"STAGE_PRODUCT": 1} if self.product else {}
+        return {"STAGE_PRODUCT": 1} if self.stage_product else {}
 
 
 @dataclass(frozen=True, slots=True)
-class FDivOp(Op):
+class FDivOp(FloatOp):
     mnemonic: ClassVar[str] = "fdiv"
     arity: ClassVar[int] = 2
     error_ports: ClassVar[list[str]] = ["div0"]
-    input_stage: int = 0
+    stage_input: int = 0
 
     def __post_init__(self) -> None:
-        if self.input_stage not in (0, 1):
-            raise ValueError(f"input_stage must be 0 or 1; got {self.input_stage!r}")
+        if self.stage_input not in (0, 1):
+            raise ValueError(f"stage_input must be 0 or 1; got {self.stage_input!r}")
 
-    def latency(self, fmt: FloatFormat) -> int:
-        w = fmt.wman
-        return 4 + ((w + 2 + ((w + 2) % 2)) // 2) + self.input_stage
+    @property
+    def latency(self) -> int:
+        w = self.fmt.wman
+        return 4 + ((w + 2 + ((w + 2) % 2)) // 2) + self.stage_input
 
     def evaluate(self, *operands: float) -> float:
         a, b = operands
@@ -169,25 +188,26 @@ class FDivOp(Op):
         return f"{a}/{b}"
 
     def hdl_params(self) -> dict[str, int]:
-        return {"STAGE_INPUT": 1} if self.input_stage else {}
+        return {"STAGE_INPUT": 1} if self.stage_input else {}
 
 
 @dataclass(frozen=True, slots=True)
-class FMulILog2Op(Op):
+class FMulILog2Op(FloatOp):
     """Exact scaling by a power of two, ``a * 2**k``; the concrete op the factory returns."""
 
     mnemonic: ClassVar[str] = "fmul_ilog2_const"
     arity: ClassVar[int] = 1
     k: int
-    decode: int = 0
+    stage_decode: int = 0
 
     def __post_init__(self) -> None:
         # k's range is format-dependent (|k| < 2**(WEXP-1)) and is enforced during lowering, not here.
-        if self.decode not in (0, 1):
-            raise ValueError(f"decode must be 0 or 1; got {self.decode!r}")
+        if self.stage_decode not in (0, 1):
+            raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
 
-    def latency(self, fmt: FloatFormat) -> int:
-        return 1 + self.decode
+    @property
+    def latency(self) -> int:
+        return 1 + self.stage_decode
 
     def evaluate(self, *operands: float) -> float:
         (a,) = operands
@@ -199,24 +219,24 @@ class FMulILog2Op(Op):
 
     def hdl_params(self) -> dict[str, int]:
         params: dict[str, int] = {"K": self.k}
-        if self.decode:
+        if self.stage_decode:
             params["STAGE_DECODE"] = 1
         return params
 
 
 @dataclass(frozen=True, slots=True)
-class FMulILog2GenericOp(ParameterizedOp):
-    """The ilog2 family: a factory whose ``decode`` knob is baked into every concrete op it instantiates."""
+class FMulILog2GenericOp(FloatParameterizedOp):
+    """The ilog2 family: a factory whose stage knob is baked into every concrete op it instantiates."""
 
-    decode: int = 0
+    stage_decode: int = 0
 
     def __post_init__(self) -> None:
-        if self.decode not in (0, 1):
-            raise ValueError(f"decode must be 0 or 1; got {self.decode!r}")
+        if self.stage_decode not in (0, 1):
+            raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
 
     def instantiate(self, *params: int) -> FMulILog2Op:
         (k,) = params
-        return FMulILog2Op(k=k, decode=self.decode)
+        return FMulILog2Op(fmt=self.fmt, k=k, stage_decode=self.stage_decode)
 
 
 # Order is load-bearing: it reproduces the operator-instance numbering the scheduler and backend emit.
@@ -226,11 +246,19 @@ ALL_OP_CLASSES: list[type[Op]] = [FAddOp, FMulOp, FDivOp, FMulILog2Op]
 @dataclass(frozen=True)
 class OpConfig:
     """
-    The operator configuration threaded into synthesis; each field fixes one operator's parameters. Constructed
-    explicitly by the caller (no defaults), held on the pipeline and never hashed.
+    The operator configuration threaded into synthesis; each field fixes one operator's format and parameters.
+    Constructed explicitly by the caller (no defaults), held on the pipeline and never hashed.
     """
 
     fadd: FAddOp
     fmul: FMulOp
     fdiv: FDivOp
     fmul_ilog2: FMulILog2GenericOp
+
+    @property
+    def float_format(self) -> FloatFormat:
+        formats = {self.fadd.fmt, self.fmul.fmt, self.fdiv.fmt, self.fmul_ilog2.fmt}
+        if len(formats) != 1:
+            ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
+            raise ValueError(f"all floating-point operators must use the same format; got {ordered}")
+        return self.fadd.fmt

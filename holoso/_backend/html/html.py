@@ -84,11 +84,12 @@ def generate(lir: Lir, interface: ModuleInterface, verilog_output: VerilogOutput
 
 
 def _metrics(lir: Lir) -> str:
+    fmt = lir.regfile.fmt
     op_counts: dict[str, int] = {}
     for inst in lir.instances:
         op_counts[inst.op.mnemonic] = op_counts.get(inst.op.mnemonic, 0) + 1
     rows: list[tuple[str, object]] = [
-        ("ZKF format", f"e{lir.fmt.wexp}+m{lir.fmt.wman} = {lir.fmt.width}-bit"),
+        ("ZKF format", f"e{fmt.wexp}+m{fmt.wman} = {fmt.width}-bit"),
         ("operator instances", " ".join(f"{count}×{kind}" for kind, count in op_counts.items())),
         ("registers", lir.regfile.nreg),
         ("regfile R/W ports", f"{lir.regfile.nrd} / {lir.regfile.nwr}"),
@@ -122,13 +123,16 @@ def _interface(interface: ModuleInterface) -> str:
     out = ["<h2>Interface</h2><div class='ifaces'>"]
     ctrl = interface.control_ports
     out.append(f"<div class='iface'><h3>ctrl ({len(ctrl)})</h3><table><tr><th>port</th><th>dir</th><th>bits</th></tr>")
-    for port in ctrl:
-        out.append(f"<tr><td>{_esc(port.name)}</td><td>{port.direction.value}</td><td>{port.width}</td></tr>")
+    for control_port in ctrl:
+        out.append(
+            f"<tr><td>{_esc(control_port.name)}</td><td>{control_port.direction}</td>"
+            f"<td>{control_port.width}</td></tr>"
+        )
     out.append("</table></div>")
     for title, ports in (("in", interface.input_ports), ("out", interface.output_ports)):
         out.append(f"<div class='iface'><h3>{title} ({len(ports)})</h3><table><tr><th>port</th><th>bits</th></tr>")
-        for port in ports:
-            out.append(f"<tr><td>{_esc(port.name)}</td><td>{port.width}</td></tr>")
+        for data_port in ports:
+            out.append(f"<tr><td>{_esc(data_port.name)}</td><td>{data_port.width}</td></tr>")
         out.append("</table></div>")
     out.append("</div>")
     return "".join(out)
@@ -248,7 +252,7 @@ def _stage_columns(lir: Lir) -> list[tuple[OperatorInstance, int]]:
     """
     cols: list[tuple[OperatorInstance, int]] = []
     for inst in lir.instances:
-        cols.extend((inst, k) for k in range(inst.op.latency(lir.fmt)))
+        cols.extend((inst, k) for k in range(inst.op.latency))
     return cols
 
 
@@ -360,7 +364,7 @@ def _schedule(lir: Lir) -> str:
     stage_base: dict[OperatorInstance, int] = {}
     for sidx, (inst, _k) in enumerate(stage_cols):
         stage_base.setdefault(inst, sidx)
-    group_ends = {stage_base[inst] + inst.op.latency(lir.fmt) - 1 for inst in lir.instances}  # last stage per operator
+    group_ends = {stage_base[inst] + inst.op.latency - 1 for inst in lir.instances}  # last stage per operator
 
     # Column seams: 2px at the two block boundaries (constants | pipeline and pipeline | OPERATIONS); 1px at the lighter
     # registers | constants seam and between operator groups.
@@ -436,7 +440,7 @@ def _schedule(lir: Lir) -> str:
         cls = "gh k" + _border_suffix(nreg + index, dv.data_thin, dv.data_thick)
         out.append(f"<th class='{cls}' rowspan='2'><span>c{index}</span></th>")
     for inst in lir.instances:
-        lat = inst.op.latency(lir.fmt)
+        lat = inst.op.latency
         name = f"{inst.op.mnemonic}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
         seam = _border_suffix(stage_base[inst] + lat - 1, dv.stage_thin, dv.stage_thick)
         out.append(

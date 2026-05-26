@@ -13,7 +13,7 @@ from holoso._schedule import build, interface_of
 from holoso._scheduler import resolve_pool, schedule_ops
 
 FMT = FloatFormat(6, 18)
-OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())
+OPS = OpConfig(FAddOp(FMT), FMulOp(FMT), FDivOp(FMT), FMulILog2GenericOp(FMT))
 
 
 def _muls(hir):  # type: ignore[no-untyped-def]
@@ -24,7 +24,7 @@ def test_schedule_respects_dependencies() -> None:
     def f(a, b):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
-    hir = run(lower(f, FMT), OPS)
+    hir = run(lower(f), OPS)
     sched = schedule_ops(hir, resolve_pool(hir, None))
     for vid, cycle in sched.issue_cycle.items():
         op = hir.nodes[vid]
@@ -34,14 +34,14 @@ def test_schedule_respects_dependencies() -> None:
             node = hir.nodes[operand] if operand is not None else None
             if isinstance(node, OpNode):
                 # A consumer issues no earlier than the producer's commit + 1 (read-first writeback latency).
-                assert cycle >= sched.issue_cycle[operand] + node.op.latency(FMT) + 1
+                assert cycle >= sched.issue_cycle[operand] + node.op.latency + 1
 
 
 def test_multi_issue_packs_independent_ops() -> None:
     def f(a, b, c):  # type: ignore[no-untyped-def]
         return a * b + b * c
 
-    hir = run(lower(f, FMT), OPS)
+    hir = run(lower(f), OPS)
     muls = _muls(hir)
     assert len(muls) == 2
 
@@ -58,10 +58,10 @@ def test_pipelined_issue_overlaps_a_slow_op() -> None:
     def f(a, b, c):  # type: ignore[no-untyped-def]
         return a / b + (a + b + c)
 
-    hir = run(lower(f, FMT), OPS)
+    hir = run(lower(f), OPS)
     sched = schedule_ops(hir, resolve_pool(hir, None))
     div = next(vid for vid, n in hir.nodes.items() if isinstance(n, OpNode) and isinstance(n.op, FDivOp))
-    div_commit = sched.issue_cycle[div] + hir.nodes[div].op.latency(FMT)  # type: ignore[union-attr]
+    div_commit = sched.issue_cycle[div] + hir.nodes[div].op.latency  # type: ignore[union-attr]
     adds = [vid for vid, n in hir.nodes.items() if isinstance(n, OpNode) and isinstance(n.op, FAddOp)]
     # Some fadd of the independent (a+b+c) chain issues before the divide commits -- genuine overlap, no barrier.
     assert any(sched.issue_cycle[vid] < div_commit for vid in adds)
@@ -76,7 +76,7 @@ def test_fmul_ilog2_same_k_shares_one_instance() -> None:
     def f(a, b):  # type: ignore[no-untyped-def]
         return (a * b) * 4.0, b * 4.0
 
-    hir = run(lower(f, FMT), OPS)
+    hir = run(lower(f), OPS)
     il = _ilog2(hir)
     assert len(il) == 2
     sched = schedule_ops(hir, resolve_pool(hir, None))
@@ -90,7 +90,7 @@ def test_fmul_ilog2_same_k_serializes_by_default_parallelizes_with_budget() -> N
     def f(a, b):  # type: ignore[no-untyped-def]
         return a * 4.0, b * 4.0
 
-    hir = run(lower(f, FMT), OPS)
+    hir = run(lower(f), OPS)
     il = _ilog2(hir)
     assert len(il) == 2
 
@@ -107,7 +107,7 @@ def test_fmul_ilog2_different_k_never_shares() -> None:
     def f(a, b):  # type: ignore[no-untyped-def]
         return a * 4.0 + b * 8.0  # K=2 and K=3 -- distinct hardware modules
 
-    hir = run(lower(f, FMT), OPS)
+    hir = run(lower(f), OPS)
     il = _ilog2(hir)
     assert len(il) == 2
     sched = schedule_ops(hir, resolve_pool(hir, None))
@@ -119,7 +119,7 @@ def test_build_lir_small_kernel() -> None:
     def f(a, b):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
-    lir = build(run(lower(f, FMT), OPS), "kernel")
+    lir = build(run(lower(f), OPS), "kernel", fmt=FMT)
     assert lir.module_name == "kernel"
     assert lir.regfile.nreg >= 1
     assert {i.name for i in lir.inputs} == {"a", "b"}
@@ -149,7 +149,7 @@ def test_build_lir_ekf1() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1
 
-    lir = build(run(lower(ekf1.update_x_P, FMT), OPS), "update_x_P")
+    lir = build(run(lower(ekf1.update_x_P), OPS), "update_x_P", fmt=FMT)
     assert len(lir.inputs) == 17
     assert len(lir.outputs) == 9
     fdivs = [inst for inst in lir.instances if isinstance(inst.op, FDivOp)]

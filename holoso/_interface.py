@@ -1,47 +1,95 @@
 """The composition contract for a synthesized module."""
 
-import enum
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import enum
 
-from ._format import FloatFormat
+from ._type import ScalarType
 
 
-class Direction(enum.Enum):
+class Direction(enum.StrEnum):
+    """Module port direction."""
+
     IN = "in"
     OUT = "out"
 
 
-class PortRole(enum.Enum):
-    DATA = "data"  # a float scalar carried in/out of the module
-    CONTROL = "control"  # clock, reset, the valid/ready handshake, diagnostics
+@dataclass(frozen=True, slots=True)
+class Port(ABC):
+    """One I/O port on a generated module."""
+
+    name: str
+
+    @property
+    @abstractmethod
+    def direction(self) -> Direction:
+        pass
+
+    @property
+    @abstractmethod
+    def width(self) -> int:
+        """Port width in bits."""
 
 
 @dataclass(frozen=True, slots=True)
-class Port:
-    """One Verilog port on a generated module."""
+class DataPort(Port, ABC):
+    scalar_type: ScalarType
 
-    name: str
-    direction: Direction
-    role: PortRole
-    width: int
+    @property
+    def width(self) -> int:
+        return self.scalar_type.width
+
+
+@dataclass(frozen=True, slots=True)
+class DataInputPort(DataPort):
+    @property
+    def direction(self) -> Direction:
+        return Direction.IN
+
+
+@dataclass(frozen=True, slots=True)
+class DataOutputPort(DataPort):
+    @property
+    def direction(self) -> Direction:
+        return Direction.OUT
+
+
+@dataclass(frozen=True, slots=True)
+class ControlPort(Port, ABC):
+    bit_width: int
+
+    @property
+    def width(self) -> int:
+        return self.bit_width
+
+
+@dataclass(frozen=True, slots=True)
+class ControlInputPort(ControlPort):
+    @property
+    def direction(self) -> Direction:
+        return Direction.IN
+
+
+@dataclass(frozen=True, slots=True)
+class ControlOutputPort(ControlPort):
+    @property
+    def direction(self) -> Direction:
+        return Direction.OUT
 
 
 @dataclass(frozen=True, slots=True)
 class ModuleInterface:
-    """The generated module's ports and float format."""
-
     module_name: str
-    float_format: FloatFormat
     ports: list[Port]
 
     @property
-    def input_ports(self) -> list[Port]:
-        return [p for p in self.ports if p.role is PortRole.DATA and p.direction is Direction.IN]
+    def input_ports(self) -> list[DataInputPort]:
+        return [p for p in self.ports if isinstance(p, DataInputPort)]
 
     @property
-    def output_ports(self) -> list[Port]:
-        return [p for p in self.ports if p.role is PortRole.DATA and p.direction is Direction.OUT]
+    def output_ports(self) -> list[DataOutputPort]:
+        return [p for p in self.ports if isinstance(p, DataOutputPort)]
 
     @property
-    def control_ports(self) -> list[Port]:
-        return [p for p in self.ports if p.role is PortRole.CONTROL]
+    def control_ports(self) -> list[ControlPort]:
+        return [p for p in self.ports if isinstance(p, ControlPort)]

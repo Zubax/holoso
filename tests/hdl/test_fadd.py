@@ -132,7 +132,9 @@ def test_holoso_fadd(sim: str, stages: tuple[int, int]) -> None:
         test_dir=REPO_ROOT,
         build_dir=build_dir,
         extra_env={
-            "HOLOSO_EXPECTED_LATENCY": str(FAddOp(decode=stage_decode, align=stage_align).latency(FloatFormat(8, 24)))
+            "HOLOSO_EXPECTED_LATENCY": str(
+                FAddOp(FloatFormat(8, 24), stage_decode=stage_decode, stage_align=stage_align).latency
+            )
         },
         results_xml=str(build_dir / "results.xml"),
     )

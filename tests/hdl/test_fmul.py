@@ -125,6 +125,6 @@ def test_holoso_fmul(sim: str, stage_product: int) -> None:
         test_module="tests.hdl.test_fmul",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": str(FMulOp(product=stage_product).latency(FloatFormat(8, 24)))},
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(FMulOp(FloatFormat(8, 24), stage_product=stage_product).latency)},
         results_xml=str(build_dir / "results.xml"),
     )

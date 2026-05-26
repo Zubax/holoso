@@ -9,9 +9,9 @@ default pickle (every field is a frozen dataclass of plain values), so a generat
 
 from dataclasses import dataclass
 
-from .._format import FloatFormat
 from .._lir import ConstRef, Lir, RegRef
 from .._operators import Sgnop
+from .._type import FloatFormat
 
 # A value source on a register's write timeline: an input (by input index) or an operator result (by op index).
 type _Producer = tuple[str, int]
@@ -61,7 +61,7 @@ class NumericalModel:
         lir = self.lir
         if len(inputs) != len(lir.inputs):
             raise ValueError(f"expected {len(lir.inputs)} inputs, got {len(inputs)}")
-        fmt = lir.fmt
+        fmt = lir.regfile.fmt
         consts = lir.consts
         in_values = [fmt.round(x) for x in inputs]
 
@@ -103,7 +103,7 @@ class NumericalModel:
 
     @property
     def float_format(self) -> FloatFormat:
-        return self.lir.fmt
+        return self.lir.regfile.fmt
 
 
 def generate(lir: Lir) -> NumericalModel:

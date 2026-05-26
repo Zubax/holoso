@@ -25,7 +25,7 @@ from ._modelref import (
 
 F32 = FloatFormat(8, 24)
 FMT = FloatFormat(6, 18)
-OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())
+OPS = OpConfig(FAddOp(FMT), FMulOp(FMT), FDivOp(FMT), FMulILog2GenericOp(FMT))
 
 
 def test_codec_known_binary32_values() -> None:
@@ -73,7 +73,7 @@ def test_model_matches_reference_small_kernels() -> None:
         return (a - b) * 0.25 + a * b
 
     inputs = {"a": 1.25, "b": -3.5}
-    model = build_model(build(run(lower(f, FMT), OPS), "f"))
+    model = build_model(build(run(lower(f), OPS), "f", fmt=FMT))
     got = model(*[inputs[name] for name in model.input_names])
     ref = evaluate_reference(f, inputs)
     rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=max(abs(v) for v in inputs.values()))
@@ -105,7 +105,7 @@ def test_model_matches_reference_ekf1() -> None:
         "z_ct": bounded(rng, -1.0, 1.0),
         "z_shunt": bounded(rng, -1.0, 1.0),
     }
-    model = build_model(build(run(lower(ekf1.update_x_P, FMT), OPS), "ekf1"))
+    model = build_model(build(run(lower(ekf1.update_x_P), OPS), "ekf1", fmt=FMT))
     got = model(*[inputs[name] for name in model.input_names])
     ref = evaluate_reference(ekf1.update_x_P, inputs)
     assert len(ref) == 9 and all(np.isfinite(ref))
@@ -117,7 +117,7 @@ def test_model_pickles_and_round_trips() -> None:
     def f(a, b):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
-    model = build_model(build(run(lower(f, FMT), OPS), "f"))
+    model = build_model(build(run(lower(f), OPS), "f", fmt=FMT))
     inputs = [1.25, -3.5]
     restored = pickle.loads(pickle.dumps(model))
     assert restored(*inputs) == model(*inputs)

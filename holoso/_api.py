@@ -10,7 +10,6 @@ from ._backend.html import generate as generate_html, HtmlOutput
 from ._backend.numerical import generate as generate_model, NumericalModel
 from ._backend.verilog import generate as generate_verilog, VerilogOutput
 
-from ._format import FloatFormat
 from ._frontend import lower
 from ._operators import Op, OpConfig
 from ._passes import run
@@ -56,7 +55,6 @@ class SynthesisResult:
 def synthesize(
     target: Target,
     *,
-    float_format: FloatFormat,
     ops: OpConfig,
     parameters: Mapping[str, object] | None = None,
     entry: str = "__call__",
@@ -67,14 +65,14 @@ def synthesize(
     Synthesize ``target`` (a function or class object) into a Verilog ZISC FSM, returned in memory.
 
     ``ops`` is the operator configuration, constructed explicitly by the caller: each field fixes one operator's
-    parameters, including any pipeline-stage knobs that lengthen its latency to ease timing closure. ``parameters``
-    overrides a class's keyword-only ``__init__`` defaults; ``entry`` selects the analyzed method for a class
-    (default ``__call__``); ``name`` overrides the generated module name; ``operator_instances`` sets the number of
-    instances per operator class for scheduling (default one each).
+    float format and parameters, including any pipeline-stage knobs that lengthen its latency to ease timing closure.
+    ``parameters`` overrides a class's keyword-only ``__init__`` defaults; ``entry`` selects the analyzed method for a
+    class (default ``__call__``); ``name`` overrides the generated module name; ``operator_instances`` sets the number
+    of instances per operator class for scheduling (default one each).
     """
-    hir = run(lower(target, float_format), ops)
+    hir = run(lower(target), ops)
     module_name: str = name if name is not None else str(getattr(target, "__name__", "holoso_module"))
-    lir = build(hir, module_name, instances=operator_instances)
+    lir = build(hir, module_name, fmt=ops.float_format, instances=operator_instances)
     interface = interface_of(lir)
     verilog_output = generate_verilog(lir)
     html_output = generate_html(lir, interface, verilog_output)

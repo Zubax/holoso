@@ -134,7 +134,7 @@ async def holoso_fdiv_cocotb(dut) -> None:
 def test_holoso_fdiv(sim: str, stage_input: int) -> None:
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fdiv_si{stage_input}"
-    latency = FDivOp(input_stage=stage_input).latency(FloatFormat(8, 24))
+    latency = FDivOp(FloatFormat(8, 24), stage_input=stage_input).latency
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],

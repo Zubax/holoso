@@ -23,7 +23,7 @@ from holoso._schedule import build
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
 
 FMT = FloatFormat(6, 18)
-OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())
+OPS = OpConfig(FAddOp(FMT), FMulOp(FMT), FDivOp(FMT), FMulILog2GenericOp(FMT))
 
 
 def _divide(a, b):  # type: ignore[no-untyped-def]
@@ -66,7 +66,7 @@ async def err_cyc_latches_div0(dut) -> None:
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_err_cyc(sim: str) -> None:
-    lir = build(run(lower(_divide, FMT), OPS), "divide")
+    lir = build(run(lower(_divide), OPS), "divide", fmt=FMT)
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"divide_w{FMT.wexp}_{FMT.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     verilog_path = gen_dir / "divide.v"

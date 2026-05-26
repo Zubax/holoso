@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from holoso._format import FloatFormat
+from holoso._type import FloatFormat
 from holoso._frontend._lower import _Path, _port_name
 
 

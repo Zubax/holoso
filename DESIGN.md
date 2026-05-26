@@ -61,15 +61,14 @@ model for verification, and once that is proven, move on to the actual HDL gener
 nothing touches the filesystem unless the caller asks.
 
 ```python
-def synthesize(target, *, float_format: FloatFormat, ops: OpConfig,
-               parameters: Mapping[str, object] | None = None,
+def synthesize(target, *, ops: OpConfig, parameters: Mapping[str, object] | None = None,
                entry: str = "__call__", name: str | None = None,
                operator_instances: Mapping[type[Op], int] | None = None) -> SynthesisResult: ...
 
 @dataclass(frozen=True)
 class SynthesisResult:
     module_name: str
-    interface:      ModuleInterface   # ports (name/dir/width) and float format -- the composition contract
+    interface:      ModuleInterface   # typed ports -- the composition contract
     verilog_output: VerilogOutput     # generated module text + support_files (the shared holoso_support .v/.vh)
     numerical_model: NumericalModel   # bit-exact, picklable pure-Python model of the module (flat in -> flat tuple out)
     cocotb_output:  CocotbOutput      # self-contained testbench: embeds the model, checks the DUT bit-for-bit
@@ -117,9 +116,15 @@ Runtime values are only:
 - `float` -- one ZKF format, `WEXP`/`WMAN` fixed per build.
 Typical FPGA-friendly formats: WEXP=8 WMAN=36 (44 bits) for precision; WEXP=6 WMAN=18 (24 bits) for simpler targets.
 Generated top-level modules are not parameterizable by `WEXP`/`WMAN`: port widths are hardcoded and the selected float
-format is recorded as internal localparams. Changing the float format requires re-running synthesis because operator
-latencies, the static schedule, and register widths are all tied to that choice.
+format is recorded by the typed float register-file resource and as internal localparams. Changing the float format
+requires re-running synthesis because operator latencies, the static schedule, and register widths are all tied to that
+choice.
 - `bool` -- 1 bit.
+
+Scalar types live in `holoso._type`: `FloatFormat` describes the ZKF encoding, while `FloatType` is the scalar type
+used by data ports and internal typed resources. A data port carries its scalar type and derives its bit width from it;
+control ports carry explicit bit widths.
+Today all data ports are the same `FloatType`, but this is an implementation detail.
 
 Compile-time ints/shapes/structure are resolved in the front-end and never reach HIR. A dynamic integer only ever
 appears as an index into a static table; it is lowered to a one-hot bool vector + mux, never materialized as an int.
@@ -131,10 +136,10 @@ A FloPoCo backend may be introduced later on if makes sense, but it is likely to
 
 ```
 # values
-in_port(name, ty)                 # module input
-const(value, ty)
+in_port(name)                     # module input; scalar type is assigned at LIR/interface construction
+const(value)
 state_read(slot)                  # persistent state at block entry
-phi(ty, [(pred_block, value)])    # SSA merge
+phi([(pred_block, value)])        # SSA merge
 
 # pure ops (generic; lowered to concrete operators by a later pass)
 arith(op, a, b)                   # add, mul, div        (sub = add + signfix)
@@ -179,7 +184,7 @@ results, which is accepted.
 ```
 resources:
   operators: [inst(op), ...]                # each inst binds a fully-specified Op (its params + latency baked in)
-  regfile:   N float regs + M bool regs     # FF bank, multiport -- parallel reads are free
+  float_regfile: fmt + N float regs         # FF bank, multiport -- parallel reads are free
   constants: [fconst(value), ...]
 
 scheduled op:
@@ -195,16 +200,18 @@ makespan: the last commit cycle (the in_valid->out_valid latency is makespan + 1
 ## Operators
 
 Concrete operators are instances of a small class hierarchy under `OperatorDef` (kind-level metadata: `mnemonic`,
-`arity`, `error_ports`, `module_name`). A concrete `Op` is a frozen dataclass whose fields are its parameters; each
-operator owns its own timing, reference semantics, notation, and instantiation params. Nothing downstream branches
-on operator identity.
+`arity`, `error_ports`, `module_name`). A concrete `Op` is a frozen dataclass whose fields are its parameters; the
+current `FloatOp` subclass also owns its `FloatFormat`. Each operator owns its own timing, reference semantics,
+notation, and instantiation params. Nothing downstream branches on operator identity.
 
 Generic, per-node-parameterized operators are factories: a standalone `ParameterizedOp` (separate from `OperatorDef`,
 carrying only its config-time knobs) whose `instantiate(k)` returns a concrete `Op`. The fully-specified `Op`
 instance is itself the resource-sharing key (equal ops time-share one module).
 
 The available operators are chosen by an `OpConfig`, constructed explicitly by the caller and passed into
-`synthesize`; each field fixes one operator's parameters. There is no implicit default configuration.
+`synthesize`; each field fixes one operator's format and parameters. There is no implicit default configuration.
+Pipeline-stage knobs are named after the HDL parameters in lowercase, such as `stage_decode`, `stage_align`,
+`stage_product`, and `stage_input`.
 
 ## Scheduler
 
@@ -214,7 +221,7 @@ at compile time: each op is assigned an issue cycle and a bound instance, and th
 cycle counter.
 
 The per-operator latency model is therefore exact and load-bearing: the backend commits each result on
-`issue + op.latency(fmt)` without watching `out_valid`, so each operator's `latency` method (mirroring its RTL
+`issue + op.latency` without watching `out_valid`, so each operator's `latency` property (mirroring its RTL
 wrapper) must match the hardware cycle-for-cycle. An inaccurate latency is a *correctness* bug, not a bad estimate --
 the consumer would read a stale register. The resulting cycle count is exact, never an estimate.
 
@@ -268,10 +275,10 @@ the operators committing that cycle, and the control block latches `err_cyc <= c
 Reset covers only the control registers (`cyc`, `err_cyc`). Nonblocking assignment only, `case` not functions.
 The control word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
 
-Each operator instance carries its own parameters, fixed at construction from the
-`OpConfig` threaded through `synthesize`. The wrappers' instantiation params come from `op.hdl_params()` and the
-scheduler's timing from `op.latency(fmt)` -- both read the same operator instance, so the emitted RTL and the static
-schedule cannot drift; emitting only enabled `STAGE_*` keeps a default build's wrappers parameter-free.
+Each operator instance carries its own parameters and float format, fixed at construction from the `OpConfig` threaded
+through `synthesize`. The wrappers' instantiation params come from `op.hdl_params()` and the scheduler's timing from
+`op.latency` -- both read the same operator instance, so the emitted RTL and the static schedule cannot drift; emitting
+only enabled `STAGE_*` keeps a default build's wrappers parameter-free.
 
 **Microcode ROM (deferred, keep on the radar):** the per-cycle `case(cyc)` is a wide mux; for large kernels it could
 instead be emitted as a microcode ROM indexed by `cyc` (one packed control word per active cycle), which should

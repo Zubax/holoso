@@ -6,7 +6,6 @@ import textwrap
 import types
 
 from .._errors import MissingIntrinsic, SourceLocation, SourceUnavailable, UnsupportedConstruct
-from .._format import FloatFormat
 from .._hir import ABS, ADD, DIV, MUL, NEG, Hir, HirBuilder, ValueId
 
 _Path = list[int | str]
@@ -42,7 +41,7 @@ def _port_name(path: _Path) -> str:
 
 
 class _Lowerer:
-    def __init__(self, fn: types.FunctionType, fmt: FloatFormat) -> None:
+    def __init__(self, fn: types.FunctionType) -> None:
         self._fn = fn
         try:
             lines, start = inspect.getsourcelines(fn)
@@ -54,7 +53,7 @@ class _Lowerer:
         self._lines = lines
         self._start = start
         self._filename = inspect.getsourcefile(fn) or "<unknown>"
-        self._builder = HirBuilder(fmt)
+        self._builder = HirBuilder()
         self._env: dict[str, ValueId] = {}
 
     def _loc(self, node: ast.AST) -> SourceLocation:
@@ -203,10 +202,10 @@ def _flatten_return(node: ast.expr) -> list[tuple[_Path, ast.expr]]:
     return leaves
 
 
-def lower(target: object, float_format: FloatFormat) -> Hir:
+def lower(target: object) -> Hir:
     """Lower a function object into HIR. Classes/other targets raise an explicit error in v0."""
     if isinstance(target, types.FunctionType):
-        return _Lowerer(target, float_format).run()
+        return _Lowerer(target).run()
     if inspect.isclass(target):
         raise UnsupportedConstruct("class/stateful targets are not supported in v0 (state lands in a later milestone)")
     raise UnsupportedConstruct(f"unsupported synthesis target of type {type(target).__name__!r}")

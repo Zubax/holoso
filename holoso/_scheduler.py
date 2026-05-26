@@ -82,7 +82,7 @@ def _critical_path(hir: Hir, op_ids: list[ValueId]) -> dict[ValueId, int]:
     height: dict[ValueId, int] = {}
     for vid in sorted(op_ids, reverse=True):  # consumers have larger ids; process them first
         op = _opnode(hir, vid)
-        height[vid] = op.op.latency(hir.fmt) + max((1 + height[c] for c in consumers[vid]), default=0)
+        height[vid] = op.op.latency + max((1 + height[c] for c in consumers[vid]), default=0)
     return height
 
 
@@ -99,10 +99,10 @@ def schedule_ops(hir: Hir, pool: Mapping[type[Op], int]) -> Schedule:
 
     def commit_cycle(vid: ValueId) -> int:
         op = _opnode(hir, vid)
-        return issue_cycle[vid] + op.op.latency(hir.fmt)
+        return issue_cycle[vid] + op.op.latency
 
     unscheduled = set(op_ids)
-    cap = sum(_opnode(hir, vid).op.latency(hir.fmt) for vid in op_ids) + 2 * len(op_ids) + 64
+    cap = sum(_opnode(hir, vid).op.latency for vid in op_ids) + 2 * len(op_ids) + 64
     cycle = 1
     while unscheduled:
         assert cycle <= cap, "scheduler made no progress"

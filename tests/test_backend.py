@@ -16,7 +16,10 @@ from holoso._schedule import build
 from .hdl.hdl_float_oracle import HDL_DIR, sources
 
 requires_iverilog = pytest.mark.skipif(shutil.which("iverilog") is None, reason="iverilog not installed")
-OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())
+
+
+def _ops(fmt: FloatFormat) -> OpConfig:
+    return OpConfig(FAddOp(fmt), FMulOp(fmt), FDivOp(fmt), FMulILog2GenericOp(fmt))
 
 
 def _elaborate(name: str, verilog: str, tmp_path: Path) -> None:
@@ -43,7 +46,8 @@ def test_small_kernel_elaborates(tmp_path: Path) -> None:
     def kernel(a, b):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
-    lir = build(run(lower(kernel, FloatFormat(8, 24)), OPS), "kernel")
+    fmt = FloatFormat(8, 24)
+    lir = build(run(lower(kernel), _ops(fmt)), "kernel", fmt=fmt)
     _elaborate("kernel", generate(lir).verilog, tmp_path)
 
 
@@ -52,7 +56,8 @@ def test_kernel_with_division_elaborates(tmp_path: Path) -> None:
     def blend(a, b, c):  # type: ignore[no-untyped-def]
         return a / b + c * 2.0
 
-    lir = build(run(lower(blend, FloatFormat(6, 18)), OPS), "blend")
+    fmt = FloatFormat(6, 18)
+    lir = build(run(lower(blend), _ops(fmt)), "blend", fmt=fmt)
     _elaborate("blend", generate(lir).verilog, tmp_path)
 
 
@@ -63,7 +68,8 @@ def test_constant_only_module_elaborates(tmp_path: Path) -> None:
     def const_only():  # type: ignore[no-untyped-def]
         return 3.5
 
-    lir = build(run(lower(const_only, FloatFormat(8, 24)), OPS), "const_only")
+    fmt = FloatFormat(8, 24)
+    lir = build(run(lower(const_only), _ops(fmt)), "const_only", fmt=fmt)
     _elaborate("const_only", generate(lir).verilog, tmp_path)
 
 
@@ -72,5 +78,6 @@ def test_ekf1_elaborates(tmp_path: Path) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1
 
-    lir = build(run(lower(ekf1.update_x_P, FloatFormat(6, 18)), OPS), "update_x_P")
+    fmt = FloatFormat(6, 18)
+    lir = build(run(lower(ekf1.update_x_P), _ops(fmt)), "update_x_P", fmt=fmt)
     _elaborate("update_x_P", generate(lir).verilog, tmp_path)

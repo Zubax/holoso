@@ -38,7 +38,7 @@ def allocate(hir: Hir, issue_cycle: dict[ValueId, int], makespan: int) -> Alloca
     def def_cycle(vid: ValueId) -> int:
         node = hir.nodes[vid]
         if isinstance(node, OpNode):
-            return issue_cycle[vid] + node.op.latency(hir.fmt)
+            return issue_cycle[vid] + node.op.latency
         return 0  # an input port, written at the accept edge
 
     reg_values: list[ValueId] = [*hir.input_ids, *issue_cycle.keys()]

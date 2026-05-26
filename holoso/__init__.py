@@ -1,8 +1,18 @@
 """Holoso: a narrow Python-to-Verilog synthesizer for numeric kernels."""
 
 from ._api import synthesize as synthesize, SynthesisResult as SynthesisResult
-from ._interface import ModuleInterface as ModuleInterface, Port as Port
-from ._format import FloatFormat as FloatFormat
+from ._interface import (
+    ControlInputPort as ControlInputPort,
+    ControlOutputPort as ControlOutputPort,
+    ControlPort as ControlPort,
+    DataInputPort as DataInputPort,
+    DataOutputPort as DataOutputPort,
+    DataPort as DataPort,
+    Direction as Direction,
+    ModuleInterface as ModuleInterface,
+    Port as Port,
+)
+from ._type import FloatFormat as FloatFormat, FloatType as FloatType, ScalarType as ScalarType
 from ._errors import (
     HolosoError as HolosoError,
     MissingIntrinsic as MissingIntrinsic,

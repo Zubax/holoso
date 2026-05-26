@@ -1,8 +1,19 @@
-"""The single scalar floating-point format used throughout a synthesized module."""
+"""Scalar data types and the Zubax Kulibin float format."""
 
 import math
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from fractions import Fraction
+
+
+@dataclass(frozen=True, slots=True)
+class ScalarType(ABC):
+    """A scalar value type carried by a data port or an internal typed storage resource."""
+
+    @property
+    @abstractmethod
+    def width(self) -> int:
+        """The number of bits needed to represent one scalar value."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +131,17 @@ class FloatFormat:
     def _pack(self, sign: int, exp: int, frac: int) -> int:
         wfrac = self._wfrac
         return ((sign & 1) << (self.width - 1)) | ((exp & self._exp_inf) << wfrac) | (frac & ((1 << wfrac) - 1))
+
+
+@dataclass(frozen=True, slots=True)
+class FloatType(ScalarType):
+    """A ZKF floating-point scalar with the given bit-exact format."""
+
+    fmt: FloatFormat
+
+    @property
+    def width(self) -> int:
+        return self.fmt.width
 
 
 def _pow2(exp: int) -> Fraction:

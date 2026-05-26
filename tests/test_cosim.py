@@ -17,11 +17,14 @@ from holoso._schedule import build, interface_of
 
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, sources
 
-OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())
+
+def _ops(fmt: FloatFormat) -> OpConfig:
+    return OpConfig(FAddOp(fmt), FMulOp(fmt), FDivOp(fmt), FMulILog2GenericOp(fmt))
 
 
-def _run_cosim(sim: str, fn: Callable[..., object], fmt: FloatFormat, name: str, ops: OpConfig = OPS) -> None:
-    lir = build(run(lower(fn, fmt), ops), name)
+def _run_cosim(sim: str, fn: Callable[..., object], fmt: FloatFormat, name: str, ops: OpConfig | None = None) -> None:
+    ops = _ops(fmt) if ops is None else ops
+    lir = build(run(lower(fn), ops), name, fmt=fmt)
     interface = interface_of(lir)
     model = build_model(lir)
     # Generated sources live outside the cocotb build dir, which the runner wipes on clean=True.
@@ -83,8 +86,14 @@ def test_cosim_staged_kernel(sim: str) -> None:
         return (a - b) * 0.25 + a * b
 
     # Exercise staged operator parameters end-to-end through synthesis and cosim.
-    ops = OpConfig(FAddOp(decode=1), FMulOp(product=1), FDivOp(), FMulILog2GenericOp(decode=1))
-    _run_cosim(sim, kernel, FloatFormat(8, 24), "kernel_staged", ops=ops)
+    fmt = FloatFormat(8, 24)
+    ops = OpConfig(
+        FAddOp(fmt, stage_decode=1),
+        FMulOp(fmt, stage_product=1),
+        FDivOp(fmt),
+        FMulILog2GenericOp(fmt, stage_decode=1),
+    )
+    _run_cosim(sim, kernel, fmt, "kernel_staged", ops=ops)
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -93,5 +102,11 @@ def test_cosim_staged_division(sim: str) -> None:
         return a / b + (a - c)
 
     # Exercise the STAGE_ALIGN (fadd) and STAGE_INPUT (fdiv) knobs end-to-end -- the combos the staged-kernel misses.
-    ops = OpConfig(FAddOp(decode=1, align=1), FMulOp(), FDivOp(input_stage=1), FMulILog2GenericOp())
-    _run_cosim(sim, blend, FloatFormat(6, 18), "blend_staged", ops=ops)
+    fmt = FloatFormat(6, 18)
+    ops = OpConfig(
+        FAddOp(fmt, stage_decode=1, stage_align=1),
+        FMulOp(fmt),
+        FDivOp(fmt, stage_input=1),
+        FMulILog2GenericOp(fmt),
+    )
+    _run_cosim(sim, blend, fmt, "blend_staged", ops=ops)

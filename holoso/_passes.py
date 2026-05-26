@@ -27,6 +27,7 @@ from ._hir import (
     ValueId,
 )
 from ._operators import OpConfig, Sgnop
+from ._type import FloatFormat
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Small numeric helpers
@@ -88,7 +89,7 @@ def _copy(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> Val
 
 def _const_fold(hir: Hir) -> Hir:
     """Fold operations whose operands are all constants into a single constant."""
-    builder = HirBuilder(hir.fmt)
+    builder = HirBuilder()
     remap: dict[ValueId, ValueId] = {}
     cval: dict[ValueId, float] = {}
     for old_id in sorted(hir.nodes):
@@ -116,12 +117,12 @@ def _const_fold(hir: Hir) -> Hir:
     return builder.finish()
 
 
-def _strength_reduce(hir: Hir) -> Hir:
+def _strength_reduce(hir: Hir, fmt: FloatFormat) -> Hir:
     """Rewrite multiply/divide by power-of-two constants to ``Fmul2K`` and divide-by-constant to reciprocal-multiply."""
-    builder = HirBuilder(hir.fmt)
+    builder = HirBuilder()
     remap: dict[ValueId, ValueId] = {}
     cval: dict[ValueId, float] = {}
-    k_bound = 1 << (hir.fmt.wexp - 1)  # holoso_fmul_ilog2_const requires |k| < 2**(WEXP-1)
+    k_bound = 1 << (fmt.wexp - 1)  # holoso_fmul_ilog2_const requires |k| < 2**(WEXP-1)
     for old_id in sorted(hir.nodes):
         node = hir.nodes[old_id]
         match node:
@@ -168,7 +169,7 @@ def _lower_to_operators(hir: Hir, ops: OpConfig) -> Hir:
     power-of-two scaling -> ``ops.fmul_ilog2.instantiate(k)``); the chosen operator instance is baked into the OpNode,
     so its latency and instantiation params travel with the node and cannot drift.
     """
-    builder = HirBuilder(hir.fmt)
+    builder = HirBuilder()
     remap: dict[ValueId, ValueId] = {}
     for old_id in sorted(hir.nodes):
         node = hir.nodes[old_id]
@@ -223,7 +224,7 @@ def _dce(hir: Hir) -> Hir:
             case _:
                 pass
     keep = reachable | set(hir.input_ids)
-    builder = HirBuilder(hir.fmt)
+    builder = HirBuilder()
     remap: dict[ValueId, ValueId] = {}
     for old_id in sorted(keep):
         remap[old_id] = _copy(builder, hir.nodes[old_id], remap)
@@ -234,4 +235,4 @@ def _dce(hir: Hir) -> Hir:
 
 def run(hir: Hir, ops: OpConfig) -> Hir:
     """Run the full pass pipeline, returning a fully lowered HIR (only InPort/Const/OpNode)."""
-    return _dce(_lower_to_operators(_strength_reduce(_const_fold(hir)), ops))
+    return _dce(_lower_to_operators(_strength_reduce(_const_fold(hir), ops.float_format), ops))

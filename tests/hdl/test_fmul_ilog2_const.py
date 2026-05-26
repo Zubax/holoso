@@ -129,7 +129,7 @@ def test_holoso_fmul_ilog2_const(sim: str, config: tuple[int, int]) -> None:
         build_dir=build_dir,
         extra_env={
             "HOLOSO_TEST_K": str(k),
-            "HOLOSO_EXPECTED_LATENCY": str(FMulILog2Op(k=0, decode=stage_decode).latency(FloatFormat(8, 24))),
+            "HOLOSO_EXPECTED_LATENCY": str(FMulILog2Op(fmt=FloatFormat(8, 24), k=0, stage_decode=stage_decode).latency),
         },
         results_xml=str(build_dir / "results.xml"),
     )
