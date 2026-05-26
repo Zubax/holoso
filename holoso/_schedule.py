@@ -17,7 +17,7 @@ from ._lir import (
 )
 from ._operators import Op, Sgnop
 from ._regalloc import Allocation, allocate
-from ._result import Direction, IIModel, ModuleInterface, Port, PortRole, SynthesisMetrics
+from ._interface import Direction, IIModel, ModuleInterface, Port, PortRole, SynthesisMetrics
 from ._scheduler import Schedule, resolve_pool, schedule_ops
 
 

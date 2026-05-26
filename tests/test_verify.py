@@ -1,22 +1,25 @@
 """Unit tests for the pure-Python verification core."""
 
+import pickle
 import sys
 from pathlib import Path
 
 import numpy as np
 
 from holoso import FAddOp, FDivOp, FloatFormat, FMulILog2GenericOp, FMulOp, OpConfig
+from holoso._backend.numerical import generate as build_model
 from holoso._frontend import lower
 from holoso._passes import run
-from holoso._verify import default_tolerance, evaluate_reference, unit_roundoff
-
+from holoso._schedule import build
 from _modelref import (
     bounded,
+    default_tolerance,
     encode_inputs,
-    evaluate_opgraph,
+    evaluate_reference,
     log_uniform_positive,
     random_legal_bits,
     spd_matrix,
+    unit_roundoff,
     within,
 )
 
@@ -65,18 +68,19 @@ def test_reference_evaluates_and_flattens() -> None:
     assert evaluate_reference(f, {"a": 2.0, "b": 3.0}) == [5.0, 6.0]
 
 
-def test_opgraph_matches_original_small_kernels() -> None:
+def test_model_matches_reference_small_kernels() -> None:
     def f(a, b):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
-    hir = run(lower(f, FMT), OPS)
     inputs = {"a": 1.25, "b": -3.5}
+    model = build_model(build(run(lower(f, FMT), OPS), "f"))
+    got = model(*[inputs[name] for name in model.input_names])
     ref = evaluate_reference(f, inputs)
-    got = evaluate_opgraph(hir, inputs)
-    assert all(within(g, r, 1e-12, 1e-15) for g, r in zip(got, ref))
+    rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=max(abs(v) for v in inputs.values()))
+    assert all(within(g, r, rtol, atol) for g, r in zip(got, ref))
 
 
-def test_opgraph_matches_original_ekf1() -> None:
+def test_model_matches_reference_ekf1() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1
 
@@ -101,11 +105,22 @@ def test_opgraph_matches_original_ekf1() -> None:
         "z_ct": bounded(rng, -1.0, 1.0),
         "z_shunt": bounded(rng, -1.0, 1.0),
     }
-    hir = run(lower(ekf1.update_x_P, FMT), OPS)
+    model = build_model(build(run(lower(ekf1.update_x_P, FMT), OPS), "ekf1"))
+    got = model(*[inputs[name] for name in model.input_names])
     ref = evaluate_reference(ekf1.update_x_P, inputs)
-    got = evaluate_opgraph(hir, inputs)
     assert len(ref) == 9 and all(np.isfinite(ref))
-    assert all(within(g, r, 1e-9, 1e-12) for g, r in zip(got, ref))
+    rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=max(abs(v) for v in inputs.values()))
+    assert all(within(g, r, rtol, atol) for g, r in zip(got, ref))
+
+
+def test_model_pickles_and_round_trips() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        return (a - b) * 0.25 + a * b
+
+    model = build_model(build(run(lower(f, FMT), OPS), "f"))
+    inputs = [1.25, -3.5]
+    restored = pickle.loads(pickle.dumps(model))
+    assert restored(*inputs) == model(*inputs)
 
 
 def test_tolerance_predicate() -> None:

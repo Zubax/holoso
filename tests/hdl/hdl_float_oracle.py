@@ -36,7 +36,7 @@ def within(actual: float, expected: float, rtol: float, atol: float) -> bool:
 
 BENCH_DIR = Path(__file__).resolve().parent  # tests/hdl -- the cocotb test_dir for the benches and cosim driver
 REPO_ROOT = BENCH_DIR.parents[1]
-HDL_DIR = Path(holoso.__file__).resolve().parent / "_hdl"  # holoso/_hdl -- support .v/.vh ship as package data
+HDL_DIR = Path(holoso.__file__).resolve().parent / "_backend" / "verilog"  # support .v/.vh ship as package data
 HOLOSO_HDL = HDL_DIR / "holoso_support.v"
 KULIBIN_HDL_DIR = REPO_ROOT / "lib" / "kulibin" / "float" / "hdl"
 TESTS_DIR = REPO_ROOT / "tests"

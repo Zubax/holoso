@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from holoso import FAddOp, FDivOp, FloatFormat, FMulILog2GenericOp, FMulOp, OpConfig
-from holoso._backend_verilog import generate
+from holoso._backend.verilog import generate
 from holoso._frontend import lower
 from holoso._passes import run
 from holoso._schedule import build

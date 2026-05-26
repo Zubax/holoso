@@ -26,8 +26,8 @@ def test_synthesize_small_kernel_result() -> None:
     assert '`include "holoso_support.vh"' in result.verilog_output.support_files["holoso_support.v"]
     assert "`ifndef HOLOSO_REGFILE_VH" not in result.verilog_output.support_files["holoso_support.v"]
     assert "`HOLOSO_REGFILE_LANE" in result.verilog_output.support_files["holoso_support.vh"]
-    assert "@cocotb.test()" in result.testbench
-    assert "<html" in result.report_html.lower()
+    assert "@cocotb.test()" in result.cocotb_output.testbench
+    assert "<html" in result.html_output.html.lower()
     assert result.metrics.op_count >= 3
     names = [p.name for p in result.interface.ports]
     assert "in_a" in names and "out_0" in names and "err_cyc" in names
@@ -59,7 +59,7 @@ def test_rejects_non_finite_constants() -> None:
 
 def test_generated_testbench_is_valid_python() -> None:
     result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
-    compile(result.testbench, "<generated-testbench>", "exec")
+    compile(result.cocotb_output.testbench, "<generated-testbench>", "exec")
 
 
 def test_write_artifacts(tmp_path: Path) -> None:
@@ -75,7 +75,7 @@ def test_write_artifacts(tmp_path: Path) -> None:
 
 def test_report_has_expected_sections() -> None:
     result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
-    report = result.report_html
+    report = result.html_output.html
     header_html = report.split("<pre class='modhdr'", 1)[1].split("</code></pre>", 1)[0]
     header_html = header_html.split("<code>", 1)[1]
     header_text = html.unescape(re.sub(r"<[^>]+>", "", header_html))
@@ -106,7 +106,7 @@ def test_report_has_expected_sections() -> None:
 
 def test_report_schedule_displays_exact_ii_cycle_rows() -> None:
     result = holoso.synthesize(_kernel, float_format=FloatFormat(8, 24), ops=OPS)
-    grid = result.report_html.split("<table class='grid'>", 1)[1].split("</table>", 1)[0]
+    grid = result.html_output.html.split("<table class='grid'>", 1)[1].split("</table>", 1)[0]
     cycle_labels = re.findall(r"<td class='clk'>([^<]+)</td>", grid)
 
     assert len(cycle_labels) == result.metrics.ii_cycles
@@ -123,7 +123,7 @@ def test_synthesize_ekf1() -> None:
     assert result.module_name == "update_x_P"
     assert len(result.interface.output_ports) == 9
     assert result.metrics.operator_instances.get("fdiv") == 1
-    compile(result.testbench, "<generated-testbench>", "exec")
+    compile(result.cocotb_output.testbench, "<generated-testbench>", "exec")
 
 
 def test_class_target_is_unsupported() -> None:

@@ -13,10 +13,19 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
 
-from .._format import FloatFormat
-from .._lir import Lir, Operand, OperatorInstance, RegRef, ScheduledOp
-from .._operators import FAddOp, FDivOp, FMulILog2Op, FMulOp, Op
-from .._result import ModuleInterface, SynthesisMetrics
+from ..._format import FloatFormat
+from ..._interface import ModuleInterface, SynthesisMetrics
+from ..._lir import Lir, Operand, OperatorInstance, RegRef, ScheduledOp
+from ..._operators import FAddOp, FDivOp, FMulILog2Op, FMulOp, Op
+from ..verilog import VerilogOutput
+
+
+@dataclass(frozen=True, slots=True)
+class HtmlOutput:
+    """One self-contained, single-page report document, with resources built-in."""
+
+    html: str
+
 
 _GITHUB_URL = "https://github.com/Zubax/holoso"
 
@@ -50,7 +59,9 @@ def _op_text(op: ScheduledOp) -> str:
     return op.y_sgnop.decorate(f"r{op.dst.index}={body}")
 
 
-def build_report_html(lir: Lir, interface: ModuleInterface, metrics: SynthesisMetrics, module_verilog: str) -> str:
+def generate(
+    lir: Lir, interface: ModuleInterface, metrics: SynthesisMetrics, verilog_output: VerilogOutput
+) -> HtmlOutput:
     fmt = lir.fmt
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     link = f"<a href='{_GITHUB_URL}'>Holoso</a>"
@@ -69,7 +80,7 @@ def build_report_html(lir: Lir, interface: ModuleInterface, metrics: SynthesisMe
     if constants:
         out.append(f"<div class='sec'>{constants}</div>")
     out.append(f"<div class='sec'>{_interface(interface)}</div>")
-    out.append(f"<div class='sec modhdrsec'>{_module_header(module_verilog)}</div>")
+    out.append(f"<div class='sec modhdrsec'>{_module_header(verilog_output.verilog)}</div>")
     out.append("</div>")
     if interface.ii.cycles != metrics.ii_cycles:
         raise RuntimeError(
@@ -78,7 +89,7 @@ def build_report_html(lir: Lir, interface: ModuleInterface, metrics: SynthesisMe
         )
     out.append(_schedule(lir, fmt, interface.ii.cycles))
     out.append("</main></body></html>")
-    return "".join(out)
+    return HtmlOutput(html="".join(out))
 
 
 def _metrics(interface: ModuleInterface, metrics: SynthesisMetrics, fmt: FloatFormat) -> str:

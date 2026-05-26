@@ -1,55 +1,44 @@
 """
-Test-only verification helpers, relocated out of the holoso library (which will gain a model-backend later).
+Test-only verification helpers, relocated out of the holoso library (which now carries a numerical model backend).
 
-Kept confined to this one module for easy removal: the float64 op-graph evaluator (a simulator-free reference for
-the lowered HIR), input samplers, the output-name convention, and the tolerance predicate. Tests are exempt from the
-"import only the public surface" rule, so this reaches into holoso's underscored modules directly.
+Kept confined to this one module for easy removal: the float64 reference, the tolerance model, input samplers, and the
+output-name convention. Tests are exempt from the "import only the public surface" rule, so this reaches into holoso's
+underscored modules directly.
 """
 
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 import numpy as np
 
 from holoso._format import FloatFormat
 from holoso._frontend import flatten_value, port_name
-from holoso._hir import Const, Hir, InPort, OpNode, ValueId
-from holoso._operators import Sgnop
 
 
-def _apply_sgnop(x: float, sgnop: Sgnop) -> float:
-    if Sgnop.ABS in sgnop:
-        x = abs(x)
-    if Sgnop.NEG in sgnop:
-        x = -x
-    return x
-
-
-def _eval_op(op: OpNode, val: dict[ValueId, float]) -> float:
-    operands = [_apply_sgnop(val[vid], sgnop) for vid, sgnop in zip(op.operands, op.operand_sgnops)]
-    return _apply_sgnop(op.op.evaluate(*operands), op.y_sgnop)
-
-
-def evaluate_opgraph(hir: Hir, inputs: Mapping[str, float]) -> list[float]:
-    """Evaluate a fully lowered HIR (InPort/Const/OpNode only) in float64 -- the simulator-free op-graph reference."""
-    val: dict[ValueId, float] = {}
-    for vid in sorted(hir.nodes):
-        node = hir.nodes[vid]
-        match node:
-            case InPort(name=name):
-                val[vid] = float(inputs[name])
-            case Const(value=value):
-                val[vid] = value
-            case OpNode():
-                val[vid] = _eval_op(node, val)
-            case _:
-                raise ValueError("evaluate_opgraph requires a fully lowered HIR (InPort/Const/OpNode only)")
-    return [_apply_sgnop(val[out.value], out.sgnop) for out in hir.outputs]
+def evaluate_reference(fn: Callable[..., object], inputs: Mapping[str, float]) -> list[float]:
+    """Call ``fn`` in float64 with the named inputs and flatten the result into ordered output values."""
+    result = fn(**inputs)
+    return [float(value) for _, value in flatten_value(result)]
 
 
 def output_names(root: object) -> list[str]:
     """The ordered output-port names for a runtime return value."""
     return [port_name(path) for path, _ in flatten_value(root)]
+
+
+def unit_roundoff(fmt: FloatFormat) -> float:
+    """The format's unit roundoff, ``2**-(wman-1)`` (relative spacing of representable values)."""
+    return 2.0 ** -(fmt.wman - 1)
+
+
+def default_tolerance(
+    fmt: FloatFormat, op_count: int, magnitude: float = 1.0, rel_factor: float = 16.0
+) -> tuple[float, float]:
+    """A defensible (rtol, atol) for a kernel of ``op_count`` operations evaluated over operands up to ``magnitude``."""
+    u = unit_roundoff(fmt)
+    rtol = rel_factor * max(op_count, 1) * u
+    atol = rtol * abs(magnitude)
+    return rtol, atol
 
 
 def within(actual: float, expected: float, rtol: float, atol: float) -> bool:

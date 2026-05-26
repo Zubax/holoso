@@ -1,7 +1,10 @@
 """Holoso: a narrow Python-to-Verilog synthesizer for numeric kernels."""
 
 from ._api import synthesize as synthesize
-from ._backend_verilog import VerilogOutput as VerilogOutput
+from ._backend.cocotb import CocotbOutput as CocotbOutput
+from ._backend.html import HtmlOutput as HtmlOutput
+from ._backend.numerical import NumericalModel as NumericalModel
+from ._backend.verilog import VerilogOutput as VerilogOutput
 from ._errors import (
     HolosoError as HolosoError,
     MissingIntrinsic as MissingIntrinsic,
@@ -17,12 +20,12 @@ from ._operators import (
     FMulOp as FMulOp,
     OpConfig as OpConfig,
 )
-from ._result import (
+from ._interface import (
     IIModel as IIModel,
     ModuleInterface as ModuleInterface,
     Port as Port,
     SynthesisMetrics as SynthesisMetrics,
-    SynthesisResult as SynthesisResult,
 )
+from ._result import SynthesisResult as SynthesisResult
 
 __version__ = "0.1.0"

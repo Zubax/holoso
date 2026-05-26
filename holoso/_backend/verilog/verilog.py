@@ -4,14 +4,19 @@ the generated module instantiates.
 """
 
 from dataclasses import dataclass
-from functools import cache
 from importlib import resources
+from string import ascii_letters
 
-from ._lir import ConstRef, Lir, OperatorInstance, Operand, RegRef, ScheduledOp
-from ._operators import ALL_OP_CLASSES, Sgnop
+from ..._lir import ConstRef, Lir, OperatorInstance, Operand, RegRef, ScheduledOp
+from ..._operators import ALL_OP_CLASSES, Sgnop
 
 _CLASS_ORDER = {cls: index for index, cls in enumerate(ALL_OP_CLASSES)}
-_PORT_LETTERS = "abcdefgh"  # operand position -> wrapper port letter (a, b, ...)
+_PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
+
+_SUPPORT_FILES = {
+    name: resources.files(__package__).joinpath(name).read_text(encoding="utf-8")
+    for name in ("holoso_support.v", "holoso_support.vh")
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,19 +24,7 @@ class VerilogOutput:
     """The Verilog backend's output: the generated module text and the shared support files it instantiates."""
 
     verilog: str
-    support_files: dict[str, str]  # filename -> content (holoso_support.v / holoso_support.vh)
-
-
-@cache
-def _support_verilog() -> str:
-    """The contents of ``holoso_support.v`` (the operator wrappers and register file)."""
-    return resources.files(__package__).joinpath("_hdl", "holoso_support.v").read_text(encoding="utf-8")
-
-
-@cache
-def _support_header() -> str:
-    """The contents of ``holoso_support.vh`` (lane-select and sign-op macros)."""
-    return resources.files(__package__).joinpath("_hdl", "holoso_support.vh").read_text(encoding="utf-8")
+    support_files: dict[str, str]  # filename -> content
 
 
 class VerilogWriter:
@@ -143,10 +136,7 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_fsm(w)
     _emit_outputs(w, lir)
     w.lines("endmodule", "", "`undef REGF_DATA", "`undef REGF_ADDR", "`undef REGF_VIEW")
-    return VerilogOutput(
-        verilog=w.render(),
-        support_files={"holoso_support.v": _support_verilog(), "holoso_support.vh": _support_header()},
-    )
+    return VerilogOutput(verilog=w.render(), support_files=_SUPPORT_FILES)
 
 
 def _emit_header(w: VerilogWriter, lir: Lir, cycw: int) -> None:

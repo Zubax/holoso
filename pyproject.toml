@@ -31,9 +31,10 @@ version = {attr = "holoso.__version__"}
 include = ["holoso*"]
 
 [tool.setuptools.package-data]
-# The report's stylesheet and interactive layer are loaded at runtime via importlib.resources.
-"holoso.report" = ["*.css", "*.js"]
-"holoso" = ["py.typed", "_hdl/*.v", "_hdl/*.vh"]
+# Each backend ships its runtime assets (loaded via importlib.resources) as package data.
+"holoso._backend.verilog" = ["*.v", "*.vh"]
+"holoso._backend.html" = ["*.css", "*.js"]
+"holoso" = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

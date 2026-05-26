@@ -8,7 +8,7 @@ from cocotb.triggers import FallingEdge, RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-HDL = REPO_ROOT / "holoso" / "_hdl" / "holoso_support.v"
+HDL = REPO_ROOT / "holoso" / "_backend" / "verilog" / "holoso_support.v"
 BENCH_DIR = REPO_ROOT / "tests" / "hdl"
 
 
@@ -311,7 +311,7 @@ def test_holoso_regfile(case_name: str, sim: str) -> None:
 
     runner.build(
         sources=[HDL],
-        includes=[REPO_ROOT / "holoso" / "_hdl"],
+        includes=[REPO_ROOT / "holoso" / "_backend" / "verilog"],
         hdl_toplevel="holoso_regfile",
         parameters=params,
         build_args=build_args,

@@ -3,15 +3,16 @@
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from ._backend_verilog import generate
+from ._backend.cocotb import generate as generate_testbench
+from ._backend.html import generate as generate_html
+from ._backend.numerical import generate as generate_model
+from ._backend.verilog import generate as generate_verilog
 from ._format import FloatFormat
 from ._frontend import lower
 from ._operators import Op, OpConfig
 from ._passes import run
-from .report import build_report_html
 from ._result import SynthesisResult
 from ._schedule import build, interface_of, metrics_of
-from ._verify import render_testbench
 
 type Target = Callable[..., Any] | type[object]
 
@@ -40,13 +41,16 @@ def synthesize(
     lir = build(hir, module_name, instances=operator_instances)
     interface = interface_of(lir)
     metrics = metrics_of(lir)
-    verilog_output = generate(lir)
-    testbench = render_testbench(lir, float_format, target) if callable(target) else ""
+    verilog_output = generate_verilog(lir)
+    html_output = generate_html(lir, interface, metrics, verilog_output)
+    model = generate_model(lir)
+    cocotb_output = generate_testbench(model, interface)
     return SynthesisResult(
         module_name=module_name,
         interface=interface,
         verilog_output=verilog_output,
-        testbench=testbench,
-        report_html=build_report_html(lir, interface, metrics, verilog_output.verilog),
+        model=model,
+        cocotb_output=cocotb_output,
+        html_output=html_output,
         metrics=metrics,
     )

@@ -83,6 +83,14 @@ class FloatFormat:
         value = math.ldexp(float(significand), exp - self._bias - wfrac)
         return -value if sign else value
 
+    def round(self, value: float) -> float:
+        """
+        Snap a real-valued result to the nearest value representable in this format (round-to-nearest, ties to even),
+        exactly as the hardware packer rounds after each operator. NaN may be rejected depending on the format
+        (e.g., ZKF has no NaN).
+        """
+        return self.decode(self.encode(value))
+
     def is_legal(self, bits: int) -> bool:
         """Whether ``bits`` is a legal ZKF value (rejects subnormals and negative zero)."""
         wfrac = self._wfrac

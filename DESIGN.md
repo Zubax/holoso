@@ -28,16 +28,27 @@ One must read the representative use-case examples under the `examples/` directo
 
 ## Pipeline
 
-```
-Python -front-end-> HIR -passes-> HIR(lowered) -schedule/bind/regalloc-> LIR -backend-> Verilog + TB + report
+```mermaid
+flowchart LR
+    Python[Python] -->|front-end| HIR[HIR]
+    HIR -->|passes| HIRL["HIR (lowered)"]
+    HIRL -->|schedule / bind / regalloc| LIR[LIR]
+
+    LIR -->|backend| Verilog[Verilog]
+    LIR -->|backend| Testbench[Testbench]
+    LIR -->|backend| Report[Report]
+    LIR -->|backend| Model[Model]
 ```
 
 - HIR -- "what to compute": SSA dataflow inside a control-flow graph with real branches. Target-independent.
 - LIR -- "the microprogram": the scheduled, bound, register-allocated op stream for the synthesized machine.
   Controller-agnostic; this is the seam where a second controller backend can be added later.
+- Backends -- Verilog, testbench, HTML report, numerical model
 
-Mental model: HIR is the compiler IR; LIR is the instruction stream of a tiny specialized processor; the backend is its
-assembler and datapath generator.
+Mental model: HIR is the compiler IR; LIR is the instruction stream of a tiny specialized processor; the Verilog
+backend is its assembler and datapath generator. The backend stage is a family of independent backends --
+the Verilog module, an HTML report, a Cocotb testbench, and a bit-exact numerical model -- each consuming the LIR,
+and possibly some additional inputs, such as outputs of another backend.
 
 ## Python API
 
@@ -53,11 +64,12 @@ def synthesize(target, *, float_format: FloatFormat, ops: OpConfig,
 @dataclass(frozen=True)
 class SynthesisResult:
     module_name: str
-    interface:      ModuleInterface       # ports (name/dir/width), float format, II model -- the composition contract
-    verilog_output: VerilogOutput  # generated module text + support_files (the shared holoso_support .v/.vh)
-    testbench:      str                   # Cocotb testbench
-    report_html:    str
-    metrics:        SynthesisMetrics      # operator instances, N float / M bool regs, makespan, exact II (cycles)
+    interface:      ModuleInterface   # ports (name/dir/width), float format, II model -- the composition contract
+    verilog_output: VerilogOutput     # generated module text + support_files (the shared holoso_support .v/.vh)
+    model:          NumericalModel    # bit-exact, picklable pure-Python model of the module (flat in -> flat tuple out)
+    cocotb_output:  CocotbOutput      # self-contained testbench: embeds the model, checks the DUT bit-for-bit
+    html_output:    HtmlOutput        # self-contained single-page report
+    metrics:        SynthesisMetrics  # operator instances, N float / M bool regs, makespan, exact II (cycles)
 ```
 
 Passing the object is more ergonomic and strictly more capable than a file: it carries the runtime environment the
@@ -285,7 +297,7 @@ exit:   y_out = phi[(b_init, ya), (b_run, yb)]
 
 ## First delivery (v0)
 
-Minimal end-to-end slice -- front-end -> HIR -> passes -> scheduler -> LIR -> Verilog + Cocotb -- on a single basic
+Minimal end-to-end slice -- front-end -> HIR -> passes -> scheduler -> LIR -> Verilog + testbench + report + model -- on a single basic
 block: combinational, scalar-only, operators `fadd`/`fmul`/`fdiv`/`fmul_ilog2_const` plus `signfix` and `fconst`
 (`fdiv` and its wrapper already exist in ZKF). No state, control flow, arrays, or bools (`M = 0`); intrinsics
 (`sqrt`, `sincos`, ...) raise the "implement this operator" error, pending ZKF support. State, branches, and arrays
