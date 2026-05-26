@@ -50,6 +50,11 @@ backend is its assembler and datapath generator. The backend stage is a family o
 the Verilog module, an HTML report, a Cocotb testbench, and a bit-exact numerical model -- each consuming the LIR,
 and possibly some additional inputs, such as outputs of another backend.
 
+The numerical backend is helpful during development and heavy refactors: it allows early verification of the synthesis
+logic without involving the actual HDL emission and simulation steps, which are slow to iterate on.
+Thus, the normal policy during development is to stabilize the synthesis logic down to the LIR using the numerical
+model for verification, and once that is proven, move on to the actual HDL generation and testbenches.
+
 ## Python API
 
 `synthesize` takes the object -- a function or class, not a source file or path -- and returns an in-memory result;

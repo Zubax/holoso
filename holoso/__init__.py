@@ -1,6 +1,6 @@
 """Holoso: a narrow Python-to-Verilog synthesizer for numeric kernels."""
 
-from ._api import synthesize as synthesize
+from ._api import synthesize as synthesize, SynthesisResult as SynthesisResult
 from ._backend.cocotb import CocotbOutput as CocotbOutput
 from ._backend.html import HtmlOutput as HtmlOutput
 from ._backend.numerical import NumericalModel as NumericalModel
@@ -26,6 +26,5 @@ from ._interface import (
     Port as Port,
     SynthesisMetrics as SynthesisMetrics,
 )
-from ._result import SynthesisResult as SynthesisResult
 
 __version__ = "0.1.0"
