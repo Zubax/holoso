@@ -15,14 +15,13 @@ from cocotb_tools.runner import get_runner
 
 from holoso import FAddOp, FloatFormat
 
-from hdl_float_oracle import (
+from .hdl_float_oracle import (
     DIRECTED_F32,
     HDL_DIR,
     PipelineScoreboard,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    BENCH_DIR,
     add_oracle_bits,
     apply_sgnop,
     build_args,
@@ -129,8 +128,8 @@ def test_holoso_fadd(sim: str, stages: tuple[int, int]) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fadd",
-        test_module="test_fadd",
-        test_dir=BENCH_DIR,
+        test_module="tests.hdl.test_fadd",
+        test_dir=REPO_ROOT,
         build_dir=build_dir,
         extra_env={
             "HOLOSO_EXPECTED_LATENCY": str(FAddOp(decode=stage_decode, align=stage_align).latency(FloatFormat(8, 24)))

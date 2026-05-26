@@ -98,8 +98,8 @@ def generate(model: NumericalModel, interface: ModuleInterface) -> CocotbOutput:
     """
     Build a self-contained cocotb testbench that checks the DUT against the embedded bit-exact model.
 
-    ``count`` random vectors are drawn at simulation time (seeded by ``seed``); each input is a ZKF value uniform in
-    ``[-value_range, value_range]``, bounded to keep multi-operation kernels from overflowing into infinities.
+    A fixed set of random vectors is drawn at simulation time. Each input is a ZKF value uniform in a small bounded
+    range to keep multi-operation kernels from overflowing into infinities.
     """
     blob = base64.b64encode(zlib.compress(pickle.dumps(model, pickle.HIGHEST_PROTOCOL))).decode("ascii")
     testbench = _TEMPLATE.replace("@@MODULE@@", interface.module_name).replace("@@BLOB@@", blob)

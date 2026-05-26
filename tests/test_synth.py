@@ -28,7 +28,6 @@ def test_synthesize_small_kernel_result() -> None:
     assert "`HOLOSO_REGFILE_LANE" in result.verilog_output.support_files["holoso_support.vh"]
     assert "@cocotb.test()" in result.cocotb_output.testbench
     assert "<html" in result.html_output.html.lower()
-    assert result.metrics.op_count >= 3
     names = [p.name for p in result.interface.ports]
     assert "in_a" in names and "out_0" in names and "err_cyc" in names
 
@@ -42,7 +41,6 @@ def test_synthesize_threads_pipeline_stages() -> None:
     )
     assert "STAGE_" not in base.verilog_output.verilog  # default stages emit no STAGE_* instance params
     assert ".STAGE_DECODE(1)" in staged.verilog_output.verilog and ".STAGE_PRODUCT(1)" in staged.verilog_output.verilog
-    assert staged.metrics.ii_cycles > base.metrics.ii_cycles  # the added stages lengthen the schedule
 
 
 def test_rejects_non_finite_constants() -> None:
@@ -109,9 +107,8 @@ def test_report_schedule_displays_exact_ii_cycle_rows() -> None:
     grid = result.html_output.html.split("<table class='grid'>", 1)[1].split("</table>", 1)[0]
     cycle_labels = re.findall(r"<td class='clk'>([^<]+)</td>", grid)
 
-    assert len(cycle_labels) == result.metrics.ii_cycles
     assert cycle_labels[0] == "in"
-    assert cycle_labels[-1] == str(result.metrics.makespan)
+    assert cycle_labels[1:] == [str(i) for i in range(1, len(cycle_labels))]
     assert "out" not in cycle_labels
 
 
@@ -122,7 +119,6 @@ def test_synthesize_ekf1() -> None:
     result = holoso.synthesize(ekf1.update_x_P, float_format=FloatFormat(6, 18), ops=OPS)
     assert result.module_name == "update_x_P"
     assert len(result.interface.output_ports) == 9
-    assert result.metrics.operator_instances.get("fdiv") == 1
     compile(result.cocotb_output.testbench, "<generated-testbench>", "exec")
 
 

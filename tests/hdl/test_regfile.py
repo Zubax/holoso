@@ -9,7 +9,6 @@ from cocotb_tools.runner import get_runner
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HDL = REPO_ROOT / "holoso" / "_backend" / "verilog" / "holoso_support.v"
-BENCH_DIR = REPO_ROOT / "tests" / "hdl"
 
 
 CASES = {
@@ -322,8 +321,8 @@ def test_holoso_regfile(case_name: str, sim: str) -> None:
     results_xml = build_dir / f"results_{case_name}.xml"
     runner.test(
         hdl_toplevel="holoso_regfile",
-        test_module="test_regfile",
-        test_dir=BENCH_DIR,
+        test_module="tests.hdl.test_regfile",
+        test_dir=REPO_ROOT,
         build_dir=build_dir,
         extra_env={"HOLOSO_REGFILE_CASE": case_name},
         results_xml=str(results_xml),

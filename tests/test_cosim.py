@@ -15,14 +15,12 @@ from holoso._frontend import lower
 from holoso._passes import run
 from holoso._schedule import build, interface_of
 
-from hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, sources
+from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, sources
 
 OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())
 
 
-def _run_cosim(
-    sim: str, fn: Callable[..., object], fmt: FloatFormat, name: str, count: int, ops: OpConfig = OPS
-) -> None:
+def _run_cosim(sim: str, fn: Callable[..., object], fmt: FloatFormat, name: str, ops: OpConfig = OPS) -> None:
     lir = build(run(lower(fn, fmt), ops), name)
     interface = interface_of(lir)
     model = build_model(lir)
@@ -35,7 +33,7 @@ def _run_cosim(
     # The cocotb backend emits a self-contained bench that embeds the bit-exact model and draws random vectors at run
     # time; it asserts the DUT's output bits equal the model's exactly (no tolerance) and the exact cycle latency.
     test_module = f"test_{name}"
-    (gen_dir / f"{test_module}.py").write_text(generate_testbench(model, interface, count=count).testbench)
+    (gen_dir / f"{test_module}.py").write_text(generate_testbench(model, interface).testbench)
 
     runner = get_runner(sim)
     runner.build(
@@ -61,7 +59,7 @@ def test_cosim_small_kernel(sim: str) -> None:
     def kernel(a, b):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
-    _run_cosim(sim, kernel, FloatFormat(8, 24), "kernel", count=64)
+    _run_cosim(sim, kernel, FloatFormat(8, 24), "kernel")
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -69,7 +67,7 @@ def test_cosim_division(sim: str) -> None:
     def blend(a, b, c):  # type: ignore[no-untyped-def]
         return a / b + c * 2.0
 
-    _run_cosim(sim, blend, FloatFormat(6, 18), "blend", count=64)
+    _run_cosim(sim, blend, FloatFormat(6, 18), "blend")
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -77,7 +75,7 @@ def test_cosim_ekf1(sim: str) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1
 
-    _run_cosim(sim, ekf1.update_x_P, FloatFormat(6, 18), "update_x_P", count=24)
+    _run_cosim(sim, ekf1.update_x_P, FloatFormat(6, 18), "update_x_P")
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -88,7 +86,7 @@ def test_cosim_staged_kernel(sim: str) -> None:
     # A pipeline stage on each operator kind the kernel uses; the exact-cycle cosim proves the staged latencies --
     # threaded from annotation through the schedule into the generated STAGE_* params -- all agree with the RTL.
     ops = OpConfig(FAddOp(decode=1), FMulOp(product=1), FDivOp(), FMulILog2GenericOp(decode=1))
-    _run_cosim(sim, kernel, FloatFormat(8, 24), "kernel_staged", count=64, ops=ops)
+    _run_cosim(sim, kernel, FloatFormat(8, 24), "kernel_staged", ops=ops)
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -98,4 +96,4 @@ def test_cosim_staged_division(sim: str) -> None:
 
     # Exercise the STAGE_ALIGN (fadd) and STAGE_INPUT (fdiv) knobs end-to-end -- the combos the staged-kernel misses.
     ops = OpConfig(FAddOp(decode=1, align=1), FMulOp(), FDivOp(input_stage=1), FMulILog2GenericOp())
-    _run_cosim(sim, blend, FloatFormat(6, 18), "blend_staged", count=64, ops=ops)
+    _run_cosim(sim, blend, FloatFormat(6, 18), "blend_staged", ops=ops)

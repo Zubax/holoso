@@ -17,7 +17,7 @@ from cocotb_tools.runner import get_runner
 
 from holoso import FDivOp, FloatFormat
 
-from hdl_float_oracle import (
+from .hdl_float_oracle import (
     DIRECTED_F32,
     F32_EXP_MASK,
     HDL_DIR,
@@ -25,7 +25,6 @@ from hdl_float_oracle import (
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    BENCH_DIR,
     apply_sgnop,
     build_args,
     div_oracle_bits,
@@ -148,8 +147,8 @@ def test_holoso_fdiv(sim: str, stage_input: int) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fdiv",
-        test_module="test_fdiv",
-        test_dir=BENCH_DIR,
+        test_module="tests.hdl.test_fdiv",
+        test_dir=REPO_ROOT,
         build_dir=build_dir,
         extra_env={"HOLOSO_EXPECTED_LATENCY": str(latency)},
         results_xml=str(build_dir / "results.xml"),

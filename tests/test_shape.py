@@ -4,7 +4,7 @@ import dataclasses
 
 from holoso._frontend import flatten_value, port_name
 
-from _modelref import output_names
+from ._modelref import output_names
 
 
 def test_scalar_is_output_zero() -> None:

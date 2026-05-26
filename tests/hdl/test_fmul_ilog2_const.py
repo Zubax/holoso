@@ -17,14 +17,13 @@ from cocotb_tools.runner import get_runner
 from holoso import FloatFormat
 from holoso._operators import FMulILog2Op
 
-from hdl_float_oracle import (
+from .hdl_float_oracle import (
     DIRECTED_F32,
     HDL_DIR,
     PipelineScoreboard,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    BENCH_DIR,
     apply_sgnop,
     build_args,
     drive_reset,
@@ -125,8 +124,8 @@ def test_holoso_fmul_ilog2_const(sim: str, config: tuple[int, int]) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fmul_ilog2_const",
-        test_module="test_fmul_ilog2_const",
-        test_dir=BENCH_DIR,
+        test_module="tests.hdl.test_fmul_ilog2_const",
+        test_dir=REPO_ROOT,
         build_dir=build_dir,
         extra_env={
             "HOLOSO_TEST_K": str(k),

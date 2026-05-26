@@ -69,12 +69,11 @@ def synthesize(target, *, float_format: FloatFormat, ops: OpConfig,
 @dataclass(frozen=True)
 class SynthesisResult:
     module_name: str
-    interface:      ModuleInterface   # ports (name/dir/width), float format, II model -- the composition contract
+    interface:      ModuleInterface   # ports (name/dir/width) and float format -- the composition contract
     verilog_output: VerilogOutput     # generated module text + support_files (the shared holoso_support .v/.vh)
-    model:          NumericalModel    # bit-exact, picklable pure-Python model of the module (flat in -> flat tuple out)
+    numerical_model: NumericalModel   # bit-exact, picklable pure-Python model of the module (flat in -> flat tuple out)
     cocotb_output:  CocotbOutput      # self-contained testbench: embeds the model, checks the DUT bit-for-bit
     html_output:    HtmlOutput        # self-contained single-page report
-    metrics:        SynthesisMetrics  # operator instances, N float / M bool regs, makespan, exact II (cycles)
 ```
 
 Passing the object is more ergonomic and strictly more capable than a file: it carries the runtime environment the

@@ -12,14 +12,13 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from hdl_float_oracle import (
+from .hdl_float_oracle import (
     DIRECTED_F32,
     PipelineScoreboard,
     HDL_DIR,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    BENCH_DIR,
     apply_sgnop,
     build_args,
     cmp_oracle,
@@ -143,8 +142,8 @@ def test_holoso_fcmp(sim: str) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fcmp",
-        test_module="test_fcmp",
-        test_dir=BENCH_DIR,
+        test_module="tests.hdl.test_fcmp",
+        test_dir=REPO_ROOT,
         build_dir=build_dir,
         results_xml=str(build_dir / "results.xml"),
     )

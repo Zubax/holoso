@@ -13,7 +13,7 @@ from holoso._frontend import lower
 from holoso._passes import run
 from holoso._schedule import build
 
-from hdl_float_oracle import HDL_DIR, sources
+from .hdl.hdl_float_oracle import HDL_DIR, sources
 
 requires_iverilog = pytest.mark.skipif(shutil.which("iverilog") is None, reason="iverilog not installed")
 OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())

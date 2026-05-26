@@ -11,7 +11,7 @@ from holoso._backend.numerical import generate as build_model
 from holoso._frontend import lower
 from holoso._passes import run
 from holoso._schedule import build
-from _modelref import (
+from ._modelref import (
     bounded,
     default_tolerance,
     encode_inputs,

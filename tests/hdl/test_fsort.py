@@ -15,14 +15,13 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from hdl_float_oracle import (
+from .hdl_float_oracle import (
     DIRECTED_F32,
     PipelineScoreboard,
     HDL_DIR,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    BENCH_DIR,
     apply_sgnop,
     build_args,
     drive_reset,
@@ -137,8 +136,8 @@ def test_holoso_fsort(sim: str) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fsort",
-        test_module="test_fsort",
-        test_dir=BENCH_DIR,
+        test_module="tests.hdl.test_fsort",
+        test_dir=REPO_ROOT,
         build_dir=build_dir,
         extra_env={"HOLOSO_EXPECTED_LATENCY": "1"},
         results_xml=str(build_dir / "results.xml"),

@@ -20,7 +20,7 @@ from holoso._frontend import lower
 from holoso._passes import run
 from holoso._schedule import build
 
-from hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, BENCH_DIR, build_args, drive_reset, sources, start_clock
+from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
 
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOp(), FMulOp(), FDivOp(), FMulILog2GenericOp())
@@ -85,8 +85,8 @@ def test_err_cyc(sim: str) -> None:
     )
     runner.test(
         hdl_toplevel="divide",
-        test_module="test_err_cyc",
-        test_dir=str(BENCH_DIR),
+        test_module="tests.hdl.test_err_cyc",
+        test_dir=str(REPO_ROOT),
         build_dir=str(build_dir),
         extra_env={"HOLOSO_ERRCYC": json.dumps({"cycles": lir.initiation_interval})},
         results_xml=str(build_dir / "results.xml"),
