@@ -116,10 +116,10 @@ def main() -> None:
     # Operators are constructed explicitly; each fixes its float format and parameters (here, default latencies, no
     # extra pipeline stages). The numeric kernel uses add, multiply, divide, and the power-of-two scaling operator.
     ops = holoso.OpConfig(
-        holoso.FAddOp(float_format),
-        holoso.FMulOp(float_format),
-        holoso.FDivOp(float_format),
-        holoso.FMulILog2GenericOp(float_format),
+        holoso.FAddOperator(float_format),
+        holoso.FMulOperator(float_format),
+        holoso.FDivOperator(float_format),
+        holoso.FMulILog2OperatorFamily(float_format),
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
 

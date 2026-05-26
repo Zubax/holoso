@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from holoso import synthesize, FloatFormat, SynthesisResult
-from holoso import FAddOp, FDivOp, FMulILog2GenericOp, FMulOp, OpConfig
+from holoso import FAddOperator, FDivOperator, FMulILog2OperatorFamily, FMulOperator, OpConfig
 
 from ._synth import BUILD_ROOT, SynthReport
 from .flows import Flow
@@ -71,7 +71,9 @@ def _collect_rtl(specs: list[str]) -> list[Path]:
 def _synthesize(kernel: Path, entry: str, fmt: FloatFormat, name: str) -> SynthesisResult:
     sys.path.insert(0, str(kernel.resolve().parent))
     module = importlib.import_module(kernel.stem)
-    ops = OpConfig(fadd=FAddOp(fmt), fmul=FMulOp(fmt), fdiv=FDivOp(fmt), fmul_ilog2=FMulILog2GenericOp(fmt))
+    ops = OpConfig(
+        fadd=FAddOperator(fmt), fmul=FMulOperator(fmt), fdiv=FDivOperator(fmt), fmul_ilog2=FMulILog2OperatorFamily(fmt)
+    )
     return synthesize(getattr(module, entry), ops=ops, name=name)
 
 

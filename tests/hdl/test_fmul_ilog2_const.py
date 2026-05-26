@@ -15,7 +15,7 @@ from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
 from holoso import FloatFormat
-from holoso._operators import FMulILog2Op
+from holoso._operators import FMulILog2Operator
 
 from .hdl_float_oracle import (
     DIRECTED_F32,
@@ -129,7 +129,9 @@ def test_holoso_fmul_ilog2_const(sim: str, config: tuple[int, int]) -> None:
         build_dir=build_dir,
         extra_env={
             "HOLOSO_TEST_K": str(k),
-            "HOLOSO_EXPECTED_LATENCY": str(FMulILog2Op(fmt=FloatFormat(8, 24), k=0, stage_decode=stage_decode).latency),
+            "HOLOSO_EXPECTED_LATENCY": str(
+                FMulILog2Operator(fmt=FloatFormat(8, 24), k=0, stage_decode=stage_decode).latency
+            ),
         },
         results_xml=str(build_dir / "results.xml"),
     )

@@ -1,9 +1,5 @@
-"""
-The operator model -- a class hierarchy whose instances are operators built from the synthesis configuration -- and
-the sign-op encoding.
-"""
+"""Hardware operator models and folded sign controls."""
 
-import enum
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -11,37 +7,50 @@ from typing import ClassVar
 
 from ._type import FloatFormat
 
+# ----------------------------------------------------------------------------------------------------------------------
+# Sign controls and hardware operators: selected, fully configured resources.
 
-class Sgnop(enum.IntFlag):
-    """
-    Folded sign manipulation applied to an operator operand or output.
 
-    A 2-bit field: bit 0 = negate, bit 1 = absolute value (so ``ABS | NEG`` means ``-|x|``). The integer values match
-    ``HOLOSO_FSGNOP_*`` in ``holoso_support.vh`` (NONE=0, NEG=1, ABS=2, ABS|NEG=3), which is why ``IntFlag`` is used:
-    ``int(op)`` yields the Verilog encoding while membership tests (``Sgnop.ABS in op``) express the bit semantics.
-    """
+@dataclass(frozen=True, slots=True)
+class SignControl:
+    """A hardware-side sign conditioner: absolute value first, then optional negation."""
 
-    NONE = 0
-    NEG = 1
-    ABS = 2
+    negate: bool = False
+    absolute: bool = False
+
+    def then(self, outer: "SignControl") -> "SignControl":
+        """Compose two controls where ``self`` is applied first and ``outer`` after."""
+        if outer.absolute:
+            return SignControl(negate=outer.negate, absolute=True)
+        return SignControl(negate=self.negate ^ outer.negate, absolute=self.absolute)
+
+    def apply_float(self, value: float) -> float:
+        if self.absolute:
+            value = abs(value)
+        if self.negate:
+            value = -value
+        return value
 
     def decorate(self, text: str) -> str:
-        """Wrap a value's name to show this sign-op: NEG -> ``-x``, ABS -> ``|x|``, ABS|NEG -> ``-|x|``."""
-        if Sgnop.ABS in self:
+        if self.absolute:
             text = f"|{text}|"
-        if Sgnop.NEG in self:
+        if self.negate:
             text = f"-{text}"
         return text
 
-
-# ----------------------------------------------------------------------------------------------------------------------
-# Operator type hierarchy. Each operator is a frozen, equal-by-value instance constructed from the synthesis config.
-# The fully-specified instance is itself the resource-sharing key, so equal ops time-share one physical module.
-# Nothing downstream branches on operator identity.
+    @property
+    def encoded(self) -> int:
+        return (1 if self.negate else 0) | (2 if self.absolute else 0)
 
 
-class OperatorDef(ABC):
-    """Kind-level metadata and naming common to the concrete operators."""
+@dataclass(frozen=True)
+class HardwareOperator(ABC):
+    """
+    A fully specified hardware operator configuration.
+
+    Frozen-dataclass equality makes an instance the resource-sharing key: equal operators time-share one physical
+    module. Each concrete operator owns its timing, reference semantics, notation, and HDL parameters.
+    """
 
     mnemonic: ClassVar[str]
     arity: ClassVar[int]
@@ -51,60 +60,50 @@ class OperatorDef(ABC):
     def module_name(self) -> str:
         return f"holoso_{self.mnemonic}"
 
-
-@dataclass(frozen=True)
-class Op(OperatorDef, ABC):
-    """
-    A fully-specified operator: one concrete module configuration. Frozen-dataclass equality makes the instance
-    itself the resource-sharing key, so equal ops time-share one physical module. Every per-operator behavior is a
-    method here; the uniform ``*operands`` signatures keep the abstract methods LSP-compatible while concrete bodies
-    unpack per their arity. A field-less frozen-dataclass base lets the concrete ops (and the deterministic
-    ``dataclasses.astuple`` sort over them) be recognized uniformly.
-    """
-
     @property
     @abstractmethod
     def latency(self) -> int:
-        """Exact cycle latency of this fully-specified operator instance."""
+        """Exact cycle latency of this fully specified operator instance."""
 
     @abstractmethod
     def evaluate(self, *operands: float) -> float: ...
 
     @abstractmethod
     def render(self, *operands: str) -> str:
-        """Human-friendly expression for the report and trace comments (never parsed). Best to keep it compact."""
+        """Human-friendly expression for the report and trace comments."""
 
     @abstractmethod
     def hdl_params(self) -> dict[str, int]:
         """Operator-specific ``#(.NAME(v))`` params; the backend prepends ``WEXP``/``WMAN``."""
 
 
-class ParameterizedOp(ABC):
+class ParameterizedHardwareOperator(ABC):
     """
-    A family of operators needing per-node parameters; a factory producing concrete :class:`Op` instances. It carries
-    only config-time values, not operator metadata -- the concrete :class:`Op` it produces owns that.
+    A family of hardware operators needing per-node parameters.
+
+    It carries only config-time values; the concrete :class:`HardwareOperator` it produces owns the hardware metadata.
     """
 
     @abstractmethod
-    def instantiate(self, *params: int) -> Op: ...
+    def instantiate(self, *params: int) -> HardwareOperator: ...
 
 
 @dataclass(frozen=True, slots=True)
-class FloatOp(Op, ABC):
-    """A fully-specified floating-point operator bound to one ZKF format."""
+class FloatHardwareOperator(HardwareOperator, ABC):
+    """A fully specified floating-point operator bound to one ZKF format."""
 
     fmt: FloatFormat
 
 
 @dataclass(frozen=True, slots=True)
-class FloatParameterizedOp(ParameterizedOp, ABC):
+class FloatParameterizedHardwareOperator(ParameterizedHardwareOperator, ABC):
     """A floating-point operator family bound to one ZKF format."""
 
     fmt: FloatFormat
 
 
 @dataclass(frozen=True, slots=True)
-class FAddOp(FloatOp):
+class FAddOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fadd"
     arity: ClassVar[int] = 2
     stage_decode: int = 0
@@ -138,7 +137,7 @@ class FAddOp(FloatOp):
 
 
 @dataclass(frozen=True, slots=True)
-class FMulOp(FloatOp):
+class FMulOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fmul"
     arity: ClassVar[int] = 2
     stage_product: int = 0
@@ -164,7 +163,7 @@ class FMulOp(FloatOp):
 
 
 @dataclass(frozen=True, slots=True)
-class FDivOp(FloatOp):
+class FDivOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fdiv"
     arity: ClassVar[int] = 2
     error_ports: ClassVar[list[str]] = ["div0"]
@@ -192,8 +191,8 @@ class FDivOp(FloatOp):
 
 
 @dataclass(frozen=True, slots=True)
-class FMulILog2Op(FloatOp):
-    """Exact scaling by a power of two, ``a * 2**k``; the concrete op the factory returns."""
+class FMulILog2Operator(FloatHardwareOperator):
+    """Exact scaling by a power of two, ``a * 2**k``; the concrete operator the family returns."""
 
     mnemonic: ClassVar[str] = "fmul_ilog2_const"
     arity: ClassVar[int] = 1
@@ -201,7 +200,7 @@ class FMulILog2Op(FloatOp):
     stage_decode: int = 0
 
     def __post_init__(self) -> None:
-        # k's range is format-dependent (|k| < 2**(WEXP-1)) and is enforced during lowering, not here.
+        # k's range is format-dependent (|k| < 2**(WEXP-1)) and is enforced by HIR-to-MIR lowering.
         if self.stage_decode not in (0, 1):
             raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
 
@@ -225,8 +224,8 @@ class FMulILog2Op(FloatOp):
 
 
 @dataclass(frozen=True, slots=True)
-class FMulILog2GenericOp(FloatParameterizedOp):
-    """The ilog2 family: a factory whose stage knob is baked into every concrete op it instantiates."""
+class FMulILog2OperatorFamily(FloatParameterizedHardwareOperator):
+    """The ilog2 family: a factory whose stage knob is baked into every concrete operator it instantiates."""
 
     stage_decode: int = 0
 
@@ -234,26 +233,33 @@ class FMulILog2GenericOp(FloatParameterizedOp):
         if self.stage_decode not in (0, 1):
             raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
 
-    def instantiate(self, *params: int) -> FMulILog2Op:
+    def instantiate(self, *params: int) -> FMulILog2Operator:
         (k,) = params
-        return FMulILog2Op(fmt=self.fmt, k=k, stage_decode=self.stage_decode)
+        return FMulILog2Operator(fmt=self.fmt, k=k, stage_decode=self.stage_decode)
 
 
 # Order is load-bearing: it reproduces the operator-instance numbering the scheduler and backend emit.
-ALL_OP_CLASSES: list[type[Op]] = [FAddOp, FMulOp, FDivOp, FMulILog2Op]
+ALL_OPERATOR_CLASSES: list[type[HardwareOperator]] = [
+    FAddOperator,
+    FMulOperator,
+    FDivOperator,
+    FMulILog2Operator,
+]
 
 
 @dataclass(frozen=True)
 class OpConfig:
     """
-    The operator configuration threaded into synthesis; each field fixes one operator's format and parameters.
-    Constructed explicitly by the caller (no defaults), held on the pipeline and never hashed.
+    The hardware operator configuration threaded into synthesis.
+
+    Constructed explicitly by the caller (no defaults), held on the pipeline and never hashed. Each field fixes one
+    operator's format and parameters.
     """
 
-    fadd: FAddOp
-    fmul: FMulOp
-    fdiv: FDivOp
-    fmul_ilog2: FMulILog2GenericOp
+    fadd: FAddOperator
+    fmul: FMulOperator
+    fdiv: FDivOperator
+    fmul_ilog2: FMulILog2OperatorFamily
 
     @property
     def float_format(self) -> FloatFormat:

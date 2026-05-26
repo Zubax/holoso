@@ -17,7 +17,8 @@ count simply grows.
 import heapq
 from dataclasses import dataclass
 
-from ._hir import Const, Hir, OpNode, ValueId
+from ._hir import ValueId
+from ._mir import Mir, MirConst, MirOperation
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,32 +27,32 @@ class Allocation:
     nreg: int
 
 
-def _opnode(hir: Hir, vid: ValueId) -> OpNode:
-    node = hir.nodes[vid]
-    assert isinstance(node, OpNode)
+def _operation(mir: Mir, vid: ValueId) -> MirOperation:
+    node = mir.nodes[vid]
+    assert isinstance(node, MirOperation)
     return node
 
 
-def allocate(hir: Hir, issue_cycle: dict[ValueId, int], makespan: int) -> Allocation:
+def allocate(mir: Mir, issue_cycle: dict[ValueId, int], makespan: int) -> Allocation:
     present_cycle = makespan + 1
 
     def def_cycle(vid: ValueId) -> int:
-        node = hir.nodes[vid]
-        if isinstance(node, OpNode):
-            return issue_cycle[vid] + node.op.latency
+        node = mir.nodes[vid]
+        if isinstance(node, MirOperation):
+            return issue_cycle[vid] + node.operator.latency
         return 0  # an input port, written at the accept edge
 
-    reg_values: list[ValueId] = [*hir.input_ids, *issue_cycle.keys()]
+    reg_values: list[ValueId] = [*mir.input_ids, *issue_cycle.keys()]
     last_use: dict[ValueId, int] = {vid: def_cycle(vid) for vid in reg_values}
 
     for vid in issue_cycle:
-        op = _opnode(hir, vid)
-        for operand in (op.a, op.b):
-            if operand is None or isinstance(hir.nodes[operand], Const):
+        op = _operation(mir, vid)
+        for operand in op.operands:
+            if isinstance(mir.nodes[operand], MirConst):
                 continue
             last_use[operand] = max(last_use[operand], issue_cycle[vid])
-    for out in hir.outputs:
-        if not isinstance(hir.nodes[out.value], Const):
+    for out in mir.outputs:
+        if not isinstance(mir.nodes[out.value], MirConst):
             last_use[out.value] = max(last_use.get(out.value, 0), present_cycle)
 
     assign: dict[ValueId, int] = {}

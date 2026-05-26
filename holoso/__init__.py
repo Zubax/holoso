@@ -27,10 +27,10 @@ from ._backend.numerical import NumericalModel as NumericalModel
 from ._backend.verilog import VerilogOutput as VerilogOutput
 
 from ._operators import (
-    FAddOp as FAddOp,
-    FDivOp as FDivOp,
-    FMulILog2GenericOp as FMulILog2GenericOp,
-    FMulOp as FMulOp,
+    FAddOperator as FAddOperator,
+    FDivOperator as FDivOperator,
+    FMulILog2OperatorFamily as FMulILog2OperatorFamily,
+    FMulOperator as FMulOperator,
     OpConfig as OpConfig,
 )
 

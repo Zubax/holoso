@@ -13,7 +13,7 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FloatFormat, FMulOp
+from holoso import FloatFormat, FMulOperator
 
 from .hdl_float_oracle import (
     DIRECTED_F32,
@@ -125,6 +125,8 @@ def test_holoso_fmul(sim: str, stage_product: int) -> None:
         test_module="tests.hdl.test_fmul",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": str(FMulOp(FloatFormat(8, 24), stage_product=stage_product).latency)},
+        extra_env={
+            "HOLOSO_EXPECTED_LATENCY": str(FMulOperator(FloatFormat(8, 24), stage_product=stage_product).latency)
+        },
         results_xml=str(build_dir / "results.xml"),
     )

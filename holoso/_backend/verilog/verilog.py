@@ -8,9 +8,9 @@ from importlib import resources
 from string import ascii_letters
 
 from ..._lir import ConstRef, Lir, OperatorInstance, Operand, RegRef, ScheduledOp
-from ..._operators import ALL_OP_CLASSES, Sgnop
+from ..._operators import ALL_OPERATOR_CLASSES, SignControl
 
-_CLASS_ORDER = {cls: index for index, cls in enumerate(ALL_OP_CLASSES)}
+_CLASS_ORDER = {cls: index for index, cls in enumerate(ALL_OPERATOR_CLASSES)}
 _PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
 
 _SUPPORT_FILES = {
@@ -53,7 +53,7 @@ class _Writer:
 
 
 def _base(inst: OperatorInstance) -> str:
-    return f"{inst.op.mnemonic}_{inst.index}"
+    return f"{inst.operator.mnemonic}_{inst.index}"
 
 
 def _sig(inst: OperatorInstance) -> str:
@@ -80,11 +80,11 @@ def _operand_value(operand: Operand, lanes: dict[int, int]) -> str:
 
 def _operand_name(operand: Operand) -> str:
     base = f"r{operand.source.index}" if isinstance(operand.source, RegRef) else f"c{operand.source.index}"
-    return operand.sgnop.decorate(base)
+    return operand.sign.decorate(base)
 
 
 def _op_expr(op: ScheduledOp) -> str:
-    return f"r{op.dst.index}={op.inst.op.render(*[_operand_name(o) for o in op.operands])}"
+    return f"r{op.dst.index}={op.inst.operator.render(*[_operand_name(o) for o in op.operands])}"
 
 
 def _cycle_summary(issues: list[ScheduledOp], commits: list[ScheduledOp]) -> str:
@@ -105,7 +105,7 @@ def _group_by_cycle(lir: Lir) -> tuple[dict[int, list[ScheduledOp]], dict[int, l
         commits.setdefault(op.commit_cycle, []).append(op)
     for group in (issues, commits):
         for ops in group.values():
-            ops.sort(key=lambda op: (_CLASS_ORDER[type(op.inst.op)], op.inst.index))
+            ops.sort(key=lambda op: (_CLASS_ORDER[type(op.inst.operator)], op.inst.index))
     return issues, commits
 
 
@@ -215,12 +215,12 @@ def _emit_declarations(w: _Writer, lir: Lir) -> None:
     for inst in lir.instances:
         sig = _sig(inst)
         w.line(f"reg          {sig}_iv;")
-        for letter in _PORT_LETTERS[: inst.op.arity]:
+        for letter in _PORT_LETTERS[: inst.operator.arity]:
             w.line(f"reg  [1:0]   {sig}_{letter}s;")
             w.line(f"reg  [W-1:0] {sig}_{letter};")
         w.line(f"reg  [1:0]   {sig}_ys;")
         w.line(f"wire [W-1:0] {sig}_y;")
-        for port in inst.op.error_ports:
+        for port in inst.operator.error_ports:
             w.line(f"wire         {sig}_{port};")
     w.line("")
 
@@ -260,12 +260,14 @@ def _emit_regfile(w: _Writer, lir: Lir) -> None:
 def _emit_operators(w: _Writer, lir: Lir) -> None:
     for inst in lir.instances:
         sig = _sig(inst)
-        letters = _PORT_LETTERS[: inst.op.arity]
+        letters = _PORT_LETTERS[: inst.operator.arity]
         # WEXP/WMAN frame the float format; hdl_params() adds K (ilog2) and any enabled STAGE_* (defaults omitted),
         # so the schedule's op.latency and the emitted instantiation params always describe the same module.
-        parts = [".WEXP(WEXP)", ".WMAN(WMAN)"] + [f".{param}({value})" for param, value in inst.op.hdl_params().items()]
+        parts = [".WEXP(WEXP)", ".WMAN(WMAN)"] + [
+            f".{param}({value})" for param, value in inst.operator.hdl_params().items()
+        ]
         params = "#(" + ", ".join(parts) + ")"
-        w.line(f"{inst.op.module_name} {params} u_{_base(inst)} (")
+        w.line(f"{inst.operator.module_name} {params} u_{_base(inst)} (")
         w.push()
         w.line(f".clk(clk), .rst(rst), .in_valid({sig}_iv),")
         sgn_ports = ", ".join(f".{letter}_sgnop({sig}_{letter}s)" for letter in letters)
@@ -274,7 +276,7 @@ def _emit_operators(w: _Writer, lir: Lir) -> None:
         w.line(f"{data_ports},")
         # out_valid is left unconnected: the static schedule already knows when each result is ready.
         tail = f".out_valid(), .y({sig}_y)"
-        for port in inst.op.error_ports:
+        for port in inst.operator.error_ports:
             tail += f", .{port}({sig}_{port})"
         w.line(tail)
         w.pop()
@@ -296,7 +298,7 @@ def _emit_datapath(
     for inst in lir.instances:
         sig = _sig(inst)
         w.line(f"{sig}_iv = 1'b0; {sig}_ys = 2'd0;")
-        for letter in _PORT_LETTERS[: inst.op.arity]:
+        for letter in _PORT_LETTERS[: inst.operator.arity]:
             w.line(f"{sig}_{letter} = {{W{{1'b0}}}}; {sig}_{letter}s = 2'd0;")
     w.lines(
         "rf_rd_addr = {(NRD*WADDR){1'b0}};",
@@ -332,14 +334,17 @@ def _emit_datapath(
             sig = _sig(op.inst)
             w.line(f"{sig}_iv = 1'b1;")
             for letter, operand in zip(_PORT_LETTERS, op.operands):
-                w.line(f"{sig}_{letter} = {_operand_value(operand, lanes)}; {sig}_{letter}s = 2'd{int(operand.sgnop)};")
-            w.line(f"{sig}_ys = 2'd{int(op.y_sgnop)};")
+                w.line(
+                    f"{sig}_{letter} = {_operand_value(operand, lanes)}; "
+                    f"{sig}_{letter}s = 2'd{operand.sign.encoded};"
+                )
+            w.line(f"{sig}_ys = 2'd{op.result_sign.encoded};")
         for lane, op in enumerate(commits):
             sig = _sig(op.inst)
             w.line(f"rf_wr_en[{lane}] = 1'b1;")
             w.line(f"rf_wr_addr[{_rf_addr(lane)}] = {op.dst.index};")
             w.line(f"rf_wr_data[{_rf_data(lane)}] = {sig}_y;")
-        err_terms = [f"{_sig(op.inst)}_{port}" for op in commits for port in op.inst.op.error_ports]
+        err_terms = [f"{_sig(op.inst)}_{port}" for op in commits for port in op.inst.operator.error_ports]
         if err_terms:
             w.line(f"err = {' | '.join(err_terms)};  // error(s) detected as these operators commit")
         w.pop()
@@ -396,10 +401,11 @@ def _emit_outputs(w: _Writer, lir: Lir) -> None:
             raw = f"const_{wire.source.index}"
         else:
             raw = f"rf_view[{_rf_view(wire.source.index)}]"
-        if wire.sgnop is Sgnop.NONE:
+        if wire.sign == SignControl():
             w.line(f"assign {wire.name} = {raw};")
         else:
             w.line(
-                f"holoso_fsgnop #(.WFULL(W)) u_outsgn_{index} (.x({raw}), .op(2'd{int(wire.sgnop)}), .y({wire.name}));"
+                f"holoso_fsgnop #(.WFULL(W)) u_outsgn_{index} "
+                f"(.x({raw}), .op(2'd{wire.sign.encoded}), .y({wire.name}));"
             )
     w.line("")

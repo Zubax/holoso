@@ -1,28 +1,19 @@
 """
-Software-pipelined (zero-bubble) list scheduling over a lowered HIR.
+Software-pipelined (zero-bubble) list scheduling over selected MIR.
 
-The operators are fully pipelined (throughput 1) and their latencies are static and data-independent, so the whole
-schedule is computed here at compile time and the backend controller is just a cycle counter replaying it. We issue
-each operator as soon as its operands are *ready* -- without waiting for unrelated ops to finish (no barrier). The
-register file is read-first: a result written on cycle ``c+L`` lands in the FF on the next edge and is
-readable from ``c+L+1``, so a data-dependent consumer is held one extra cycle past the producer's latency.
-
-Cycle 0 is the input-load/accept cycle; inputs are readable from cycle 1. Compute cycles start at 1. An op issued at
-cycle ``c`` reads its register operands at ``c`` and commits at ``c + L``. The dependency constraint is therefore
-``c_consumer >= c_producer + L_producer + 1``.
-
-Instances are pooled by operator instance: equal ops time-share ``pool[type(op)]`` copies, at most one issue per copy
-per cycle.
+The hardware operators are fully pipelined (throughput 1) and their latencies are static and data-independent, so the
+whole schedule is computed here at compile time and the backend controller is just a cycle counter replaying it.
 """
 
 from collections.abc import Mapping
 from dataclasses import astuple, dataclass
 
-from ._hir import Hir, OpNode, ValueId
+from ._hir import ValueId
 from ._lir import OperatorInstance
-from ._operators import ALL_OP_CLASSES, Op
+from ._mir import Mir, MirOperation
+from ._operators import ALL_OPERATOR_CLASSES, HardwareOperator
 
-_CLASS_ORDER = {cls: index for index, cls in enumerate(ALL_OP_CLASSES)}
+_CLASS_ORDER = {cls: index for index, cls in enumerate(ALL_OPERATOR_CLASSES)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,93 +26,86 @@ class Schedule:
     makespan: int  # max commit cycle (issue_cycle + latency), or 0 if there are no ops
 
 
-def _opnode(hir: Hir, vid: ValueId) -> OpNode:
-    node = hir.nodes[vid]
-    assert isinstance(node, OpNode)
+def _operation(mir: Mir, vid: ValueId) -> MirOperation:
+    node = mir.nodes[vid]
+    assert isinstance(node, MirOperation)
     return node
 
 
-def _op_ids(hir: Hir) -> list[ValueId]:
-    return [vid for vid, node in hir.nodes.items() if isinstance(node, OpNode)]
+def _op_ids(mir: Mir) -> list[ValueId]:
+    return [vid for vid, node in mir.nodes.items() if isinstance(node, MirOperation)]
 
 
-def _operands(hir: Hir, vid: ValueId) -> list[ValueId]:
-    op = _opnode(hir, vid)
-    return [op.a] if op.b is None else [op.a, op.b]
+def _operator_operands(mir: Mir, vid: ValueId) -> list[ValueId]:
+    """Operand values that are themselves operators; inputs/consts are ready at cycle 1."""
+    return [operand for operand in _operation(mir, vid).operands if isinstance(mir.nodes[operand], MirOperation)]
 
 
-def _operator_operands(hir: Hir, vid: ValueId) -> list[ValueId]:
-    """Operand values that are themselves operators (the scheduling dependencies). Inputs/consts are ready at cycle 1."""
-    return [x for x in _operands(hir, vid) if isinstance(hir.nodes[x], OpNode)]
+def _present_classes(mir: Mir) -> set[type[HardwareOperator]]:
+    return {type(_operation(mir, vid).operator) for vid in _op_ids(mir)}
 
 
-def _present_classes(hir: Hir) -> set[type[Op]]:
-    return {type(_opnode(hir, vid).op) for vid in _op_ids(hir)}
-
-
-def resolve_pool(hir: Hir, instances: Mapping[type[Op], int] | None) -> dict[type[Op], int]:
+def resolve_pool(mir: Mir, instances: Mapping[type[HardwareOperator], int] | None) -> dict[type[HardwareOperator], int]:
     """
-    The per-class instance budget: at least one of every operator class present in the graph (default 1).
+    The per-class instance budget: at least one of every operator class present in the graph.
 
-    The budget is applied per distinct operator, so ``fmul_ilog2_const`` gets ``pool[FMulILog2Op]`` instances per
-    distinct ``K``. Raising a class's budget lets that many equal ops co-issue.
+    The budget is applied per distinct hardware operator, so ``fmul_ilog2_const`` gets the requested number of
+    instances for each distinct ``K``.
     """
-    pool: dict[type[Op], int] = {}
-    for cls in _present_classes(hir):
+    pool: dict[type[HardwareOperator], int] = {}
+    for cls in _present_classes(mir):
         requested = 1 if instances is None else instances.get(cls, 1)
         pool[cls] = max(1, requested)
     return pool
 
 
-def _critical_path(hir: Hir, op_ids: list[ValueId]) -> dict[ValueId, int]:
+def _critical_path(mir: Mir, op_ids: list[ValueId]) -> dict[ValueId, int]:
     """Priority height: the latency-weighted longest path to a sink, counting the +1 writeback per dependency edge."""
     consumers: dict[ValueId, list[ValueId]] = {vid: [] for vid in op_ids}
     for vid in op_ids:
-        for operand in _operator_operands(hir, vid):
+        for operand in _operator_operands(mir, vid):
             consumers[operand].append(vid)
     height: dict[ValueId, int] = {}
-    for vid in sorted(op_ids, reverse=True):  # consumers have larger ids; process them first
-        op = _opnode(hir, vid)
-        height[vid] = op.op.latency + max((1 + height[c] for c in consumers[vid]), default=0)
+    for vid in sorted(op_ids, reverse=True):  # consumers have larger IDs; process them first
+        node = _operation(mir, vid)
+        height[vid] = node.operator.latency + max((1 + height[c] for c in consumers[vid]), default=0)
     return height
 
 
-def schedule_ops(hir: Hir, pool: Mapping[type[Op], int]) -> Schedule:
-    """Place every operator on the earliest cycle its operands are ready and a free instance exists."""
-    op_ids = _op_ids(hir)
+def schedule_ops(mir: Mir, pool: Mapping[type[HardwareOperator], int]) -> Schedule:
+    """Place every selected operation on the earliest cycle its operands are ready and a free instance exists."""
+    op_ids = _op_ids(mir)
     if not op_ids:
         return Schedule(issue_cycle={}, inst_of={}, instances=[], makespan=0)
 
-    height = _critical_path(hir, op_ids)
+    height = _critical_path(mir, op_ids)
     issue_cycle: dict[ValueId, int] = {}
-    inst_count: dict[Op, int] = {}  # operator instance -> copies needed (peak concurrent use of that module)
-    slot_of: dict[ValueId, tuple[Op, int]] = {}  # op -> (its operator instance, its 0-based copy slot)
+    inst_count: dict[HardwareOperator, int] = {}
+    slot_of: dict[ValueId, tuple[HardwareOperator, int]] = {}
 
     def commit_cycle(vid: ValueId) -> int:
-        op = _opnode(hir, vid)
-        return issue_cycle[vid] + op.op.latency
+        return issue_cycle[vid] + _operation(mir, vid).operator.latency
 
     unscheduled = set(op_ids)
-    cap = sum(_opnode(hir, vid).op.latency for vid in op_ids) + 2 * len(op_ids) + 64
+    cap = sum(_operation(mir, vid).operator.latency for vid in op_ids) + 2 * len(op_ids) + 64
     cycle = 1
     while unscheduled:
         assert cycle <= cap, "scheduler made no progress"
         ready = [
             vid
             for vid in unscheduled
-            if all(x in issue_cycle and cycle >= commit_cycle(x) + 1 for x in _operator_operands(hir, vid))
+            if all(x in issue_cycle and cycle >= commit_cycle(x) + 1 for x in _operator_operands(mir, vid))
         ]
         ready.sort(key=lambda vid: (-height[vid], vid))
-        used: dict[Op, int] = {}  # operator instance -> copies busy this cycle
+        used: dict[HardwareOperator, int] = {}
         for vid in ready:
-            op = _opnode(hir, vid)
-            key = op.op
-            slot = used.get(key, 0)
-            if slot >= pool[type(key)]:  # every copy of this module is busy this cycle -> the op waits
+            operator = _operation(mir, vid).operator
+            slot = used.get(operator, 0)
+            if slot >= pool[type(operator)]:
                 continue
-            used[key] = slot + 1
-            inst_count[key] = max(inst_count.get(key, 0), slot + 1)
-            slot_of[vid] = (key, slot)
+            used[operator] = slot + 1
+            inst_count[operator] = max(inst_count.get(operator, 0), slot + 1)
+            slot_of[vid] = (operator, slot)
             issue_cycle[vid] = cycle
             unscheduled.discard(vid)
         cycle += 1
@@ -132,21 +116,19 @@ def schedule_ops(hir: Hir, pool: Mapping[type[Op], int]) -> Schedule:
 
 
 def _bind_instances(
-    inst_count: dict[Op, int], slot_of: dict[ValueId, tuple[Op, int]]
+    inst_count: dict[HardwareOperator, int], slot_of: dict[ValueId, tuple[HardwareOperator, int]]
 ) -> tuple[dict[ValueId, OperatorInstance], list[OperatorInstance]]:
     """
-    Give each operator a contiguous block of instance indices within its class, then bind every op.
-
-    Indices are 0-based within a class and run over the class's distinct operators in a deterministic order (class
-    order, then the operator's field tuple), so a class with several variants (e.g. ``fmul_ilog2_const`` with
-    multiple ``K``) gets uniquely-named modules.
+    Give each hardware operator a contiguous block of instance indices within its class, then bind every operation.
     """
-    keys = sorted(inst_count, key=lambda op: (_CLASS_ORDER[type(op)], astuple(op)))
-    base: dict[Op, int] = {}
-    per_class_next: dict[type[Op], int] = {}
-    for op in keys:
-        base[op] = per_class_next.get(type(op), 0)
-        per_class_next[type(op)] = base[op] + inst_count[op]
-    inst_of = {vid: OperatorInstance(op, base[op] + slot) for vid, (op, slot) in slot_of.items()}
-    instances = [OperatorInstance(op, base[op] + s) for op in keys for s in range(inst_count[op])]
+    keys = sorted(inst_count, key=lambda operator: (_CLASS_ORDER[type(operator)], astuple(operator)))
+    base: dict[HardwareOperator, int] = {}
+    per_class_next: dict[type[HardwareOperator], int] = {}
+    for operator in keys:
+        base[operator] = per_class_next.get(type(operator), 0)
+        per_class_next[type(operator)] = base[operator] + inst_count[operator]
+    inst_of = {vid: OperatorInstance(operator, base[operator] + slot) for vid, (operator, slot) in slot_of.items()}
+    instances = [
+        OperatorInstance(operator, base[operator] + slot) for operator in keys for slot in range(inst_count[operator])
+    ]
     return inst_of, instances

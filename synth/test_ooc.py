@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from holoso import synthesize, SynthesisResult, FloatFormat
-from holoso import FAddOp, FDivOp, FMulILog2GenericOp, FMulOp, OpConfig
+from holoso import FAddOperator, FDivOperator, FMulILog2OperatorFamily, FMulOperator, OpConfig
 
 from synth import SynthReport, build_ooc_wrapper
 from synth.flows.diamond import DiamondEcp5Flow
@@ -29,7 +29,9 @@ def wide(a: float, b: float, c: float, d: float, e: float, f: float) -> list[flo
     return [a * b + c, d - e * f, a + d]
 
 
-OPS = OpConfig(fadd=FAddOp(FMT), fmul=FMulOp(FMT), fdiv=FDivOp(FMT), fmul_ilog2=FMulILog2GenericOp(FMT))
+OPS = OpConfig(
+    fadd=FAddOperator(FMT), fmul=FMulOperator(FMT), fdiv=FDivOperator(FMT), fmul_ilog2=FMulILog2OperatorFamily(FMT)
+)
 KERN: SynthesisResult = synthesize(kern, ops=OPS, name="kern")
 WIDE: SynthesisResult = synthesize(wide, ops=OPS, name="wide")
 

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import holoso
-from holoso import FAddOp, FDivOp, FloatFormat, FMulILog2GenericOp, FMulOp, OpConfig
+from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
 
 
 def _kernel(a, b):  # type: ignore[no-untyped-def]  # module-level so inspect.getsource works
@@ -19,7 +19,7 @@ FMT32 = FloatFormat(8, 24)
 
 
 def _ops(fmt: FloatFormat = FMT32) -> OpConfig:
-    return OpConfig(FAddOp(fmt), FMulOp(fmt), FDivOp(fmt), FMulILog2GenericOp(fmt))
+    return OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
 
 
 def test_synthesize_small_kernel_result() -> None:
@@ -44,7 +44,7 @@ def test_synthesize_small_kernel_result() -> None:
 
 def test_op_config_rejects_mixed_float_formats() -> None:
     fmt24 = FloatFormat(6, 18)
-    ops = OpConfig(FAddOp(FMT32), FMulOp(fmt24), FDivOp(FMT32), FMulILog2GenericOp(FMT32))
+    ops = OpConfig(FAddOperator(FMT32), FMulOperator(fmt24), FDivOperator(FMT32), FMulILog2OperatorFamily(FMT32))
     with pytest.raises(ValueError, match="same format"):
         _ = ops.float_format
 
@@ -66,10 +66,10 @@ def test_synthesize_threads_pipeline_stages() -> None:
     staged = holoso.synthesize(
         _kernel,
         ops=OpConfig(
-            FAddOp(FMT32, stage_decode=1),
-            FMulOp(FMT32, stage_product=1),
-            FDivOp(FMT32),
-            FMulILog2GenericOp(FMT32),
+            FAddOperator(FMT32, stage_decode=1),
+            FMulOperator(FMT32, stage_product=1),
+            FDivOperator(FMT32),
+            FMulILog2OperatorFamily(FMT32),
         ),
     )
     assert "STAGE_" not in base.verilog_output.verilog  # default stages emit no STAGE_* instance params

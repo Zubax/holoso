@@ -15,7 +15,7 @@ from importlib import resources
 
 from ..._interface import ModuleInterface
 from ..._lir import Lir, Operand, OperatorInstance, RegRef, ScheduledOp
-from ..._operators import FAddOp, FDivOp, FMulILog2Op, FMulOp, Op
+from ..._operators import FAddOperator, FDivOperator, FMulILog2Operator, FMulOperator, HardwareOperator
 from ..verilog import VerilogOutput
 
 
@@ -26,18 +26,19 @@ class HtmlOutput:
     html: str
 
 
-_GITHUB_URL = "https://github.com/Zubax/holoso"
+_HOMEPAGE_URL = "https://github.com/Zubax/holoso"
 
 _CSS = resources.files(__package__).joinpath("html.css").read_text(encoding="utf-8")
 # Interactive layer; ``__DATA__`` is replaced by the per-module payload in ``_sched_script``.
 _SCHED_JS = resources.files(__package__).joinpath("html.js").read_text(encoding="utf-8")
 
 # Reserved, high-contrast operator colors (white text legible on each) for a light background.
-_KIND_COLOR: dict[type[Op], str] = {
-    FAddOp: "#2456a6",
-    FMulOp: "#1f7a3d",
-    FDivOp: "#b3261e",
-    FMulILog2Op: "#6d4c9f",
+# TODO: When adding a new operator, replace this with a generalized palette sliced into as many colors as needed.
+_KIND_COLOR: dict[type[HardwareOperator], str] = {
+    FAddOperator: "#00a",
+    FMulOperator: "#0a0",
+    FDivOperator: "#a00",
+    FMulILog2Operator: "#050",
 }
 _MODULE_HEADER_RE = re.compile(r"(?ms)^module\b.*?^\);")
 _VERILOG_TOKEN_RE = re.compile(r"(?P<space>\s+)|(?P<ident>[A-Za-z_]\w*)|(?P<number>\d+)|(?P<other>.)")
@@ -50,17 +51,17 @@ def _esc(text: str) -> str:
 
 def _operand(operand: Operand) -> str:
     name = f"r{operand.source.index}" if isinstance(operand.source, RegRef) else f"c{operand.source.index}"
-    return operand.sgnop.decorate(name)
+    return operand.sign.decorate(name)
 
 
 def _op_text(op: ScheduledOp) -> str:
-    body = op.inst.op.render(*[_operand(o) for o in op.operands])
-    return op.y_sgnop.decorate(f"r{op.dst.index}={body}")
+    body = op.inst.operator.render(*[_operand(o) for o in op.operands])
+    return op.result_sign.decorate(f"r{op.dst.index}={body}")
 
 
 def generate(lir: Lir, interface: ModuleInterface, verilog_output: VerilogOutput) -> HtmlOutput:
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    link = f"<a href='{_GITHUB_URL}'>Holoso</a>"
+    link = f"<a href='{_HOMEPAGE_URL}'>Holoso</a>"
     out: list[str] = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'>",
         f"<title>Module {_esc(lir.module_name)} - Holoso</title><style>{_CSS}</style></head><body>",
@@ -87,7 +88,7 @@ def _metrics(lir: Lir) -> str:
     fmt = lir.regfile.fmt
     op_counts: dict[str, int] = {}
     for inst in lir.instances:
-        op_counts[inst.op.mnemonic] = op_counts.get(inst.op.mnemonic, 0) + 1
+        op_counts[inst.operator.mnemonic] = op_counts.get(inst.operator.mnemonic, 0) + 1
     rows: list[tuple[str, object]] = [
         ("ZKF format", f"e{fmt.wexp}+m{fmt.wman} = {fmt.width}-bit"),
         ("operator instances", " ".join(f"{count}×{kind}" for kind, count in op_counts.items())),
@@ -105,9 +106,9 @@ def _metrics(lir: Lir) -> str:
 def _stage_config(lir: Lir) -> str:
     out = ["<h2>Operator Params</h2><table class='metrics cfg'>"]
     out.append("<tr><th>operator</th><th>HDL param</th><th>value</th></tr>")
-    seen: dict[Op, None] = {}  # distinct operators present, in instance order
+    seen: dict[HardwareOperator, None] = {}  # distinct operators present, in instance order
     for inst in lir.instances:
-        seen.setdefault(inst.op, None)
+        seen.setdefault(inst.operator, None)
     rows = 0
     for op in seen:
         for param, value in op.hdl_params().items():
@@ -252,7 +253,7 @@ def _stage_columns(lir: Lir) -> list[tuple[OperatorInstance, int]]:
     """
     cols: list[tuple[OperatorInstance, int]] = []
     for inst in lir.instances:
-        cols.extend((inst, k) for k in range(inst.op.latency))
+        cols.extend((inst, k) for k in range(inst.operator.latency))
     return cols
 
 
@@ -364,7 +365,7 @@ def _schedule(lir: Lir) -> str:
     stage_base: dict[OperatorInstance, int] = {}
     for sidx, (inst, _k) in enumerate(stage_cols):
         stage_base.setdefault(inst, sidx)
-    group_ends = {stage_base[inst] + inst.op.latency - 1 for inst in lir.instances}  # last stage per operator
+    group_ends = {stage_base[inst] + inst.operator.latency - 1 for inst in lir.instances}
 
     # Column seams: 2px at the two block boundaries (constants | pipeline and pipeline | OPERATIONS); 1px at the lighter
     # registers | constants seam and between operator groups.
@@ -394,7 +395,7 @@ def _schedule(lir: Lir) -> str:
     group = 0  # global per-operation id, linking a commit cell with its edges/chip for the hover-focus behavior
     for op in lir.ops:
         tip = _esc(_op_text(op))
-        color = _KIND_COLOR[type(op.inst.op)]
+        color = _KIND_COLOR[type(op.inst.operator)]
         issue, commit = op.issue_cycle, op.commit_cycle
         dcol: ColKey = ("r", op.dst.index)
         dord = col_ord[dcol]
@@ -415,7 +416,7 @@ def _schedule(lir: Lir) -> str:
             if key in stage_fill and stage_fill[key][1] != group:
                 conflicts.add(key)
             stage_fill[key] = (color, group)
-            stage_tip[key] = f"{op.inst.op.mnemonic}_{op.inst.index} s{k}: {tip}"
+            stage_tip[key] = f"{op.inst.operator.mnemonic}_{op.inst.index} s{k}: {tip}"
         group += 1
 
     out = [_schedule_key(lir), "<div id='schedwrap'><table class='grid'>"]
@@ -440,11 +441,13 @@ def _schedule(lir: Lir) -> str:
         cls = "gh k" + _border_suffix(nreg + index, dv.data_thin, dv.data_thick)
         out.append(f"<th class='{cls}' rowspan='2'><span>c{index}</span></th>")
     for inst in lir.instances:
-        lat = inst.op.latency
-        name = f"{inst.op.mnemonic}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
+        lat = inst.operator.latency
+        name = (
+            f"{inst.operator.mnemonic}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
+        )
         seam = _border_suffix(stage_base[inst] + lat - 1, dv.stage_thin, dv.stage_thick)
         out.append(
-            f"<th class='ohgrp{seam}' colspan='{lat}' style='color:{_KIND_COLOR[type(inst.op)]}'>"
+            f"<th class='ohgrp{seam}' colspan='{lat}' style='color:{_KIND_COLOR[type(inst.operator)]}'>"
             f"<span>{_esc(name)}</span></th>"
         )
     out.append("</tr>")
@@ -531,9 +534,9 @@ def _input_chip(tip: str) -> str:
 
 def _schedule_key(lir: Lir) -> str:
     """A small legend above the grid: operator-kind colors plus the read/write chip shapes."""
-    seen: dict[type[Op], None] = {}  # operator classes present, in instance order, de-duplicated
+    seen: dict[type[HardwareOperator], None] = {}  # operator classes present, in instance order, de-duplicated
     for inst in lir.instances:
-        seen.setdefault(type(inst.op), None)
+        seen.setdefault(type(inst.operator), None)
     kinds = [f"<span class='wr' style='background:{_KIND_COLOR[cls]}'>{cls.mnemonic}</span>" for cls in seen]
     return (
         "<h2>Schedule</h2><div class='gridkey'>"

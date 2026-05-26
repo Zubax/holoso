@@ -1,13 +1,13 @@
 """
 The low-level IR (LIR): the scheduled, bound, register-allocated microprogram for the synthesized ZISC machine.
 
-A :class:`Lir` is controller-agnostic -- it describes which operators issue on which cycle, reading/writing which
-registers, with which folded sign-ops.
+A :class:`Lir` is controller-agnostic -- it describes which hardware operators issue on which cycle, reading/writing
+which registers, with which folded sign controls.
 """
 
 from dataclasses import dataclass
 
-from ._operators import Op, Sgnop
+from ._operators import HardwareOperator, SignControl
 from ._type import FloatFormat
 
 
@@ -16,14 +16,12 @@ class OperatorInstance:
     """
     One physical operator module, e.g. ``u_fadd_0`` or ``u_fmul_ilog2_const_2``.
 
-    ``op`` is the fully-specified operator it elaborates (its parameters baked in); ``index`` numbers the copies of
-    that operator class. The scheduler pools ops onto instances by the ``op`` instance: equal ops may time-share one
-    instance (at most one issue per instance per cycle, a fully pipelined instance carrying several ops in flight),
-    bounded by the per-class instance budget. E.g., all ``fadd`` share, while ``fmul_ilog2_const`` shares by exponent.
+    ``operator`` is the fully specified hardware operator it elaborates; ``index`` numbers the copies of that operator
+    class. The scheduler pools operations by the hardware-operator instance: equal operators may time-share one module.
     """
 
-    op: Op
-    index: int  # 0-based within its operator class (contiguous across that class's distinct ops)
+    operator: HardwareOperator
+    index: int  # 0-based within its operator class (contiguous across that class's distinct operators)
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,10 +40,10 @@ class ConstRef:
 
 @dataclass(frozen=True, slots=True)
 class Operand:
-    """An operator input: a register read or a constant immediate, with a folded sign-op."""
+    """An operator input: a register read or a constant immediate, with a folded sign control."""
 
     source: RegRef | ConstRef
-    sgnop: Sgnop
+    sign: SignControl = SignControl()
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,25 +51,16 @@ class ScheduledOp:
     """
     One operator firing in the software-pipelined schedule.
 
-    ``inst`` is the bound physical instance (decided by the scheduler), ``issue_cycle`` is the cycle its ``in_valid``
-    is asserted (operands read combinationally that cycle), and the result commits to ``dst`` at ``commit_cycle ==
-    issue_cycle + latency`` (readable one cycle later, since the register file is read-first). Operators are fully
-    pipelined, so one instance may carry several ops in flight; same-kind ops share a latency so two ops on one
-    instance never commit on the same cycle.
+    ``inst`` is the bound physical instance, ``issue_cycle`` is the cycle its ``in_valid`` is asserted, and the result
+    commits to ``dst`` at ``commit_cycle == issue_cycle + latency``.
     """
 
     inst: OperatorInstance
-    a: Operand
-    b: Operand | None  # None for a unary operator
-    y_sgnop: Sgnop
+    operands: list[Operand]
+    result_sign: SignControl
     dst: RegRef
     issue_cycle: int
     latency: int
-
-    @property
-    def operands(self) -> list[Operand]:
-        b = self.b
-        return [self.a] if b is None else [self.a, b]
 
     @property
     def commit_cycle(self) -> int:
@@ -88,11 +77,11 @@ class InputLoad:
 
 @dataclass(frozen=True, slots=True)
 class OutputWire:
-    """An output port driven from a register or constant immediate, with a folded output sign-op."""
+    """An output port driven from a register or constant immediate, with a folded output sign control."""
 
     name: str
     source: RegRef | ConstRef
-    sgnop: Sgnop
+    sign: SignControl = SignControl()
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,11 +102,11 @@ class Lir:
     consts: list[float]  # constant pool: index -> value
     regfile: FloatRegFileLayout
     inputs: list[InputLoad]  # ordered as the function parameters
-    ops: list[ScheduledOp]  # the pipelined schedule, ordered by (issue_cycle, value-id)
+    ops: list[ScheduledOp]  # the pipelined schedule, ordered by (issue_cycle, value ID)
     outputs: list[OutputWire]
     makespan: int  # last commit cycle (0 if no ops); the in_valid->out_valid latency is makespan + 1
     op_count: int
-    max_chain_len: int  # longest dependency chain in operators (for verification tolerance)
+    max_chain_len: int  # longest dependency chain in hardware operators (for verification tolerance)
 
     @property
     def cyc_width(self) -> int:
@@ -127,9 +116,10 @@ class Lir:
     @property
     def initiation_interval(self) -> int:
         """
-        Exact in_valid->out_valid latency: the schedule makespan (last commit cycle) plus one cycle to present.
-        Cycle 0 accepts and writes the inputs; compute cycles 1..makespan run the pipelined schedule (the last operator
-        commits on the makespan cycle); the result lands in the register file on the next edge and is presented on cycle
-        makespan+1. Data-independent, so this is exact. Zero-op (pure passthrough) modules present on cycle 1.
+        Exact in_valid->out_valid latency: the schedule makespan plus one cycle to present.
+
+        Cycle 0 accepts and writes the inputs; compute cycles 1..makespan run the schedule; the last operator commits
+        on the makespan cycle; the result lands in the register file on the next edge and is presented on
+        cycle makespan+1. Zero-op modules present on cycle 1.
         """
         return self.makespan + 1

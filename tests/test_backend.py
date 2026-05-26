@@ -7,10 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from holoso import FAddOp, FDivOp, FloatFormat, FMulILog2GenericOp, FMulOp, OpConfig
+from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
 from holoso._backend.verilog import generate
 from holoso._frontend import lower
-from holoso._passes import run
+from holoso._hir import optimize
+from holoso._lower import lower as lower_to_mir
 from holoso._schedule import build
 
 from .hdl.hdl_float_oracle import HDL_DIR, sources
@@ -19,7 +20,11 @@ requires_iverilog = pytest.mark.skipif(shutil.which("iverilog") is None, reason=
 
 
 def _ops(fmt: FloatFormat) -> OpConfig:
-    return OpConfig(FAddOp(fmt), FMulOp(fmt), FDivOp(fmt), FMulILog2GenericOp(fmt))
+    return OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
+
+
+def _run(target, ops: OpConfig):  # type: ignore[no-untyped-def]
+    return lower_to_mir(optimize(lower(target)), ops)
 
 
 def _elaborate(name: str, verilog: str, tmp_path: Path) -> None:
@@ -47,7 +52,7 @@ def test_small_kernel_elaborates(tmp_path: Path) -> None:
         return (a - b) * 0.25 + a * b
 
     fmt = FloatFormat(8, 24)
-    lir = build(run(lower(kernel), _ops(fmt)), "kernel", fmt=fmt)
+    lir = build(_run(kernel, _ops(fmt)), "kernel", fmt=fmt)
     _elaborate("kernel", generate(lir).verilog, tmp_path)
 
 
@@ -57,7 +62,7 @@ def test_kernel_with_division_elaborates(tmp_path: Path) -> None:
         return a / b + c * 2.0
 
     fmt = FloatFormat(6, 18)
-    lir = build(run(lower(blend), _ops(fmt)), "blend", fmt=fmt)
+    lir = build(_run(blend, _ops(fmt)), "blend", fmt=fmt)
     _elaborate("blend", generate(lir).verilog, tmp_path)
 
 
@@ -69,7 +74,7 @@ def test_constant_only_module_elaborates(tmp_path: Path) -> None:
         return 3.5
 
     fmt = FloatFormat(8, 24)
-    lir = build(run(lower(const_only), _ops(fmt)), "const_only", fmt=fmt)
+    lir = build(_run(const_only, _ops(fmt)), "const_only", fmt=fmt)
     _elaborate("const_only", generate(lir).verilog, tmp_path)
 
 
@@ -79,5 +84,5 @@ def test_ekf1_elaborates(tmp_path: Path) -> None:
     import ekf1
 
     fmt = FloatFormat(6, 18)
-    lir = build(run(lower(ekf1.update_x_P), _ops(fmt)), "update_x_P", fmt=fmt)
+    lir = build(_run(ekf1.update_x_P, _ops(fmt)), "update_x_P", fmt=fmt)
     _elaborate("update_x_P", generate(lir).verilog, tmp_path)

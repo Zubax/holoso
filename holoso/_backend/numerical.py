@@ -10,20 +10,16 @@ default pickle (every field is a frozen dataclass of plain values), so a generat
 from dataclasses import dataclass
 
 from .._lir import ConstRef, Lir, RegRef
-from .._operators import Sgnop
+from .._operators import SignControl
 from .._type import FloatFormat
 
 # A value source on a register's write timeline: an input (by input index) or an operator result (by op index).
 type _Producer = tuple[str, int]
 
 
-def _apply_sgnop(value: float, sgnop: Sgnop) -> float:
-    """Apply a folded sign-op exactly as ``holoso_fsgnop`` does in the RTL: absolute value first, then negate."""
-    if Sgnop.ABS in sgnop:
-        value = abs(value)
-    if Sgnop.NEG in sgnop:
-        value = -value
-    return value
+def _apply_sign(value: float, sign: SignControl) -> float:
+    """Apply a folded sign control exactly as ``holoso_fsgnop`` does in the RTL."""
+    return sign.apply_float(value)
 
 
 def _latest_before(writes: list[tuple[int, _Producer]], read_cycle: int) -> _Producer:
@@ -87,11 +83,11 @@ class NumericalModel:
         # Evaluate in commit order: a producer commits before any consumer issues, so its value is ready in op_values.
         for j in sorted(range(len(lir.ops)), key=lambda k: (lir.ops[k].commit_cycle, lir.ops[k].issue_cycle)):
             op = lir.ops[j]
-            operands = [_apply_sgnop(value(o.source, op.issue_cycle), o.sgnop) for o in op.operands]
-            op_values[j] = fmt.round(_apply_sgnop(op.inst.op.evaluate(*operands), op.y_sgnop))
+            operands = [_apply_sign(value(o.source, op.issue_cycle), o.sign) for o in op.operands]
+            op_values[j] = fmt.round(_apply_sign(op.inst.operator.evaluate(*operands), op.result_sign))
 
         present = lir.makespan + 1  # outputs present one cycle after the last commit; they read the final live value
-        return tuple(_apply_sgnop(value(wire.source, present), wire.sgnop) for wire in lir.outputs)
+        return tuple(_apply_sign(value(wire.source, present), wire.sign) for wire in lir.outputs)
 
     @property
     def input_names(self) -> tuple[str, ...]:

@@ -10,17 +10,13 @@ import pytest
 from holoso import MissingIntrinsic, UnsupportedConstruct
 from holoso._frontend import lower
 from holoso._frontend._lower import _port_name
-from holoso._hir import ABS, ADD, DIV, MUL, Arith, SignFix
+from holoso._hir import Abs, Add, Div, Mul, Neg, Operation
 
 from ._modelref import flatten_value, output_names
 
 
-def _arith_count(hir, op):  # type: ignore[no-untyped-def]
-    return sum(1 for n in hir.nodes.values() if isinstance(n, Arith) and n.op is op)
-
-
-def _count(hir, cls):  # type: ignore[no-untyped-def]
-    return sum(1 for n in hir.nodes.values() if isinstance(n, cls))
+def _arith_count(hir, op_type):  # type: ignore[no-untyped-def]
+    return sum(1 for n in hir.nodes.values() if isinstance(n, Operation) and type(n.operator) is op_type)
 
 
 def test_scalar_is_output_zero() -> None:
@@ -81,9 +77,9 @@ def test_small_kernel_inputs_outputs_and_ops() -> None:
     hir = lower(kernel)
     assert hir.input_names() == ["a", "b"]
     assert [o.name for o in hir.outputs] == ["out_0"]
-    assert _arith_count(hir, MUL) == 2  # (a-b)*0.25 and a*b
-    assert _arith_count(hir, ADD) == 2  # subtraction (add+neg) and the final add
-    assert _count(hir, SignFix) == 1  # the negation introduced by subtraction
+    assert _arith_count(hir, Mul) == 2  # (a-b)*0.25 and a*b
+    assert _arith_count(hir, Add) == 2  # subtraction (add+neg) and the final add
+    assert _arith_count(hir, Neg) == 1  # the negation introduced by subtraction
 
 
 def test_pow_expands_to_multiply_chain() -> None:
@@ -91,17 +87,16 @@ def test_pow_expands_to_multiply_chain() -> None:
         return a**3
 
     hir = lower(cube)
-    assert _arith_count(hir, MUL) == 2  # a*a*a
+    assert _arith_count(hir, Mul) == 2  # a*a*a
 
 
-def test_abs_lowers_to_signfix_abs() -> None:
+def test_abs_lowers_to_semantic_operation() -> None:
     def f(a):  # type: ignore[no-untyped-def]
         return abs(a)
 
     hir = lower(f)
-    signfixes = [n for n in hir.nodes.values() if isinstance(n, SignFix)]
-    assert len(signfixes) == 1
-    assert signfixes[0].op == ABS
+    abs_ops = [n for n in hir.nodes.values() if isinstance(n, Operation) and type(n.operator) is Abs]
+    assert len(abs_ops) == 1
 
 
 def test_division_lowers_to_div() -> None:
@@ -109,8 +104,8 @@ def test_division_lowers_to_div() -> None:
         return a / b
 
     hir = lower(f)
-    assert _arith_count(hir, DIV) == 1
-    divs = [n for n in hir.nodes.values() if isinstance(n, Arith) and n.op == DIV]
+    assert _arith_count(hir, Div) == 1
+    divs = [n for n in hir.nodes.values() if isinstance(n, Operation) and type(n.operator) is Div]
     assert len(divs) == 1
 
 
@@ -121,7 +116,7 @@ def test_ekf1_structure() -> None:
     hir = lower(ekf1.update_x_P)
     assert len(hir.input_ids) == 17
     assert [o.name for o in hir.outputs] == [f"out_{i}_0" for i in range(9)]
-    assert _arith_count(hir, DIV) == 1  # only x22 = 1 / x21
+    assert _arith_count(hir, Div) == 1  # only x22 = 1 / x21
 
 
 def test_for_loop_is_unsupported() -> None:

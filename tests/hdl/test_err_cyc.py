@@ -14,16 +14,17 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FAddOp, FDivOp, FloatFormat, FMulILog2GenericOp, FMulOp, OpConfig
+from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
 from holoso._backend.verilog import generate
 from holoso._frontend import lower
-from holoso._passes import run
+from holoso._hir import optimize
+from holoso._lower import lower as lower_to_mir
 from holoso._schedule import build
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
 
 FMT = FloatFormat(6, 18)
-OPS = OpConfig(FAddOp(FMT), FMulOp(FMT), FDivOp(FMT), FMulILog2GenericOp(FMT))
+OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT))
 
 
 def _divide(a, b):  # type: ignore[no-untyped-def]
@@ -66,7 +67,7 @@ async def err_cyc_latches_div0(dut) -> None:
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_err_cyc(sim: str) -> None:
-    lir = build(run(lower(_divide), OPS), "divide", fmt=FMT)
+    lir = build(lower_to_mir(optimize(lower(_divide)), OPS), "divide", fmt=FMT)
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"divide_w{FMT.wexp}_{FMT.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     verilog_path = gen_dir / "divide.v"

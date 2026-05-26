@@ -10,9 +10,10 @@ from ._backend.html import generate as generate_html, HtmlOutput
 from ._backend.numerical import generate as generate_model, NumericalModel
 from ._backend.verilog import generate as generate_verilog, VerilogOutput
 
-from ._frontend import lower
-from ._operators import Op, OpConfig
-from ._passes import run
+from ._frontend import lower as lower_frontend
+from ._hir import optimize
+from ._lower import lower as lower_to_mir
+from ._operators import HardwareOperator, OpConfig
 from ._schedule import build, interface_of
 from ._interface import ModuleInterface
 
@@ -59,7 +60,7 @@ def synthesize(
     parameters: Mapping[str, object] | None = None,
     entry: str = "__call__",
     name: str | None = None,
-    operator_instances: Mapping[type[Op], int] | None = None,
+    operator_instances: Mapping[type[HardwareOperator], int] | None = None,
 ) -> SynthesisResult:
     """
     Synthesize ``target`` (a function or class object) into a Verilog ZISC FSM, returned in memory.
@@ -70,9 +71,9 @@ def synthesize(
     class (default ``__call__``); ``name`` overrides the generated module name; ``operator_instances`` sets the number
     of instances per operator class for scheduling (default one each).
     """
-    hir = run(lower(target), ops)
+    mir = lower_to_mir(optimize(lower_frontend(target)), ops)
     module_name: str = name if name is not None else str(getattr(target, "__name__", "holoso_module"))
-    lir = build(hir, module_name, fmt=ops.float_format, instances=operator_instances)
+    lir = build(mir, module_name, fmt=ops.float_format, instances=operator_instances)
     interface = interface_of(lir)
     verilog_output = generate_verilog(lir)
     html_output = generate_html(lir, interface, verilog_output)
