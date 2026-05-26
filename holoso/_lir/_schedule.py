@@ -6,14 +6,12 @@ whole schedule is computed here at compile time and the backend controller is ju
 """
 
 from collections.abc import Mapping
-from dataclasses import astuple, dataclass
+from dataclasses import dataclass
 
-from ._hir import ValueId
-from ._lir import OperatorInstance
-from ._mir import Mir, MirOperation
-from ._operators import ALL_OPERATOR_CLASSES, HardwareOperator
-
-_CLASS_ORDER = {cls: index for index, cls in enumerate(ALL_OPERATOR_CLASSES)}
+from .._hir import ValueId
+from .._mir import Mir, MirOperation
+from .._operators import HardwareOperator
+from ._ir import OperatorInstance
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,16 +117,8 @@ def _bind_instances(
     inst_count: dict[HardwareOperator, int], slot_of: dict[ValueId, tuple[HardwareOperator, int]]
 ) -> tuple[dict[ValueId, OperatorInstance], list[OperatorInstance]]:
     """
-    Give each hardware operator a contiguous block of instance indices within its class, then bind every operation.
+    Bind each operation to a physical instance. Instance indices are local to one concrete hardware operator value.
     """
-    keys = sorted(inst_count, key=lambda operator: (_CLASS_ORDER[type(operator)], astuple(operator)))
-    base: dict[HardwareOperator, int] = {}
-    per_class_next: dict[type[HardwareOperator], int] = {}
-    for operator in keys:
-        base[operator] = per_class_next.get(type(operator), 0)
-        per_class_next[type(operator)] = base[operator] + inst_count[operator]
-    inst_of = {vid: OperatorInstance(operator, base[operator] + slot) for vid, (operator, slot) in slot_of.items()}
-    instances = [
-        OperatorInstance(operator, base[operator] + slot) for operator in keys for slot in range(inst_count[operator])
-    ]
+    inst_of = {vid: OperatorInstance(operator, slot) for vid, (operator, slot) in slot_of.items()}
+    instances = [OperatorInstance(operator, slot) for operator in inst_count for slot in range(inst_count[operator])]
     return inst_of, instances

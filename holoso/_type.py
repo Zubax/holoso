@@ -17,6 +17,18 @@ class ScalarType(ABC):
 
 
 @dataclass(frozen=True, slots=True)
+class ScalarSignature:
+    """Operand/result types for a concrete hardware operator."""
+
+    operand_types: tuple[ScalarType, ...]
+    result_type: ScalarType
+
+    @property
+    def arity(self) -> int:
+        return len(self.operand_types)
+
+
+@dataclass(frozen=True, slots=True)
 class FloatFormat:
     """
     A Zubax Kulibin float (ZKF) format: ``wexp`` exponent bits and ``wman`` significand bits.

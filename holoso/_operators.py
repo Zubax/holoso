@@ -1,28 +1,38 @@
-"""Hardware operator models and folded sign controls."""
+"""Hardware operator models and folded floating-point sign controls."""
 
 import math
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import ClassVar
 
-from ._type import FloatFormat
+from ._type import FloatFormat, FloatType, ScalarSignature
 
-# ----------------------------------------------------------------------------------------------------------------------
-# Sign controls and hardware operators: selected, fully configured resources.
+
+def _instance_stem_text(text: str) -> str:
+    return re.sub(r"[^0-9a-z_]+", "_", text.lower()).strip("_") or "x"
+
+
+def _instance_stem_int(value: int) -> str:
+    return f"m{-value}" if value < 0 else str(value)
+
+
+def _hdl_param_stems(params: dict[str, int]) -> list[str]:
+    return [f"{_instance_stem_text(name)}_{_instance_stem_int(value)}" for name, value in sorted(params.items())]
 
 
 @dataclass(frozen=True, slots=True)
-class SignControl:
-    """A hardware-side sign conditioner: absolute value first, then optional negation."""
+class FloatSignControl:
+    """A hardware-side floating-point sign conditioner: absolute value first, then optional negation."""
 
     negate: bool = False
     absolute: bool = False
 
-    def then(self, outer: "SignControl") -> "SignControl":
+    def then(self, outer: "FloatSignControl") -> "FloatSignControl":
         """Compose two controls where ``self`` is applied first and ``outer`` after."""
         if outer.absolute:
-            return SignControl(negate=outer.negate, absolute=True)
-        return SignControl(negate=self.negate ^ outer.negate, absolute=self.absolute)
+            return FloatSignControl(negate=outer.negate, absolute=True)
+        return FloatSignControl(negate=self.negate ^ outer.negate, absolute=self.absolute)
 
     def apply_float(self, value: float) -> float:
         if self.absolute:
@@ -53,7 +63,6 @@ class HardwareOperator(ABC):
     """
 
     mnemonic: ClassVar[str]
-    arity: ClassVar[int]
     error_ports: ClassVar[list[str]] = []
 
     @property
@@ -61,12 +70,18 @@ class HardwareOperator(ABC):
         return f"holoso_{self.mnemonic}"
 
     @property
+    def instance_stem(self) -> str:
+        """
+        Verilog-safe physical instance stem, unique for distinct hardware identities of this operator family.
+
+        Override this if the operator's hardware identity is not fully captured by its mnemonic and HDL params.
+        """
+        return "_".join([_instance_stem_text(self.mnemonic), *_hdl_param_stems(self.hdl_params())])
+
+    @property
     @abstractmethod
     def latency(self) -> int:
         """Exact cycle latency of this fully specified operator instance."""
-
-    @abstractmethod
-    def evaluate(self, *operands: float) -> float: ...
 
     @abstractmethod
     def render(self, *operands: str) -> str:
@@ -75,6 +90,15 @@ class HardwareOperator(ABC):
     @abstractmethod
     def hdl_params(self) -> dict[str, int]:
         """Operator-specific ``#(.NAME(v))`` params; the backend prepends ``WEXP``/``WMAN``."""
+
+    @property
+    @abstractmethod
+    def signature(self) -> ScalarSignature:
+        """Concrete operand/result types."""
+
+    @property
+    def arity(self) -> int:
+        return self.signature.arity
 
 
 class ParameterizedHardwareOperator(ABC):
@@ -94,6 +118,24 @@ class FloatHardwareOperator(HardwareOperator, ABC):
 
     fmt: FloatFormat
 
+    @property
+    def instance_stem(self) -> str:
+        return "_".join(
+            [
+                _instance_stem_text(self.mnemonic),
+                f"e{self.fmt.wexp}",
+                f"m{self.fmt.wman}",
+                *_hdl_param_stems(self.hdl_params()),
+            ]
+        )
+
+    def float_signature(self, arity: int) -> ScalarSignature:
+        ty = FloatType(self.fmt)
+        return ScalarSignature((ty,) * arity, ty)
+
+    @abstractmethod
+    def evaluate(self, *operands: float) -> float: ...
+
 
 @dataclass(frozen=True, slots=True)
 class FloatParameterizedHardwareOperator(ParameterizedHardwareOperator, ABC):
@@ -105,7 +147,6 @@ class FloatParameterizedHardwareOperator(ParameterizedHardwareOperator, ABC):
 @dataclass(frozen=True, slots=True)
 class FAddOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fadd"
-    arity: ClassVar[int] = 2
     stage_decode: int = 0
     stage_align: int = 0
 
@@ -118,6 +159,10 @@ class FAddOperator(FloatHardwareOperator):
     @property
     def latency(self) -> int:
         return 6 + self.stage_decode + self.stage_align
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return self.float_signature(2)
 
     def evaluate(self, *operands: float) -> float:
         a, b = operands
@@ -139,7 +184,6 @@ class FAddOperator(FloatHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class FMulOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fmul"
-    arity: ClassVar[int] = 2
     stage_product: int = 0
 
     def __post_init__(self) -> None:
@@ -149,6 +193,10 @@ class FMulOperator(FloatHardwareOperator):
     @property
     def latency(self) -> int:
         return 3 + self.stage_product
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return self.float_signature(2)
 
     def evaluate(self, *operands: float) -> float:
         a, b = operands
@@ -165,7 +213,6 @@ class FMulOperator(FloatHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class FDivOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fdiv"
-    arity: ClassVar[int] = 2
     error_ports: ClassVar[list[str]] = ["div0"]
     stage_input: int = 0
 
@@ -177,6 +224,10 @@ class FDivOperator(FloatHardwareOperator):
     def latency(self) -> int:
         w = self.fmt.wman
         return 4 + ((w + 2 + ((w + 2) % 2)) // 2) + self.stage_input
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return self.float_signature(2)
 
     def evaluate(self, *operands: float) -> float:
         a, b = operands
@@ -195,18 +246,23 @@ class FMulILog2Operator(FloatHardwareOperator):
     """Exact scaling by a power of two, ``a * 2**k``; the concrete operator the family returns."""
 
     mnemonic: ClassVar[str] = "fmul_ilog2_const"
-    arity: ClassVar[int] = 1
     k: int
     stage_decode: int = 0
 
     def __post_init__(self) -> None:
-        # k's range is format-dependent (|k| < 2**(WEXP-1)) and is enforced by HIR-to-MIR lowering.
+        limit = 1 << (self.fmt.wexp - 1)
+        if abs(self.k) >= limit:
+            raise ValueError(f"k must satisfy |k| < {limit} for {self.fmt}; got {self.k!r}")
         if self.stage_decode not in (0, 1):
             raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
 
     @property
     def latency(self) -> int:
         return 1 + self.stage_decode
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return self.float_signature(1)
 
     def evaluate(self, *operands: float) -> float:
         (a,) = operands
@@ -236,15 +292,6 @@ class FMulILog2OperatorFamily(FloatParameterizedHardwareOperator):
     def instantiate(self, *params: int) -> FMulILog2Operator:
         (k,) = params
         return FMulILog2Operator(fmt=self.fmt, k=k, stage_decode=self.stage_decode)
-
-
-# Order is load-bearing: it reproduces the operator-instance numbering the scheduler and backend emit.
-ALL_OPERATOR_CLASSES: list[type[HardwareOperator]] = [
-    FAddOperator,
-    FMulOperator,
-    FDivOperator,
-    FMulILog2Operator,
-]
 
 
 @dataclass(frozen=True)

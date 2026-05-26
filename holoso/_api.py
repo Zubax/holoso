@@ -12,9 +12,9 @@ from ._backend.verilog import generate as generate_verilog, VerilogOutput
 
 from ._frontend import lower as lower_frontend
 from ._hir import optimize
-from ._lower import lower as lower_to_mir
+from ._lir import build, interface_of
+from ._mir import lower as lower_to_mir
 from ._operators import HardwareOperator, OpConfig
-from ._schedule import build, interface_of
 from ._interface import ModuleInterface
 
 type Target = Callable[..., Any] | type[object]
@@ -73,7 +73,7 @@ def synthesize(
     """
     mir = lower_to_mir(optimize(lower_frontend(target)), ops)
     module_name: str = name if name is not None else str(getattr(target, "__name__", "holoso_module"))
-    lir = build(mir, module_name, fmt=ops.float_format, instances=operator_instances)
+    lir = build(mir, module_name, instances=operator_instances)
     interface = interface_of(lir)
     verilog_output = generate_verilog(lir)
     html_output = generate_html(lir, interface, verilog_output)

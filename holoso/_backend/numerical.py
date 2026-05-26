@@ -9,15 +9,15 @@ default pickle (every field is a frozen dataclass of plain values), so a generat
 
 from dataclasses import dataclass
 
-from .._lir import ConstRef, Lir, RegRef
-from .._operators import SignControl
+from .._lir import FloatConstRef, FloatRegRef, Lir
+from .._operators import FloatHardwareOperator, FloatSignControl
 from .._type import FloatFormat
 
 # A value source on a register's write timeline: an input (by input index) or an operator result (by op index).
 type _Producer = tuple[str, int]
 
 
-def _apply_sign(value: float, sign: SignControl) -> float:
+def _apply_sign(value: float, sign: FloatSignControl) -> float:
     """Apply a folded sign control exactly as ``holoso_fsgnop`` does in the RTL."""
     return sign.apply_float(value)
 
@@ -55,51 +55,54 @@ class NumericalModel:
 
     def __call__(self, *inputs: float) -> tuple[float, ...]:
         lir = self.lir
-        if len(inputs) != len(lir.inputs):
-            raise ValueError(f"expected {len(lir.inputs)} inputs, got {len(inputs)}")
-        fmt = lir.regfile.fmt
-        consts = lir.consts
+        if len(inputs) != len(lir.float_inputs):
+            raise ValueError(f"expected {len(lir.float_inputs)} inputs, got {len(inputs)}")
+        fmt = lir.float_regfile.fmt
+        consts = lir.float_consts
         in_values = [fmt.round(x) for x in inputs]
 
         # Per-register write timeline: (commit_cycle, producer) in increasing commit order. Inputs are sampled at
         # cycle 0; each op commits at its commit_cycle. Operands resolve against this so a register reused for several
         # values over its lifetime yields the value that is live at the operand's read (issue) cycle, not the final one.
         writes: dict[int, list[tuple[int, _Producer]]] = {}
-        for i, load in enumerate(lir.inputs):
+        for i, load in enumerate(lir.float_inputs):
             writes.setdefault(load.dst.index, []).append((0, ("in", i)))
-        for j, op in enumerate(lir.ops):
+        for j, op in enumerate(lir.float_ops):
             writes.setdefault(op.dst.index, []).append((op.commit_cycle, ("op", j)))
         for events in writes.values():
             events.sort()
 
         op_values: dict[int, float] = {}
 
-        def value(source: RegRef | ConstRef, read_cycle: int) -> float:
-            if isinstance(source, ConstRef):
+        def value(source: FloatRegRef | FloatConstRef, read_cycle: int) -> float:
+            if isinstance(source, FloatConstRef):
                 return consts[source.index]
             kind, index = _latest_before(writes[source.index], read_cycle)
             return in_values[index] if kind == "in" else op_values[index]
 
         # Evaluate in commit order: a producer commits before any consumer issues, so its value is ready in op_values.
-        for j in sorted(range(len(lir.ops)), key=lambda k: (lir.ops[k].commit_cycle, lir.ops[k].issue_cycle)):
-            op = lir.ops[j]
+        for j in sorted(
+            range(len(lir.float_ops)), key=lambda k: (lir.float_ops[k].commit_cycle, lir.float_ops[k].issue_cycle)
+        ):
+            op = lir.float_ops[j]
+            assert isinstance(op.inst.operator, FloatHardwareOperator)
             operands = [_apply_sign(value(o.source, op.issue_cycle), o.sign) for o in op.operands]
             op_values[j] = fmt.round(_apply_sign(op.inst.operator.evaluate(*operands), op.result_sign))
 
         present = lir.makespan + 1  # outputs present one cycle after the last commit; they read the final live value
-        return tuple(_apply_sign(value(wire.source, present), wire.sign) for wire in lir.outputs)
+        return tuple(_apply_sign(value(wire.source, present), wire.sign) for wire in lir.float_outputs)
 
     @property
     def input_names(self) -> tuple[str, ...]:
-        return tuple(load.name for load in self.lir.inputs)
+        return tuple(load.name for load in self.lir.float_inputs)
 
     @property
     def output_names(self) -> tuple[str, ...]:
-        return tuple(wire.name for wire in self.lir.outputs)
+        return tuple(wire.name for wire in self.lir.float_outputs)
 
     @property
     def float_format(self) -> FloatFormat:
-        return self.lir.regfile.fmt
+        return self.lir.float_regfile.fmt
 
 
 def generate(lir: Lir) -> NumericalModel:

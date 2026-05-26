@@ -42,6 +42,9 @@ cleanly into the existing architecture.
 An acceptable design will not involve special-casing. Do not bypass existing abstractions to get the job done.
 Work will not be accepted unless architected cleanly.
 
+When editing code, do not ever leave any compatibility shims behind. Always do a clean break with bridges burned.
+API compatibility is not a concern.
+
 The Python version to target is 3.14 and newer. No need to ensure compatibility with older versions.
 
 Do not use `from __future__ import annotations`.
@@ -52,6 +55,9 @@ Prefer explicit `from X import Y as Y` instead of using `__all__` in `__init__.p
 Public APIs can only include items that are required to use the API and nothing else.
 All non-public items are hidden in underscore-prefixed submodules.
 Minimize the public API surface.
+
+Importing anything from a package or subpackage is only allowed as long as it doesn't involve referencing
+underscore-prefixed names. Exceptions apply for importing from parent modules with the dot notation, and for unit tests.
 
 If a docstring comment doesn't fit on one line, add an initial line break like this:
 

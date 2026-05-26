@@ -3,8 +3,8 @@
 import math
 
 from ._copy import copy_node
-from ._ir import Const, Hir, HirBuilder, Operation, ValueId
-from ._operators import Div, Mul, MulPow2
+from ._ir import FloatConst, Hir, HirBuilder, Operation, ValueId
+from ._operators import FloatDiv, FloatMul, FloatMulPow2
 
 
 def _ilog2_exact(c: float) -> int | None:
@@ -23,12 +23,12 @@ def run(hir: Hir) -> Hir:
     for old_id in sorted(hir.nodes):
         node = hir.nodes[old_id]
         match node:
-            case Const(value=value):
-                new_id = builder.const(value)
+            case FloatConst(value=value):
+                new_id = builder.float_const(value)
                 cval[new_id] = value
-            case Operation(operator=Mul(), operands=(a, b)):
+            case Operation(operator=FloatMul(), operands=(a, b)):
                 new_id = _reduce_mul(builder, remap[a], remap[b], cval)
-            case Operation(operator=Div(), operands=(a, b)):
+            case Operation(operator=FloatDiv(), operands=(a, b)):
                 new_id = _reduce_div(builder, remap[a], remap[b], cval)
             case _:
                 new_id = copy_node(builder, node, remap)
@@ -43,8 +43,8 @@ def _reduce_mul(builder: HirBuilder, a: ValueId, b: ValueId, cval: dict[ValueId,
         if const_side in cval:
             k = _ilog2_exact(cval[const_side])
             if k is not None:
-                return builder.operation(MulPow2(k), [other])
-    return builder.operation(Mul(), [a, b])
+                return builder.operation(FloatMulPow2(k), [other])
+    return builder.operation(FloatMul(), [a, b])
 
 
 def _reduce_div(builder: HirBuilder, a: ValueId, b: ValueId, cval: dict[ValueId, float]) -> ValueId:
@@ -52,7 +52,7 @@ def _reduce_div(builder: HirBuilder, a: ValueId, b: ValueId, cval: dict[ValueId,
         c = cval[b]
         k = _ilog2_exact(c)
         if k is not None:
-            return builder.operation(MulPow2(-k), [a])
+            return builder.operation(FloatMulPow2(-k), [a])
         if c != 0.0 and math.isfinite(c):
-            return builder.operation(Mul(), [a, builder.const(1.0 / c)])
-    return builder.operation(Div(), [a, b])
+            return builder.operation(FloatMul(), [a, builder.float_const(1.0 / c)])
+    return builder.operation(FloatDiv(), [a, b])

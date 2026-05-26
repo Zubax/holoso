@@ -1,5 +1,6 @@
 """Elaboration tests for the generated Verilog backend (structural correctness under Icarus)."""
 
+import re
 import shutil
 import subprocess
 import sys
@@ -11,8 +12,8 @@ from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFam
 from holoso._backend.verilog import generate
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lower import lower as lower_to_mir
-from holoso._schedule import build
+from holoso._lir import build
+from holoso._mir import lower as lower_to_mir
 
 from .hdl.hdl_float_oracle import HDL_DIR, sources
 
@@ -46,13 +47,29 @@ def _elaborate(name: str, verilog: str, tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_operator_instance_names_include_hardware_identity() -> None:
+    def scale(a, b):  # type: ignore[no-untyped-def]
+        return a * 4.0 + b * 8.0
+
+    fmt = FloatFormat(6, 18)
+    lir = build(_run(scale, _ops(fmt)), "scale")
+    names = re.findall(
+        r"\bholoso_fmul_ilog2_const\s+#\([^;]+?\)\s+u_([A-Za-z_][A-Za-z0-9_]*)\s+\(", generate(lir).verilog
+    )
+
+    assert len(names) == len(set(names))
+    assert "fmul_ilog2_const_e6_m18_k_2_0" in names
+    assert "fmul_ilog2_const_e6_m18_k_3_0" in names
+    assert all(name == name.lower() for name in names)
+
+
 @requires_iverilog
 def test_small_kernel_elaborates(tmp_path: Path) -> None:
     def kernel(a, b):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
     fmt = FloatFormat(8, 24)
-    lir = build(_run(kernel, _ops(fmt)), "kernel", fmt=fmt)
+    lir = build(_run(kernel, _ops(fmt)), "kernel")
     _elaborate("kernel", generate(lir).verilog, tmp_path)
 
 
@@ -62,7 +79,7 @@ def test_kernel_with_division_elaborates(tmp_path: Path) -> None:
         return a / b + c * 2.0
 
     fmt = FloatFormat(6, 18)
-    lir = build(_run(blend, _ops(fmt)), "blend", fmt=fmt)
+    lir = build(_run(blend, _ops(fmt)), "blend")
     _elaborate("blend", generate(lir).verilog, tmp_path)
 
 
@@ -74,7 +91,7 @@ def test_constant_only_module_elaborates(tmp_path: Path) -> None:
         return 3.5
 
     fmt = FloatFormat(8, 24)
-    lir = build(_run(const_only, _ops(fmt)), "const_only", fmt=fmt)
+    lir = build(_run(const_only, _ops(fmt)), "const_only")
     _elaborate("const_only", generate(lir).verilog, tmp_path)
 
 
@@ -84,5 +101,5 @@ def test_ekf1_elaborates(tmp_path: Path) -> None:
     import ekf1
 
     fmt = FloatFormat(6, 18)
-    lir = build(_run(ekf1.update_x_P, _ops(fmt)), "update_x_P", fmt=fmt)
+    lir = build(_run(ekf1.update_x_P, _ops(fmt)), "update_x_P")
     _elaborate("update_x_P", generate(lir).verilog, tmp_path)

@@ -7,10 +7,9 @@ from dataclasses import dataclass
 from importlib import resources
 from string import ascii_letters
 
-from ..._lir import ConstRef, Lir, OperatorInstance, Operand, RegRef, ScheduledOp
-from ..._operators import ALL_OPERATOR_CLASSES, SignControl
+from ..._lir import FloatConstRef, Lir, FloatOperatorInstance, FloatOperand, FloatRegRef, FloatScheduledOp
+from ..._operators import FloatSignControl
 
-_CLASS_ORDER = {cls: index for index, cls in enumerate(ALL_OPERATOR_CLASSES)}
 _PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
 
 _SUPPORT_FILES = {
@@ -52,11 +51,11 @@ class _Writer:
         return "\n".join(self._lines) + "\n"
 
 
-def _base(inst: OperatorInstance) -> str:
-    return f"{inst.operator.mnemonic}_{inst.index}"
+def _base(inst: FloatOperatorInstance) -> str:
+    return f"{inst.operator.instance_stem}_{inst.index}"
 
 
-def _sig(inst: OperatorInstance) -> str:
+def _sig(inst: FloatOperatorInstance) -> str:
     return f"s_{_base(inst)}"
 
 
@@ -72,22 +71,22 @@ def _rf_view(reg: int) -> str:
     return f"`REGF_VIEW({reg})"
 
 
-def _operand_value(operand: Operand, lanes: dict[int, int]) -> str:
-    if isinstance(operand.source, ConstRef):
+def _operand_value(operand: FloatOperand, lanes: dict[int, int]) -> str:
+    if isinstance(operand.source, FloatConstRef):
         return f"const_{operand.source.index}"
     return f"rf_rd_data[{_rf_data(lanes[operand.source.index])}]"
 
 
-def _operand_name(operand: Operand) -> str:
-    base = f"r{operand.source.index}" if isinstance(operand.source, RegRef) else f"c{operand.source.index}"
+def _operand_name(operand: FloatOperand) -> str:
+    base = f"r{operand.source.index}" if isinstance(operand.source, FloatRegRef) else f"c{operand.source.index}"
     return operand.sign.decorate(base)
 
 
-def _op_expr(op: ScheduledOp) -> str:
+def _op_expr(op: FloatScheduledOp) -> str:
     return f"r{op.dst.index}={op.inst.operator.render(*[_operand_name(o) for o in op.operands])}"
 
 
-def _cycle_summary(issues: list[ScheduledOp], commits: list[ScheduledOp]) -> str:
+def _cycle_summary(issues: list[FloatScheduledOp], commits: list[FloatScheduledOp]) -> str:
     parts: list[str] = []
     if issues:
         parts.append("issue " + ", ".join(_op_expr(op) for op in issues))
@@ -96,32 +95,32 @@ def _cycle_summary(issues: list[ScheduledOp], commits: list[ScheduledOp]) -> str
     return "; ".join(parts)
 
 
-def _group_by_cycle(lir: Lir) -> tuple[dict[int, list[ScheduledOp]], dict[int, list[ScheduledOp]]]:
+def _group_by_cycle(lir: Lir) -> tuple[dict[int, list[FloatScheduledOp]], dict[int, list[FloatScheduledOp]]]:
     """Group the schedule into per-cycle issues (by issue_cycle) and commits (by commit_cycle), canonically ordered."""
-    issues: dict[int, list[ScheduledOp]] = {}
-    commits: dict[int, list[ScheduledOp]] = {}
-    for op in lir.ops:
+    issues: dict[int, list[FloatScheduledOp]] = {}
+    commits: dict[int, list[FloatScheduledOp]] = {}
+    for op in lir.float_ops:
         issues.setdefault(op.issue_cycle, []).append(op)
         commits.setdefault(op.commit_cycle, []).append(op)
     for group in (issues, commits):
         for ops in group.values():
-            ops.sort(key=lambda op: (_CLASS_ORDER[type(op.inst.operator)], op.inst.index))
+            ops.sort(key=lambda op: (_base(op.inst), op.dst.index, op.issue_cycle))
     return issues, commits
 
 
-def _read_lanes_for(issues: list[ScheduledOp]) -> dict[int, int]:
+def _read_lanes_for(issues: list[FloatScheduledOp]) -> dict[int, int]:
     """Assign a read-port lane to each distinct register operand read by a cycle's issues (shared reads dedup)."""
     lanes: dict[int, int] = {}
     for op in issues:
         for operand in op.operands:
-            if isinstance(operand.source, RegRef) and operand.source.index not in lanes:
+            if isinstance(operand.source, FloatRegRef) and operand.source.index not in lanes:
                 lanes[operand.source.index] = len(lanes)
     return lanes
 
 
 def generate(lir: Lir) -> VerilogOutput:
     w = _Writer()
-    waddr = max(1, (lir.regfile.nreg - 1).bit_length())
+    waddr = max(1, (lir.float_regfile.nreg - 1).bit_length())
     cycw = lir.cyc_width
     issues_by_cycle, commits_by_cycle = _group_by_cycle(lir)
     read_lanes = {cycle: _read_lanes_for(issues) for cycle, issues in issues_by_cycle.items()}
@@ -140,7 +139,7 @@ def generate(lir: Lir) -> VerilogOutput:
 
 
 def _emit_header(w: _Writer, lir: Lir, cycw: int) -> None:
-    fmt = lir.regfile.fmt
+    fmt = lir.float_regfile.fmt
     w.lines('`include "holoso_support.vh"', "`timescale 1ns/1ps", "")
     w.line(f"// Float format: exponent {fmt.wexp} bits, significand {fmt.wman} bits, total {fmt.width} bits.")
     w.line(f"module {lir.module_name} (")
@@ -157,10 +156,10 @@ def _emit_header(w: _Writer, lir: Lir, cycw: int) -> None:
     for line in ports:
         w.line(line)
     _emit_port_group(w, "INPUT PORTS", "Latched when in_valid && in_ready.")
-    for load in lir.inputs:
+    for load in lir.float_inputs:
         w.line(f"input  wire [{fmt.width - 1}:0] in_{load.name},")
     _emit_port_group(w, "OUTPUT PORTS", "Valid when out_valid is pulsed.")
-    for wire in lir.outputs:
+    for wire in lir.float_outputs:
         w.line(f"output wire [{fmt.width - 1}:0] {wire.name},")
     _emit_port_group(w, "DIAGNOSTIC PORTS", "Runtime diagnostics available while the module is running.")
     # err_cyc: 0 = no error; otherwise the (last) cycle an error was detected. |err_cyc answers "any error?".
@@ -174,17 +173,17 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
 
 
 def _emit_localparams(w: _Writer, lir: Lir, waddr: int, cycw: int) -> None:
-    fmt = lir.regfile.fmt
+    fmt = lir.float_regfile.fmt
     w.line(f"localparam WEXP  = {fmt.wexp};  // Float exponent bits fixed by the static schedule")
     w.line(f"localparam WMAN  = {fmt.wman};  // Float mantissa bits fixed by the static schedule")
     w.line("localparam W     = WEXP + WMAN;")
     w.line(
-        f"localparam NREG  = {max(1, lir.regfile.nreg)};  // >= 1; the bank is unused when no value needs a register"
+        f"localparam NREG  = {max(1, lir.float_regfile.nreg)};  // >= 1; the bank is unused when no value needs a register"
     )
     w.line(f"localparam WADDR = {waddr};")
-    w.line(f"localparam NRD   = {lir.regfile.nrd};")
-    w.line(f"localparam NWR   = {lir.regfile.nwr};")
-    w.line(f"localparam NLOAD = {lir.regfile.nload};")
+    w.line(f"localparam NRD   = {lir.float_regfile.nrd};")
+    w.line(f"localparam NWR   = {lir.float_regfile.nwr};")
+    w.line(f"localparam NLOAD = {lir.float_regfile.nload};")
     w.line(f"localparam CYCW  = {cycw};")
     w.line(f"localparam [CYCW-1:0] LAST = {lir.makespan + 1};")
     compute = f"1..{lir.makespan} = pipelined compute, " if lir.makespan else ""
@@ -206,13 +205,13 @@ def _emit_declarations(w: _Writer, lir: Lir) -> None:
         "wire [NREG*W-1:0]    rf_view;",
         "",
     )
-    if lir.regfile.nload:
+    if lir.float_regfile.nload:
         w.lines(
             "reg                  rf_load_en;",
             "reg  [NLOAD*W-1:0]   rf_load_data;",
             "",
         )
-    for inst in lir.instances:
+    for inst in lir.float_instances:
         sig = _sig(inst)
         w.line(f"reg          {sig}_iv;")
         for letter in _PORT_LETTERS[: inst.operator.arity]:
@@ -226,12 +225,12 @@ def _emit_declarations(w: _Writer, lir: Lir) -> None:
 
 
 def _emit_consts(w: _Writer, lir: Lir) -> None:
-    fmt = lir.regfile.fmt
+    fmt = lir.float_regfile.fmt
     width = fmt.width
     digits = (width + 3) // 4
-    for index, value in enumerate(lir.consts):
+    for index, value in enumerate(lir.float_consts):
         w.line(f"wire [W-1:0] const_{index} = {width}'h{fmt.encode(value):0{digits}x};  // {value!r}")
-    if lir.consts:
+    if lir.float_consts:
         w.line("")
 
 
@@ -244,7 +243,7 @@ def _emit_regfile(w: _Writer, lir: Lir) -> None:
     )
     w.push()
     w.line(".clk(clk),")
-    if lir.regfile.nload:
+    if lir.float_regfile.nload:
         w.line(".load_en(rf_load_en), .load_data(rf_load_data),")
     else:
         w.line(".load_en(1'b0), .load_data(1'b0),  // no inputs: load port disabled (NLOAD=0)")
@@ -258,7 +257,7 @@ def _emit_regfile(w: _Writer, lir: Lir) -> None:
 
 
 def _emit_operators(w: _Writer, lir: Lir) -> None:
-    for inst in lir.instances:
+    for inst in lir.float_instances:
         sig = _sig(inst)
         letters = _PORT_LETTERS[: inst.operator.arity]
         # WEXP/WMAN frame the float format; hdl_params() adds K (ilog2) and any enabled STAGE_* (defaults omitted),
@@ -286,8 +285,8 @@ def _emit_operators(w: _Writer, lir: Lir) -> None:
 def _emit_datapath(
     w: _Writer,
     lir: Lir,
-    issues_by_cycle: dict[int, list[ScheduledOp]],
-    commits_by_cycle: dict[int, list[ScheduledOp]],
+    issues_by_cycle: dict[int, list[FloatScheduledOp]],
+    commits_by_cycle: dict[int, list[FloatScheduledOp]],
     read_lanes: dict[int, dict[int, int]],
 ) -> None:
     # One combinational block: per cycle, set the operand reads + in_valid for issuing operators and the write ports
@@ -295,7 +294,7 @@ def _emit_datapath(
     # the regfile and the control block below.
     w.line("always @* begin")
     w.push()
-    for inst in lir.instances:
+    for inst in lir.float_instances:
         sig = _sig(inst)
         w.line(f"{sig}_iv = 1'b0; {sig}_ys = 2'd0;")
         for letter in _PORT_LETTERS[: inst.operator.arity]:
@@ -307,18 +306,18 @@ def _emit_datapath(
         "rf_wr_data = {(NWR*W){1'b0}};",
         "err        = 1'b0;",
     )
-    if lir.regfile.nload:
+    if lir.float_regfile.nload:
         w.lines(
             "rf_load_en = 1'b0;",
             "rf_load_data  = {(NLOAD*W){1'b0}};",
         )
     w.line("case (cyc)")
     w.push()
-    if lir.regfile.nload:
+    if lir.float_regfile.nload:
         w.line("0: if (in_valid) begin  // parallel-load the input ports into registers 0..NLOAD-1 in one cycle")
         w.push()
         w.line("rf_load_en = 1'b1;")
-        for load in lir.inputs:
+        for load in lir.float_inputs:
             w.line(f"rf_load_data[{_rf_view(load.dst.index)}] = in_{load.name};")
         w.pop()
         w.line("end")
@@ -396,12 +395,12 @@ def _emit_fsm(w: _Writer) -> None:
 def _emit_outputs(w: _Writer, lir: Lir) -> None:
     w.line("assign in_ready  = (cyc == 0);")
     w.line("assign out_valid = (cyc == LAST);")
-    for index, wire in enumerate(lir.outputs):
-        if isinstance(wire.source, ConstRef):
+    for index, wire in enumerate(lir.float_outputs):
+        if isinstance(wire.source, FloatConstRef):
             raw = f"const_{wire.source.index}"
         else:
             raw = f"rf_view[{_rf_view(wire.source.index)}]"
-        if wire.sign == SignControl():
+        if wire.sign == FloatSignControl():
             w.line(f"assign {wire.name} = {raw};")
         else:
             w.line(

@@ -18,8 +18,8 @@ from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFam
 from holoso._backend.verilog import generate
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lower import lower as lower_to_mir
-from holoso._schedule import build
+from holoso._lir import build
+from holoso._mir import lower as lower_to_mir
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
 
@@ -67,7 +67,7 @@ async def err_cyc_latches_div0(dut) -> None:
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_err_cyc(sim: str) -> None:
-    lir = build(lower_to_mir(optimize(lower(_divide)), OPS), "divide", fmt=FMT)
+    lir = build(lower_to_mir(optimize(lower(_divide)), OPS), "divide")
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"divide_w{FMT.wexp}_{FMT.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     verilog_path = gen_dir / "divide.v"

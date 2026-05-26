@@ -14,7 +14,7 @@ from datetime import datetime
 from importlib import resources
 
 from ..._interface import ModuleInterface
-from ..._lir import Lir, Operand, OperatorInstance, RegRef, ScheduledOp
+from ..._lir import Lir, FloatOperand, FloatOperatorInstance, FloatRegRef, FloatScheduledOp
 from ..._operators import FAddOperator, FDivOperator, FMulILog2Operator, FMulOperator, HardwareOperator
 from ..verilog import VerilogOutput
 
@@ -49,12 +49,12 @@ def _esc(text: str) -> str:
     return html.escape(text)
 
 
-def _operand(operand: Operand) -> str:
-    name = f"r{operand.source.index}" if isinstance(operand.source, RegRef) else f"c{operand.source.index}"
+def _operand(operand: FloatOperand) -> str:
+    name = f"r{operand.source.index}" if isinstance(operand.source, FloatRegRef) else f"c{operand.source.index}"
     return operand.sign.decorate(name)
 
 
-def _op_text(op: ScheduledOp) -> str:
+def _op_text(op: FloatScheduledOp) -> str:
     body = op.inst.operator.render(*[_operand(o) for o in op.operands])
     return op.result_sign.decorate(f"r{op.dst.index}={body}")
 
@@ -85,15 +85,15 @@ def generate(lir: Lir, interface: ModuleInterface, verilog_output: VerilogOutput
 
 
 def _metrics(lir: Lir) -> str:
-    fmt = lir.regfile.fmt
+    fmt = lir.float_regfile.fmt
     op_counts: dict[str, int] = {}
-    for inst in lir.instances:
+    for inst in lir.float_instances:
         op_counts[inst.operator.mnemonic] = op_counts.get(inst.operator.mnemonic, 0) + 1
     rows: list[tuple[str, object]] = [
         ("ZKF format", f"e{fmt.wexp}+m{fmt.wman} = {fmt.width}-bit"),
         ("operator instances", " ".join(f"{count}×{kind}" for kind, count in op_counts.items())),
-        ("registers", lir.regfile.nreg),
-        ("regfile R/W ports", f"{lir.regfile.nrd} / {lir.regfile.nwr}"),
+        ("registers", lir.float_regfile.nreg),
+        ("regfile R/W ports", f"{lir.float_regfile.nrd} / {lir.float_regfile.nwr}"),
         ("schedule makespan", lir.makespan),
         ("operations", lir.op_count),
         ("II (cycles)", lir.initiation_interval),
@@ -107,7 +107,7 @@ def _stage_config(lir: Lir) -> str:
     out = ["<h2>Operator Params</h2><table class='metrics cfg'>"]
     out.append("<tr><th>operator</th><th>HDL param</th><th>value</th></tr>")
     seen: dict[HardwareOperator, None] = {}  # distinct operators present, in instance order
-    for inst in lir.instances:
+    for inst in lir.float_instances:
         seen.setdefault(inst.operator, None)
     rows = 0
     for op in seen:
@@ -177,10 +177,10 @@ def _highlight_verilog_code(code: str) -> str:
 
 
 def _constants(lir: Lir) -> str:
-    if not lir.consts:
+    if not lir.float_consts:
         return ""
     chips = "".join(
-        f"<span class='const'>c{index} = {_esc(repr(value))}</span>" for index, value in enumerate(lir.consts)
+        f"<span class='const'>c{index} = {_esc(repr(value))}</span>" for index, value in enumerate(lir.float_consts)
     )
     return f"<h2>Constants</h2><div>{chips}</div>"
 
@@ -205,8 +205,8 @@ def _write_label(index: int, tip: str) -> str:
     return f"<span class='wl' title='{tip}'>{index}</span>"
 
 
-def _operand_col(operand: Operand) -> ColKey:
-    return ("r", operand.source.index) if isinstance(operand.source, RegRef) else ("c", operand.source.index)
+def _operand_col(operand: FloatOperand) -> ColKey:
+    return ("r", operand.source.index) if isinstance(operand.source, FloatRegRef) else ("c", operand.source.index)
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,7 +242,7 @@ def _oc_class(sidx: int, dv: _Dividers) -> str:
     return "oc" + _border_suffix(sidx, dv.stage_thin, dv.stage_thick)
 
 
-def _stage_columns(lir: Lir) -> list[tuple[OperatorInstance, int]]:
+def _stage_columns(lir: Lir) -> list[tuple[FloatOperatorInstance, int]]:
     """
     The operator-stage columns, in instance order: ``(instance, stage)`` for each pipeline stage of each operator.
 
@@ -251,8 +251,8 @@ def _stage_columns(lir: Lir) -> list[tuple[OperatorInstance, int]]:
     ``issue + L``. This makes the pipeline's advance directly visible and exposes any structural hazard once several
     operations are in flight at once.
     """
-    cols: list[tuple[OperatorInstance, int]] = []
-    for inst in lir.instances:
+    cols: list[tuple[FloatOperatorInstance, int]] = []
+    for inst in lir.float_instances:
         cols.extend((inst, k) for k in range(inst.operator.latency))
     return cols
 
@@ -290,15 +290,15 @@ def _liveness(lir: Lir) -> dict[int, set[int]]:
     present = lir.makespan + 1
     defs: dict[int, list[int]] = {}
     uses: dict[int, list[int]] = {}
-    for load in lir.inputs:
+    for load in lir.float_inputs:
         defs.setdefault(load.dst.index, []).append(0)
-    for op in lir.ops:
+    for op in lir.float_ops:
         defs.setdefault(op.dst.index, []).append(op.commit_cycle)
         for operand in op.operands:
-            if isinstance(operand.source, RegRef):
+            if isinstance(operand.source, FloatRegRef):
                 uses.setdefault(operand.source.index, []).append(op.issue_cycle)
-    for wire in lir.outputs:
-        if isinstance(wire.source, RegRef):
+    for wire in lir.float_outputs:
+        if isinstance(wire.source, FloatRegRef):
             uses.setdefault(wire.source.index, []).append(present)
     live: dict[int, set[int]] = {}
     for reg in defs.keys() | uses.keys():
@@ -348,7 +348,7 @@ def _cell_style(
 
 
 def _schedule(lir: Lir) -> str:
-    nreg, nconst = lir.regfile.nreg, len(lir.consts)
+    nreg, nconst = lir.float_regfile.nreg, len(lir.float_consts)
     columns = _columns_of(lir)
     col_ord = {col: ordinal for ordinal, col in enumerate(columns)}
     compute_cycles = list(range(1, lir.makespan + 1))
@@ -362,10 +362,10 @@ def _schedule(lir: Lir) -> str:
     # The operator-stage block: one square column per pipeline stage of each operator, in instance order.
     stage_cols = _stage_columns(lir)
     n_stage = len(stage_cols)
-    stage_base: dict[OperatorInstance, int] = {}
+    stage_base: dict[FloatOperatorInstance, int] = {}
     for sidx, (inst, _k) in enumerate(stage_cols):
         stage_base.setdefault(inst, sidx)
-    group_ends = {stage_base[inst] + inst.operator.latency - 1 for inst in lir.instances}
+    group_ends = {stage_base[inst] + inst.operator.latency - 1 for inst in lir.float_instances}
 
     # Column seams: 2px at the two block boundaries (constants | pipeline and pipeline | OPERATIONS); 1px at the lighter
     # registers | constants seam and between operator groups.
@@ -393,7 +393,7 @@ def _schedule(lir: Lir) -> str:
     chips_at: dict[int, list[str]] = {}  # cycle -> chips for the operations committing on that row
 
     group = 0  # global per-operation id, linking a commit cell with its edges/chip for the hover-focus behavior
-    for op in lir.ops:
+    for op in lir.float_ops:
         tip = _esc(_op_text(op))
         color = _KIND_COLOR[type(op.inst.operator)]
         issue, commit = op.issue_cycle, op.commit_cycle
@@ -440,7 +440,7 @@ def _schedule(lir: Lir) -> str:
     for index in range(nconst):
         cls = "gh k" + _border_suffix(nreg + index, dv.data_thin, dv.data_thick)
         out.append(f"<th class='{cls}' rowspan='2'><span>c{index}</span></th>")
-    for inst in lir.instances:
+    for inst in lir.float_instances:
         lat = inst.operator.latency
         name = (
             f"{inst.operator.mnemonic}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
@@ -460,7 +460,7 @@ def _schedule(lir: Lir) -> str:
 
     # The grid has exactly one displayed row per II cycle: the input-load cycle (0), then the compute/writeback cycles
     # 1..makespan. The output-present boundary is not an extra cycle row; out_valid rises after these II cycles.
-    in_cells = {("r", load.dst.index): _input_chip(f"in_{load.name}") for load in lir.inputs}
+    in_cells = {("r", load.dst.index): _input_chip(f"in_{load.name}") for load in lir.float_inputs}
     out.append(_bookend_row("in", in_cells, columns, live, 0, n_stage, dv))
 
     for cyc in compute_cycles:  # one row per compute cycle; idle cycles show only pipeline advance
@@ -516,7 +516,7 @@ def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[i
     data = {
         "edges": edges,
         "columns": cols,
-        "constants": {f"c{i}": repr(value) for i, value in enumerate(lir.consts)},
+        "constants": {f"c{i}": repr(value) for i, value in enumerate(lir.float_consts)},
         "liveness": {str(reg): _live_intervals(rows) for reg, rows in live.items()},
     }
     return "<script>\n" + _SCHED_JS.replace("__DATA__", json.dumps(data)) + "\n</script>"
@@ -524,7 +524,7 @@ def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[i
 
 def _columns_of(lir: Lir) -> list[ColKey]:
     """The grid columns: one per float register, then one per constant (matches the order rendered in the table)."""
-    return [("r", i) for i in range(lir.regfile.nreg)] + [("c", i) for i in range(len(lir.consts))]
+    return [("r", i) for i in range(lir.float_regfile.nreg)] + [("c", i) for i in range(len(lir.float_consts))]
 
 
 def _input_chip(tip: str) -> str:
@@ -535,7 +535,7 @@ def _input_chip(tip: str) -> str:
 def _schedule_key(lir: Lir) -> str:
     """A small legend above the grid: operator-kind colors plus the read/write chip shapes."""
     seen: dict[type[HardwareOperator], None] = {}  # operator classes present, in instance order, de-duplicated
-    for inst in lir.instances:
+    for inst in lir.float_instances:
         seen.setdefault(type(inst.operator), None)
     kinds = [f"<span class='wr' style='background:{_KIND_COLOR[cls]}'>{cls.mnemonic}</span>" for cls in seen]
     return (

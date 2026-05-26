@@ -6,7 +6,7 @@ import textwrap
 import types
 
 from .._errors import MissingIntrinsic, SourceLocation, SourceUnavailable, UnsupportedConstruct
-from .._hir import Abs, Add, Div, Hir, HirBuilder, Mul, Neg, ValueId
+from .._hir import FloatAbs, FloatAdd, FloatDiv, FloatMul, FloatNeg, Hir, HirBuilder, ValueId
 
 _Path = list[int | str]
 
@@ -81,7 +81,7 @@ class _Lowerer:
         if args.vararg is not None or args.kwarg is not None or args.kwonlyargs:
             raise UnsupportedConstruct("variadic and keyword-only parameters are not supported in v0", self._loc(fndef))
         for arg in (*args.posonlyargs, *args.args):
-            self._env[arg.arg] = self._builder.input(arg.arg)
+            self._env[arg.arg] = self._builder.float_input(arg.arg)
 
     def _lower_body(self, fndef: ast.FunctionDef) -> None:
         for stmt in fndef.body:
@@ -120,7 +120,7 @@ class _Lowerer:
                 if isinstance(value, bool):
                     raise UnsupportedConstruct("boolean values are not supported in v0", self._loc(node))
                 if isinstance(value, (int, float)):
-                    return self._builder.const(float(value))
+                    return self._builder.float_const(float(value))
                 raise UnsupportedConstruct(f"unsupported constant {value!r}", self._loc(node))
             case ast.Name(id=name):
                 vid = self._env.get(name)
@@ -130,9 +130,9 @@ class _Lowerer:
                     )
                 return vid
             case ast.UnaryOp(op=ast.USub(), operand=ast.Constant(value=(int() | float()) as value)):
-                return self._builder.const(-float(value))
+                return self._builder.float_const(-float(value))
             case ast.UnaryOp(op=ast.USub(), operand=operand):
-                return self._builder.operation(Neg(), [self._lower_expr(operand)])
+                return self._builder.operation(FloatNeg(), [self._lower_expr(operand)])
             case ast.UnaryOp(op=ast.UAdd(), operand=operand):
                 return self._lower_expr(operand)
             case ast.BinOp(left=left, op=ast.Pow(), right=right):
@@ -152,20 +152,20 @@ class _Lowerer:
         elif isinstance(func, ast.Attribute):
             name = func.attr
         if name == "abs" and len(node.args) == 1 and not node.keywords:
-            return self._builder.operation(Abs(), [self._lower_expr(node.args[0])])
+            return self._builder.operation(FloatAbs(), [self._lower_expr(node.args[0])])
         if name in _KNOWN_INTRINSICS:
             raise MissingIntrinsic(f"implement this operator: {name}", self._loc(node))
         raise UnsupportedConstruct(f"unsupported call to {name or '<expr>'!r}", self._loc(node))
 
     def _lower_pow(self, base: ast.expr, exponent: ast.expr) -> ValueId:
         match exponent:
-            case ast.Constant(value=int() as n) if not isinstance(n, bool) and n >= 0:
+            case ast.Constant(value=int(n)) if not isinstance(n, bool) and n >= 0:
                 base_id = self._lower_expr(base)
                 if n == 0:
-                    return self._builder.const(1.0)
+                    return self._builder.float_const(1.0)
                 result = base_id
                 for _ in range(n - 1):
-                    result = self._builder.operation(Mul(), [result, base_id])
+                    result = self._builder.operation(FloatMul(), [result, base_id])
                 return result
             case _:
                 raise UnsupportedConstruct("exponent must be a non-negative integer literal in v0", self._loc(exponent))
@@ -173,13 +173,13 @@ class _Lowerer:
     def _apply_binop(self, op: ast.operator, a: ValueId, b: ValueId, loc: SourceLocation) -> ValueId:
         match op:
             case ast.Add():
-                return self._builder.operation(Add(), [a, b])
+                return self._builder.operation(FloatAdd(), [a, b])
             case ast.Sub():
-                return self._builder.operation(Add(), [a, self._builder.operation(Neg(), [b])])
+                return self._builder.operation(FloatAdd(), [a, self._builder.operation(FloatNeg(), [b])])
             case ast.Mult():
-                return self._builder.operation(Mul(), [a, b])
+                return self._builder.operation(FloatMul(), [a, b])
             case ast.Div():
-                return self._builder.operation(Div(), [a, b])
+                return self._builder.operation(FloatDiv(), [a, b])
             case _:
                 raise UnsupportedConstruct(f"unsupported binary operator {type(op).__name__}", loc)
 

@@ -4,6 +4,17 @@ import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import ClassVar
+from typing import TYPE_CHECKING
+
+from ._types import FloatType, Signature
+
+if TYPE_CHECKING:
+    from ._ir import Const
+
+
+def _float_signature(arity: int) -> Signature:
+    ty = FloatType()
+    return Signature((ty,) * arity, ty)
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,11 +22,19 @@ class Operator(ABC):
     """A reusable semantic operation definition referenced by HIR operation nodes."""
 
     mnemonic: ClassVar[str]
-    arity: ClassVar[int]
+
+    @property
+    @abstractmethod
+    def signature(self) -> Signature:
+        """Semantic operand/result types."""
+
+    @property
+    def arity(self) -> int:
+        return self.signature.arity
 
     @abstractmethod
-    def evaluate(self, *operands: float) -> float | None:
-        """Return the folded value, or ``None`` if this operation should not be constant-folded."""
+    def fold_constants(self, operands: list["Const"]) -> "Const | None":
+        """Return the folded constant node, or ``None`` if this operation should not be constant-folded."""
 
     @abstractmethod
     def render(self, *operands: str) -> str:
@@ -23,13 +42,20 @@ class Operator(ABC):
 
 
 @dataclass(frozen=True, slots=True)
-class Add(Operator):
+class FloatAdd(Operator):
     mnemonic: ClassVar[str] = "add"
-    arity: ClassVar[int] = 2
 
-    def evaluate(self, *operands: float) -> float:
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(2)
+
+    def fold_constants(self, operands: list["Const"]) -> "Const":
+        from ._ir import FloatConst
+
         a, b = operands
-        return a + b
+        assert isinstance(a, FloatConst)
+        assert isinstance(b, FloatConst)
+        return FloatConst(a.value + b.value)
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -37,13 +63,20 @@ class Add(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class Mul(Operator):
+class FloatMul(Operator):
     mnemonic: ClassVar[str] = "mul"
-    arity: ClassVar[int] = 2
 
-    def evaluate(self, *operands: float) -> float:
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(2)
+
+    def fold_constants(self, operands: list["Const"]) -> "Const":
+        from ._ir import FloatConst
+
         a, b = operands
-        return a * b
+        assert isinstance(a, FloatConst)
+        assert isinstance(b, FloatConst)
+        return FloatConst(a.value * b.value)
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -51,13 +84,20 @@ class Mul(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class Div(Operator):
+class FloatDiv(Operator):
     mnemonic: ClassVar[str] = "div"
-    arity: ClassVar[int] = 2
 
-    def evaluate(self, *operands: float) -> float | None:
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(2)
+
+    def fold_constants(self, operands: list["Const"]) -> "Const | None":
+        from ._ir import FloatConst
+
         a, b = operands
-        return a / b if b != 0 else None
+        assert isinstance(a, FloatConst)
+        assert isinstance(b, FloatConst)
+        return FloatConst(a.value / b.value) if b.value != 0 else None
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -65,13 +105,19 @@ class Div(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class Neg(Operator):
+class FloatNeg(Operator):
     mnemonic: ClassVar[str] = "neg"
-    arity: ClassVar[int] = 1
 
-    def evaluate(self, *operands: float) -> float:
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+    def fold_constants(self, operands: list["Const"]) -> "Const":
+        from ._ir import FloatConst
+
         (a,) = operands
-        return -a
+        assert isinstance(a, FloatConst)
+        return FloatConst(-a.value)
 
     def render(self, *operands: str) -> str:
         (a,) = operands
@@ -79,13 +125,19 @@ class Neg(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class Abs(Operator):
+class FloatAbs(Operator):
     mnemonic: ClassVar[str] = "abs"
-    arity: ClassVar[int] = 1
 
-    def evaluate(self, *operands: float) -> float:
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+    def fold_constants(self, operands: list["Const"]) -> "Const":
+        from ._ir import FloatConst
+
         (a,) = operands
-        return abs(a)
+        assert isinstance(a, FloatConst)
+        return FloatConst(abs(a.value))
 
     def render(self, *operands: str) -> str:
         (a,) = operands
@@ -93,16 +145,22 @@ class Abs(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class MulPow2(Operator):
+class FloatMulPow2(Operator):
     """Exact semantic scaling by a power of two, introduced by strength reduction."""
 
     mnemonic: ClassVar[str] = "mul_pow2"
-    arity: ClassVar[int] = 1
     k: int
 
-    def evaluate(self, *operands: float) -> float:
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+    def fold_constants(self, operands: list["Const"]) -> "Const":
+        from ._ir import FloatConst
+
         (a,) = operands
-        return math.ldexp(a, self.k)
+        assert isinstance(a, FloatConst)
+        return FloatConst(math.ldexp(a.value, self.k))
 
     def render(self, *operands: str) -> str:
         (a,) = operands
