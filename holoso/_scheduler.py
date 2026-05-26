@@ -61,7 +61,7 @@ def _register_operands(hir: Hir, vid: ValueId) -> list[ValueId]:
     return [x for x in _operands(hir, vid) if not isinstance(hir.nodes[x], Const)]
 
 
-def present_classes(hir: Hir) -> set[type[Op]]:
+def _present_classes(hir: Hir) -> set[type[Op]]:
     return {type(_opnode(hir, vid).op) for vid in _op_ids(hir)}
 
 
@@ -73,7 +73,7 @@ def resolve_pool(hir: Hir, instances: Mapping[type[Op], int] | None) -> dict[typ
     distinct ``K``. Raising a class's budget lets that many equal ops co-issue.
     """
     pool: dict[type[Op], int] = {}
-    for cls in present_classes(hir):
+    for cls in _present_classes(hir):
         requested = 1 if instances is None else instances.get(cls, 1)
         pool[cls] = max(1, requested)
     return pool

@@ -76,6 +76,13 @@ class SynthesisResult:
     html_output:    HtmlOutput        # self-contained single-page report
 ```
 
+The root package re-exports only the supported public API, keeping the API surface to the minimum.
+Private implementation modules may still expose unprefixed package-internal entrypoints at subsystem boundaries,
+such as `lower`, `run`, `build`, and backend `generate`; this is fine because they are shielded by the
+`__init__.py` selective re-export policy (not visible from outside).
+Purely module-local helpers and type aliases inside those private modules are underscore-prefixed.
+Same applies to nested subpackages: their internals are private to the subpackage, each has its own API.
+
 Passing the object is more ergonomic and strictly more capable than a file: it carries the runtime environment the
 binding-time front-end needs -- `__globals__`, closure cells, default args, and the result of running `__init__` --
 which is what evaluates compile-time tables and follows/inlines imported callables. The object is the compile root; the

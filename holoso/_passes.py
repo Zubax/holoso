@@ -86,7 +86,7 @@ def _copy(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> Val
 # Passes
 
 
-def const_fold(hir: Hir) -> Hir:
+def _const_fold(hir: Hir) -> Hir:
     """Fold operations whose operands are all constants into a single constant."""
     builder = HirBuilder(hir.fmt)
     remap: dict[ValueId, ValueId] = {}
@@ -116,7 +116,7 @@ def const_fold(hir: Hir) -> Hir:
     return builder.finish()
 
 
-def strength_reduce(hir: Hir) -> Hir:
+def _strength_reduce(hir: Hir) -> Hir:
     """Rewrite multiply/divide by power-of-two constants to ``Fmul2K`` and divide-by-constant to reciprocal-multiply."""
     builder = HirBuilder(hir.fmt)
     remap: dict[ValueId, ValueId] = {}
@@ -160,7 +160,7 @@ def _reduce_div(builder: HirBuilder, na: ValueId, nb: ValueId, cval: dict[ValueI
     return builder.arith(DIV, na, nb)
 
 
-def lower_to_operators(hir: Hir, ops: OpConfig) -> Hir:
+def _lower_to_operators(hir: Hir, ops: OpConfig) -> Hir:
     """
     Select hardware operators from the configuration and fold sign manipulations onto operator/output sign-op ports.
 
@@ -199,7 +199,7 @@ def lower_to_operators(hir: Hir, ops: OpConfig) -> Hir:
     return builder.finish()
 
 
-def dce(hir: Hir) -> Hir:
+def _dce(hir: Hir) -> Hir:
     """Drop nodes not reachable from any output (all input ports are retained as the module signature)."""
     reachable: set[ValueId] = set()
     stack = [out.value for out in hir.outputs]
@@ -234,4 +234,4 @@ def dce(hir: Hir) -> Hir:
 
 def run(hir: Hir, ops: OpConfig) -> Hir:
     """Run the full pass pipeline, returning a fully lowered HIR (only InPort/Const/OpNode)."""
-    return dce(lower_to_operators(strength_reduce(const_fold(hir)), ops))
+    return _dce(_lower_to_operators(_strength_reduce(_const_fold(hir)), ops))

@@ -27,7 +27,7 @@ class VerilogOutput:
     support_files: dict[str, str]  # filename -> content
 
 
-class VerilogWriter:
+class _Writer:
     """Accumulates 4-space-indented lines. Use :meth:`line` for content and :meth:`push`/:meth:`pop` for nesting."""
 
     def __init__(self) -> None:
@@ -120,7 +120,7 @@ def _read_lanes_for(issues: list[ScheduledOp]) -> dict[int, int]:
 
 
 def generate(lir: Lir) -> VerilogOutput:
-    w = VerilogWriter()
+    w = _Writer()
     waddr = max(1, (lir.regfile.nreg - 1).bit_length())
     cycw = lir.cyc_width
     issues_by_cycle, commits_by_cycle = _group_by_cycle(lir)
@@ -139,7 +139,7 @@ def generate(lir: Lir) -> VerilogOutput:
     return VerilogOutput(verilog=w.render(), support_files=_SUPPORT_FILES)
 
 
-def _emit_header(w: VerilogWriter, lir: Lir, cycw: int) -> None:
+def _emit_header(w: _Writer, lir: Lir, cycw: int) -> None:
     w.lines('`include "holoso_support.vh"', "`timescale 1ns/1ps", "")
     w.line(
         f"// Float format: exponent {lir.fmt.wexp} bits, significand {lir.fmt.wman} bits, total {lir.fmt.width} bits."
@@ -170,11 +170,11 @@ def _emit_header(w: VerilogWriter, lir: Lir, cycw: int) -> None:
     w.lines(");", "")
 
 
-def _emit_port_group(w: VerilogWriter, title: str, comment: str) -> None:
+def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
     w.lines(f"// {title}", f"// {comment}")
 
 
-def _emit_localparams(w: VerilogWriter, lir: Lir, waddr: int, cycw: int) -> None:
+def _emit_localparams(w: _Writer, lir: Lir, waddr: int, cycw: int) -> None:
     w.line(f"localparam WEXP  = {lir.fmt.wexp};  // Float exponent bits fixed by the static schedule")
     w.line(f"localparam WMAN  = {lir.fmt.wman};  // Float mantissa bits fixed by the static schedule")
     w.line("localparam W     = WEXP + WMAN;")
@@ -195,7 +195,7 @@ def _emit_localparams(w: VerilogWriter, lir: Lir, waddr: int, cycw: int) -> None
     w.line("")
 
 
-def _emit_declarations(w: VerilogWriter, lir: Lir) -> None:
+def _emit_declarations(w: _Writer, lir: Lir) -> None:
     w.lines("reg [CYCW-1:0] cyc;", "reg err;  // combinational: an error is detected on the current cycle", "")
     w.lines(
         "reg  [NWR-1:0]       rf_wr_en;",
@@ -225,7 +225,7 @@ def _emit_declarations(w: VerilogWriter, lir: Lir) -> None:
     w.line("")
 
 
-def _emit_consts(w: VerilogWriter, lir: Lir) -> None:
+def _emit_consts(w: _Writer, lir: Lir) -> None:
     width = lir.fmt.width
     digits = (width + 3) // 4
     for index, value in enumerate(lir.consts):
@@ -234,7 +234,7 @@ def _emit_consts(w: VerilogWriter, lir: Lir) -> None:
         w.line("")
 
 
-def _emit_regfile(w: VerilogWriter, lir: Lir) -> None:
+def _emit_regfile(w: _Writer, lir: Lir) -> None:
     w.line("// Read-first register file (RWPASS=0): a value written on a cycle is readable only on the next cycle.")
     w.line("// The scheduler's +1 dependency latency and the allocator's last_use<=def register sharing both rely")
     w.line("// on this; do NOT switch to write-through (RWPASS=1) without revisiting holoso/regalloc.py.")
@@ -256,7 +256,7 @@ def _emit_regfile(w: VerilogWriter, lir: Lir) -> None:
     w.lines(");", "")
 
 
-def _emit_operators(w: VerilogWriter, lir: Lir) -> None:
+def _emit_operators(w: _Writer, lir: Lir) -> None:
     for inst in lir.instances:
         sig = _sig(inst)
         letters = _PORT_LETTERS[: inst.op.arity]
@@ -281,7 +281,7 @@ def _emit_operators(w: VerilogWriter, lir: Lir) -> None:
 
 
 def _emit_datapath(
-    w: VerilogWriter,
+    w: _Writer,
     lir: Lir,
     issues_by_cycle: dict[int, list[ScheduledOp]],
     commits_by_cycle: dict[int, list[ScheduledOp]],
@@ -350,7 +350,7 @@ def _emit_datapath(
     w.lines("end", "")
 
 
-def _emit_fsm(w: VerilogWriter) -> None:
+def _emit_fsm(w: _Writer) -> None:
     # Sequential control: a plain up-counter replaying the static schedule, plus the generic error latch. All
     # cycle-indexed logic -- including which operator's error matters when -- lives in the combinational block above;
     # here we only advance the counter and, every cycle, latch err_cyc <= cyc whenever the combinational `err` is set.
@@ -387,7 +387,7 @@ def _emit_fsm(w: VerilogWriter) -> None:
     w.lines("end", "")
 
 
-def _emit_outputs(w: VerilogWriter, lir: Lir) -> None:
+def _emit_outputs(w: _Writer, lir: Lir) -> None:
     w.line("assign in_ready  = (cyc == 0);")
     w.line("assign out_valid = (cyc == LAST);")
     for index, wire in enumerate(lir.outputs):
