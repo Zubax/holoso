@@ -36,10 +36,6 @@ class Operator(ABC):
     def fold_constants(self, operands: list["Const"]) -> "Const | None":
         """Return the folded constant node, or ``None`` if this operation should not be constant-folded."""
 
-    @abstractmethod
-    def render(self, *operands: str) -> str:
-        """Human-friendly expression for diagnostics."""
-
 
 @dataclass(frozen=True, slots=True)
 class FloatAdd(Operator):
@@ -56,10 +52,6 @@ class FloatAdd(Operator):
         assert isinstance(a, FloatConst)
         assert isinstance(b, FloatConst)
         return FloatConst(a.value + b.value)
-
-    def render(self, *operands: str) -> str:
-        a, b = operands
-        return f"{a}+{b}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,10 +70,6 @@ class FloatMul(Operator):
         assert isinstance(b, FloatConst)
         return FloatConst(a.value * b.value)
 
-    def render(self, *operands: str) -> str:
-        a, b = operands
-        return f"{a}×{b}"
-
 
 @dataclass(frozen=True, slots=True)
 class FloatDiv(Operator):
@@ -99,10 +87,6 @@ class FloatDiv(Operator):
         assert isinstance(b, FloatConst)
         return FloatConst(a.value / b.value) if b.value != 0 else None
 
-    def render(self, *operands: str) -> str:
-        a, b = operands
-        return f"{a}/{b}"
-
 
 @dataclass(frozen=True, slots=True)
 class FloatNeg(Operator):
@@ -119,10 +103,6 @@ class FloatNeg(Operator):
         assert isinstance(a, FloatConst)
         return FloatConst(-a.value)
 
-    def render(self, *operands: str) -> str:
-        (a,) = operands
-        return f"-{a}"
-
 
 @dataclass(frozen=True, slots=True)
 class FloatAbs(Operator):
@@ -138,10 +118,6 @@ class FloatAbs(Operator):
         (a,) = operands
         assert isinstance(a, FloatConst)
         return FloatConst(abs(a.value))
-
-    def render(self, *operands: str) -> str:
-        (a,) = operands
-        return f"|{a}|"
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +137,3 @@ class FloatMulPow2(Operator):
         (a,) = operands
         assert isinstance(a, FloatConst)
         return FloatConst(math.ldexp(a.value, self.k))
-
-    def render(self, *operands: str) -> str:
-        (a,) = operands
-        return f"{a}×2^{self.k}"
