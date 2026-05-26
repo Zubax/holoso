@@ -1,0 +1,82 @@
+"""
+Linear-scan register allocation over the software-pipelined (cycle-accurate) schedule.
+
+Register-needing values are the input ports and operator results (constants are immediates, not registers). A value
+is *defined* (written into its register) at its commit cycle -- ``issue_cycle + latency`` for an op, cycle 0 for an
+input (the accept edge) -- and *last used* at the latest cycle it is read: the issue cycle of its last consuming op,
+or the output-presentation cycle ``makespan + 1`` if it drives an output.
+
+Two values share a register when the older one's last use is no later than the newer one's definition cycle
+(``last_use <= def_cycle``). This aggressive rule is sound ONLY because the register file is read-first (not
+write-through): when a consumer reads value V on cycle X while value W is committed to the same register on cycle X,
+the combinational read returns the old (stored) V and W lands on the next edge -- no corruption. Under a write-through
+file this would forward W into the read and break. We never spill -- the register count simply grows.
+"""
+
+import heapq
+from dataclasses import dataclass
+
+from .._hir import ValueId
+from .._mir import Mir, MirFloatConst, MirFloatInput, MirFloatOperation
+
+
+@dataclass(frozen=True, slots=True)
+class FloatAllocation:
+    assign: dict[ValueId, int]  # register-needing value -> register index
+    nreg: int
+
+
+def _operation(mir: Mir, vid: ValueId) -> MirFloatOperation:
+    node = mir.nodes[vid]
+    assert isinstance(node, MirFloatOperation)
+    return node
+
+
+def allocate_float(mir: Mir, issue_cycle: dict[ValueId, int], makespan: int) -> FloatAllocation:
+    present_cycle = makespan + 1
+
+    def def_cycle(vid: ValueId) -> int:
+        node = mir.nodes[vid]
+        if isinstance(node, MirFloatOperation):
+            return issue_cycle[vid] + node.operator.latency
+        return 0  # an input port, written at the accept edge
+
+    reg_values: list[ValueId] = [
+        *[vid for vid in mir.input_ids if isinstance(mir.nodes[vid], MirFloatInput)],
+        *[vid for vid in issue_cycle if isinstance(mir.nodes[vid], MirFloatOperation)],
+    ]
+    last_use: dict[ValueId, int] = {vid: def_cycle(vid) for vid in reg_values}
+
+    for vid in issue_cycle:
+        if not isinstance(mir.nodes[vid], MirFloatOperation):
+            continue
+        op = _operation(mir, vid)
+        for operand in op.operands:
+            if isinstance(mir.nodes[operand], MirFloatConst):
+                continue
+            last_use[operand] = max(last_use[operand], issue_cycle[vid])
+    for out in mir.outputs:
+        if out.value in last_use and not isinstance(mir.nodes[out.value], MirFloatConst):
+            last_use[out.value] = max(last_use.get(out.value, 0), present_cycle)
+
+    assign: dict[ValueId, int] = {}
+    free: list[int] = []
+    active: list[tuple[int, int]] = []  # (last_use, reg)
+    next_reg = 0
+    for vid in sorted(reg_values, key=lambda v: (def_cycle(v), v)):
+        d = def_cycle(vid)
+        retained: list[tuple[int, int]] = []
+        for lu, reg in active:
+            if lu <= d:  # read-first (RWPASS=0): a read on cycle d still sees the old value, so sharing is sound
+                heapq.heappush(free, reg)
+            else:
+                retained.append((lu, reg))
+        active = retained
+        if free:
+            reg = heapq.heappop(free)
+        else:
+            reg = next_reg
+            next_reg += 1
+        assign[vid] = reg
+        active.append((last_use[vid], reg))
+    return FloatAllocation(assign=assign, nreg=next_reg)

@@ -1,12 +1,11 @@
-"""Tests for holoso_fdiv (pipelined; y = sgnop(sgnop(a)/sgnop(b)); div0 alongside out_valid).
+"""
+Tests for holoso_fdiv (pipelined; y = sgnop(sgnop(a)/sgnop(b)); div0 alongside out_valid).
 
 div0 is asserted when the post-sgnop divisor has exp=0 (i.e., the divisor is zero in either sign form). When div0=1
 the y output is unspecified by the wrapper contract, so the test skips the y comparison for those cases but still
 checks that div0 itself is correct. The wrapper delays y_sgnop through the same number of stages as zkf_div, and the
 scoreboard verifies the documented latency against actual out_valid timing.
 """
-
-from __future__ import annotations
 
 import os
 
@@ -16,14 +15,16 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from hdl_float_oracle import (
+from holoso import FDivOperator, FloatFormat
+
+from .hdl_float_oracle import (
     DIRECTED_F32,
     F32_EXP_MASK,
+    HDL_DIR,
     PipelineScoreboard,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    BENCH_DIR,
     apply_sgnop,
     build_args,
     div_oracle_bits,
@@ -133,10 +134,10 @@ async def holoso_fdiv_cocotb(dut) -> None:
 def test_holoso_fdiv(sim: str, stage_input: int) -> None:
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fdiv_si{stage_input}"
-    latency = 4 + ((24 + 2 + ((24 + 2) % 2)) // 2) + int(bool(stage_input))
+    latency = FDivOperator(FloatFormat(8, 24), stage_input=stage_input).latency
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fdiv",
         parameters={"WEXP": 8, "WMAN": 24, "STAGE_INPUT": stage_input},
         build_args=build_args(sim),
@@ -146,8 +147,8 @@ def test_holoso_fdiv(sim: str, stage_input: int) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fdiv",
-        test_module="test_fdiv",
-        test_dir=BENCH_DIR,
+        test_module="tests.hdl.test_fdiv",
+        test_dir=REPO_ROOT,
         build_dir=build_dir,
         extra_env={"HOLOSO_EXPECTED_LATENCY": str(latency)},
         results_xml=str(build_dir / "results.xml"),

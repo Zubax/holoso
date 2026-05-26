@@ -31,13 +31,14 @@ version = {attr = "holoso.__version__"}
 include = ["holoso*"]
 
 [tool.setuptools.package-data]
-# The report's stylesheet and interactive layer are loaded at runtime via importlib.resources.
-"holoso.report" = ["*.css", "*.js"]
+# Each backend ships its runtime assets (loaded via importlib.resources) as package data.
+"holoso._backend.verilog" = ["*.v", "*.vh"]
+"holoso._backend.html" = ["*.css", "*.js"]
+"holoso" = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-p", "no:mypy"]
-markers = ["slow: long-running synthesis cosimulation (run via nox -s synth_examples)"]
 
 [tool.black]
 line-length = 120

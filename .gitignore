@@ -29,6 +29,7 @@ hdr_log
 *.*-swp
 .*.ini
 *.log
+*.jou
 *.xml
 *.zip
 *.rpt
@@ -42,5 +43,6 @@ hdr_log
 *.vcd
 *.lock
 *.history
-*.coverage
+*.coverage*
 *.egg-info
+.idea/

@@ -1,4 +1,5 @@
-"""Shared scaffolding for the holoso_f* HDL wrapper test suite.
+"""
+Shared scaffolding for the holoso_f* HDL wrapper test suite.
 
 Provides build helpers (source list, verilator flags, simulator selection); a bit-level oracle (binary32 <-> bits,
 sgnop emulation, classification); a directed corner-case battery and a ZKF-legal random sampler; and cocotb
@@ -9,17 +10,25 @@ Subnormals, NaN, and -0 are excluded from stimulus because ZKF does not define t
 those classes are mapped through ZKF's zero/MIN_NORMAL boundary rule and canonical-zero rule.
 """
 
-from __future__ import annotations
-
+import math
 import os
 from collections import deque
 from pathlib import Path
 from typing import Iterable
 
 import cocotb
+import holoso
 import numpy as np
 from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, RisingEdge, Timer
+
+
+def within(actual: float, expected: float, rtol: float, atol: float) -> bool:
+    """Whether ``actual`` is within ``atol + rtol*|expected|`` of ``expected`` (infinities must match exactly)."""
+    if math.isinf(expected) or math.isinf(actual) or math.isnan(expected) or math.isnan(actual):
+        return actual == expected
+    return abs(actual - expected) <= atol + rtol * abs(expected)
+
 
 # ---------------------------------------------------------------------------
 # Paths and build helpers
@@ -27,7 +36,7 @@ from cocotb.triggers import FallingEdge, RisingEdge, Timer
 
 BENCH_DIR = Path(__file__).resolve().parent  # tests/hdl -- the cocotb test_dir for the benches and cosim driver
 REPO_ROOT = BENCH_DIR.parents[1]
-HDL_DIR = REPO_ROOT / "hdl"
+HDL_DIR = Path(holoso.__file__).resolve().parent / "_backend" / "verilog"  # support .v/.vh ship as package data
 HOLOSO_HDL = HDL_DIR / "holoso_support.v"
 KULIBIN_HDL_DIR = REPO_ROOT / "lib" / "kulibin" / "float" / "hdl"
 TESTS_DIR = REPO_ROOT / "tests"
@@ -179,7 +188,8 @@ def mul_oracle_bits(a_bits: int, b_bits: int) -> int | None:
 
 
 def div_oracle_bits(a_bits: int, b_bits: int) -> int | None:
-    """ZKF-compatible float32 divide; returns None whenever the wrapper's y is unspecified.
+    """
+    ZKF-compatible float32 divide; returns None whenever the wrapper's y is unspecified.
 
     Division by +0 is a separately-signalled condition (the div0 flag); the wrapper contract leaves y unspecified
     there, so callers should skip the value check when b == +0 and verify div0 instead.
@@ -225,7 +235,8 @@ def mul_ilog2_oracle_bits(a_bits: int, k: int) -> int | None:
 
 
 def _flush_to_zkf(bits: int) -> int:
-    """Map a float32 result to a ZKF-legal bit pattern.
+    """
+    Map a float32 result to a ZKF-legal bit pattern.
 
     ZKF has no subnormals and no negative zero. Tiny finite magnitudes below 0.5*MIN_NORMAL round to canonical +0;
     magnitudes at or above that boundary round to signed MIN_NORMAL.
@@ -274,7 +285,8 @@ async def drive_reset(dut, cycles: int = 4) -> None:
 
 
 class PipelineScoreboard:
-    """Checker for in_valid / out_valid pipelines.
+    """
+    Checker for in_valid / out_valid pipelines.
 
     Workflow per case: drive inputs and set in_valid=1, then `push({...})` the expected payload, then
     `await RisingEdge(dut.clk)` and `await Timer(1, "ns")`, then `sample()`. The invariant is that out_valid

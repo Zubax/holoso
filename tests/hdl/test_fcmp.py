@@ -1,11 +1,10 @@
-"""Tests for holoso_fcmp (pipelined; comparison with input sgnops only).
+"""
+Tests for holoso_fcmp (pipelined; comparison with input sgnops only).
 
 Outputs a_gt_b, a_eq_b, a_lt_b are mutually-exclusive one-hot flags. There is no output sgnop, so no drain on
 sgnop change is needed; a_sgnop and b_sgnop can vary every cycle. The DUT's one-hot invariant is also checked
 on every out_valid pulse in addition to the per-flag comparison.
 """
-
-from __future__ import annotations
 
 import cocotb
 import numpy as np
@@ -13,13 +12,13 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from hdl_float_oracle import (
+from .hdl_float_oracle import (
     DIRECTED_F32,
     PipelineScoreboard,
+    HDL_DIR,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    BENCH_DIR,
     apply_sgnop,
     build_args,
     cmp_oracle,
@@ -133,7 +132,7 @@ def test_holoso_fcmp(sim: str) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / "fcmp"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fcmp",
         parameters={"WEXP": 8, "WMAN": 24},
         build_args=build_args(sim),
@@ -143,8 +142,8 @@ def test_holoso_fcmp(sim: str) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fcmp",
-        test_module="test_fcmp",
-        test_dir=BENCH_DIR,
+        test_module="tests.hdl.test_fcmp",
+        test_dir=REPO_ROOT,
         build_dir=build_dir,
         results_xml=str(build_dir / "results.xml"),
     )

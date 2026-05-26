@@ -1,19 +1,17 @@
 """Tests for holoso_ftobool (combinational; exponent-zero values map to false)."""
 
-from __future__ import annotations
-
 import cocotb
 import numpy as np
 import pytest
 from cocotb.triggers import Timer
 from cocotb_tools.runner import get_runner
 
-from hdl_float_oracle import (
+from .hdl_float_oracle import (
     DIRECTED_F32,
     F32_EXP_MASK,
+    HDL_DIR,
     REPO_ROOT,
     SIMULATORS,
-    BENCH_DIR,
     build_args,
     get_random_count,
     get_seed,
@@ -60,7 +58,7 @@ def test_holoso_ftobool(sim: str) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / "ftobool"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_ftobool",
         parameters={"WEXP": 8, "WMAN": 24},
         build_args=build_args(sim),
@@ -70,8 +68,8 @@ def test_holoso_ftobool(sim: str) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_ftobool",
-        test_module="test_ftobool",
-        test_dir=BENCH_DIR,
+        test_module="tests.hdl.test_ftobool",
+        test_dir=REPO_ROOT,
         build_dir=build_dir,
         results_xml=str(build_dir / "results.xml"),
     )

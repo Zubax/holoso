@@ -1,0 +1,93 @@
+@import url('https://fonts.googleapis.com/css2?family=Ubuntu+Mono:wght@400;700&display=swap');
+* { box-sizing: border-box; }
+body { font-family: "Ubuntu Mono", ui-monospace, monospace; margin: 0; background: #ffffff; color: #111827; font-size: 14px; }
+header { padding: 16px 28px; background: #111827; color: #f9fafb; }
+header h1 { margin: 0; font-size: 22px; }
+header .sub { color: #cbd5e1; font-size: 13px; margin-top: 3px; }
+header .sub a { color: #93c5fd; text-decoration: underline; }
+main { padding: 14px 28px 70px; }
+/* Compact summary sections share one wrapping row; the full-width register-grid schedule follows below. */
+.toprow { display: flex; flex-wrap: wrap; gap: 0 40px; align-items: flex-start; }
+.toprow .sec { min-width: 0; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: #111827; font-weight: 700; margin: 26px 0 8px; border-bottom: 1px solid #000; padding-bottom: 4px; }
+.metrics { border-collapse: collapse; font-size: 12px; }
+.metrics th, .metrics td { text-align: left; padding: 2px 12px 2px 0; border-bottom: 1px solid #c2c7cf; }
+.metrics th { color: #4b5563; font-weight: 700; white-space: nowrap; }
+.metrics td { color: #111827; font-weight: 700; }
+.note { color: #4b5563; font-size: 12px; margin: 6px 0 0; }
+.ifaces { display: flex; gap: 30px; flex-wrap: wrap; }
+.iface h3 { font-size: 12px; color: #111827; margin: 0 0 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+.iface table { border-collapse: collapse; font-size: 12px; }
+.iface th, .iface td { text-align: left; padding: 2px 12px 2px 0; border-bottom: 1px solid #c2c7cf; white-space: nowrap; }
+.iface th { color: #4b5563; font-weight: 700; }
+.const { display: inline-block; background: #f3f4f6; color: #92400e; border: 1px solid #cbd5e1; margin: 2px; padding: 1px 7px; border-radius: 3px; font-size: 12px; }
+.modhdrsec { flex: 0 1 auto; max-width: 100%; }
+.modhdr { display: inline-block; max-width: 100%; overflow-x: auto; margin: 0; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 3px; background: #f8fafc; color: #111827; font-size: 10px; line-height: 1.25; }
+.modhdr code { display: inline-block; min-width: max-content; font: inherit; }
+.vh-comment { color: #64748b; }
+.vh-keyword { color: #2456a6; font-weight: 700; }
+.vh-number { color: #92400e; }
+/* Schedule: a register grid, an operator-stage block, and the operations list. Rows = clock cycles; columns =
+   registers, then constants, then one square column per pipeline stage of each operator (black dividers between
+   groups). The destination cell on a result's completion cycle is filled with its operator color, the operator-stage
+   cells show the pipeline advancing, and an SVG overlay links each result to its operand cells. Bold rules separate
+   steps. */
+#schedwrap { position: relative; display: inline-block; }
+.edges { position: absolute; top: 0; left: 0; pointer-events: none; overflow: visible; }
+/* Auto layout (not fixed): the small columns are pinned square by their widths while the operations column sizes to
+   its widest row -- which may be very wide when many pipelined operations complete on one cycle, scrolling the page. */
+.grid { border-collapse: collapse; }
+.grid th.gh { width: 14px; font-size: 9px; color: #4b5563; font-weight: 700; padding: 0 1px; border-bottom: 1px solid #000; vertical-align: bottom; }
+/* clk/step carry no fixed width -- auto layout sizes them to their content (cycle numbers, "S<n>"), which is narrow. */
+.grid th.clkh, .grid th.steph { border-right: 1px solid #000; }
+.grid th.gh span { writing-mode: vertical-rl; }
+.grid th.gh.k span { color: #92400e; }
+/* Top-row group bands naming a block of columns ("registers", "operator pipelines"). The label is absolutely
+   positioned, so it is out of flow and never forces its column group wider -- with few registers/operators it simply
+   clips to the available width instead of stretching the (square) columns. */
+.grid th.gband { position: relative; height: 15px; padding: 0; border-bottom: 1px solid #cbd5e1; }
+.grid th.gband span { position: absolute; left: 0; right: 0; bottom: 2px; overflow: hidden; text-align: center; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #4b5563; white-space: nowrap; }
+.grid td { height: 13px; font-size: 11px; line-height: 1; white-space: nowrap; border-top: 1px solid #d7dbe0; }
+/* Faint residence tint over the cycles a register holds a live value (must match _LIVE_BG in html.py, used for the
+   legend swatch). A class, not an inline style, so the higher-specificity row-hover rule below can override it. */
+.grid td.live { background: #edf2fb; }
+/* Hovering any cell tints its whole clock row -- this outranks .live (so liveness is overridden under the cursor),
+   while filled cells keep their inline operator color. */
+.grid tr:hover td { background: #e6eaf0; }
+.grid td.gc { width: 13px; padding: 0; text-align: center; border-right: 1px solid #eef0f2; overflow: hidden; }
+/* Operator-stage cells: same square geometry as the register cells; filled (inline) with the operator color on the
+   cycles their pipeline stage is occupied. The block sits between the constants and OPERATIONS. */
+.grid td.oc { width: 13px; padding: 0; border-right: 1px solid #eef0f2; overflow: hidden; }
+/* The black structural dividers: same width/style as the faint inter-cell line, so they must out-specify .grid td.gc
+   (equal specificity, declared later) and sit on the left cell's right edge -- the side border-collapse keeps. */
+.grid td.rbk, .grid th.rbk { border-right: 1px solid #000; }
+/* Heavy 2px seams at the two block boundaries: constants | operator-pipeline and operator-pipeline | OPERATIONS. */
+.grid td.rbk2, .grid th.rbk2 { border-right: 2px solid #000; }
+.clk { color: #9aa1ab; text-align: right; font-size: 10px; padding: 0 3px; border-right: 1px solid #000; }
+.stepn { font-weight: 700; color: #111827; padding: 0 4px; border-right: 1px solid #000; white-space: nowrap; }
+.rd { display: inline-block; font-size: 9px; line-height: 11px; border: 1px solid; border-radius: 2px; padding: 0 1px; }
+.wr { display: inline-block; font-size: 9px; line-height: 11px; border-radius: 2px; padding: 0 1px; color: #fff; font-weight: 700; }
+.wl { color: #fff; font-size: 9px; font-weight: 700; line-height: 11px; }
+/* Operations column: one cell per clock row, holding the chips for the operations that complete on that cycle. It
+   stays on a single line (so the row height matches the grid) and the column widens to fit -- a row may carry many
+   chips when many pipelined operations complete together, so the column can get very wide and the page scrolls. */
+.grid th.oph { text-align: left; vertical-align: bottom; padding: 0 4px 2px 4px; border-bottom: 1px solid #000; font-size: 10px; color: #4b5563; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+/* Operator-group header: names one operator (e.g. green "fmul_0"; color carries the kind), spanning its stage columns.
+   The name is set vertically (like the register headers) so a 1-stage operator's group does not widen its column. */
+.grid th.ohgrp { text-align: center; vertical-align: bottom; padding: 2px 1px 1px; font-size: 10px; font-weight: 700; }
+.grid th.ohgrp span { writing-mode: vertical-rl; white-space: nowrap; }
+.grid td.opcell { vertical-align: middle; padding: 0 4px; white-space: nowrap; }
+.opf { display: inline-block; background: #374151; color: #fff; font-size: 10px; font-weight: 700; border-radius: 3px; padding: 0 4px; margin: 0 2px 0 0; white-space: nowrap; }
+/* Hover-focus: only the hovered operation's own elements get the .hl class (its edges, result cells and ops chip),
+   so no per-hover sweep of the rest of the grid. They turn black with a soft glow to stand out among the colors. */
+.edges line.hl { stroke: #000; stroke-width: 2px; stroke-opacity: 1; }
+.edges circle.hl { fill: #000; }
+.grid td.gc.hl, .grid td.oc.hl { background: #111 !important; }
+.opf.hl { background: #111 !important; box-shadow: 0 0 0 2px rgba(17, 17, 17, 0.35); }
+/* Structural hazard: two operations claim one operator stage on one cycle. Impossible under the barrier schedule;
+   the red ring is the alarm for a future multiple-issue bug. */
+.grid td.oc.conflict { box-shadow: inset 0 0 0 2px #b3261e; }
+.gridkey { display: flex; flex-wrap: wrap; gap: 18px; font-size: 12px; color: #374151; margin: 0 0 8px; align-items: center; }
+.gridkey .rd, .gridkey .wr { font-size: 11px; }
+.gridkey .sw { display: inline-block; width: 14px; height: 13px; border: 1px solid #cbd5e1; vertical-align: middle; margin-right: 5px; }
+.gridkey .lk { vertical-align: middle; margin-right: 5px; }

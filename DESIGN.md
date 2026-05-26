@@ -2,8 +2,8 @@
 
 Holoso lowers a small subset of Python (numerical control/DSP kernels) into vendor-neutral, synthesizable Verilog.
 See `README.md` for scope and `PRIOR_ART.md` for why existing tools don't fit. This document records the architecture
-we are building toward; it is expected to change frequently.
-Exploratory notes live in `DESIGN.draft.md` (not up to date).
+we are building toward; it is expected to change frequently, and often may not be up to date.
+Initial exploratory notes live in `DESIGN.draft.md` (outdated, superseded by this document).
 
 One must read the representative use-case examples under the `examples/` directory to understand the motivation.
 
@@ -21,21 +21,52 @@ One must read the representative use-case examples under the `examples/` directo
 
 - The target is a specialized program, not a pipeline. We synthesize a sequential FSM (a zero-instruction-set
   computer, ZISC) that time-multiplexes a few shared operators over a register file.
-  The initiation interval is data-dependent; we do not pursue constant II or II~1.
+  We do not pursue a constant II or II~1 like a streaming pipeline: the initiation interval is whatever the scheduled
+  program costs. For a fixed control path it is an exact, statically known cycle count derived from the per-operator
+  latency model (data-independent in v0); it varies across programs and, later, across branch paths.
   This is a compiler problem more than a circuit-design one.
 
 ## Pipeline
 
-```
-Python -front-end-> HIR -passes-> HIR(lowered) -schedule/bind/regalloc-> LIR -backend-> Verilog + TB + report
+```mermaid
+flowchart LR
+    Python[Python] -->|front-end| HIR[HIR]
+    HIR -->|optimize| HIRO["HIR (optimized)"]
+    HIRO -->|lower| MIR[MIR]
+    MIR -->|schedule / bind / regalloc| LIR[LIR]
+
+    LIR -->|backend| Verilog[Verilog]
+    LIR -->|backend| Testbench[Testbench]
+    LIR -->|backend| Report[Report]
+    LIR -->|backend| Model[Model]
 ```
 
-- HIR -- "what to compute": SSA dataflow inside a control-flow graph with real branches. Target-independent.
-- LIR -- "the microprogram": scheduled, bound, register-allocated steps for the synthesized machine.
+- HIR -- "what to compute": SSA dataflow inside a control-flow graph with real branches. Target-independent and
+  semantic; it does not know how an operation is implemented. The `holoso._hir` subpackage owns the IR, semantic
+  operators, and hardware-agnostic optimization passes.
+
+- MIR -- "which hardware to use": selected hardware operators, with typed input/constant/operation/output nodes,
+  still unscheduled. The current implementation has float-specific subclasses carrying folded sign controls. The
+  `holoso._mir` subpackage owns the selected IR and HIR-to-MIR lowerer; this is the first stage allowed to inspect
+  `OpConfig` or float-format limits.
+
+- LIR -- "the microprogram": the scheduled, bound, register-allocated op stream for the synthesized machine.
+  It has generic resource/operation base classes plus typed resource families such as the current float register file.
+  The `holoso._lir` subpackage owns the IR, MIR-to-LIR construction, scheduling, binding, and register allocation.
   Controller-agnostic; this is the seam where a second controller backend can be added later.
 
-Mental model: HIR is the compiler IR; LIR is the instruction stream of a tiny specialized processor; the backend is its
-assembler and datapath generator.
+- Backends -- Verilog, testbench, HTML report, numerical model
+
+Mental model: HIR is the source-level compiler IR; MIR is selected machine-independent hardware dataflow; LIR is the
+instruction stream of a tiny specialized processor; the Verilog backend is its assembler and datapath generator. The
+backend stage is a family of independent backends --
+the Verilog module, an HTML report, a Cocotb testbench, and a bit-exact numerical model -- each consuming the LIR,
+and possibly some additional inputs, such as outputs of another backend.
+
+The numerical backend is helpful during development and heavy refactors: it allows early verification of the synthesis
+logic without involving the actual HDL emission and simulation steps, which are slow to iterate on.
+Thus, the normal policy during development is to stabilize the synthesis logic down to the LIR using the numerical
+model for verification, and once that is proven, move on to the actual HDL generation and testbenches.
 
 ## Python API
 
@@ -43,21 +74,27 @@ assembler and datapath generator.
 nothing touches the filesystem unless the caller asks.
 
 ```python
-def synthesize(target, *, float_format: FloatFormat,
-               parameters: Mapping[str, object] | None = None,
-               entry: str = "__call__", name: str | None = None) -> SynthesisResult: ...
+def synthesize(target, *, ops: OpConfig, parameters: Mapping[str, object] | None = None,
+               entry: str = "__call__", name: str | None = None,
+               operator_instances: Mapping[type[HardwareOperator], int] | None = None) -> SynthesisResult: ...
 
 @dataclass(frozen=True)
 class SynthesisResult:
     module_name: str
-    interface:   ModuleInterface     # ports (name/dir/width), float format, II model -- the composition contract
-    verilog:     str                 # generated module
-    support:     str                 # holoso_support contents (shareable across modules)
-    testbench:   str                 # Cocotb
-    report_html: str
-    metrics:     SynthesisMetrics    # operator instances, N float / M bool regs, step count, II estimate
-    hir: Hir;  lir: Lir              # kept for inspection
+    interface:      ModuleInterface   # typed ports -- the composition contract
+    verilog_output: VerilogOutput     # generated module text + support_files (the shared holoso_support .v/.vh)
+    numerical_model: NumericalModel   # bit-exact, picklable pure-Python model of the module (flat in -> flat tuple out)
+    cocotb_output:  CocotbOutput      # self-contained testbench: embeds the model, checks the DUT bit-for-bit
+    html_output:    HtmlOutput        # self-contained single-page report
 ```
+
+The root package re-exports only the supported public API, keeping the API surface to the minimum.
+Private implementation modules may still expose unprefixed package-internal entrypoints at subsystem boundaries;
+this is fine because they are shielded by the `__init__.py` selective re-export policy (not visible from outside).
+Purely module-local helpers and type aliases inside those private modules are underscore-prefixed.
+Same applies to nested subpackages: their internals are private to the subpackage, each has its own API.
+
+The library should not contain entities that are only used in the unit test suite; those belong in the suite.
 
 Passing the object is more ergonomic and strictly more capable than a file: it carries the runtime environment the
 binding-time front-end needs -- `__globals__`, closure cells, default args, and the result of running `__init__` --
@@ -66,8 +103,8 @@ boundary ("what to ignore") falls out of reachability + binding-time analysis, n
 via `inspect.getsource` + `ast`; when unavailable (REPL/`exec`/notebook-defined, some lambdas) synthesis fails with an
 explicit error. For a class, `__init__` runs with `parameters` (overriding the kw-only defaults that otherwise map to
 Verilog parameters), attributes written by `entry` become state registers, and `entry` (default `__call__`) is analysed
-with the ports dynamic; a plain function is analysed directly. `write_artifacts(result, out_dir)` (or
-`result.write(out_dir)`) is the only operation that touches the filesystem.
+with the ports dynamic; a plain function is analysed directly. `result.write(out_dir)` is the only operation that
+touches the filesystem.
 
 ## Front-end
 
@@ -91,7 +128,17 @@ Runtime values are only:
 
 - `float` -- one ZKF format, `WEXP`/`WMAN` fixed per build.
 Typical FPGA-friendly formats: WEXP=8 WMAN=36 (44 bits) for precision; WEXP=6 WMAN=18 (24 bits) for simpler targets.
+Generated top-level modules are not parameterizable by `WEXP`/`WMAN`: port widths are hardcoded and the selected float
+format is recorded by the typed float register-file resource and as internal localparams. Changing the float format
+requires re-running synthesis because operator latencies, the static schedule, and register widths are all tied to that
+choice.
 - `bool` -- 1 bit.
+
+HIR types live in `holoso._hir` as format-free `Type` values; today that family contains `FloatType`. Concrete scalar
+types live in `holoso._type`: `ScalarType` is the width-bearing MIR/interface/resource type family, today containing
+`FloatType`, whose `FloatFormat` describes the ZKF encoding. A data port carries its scalar type and derives its bit
+width from it; control ports carry explicit bit widths. Today all data ports are the same scalar `FloatType`, but this
+is an implementation detail.
 
 Compile-time ints/shapes/structure are resolved in the front-end and never reach HIR. A dynamic integer only ever
 appears as an index into a static table; it is lowered to a one-hot bool vector + mux, never materialized as an int.
@@ -103,14 +150,13 @@ A FloPoCo backend may be introduced later on if makes sense, but it is likely to
 
 ```
 # values
-in_port(name, ty)                 # module input
-const(value, ty)
+in_port(name, type)               # module input; concrete scalar type is assigned at HIR-to-MIR lowering
+float_const(value)
 state_read(slot)                  # persistent state at block entry
-phi(ty, [(pred_block, value)])    # SSA merge
+phi([(pred_block, value)])        # SSA merge
 
-# pure ops (generic; lowered to concrete operators by a later pass)
-arith(op, a, b)                   # add, mul, div        (sub = add + signfix)
-signfix(op, a)                    # neg, abs             (combinational, not an operator module)
+# pure semantic operations (generic; selected into concrete hardware by a later pass)
+operation(operator, operands)      # float_add, float_mul, float_div, float_neg, float_abs, float_mul_pow2, ...
 relational(op, a, b) -> bool      # lt, le, eq, ...
 boolean(op, ...)     -> bool      # and, or, not, xor
 select(cond, a, b)                # DATA mux (not control flow)
@@ -133,15 +179,40 @@ Branch vs. select (the core control-flow decision):
 
 - A real `if`/`else` lowers to a `branch` terminator + a `phi` at the merge. Only one side executes; the merge is
   resolved at register allocation by coalescing both definitions onto one register -- no runtime mux, the untaken
-  arm is never computed, and no spurious `diag_error`. Branches are the default.
+  arm is never computed, and no spurious error is recorded. Branches are the default.
 - `select` (a mux, both inputs live) is reserved for data multiplexing (one-hot lookup, `where`-style picks) and for an
   optional if-conversion peephole that collapses a tiny, pure, cheap diamond. Conservative by default.
 
-## Passes (HIR -> HIR)
+The implemented v0 HIR value set is float-only, but the node names are explicit (`FloatConst`, `FloatAdd`, etc.) so
+bool/int nodes can be added later without overloading float semantics. Negation and absolute value are ordinary
+semantic float operations in HIR. They are not represented as hardware details until selection.
+HIR operators expose a HIR-local `Signature`, and the builder rejects operands whose HIR types do not match.
 
-const-fold + algebraic simplify (SymPy-assisted) - CSE - strength reduction (`x*2^k`, `x/2^k` -> `fmul_ilog2_const`;
-`x/c` -> `x*(1/c)` to avoid true dividers; `x**n` -> multiply chain) - operator selection + latency annotation -
-optional if-conversion - DCE.
+## HIR optimization and lowering
+
+HIR optimization is hardware-agnostic: const-fold + algebraic simplify (SymPy-assisted) - CSE - strength reduction
+(`x*2^k`, `x/2^k` -> semantic `float_mul_pow2`; `x/c` -> `x*(1/c)` for finite non-power-of-two constants; `x**n` ->
+multiply chain) - optional if-conversion - DCE. Constant folding is typed: an operator receives constant nodes and
+returns a folded `Const` node, not an untyped Python value. The HIR builder can re-intern an arbitrary `Const` node
+with `const_node()`, so future bool/int constants do not need float-specific rebuilding in shared passes.
+
+HIR-to-MIR lowering lives in `holoso._mir` and is implemented by a lowering context that owns the HIR tree, `OpConfig`,
+MIR builder, and value remap. The context delegates domain-specific nodes to private lowerers; today the only domain
+lowerer is float. The float lowerer maps each semantic float operator to its configured `FloatHardwareOperator` from the
+single root-level hardware-operator config and collapses semantic `float_neg`/`float_abs` chains into selected-float MIR
+`FloatSignControl` values on operator operands/results or output wires. Semantic `float_mul_pow2(k)` selects
+`fmul_ilog2_const` when the configured float format supports that exponent; otherwise it falls back to ordinary multiply
+by the constant `2^k`.
+`MirBuilder` is a single graph builder with typed construction methods; it does not own a global scalar type, so future
+mixed-type expressions can share one value namespace and add typed constructors for bool/int values. Hardware operators
+expose a concrete `ScalarSignature`, and MIR construction validates operands against the selected operator's signature.
+HIR-to-MIR lowering rejects semantic domains that do not yet have a selected MIR representation instead of silently
+treating them as floats.
+
+Typed MIR subclasses validate their local invariants at construction time. For example, selected-float MIR nodes verify
+that their scalar types/operators/sign controls are float-domain objects and that operation operand/sign sidebands match
+the selected operator arity. Cross-node operand type checks still belong in `MirBuilder`, where the referenced values
+are available.
 
 Note: it is understood that FP math is non-associative and some of these optimizations may result in non-bit-exact
 results, which is accepted.
@@ -150,67 +221,156 @@ results, which is accepted.
 
 ```
 resources:
-  operators: [inst(kind, latency), ...]    # e.g. 1x fmul(3), 1x fdiv(18), 1x fadd(3)
-  regfile:   N float regs + M bool regs     # FF bank, multiport -- parallel reads are free
-  constants: [fconst(value), ...]
+  float_instances: [inst(operator), ...]    # each inst binds a fully-specified FloatHardwareOperator
+  float_regfile: fmt + N float regs         # FF bank, multiport -- parallel reads are free
+  float_consts: [fconst(value), ...]
+  float_inputs: [input_load(name, dst_reg), ...]
+  float_outputs: [output_wire(name, source, sign), ...]
 
-step k:
-  issue:  [ (inst, src_regs, dst_reg), ... ]
-  commit: [ writes whose operator has signalled out_valid ]
-  term:   next = k+1 | branch(bool_reg, t, f) | done
+scheduled float op:
+  (inst, operands+sign_controls, dst_reg, issue_cycle)  # commits at issue_cycle + latency
+makespan: the last commit cycle (the in_valid->out_valid latency is makespan + 1)
 ```
+
+LIR exposes generic dataclass bases (`OperatorInstance`, `RegRef`, `ConstRef`, `Operand`, `ScheduledOp`, `InputLoad`,
+`OutputWire`, `RegFileLayout`) and float-specialized subclasses (`FloatOperatorInstance`, `FloatRegRef`,
+`FloatConstRef`, `FloatOperand`, `FloatScheduledOp`, `FloatInputLoad`, `FloatOutputWire`, `FloatRegFileLayout`).
+The top-level `Lir` fields are typed explicitly as `float_instances`, `float_regfile`, `float_inputs`, `float_ops`,
+and `float_outputs` because the current machine has only float data resources; future bool/int resources should add
+sibling fields instead of overloading these. LIR construction fails explicitly if selected MIR contains a non-float
+domain before that domain has a register/constant/output resource family.
+
+The `holoso._lir` package exports the LIR consumer contract: the LIR dataclasses backends need, plus `build()` and
+`interface_of()`. Its private `_build.py` module orchestrates selected MIR validation, scheduling, binding, float
+register allocation, constant-pool construction, and interface derivation. Its private `_schedule.py` module contains
+the list-scheduling algorithm and schedule result type. Its private `_regalloc.py` module contains the current
+float-register allocator.
 
 - Reads are cheap (multiport FF), so binding is constrained only by operator-instance count and writes.
 - Register allocation = liveness + phi-coalescing; widen `N` rather than spill at these sizes.
-- `branch` is the real control transfer: the microprogram counter jumps, untaken steps never run, and II is whatever the
-  executed path costs.
+- `branch` is the real control transfer: the microprogram counter jumps, untaken ops never run, and the II is whatever
+  the executed path costs (each path's count is itself exact).
+
+## Operators
+
+HIR semantic float operations are value instances of the HIR-local `Operator` hierarchy: `FloatAdd`, `FloatMul`,
+`FloatDiv`, `FloatNeg`, `FloatAbs`, and strength-reduced `FloatMulPow2`. A HIR `Operation` is an occurrence of one
+semantic operator applied to operand value IDs. There are no global semantic-operator singletons; frontend lowering and
+HIR passes construct operator values ad hoc and distinguish operation kinds by class-pattern matching.
+
+Concrete hardware operators live at the root in `holoso._operators` and are instances of the `HardwareOperator`
+hierarchy. A concrete `HardwareOperator` is a frozen dataclass whose fields are its parameters. Float operators use the
+`FloatHardwareOperator` subclass, which owns its `FloatFormat` and typed `evaluate(*float) -> float` reference semantics.
+Each hardware operator owns its own timing, notation, concrete `ScalarSignature`, instantiation params, and
+`instance_stem`: a lowercase Verilog-safe physical identity stem used for collision-free HDL names. Float instance stems
+include the float format and sorted HDL params, e.g. `fadd_e8_m24` or `fmul_ilog2_const_e8_m24_k_m2`.
+
+Generic, per-node-parameterized hardware operators are factories: a standalone `ParameterizedHardwareOperator`
+carrying only its config-time knobs whose `instantiate(k)` returns a concrete `HardwareOperator`. The fully specified
+hardware operator instance is itself the resource-sharing key (equal operators time-share one module).
+
+Operators are chosen by a single `OpConfig`, constructed explicitly by the caller and passed into `synthesize`; today
+its fields are all floating-point operators, and future bool/int operators should be added to the same config. Its
+`float_format` property verifies the configured float operators agree and is used by HIR-to-MIR lowering. After that,
+schedule construction derives the format from selected MIR instead of accepting a separate format argument. There is no
+implicit default configuration.
+Pipeline-stage knobs are named after the HDL parameters in lowercase, such as `stage_decode`, `stage_align`,
+`stage_product`, and `stage_input`.
 
 ## Scheduler
 
-v0 is barrier-step multi-issue list scheduling over the lowered single-block HIR. Each step issues every independent
-ready op to a distinct free operator instance; the FSM waits for all issued operators to complete (their `out_valid`),
-latches the results, and advances. Annotated operator latency is a scheduling input only -- issue priority and the II
-estimate -- and never appears in the RTL.
+The private `holoso._lir._schedule` module implements software-pipelined (zero-bubble) list scheduling over selected
+single-block MIR. Operators are fully pipelined (throughput 1) and their latencies are static and data-independent, so
+the entire schedule is computed at compile time: each op is assigned an issue cycle and a bound instance, and the backend
+just replays it with a cycle counter. The scheduler itself is domain-agnostic; LIR construction partitions the scheduled
+result into the typed resource families that exist today. There is no global operator-class registry and no global
+operator ordering: physical instance indices are local to one equal-by-value hardware operator, while HDL names use
+`instance_stem` to distinguish different operator values of the same class.
+
+The per-operator latency model is therefore exact and load-bearing: the backend commits each result on
+`issue + op.latency` without watching `out_valid`, so each operator's `latency` property (mirroring its RTL
+wrapper) must match the hardware cycle-for-cycle. An inaccurate latency is a *correctness* bug, not a bad estimate --
+the consumer would read a stale register. The resulting cycle count is exact, never an estimate.
+
+We issue each op on the earliest cycle its operands are ready and a free instance exists -- without waiting for
+unrelated ops (no barrier), so a fast `fmul` no longer idles behind a co-scheduled `fdiv`. The register file is
+read-first (`RWPASS=0`): a result written on cycle `c+L` lands in the flop on the next edge and is readable from
+`c+L+1`, so a data-dependent consumer is held one cycle past the producer's latency.
 
 ```
-ready = ops with all operands available
-while unscheduled:
-    free = pool.copy(); issue = []
+for cycle = 1, 2, ...:                         # cycle 0 accepts/loads inputs; they read back from cycle 1
+    ready = unscheduled ops whose every operator-operand has committed (issue + L + 1 <= cycle)
     for op in ready by critical_path desc:
-        inst = free.take(op.kind)              # if an instance of that kind is free
-        if inst: bind(op, inst); issue.append(op)
-    emit step(issue, term=next)                # FSM: assert in_valid to each; wait AND(out_valid); latch all
-    mark issue results available; update ready
-regalloc: linear scan over steps (multiple commits per step); no spill (widen N); reads free
+        if an instance of op's concrete hardware operator is free this cycle (and ports permit):
+            bind op to that instance; issue_cycle[op] = cycle
+regalloc: linear scan over commit cycles; share a register when last_use <= def (sound under read-first); no spill
 ```
 
-- Operator pool: configurable instances per kind (default 1); concurrency is across kinds and across any extra
-  instances of a kind. Auto-sizing the pool is deferred.
-- `signfix` folds into operand sign-mods, `fconst` is an immediate on the input mux; both are free (no step).
+- Instances are pooled by the fully specified hardware operator itself (a frozen, equal-by-value `HardwareOperator`):
+  ops that elaborate to the same hardware are equal and share instances. E.g., all `fadd`/`fmul`/`fdiv` of a given
+  config are equal; `fmul_ilog2_const` differs by its exponent `K`, so same-`K` ops pool while different `K` are
+  distinct modules. Each distinct operator value numbers its physical copies from zero, so different `K` values may both
+  have instance index `0`; their `instance_stem` keeps emitted names unique.
+  The configurable per-class budget (default 1) caps instances of each distinct operator value of that class: equal ops
+  time-share, serializing when more than the budget would co-issue.
 
-Self-timed multi-issue is the first scheduler target after v0. The v0 barrier gates every op in an issue group on the
-slowest one to finish -- a fast `fmul` sits idle until a co-issued `fdiv` completes. Self-timed mode drops the barrier:
-each operator restarts on its own `out_valid`, and a freed instance immediately picks up the next ready op instead of
-waiting for its step-mates. It consumes the same LIR but needs a scoreboard (per-instance busy/ready tracking and
-dynamic dispatch) rather than the flat barrier FSM -- so it is out of the first delivery, not out of scope.
+- Read/write ports auto-size to the schedule's peak internal parallelism (independent of I/O width).
+  Inputs preload through the register file's immediate `load` port on cycle 0 instead of write ports.
+  Outputs are tapped from the register file's passive `view` bus by fixed register index instead of read ports.
+  An optional NRD/NWR budget (default unbounded) instead gates admission and lengthens the makespan to fit --
+  the knob for trading latency against register-file area.
+
+- The `load` port folds into each low register's write-data OR (one masked term, no address comparator), so a
+  single-cycle preload of registers `0..nload-1` costs far less than the per-register comparators that one write
+  port per input would add. `nload` spans the input block (the highest input register index plus one).
+
+- Selected-float MIR `FloatSignControl` value objects fold into operand/result sign-control sidebands, and `fconst` is an
+  immediate on the input mux; both are free in the schedule. Sign controls are constructed ad hoc rather than
+  represented by global sentinel instances.
+
+Why not write-through forwarding? A write-through register file (`RWPASS=1`) would erase the +1 dependency cycle, but
+its forwarding muxes cost O(NRD*NWR) and we need many ports -- unsustainable. Read-first plus the +1, hidden under
+pipelined overlap, is the better trade.
 
 ## Backend (ZISC)
 
-Mechanical from LIR: FF register bank (per-reg input mux + `we`), operator instances with input muxes, all driven by a
-control word; the controller is a `case(state)` emitting the control word + next-state (conditional on a bool reg).
-A step advances when all of its issued operators assert `out_valid` (the FSM drives their `out_ready`, where available,
-to latch the results). Module-level valid/ready handshake + `done` at `ret`; `diag_error` OR-aggregated from operators
-on the executed path. Nonblocking assignment only, `case` not functions.
+Mechanical from LIR: a `holoso_regfile` flop bank, one operator instance per `FloatOperatorInstance`, and one continuous
+assignment per pooled constant -- its ZKF bit pattern precomputed in Python by `FloatFormat.encode` --
+all driven by a control word. The controller is a cycle counter `cyc` driving a `case(cyc)`
+microprogram that replays the static schedule: `cyc==0` accepts and parallel-loads the inputs through the register
+file's `load` port (registers `0..nload-1` in one cycle), `cyc` advances every clock through the compute cycles
+`1..makespan`, and `cyc==makespan+1` asserts `out_valid` while the outputs are driven combinationally from the
+register file's `view` bus (wired by fixed register index, so no read ports and no read-address work that cycle).
+Each compute cycle asserts `in_valid` to the operators issued that cycle (driving their operand reads) and writes
+back the operators that commit that cycle. No scoreboard is needed because latencies are static. Errors are non-fatal
+and informative: a combinational `err` flag in the `case(cyc)` block ORs the error signals of the operators committing
+that cycle, and the control block latches `err_cyc <= cyc` whenever `err`, so `err_cyc` is 0 if the run hit no errors
+(reset at every accept; `|err_cyc` means "any error"), else the last cycle one occurred.
+
+Reset covers only the control registers (`cyc`, `err_cyc`). Nonblocking assignment only, `case` not functions.
 The control word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
+
+Each operator instance carries its own parameters and float format, fixed at construction from the `OpConfig` threaded
+through `synthesize`. The wrappers' instantiation params come from `operator.hdl_params()` and the scheduler's timing
+from `operator.latency` -- both read the same hardware operator instance, so the emitted RTL and the static schedule
+cannot drift; emitting only enabled `STAGE_*` keeps a default build's wrappers parameter-free. The wrapper instance name
+is `u_{operator.instance_stem}_{index}`, where `index` is local to that concrete operator value.
+
+**Microcode ROM (deferred, keep on the radar):** the per-cycle `case(cyc)` is a wide mux; for large kernels it could
+instead be emitted as a microcode ROM indexed by `cyc` (one packed control word per active cycle), which should
+synthesize far better at scale. This is to be confirmed empirically.
 
 ## Decisions
 
 1. Phi merges are resolved by register coalescing, not materialized selects.
 2. Split float and bool register banks.
 3. If-conversion is conservative -- trivial pure diamonds only; real branches otherwise.
-4. SymPy-assisted algebra (fold/CSE/simplify); hardware strength reduction in-house.
-5. Operator completion is by valid/ready handshake. Annotated latency is a scheduling input only (issue priority + II estimate).
-6. Barrier-step multi-issue list scheduling for v0; self-timed multi-issue is the first post-v0 upgrade (same LIR).
+4. SymPy-assisted algebra (fold/CSE/simplify); simple HIR strength reduction in-house.
+5. The per-operator latency model is exact and must match the RTL wrappers cycle-for-cycle: the static schedule commits
+   each result on `issue + latency` without watching `out_valid`, so an inaccurate latency is a correctness bug, not a
+   bad estimate. (Module I/O still uses a valid/ready handshake; `div0` is the only data-dependent runtime signal.)
+6. Software-pipelined (zero-bubble) static list scheduling over a read-first register file; the controller is a static
+   `case(cycle)` microprogram (no runtime scoreboard), since v0 operator latencies are data-independent.
 7. API takes the function/class object (not source files); synthesis is in-memory, returning `SynthesisResult`; disk
    I/O is an opt-in helper.
 
@@ -232,13 +392,15 @@ exit:   y_out = phi[(b_init, ya), (b_run, yb)]
 
 ## First delivery (v0)
 
-Minimal end-to-end slice -- front-end -> HIR -> passes -> scheduler -> LIR -> Verilog + Cocotb -- on a single basic
-block: combinational, scalar-only, operators `fadd`/`fmul`/`fdiv`/`fmul_ilog2_const` plus `signfix` and `fconst`
+Minimal end-to-end slice -- front-end -> HIR -> MIR -> scheduler -> LIR -> Verilog + testbench + report + model --
+on a single basic block: combinational, scalar-only, operators `fadd`/`fmul`/`fdiv`/`fmul_ilog2_const` plus semantic
+`FloatNeg`/`FloatAbs` folding and `FloatConst`
 (`fdiv` and its wrapper already exist in ZKF). No state, control flow, arrays, or bools (`M = 0`); intrinsics
 (`sqrt`, `sincos`, ...) raise the "implement this operator" error, pending ZKF support. State, branches, and arrays
 follow in later milestones.
 
 ## Deferred
 
-Operator-pool auto-sizing, optional ILP mode, dynamic-trip loops, second controller backend, FloPoCo backend, OOC
-synthesis scaffolding, intrinsics (`sqrt`, `sincos`, `exp`, ... -- pending ZKF support).
+Operator-pool auto-sizing, optional ILP mode, dynamic-trip loops, second controller backend, FloPoCo backend,
+**microcode-ROM controller** (a packed control word per cycle indexed by `cyc`, replacing the `case(cyc)` mux --
+important for large kernels), intrinsics (`sqrt`, `sincos`, `exp`, ... -- pending ZKF support).

@@ -1,10 +1,9 @@
-"""Tests for holoso_fadd (pipelined; sgnop on a, b, y; y = sgnop(sgnop(a)+sgnop(b))).
+"""
+Tests for holoso_fadd (pipelined; sgnop on a, b, y; y = sgnop(sgnop(a)+sgnop(b))).
 
 The wrapper delays y_sgnop through the same number of stages as zkf_add, so all sgnop controls are allowed to vary
 every input cycle. The scoreboard verifies the documented wrapper latency against actual out_valid timing.
 """
-
-from __future__ import annotations
 
 import os
 
@@ -14,13 +13,15 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from hdl_float_oracle import (
+from holoso import FAddOperator, FloatFormat
+
+from .hdl_float_oracle import (
     DIRECTED_F32,
+    HDL_DIR,
     PipelineScoreboard,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    BENCH_DIR,
     add_oracle_bits,
     apply_sgnop,
     build_args,
@@ -117,7 +118,7 @@ def test_holoso_fadd(sim: str, stages: tuple[int, int]) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fadd_d{stage_decode}a{stage_align}"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fadd",
         parameters={"WEXP": 8, "WMAN": 24, "STAGE_DECODE": stage_decode, "STAGE_ALIGN": stage_align},
         build_args=build_args(sim),
@@ -127,9 +128,13 @@ def test_holoso_fadd(sim: str, stages: tuple[int, int]) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fadd",
-        test_module="test_fadd",
-        test_dir=BENCH_DIR,
+        test_module="tests.hdl.test_fadd",
+        test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": str(6 + int(bool(stage_decode)) + int(bool(stage_align)))},
+        extra_env={
+            "HOLOSO_EXPECTED_LATENCY": str(
+                FAddOperator(FloatFormat(8, 24), stage_decode=stage_decode, stage_align=stage_align).latency
+            )
+        },
         results_xml=str(build_dir / "results.xml"),
     )

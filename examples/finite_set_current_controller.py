@@ -4,7 +4,6 @@ A complex example of a larger-scale control system for a VSI inverter operating 
 
 from dataclasses import dataclass
 import numpy as np
-import sympy as sp
 
 
 @dataclass(frozen=True)

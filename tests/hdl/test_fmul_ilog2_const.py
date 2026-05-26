@@ -1,11 +1,10 @@
-"""Tests for holoso_fmul_ilog2_const (pipelined; y = sgnop(sgnop(a) * 2^K)).
+"""
+Tests for holoso_fmul_ilog2_const (pipelined; y = sgnop(sgnop(a) * 2^K)).
 
 K is a compile-time signed integer exponent shift. The test rebuilds the DUT for several K values to cover negative,
 zero, and positive scales, and separately sweeps STAGE_DECODE at K=0. The wrapper delays y_sgnop through the same
 number of stages as zkf_mul_ilog2_const, and the scoreboard verifies the documented latency against out_valid timing.
 """
-
-from __future__ import annotations
 
 import os
 
@@ -15,13 +14,16 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from hdl_float_oracle import (
+from holoso import FloatFormat
+from holoso._operators import FMulILog2Operator
+
+from .hdl_float_oracle import (
     DIRECTED_F32,
+    HDL_DIR,
     PipelineScoreboard,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    BENCH_DIR,
     apply_sgnop,
     build_args,
     drive_reset,
@@ -112,7 +114,7 @@ def test_holoso_fmul_ilog2_const(sim: str, config: tuple[int, int]) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fmlog_k{k}_d{stage_decode}"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fmul_ilog2_const",
         parameters={"WEXP": 8, "WMAN": 24, "K": k, "STAGE_DECODE": stage_decode},
         build_args=build_args(sim),
@@ -122,9 +124,14 @@ def test_holoso_fmul_ilog2_const(sim: str, config: tuple[int, int]) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fmul_ilog2_const",
-        test_module="test_fmul_ilog2_const",
-        test_dir=BENCH_DIR,
+        test_module="tests.hdl.test_fmul_ilog2_const",
+        test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_TEST_K": str(k), "HOLOSO_EXPECTED_LATENCY": str(1 + int(bool(stage_decode)))},
+        extra_env={
+            "HOLOSO_TEST_K": str(k),
+            "HOLOSO_EXPECTED_LATENCY": str(
+                FMulILog2Operator(fmt=FloatFormat(8, 24), k=0, stage_decode=stage_decode).latency
+            ),
+        },
         results_xml=str(build_dir / "results.xml"),
     )

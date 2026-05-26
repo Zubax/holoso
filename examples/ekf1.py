@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 from pathlib import Path
-import sys
 import holoso
 
 
@@ -10,7 +9,8 @@ def update_x_P(P00, P01, P02, P11, P12, P22, Q_R, Q_g, Q_i, R_ct, R_shunt, dt, x
     All inputs are floating point scalars that are translated into Verilog `input wire [WFULL-1:0]` ports,
     where WFULL = WEXP + WMAN, where WEXP and WMAN are the bit width of the exponent field and the significand
     (including the hidden bit).
-    The float format to use in the generated Verilog is specified via `holoso.FloatFormat(wexp: int, wman: int)`.
+    The float format to use in the generated Verilog is specified by constructing the operators with
+    `holoso.FloatFormat(wexp: int, wman: int)`.
 
     The return type may be a scalar or a sequence, potentially nested (such as matrices); in the latter case the
     sequences are flattened in the row-major order, and each element thereof becomes a separate Verilog output port.
@@ -113,13 +113,20 @@ def update_x_P(P00, P01, P02, P11, P12, P22, Q_R, Q_g, Q_i, R_ct, R_shunt, dt, x
 
 def main() -> None:
     float_format = holoso.FloatFormat(wexp=6, wman=18)  # Use 24-bit float with 6-bit exponent and 18-bit significand.
+    # Operators are constructed explicitly; each fixes its float format and parameters (here, default latencies, no
+    # extra pipeline stages). The numeric kernel uses add, multiply, divide, and the power-of-two scaling operator.
+    ops = holoso.OpConfig(
+        holoso.FAddOperator(float_format),
+        holoso.FMulOperator(float_format),
+        holoso.FDivOperator(float_format),
+        holoso.FMulILog2OperatorFamily(float_format),
+    )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
 
     # Generated Verilog module name defaults to the function name, unless overridden explicitly.
-    result = holoso.synthesize(update_x_P, float_format=float_format)
-    paths = holoso.write_artifacts(result, out_dir)
-    for kind, path in paths.items():
-        print(f"{kind}: {path}")
+    result = holoso.synthesize(update_x_P, ops=ops)
+    for filename, path in result.write(out_dir).items():
+        print(f"{filename}: {path}")
 
 
 if __name__ == "__main__":

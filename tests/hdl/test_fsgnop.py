@@ -1,9 +1,6 @@
 """Tests for holoso_fsgnop (combinational, format-independent)."""
 
-from __future__ import annotations
-
 import os
-from pathlib import Path
 
 import cocotb
 import numpy as np
@@ -11,12 +8,12 @@ import pytest
 from cocotb.triggers import Timer
 from cocotb_tools.runner import get_runner
 
-from hdl_float_oracle import (
+from .hdl_float_oracle import (
     DIRECTED_F32,
+    HDL_DIR,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    BENCH_DIR,
     apply_sgnop,
     build_args,
     get_random_count,
@@ -71,7 +68,7 @@ def test_holoso_fsgnop(sim: str, wfull: int) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fsgnop_w{wfull}"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fsgnop",
         parameters={"WFULL": wfull},
         build_args=build_args(sim),
@@ -81,8 +78,8 @@ def test_holoso_fsgnop(sim: str, wfull: int) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fsgnop",
-        test_module="test_fsgnop",
-        test_dir=BENCH_DIR,
+        test_module="tests.hdl.test_fsgnop",
+        test_dir=REPO_ROOT,
         build_dir=build_dir,
         extra_env={"HOLOSO_TEST_WFULL": str(wfull)},
         results_xml=str(build_dir / "results.xml"),

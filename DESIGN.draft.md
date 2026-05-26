@@ -1,5 +1,7 @@
 # Holoso -- simple high-level synthesis of numerical RTL modules
 
+> NOTE: This document is obsolete now; the working design notes are in DESIGN.md.
+
 This is a Python library that provides a simple way of synthesizing numerical Verilog FSM modules for applications involving control systems and DSP from high-level Python models. The idea is that the user would model/verify the system in Python, and then use Python code very similar to the original model (if not the same) to generate the final production-ready RTL.
 
 Holoso uses a single floating point data type for all scalars with configurable exponent and significand width (WEXP and WMAN), plus booleans (mostly for flow control purposes). The total floating point scalar bit width is referred to as WFULL=WEXP+WMAN (the sign bit is added, the most significant bit of the significand is hidden). The floatint point format used by Holoso does not necessarily have to be standards-compliant; one option is the Zubax Kulibin float (ZKF), which is IEEE 754-like but without NaN, subnormals, or signed zero, which results in a more efficient FPGA resource usage with marginal loss of utility.

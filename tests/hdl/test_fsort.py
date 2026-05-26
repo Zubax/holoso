@@ -1,12 +1,11 @@
-"""Tests for holoso_fsort (pipelined; min/max with input + output sgnops).
+"""
+Tests for holoso_fsort (pipelined; min/max with input + output sgnops).
 
 The wrapper delays min_sgnop and max_sgnop through the same number of stages as zkf_sort, so output sign controls are
 allowed to vary every input cycle. The test also skips any case where applying sgnop to an input would produce a
 non-canonical -0, since sort preserves the input bit pattern through to its outputs and -0 is outside the ZKF input
 contract.
 """
-
-from __future__ import annotations
 
 import os
 
@@ -16,13 +15,13 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from hdl_float_oracle import (
+from .hdl_float_oracle import (
     DIRECTED_F32,
     PipelineScoreboard,
+    HDL_DIR,
     REPO_ROOT,
     SGNOP_OPS,
     SIMULATORS,
-    BENCH_DIR,
     apply_sgnop,
     build_args,
     drive_reset,
@@ -127,7 +126,7 @@ def test_holoso_fsort(sim: str) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / "fsort"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_fsort",
         parameters={"WEXP": 8, "WMAN": 24},
         build_args=build_args(sim),
@@ -137,8 +136,8 @@ def test_holoso_fsort(sim: str) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_fsort",
-        test_module="test_fsort",
-        test_dir=BENCH_DIR,
+        test_module="tests.hdl.test_fsort",
+        test_dir=REPO_ROOT,
         build_dir=build_dir,
         extra_env={"HOLOSO_EXPECTED_LATENCY": "1"},
         results_xml=str(build_dir / "results.xml"),

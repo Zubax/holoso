@@ -1,16 +1,14 @@
 """Tests for holoso_ffrombool (combinational; false -> +0, true -> +1.0)."""
 
-from __future__ import annotations
-
 import cocotb
 import pytest
 from cocotb.triggers import Timer
 from cocotb_tools.runner import get_runner
 
-from hdl_float_oracle import (
+from .hdl_float_oracle import (
+    HDL_DIR,
     REPO_ROOT,
     SIMULATORS,
-    BENCH_DIR,
     build_args,
     f32_to_bits,
     sources,
@@ -32,7 +30,7 @@ def test_holoso_ffrombool(sim: str) -> None:
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / "ffrombool"
     runner.build(
         sources=sources(),
-        includes=[REPO_ROOT / "hdl"],
+        includes=[HDL_DIR],
         hdl_toplevel="holoso_ffrombool",
         parameters={"WEXP": 8, "WMAN": 24},
         build_args=build_args(sim),
@@ -42,8 +40,8 @@ def test_holoso_ffrombool(sim: str) -> None:
     )
     runner.test(
         hdl_toplevel="holoso_ffrombool",
-        test_module="test_ffrombool",
-        test_dir=BENCH_DIR,
+        test_module="tests.hdl.test_ffrombool",
+        test_dir=REPO_ROOT,
         build_dir=build_dir,
         results_xml=str(build_dir / "results.xml"),
     )
