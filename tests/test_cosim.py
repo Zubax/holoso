@@ -30,8 +30,7 @@ def _run_cosim(sim: str, fn: Callable[..., object], fmt: FloatFormat, name: str,
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"synth_{name}_w{fmt.wexp}_{fmt.wman}"
     verilog_path = gen_dir / f"{name}.v"
     verilog_path.write_text(generate_verilog(lir).verilog)
-    # The cocotb backend emits a self-contained bench that embeds the bit-exact model and draws random vectors at run
-    # time; it asserts the DUT's output bits equal the model's exactly (no tolerance) and the exact cycle latency.
+    # The generated bench embeds the bit-exact model and checks the DUT's output bits exactly.
     test_module = f"test_{name}"
     (gen_dir / f"{test_module}.py").write_text(generate_testbench(model, interface).testbench)
 
@@ -83,8 +82,7 @@ def test_cosim_staged_kernel(sim: str) -> None:
     def kernel(a, b):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
-    # A pipeline stage on each operator kind the kernel uses; the exact-cycle cosim proves the staged latencies --
-    # threaded from annotation through the schedule into the generated STAGE_* params -- all agree with the RTL.
+    # Exercise staged operator parameters end-to-end through synthesis and cosim.
     ops = OpConfig(FAddOp(decode=1), FMulOp(product=1), FDivOp(), FMulILog2GenericOp(decode=1))
     _run_cosim(sim, kernel, FloatFormat(8, 24), "kernel_staged", ops=ops)
 

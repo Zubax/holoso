@@ -94,14 +94,6 @@ class NumericalModel:
         return tuple(_apply_sgnop(value(wire.source, present), wire.sgnop) for wire in lir.outputs)
 
     @property
-    def n_inputs(self) -> int:
-        return len(self.lir.inputs)
-
-    @property
-    def n_outputs(self) -> int:
-        return len(self.lir.outputs)
-
-    @property
     def input_names(self) -> tuple[str, ...]:
         return tuple(load.name for load in self.lir.inputs)
 

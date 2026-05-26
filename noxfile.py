@@ -38,7 +38,10 @@ def synth(session: nox.Session) -> None:
 
 @nox.session
 def synth_examples(session: nox.Session) -> None:
-    """Out-of-context FPGA synthesis (f_max/fabric) of the bundled examples across the available tools."""
+    """
+    Out-of-context FPGA synthesis (f_max/fabric) of the bundled examples across the available tools.
+    This one takes a long time.
+    """
     session.install("-e", ".[test]")
 
     def syn(*args: str) -> None:

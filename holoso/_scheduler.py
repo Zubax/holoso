@@ -11,15 +11,14 @@ Cycle 0 is the input-load/accept cycle; inputs are readable from cycle 1. Comput
 cycle ``c`` reads its register operands at ``c`` and commits at ``c + L``. The dependency constraint is therefore
 ``c_consumer >= c_producer + L_producer + 1``.
 
-Instances are pooled by the operator instance itself: equal ops (e.g., all ``fadd``, or all ``fmul_ilog2_const`` with
-the same ``K``) time-share ``pool[type(op)]`` instances, at most one issue per instance per cycle. Optional read/write
-port budgets (default unbounded) further gate admission and lengthen the makespan to fit.
+Instances are pooled by operator instance: equal ops time-share ``pool[type(op)]`` copies, at most one issue per copy
+per cycle.
 """
 
 from collections.abc import Mapping
 from dataclasses import astuple, dataclass
 
-from ._hir import Const, Hir, OpNode, ValueId
+from ._hir import Hir, OpNode, ValueId
 from ._lir import OperatorInstance
 from ._operators import ALL_OP_CLASSES, Op
 
@@ -56,11 +55,6 @@ def _operator_operands(hir: Hir, vid: ValueId) -> list[ValueId]:
     return [x for x in _operands(hir, vid) if isinstance(hir.nodes[x], OpNode)]
 
 
-def _register_operands(hir: Hir, vid: ValueId) -> list[ValueId]:
-    """Operand values backed by a register (inputs or operator results); constants are immediates, no read port."""
-    return [x for x in _operands(hir, vid) if not isinstance(hir.nodes[x], Const)]
-
-
 def _present_classes(hir: Hir) -> set[type[Op]]:
     return {type(_opnode(hir, vid).op) for vid in _op_ids(hir)}
 
@@ -92,38 +86,9 @@ def _critical_path(hir: Hir, op_ids: list[ValueId]) -> dict[ValueId, int]:
     return height
 
 
-def _check_port_budget(hir: Hir, op_ids: list[ValueId], nrd: int | None, nwr: int | None) -> None:
-    """
-    Reject read/write port budgets no schedule can meet, with a clear message rather than a 'no progress' stall.
-
-    A binary op must read its (up to two) distinct register operands in one cycle, and the output-presentation cycle
-    reads every distinct output register at once -- both are hard floors on ``nrd``. The single-cycle input load is the
-    floor on ``nwr``. (Operator commits can always be spread across cycles, so they impose no extra floor.)
-    """
-    max_op_reads = max((len(set(_register_operands(hir, vid))) for vid in op_ids), default=0)
-    output_regs = len({out.value for out in hir.outputs if not isinstance(hir.nodes[out.value], Const)})
-    floor_nrd = max(max_op_reads, output_regs, 1)
-    floor_nwr = max(len(hir.input_ids), 1)
-    if nrd is not None and nrd < floor_nrd:
-        raise ValueError(
-            f"nrd={nrd} read ports is infeasible: need >= {floor_nrd} "
-            f"(an operator reads up to {max_op_reads} registers; output presentation reads {output_regs})"
-        )
-    if nwr is not None and nwr < floor_nwr:
-        raise ValueError(f"nwr={nwr} write ports is infeasible: need >= {floor_nwr} for the single-cycle input load")
-
-
-def schedule_ops(hir: Hir, pool: Mapping[type[Op], int], *, nrd: int | None = None, nwr: int | None = None) -> Schedule:
-    """
-    Greedily place every operator on the earliest cycle its operands are ready and a free instance/port exists.
-
-    ``nrd``/``nwr`` are optional read/write port budgets; ``None`` means unbounded (sized to the schedule's peak
-    afterwards). With budgets set, an op that cannot claim a read slot at its issue cycle or a write slot at its
-    commit cycle waits, lengthening the makespan.
-    """
+def schedule_ops(hir: Hir, pool: Mapping[type[Op], int]) -> Schedule:
+    """Place every operator on the earliest cycle its operands are ready and a free instance exists."""
     op_ids = _op_ids(hir)
-    if nrd is not None or nwr is not None:
-        _check_port_budget(hir, op_ids, nrd, nwr)
     if not op_ids:
         return Schedule(issue_cycle={}, inst_of={}, instances=[], makespan=0)
 
@@ -131,7 +96,6 @@ def schedule_ops(hir: Hir, pool: Mapping[type[Op], int], *, nrd: int | None = No
     issue_cycle: dict[ValueId, int] = {}
     inst_count: dict[Op, int] = {}  # operator instance -> copies needed (peak concurrent use of that module)
     slot_of: dict[ValueId, tuple[Op, int]] = {}  # op -> (its operator instance, its 0-based copy slot)
-    writes_used: dict[int, int] = {}  # commit cycle -> write ports already claimed (forward-indexed; budget only)
 
     def commit_cycle(vid: ValueId) -> int:
         op = _opnode(hir, vid)
@@ -141,7 +105,7 @@ def schedule_ops(hir: Hir, pool: Mapping[type[Op], int], *, nrd: int | None = No
     cap = sum(_opnode(hir, vid).op.latency(hir.fmt) for vid in op_ids) + 2 * len(op_ids) + 64
     cycle = 1
     while unscheduled:
-        assert cycle <= cap, "scheduler made no progress (infeasible port budget?)"
+        assert cycle <= cap, "scheduler made no progress"
         ready = [
             vid
             for vid in unscheduled
@@ -149,16 +113,9 @@ def schedule_ops(hir: Hir, pool: Mapping[type[Op], int], *, nrd: int | None = No
         ]
         ready.sort(key=lambda vid: (-height[vid], vid))
         used: dict[Op, int] = {}  # operator instance -> copies busy this cycle
-        cycle_reads: set[int] = set()
         for vid in ready:
             op = _opnode(hir, vid)
             key = op.op
-            new_reads = {r for r in _register_operands(hir, vid) if r not in cycle_reads}
-            commit = cycle + key.latency(hir.fmt)
-            if nrd is not None and len(cycle_reads) + len(new_reads) > nrd:
-                continue
-            if nwr is not None and writes_used.get(commit, 0) + 1 > nwr:
-                continue
             slot = used.get(key, 0)
             if slot >= pool[type(key)]:  # every copy of this module is busy this cycle -> the op waits
                 continue
@@ -166,8 +123,6 @@ def schedule_ops(hir: Hir, pool: Mapping[type[Op], int], *, nrd: int | None = No
             inst_count[key] = max(inst_count.get(key, 0), slot + 1)
             slot_of[vid] = (key, slot)
             issue_cycle[vid] = cycle
-            cycle_reads |= new_reads
-            writes_used[commit] = writes_used.get(commit, 0) + 1
             unscheduled.discard(vid)
         cycle += 1
 

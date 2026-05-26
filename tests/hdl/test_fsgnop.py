@@ -1,7 +1,6 @@
 """Tests for holoso_fsgnop (combinational, format-independent)."""
 
 import os
-from pathlib import Path
 
 import cocotb
 import numpy as np

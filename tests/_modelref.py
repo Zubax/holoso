@@ -1,18 +1,37 @@
-"""
-Test-only verification helpers, relocated out of the holoso library (which now carries a numerical model backend).
+"""Test-only verification helpers."""
 
-Kept confined to this one module for easy removal: the float64 reference, the tolerance model, input samplers, and the
-output-name convention. Tests are exempt from the "import only the public surface" rule, so this reaches into holoso's
-underscored modules directly.
-"""
-
+import dataclasses
 import math
 from collections.abc import Callable, Mapping
+from typing import Any
 
 import numpy as np
 
 from holoso._format import FloatFormat
-from holoso._frontend import flatten_value, port_name
+from holoso._frontend._lower import _Path, _port_name
+
+
+def flatten_value(root: object) -> list[tuple[_Path, Any]]:
+    """Flatten a runtime return value into ``(path, leaf)`` pairs."""
+    leaves: list[tuple[_Path, Any]] = []
+
+    def walk(node: object, path: _Path) -> None:
+        if isinstance(node, (list, tuple)) and not isinstance(node, str):
+            for index, item in enumerate(node):
+                walk(item, [*path, index])
+        elif dataclasses.is_dataclass(node) and not isinstance(node, type):
+            for field in dataclasses.fields(node):
+                walk(getattr(node, field.name), [*path, field.name])
+        else:
+            leaves.append((path, node))
+
+    if (isinstance(root, (list, tuple)) and not isinstance(root, str)) or (
+        dataclasses.is_dataclass(root) and not isinstance(root, type)
+    ):
+        walk(root, [])
+    else:
+        leaves.append(([0], root))
+    return leaves
 
 
 def evaluate_reference(fn: Callable[..., object], inputs: Mapping[str, float]) -> list[float]:
@@ -23,7 +42,7 @@ def evaluate_reference(fn: Callable[..., object], inputs: Mapping[str, float]) -
 
 def output_names(root: object) -> list[str]:
     """The ordered output-port names for a runtime return value."""
-    return [port_name(path) for path, _ in flatten_value(root)]
+    return [_port_name(path) for path, _ in flatten_value(root)]
 
 
 def unit_roundoff(fmt: FloatFormat) -> float:

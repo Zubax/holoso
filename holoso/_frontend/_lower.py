@@ -5,10 +5,11 @@ import inspect
 import textwrap
 import types
 
-from ._shape import Path, port_name
 from .._errors import MissingIntrinsic, SourceLocation, SourceUnavailable, UnsupportedConstruct
 from .._format import FloatFormat
 from .._hir import ABS, ADD, DIV, MUL, NEG, Hir, HirBuilder, ValueId
+
+_Path = list[int | str]
 
 # Standard numeric operators that are recognized but not yet implemented; calling them fails with a clear message.
 _KNOWN_INTRINSICS = frozenset(
@@ -33,6 +34,11 @@ _KNOWN_INTRINSICS = frozenset(
         "pow",
     }
 )
+
+
+def _port_name(path: _Path) -> str:
+    """Map a leaf path to its output-port name, e.g. ``[0, "x"]`` -> ``out_0_x``."""
+    return "out" + "".join(f"_{key}" for key in path)
 
 
 class _Lowerer:
@@ -104,7 +110,7 @@ class _Lowerer:
                 return False
             case ast.Return(value=ast.expr() as value):
                 for path, expr in _flatten_return(value):
-                    self._builder.output(port_name(path), self._lower_expr(expr))
+                    self._builder.output(_port_name(path), self._lower_expr(expr))
                 return True
             case _:
                 raise UnsupportedConstruct(f"unsupported statement {type(stmt).__name__}", self._loc(stmt))
@@ -179,11 +185,11 @@ class _Lowerer:
                 raise UnsupportedConstruct(f"unsupported binary operator {type(op).__name__}", loc)
 
 
-def _flatten_return(node: ast.expr) -> list[tuple[Path, ast.expr]]:
-    """Flatten a return expression tree into ``(path, scalar-expr)`` pairs, mirroring ``_shape.flatten_value``."""
-    leaves: list[tuple[Path, ast.expr]] = []
+def _flatten_return(node: ast.expr) -> list[tuple[_Path, ast.expr]]:
+    """Flatten a return expression tree into ``(path, scalar-expr)`` pairs."""
+    leaves: list[tuple[_Path, ast.expr]] = []
 
-    def walk(expr: ast.expr, path: Path) -> None:
+    def walk(expr: ast.expr, path: _Path) -> None:
         if isinstance(expr, (ast.List, ast.Tuple)):
             for index, item in enumerate(expr.elts):
                 walk(item, [*path, index])

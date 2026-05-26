@@ -1,4 +1,4 @@
-"""Orchestrate scheduling + register allocation into a finished :class:`Lir`, and derive interface/metrics from it."""
+"""Build a finished :class:`Lir` and derive its interface."""
 
 import math
 from collections.abc import Mapping
@@ -133,9 +133,7 @@ def _build_outputs(hir: Hir, alloc: Allocation, const_index: dict[ValueId, int])
 def _compute_nrd(hir: Hir, sched: Schedule, alloc: Allocation) -> int:
     """
     Combinational read ports: the peak distinct register reads in any issue cycle.
-
-    Outputs are presented from the register file's passive ``view`` bus (wired by fixed register index in the
-    backend), so they no longer consume read ports -- this counts operand reads only.
+    Outputs use the register file's passive ``view`` bus, so only operand reads count here.
     """
     per_cycle: dict[int, set[int]] = {}
     for vid, cycle in sched.issue_cycle.items():
@@ -151,9 +149,7 @@ def _compute_nrd(hir: Hir, sched: Schedule, alloc: Allocation) -> int:
 def _compute_nwr(hir: Hir, sched: Schedule) -> int:
     """
     Synchronous write ports: the peak operator commits landing on one cycle.
-
-    Inputs are preloaded through the register file's immediate ``load`` port on cycle 0, not the write ports, so the
-    input count no longer inflates this -- the write ports carry operator commits only.
+    Inputs use the register file's immediate ``load`` port on cycle 0.
     """
     per_commit: dict[int, int] = {}
     for vid, cycle in sched.issue_cycle.items():

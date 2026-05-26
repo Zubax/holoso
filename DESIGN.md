@@ -77,9 +77,8 @@ class SynthesisResult:
 ```
 
 The root package re-exports only the supported public API, keeping the API surface to the minimum.
-Private implementation modules may still expose unprefixed package-internal entrypoints at subsystem boundaries,
-such as `lower`, `run`, `build`, and backend `generate`; this is fine because they are shielded by the
-`__init__.py` selective re-export policy (not visible from outside).
+Private implementation modules may still expose unprefixed package-internal entrypoints at subsystem boundaries;
+this is fine because they are shielded by the `__init__.py` selective re-export policy (not visible from outside).
 Purely module-local helpers and type aliases inside those private modules are underscore-prefixed.
 Same applies to nested subpackages: their internals are private to the subpackage, each has its own API.
 

@@ -1,4 +1,4 @@
-"""The composition contract for a synthesized module: its ports, timing, and resource/timing metrics."""
+"""The composition contract for a synthesized module."""
 
 import enum
 from dataclasses import dataclass
@@ -28,7 +28,7 @@ class Port:
 
 @dataclass(frozen=True, slots=True)
 class ModuleInterface:
-    """The generated module's ports and timing -- the contract for composing it with other RTL."""
+    """The generated module's ports and float format."""
 
     module_name: str
     float_format: FloatFormat

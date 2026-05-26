@@ -71,12 +71,10 @@ async def cosim(dut):
         await Timer(1, unit="ns")
         dut.in_valid.value = 0
 
-        # TODO: verify the cycle counts! Depends the control flow (branching) -- the numerical model should predict.
-        elapsed = 1
+        # TODO: verify exact latency after branch support makes the model predict per-transaction latency.
         while int(dut.out_valid.value) != 1:
             await RisingEdge(dut.clk)
             await Timer(1, unit="ns")
-            elapsed += 1
         assert int(dut.err_cyc.value) == 0, "vector %d: unexpected error at cycle %d" % (index, int(dut.err_cyc.value))
 
         for name, want in zip(out_names, exp_bits):

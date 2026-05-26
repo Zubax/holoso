@@ -3,8 +3,6 @@
 import sys
 from pathlib import Path
 
-import pytest
-
 from holoso import FAddOp, FDivOp, FloatFormat, FMulILog2GenericOp, FMulOp, OpConfig
 from holoso._frontend import lower
 from holoso._hir import OpNode
@@ -162,22 +160,8 @@ def test_build_lir_ekf1() -> None:
     assert lir.regfile.nreg < lir.op_count + len(lir.inputs)
     # Inputs preload through the regfile's load port (registers 0..nload-1), so nload spans the input block.
     assert lir.regfile.nload == 17
-    # Port counts now track internal parallelism, not I/O width: write ports collapse to peak commits (was the
-    # 17-wide input load) and read ports to peak operand reads (was the 9-wide output presentation).
+    # Port counts track internal parallelism, not I/O width.
     assert lir.regfile.nwr == 3
     assert lir.regfile.nrd == 5
     # The 1/x21 numerator survives as a constant immediate.
     assert any(abs(c - 1.0) < 1e-12 for c in lir.consts)
-
-
-def test_port_budget_feasibility() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
-        return a * b + a
-
-    hir = run(lower(f, FMT), OPS)
-    pool = resolve_pool(hir, None)
-    n_ops = sum(1 for n in hir.nodes.values() if isinstance(n, OpNode))
-    with pytest.raises(ValueError):
-        schedule_ops(hir, pool, nrd=1)  # a binary operator needs 2 read ports in its issue cycle
-    sched = schedule_ops(hir, pool, nrd=2, nwr=4)  # feasible budget still schedules every op
-    assert len(sched.issue_cycle) == n_ops
