@@ -75,8 +75,7 @@ nothing touches the filesystem unless the caller asks.
 
 ```python
 def synthesize(target, *, ops: OpConfig, parameters: Mapping[str, object] | None = None,
-               entry: str = "__call__", name: str | None = None,
-               operator_instances: Mapping[type[HardwareOperator], int] | None = None) -> SynthesisResult: ...
+               entry: str = "__call__", name: str | None = None) -> SynthesisResult: ...
 
 @dataclass(frozen=True)
 class SynthesisResult:

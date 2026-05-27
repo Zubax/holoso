@@ -178,6 +178,12 @@ class MirFloatView:
             if not isinstance(out, MirFloatOutput):
                 raise UnsupportedConstruct(f"LIR construction does not support non-float MIR output {out.name!r}")
             outputs.append(out)
+        for vid in mir.input_ids:
+            input_node = nodes.get(vid)
+            if input_node is None:
+                raise ValueError(f"MIR input ID {vid} does not reference a MIR node")
+            if not isinstance(input_node, MirFloatInput):
+                raise ValueError(f"MIR input ID {vid} must reference a MirFloatInput, got {input_node!r}")
         if len(formats) != 1:
             ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
             raise ValueError(f"LIR requires exactly one floating-point format; got {ordered or 'none'}")

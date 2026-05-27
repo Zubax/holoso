@@ -292,6 +292,26 @@ def test_float_view_rejects_non_float_mir_before_scheduling() -> None:
         MirFloatView.from_mir(mir)
 
 
+def test_float_view_rejects_non_input_input_id() -> None:
+    mir = Mir(
+        nodes={0: MirFloatConst(FloatType(FMT), 1.0)},
+        input_ids=[0],
+        outputs=[MirFloatOutput("out_0", 0)],
+    )
+    with pytest.raises(ValueError, match="must reference a MirFloatInput"):
+        MirFloatView.from_mir(mir)
+
+
+def test_float_view_rejects_missing_input_id() -> None:
+    mir = Mir(
+        nodes={0: MirFloatConst(FloatType(FMT), 1.0)},
+        input_ids=[1],
+        outputs=[MirFloatOutput("out_0", 0)],
+    )
+    with pytest.raises(ValueError, match="does not reference a MIR node"):
+        MirFloatView.from_mir(mir)
+
+
 def test_fmul_ilog2_operator_rejects_out_of_range_k() -> None:
     with pytest.raises(ValueError, match="k must satisfy"):
         FMulILog2Operator(FMT, k=1 << (FMT.wexp - 1))
