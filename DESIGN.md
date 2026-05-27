@@ -263,9 +263,10 @@ Concrete hardware operators live at the root in `holoso._operators` and are inst
 hierarchy. A concrete `HardwareOperator` is a frozen dataclass whose fields are its parameters. Float operators use the
 `FloatHardwareOperator` subclass, which owns its `FloatFormat` and typed `evaluate(*float) -> float` reference semantics.
 Each hardware operator owns its own timing, notation, concrete `ScalarSignature`, instantiation params, and
-`instance_stem`: a lowercase Verilog-safe physical identity stem used for collision-free HDL names. Float instance stems
-include the float format and all sorted HDL params -- always emitted, including zero-valued ones -- e.g.
-`fadd_e8_m24_stage_align_0_stage_decode_0_stage_output_0` or `fmul_ilog2_const_e8_m24_k_m2_stage_decode_0`.
+`instance_stem`: a lowercase Verilog-safe compact physical identity stem used for HDL names. The visible prefix is the
+normalized mnemonic; the suffix is a hex stable hash of the canonical hardware parameters. For float
+operators, that hash covers the float format and all sorted HDL params -- always including zero-valued stage params.
+Examples look like `fadd_326215ea` or `fmul_ilog2_const_7296114c` rather than spelling every parameter into the name.
 
 Generic, per-node-parameterized hardware operators are factories: a standalone `ParameterizedHardwareOperator`
 carrying only its config-time knobs whose `instantiate(k)` returns a concrete `HardwareOperator`. The fully specified
@@ -378,7 +379,7 @@ from `operator.latency` -- both read the same hardware operator instance, so the
 cannot drift. `hdl_params()` always lists every parameter explicitly (including zero-valued `STAGE_*`), so the
 instantiation is self-describing, survives changes to wrapper defaults, and turns a param-name mismatch into a loud
 elaboration error. The wrapper instance name is `u_{operator.instance_stem}_{index}`, where `index` is local to that
-concrete operator value.
+concrete operator value; the stem uses a short stable hash of the operator's canonical hardware parameters.
 
 Constant operands are kept as immediates on the input mux. Two alternatives are noted in the backend for when this turns
 into a constraint: folding constants into the register file (preloaded like inputs, so every operand is a uniform

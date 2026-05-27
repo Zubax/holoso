@@ -2,25 +2,25 @@
 Command-line entry point for the OOC synthesis-evaluation harness.
 Usage::
 
-    python -m synth <kernel.py> <entry> --wexp W --wman M --rtl PATH... --flow FLOW:freq=MHz
+    python -m synth <kernel.py> <entry> --wexp W --wman M --rtl PATH... --flow FLOW:freq=MHz[,OP.KNOB=VALUE...]
 
-This will synthesize one Holoso-generated module across the requested FPGA tool flows and report the achieved post-route
-f_max and fabric usage. Repeat ``--flow`` to run multiple flows, each with its own target frequency.
+Repeat ``--flow`` to run multiple flows, each with its own target frequency.
+Each flow may override operator knobs using fields such as ``fadd.stage_decode=1``.
 Synthesis failure is recorded as a failure without stopping other tools.
 """
 
 import argparse
+from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import importlib
 import math
 import os
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 
-from holoso import synthesize, FloatFormat, SynthesisResult
-from holoso import FAddOperator, FDivOperator, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso import synthesize, FloatFormat, OpConfig
 
 from ._synth import BUILD_ROOT, SynthReport
 from .flows import Flow
@@ -46,9 +46,23 @@ class _Failure:
 
 
 @dataclass(frozen=True, slots=True)
+class _OperatorKnob:
+    operator_name: str
+    field_name: str
+    value: object
+
+
+@dataclass(frozen=True, slots=True)
 class _FlowRequest:
     flow_id: str
     target_frequency_MHz: float
+    op_knobs: list[_OperatorKnob]
+
+
+@dataclass(frozen=True, slots=True)
+class _SelectedFlow:
+    request: _FlowRequest
+    flow: Flow
 
 
 _FLOWS = {
@@ -59,7 +73,9 @@ _FLOWS = {
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="python -m synth", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="python -m synth", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("kernel", help="path to the Python file containing the kernel")
     parser.add_argument("entry", help="name of the function to synthesize")
     parser.add_argument("--wexp", type=int, default=6, help="float exponent bits")
@@ -77,8 +93,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="append",
         dest="flow_specs",
         required=True,
-        metavar="FLOW:freq=MHz",
-        help=f"synthesis flow to run; repeatable; supported flows: {', '.join(_FLOWS.keys())}",
+        metavar="FLOW:freq=MHz[,OP.KNOB=VALUE...]",
+        help=(
+            f"synthesis flow to run; repeatable; supported flows: {', '.join(_FLOWS.keys())}; "
+            "optional operator knob fields are OP.KNOB, where OP is an OpConfig operator field"
+        ),
     )
     args = parser.parse_args(argv)
     args.flow_requests = _parse_flow_requests(parser, args.flow_specs)
@@ -99,25 +118,33 @@ def _parse_flow_requests(parser: argparse.ArgumentParser, specs: list[str]) -> l
 
 def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest:
     if ":" not in spec:
-        parser.error(f"flow spec {spec!r} must be written as FLOW:freq=MHz")
+        parser.error(f"flow spec {spec!r} must be written as FLOW:freq=MHz[,OP.KNOB=VALUE...]")
     flow_id, raw_fields = (part.strip() for part in spec.split(":", 1))
     if flow_id not in _FLOWS.keys():
         parser.error(f"unknown flow {flow_id!r}; supported flows: {', '.join(_FLOWS.keys())}")
     if not raw_fields:
         parser.error(f"flow spec {spec!r} has no fields; expected freq=MHz")
 
-    fields: dict[str, str] = {}
+    raw_frequency: str | None = None
+    op_knobs: list[_OperatorKnob] = []
+    knob_keys: set[tuple[str, str]] = set()
     for item in raw_fields.split(","):
         if "=" not in item:
             parser.error(f"flow field {item!r} in {spec!r} must be written as key=value")
         key, value = (part.strip() for part in item.split("=", 1))
-        if key != "freq":
-            parser.error(f"unknown flow field {key!r} in {spec!r}; supported field: freq")
-        if key in fields:
-            parser.error(f"flow field {key!r} is duplicated in {spec!r}")
-        fields[key] = value
-
-    raw_frequency = fields.get("freq")
+        if key == "freq":
+            if raw_frequency is not None:
+                parser.error(f"flow field {key!r} is duplicated in {spec!r}")
+            raw_frequency = value
+            continue
+        if op_knob := _parse_op_knob(parser, spec, key, value):
+            knob_key = (op_knob.operator_name, op_knob.field_name)
+            if knob_key in knob_keys:
+                parser.error(f"knob {op_knob.operator_name}.{op_knob.field_name} is duplicated in {spec!r}")
+            knob_keys.add(knob_key)
+            op_knobs.append(op_knob)
+            continue
+        parser.error(f"unknown flow field {key!r} in {spec!r}")
     if raw_frequency is None:
         parser.error(f"flow spec {spec!r} is missing required field freq=MHz")
     try:
@@ -126,7 +153,41 @@ def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest
         parser.error(f"flow spec {spec!r} has invalid frequency {raw_frequency!r}")
     if not math.isfinite(target_frequency_MHz) or target_frequency_MHz <= 0.0:
         parser.error(f"flow spec {spec!r} has invalid frequency {raw_frequency!r}")
-    return _FlowRequest(flow_id=flow_id, target_frequency_MHz=target_frequency_MHz)
+    return _FlowRequest(flow_id=flow_id, target_frequency_MHz=target_frequency_MHz, op_knobs=op_knobs)
+
+
+def _parse_op_knob(parser: argparse.ArgumentParser, spec: str, key: str, raw_value: str) -> _OperatorKnob | None:
+    operator_name, separator, knob_name = key.partition(".")
+    operator_classes = _op_config_operator_classes()
+    if not separator or operator_name not in operator_classes:
+        return None
+    if not knob_name:
+        parser.error(f"knob {key!r} in {spec!r} is missing a name")
+    operator_cls = operator_classes[operator_name]
+    flds = {item.name: item for item in fields(operator_cls)}
+    if knob_name not in flds:
+        parser.error(f"unknown knob {operator_name}.{knob_name} in {spec!r}")
+    try:
+        value = int(raw_value)
+    except ValueError:
+        parser.error(f"knob {knob_name!r} in {spec!r} value not understood: {raw_value!r}")
+    return _OperatorKnob(operator_name=operator_name, field_name=knob_name, value=value)
+
+
+def _op_config_operator_classes() -> dict[str, type]:
+    classes: dict[str, type] = {}
+    for item in fields(OpConfig):
+        if not isinstance(item.type, type):
+            raise TypeError(f"OpConfig field {item.name!r} has unsupported annotation {item.type!r}")
+        classes[item.name] = item.type
+    return classes
+
+
+def _instantiate_operator(operator_cls: type, fmt: FloatFormat, overrides: dict[str, object]) -> object:
+    try:
+        return operator_cls(fmt, **overrides)
+    except TypeError as exc:
+        raise TypeError(f"cannot construct OpConfig operator {operator_cls.__name__}: {exc}") from exc
 
 
 def _collect_rtl(specs: list[str]) -> list[Path]:
@@ -137,51 +198,52 @@ def _collect_rtl(specs: list[str]) -> list[Path]:
     return rtl
 
 
-def _synthesize(kernel: Path, entry: str, fmt: FloatFormat, name: str) -> SynthesisResult:
+def _load_target(kernel: Path, entry: str) -> object:
     sys.path.insert(0, str(kernel.resolve().parent))
     module = importlib.import_module(kernel.stem)
-    # TODO: specify pipeline stages per operator per flow via _FlowRequest; disable all stages by default.
-    ops = OpConfig(
-        fadd=FAddOperator(fmt, stage_decode=1),
-        fmul=FMulOperator(fmt, stage_input=1),
-        fdiv=FDivOperator(fmt),
-        fmul_ilog2=FMulILog2OperatorFamily(fmt),
+    return getattr(module, entry)
+
+
+def _op_config(fmt: FloatFormat, op_knobs: list[_OperatorKnob]) -> OpConfig:
+    grouped_overrides: dict[str, dict[str, object]] = {}
+    for override in op_knobs:
+        grouped_overrides.setdefault(override.operator_name, {})[override.field_name] = override.value
+    return OpConfig(
+        **{  # type: ignore
+            name: _instantiate_operator(operator_cls, fmt, grouped_overrides.get(name, {}))
+            for name, operator_cls in _op_config_operator_classes().items()
+        }
     )
-    return synthesize(getattr(module, entry), ops=ops, name=name)
 
 
-def _flow_from_request(request: _FlowRequest) -> Flow:
-    try:
-        return _FLOWS[request.flow_id](request)  # type: ignore
-    except LookupError:
-        raise AssertionError(f"unknown flow ID {request.flow_id!r}")
-
-
-def _select_flows(requests: list[_FlowRequest]) -> tuple[list[Flow], list[str]]:
-    flows: list[Flow] = []
+def _select_flows(requests: list[_FlowRequest]) -> tuple[list[_SelectedFlow], list[str]]:
+    flows: list[_SelectedFlow] = []
     skipped: list[str] = []
     for request in requests:
-        flow = _flow_from_request(request)
+        try:
+            flow: Flow = _FLOWS[request.flow_id](request)  # type: ignore
+        except LookupError:
+            raise AssertionError(f"unknown flow ID {request.flow_id!r}")
         if flow.available():
-            flows.append(flow)
+            flows.append(_SelectedFlow(request, flow))
         else:
             skipped.append(request.flow_id)
     return flows, skipped
 
 
-def _run_flow(flow: Flow, result: SynthesisResult, rtl: list[Path], directory: Path) -> SynthReport | _Failure:
+def _run_flow(
+    flow: Flow,
+    ops: OpConfig,
+    target: Any,
+    name: str,
+    rtl: list[Path],
+    directory: Path,
+) -> SynthReport | _Failure:
     try:
+        result = synthesize(target, ops=ops, name=name)
         return flow.prepare(result, rtl).synthesize(directory)
     except Exception as exc:  # one tool's failure must not stop the others
         return _Failure(type(flow).__name__, directory, str(exc))
-
-
-def _resources(report: SynthReport) -> list[str]:
-    return [
-        f"{use.name} {use.used}" + (f"/{use.available}" if use.available else "")
-        for use in report.resources.values()
-        if use.used
-    ]
 
 
 def _print_outcome(outcome: SynthReport | _Failure) -> None:
@@ -198,7 +260,11 @@ def _print_outcome(outcome: SynthReport | _Failure) -> None:
         f"{emo} {_BOLD}{color}{outcome.flow}: f_max {outcome.fmax_MHz:.2f} MHz{_RESET} "
         f"(target {outcome.target_frequency_MHz:.0f}, slack {outcome.slack_ns:+.3f} ns)"
     )
-    if resources := _resources(outcome):
+    if resources := [
+        f"{use.name} {use.used}" + (f"/{use.available}" if use.available else "")
+        for use in outcome.resources.values()
+        if use.used
+    ]:
         print(f"\t{_DIM}{'\n\t'.join(resources)}{_RESET}")
 
 
@@ -214,25 +280,31 @@ def main() -> int:
     fmt = FloatFormat(wexp=args.wexp, wman=args.wman)
     name = args.name or args.entry
     rtl = _collect_rtl(args.rtl)
-    result = _synthesize(Path(args.kernel), args.entry, fmt, name)
+    target = _load_target(Path(args.kernel), args.entry)
 
     out_dir = BUILD_ROOT / name
     shutil.rmtree(out_dir, ignore_errors=True)
 
     outcomes: list[SynthReport | _Failure] = []
     workers = max(2, (os.cpu_count() or 1) // 2)
-    print(f"{_BOLD}{_CYAN}Running {len(flows)} synthesis flows with {workers} worker(s).{_RESET}")
+    print(f"{_BOLD}{_CYAN}Running {len(flows)} synthesis flows with ≤{workers} worker(s).{_RESET}")
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {}
-        for flow in flows:
+        for selected in flows:
+            flow = selected.flow
             directory = out_dir / type(flow).__name__
+            ops = _op_config(fmt, selected.request.op_knobs)
             print(
                 f"🛠️ Synthesizing {_MAGENTA}{args.kernel}::{args.entry}{_RESET} as "
                 f"{_BOLD}{_MAGENTA}{name}{_RESET} using {_BOLD}{_CYAN}{flow.__class__.__name__}{_RESET} "
-                f"in {_BOLD}{directory}{_RESET}...",
-                flush=True,
+                f"in {_BOLD}{directory}{_RESET}"
             )
-            futures[executor.submit(_run_flow, flow, result, rtl, directory)] = flow
+            print("⚙ Operators:")
+            for field in fields(ops):
+                operator = getattr(ops, field.name)
+                print(f"    {_BOLD}{_CYAN}{field.name:12}{_RESET}: {operator}")
+            print(flush=True)
+            futures[executor.submit(_run_flow, flow, ops, target, name, rtl, directory)] = flow
 
         for future in as_completed(futures):
             outcomes.append(future.result())

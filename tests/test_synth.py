@@ -22,6 +22,13 @@ def _ops(fmt: FloatFormat = FMT32) -> OpConfig:
     return OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
 
 
+def _has_localparam(verilog: str, name: str, value: int) -> bool:
+    return (
+        re.search(rf"^localparam\s+(?:\[[^\]]+\]\s+)?{re.escape(name)}\s*=\s*{value};", verilog, re.MULTILINE)
+        is not None
+    )
+
+
 def test_synthesize_small_kernel_result() -> None:
     result = holoso.synthesize(_kernel, ops=_ops())
     assert result.module_name == "_kernel"
@@ -56,8 +63,8 @@ def test_constant_only_module_keeps_operator_configured_format() -> None:
     fmt = FloatFormat(6, 18)
     result = holoso.synthesize(const_only, ops=_ops(fmt))
     assert result.numerical_model.float_format == fmt
-    assert "localparam WEXP  = 6;" in result.verilog_output.verilog
-    assert "localparam WMAN  = 18;" in result.verilog_output.verilog
+    assert _has_localparam(result.verilog_output.verilog, "WEXP", 6)
+    assert _has_localparam(result.verilog_output.verilog, "WMAN", 18)
     assert all(p.width == fmt.width for p in result.interface.output_ports)
 
 
@@ -129,8 +136,8 @@ def test_report_has_expected_sections() -> None:
     assert "module _kernel #(" not in result.verilog_output.verilog
     assert "parameter WEXP" not in result.verilog_output.verilog
     assert "parameter WMAN" not in result.verilog_output.verilog
-    assert "localparam WEXP  = 8;" in result.verilog_output.verilog
-    assert "localparam WMAN  = 24;" in result.verilog_output.verilog
+    assert _has_localparam(result.verilog_output.verilog, "WEXP", 8)
+    assert _has_localparam(result.verilog_output.verilog, "WMAN", 24)
     assert report.index("<h2>Interface</h2>") < report.index("<h2>Module Header</h2>")
     assert "--modhdr-width:" not in report
     assert "Runtime diagnostics available while the module is running." in header_text

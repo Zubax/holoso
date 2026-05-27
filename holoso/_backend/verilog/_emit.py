@@ -15,6 +15,7 @@ and omitted from the ROM, so synthesis prunes the logic they feed.
 
 from dataclasses import dataclass
 from importlib import resources
+from textwrap import dedent
 
 from ..._lir import FloatConstRef, Lir, FloatOperatorInstance, FloatScheduledOp
 from ..._operators import FloatSignControl
@@ -55,7 +56,7 @@ class VerilogOutput:
 
 
 class _Writer:
-    """Accumulates 4-space-indented lines. Use :meth:`line` for content and :meth:`push`/:meth:`pop` for nesting."""
+    """Accumulates 4-space-indented lines; ``w(...)`` accepts single lines or dedented multiline blocks."""
 
     def __init__(self) -> None:
         self._lines: list[str] = []
@@ -63,7 +64,15 @@ class _Writer:
 
     def __call__(self, *texts: str) -> None:
         for text in texts:
-            self._lines.append(("    " * self._depth + text) if text else "")
+            if "\n" in text:
+                block = dedent(text).removeprefix("\n").removesuffix("\n")
+                for line in block.split("\n"):
+                    self._append(line)
+            else:
+                self._append(text)
+
+    def _append(self, text: str) -> None:
+        self._lines.append(("    " * self._depth + text) if text else "")
 
     def push(self) -> None:
         self._depth += 1
@@ -93,7 +102,7 @@ def _rf_view(reg: int) -> str:
 
 
 def _decl_range(width: int) -> str:
-    return "" if width == 1 else f"[{width - 1}:0] "
+    return "" if width == 1 else f"[{width - 1:2}:0] "
 
 
 def _lit(width: int, value: int) -> str:
@@ -130,27 +139,35 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_sequencer(w)
     _emit_datapath(w, lir, read_port, write_port, port_consts)
     _emit_outputs(w, lir)
-    w("endmodule", "", "`undef REGF_DATA", "`undef REGF_ADDR", "`undef REGF_VIEW")
+    w("""
+endmodule
+
+`undef REGF_DATA
+`undef REGF_ADDR
+`undef REGF_VIEW
+        """)
     return VerilogOutput(verilog=w.render(), support_files=_SUPPORT_FILES)
 
 
 def _emit_header(w: _Writer, lir: Lir, cycw: int) -> None:
     fmt = lir.float_regfile.fmt
-    w('`include "holoso_support.vh"', "`timescale 1ns/1ps", "")
-    w(f"// Float format: exponent {fmt.wexp} bits, significand {fmt.wman} bits, total {fmt.width} bits.")
-    w(f"module {lir.module_name} (")
+    w(f"""
+`include "holoso_support.vh"
+`timescale 1ns/1ps
+
+// Float format: exponent {fmt.wexp} bits, significand {fmt.wman} bits, total {fmt.width} bits.
+module {lir.module_name} (
+""")
     w.push()
     _emit_port_group(w, "CONTROL PORTS", "Clock/reset and ready/valid handshake for one scheduled invocation.")
-    ports = [
-        "input  wire clk,",
-        "input  wire rst,",
-        "input  wire in_valid,",
-        "output wire in_ready,",
-        "output wire out_valid,",
-        "input  wire out_ready,",
-    ]
-    for line in ports:
-        w(line)
+    w("""
+input  wire clk,
+input  wire rst,
+input  wire in_valid,
+output wire in_ready,
+output wire out_valid,
+input  wire out_ready,
+        """)
     _emit_port_group(w, "INPUT PORTS", "Latched when in_valid && in_ready.")
     for load in lir.float_inputs:
         w(f"input  wire [{fmt.width - 1}:0] in_{load.name},")
@@ -170,50 +187,50 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
 
 def _emit_localparams(w: _Writer, lir: Lir, waddr: int, cycw: int, pcw: int, ucw: int) -> None:
     fmt = lir.float_regfile.fmt
-    w(f"localparam WEXP  = {fmt.wexp};  // Float exponent bits fixed by the static schedule")
-    w(f"localparam WMAN  = {fmt.wman};  // Float mantissa bits fixed by the static schedule")
-    w("localparam W     = WEXP + WMAN;")
-    w(
-        f"localparam NREG  = {max(1, lir.float_regfile.nreg)};  // >= 1; the bank is unused when no value needs a register"
-    )
-    w(f"localparam WADDR = {waddr:2};")
-    w(f"localparam NRD   = {lir.float_regfile.nrd:2};  // dedicated read ports: one per operator operand")
-    w(f"localparam NWR   = {lir.float_regfile.nwr:2};  // dedicated write ports: one per operator instance")
-    w(f"localparam NLOAD = {lir.float_regfile.nload:2};")
-    w(f"localparam CYCW  = {cycw:2};  // err_pc width: enough for the executing step (0..makespan)")
-    w(f"localparam PCW   = {pcw:2};  // fetch-PC width: counts to LAST+1 (execution lags the 2-stage fetch by one)")
-    w(f"localparam [PCW-1:0] LAST = {lir.makespan + 1};")
-    w(f"localparam UCW   = {ucw};  // microcode word width after lifting out constant control fields")
     compute = f"1..{lir.makespan} = compute, " if lir.makespan else ""
-    w(f"// pc: 0 = idle/accept, {compute}LAST = last compute step; out_valid at LAST+1 (fetch leads execution by one)")
-    w("", "`define REGF_DATA(PORT) `HOLOSO_REGFILE_LANE(W, PORT)")
-    w("`define REGF_ADDR(PORT) `HOLOSO_REGFILE_LANE(WADDR, PORT)")
-    w("`define REGF_VIEW(REG)  `HOLOSO_REGFILE_LANE(W, REG)")
-    w("")
+    nreg = max(1, lir.float_regfile.nreg)
+    w(f"""
+localparam           WEXP  = {fmt.wexp};  // Float exponent bits fixed by the static schedule
+localparam           WMAN  = {fmt.wman};  // Float mantissa bits fixed by the static schedule
+localparam           W     = WEXP + WMAN;
+localparam           NREG  = {nreg};  // >= 1; the bank is unused when no value needs a register
+localparam           WADDR = {waddr:2};
+localparam           NRD   = {lir.float_regfile.nrd:2};  // dedicated read ports: one per operator operand
+localparam           NWR   = {lir.float_regfile.nwr:2};  // dedicated write ports: one per operator instance
+localparam           NLOAD = {lir.float_regfile.nload:2};
+localparam           CYCW  = {cycw:2};  // err_pc width: enough for the executing step (0..makespan)
+localparam           PCW   = {pcw:2};  // fetch-PC width: counts to LAST+1 (execution lags the 2-stage fetch by one)
+localparam [PCW-1:0] LAST = {lir.makespan + 1};
+localparam           UCW   = {ucw};  // microcode word width after lifting out constant control fields
+// pc: 0 = idle/accept, {compute}LAST = last compute step; out_valid at LAST+1 (fetch leads execution by one)
+
+`define REGF_DATA(PORT) `HOLOSO_REGFILE_LANE(W, PORT)
+`define REGF_ADDR(PORT) `HOLOSO_REGFILE_LANE(WADDR, PORT)
+`define REGF_VIEW(REG)  `HOLOSO_REGFILE_LANE(W, REG)
+
+        """)
 
 
 def _emit_declarations(w: _Writer, lir: Lir) -> None:
-    w(
-        "reg  [PCW-1:0] pc;       // fetch program counter; the executing step lags it by one (2-stage control store)",
-        "reg  [PCW-1:0] next_pc;  // combinational next-state presented to the ROM each cycle",
-        "wire err;  // an operator error is detected on the current step",
-        "",
-    )
-    w(
-        "wire [NWR-1:0]       rf_wr_en;",
-        "wire [NWR*WADDR-1:0] rf_wr_addr;",
-        "wire [NWR*W-1:0]     rf_wr_data;",
-        "wire [NRD*WADDR-1:0] rf_rd_addr;",
-        "wire [NRD*W-1:0]     rf_rd_data;",
-        "wire [NREG*W-1:0]    rf_view;",
-        "",
-    )
+    w("""
+        reg  [PCW-1:0] pc;       // fetch program counter; the executing step lags it by one (2-stage control store)
+        reg  [PCW-1:0] next_pc;  // combinational next-state presented to the ROM each cycle
+        wire           err;      // an operator error is detected on the current step
+
+        wire [NWR-1:0]       rf_wr_en;
+        wire [NWR*WADDR-1:0] rf_wr_addr;
+        wire [NWR*W-1:0]     rf_wr_data;
+        wire [NRD*WADDR-1:0] rf_rd_addr;
+        wire [NRD*W-1:0]     rf_rd_data;
+        wire [NREG*W-1:0]    rf_view;
+
+        """)
     if lir.float_regfile.nload:
-        w(
-            "wire                 rf_load_en;",
-            "wire [NLOAD*W-1:0]   rf_load_data;",
-            "",
-        )
+        w("""
+            wire                 rf_load_en;
+            wire [NLOAD*W-1:0]   rf_load_data;
+
+            """)
     for inst in lir.float_instances:
         sig = _sig(inst)
         w(f"wire         {sig}_iv;")
@@ -238,22 +255,27 @@ def _emit_consts(w: _Writer, lir: Lir) -> None:
 
 
 def _emit_regfile(w: _Writer, lir: Lir) -> None:
-    w("// Read-first register file (RWPASS=0): a value written on a step is readable only on the next step.")
-    w("// The scheduler's +1 dependency latency and the allocator's last_use<=def register sharing rely on this.")
-    w("holoso_regfile #(.W(W), .WADDR(WADDR), .NRD(NRD), .NWR(NWR), .NLOAD(NLOAD), .NREG(NREG), .RWPASS(0)) u_rf (")
+    w("""
+// Read-first register file (RWPASS=0): a value written on a step is readable only on the next step.
+// The scheduler's +1 dependency latency and the allocator's last_use<=def register sharing rely on this.
+holoso_regfile #(.W(W), .WADDR(WADDR), .NRD(NRD), .NWR(NWR), .NLOAD(NLOAD), .NREG(NREG), .RWPASS(0)) u_rf (
+""")
     w.push()
     w(".clk(clk),")
     if lir.float_regfile.nload:
         w(".load_en(rf_load_en), .load_data(rf_load_data),")
     else:
         w(".load_en(1'b0), .load_data(1'b0),  // no inputs: load port disabled (NLOAD=0)")
-    w(
-        ".wr_en(rf_wr_en), .wr_addr(rf_wr_addr), .wr_data(rf_wr_data),",
-        ".rd_addr(rf_rd_addr), .rd_data(rf_rd_data),",
-        ".view(rf_view)",
-    )
+    w("""
+.wr_en(rf_wr_en), .wr_addr(rf_wr_addr), .wr_data(rf_wr_data),
+.rd_addr(rf_rd_addr), .rd_data(rf_rd_data),
+.view(rf_view)
+""")
     w.pop()
-    w(");", "")
+    w("""
+);
+
+""")
 
 
 def _emit_operators(w: _Writer, lir: Lir) -> None:
@@ -265,19 +287,20 @@ def _emit_operators(w: _Writer, lir: Lir) -> None:
         parts = [".WEXP(WEXP)", ".WMAN(WMAN)"] + [
             f".{param}({value})" for param, value in inst.operator.hdl_params().items()
         ]
-        params = "#(" + ", ".join(parts) + ")"
-        w(f"{inst.operator.module_name} {params} u_{base_name(inst)} (")
+        params = ", ".join(parts)
+        w(f"{inst.operator.module_name} #(", f"    {params}", f") u_{base_name(inst)} (")
         w.push()
         w(f".clk(clk), .rst(rst), .in_valid({sig}_iv),")
-        sgn_ports = ", ".join(f".{letter}_sgnop({sig}_{letter}s)" for letter in letters)
-        w(f"{sgn_ports}, .y_sgnop({sig}_ys),")
-        data_ports = ", ".join(f".{letter}({sig}_{letter})" for letter in letters)
-        w(f"{data_ports},")
+        for letter in letters:
+            w(f".{letter}_sgnop({sig}_{letter}s),")
+        w(f".y_sgnop({sig}_ys),")
+        for letter in letters:
+            w(f".{letter}({sig}_{letter}),")
         # out_valid is left unconnected: the static schedule already knows when each result is ready.
-        tail = f".out_valid(), .y({sig}_y)"
+        w(".out_valid(),")
+        w(f".y({sig}_y)" + ("," if inst.operator.error_ports else ""))
         for port in inst.operator.error_ports:
-            tail += f", .{port}({sig}_{port})"
-        w(tail)
+            w(f".{port}({sig}_{port})")
         w.pop()
         w(");", "")
 
@@ -291,78 +314,101 @@ def _emit_microcode_rom(
     commits_by_cycle: dict[int, list[FloatScheduledOp]],
 ) -> None:
     digits = (ucw + 3) // 4
-    w("// Microcode VLIW ROM: one pre-decoded control word per step, registered on read (in the sequencer below).")
-    w("// Constant control fields are lifted out (below) and not stored here, enabling synthesis-time folding.")
-    w('(* rom_style = "block", ram_style = "block", syn_romstyle = "EBR" *)')
-    w("reg [UCW-1:0] ucode [0:LAST];")
-    w("initial begin")
+    w("""
+// Microcode VLIW ROM: one pre-decoded control word per step, registered on read (in the sequencer below).
+// Constant control fields are lifted out (below) and not stored here, enabling synthesis-time folding.
+(* rom_style = "block", ram_style = "block", syn_romstyle = "EBR" *)
+reg [UCW-1:0] ucode [0:LAST];
+initial begin
+        """)
     w.push()
     for step in range(depth):
         summary = cycle_summary(issues_by_cycle.get(step, []), commits_by_cycle.get(step, []))
         comment = f"  // {summary}" if summary else ""
         w(f"ucode[{step: 5}] = {ucw}'h{pack(fields, step):0{digits}x};{comment}")
     w.pop()
-    w("end", "")
-    w("reg [UCW-1:0] ucode_q;     // 1st fetch stage: control-store array-read register")
-    w("reg [UCW-1:0] ucode_word;  // 2nd fetch stage: packs into the BRAM output register; drives this step")
-    w("")
+    w("""
+end
+
+reg [UCW-1:0] ucode_q;     // 1st fetch stage: control-store array-read register
+reg [UCW-1:0] ucode_word;  // 2nd fetch stage: packs into the BRAM output register; drives this step
+
+""")
 
 
 def _emit_field_wires(w: _Writer, fields: dict[str, Field]) -> None:
-    w("// Decoded control fields. A field that is constant across the whole program is driven by a constant net")
-    w("// (so synthesis prunes the logic it feeds); a varying field is a slice of the instruction word.")
+    w("""
+// Decoded control fields. A field that is constant across the whole program is driven by a constant net
+// (so synthesis prunes the logic it feeds); a varying field is a slice of the instruction word.
+""")
     for f in fields.values():
         if f.offset < 0:
             w(f"wire {_decl_range(f.width)}{f.name} = {_lit(f.width, f.const_value)};")
         elif f.width == 1:
-            w(f"wire {f.name} = ucode_word[{f.offset}];")
+            w(f"wire        {f.name} = ucode_word[{f.offset}];")
         else:
             w(f"wire {_decl_range(f.width)}{f.name} = ucode_word[{f.offset} +: {f.width}];")
     w("")
 
 
 def _emit_sequencer(w: _Writer) -> None:
-    w("// Sequencer.")
-    w("//")
-    w("// ucode_word is a SECOND register cascaded directly after the array-read register ucode_q (no logic between")
-    w("// them), so the tool packs it into the BRAM's dedicated output register, which offers better slack.")
-    w("// The cost is +1 cycle of read latency, so the executing step lags the fetch PC by one: pc runs")
-    w("// 0..LAST+1 and out_valid is asserted at LAST+1.")
-    w("// Reset covers only control state (pc, err_pc); ucode_q and ucode_word are reset-unconditional")
-    w("// (required so they can pack into the BRAM output register) and settle to ucode[0] under reset.")
-    w("//")
-    w("// FUTURE TUNING KNOB: This extra fetch stage mainly helps tools that infer the control store as BRAM")
-    w("// with a no-output-register read (e.g. Yosys+nextpnr-ecp5, whose DP16KD clock-to-out is ~6 ns and sat on")
-    w("// the datapath cycle). Flows that already register the control store in fabric do not need it and pay")
-    w("// the extra latency for nothing. This should become an opt-in per-target build knob so well-behaved flows")
-    w("// can drop the stage.")
-    w("always @* begin")
+    w("""
+// Sequencer.
+//
+// ucode_word is a SECOND register cascaded directly after the array-read register ucode_q (no logic between them),
+// so the tool packs it into the BRAM's dedicated output register, which offers better slack. The cost is +1 cycle of
+// read latency, so the executing step lags the fetch PC by one: pc runs 0..LAST+1 and out_valid is asserted at LAST+1.
+//
+// Reset covers only control state (pc, err_pc); ucode_q and ucode_word are reset-unconditional
+// (required so they can pack into the BRAM output register) and settle to ucode[0] under reset.
+//
+// FUTURE TUNING KNOB: This extra fetch stage mainly helps tools that infer the control store as BRAM with a
+// no-output-register read (e.g. Yosys+nextpnr-ecp5, whose DP16KD clock-to-out is ~6 ns and sat on the datapath cycle).
+// Flows that already register the control store in fabric do not need it and pay the extra latency for nothing.
+// This could become an opt-in per-target build knob so well-behaved flows can drop the stage.
+always @* begin
+        """)
     w.push()
-    w("if (rst)                 next_pc = 0;")
-    w("else if (pc == LAST + 1) next_pc = out_ready ? 0 : (LAST + 1);  // present: hold until the result is taken")
-    w("else if (pc == 0)        next_pc = in_valid ? 1 : 0;            // accept: hold until a transaction arrives")
-    w("else                     next_pc = pc + 1'b1;                   // advance the fetch")
+    w("""
+if (rst)                 next_pc = 0;
+else if (pc == LAST + 1) next_pc = out_ready ? 0 : (LAST + 1);  // present: hold until the result is taken
+else if (pc == 0)        next_pc = in_valid ? 1 : 0;            // accept: hold until a transaction arrives
+else                     next_pc = pc + 1'b1;                   // advance the fetch
+""")
     w.pop()
-    w("end", "")
-    w("wire [PCW-1:0] fetch_addr = (next_pc > LAST) ? LAST : next_pc;  // ROM holds 0..LAST; pc fetches up to LAST+1")
-    w("")
-    w("always @(posedge clk) begin")
+    w("""
+end
+
+wire [PCW-1:0] fetch_addr = (next_pc > LAST) ? LAST : next_pc;  // ROM holds 0..LAST; pc fetches up to LAST+1
+
+always @(posedge clk) begin
+""")
     w.push()
-    w("ucode_q    <= ucode[fetch_addr];  // 1st stage: control-store array read")
-    w("ucode_word <= ucode_q;            // 2nd stage: BRAM output register (fast clock-to-out)")
-    w("if (rst) begin")
+    w("""
+ucode_q    <= ucode[fetch_addr];  // 1st stage: control-store array read
+ucode_word <= ucode_q;            // 2nd stage: BRAM output register (fast clock-to-out)
+if (rst) begin
+""")
     w.push()
-    w("pc     <= 0;", "err_pc <= 0;")
+    w("""
+pc     <= 0;
+err_pc <= 0;
+""")
     w.pop()
     w("end else begin")
     w.push()
-    w("pc <= next_pc;")
-    w("if ((pc == 0) && in_valid) err_pc <= 0;   // clear the diagnostic when a new transaction is accepted")
-    w("if (err) err_pc <= pc - 1'b1;             // execution lags the fetch PC by one, so the step is pc-1")
+    w("""
+pc <= next_pc;
+if ((pc == 0) && in_valid) err_pc <= 0;   // clear the diagnostic when a new transaction is accepted
+if (err) err_pc <= pc - 1'b1;             // execution lags the fetch PC by one, so the step is pc-1
+""")
     w.pop()
     w("end")
     w.pop()
-    w("end", "")
+    w("""
+end
+
+""")
 
 
 def _operand_expr(port: int, port_consts: dict[int, list[int]]) -> str:
@@ -441,9 +487,11 @@ def _emit_datapath(
     w(f"assign err = {err_rhs};")
 
     if rf.nload:
-        w("")
-        w("// Input parallel-load through the regfile load port, taken on the accept handshake.")
-        w("assign rf_load_en = (pc == 0) && in_valid;")
+        w("""
+
+            // Input parallel-load through the regfile load port, taken on the accept handshake.
+            assign rf_load_en = (pc == 0) && in_valid;
+            """)
         covered = {load.dst.index: load.name for load in lir.float_inputs}
         for lane in range(rf.nload):
             rhs = f"in_{covered[lane]}" if lane in covered else "{W{1'b0}}"
@@ -452,8 +500,10 @@ def _emit_datapath(
 
 
 def _emit_outputs(w: _Writer, lir: Lir) -> None:
-    w("assign in_ready  = (pc == 0);")
-    w("assign out_valid = (pc == LAST + 1);  // execution lags the fetch PC by one (2-stage control-store fetch)")
+    w("""
+assign in_ready  = (pc == 0);
+assign out_valid = (pc == LAST + 1);  // execution lags the fetch PC by one (2-stage control-store fetch)
+""")
     for index, wire in enumerate(lir.float_outputs):
         if isinstance(wire.source, FloatConstRef):
             raw = f"const_{wire.source.index}"
@@ -462,8 +512,5 @@ def _emit_outputs(w: _Writer, lir: Lir) -> None:
         if wire.sign == FloatSignControl():
             w(f"assign {wire.name} = {raw};")
         else:
-            w(
-                f"holoso_fsgnop #(.WFULL(W)) u_outsgn_{index} "
-                f"(.x({raw}), .op(2'd{wire.sign.encoded}), .y({wire.name}));"
-            )
+            w(f"holoso_fsgnop #(.WFULL(W)) u_outsgn_{index} (.x({raw}), .op(2'd{wire.sign.encoded}), .y({wire.name}));")
     w("")

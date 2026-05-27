@@ -4,6 +4,7 @@ import math
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from hashlib import blake2s
 from typing import ClassVar
 
 from ._type import FloatFormat, FloatType, ScalarSignature
@@ -13,12 +14,13 @@ def _instance_stem_text(text: str) -> str:
     return re.sub(r"[^0-9a-z_]+", "_", text.lower()).strip("_") or "x"
 
 
-def _instance_stem_int(value: int) -> str:
-    return f"m{-value}" if value < 0 else str(value)
+def _instance_stem_hash(params: dict[str, int]) -> str:
+    payload = "\n".join(f"{name}={value}" for name, value in sorted(params.items())).encode("ascii")
+    return blake2s(payload, digest_size=4).hexdigest()
 
 
-def _hdl_param_stems(params: dict[str, int]) -> list[str]:
-    return [f"{_instance_stem_text(name)}_{_instance_stem_int(value)}" for name, value in sorted(params.items())]
+def _hashed_instance_stem(mnemonic: str, params: dict[str, int]) -> str:
+    return f"{_instance_stem_text(mnemonic)}_{_instance_stem_hash(params)}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +59,6 @@ class FloatSignControl:
 class HardwareOperator(ABC):
     """
     A fully specified hardware operator configuration.
-
     Frozen-dataclass equality makes an instance the resource-sharing key: equal operators time-share one physical
     module. Each concrete operator owns its timing, reference semantics, notation, and HDL parameters.
     """
@@ -72,11 +73,10 @@ class HardwareOperator(ABC):
     @property
     def instance_stem(self) -> str:
         """
-        Verilog-safe physical instance stem, unique for distinct hardware identities of this operator family.
-
+        Verilog-safe physical instance stem, compactly identifying this operator family and its HDL params.
         Override this if the operator's hardware identity is not fully captured by its mnemonic and HDL params.
         """
-        return "_".join([_instance_stem_text(self.mnemonic), *_hdl_param_stems(self.hdl_params())])
+        return _hashed_instance_stem(self.mnemonic, self.hdl_params())
 
     @property
     @abstractmethod
@@ -104,7 +104,6 @@ class HardwareOperator(ABC):
 class ParameterizedHardwareOperator(ABC):
     """
     A family of hardware operators needing per-node parameters.
-
     It carries only config-time values; the concrete :class:`HardwareOperator` it produces owns the hardware metadata.
     """
 
@@ -120,14 +119,9 @@ class FloatHardwareOperator(HardwareOperator, ABC):
 
     @property
     def instance_stem(self) -> str:
-        return "_".join(
-            [
-                _instance_stem_text(self.mnemonic),
-                f"e{self.fmt.wexp}",
-                f"m{self.fmt.wman}",
-                *_hdl_param_stems(self.hdl_params()),
-            ]
-        )
+        params = {"WEXP": self.fmt.wexp, "WMAN": self.fmt.wman}
+        params.update(self.hdl_params())
+        return _hashed_instance_stem(self.mnemonic, params)
 
     def float_signature(self, arity: int) -> ScalarSignature:
         ty = FloatType(self.fmt)
@@ -302,7 +296,6 @@ class FMulILog2OperatorFamily(FloatParameterizedHardwareOperator):
 class OpConfig:
     """
     The hardware operator configuration threaded into synthesis.
-
     Constructed explicitly by the caller (no defaults), held on the pipeline and never hashed. Each field fixes one
     operator's format and parameters.
     """

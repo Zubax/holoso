@@ -58,8 +58,8 @@ def test_operator_instance_names_include_hardware_identity() -> None:
     )
 
     assert len(names) == len(set(names))
-    assert "fmul_ilog2_const_e6_m18_k_2_stage_decode_0_0" in names
-    assert "fmul_ilog2_const_e6_m18_k_3_stage_decode_0_0" in names
+    assert all(re.fullmatch(r"fmul_ilog2_const_[0-9a-f]{8}_0", name) for name in names)
+    assert all("stage_decode" not in name and "e6_m18" not in name and "_k_" not in name for name in names)
     assert all(name == name.lower() for name in names)
 
 

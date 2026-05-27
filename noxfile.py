@@ -82,9 +82,9 @@ def synth_examples(session: nox.Session) -> None:
         "--name",
         "ekf1",
         "--flow",
-        "yosys-ecp5:freq=42.0",
+        "yosys-ecp5:freq=42.0,fadd.stage_decode=1,fmul.stage_input=1",
         "--flow",
-        "diamond-ecp5:freq=42.0",
+        "diamond-ecp5:freq=42.0,fadd.stage_decode=1,fmul.stage_input=1",
         "--flow",
-        "vivado:freq=60.0",
+        "vivado:freq=60.0,fadd.stage_decode=1,fmul.stage_input=1",
     )

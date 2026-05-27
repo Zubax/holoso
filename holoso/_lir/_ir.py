@@ -14,7 +14,7 @@ from .._type import FloatFormat
 @dataclass(frozen=True, slots=True)
 class OperatorInstance:
     """
-    One physical operator module, e.g. ``u_fadd_e8_m24_0`` or ``u_fmul_ilog2_const_e8_m24_k_m2_0``.
+    One physical operator module, e.g. ``u_fadd_326215ea_0`` or ``u_fmul_ilog2_const_7296114c_0``.
 
     ``operator`` is the fully specified hardware operator it elaborates; ``index`` numbers the copies of that operator
     value. The scheduler pools operations by the hardware-operator instance: equal operators may time-share one module.
