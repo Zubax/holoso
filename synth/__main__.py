@@ -10,8 +10,10 @@ Synthesis failure is recorded as a failure without stopping other tools.
 """
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import importlib
 import math
+import os
 import shutil
 import sys
 from dataclasses import dataclass
@@ -163,6 +165,13 @@ def _select_flows(requests: list[_FlowRequest]) -> tuple[list[Flow], list[str]]:
     return flows, skipped
 
 
+def _run_flow(flow: Flow, result: SynthesisResult, rtl: list[Path], directory: Path) -> SynthReport | _Failure:
+    try:
+        return flow.prepare(result, rtl).synthesize(directory)
+    except Exception as exc:  # one tool's failure must not stop the others
+        return _Failure(type(flow).__name__, directory, str(exc))
+
+
 def _resources(report: SynthReport) -> list[str]:
     return [
         f"{use.name} {use.used}" + (f"/{use.available}" if use.available else "")
@@ -207,17 +216,23 @@ def main() -> int:
     shutil.rmtree(out_dir, ignore_errors=True)
 
     outcomes: list[SynthReport | _Failure] = []
-    for flow in flows:
-        directory = out_dir / type(flow).__name__
-        print(
-            f"🛠️ Synthesizing {_MAGENTA}{args.kernel}::{args.entry}{_RESET} as {_BOLD}{_MAGENTA}{name}{_RESET} "
-            f"using {_BOLD}{_CYAN}{flow.__class__.__name__}{_RESET} in {_BOLD}{directory}{_RESET}..."
-        )
-        try:
-            outcomes.append(flow.prepare(result, rtl).synthesize(directory))
-        except Exception as exc:  # one tool's failure must not stop the others
-            outcomes.append(_Failure(type(flow).__name__, directory, str(exc)))
-        _print_outcome(outcomes[-1])
+    workers = max(2, (os.cpu_count() or 1) // 2)
+    print(f"{_BOLD}{_CYAN}Running {len(flows)} synthesis flows with {workers} worker(s).{_RESET}")
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {}
+        for flow in flows:
+            directory = out_dir / type(flow).__name__
+            print(
+                f"🛠️ Synthesizing {_MAGENTA}{args.kernel}::{args.entry}{_RESET} as "
+                f"{_BOLD}{_MAGENTA}{name}{_RESET} using {_BOLD}{_CYAN}{flow.__class__.__name__}{_RESET} "
+                f"in {_BOLD}{directory}{_RESET}...",
+                flush=True,
+            )
+            futures[executor.submit(_run_flow, flow, result, rtl, directory)] = flow
+
+        for future in as_completed(futures):
+            outcomes.append(future.result())
+            _print_outcome(outcomes[-1])
 
     succ = True
     for ou in outcomes:
