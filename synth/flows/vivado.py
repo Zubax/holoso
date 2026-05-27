@@ -34,7 +34,6 @@ class VivadoFlow(Flow):
 
     part: XilinxPart = field(default_factory=XilinxPart)
     target_frequency_MHz: float = 100.0
-    retiming: bool = True
     options: dict[str, Any] = field(default_factory=dict)
 
     def available(self) -> bool:
@@ -48,7 +47,7 @@ class VivadoFlow(Flow):
 
         period_ns = 1000.0 / self.target_frequency_MHz
         xdc = SourceFile(Path(_XDC), f"create_clock -name clk -period {period_ns:.4f} [get_ports clk]\n")
-        tcl = SourceFile(Path(_TCL), _tcl(top, self.part.name, verilog_paths, self.retiming))
+        tcl = SourceFile(Path(_TCL), _tcl(top, self.part.name, verilog_paths))
         commands = [CommandSpec(["vivado", "-mode", "batch", "-source", _TCL, "-nojournal"])]
 
         def runner(directory: Path) -> SynthReport:
@@ -62,17 +61,18 @@ class VivadoFlow(Flow):
         return SynthArtifact(flow="vivado", top=top, files=[*src, xdc, tcl], commands=commands, runner=runner)
 
 
-def _tcl(top: str, part: str, verilog_paths: list[Path], retiming: bool) -> str:
+def _tcl(top: str, part: str, verilog_paths: list[Path]) -> str:
     read_list = " ".join(path.as_posix() for path in verilog_paths)
-    retiming_arg = " -retiming" if retiming else ""
     return "\n".join(
         [
             f"read_verilog [list {read_list}]",
             f"read_xdc {_XDC}",
-            f"synth_design -top {top} -part {part} -mode out_of_context{retiming_arg}",
-            "opt_design",
-            "place_design",
-            "route_design",
+            f"synth_design -top {top} -part {part} -mode out_of_context "
+            "-directive PerformanceOptimized -global_retiming on -resource_sharing off",
+            "opt_design -directive Explore",
+            "place_design -directive ExtraTimingOpt",
+            "phys_opt_design -directive AddRetime",
+            "route_design -directive AggressiveExplore -tns_cleanup",
             f"report_utilization -file {_UTIL}",
             f"report_timing -delay_type max -max_paths 1 -nworst 1 -file {_TIMING}",
             "",

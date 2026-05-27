@@ -5,11 +5,13 @@ End-to-end checks for the OOC synthesis-evaluation harness.
 from pathlib import Path
 
 import pytest
+import synth.__main__ as synth_cli
 
 from holoso import synthesize, SynthesisResult, FloatFormat
 from holoso import FAddOperator, FDivOperator, FMulILog2OperatorFamily, FMulOperator, OpConfig
 
 from synth import SynthReport, build_ooc_wrapper
+from synth._synth import SynthArtifact
 from synth.flows.diamond import DiamondEcp5Flow
 from synth.flows.vivado import VivadoFlow
 from synth.flows.yosys import YosysEcp5Flow

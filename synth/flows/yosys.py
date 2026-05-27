@@ -88,7 +88,7 @@ def _yosys_script(top: str, dut_module: str) -> str:
             f"read_verilog -I . {dut_module}.v",
             f"read_verilog -I . {top}.v",
             f"hierarchy -check -top {top} -libdir {libdir}",
-            f"synth_ecp5 -top {top} -noiopad -dff -run begin:check",
+            f"synth_ecp5 -top {top} -noiopad -dff -retime -noabc9 -run begin:check",
             "clean",
             f"hierarchy -check -top {top}",
             "stat",
