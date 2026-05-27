@@ -93,6 +93,9 @@ Private implementation modules may still expose unprefixed package-internal entr
 this is fine because they are shielded by the `__init__.py` selective re-export policy (not visible from outside).
 Purely module-local helpers and type aliases inside those private modules are underscore-prefixed.
 Same applies to nested subpackages: their internals are private to the subpackage, each has its own API.
+Private module-local classes use unprefixed attributes for fields that sibling helpers need to access; the class name
+itself provides the module-local privacy boundary. Underscore-prefixed attributes are reserved for state accessed only
+by the owning class or its descendants.
 
 The library should not contain entities that are only used in the unit test suite; those belong in the suite.
 

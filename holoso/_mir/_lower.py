@@ -62,7 +62,7 @@ def _pow2(k: int) -> float:
 
 class _DomainLowerer(ABC):
     def __init__(self, context: "_LoweringContext") -> None:
-        self._context = context
+        self.context = context
 
     @abstractmethod
     def lower_node(self, old_id: ValueId, node: Node) -> bool:
@@ -77,21 +77,21 @@ class _DomainLowerer(ABC):
 
 class _LoweringContext:
     def __init__(self, hir: Hir, ops: OpConfig) -> None:
-        self._hir = hir
-        self._ops = ops
-        self._builder = MirBuilder()
-        self._remap: dict[ValueId, ValueId] = {}
-        self._domains: list[_DomainLowerer] = [_FloatLowerer(self)]
+        self.hir = hir
+        self.ops = ops
+        self.builder = MirBuilder()
+        self.remap: dict[ValueId, ValueId] = {}
+        self.domains: list[_DomainLowerer] = [_FloatLowerer(self)]
 
     def run(self) -> Mir:
-        for old_id in sorted(self._hir.nodes):
-            self._lower_node(old_id, self._hir.nodes[old_id])
-        for out in self._hir.outputs:
+        for old_id in sorted(self.hir.nodes):
+            self._lower_node(old_id, self.hir.nodes[old_id])
+        for out in self.hir.outputs:
             self._lower_output(out.name, out.value)
-        return self._builder.finish()
+        return self.builder.finish()
 
     def _lower_node(self, old_id: ValueId, node: Node) -> None:
-        for domain in self._domains:
+        for domain in self.domains:
             if domain.lower_node(old_id, node):
                 return
         match node:
@@ -103,24 +103,24 @@ class _LoweringContext:
                 raise UnsupportedConstruct(f"no hardware lowering rule for HIR operator {operator.mnemonic!r}")
 
     def _lower_output(self, name: str, value: ValueId) -> None:
-        for domain in self._domains:
+        for domain in self.domains:
             if domain.lower_output(name, value):
                 return
-        raise UnsupportedConstruct(f"no MIR lowering rule for HIR output type {self._hir.nodes[value].type!r}")
+        raise UnsupportedConstruct(f"no MIR lowering rule for HIR output type {self.hir.nodes[value].type!r}")
 
 
 class _FloatLowerer(_DomainLowerer):
     def __init__(self, context: _LoweringContext) -> None:
         super().__init__(context)
-        self._float_type = ScalarFloatType(context._ops.float_format)
+        self.float_type = ScalarFloatType(context.ops.float_format)
 
     def lower_node(self, old_id: ValueId, node: Node) -> bool:
         match node:
             case InPort(name=name, type=HirFloatType()):
-                self._context._remap[old_id] = self._context._builder.float_input(name, self._float_type)
+                self.context.remap[old_id] = self.context.builder.float_input(name, self.float_type)
                 return True
             case FloatConst(value=value):
-                self._context._remap[old_id] = self._lower_float_const(value)
+                self.context.remap[old_id] = self._lower_float_const(value)
                 return True
             case Operation() if _sign_of(node) is not None:
                 return True
@@ -128,53 +128,53 @@ class _FloatLowerer(_DomainLowerer):
                 lowered = self._lower_operation(operation)
                 if lowered is None:
                     return False
-                self._context._remap[old_id] = lowered
+                self.context.remap[old_id] = lowered
                 return True
             case _:
                 return False
 
     def _lower_float_const(self, value: float) -> ValueId:
-        return self._context._builder.float_const(value, self._float_type)
+        return self.context.builder.float_const(value, self.float_type)
 
     def _lower_operation(self, node: Operation) -> ValueId | None:
         match node:
             case Operation(operator=FloatAdd(), operands=(a, b)):
-                return self._lower_binary_float(self._context._ops.fadd, a, b)
+                return self._lower_binary_float(self.context.ops.fadd, a, b)
             case Operation(operator=FloatMul(), operands=(a, b)):
-                return self._lower_binary_float(self._context._ops.fmul, a, b)
+                return self._lower_binary_float(self.context.ops.fmul, a, b)
             case Operation(operator=FloatDiv(), operands=(a, b)):
-                return self._lower_binary_float(self._context._ops.fdiv, a, b)
+                return self._lower_binary_float(self.context.ops.fdiv, a, b)
             case Operation(operator=FloatMulPow2(k=k), operands=(a,)):
                 return self._lower_float_mul_pow2(a, k)
             case _:
                 return None
 
     def _lower_binary_float(self, operator: FloatHardwareOperator, a: ValueId, b: ValueId) -> ValueId:
-        base_a, sign_a = _collapse_signs(self._context._hir.nodes, a)
-        base_b, sign_b = _collapse_signs(self._context._hir.nodes, b)
-        return self._context._builder.float_operation(
+        base_a, sign_a = _collapse_signs(self.context.hir.nodes, a)
+        base_b, sign_b = _collapse_signs(self.context.hir.nodes, b)
+        return self.context.builder.float_operation(
             operator,
-            [self._context._remap[base_a], self._context._remap[base_b]],
+            [self.context.remap[base_a], self.context.remap[base_b]],
             [sign_a, sign_b],
         )
 
     def _lower_float_mul_pow2(self, a: ValueId, k: int) -> ValueId:
-        base, sign = _collapse_signs(self._context._hir.nodes, a)
-        if _ilog2_feasible(self._context._ops, k):
-            return self._context._builder.float_operation(
-                self._context._ops.fmul_ilog2.instantiate(k), [self._context._remap[base]], [sign]
+        base, sign = _collapse_signs(self.context.hir.nodes, a)
+        if _ilog2_feasible(self.context.ops, k):
+            return self.context.builder.float_operation(
+                self.context.ops.fmul_ilog2.instantiate(k), [self.context.remap[base]], [sign]
             )
-        return self._context._builder.float_operation(
-            self._context._ops.fmul,
-            [self._context._remap[base], self._context._builder.float_const(_pow2(k), self._float_type)],
+        return self.context.builder.float_operation(
+            self.context.ops.fmul,
+            [self.context.remap[base], self.context.builder.float_const(_pow2(k), self.float_type)],
             [sign, FloatSignControl()],
         )
 
     def lower_output(self, name: str, value: ValueId) -> bool:
-        base, sign = _collapse_signs(self._context._hir.nodes, value)
-        if not isinstance(self._context._hir.nodes[base].type, HirFloatType):
+        base, sign = _collapse_signs(self.context.hir.nodes, value)
+        if not isinstance(self.context.hir.nodes[base].type, HirFloatType):
             return False
-        self._context._builder.float_output(name, self._context._remap[base], sign)
+        self.context.builder.float_output(name, self.context.remap[base], sign)
         return True
 
 
