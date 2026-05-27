@@ -41,7 +41,7 @@ def build(mir: Mir, module_name: str) -> Lir:
             nreg=alloc.nreg,
             nrd=_compute_nrd(sched),
             nwr=_compute_nwr(sched),
-            nload=_compute_nload(float_mir, alloc),
+            nload=_compute_nload(float_mir),
         ),
         float_inputs=_build_inputs(float_mir, alloc),
         float_ops=_build_ops(float_mir, sched, alloc, const_index),
@@ -138,7 +138,6 @@ def _build_outputs(mir: MirFloatView, alloc: FloatAllocation, const_index: dict[
 def _compute_nrd(sched: Schedule) -> int:
     """
     Combinational read ports: one dedicated port per operator operand (the sum of instance arities).
-
     Each ``(instance, operand-position)`` reads from its own fixed port, so the controller word carries only the
     per-port register address and the per-cycle operand-routing mux disappears. Floored to >=1 so the regfile
     parameter guard holds when the kernel has no operators.
@@ -149,20 +148,18 @@ def _compute_nrd(sched: Schedule) -> int:
 def _compute_nwr(sched: Schedule) -> int:
     """
     Synchronous write ports: one dedicated port per operator instance.
-
     Each instance's result wires straight to its own write port (no write-data routing mux) and the error/commit
     gating is just that port's write-enable. Floored to >=1 so the regfile parameter guard holds with no operators.
     """
     return max(1, len(sched.instances))
 
 
-def _compute_nload(mir: MirFloatView, alloc: FloatAllocation) -> int:
+def _compute_nload(mir: MirFloatView) -> int:
     """
-    Immediate parallel-load lanes: enough to cover the highest register any input occupies.
-
-    Registers 0..nload-1 are exactly the input block for used inputs; unused inputs may share low registers.
+    Immediate parallel-load lanes: one unique low register per input port.
+    Registers 0..nload-1 are exactly the input block in module port order, including unused inputs retained as ports.
     """
-    return max((alloc.assign[vid] for vid in mir.input_ids if vid in alloc.assign), default=-1) + 1
+    return len(mir.input_ids)
 
 
 def _max_chain_len(mir: MirFloatView) -> int:

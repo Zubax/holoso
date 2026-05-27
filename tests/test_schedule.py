@@ -313,5 +313,10 @@ def test_float_view_rejects_missing_input_id() -> None:
 
 
 def test_fmul_ilog2_operator_rejects_out_of_range_k() -> None:
+    limit = (1 << FMT.wexp) - 2
+    assert FMulILog2Operator(FMT, k=-limit).k == -limit
+    assert FMulILog2Operator(FMT, k=limit - 1).k == limit - 1
     with pytest.raises(ValueError, match="k must satisfy"):
-        FMulILog2Operator(FMT, k=1 << (FMT.wexp - 1))
+        FMulILog2Operator(FMT, k=limit)
+    with pytest.raises(ValueError, match="k must satisfy"):
+        FMulILog2Operator(FMT, k=-limit - 1)

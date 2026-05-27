@@ -1,7 +1,5 @@
 """Lower optimized HIR to selected MIR."""
 
-import math
-
 from .._errors import UnsupportedConstruct
 from .._hir import (
     Const,
@@ -46,17 +44,6 @@ def _collapse_signs(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, 
     for sign in reversed(chain):  # innermost first
         control = control.then(sign)
     return vid, control
-
-
-def _ilog2_feasible(ops: OpConfig, k: int) -> bool:
-    return abs(k) < (1 << (ops.float_format.wexp - 1))
-
-
-def _pow2(k: int) -> float:
-    try:
-        return math.ldexp(1.0, k)
-    except OverflowError:
-        return math.inf
 
 
 class _LoweringContext:
@@ -142,15 +129,11 @@ class _FloatLowerer:
 
     def _lower_float_mul_pow2(self, a: ValueId, k: int) -> ValueId:
         base, sign = _collapse_signs(self.context.hir.nodes, a)
-        if _ilog2_feasible(self.context.ops, k):
-            return self.context.builder.float_operation(
-                self.context.ops.fmul_ilog2.instantiate(k), [self.context.remap[base]], [sign]
-            )
-        return self.context.builder.float_operation(
-            self.context.ops.fmul,
-            [self.context.remap[base], self.context.builder.float_const(_pow2(k), self.float_type)],
-            [sign, FloatSignControl()],
-        )
+        try:
+            operator = self.context.ops.fmul_ilog2.instantiate(k)
+        except ValueError as exc:
+            raise UnsupportedConstruct(f"unsupported power-of-two float scale 2**{k}: {exc}") from exc
+        return self.context.builder.float_operation(operator, [self.context.remap[base]], [sign])
 
     def lower_output(self, name: str, value: ValueId) -> bool:
         base, sign = _collapse_signs(self.context.hir.nodes, value)
@@ -165,7 +148,6 @@ def lower(hir: Hir, ops: OpConfig) -> Mir:
     Select hardware operators from the configuration and fold semantic signs onto MIR sign controls.
 
     Semantic sign operations are never emitted as standalone scheduled operators. Exact power-of-two scaling selects
-    ``fmul_ilog2_const`` when feasible for the configured float format, otherwise it falls back to ordinary multiply
-    by a constant factor.
+    ``fmul_ilog2_const`` when supported by the configured float format; unsupported exponents are rejected.
     """
     return _LoweringContext(hir, ops).run()

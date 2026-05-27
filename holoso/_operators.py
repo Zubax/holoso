@@ -257,9 +257,9 @@ class FMulILog2Operator(FloatHardwareOperator):
     stage_decode: int = 0
 
     def __post_init__(self) -> None:
-        limit = 1 << (self.fmt.wexp - 1)
-        if abs(self.k) >= limit:
-            raise ValueError(f"k must satisfy |k| < {limit} for {self.fmt}; got {self.k!r}")
+        limit = (1 << self.fmt.wexp) - 2
+        if self.k < -limit or self.k >= limit:
+            raise ValueError(f"k must satisfy {-limit} <= k < {limit} for {self.fmt}; got {self.k!r}")
         if self.stage_decode not in (0, 1):
             raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
 

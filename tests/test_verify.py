@@ -105,6 +105,27 @@ def test_model_matches_reference_small_kernels() -> None:
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
+def test_model_uses_exact_ilog2_for_wide_supported_shift() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        return a * 16.0
+
+    fmt = FloatFormat(3, 4)
+    ops = OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
+    model = build_model(build(lower_to_mir(optimize(lower(f)), ops), "f"))
+    assert model(FloatValue.from_float(fmt, 0.5))[0] == FloatValue.from_float(fmt, 8.0)
+
+
+def test_model_handles_unused_input_ports() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        return b
+
+    model = build_model(build(_run(f), "f"))
+    assert [load.name for load in model.lir.float_inputs] == ["a", "b"]
+    assert [load.dst.index for load in model.lir.float_inputs] == [0, 1]
+    assert model.lir.float_regfile.nload == 2
+    assert model(1.0, 2.0)[0] == FloatValue.from_float(FMT, 2.0)
+
+
 def test_model_rejects_ambiguous_int_and_mismatched_float_value_format() -> None:
     def f(a):  # type: ignore[no-untyped-def]
         return a

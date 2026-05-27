@@ -11,6 +11,9 @@ Two values share a register when the older one's last use is no later than the n
 write-through): when a consumer reads value V on cycle X while value W is committed to the same register on cycle X,
 the combinational read returns the old (stored) V and W lands on the next edge -- no corruption. Under a write-through
 file this would forward W into the read and break. We never spill -- the register count simply grows.
+
+Input ports are pinned to unique low registers so the step-0 parallel-load lanes map one-to-one onto module input
+ports. Operation results may still reuse those registers after the corresponding input value is dead.
 """
 
 import heapq
@@ -39,10 +42,9 @@ def allocate_float(mir: MirFloatView, issue_cycle: dict[ValueId, int], makespan:
             return issue_cycle[vid] + node.operator.latency
         return 0  # an input port, written at the accept edge
 
-    reg_values: list[ValueId] = [
-        *[vid for vid in mir.input_ids if isinstance(mir.nodes[vid], MirFloatInput)],
-        *[vid for vid in issue_cycle if isinstance(mir.nodes[vid], MirFloatOperation)],
-    ]
+    input_values = [vid for vid in mir.input_ids if isinstance(mir.nodes[vid], MirFloatInput)]
+    operation_values = [vid for vid in issue_cycle if isinstance(mir.nodes[vid], MirFloatOperation)]
+    reg_values: list[ValueId] = [*input_values, *operation_values]
     last_use: dict[ValueId, int] = {vid: def_cycle(vid) for vid in reg_values}
 
     for vid in issue_cycle:
@@ -60,8 +62,12 @@ def allocate_float(mir: MirFloatView, issue_cycle: dict[ValueId, int], makespan:
     assign: dict[ValueId, int] = {}
     free: list[int] = []
     active: list[tuple[int, int]] = []  # (last_use, reg)
-    next_reg = 0
-    for vid in sorted(reg_values, key=lambda v: (def_cycle(v), v)):
+    for reg, vid in enumerate(input_values):
+        assign[vid] = reg
+        active.append((last_use[vid], reg))
+    next_reg = len(input_values)
+
+    for vid in sorted(operation_values, key=lambda v: (def_cycle(v), v)):
         d = def_cycle(vid)
         retained: list[tuple[int, int]] = []
         for lu, reg in active:
