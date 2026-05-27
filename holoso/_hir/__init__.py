@@ -1,8 +1,7 @@
 """Thin API for the hardware-agnostic high-level IR."""
 
+from ._const import Const as Const, FloatConst as FloatConst
 from ._ir import (
-    Const as Const,
-    FloatConst as FloatConst,
     Hir as Hir,
     HirBuilder as HirBuilder,
     InPort as InPort,

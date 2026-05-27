@@ -17,7 +17,18 @@ from dataclasses import dataclass
 from importlib import resources
 from textwrap import dedent
 
-from ..._lir import FloatConstRef, Lir, FloatOperatorInstance, FloatScheduledOp
+from ..._lir import (
+    ControlPort,
+    DataInputPort,
+    DataOutputPort,
+    Direction,
+    FloatConstRef,
+    Lir,
+    FloatOperatorInstance,
+    FloatScheduledOp,
+    Port,
+    group_by_cycle,
+)
 from ..._operators import FloatSignControl
 from ._microcode import (
     PORT_LETTERS,
@@ -34,7 +45,6 @@ from ._microcode import (
     f_wa,
     f_ysgn,
     finalize_fields,
-    group_by_cycle,
     pack,
     port_const_map,
     read_ports,
@@ -128,7 +138,7 @@ def generate(lir: Lir) -> VerilogOutput:
     ucw = finalize_fields(fields)
     issues_by_cycle, commits_by_cycle = group_by_cycle(lir)
 
-    _emit_header(w, lir, cycw)
+    _emit_header(w, lir)
     _emit_localparams(w, lir, waddr, cycw, pcw, ucw)
     _emit_declarations(w, lir)
     _emit_consts(w, lir)
@@ -149,7 +159,7 @@ endmodule
     return VerilogOutput(verilog=w.render(), support_files=_SUPPORT_FILES)
 
 
-def _emit_header(w: _Writer, lir: Lir, cycw: int) -> None:
+def _emit_header(w: _Writer, lir: Lir) -> None:
     fmt = lir.float_regfile.fmt
     w(f"""
 `include "holoso_support.vh"
@@ -159,26 +169,30 @@ def _emit_header(w: _Writer, lir: Lir, cycw: int) -> None:
 module {lir.module_name} (
 """)
     w.push()
+    ports = lir.ports
+    last = ports[-1]
     _emit_port_group(w, "CONTROL PORTS", "Clock/reset and ready/valid handshake for one scheduled invocation.")
-    w("""
-input  wire clk,
-input  wire rst,
-input  wire in_valid,
-output wire in_ready,
-output wire out_valid,
-input  wire out_ready,
-        """)
+    for control_port in [port for port in ports if isinstance(port, ControlPort) and port.name != "err_pc"]:
+        _emit_port(w, control_port, control_port is not last)
     _emit_port_group(w, "INPUT PORTS", "Latched when in_valid && in_ready.")
-    for load in lir.float_inputs:
-        w(f"input  wire [{fmt.width - 1}:0] in_{load.name},")
+    for input_port in [port for port in ports if isinstance(port, DataInputPort)]:
+        _emit_port(w, input_port, input_port is not last)
     _emit_port_group(w, "OUTPUT PORTS", "Valid when out_valid is pulsed.")
-    for wire in lir.float_outputs:
-        w(f"output wire [{fmt.width - 1}:0] {wire.name},")
+    for output_port in [port for port in ports if isinstance(port, DataOutputPort)]:
+        _emit_port(w, output_port, output_port is not last)
     _emit_port_group(w, "DIAGNOSTIC PORTS", "Runtime diagnostics available while the module is running.")
-    # err_pc: 0 = no error; otherwise the (last) step an error was detected. |err_pc answers "any error?".
-    w(f"output reg  [{cycw - 1}:0] err_pc")
+    for diagnostic_port in [port for port in ports if isinstance(port, ControlPort) and port.name == "err_pc"]:
+        # err_pc: 0 = no error; otherwise the (last) step an error was detected. |err_pc answers "any error?".
+        _emit_port(w, diagnostic_port, diagnostic_port is not last)
     w.pop()
     w(");", "")
+
+
+def _emit_port(w: _Writer, port: Port, comma: bool) -> None:
+    direction = "input " if port.direction == Direction.IN else "output"
+    port_range = "" if port.width == 1 else f"[{port.width - 1}:0] "
+    suffix = "," if comma else ""
+    w(f"{direction} wire {port_range}{port.name}{suffix}")
 
 
 def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
@@ -213,9 +227,10 @@ localparam           UCW   = {ucw};  // microcode word width after lifting out c
 
 def _emit_declarations(w: _Writer, lir: Lir) -> None:
     w("""
-        reg  [PCW-1:0] pc;       // fetch program counter; the executing step lags it by one (2-stage control store)
-        reg  [PCW-1:0] next_pc;  // combinational next-state presented to the ROM each cycle
-        wire           err;      // an operator error is detected on the current step
+        reg  [PCW-1:0]  pc;       // fetch program counter; the executing step lags it by one (2-stage control store)
+        reg  [PCW-1:0]  next_pc;  // combinational next-state presented to the ROM each cycle
+        reg  [CYCW-1:0] err_pc_q;
+        wire            err;      // an operator error is detected on the current step
 
         wire [NWR-1:0]       rf_wr_en;
         wire [NWR*WADDR-1:0] rf_wr_addr;
@@ -359,7 +374,7 @@ def _emit_sequencer(w: _Writer) -> None:
 // so the tool packs it into the BRAM's dedicated output register, which offers better slack. The cost is +1 cycle of
 // read latency, so the executing step lags the fetch PC by one: pc runs 0..LAST+1 and out_valid is asserted at LAST+1.
 //
-// Reset covers only control state (pc, err_pc); ucode_q and ucode_word are reset-unconditional
+// Reset covers only control state (pc, err_pc_q); ucode_q and ucode_word are reset-unconditional
 // (required so they can pack into the BRAM output register) and settle to ucode[0] under reset.
 //
 // FUTURE TUNING KNOB: This extra fetch stage mainly helps tools that infer the control store as BRAM with a
@@ -392,15 +407,15 @@ if (rst) begin
     w.push()
     w("""
 pc     <= 0;
-err_pc <= 0;
+err_pc_q <= 0;
 """)
     w.pop()
     w("end else begin")
     w.push()
     w("""
 pc <= next_pc;
-if ((pc == 0) && in_valid) err_pc <= 0;   // clear the diagnostic when a new transaction is accepted
-if (err) err_pc <= pc - 1'b1;             // execution lags the fetch PC by one, so the step is pc-1
+if ((pc == 0) && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted
+if (err) err_pc_q <= pc - 1'b1;            // execution lags the fetch PC by one, so the step is pc-1
 """)
     w.pop()
     w("end")
@@ -503,6 +518,7 @@ def _emit_outputs(w: _Writer, lir: Lir) -> None:
     w("""
 assign in_ready  = (pc == 0);
 assign out_valid = (pc == LAST + 1);  // execution lags the fetch PC by one (2-stage control-store fetch)
+assign err_pc    = err_pc_q;
 """)
     for index, wire in enumerate(lir.float_outputs):
         if isinstance(wire.source, FloatConstRef):

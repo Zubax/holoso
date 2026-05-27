@@ -12,7 +12,6 @@ import pickle
 import zlib
 from dataclasses import dataclass
 
-from .._interface import ModuleInterface
 from .numerical import NumericalModel
 
 # language=python
@@ -92,7 +91,7 @@ class CocotbOutput:
     testbench: str
 
 
-def generate(model: NumericalModel, interface: ModuleInterface) -> CocotbOutput:
+def generate(model: NumericalModel) -> CocotbOutput:
     """
     Build a self-contained cocotb testbench that checks the DUT against the embedded bit-exact model.
 
@@ -100,5 +99,5 @@ def generate(model: NumericalModel, interface: ModuleInterface) -> CocotbOutput:
     range to keep multi-operation kernels from overflowing into infinities.
     """
     blob = base64.b64encode(zlib.compress(pickle.dumps(model, pickle.HIGHEST_PROTOCOL))).decode("ascii")
-    testbench = _TEMPLATE.replace("@@MODULE@@", interface.module_name).replace("@@BLOB@@", blob)
+    testbench = _TEMPLATE.replace("@@MODULE@@", model.lir.module_name).replace("@@BLOB@@", blob)
     return CocotbOutput(testbench=testbench)

@@ -13,7 +13,7 @@ from holoso._backend.numerical import generate as build_model
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lir import build, interface_of
+from holoso._lir import build
 from holoso._mir import lower as lower_to_mir
 
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, sources
@@ -26,7 +26,6 @@ def _ops(fmt: FloatFormat) -> OpConfig:
 def _run_cosim(sim: str, fn: Callable[..., object], fmt: FloatFormat, name: str, ops: OpConfig | None = None) -> None:
     ops = _ops(fmt) if ops is None else ops
     lir = build(lower_to_mir(optimize(lower(fn)), ops), name)
-    interface = interface_of(lir)
     model = build_model(lir)
     # Generated sources live outside the cocotb build dir, which the runner wipes on clean=True.
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"{name}_w{fmt.wexp}_{fmt.wman}"
@@ -36,7 +35,7 @@ def _run_cosim(sim: str, fn: Callable[..., object], fmt: FloatFormat, name: str,
     verilog_path.write_text(generate_verilog(lir).verilog)
     # The generated bench embeds the bit-exact model and checks the DUT's output bits exactly.
     test_module = f"test_{name}"
-    (gen_dir / f"{test_module}.py").write_text(generate_testbench(model, interface).testbench)
+    (gen_dir / f"{test_module}.py").write_text(generate_testbench(model).testbench)
 
     runner = get_runner(sim)
     runner.build(

@@ -81,7 +81,12 @@ def synthesize(target, *, ops: OpConfig, parameters: Mapping[str, object] | None
 @dataclass(frozen=True)
 class SynthesisResult:
     module_name: str
-    interface:      ModuleInterface   # typed ports -- the composition contract
+
+    ports: list[Port]
+    input_ports: list[DataInputPort]
+    output_ports: list[DataOutputPort]
+    control_ports: list[ControlPort]
+
     verilog_output: VerilogOutput     # generated module text + support_files (the shared holoso_support .v/.vh)
     numerical_model: NumericalModel   # bit-exact, picklable pure-Python model of the module (flat in -> flat tuple out)
     cocotb_output:  CocotbOutput      # self-contained testbench: embeds the model, checks the DUT bit-for-bit
@@ -138,7 +143,7 @@ choice.
 - `bool` -- 1 bit.
 
 HIR types live in `holoso._hir` as format-free `Type` values; today that family contains `FloatType`. Concrete scalar
-types live in `holoso._type`: `ScalarType` is the width-bearing MIR/interface/resource type family, today containing
+types live in `holoso._type`: `ScalarType` is the width-bearing MIR/LIR-port/resource type family, today containing
 `FloatType`, whose `FloatFormat` describes the ZKF encoding. A data port carries its scalar type and derives its bit
 width from it; control ports carry explicit bit widths. Today all data ports are the same scalar `FloatType`, but this
 is an implementation detail.
@@ -200,12 +205,13 @@ returns a folded `Const` node, not an untyped Python value. The HIR builder can 
 with `const_node()`, so future bool/int constants do not need float-specific rebuilding in shared passes.
 
 HIR-to-MIR lowering lives in `holoso._mir` and is implemented by a lowering context that owns the HIR tree, `OpConfig`,
-MIR builder, and value remap. The context delegates domain-specific nodes to private lowerers; today the only domain
-lowerer is float. The float lowerer maps each semantic float operator to its configured `FloatHardwareOperator` from the
+MIR builder, and value remap. The float lowerer maps each semantic float operator to its configured
+`FloatHardwareOperator` from the
 single root-level hardware-operator config and collapses semantic `float_neg`/`float_abs` chains into selected-float MIR
 `FloatSignControl` values on operator operands/results or output wires. Semantic `float_mul_pow2(k)` selects
 `fmul_ilog2_const` when the configured float format supports that exponent; otherwise it falls back to ordinary multiply
 by the constant `2^k`.
+
 `MirBuilder` is a single graph builder with typed construction methods; it does not own a global scalar type, so future
 mixed-type expressions can share one value namespace and add typed constructors for bool/int values. Hardware operators
 expose a concrete `ScalarSignature`, and MIR construction validates operands against the selected operator's signature.
@@ -239,13 +245,15 @@ LIR exposes only a minimal API surface, following the design policies.
 The top-level `Lir` fields are typed explicitly as `float_instances`, `float_regfile`, `float_inputs`, `float_ops`,
 and `float_outputs` because the current machine has only float data resources; future bool/int resources should add
 sibling fields instead of overloading these. LIR construction fails explicitly if selected MIR contains a non-float
-domain before that domain has a register/constant/output resource family.
+domain before that domain has a register/constant/output resource family. This check produces a `MirFloatView` once;
+scheduling and float register allocation consume that narrowed view.
 
-The `holoso._lir` package exports the LIR consumer contract: the LIR dataclasses backends need, plus `build()` and
-`interface_of()`. Its private `_build.py` module orchestrates selected MIR validation, scheduling, binding, float
-register allocation, constant-pool construction, and interface derivation. Its private `_schedule.py` module contains
-the list-scheduling algorithm and schedule result type. Its private `_regalloc.py` module contains the current
-float-register allocator.
+The `holoso._lir` package exports the LIR consumer contract: the LIR dataclasses and port classes backends need, plus
+`build()`. Its private `_build.py` module orchestrates selected MIR narrowing, scheduling, binding, float register
+allocation, and constant-pool construction. Its private `_schedule.py` module contains the list-scheduling algorithm and
+schedule result type. Its private `_regalloc.py` module contains the current float-register allocator. Shared LIR
+analysis helpers provide per-cycle grouping, register liveness, stable ref labels, and write-timeline reconstruction so
+backends do not each re-derive them.
 
 - Reads are cheap (multiport FF), so binding is constrained only by operator-instance count and writes.
 - Register allocation = liveness + phi-coalescing; widen `N` rather than spill at these sizes.
@@ -282,7 +290,7 @@ Pipeline-stage knobs are named after the HDL parameters in lowercase, such as `s
 
 ## Scheduler
 
-The private `holoso._lir._schedule` module implements software-pipelined (zero-bubble) list scheduling over selected
+The private `holoso._lir._schedule` module implements software-pipelined list scheduling over selected
 single-block MIR. Operators are fully pipelined (throughput 1) and their latencies are static and data-independent, so
 the entire schedule is computed at compile time: each op is assigned an issue cycle and a bound instance, and the backend
 just replays it with a cycle counter. The scheduler itself is domain-agnostic; LIR construction partitions the scheduled

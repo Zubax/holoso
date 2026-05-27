@@ -106,8 +106,7 @@ def test_cli_parser_does_not_validate_stage_value_range() -> None:
 
 
 def _native_data_bits(result: SynthesisResult) -> int:
-    iface = result.interface
-    return sum(p.width for p in iface.input_ports) + sum(p.width for p in iface.output_ports)
+    return sum(p.width for p in result.input_ports) + sum(p.width for p in result.output_ports)
 
 
 def test_wrapper_reduces_io_to_bounded_words() -> None:

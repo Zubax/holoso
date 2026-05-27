@@ -10,32 +10,14 @@ default pickle (every field is a frozen dataclass of plain values), so a generat
 from dataclasses import dataclass
 
 from .._lir import FloatConstRef, FloatRegRef, Lir
-from .._operators import FloatHardwareOperator, FloatSignControl
+from .._lir import InputProducer, OperationProducer, float_write_timeline, latest_producer_before
+from .._operators import FloatSignControl
 from .._type import FloatFormat
-
-# A value source on a register's write timeline: an input (by input index) or an operator result (by op index).
-type _Producer = tuple[str, int]
 
 
 def _apply_sign(value: float, sign: FloatSignControl) -> float:
     """Apply a folded sign control exactly as ``holoso_fsgnop`` does in the RTL."""
     return sign.apply_float(value)
-
-
-def _latest_before(writes: list[tuple[int, _Producer]], read_cycle: int) -> _Producer:
-    """
-    The producer of the value a register holds when read at ``read_cycle``: the latest write committed strictly before
-    it. The register file is read-first (a value committed at cycle ``c`` is readable from ``c + 1``), so this correctly
-    distinguishes a still-live value from a later reuse of the same physical register on a different cycle.
-    """
-    chosen: _Producer | None = None
-    for commit_cycle, producer in writes:  # writes are in increasing commit-cycle order
-        if commit_cycle < read_cycle:
-            chosen = producer
-        else:
-            break
-    assert chosen is not None, "operand read resolves to no prior writer; the schedule is inconsistent"
-    return chosen
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,28 +46,25 @@ class NumericalModel:
         # Per-register write timeline: (commit_cycle, producer) in increasing commit order. Inputs are sampled at
         # cycle 0; each op commits at its commit_cycle. Operands resolve against this so a register reused for several
         # values over its lifetime yields the value that is live at the operand's read (issue) cycle, not the final one.
-        writes: dict[int, list[tuple[int, _Producer]]] = {}
-        for i, load in enumerate(lir.float_inputs):
-            writes.setdefault(load.dst.index, []).append((0, ("in", i)))
-        for j, op in enumerate(lir.float_ops):
-            writes.setdefault(op.dst.index, []).append((op.commit_cycle, ("op", j)))
-        for events in writes.values():
-            events.sort()
+        writes = float_write_timeline(lir)
 
         op_values: dict[int, float] = {}
 
         def value(source: FloatRegRef | FloatConstRef, read_cycle: int) -> float:
             if isinstance(source, FloatConstRef):
                 return consts[source.index]
-            kind, index = _latest_before(writes[source.index], read_cycle)
-            return in_values[index] if kind == "in" else op_values[index]
+            producer = latest_producer_before(writes, source, read_cycle)
+            match producer:
+                case InputProducer(index=index):
+                    return in_values[index]
+                case OperationProducer(index=index):
+                    return op_values[index]
 
         # Evaluate in commit order: a producer commits before any consumer issues, so its value is ready in op_values.
         for j in sorted(
             range(len(lir.float_ops)), key=lambda k: (lir.float_ops[k].commit_cycle, lir.float_ops[k].issue_cycle)
         ):
             op = lir.float_ops[j]
-            assert isinstance(op.inst.operator, FloatHardwareOperator)
             operands = [_apply_sign(value(o.source, op.issue_cycle), o.sign) for o in op.operands]
             op_values[j] = fmt.round(_apply_sign(op.inst.operator.evaluate(*operands), op.result_sign))
 

@@ -1,8 +1,8 @@
 """HIR data model."""
 
 from dataclasses import dataclass
-from abc import ABC, abstractmethod
 
+from ._const import Const, FloatConst
 from ._operators import Operator
 from ._types import FloatType, Type
 
@@ -15,27 +15,6 @@ class InPort:
 
     name: str
     type: Type
-
-
-@dataclass(frozen=True, slots=True)
-class Const(ABC):
-    """A typed HIR constant value."""
-
-    @property
-    @abstractmethod
-    def type(self) -> Type:
-        """The HIR type of this constant."""
-
-
-@dataclass(frozen=True, slots=True)
-class FloatConst(Const):
-    """A floating-point constant."""
-
-    value: float
-
-    @property
-    def type(self) -> FloatType:
-        return FloatType()
 
 
 @dataclass(frozen=True, slots=True)

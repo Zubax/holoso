@@ -68,13 +68,8 @@ def f_wa(base: str) -> str:
     return f"mc_wa_{base}"
 
 
-def _operand_name(operand: FloatOperand) -> str:
-    base = f"r{operand.source.index}" if isinstance(operand.source, FloatRegRef) else f"c{operand.source.index}"
-    return operand.sign.decorate(base)
-
-
 def _op_expr(op: FloatScheduledOp) -> str:
-    return f"r{op.dst.index}={op.inst.operator.render(*[_operand_name(o) for o in op.operands])}"
+    return f"r{op.dst.index}={op.inst.operator.render(*[o.stable_label for o in op.operands])}"
 
 
 def cycle_summary(issues: list[FloatScheduledOp], commits: list[FloatScheduledOp]) -> str:
@@ -84,19 +79,6 @@ def cycle_summary(issues: list[FloatScheduledOp], commits: list[FloatScheduledOp
     if commits:
         parts.append("commit " + ", ".join(f"r{op.dst.index}" for op in commits))
     return "; ".join(parts)
-
-
-def group_by_cycle(lir: Lir) -> tuple[dict[int, list[FloatScheduledOp]], dict[int, list[FloatScheduledOp]]]:
-    """Group the schedule into per-cycle issues (by issue_cycle) and commits (by commit_cycle), canonically ordered."""
-    issues: dict[int, list[FloatScheduledOp]] = {}
-    commits: dict[int, list[FloatScheduledOp]] = {}
-    for op in lir.float_ops:
-        issues.setdefault(op.issue_cycle, []).append(op)
-        commits.setdefault(op.commit_cycle, []).append(op)
-    for group in (issues, commits):
-        for ops in group.values():
-            ops.sort(key=lambda op: (base_name(op.inst), op.dst.index, op.issue_cycle))
-    return issues, commits
 
 
 def read_ports(lir: Lir) -> dict[tuple[FloatOperatorInstance, int], int]:

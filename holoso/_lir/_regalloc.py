@@ -17,7 +17,7 @@ import heapq
 from dataclasses import dataclass
 
 from .._hir import ValueId
-from .._mir import Mir, MirFloatConst, MirFloatInput, MirFloatOperation
+from .._mir import MirFloatConst, MirFloatInput, MirFloatOperation, MirFloatView
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,13 +26,11 @@ class FloatAllocation:
     nreg: int
 
 
-def _operation(mir: Mir, vid: ValueId) -> MirFloatOperation:
-    node = mir.nodes[vid]
-    assert isinstance(node, MirFloatOperation)
-    return node
+def _operation(mir: MirFloatView, vid: ValueId) -> MirFloatOperation:
+    return mir.operation_nodes[vid]
 
 
-def allocate_float(mir: Mir, issue_cycle: dict[ValueId, int], makespan: int) -> FloatAllocation:
+def allocate_float(mir: MirFloatView, issue_cycle: dict[ValueId, int], makespan: int) -> FloatAllocation:
     present_cycle = makespan + 1
 
     def def_cycle(vid: ValueId) -> int:

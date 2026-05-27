@@ -8,7 +8,8 @@ which typed storage resources, with which folded sign controls.
 from dataclasses import dataclass
 
 from .._operators import FloatHardwareOperator, FloatSignControl, HardwareOperator
-from .._type import FloatFormat
+from .._type import FloatFormat, FloatType
+from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +39,14 @@ class RegRef:
 
     index: int
 
+    @property
+    def stable_label(self) -> str:
+        return f"r{self.index}"
+
+    @property
+    def is_register(self) -> bool:
+        return True
+
 
 @dataclass(frozen=True, slots=True)
 class FloatRegRef(RegRef):
@@ -49,6 +58,14 @@ class ConstRef:
     """An immediate constant, ``index`` into one typed LIR constant pool."""
 
     index: int
+
+    @property
+    def stable_label(self) -> str:
+        return f"c{self.index}"
+
+    @property
+    def is_register(self) -> bool:
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +86,10 @@ class FloatOperand(Operand):
 
     source: FloatRegRef | FloatConstRef
     sign: FloatSignControl = FloatSignControl()
+
+    @property
+    def stable_label(self) -> str:
+        return self.sign.decorate(self.source.stable_label)
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +187,34 @@ class Lir:
     makespan: int  # last commit cycle (0 if no ops); the in_valid->out_valid latency is makespan + 1
     op_count: int
     max_chain_len: int  # longest dependency chain in hardware operators (for verification tolerance)
+
+    @property
+    def ports(self) -> list[Port]:
+        scalar_type = FloatType(self.float_regfile.fmt)
+        ports: list[Port] = [
+            ControlInputPort("clk", 1),
+            ControlInputPort("rst", 1),
+            ControlInputPort("in_valid", 1),
+            ControlOutputPort("in_ready", 1),
+            ControlOutputPort("out_valid", 1),
+            ControlInputPort("out_ready", 1),
+        ]
+        ports.extend(DataInputPort(f"in_{load.name}", scalar_type) for load in self.float_inputs)
+        ports.extend(DataOutputPort(wire.name, scalar_type) for wire in self.float_outputs)
+        ports.append(ControlOutputPort("err_pc", self.cyc_width))
+        return ports
+
+    @property
+    def input_ports(self) -> list[DataInputPort]:
+        return [port for port in self.ports if isinstance(port, DataInputPort)]
+
+    @property
+    def output_ports(self) -> list[DataOutputPort]:
+        return [port for port in self.ports if isinstance(port, DataOutputPort)]
+
+    @property
+    def control_ports(self) -> list[ControlPort]:
+        return [port for port in self.ports if isinstance(port, ControlPort)]
 
     @property
     def cyc_width(self) -> int:

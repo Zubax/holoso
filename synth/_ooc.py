@@ -69,7 +69,7 @@ def _zext(reg: str, width: int, target: int) -> str:
 
 
 def _find_err_pc(result: SynthesisResult) -> Port:
-    for port in result.interface.control_ports:
+    for port in result.control_ports:
         if port.name == _ERR_PC:
             return port
     raise ValueError(f"module {result.module_name!r} has no err_pc port; cannot build an OOC wrapper")
@@ -77,9 +77,8 @@ def _find_err_pc(result: SynthesisResult) -> Port:
 
 def build_ooc_wrapper(result: SynthesisResult, *, top_suffix: str = "_ooc") -> OocWrapper:
     """Generate a mux-reduced OOC measurement wrapper for ``result``'s generated module."""
-    iface = result.interface
-    data_inputs = iface.input_ports
-    data_outputs = iface.output_ports
+    data_inputs = result.input_ports
+    data_outputs = result.output_ports
     err_pc = _find_err_pc(result)
 
     in_slots = [WordSlot(i, p.name, p.width) for i, p in enumerate(data_inputs)]

@@ -1,7 +1,8 @@
 """HIR constant folding."""
 
+from ._const import Const
 from ._copy import copy_node
-from ._ir import Const, Hir, HirBuilder, Operation, ValueId
+from ._ir import Hir, HirBuilder, Operation, ValueId
 
 
 def run(hir: Hir) -> Hir:

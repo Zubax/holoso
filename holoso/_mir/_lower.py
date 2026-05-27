@@ -1,7 +1,6 @@
 """Lower optimized HIR to selected MIR."""
 
 import math
-from abc import ABC, abstractmethod
 
 from .._errors import UnsupportedConstruct
 from .._hir import (
@@ -60,28 +59,13 @@ def _pow2(k: int) -> float:
         return math.inf
 
 
-class _DomainLowerer(ABC):
-    def __init__(self, context: "_LoweringContext") -> None:
-        self.context = context
-
-    @abstractmethod
-    def lower_node(self, old_id: ValueId, node: Node) -> bool:
-        """
-        Return true if this domain consumed the node. Some semantic nodes may be consumed without producing MIR.
-        """
-
-    @abstractmethod
-    def lower_output(self, name: str, value: ValueId) -> bool:
-        """Return true if this domain consumed the output."""
-
-
 class _LoweringContext:
     def __init__(self, hir: Hir, ops: OpConfig) -> None:
         self.hir = hir
         self.ops = ops
         self.builder = MirBuilder()
         self.remap: dict[ValueId, ValueId] = {}
-        self.domains: list[_DomainLowerer] = [_FloatLowerer(self)]
+        self.float_lowerer = _FloatLowerer(self)
 
     def run(self) -> Mir:
         for old_id in sorted(self.hir.nodes):
@@ -91,9 +75,8 @@ class _LoweringContext:
         return self.builder.finish()
 
     def _lower_node(self, old_id: ValueId, node: Node) -> None:
-        for domain in self.domains:
-            if domain.lower_node(old_id, node):
-                return
+        if self.float_lowerer.lower_node(old_id, node):
+            return
         match node:
             case Const(type=type):
                 raise UnsupportedConstruct(f"no MIR lowering rule for HIR constant type {type!r}")
@@ -103,15 +86,14 @@ class _LoweringContext:
                 raise UnsupportedConstruct(f"no hardware lowering rule for HIR operator {operator.mnemonic!r}")
 
     def _lower_output(self, name: str, value: ValueId) -> None:
-        for domain in self.domains:
-            if domain.lower_output(name, value):
-                return
+        if self.float_lowerer.lower_output(name, value):
+            return
         raise UnsupportedConstruct(f"no MIR lowering rule for HIR output type {self.hir.nodes[value].type!r}")
 
 
-class _FloatLowerer(_DomainLowerer):
+class _FloatLowerer:
     def __init__(self, context: _LoweringContext) -> None:
-        super().__init__(context)
+        self.context = context
         self.float_type = ScalarFloatType(context.ops.float_format)
 
     def lower_node(self, old_id: ValueId, node: Node) -> bool:

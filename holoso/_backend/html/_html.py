@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
 
-from ..._interface import ModuleInterface
-from ..._lir import Lir, FloatOperand, FloatOperatorInstance, FloatRegRef, FloatScheduledOp
+from ..._lir import Lir, FloatConstRef, FloatOperand, FloatOperatorInstance, FloatRegRef, FloatScheduledOp
+from ..._lir import float_liveness
 from ..._operators import FAddOperator, FDivOperator, FMulILog2Operator, FMulOperator, HardwareOperator
 from ..verilog import VerilogOutput
 
@@ -49,17 +49,12 @@ def _esc(text: str) -> str:
     return html.escape(text)
 
 
-def _operand(operand: FloatOperand) -> str:
-    name = f"r{operand.source.index}" if isinstance(operand.source, FloatRegRef) else f"c{operand.source.index}"
-    return operand.sign.decorate(name)
-
-
 def _op_text(op: FloatScheduledOp) -> str:
-    body = op.inst.operator.render(*[_operand(o) for o in op.operands])
-    return op.result_sign.decorate(f"r{op.dst.index}={body}")
+    body = op.inst.operator.render(*[o.stable_label for o in op.operands])
+    return op.result_sign.decorate(f"{op.dst.stable_label}={body}")
 
 
-def generate(lir: Lir, interface: ModuleInterface, verilog_output: VerilogOutput) -> HtmlOutput:
+def generate(lir: Lir, verilog_output: VerilogOutput) -> HtmlOutput:
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     link = f"<a href='{_HOMEPAGE_URL}'>Holoso</a>"
     out: list[str] = [
@@ -76,7 +71,7 @@ def generate(lir: Lir, interface: ModuleInterface, verilog_output: VerilogOutput
     constants = _constants(lir)
     if constants:
         out.append(f"<div class='sec'>{constants}</div>")
-    out.append(f"<div class='sec'>{_interface(interface)}</div>")
+    out.append(f"<div class='sec'>{_interface(lir)}</div>")
     out.append(f"<div class='sec modhdrsec'>{_module_header(verilog_output.verilog)}</div>")
     out.append("</div>")
     out.append(_schedule(lir))
@@ -120,9 +115,9 @@ def _stage_config(lir: Lir) -> str:
     return "".join(out)
 
 
-def _interface(interface: ModuleInterface) -> str:
+def _interface(lir: Lir) -> str:
     out = ["<h2>Interface</h2><div class='ifaces'>"]
-    ctrl = interface.control_ports
+    ctrl = lir.control_ports
     out.append(f"<div class='iface'><h3>ctrl ({len(ctrl)})</h3><table><tr><th>port</th><th>dir</th><th>bits</th></tr>")
     for control_port in ctrl:
         out.append(
@@ -130,7 +125,7 @@ def _interface(interface: ModuleInterface) -> str:
             f"<td>{control_port.width}</td></tr>"
         )
     out.append("</table></div>")
-    for title, ports in (("in", interface.input_ports), ("out", interface.output_ports)):
+    for title, ports in (("in", lir.input_ports), ("out", lir.output_ports)):
         out.append(f"<div class='iface'><h3>{title} ({len(ports)})</h3><table><tr><th>port</th><th>bits</th></tr>")
         for data_port in ports:
             out.append(f"<tr><td>{_esc(data_port.name)}</td><td>{data_port.width}</td></tr>")
@@ -187,12 +182,12 @@ def _constants(lir: Lir) -> str:
 
 _NEUTRAL = "#6b7280"  # input/output bookend chips (port boundary, not an operator)
 _LIVE_BG = "#edf2fb"  # legend swatch for the liveness tint; the grid cells use the ``.live`` CSS class (same color)
-ColKey = tuple[str, int]  # ("r", reg index) or ("c", constant index)
+type ColKey = FloatRegRef | FloatConstRef
 
 
-def _is_live(col: ColKey, row_id: int, live: dict[int, set[int]]) -> bool:
+def _is_live(col: ColKey, row_id: int, live: dict[FloatRegRef, set[int]]) -> bool:
     """Whether register column ``col`` holds a live value on grid row ``row_id`` (constants are never tinted)."""
-    return col[0] == "r" and col[1] in live and row_id in live[col[1]]
+    return isinstance(col, FloatRegRef) and col in live and row_id in live[col]
 
 
 def _write_label(index: int, tip: str) -> str:
@@ -206,7 +201,7 @@ def _write_label(index: int, tip: str) -> str:
 
 
 def _operand_col(operand: FloatOperand) -> ColKey:
-    return ("r", operand.source.index) if isinstance(operand.source, FloatRegRef) else ("c", operand.source.index)
+    return operand.source
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,7 +256,7 @@ def _bookend_row(
     label: str,
     cells: dict[ColKey, str],
     columns: list[ColKey],
-    live: dict[int, set[int]],
+    live: dict[FloatRegRef, set[int]],
     row_id: int,
     n_stage: int,
     dv: _Dividers,
@@ -275,42 +270,6 @@ def _bookend_row(
         out.append(f"<td class='{_oc_class(sidx, dv)}'></td>")
     out.append("<td class='opcell'></td></tr>")
     return "".join(out)
-
-
-def _liveness(lir: Lir) -> dict[int, set[int]]:
-    """
-    Map each register to the clock cycles on which it holds a live value.
-
-    A value is written on its definition cycle -- the accept cycle 0 for an input, the operator's commit cycle
-    (``issue + latency``) for a result -- and read on each consumer's issue cycle, or on the output-present cycle
-    ``makespan + 1`` if it drives an output. The report displays cycles 0..makespan; retaining the present cycle in the
-    intervals keeps the final visible row live for output values. Liveness is per value, so a register reused for
-    several values yields several disjoint residence intervals with dead gaps between them.
-    """
-    present = lir.makespan + 1
-    defs: dict[int, list[int]] = {}
-    uses: dict[int, list[int]] = {}
-    for load in lir.float_inputs:
-        defs.setdefault(load.dst.index, []).append(0)
-    for op in lir.float_ops:
-        defs.setdefault(op.dst.index, []).append(op.commit_cycle)
-        for operand in op.operands:
-            if isinstance(operand.source, FloatRegRef):
-                uses.setdefault(operand.source.index, []).append(op.issue_cycle)
-    for wire in lir.float_outputs:
-        if isinstance(wire.source, FloatRegRef):
-            uses.setdefault(wire.source.index, []).append(present)
-    live: dict[int, set[int]] = {}
-    for reg in defs.keys() | uses.keys():
-        writes = sorted(defs.get(reg, []))
-        reads = sorted(uses.get(reg, []))
-        rows: set[int] = set()
-        for i, start in enumerate(writes):
-            nxt = writes[i + 1] if i + 1 < len(writes) else present + 1  # this value persists until the next overwrite
-            last = max((u for u in reads if start <= u < nxt), default=start)
-            rows.update(range(start, last + 1))
-        live[reg] = rows
-    return live
 
 
 def _live_intervals(rows: set[int]) -> list[list[int]]:
@@ -331,7 +290,7 @@ def _live_intervals(rows: set[int]) -> list[list[int]]:
 
 
 def _cell_style(
-    col: ColKey, cyc: int, live: dict[int, set[int]], fills: dict[tuple[int, ColKey], str]
+    col: ColKey, cyc: int, live: dict[FloatRegRef, set[int]], fills: dict[tuple[int, ColKey], str]
 ) -> tuple[str, str]:
     """
     Background for a register/constant cell, as ``(extra_class, inline_style)``. The single cycle on which a result
@@ -376,7 +335,7 @@ def _schedule(lir: Lir) -> str:
         stage_thick={n_stage - 1} if n_stage else set(),
     )
 
-    live = _liveness(lir)
+    live = float_liveness(lir)
     edges: list[tuple[str, str, str, int]] = []  # (commit id, operand id, color, operation group) for the overlay
     # Operator pipeline occupancy: instance ``inst`` is in stage ``k`` on cycle ``issue + k``. Keyed to the operation
     # group so a hover lights the whole pipeline trail together with the result cell, its chip and its edges.
@@ -397,7 +356,7 @@ def _schedule(lir: Lir) -> str:
         tip = _esc(_op_text(op))
         color = _KIND_COLOR[type(op.inst.operator)]
         issue, commit = op.issue_cycle, op.commit_cycle
-        dcol: ColKey = ("r", op.dst.index)
+        dcol: ColKey = op.dst
         dord = col_ord[dcol]
         writes_at[(commit, dcol)] = writes_at.get((commit, dcol), "") + _write_label(op.inst.index, tip)
         fills[(commit, dcol)] = color
@@ -460,7 +419,7 @@ def _schedule(lir: Lir) -> str:
 
     # The grid has exactly one displayed row per II cycle: the input-load cycle (0), then the compute/writeback cycles
     # 1..makespan. The output-present boundary is not an extra cycle row; out_valid rises after these II cycles.
-    in_cells = {("r", load.dst.index): _input_chip(f"in_{load.name}") for load in lir.float_inputs}
+    in_cells: dict[ColKey, str] = {load.dst: _input_chip(f"in_{load.name}") for load in lir.float_inputs}
     out.append(_bookend_row("in", in_cells, columns, live, 0, n_stage, dv))
 
     for cyc in compute_cycles:  # one row per compute cycle; idle cycles show only pipeline advance
@@ -504,7 +463,7 @@ def _stage_cell(
     return f"<td class='{cls}' data-op='{group}' title='{stage_tip[(sidx, cyc)]}' style='background:{color}'></td>"
 
 
-def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[int, set[int]]) -> str:
+def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[FloatRegRef, set[int]]) -> str:
     """
     Build the interactive layer: substitute the per-module data into the readable script template (:data:`_SCHED_JS`).
 
@@ -512,19 +471,21 @@ def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[i
     enough for the script to draw the dataflow overlay and synthesize hover tooltips on demand without a per-cell
     attribute. Without JS the grid still renders fully; only these behaviors are absent.
     """
-    cols = [f"{kind}{index}" for kind, index in _columns_of(lir)]
+    cols = [col.stable_label for col in _columns_of(lir)]
     data = {
         "edges": edges,
         "columns": cols,
         "constants": {f"c{i}": repr(value) for i, value in enumerate(lir.float_consts)},
-        "liveness": {str(reg): _live_intervals(rows) for reg, rows in live.items()},
+        "liveness": {str(reg.index): _live_intervals(rows) for reg, rows in live.items()},
     }
     return "<script>\n" + _SCHED_JS.replace("__DATA__", json.dumps(data)) + "\n</script>"
 
 
 def _columns_of(lir: Lir) -> list[ColKey]:
     """The grid columns: one per float register, then one per constant (matches the order rendered in the table)."""
-    return [("r", i) for i in range(lir.float_regfile.nreg)] + [("c", i) for i in range(len(lir.float_consts))]
+    return [FloatRegRef(i) for i in range(lir.float_regfile.nreg)] + [
+        FloatConstRef(i) for i in range(len(lir.float_consts))
+    ]
 
 
 def _input_chip(tip: str) -> str:

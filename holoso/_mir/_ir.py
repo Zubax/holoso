@@ -4,7 +4,8 @@ from dataclasses import dataclass
 
 from .._hir import ValueId
 from .._operators import FloatHardwareOperator, FloatSignControl, HardwareOperator
-from .._type import FloatType, ScalarType
+from .._errors import UnsupportedConstruct
+from .._type import FloatFormat, FloatType, ScalarType
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +103,7 @@ class MirFloatOperation(MirOperation):
 
 
 type MirNode = MirInput | MirConst | MirOperation
+type MirFloatNode = MirFloatInput | MirFloatConst | MirFloatOperation
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +124,64 @@ class Mir:
     nodes: dict[ValueId, MirNode]
     input_ids: list[ValueId]
     outputs: list[MirOutput]
+
+
+@dataclass(frozen=True, slots=True)
+class MirFloatView:
+    """A MIR graph narrowed once to the float-only resource family implemented by LIR today."""
+
+    nodes: dict[ValueId, MirFloatNode]
+    input_ids: list[ValueId]
+    outputs: list[MirFloatOutput]
+    fmt: FloatFormat
+
+    @property
+    def input_nodes(self) -> dict[ValueId, MirFloatInput]:
+        result: dict[ValueId, MirFloatInput] = {}
+        for vid in self.input_ids:
+            node = self.nodes[vid]
+            if isinstance(node, MirFloatInput):
+                result[vid] = node
+        return result
+
+    @property
+    def const_nodes(self) -> dict[ValueId, MirFloatConst]:
+        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirFloatConst)}
+
+    @property
+    def operation_nodes(self) -> dict[ValueId, MirFloatOperation]:
+        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirFloatOperation)}
+
+    @classmethod
+    def from_mir(cls, mir: Mir) -> "MirFloatView":
+        nodes: dict[ValueId, MirFloatNode] = {}
+        formats: set[FloatFormat] = set()
+        for vid, node in mir.nodes.items():
+            match node:
+                case MirFloatInput(scalar_type=scalar_type):
+                    nodes[vid] = node
+                    formats.add(scalar_type.fmt)
+                case MirFloatConst(scalar_type=scalar_type):
+                    nodes[vid] = node
+                    formats.add(scalar_type.fmt)
+                case MirFloatOperation(scalar_type=scalar_type):
+                    nodes[vid] = node
+                    formats.add(scalar_type.fmt)
+                case MirInput():
+                    raise UnsupportedConstruct(f"LIR construction does not support non-float MIR input {vid}")
+                case MirConst():
+                    raise UnsupportedConstruct(f"LIR construction does not support non-float MIR constant {vid}")
+                case MirOperation():
+                    raise UnsupportedConstruct(f"LIR construction does not support non-float MIR operation {vid}")
+        outputs: list[MirFloatOutput] = []
+        for out in mir.outputs:
+            if not isinstance(out, MirFloatOutput):
+                raise UnsupportedConstruct(f"LIR construction does not support non-float MIR output {out.name!r}")
+            outputs.append(out)
+        if len(formats) != 1:
+            ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
+            raise ValueError(f"LIR requires exactly one floating-point format; got {ordered or 'none'}")
+        return cls(nodes=nodes, input_ids=list(mir.input_ids), outputs=outputs, fmt=next(iter(formats)))
 
 
 class MirBuilder:

@@ -12,10 +12,9 @@ from ._backend.verilog import generate as generate_verilog, VerilogOutput
 
 from ._frontend import lower as lower_frontend
 from ._hir import optimize
-from ._lir import build, interface_of
+from ._lir import ControlPort, DataInputPort, DataOutputPort, Port, build
 from ._mir import lower as lower_to_mir
 from ._operators import HardwareOperator, OpConfig
-from ._interface import ModuleInterface
 
 type Target = Callable[..., Any] | type[object]
 
@@ -25,7 +24,11 @@ class SynthesisResult:
     """Everything produced by a synthesis run, held in memory. Nothing is written to disk unless requested."""
 
     module_name: str
-    interface: ModuleInterface
+
+    ports: list[Port]
+    input_ports: list[DataInputPort]
+    output_ports: list[DataOutputPort]
+    control_ports: list[ControlPort]
 
     verilog_output: VerilogOutput
     numerical_model: NumericalModel
@@ -74,14 +77,16 @@ def synthesize(
     mir = lower_to_mir(optimize(lower_frontend(target)), ops)
     module_name: str = name if name is not None else str(getattr(target, "__name__", "holoso_module"))
     lir = build(mir, module_name, instances=operator_instances)
-    interface = interface_of(lir)
     verilog_output = generate_verilog(lir)
-    html_output = generate_html(lir, interface, verilog_output)
+    html_output = generate_html(lir, verilog_output)
     model = generate_model(lir)
-    cocotb_output = generate_testbench(model, interface)
+    cocotb_output = generate_testbench(model)
     return SynthesisResult(
         module_name=module_name,
-        interface=interface,
+        ports=lir.ports,
+        input_ports=lir.input_ports,
+        output_ports=lir.output_ports,
+        control_ports=lir.control_ports,
         verilog_output=verilog_output,
         numerical_model=model,
         cocotb_output=cocotb_output,

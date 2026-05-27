@@ -3,7 +3,8 @@
 import math
 
 from ._copy import copy_node
-from ._ir import FloatConst, Hir, HirBuilder, Operation, ValueId
+from ._const import FloatConst
+from ._ir import Hir, HirBuilder, Operation, ValueId
 from ._operators import FloatDiv, FloatMul, FloatMulPow2
 
 
