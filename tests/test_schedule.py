@@ -217,9 +217,9 @@ def test_build_lir_ekf1() -> None:
     assert lir.float_regfile.nreg < lir.op_count + len(lir.float_inputs)
     # Inputs preload through the regfile's load port (registers 0..nload-1), so nload spans the input block.
     assert lir.float_regfile.nload == 17
-    # Port counts track internal parallelism, not I/O width.
-    assert lir.float_regfile.nwr == 3
-    assert lir.float_regfile.nrd == 5
+    # Dedicated ports: one read port per operator operand (sum of arities = 2+2+1+2), one write port per instance.
+    assert lir.float_regfile.nwr == 4
+    assert lir.float_regfile.nrd == 7
     # The 1/x21 numerator survives as a constant immediate.
     assert any(abs(c - 1.0) < 1e-12 for c in lir.float_consts)
 

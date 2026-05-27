@@ -61,8 +61,8 @@ def build(
         float_regfile=FloatRegFileLayout(
             fmt=fmt,
             nreg=alloc.nreg,
-            nrd=_compute_nrd(mir, sched, alloc),
-            nwr=_compute_nwr(mir, sched),
+            nrd=_compute_nrd(sched),
+            nwr=_compute_nwr(sched),
             nload=_compute_nload(mir, alloc),
         ),
         float_inputs=_build_inputs(mir, alloc),
@@ -204,30 +204,25 @@ def _build_outputs(mir: Mir, alloc: FloatAllocation, const_index: dict[ValueId, 
     return wires
 
 
-def _compute_nrd(mir: Mir, sched: Schedule, alloc: FloatAllocation) -> int:
+def _compute_nrd(sched: Schedule) -> int:
     """
-    Combinational read ports: the peak distinct register reads in any issue cycle.
-    Outputs use the register file's passive ``view`` bus, so only operand reads count here.
+    Combinational read ports: one dedicated port per operator operand (the sum of instance arities).
+
+    Each ``(instance, operand-position)`` reads from its own fixed port, so the controller word carries only the
+    per-port register address and the per-cycle operand-routing mux disappears. Floored to >=1 so the regfile
+    parameter guard holds when the kernel has no operators.
     """
-    per_cycle: dict[int, set[int]] = {}
-    for vid, cycle in sched.issue_cycle.items():
-        node = _operation(mir, vid)
-        regs = per_cycle.setdefault(cycle, set())
-        for operand in node.operands:
-            if not isinstance(mir.nodes[operand], MirFloatConst):
-                regs.add(alloc.assign[operand])
-    max_reads = max((len(regs) for regs in per_cycle.values()), default=0)
-    return max(max_reads, 1)
+    return max(1, sum(inst.operator.arity for inst in sched.instances))
 
 
-def _compute_nwr(mir: Mir, sched: Schedule) -> int:
-    """Synchronous write ports: the peak operator commits landing on one cycle."""
-    per_commit: dict[int, int] = {}
-    for vid, cycle in sched.issue_cycle.items():
-        commit = cycle + _operation(mir, vid).operator.latency
-        per_commit[commit] = per_commit.get(commit, 0) + 1
-    peak_commits = max(per_commit.values(), default=0)
-    return max(peak_commits, 1)
+def _compute_nwr(sched: Schedule) -> int:
+    """
+    Synchronous write ports: one dedicated port per operator instance.
+
+    Each instance's result wires straight to its own write port (no write-data routing mux) and the error/commit
+    gating is just that port's write-enable. Floored to >=1 so the regfile parameter guard holds with no operators.
+    """
+    return max(1, len(sched.instances))
 
 
 def _compute_nload(mir: Mir, alloc: FloatAllocation) -> int:

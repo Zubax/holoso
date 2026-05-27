@@ -232,9 +232,7 @@ scheduled float op:
 makespan: the last commit cycle (the in_valid->out_valid latency is makespan + 1)
 ```
 
-LIR exposes generic dataclass bases (`OperatorInstance`, `RegRef`, `ConstRef`, `Operand`, `ScheduledOp`, `InputLoad`,
-`OutputWire`, `RegFileLayout`) and float-specialized subclasses (`FloatOperatorInstance`, `FloatRegRef`,
-`FloatConstRef`, `FloatOperand`, `FloatScheduledOp`, `FloatInputLoad`, `FloatOutputWire`, `FloatRegFileLayout`).
+LIR exposes only a minimal API surface, following the design policies.
 The top-level `Lir` fields are typed explicitly as `float_instances`, `float_regfile`, `float_inputs`, `float_ops`,
 and `float_outputs` because the current machine has only float data resources; future bool/int resources should add
 sibling fields instead of overloading these. LIR construction fails explicitly if selected MIR contains a non-float
@@ -314,11 +312,11 @@ regalloc: linear scan over commit cycles; share a register when last_use <= def 
   The configurable per-class budget (default 1) caps instances of each distinct operator value of that class: equal ops
   time-share, serializing when more than the budget would co-issue.
 
-- Read/write ports auto-size to the schedule's peak internal parallelism (independent of I/O width).
-  Inputs preload through the register file's immediate `load` port on cycle 0 instead of write ports.
-  Outputs are tapped from the register file's passive `view` bus by fixed register index instead of read ports.
-  An optional NRD/NWR budget (default unbounded) instead gates admission and lengthens the makespan to fit --
-  the knob for trading latency against register-file area.
+- Read/write ports are dedicated, so the controller word carries only addresses (no operand or write-data crossbar):
+  one read port per operator operand (`nrd` = sum of instance arities) and one write port per operator instance
+  (`nwr` = instance count), independent of I/O width. Inputs preload through the register file's immediate `load` port
+  on step 0 instead of write ports. Outputs are tapped from the register file's passive `view` bus by fixed register
+  index instead of read ports.
 
 - The `load` port folds into each low register's write-data OR (one masked term, no address comparator), so a
   single-cycle preload of registers `0..nload-1` costs far less than the per-register comparators that one write
@@ -335,20 +333,34 @@ pipelined overlap, is the better trade.
 ## Backend (ZISC)
 
 Mechanical from LIR: a `holoso_regfile` flop bank, one operator instance per `FloatOperatorInstance`, and one continuous
-assignment per pooled constant -- its ZKF bit pattern precomputed in Python by `FloatFormat.encode` --
-all driven by a control word. The controller is a cycle counter `cyc` driving a `case(cyc)`
-microprogram that replays the static schedule: `cyc==0` accepts and parallel-loads the inputs through the register
-file's `load` port (registers `0..nload-1` in one cycle), `cyc` advances every clock through the compute cycles
-`1..makespan`, and `cyc==makespan+1` asserts `out_valid` while the outputs are driven combinationally from the
-register file's `view` bus (wired by fixed register index, so no read ports and no read-address work that cycle).
-Each compute cycle asserts `in_valid` to the operators issued that cycle (driving their operand reads) and writes
-back the operators that commit that cycle. No scoreboard is needed because latencies are static. Errors are non-fatal
-and informative: a combinational `err` flag in the `case(cyc)` block ORs the error signals of the operators committing
-that cycle, and the control block latches `err_cyc <= cyc` whenever `err`, so `err_cyc` is 0 if the run hit no errors
-(reset at every accept; `|err_cyc` means "any error"), else the last cycle one occurred.
+assignment per pooled constant -- its ZKF bit pattern precomputed in Python by `FloatFormat.encode`. The controller is a
+microcode ROM: one pre-decoded VLIW control word per step, stored in a (BRAM-inferable) ROM and registered on read. A
+program counter `pc` addresses the ROM with its *next* state, so the registered word for step N is available exactly
+during step N -- no added latency, the makespan and the `in_valid->out_valid` interval are unchanged. Registering the
+word is the point: it splits what used to be one wide combinational `case(cyc)` cone (`cyc -> read-address mux -> regfile
+read -> operand mux -> operator`) into two short register-to-register paths (`pc -> ROM -> word` and `word -> datapath`).
 
-Reset covers only the control registers (`cyc`, `err_cyc`). Nonblocking assignment only, `case` not functions.
-The control word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
+The schedule is replayed step by step: `pc==0` accepts and parallel-loads the inputs through the register file's `load`
+port (registers `0..nload-1` in one cycle, gated by `in_valid`); `pc` advances every clock through the compute steps
+`1..makespan`; and `pc==makespan+1` asserts `out_valid` while the outputs are driven combinationally from the register
+file's `view` bus (wired by fixed register index). The PC holds only at these two I/O boundaries; bubble steps with no
+issue/commit carry an explicit NOP word and the PC keeps advancing -- trading a little ROM for a trivial, fast sequencer.
+No scoreboard is needed because latencies are static.
+
+The control word stores selectors and addresses, never data: each operator operand has a dedicated register-file read
+port (the word carries only its address, so there is no operand crossbar), and each operator instance has a dedicated
+write port (its result wires straight in; the word carries the write enable and destination). Constant operands keep
+using the `const_<i>` immediate wires through a small per-operand select. A control field that is constant across the
+whole program -- very common for sign controls -- is driven by a constant net and lifted out of the ROM, so synthesis
+prunes the logic it feeds (e.g. an unused sign conditioner); the Python packer that builds the ROM and the bit-slice
+offsets the module reads are produced together, so they cannot drift.
+
+Errors are non-fatal and informative: `err` ORs each error-bearing operator's flag gated by that instance's write-enable
+(the step it commits), and the control block  latches `err_cyc <= pc` whenever `err`, so `err_cyc` is 0 if the run hit
+no errors (reset at every accept; `|err_cyc` means "any error"), else the last step one occurred.
+
+Reset covers only the control registers (`pc`, `err_cyc`); the ROM word register follows `pc` (`next_pc==0` under
+reset). The control word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
 
 Each operator instance carries its own parameters and float format, fixed at construction from the `OpConfig` threaded
 through `synthesize`. The wrappers' instantiation params come from `operator.hdl_params()` and the scheduler's timing
@@ -356,9 +368,10 @@ from `operator.latency` -- both read the same hardware operator instance, so the
 cannot drift; emitting only enabled `STAGE_*` keeps a default build's wrappers parameter-free. The wrapper instance name
 is `u_{operator.instance_stem}_{index}`, where `index` is local to that concrete operator value.
 
-**Microcode ROM (deferred, keep on the radar):** the per-cycle `case(cyc)` is a wide mux; for large kernels it could
-instead be emitted as a microcode ROM indexed by `cyc` (one packed control word per active cycle), which should
-synthesize far better at scale. This is to be confirmed empirically.
+Constant operands are kept as immediates on the input mux. Two alternatives are noted in the backend for when this turns
+into a constraint: folding constants into the register file (preloaded like inputs, so every operand is a uniform
+register read), or emitting explicit constant-load micro-instructions (uniform operand path with lighter register
+pressure, at the cost of scheduling/allocation complexity).
 
 ## Decisions
 
@@ -369,8 +382,9 @@ synthesize far better at scale. This is to be confirmed empirically.
 5. The per-operator latency model is exact and must match the RTL wrappers cycle-for-cycle: the static schedule commits
    each result on `issue + latency` without watching `out_valid`, so an inaccurate latency is a correctness bug, not a
    bad estimate. (Module I/O still uses a valid/ready handshake; `div0` is the only data-dependent runtime signal.)
-6. Software-pipelined (zero-bubble) static list scheduling over a read-first register file; the controller is a static
-   `case(cycle)` microprogram (no runtime scoreboard), since v0 operator latencies are data-independent.
+6. Software-pipelined (zero-bubble) static list scheduling over a read-first register file; the controller is a
+   microcode ROM replaying the schedule step by step (no runtime scoreboard), since v0 operator latencies are
+   data-independent.
 7. API takes the function/class object (not source files); synthesis is in-memory, returning `SynthesisResult`; disk
    I/O is an opt-in helper.
 
@@ -402,5 +416,4 @@ follow in later milestones.
 ## Deferred
 
 Operator-pool auto-sizing, optional ILP mode, dynamic-trip loops, second controller backend, FloPoCo backend,
-**microcode-ROM controller** (a packed control word per cycle indexed by `cyc`, replacing the `case(cyc)` mux --
-important for large kernels), intrinsics (`sqrt`, `sincos`, `exp`, ... -- pending ZKF support).
+intrinsics (`sqrt`, `sincos`, `exp`, ... -- pending ZKF support).
