@@ -107,20 +107,27 @@ async def holoso_fadd_cocotb(dut) -> None:
         assert int(dut.out_valid.value) == 0, "out_valid asserted while idle after reset"
 
 
-STAGE_COMBOS = ((0, 0), (1, 0), (0, 1), (1, 1))
+# (stage_decode, stage_align, stage_output): base + each knob alone + all-on -- enough to verify the additive latency.
+STAGE_COMBOS = ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1))
 
 
-@pytest.mark.parametrize("stages", STAGE_COMBOS, ids=lambda s: f"d{s[0]}a{s[1]}")
+@pytest.mark.parametrize("stages", STAGE_COMBOS, ids=lambda s: f"d{s[0]}a{s[1]}o{s[2]}")
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_holoso_fadd(sim: str, stages: tuple[int, int]) -> None:
-    stage_decode, stage_align = stages
+def test_holoso_fadd(sim: str, stages: tuple[int, int, int]) -> None:
+    stage_decode, stage_align, stage_output = stages
     runner = get_runner(sim)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fadd_d{stage_decode}a{stage_align}"
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fadd_d{stage_decode}a{stage_align}o{stage_output}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_fadd",
-        parameters={"WEXP": 8, "WMAN": 24, "STAGE_DECODE": stage_decode, "STAGE_ALIGN": stage_align},
+        parameters={
+            "WEXP": 8,
+            "WMAN": 24,
+            "STAGE_DECODE": stage_decode,
+            "STAGE_ALIGN": stage_align,
+            "STAGE_OUTPUT": stage_output,
+        },
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
@@ -133,7 +140,9 @@ def test_holoso_fadd(sim: str, stages: tuple[int, int]) -> None:
         build_dir=build_dir,
         extra_env={
             "HOLOSO_EXPECTED_LATENCY": str(
-                FAddOperator(FloatFormat(8, 24), stage_decode=stage_decode, stage_align=stage_align).latency
+                FAddOperator(
+                    FloatFormat(8, 24), stage_decode=stage_decode, stage_align=stage_align, stage_output=stage_output
+                ).latency
             )
         },
         results_xml=str(build_dir / "results.xml"),

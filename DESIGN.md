@@ -264,7 +264,8 @@ hierarchy. A concrete `HardwareOperator` is a frozen dataclass whose fields are 
 `FloatHardwareOperator` subclass, which owns its `FloatFormat` and typed `evaluate(*float) -> float` reference semantics.
 Each hardware operator owns its own timing, notation, concrete `ScalarSignature`, instantiation params, and
 `instance_stem`: a lowercase Verilog-safe physical identity stem used for collision-free HDL names. Float instance stems
-include the float format and sorted HDL params, e.g. `fadd_e8_m24` or `fmul_ilog2_const_e8_m24_k_m2`.
+include the float format and all sorted HDL params -- always emitted, including zero-valued ones -- e.g.
+`fadd_e8_m24_stage_align_0_stage_decode_0_stage_output_0` or `fmul_ilog2_const_e8_m24_k_m2_stage_decode_0`.
 
 Generic, per-node-parameterized hardware operators are factories: a standalone `ParameterizedHardwareOperator`
 carrying only its config-time knobs whose `instantiate(k)` returns a concrete `HardwareOperator`. The fully specified
@@ -276,7 +277,7 @@ its fields are all floating-point operators, and future bool/int operators shoul
 schedule construction derives the format from selected MIR instead of accepting a separate format argument. There is no
 implicit default configuration.
 Pipeline-stage knobs are named after the HDL parameters in lowercase, such as `stage_decode`, `stage_align`,
-`stage_product`, and `stage_input`.
+`stage_product`, `stage_input`, and `stage_output`.
 
 ## Scheduler
 
@@ -368,8 +369,10 @@ reset). The control word and datapath skeleton are the only ZISC-specific part -
 Each operator instance carries its own parameters and float format, fixed at construction from the `OpConfig` threaded
 through `synthesize`. The wrappers' instantiation params come from `operator.hdl_params()` and the scheduler's timing
 from `operator.latency` -- both read the same hardware operator instance, so the emitted RTL and the static schedule
-cannot drift; emitting only enabled `STAGE_*` keeps a default build's wrappers parameter-free. The wrapper instance name
-is `u_{operator.instance_stem}_{index}`, where `index` is local to that concrete operator value.
+cannot drift. `hdl_params()` always lists every parameter explicitly (including zero-valued `STAGE_*`), so the
+instantiation is self-describing, survives changes to wrapper defaults, and turns a param-name mismatch into a loud
+elaboration error. The wrapper instance name is `u_{operator.instance_stem}_{index}`, where `index` is local to that
+concrete operator value.
 
 Constant operands are kept as immediates on the input mux. Two alternatives are noted in the backend for when this turns
 into a constraint: folding constants into the register file (preloaded like inputs, so every operand is a uniform
@@ -420,3 +423,7 @@ follow in later milestones.
 
 Operator-pool auto-sizing, optional ILP mode, dynamic-trip loops, second controller backend, FloPoCo backend,
 intrinsics (`sqrt`, `sincos`, `exp`, ... -- pending ZKF support).
+
+A fused multiply-add operator wrapping kulibin `zkf_fma` is planned: a `holoso_ffma` wrapper plus an `FFmaOperator`
+(with the selection pass fusing `a*b + c` chains). It should cut operator count, register pressure, and latency, and
+help timing closure -- to be added later.

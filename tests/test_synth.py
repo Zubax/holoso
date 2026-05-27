@@ -72,7 +72,9 @@ def test_synthesize_threads_pipeline_stages() -> None:
             FMulILog2OperatorFamily(FMT32),
         ),
     )
-    assert "STAGE_" not in base.verilog_output.verilog  # default stages emit no STAGE_* instance params
+    # Every STAGE_* is emitted explicitly (defaults as 0), so the instantiation is self-describing and threading is
+    # visible in both directions: default operators show 0, configured ones show 1.
+    assert ".STAGE_DECODE(0)" in base.verilog_output.verilog
     assert ".STAGE_DECODE(1)" in staged.verilog_output.verilog and ".STAGE_PRODUCT(1)" in staged.verilog_output.verilog
 
 
@@ -120,7 +122,7 @@ def test_report_has_expected_sections() -> None:
         "module _kernel (",
         "input  wire [31:0] in_a",
         "output wire [31:0] out_0",
-        "output reg  [4:0] err_pc",
+        "output reg  [3:0] err_pc",
     ):
         assert token in result.verilog_output.verilog
         assert token in header_text

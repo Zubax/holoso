@@ -149,16 +149,19 @@ class FAddOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fadd"
     stage_decode: int = 0
     stage_align: int = 0
+    stage_output: int = 0
 
     def __post_init__(self) -> None:
         if self.stage_decode not in (0, 1):
             raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
         if self.stage_align not in (0, 1):
             raise ValueError(f"stage_align must be 0 or 1; got {self.stage_align!r}")
+        if self.stage_output not in (0, 1):
+            raise ValueError(f"stage_output must be 0 or 1; got {self.stage_output!r}")
 
     @property
     def latency(self) -> int:
-        return 6 + self.stage_decode + self.stage_align
+        return 4 + self.stage_decode + self.stage_align + self.stage_output
 
     @property
     def signature(self) -> ScalarSignature:
@@ -173,26 +176,27 @@ class FAddOperator(FloatHardwareOperator):
         return f"{a}+{b}"
 
     def hdl_params(self) -> dict[str, int]:
-        params: dict[str, int] = {}
-        if self.stage_decode:
-            params["STAGE_DECODE"] = 1
-        if self.stage_align:
-            params["STAGE_ALIGN"] = 1
-        return params
+        return {"STAGE_DECODE": self.stage_decode, "STAGE_ALIGN": self.stage_align, "STAGE_OUTPUT": self.stage_output}
 
 
 @dataclass(frozen=True, slots=True)
 class FMulOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fmul"
+    stage_input: int = 0
     stage_product: int = 0
+    stage_output: int = 0
 
     def __post_init__(self) -> None:
+        if self.stage_input not in (0, 1):
+            raise ValueError(f"stage_input must be 0 or 1; got {self.stage_input!r}")
         if self.stage_product not in (0, 1):
             raise ValueError(f"stage_product must be 0 or 1; got {self.stage_product!r}")
+        if self.stage_output not in (0, 1):
+            raise ValueError(f"stage_output must be 0 or 1; got {self.stage_output!r}")
 
     @property
     def latency(self) -> int:
-        return 3 + self.stage_product
+        return 1 + self.stage_input + self.stage_product + self.stage_output
 
     @property
     def signature(self) -> ScalarSignature:
@@ -207,7 +211,7 @@ class FMulOperator(FloatHardwareOperator):
         return f"{a}×{b}"
 
     def hdl_params(self) -> dict[str, int]:
-        return {"STAGE_PRODUCT": 1} if self.stage_product else {}
+        return {"STAGE_INPUT": self.stage_input, "STAGE_PRODUCT": self.stage_product, "STAGE_OUTPUT": self.stage_output}
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,15 +219,18 @@ class FDivOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fdiv"
     error_ports: ClassVar[list[str]] = ["div0"]
     stage_input: int = 0
+    stage_output: int = 0
 
     def __post_init__(self) -> None:
         if self.stage_input not in (0, 1):
             raise ValueError(f"stage_input must be 0 or 1; got {self.stage_input!r}")
+        if self.stage_output not in (0, 1):
+            raise ValueError(f"stage_output must be 0 or 1; got {self.stage_output!r}")
 
     @property
     def latency(self) -> int:
         w = self.fmt.wman
-        return 4 + ((w + 2 + ((w + 2) % 2)) // 2) + self.stage_input
+        return 2 + self.stage_input + ((w + 2 + ((w + 2) % 2)) // 2) + self.stage_output
 
     @property
     def signature(self) -> ScalarSignature:
@@ -238,7 +245,7 @@ class FDivOperator(FloatHardwareOperator):
         return f"{a}/{b}"
 
     def hdl_params(self) -> dict[str, int]:
-        return {"STAGE_INPUT": 1} if self.stage_input else {}
+        return {"STAGE_INPUT": self.stage_input, "STAGE_OUTPUT": self.stage_output}
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,10 +280,7 @@ class FMulILog2Operator(FloatHardwareOperator):
         return f"{a}×2^{self.k}"
 
     def hdl_params(self) -> dict[str, int]:
-        params: dict[str, int] = {"K": self.k}
-        if self.stage_decode:
-            params["STAGE_DECODE"] = 1
-        return params
+        return {"K": self.k, "STAGE_DECODE": self.stage_decode}
 
 
 @dataclass(frozen=True, slots=True)

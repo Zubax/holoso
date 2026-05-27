@@ -33,7 +33,8 @@ from .hdl_float_oracle import (
     start_clock,
 )
 
-STAGE_PRODUCT_VALUES = (0, 1)
+# (stage_input, stage_product, stage_output): base + each knob alone + all-on -- enough to verify additive latency.
+STAGE_COMBOS = ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1))
 
 
 @cocotb.test()
@@ -105,16 +106,23 @@ async def holoso_fmul_cocotb(dut) -> None:
         assert int(dut.out_valid.value) == 0
 
 
-@pytest.mark.parametrize("stage_product", STAGE_PRODUCT_VALUES)
+@pytest.mark.parametrize("stages", STAGE_COMBOS, ids=lambda s: f"i{s[0]}p{s[1]}o{s[2]}")
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_holoso_fmul(sim: str, stage_product: int) -> None:
+def test_holoso_fmul(sim: str, stages: tuple[int, int, int]) -> None:
+    stage_input, stage_product, stage_output = stages
     runner = get_runner(sim)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fmul_sp{stage_product}"
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fmul_i{stage_input}p{stage_product}o{stage_output}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_fmul",
-        parameters={"WEXP": 8, "WMAN": 24, "STAGE_PRODUCT": stage_product},
+        parameters={
+            "WEXP": 8,
+            "WMAN": 24,
+            "STAGE_INPUT": stage_input,
+            "STAGE_PRODUCT": stage_product,
+            "STAGE_OUTPUT": stage_output,
+        },
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
@@ -126,7 +134,11 @@ def test_holoso_fmul(sim: str, stage_product: int) -> None:
         test_dir=REPO_ROOT,
         build_dir=build_dir,
         extra_env={
-            "HOLOSO_EXPECTED_LATENCY": str(FMulOperator(FloatFormat(8, 24), stage_product=stage_product).latency)
+            "HOLOSO_EXPECTED_LATENCY": str(
+                FMulOperator(
+                    FloatFormat(8, 24), stage_input=stage_input, stage_product=stage_product, stage_output=stage_output
+                ).latency
+            )
         },
         results_xml=str(build_dir / "results.xml"),
     )

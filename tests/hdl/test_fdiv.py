@@ -37,7 +37,7 @@ from .hdl_float_oracle import (
     start_clock,
 )
 
-STAGE_INPUT_VALUES = (0, 1)
+STAGE_COMBOS = ((0, 0), (1, 0), (0, 1), (1, 1))  # (stage_input, stage_output) -- full cross-product
 
 
 def _exp_is_zero(bits: int) -> bool:
@@ -129,17 +129,18 @@ async def holoso_fdiv_cocotb(dut) -> None:
         assert int(dut.out_valid.value) == 0
 
 
-@pytest.mark.parametrize("stage_input", STAGE_INPUT_VALUES)
+@pytest.mark.parametrize("stages", STAGE_COMBOS, ids=lambda s: f"i{s[0]}o{s[1]}")
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_holoso_fdiv(sim: str, stage_input: int) -> None:
+def test_holoso_fdiv(sim: str, stages: tuple[int, int]) -> None:
+    stage_input, stage_output = stages
     runner = get_runner(sim)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fdiv_si{stage_input}"
-    latency = FDivOperator(FloatFormat(8, 24), stage_input=stage_input).latency
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fdiv_i{stage_input}o{stage_output}"
+    latency = FDivOperator(FloatFormat(8, 24), stage_input=stage_input, stage_output=stage_output).latency
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_fdiv",
-        parameters={"WEXP": 8, "WMAN": 24, "STAGE_INPUT": stage_input},
+        parameters={"WEXP": 8, "WMAN": 24, "STAGE_INPUT": stage_input, "STAGE_OUTPUT": stage_output},
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
