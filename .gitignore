@@ -46,3 +46,4 @@ hdr_log
 *.coverage*
 *.egg-info
 .idea/
+.claude/worktrees
