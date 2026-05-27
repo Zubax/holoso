@@ -58,6 +58,8 @@ Minimize the public API surface.
 
 Importing anything from a package or subpackage is only allowed as long as it doesn't involve referencing
 underscore-prefixed names. Exceptions apply for importing from parent modules with the dot notation, and for unit tests.
+Accessing underscore-prefixed names from outside a class (or its descendants) is not allowed;
+all externally accessble entities must be non-underscore-prefixed.
 
 If a docstring comment doesn't fit on one line, add an initial line break like this:
 

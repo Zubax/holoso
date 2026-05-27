@@ -75,7 +75,7 @@ async def cosim(dut):
         while int(dut.out_valid.value) != 1:
             await RisingEdge(dut.clk)
             await Timer(1, unit="ns")
-        assert int(dut.err_cyc.value) == 0, "vector %d: unexpected error at cycle %d" % (index, int(dut.err_cyc.value))
+        assert int(dut.err_pc.value) == 0, "vector %d: unexpected error at cycle %d" % (index, int(dut.err_pc.value))
 
         for name, want in zip(out_names, exp_bits):
             got = int(getattr(dut, name).value)

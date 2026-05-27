@@ -33,10 +33,10 @@ def test_synthesize_small_kernel_result() -> None:
     assert "@cocotb.test()" in result.cocotb_output.testbench
     assert "<html" in result.html_output.html.lower()
     names = [p.name for p in result.interface.ports]
-    assert "in_a" in names and "out_0" in names and "err_cyc" in names
+    assert "in_a" in names and "out_0" in names and "err_pc" in names
     assert all(isinstance(p, holoso.DataInputPort) for p in result.interface.input_ports)
     assert all(isinstance(p, holoso.DataOutputPort) for p in result.interface.output_ports)
-    assert any(isinstance(p, holoso.ControlOutputPort) and p.name == "err_cyc" for p in result.interface.control_ports)
+    assert any(isinstance(p, holoso.ControlOutputPort) and p.name == "err_pc" for p in result.interface.control_ports)
     assert all(
         isinstance(p.scalar_type, holoso.FloatType) and p.scalar_type.fmt == FMT32 for p in result.interface.input_ports
     )
@@ -120,7 +120,7 @@ def test_report_has_expected_sections() -> None:
         "module _kernel (",
         "input  wire [31:0] in_a",
         "output wire [31:0] out_0",
-        "output reg  [4:0] err_cyc",
+        "output reg  [4:0] err_pc",
     ):
         assert token in result.verilog_output.verilog
         assert token in header_text

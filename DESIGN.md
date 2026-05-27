@@ -356,10 +356,10 @@ prunes the logic it feeds (e.g. an unused sign conditioner); the Python packer t
 offsets the module reads are produced together, so they cannot drift.
 
 Errors are non-fatal and informative: `err` ORs each error-bearing operator's flag gated by that instance's write-enable
-(the step it commits), and the control block  latches `err_cyc <= pc` whenever `err`, so `err_cyc` is 0 if the run hit
-no errors (reset at every accept; `|err_cyc` means "any error"), else the last step one occurred.
+(the step it commits), and the control block  latches `err_pc <= pc` whenever `err`, so `err_pc` is 0 if the run hit
+no errors (reset at every accept; `|err_pc` means "any error"), else the last step one occurred.
 
-Reset covers only the control registers (`pc`, `err_cyc`); the ROM word register follows `pc` (`next_pc==0` under
+Reset covers only the control registers (`pc`, `err_pc`); the ROM word register follows `pc` (`next_pc==0` under
 reset). The control word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
 
 Each operator instance carries its own parameters and float format, fixed at construction from the `OpConfig` threaded

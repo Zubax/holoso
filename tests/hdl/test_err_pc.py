@@ -1,8 +1,8 @@
 """
-Directed cosim: a divide-by-zero latches ``err_cyc`` to the fdiv's commit cycle, and it resets each run.
+Directed cosim: a divide-by-zero latches ``err_pc`` to the fdiv's commit cycle, and it resets each run.
 
-Builds the tiny module ``a / b``, then drives three back-to-back invocations: a normal one (err_cyc stays 0), a
-zero-divisor one (err_cyc latches the fdiv commit cycle, == cycle_count-1, which is nonzero), and a normal one again
+Builds the tiny module ``a / b``, then drives three back-to-back invocations: a normal one (err_pc stays 0), a
+zero-divisor one (err_pc latches the fdiv commit cycle, == cycle_count-1, which is nonzero), and a normal one again
 (the per-initiation reset must have cleared the prior error).
 """
 
@@ -37,7 +37,7 @@ async def _settle(dut) -> None:  # type: ignore[no-untyped-def]
 
 
 @cocotb.test()
-async def err_cyc_latches_div0(dut) -> None:
+async def err_pc_latches_div0(dut) -> None:
     cycles = int(json.loads(os.environ["HOLOSO_ERRCYC"])["cycles"])
     a_bits = FMT.encode(1.0)
 
@@ -55,18 +55,18 @@ async def err_cyc_latches_div0(dut) -> None:
         dut.in_valid.value = 0
         while int(dut.out_valid.value) != 1:
             await _settle(dut)
-        latched = int(dut.err_cyc.value)
+        latched = int(dut.err_pc.value)
         await _settle(dut)  # accept the result and return to idle
         return latched
 
-    assert await invoke(2.0) == 0, "no-error run must leave err_cyc clear"
+    assert await invoke(2.0) == 0, "no-error run must leave err_pc clear"
     # Divide by zero: the fdiv asserts div0 at its commit cycle, the last compute cycle.
-    assert await invoke(0.0) == cycles - 1, "div0 must latch err_cyc to the fdiv commit cycle"
+    assert await invoke(0.0) == cycles - 1, "div0 must latch err_pc to the fdiv commit cycle"
     assert await invoke(2.0) == 0, "the per-initiation reset must clear the previous run's error"
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_err_cyc(sim: str) -> None:
+def test_err_pc(sim: str) -> None:
     lir = build(lower_to_mir(optimize(lower(_divide)), OPS), "divide")
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"divide_w{FMT.wexp}_{FMT.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
@@ -86,7 +86,7 @@ def test_err_cyc(sim: str) -> None:
     )
     runner.test(
         hdl_toplevel="divide",
-        test_module="tests.hdl.test_err_cyc",
+        test_module="tests.hdl.test_err_pc",
         test_dir=str(REPO_ROOT),
         build_dir=str(build_dir),
         extra_env={"HOLOSO_ERRCYC": json.dumps({"cycles": lir.initiation_interval})},

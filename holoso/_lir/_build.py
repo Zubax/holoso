@@ -256,5 +256,5 @@ def interface_of(lir: Lir) -> ModuleInterface:
     ]
     ports.extend(DataInputPort(f"in_{load.name}", scalar_type) for load in lir.float_inputs)
     ports.extend(DataOutputPort(wire.name, scalar_type) for wire in lir.float_outputs)
-    ports.append(ControlOutputPort("err_cyc", lir.cyc_width))
+    ports.append(ControlOutputPort("err_pc", lir.cyc_width))
     return ModuleInterface(lir.module_name, ports)

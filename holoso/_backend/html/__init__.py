@@ -1,3 +1,3 @@
 """The HTML backend: render a self-contained single-page report for a synthesized module."""
 
-from .html import HtmlOutput as HtmlOutput, generate as generate
+from ._html import HtmlOutput as HtmlOutput, generate as generate

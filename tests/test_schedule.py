@@ -197,7 +197,7 @@ def test_build_lir_small_kernel() -> None:
         "in_a",
         "in_b",
         "out_0",
-        "err_cyc",
+        "err_pc",
     ):
         assert expected in names
 

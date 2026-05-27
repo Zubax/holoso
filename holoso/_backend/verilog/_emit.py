@@ -1,25 +1,43 @@
 """
-Render a :class:`Lir` into a synthesizable Verilog ZISC module, plus access to the shared ``holoso_support`` HDL that
-the generated module instantiates.
+Render a scheduled :class:`Lir` into a synthesizable Verilog ZISC module, plus access to the shared ``holoso_support``
+HDL that the generated module instantiates.
 
-The controller is a microcode ROM: one pre-decoded VLIW control word per step, stored in a (BRAM-inferable) ROM and
-registered on read. Addressing the ROM with the *next* program counter and registering its output keeps the word for
-step N available exactly during step N (no added latency), while splitting the old combinational ``case(cyc)`` cone
-into two short register-to-register paths -- ``pc -> ROM -> word`` and ``word -> datapath``. Each operator operand has
-a dedicated register-file read port (the word carries only its address, no operand crossbar), and each operator
-instance has a dedicated write port (its result wires straight in). Control fields that are constant across the whole
-program (very common for sign controls) are driven by constant nets and omitted from the ROM, so synthesis prunes the
-logic they feed -- the behaviour the old default-initialised ``always @*`` got implicitly.
+The controller is a microcode ROM (see :mod:`._microcode`): one pre-decoded VLIW control word per step, stored in a
+(BRAM-inferable) ROM and registered on read. Addressing the ROM with the *next* program counter and registering its
+output keeps the word for step N available exactly during step N (no added latency), while splitting the old
+combinational ``case(cyc)`` cone into two short register-to-register paths -- ``pc -> ROM -> word`` and
+``word -> datapath``. Each operator operand has a dedicated register-file read port (the word carries only its address,
+no operand crossbar), and each operator instance has a dedicated write port (its result wires straight in). Control
+fields that are constant across the whole program (very common for sign controls) are driven by constant nets and
+omitted from the ROM, so synthesis prunes the logic they feed.
 """
 
 from dataclasses import dataclass
 from importlib import resources
-from string import ascii_letters
 
-from ..._lir import FloatConstRef, Lir, FloatOperand, FloatOperatorInstance, FloatRegRef, FloatScheduledOp
+from ..._lir import FloatConstRef, Lir, FloatOperatorInstance, FloatScheduledOp
 from ..._operators import FloatSignControl
-
-_PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
+from ._microcode import (
+    PORT_LETTERS,
+    Field,
+    base_name,
+    build_microcode,
+    cycle_summary,
+    f_cidx,
+    f_iv,
+    f_osgn,
+    f_rd,
+    f_selc,
+    f_we,
+    f_wa,
+    f_ysgn,
+    finalize_fields,
+    group_by_cycle,
+    pack,
+    port_const_map,
+    read_ports,
+    write_ports,
+)
 
 _SUPPORT_FILES = {
     name: resources.files(__package__).joinpath(name).read_text(encoding="utf-8")
@@ -60,27 +78,8 @@ class _Writer:
         return "\n".join(self._lines) + "\n"
 
 
-@dataclass
-class _Field:
-    """
-    One scalar control field of the microcode word, with its value on every step (``None`` == don't-care).
-    After :func:`_finalize_fields`, a field is either constant across the program (``offset < 0``; driven by the
-    constant net ``const_value``) or varying (stored at bit ``offset`` of the ROM word).
-    """
-
-    name: str
-    width: int
-    values: list[int | None]
-    offset: int = -1
-    const_value: int = 0
-
-
-def _base(inst: FloatOperatorInstance) -> str:
-    return f"{inst.operator.instance_stem}_{inst.index}"
-
-
 def _sig(inst: FloatOperatorInstance) -> str:
-    return f"s_{_base(inst)}"
+    return f"s_{base_name(inst)}"
 
 
 def _rf_data(port: int) -> str:
@@ -95,39 +94,6 @@ def _rf_view(reg: int) -> str:
     return f"`REGF_VIEW({reg})"
 
 
-# Microcode field names. Signal names (``s_<base>_*``) and field names (``mc_*_<base>``) live in disjoint namespaces.
-def _f_rd(port: int) -> str:
-    return f"mc_rd{port}"
-
-
-def _f_iv(base: str) -> str:
-    return f"mc_iv_{base}"
-
-
-def _f_osgn(base: str, letter: str) -> str:
-    return f"mc_{base}_{letter}s"
-
-
-def _f_ysgn(base: str) -> str:
-    return f"mc_{base}_ys"
-
-
-def _f_selc(port: int) -> str:
-    return f"mc_selc{port}"
-
-
-def _f_cidx(port: int) -> str:
-    return f"mc_cidx{port}"
-
-
-def _f_we(base: str) -> str:
-    return f"mc_we_{base}"
-
-
-def _f_wa(base: str) -> str:
-    return f"mc_wa_{base}"
-
-
 def _decl_range(width: int) -> str:
     return "" if width == 1 else f"[{width - 1}:0] "
 
@@ -136,139 +102,20 @@ def _lit(width: int, value: int) -> str:
     return f"{width}'d{value}"
 
 
-def _operand_name(operand: FloatOperand) -> str:
-    base = f"r{operand.source.index}" if isinstance(operand.source, FloatRegRef) else f"c{operand.source.index}"
-    return operand.sign.decorate(base)
-
-
-def _op_expr(op: FloatScheduledOp) -> str:
-    return f"r{op.dst.index}={op.inst.operator.render(*[_operand_name(o) for o in op.operands])}"
-
-
-def _cycle_summary(issues: list[FloatScheduledOp], commits: list[FloatScheduledOp]) -> str:
-    parts: list[str] = []
-    if issues:
-        parts.append("issue " + ", ".join(_op_expr(op) for op in issues))
-    if commits:
-        parts.append("commit " + ", ".join(f"r{op.dst.index}" for op in commits))
-    return "; ".join(parts)
-
-
-def _group_by_cycle(lir: Lir) -> tuple[dict[int, list[FloatScheduledOp]], dict[int, list[FloatScheduledOp]]]:
-    """Group the schedule into per-cycle issues (by issue_cycle) and commits (by commit_cycle), canonically ordered."""
-    issues: dict[int, list[FloatScheduledOp]] = {}
-    commits: dict[int, list[FloatScheduledOp]] = {}
-    for op in lir.float_ops:
-        issues.setdefault(op.issue_cycle, []).append(op)
-        commits.setdefault(op.commit_cycle, []).append(op)
-    for group in (issues, commits):
-        for ops in group.values():
-            ops.sort(key=lambda op: (_base(op.inst), op.dst.index, op.issue_cycle))
-    return issues, commits
-
-
-def _build_microcode(
-    lir: Lir, read_port: dict[tuple[FloatOperatorInstance, int], int], port_consts: dict[int, list[int]], waddr: int
-) -> dict[str, _Field]:
-    """
-    Build the per-step value table of every control field from the static schedule.
-    ``in_valid`` and ``write-enable`` are concrete every step (they gate operation), so they default to 0; every other
-    field is a don't-care (``None``) except on the step its operator issues or commits, which maximises the constant
-    columns that later get lifted out of the ROM.
-    """
-    depth = lir.makespan + 2  # steps 0..LAST (LAST == makespan + 1, the present step)
-    fields: dict[str, _Field] = {}
-
-    def add(name: str, width: int, default: int | None) -> None:
-        fields[name] = _Field(name, width, [default] * depth)
-
-    for inst in lir.float_instances:
-        base = _base(inst)
-        add(_f_iv(base), 1, 0)
-        add(_f_we(base), 1, 0)
-        add(_f_wa(base), waddr, None)
-        add(_f_ysgn(base), 2, None)
-        for pos in range(inst.operator.arity):
-            add(_f_osgn(base, _PORT_LETTERS[pos]), 2, None)
-            port = read_port[(inst, pos)]
-            add(_f_rd(port), waddr, None)
-            if port in port_consts:
-                add(_f_selc(port), 1, None)
-                if len(port_consts[port]) > 1:
-                    add(_f_cidx(port), max(1, (len(port_consts[port]) - 1).bit_length()), None)
-
-    for op in lir.float_ops:
-        base = _base(op.inst)
-        ci = op.issue_cycle
-        fields[_f_iv(base)].values[ci] = 1
-        fields[_f_ysgn(base)].values[ci] = op.result_sign.encoded
-        for pos, operand in enumerate(op.operands):
-            port = read_port[(op.inst, pos)]
-            fields[_f_osgn(base, _PORT_LETTERS[pos])].values[ci] = operand.sign.encoded
-            if isinstance(operand.source, FloatConstRef):
-                fields[_f_selc(port)].values[ci] = 1
-                if _f_cidx(port) in fields:
-                    fields[_f_cidx(port)].values[ci] = port_consts[port].index(operand.source.index)
-            else:
-                if _f_selc(port) in fields:
-                    fields[_f_selc(port)].values[ci] = 0
-                fields[_f_rd(port)].values[ci] = operand.source.index
-        cc = op.commit_cycle
-        fields[_f_we(base)].values[cc] = 1
-        fields[_f_wa(base)].values[cc] = op.dst.index
-
-    return fields
-
-
-def _finalize_fields(fields: dict[str, _Field]) -> int:
-    """Partition fields into constant (lifted out, ``offset = -1``) and varying (packed); return the ROM word width."""
-    offset = 0
-    for f in fields.values():
-        concrete = [v for v in f.values if v is not None]
-        if concrete and any(v != concrete[0] for v in concrete):
-            f.offset = offset
-            offset += f.width
-        else:
-            f.offset = -1
-            f.const_value = concrete[0] if concrete else 0
-    return max(1, offset)
-
-
-def _pack(fields: dict[str, _Field], step: int) -> int:
-    word = 0
-    for f in fields.values():
-        if f.offset < 0:
-            continue
-        v = f.values[step]
-        word |= ((0 if v is None else v) & ((1 << f.width) - 1)) << f.offset
-    return word
-
-
 def generate(lir: Lir) -> VerilogOutput:
     w = _Writer()
     rf = lir.float_regfile
     waddr = max(1, (rf.nreg - 1).bit_length())
     cycw = lir.cyc_width
 
-    # Dedicated ports: one read port per operator operand, one write port per operator instance. The counts match
-    # FloatRegFileLayout.nrd/nwr (sum of arities / instance count), so the regfile is parameterised consistently.
-    read_port: dict[tuple[FloatOperatorInstance, int], int] = {}
-    for inst in lir.float_instances:
-        for pos in range(inst.operator.arity):
-            read_port[(inst, pos)] = len(read_port)
-    write_port = {inst: index for index, inst in enumerate(lir.float_instances)}
-
-    port_consts: dict[int, list[int]] = {}  # read port -> the distinct constant-pool indices it ever sources
-    for op in lir.float_ops:
-        for pos, operand in enumerate(op.operands):
-            if isinstance(operand.source, FloatConstRef):
-                port_consts.setdefault(read_port[(op.inst, pos)], [])
-                if operand.source.index not in port_consts[read_port[(op.inst, pos)]]:
-                    port_consts[read_port[(op.inst, pos)]].append(operand.source.index)
-
-    fields = _build_microcode(lir, read_port, port_consts, waddr)
-    ucw = _finalize_fields(fields)
-    issues_by_cycle, commits_by_cycle = _group_by_cycle(lir)
+    # Dedicated ports: one read port per operator operand, one write port per operator instance (matching
+    # FloatRegFileLayout.nrd/nwr), so the control word carries only addresses and there is no operand/write crossbar.
+    read_port = read_ports(lir)
+    write_port = write_ports(lir)
+    port_consts = port_const_map(lir, read_port)
+    fields = build_microcode(lir, read_port, port_consts, waddr)
+    ucw = finalize_fields(fields)
+    issues_by_cycle, commits_by_cycle = group_by_cycle(lir)
 
     _emit_header(w, lir, cycw)
     _emit_localparams(w, lir, waddr, cycw, ucw)
@@ -309,8 +156,8 @@ def _emit_header(w: _Writer, lir: Lir, cycw: int) -> None:
     for wire in lir.float_outputs:
         w.line(f"output wire [{fmt.width - 1}:0] {wire.name},")
     _emit_port_group(w, "DIAGNOSTIC PORTS", "Runtime diagnostics available while the module is running.")
-    # err_cyc: 0 = no error; otherwise the (last) step an error was detected. |err_cyc answers "any error?".
-    w.line(f"output reg  [{cycw - 1}:0] err_cyc")
+    # err_pc: 0 = no error; otherwise the (last) step an error was detected. |err_pc answers "any error?".
+    w.line(f"output reg  [{cycw - 1}:0] err_pc")
     w.pop()
     w.lines(");", "")
 
@@ -367,7 +214,7 @@ def _emit_declarations(w: _Writer, lir: Lir) -> None:
     for inst in lir.float_instances:
         sig = _sig(inst)
         w.line(f"wire         {sig}_iv;")
-        for letter in _PORT_LETTERS[: inst.operator.arity]:
+        for letter in PORT_LETTERS[: inst.operator.arity]:
             w.line(f"wire [1:0]   {sig}_{letter}s;")
             w.line(f"wire [W-1:0] {sig}_{letter};")
         w.line(f"wire [1:0]   {sig}_ys;")
@@ -411,14 +258,14 @@ def _emit_regfile(w: _Writer, lir: Lir) -> None:
 def _emit_operators(w: _Writer, lir: Lir) -> None:
     for inst in lir.float_instances:
         sig = _sig(inst)
-        letters = _PORT_LETTERS[: inst.operator.arity]
+        letters = PORT_LETTERS[: inst.operator.arity]
         # WEXP/WMAN frame the float format; hdl_params() adds K (ilog2) and any enabled STAGE_* (defaults omitted),
         # so the schedule's op.latency and the emitted instantiation params always describe the same module.
         parts = [".WEXP(WEXP)", ".WMAN(WMAN)"] + [
             f".{param}({value})" for param, value in inst.operator.hdl_params().items()
         ]
         params = "#(" + ", ".join(parts) + ")"
-        w.line(f"{inst.operator.module_name} {params} u_{_base(inst)} (")
+        w.line(f"{inst.operator.module_name} {params} u_{base_name(inst)} (")
         w.push()
         w.line(f".clk(clk), .rst(rst), .in_valid({sig}_iv),")
         sgn_ports = ", ".join(f".{letter}_sgnop({sig}_{letter}s)" for letter in letters)
@@ -436,31 +283,30 @@ def _emit_operators(w: _Writer, lir: Lir) -> None:
 
 def _emit_microcode_rom(
     w: _Writer,
-    fields: dict[str, _Field],
+    fields: dict[str, Field],
     ucw: int,
     depth: int,
     issues_by_cycle: dict[int, list[FloatScheduledOp]],
     commits_by_cycle: dict[int, list[FloatScheduledOp]],
 ) -> None:
     digits = (ucw + 3) // 4
-    w.line("// Microcode VLIW ROM: one pre-decoded control word per step, registered on read.")
+    w.line("// Microcode VLIW ROM: one pre-decoded control word per step, registered on read (in the sequencer below).")
     w.line("// Constant control fields are lifted out (below) and not stored here, enabling synthesis-time folding.")
     w.line('(* rom_style = "block", ram_style = "block", syn_romstyle = "EBR" *)')
     w.line("reg [UCW-1:0] ucode [0:LAST];")
     w.line("initial begin")
     w.push()
     for step in range(depth):
-        summary = _cycle_summary(issues_by_cycle.get(step, []), commits_by_cycle.get(step, []))
+        summary = cycle_summary(issues_by_cycle.get(step, []), commits_by_cycle.get(step, []))
         comment = f"  // {summary}" if summary else ""
-        w.line(f"ucode[{step: 5}] = {ucw}'h{_pack(fields, step):0{digits}x};{comment}")
+        w.line(f"ucode[{step: 5}] = {ucw}'h{pack(fields, step):0{digits}x};{comment}")
     w.pop()
     w.lines("end", "")
-    w.line("reg [UCW-1:0] ucode_word;  // the current step's control word")
-    w.line("always @(posedge clk) ucode_word <= ucode[next_pc];")
+    w.line("reg [UCW-1:0] ucode_word;  // the current step's control word (registered ROM read; see the sequencer)")
     w.line("")
 
 
-def _emit_field_wires(w: _Writer, fields: dict[str, _Field]) -> None:
+def _emit_field_wires(w: _Writer, fields: dict[str, Field]) -> None:
     w.line("// Decoded control fields. A field that is constant across the whole program is driven by a constant net")
     w.line("// (so synthesis prunes the logic it feeds); a varying field is a slice of the instruction word.")
     for f in fields.values():
@@ -474,7 +320,9 @@ def _emit_field_wires(w: _Writer, fields: dict[str, _Field]) -> None:
 
 
 def _emit_sequencer(w: _Writer) -> None:
-    w.line("// Sequencer. Reset covers only the control state (pc, err_cyc).")
+    w.line("// Sequencer. The ROM is addressed with next_pc, so the registered word for step N is ready exactly during")
+    w.line("// step N (no added latency). Reset covers only the control state (pc, err_pc); the ROM word register is")
+    w.line("// reset-unconditional and settles to ucode[0] before the first active step (next_pc is 0 under reset).")
     w.line("always @* begin")
     w.push()
     w.line("if (rst)             next_pc = 0;")
@@ -485,15 +333,16 @@ def _emit_sequencer(w: _Writer) -> None:
     w.lines("end", "")
     w.line("always @(posedge clk) begin")
     w.push()
+    w.line("ucode_word <= ucode[next_pc];  // registered ROM read (BRAM-inferable); reset-unconditional, aligned by pc")
     w.line("if (rst) begin")
     w.push()
-    w.lines("pc      <= 0;", "err_cyc <= 0;")
+    w.lines("pc     <= 0;", "err_pc <= 0;")
     w.pop()
     w.line("end else begin")
     w.push()
     w.line("pc <= next_pc;")
-    w.line("if ((pc == 0) && in_valid) err_cyc <= 0;  // clear the diagnostic when a new transaction is accepted")
-    w.line("if (err) err_cyc <= pc;                   // latch the step on which an error was detected")
+    w.line("if ((pc == 0) && in_valid) err_pc <= 0;  // clear the diagnostic when a new transaction is accepted")
+    w.line("if (err) err_pc <= pc;                   // latch the step on which an error was detected")
     w.pop()
     w.line("end")
     w.pop()
@@ -511,13 +360,13 @@ def _operand_expr(port: int, port_consts: dict[int, list[int]]) -> str:
         return rd
     consts = port_consts[port]
     cterm = f"const_{consts[0]}" if len(consts) == 1 else f"cterm{port}"
-    return f"{_f_selc(port)} ? {cterm} : {rd}"
+    return f"{f_selc(port)} ? {cterm} : {rd}"
 
 
 def _const_term_expr(port: int, consts: list[int]) -> str:
     expr = f"const_{consts[-1]}"
     for local in range(len(consts) - 2, -1, -1):
-        expr = f"({_f_cidx(port)} == {local}) ? const_{consts[local]} : {expr}"
+        expr = f"({f_cidx(port)} == {local}) ? const_{consts[local]} : {expr}"
     return expr
 
 
@@ -538,26 +387,26 @@ def _emit_datapath(
 
     w.line("// Register-file read addresses: each dedicated port is wired to the step's address for its operand.")
     for port in range(rf.nrd):
-        rhs = _f_rd(port) if port in owned_rd else "{WADDR{1'b0}}"
+        rhs = f_rd(port) if port in owned_rd else "{WADDR{1'b0}}"
         w.line(f"assign rf_rd_addr[{_rf_addr(port)}] = {rhs};")
     w.line("")
 
     w.line("// Operator control and operand data (operand data is fixed wiring from its dedicated read port).")
     for inst in lir.float_instances:
-        sig, base = _sig(inst), _base(inst)
-        w.line(f"assign {sig}_iv = {_f_iv(base)};")
-        w.line(f"assign {sig}_ys = {_f_ysgn(base)};")
+        sig, base = _sig(inst), base_name(inst)
+        w.line(f"assign {sig}_iv = {f_iv(base)};")
+        w.line(f"assign {sig}_ys = {f_ysgn(base)};")
         for pos in range(inst.operator.arity):
-            letter = _PORT_LETTERS[pos]
-            w.line(f"assign {sig}_{letter}s = {_f_osgn(base, letter)};")
+            letter = PORT_LETTERS[pos]
+            w.line(f"assign {sig}_{letter}s = {f_osgn(base, letter)};")
             w.line(f"assign {sig}_{letter} = {_operand_expr(read_port[(inst, pos)], port_consts)};")
     w.line("")
 
     w.line("// Register-file write ports: each instance's result wires straight into its own dedicated port.")
     for inst in lir.float_instances:
-        sig, base, port = _sig(inst), _base(inst), write_port[inst]
-        w.line(f"assign rf_wr_en[{port}] = {_f_we(base)};")
-        w.line(f"assign rf_wr_addr[{_rf_addr(port)}] = {_f_wa(base)};")
+        sig, base, port = _sig(inst), base_name(inst), write_port[inst]
+        w.line(f"assign rf_wr_en[{port}] = {f_we(base)};")
+        w.line(f"assign rf_wr_addr[{_rf_addr(port)}] = {f_wa(base)};")
         w.line(f"assign rf_wr_data[{_rf_data(port)}] = {sig}_y;")
     for port in range(rf.nwr):
         if port not in owned_wr:
@@ -568,7 +417,7 @@ def _emit_datapath(
 
     # An error matters only on the step its operator commits, which is exactly that instance's write-enable.
     err_terms = [
-        f"({_f_we(_base(inst))} & {_sig(inst)}_{port})"
+        f"({f_we(base_name(inst))} & {_sig(inst)}_{port})"
         for inst in lir.float_instances
         for port in inst.operator.error_ports
     ]
