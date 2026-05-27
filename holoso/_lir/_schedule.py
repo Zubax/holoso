@@ -41,9 +41,7 @@ def _present_classes(mir: MirFloatView) -> set[type[HardwareOperator]]:
     return {type(_operation(mir, vid).operator) for vid in _op_ids(mir)}
 
 
-def resolve_pool(
-    mir: MirFloatView, instances: Mapping[type[HardwareOperator], int] | None
-) -> dict[type[HardwareOperator], int]:
+def resolve_pool(mir: MirFloatView) -> dict[type[HardwareOperator], int]:
     """
     The per-class instance budget: at least one of every operator class present in the graph.
 
@@ -52,7 +50,7 @@ def resolve_pool(
     """
     pool: dict[type[HardwareOperator], int] = {}
     for cls in _present_classes(mir):
-        requested = 1 if instances is None else instances.get(cls, 1)
+        requested = 1  # TODO: we can add heuristics for determining how many operator instances to use.
         pool[cls] = max(1, requested)
     return pool
 

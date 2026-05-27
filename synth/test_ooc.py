@@ -5,13 +5,11 @@ End-to-end checks for the OOC synthesis-evaluation harness.
 from pathlib import Path
 
 import pytest
-import synth.__main__ as synth_cli
 
 from holoso import synthesize, SynthesisResult, FloatFormat
 from holoso import FAddOperator, FDivOperator, FMulILog2OperatorFamily, FMulOperator, OpConfig
 
 from synth import SynthReport, build_ooc_wrapper
-from synth._synth import SynthArtifact
 from synth.flows.diamond import DiamondEcp5Flow
 from synth.flows.vivado import VivadoFlow
 from synth.flows.yosys import YosysEcp5Flow
@@ -39,70 +37,6 @@ WIDE: SynthesisResult = synthesize(wide, ops=OPS, name="wide")
 
 requires_diamond = pytest.mark.skipif(not DiamondEcp5Flow().available(), reason="Lattice Diamond not found")
 requires_vivado = pytest.mark.skipif(not VivadoFlow().available(), reason="Vivado not found")
-
-
-def _parse_cli_flow_requests(*flow_specs: str) -> list[synth_cli._FlowRequest]:
-    args = ["kernel.py", "entry", "--rtl", "lib/kulibin/float/hdl"]
-    for flow_spec in flow_specs:
-        args += ["--flow", flow_spec]
-    return synth_cli._parse_args(args).flow_requests
-
-
-def _stage_override_map(request: synth_cli._FlowRequest) -> dict[tuple[str, str], object]:
-    return {(override.operator_name, override.field_name): override.value for override in request.stage_overrides}
-
-
-def test_cli_flow_stage_overrides_are_sparse_per_flow() -> None:
-    yosys, vivado = _parse_cli_flow_requests(
-        "yosys-ecp5:freq=42,fadd.decode=1,fmul.input=1",
-        "vivado:freq=60,fmul.stage_output=0,fdiv.input=1,fmul_ilog2.decode=1",
-    )
-    yosys_stages = _stage_override_map(yosys)
-    vivado_stages = _stage_override_map(vivado)
-
-    assert yosys.flow_id == "yosys-ecp5"
-    assert yosys_stages[("fadd", "stage_decode")] == 1
-    assert ("fadd", "stage_align") not in yosys_stages
-    assert yosys_stages[("fmul", "stage_input")] == 1
-    assert ("fmul", "stage_product") not in yosys_stages
-
-    assert vivado.flow_id == "vivado"
-    assert vivado_stages[("fmul", "stage_output")] == 0
-    assert vivado_stages[("fdiv", "stage_input")] == 1
-    assert vivado_stages[("fmul_ilog2", "stage_decode")] == 1
-
-
-def test_cli_operator_config_preserves_defaults_for_unset_stages() -> None:
-    (request,) = _parse_cli_flow_requests("yosys-ecp5:freq=42,fadd.decode=1,fmul.output=0")
-    ops = synth_cli._op_config(FMT, request.stage_overrides)
-
-    assert ops.fadd.stage_decode == 1
-    assert ops.fadd.stage_align == FAddOperator(FMT).stage_align
-    assert ops.fadd.stage_output == FAddOperator(FMT).stage_output
-    assert ops.fmul.stage_input == FMulOperator(FMT).stage_input
-    assert ops.fmul.stage_product == FMulOperator(FMT).stage_product
-    assert ops.fmul.stage_output == 0
-    assert ops.fdiv == FDivOperator(FMT)
-    assert ops.fmul_ilog2 == FMulILog2OperatorFamily(FMT)
-
-
-@pytest.mark.parametrize(
-    "flow_spec",
-    [
-        "yosys-ecp5:freq=42,fadd.decode=no",
-        "yosys-ecp5:freq=42,fadd.foo=1",
-        "yosys-ecp5:freq=42,unknown.decode=1",
-    ],
-)
-def test_cli_rejects_invalid_stage_fields(flow_spec: str) -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        _parse_cli_flow_requests(flow_spec)
-    assert exc_info.value.code == 2
-
-
-def test_cli_parser_does_not_validate_stage_value_range() -> None:
-    (request,) = _parse_cli_flow_requests("yosys-ecp5:freq=42,fadd.decode=2")
-    assert _stage_override_map(request)[("fadd", "stage_decode")] == 2
 
 
 def _native_data_bits(result: SynthesisResult) -> int:

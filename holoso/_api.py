@@ -63,7 +63,6 @@ def synthesize(
     parameters: Mapping[str, object] | None = None,
     entry: str = "__call__",
     name: str | None = None,
-    operator_instances: Mapping[type[HardwareOperator], int] | None = None,
 ) -> SynthesisResult:
     """
     Synthesize ``target`` (a function or class object) into a Verilog ZISC FSM, returned in memory.
@@ -71,12 +70,11 @@ def synthesize(
     ``ops`` is the operator configuration, constructed explicitly by the caller: each field fixes one operator's
     float format and parameters, including any pipeline-stage knobs that lengthen its latency to ease timing closure.
     ``parameters`` overrides a class's keyword-only ``__init__`` defaults; ``entry`` selects the analyzed method for a
-    class (default ``__call__``); ``name`` overrides the generated module name; ``operator_instances`` sets the number
-    of instances per operator class for scheduling (default one each).
+    class (default ``__call__``); ``name`` overrides the generated module name.
     """
     mir = lower_to_mir(optimize(lower_frontend(target)), ops)
     module_name: str = name if name is not None else str(getattr(target, "__name__", "holoso_module"))
-    lir = build(mir, module_name, instances=operator_instances)
+    lir = build(mir, module_name)
     verilog_output = generate_verilog(lir)
     html_output = generate_html(lir, verilog_output)
     model = generate_model(lir)

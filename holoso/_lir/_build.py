@@ -5,15 +5,8 @@ from collections.abc import Mapping
 
 from .._errors import UnsupportedConstruct
 from .._hir import ValueId
-from .._mir import (
-    Mir,
-    MirFloatConst,
-    MirFloatInput,
-    MirFloatOperation,
-    MirFloatOutput,
-    MirFloatView,
-)
-from .._operators import FloatSignControl, HardwareOperator
+from .._mir import Mir, MirFloatConst, MirFloatInput, MirFloatOperation, MirFloatView
+from .._operators import FloatSignControl
 from ._ir import (
     FloatConstRef,
     FloatInputLoad,
@@ -32,15 +25,10 @@ def _operation(mir: MirFloatView, vid: ValueId) -> MirFloatOperation:
     return mir.operation_nodes[vid]
 
 
-def build(
-    mir: Mir,
-    module_name: str,
-    *,
-    instances: Mapping[type[HardwareOperator], int] | None = None,
-) -> Lir:
+def build(mir: Mir, module_name: str) -> Lir:
     """Schedule, bind, and register-allocate selected MIR into a pipelined microprogram."""
     float_mir = MirFloatView.from_mir(mir)
-    pool = resolve_pool(float_mir, instances)
+    pool = resolve_pool(float_mir)
     sched = schedule_ops(float_mir, pool)
     alloc = allocate_float(float_mir, sched.issue_cycle, sched.makespan)
     consts, const_index = _build_const_pool(float_mir)

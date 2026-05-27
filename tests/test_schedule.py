@@ -77,9 +77,9 @@ def _view(mir: Mir) -> MirFloatView:
     return MirFloatView.from_mir(mir)
 
 
-def _schedule(mir: Mir, instances: dict[type[HardwareOperator], int] | None = None):
+def _schedule(mir: Mir):
     view = _view(mir)
-    return schedule_ops(view, resolve_pool(view, instances))
+    return schedule_ops(view, resolve_pool(view))
 
 
 def _muls(mir: Mir) -> list[int]:
@@ -101,22 +101,6 @@ def test_schedule_respects_dependencies() -> None:
             if isinstance(node, MirOperation):
                 # A consumer issues no earlier than the producer's commit + 1 (read-first writeback latency).
                 assert cycle >= sched.issue_cycle[operand] + node.operator.latency + 1
-
-
-def test_multi_issue_packs_independent_ops() -> None:
-    def f(a, b, c):  # type: ignore[no-untyped-def]
-        return a * b + b * c
-
-    mir = _run(f)
-    muls = _muls(mir)
-    assert len(muls) == 2
-
-    two = _schedule(mir, {FMulOperator: 2})
-    assert two.issue_cycle[muls[0]] == two.issue_cycle[muls[1]]  # two instances -> both multiplies issue together
-    assert two.inst_of[muls[0]].index != two.inst_of[muls[1]].index  # ...on distinct instances
-
-    one = _schedule(mir, {FMulOperator: 1})
-    assert one.issue_cycle[muls[0]] != one.issue_cycle[muls[1]]  # one instance forces them onto consecutive cycles
 
 
 def test_pipelined_issue_overlaps_a_slow_op() -> None:
@@ -169,10 +153,6 @@ def test_fmul_ilog2_same_k_serializes_by_default_parallelizes_with_budget() -> N
     one = _schedule(mir)  # default budget 1 -> serialize onto a single instance
     assert one.issue_cycle[il[0]] != one.issue_cycle[il[1]]
     assert sum(1 for i in one.instances if isinstance(i.operator, FMulILog2Operator)) == 1
-
-    two = _schedule(mir, {FMulILog2Operator: 2})  # budget 2 -> co-issue on two instances
-    assert two.issue_cycle[il[0]] == two.issue_cycle[il[1]]
-    assert two.inst_of[il[0]].index != two.inst_of[il[1]].index
 
 
 def test_fmul_ilog2_different_k_never_shares() -> None:
