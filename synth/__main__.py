@@ -140,8 +140,12 @@ def _collect_rtl(specs: list[str]) -> list[Path]:
 def _synthesize(kernel: Path, entry: str, fmt: FloatFormat, name: str) -> SynthesisResult:
     sys.path.insert(0, str(kernel.resolve().parent))
     module = importlib.import_module(kernel.stem)
+    # TODO: specify pipeline stages per operator per flow via _FlowRequest; disable all stages by default.
     ops = OpConfig(
-        fadd=FAddOperator(fmt), fmul=FMulOperator(fmt), fdiv=FDivOperator(fmt), fmul_ilog2=FMulILog2OperatorFamily(fmt)
+        fadd=FAddOperator(fmt, stage_decode=1),
+        fmul=FMulOperator(fmt, stage_input=1),
+        fdiv=FDivOperator(fmt),
+        fmul_ilog2=FMulILog2OperatorFamily(fmt),
     )
     return synthesize(getattr(module, entry), ops=ops, name=name)
 

@@ -338,16 +338,22 @@ pipelined overlap, is the better trade.
 
 Mechanical from LIR: a `holoso_regfile` flop bank, one operator instance per `FloatOperatorInstance`, and one continuous
 assignment per pooled constant -- its ZKF bit pattern precomputed in Python by `FloatFormat.encode`. The controller is a
-microcode ROM: one pre-decoded VLIW control word per step, stored in a (BRAM-inferable) ROM and registered on read. A
-program counter `pc` addresses the ROM with its *next* state, so the registered word for step N is available exactly
-during step N -- no added latency, the makespan and the `in_valid->out_valid` interval are unchanged. Registering the
-word is the point: it splits what used to be one wide combinational `case(cyc)` cone (`cyc -> read-address mux -> regfile
-read -> operand mux -> operator`) into two short register-to-register paths (`pc -> ROM -> word` and `word -> datapath`).
+microcode ROM: one pre-decoded VLIW control word per step, stored in a (BRAM-inferable) ROM read through two cascaded
+registers, so the second packs into the BRAM's dedicated output register (DP16KD OUTREG / Xilinx DO*_REG) -- a fast
+clock-to-out instead of the slow array-access clock-to-out. Registering the word is the point: it splits what used to
+be one wide combinational `case(cyc)` cone (`cyc -> read-address mux -> regfile read -> operand mux -> operator`) into
+short register-to-register paths (`pc -> ROM -> ucode_q -> ucode_word` and `ucode_word -> datapath`). The two-stage
+fetch costs +1 cycle of read latency, so the executing step lags the fetch `pc` by one: `pc` runs `0..makespan+2` and
+`out_valid` is asserted at `makespan+2`. Under fully static scheduling that cycle is essentially free (it only adds one
+to the makespan/II). The extra stage mainly helps tools that infer BRAM with a no-output-register read (e.g.
+Yosys+nextpnr); flows that already register the control store in fabric (e.g. Diamond) do not need it -- a future
+per-target build knob should let those flows drop the stage and reclaim the cycle.
 
 The schedule is replayed step by step: `pc==0` accepts and parallel-loads the inputs through the register file's `load`
 port (registers `0..nload-1` in one cycle, gated by `in_valid`); `pc` advances every clock through the compute steps
-`1..makespan`; and `pc==makespan+1` asserts `out_valid` while the outputs are driven combinationally from the register
-file's `view` bus (wired by fixed register index). The PC holds only at these two I/O boundaries; bubble steps with no
+`1..makespan`; and `pc==makespan+2` asserts `out_valid` (the executing step lags `pc` by one) while the outputs are
+driven combinationally from the register file's `view` bus (wired by fixed register index). The PC holds only at these
+two I/O boundaries; bubble steps with no
 issue/commit carry an explicit NOP word and the PC keeps advancing -- trading a little ROM for a trivial, fast sequencer.
 No scoreboard is needed because latencies are static.
 
