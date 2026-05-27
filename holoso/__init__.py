@@ -12,6 +12,7 @@ from ._lir import (
     Port as Port,
 )
 from ._type import FloatFormat as FloatFormat, FloatType as FloatType, ScalarType as ScalarType
+from ._value import FloatValue as FloatValue
 from ._errors import (
     HolosoError as HolosoError,
     MissingIntrinsic as MissingIntrinsic,

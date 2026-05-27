@@ -57,8 +57,8 @@ async def cosim(dut):
         # The model is fed exactly the bits the DUT receives, so the comparison is bit-exact.
         # TODO: value range must be configurable via plusargs
         in_bits = [_FMT.encode(rng.uniform(-4, +4)) for _ in in_names]
-        expected = _MODEL(*[_FMT.decode(bits) for bits in in_bits])
-        exp_bits = [_FMT.encode(value) for value in expected]
+        expected = _MODEL(*[holoso.FloatValue.from_bits(_FMT, bits) for bits in in_bits])
+        exp_bits = [value.bits for value in expected]
 
         while int(dut.in_ready.value) != 1:
             await RisingEdge(dut.clk)

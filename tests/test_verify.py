@@ -5,8 +5,9 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
-from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso import FloatValue, FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
 from holoso._backend.numerical import generate as build_model
 from holoso._frontend import lower
 from holoso._hir import optimize
@@ -58,6 +59,25 @@ def test_codec_exact_powers_and_simple_fractions() -> None:
         assert FMT.decode(FMT.encode(value)) == value
 
 
+def test_float_value_factories_and_fields() -> None:
+    value = FloatValue.from_bits(F32, 0x3F800001)
+    assert value.fmt == F32
+    assert value.bits == 0x3F800001
+    assert value.sign == 0
+    assert value.exponent == 0x7F
+    assert value.significand == 0x800001
+    assert float(FloatValue.from_float(F32, 1.0)) == 1.0
+
+    with pytest.raises(TypeError, match="from_bits"):
+        FloatValue(F32, 1.0)
+    with pytest.raises(TypeError, match="float"):
+        FloatValue.from_float(F32, 1)
+    with pytest.raises(TypeError, match="int"):
+        FloatValue.from_bits(F32, True)
+    with pytest.raises(ValueError, match="fit"):
+        FloatValue.from_bits(F32, 1 << F32.width)
+
+
 def test_is_legal_rejects_subnormal_and_negative_zero() -> None:
     # exp == 0 with nonzero fraction is subnormal; sign bit with zero magnitude is negative zero.
     assert not FMT.is_legal(0b1)  # subnormal
@@ -82,7 +102,35 @@ def test_model_matches_reference_small_kernels() -> None:
     got = model(*[inputs[name] for name in model.input_names])
     ref = evaluate_reference(f, inputs)
     rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=max(abs(v) for v in inputs.values()))
-    assert all(within(g, r, rtol, atol) for g, r in zip(got, ref))
+    assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
+
+
+def test_model_rejects_ambiguous_int_and_mismatched_float_value_format() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        return a
+
+    model = build_model(build(_run(f), "f"))
+    assert model(1.0)[0] == FloatValue.from_float(FMT, 1.0)
+
+    with pytest.raises(TypeError, match="FloatValue or float"):
+        model(1)
+    with pytest.raises(ValueError, match="expected"):
+        model(FloatValue.from_float(F32, 1.0))
+
+
+def test_model_is_bit_exact_for_wide_zkf_multiply_regression() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        return a * b
+
+    fmt = FloatFormat(8, 36)
+    ops = OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
+    mir = lower_to_mir(optimize(lower(f)), ops)
+    model = build_model(build(mir, "f"))
+    got = model(
+        FloatValue.from_bits(fmt, 0x42BF30E6505),
+        FloatValue.from_bits(fmt, 0xBD734F60F3A),
+    )
+    assert got[0].bits == 0xC0B5B6B31D9
 
 
 def test_model_matches_reference_ekf1() -> None:
@@ -115,7 +163,7 @@ def test_model_matches_reference_ekf1() -> None:
     ref = evaluate_reference(ekf1.update_x_P, inputs)
     assert len(ref) == 9 and all(np.isfinite(ref))
     rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=max(abs(v) for v in inputs.values()))
-    assert all(within(g, r, rtol, atol) for g, r in zip(got, ref))
+    assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
 def test_model_pickles_and_round_trips() -> None:

@@ -87,7 +87,7 @@ class SynthesisResult:
     control_ports: list[ControlPort]
 
     verilog_output: VerilogOutput     # generated module text + support_files (the shared holoso_support .v/.vh)
-    numerical_model: NumericalModel   # bit-exact, picklable pure-Python model of the module (flat in -> flat tuple out)
+    numerical_model: NumericalModel   # bit-exact, picklable pure-Python model (flat FloatValue in -> flat tuple out)
     cocotb_output:  CocotbOutput      # self-contained testbench: embeds the model, checks the DUT bit-for-bit
     html_output:    HtmlOutput        # self-contained single-page report
 ```
@@ -268,7 +268,8 @@ HIR passes construct operator values ad hoc and distinguish operation kinds by c
 
 Concrete hardware operators live at the root in `holoso._operators` and are instances of the `HardwareOperator`
 hierarchy. A concrete `HardwareOperator` is a frozen dataclass whose fields are its parameters. Float operators use the
-`FloatHardwareOperator` subclass, which owns its `FloatFormat` and typed `evaluate(*float) -> float` reference semantics.
+`FloatHardwareOperator` subclass, which owns its `FloatFormat` and typed `evaluate(*FloatValue) -> FloatValue` reference
+semantics.
 Each hardware operator owns its own timing, notation, concrete `ScalarSignature`, instantiation params, and
 `instance_stem`: a lowercase Verilog-safe compact physical identity stem used for HDL names. The visible prefix is the
 normalized mnemonic; the suffix is a hex stable hash of the canonical hardware parameters. For float

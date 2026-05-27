@@ -97,6 +97,9 @@ def test_rejects_non_finite_constants() -> None:
 
 def test_generated_testbench_is_valid_python() -> None:
     result = holoso.synthesize(_kernel, ops=_ops())
+    assert "holoso.FloatValue.from_bits(_FMT, bits)" in result.cocotb_output.testbench
+    assert "exp_bits = [value.bits for value in expected]" in result.cocotb_output.testbench
+    assert "_FMT.decode(bits)" not in result.cocotb_output.testbench
     compile(result.cocotb_output.testbench, "<generated-testbench>", "exec")
 
 

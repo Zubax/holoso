@@ -1,12 +1,12 @@
 """Hardware operator models and folded floating-point sign controls."""
 
-import math
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from hashlib import blake2s
 from typing import ClassVar
 
+from ._value import FloatValue, add_float_values, div_float_values, mul_float_values, mul_ilog2_float_value
 from ._type import FloatFormat, FloatType, ScalarSignature
 
 
@@ -36,12 +36,8 @@ class FloatSignControl:
             return FloatSignControl(negate=outer.negate, absolute=True)
         return FloatSignControl(negate=self.negate ^ outer.negate, absolute=self.absolute)
 
-    def apply_float(self, value: float) -> float:
-        if self.absolute:
-            value = abs(value)
-        if self.negate:
-            value = -value
-        return value
+    def apply_value(self, value: FloatValue) -> FloatValue:
+        return value.apply_sign(negate=self.negate, absolute=self.absolute)
 
     def decorate(self, text: str) -> str:
         if self.absolute:
@@ -127,8 +123,18 @@ class FloatHardwareOperator(HardwareOperator, ABC):
         ty = FloatType(self.fmt)
         return ScalarSignature((ty,) * arity, ty)
 
+    def _validated_operands(self, operands: tuple[FloatValue, ...], arity: int) -> tuple[FloatValue, ...]:
+        if len(operands) != arity:
+            raise ValueError(f"{self.mnemonic} expected {arity} operands, got {len(operands)}")
+        for index, operand in enumerate(operands):
+            if not isinstance(operand, FloatValue):
+                raise TypeError(f"{self.mnemonic} operand {index} must be FloatValue, got {type(operand).__name__}")
+            if operand.fmt != self.fmt:
+                raise ValueError(f"{self.mnemonic} operand {index} has {operand.fmt}, expected {self.fmt}")
+        return operands
+
     @abstractmethod
-    def evaluate(self, *operands: float) -> float: ...
+    def evaluate(self, *operands: FloatValue) -> FloatValue: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,9 +167,9 @@ class FAddOperator(FloatHardwareOperator):
     def signature(self) -> ScalarSignature:
         return self.float_signature(2)
 
-    def evaluate(self, *operands: float) -> float:
-        a, b = operands
-        return a + b
+    def evaluate(self, *operands: FloatValue) -> FloatValue:
+        a, b = self._validated_operands(operands, 2)
+        return add_float_values(a, b)
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -196,9 +202,9 @@ class FMulOperator(FloatHardwareOperator):
     def signature(self) -> ScalarSignature:
         return self.float_signature(2)
 
-    def evaluate(self, *operands: float) -> float:
-        a, b = operands
-        return a * b
+    def evaluate(self, *operands: FloatValue) -> FloatValue:
+        a, b = self._validated_operands(operands, 2)
+        return mul_float_values(a, b)
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -230,9 +236,9 @@ class FDivOperator(FloatHardwareOperator):
     def signature(self) -> ScalarSignature:
         return self.float_signature(2)
 
-    def evaluate(self, *operands: float) -> float:
-        a, b = operands
-        return a / b if b else math.copysign(math.inf, a)
+    def evaluate(self, *operands: FloatValue) -> FloatValue:
+        a, b = self._validated_operands(operands, 2)
+        return div_float_values(a, b)
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -265,9 +271,9 @@ class FMulILog2Operator(FloatHardwareOperator):
     def signature(self) -> ScalarSignature:
         return self.float_signature(1)
 
-    def evaluate(self, *operands: float) -> float:
-        (a,) = operands
-        return math.ldexp(a, self.k)
+    def evaluate(self, *operands: FloatValue) -> FloatValue:
+        (a,) = self._validated_operands(operands, 1)
+        return mul_ilog2_float_value(a, self.k)
 
     def render(self, *operands: str) -> str:
         (a,) = operands
