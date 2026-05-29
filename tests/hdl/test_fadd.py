@@ -115,6 +115,9 @@ STAGE_COMBOS = ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1))
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fadd(sim: str, stages: tuple[int, int, int]) -> None:
     stage_decode, stage_align, stage_output = stages
+    latency = FAddOperator(
+        FloatFormat(8, 24), stage_decode=stage_decode, stage_align=stage_align, stage_output=stage_output
+    ).latency
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fadd_d{stage_decode}a{stage_align}o{stage_output}"
     runner.build(
@@ -127,6 +130,7 @@ def test_holoso_fadd(sim: str, stages: tuple[int, int, int]) -> None:
             "STAGE_DECODE": stage_decode,
             "STAGE_ALIGN": stage_align,
             "STAGE_OUTPUT": stage_output,
+            "LATENCY": latency,
         },
         build_args=build_args(sim),
         build_dir=build_dir,
@@ -138,12 +142,6 @@ def test_holoso_fadd(sim: str, stages: tuple[int, int, int]) -> None:
         test_module="tests.hdl.test_fadd",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={
-            "HOLOSO_EXPECTED_LATENCY": str(
-                FAddOperator(
-                    FloatFormat(8, 24), stage_decode=stage_decode, stage_align=stage_align, stage_output=stage_output
-                ).latency
-            )
-        },
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(latency)},
         results_xml=str(build_dir / "results.xml"),
     )

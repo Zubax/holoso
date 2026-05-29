@@ -110,6 +110,9 @@ async def holoso_fmul_cocotb(dut) -> None:
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fmul(sim: str, stages: tuple[int, int, int]) -> None:
     stage_input, stage_product, stage_output = stages
+    latency = FMulOperator(
+        FloatFormat(8, 24), stage_input=stage_input, stage_product=stage_product, stage_output=stage_output
+    ).latency
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fmul_i{stage_input}p{stage_product}o{stage_output}"
     runner.build(
@@ -122,6 +125,7 @@ def test_holoso_fmul(sim: str, stages: tuple[int, int, int]) -> None:
             "STAGE_INPUT": stage_input,
             "STAGE_PRODUCT": stage_product,
             "STAGE_OUTPUT": stage_output,
+            "LATENCY": latency,
         },
         build_args=build_args(sim),
         build_dir=build_dir,
@@ -133,12 +137,6 @@ def test_holoso_fmul(sim: str, stages: tuple[int, int, int]) -> None:
         test_module="tests.hdl.test_fmul",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={
-            "HOLOSO_EXPECTED_LATENCY": str(
-                FMulOperator(
-                    FloatFormat(8, 24), stage_input=stage_input, stage_product=stage_product, stage_output=stage_output
-                ).latency
-            )
-        },
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(latency)},
         results_xml=str(build_dir / "results.xml"),
     )

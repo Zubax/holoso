@@ -310,9 +310,11 @@ operator ordering: physical instance indices are local to one equal-by-value har
 `instance_stem` to distinguish different operator values of the same class.
 
 The per-operator latency model is therefore exact and load-bearing: the backend commits each result on
-`issue + op.latency` without watching `out_valid`, so each operator's `latency` property (mirroring its RTL
-wrapper) must match the hardware cycle-for-cycle. An inaccurate latency is a *correctness* bug, not a bad estimate --
-the consumer would read a stale register. The resulting cycle count is exact, never an estimate.
+`issue + op.latency` without watching `out_valid`, so each operator's `latency` property must match the hardware
+cycle-for-cycle. The generated RTL passes this value into each streaming Holoso wrapper's mandatory `LATENCY`
+parameter, and the wrapper forwards it into the wrapped ZKF operator so a Python-model/ZKF drift fails during
+elaboration or synthesis. An inaccurate latency is a *correctness* bug, not a bad estimate -- the consumer would read a
+stale register if the guard were bypassed. The resulting cycle count is exact, never an estimate.
 
 We issue each op on the earliest cycle its operands are ready and a free instance exists -- without waiting for
 unrelated ops (no barrier), so a fast `fmul` no longer idles behind a co-scheduled `fdiv`. The register file is
@@ -400,12 +402,14 @@ into the BRAM output register) and settle to `ucode[0]` under reset. The control
 ZISC-specific part -- LIR itself is controller-agnostic.
 
 Each operator instance carries its own parameters and float format, fixed at construction from the `OpConfig` threaded
-through `synthesize`. The wrappers' instantiation params come from `operator.hdl_params()` and the scheduler's timing
-from `operator.latency` -- both read the same hardware operator instance, so the emitted RTL and the static schedule
-cannot drift. `hdl_params()` always lists every parameter explicitly (including zero-valued `STAGE_*`), so the
-instantiation is self-describing, survives changes to wrapper defaults, and turns a param-name mismatch into a loud
-elaboration error. The wrapper instance name is `u_{operator.instance_stem}_{index}`, where `index` is local to that
-concrete operator value; the stem uses a short stable hash of the operator's canonical hardware parameters.
+through `synthesize`. The wrappers' configuration params come from `operator.hdl_params()`, while `operator.latency` is
+emitted separately as the mandatory `LATENCY` assertion parameter. `hdl_params()` always lists every hardware parameter
+explicitly (including zero-valued `STAGE_*`), so the instantiation is self-describing, survives changes to wrapper
+defaults, and turns a param-name mismatch into a loud elaboration error. The wrapper does not derive the ZKF latency
+internally; it uses `LATENCY` for Holoso sideband alignment and forwards it to the wrapped ZKF operator, whose own
+source is the reference for stage-count details. The wrapper instance name is `u_{operator.instance_stem}_{index}`,
+where `index` is local to that concrete operator value; the stem uses a short stable hash of the operator's canonical
+hardware parameters.
 
 Constant operands are kept as immediates on the input mux. Two alternatives are noted in the backend for when this turns
 into a constraint: folding constants into the register file (preloaded like inputs, so every operand is a uniform
@@ -418,9 +422,10 @@ pressure, at the cost of scheduling/allocation complexity).
 2. Split float and bool register banks.
 3. If-conversion is conservative -- trivial pure diamonds only; real branches otherwise.
 4. SymPy-assisted algebra (fold/CSE/simplify); simple HIR strength reduction in-house.
-5. The per-operator latency model is exact and must match the RTL wrappers cycle-for-cycle: the static schedule commits
-   each result on `issue + latency` without watching `out_valid`, so an inaccurate latency is a correctness bug, not a
-   bad estimate. (Module I/O still uses a valid/ready handshake; `div0` is the only data-dependent runtime signal.)
+5. The per-operator latency model is exact and must match the ZKF RTL cycle-for-cycle: the static schedule commits each
+   result on `issue + latency` without watching `out_valid`, and generated wrappers pass that value as mandatory
+   `LATENCY` so ZKF elaboration catches drift. (Module I/O still uses a valid/ready handshake; `div0` is the only
+   data-dependent runtime signal.)
 6. Software-pipelined (zero-bubble) static list scheduling over a read-first register file; the controller is a
    microcode ROM replaying the schedule step by step (no runtime scoreboard), since v0 operator latencies are
    data-independent.

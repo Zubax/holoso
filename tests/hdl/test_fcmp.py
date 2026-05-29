@@ -6,6 +6,8 @@ sgnop change is needed; a_sgnop and b_sgnop can vary every cycle. The DUT's one-
 on every out_valid pulse in addition to the per-flag comparison.
 """
 
+import os
+
 import cocotb
 import numpy as np
 import pytest
@@ -43,6 +45,7 @@ async def holoso_fcmp_cocotb(dut) -> None:
             ("a_eq_b", "eq"),
             ("a_lt_b", "lt"),
         ],
+        latency=int(os.environ["HOLOSO_EXPECTED_LATENCY"]),
     )
     rng = np.random.default_rng(get_seed())
 
@@ -134,7 +137,7 @@ def test_holoso_fcmp(sim: str) -> None:
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_fcmp",
-        parameters={"WEXP": 8, "WMAN": 24},
+        parameters={"WEXP": 8, "WMAN": 24, "LATENCY": 1},
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
@@ -145,5 +148,6 @@ def test_holoso_fcmp(sim: str) -> None:
         test_module="tests.hdl.test_fcmp",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
+        extra_env={"HOLOSO_EXPECTED_LATENCY": "1"},
         results_xml=str(build_dir / "results.xml"),
     )

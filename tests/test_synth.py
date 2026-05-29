@@ -86,6 +86,8 @@ def test_synthesize_threads_pipeline_stages() -> None:
     # visible in both directions: default operators show 0, configured ones show 1.
     assert ".STAGE_DECODE(0)" in base.verilog_output.verilog
     assert ".STAGE_DECODE(1)" in staged.verilog_output.verilog and ".STAGE_PRODUCT(1)" in staged.verilog_output.verilog
+    assert ".LATENCY(4)" in base.verilog_output.verilog and ".LATENCY(1)" in base.verilog_output.verilog
+    assert ".LATENCY(5)" in staged.verilog_output.verilog and ".LATENCY(2)" in staged.verilog_output.verilog
 
 
 def test_rejects_non_finite_constants() -> None:

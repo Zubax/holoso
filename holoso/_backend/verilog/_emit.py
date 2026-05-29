@@ -261,11 +261,12 @@ def _emit_operators(w: _Writer, lir: Lir) -> None:
     for inst in lir.float_instances:
         sig = _sig(inst)
         letters = PORT_LETTERS[: inst.operator.arity]
-        # WEXP/WMAN frame the float format; hdl_params() lists K (ilog2) and every STAGE_* explicitly (including zeros),
-        # so the instantiation is self-describing and a param-name mismatch with the wrapper fails loudly at elaboration.
+        # WEXP/WMAN frame the float format; hdl_params() lists K (ilog2) and every STAGE_* explicitly. LATENCY is
+        # emitted separately from the scheduler model, so a model/RTL drift fails during wrapper elaboration.
         parts = [".WEXP(WEXP)", ".WMAN(WMAN)"] + [
             f".{param}({value})" for param, value in inst.operator.hdl_params().items()
         ]
+        parts.append(f".LATENCY({inst.operator.latency})")
         params = ", ".join(parts)
         w(f"{inst.operator.module_name} #(", f"    {params}", f") u_{base_name(inst)} (")
         w.push()
