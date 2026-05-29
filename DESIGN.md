@@ -313,8 +313,10 @@ The per-operator latency model is therefore exact and load-bearing: the backend 
 `issue + op.latency` without watching `out_valid`, so each operator's `latency` property must match the hardware
 cycle-for-cycle. The generated RTL passes this value into each streaming Holoso wrapper's mandatory `LATENCY`
 parameter, and the wrapper forwards it into the wrapped ZKF operator so a Python-model/ZKF drift fails during
-elaboration or synthesis. An inaccurate latency is a *correctness* bug, not a bad estimate -- the consumer would read a
-stale register if the guard were bypassed. The resulting cycle count is exact, never an estimate.
+elaboration or synthesis. The wrapper's Verilog default is the compact invalid sentinel `0`, so omitted LATENCY params
+fail without asking synthesis to elaborate a large placeholder delay line. An inaccurate latency is a *correctness* bug,
+not a bad estimate -- the consumer would read a stale register if the guard were bypassed. The resulting cycle count is
+exact, never an estimate.
 
 We issue each op on the earliest cycle its operands are ready and a free instance exists -- without waiting for
 unrelated ops (no barrier), so a fast `fmul` no longer idles behind a co-scheduled `fdiv`. The register file is
@@ -415,6 +417,10 @@ Constant operands are kept as immediates on the input mux. Two alternatives are 
 into a constraint: folding constants into the register file (preloaded like inputs, so every operand is a uniform
 register read), or emitting explicit constant-load micro-instructions (uniform operand path with lighter register
 pressure, at the cost of scheduling/allocation complexity).
+
+The Verilog backend's `support_files` map is the authoritative manifest for auxiliary HDL shipped with a generated
+module. File-writing helpers and the out-of-context synthesis harness materialize the whole map verbatim alongside the
+generated module, while tool-specific scripts name only the HDL root they read directly.
 
 ## Decisions
 

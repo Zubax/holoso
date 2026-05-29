@@ -45,7 +45,7 @@ endmodule
 module holoso_fadd#(parameter WEXP = 6, parameter WMAN = 18,
                     parameter STAGE_INPUT = 0, parameter STAGE_DECODE = 0, parameter STAGE_ALIGN = 0,
                     parameter STAGE_NORMALIZE = 0, parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
-                    parameter integer LATENCY = 99999) (
+                    parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
@@ -81,7 +81,7 @@ endmodule
 // Caution: STAGE_PRODUCT is almost never a good idea unless WMAN is wider than DSP multiplier input widths.
 module holoso_fmul#(parameter WEXP = 6, parameter WMAN = 18, parameter STAGE_INPUT = 0,
                     parameter STAGE_PRODUCT = 0, parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
-                    parameter integer LATENCY = 99999) (
+                    parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
@@ -117,7 +117,7 @@ endmodule
 // The inputs are sampled once at in_valid and are not required to remain stable during operation.
 module holoso_fmul_ilog2_const#(parameter WEXP = 6, parameter WMAN = 18, parameter integer K = 0,
                                 parameter STAGE_INPUT = 0, parameter STAGE_DECODE = 0,
-                                parameter integer LATENCY = 99999) (
+                                parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
@@ -149,7 +149,7 @@ endmodule
 // The inputs are sampled once at in_valid and are not required to remain stable during operation.
 module holoso_fdiv#(parameter WEXP = 6, parameter WMAN = 18,
                     parameter STAGE_INPUT = 0, parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
-                    parameter integer LATENCY = 99999) (
+                    parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
@@ -193,7 +193,7 @@ endmodule
 //      min = sgnop(min(sgnop(a), sgnop(b)))
 //      max = sgnop(max(sgnop(a), sgnop(b)))
 // Useful for e.g. sort-by-absolute-value or producing sign-flipped extrema.
-module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18, parameter integer LATENCY = 99999) (
+module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18, parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
@@ -229,7 +229,7 @@ endmodule
 // Floating point comparator with sign conditioning on inputs only:
 //      (a_gt_b, a_eq_b, a_lt_b) = compare(sgnop(a), sgnop(b))
 // Outputs are mutually-exclusive one-hot flags.
-module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18, parameter integer LATENCY = 99999) (
+module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18, parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
