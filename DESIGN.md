@@ -318,12 +318,14 @@ We issue each op on the earliest cycle its operands are ready and a free instanc
 unrelated ops (no barrier), so a fast `fmul` no longer idles behind a co-scheduled `fdiv`. The register file is
 read-first and carries mandatory read- and write-port latches, so a data-dependent consumer is held
 `DEPENDENCY_EDGE = 1 + WRITE_LATCH + READ_LATCH` cycles past the producer's commit (the read-first write edge plus the
-write and read latches). Inputs load at the accept edge (commit cycle 0) and obey the same edge.
+write and read latches). Inputs are the exception: they load directly into the array at the accept edge (bypassing the
+write latch) and the microcode fetch lag hides that load before the first control word reaches the datapath, so an
+input-reading op waits only `INPUT_DEPENDENCY_EDGE` -- the read latch alone (= 1 here).
 
 ```
 for cycle = 1, 2, ...:                          # cycle 0 accepts/loads inputs
     ready = unscheduled ops whose every operator-operand committed (commit + DEPENDENCY_EDGE <= cycle); and,
-            if the op reads an input, cycle >= DEPENDENCY_EDGE (the input load commits at cycle 0)
+            if the op reads an input, cycle >= INPUT_DEPENDENCY_EDGE (the load is hidden by the fetch lag)
     for op in ready by critical_path desc:
         if an instance of op's concrete hardware operator is free this cycle:
             bind op to that instance; issue_cycle[op] = cycle

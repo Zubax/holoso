@@ -17,6 +17,12 @@ from ._ir import FloatOperatorInstance
 # register-file write-to-read edge (read-first), plus one per latch traversed (write latch then read latch).
 DEPENDENCY_EDGE = 3
 
+# Inputs are the exception. They load straight into the register array at the accept edge (bypassing the write latch),
+# and the 3-stage microcode fetch lands that load before the first control word reaches the datapath, so neither the
+# write latch nor the read-first edge applies to an input-reading op -- only the read latch remains. (It would regain
+# the read-first cycle only if the fetch were ever made shallow enough not to hide the load.)
+INPUT_DEPENDENCY_EDGE = 1
+
 
 @dataclass(frozen=True, slots=True)
 class Schedule:
@@ -87,14 +93,15 @@ def schedule_ops(mir: MirFloatView, pool: Mapping[type[HardwareOperator], int]) 
         return issue_cycle[vid] + _operation(mir, vid).operator.latency
 
     def is_ready(vid: ValueId, cycle: int) -> bool:
-        # A consumer may read a producer only DEPENDENCY_EDGE cycles after the producer commits (the read-first write
-        # edge plus the write and read latches). Inputs are loaded at the accept edge, i.e. commit cycle 0, so they
-        # too need the full edge; constants are immediates with no read-timing constraint.
+        # A consumer may read an operator producer only DEPENDENCY_EDGE cycles after it commits (the read-first write
+        # edge plus the write and read latches). An input loads directly into the array at the accept edge and the
+        # fetch lag hides it, so an input-reading op needs only INPUT_DEPENDENCY_EDGE; constants are immediates with no
+        # read-timing constraint.
         for operand in _operation(mir, vid).operands:
             if operand in mir.operation_nodes:
                 if operand not in issue_cycle or cycle < commit_cycle(operand) + DEPENDENCY_EDGE:
                     return False
-            elif isinstance(mir.nodes[operand], MirFloatInput) and cycle < DEPENDENCY_EDGE:
+            elif isinstance(mir.nodes[operand], MirFloatInput) and cycle < INPUT_DEPENDENCY_EDGE:
                 return False
         return True
 
