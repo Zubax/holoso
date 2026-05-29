@@ -80,8 +80,8 @@ def synth_examples(session: nox.Session) -> None:
     syn(
         "examples/ekf1.py",
         "update_x_P",
-        [  # Yosys is weak and needs extra pipelining.
-            "yosys-ecp5:freq=100,fadd.stage_decode=1,fmul.stage_input=1,fmul.stage_pack=1,fmul.stage_output=1",
+        [
+            "yosys-ecp5:freq=100",
             "diamond-ecp5:freq=100",
             "vivado:freq=150",
         ],
