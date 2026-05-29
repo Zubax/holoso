@@ -19,16 +19,16 @@ placed in the same register so that port reaches one register, not two; values p
 want to share a register so its write port fans into one place.
 
 The allocator is a port-affinity-biased graph coloring (a linear scan whose register choice minimizes the marginal
-increase in total mux fan-in), refined by a bounded, deterministic simulated-annealing pass. Input ports are pinned to
-the unique low registers ``0..nload-1`` so the step-0 parallel-load lanes map one-to-one onto module input ports;
-operation results may still reuse those registers once the input value is dead. The register count simply grows; we
-never spill.
+increase in total mux fan-in), refined by simulated annealing. Input ports are pinned to the unique low registers
+``0..nload-1`` so the step-0 parallel-load lanes map one-to-one onto module input ports; operation results may still
+reuse those registers once the input value is dead. The register count simply grows; we have nowhere to spill.
 """
 
-import math
-import random
 from collections import Counter
 from dataclasses import dataclass
+
+import numpy as np
+from scipy.optimize import dual_annealing
 
 from .._hir import ValueId
 from .._mir import MirFloatConst, MirFloatInput, MirFloatOperation, MirFloatView
@@ -39,10 +39,11 @@ type _Port = tuple[FloatOperatorInstance, int]
 type _Producer = FloatOperatorInstance | str
 _INPUT_LOAD: _Producer = "input_load"
 
-# Annealing schedule.
-_ANNEAL_ITERS_PER_VALUE = 100
-_ANNEAL_MAX_ITERS = 1000000
-_ANNEAL_T0 = 2.0
+# Budget for the SciPy dual-annealing refinement. It only polishes an already-valid greedy seed (and is a no-op when
+# the seed is already at the reach floor), so the function-evaluation cap keeps build time bounded; raise it to trade
+# build time for a deeper search.
+_REFINE_MAXITER = 5000
+_REFINE_MAXFUN = 10000
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +130,7 @@ def allocate_float(
 
     assign = _greedy(input_values, operation_values, def_cycle, last_use, consumer_ports, producer_key)
     nreg = (max(assign.values()) + 1) if assign else 0
-    assign = _anneal(assign, nreg, operation_values, def_cycle, last_use, consumer_ports, producer_key)
+    assign = _refine(assign, nreg, operation_values, def_cycle, last_use, consumer_ports, producer_key)
     _assert_no_interference(assign, def_cycle, last_use)
     return FloatAllocation(assign=assign, nreg=nreg)
 
@@ -204,8 +205,8 @@ def _greedy(
     return assign
 
 
-def _anneal(
-    assign: dict[ValueId, int],
+def _refine(
+    seed: dict[ValueId, int],
     nreg: int,
     operation_values: list[ValueId],
     def_cycle: dict[ValueId, int],
@@ -214,44 +215,51 @@ def _anneal(
     producer_key: dict[ValueId, _Producer],
 ) -> dict[ValueId, int]:
     """
-    Simulated-annealing refinement of the greedy assignment.
-    Moves relocate one operation value to a different, interference-free, already-allocated register (inputs stay
-    pinned, the register count never grows), accepted by the Metropolis criterion on the mux-fan-in objective with a
-    linear cooling schedule. The best assignment seen is returned, so the pass can only improve on the greedy seed.
+    Refine the greedy assignment with SciPy's simulated annealing (``scipy.optimize.dual_annealing``).
+
+    Each operation value gets a continuous coordinate in ``[0, nreg)``; a decode in definition-cycle order maps it to
+    its preferred register, repairing interference by scanning to the next register free at that cycle. Every evaluated
+    point is therefore a valid (interference-free) coloring reusing only the ``nreg`` seed registers, and the annealer
+    minimizes the mux-fan-in objective. The greedy seed is the starting point and the best point seen is kept, so the
+    pass can only improve on the seed. Inputs are pinned (they are not in ``operation_values``).
     """
-    if not operation_values or nreg <= 1:
+    order = sorted(operation_values, key=lambda vid: (def_cycle[vid], vid))
+    if len(order) < 2 or nreg <= 1:
+        return seed
+    op_set = set(order)
+    pinned = [(vid, reg) for vid, reg in seed.items() if vid not in op_set]
+
+    def decode(coords: np.ndarray) -> dict[ValueId, int]:
+        assign: dict[ValueId, int] = {}
+        # free_after[reg] = max last_use of any value placed in reg; the register is free at cycle d iff it is <= d
+        # (read-first: every occupant is then dead by d). Processing in def-cycle order keeps this an O(1) check.
+        free_after = [-1] * nreg
+        for vid, reg in pinned:
+            assign[vid] = reg
+            free_after[reg] = max(free_after[reg], last_use[vid])
+        for index, vid in enumerate(order):
+            d = def_cycle[vid]
+            pref = min(nreg - 1, max(0, int(coords[index])))
+            for offset in range(nreg):  # a register free at d always exists, since nreg covers the peak liveness
+                reg = (pref + offset) % nreg
+                if free_after[reg] <= d:
+                    assign[vid] = reg
+                    free_after[reg] = last_use[vid]  # >= d >= the old value, so this is the new running max
+                    break
         return assign
-    members: dict[int, set[ValueId]] = {}
-    for vid, reg in assign.items():
-        members.setdefault(reg, set()).add(vid)
 
-    def fits(vid: ValueId, target: int) -> bool:
-        for other in members.get(target, ()):
-            if other != vid and not (last_use[vid] <= def_cycle[other] or last_use[other] <= def_cycle[vid]):
-                return False
-        return True
+    best = seed
+    best_cost = _objective(seed, consumer_ports, producer_key)
 
-    rng = random.Random(0)
-    current = dict(assign)
-    current_cost = _objective(current, consumer_ports, producer_key)
-    best, best_cost = dict(current), current_cost
-    iterations = min(_ANNEAL_MAX_ITERS, _ANNEAL_ITERS_PER_VALUE * len(operation_values))
-    for i in range(iterations):
-        temperature = _ANNEAL_T0 * (1.0 - i / iterations)
-        vid = operation_values[rng.randrange(len(operation_values))]
-        target = rng.randrange(nreg)
-        source = current[vid]
-        if target == source or not fits(vid, target):
-            continue
-        current[vid] = target
-        cost = _objective(current, consumer_ports, producer_key)
-        delta = cost - current_cost
-        if delta <= 0 or (temperature > 0.0 and rng.random() < math.exp(-delta / temperature)):
-            members[source].discard(vid)
-            members.setdefault(target, set()).add(vid)
-            current_cost = cost
-            if cost < best_cost:
-                best, best_cost = dict(current), cost
-        else:
-            current[vid] = source
+    def cost(coords: np.ndarray) -> float:
+        nonlocal best, best_cost
+        candidate = decode(coords)
+        value = _objective(candidate, consumer_ports, producer_key)
+        if value < best_cost:
+            best, best_cost = candidate, value
+        return float(value)
+
+    x0 = np.array([float(seed[vid]) for vid in order])
+    bounds = [(0.0, nreg - 1e-6)] * len(order)
+    dual_annealing(cost, bounds, x0=x0, seed=0, maxiter=_REFINE_MAXITER, maxfun=_REFINE_MAXFUN, no_local_search=True)
     return best

@@ -86,7 +86,7 @@ class SynthesisResult:
     output_ports: list[DataOutputPort]
     control_ports: list[ControlPort]
 
-    verilog_output: VerilogOutput     # generated module text + support_files (the shared holoso_support .v/.vh)
+    verilog_output: VerilogOutput     # generated module text + support_files (the shared holoso_support.v)
     numerical_model: NumericalModel   # bit-exact, picklable pure-Python model (flat FloatValue in -> flat tuple out)
     cocotb_output:  CocotbOutput      # self-contained testbench: embeds the model, checks the DUT bit-for-bit
     html_output:    HtmlOutput        # self-contained single-page report
@@ -327,8 +327,8 @@ for cycle = 1, 2, ...:                          # cycle 0 accepts/loads inputs
     for op in ready by critical_path desc:
         if an instance of op's concrete hardware operator is free this cycle:
             bind op to that instance; issue_cycle[op] = cycle
-regalloc: reach-aware coloring (greedy port-affinity + bounded simulated annealing); share a register when
-  last_use <= def (sound under read-first; the latches only widen the margin); no spill
+regalloc: reach-aware coloring (greedy port-affinity + a bounded SciPy dual-annealing refinement); share a register
+  when last_use <= def (sound under read-first; the latches only widen the margin); no spill
 ```
 
 - Instances are pooled by the fully specified hardware operator itself (a frozen, equal-by-value `HardwareOperator`):

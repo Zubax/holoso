@@ -37,9 +37,11 @@ def test_synthesize_small_kernel_result() -> None:
     assert "holoso_regfile" not in result.verilog_output.support_files["holoso_support.v"]
     assert "holoso_fadd" in result.verilog_output.support_files["holoso_support.v"]
     assert "reg  [W-1:0] regs [0:NREG-1];" in result.verilog_output.verilog
-    assert '`include "holoso_support.vh"' in result.verilog_output.support_files["holoso_support.v"]
-    assert "`define HOLOSO_FSGNOP_NEG" in result.verilog_output.support_files["holoso_support.vh"]
-    assert "HOLOSO_REGFILE_LANE" not in result.verilog_output.support_files["holoso_support.vh"]
+    # The support header is gone: nothing includes it and it is not bundled.
+    assert "holoso_support.vh" not in result.verilog_output.support_files
+    assert "`include" not in result.verilog_output.verilog
+    # Project policy: all sequential logic lives in exactly one clocked process.
+    assert result.verilog_output.verilog.count("always @(posedge clk)") == 1
     assert "@cocotb.test()" in result.cocotb_output.testbench
     assert "<html" in result.html_output.html.lower()
     names = [p.name for p in result.ports]
@@ -109,12 +111,11 @@ def test_generated_testbench_is_valid_python() -> None:
 def test_write_artifacts(tmp_path: Path) -> None:
     result = holoso.synthesize(_kernel, ops=_ops())
     paths = result.write(tmp_path)
-    assert set(paths) == {"_kernel.v", "holoso_support.v", "holoso_support.vh", "test__kernel.py", "_kernel.html"}
+    assert set(paths) == {"_kernel.v", "holoso_support.v", "test__kernel.py", "_kernel.html"}
     assert (tmp_path / "_kernel.v").exists()
     assert (tmp_path / "test__kernel.py").exists()
     assert (tmp_path / "_kernel.html").exists()
     assert (tmp_path / "holoso_support.v").exists()
-    assert (tmp_path / "holoso_support.vh").exists()
 
 
 def test_report_has_expected_sections() -> None:

@@ -14,7 +14,6 @@ from datetime import datetime
 from importlib import resources
 
 from ..._lir import Lir, FloatConstRef, FloatOperand, FloatOperatorInstance, FloatRegRef, FloatScheduledOp
-from ..._lir import float_liveness
 from ..._operators import FAddOperator, FDivOperator, FMulILog2Operator, FMulOperator, HardwareOperator
 from ..verilog import VerilogOutput
 
@@ -333,7 +332,7 @@ def _schedule(lir: Lir) -> str:
         stage_thick={n_stage - 1} if n_stage else set(),
     )
 
-    live = float_liveness(lir)
+    live = lir.float_liveness
     edges: list[tuple[str, str, str, int]] = []  # (commit id, operand id, color, operation group) for the overlay
     # Operator pipeline occupancy: instance ``inst`` is in stage ``k`` on cycle ``issue + k``. Keyed to the operation
     # group so a hover lights the whole pipeline trail together with the result cell, its chip and its edges.

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from .._value import FloatValue
 from .._lir import FloatConstRef, FloatRegRef, Lir
-from .._lir import InputProducer, OperationProducer, float_write_timeline, latest_producer_before
+from .._lir import InputProducer, OperationProducer, latest_producer_before
 from .._operators import FloatSignControl
 from .._type import FloatFormat
 
@@ -59,7 +59,7 @@ class NumericalModel:
         # Per-register write timeline: (commit_cycle, producer) in increasing commit order. Inputs are sampled at
         # cycle 0; each op commits at its commit_cycle. Operands resolve against this so a register reused for several
         # values over its lifetime yields the value that is live at the operand's read (issue) cycle, not the final one.
-        writes = float_write_timeline(lir)
+        writes = lir.float_write_timeline
 
         op_values: dict[int, FloatValue] = {}
 

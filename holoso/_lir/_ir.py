@@ -179,6 +179,23 @@ class FloatRegFileLayout(RegFileLayout):
 
 
 @dataclass(frozen=True, slots=True)
+class InputProducer:
+    """A write to a register that came from an input-load lane ``index`` (in module-port order)."""
+
+    index: int
+
+
+@dataclass(frozen=True, slots=True)
+class OperationProducer:
+    """A write to a register that came from operation ``index`` in ``Lir.float_ops``."""
+
+    index: int
+
+
+type FloatProducer = InputProducer | OperationProducer
+
+
+@dataclass(frozen=True, slots=True)
 class Lir:
     module_name: str
     float_instances: list[FloatOperatorInstance]
@@ -280,3 +297,61 @@ class Lir:
         for writers in sets.values():
             writers.sort(key=lambda inst: (inst.operator.instance_stem, inst.index))
         return sets
+
+    @property
+    def group_by_cycle(self) -> tuple[dict[int, list[FloatScheduledOp]], dict[int, list[FloatScheduledOp]]]:
+        """The schedule grouped into per-cycle issues and commits, each canonically ordered."""
+        issues: dict[int, list[FloatScheduledOp]] = {}
+        commits: dict[int, list[FloatScheduledOp]] = {}
+        for op in self.float_ops:
+            issues.setdefault(op.issue_cycle, []).append(op)
+            commits.setdefault(op.commit_cycle, []).append(op)
+        for group in (issues, commits):
+            for ops in group.values():
+                ops.sort(key=lambda op: (op.inst.operator.instance_stem, op.inst.index, op.dst.index, op.issue_cycle))
+        return issues, commits
+
+    @property
+    def float_liveness(self) -> dict[FloatRegRef, set[int]]:
+        """
+        Map each float register to the clock cycles on which it holds a live value.
+
+        A value is written on its definition cycle and read on each consumer issue cycle, or on the output-present
+        cycle if it drives an output. Each row spans a value's definition through its last read.
+        """
+        present = self.makespan + 1
+        defs: dict[FloatRegRef, list[int]] = {}
+        uses: dict[FloatRegRef, list[int]] = {}
+        for load in self.float_inputs:
+            defs.setdefault(load.dst, []).append(0)
+        for op in self.float_ops:
+            defs.setdefault(op.dst, []).append(op.commit_cycle)
+            for operand in op.operands:
+                if isinstance(operand.source, FloatRegRef):
+                    uses.setdefault(operand.source, []).append(op.issue_cycle)
+        for wire in self.float_outputs:
+            if isinstance(wire.source, FloatRegRef):
+                uses.setdefault(wire.source, []).append(present)
+        live: dict[FloatRegRef, set[int]] = {}
+        for reg in defs.keys() | uses.keys():
+            writes = sorted(defs.get(reg, []))
+            reads = sorted(uses.get(reg, []))
+            rows: set[int] = set()
+            for i, start in enumerate(writes):
+                nxt = writes[i + 1] if i + 1 < len(writes) else present + 1
+                last = max((use for use in reads if start <= use < nxt), default=start)
+                rows.update(range(start, last + 1))
+            live[reg] = rows
+        return live
+
+    @property
+    def float_write_timeline(self) -> dict[FloatRegRef, list[tuple[int, FloatProducer]]]:
+        """Per-register write timeline (commit cycle, producer) used to resolve a register source at a read cycle."""
+        writes: dict[FloatRegRef, list[tuple[int, FloatProducer]]] = {}
+        for i, load in enumerate(self.float_inputs):
+            writes.setdefault(load.dst, []).append((0, InputProducer(i)))
+        for j, op in enumerate(self.float_ops):
+            writes.setdefault(op.dst, []).append((op.commit_cycle, OperationProducer(j)))
+        for events in writes.values():
+            events.sort()
+        return writes

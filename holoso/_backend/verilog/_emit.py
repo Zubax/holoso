@@ -13,9 +13,10 @@ registers that operand ever reads across the schedule (a single-register operand
 latch. Each operator result passes through a writeback latch into a per-register write select that spans only the
 instances that ever write that register (a single-writer register needs no address compare).
 
-The RF read and write latches are mandatory in this version; the dependency scheduler and the microcode field placement
-budget for them. Control fields that are constant across the whole program are driven by constant nets and omitted
-from the ROM, so synthesis prunes the logic they feed.
+All sequential logic -- the fetch pipeline, the read/write register-file latches, the register writes, and the
+reset-gated control state -- is emitted as a single ``always @(posedge clk)`` block (project policy); only the next-PC
+sequencer is a separate combinational ``always @*``. Control fields that are constant across the whole program are
+driven by constant nets and omitted from the ROM, so synthesis prunes the logic they feed.
 """
 
 from dataclasses import dataclass
@@ -34,7 +35,6 @@ from ..._lir import (
     FloatOperatorInstance,
     FloatScheduledOp,
     Port,
-    group_by_cycle,
 )
 from ..._operators import FloatSignControl
 from ._microcode import (
@@ -58,8 +58,7 @@ from ._microcode import (
 )
 
 _SUPPORT_FILES = {
-    name: resources.files(__package__).joinpath(name).read_text(encoding="utf-8")
-    for name in ("holoso_support.v", "holoso_support.vh")
+    name: resources.files(__package__).joinpath(name).read_text(encoding="utf-8") for name in ("holoso_support.v",)
 }
 
 
@@ -140,8 +139,8 @@ def generate(lir: Lir) -> VerilogOutput:
     fields = build_microcode(lir, read_port, port_consts, waddr)
     ucw = finalize_fields(fields)
 
-    issues_by_cycle, commits_by_cycle = group_by_cycle(lir)
-    commits_by_step: dict[int, list[FloatScheduledOp]] = {}  # the writeback latch delays the commit step by write latch
+    issues_by_cycle, commits_by_cycle = lir.group_by_cycle
+    commits_by_step: dict[int, list[FloatScheduledOp]] = {}  # the writeback latch delays the commit step by one
     for commit_cycle, ops in commits_by_cycle.items():
         commits_by_step.setdefault(commit_cycle + 1, []).extend(ops)
 
@@ -155,8 +154,8 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_operators(w, lir)
     _emit_microcode_rom(w, fields, ucw, depth, last_pc, issues_by_cycle, commits_by_step)
     _emit_field_wires(w, fields)
-    _emit_sequencer(w)
-    _emit_datapath(w, lir, read_port, port_consts, read_sets, write_sets, inst_targets, waddr)
+    _emit_datapath_comb(w, lir, port_consts)
+    _emit_clocked(w, lir, read_port, port_consts, read_sets, write_sets, inst_targets, waddr)
     _emit_outputs(w, lir)
     w("\nendmodule\n")
     return VerilogOutput(verilog=w.render(), support_files=_SUPPORT_FILES)
@@ -165,7 +164,6 @@ def generate(lir: Lir) -> VerilogOutput:
 def _emit_header(w: _Writer, lir: Lir) -> None:
     fmt = lir.float_regfile.fmt
     w(f"""
-`include "holoso_support.vh"
 `timescale 1ns/1ps
 
 // Float format: exponent {fmt.wexp} bits, significand {fmt.wman} bits, total {fmt.width} bits.
@@ -225,10 +223,11 @@ localparam           UCW   = {ucw};  // microcode word width after lifting out c
 
 def _emit_declarations(w: _Writer, lir: Lir) -> None:
     w("""
-        reg  [PCW-1:0]  pc;       // fetch program counter; the executing step lags it by FETCH_LAG
-        reg  [PCW-1:0]  next_pc;  // combinational next-state presented to the ROM each cycle
+        reg  [PCW-1:0]  pc;            // fetch program counter; the executing step lags it by FETCH_LAG
+        reg  [PCW-1:0]  next_pc;       // combinational next-state presented to the ROM each cycle
+        reg  [PCW-1:0]  ucode_addr_q;  // PC latch: splits pc -> next_pc -> ROM address from the array read
         reg  [CYCW-1:0] err_pc_q;
-        wire            err;      // an operator error is detected on the current step
+        wire            err;           // an operator error is detected on the current step
 
         reg  [W-1:0] regs [0:NREG-1];  // the sparse register array (read-first: a write is visible the next step)
 
@@ -296,7 +295,7 @@ def _emit_microcode_rom(
 ) -> None:
     digits = (ucw + 3) // 4
     w("""
-// Microcode VLIW ROM: one pre-decoded control word per step, registered on read (in the sequencer below).
+// Microcode VLIW ROM: one pre-decoded control word per step, registered on read (in the clocked block below).
 // Constant control fields are lifted out (below) and not stored here, enabling synthesis-time folding.
 (* rom_style = "block", ram_style = "block", syn_romstyle = "EBR" *)
 reg [UCW-1:0] ucode [0:LASTPC];  // steps 0..PRESENT carry the program; PRESENT+1..LASTPC are NOP fetch padding
@@ -334,66 +333,6 @@ def _emit_field_wires(w: _Writer, fields: dict[str, Field]) -> None:
     w("")
 
 
-def _emit_sequencer(w: _Writer) -> None:
-    w("""
-// Sequencer.
-//
-// The control store is read through a 3-stage fetch: a PC latch (ucode_addr_q) splits the pc -> next_pc -> ROM-address
-// cone from the array read, then ucode_q is the array-read register and ucode_word a second register cascaded directly
-// after it (no logic between them) so the tool packs it into the BRAM's dedicated output register. The executing step
-// therefore lags the fetch PC by FETCH_LAG: pc runs 0..LASTPC and out_valid is asserted at LASTPC.
-//
-// Reset covers only control state (pc, err_pc_q); the fetch registers are reset-unconditional (so they can pack into
-// the BRAM output register) and settle to ucode[0] under reset.
-//
-// FUTURE TUNING KNOB: the fetch depth (and the read/write latches) are fixed here; flows that register the control
-// store in fabric, or that close timing without a latch, could drop a stage. That is a deferred per-target knob.
-always @* begin
-    """)
-    w.push()
-    w("""
-if (rst)              next_pc = 0;
-else if (pc == LASTPC) next_pc = out_ready ? 0 : LASTPC;  // present: hold until the result is taken
-else if (pc == 0)      next_pc = in_valid ? 1 : 0;        // accept: hold until a transaction arrives
-else                   next_pc = pc + 1'b1;               // advance the fetch
-""")
-    w.pop()
-    w("""
-end
-
-reg [PCW-1:0] ucode_addr_q;  // PC latch: splits pc -> next_pc -> ROM address cone from the BRAM read
-
-always @(posedge clk) begin
-""")
-    w.push()
-    w("""
-ucode_addr_q <= next_pc;                // 1st stage: PC latch (route-split helper)
-ucode_q      <= ucode[ucode_addr_q];    // 2nd stage: control-store array read
-ucode_word   <= ucode_q;                // 3rd stage: BRAM output register (fast clock-to-out)
-if (rst) begin
-""")
-    w.push()
-    w("""
-pc     <= 0;
-err_pc_q <= 0;
-""")
-    w.pop()
-    w("end else begin")
-    w.push()
-    w("""
-pc <= next_pc;
-if ((pc == 0) && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted
-if (err) err_pc_q <= pc - FETCH_LAG;        // execution lags the fetch PC by FETCH_LAG, so the step is pc-FETCH_LAG
-""")
-    w.pop()
-    w("end")
-    w.pop()
-    w("""
-end
-
-""")
-
-
 def _const_term_expr(port: int, consts: list[int]) -> str:
     expr = f"const_{consts[-1]}"
     for local in range(len(consts) - 2, -1, -1):
@@ -401,56 +340,8 @@ def _const_term_expr(port: int, consts: list[int]) -> str:
     return expr
 
 
-def _emit_read_latch(
-    w: _Writer, target: str, port: int, read_set: list[int], port_consts: dict[int, list[int]], waddr: int
-) -> None:
-    """
-    Emit the read mux + read latch for one operand: ``target`` is registered from the value selected this step.
-
-    The mux spans only ``read_set`` (the registers this port ever reads): no register at all when the operand is
-    always a constant, a direct wire for a single register, a case over the read-set otherwise. A const-select picks
-    the immediate when the operand is sometimes a constant. On idle steps the latch captures a don't-care value that
-    the operator ignores (its in_valid is low).
-    """
-    consts = port_consts.get(port)
-    cterm = _cterm_expr(port, consts) if consts else None
-    if not read_set:  # the operand is always a constant immediate
-        w(f"always @(posedge clk) {target} <= {cterm};")
-        return
-    if len(read_set) == 1:
-        reg_expr = f"regs[{read_set[0]}]"
-        rhs = f"{f_selc(port)} ? {cterm} : {reg_expr}" if cterm else reg_expr
-        w(f"always @(posedge clk) {target} <= {rhs};")
-        return
-    w("always @(posedge clk) begin")
-    w.push()
-    if cterm:
-        w(f"if ({f_selc(port)}) {target} <= {cterm};")
-        w(f"else case ({f_rd(port)})")
-    else:
-        w(f"case ({f_rd(port)})")
-    w.push()
-    for reg in read_set:
-        w(f"{_lit(waddr, reg)}: {target} <= regs[{reg}];")
-    w(f"default: {target} <= regs[{read_set[0]}];")
-    w.pop()
-    w("endcase")
-    w.pop()
-    w("end")
-
-
-def _emit_datapath(
-    w: _Writer,
-    lir: Lir,
-    read_port: dict[tuple[FloatOperatorInstance, int], int],
-    port_consts: dict[int, list[int]],
-    read_sets: dict[tuple[FloatOperatorInstance, int], list[int]],
-    write_sets: dict[int, list[FloatOperatorInstance]],
-    inst_targets: dict[FloatOperatorInstance, set[int]],
-    waddr: int,
-) -> None:
-    nreg = max(1, lir.float_regfile.nreg)
-
+def _emit_datapath_comb(w: _Writer, lir: Lir, port_consts: dict[int, list[int]]) -> None:
+    """Combinational datapath: constant terms, the input-load enable, operator control, the err flag, and next_pc."""
     for port in sorted(port_consts):
         if len(port_consts[port]) > 1:
             w(f"wire [W-1:0] cterm{port} = {_const_term_expr(port, port_consts[port])};")
@@ -467,59 +358,159 @@ def _emit_datapath(
             w(f"assign {sig}_{PORT_LETTERS[pos]}s = {f_osgn(base, PORT_LETTERS[pos])};")
     w("")
 
-    w("// Operand read ports: a sparse mux over each operand's read-set, registered by the read latch.")
-    for inst in lir.float_instances:
-        sig = _sig(inst)
-        for pos in range(inst.operator.arity):
-            letter = PORT_LETTERS[pos]
-            port = read_port[(inst, pos)]
-            _emit_read_latch(w, f"{sig}_{letter}", port, read_sets.get((inst, pos), []), port_consts, waddr)
-    w("")
-
-    w("// Writeback latches: the operator result (and any error sideband) is registered before the register write.")
-    for inst in lir.float_instances:
-        sig = _sig(inst)
-        w(f"always @(posedge clk) {sig}_y_q <= {sig}_y;")
-        for err_port in inst.operator.error_ports:
-            w(f"always @(posedge clk) {sig}_{err_port}_q <= {sig}_{err_port};")
-    w("")
-
-    w("// Register writes: a synchronous select spanning only each register's writers (plus the input load).")
-    covered = {load.dst.index: load.name for load in lir.float_inputs}
-    for reg in range(nreg):
-        writers = write_sets.get(reg, [])
-        is_load = reg in covered
-        if not is_load and not writers:
-            continue  # an unused register (only the NREG>=1 floor with no values); leave it undriven
-        w("always @(posedge clk) begin")
-        w.push()
-        clause = "if"
-        if is_load:
-            w(f"if (load_en) regs[{reg}] <= in_{covered[reg]};")
-            clause = "else if"
-        for inst in writers:
-            sig, base = _sig(inst), base_name(inst)
-            # A register written by a single instance that only ever writes here needs no address compare.
-            if inst_targets.get(inst) == {reg}:
-                cond = f_we(base)
-            else:
-                cond = f"{f_we(base)} && ({f_wa(base)} == {_lit(waddr, reg)})"
-            w(f"{clause} ({cond}) regs[{reg}] <= {sig}_y_q;")
-            clause = "else if"
-        w.pop()
-        w("end")
-    w("")
-
     # An error matters only on the step its operator commits, which is exactly that instance's write-enable; both the
-    # write-enable and the error sideband are aligned to the writeback latch (commit + WRITE_LATCH).
+    # write-enable and the error sideband are aligned to the writeback latch (commit + write latch).
     err_terms = [
         f"({f_we(base_name(inst))} & {_sig(inst)}_{port}_q)"
         for inst in lir.float_instances
         for port in inst.operator.error_ports
     ]
     err_rhs = " | ".join(err_terms) if err_terms else "1'b0"
-    w(f"assign err = {err_rhs};")
+    w(f"assign err = {err_rhs};", "")
+
+    w("""
+// Next-PC sequencer (combinational). The PC holds at the accept (pc==0) and present (pc==LASTPC) boundaries; bubble
+// steps carry a NOP word and the PC keeps advancing. The executing step lags the fetch PC by FETCH_LAG.
+always @* begin
+""")
+    w.push()
+    w("""
+if (rst)               next_pc = 0;
+else if (pc == LASTPC) next_pc = out_ready ? 0 : LASTPC;  // present: hold until the result is taken
+else if (pc == 0)      next_pc = in_valid ? 1 : 0;        // accept: hold until a transaction arrives
+else                   next_pc = pc + 1'b1;               // advance the fetch
+""")
+    w.pop()
+    w("end", "")
+
+
+def _read_latch_stmts(
+    w: _Writer, target: str, port: int, read_set: list[int], port_consts: dict[int, list[int]], waddr: int
+) -> None:
+    """
+    Emit the read mux + read-latch update for one operand, as statements inside the single clocked block.
+
+    The mux spans only ``read_set`` (the registers this port ever reads): no register at all when the operand is
+    always a constant, a direct register read for a single register, a case over the read-set otherwise. A
+    const-select picks the immediate when the operand is sometimes a constant. On idle steps the latch captures a
+    don't-care value that the operator ignores (its in_valid is low).
+    """
+    consts = port_consts.get(port)
+    cterm = _cterm_expr(port, consts) if consts else None
+    if not read_set:  # the operand is always a constant immediate
+        w(f"{target} <= {cterm};")
+        return
+    if len(read_set) == 1:
+        reg_expr = f"regs[{read_set[0]}]"
+        rhs = f"{f_selc(port)} ? {cterm} : {reg_expr}" if cterm else reg_expr
+        w(f"{target} <= {rhs};")
+        return
+    if cterm:
+        w(f"if ({f_selc(port)}) {target} <= {cterm};")
+        w(f"else case ({f_rd(port)})")
+    else:
+        w(f"case ({f_rd(port)})")
+    w.push()
+    for reg in read_set:
+        w(f"{_lit(waddr, reg)}: {target} <= regs[{reg}];")
+    w(f"default: {target} <= regs[{read_set[0]}];")
+    w.pop()
+    w("endcase")
+
+
+def _reg_write_stmts(
+    w: _Writer,
+    reg: int,
+    writers: list[FloatOperatorInstance],
+    load_name: str | None,
+    inst_targets: dict[FloatOperatorInstance, set[int]],
+    waddr: int,
+) -> None:
+    """Emit the write select for one register (input load plus only its actual writers) inside the clocked block."""
+    clause = "if"
+    if load_name is not None:
+        w(f"if (load_en) regs[{reg}] <= in_{load_name};")
+        clause = "else if"
+    for inst in writers:
+        sig, base = _sig(inst), base_name(inst)
+        # A register written by a single instance that only ever writes here needs no address compare.
+        if inst_targets.get(inst) == {reg}:
+            cond = f_we(base)
+        else:
+            cond = f"{f_we(base)} && ({f_wa(base)} == {_lit(waddr, reg)})"
+        w(f"{clause} ({cond}) regs[{reg}] <= {sig}_y_q;")
+        clause = "else if"
+
+
+def _emit_clocked(
+    w: _Writer,
+    lir: Lir,
+    read_port: dict[tuple[FloatOperatorInstance, int], int],
+    port_consts: dict[int, list[int]],
+    read_sets: dict[tuple[FloatOperatorInstance, int], list[int]],
+    write_sets: dict[int, list[FloatOperatorInstance]],
+    inst_targets: dict[FloatOperatorInstance, set[int]],
+    waddr: int,
+) -> None:
+    """Emit every sequential element in one always @(posedge clk): fetch, latches, writes, and control state."""
+    nreg = max(1, lir.float_regfile.nreg)
+    covered = {load.dst.index: load.name for load in lir.float_inputs}
+
+    w("""
+// Project policy: all sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q);
+// the fetch pipeline, the read/write register-file latches, and the register array are reset-unconditional so they
+// stay out of the reset fan-out and can pack into dedicated BRAM-output / DSP flops.
+always @(posedge clk) begin
+""")
+    w.push()
+
+    w("// Microcode fetch: PC latch -> control-store array read -> BRAM output register.")
+    w("ucode_addr_q <= next_pc;")
+    w("ucode_q      <= ucode[ucode_addr_q];")
+    w("ucode_word   <= ucode_q;")
     w("")
+
+    w("// Operand read latches: a sparse mux over each operand's read-set, registered before the wrapper.")
+    for inst in lir.float_instances:
+        sig = _sig(inst)
+        for pos in range(inst.operator.arity):
+            port = read_port[(inst, pos)]
+            _read_latch_stmts(w, f"{sig}_{PORT_LETTERS[pos]}", port, read_sets.get((inst, pos), []), port_consts, waddr)
+    w("")
+
+    w("// Writeback latches: the operator result (and any error sideband) registered before the register write.")
+    for inst in lir.float_instances:
+        sig = _sig(inst)
+        w(f"{sig}_y_q <= {sig}_y;")
+        for err_port in inst.operator.error_ports:
+            w(f"{sig}_{err_port}_q <= {sig}_{err_port};")
+    w("")
+
+    w("// Register writes: the input load plus a select spanning only each register's writers.")
+    for reg in range(nreg):
+        writers = write_sets.get(reg, [])
+        load_name = covered.get(reg)
+        if load_name is None and not writers:
+            continue  # an unused register (only the NREG>=1 floor with no values); leave it undriven
+        _reg_write_stmts(w, reg, writers, load_name, inst_targets, waddr)
+    w("")
+
+    w("// Control state: the only reset-gated registers.")
+    w("if (rst) begin")
+    w.push()
+    w("pc       <= 0;")
+    w("err_pc_q <= 0;")
+    w.pop()
+    w("end else begin")
+    w.push()
+    w("pc <= next_pc;")
+    w("if ((pc == 0) && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted")
+    w("if (err) err_pc_q <= pc - FETCH_LAG;        // execution lags the fetch PC by FETCH_LAG, so the step is pc-lag")
+    w.pop()
+    w("end")
+
+    w.pop()
+    w("end", "")
 
 
 def _emit_outputs(w: _Writer, lir: Lir) -> None:
