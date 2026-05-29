@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
 
-from ..._lir import Lir, FloatConstRef, FloatOperand, FloatOperatorInstance, FloatRegRef, FloatScheduledOp
+from ..._lir import FETCH_LAG, Lir, FloatConstRef, FloatOperand, FloatOperatorInstance, FloatRegRef, FloatScheduledOp
 from ..._operators import FAddOperator, FDivOperator, FMulILog2Operator, FMulOperator, HardwareOperator
 from ..verilog import VerilogOutput
 
@@ -98,15 +98,17 @@ def _metrics(lir: Lir) -> str:
 
 
 def _stage_config(lir: Lir) -> str:
-    out = ["<h2>Operator Params</h2><table class='metrics cfg'>"]
-    out.append("<tr><th>operator</th><th>HDL param</th><th>value</th></tr>")
+    out = [
+        "<h2>Operator Params</h2><table class='metrics cfg'>",
+        "<tr><th>operator</th><th>HDL param</th><th>value</th></tr>",
+    ]
     seen: dict[HardwareOperator, None] = {}  # distinct operators present, in instance order
     for inst in lir.float_instances:
         seen.setdefault(inst.operator, None)
     rows = 0
     for op in seen:
         for param, value in op.hdl_params().items():
-            out.append(f"<tr><td>{_esc(op.mnemonic)}</td><td>{_esc(param)}</td><td>{value}</td></tr>")
+            out.append(f"<tr><td>{_esc(op.instance_stem)}</td><td>{_esc(param)}</td><td>{value}</td></tr>")
             rows += 1
     if rows == 0:
         out.append("<tr><td colspan='3'>(defaults)</td></tr>")
@@ -251,6 +253,15 @@ def _stage_columns(lir: Lir) -> list[tuple[FloatOperatorInstance, int]]:
     return cols
 
 
+def _pc_cell(cyc: int) -> str:
+    """
+    The executing microcode step for grid row ``cyc`` (``clk - FETCH_LAG``): the ROM address whose control word drives
+    this cycle's datapath, and exactly what ``err_pc`` latches. Blank during the fetch warmup, where it is negative.
+    """
+    step = cyc - FETCH_LAG
+    return f"<td class='pc'>{step if step >= 0 else ''}</td>"
+
+
 def _bookend_row(
     label: str,
     cells: dict[ColKey, str],
@@ -267,7 +278,9 @@ def _bookend_row(
         out.append(f"<td class='{_gc_class(ordinal, dv)}{extra}'>{cells.get(col, '')}</td>")
     for sidx in range(n_stage):
         out.append(f"<td class='{_oc_class(sidx, dv)}'></td>")
-    out.append("<td class='opcell'></td></tr>")
+    out.append("<td class='opcell'></td>")
+    out.append(_pc_cell(row_id))
+    out.append("</tr>")
     return "".join(out)
 
 
@@ -309,11 +322,9 @@ def _schedule(lir: Lir) -> str:
     nreg, nconst = lir.float_regfile.nreg, len(lir.float_consts)
     columns = _columns_of(lir)
     col_ord = {col: ordinal for ordinal, col in enumerate(columns)}
-    compute_cycles = list(range(1, lir.makespan + 1))
-    # TODO FIXME: The grid shows the abstract compute schedule: the input-load row (cycle 0) plus the commit cycles
-    #       1..makespan. The observable initiation interval is larger -- it additionally covers the fixed
-    #       read/write-latch and microcode-fetch staging, which are not part of this per-cycle register-occupancy
-    #       view -- and is shown in Metrics. THIS MUST BE FIXED -- THE REGVIEW MUST BE CYCLE-ACCURATE.
+    # Cycle-accurate clock cycles 1..II (cycle 0 is the accept/input-load bookend row): the grid reflects what the
+    # register array physically holds each cycle, including the read/write-latch and microcode-fetch staging.
+    compute_cycles = list(range(1, lir.initiation_interval + 1))
 
     # The operator-stage block: one square column per pipeline stage of each operator, in instance order.
     stage_cols = _stage_columns(lir)
@@ -352,23 +363,25 @@ def _schedule(lir: Lir) -> str:
     for op in lir.float_ops:
         tip = _esc(_op_text(op))
         color = _KIND_COLOR[type(op.inst.operator)]
-        issue, commit = op.issue_cycle, op.commit_cycle
+        # Physical clock cycles (cycle-accurate).
+        read_cyc = op.issue_cycle + FETCH_LAG - 1
+        write_cyc = op.commit_cycle + FETCH_LAG + 2
         dcol: ColKey = op.dst
         dord = col_ord[dcol]
-        writes_at[(commit, dcol)] = writes_at.get((commit, dcol), "") + _write_label(op.inst.index, tip)
-        fills[(commit, dcol)] = color
-        endpoints.add((dord, commit))
-        cell_group[(dord, commit)] = group
+        writes_at[(write_cyc, dcol)] = writes_at.get((write_cyc, dcol), "") + _write_label(op.inst.index, tip)
+        fills[(write_cyc, dcol)] = color
+        endpoints.add((dord, write_cyc))
+        cell_group[(dord, write_cyc)] = group
         for operand in op.operands:
             oord = col_ord[_operand_col(operand)]
-            endpoints.add((oord, issue))  # operands are read on the issue cycle
-            edges.append((f"g{dord}_{commit}", f"g{oord}_{issue}", color, group))
-        chips_at.setdefault(commit, []).append(
+            endpoints.add((oord, read_cyc))  # operands are read a read-latch cycle before the operator issues
+            edges.append((f"g{dord}_{write_cyc}", f"g{oord}_{read_cyc}", color, group))
+        chips_at.setdefault(write_cyc, []).append(
             f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
         )
         base = stage_base[op.inst]
-        for k in range(op.latency):  # stamp the pipeline trail: stage k of this operator is busy on cycle issue + k
-            key = (base + k, issue + k)
+        for k in range(op.latency):  # stamp the pipeline trail: stage k of this operator is busy on issue + k + lag
+            key = (base + k, op.issue_cycle + k + FETCH_LAG)
             if key in stage_fill and stage_fill[key][1] != group:
                 conflicts.add(key)
             stage_fill[key] = (color, group)
@@ -387,7 +400,8 @@ def _schedule(lir: Lir) -> str:
     if n_stage:
         seam = _border_suffix(n_stage - 1, dv.stage_thin, dv.stage_thick)
         out.append(f"<th class='gband{seam}' colspan='{n_stage}'><span>operator pipelines</span></th>")
-    out.append("<th class='oph' rowspan='3'>operations</th></tr>")
+    out.append("<th class='oph' rowspan='3'>operations</th>")
+    out.append("<th class='oph pch' rowspan='3'>pc</th></tr>")
     # Header row 1: register and constant column labels, and one group cell per operator spanning its stages.
     out.append("<tr>")
     for index in range(nreg):
@@ -398,9 +412,7 @@ def _schedule(lir: Lir) -> str:
         out.append(f"<th class='{cls}' rowspan='2'><span>c{index}</span></th>")
     for inst in lir.float_instances:
         lat = inst.operator.latency
-        name = (
-            f"{inst.operator.mnemonic}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
-        )
+        name = f"{inst.operator.instance_stem}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
         seam = _border_suffix(stage_base[inst] + lat - 1, dv.stage_thin, dv.stage_thick)
         out.append(
             f"<th class='ohgrp{seam}' colspan='{lat}' style='color:{_KIND_COLOR[type(inst.operator)]}'>"
@@ -414,8 +426,8 @@ def _schedule(lir: Lir) -> str:
         out.append(f"<th class='{cls}'><span>s{k}</span></th>")
     out.append("</tr>")
 
-    # The grid has exactly one displayed row per II cycle: the input-load cycle (0), then the compute/writeback cycles
-    # 1..makespan. The output-present boundary is not an extra cycle row; out_valid rises after these II cycles.
+    # One displayed row per clock cycle, cycle-accurate to the hardware: the accept/input-load cycle (0), then the
+    # compute, latch, and fetch-staging cycles 1..II. out_valid rises on the last row (the present cycle == II).
     in_cells: dict[ColKey, str] = {load.dst: _input_chip(f"in_{load.name}") for load in lir.float_inputs}
     out.append(_bookend_row("in", in_cells, columns, live, 0, n_stage, dv))
 
@@ -432,6 +444,7 @@ def _schedule(lir: Lir) -> str:
         for sidx in range(n_stage):
             out.append(_stage_cell(sidx, cyc, dv, stage_fill, stage_tip, conflicts))
         out.append(f"<td class='opcell'>{''.join(chips_at.get(cyc, []))}</td>")
+        out.append(_pc_cell(cyc))
         out.append("</tr>")
     out.append("</table><svg class='edges'></svg></div>")
     out.append(_sched_script(lir, edges, live))
@@ -506,5 +519,6 @@ def _schedule_key(lir: Lir) -> str:
         "pipeline advances</span>"
         + f"<span><span class='sw' style='background:{_LIVE_BG}'></span> register holds a live value</span>"
         + f"<span><span class='wr' style='background:{_NEUTRAL}'>&#9662;</span> module input latch</span>"
+        + f"<span>pc = microcode step executing this cycle (clk&minus;{FETCH_LAG} fetch lag)</span>"
         + "</div>"
     )

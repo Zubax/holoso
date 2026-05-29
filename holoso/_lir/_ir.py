@@ -314,21 +314,26 @@ class Lir:
     @property
     def float_liveness(self) -> dict[FloatRegRef, set[int]]:
         """
-        Map each float register to the clock cycles on which it holds a live value.
+        Map each float register to the actual clock cycles on which it holds a live value.
 
-        A value is written on its definition cycle and read on each consumer issue cycle, or on the output-present
-        cycle if it drives an output. Each row spans a value's definition through its last read.
+        This is cycle-accurate to the emitted hardware. Accounting for the read/write register-file latches and the
+        microcode-fetch staging: an input lands in the array on cycle 1; an operator result lands on
+        ``commit_cycle + FETCH_LAG + 2`` (the write latch, the read-first edge, then the fetch lag) -- which for the
+        last result is exactly the initiation interval; a register is read on ``issue_cycle + FETCH_LAG - 1`` (the read
+        latch presents the address a cycle early); and an output is read on the present cycle (the initiation interval).
+        Each row spans a value from when it lands in the array through its last read.
         """
-        present = self.makespan + 1
+        present = self.initiation_interval
         defs: dict[FloatRegRef, list[int]] = {}
         uses: dict[FloatRegRef, list[int]] = {}
         for load in self.float_inputs:
-            defs.setdefault(load.dst, []).append(0)
+            defs.setdefault(load.dst, []).append(1)
         for op in self.float_ops:
-            defs.setdefault(op.dst, []).append(op.commit_cycle)
+            defs.setdefault(op.dst, []).append(op.commit_cycle + FETCH_LAG + 2)
+            read = op.issue_cycle + FETCH_LAG - 1
             for operand in op.operands:
                 if isinstance(operand.source, FloatRegRef):
-                    uses.setdefault(operand.source, []).append(op.issue_cycle)
+                    uses.setdefault(operand.source, []).append(read)
         for wire in self.float_outputs:
             if isinstance(wire.source, FloatRegRef):
                 uses.setdefault(wire.source, []).append(present)

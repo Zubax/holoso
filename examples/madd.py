@@ -6,11 +6,11 @@ import holoso
 
 def madd(a, b, c):
     """
-    Tiny multiply-add kernel: (a - b) * 0.25 + a * b.
-    The 0.25 scale strength-reduces to fmul_ilog2 (K = -2); ``a`` and ``b`` are each read twice (small reuse),
+    Tiny multiply-add kernel.
+    The const mults strength-reduce to fmul_ilog2 (K = -2); ``a`` and ``b`` are each read twice (small reuse),
     the products are single-use. ``c`` is an unused argument, kept as given to exercise dead-input handling.
     """
-    return (a - b) * 0.25 + a * b
+    return (a - b) * 0.25 + a * b * 8
 
 
 def main() -> None:
