@@ -88,7 +88,10 @@ def _yosys_script(top: str, dut_module: str) -> str:
             f"read_verilog -I . {dut_module}.v",
             f"read_verilog -I . {top}.v",
             f"hierarchy -check -top {top} -libdir {libdir}",
-            f"synth_ecp5 -top {top} -noiopad -dff -retime -noabc9 -run begin:check",
+            # Retiming underperforms on many OOC targets today, apparently around the fmul DSP/packer boundary.
+            # Revisit this if future Yosys/nextpnr versions or RTL changes make retiming consistently beneficial.
+            # ABC9 also appears to be sucky at least on ECP5.
+            f"synth_ecp5 -top {top} -noiopad -dff -noabc9 -run begin:check",
             "clean",
             f"hierarchy -check -top {top}",
             "stat",

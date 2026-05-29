@@ -16,8 +16,8 @@ def poly3(x, c0, c1, c2, c3):
 def main() -> None:
     float_format = holoso.FloatFormat(wexp=6, wman=18)
     ops = holoso.OpConfig(
-        holoso.FAddOperator(float_format, stage_decode=1),
-        holoso.FMulOperator(float_format, stage_input=1),
+        holoso.FAddOperator(float_format),
+        holoso.FMulOperator(float_format),
         holoso.FDivOperator(float_format),
         holoso.FMulILog2OperatorFamily(float_format),
     )

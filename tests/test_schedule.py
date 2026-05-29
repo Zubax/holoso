@@ -12,6 +12,7 @@ from holoso._errors import UnsupportedConstruct
 from holoso._frontend import lower
 from holoso._hir import optimize
 from holoso._lir import FloatRegRef
+from holoso._lir._schedule import DEPENDENCY_EDGE
 from holoso._mir import (
     lower as lower_to_mir,
     Mir,
@@ -95,12 +96,13 @@ def test_schedule_respects_dependencies() -> None:
     for vid, cycle in sched.issue_cycle.items():
         op = mir.nodes[vid]
         assert isinstance(op, MirOperation)
-        assert cycle >= 1  # nothing issues on the accept cycle; inputs are readable from cycle 1
+        assert cycle >= 1  # nothing issues on the accept cycle
         for operand in op.operands:
             node = mir.nodes[operand]
             if isinstance(node, MirOperation):
-                # A consumer issues no earlier than the producer's commit + 1 (read-first writeback latency).
-                assert cycle >= sched.issue_cycle[operand] + node.operator.latency + 1
+                # A consumer issues no earlier than the producer's commit plus the register-file traversal edge
+                # (the read-first write edge plus the read and write latches).
+                assert cycle >= sched.issue_cycle[operand] + node.operator.latency + DEPENDENCY_EDGE
 
 
 def test_pipelined_issue_overlaps_a_slow_op() -> None:

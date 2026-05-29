@@ -147,21 +147,31 @@ class FloatParameterizedHardwareOperator(ParameterizedHardwareOperator, ABC):
 @dataclass(frozen=True, slots=True)
 class FAddOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fadd"
+    stage_input: int = 0
     stage_decode: int = 0
     stage_align: int = 0
+    stage_normalize: int = 0  # close-cancellation normshift barriers, 0..2 (forwarded to _zkf_normshift.STAGE_SPLIT)
+    stage_pack: int = 0
     stage_output: int = 0
 
     def __post_init__(self) -> None:
-        if self.stage_decode not in (0, 1):
-            raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
-        if self.stage_align not in (0, 1):
-            raise ValueError(f"stage_align must be 0 or 1; got {self.stage_align!r}")
-        if self.stage_output not in (0, 1):
-            raise ValueError(f"stage_output must be 0 or 1; got {self.stage_output!r}")
+        for field in ("stage_input", "stage_decode", "stage_align", "stage_pack", "stage_output"):
+            if getattr(self, field) not in (0, 1):
+                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
+        if self.stage_normalize not in (0, 1, 2):
+            raise ValueError(f"stage_normalize must be 0, 1, or 2; got {self.stage_normalize!r}")
 
     @property
     def latency(self) -> int:
-        return 4 + self.stage_decode + self.stage_align + self.stage_output
+        return (
+            4
+            + self.stage_input
+            + self.stage_decode
+            + self.stage_align
+            + self.stage_normalize
+            + self.stage_pack
+            + self.stage_output
+        )
 
     @property
     def signature(self) -> ScalarSignature:
@@ -176,7 +186,14 @@ class FAddOperator(FloatHardwareOperator):
         return f"{a}+{b}"
 
     def hdl_params(self) -> dict[str, int]:
-        return {"STAGE_DECODE": self.stage_decode, "STAGE_ALIGN": self.stage_align, "STAGE_OUTPUT": self.stage_output}
+        return {
+            "STAGE_INPUT": self.stage_input,
+            "STAGE_DECODE": self.stage_decode,
+            "STAGE_ALIGN": self.stage_align,
+            "STAGE_NORMALIZE": self.stage_normalize,
+            "STAGE_PACK": self.stage_pack,
+            "STAGE_OUTPUT": self.stage_output,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,19 +201,17 @@ class FMulOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fmul"
     stage_input: int = 0
     stage_product: int = 0
+    stage_pack: int = 0
     stage_output: int = 0
 
     def __post_init__(self) -> None:
-        if self.stage_input not in (0, 1):
-            raise ValueError(f"stage_input must be 0 or 1; got {self.stage_input!r}")
-        if self.stage_product not in (0, 1):
-            raise ValueError(f"stage_product must be 0 or 1; got {self.stage_product!r}")
-        if self.stage_output not in (0, 1):
-            raise ValueError(f"stage_output must be 0 or 1; got {self.stage_output!r}")
+        for field in ("stage_input", "stage_product", "stage_pack", "stage_output"):
+            if getattr(self, field) not in (0, 1):
+                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
 
     @property
     def latency(self) -> int:
-        return 1 + self.stage_input + self.stage_product + self.stage_output
+        return 1 + self.stage_input + self.stage_product + self.stage_pack + self.stage_output
 
     @property
     def signature(self) -> ScalarSignature:
@@ -211,7 +226,12 @@ class FMulOperator(FloatHardwareOperator):
         return f"{a}×{b}"
 
     def hdl_params(self) -> dict[str, int]:
-        return {"STAGE_INPUT": self.stage_input, "STAGE_PRODUCT": self.stage_product, "STAGE_OUTPUT": self.stage_output}
+        return {
+            "STAGE_INPUT": self.stage_input,
+            "STAGE_PRODUCT": self.stage_product,
+            "STAGE_PACK": self.stage_pack,
+            "STAGE_OUTPUT": self.stage_output,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,18 +239,18 @@ class FDivOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fdiv"
     error_ports: ClassVar[list[str]] = ["div0"]
     stage_input: int = 0
+    stage_pack: int = 0
     stage_output: int = 0
 
     def __post_init__(self) -> None:
-        if self.stage_input not in (0, 1):
-            raise ValueError(f"stage_input must be 0 or 1; got {self.stage_input!r}")
-        if self.stage_output not in (0, 1):
-            raise ValueError(f"stage_output must be 0 or 1; got {self.stage_output!r}")
+        for field in ("stage_input", "stage_pack", "stage_output"):
+            if getattr(self, field) not in (0, 1):
+                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
 
     @property
     def latency(self) -> int:
         w = self.fmt.wman
-        return 2 + self.stage_input + ((w + 2 + ((w + 2) % 2)) // 2) + self.stage_output
+        return 2 + self.stage_input + ((w + 2 + ((w + 2) % 2)) // 2) + self.stage_pack + self.stage_output
 
     @property
     def signature(self) -> ScalarSignature:
@@ -245,7 +265,7 @@ class FDivOperator(FloatHardwareOperator):
         return f"{a}/{b}"
 
     def hdl_params(self) -> dict[str, int]:
-        return {"STAGE_INPUT": self.stage_input, "STAGE_OUTPUT": self.stage_output}
+        return {"STAGE_INPUT": self.stage_input, "STAGE_PACK": self.stage_pack, "STAGE_OUTPUT": self.stage_output}
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,18 +274,20 @@ class FMulILog2Operator(FloatHardwareOperator):
 
     mnemonic: ClassVar[str] = "fmul_ilog2_const"
     k: int
+    stage_input: int = 0
     stage_decode: int = 0
 
     def __post_init__(self) -> None:
         limit = (1 << self.fmt.wexp) - 2
         if self.k < -limit or self.k >= limit:
             raise ValueError(f"k must satisfy {-limit} <= k < {limit} for {self.fmt}; got {self.k!r}")
-        if self.stage_decode not in (0, 1):
-            raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
+        for field in ("stage_input", "stage_decode"):
+            if getattr(self, field) not in (0, 1):
+                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
 
     @property
     def latency(self) -> int:
-        return 1 + self.stage_decode
+        return 1 + self.stage_input + self.stage_decode
 
     @property
     def signature(self) -> ScalarSignature:
@@ -280,22 +302,24 @@ class FMulILog2Operator(FloatHardwareOperator):
         return f"{a}×2^{self.k}"
 
     def hdl_params(self) -> dict[str, int]:
-        return {"K": self.k, "STAGE_DECODE": self.stage_decode}
+        return {"K": self.k, "STAGE_INPUT": self.stage_input, "STAGE_DECODE": self.stage_decode}
 
 
 @dataclass(frozen=True, slots=True)
 class FMulILog2OperatorFamily(FloatParameterizedHardwareOperator):
-    """The ilog2 family: a factory whose stage knob is baked into every concrete operator it instantiates."""
+    """The ilog2 family: a factory whose stage knobs are baked into every concrete operator it instantiates."""
 
+    stage_input: int = 0
     stage_decode: int = 0
 
     def __post_init__(self) -> None:
-        if self.stage_decode not in (0, 1):
-            raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
+        for field in ("stage_input", "stage_decode"):
+            if getattr(self, field) not in (0, 1):
+                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
 
     def instantiate(self, *params: int) -> FMulILog2Operator:
         (k,) = params
-        return FMulILog2Operator(fmt=self.fmt, k=k, stage_decode=self.stage_decode)
+        return FMulILog2Operator(fmt=self.fmt, k=k, stage_input=self.stage_input, stage_decode=self.stage_decode)
 
 
 @dataclass(frozen=True)

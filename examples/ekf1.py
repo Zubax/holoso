@@ -116,8 +116,8 @@ def main() -> None:
     # Operators are constructed explicitly; each fixes its float format and pipeline stages.
     # The pipeline stages are tuned per target chip, frequency, and synthesis flow.
     ops = holoso.OpConfig(
-        holoso.FAddOperator(float_format, stage_decode=1),
-        holoso.FMulOperator(float_format, stage_input=1),
+        holoso.FAddOperator(float_format),
+        holoso.FMulOperator(float_format),
         holoso.FDivOperator(float_format),
         holoso.FMulILog2OperatorFamily(float_format),
     )

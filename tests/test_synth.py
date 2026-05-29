@@ -33,10 +33,13 @@ def test_synthesize_small_kernel_result() -> None:
     result = holoso.synthesize(_kernel, ops=_ops())
     assert result.module_name == "_kernel"
     assert "module _kernel" in result.verilog_output.verilog
-    assert "holoso_regfile" in result.verilog_output.support_files["holoso_support.v"]
+    # The full-crossbar register file is gone; storage is emitted inline as a sparse register array.
+    assert "holoso_regfile" not in result.verilog_output.support_files["holoso_support.v"]
+    assert "holoso_fadd" in result.verilog_output.support_files["holoso_support.v"]
+    assert "reg  [W-1:0] regs [0:NREG-1];" in result.verilog_output.verilog
     assert '`include "holoso_support.vh"' in result.verilog_output.support_files["holoso_support.v"]
-    assert "`ifndef HOLOSO_REGFILE_VH" not in result.verilog_output.support_files["holoso_support.v"]
-    assert "`HOLOSO_REGFILE_LANE" in result.verilog_output.support_files["holoso_support.vh"]
+    assert "`define HOLOSO_FSGNOP_NEG" in result.verilog_output.support_files["holoso_support.vh"]
+    assert "HOLOSO_REGFILE_LANE" not in result.verilog_output.support_files["holoso_support.vh"]
     assert "@cocotb.test()" in result.cocotb_output.testbench
     assert "<html" in result.html_output.html.lower()
     names = [p.name for p in result.ports]
@@ -130,7 +133,7 @@ def test_report_has_expected_sections() -> None:
         "module _kernel (",
         "input  wire [31:0] in_a",
         "output wire [31:0] out_0",
-        "output wire [3:0] err_pc",
+        "output wire [4:0] err_pc",
     ):
         assert token in result.verilog_output.verilog
         assert token in header_text

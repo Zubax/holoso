@@ -241,6 +241,7 @@ def _run_flow(
 ) -> SynthReport | _Failure:
     try:
         result = synthesize(target, ops=ops, name=name)
+        result.write(directory / "holoso_result")
         return flow.prepare(result, rtl).synthesize(directory)
     except Exception as exc:  # one tool's failure must not stop the others
         return _Failure(type(flow).__name__, directory, str(exc))

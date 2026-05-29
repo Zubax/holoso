@@ -8,6 +8,8 @@ from ._ir import (
     FloatOperatorInstance as FloatOperatorInstance,
     FloatRegRef as FloatRegRef,
     FloatScheduledOp as FloatScheduledOp,
+    FETCH_LAG as FETCH_LAG,
+    FETCH_STAGES as FETCH_STAGES,
 )
 from ._ports import (
     ControlInputPort as ControlInputPort,

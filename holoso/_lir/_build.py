@@ -1,7 +1,6 @@
 """Build a finished :class:`Lir` from MIR."""
 
 import math
-from collections.abc import Mapping
 
 from .._errors import UnsupportedConstruct
 from .._hir import ValueId
@@ -30,7 +29,7 @@ def build(mir: Mir, module_name: str) -> Lir:
     float_mir = MirFloatView.from_mir(mir)
     pool = resolve_pool(float_mir)
     sched = schedule_ops(float_mir, pool)
-    alloc = allocate_float(float_mir, sched.issue_cycle, sched.makespan)
+    alloc = allocate_float(float_mir, sched.issue_cycle, sched.inst_of, sched.makespan)
     consts, const_index = _build_const_pool(float_mir)
     return Lir(
         module_name=module_name,

@@ -10,7 +10,7 @@ emitter wires up. It emits no Verilog text -- that is the emitter's job; this mo
 from dataclasses import dataclass
 from string import ascii_letters
 
-from ..._lir import FloatConstRef, Lir, FloatOperand, FloatOperatorInstance, FloatRegRef, FloatScheduledOp
+from ..._lir import FloatConstRef, Lir, FloatOperatorInstance, FloatScheduledOp
 
 PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
 
@@ -90,11 +90,6 @@ def read_ports(lir: Lir) -> dict[tuple[FloatOperatorInstance, int], int]:
     return read_port
 
 
-def write_ports(lir: Lir) -> dict[FloatOperatorInstance, int]:
-    """One dedicated write port per operator instance (counts to ``nwr``)."""
-    return {inst: index for index, inst in enumerate(lir.float_instances)}
-
-
 def port_const_map(lir: Lir, read_port: dict[tuple[FloatOperatorInstance, int], int]) -> dict[int, list[int]]:
     """Read port -> the distinct constant-pool indices it ever sources (drives the per-operand constant select)."""
     port_consts: dict[int, list[int]] = {}
@@ -117,8 +112,12 @@ def build_microcode(
     ``in_valid`` and ``write-enable`` are concrete every step (they gate operation), so they default to 0; every other
     field is a don't-care (``None``) except on the step its operator issues or commits, which maximises the constant
     columns that later get lifted out of the ROM.
+
+    Read and write control are placed on shifted steps to line up with the register-file latches: the read-address group
+    is presented 1 step before the operator issues (so the latched operand arrives on the issue step), and the
+    write-enable/address are presented 1 step after the operator commits (so they line up with the writeback latch).
     """
-    depth = lir.makespan + 2  # steps 0..LAST (LAST == makespan + 1, the present step)
+    depth = lir.makespan + 3  # steps 0..present (present == makespan + WRITE_LATCH + 1)
     fields: dict[str, Field] = {}
 
     def add(name: str, width: int, default: int | None) -> None:
@@ -141,23 +140,25 @@ def build_microcode(
 
     for op in lir.float_ops:
         base = base_name(op.inst)
-        ci = op.issue_cycle
+        ci = op.issue_cycle  # in_valid and sign controls, consumed inside the wrapper on the issue step
+        rci = op.issue_cycle - 1  # read-address group, presented early so the read latch delivers on issue
+        wcc = op.commit_cycle + 1  # write-enable/address, delayed to line up with the writeback latch
+        assert 0 <= rci and wcc < depth, f"microcode step out of range: rci={rci}, wcc={wcc}, depth={depth}"
         fields[f_iv(base)].values[ci] = 1
         fields[f_ysgn(base)].values[ci] = op.result_sign.encoded
         for pos, operand in enumerate(op.operands):
             port = read_port[(op.inst, pos)]
             fields[f_osgn(base, PORT_LETTERS[pos])].values[ci] = operand.sign.encoded
             if isinstance(operand.source, FloatConstRef):
-                fields[f_selc(port)].values[ci] = 1
+                fields[f_selc(port)].values[rci] = 1
                 if f_cidx(port) in fields:
-                    fields[f_cidx(port)].values[ci] = port_consts[port].index(operand.source.index)
+                    fields[f_cidx(port)].values[rci] = port_consts[port].index(operand.source.index)
             else:
                 if f_selc(port) in fields:
-                    fields[f_selc(port)].values[ci] = 0
-                fields[f_rd(port)].values[ci] = operand.source.index
-        cc = op.commit_cycle
-        fields[f_we(base)].values[cc] = 1
-        fields[f_wa(base)].values[cc] = op.dst.index
+                    fields[f_selc(port)].values[rci] = 0
+                fields[f_rd(port)].values[rci] = operand.source.index
+        fields[f_we(base)].values[wcc] = 1
+        fields[f_wa(base)].values[wcc] = op.dst.index
 
     return fields
 

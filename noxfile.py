@@ -73,18 +73,16 @@ def synth_examples(session: nox.Session) -> None:
     """
     session.install("-e", ".[test]")
 
-    def syn(*args: str) -> None:
-        session.run("python", "-m", "synth", *args, "--rtl", "lib/kulibin/float/hdl")
+    def syn(source: str, target: str, flows: list[str]) -> None:
+        flows = [flow for f in flows for flow in ("--flow", f)]
+        session.run("python", "-m", "synth", source, target, *flows, "--rtl", "lib/kulibin/float/hdl")
 
     syn(
         "examples/ekf1.py",
         "update_x_P",
-        "--name",
-        "ekf1",
-        "--flow",
-        "yosys-ecp5:freq=42.0,fadd.stage_decode=1,fmul.stage_input=1",
-        "--flow",
-        "diamond-ecp5:freq=42.0,fadd.stage_decode=1,fmul.stage_input=1",
-        "--flow",
-        "vivado:freq=60.0,fadd.stage_decode=1,fmul.stage_input=1",
+        [  # Yosys is weak and needs extra pipelining.
+            "yosys-ecp5:freq=100,fadd.stage_decode=1,fmul.stage_input=1,fmul.stage_pack=1,fmul.stage_output=1",
+            "diamond-ecp5:freq=100",
+            "vivado:freq=150",
+        ],
     )

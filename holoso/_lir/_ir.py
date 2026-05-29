@@ -11,6 +11,9 @@ from .._operators import FloatHardwareOperator, FloatSignControl, HardwareOperat
 from .._type import FloatFormat, FloatType
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
+FETCH_STAGES = 3
+FETCH_LAG = FETCH_STAGES - 1
+
 
 @dataclass(frozen=True, slots=True)
 class OperatorInstance:
@@ -217,17 +220,63 @@ class Lir:
         return [port for port in self.ports if isinstance(port, ControlPort)]
 
     @property
+    def present_step(self) -> int:
+        """
+        The executing step on which the outputs are valid in the register array.
+        The last operator commits on the makespan cycle; the write latch delays the write in the write latch, so the
+        result lands on the next edge and is presented on cycle ``makespan + 2``.
+        """
+        return self.makespan + 2
+
+    @property
     def cyc_width(self) -> int:
-        """Bit width of the cycle counter: enough to hold ``0..makespan+1``."""
-        return max(1, (self.makespan + 1).bit_length())
+        """Bit width of the err_pc diagnostic: enough to hold any executing step ``0..present_step``."""
+        return max(1, self.present_step.bit_length())
 
     @property
     def initiation_interval(self) -> int:
         """
-        Exact in_valid->out_valid latency: the schedule makespan plus one cycle to present.
+        Observable in_valid->out_valid latency.
 
-        Cycle 0 accepts and writes the inputs; compute cycles 1..makespan run the schedule; the last operator commits
-        on the makespan cycle; the result lands in the register file on the next edge and is presented on
-        cycle makespan+1. Zero-op modules present on cycle 1.
+        Cycle 0 accepts and loads the inputs; compute cycles 1..makespan run the schedule. With the write latch the
+        result is presented on the executing step ``present_step``; the executing step lags the fetch PC by FETCH_LAG,
+        so out_valid is asserted FETCH_LAG cycles later: ``present_step + FETCH_LAG``. Zero-op modules still present
+        one accept-relative cycle plus the fixed staging.
         """
-        return self.makespan + 1
+        return self.present_step + FETCH_LAG
+
+    @property
+    def read_set_per_port(self) -> dict[tuple[FloatOperatorInstance, int], list[int]]:
+        """
+        For each operator read port -- identified by its ``(instance, operand-position)`` pair -- the sorted distinct
+        register indices it ever reads across the schedule.
+
+        Constant operands are excluded: they are immediates on the per-operand const-select path, not register reads.
+        Ports that never read a register are absent. This drives the sparse per-port read mux: a port that reads a
+        single register needs no mux at all, and one that reads several needs a mux spanning only those registers.
+        """
+        sets: dict[tuple[FloatOperatorInstance, int], set[int]] = {}
+        for op in self.float_ops:
+            for pos, operand in enumerate(op.operands):
+                if isinstance(operand.source, FloatRegRef):
+                    sets.setdefault((op.inst, pos), set()).add(operand.source.index)
+        return {port: sorted(regs) for port, regs in sets.items()}
+
+    @property
+    def write_set_per_register(self) -> dict[int, list[FloatOperatorInstance]]:
+        """
+        For each register index, the operator instances that ever write it (each through its own dedicated write port),
+        in a canonical order.
+
+        This drives the sparse per-register write select: a register written by a single instance needs no write-port
+        mux. The input-load writers of registers ``0..nload-1`` are tracked separately via ``lir.float_inputs``
+        (they are a distinct, address-free write source folded into the same select).
+        """
+        sets: dict[int, list[FloatOperatorInstance]] = {}
+        for op in self.float_ops:
+            writers = sets.setdefault(op.dst.index, [])
+            if op.inst not in writers:
+                writers.append(op.inst)
+        for writers in sets.values():
+            writers.sort(key=lambda inst: (inst.operator.instance_stem, inst.index))
+        return sets

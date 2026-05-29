@@ -110,3 +110,36 @@ def test_cosim_staged_division(sim: str) -> None:
         FMulILog2OperatorFamily(fmt),
     )
     _run_cosim(sim, blend, fmt, "blend_staged", ops=ops)
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_poly3(sim: str) -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import poly3
+
+    _run_cosim(sim, poly3.poly3, FloatFormat(6, 18), "poly3")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_madd(sim: str) -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import madd
+
+    _run_cosim(sim, madd.madd, FloatFormat(6, 18), "madd")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_new_operator_stages(sim: str) -> None:
+    def kernel(a, b, c):  # type: ignore[no-untyped-def]
+        return (a - b) / c + a * b * 0.25  # fadd, fdiv, fmul, and fmul_ilog2 (the 2^-2 scale) all in one kernel
+
+    # Exercise the newly-shipped ZKF knobs end-to-end: fadd STAGE_INPUT/STAGE_NORMALIZE/STAGE_PACK, fmul STAGE_PACK,
+    # fdiv STAGE_PACK, and fmul_ilog2 STAGE_INPUT -- all folded into the latency model and the latched datapath.
+    fmt = FloatFormat(8, 24)
+    ops = OpConfig(
+        FAddOperator(fmt, stage_input=1, stage_normalize=2, stage_pack=1),
+        FMulOperator(fmt, stage_input=1, stage_pack=1),
+        FDivOperator(fmt, stage_pack=1),
+        FMulILog2OperatorFamily(fmt, stage_input=1),
+    )
+    _run_cosim(sim, kernel, fmt, "new_stages", ops=ops)

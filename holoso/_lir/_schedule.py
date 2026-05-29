@@ -9,9 +9,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .._hir import ValueId
-from .._mir import MirFloatOperation, MirFloatView
+from .._mir import MirFloatInput, MirFloatOperation, MirFloatView
 from .._operators import FloatHardwareOperator, HardwareOperator
 from ._ir import FloatOperatorInstance
+
+# The extra cycles a consumer must wait beyond a producer's commit before it may read the result: one for the
+# register-file write-to-read edge (read-first), plus one per latch traversed (write latch then read latch).
+DEPENDENCY_EDGE = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +60,7 @@ def resolve_pool(mir: MirFloatView) -> dict[type[HardwareOperator], int]:
 
 
 def _critical_path(mir: MirFloatView, op_ids: list[ValueId]) -> dict[ValueId, int]:
-    """Priority height: the latency-weighted longest path to a sink, counting the +1 writeback per dependency edge."""
+    """Priority height: longest latency-weighted path to a sink, counting DEPENDENCY_EDGE per dependency edge."""
     consumers: dict[ValueId, list[ValueId]] = {vid: [] for vid in op_ids}
     for vid in op_ids:
         for operand in _operator_operands(mir, vid):
@@ -64,7 +68,7 @@ def _critical_path(mir: MirFloatView, op_ids: list[ValueId]) -> dict[ValueId, in
     height: dict[ValueId, int] = {}
     for vid in sorted(op_ids, reverse=True):  # consumers have larger IDs; process them first
         node = _operation(mir, vid)
-        height[vid] = node.operator.latency + max((1 + height[c] for c in consumers[vid]), default=0)
+        height[vid] = node.operator.latency + max((DEPENDENCY_EDGE + height[c] for c in consumers[vid]), default=0)
     return height
 
 
@@ -82,18 +86,25 @@ def schedule_ops(mir: MirFloatView, pool: Mapping[type[HardwareOperator], int]) 
     def commit_cycle(vid: ValueId) -> int:
         return issue_cycle[vid] + _operation(mir, vid).operator.latency
 
+    def is_ready(vid: ValueId, cycle: int) -> bool:
+        # A consumer may read a producer only DEPENDENCY_EDGE cycles after the producer commits (the read-first write
+        # edge plus the write and read latches). Inputs are loaded at the accept edge, i.e. commit cycle 0, so they
+        # too need the full edge; constants are immediates with no read-timing constraint.
+        for operand in _operation(mir, vid).operands:
+            if operand in mir.operation_nodes:
+                if operand not in issue_cycle or cycle < commit_cycle(operand) + DEPENDENCY_EDGE:
+                    return False
+            elif isinstance(mir.nodes[operand], MirFloatInput) and cycle < DEPENDENCY_EDGE:
+                return False
+        return True
+
     unscheduled = set(op_ids)
-    cap = sum(_operation(mir, vid).operator.latency for vid in op_ids) + 2 * len(op_ids) + 64
+    cap = sum(_operation(mir, vid).operator.latency for vid in op_ids) + DEPENDENCY_EDGE * len(op_ids) + 64
     cycle = 1
     while unscheduled:
         if cycle > cap:
             raise RuntimeError("scheduler made no progress")
-        ready = [
-            vid
-            for vid in unscheduled
-            if all(x in issue_cycle and cycle >= commit_cycle(x) + 1 for x in _operator_operands(mir, vid))
-        ]
-        ready.sort(key=lambda vid: (-height[vid], vid))
+        ready = sorted((vid for vid in unscheduled if is_ready(vid, cycle)), key=lambda vid: (-height[vid], vid))
         used: dict[FloatHardwareOperator, int] = {}
         for vid in ready:
             operator = _operation(mir, vid).operator
