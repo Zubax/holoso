@@ -6,6 +6,7 @@ package data in ``pyproject.toml``); they are inlined into the self-contained re
 beyond the web font.
 """
 
+import colorsys
 import html
 import json
 import re
@@ -14,7 +15,7 @@ from datetime import datetime
 from importlib import resources
 
 from ..._lir import FETCH_LAG, Lir, FloatConstRef, FloatOperand, FloatOperatorInstance, FloatRegRef, FloatScheduledOp
-from ..._operators import FAddOperator, FDivOperator, FMulILog2Operator, FMulOperator, HardwareOperator
+from ..._operators import HardwareOperator
 from ..verilog import VerilogOutput
 
 
@@ -31,14 +32,6 @@ _CSS = resources.files(__package__).joinpath("html.css").read_text(encoding="utf
 # Interactive layer; ``__DATA__`` is replaced by the per-module payload in ``_sched_script``.
 _SCHED_JS = resources.files(__package__).joinpath("html.js").read_text(encoding="utf-8")
 
-# Reserved, high-contrast operator colors (white text legible on each) for a light background.
-# TODO: When adding a new operator, replace this with a generalized palette sliced into as many colors as needed.
-_KIND_COLOR: dict[type[HardwareOperator], str] = {
-    FAddOperator: "#00a",
-    FMulOperator: "#0a0",
-    FDivOperator: "#a00",
-    FMulILog2Operator: "#050",
-}
 _MODULE_HEADER_RE = re.compile(r"(?ms)^module\b.*?^\);")
 _VERILOG_TOKEN_RE = re.compile(r"(?P<space>\s+)|(?P<ident>[A-Za-z_]\w*)|(?P<number>\d+)|(?P<other>.)")
 _VERILOG_KEYWORDS = frozenset({"module", "parameter", "input", "output", "wire", "reg"})
@@ -322,6 +315,7 @@ def _schedule(lir: Lir) -> str:
     nreg, nconst = lir.float_regfile.nreg, len(lir.float_consts)
     columns = _columns_of(lir)
     col_ord = {col: ordinal for ordinal, col in enumerate(columns)}
+    operator_colors = _operator_colors(lir)
     # Cycle-accurate clock cycles 1..II (cycle 0 is the accept/input-load bookend row): the grid reflects what the
     # register array physically holds each cycle, including the read/write-latch and microcode-fetch staging.
     compute_cycles = list(range(1, lir.initiation_interval + 1))
@@ -362,7 +356,7 @@ def _schedule(lir: Lir) -> str:
     group = 0  # global per-operation id, linking a commit cell with its edges/chip for the hover-focus behavior
     for op in lir.float_ops:
         tip = _esc(_op_text(op))
-        color = _KIND_COLOR[type(op.inst.operator)]
+        color = operator_colors[type(op.inst.operator)]
         # Physical clock cycles (cycle-accurate).
         read_cyc = op.issue_cycle + FETCH_LAG - 1
         write_cyc = op.commit_cycle + FETCH_LAG + 2
@@ -388,7 +382,7 @@ def _schedule(lir: Lir) -> str:
             stage_tip[key] = f"{op.inst.operator.mnemonic}_{op.inst.index} s{k}: {tip}"
         group += 1
 
-    out = [_schedule_key(lir), "<div id='schedwrap'><table class='grid'>"]
+    out = [_schedule_key(operator_colors), "<div id='schedwrap'><table class='grid'>"]
     # Header row 0: group bands over the register, constant and operator-pipeline blocks. clk/operations span all rows.
     out.append("<tr><th class='gh clkh' rowspan='3'><span>clk</span></th>")
     if nreg:
@@ -415,7 +409,7 @@ def _schedule(lir: Lir) -> str:
         name = f"{inst.operator.instance_stem}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
         seam = _border_suffix(stage_base[inst] + lat - 1, dv.stage_thin, dv.stage_thick)
         out.append(
-            f"<th class='ohgrp{seam}' colspan='{lat}' style='color:{_KIND_COLOR[type(inst.operator)]}'>"
+            f"<th class='ohgrp{seam}' colspan='{lat}' style='color:{operator_colors[type(inst.operator)]}'>"
             f"<span>{_esc(name)}</span></th>"
         )
     out.append("</tr>")
@@ -503,12 +497,12 @@ def _input_chip(tip: str) -> str:
     return f"<span class='wr' style='background:{_NEUTRAL}' title='{tip}'>&#9662;</span>"
 
 
-def _schedule_key(lir: Lir) -> str:
+def _schedule_key(operator_colors: dict[type[HardwareOperator], str]) -> str:
     """A small legend above the grid: operator-kind colors plus the read/write chip shapes."""
-    seen: dict[type[HardwareOperator], None] = {}  # operator classes present, in instance order, de-duplicated
-    for inst in lir.float_instances:
-        seen.setdefault(type(inst.operator), None)
-    kinds = [f"<span class='wr' style='background:{_KIND_COLOR[cls]}'>{cls.mnemonic}</span>" for cls in seen]
+    kinds = [
+        f"<span class='wr' style='background:{color}'>{_esc(cls.mnemonic)}</span>"
+        for cls, color in operator_colors.items()
+    ]
     return (
         "<h2>Schedule</h2><div class='gridkey'>"
         + " ".join(kinds)
@@ -522,3 +516,49 @@ def _schedule_key(lir: Lir) -> str:
         + f"<span>pc = microcode step executing this cycle (clk&minus;{FETCH_LAG} fetch lag)</span>"
         + "</div>"
     )
+
+
+def _operator_colors(lir: Lir) -> dict[type[HardwareOperator], str]:
+    kinds = sorted(
+        {type(inst.operator) for inst in lir.float_instances},
+        key=lambda kind: (kind.mnemonic, kind.__module__, kind.__qualname__),
+    )
+    return dict(zip(kinds, _html_palette(len(kinds)), strict=True))
+
+
+def _html_palette(n: int, lightness: float = 0.2, saturation: float = 1.0, hue_start: float = 0.0) -> list[str]:
+    """
+    n: number of colors equidistant on the hue wheel, starting at hue_start
+    lightness: 0..1, target WCAG relative luminance
+    saturation: 0..1, color intensity
+    hue_start: 0..1, rotates the palette around the hue wheel
+    """
+    colors = []
+    for i in range(n):
+        hue = (hue_start + i / n) % 1.0
+        color = "#{:02X}{:02X}{:02X}".format(*[round(x * 255) for x in _hls_for_luminance(hue, lightness, saturation)])
+        colors.append(color)
+    return colors
+
+
+def _hls_for_luminance(hue: float, luminance: float, saturation: float) -> tuple[float, float, float]:
+    low, high = 0.0, 1.0
+    for _ in range(24):
+        lightness = (low + high) / 2
+        rgb = colorsys.hls_to_rgb(hue, lightness, saturation)
+        if _relative_luminance(rgb) < luminance:
+            low = lightness
+        else:
+            high = lightness
+    return colorsys.hls_to_rgb(hue, (low + high) / 2, saturation)
+
+
+def _relative_luminance(rgb: tuple[float, float, float]) -> float:
+    red, green, blue = (_linear_srgb(channel) for channel in rgb)
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def _linear_srgb(channel: float) -> float:
+    if channel <= 0.04045:
+        return channel / 12.92
+    return float(((channel + 0.055) / 1.055) ** 2.4)
