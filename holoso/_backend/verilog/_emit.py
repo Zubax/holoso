@@ -126,6 +126,11 @@ def generate(lir: Lir) -> VerilogOutput:
     waddr = max(1, (rf.nreg - 1).bit_length())
     cycw = lir.cyc_width
     pcw = max(1, lir.initiation_interval.bit_length())
+    # Read-mux gather stride: round the float width up to the next power of two so the part-select bit offset
+    # (index * stride) synthesizes as a shift, not a multiply. A non-power-of-two stride makes Lattice Diamond's LSE
+    # infer DSP multipliers on the operand-read path (see DESIGN.md); the pad bits are constant-0 and pruned.
+    rdmux_stride = 1 << (rf.fmt.width - 1).bit_length()
+    rdmux_pad = rdmux_stride - rf.fmt.width
 
     # One dedicated read port per operator operand; the per-port read mux spans only the registers it actually reads.
     read_port = read_ports(lir)
@@ -148,12 +153,13 @@ def generate(lir: Lir) -> VerilogOutput:
     last_pc = lir.initiation_interval  # = present_step + FETCH_LAG; the ROM is padded with NOPs up to here
 
     _emit_header(w, lir)
-    _emit_localparams(w, lir, waddr, cycw, pcw, ucw)
+    _emit_localparams(w, lir, waddr, cycw, pcw, ucw, rdmux_stride)
     _emit_declarations(w, lir)
     _emit_consts(w, lir)
     _emit_operators(w, lir)
     _emit_microcode_rom(w, fields, ucw, depth, last_pc, issues_by_cycle, commits_by_step)
     _emit_field_wires(w, fields)
+    _emit_gather_wires(w, lir, read_sets, rdmux_pad)
     _emit_datapath_comb(w, lir, port_consts)
     _emit_clocked(w, lir, read_port, port_consts, read_sets, write_sets, inst_targets, waddr)
     _emit_outputs(w, lir)
@@ -200,7 +206,7 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
     w(f"// {title}", f"// {comment}")
 
 
-def _emit_localparams(w: _Writer, lir: Lir, waddr: int, cycw: int, pcw: int, ucw: int) -> None:
+def _emit_localparams(w: _Writer, lir: Lir, waddr: int, cycw: int, pcw: int, ucw: int, rdmux_stride: int) -> None:
     fmt = lir.float_regfile.fmt
     compute = f"1..{lir.makespan} = compute, " if lir.makespan else ""
     nreg = max(1, lir.float_regfile.nreg)
@@ -209,7 +215,8 @@ localparam           WEXP  = {fmt.wexp};  // Float exponent bits fixed by the st
 localparam           WMAN  = {fmt.wman};  // Float mantissa bits fixed by the static schedule
 localparam           W     = WEXP + WMAN;
 localparam           NREG  = {nreg};  // >= 1; the bank is unused when no value needs a register
-localparam           WADDR = {waddr:2};  // register-index width used by the read/write selectors
+localparam           WADDR = {waddr:2};  // register-index width used by the write selectors
+localparam           RDMUX_STRIDE = {rdmux_stride};  // read-mux gather element stride: W rounded up to a power of two
 localparam           CYCW  = {cycw:2};  // err_pc width: enough for any executing step (0..present)
 localparam           PCW   = {pcw:2};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
 localparam           FETCH_LAG = {FETCH_LAG};  // executing step = pc - FETCH_LAG ({FETCH_STAGES}-stage control fetch)
@@ -341,6 +348,42 @@ def _const_term_expr(port: int, consts: list[int]) -> str:
     return expr
 
 
+def _emit_gather_wires(
+    w: _Writer, lir: Lir, read_sets: dict[tuple[FloatOperatorInstance, int], list[int]], pad: int
+) -> None:
+    """
+    Emit, per multi-reader read port, the gather bus its read latch part-selects: the read-set registers concatenated,
+    each zero-extended to RDMUX_STRIDE bits so concatenation element i (low to high) is read-set index i. With a
+    power-of-two stride the part-select offset is a shift, not a multiply -- the pad bits are constant-0 and pruned.
+    Single-reader and always-constant operands read a register / immediate directly and need no gather.
+    """
+
+    def slot(reg: int) -> str:
+        return f"regs[{reg}]" if pad == 0 else f"{{{pad}'b0, regs[{reg:3}]}}"
+
+    emitted = False
+    for inst in lir.float_instances:
+        sig = _sig(inst)
+        for pos in range(inst.operator.arity):
+            read_set = read_sets.get((inst, pos), [])
+            if len(read_set) <= 1:
+                continue
+            if not emitted:
+                w(
+                    "// Read-set gather buses: each operand's read-set on a power-of-two stride; its read latch part-selects."
+                )
+                emitted = True
+            w(f"wire [{len(read_set)}*RDMUX_STRIDE-1:0] {sig}_{PORT_LETTERS[pos]}_rdmux = {{")
+            w.push()
+            elements = list(reversed(read_set))  # element 0 (low bits) is read-set index 0
+            for i, reg in enumerate(elements):
+                w(f"{slot(reg)}{',' if i < len(elements) - 1 else ''}")
+            w.pop()
+            w("};")
+    if emitted:
+        w("")
+
+
 def _emit_datapath_comb(w: _Writer, lir: Lir, port_consts: dict[int, list[int]]) -> None:
     """Combinational datapath: constant terms, the input-load enable, operator control, the err flag, and next_pc."""
     for port in sorted(port_consts):
@@ -386,15 +429,15 @@ else                   next_pc = pc + 1'b1;               // advance the fetch
 
 
 def _read_latch_stmts(
-    w: _Writer, target: str, port: int, read_set: list[int], port_consts: dict[int, list[int]], waddr: int
+    w: _Writer, target: str, port: int, read_set: list[int], port_consts: dict[int, list[int]]
 ) -> None:
     """
-    Emit the read mux + read-latch update for one operand, as statements inside the single clocked block.
+    Emit the read-mux + read-latch update for one operand, as a single statement inside the clocked block.
 
-    The mux spans only ``read_set`` (the registers this port ever reads): no register at all when the operand is
-    always a constant, a direct register read for a single register, a case over the read-set otherwise. A
-    const-select picks the immediate when the operand is sometimes a constant. On idle steps the latch captures a
-    don't-care value that the operator ignores (its in_valid is low).
+    The mux spans only ``read_set`` (the registers this port ever reads): nothing at all when the operand is always a
+    constant, a direct register read for a single register, and otherwise a part-select into the per-port gather bus
+    (see :func:`_emit_gather_wires`). A const-select picks the immediate when the operand is sometimes a constant. On
+    idle steps the latch captures a don't-care value the operator ignores (its in_valid is low).
     """
     consts = port_consts.get(port)
     cterm = _cterm_expr(port, consts) if consts else None
@@ -403,20 +446,12 @@ def _read_latch_stmts(
         return
     if len(read_set) == 1:
         reg_expr = f"regs[{read_set[0]}]"
-        rhs = f"{f_selc(port)} ? {cterm} : {reg_expr}" if cterm else reg_expr
-        w(f"{target} <= {rhs};")
-        return
-    if cterm:
-        w(f"if ({f_selc(port)}) {target} <= {cterm};")
-        w(f"else case ({f_rd(port)})")
     else:
-        w(f"case ({f_rd(port)})")
-    w.push()
-    for reg in read_set:
-        w(f"{_lit(waddr, reg)}: {target} <= regs[{reg}];")
-    w(f"default: {target} <= regs[{read_set[0]}];")
-    w.pop()
-    w("endcase")
+        # The read-address field is the dense read-set index; the gather lays each element on a power-of-two stride,
+        # so this offset is a shift, not a multiply (which would infer a DSP on Diamond -- see DESIGN.md).
+        reg_expr = f"{target}_rdmux[{f_rd(port)}*RDMUX_STRIDE +: W]"
+    rhs = f"{f_selc(port)} ? {cterm} : {reg_expr}" if cterm else reg_expr
+    w(f"{target} <= {rhs};")
 
 
 def _reg_write_stmts(
@@ -476,7 +511,7 @@ always @(posedge clk) begin
         sig = _sig(inst)
         for pos in range(inst.operator.arity):
             port = read_port[(inst, pos)]
-            _read_latch_stmts(w, f"{sig}_{PORT_LETTERS[pos]}", port, read_sets.get((inst, pos), []), port_consts, waddr)
+            _read_latch_stmts(w, f"{sig}_{PORT_LETTERS[pos]}", port, read_sets.get((inst, pos), []), port_consts)
     w("")
 
     w("// Writeback latches: the operator result (and any error sideband) registered before the register write.")

@@ -81,6 +81,16 @@ def test_cosim_ekf1(sim: str) -> None:
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_ekf1_pow2_width(sim: str) -> None:
+    # W = 8 + 24 = 32 is a power of two, so the read-mux gather stride equals W and the elements are not zero-extended
+    # (pad = 0). This exercises that branch of the gather emission, which the W=24 kernels do not.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import ekf1
+
+    _run_cosim(sim, ekf1.update_x_P, FloatFormat(8, 24), "update_x_P_w32")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_staged_kernel(sim: str) -> None:
     def kernel(a, b):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b

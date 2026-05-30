@@ -123,6 +123,15 @@ def build_microcode(
     def add(name: str, width: int, default: int | None) -> None:
         fields[name] = Field(name, width, [default] * depth)
 
+    # The read-address field selects within a port's read-set, not the whole register file: it carries the dense
+    # read-set index (0..K-1), so its width is ceil(log2 K) and the emitter's gather + part-select indexes by it. A
+    # single-reader or always-constant port keeps the constant value finalize_fields lifts out of the ROM.
+    port_read_set = {read_port[key]: regs for key, regs in lir.read_set_per_port.items()}
+
+    def rd_width(port: int) -> int:
+        regs = port_read_set.get(port, [])
+        return max(1, (len(regs) - 1).bit_length()) if len(regs) > 1 else 1
+
     for inst in lir.float_instances:
         base = base_name(inst)
         add(f_iv(base), 1, 0)
@@ -132,7 +141,7 @@ def build_microcode(
         for pos in range(inst.operator.arity):
             add(f_osgn(base, PORT_LETTERS[pos]), 2, None)
             port = read_port[(inst, pos)]
-            add(f_rd(port), waddr, None)
+            add(f_rd(port), rd_width(port), None)
             if port in port_consts:
                 add(f_selc(port), 1, None)
                 if len(port_consts[port]) > 1:
@@ -156,7 +165,7 @@ def build_microcode(
             else:
                 if f_selc(port) in fields:
                     fields[f_selc(port)].values[rci] = 0
-                fields[f_rd(port)].values[rci] = operand.source.index
+                fields[f_rd(port)].values[rci] = port_read_set[port].index(operand.source.index)
         fields[f_we(base)].values[wcc] = 1
         fields[f_wa(base)].values[wcc] = op.dst.index
 
