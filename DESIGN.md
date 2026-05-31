@@ -348,8 +348,8 @@ regalloc: reach-aware coloring (greedy port-affinity + a bounded SciPy dual-anne
 - Read/write ports are dedicated -- one read port per operator operand (`nrd` = sum of instance arities), one write
   port per operator instance (`nwr` = instance count), independent of I/O width -- but the storage is sparse, not a
   crossbar. Per read port the backend emits a mux spanning only that operand's read-set: a single-register operand is
-  a bare wire, an always-constant operand is the immediate, and a multi-register operand is a gather bus (its read-set
-  registers concatenated) indexed by a part-select -- see "Read mux" below. Per register it emits a write select
+  a bare wire, an always-constant operand is the immediate, and a multi-register operand is a `case` over its read-set
+  index -- see "Read mux" below. Per register it emits a write select
   spanning only that register's writers (a single-writer register needs no address compare). The two sides are
   symmetric: the read-address field carries the dense read-set index and the write-address field the dense
   write-target index (each `ceil(log2 set)` wide, not the file-wide register index), so the controller word carries
@@ -399,16 +399,15 @@ driven by a constant net and lifted out of the ROM, so synthesis prunes the logi
 Python packer that builds the ROM and the bit-slice offsets the module reads are produced together, so they cannot
 drift.
 
-Read mux. A multi-reader operand's mux is a gather bus -- its read-set registers concatenated, each zero-extended to a
-common element stride -- indexed by a part-select `rdmux[idx*RDMUX_STRIDE +: W]`, where `idx` is the dense read-set
-index carried in the read-address field. The stride is `W` rounded up to the next power of two, and that rounding is
-the load-bearing detail: with a power-of-two stride the offset `idx*stride` is a shift, but a non-power-of-two stride
-(e.g. `W = 24`) makes it a genuine multiply, which Lattice Diamond's LSE infers as a DSP `MULT9X9D` per operand sitting
-on the operand-read path. Measured on ekf1 that costs +4 DSP, +21% LUT4s, and a Diamond@100 timing miss; padding to a
-power of two restores zero DSP and the smallest area on all three flows. (yosys and Vivado strength-reduce the multiply
-to LUTs regardless.) The pad bits are constant-0 and pruned, so the rounding is free. The original form was an explicit
-per-arm `case` -- tool-robust but verbose; the gather is terser and, with the power-of-two stride, at least as small on
-every flow.
+Read mux. A multi-reader operand's mux is a `case` over its dense read-set index (the read-address field) selecting
+`regs[...]` directly; the last read-set entry is the `default` arm so the case is full (no inferred latch, and the
+unused high codes fall there as don't-cares). It deliberately avoids the obvious-looking alternative -- an indexed
+part-select into a packed gather bus, `bus[idx*W +: W]` -- because a variable part-select offset is a multiply: with a
+non-power-of-two `W` (e.g. 24) Lattice Diamond's LSE infers it as a DSP `MULT9X9D` per operand on the operand-read path
+(measured on ekf1: +4 DSP, +21% LUT4s, a Diamond@100 miss; yosys and Vivado strength-reduce it to LUTs instead).
+Padding each gather element to a power-of-two stride turns the offset back into a shift and removes the DSP, but a
+`case` has no offset arithmetic at all, needs no padding, and measures slightly smaller and faster than the
+part-select on all three flows -- so the read mux is a plain `case`.
 
 Write select. Each register's writeback is a one-hot select over only its writers. For a register written by an
 instance that writes more than one register, the guard compares that instance's write-address field against the dense

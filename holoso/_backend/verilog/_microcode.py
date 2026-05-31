@@ -150,7 +150,7 @@ def build_microcode(
         fields[name] = Field(name, width, [default] * depth)
 
     # The read-address field selects within a port's read-set, not the whole register file: it carries the dense
-    # read-set index (0..K-1), so its width is ceil(log2 K) and the emitter's gather + part-select indexes by it. A
+    # read-set index (0..K-1), so its width is ceil(log2 K) and the emitter's read-mux case selects by it. A
     # single-reader or always-constant port keeps the constant value finalize_fields lifts out of the ROM.
     port_read_set = {read_port[key]: regs for key, regs in lir.read_set_per_port.items()}
 
