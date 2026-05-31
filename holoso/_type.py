@@ -57,9 +57,6 @@ class FloatFormat:
         """Total bit width of one scalar (``WFULL = wexp + wman``)."""
         return self.wexp + self.wman
 
-    def __str__(self) -> str:
-        return f"ZKF(wexp={self.wexp}, wman={self.wman}, width={self.width})"
-
     def encode(self, value: float) -> int:
         """Encode a Python float to the nearest ZKF bit pattern (ties to even). NaN is rejected; ZKF has no NaN."""
         if math.isnan(value):

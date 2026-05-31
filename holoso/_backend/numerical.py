@@ -96,6 +96,13 @@ class NumericalModel:
     def float_format(self) -> FloatFormat:
         return self.lir.float_regfile.fmt
 
+    def __str__(self) -> str:
+        return (
+            f"{type(self).__name__}({self.lir.module_name!r},"
+            f" inputs={self.input_names}, outputs={self.output_names},"
+            f" float_format={self.float_format})"
+        )
+
 
 def generate(lir: Lir) -> NumericalModel:
     """Build the bit-exact functional model from a finished :class:`Lir`."""

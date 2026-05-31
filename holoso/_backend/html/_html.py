@@ -25,6 +25,9 @@ class HtmlOutput:
 
     html: str
 
+    def __str__(self) -> str:
+        return f"{type(self).__name__}(html_bytes={len(self.html.encode())})"
+
 
 _HOMEPAGE_URL = "https://github.com/Zubax/holoso"
 

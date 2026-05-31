@@ -71,6 +71,10 @@ class VerilogOutput:
     verilog: str
     support_files: dict[str, str]  # filename -> content
 
+    def __str__(self) -> str:
+        sup = ",".join(f"{name!r}:{len(text.encode())}" for name, text in self.support_files.items())
+        return f"{type(self).__name__}(verilog_bytes={len(self.verilog.encode())}, support_bytes={{{sup}}})"
+
 
 class _Writer:
     """Accumulates 4-space-indented lines; ``w(...)`` accepts single lines or dedented multiline blocks."""

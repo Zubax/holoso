@@ -90,6 +90,9 @@ class CocotbOutput:
 
     testbench: str
 
+    def __str__(self) -> str:
+        return f"{type(self).__name__}(testbench_bytes={len(self.testbench.encode())})"
+
 
 def generate(model: NumericalModel) -> CocotbOutput:
     """
