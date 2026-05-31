@@ -26,6 +26,7 @@ reuse those registers once the input value is dead. The register count simply gr
 
 from collections import Counter
 from dataclasses import dataclass
+import logging
 
 import numpy as np
 from scipy.optimize import dual_annealing
@@ -44,6 +45,8 @@ _INPUT_LOAD: _Producer = "input_load"
 # build time for a deeper search.
 _REFINE_MAXITER = 5000
 _REFINE_MAXFUN = 10000
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,8 +133,18 @@ def allocate_float(
 
     assign = _greedy(input_values, operation_values, def_cycle, last_use, consumer_ports, producer_key)
     nreg = (max(assign.values()) + 1) if assign else 0
+    greedy_cost = _objective(assign, consumer_ports, producer_key)
     assign = _refine(assign, nreg, operation_values, def_cycle, last_use, consumer_ports, producer_key)
+    refined_cost = _objective(assign, consumer_ports, producer_key)
     _assert_no_interference(assign, def_cycle, last_use)
+    _logger.info(
+        "Float regalloc: values=%d input_pins=%d greedy_cost=%d refined_cost=%d registers=%d",
+        len(reg_values),
+        len(input_values),
+        greedy_cost,
+        refined_cost,
+        nreg,
+    )
     return FloatAllocation(assign=assign, nreg=nreg)
 
 
@@ -256,6 +269,13 @@ def _refine(
         candidate = decode(coords)
         value = _objective(candidate, consumer_ports, producer_key)
         if value < best_cost:
+            _logger.debug(
+                "Annealing new best: cost=%d previous=%d registers=%d movable_values=%d",
+                value,
+                best_cost,
+                nreg,
+                len(order),
+            )
             best, best_cost = candidate, value
         return float(value)
 

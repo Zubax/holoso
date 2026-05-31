@@ -18,6 +18,7 @@ does not prove optimality in the time budget, so the result never increases read
 """
 
 from collections import defaultdict
+import logging
 
 import numpy as np
 import scipy.sparse as sp
@@ -37,6 +38,8 @@ type _Use = tuple[ValueId, int | None, int | None]
 # Currently, the timeout is so large that the fallback is effectively disabled; this is intentional (may revisit later).
 _MILP_TIME_LIMIT_S = 3600.0
 
+_logger = logging.getLogger(__name__)
+
 
 def assign_commutative_ports(mir: MirFloatView, sched: Schedule, alloc: FloatAllocation) -> dict[ValueId, bool]:
     """
@@ -52,11 +55,31 @@ def assign_commutative_ports(mir: MirFloatView, sched: Schedule, alloc: FloatAll
         first, second = (alloc.assign.get(operand) for operand in node.operands)
         uses_by_instance[sched.inst_of[vid]].append((vid, first, second))
     swap: dict[ValueId, bool] = {}
-    for uses in uses_by_instance.values():
+    fan_in_before = 0
+    fan_in_after = 0
+    for inst, uses in uses_by_instance.items():
+        before = _fan_in(uses, [False] * len(uses))
         orientation = _optimal_orientation(uses)
         if orientation is None:
+            _logger.warning(
+                "Commutative port assignment fallback: instance=%s index=%d uses=%d fan_in_before=%d",
+                inst.operator.instance_stem,
+                inst.index,
+                len(uses),
+                before,
+            )
             orientation = _local_search(uses)
+        after = _fan_in(uses, orientation)
+        fan_in_before += before
+        fan_in_after += after
         swap.update({use[0]: swapped for use, swapped in zip(uses, orientation, strict=True)})
+    _logger.info(
+        "Commutative port assignment: uses=%d instances=%d fan_in=%d->%d",
+        sum(len(uses) for uses in uses_by_instance.values()),
+        len(uses_by_instance),
+        fan_in_before,
+        fan_in_after,
+    )
     return swap
 
 
@@ -120,6 +143,7 @@ def _optimal_orientation(uses: list[_Use]) -> list[bool] | None:
         options={"time_limit": _MILP_TIME_LIMIT_S, "mip_rel_gap": 0.0},
     )
     if result.status != 0 or result.x is None:  # 0 == proven optimal; otherwise let the caller fall back
+        _logger.warning("Port assignment MILP not optimal: uses=%d status=%s", len(uses), result.status)
         return None
     return [round(result.x[use]) > 0 for use in range(n_uses)]
 

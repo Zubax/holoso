@@ -74,8 +74,7 @@ model for verification, and once that is proven, move on to the actual HDL gener
 nothing touches the filesystem unless the caller asks.
 
 ```python
-def synthesize(target, *, ops: OpConfig, parameters: Mapping[str, object] | None = None,
-               entry: str = "__call__", name: str | None = None) -> SynthesisResult: ...
+def synthesize(target, *, ops: OpConfig, entry: str = "__call__", name: str | None = None) -> SynthesisResult: ...
 
 @dataclass(frozen=True)
 class SynthesisResult:
@@ -108,10 +107,9 @@ binding-time front-end needs -- `__globals__`, closure cells, default args, and 
 which is what evaluates compile-time tables and follows/inlines imported callables. The object is the compile root; the
 boundary ("what to ignore") falls out of reachability + binding-time analysis, not manual enumeration. Source is read
 via `inspect.getsource` + `ast`; when unavailable (REPL/`exec`/notebook-defined, some lambdas) synthesis fails with an
-explicit error. For a class, `__init__` runs with `parameters` (overriding the kw-only defaults that otherwise map to
-Verilog parameters), attributes written by `entry` become state registers, and `entry` (default `__call__`) is analysed
-with the ports dynamic; a plain function is analysed directly. `result.write(out_dir)` is the only operation that
-touches the filesystem.
+explicit error.
+
+`result.write(out_dir)` is the only operation that touches the filesystem.
 
 ## Front-end
 
