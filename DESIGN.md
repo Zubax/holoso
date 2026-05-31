@@ -513,3 +513,79 @@ that closes timing without one of them should be able to drop it at code-generat
 A fused multiply-add operator wrapping kulibin `zkf_fma` is planned: a `holoso_ffma` wrapper plus an `FFmaOperator`
 (with the selection pass fusing `a*b + c` chains). It should cut operator count, register pressure, and latency, and
 help timing closure -- to be added later.
+
+## Fabric-area exploration
+
+The synthesized fabric is dominated by the per-operand read multiplexers: on a register-pressure-heavy kernel (the
+`ekf1` EKF update) they are roughly 60-65% of the LUTs, and a read mux's cost is approximately linear in
+`read-set-size * W`. The read-set sizes sit at the interference floor -- the values a port reads are largely
+simultaneously live, so they must occupy distinct registers -- so the muxes encode real liveness rather than
+allocation slack, which is what bounds most levers. The results below were measured end-to-end on Yosys+nextpnr-ECP5,
+Lattice Diamond, and Vivado, and are recorded so the dead ends are not re-explored.
+
+Adopted (lossless, f_max-neutral, in the committed design):
+
+- Read mux as a `case` over the dense read-set index rather than an indexed part-select into a packed gather bus:
+  smallest and fastest of the encodings tried, and free of the DSP-inference trap (a variable part-select offset is a
+  multiply that Diamond's LSE maps to DSP blocks). Nested-ternary muxes are catastrophic.
+- Commutative operand port assignment (see LIR / `_portassign.py`), solved exactly as a MILP: about 4-5% LUT on `ekf1`
+  across all three tools (read-mux fan-in 89 -> 78), at zero hardware or latency cost. Based on Chen & Cong.
+- Dense write-target index and a grouped input load: read/write symmetry and cleaner emission at neutral area. The
+  per-register write select beats a per-instance write demux -- the scatter costs about 10% more LUTs.
+
+Explored and rejected for register-pressure-bound kernels like `ekf1`:
+
+- LUTRAM register file: a multi-write workload needs a live-value table that costs as many LUTs as the FF+mux it
+  replaces; banking (Cong's RDR) helps only when access sets partition cleanly, which `ekf1`'s do not.
+- Register-file size cap via register-pressure-limited scheduling: `nreg` floors at the peak liveness (the
+  parallel-loaded inputs plus long-lived state), so it trades large latency and f_max for a couple of percent.
+- Operator replication and FMA fusion: both raise read-operand traffic (more, or wider, read ports), enlarging total
+  mux area despite fewer ops or a shorter makespan.
+- Operand collectors (copy/move ops that relocate values off the worst-reach ports): a copy relocates fan-in rather
+  than removing it -- it must itself read what it relocates -- so a net gain needs a value read by several ports moved
+  onto a target that is co-reachable but not co-live, which the interference floor denies. An honest greedy moved
+  total read reach only 95 -> 94. Copies on the shared operator also cost cycles; producer-side placement is the cited
+  alternative (Terechko et al.; the GPU operand-collector line, Gebhart et al. and CORF, stages hot operands but
+  targets access energy, not static mux area).
+
+Latency-for-area trades (set aside -- latency is itself a real cost, not a free lever, and the area gain did not
+justify it):
+
+- Distributed/banked register file with scheduled inter-bank copies (Cong's RDR): banking narrows each port's mux but
+  serializes the schedule, buying area with latency. On `ekf1`, whose read muxes are already at the interference
+  floor, the trade was not worthwhile.
+- Shared read bus / vertical microcode (serialize to one operator per cycle, two shared operand buses): measured at
+  about -6% total LUTs for about +55% latency on `ekf1`, f_max-safe -- a real latency cost for a modest area gain, so
+  not pursued.
+
+## References
+
+Multiplexer-aware binding and port assignment:
+
+- L. Chen, J. Cong. Register Binding and Port Assignment for Multiplexer Optimization. ASP-DAC 2004. Basis for the
+  commutative operand port-assignment pass; frames steering minimization as a binding/port-assignment problem.
+
+Distributed register files and inter-cluster communication (the latency-for-interconnect direction):
+
+- J. Cong, Y. Fan, et al. Architecture and Synthesis for Multi-Cycle Communication (the Regular Distributed Register
+  microarchitecture). ISPD 2003. Banking plus explicitly scheduled inter-bank copies.
+- A. Terechko, et al. Inter-cluster Communication Models for Clustered VLIW Processors. HPCA 2003. Copies in issue
+  slots are expensive; producer-side placement is preferred over after-the-fact copies.
+
+Operand collectors and register-file caches:
+
+- M. Gebhart, et al. A Compile-Time Managed Multi-Level Register File Hierarchy. MICRO 2011. Compiler-staged operand
+  near-file (targets access energy).
+- S. Asghari Esfeden, et al. CORF: Coalescing Operand Register File for GPUs. ASPLOS 2019. Operand co-location posed
+  as graph coloring.
+
+Register pressure and copies:
+
+- A. W. Appel, K. J. Supowit. Generalizations of the Sethi-Ullman algorithm for register allocation, 1987.
+  Pressure-minimizing evaluation order and rematerialization. The copy-coalescing-vs-splitting literature is the
+  formal statement of why a copy relocates steering cost unless it collapses a fan-in cone.
+
+Reset and timing:
+
+- AMD UG949, Vivado Design Methodology, "When and Where to Use a Reset."
+- Intel Hyperflex Architecture High-Performance Design Handbook, "Synchronous Resets Summary" and "Reset Strategies."
