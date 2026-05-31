@@ -133,8 +133,8 @@ def generate(lir: Lir) -> VerilogOutput:
     read_sets = lir.read_set_per_port
     write_sets = lir.write_set_per_register
     # Symmetric to the read-set index on the read side: the write-address field and the per-register write comparators
-    # carry the per-instance dense write-target index (ceil(log2 M) over each instance's M targets, not the whole
-    # file). The codebook is shared between the microcode and the comparators so they cannot drift.
+    # carry the dense write-target index (ceil(log2 M) over each instance's M write targets, not the whole file). The
+    # codebook is shared between the microcode and the comparators so they cannot drift.
     write_lists = write_target_lists(lir)
 
     fields = build_microcode(lir, read_port, port_consts, write_lists)
@@ -425,22 +425,20 @@ def _read_latch_stmts(
 
 
 def _reg_write_stmts(
-    w: _Writer,
-    reg: int,
-    writers: list[FloatOperatorInstance],
-    load_name: str | None,
-    write_lists: dict[FloatOperatorInstance, list[int]],
+    w: _Writer, reg: int, writers: list[FloatOperatorInstance], write_lists: dict[FloatOperatorInstance, list[int]]
 ) -> None:
-    """Emit the write select for one register (input load plus only its actual writers) inside the clocked block."""
+    """
+    Emit the write select for one register: a select spanning only that register's writer instances.
+
+    Each register's flop gets one clock-enabled write (the input load is grouped separately, above), so the write
+    logic stays one register per flop rather than scattering a register's drivers across per-instance blocks. A
+    single-target instance needs no address compare; otherwise the guard compares the instance's write-address field
+    against the dense write-target index this register occupies in the instance's codebook (the microcode value).
+    """
     clause = "if"
-    if load_name is not None:
-        w(f"if (load_en) regs[{reg}] <= in_{load_name};")
-        clause = "else if"
     for inst in writers:
         sig, base = _sig(inst), base_name(inst)
         targets = write_lists[inst]
-        # An instance that only ever writes one register needs no address compare; otherwise compare against the
-        # dense write-target index this register occupies in the instance's codebook (matches the microcode value).
         if len(targets) == 1:
             cond = f_we(base)
         else:
@@ -460,8 +458,6 @@ def _emit_clocked(
 ) -> None:
     """Emit every sequential element in one always @(posedge clk): fetch, latches, writes, and control state."""
     nreg = max(1, lir.float_regfile.nreg)
-    covered = {load.dst.index: load.name for load in lir.float_inputs}
-
     w("""
 // Project policy: all sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q);
 // the fetch pipeline, the read/write register-file latches, and the register array are reset-unconditional so they
@@ -492,13 +488,20 @@ always @(posedge clk) begin
             w(f"{sig}_{err_port}_q <= {sig}_{err_port};")
     w("")
 
-    w("// Register writes: the input load plus a select spanning only each register's writers.")
+    if lir.float_inputs:
+        w("// Parallel input load: every input lane captured together on the accept step.")
+        w("if (load_en) begin")
+        w.push()
+        for load in sorted(lir.float_inputs, key=lambda load: load.dst.index):
+            w(f"regs[{load.dst.index}] <= in_{load.name};")
+        w.pop()
+        w("end", "")
+
+    w("// Register writes: a select spanning only each register's writers (the input load is grouped above).")
     for reg in range(nreg):
         writers = write_sets.get(reg, [])
-        load_name = covered.get(reg)
-        if load_name is None and not writers:
-            continue  # an unused register (only the NREG>=1 floor with no values); leave it undriven
-        _reg_write_stmts(w, reg, writers, load_name, write_lists)
+        if writers:
+            _reg_write_stmts(w, reg, writers, write_lists)
     w("")
 
     w("// Control state: the only reset-gated registers.")

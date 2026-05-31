@@ -355,9 +355,9 @@ regalloc: reach-aware coloring (greedy port-affinity + a bounded SciPy dual-anne
   write-target index (each `ceil(log2 set)` wide, not the file-wide register index), so the controller word carries
   only those set-local indices plus the per-register write enable.
 
-- Inputs preload directly into the low registers `0..nload-1` on the accept step, folded into each such register's
-  write select and gated by `in_valid`, rather than through write ports. `nload` spans the input block (the highest
-  input register index plus one). Outputs are tapped directly from their register by fixed index.
+- Inputs preload directly into the low registers `0..nload-1` on the accept step, captured together under a single
+  `if (load_en)` block (gated by `in_valid`) rather than through write ports. `nload` spans the input block (the
+  highest input register index plus one). Outputs are tapped directly from their register by fixed index.
 
 - Selected-float MIR `FloatSignControl` value objects fold into operand/result sign-control sidebands, and `fconst` is an
   immediate on the input mux; both are free in the schedule. Sign controls are constructed ad hoc rather than
@@ -409,8 +409,10 @@ Padding each gather element to a power-of-two stride turns the offset back into 
 `case` has no offset arithmetic at all, needs no padding, and measures slightly smaller and faster than the
 part-select on all three flows -- so the read mux is a plain `case`.
 
-Write select. Each register's writeback is a one-hot select over only its writers. For a register written by an
-instance that writes more than one register, the guard compares that instance's write-address field against the dense
+Write select. Each register's writeback is a one-hot select over only its writers, kept one register per flop (the
+input load is a separate `if (load_en)` block above, not an arm of the select) so the write logic does not scatter a
+register's drivers across per-instance blocks -- a per-writer-instance demux was measured ~10% larger on yosys/Vivado.
+For a register written by an instance that writes more than one register, the guard compares its write-address field against the dense
 index this register occupies in the instance's sorted write-target set -- the same codebook the microcode packs, so
 the two cannot drift. This mirrors the read-set index on the read side: both fields carry a set-local index sized to
 the set, never the file-wide register index. A single-target instance needs no compare (its field is lifted out as a
