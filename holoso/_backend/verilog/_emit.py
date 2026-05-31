@@ -488,21 +488,34 @@ always @(posedge clk) begin
             w(f"{sig}_{err_port}_q <= {sig}_{err_port};")
     w("")
 
+    def emit_writeback() -> None:
+        for reg in range(nreg):
+            writers = write_sets.get(reg, [])
+            if writers:
+                _reg_write_stmts(w, reg, writers, write_lists)
+
+    has_writes = any(write_sets.get(reg) for reg in range(nreg))
     if lir.float_inputs:
-        w("// Parallel input load: every input lane captured together on the accept step.")
+        # The accept-step input load and operator writeback are mutually exclusive in time (the schedule never commits
+        # a result on the load step), but the tools cannot see that. Making writeback the else of the load encodes the
+        # exclusivity structurally -- load wins, writes are gated by !load_en -- so correctness never rests on the
+        # ordering of competing non-blocking assignments to the same register.
+        w("// Register update: input load on the accept step, else the per-register writeback select.")
         w("if (load_en) begin")
         w.push()
         for load in sorted(lir.float_inputs, key=lambda load: load.dst.index):
             w(f"regs[{load.dst.index}] <= in_{load.name};")
         w.pop()
+        if has_writes:
+            w("end else begin")
+            w.push()
+            emit_writeback()
+            w.pop()
         w("end", "")
-
-    w("// Register writes: a select spanning only each register's writers (the input load is grouped above).")
-    for reg in range(nreg):
-        writers = write_sets.get(reg, [])
-        if writers:
-            _reg_write_stmts(w, reg, writers, write_lists)
-    w("")
+    elif has_writes:
+        w("// Register writes: a select spanning only each register's writers.")
+        emit_writeback()
+        w("")
 
     w("// Control state: the only reset-gated registers.")
     w("if (rst) begin")
