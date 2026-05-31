@@ -9,6 +9,7 @@ requires-python = ">=3.14"
 description = "A narrow Python-to-Verilog synthesizer for numeric kernels."
 dependencies = [
     "numpy~=2.4",
+    "scipy~=1.17",
     "sympy~=1.14",
 ]
 
@@ -51,5 +52,5 @@ strict = true
 files = ["holoso"]
 
 [[tool.mypy.overrides]]
-module = ["sympy.*"]
+module = ["sympy.*", "scipy.*"]
 ignore_missing_imports = true

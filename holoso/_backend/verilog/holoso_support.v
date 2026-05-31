@@ -9,145 +9,7 @@
 //
 // Modules named with an underscore are internal implementation details.
 
-`include "holoso_support.vh"
-
 `timescale 1ns/1ps
-
-// ====================================================================================================================
-// REGISTER FILE
-
-// Multiport combinational register file with flattened lane buses.
-//
-// The packed lane buses use zero-based port order.
-// The helper macro in holoso_support.vh is intended to be used inside indexed part-selects, for example:
-//
-//     rd_addr[`HOLOSO_REGFILE_LANE(WADDR, 0)]
-//     rd_data[`HOLOSO_REGFILE_LANE(W,    0)]
-//     wr_addr[`HOLOSO_REGFILE_LANE(WADDR, 1)]
-//     wr_data[`HOLOSO_REGFILE_LANE(W,    1)]
-//     wr_en[1]
-//
-// Reads are combinational. With RWPASS=0, each read port returns the selected stored register only.
-// With RWPASS!=0, if an active write targets the selected read address, the read port returns the matching write-data
-// lanes before the clock edge; this write-to-read combinational path implements write-through same-cycle behavior.
-// Enabling RWPASS adds NRD*NWR W-bit wide muxes, significantly enlarging the fabric area and combinational paths.
-//
-// Writes are synchronous. On the rising edge of clk, each addressed register with an active matching write
-// port is updated to the matching write-data lanes.
-//
-// An optional immediate parallel load preloads registers 0..NLOAD-1 from the load_data lanes in a single cycle when
-// load_valid is asserted, bypassing the write ports (lane i drives register i, no address needed). It is folded into
-// the synchronous write-data OR on those registers, so it is synchronous and read-first like a normal write.
-//
-// The combinational view port mirrors every register (view[i*W +: W] == regs[i]); like the read ports under RWPASS=0
-// it is read-first, so a value written or loaded on a cycle appears on view only on the following cycle. It lets a
-// client tap results from fixed register indices without consuming read ports.
-//
-// There is no reset input and stored data is not initialized. Accesses are unchecked; the client must only use
-// addresses below NREG and load lanes below NLOAD. Out-of-range behavior is unspecified. Conflicting write behavior,
-// and a load conflicting with a write to the same register on the same cycle, are unspecified.
-module holoso_regfile#(
-    parameter W       = 32,           // width of one data word
-    parameter WADDR   = 5,            // width of one address lane
-    parameter NRD     = 1,            // number of combinational read ports
-    parameter NWR     = 1,            // number of synchronous write ports
-    parameter NLOAD   = 0,            // number of low registers (0..NLOAD-1) served by the immediate load port
-    parameter NREG    = (1 << WADDR), // number of stored registers; defaults to the full addressable range
-    parameter RWPASS  = 0             // enables same-cycle read/write combinational pass-through
-)(
-    input wire clk,
-
-    input wire       [NWR-1:0] wr_en,
-    input wire [NWR*WADDR-1:0] wr_addr,
-    input wire     [NWR*W-1:0] wr_data,
-
-    input  wire [NRD*WADDR-1:0] rd_addr,
-    output wire     [NRD*W-1:0] rd_data,
-
-    input  wire                               load_en,
-    input  wire [((NLOAD>0)?(NLOAD*W):1)-1:0] load_data,
-
-    output wire  [NREG*W-1:0] view
-);
-    reg [W-1:0] regs [0:NREG-1];
-
-    function [W-1:0] _or_write_words;
-        input [NWR*W-1:0] words;
-        integer i;
-        begin
-            _or_write_words = {W{1'b0}};
-            for (i = 0; i < NWR; i = i + 1) begin
-                _or_write_words = _or_write_words | words[(i * W) +: W];
-            end
-        end
-    endfunction
-
-    genvar reg_idx;
-    genvar rd_idx;
-    genvar wr_idx;
-    generate
-        if ((W <= 0) || (WADDR <= 0) || (NRD <= 0) || (NWR <= 0) || (NREG <= 0) || (NREG > (1 << WADDR))
-                || (NLOAD < 0) || (NLOAD > NREG)) begin : g_bad
-            _holoso_regfile_bad_parameters_invalid_usage bad_parameters();
-        end else begin : g_ok
-            // WRITE PORTS
-            for (reg_idx = 0; reg_idx < NREG; reg_idx = reg_idx + 1) begin : g_reg
-                localparam [WADDR-1:0] REG_ADDR = reg_idx;
-
-                wire   [NWR-1:0] wr_match;
-                wire [NWR*W-1:0] wr_data_masked;
-                wire     [W-1:0] wr_data_or = _or_write_words(wr_data_masked);
-
-                for (wr_idx = 0; wr_idx < NWR; wr_idx = wr_idx + 1) begin : g_wr
-                    wire match = wr_en[wr_idx] && (wr_addr[(wr_idx * WADDR) +: WADDR] == REG_ADDR);
-                    assign wr_match[wr_idx] = match;
-                    assign wr_data_masked[(wr_idx * W) +: W] = match ? wr_data[(wr_idx * W) +: W] : {W{1'b0}};
-                end
-
-                if (reg_idx < NLOAD) begin : g_load
-                    // The load is one more masked term ORed into the write data; lane reg_idx drives this register with
-                    // no address comparator or series mux. load_en and a write to this reg are normally disjoint.
-                    wire [W-1:0] load_masked = load_en ? load_data[(reg_idx * W) +: W] : {W{1'b0}};
-                    always @(posedge clk) begin
-                        if (|wr_match || load_en) begin
-                            regs[reg_idx] <= wr_data_or | load_masked;
-                        end
-                    end
-                end else begin : g_plain
-                    always @(posedge clk) begin
-                        if (|wr_match) begin
-                            regs[reg_idx] <= wr_data_or;
-                        end
-                    end
-                end
-            end
-
-            // READ PORTS
-            for (rd_idx = 0; rd_idx < NRD; rd_idx = rd_idx + 1) begin : g_rd
-                wire  [WADDR-1:0] rd_addr_lane = rd_addr[(rd_idx * WADDR) +: WADDR];
-                if (RWPASS) begin : g_passthrough
-                    wire   [NWR-1:0] rd_wr_match;
-                    wire [NWR*W-1:0] rd_wr_data_masked;
-                    wire     [W-1:0] rd_wr_data_or = _or_write_words(rd_wr_data_masked);
-
-                    for (wr_idx = 0; wr_idx < NWR; wr_idx = wr_idx + 1) begin : g_wr
-                        wire match = wr_en[wr_idx] && (wr_addr[(wr_idx * WADDR) +: WADDR] == rd_addr_lane);
-                        assign rd_wr_match[wr_idx] = match;
-                        assign rd_wr_data_masked[(wr_idx * W) +: W] = match ? wr_data[(wr_idx * W) +: W] : {W{1'b0}};
-                    end
-                    assign rd_data[(rd_idx * W) +: W] = (|rd_wr_match) ? rd_wr_data_or : regs[rd_addr_lane];
-                end else begin : g_no_passthrough
-                    assign rd_data[(rd_idx * W) +: W] = regs[rd_addr_lane];
-                end
-            end
-
-            // PASSIVE VIEW: combinational mirror of every register; view[i*W +: W] == regs[i]
-            for (reg_idx = 0; reg_idx < NREG; reg_idx = reg_idx + 1) begin : g_view
-                assign view[(reg_idx * W) +: W] = regs[reg_idx];
-            end
-        end
-    endgenerate
-endmodule
 
 // ====================================================================================================================
 // FLOATING POINT BASIC OPERATORS
@@ -158,8 +20,8 @@ endmodule
 // Parameters: WEXP -- exponent bit width, WMAN -- mantissa/significand bit width (incl. hidden bit).
 // The total width is WFULL=WEXP+WMAN (the significand MSb is absent but there is also the sign bit, like IEEE 754).
 //
-// Additional register stages can be introduced to tweak critical path timings vs. pipeline latency using
-// dedicated parameters; refer to the Kulibin source for their specific meaning.
+// Streaming wrappers require a LATENCY parameter, which is forwarded to the wrapped Kulibin operator for checking.
+// Stage parameters are forwarded as-is; refer to the corresponding Kulibin operator source for their timing details.
 
 // Combinational floating-point sign conditioner operator; to be used at the inputs/outputs of arithmetic operators.
 // Sign conditioning is a trivial and/xor single-bit gate enabling free computation of abs/neg.
@@ -180,8 +42,10 @@ endmodule
 // Floating point adder/subtractor with sign conditioning:  y = sgnop(sgnop(a) + sgnop(b))
 // E.g., subtraction: y=a+(-b); negative absolute difference: y=-abs(a-b), magnitude difference: y=abs(a)-abs(b), ...
 // The inputs are sampled once at in_valid and are not required to remain stable during operation.
-// Register stages: 6+STAGE_DECODE+STAGE_ALIGN.
-module holoso_fadd#(parameter WEXP = 6, parameter WMAN = 18, parameter STAGE_DECODE = 0, parameter STAGE_ALIGN = 0) (
+module holoso_fadd#(parameter WEXP = 6, parameter WMAN = 18,
+                    parameter STAGE_INPUT = 0, parameter STAGE_DECODE = 0, parameter STAGE_ALIGN = 0,
+                    parameter STAGE_NORMALIZE = 0, parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
+                    parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
@@ -194,17 +58,18 @@ module holoso_fadd#(parameter WEXP = 6, parameter WMAN = 18, parameter STAGE_DEC
     output wire [WEXP+WMAN-1:0] y
 );
     localparam WFULL = WEXP + WMAN;
-    localparam LATENCY = 6 + (STAGE_DECODE ? 1 : 0) + (STAGE_ALIGN ? 1 : 0);
     wire [WFULL-1:0] a1;
     wire [WFULL-1:0] b1;
     wire [WFULL-1:0] y1;
     wire       [1:0] y_sgnop_q;
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
-    _zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
-                                                   .out_valid(), .out(y_sgnop_q));
+    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
+                                                  .out_valid(), .out(y_sgnop_q));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
-    zkf_add#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_DECODE(STAGE_DECODE), .STAGE_ALIGN(STAGE_ALIGN)) u_add (
+    zkf_add#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT),
+             .STAGE_DECODE(STAGE_DECODE), .STAGE_ALIGN(STAGE_ALIGN), .STAGE_NORMALIZE(STAGE_NORMALIZE),
+             .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT), .LATENCY(LATENCY)) u_add (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .a(a1), .b(b1),
         .out_valid(out_valid), .y(y1)
@@ -213,8 +78,10 @@ endmodule
 
 // Floating point multiplier with sign conditioning: y = sgnop(sgnop(a) * sgnop(b))
 // The inputs are sampled once at in_valid and are not required to remain stable during operation.
-// Register stages: 3+STAGE_PRODUCT.
-module holoso_fmul#(parameter WEXP = 6, parameter WMAN = 18, parameter STAGE_PRODUCT = 0) (
+// Caution: STAGE_PRODUCT is almost never a good idea unless WMAN is wider than DSP multiplier input widths.
+module holoso_fmul#(parameter WEXP = 6, parameter WMAN = 18, parameter STAGE_INPUT = 0,
+                    parameter STAGE_PRODUCT = 0, parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
+                    parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
@@ -227,27 +94,30 @@ module holoso_fmul#(parameter WEXP = 6, parameter WMAN = 18, parameter STAGE_PRO
     output wire [WEXP+WMAN-1:0] y
 );
     localparam WFULL = WEXP + WMAN;
-    localparam LATENCY = 3 + (STAGE_PRODUCT ? 1 : 0);
     wire [WFULL-1:0] a1;
     wire [WFULL-1:0] b1;
     wire [WFULL-1:0] y1;
     wire       [1:0] y_sgnop_q;
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
-    _zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
-                                                   .out_valid(), .out(y_sgnop_q));
+    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
+                                                  .out_valid(), .out(y_sgnop_q));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
-    zkf_mul#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_PRODUCT(STAGE_PRODUCT)) u_mul (.clk(clk), .rst(rst),
-                                                                             .in_valid(in_valid), .a(a1), .b(b1),
-                                                                             .out_valid(out_valid), .y(y1));
+    zkf_mul#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT),
+             .STAGE_PRODUCT(STAGE_PRODUCT), .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT),
+             .LATENCY(LATENCY)) u_mul (
+        .clk(clk), .rst(rst),
+        .in_valid(in_valid), .a(a1), .b(b1),
+        .out_valid(out_valid), .y(y1)
+    );
 endmodule
 
 // Constant-power-of-two scaler with sign conditioning:  y = sgnop(sgnop(a) * 2^K)
 // K is a signed integer exponent shift; -2^(WEXP-1) < K < 2^(WEXP-1). The scaling is exact.
 // The inputs are sampled once at in_valid and are not required to remain stable during operation.
-// Register stages: 1+STAGE_DECODE.
-module holoso_fmul_ilog2_const#(parameter WEXP = 6, parameter WMAN = 18,
-                                parameter integer K = 0, parameter STAGE_DECODE = 0) (
+module holoso_fmul_ilog2_const#(parameter WEXP = 6, parameter WMAN = 18, parameter integer K = 0,
+                                parameter STAGE_INPUT = 0, parameter STAGE_DECODE = 0,
+                                parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
@@ -258,15 +128,15 @@ module holoso_fmul_ilog2_const#(parameter WEXP = 6, parameter WMAN = 18,
     output wire [WEXP+WMAN-1:0] y
 );
     localparam WFULL = WEXP + WMAN;
-    localparam LATENCY = 1 + (STAGE_DECODE ? 1 : 0);
     wire [WFULL-1:0] a1;
     wire [WFULL-1:0] y1;
     wire       [1:0] y_sgnop_q;
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a),  .op(a_sgnop), .y(a1));
-    _zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
-                                                   .out_valid(), .out(y_sgnop_q));
+    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
+                                                  .out_valid(), .out(y_sgnop_q));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
-    zkf_mul_ilog2_const#(.WEXP(WEXP), .WMAN(WMAN), .K(K), .STAGE_DECODE(STAGE_DECODE)) u_mul_ilog2_const (
+    zkf_mul_ilog2_const#(.WEXP(WEXP), .WMAN(WMAN), .K(K),
+                         .STAGE_INPUT(STAGE_INPUT), .STAGE_DECODE(STAGE_DECODE), .LATENCY(LATENCY)) u_mul_ilog2_const (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .a(a1),
         .out_valid(out_valid), .y(y1)
@@ -277,8 +147,9 @@ endmodule
 // div0 is asserted alongside out_valid when the divisor is (positive) zero; the value of y is then unspecified.
 // The quotient is rounded.
 // The inputs are sampled once at in_valid and are not required to remain stable during operation.
-// Register stages: 4+((WMAN+2+((WMAN+2)%2))/2)+STAGE_INPUT.
-module holoso_fdiv#(parameter WEXP = 6, parameter WMAN = 18, parameter STAGE_INPUT = 0) (
+module holoso_fdiv#(parameter WEXP = 6, parameter WMAN = 18,
+                    parameter STAGE_INPUT = 0, parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
+                    parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
@@ -292,19 +163,22 @@ module holoso_fdiv#(parameter WEXP = 6, parameter WMAN = 18, parameter STAGE_INP
     output wire                 div0
 );
     localparam WFULL = WEXP + WMAN;
-    localparam LATENCY = 4 + ((WMAN + 2 + ((WMAN + 2) % 2)) / 2) + (STAGE_INPUT ? 1 : 0);
     wire [WFULL-1:0] a1;
     wire [WFULL-1:0] b1;
     wire [WFULL-1:0] y1;
     wire       [1:0] y_sgnop_q;
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a),  .op(a_sgnop), .y(a1));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b),  .op(b_sgnop), .y(b1));
-    _zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
-                                                   .out_valid(), .out(y_sgnop_q));
+    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
+                                                  .out_valid(), .out(y_sgnop_q));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
-    zkf_div#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT)) u_div (.clk(clk), .rst(rst),
-                                                                         .in_valid(in_valid), .a(a1), .b(b1),
-                                                                         .out_valid(out_valid), .q(y1), .div0(div0));
+    zkf_div#(.WEXP(WEXP), .WMAN(WMAN),
+             .STAGE_INPUT(STAGE_INPUT), .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT),
+             .LATENCY(LATENCY)) u_div (
+        .clk(clk), .rst(rst),
+        .in_valid(in_valid), .a(a1), .b(b1),
+        .out_valid(out_valid), .q(y1), .div0(div0)
+    );
 endmodule
 
 // Combinational saturator: replaces infinity with the largest finite value of the same sign; finite pass through.
@@ -319,8 +193,7 @@ endmodule
 //      min = sgnop(min(sgnop(a), sgnop(b)))
 //      max = sgnop(max(sgnop(a), sgnop(b)))
 // Useful for e.g. sort-by-absolute-value or producing sign-flipped extrema.
-// Register stages: 1.
-module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18) (
+module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18, parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
@@ -335,7 +208,6 @@ module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18) (
     output wire [WEXP+WMAN-1:0] max
 );
     localparam WFULL = WEXP + WMAN;
-    localparam LATENCY = 1;
     wire [WFULL-1:0] a1;
     wire [WFULL-1:0] b1;
     wire [WFULL-1:0] min1;
@@ -345,20 +217,19 @@ module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18) (
     wire       [1:0] max_sgnop_q = out_sgnop_q[3:2];
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a   (.x(a),    .op(a_sgnop),   .y(a1));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b   (.x(b),    .op(b_sgnop),   .y(b1));
-    _zkf_pipe#(.W(4), .N(LATENCY)) u_out_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid),
-                                                      .in({max_sgnop, min_sgnop}), .out_valid(), .out(out_sgnop_q));
+    zkf_pipe#(.W(4), .N(LATENCY)) u_out_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid),
+                                                    .in({max_sgnop, min_sgnop}), .out_valid(), .out(out_sgnop_q));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_min (.x(min1), .op(min_sgnop_q), .y(min));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_max (.x(max1), .op(max_sgnop_q), .y(max));
-    zkf_sort#(.WEXP(WEXP), .WMAN(WMAN)) u_sort (.clk(clk), .rst(rst),
-                                                .in_valid(in_valid), .a(a1), .b(b1),
-                                                .out_valid(out_valid), .min(min1), .max(max1));
+    zkf_sort#(.WEXP(WEXP), .WMAN(WMAN), .LATENCY(LATENCY)) u_sort (.clk(clk), .rst(rst),
+                                                                   .in_valid(in_valid), .a(a1), .b(b1),
+                                                                   .out_valid(out_valid), .min(min1), .max(max1));
 endmodule
 
 // Floating point comparator with sign conditioning on inputs only:
 //      (a_gt_b, a_eq_b, a_lt_b) = compare(sgnop(a), sgnop(b))
 // Outputs are mutually-exclusive one-hot flags.
-// Register stages: 1
-module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18) (
+module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18, parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
@@ -376,10 +247,11 @@ module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18) (
     wire [WFULL-1:0] b1;
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
-    zkf_cmp#(.WEXP(WEXP), .WMAN(WMAN)) u_cmp (.clk(clk), .rst(rst),
-                                              .in_valid(in_valid), .a(a1), .b(b1),
-                                              .out_valid(out_valid),
-                                              .a_gt_b(a_gt_b), .a_eq_b(a_eq_b), .a_lt_b(a_lt_b));
+    zkf_cmp#(.WEXP(WEXP), .WMAN(WMAN), .LATENCY(LATENCY)) u_cmp (.clk(clk), .rst(rst),
+                                                                 .in_valid(in_valid), .a(a1), .b(b1),
+                                                                 .out_valid(out_valid),
+                                                                 .a_gt_b(a_gt_b), .a_eq_b(a_eq_b),
+                                                                 .a_lt_b(a_lt_b));
 endmodule
 
 // Combinational predicate: y=1 iff x is finite (i.e., x is not an infinity).

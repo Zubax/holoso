@@ -33,7 +33,6 @@ class DiamondEcp5Flow(Flow):
 
     device: DiamondEcp5Device = field(default_factory=DiamondEcp5Device)
     target_frequency_MHz: float = 100.0
-    retiming: bool = True
     options: dict[str, Any] = field(default_factory=dict)
 
     def available(self) -> bool:
@@ -49,7 +48,7 @@ class DiamondEcp5Flow(Flow):
         verilog_paths = [sf.path for sf in src if sf.path.suffix == ".v"]
 
         lpf = SourceFile(Path(f"{top}.lpf"), _lpf(self.target_frequency_MHz))
-        sty = SourceFile(Path(f"{top}.sty"), _strategy(self.target_frequency_MHz, self.retiming))
+        sty = SourceFile(Path(f"{top}.sty"), _strategy(self.target_frequency_MHz))
         ldf = SourceFile(Path(f"{top}.ldf"), _ldf(top, self.device.device, verilog_paths))
         tcl = SourceFile(Path(_TCL), _tcl(f"{top}.ldf"))
         commands = [CommandSpec(["pnmainc", _TCL])]
@@ -76,7 +75,7 @@ def _xml_attr(text: str) -> str:
     return text.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _strategy(freq_MHz: float, retiming: bool) -> str:
+def _strategy(freq_MHz: float) -> str:
     properties = {
         "PROP_LST_CarryChain": "True",
         "PROP_LST_DSPStyle": "DSP",
@@ -86,7 +85,7 @@ def _strategy(freq_MHz: float, retiming: bool) -> str:
         "PROP_LST_PropagatConst": "True",
         "PROP_LST_ResourceShare": "False",
         "PROP_LST_UseLPF": "True",
-        "PROP_MAP_RegRetiming": "True" if retiming else "False",
+        "PROP_MAP_RegRetiming": "True",
         "PROP_MAP_TimingDriven": "True",
         "PROP_PAR_EffortParDes": "5",
         "PROP_PAR_RoutePassParDes": "6",

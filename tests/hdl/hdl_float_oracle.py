@@ -63,7 +63,7 @@ def build_args(sim: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Sign-conditioning opcodes (must match HOLOSO_FSGNOP_* in holoso_support.vh)
+# Sign-conditioning opcodes (must match holoso_fsgnop's op encoding in holoso_support.v / FloatSignControl.encoded)
 # ---------------------------------------------------------------------------
 
 SGNOP_NONE = 0

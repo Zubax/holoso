@@ -113,8 +113,8 @@ def update_x_P(P00, P01, P02, P11, P12, P22, Q_R, Q_g, Q_i, R_ct, R_shunt, dt, x
 
 def main() -> None:
     float_format = holoso.FloatFormat(wexp=6, wman=18)  # Use 24-bit float with 6-bit exponent and 18-bit significand.
-    # Operators are constructed explicitly; each fixes its float format and parameters (here, default latencies, no
-    # extra pipeline stages). The numeric kernel uses add, multiply, divide, and the power-of-two scaling operator.
+    # Operators are constructed explicitly; each fixes its float format and pipeline stages.
+    # The pipeline stages are tuned per target chip, frequency, and synthesis flow.
     ops = holoso.OpConfig(
         holoso.FAddOperator(float_format),
         holoso.FMulOperator(float_format),

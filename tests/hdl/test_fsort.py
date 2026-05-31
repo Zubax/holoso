@@ -128,7 +128,7 @@ def test_holoso_fsort(sim: str) -> None:
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_fsort",
-        parameters={"WEXP": 8, "WMAN": 24},
+        parameters={"WEXP": 8, "WMAN": 24, "LATENCY": 1},
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,

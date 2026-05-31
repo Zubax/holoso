@@ -8,13 +8,17 @@ which typed storage resources, with which folded sign controls.
 from dataclasses import dataclass
 
 from .._operators import FloatHardwareOperator, FloatSignControl, HardwareOperator
-from .._type import FloatFormat
+from .._type import FloatFormat, FloatType
+from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
+
+FETCH_STAGES = 3
+FETCH_LAG = FETCH_STAGES - 1
 
 
 @dataclass(frozen=True, slots=True)
 class OperatorInstance:
     """
-    One physical operator module, e.g. ``u_fadd_e8_m24_0`` or ``u_fmul_ilog2_const_e8_m24_k_m2_0``.
+    One physical operator module, e.g. ``u_fadd_326215ea_0`` or ``u_fmul_ilog2_const_7296114c_0``.
 
     ``operator`` is the fully specified hardware operator it elaborates; ``index`` numbers the copies of that operator
     value. The scheduler pools operations by the hardware-operator instance: equal operators may time-share one module.
@@ -38,6 +42,14 @@ class RegRef:
 
     index: int
 
+    @property
+    def stable_label(self) -> str:
+        return f"r{self.index}"
+
+    @property
+    def is_register(self) -> bool:
+        return True
+
 
 @dataclass(frozen=True, slots=True)
 class FloatRegRef(RegRef):
@@ -49,6 +61,14 @@ class ConstRef:
     """An immediate constant, ``index`` into one typed LIR constant pool."""
 
     index: int
+
+    @property
+    def stable_label(self) -> str:
+        return f"c{self.index}"
+
+    @property
+    def is_register(self) -> bool:
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +89,10 @@ class FloatOperand(Operand):
 
     source: FloatRegRef | FloatConstRef
     sign: FloatSignControl = FloatSignControl()
+
+    @property
+    def stable_label(self) -> str:
+        return self.sign.decorate(self.source.stable_label)
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +179,23 @@ class FloatRegFileLayout(RegFileLayout):
 
 
 @dataclass(frozen=True, slots=True)
+class InputProducer:
+    """A write to a register that came from an input-load lane ``index`` (in module-port order)."""
+
+    index: int
+
+
+@dataclass(frozen=True, slots=True)
+class OperationProducer:
+    """A write to a register that came from operation ``index`` in ``Lir.float_ops``."""
+
+    index: int
+
+
+type FloatProducer = InputProducer | OperationProducer
+
+
+@dataclass(frozen=True, slots=True)
 class Lir:
     module_name: str
     float_instances: list[FloatOperatorInstance]
@@ -168,17 +209,154 @@ class Lir:
     max_chain_len: int  # longest dependency chain in hardware operators (for verification tolerance)
 
     @property
+    def ports(self) -> list[Port]:
+        scalar_type = FloatType(self.float_regfile.fmt)
+        ports: list[Port] = [
+            ControlInputPort("clk", 1),
+            ControlInputPort("rst", 1),
+            ControlInputPort("in_valid", 1),
+            ControlOutputPort("in_ready", 1),
+            ControlOutputPort("out_valid", 1),
+            ControlInputPort("out_ready", 1),
+        ]
+        ports.extend(DataInputPort(f"in_{load.name}", scalar_type) for load in self.float_inputs)
+        ports.extend(DataOutputPort(wire.name, scalar_type) for wire in self.float_outputs)
+        ports.append(ControlOutputPort("err_pc", self.cyc_width))
+        return ports
+
+    @property
+    def input_ports(self) -> list[DataInputPort]:
+        return [port for port in self.ports if isinstance(port, DataInputPort)]
+
+    @property
+    def output_ports(self) -> list[DataOutputPort]:
+        return [port for port in self.ports if isinstance(port, DataOutputPort)]
+
+    @property
+    def control_ports(self) -> list[ControlPort]:
+        return [port for port in self.ports if isinstance(port, ControlPort)]
+
+    @property
+    def present_step(self) -> int:
+        """
+        The executing step on which the outputs are valid in the register array.
+        The last operator commits on the makespan cycle; the write latch delays the write in the write latch, so the
+        result lands on the next edge and is presented on cycle ``makespan + 2``.
+        """
+        return self.makespan + 2
+
+    @property
     def cyc_width(self) -> int:
-        """Bit width of the cycle counter (and ``err_cyc``): enough to hold ``0..makespan+1``."""
-        return max(1, (self.makespan + 1).bit_length())
+        """Bit width of the err_pc diagnostic: enough to hold any executing step ``0..present_step``."""
+        return max(1, self.present_step.bit_length())
 
     @property
     def initiation_interval(self) -> int:
         """
-        Exact in_valid->out_valid latency: the schedule makespan plus one cycle to present.
+        Observable in_valid->out_valid latency.
 
-        Cycle 0 accepts and writes the inputs; compute cycles 1..makespan run the schedule; the last operator commits
-        on the makespan cycle; the result lands in the register file on the next edge and is presented on
-        cycle makespan+1. Zero-op modules present on cycle 1.
+        Cycle 0 accepts and loads the inputs; compute cycles 1..makespan run the schedule. With the write latch the
+        result is presented on the executing step ``present_step``; the executing step lags the fetch PC by FETCH_LAG,
+        so out_valid is asserted FETCH_LAG cycles later: ``present_step + FETCH_LAG``. Zero-op modules still present
+        one accept-relative cycle plus the fixed staging.
         """
-        return self.makespan + 1
+        return self.present_step + FETCH_LAG
+
+    @property
+    def read_set_per_port(self) -> dict[tuple[FloatOperatorInstance, int], list[int]]:
+        """
+        For each operator read port -- identified by its ``(instance, operand-position)`` pair -- the sorted distinct
+        register indices it ever reads across the schedule.
+
+        Constant operands are excluded: they are immediates on the per-operand const-select path, not register reads.
+        Ports that never read a register are absent. This drives the sparse per-port read mux: a port that reads a
+        single register needs no mux at all, and one that reads several needs a mux spanning only those registers.
+        """
+        sets: dict[tuple[FloatOperatorInstance, int], set[int]] = {}
+        for op in self.float_ops:
+            for pos, operand in enumerate(op.operands):
+                if isinstance(operand.source, FloatRegRef):
+                    sets.setdefault((op.inst, pos), set()).add(operand.source.index)
+        return {port: sorted(regs) for port, regs in sets.items()}
+
+    @property
+    def write_set_per_register(self) -> dict[int, list[FloatOperatorInstance]]:
+        """
+        For each register index, the operator instances that ever write it (each through its own dedicated write port),
+        in a canonical order.
+
+        This drives the sparse per-register write select: a register written by a single instance needs no write-port
+        mux. The input-load writers of registers ``0..nload-1`` are tracked separately via ``lir.float_inputs``
+        (they are a distinct, address-free write source folded into the same select).
+        """
+        sets: dict[int, list[FloatOperatorInstance]] = {}
+        for op in self.float_ops:
+            writers = sets.setdefault(op.dst.index, [])
+            if op.inst not in writers:
+                writers.append(op.inst)
+        for writers in sets.values():
+            writers.sort(key=lambda inst: (inst.operator.instance_stem, inst.index))
+        return sets
+
+    @property
+    def group_by_cycle(self) -> tuple[dict[int, list[FloatScheduledOp]], dict[int, list[FloatScheduledOp]]]:
+        """The schedule grouped into per-cycle issues and commits, each canonically ordered."""
+        issues: dict[int, list[FloatScheduledOp]] = {}
+        commits: dict[int, list[FloatScheduledOp]] = {}
+        for op in self.float_ops:
+            issues.setdefault(op.issue_cycle, []).append(op)
+            commits.setdefault(op.commit_cycle, []).append(op)
+        for group in (issues, commits):
+            for ops in group.values():
+                ops.sort(key=lambda op: (op.inst.operator.instance_stem, op.inst.index, op.dst.index, op.issue_cycle))
+        return issues, commits
+
+    @property
+    def float_liveness(self) -> dict[FloatRegRef, set[int]]:
+        """
+        Map each float register to the actual clock cycles on which it holds a live value.
+
+        This is cycle-accurate to the emitted hardware. Accounting for the read/write register-file latches and the
+        microcode-fetch staging: an input lands in the array on cycle 1; an operator result lands on
+        ``commit_cycle + FETCH_LAG + 2`` (the write latch, the read-first edge, then the fetch lag) -- which for the
+        last result is exactly the initiation interval; a register is read on ``issue_cycle + FETCH_LAG - 1`` (the read
+        latch presents the address a cycle early); and an output is read on the present cycle (the initiation interval).
+        Each row spans a value from when it lands in the array through its last read.
+        """
+        present = self.initiation_interval
+        defs: dict[FloatRegRef, list[int]] = {}
+        uses: dict[FloatRegRef, list[int]] = {}
+        for load in self.float_inputs:
+            defs.setdefault(load.dst, []).append(1)
+        for op in self.float_ops:
+            defs.setdefault(op.dst, []).append(op.commit_cycle + FETCH_LAG + 2)
+            read = op.issue_cycle + FETCH_LAG - 1
+            for operand in op.operands:
+                if isinstance(operand.source, FloatRegRef):
+                    uses.setdefault(operand.source, []).append(read)
+        for wire in self.float_outputs:
+            if isinstance(wire.source, FloatRegRef):
+                uses.setdefault(wire.source, []).append(present)
+        live: dict[FloatRegRef, set[int]] = {}
+        for reg in defs.keys() | uses.keys():
+            writes = sorted(defs.get(reg, []))
+            reads = sorted(uses.get(reg, []))
+            rows: set[int] = set()
+            for i, start in enumerate(writes):
+                nxt = writes[i + 1] if i + 1 < len(writes) else present + 1
+                last = max((use for use in reads if start <= use < nxt), default=start)
+                rows.update(range(start, last + 1))
+            live[reg] = rows
+        return live
+
+    @property
+    def float_write_timeline(self) -> dict[FloatRegRef, list[tuple[int, FloatProducer]]]:
+        """Per-register write timeline (commit cycle, producer) used to resolve a register source at a read cycle."""
+        writes: dict[FloatRegRef, list[tuple[int, FloatProducer]]] = {}
+        for i, load in enumerate(self.float_inputs):
+            writes.setdefault(load.dst, []).append((0, InputProducer(i)))
+        for j, op in enumerate(self.float_ops):
+            writes.setdefault(op.dst, []).append((op.commit_cycle, OperationProducer(j)))
+        for events in writes.values():
+            events.sort()
+        return writes

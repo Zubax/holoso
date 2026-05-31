@@ -188,7 +188,7 @@ def test_div_by_nonpow2_const_becomes_reciprocal_multiply() -> None:
     assert any(abs(c - 1.0 / 3.0) < 1e-12 for c in _consts(mir))
 
 
-def test_infeasible_pow2_falls_back_to_multiply() -> None:
+def test_wide_supported_pow2_uses_ilog2_operator() -> None:
     def f(a):  # type: ignore[no-untyped-def]
         return a * 16.0
 
@@ -196,8 +196,23 @@ def test_infeasible_pow2_falls_back_to_multiply() -> None:
     ops = OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
     mir = _run(f, ops)
     selected = _ops(mir)
-    assert [type(o.operator) for o in selected] == [FMulOperator]
-    assert any(c == 16.0 for c in _consts(mir))
+    assert [type(o.operator) for o in selected] == [FMulILog2Operator]
+    assert selected[0].operator.k == 4
+    assert _consts(mir) == []
+
+
+def test_unsupported_pow2_shift_is_rejected() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        return a * 64.0
+
+    fmt = FloatFormat(3, 4)
+    ops = OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
+    try:
+        _run(f, ops)
+    except UnsupportedConstruct as ex:
+        assert "unsupported power-of-two float scale" in str(ex)
+    else:
+        raise AssertionError("expected an unsupported power-of-two shift")
 
 
 def test_true_division_stays_fdiv() -> None:

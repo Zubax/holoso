@@ -6,8 +6,10 @@ from ._ir import (
     MirConst as MirConst,
     MirFloatConst as MirFloatConst,
     MirFloatInput as MirFloatInput,
+    MirFloatNode as MirFloatNode,
     MirFloatOperation as MirFloatOperation,
     MirFloatOutput as MirFloatOutput,
+    MirFloatView as MirFloatView,
     MirInput as MirInput,
     MirOperation as MirOperation,
 )

@@ -6,6 +6,7 @@ package data in ``pyproject.toml``); they are inlined into the self-contained re
 beyond the web font.
 """
 
+import colorsys
 import html
 import json
 import re
@@ -13,9 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
 
-from ..._interface import ModuleInterface
-from ..._lir import Lir, FloatOperand, FloatOperatorInstance, FloatRegRef, FloatScheduledOp
-from ..._operators import FAddOperator, FDivOperator, FMulILog2Operator, FMulOperator, HardwareOperator
+from ..._lir import FETCH_LAG, Lir, FloatConstRef, FloatOperand, FloatOperatorInstance, FloatRegRef, FloatScheduledOp
+from ..._operators import HardwareOperator
 from ..verilog import VerilogOutput
 
 
@@ -25,6 +25,9 @@ class HtmlOutput:
 
     html: str
 
+    def __str__(self) -> str:
+        return f"{type(self).__name__}(html_bytes={len(self.html.encode())})"
+
 
 _HOMEPAGE_URL = "https://github.com/Zubax/holoso"
 
@@ -32,14 +35,6 @@ _CSS = resources.files(__package__).joinpath("html.css").read_text(encoding="utf
 # Interactive layer; ``__DATA__`` is replaced by the per-module payload in ``_sched_script``.
 _SCHED_JS = resources.files(__package__).joinpath("html.js").read_text(encoding="utf-8")
 
-# Reserved, high-contrast operator colors (white text legible on each) for a light background.
-# TODO: When adding a new operator, replace this with a generalized palette sliced into as many colors as needed.
-_KIND_COLOR: dict[type[HardwareOperator], str] = {
-    FAddOperator: "#00a",
-    FMulOperator: "#0a0",
-    FDivOperator: "#a00",
-    FMulILog2Operator: "#050",
-}
 _MODULE_HEADER_RE = re.compile(r"(?ms)^module\b.*?^\);")
 _VERILOG_TOKEN_RE = re.compile(r"(?P<space>\s+)|(?P<ident>[A-Za-z_]\w*)|(?P<number>\d+)|(?P<other>.)")
 _VERILOG_KEYWORDS = frozenset({"module", "parameter", "input", "output", "wire", "reg"})
@@ -49,17 +44,12 @@ def _esc(text: str) -> str:
     return html.escape(text)
 
 
-def _operand(operand: FloatOperand) -> str:
-    name = f"r{operand.source.index}" if isinstance(operand.source, FloatRegRef) else f"c{operand.source.index}"
-    return operand.sign.decorate(name)
-
-
 def _op_text(op: FloatScheduledOp) -> str:
-    body = op.inst.operator.render(*[_operand(o) for o in op.operands])
-    return op.result_sign.decorate(f"r{op.dst.index}={body}")
+    body = op.inst.operator.render(*[o.stable_label for o in op.operands])
+    return op.result_sign.decorate(f"{op.dst.stable_label}={body}")
 
 
-def generate(lir: Lir, interface: ModuleInterface, verilog_output: VerilogOutput) -> HtmlOutput:
+def generate(lir: Lir, verilog_output: VerilogOutput) -> HtmlOutput:
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     link = f"<a href='{_HOMEPAGE_URL}'>Holoso</a>"
     out: list[str] = [
@@ -76,7 +66,7 @@ def generate(lir: Lir, interface: ModuleInterface, verilog_output: VerilogOutput
     constants = _constants(lir)
     if constants:
         out.append(f"<div class='sec'>{constants}</div>")
-    out.append(f"<div class='sec'>{_interface(interface)}</div>")
+    out.append(f"<div class='sec'>{_interface(lir)}</div>")
     out.append(f"<div class='sec modhdrsec'>{_module_header(verilog_output.verilog)}</div>")
     out.append("</div>")
     out.append(_schedule(lir))
@@ -104,15 +94,17 @@ def _metrics(lir: Lir) -> str:
 
 
 def _stage_config(lir: Lir) -> str:
-    out = ["<h2>Operator Params</h2><table class='metrics cfg'>"]
-    out.append("<tr><th>operator</th><th>HDL param</th><th>value</th></tr>")
+    out = [
+        "<h2>Operator Params</h2><table class='metrics cfg'>",
+        "<tr><th>operator</th><th>HDL param</th><th>value</th></tr>",
+    ]
     seen: dict[HardwareOperator, None] = {}  # distinct operators present, in instance order
     for inst in lir.float_instances:
         seen.setdefault(inst.operator, None)
     rows = 0
     for op in seen:
         for param, value in op.hdl_params().items():
-            out.append(f"<tr><td>{_esc(op.mnemonic)}</td><td>{_esc(param)}</td><td>{value}</td></tr>")
+            out.append(f"<tr><td>{_esc(op.instance_stem)}</td><td>{_esc(param)}</td><td>{value}</td></tr>")
             rows += 1
     if rows == 0:
         out.append("<tr><td colspan='3'>(defaults)</td></tr>")
@@ -120,9 +112,9 @@ def _stage_config(lir: Lir) -> str:
     return "".join(out)
 
 
-def _interface(interface: ModuleInterface) -> str:
+def _interface(lir: Lir) -> str:
     out = ["<h2>Interface</h2><div class='ifaces'>"]
-    ctrl = interface.control_ports
+    ctrl = lir.control_ports
     out.append(f"<div class='iface'><h3>ctrl ({len(ctrl)})</h3><table><tr><th>port</th><th>dir</th><th>bits</th></tr>")
     for control_port in ctrl:
         out.append(
@@ -130,7 +122,7 @@ def _interface(interface: ModuleInterface) -> str:
             f"<td>{control_port.width}</td></tr>"
         )
     out.append("</table></div>")
-    for title, ports in (("in", interface.input_ports), ("out", interface.output_ports)):
+    for title, ports in (("in", lir.input_ports), ("out", lir.output_ports)):
         out.append(f"<div class='iface'><h3>{title} ({len(ports)})</h3><table><tr><th>port</th><th>bits</th></tr>")
         for data_port in ports:
             out.append(f"<tr><td>{_esc(data_port.name)}</td><td>{data_port.width}</td></tr>")
@@ -187,12 +179,12 @@ def _constants(lir: Lir) -> str:
 
 _NEUTRAL = "#6b7280"  # input/output bookend chips (port boundary, not an operator)
 _LIVE_BG = "#edf2fb"  # legend swatch for the liveness tint; the grid cells use the ``.live`` CSS class (same color)
-ColKey = tuple[str, int]  # ("r", reg index) or ("c", constant index)
+type ColKey = FloatRegRef | FloatConstRef
 
 
-def _is_live(col: ColKey, row_id: int, live: dict[int, set[int]]) -> bool:
+def _is_live(col: ColKey, row_id: int, live: dict[FloatRegRef, set[int]]) -> bool:
     """Whether register column ``col`` holds a live value on grid row ``row_id`` (constants are never tinted)."""
-    return col[0] == "r" and col[1] in live and row_id in live[col[1]]
+    return isinstance(col, FloatRegRef) and col in live and row_id in live[col]
 
 
 def _write_label(index: int, tip: str) -> str:
@@ -206,7 +198,7 @@ def _write_label(index: int, tip: str) -> str:
 
 
 def _operand_col(operand: FloatOperand) -> ColKey:
-    return ("r", operand.source.index) if isinstance(operand.source, FloatRegRef) else ("c", operand.source.index)
+    return operand.source
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,11 +249,20 @@ def _stage_columns(lir: Lir) -> list[tuple[FloatOperatorInstance, int]]:
     return cols
 
 
+def _pc_cell(cyc: int) -> str:
+    """
+    The executing microcode step for grid row ``cyc`` (``clk - FETCH_LAG``): the ROM address whose control word drives
+    this cycle's datapath, and exactly what ``err_pc`` latches. Blank during the fetch warmup, where it is negative.
+    """
+    step = cyc - FETCH_LAG
+    return f"<td class='pc'>{step if step >= 0 else ''}</td>"
+
+
 def _bookend_row(
     label: str,
     cells: dict[ColKey, str],
     columns: list[ColKey],
-    live: dict[int, set[int]],
+    live: dict[FloatRegRef, set[int]],
     row_id: int,
     n_stage: int,
     dv: _Dividers,
@@ -273,44 +274,10 @@ def _bookend_row(
         out.append(f"<td class='{_gc_class(ordinal, dv)}{extra}'>{cells.get(col, '')}</td>")
     for sidx in range(n_stage):
         out.append(f"<td class='{_oc_class(sidx, dv)}'></td>")
-    out.append("<td class='opcell'></td></tr>")
+    out.append("<td class='opcell'></td>")
+    out.append(_pc_cell(row_id))
+    out.append("</tr>")
     return "".join(out)
-
-
-def _liveness(lir: Lir) -> dict[int, set[int]]:
-    """
-    Map each register to the clock cycles on which it holds a live value.
-
-    A value is written on its definition cycle -- the accept cycle 0 for an input, the operator's commit cycle
-    (``issue + latency``) for a result -- and read on each consumer's issue cycle, or on the output-present cycle
-    ``makespan + 1`` if it drives an output. The report displays cycles 0..makespan; retaining the present cycle in the
-    intervals keeps the final visible row live for output values. Liveness is per value, so a register reused for
-    several values yields several disjoint residence intervals with dead gaps between them.
-    """
-    present = lir.makespan + 1
-    defs: dict[int, list[int]] = {}
-    uses: dict[int, list[int]] = {}
-    for load in lir.float_inputs:
-        defs.setdefault(load.dst.index, []).append(0)
-    for op in lir.float_ops:
-        defs.setdefault(op.dst.index, []).append(op.commit_cycle)
-        for operand in op.operands:
-            if isinstance(operand.source, FloatRegRef):
-                uses.setdefault(operand.source.index, []).append(op.issue_cycle)
-    for wire in lir.float_outputs:
-        if isinstance(wire.source, FloatRegRef):
-            uses.setdefault(wire.source.index, []).append(present)
-    live: dict[int, set[int]] = {}
-    for reg in defs.keys() | uses.keys():
-        writes = sorted(defs.get(reg, []))
-        reads = sorted(uses.get(reg, []))
-        rows: set[int] = set()
-        for i, start in enumerate(writes):
-            nxt = writes[i + 1] if i + 1 < len(writes) else present + 1  # this value persists until the next overwrite
-            last = max((u for u in reads if start <= u < nxt), default=start)
-            rows.update(range(start, last + 1))
-        live[reg] = rows
-    return live
 
 
 def _live_intervals(rows: set[int]) -> list[list[int]]:
@@ -331,7 +298,7 @@ def _live_intervals(rows: set[int]) -> list[list[int]]:
 
 
 def _cell_style(
-    col: ColKey, cyc: int, live: dict[int, set[int]], fills: dict[tuple[int, ColKey], str]
+    col: ColKey, cyc: int, live: dict[FloatRegRef, set[int]], fills: dict[tuple[int, ColKey], str]
 ) -> tuple[str, str]:
     """
     Background for a register/constant cell, as ``(extra_class, inline_style)``. The single cycle on which a result
@@ -351,13 +318,10 @@ def _schedule(lir: Lir) -> str:
     nreg, nconst = lir.float_regfile.nreg, len(lir.float_consts)
     columns = _columns_of(lir)
     col_ord = {col: ordinal for ordinal, col in enumerate(columns)}
-    compute_cycles = list(range(1, lir.makespan + 1))
-    displayed_cycles = 1 + len(compute_cycles)  # input-load cycle 0 plus compute/writeback cycles 1..makespan
-    if displayed_cycles != lir.initiation_interval:
-        raise RuntimeError(
-            f"schedule grid displays {displayed_cycles} cycle rows, but computed II is {lir.initiation_interval} cycles "
-            f"(makespan={lir.makespan})"
-        )
+    operator_colors = _operator_colors(lir)
+    # Cycle-accurate clock cycles 1..II (cycle 0 is the accept/input-load bookend row): the grid reflects what the
+    # register array physically holds each cycle, including the read/write-latch and microcode-fetch staging.
+    compute_cycles = list(range(1, lir.initiation_interval + 1))
 
     # The operator-stage block: one square column per pipeline stage of each operator, in instance order.
     stage_cols = _stage_columns(lir)
@@ -376,7 +340,7 @@ def _schedule(lir: Lir) -> str:
         stage_thick={n_stage - 1} if n_stage else set(),
     )
 
-    live = _liveness(lir)
+    live = lir.float_liveness
     edges: list[tuple[str, str, str, int]] = []  # (commit id, operand id, color, operation group) for the overlay
     # Operator pipeline occupancy: instance ``inst`` is in stage ``k`` on cycle ``issue + k``. Keyed to the operation
     # group so a hover lights the whole pipeline trail together with the result cell, its chip and its edges.
@@ -395,31 +359,33 @@ def _schedule(lir: Lir) -> str:
     group = 0  # global per-operation id, linking a commit cell with its edges/chip for the hover-focus behavior
     for op in lir.float_ops:
         tip = _esc(_op_text(op))
-        color = _KIND_COLOR[type(op.inst.operator)]
-        issue, commit = op.issue_cycle, op.commit_cycle
-        dcol: ColKey = ("r", op.dst.index)
+        color = operator_colors[type(op.inst.operator)]
+        # Physical clock cycles (cycle-accurate).
+        read_cyc = op.issue_cycle + FETCH_LAG - 1
+        write_cyc = op.commit_cycle + FETCH_LAG + 2
+        dcol: ColKey = op.dst
         dord = col_ord[dcol]
-        writes_at[(commit, dcol)] = writes_at.get((commit, dcol), "") + _write_label(op.inst.index, tip)
-        fills[(commit, dcol)] = color
-        endpoints.add((dord, commit))
-        cell_group[(dord, commit)] = group
+        writes_at[(write_cyc, dcol)] = writes_at.get((write_cyc, dcol), "") + _write_label(op.inst.index, tip)
+        fills[(write_cyc, dcol)] = color
+        endpoints.add((dord, write_cyc))
+        cell_group[(dord, write_cyc)] = group
         for operand in op.operands:
             oord = col_ord[_operand_col(operand)]
-            endpoints.add((oord, issue))  # operands are read on the issue cycle
-            edges.append((f"g{dord}_{commit}", f"g{oord}_{issue}", color, group))
-        chips_at.setdefault(commit, []).append(
+            endpoints.add((oord, read_cyc))  # operands are read a read-latch cycle before the operator issues
+            edges.append((f"g{dord}_{write_cyc}", f"g{oord}_{read_cyc}", color, group))
+        chips_at.setdefault(write_cyc, []).append(
             f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
         )
         base = stage_base[op.inst]
-        for k in range(op.latency):  # stamp the pipeline trail: stage k of this operator is busy on cycle issue + k
-            key = (base + k, issue + k)
+        for k in range(op.latency):  # stamp the pipeline trail: stage k of this operator is busy on issue + k + lag
+            key = (base + k, op.issue_cycle + k + FETCH_LAG)
             if key in stage_fill and stage_fill[key][1] != group:
                 conflicts.add(key)
             stage_fill[key] = (color, group)
             stage_tip[key] = f"{op.inst.operator.mnemonic}_{op.inst.index} s{k}: {tip}"
         group += 1
 
-    out = [_schedule_key(lir), "<div id='schedwrap'><table class='grid'>"]
+    out = [_schedule_key(operator_colors), "<div id='schedwrap'><table class='grid'>"]
     # Header row 0: group bands over the register, constant and operator-pipeline blocks. clk/operations span all rows.
     out.append("<tr><th class='gh clkh' rowspan='3'><span>clk</span></th>")
     if nreg:
@@ -431,7 +397,8 @@ def _schedule(lir: Lir) -> str:
     if n_stage:
         seam = _border_suffix(n_stage - 1, dv.stage_thin, dv.stage_thick)
         out.append(f"<th class='gband{seam}' colspan='{n_stage}'><span>operator pipelines</span></th>")
-    out.append("<th class='oph' rowspan='3'>operations</th></tr>")
+    out.append("<th class='oph' rowspan='3'>operations</th>")
+    out.append("<th class='oph pch' rowspan='3'>pc</th></tr>")
     # Header row 1: register and constant column labels, and one group cell per operator spanning its stages.
     out.append("<tr>")
     for index in range(nreg):
@@ -442,12 +409,10 @@ def _schedule(lir: Lir) -> str:
         out.append(f"<th class='{cls}' rowspan='2'><span>c{index}</span></th>")
     for inst in lir.float_instances:
         lat = inst.operator.latency
-        name = (
-            f"{inst.operator.mnemonic}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
-        )
+        name = f"{inst.operator.instance_stem}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
         seam = _border_suffix(stage_base[inst] + lat - 1, dv.stage_thin, dv.stage_thick)
         out.append(
-            f"<th class='ohgrp{seam}' colspan='{lat}' style='color:{_KIND_COLOR[type(inst.operator)]}'>"
+            f"<th class='ohgrp{seam}' colspan='{lat}' style='color:{operator_colors[type(inst.operator)]}'>"
             f"<span>{_esc(name)}</span></th>"
         )
     out.append("</tr>")
@@ -458,9 +423,9 @@ def _schedule(lir: Lir) -> str:
         out.append(f"<th class='{cls}'><span>s{k}</span></th>")
     out.append("</tr>")
 
-    # The grid has exactly one displayed row per II cycle: the input-load cycle (0), then the compute/writeback cycles
-    # 1..makespan. The output-present boundary is not an extra cycle row; out_valid rises after these II cycles.
-    in_cells = {("r", load.dst.index): _input_chip(f"in_{load.name}") for load in lir.float_inputs}
+    # One displayed row per clock cycle, cycle-accurate to the hardware: the accept/input-load cycle (0), then the
+    # compute, latch, and fetch-staging cycles 1..II. out_valid rises on the last row (the present cycle == II).
+    in_cells: dict[ColKey, str] = {load.dst: _input_chip(f"in_{load.name}") for load in lir.float_inputs}
     out.append(_bookend_row("in", in_cells, columns, live, 0, n_stage, dv))
 
     for cyc in compute_cycles:  # one row per compute cycle; idle cycles show only pipeline advance
@@ -476,6 +441,7 @@ def _schedule(lir: Lir) -> str:
         for sidx in range(n_stage):
             out.append(_stage_cell(sidx, cyc, dv, stage_fill, stage_tip, conflicts))
         out.append(f"<td class='opcell'>{''.join(chips_at.get(cyc, []))}</td>")
+        out.append(_pc_cell(cyc))
         out.append("</tr>")
     out.append("</table><svg class='edges'></svg></div>")
     out.append(_sched_script(lir, edges, live))
@@ -504,7 +470,7 @@ def _stage_cell(
     return f"<td class='{cls}' data-op='{group}' title='{stage_tip[(sidx, cyc)]}' style='background:{color}'></td>"
 
 
-def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[int, set[int]]) -> str:
+def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[FloatRegRef, set[int]]) -> str:
     """
     Build the interactive layer: substitute the per-module data into the readable script template (:data:`_SCHED_JS`).
 
@@ -512,19 +478,21 @@ def _sched_script(lir: Lir, edges: list[tuple[str, str, str, int]], live: dict[i
     enough for the script to draw the dataflow overlay and synthesize hover tooltips on demand without a per-cell
     attribute. Without JS the grid still renders fully; only these behaviors are absent.
     """
-    cols = [f"{kind}{index}" for kind, index in _columns_of(lir)]
+    cols = [col.stable_label for col in _columns_of(lir)]
     data = {
         "edges": edges,
         "columns": cols,
         "constants": {f"c{i}": repr(value) for i, value in enumerate(lir.float_consts)},
-        "liveness": {str(reg): _live_intervals(rows) for reg, rows in live.items()},
+        "liveness": {str(reg.index): _live_intervals(rows) for reg, rows in live.items()},
     }
     return "<script>\n" + _SCHED_JS.replace("__DATA__", json.dumps(data)) + "\n</script>"
 
 
 def _columns_of(lir: Lir) -> list[ColKey]:
     """The grid columns: one per float register, then one per constant (matches the order rendered in the table)."""
-    return [("r", i) for i in range(lir.float_regfile.nreg)] + [("c", i) for i in range(len(lir.float_consts))]
+    return [FloatRegRef(i) for i in range(lir.float_regfile.nreg)] + [
+        FloatConstRef(i) for i in range(len(lir.float_consts))
+    ]
 
 
 def _input_chip(tip: str) -> str:
@@ -532,12 +500,12 @@ def _input_chip(tip: str) -> str:
     return f"<span class='wr' style='background:{_NEUTRAL}' title='{tip}'>&#9662;</span>"
 
 
-def _schedule_key(lir: Lir) -> str:
+def _schedule_key(operator_colors: dict[type[HardwareOperator], str]) -> str:
     """A small legend above the grid: operator-kind colors plus the read/write chip shapes."""
-    seen: dict[type[HardwareOperator], None] = {}  # operator classes present, in instance order, de-duplicated
-    for inst in lir.float_instances:
-        seen.setdefault(type(inst.operator), None)
-    kinds = [f"<span class='wr' style='background:{_KIND_COLOR[cls]}'>{cls.mnemonic}</span>" for cls in seen]
+    kinds = [
+        f"<span class='wr' style='background:{color}'>{_esc(cls.mnemonic)}</span>"
+        for cls, color in operator_colors.items()
+    ]
     return (
         "<h2>Schedule</h2><div class='gridkey'>"
         + " ".join(kinds)
@@ -548,5 +516,52 @@ def _schedule_key(lir: Lir) -> str:
         "pipeline advances</span>"
         + f"<span><span class='sw' style='background:{_LIVE_BG}'></span> register holds a live value</span>"
         + f"<span><span class='wr' style='background:{_NEUTRAL}'>&#9662;</span> module input latch</span>"
+        + f"<span>pc = microcode step executing this cycle (clk&minus;{FETCH_LAG} fetch lag)</span>"
         + "</div>"
     )
+
+
+def _operator_colors(lir: Lir) -> dict[type[HardwareOperator], str]:
+    kinds = sorted(
+        {type(inst.operator) for inst in lir.float_instances},
+        key=lambda kind: (kind.mnemonic, kind.__module__, kind.__qualname__),
+    )
+    return dict(zip(kinds, _html_palette(len(kinds)), strict=True))
+
+
+def _html_palette(n: int, lightness: float = 0.2, saturation: float = 1.0, hue_start: float = 0.0) -> list[str]:
+    """
+    n: number of colors equidistant on the hue wheel, starting at hue_start
+    lightness: 0..1, target WCAG relative luminance
+    saturation: 0..1, color intensity
+    hue_start: 0..1, rotates the palette around the hue wheel
+    """
+    colors = []
+    for i in range(n):
+        hue = (hue_start + i / n) % 1.0
+        color = "#{:02X}{:02X}{:02X}".format(*[round(x * 255) for x in _hls_for_luminance(hue, lightness, saturation)])
+        colors.append(color)
+    return colors
+
+
+def _hls_for_luminance(hue: float, luminance: float, saturation: float) -> tuple[float, float, float]:
+    low, high = 0.0, 1.0
+    for _ in range(24):
+        lightness = (low + high) / 2
+        rgb = colorsys.hls_to_rgb(hue, lightness, saturation)
+        if _relative_luminance(rgb) < luminance:
+            low = lightness
+        else:
+            high = lightness
+    return colorsys.hls_to_rgb(hue, (low + high) / 2, saturation)
+
+
+def _relative_luminance(rgb: tuple[float, float, float]) -> float:
+    red, green, blue = (_linear_srgb(channel) for channel in rgb)
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def _linear_srgb(channel: float) -> float:
+    if channel <= 0.04045:
+        return channel / 12.92
+    return float(((channel + 0.055) / 1.055) ** 2.4)

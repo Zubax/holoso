@@ -21,7 +21,7 @@ from holoso import Port, SynthesisResult
 # Marks the boundary flops so synthesis keeps them as real register-to-register IO boundaries.
 KEEP_ATTR = '(* keep = "true", syn_preserve = "true", dont_touch = "true" *)'
 
-_ERR_CYC = "err_cyc"
+_ERR_PC = "err_pc"
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,7 +29,7 @@ class WordSlot:
     """One DUT data port mapped to a value of the input or output selector."""
 
     selector: int
-    port_name: str  # the DUT port: "in_<name>", "out_<...>", or "err_cyc"
+    port_name: str  # the DUT port: "in_<name>", "out_<...>", or "err_pc"
     width: int
 
 
@@ -41,11 +41,11 @@ class OocWrapper:
     dut_module: str
     verilog: str
     io_in_width: int  # W: max data-input width; 0 when the kernel has no data inputs
-    io_out_width: int  # W_out: max over data outputs and err_cyc
+    io_out_width: int  # W_out: max over data outputs and err_pc
     in_sel_width: int  # ceil(log2 N_inputs); 0 when there are 0 or 1 data inputs
     out_sel_width: int  # ceil(log2 N_output_slots); 0 when there is a single output slot
     inputs: list[WordSlot]  # selector -> DUT data input
-    outputs: list[WordSlot]  # selector -> DUT data output / err_cyc
+    outputs: list[WordSlot]  # selector -> DUT data output / err_pc
 
     @property
     def primary_io_bits(self) -> int:
@@ -68,22 +68,21 @@ def _zext(reg: str, width: int, target: int) -> str:
     return f"{{{{{target - width}{{1'b0}}}}, {reg}}}"
 
 
-def _find_err_cyc(result: SynthesisResult) -> Port:
-    for port in result.interface.control_ports:
-        if port.name == _ERR_CYC:
+def _find_err_pc(result: SynthesisResult) -> Port:
+    for port in result.control_ports:
+        if port.name == _ERR_PC:
             return port
-    raise ValueError(f"module {result.module_name!r} has no err_cyc port; cannot build an OOC wrapper")
+    raise ValueError(f"module {result.module_name!r} has no err_pc port; cannot build an OOC wrapper")
 
 
 def build_ooc_wrapper(result: SynthesisResult, *, top_suffix: str = "_ooc") -> OocWrapper:
     """Generate a mux-reduced OOC measurement wrapper for ``result``'s generated module."""
-    iface = result.interface
-    data_inputs = iface.input_ports
-    data_outputs = iface.output_ports
-    err_cyc = _find_err_cyc(result)
+    data_inputs = result.input_ports
+    data_outputs = result.output_ports
+    err_pc = _find_err_pc(result)
 
     in_slots = [WordSlot(i, p.name, p.width) for i, p in enumerate(data_inputs)]
-    out_ports = (*data_outputs, err_cyc)
+    out_ports = (*data_outputs, err_pc)
     out_slots = [WordSlot(k, p.name, p.width) for k, p in enumerate(out_ports)]
 
     io_in_width = max((p.width for p in data_inputs), default=0)

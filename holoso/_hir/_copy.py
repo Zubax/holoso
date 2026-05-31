@@ -2,7 +2,8 @@
 
 from typing import assert_never
 
-from ._ir import Const, HirBuilder, InPort, Node, Operation, ValueId
+from ._const import Const
+from ._ir import HirBuilder, InPort, Node, Operation, ValueId
 
 
 def copy_node(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:

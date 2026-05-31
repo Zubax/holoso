@@ -40,8 +40,7 @@ requires_vivado = pytest.mark.skipif(not VivadoFlow().available(), reason="Vivad
 
 
 def _native_data_bits(result: SynthesisResult) -> int:
-    iface = result.interface
-    return sum(p.width for p in iface.input_ports) + sum(p.width for p in iface.output_ports)
+    return sum(p.width for p in result.input_ports) + sum(p.width for p in result.output_ports)
 
 
 def test_wrapper_reduces_io_to_bounded_words() -> None:
@@ -51,12 +50,12 @@ def test_wrapper_reduces_io_to_bounded_words() -> None:
     assert kern_w.top == "kern_ooc"
     assert kern_w.io_in_width == 32 and kern_w.io_out_width == 32
     assert kern_w.in_sel_width == 1  # two inputs
-    assert kern_w.out_sel_width == 1  # one output + err_cyc => two slots
+    assert kern_w.out_sel_width == 1  # one output + err_pc => two slots
     assert kern_w.primary_io_bits == 32 + 32 + 1 + 1 + 6
 
     wide_w = build_ooc_wrapper(WIDE)
     assert wide_w.in_sel_width == 3  # six inputs
-    assert wide_w.out_sel_width == 2  # three outputs + err_cyc => four slots
+    assert wide_w.out_sel_width == 2  # three outputs + err_pc => four slots
     # The reduction is real: far fewer primary bits than the DUT's native data IO.
     assert wide_w.primary_io_bits < _native_data_bits(WIDE)
     assert wide_w.primary_io_bits <= 2 * wide_w.io_in_width + 16

@@ -40,6 +40,7 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
 .grid th.gh { width: 14px; font-size: 9px; color: #4b5563; font-weight: 700; padding: 0 1px; border-bottom: 1px solid #000; vertical-align: bottom; }
 /* clk/step carry no fixed width -- auto layout sizes them to their content (cycle numbers, "S<n>"), which is narrow. */
 .grid th.clkh, .grid th.steph { border-right: 1px solid #000; }
+.grid th.pch { border-left: 1px solid #000; }
 .grid th.gh span { writing-mode: vertical-rl; }
 .grid th.gh.k span { color: #92400e; }
 /* Top-row group bands naming a block of columns ("registers", "operator pipelines"). The label is absolutely
@@ -64,6 +65,7 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
 /* Heavy 2px seams at the two block boundaries: constants | operator-pipeline and operator-pipeline | OPERATIONS. */
 .grid td.rbk2, .grid th.rbk2 { border-right: 2px solid #000; }
 .clk { color: #9aa1ab; text-align: right; font-size: 10px; padding: 0 3px; border-right: 1px solid #000; }
+.pc { color: #9aa1ab; text-align: right; font-size: 10px; padding: 0 3px; border-left: 1px solid #000; }
 .stepn { font-weight: 700; color: #111827; padding: 0 4px; border-right: 1px solid #000; white-space: nowrap; }
 .rd { display: inline-block; font-size: 9px; line-height: 11px; border: 1px solid; border-radius: 2px; padding: 0 1px; }
 .wr { display: inline-block; font-size: 9px; line-height: 11px; border-radius: 2px; padding: 0 1px; color: #fff; font-weight: 700; }
@@ -87,7 +89,7 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
 /* Structural hazard: two operations claim one operator stage on one cycle. Impossible under the barrier schedule;
    the red ring is the alarm for a future multiple-issue bug. */
 .grid td.oc.conflict { box-shadow: inset 0 0 0 2px #b3261e; }
-.gridkey { display: flex; flex-wrap: wrap; gap: 18px; font-size: 12px; color: #374151; margin: 0 0 8px; align-items: center; }
+.gridkey { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12px; color: #374151; margin: 0 0 15px; align-items: center; }
 .gridkey .rd, .gridkey .wr { font-size: 11px; }
 .gridkey .sw { display: inline-block; width: 14px; height: 13px; border: 1px solid #cbd5e1; vertical-align: middle; margin-right: 5px; }
 .gridkey .lk { vertical-align: middle; margin-right: 5px; }

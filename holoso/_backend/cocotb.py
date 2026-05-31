@@ -12,7 +12,6 @@ import pickle
 import zlib
 from dataclasses import dataclass
 
-from .._interface import ModuleInterface
 from .numerical import NumericalModel
 
 # language=python
@@ -58,8 +57,8 @@ async def cosim(dut):
         # The model is fed exactly the bits the DUT receives, so the comparison is bit-exact.
         # TODO: value range must be configurable via plusargs
         in_bits = [_FMT.encode(rng.uniform(-4, +4)) for _ in in_names]
-        expected = _MODEL(*[_FMT.decode(bits) for bits in in_bits])
-        exp_bits = [_FMT.encode(value) for value in expected]
+        expected = _MODEL(*[holoso.FloatValue.from_bits(_FMT, bits) for bits in in_bits])
+        exp_bits = [value.bits for value in expected]
 
         while int(dut.in_ready.value) != 1:
             await RisingEdge(dut.clk)
@@ -75,7 +74,7 @@ async def cosim(dut):
         while int(dut.out_valid.value) != 1:
             await RisingEdge(dut.clk)
             await Timer(1, unit="ns")
-        assert int(dut.err_cyc.value) == 0, "vector %d: unexpected error at cycle %d" % (index, int(dut.err_cyc.value))
+        assert int(dut.err_pc.value) == 0, "vector %d: unexpected error at cycle %d" % (index, int(dut.err_pc.value))
 
         for name, want in zip(out_names, exp_bits):
             got = int(getattr(dut, name).value)
@@ -91,8 +90,11 @@ class CocotbOutput:
 
     testbench: str
 
+    def __str__(self) -> str:
+        return f"{type(self).__name__}(testbench_bytes={len(self.testbench.encode())})"
 
-def generate(model: NumericalModel, interface: ModuleInterface) -> CocotbOutput:
+
+def generate(model: NumericalModel) -> CocotbOutput:
     """
     Build a self-contained cocotb testbench that checks the DUT against the embedded bit-exact model.
 
@@ -100,5 +102,5 @@ def generate(model: NumericalModel, interface: ModuleInterface) -> CocotbOutput:
     range to keep multi-operation kernels from overflowing into infinities.
     """
     blob = base64.b64encode(zlib.compress(pickle.dumps(model, pickle.HIGHEST_PROTOCOL))).decode("ascii")
-    testbench = _TEMPLATE.replace("@@MODULE@@", interface.module_name).replace("@@BLOB@@", blob)
+    testbench = _TEMPLATE.replace("@@MODULE@@", model.lir.module_name).replace("@@BLOB@@", blob)
     return CocotbOutput(testbench=testbench)

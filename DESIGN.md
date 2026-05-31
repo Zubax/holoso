@@ -74,16 +74,19 @@ model for verification, and once that is proven, move on to the actual HDL gener
 nothing touches the filesystem unless the caller asks.
 
 ```python
-def synthesize(target, *, ops: OpConfig, parameters: Mapping[str, object] | None = None,
-               entry: str = "__call__", name: str | None = None,
-               operator_instances: Mapping[type[HardwareOperator], int] | None = None) -> SynthesisResult: ...
+def synthesize(target, *, ops: OpConfig, entry: str = "__call__", name: str | None = None) -> SynthesisResult: ...
 
 @dataclass(frozen=True)
 class SynthesisResult:
     module_name: str
-    interface:      ModuleInterface   # typed ports -- the composition contract
-    verilog_output: VerilogOutput     # generated module text + support_files (the shared holoso_support .v/.vh)
-    numerical_model: NumericalModel   # bit-exact, picklable pure-Python model of the module (flat in -> flat tuple out)
+
+    ports: list[Port]
+    input_ports: list[DataInputPort]
+    output_ports: list[DataOutputPort]
+    control_ports: list[ControlPort]
+
+    verilog_output: VerilogOutput     # generated module text + support_files (the shared holoso_support.v)
+    numerical_model: NumericalModel   # bit-exact, picklable pure-Python model (flat FloatValue in -> flat tuple out)
     cocotb_output:  CocotbOutput      # self-contained testbench: embeds the model, checks the DUT bit-for-bit
     html_output:    HtmlOutput        # self-contained single-page report
 ```
@@ -93,6 +96,9 @@ Private implementation modules may still expose unprefixed package-internal entr
 this is fine because they are shielded by the `__init__.py` selective re-export policy (not visible from outside).
 Purely module-local helpers and type aliases inside those private modules are underscore-prefixed.
 Same applies to nested subpackages: their internals are private to the subpackage, each has its own API.
+Private module-local classes use unprefixed attributes for fields that sibling helpers need to access; the class name
+itself provides the module-local privacy boundary. Underscore-prefixed attributes are reserved for state accessed only
+by the owning class or its descendants.
 
 The library should not contain entities that are only used in the unit test suite; those belong in the suite.
 
@@ -101,10 +107,9 @@ binding-time front-end needs -- `__globals__`, closure cells, default args, and 
 which is what evaluates compile-time tables and follows/inlines imported callables. The object is the compile root; the
 boundary ("what to ignore") falls out of reachability + binding-time analysis, not manual enumeration. Source is read
 via `inspect.getsource` + `ast`; when unavailable (REPL/`exec`/notebook-defined, some lambdas) synthesis fails with an
-explicit error. For a class, `__init__` runs with `parameters` (overriding the kw-only defaults that otherwise map to
-Verilog parameters), attributes written by `entry` become state registers, and `entry` (default `__call__`) is analysed
-with the ports dynamic; a plain function is analysed directly. `result.write(out_dir)` is the only operation that
-touches the filesystem.
+explicit error.
+
+`result.write(out_dir)` is the only operation that touches the filesystem.
 
 ## Front-end
 
@@ -135,7 +140,7 @@ choice.
 - `bool` -- 1 bit.
 
 HIR types live in `holoso._hir` as format-free `Type` values; today that family contains `FloatType`. Concrete scalar
-types live in `holoso._type`: `ScalarType` is the width-bearing MIR/interface/resource type family, today containing
+types live in `holoso._type`: `ScalarType` is the width-bearing MIR/LIR-port/resource type family, today containing
 `FloatType`, whose `FloatFormat` describes the ZKF encoding. A data port carries its scalar type and derives its bit
 width from it; control ports carry explicit bit widths. Today all data ports are the same scalar `FloatType`, but this
 is an implementation detail.
@@ -197,12 +202,13 @@ returns a folded `Const` node, not an untyped Python value. The HIR builder can 
 with `const_node()`, so future bool/int constants do not need float-specific rebuilding in shared passes.
 
 HIR-to-MIR lowering lives in `holoso._mir` and is implemented by a lowering context that owns the HIR tree, `OpConfig`,
-MIR builder, and value remap. The context delegates domain-specific nodes to private lowerers; today the only domain
-lowerer is float. The float lowerer maps each semantic float operator to its configured `FloatHardwareOperator` from the
+MIR builder, and value remap. The float lowerer maps each semantic float operator to its configured
+`FloatHardwareOperator` from the
 single root-level hardware-operator config and collapses semantic `float_neg`/`float_abs` chains into selected-float MIR
 `FloatSignControl` values on operator operands/results or output wires. Semantic `float_mul_pow2(k)` selects
 `fmul_ilog2_const` when the configured float format supports that exponent; otherwise it falls back to ordinary multiply
 by the constant `2^k`.
+
 `MirBuilder` is a single graph builder with typed construction methods; it does not own a global scalar type, so future
 mixed-type expressions can share one value namespace and add typed constructors for bool/int values. Hardware operators
 expose a concrete `ScalarSignature`, and MIR construction validates operands against the selected operator's signature.
@@ -222,32 +228,51 @@ results, which is accepted.
 ```
 resources:
   float_instances: [inst(operator), ...]    # each inst binds a fully-specified FloatHardwareOperator
-  float_regfile: fmt + N float regs         # FF bank, multiport -- parallel reads are free
+  float_regfile: fmt + N float regs         # FF bank; the backend synthesizes a sparse, schedule-specific mux fabric
   float_consts: [fconst(value), ...]
   float_inputs: [input_load(name, dst_reg), ...]
   float_outputs: [output_wire(name, source, sign), ...]
 
 scheduled float op:
   (inst, operands+sign_controls, dst_reg, issue_cycle)  # commits at issue_cycle + latency
-makespan: the last commit cycle (the in_valid->out_valid latency is makespan + 1)
+makespan: the last commit cycle. The observable in_valid->out_valid latency (initiation_interval) is
+  makespan + WRITE_LATCH + 1 + FETCH_LAG -- the schedule, the writeback latch landing the final result, and the
+  microcode-fetch lag (see Scheduler and Backend).
 ```
 
-LIR exposes generic dataclass bases (`OperatorInstance`, `RegRef`, `ConstRef`, `Operand`, `ScheduledOp`, `InputLoad`,
-`OutputWire`, `RegFileLayout`) and float-specialized subclasses (`FloatOperatorInstance`, `FloatRegRef`,
-`FloatConstRef`, `FloatOperand`, `FloatScheduledOp`, `FloatInputLoad`, `FloatOutputWire`, `FloatRegFileLayout`).
+LIR exposes only a minimal API surface, following the design policies.
 The top-level `Lir` fields are typed explicitly as `float_instances`, `float_regfile`, `float_inputs`, `float_ops`,
 and `float_outputs` because the current machine has only float data resources; future bool/int resources should add
 sibling fields instead of overloading these. LIR construction fails explicitly if selected MIR contains a non-float
-domain before that domain has a register/constant/output resource family.
+domain before that domain has a register/constant/output resource family. This check produces a `MirFloatView` once;
+scheduling and float register allocation consume that narrowed view.
 
-The `holoso._lir` package exports the LIR consumer contract: the LIR dataclasses backends need, plus `build()` and
-`interface_of()`. Its private `_build.py` module orchestrates selected MIR validation, scheduling, binding, float
-register allocation, constant-pool construction, and interface derivation. Its private `_schedule.py` module contains
-the list-scheduling algorithm and schedule result type. Its private `_regalloc.py` module contains the current
-float-register allocator.
+The `holoso._lir` package exports the LIR consumer contract: the LIR dataclasses and port classes backends need, plus
+`build()`. Its private `_build.py` module orchestrates selected MIR narrowing, scheduling, binding, float register
+allocation, and constant-pool construction. Its private `_schedule.py` module contains the list-scheduling algorithm and
+schedule result type. It contains the reach-aware float-register allocator.
+Shared LIR analysis helpers provide per-cycle grouping, register liveness, per-port read-sets / per-register
+writer-sets, stable ref labels, and write-timeline reconstruction so backends do not each re-derive them.
 
-- Reads are cheap (multiport FF), so binding is constrained only by operator-instance count and writes.
-- Register allocation = liveness + phi-coalescing; widen `N` rather than spill at these sizes.
+- Storage is a sparse register file synthesized per kernel (see Backend): each operand's read mux spans only the
+  registers it actually reads, each register's write select only its actual writers. Originally, an attempt to use
+  a more CPU-conventional design was made, utilizing a full-reach crossbar register file, which resulted in untenable
+  timing penalties due to the expensive read/write port multiplexors, hence the sparse optimized design was preferred.
+
+- Register allocation is reach-aware: it places values to minimize per-port read-set and per-register writer-set
+  fan-in (the steering cost that matters on an FPGA), not the register count; widen `N` rather than spill.
+
+- Commutative port assignment (`_portassign.py`): after allocation, each use of a commutative operator has its two
+  operands oriented across its read ports to minimize the total read-set size. A register that an operand reads in one
+  position and another reads in the other position would otherwise sit in both ports' read muxes; consistent
+  orientation keeps it in one. This is a pure relabelling of which physical port reads which register --
+  no hardware, no latency -- so it can only shrink the read muxes (the Chen & Cong mux-aware port-assignment lever).
+  Minimizing total read-set size over orientations is graph bipartisation; a local search stalls well above the
+  optimum (ekf1's multiplier traps at 50 register-arms), so it is solved exactly per instance as a small MILP
+  (HiGHS via `scipy.optimize.milp`), with the deterministic local search kept as a fallback when the MILP does not
+  prove optimality in its time budget. On ekf1 this takes read-mux fan-in from 89 to the optimum 78 (the multiplier's
+  two operand muxes from 29+27 to 46 register-arms).
+
 - `branch` is the real control transfer: the microprogram counter jumps, untaken ops never run, and the II is whatever
   the executed path costs (each path's count is itself exact).
 
@@ -260,10 +285,13 @@ HIR passes construct operator values ad hoc and distinguish operation kinds by c
 
 Concrete hardware operators live at the root in `holoso._operators` and are instances of the `HardwareOperator`
 hierarchy. A concrete `HardwareOperator` is a frozen dataclass whose fields are its parameters. Float operators use the
-`FloatHardwareOperator` subclass, which owns its `FloatFormat` and typed `evaluate(*float) -> float` reference semantics.
+`FloatHardwareOperator` subclass, which owns its `FloatFormat` and typed `evaluate(*FloatValue) -> FloatValue` reference
+semantics.
 Each hardware operator owns its own timing, notation, concrete `ScalarSignature`, instantiation params, and
-`instance_stem`: a lowercase Verilog-safe physical identity stem used for collision-free HDL names. Float instance stems
-include the float format and sorted HDL params, e.g. `fadd_e8_m24` or `fmul_ilog2_const_e8_m24_k_m2`.
+`instance_stem`: a lowercase Verilog-safe compact physical identity stem used for HDL names. The visible prefix is the
+normalized mnemonic; the suffix is a hex stable hash of the canonical hardware parameters. For float
+operators, that hash covers the float format and all sorted HDL params -- always including zero-valued stage params.
+Examples look like `fadd_326215ea` or `fmul_ilog2_const_7296114c` rather than spelling every parameter into the name.
 
 Generic, per-node-parameterized hardware operators are factories: a standalone `ParameterizedHardwareOperator`
 carrying only its config-time knobs whose `instantiate(k)` returns a concrete `HardwareOperator`. The fully specified
@@ -274,12 +302,15 @@ its fields are all floating-point operators, and future bool/int operators shoul
 `float_format` property verifies the configured float operators agree and is used by HIR-to-MIR lowering. After that,
 schedule construction derives the format from selected MIR instead of accepting a separate format argument. There is no
 implicit default configuration.
-Pipeline-stage knobs are named after the HDL parameters in lowercase, such as `stage_decode`, `stage_align`,
-`stage_product`, and `stage_input`.
+Pipeline-stage knobs are named after the HDL parameters in lowercase and default to 0, each adding its value to the
+operator's latency. They mirror the ZKF wrappers: `fadd` has `stage_input`/`stage_decode`/`stage_align`/
+`stage_normalize` (0..2)/`stage_pack`/`stage_output`; `fmul` has `stage_input`/`stage_product`/`stage_pack`/
+`stage_output`; `fdiv` has `stage_input`/`stage_pack`/`stage_output`; and `fmul_ilog2_const` has
+`stage_input`/`stage_decode`.
 
 ## Scheduler
 
-The private `holoso._lir._schedule` module implements software-pipelined (zero-bubble) list scheduling over selected
+The private `holoso._lir._schedule` module implements software-pipelined list scheduling over selected
 single-block MIR. Operators are fully pipelined (throughput 1) and their latencies are static and data-independent, so
 the entire schedule is computed at compile time: each op is assigned an issue cycle and a bound instance, and the backend
 just replays it with a cycle counter. The scheduler itself is domain-agnostic; LIR construction partitions the scheduled
@@ -288,22 +319,31 @@ operator ordering: physical instance indices are local to one equal-by-value har
 `instance_stem` to distinguish different operator values of the same class.
 
 The per-operator latency model is therefore exact and load-bearing: the backend commits each result on
-`issue + op.latency` without watching `out_valid`, so each operator's `latency` property (mirroring its RTL
-wrapper) must match the hardware cycle-for-cycle. An inaccurate latency is a *correctness* bug, not a bad estimate --
-the consumer would read a stale register. The resulting cycle count is exact, never an estimate.
+`issue + op.latency` without watching `out_valid`, so each operator's `latency` property must match the hardware
+cycle-for-cycle. The generated RTL passes this value into each streaming Holoso wrapper's mandatory `LATENCY`
+parameter, and the wrapper forwards it into the wrapped ZKF operator so a Python-model/ZKF drift fails during
+elaboration or synthesis. The wrapper's Verilog default is the compact invalid sentinel `0`, so omitted LATENCY params
+fail without asking synthesis to elaborate a large placeholder delay line. An inaccurate latency is a *correctness* bug,
+not a bad estimate -- the consumer would read a stale register if the guard were bypassed. The resulting cycle count is
+exact, never an estimate.
 
 We issue each op on the earliest cycle its operands are ready and a free instance exists -- without waiting for
 unrelated ops (no barrier), so a fast `fmul` no longer idles behind a co-scheduled `fdiv`. The register file is
-read-first (`RWPASS=0`): a result written on cycle `c+L` lands in the flop on the next edge and is readable from
-`c+L+1`, so a data-dependent consumer is held one cycle past the producer's latency.
+read-first and carries mandatory read- and write-port latches, so a data-dependent consumer is held
+`DEPENDENCY_EDGE = 1 + WRITE_LATCH + READ_LATCH` cycles past the producer's commit (the read-first write edge plus the
+write and read latches). Inputs are the exception: they load directly into the array at the accept edge (bypassing the
+write latch) and the microcode fetch lag hides that load before the first control word reaches the datapath, so an
+input-reading op waits only `INPUT_DEPENDENCY_EDGE` -- the read latch alone (= 1 here).
 
 ```
-for cycle = 1, 2, ...:                         # cycle 0 accepts/loads inputs; they read back from cycle 1
-    ready = unscheduled ops whose every operator-operand has committed (issue + L + 1 <= cycle)
+for cycle = 1, 2, ...:                          # cycle 0 accepts/loads inputs
+    ready = unscheduled ops whose every operator-operand committed (commit + DEPENDENCY_EDGE <= cycle); and,
+            if the op reads an input, cycle >= INPUT_DEPENDENCY_EDGE (the load is hidden by the fetch lag)
     for op in ready by critical_path desc:
-        if an instance of op's concrete hardware operator is free this cycle (and ports permit):
+        if an instance of op's concrete hardware operator is free this cycle:
             bind op to that instance; issue_cycle[op] = cycle
-regalloc: linear scan over commit cycles; share a register when last_use <= def (sound under read-first); no spill
+regalloc: reach-aware coloring (greedy port-affinity + a bounded SciPy dual-annealing refinement); share a register
+  when last_use <= def (sound under read-first; the latches only widen the margin); no spill
 ```
 
 - Instances are pooled by the fully specified hardware operator itself (a frozen, equal-by-value `HardwareOperator`):
@@ -314,15 +354,19 @@ regalloc: linear scan over commit cycles; share a register when last_use <= def 
   The configurable per-class budget (default 1) caps instances of each distinct operator value of that class: equal ops
   time-share, serializing when more than the budget would co-issue.
 
-- Read/write ports auto-size to the schedule's peak internal parallelism (independent of I/O width).
-  Inputs preload through the register file's immediate `load` port on cycle 0 instead of write ports.
-  Outputs are tapped from the register file's passive `view` bus by fixed register index instead of read ports.
-  An optional NRD/NWR budget (default unbounded) instead gates admission and lengthens the makespan to fit --
-  the knob for trading latency against register-file area.
+- Read/write ports are dedicated -- one read port per operator operand (`nrd` = sum of instance arities), one write
+  port per operator instance (`nwr` = instance count), independent of I/O width -- but the storage is sparse, not a
+  crossbar. Per read port the backend emits a mux spanning only that operand's read-set: a single-register operand is
+  a bare wire, an always-constant operand is the immediate, and a multi-register operand is a `case` over its read-set
+  index -- see "Read mux" below. Per register it emits a write select
+  spanning only that register's writers (a single-writer register needs no address compare). The two sides are
+  symmetric: the read-address field carries the dense read-set index and the write-address field the dense
+  write-target index (each `ceil(log2 set)` wide, not the file-wide register index), so the controller word carries
+  only those set-local indices plus the per-register write enable.
 
-- The `load` port folds into each low register's write-data OR (one masked term, no address comparator), so a
-  single-cycle preload of registers `0..nload-1` costs far less than the per-register comparators that one write
-  port per input would add. `nload` spans the input block (the highest input register index plus one).
+- Inputs preload directly into the low registers `0..nload-1` on the accept step, captured together under a single
+  `if (load_en)` block (gated by `in_valid`) rather than through write ports. `nload` spans the input block (the
+  highest input register index plus one). Outputs are tapped directly from their register by fixed index.
 
 - Selected-float MIR `FloatSignControl` value objects fold into operand/result sign-control sidebands, and `fconst` is an
   immediate on the input mux; both are free in the schedule. Sign controls are constructed ad hoc rather than
@@ -332,33 +376,87 @@ Why not write-through forwarding? A write-through register file (`RWPASS=1`) wou
 its forwarding muxes cost O(NRD*NWR) and we need many ports -- unsustainable. Read-first plus the +1, hidden under
 pipelined overlap, is the better trade.
 
-## Backend (ZISC)
+## Backend (VLIW/ZISC)
 
-Mechanical from LIR: a `holoso_regfile` flop bank, one operator instance per `FloatOperatorInstance`, and one continuous
-assignment per pooled constant -- its ZKF bit pattern precomputed in Python by `FloatFormat.encode` --
-all driven by a control word. The controller is a cycle counter `cyc` driving a `case(cyc)`
-microprogram that replays the static schedule: `cyc==0` accepts and parallel-loads the inputs through the register
-file's `load` port (registers `0..nload-1` in one cycle), `cyc` advances every clock through the compute cycles
-`1..makespan`, and `cyc==makespan+1` asserts `out_valid` while the outputs are driven combinationally from the
-register file's `view` bus (wired by fixed register index, so no read ports and no read-address work that cycle).
-Each compute cycle asserts `in_valid` to the operators issued that cycle (driving their operand reads) and writes
-back the operators that commit that cycle. No scoreboard is needed because latencies are static. Errors are non-fatal
-and informative: a combinational `err` flag in the `case(cyc)` block ORs the error signals of the operators committing
-that cycle, and the control block latches `err_cyc <= cyc` whenever `err`, so `err_cyc` is 0 if the run hit no errors
-(reset at every accept; `|err_cyc` means "any error"), else the last cycle one occurred.
+Mechanical from LIR: an inline flop bank `regs[0:NREG-1]`, one operator instance per `FloatOperatorInstance`, and one
+continuous assignment per pooled constant -- its ZKF bit pattern precomputed in Python by `FloatFormat.encode`. There is
+no general-purpose multiport register-file module; storage is emitted as a sparse, schedule-specific fabric (read muxes
+spanning each operand's read-set, write selects spanning each register's writers), with mandatory read- and write-port
+latches. The controller is a microcode ROM: one pre-decoded VLIW control word per step, stored in a (BRAM-inferable) ROM
+read through a 3-stage fetch -- a PC latch (`ucode_addr_q`, splitting the `pc -> next_pc -> ROM-address` cone), the array
+read (`ucode_q`), and a second register (`ucode_word`) that packs into the BRAM's dedicated output register (DP16KD
+OUTREG / Xilinx DO*_REG) for a fast clock-to-out. This replaces the old wide combinational `case(cyc)` cone with short
+register-to-register paths. The fetch lags the executing step by `FETCH_LAG = FETCH_STAGES - 1` cycles: `pc` runs
+`0..LASTPC` and `out_valid` is asserted at `LASTPC = makespan + WRITE_LATCH + 1 + FETCH_LAG`. Under fully static
+scheduling these stages only add to the makespan/II. The fetch depth and the latches are fixed in v1.
 
-Reset covers only the control registers (`cyc`, `err_cyc`). Nonblocking assignment only, `case` not functions.
-The control word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
+The schedule is replayed step by step: `pc==0` accepts and parallel-loads the inputs directly into registers
+`0..nload-1` in one cycle (gated by `in_valid`); `pc` advances every clock through the compute steps; and `pc==LASTPC`
+asserts `out_valid` while the outputs are driven combinationally from their registers by fixed index. To line the
+latched datapath up with the schedule, each operand's read-address control is presented `READ_LATCH` steps early and the
+write-enable/address `WRITE_LATCH` steps late. The PC holds only at the two I/O boundaries; bubble steps carry an
+explicit NOP word and the PC keeps advancing, and the ROM is NOP-padded past the present step to cover the fetch lag. No
+scoreboard is needed because latencies are static.
+
+The control word stores selectors and addresses, never data: each operand's read mux is driven by its read-address
+field (the dense read-set index), and each register's write select by the per-instance write-enable and write-address
+field (the dense write-target index, against which the per-register comparator matches; the operator result wires
+straight into its writeback latch). Constant operands keep using the `const_<i>` immediate wires through a small
+per-operand select, latched alongside the register read. A control field that is constant across the whole program --
+very common for sign controls, and now also for single-reader read addresses and single-writer destinations -- is
+driven by a constant net and lifted out of the ROM, so synthesis prunes the logic it feeds; the
+Python packer that builds the ROM and the bit-slice offsets the module reads are produced together, so they cannot
+drift.
+
+Read mux. A multi-reader operand's mux is a `case` over its dense read-set index (the read-address field) selecting
+`regs[...]` directly; the last read-set entry is the `default` arm so the case is full (no inferred latch, and the
+unused high codes fall there as don't-cares). It deliberately avoids the obvious-looking alternative -- an indexed
+part-select into a packed gather bus, `bus[idx*W +: W]` -- because a variable part-select offset is a multiply: with a
+non-power-of-two `W` (e.g. 24) Lattice Diamond's LSE infers it as a DSP `MULT9X9D` per operand on the operand-read path
+(measured on ekf1: +4 DSP, +21% LUT4s, a Diamond@100 miss; yosys and Vivado strength-reduce it to LUTs instead).
+Padding each gather element to a power-of-two stride turns the offset back into a shift and removes the DSP, but a
+`case` has no offset arithmetic at all, needs no padding, and measures slightly smaller and faster than the
+part-select on all three flows -- so the read mux is a plain `case`.
+
+Write select. Each register's writeback is a one-hot select over only its writers, kept one register per flop (the
+input load is a separate `if (load_en)` block above, not an arm of the select) so the write logic does not scatter a
+register's drivers across per-instance blocks -- a per-writer-instance demux was measured ~10% larger on yosys/Vivado.
+For a register written by an instance that writes more than one register, the guard compares its write-address field against the dense
+index this register occupies in the instance's sorted write-target set -- the same codebook the microcode packs, so
+the two cannot drift. This mirrors the read-set index on the read side: both fields carry a set-local index sized to
+the set, never the file-wide register index. A single-target instance needs no compare (its field is lifted out as a
+constant), and the schedule guarantees at most one writer per register per step, so the priority chain the emitter
+writes is logically one-hot. The recode is transparent -- the comparator simply matches a relabelled constant -- so it
+costs no decode logic; it only narrows the ROM word and the comparators, with no measured area or timing effect today
+but a smaller microcode word that helps once a kernel approaches a BRAM-width boundary.
+
+Errors are non-fatal and informative: each error-bearing operator's flag rides the same writeback latch as its result,
+and `err` ORs it gated by that instance's (latch-aligned) write-enable; the control block latches
+`err_pc <= pc - FETCH_LAG` (the executing step) whenever `err`, so `err_pc` is 0 if the run hit no errors (reset at every
+accept; `|err_pc` means "any error"), else the last writeback step one occurred.
+
+Reset covers only the control registers (`pc`, `err_pc_q`); the fetch registers are reset-unconditional (so they pack
+into the BRAM output register) and settle to `ucode[0]` under reset. The control word and datapath skeleton are the only
+ZISC-specific part -- LIR itself is controller-agnostic.
 
 Each operator instance carries its own parameters and float format, fixed at construction from the `OpConfig` threaded
-through `synthesize`. The wrappers' instantiation params come from `operator.hdl_params()` and the scheduler's timing
-from `operator.latency` -- both read the same hardware operator instance, so the emitted RTL and the static schedule
-cannot drift; emitting only enabled `STAGE_*` keeps a default build's wrappers parameter-free. The wrapper instance name
-is `u_{operator.instance_stem}_{index}`, where `index` is local to that concrete operator value.
+through `synthesize`. The wrappers' configuration params come from `operator.hdl_params()`, while `operator.latency` is
+emitted separately as the mandatory `LATENCY` assertion parameter. `hdl_params()` always lists every hardware parameter
+explicitly (including zero-valued `STAGE_*`), so the instantiation is self-describing, survives changes to wrapper
+defaults, and turns a param-name mismatch into a loud elaboration error. The wrapper does not derive the ZKF latency
+internally; it uses `LATENCY` for Holoso sideband alignment and forwards it to the wrapped ZKF operator, whose own
+source is the reference for stage-count details. The wrapper instance name is `u_{operator.instance_stem}_{index}`,
+where `index` is local to that concrete operator value; the stem uses a short stable hash of the operator's canonical
+hardware parameters.
 
-**Microcode ROM (deferred, keep on the radar):** the per-cycle `case(cyc)` is a wide mux; for large kernels it could
-instead be emitted as a microcode ROM indexed by `cyc` (one packed control word per active cycle), which should
-synthesize far better at scale. This is to be confirmed empirically.
+Constant operands are kept as immediates on the input mux. Two alternatives are noted in the backend for when this turns
+into a constraint: folding constants into the register file (preloaded like inputs, so every operand is a uniform
+register read), or emitting explicit constant-load micro-instructions (uniform operand path with lighter register
+pressure, at the cost of scheduling/allocation complexity).
+
+The Verilog backend's `support_files` map is the authoritative manifest for auxiliary HDL shipped with a generated
+module. File-writing helpers and the out-of-context synthesis harness materialize the whole map verbatim alongside the
+generated module, while tool-specific scripts name only the HDL root they read directly.
 
 ## Decisions
 
@@ -366,11 +464,13 @@ synthesize far better at scale. This is to be confirmed empirically.
 2. Split float and bool register banks.
 3. If-conversion is conservative -- trivial pure diamonds only; real branches otherwise.
 4. SymPy-assisted algebra (fold/CSE/simplify); simple HIR strength reduction in-house.
-5. The per-operator latency model is exact and must match the RTL wrappers cycle-for-cycle: the static schedule commits
-   each result on `issue + latency` without watching `out_valid`, so an inaccurate latency is a correctness bug, not a
-   bad estimate. (Module I/O still uses a valid/ready handshake; `div0` is the only data-dependent runtime signal.)
-6. Software-pipelined (zero-bubble) static list scheduling over a read-first register file; the controller is a static
-   `case(cycle)` microprogram (no runtime scoreboard), since v0 operator latencies are data-independent.
+5. The per-operator latency model is exact and must match the ZKF RTL cycle-for-cycle: the static schedule commits each
+   result on `issue + latency` without watching `out_valid`, and generated wrappers pass that value as mandatory
+   `LATENCY` so ZKF elaboration catches drift. (Module I/O still uses a valid/ready handshake; `div0` is the only
+   data-dependent runtime signal.)
+6. Software-pipelined (zero-bubble) static list scheduling over a read-first register file; the controller is a
+   microcode ROM replaying the schedule step by step (no runtime scoreboard), since v0 operator latencies are
+   data-independent.
 7. API takes the function/class object (not source files); synthesis is in-memory, returning `SynthesisResult`; disk
    I/O is an opt-in helper.
 
@@ -402,5 +502,88 @@ follow in later milestones.
 ## Deferred
 
 Operator-pool auto-sizing, optional ILP mode, dynamic-trip loops, second controller backend, FloPoCo backend,
-**microcode-ROM controller** (a packed control word per cycle indexed by `cyc`, replacing the `case(cyc)` mux --
-important for large kernels), intrinsics (`sqrt`, `sincos`, `exp`, ... -- pending ZKF support).
+intrinsics (`sqrt`, `sincos`, `exp`, ... -- pending ZKF support).
+
+Per-target storage/control staging knobs: the read-port and write-port register-file latches and the microcode-fetch
+depth are fixed on in v0, proven necessary for timing closure on the harder targets. A flow
+that closes timing without one of them should be able to drop it at code-generation time and reclaim the latency.
+
+A fused multiply-add operator wrapping kulibin `zkf_fma` is planned: a `holoso_ffma` wrapper plus an `FFmaOperator`
+(with the selection pass fusing `a*b + c` chains). It should cut operator count, register pressure, and latency, and
+help timing closure -- to be added later.
+
+## Fabric-area exploration
+
+The synthesized fabric is dominated by the per-operand read multiplexers: on a register-pressure-heavy kernel (the
+`ekf1` EKF update) they are roughly 60-65% of the LUTs, and a read mux's cost is approximately linear in
+`read-set-size * W`. The read-set sizes sit at the interference floor -- the values a port reads are largely
+simultaneously live, so they must occupy distinct registers -- so the muxes encode real liveness rather than
+allocation slack, which is what bounds most levers. The results below were measured end-to-end on Yosys+nextpnr-ECP5,
+Lattice Diamond, and Vivado, and are recorded so the dead ends are not re-explored.
+
+Adopted (lossless, f_max-neutral, in the committed design):
+
+- Read mux as a `case` over the dense read-set index rather than an indexed part-select into a packed gather bus:
+  smallest and fastest of the encodings tried, and free of the DSP-inference trap (a variable part-select offset is a
+  multiply that Diamond's LSE maps to DSP blocks). Nested-ternary muxes are catastrophic.
+- Commutative operand port assignment (see LIR / `_portassign.py`), solved exactly as a MILP: about 4-5% LUT on `ekf1`
+  across all three tools (read-mux fan-in 89 -> 78), at zero hardware or latency cost. Based on Chen & Cong.
+- Dense write-target index and a grouped input load: read/write symmetry and cleaner emission at neutral area. The
+  per-register write select beats a per-instance write demux -- the scatter costs about 10% more LUTs.
+
+Explored and rejected for register-pressure-bound kernels like `ekf1`:
+
+- LUTRAM register file: a multi-write workload needs a live-value table that costs as many LUTs as the FF+mux it
+  replaces; banking (Cong's RDR) helps only when access sets partition cleanly, which `ekf1`'s do not.
+- Register-file size cap via register-pressure-limited scheduling: `nreg` floors at the peak liveness (the
+  parallel-loaded inputs plus long-lived state), so it trades large latency and f_max for a couple of percent.
+- Operator replication and FMA fusion: both raise read-operand traffic (more, or wider, read ports), enlarging total
+  mux area despite fewer ops or a shorter makespan.
+- Operand collectors (copy/move ops that relocate values off the worst-reach ports): a copy relocates fan-in rather
+  than removing it -- it must itself read what it relocates -- so a net gain needs a value read by several ports moved
+  onto a target that is co-reachable but not co-live, which the interference floor denies. An honest greedy moved
+  total read reach only 95 -> 94. Copies on the shared operator also cost cycles; producer-side placement is the cited
+  alternative (Terechko et al.; the GPU operand-collector line, Gebhart et al. and CORF, stages hot operands but
+  targets access energy, not static mux area).
+
+Latency-for-area trades (set aside -- latency is itself a real cost, not a free lever, and the area gain did not
+justify it):
+
+- Distributed/banked register file with scheduled inter-bank copies (Cong's RDR): banking narrows each port's mux but
+  serializes the schedule, buying area with latency. On `ekf1`, whose read muxes are already at the interference
+  floor, the trade was not worthwhile.
+- Shared read bus / vertical microcode (serialize to one operator per cycle, two shared operand buses): measured at
+  about -6% total LUTs for about +55% latency on `ekf1`, f_max-safe -- a real latency cost for a modest area gain, so
+  not pursued.
+
+## References
+
+Multiplexer-aware binding and port assignment:
+
+- L. Chen, J. Cong. Register Binding and Port Assignment for Multiplexer Optimization. ASP-DAC 2004. Basis for the
+  commutative operand port-assignment pass; frames steering minimization as a binding/port-assignment problem.
+
+Distributed register files and inter-cluster communication (the latency-for-interconnect direction):
+
+- J. Cong, Y. Fan, et al. Architecture and Synthesis for Multi-Cycle Communication (the Regular Distributed Register
+  microarchitecture). ISPD 2003. Banking plus explicitly scheduled inter-bank copies.
+- A. Terechko, et al. Inter-cluster Communication Models for Clustered VLIW Processors. HPCA 2003. Copies in issue
+  slots are expensive; producer-side placement is preferred over after-the-fact copies.
+
+Operand collectors and register-file caches:
+
+- M. Gebhart, et al. A Compile-Time Managed Multi-Level Register File Hierarchy. MICRO 2011. Compiler-staged operand
+  near-file (targets access energy).
+- S. Asghari Esfeden, et al. CORF: Coalescing Operand Register File for GPUs. ASPLOS 2019. Operand co-location posed
+  as graph coloring.
+
+Register pressure and copies:
+
+- A. W. Appel, K. J. Supowit. Generalizations of the Sethi-Ullman algorithm for register allocation, 1987.
+  Pressure-minimizing evaluation order and rematerialization. The copy-coalescing-vs-splitting literature is the
+  formal statement of why a copy relocates steering cost unless it collapses a fan-in cone.
+
+Reset and timing:
+
+- AMD UG949, Vivado Design Methodology, "When and Where to Use a Reset."
+- Intel Hyperflex Architecture High-Performance Design Handbook, "Synchronous Resets Summary" and "Reset Strategies."

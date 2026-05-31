@@ -1,125 +1,59 @@
-"""Build a finished :class:`Lir` from MIR and derive its interface."""
+"""Build a finished :class:`Lir` from MIR."""
 
 import math
-from collections.abc import Mapping
 
 from .._errors import UnsupportedConstruct
 from .._hir import ValueId
-from .._interface import ControlInputPort, ControlOutputPort, DataInputPort, DataOutputPort, ModuleInterface, Port
-from .._mir import (
-    Mir,
-    MirConst,
-    MirFloatConst,
-    MirFloatInput,
-    MirFloatOperation,
-    MirFloatOutput,
-    MirInput,
-    MirOperation,
-)
-from .._operators import FloatHardwareOperator, FloatSignControl, HardwareOperator
-from .._type import FloatFormat, FloatType
+from .._mir import Mir, MirFloatConst, MirFloatInput, MirFloatOperation, MirFloatView
+from .._operators import FloatSignControl
 from ._ir import (
     FloatConstRef,
     FloatInputLoad,
     FloatOperand,
-    FloatOperatorInstance,
     FloatOutputWire,
     FloatRegFileLayout,
     FloatRegRef,
     FloatScheduledOp,
     Lir,
-    OperatorInstance,
 )
+from ._portassign import assign_commutative_ports
 from ._regalloc import FloatAllocation, allocate_float
 from ._schedule import Schedule, resolve_pool, schedule_ops
 
 
-def _operation(mir: Mir, vid: ValueId) -> MirFloatOperation:
-    node = mir.nodes[vid]
-    assert isinstance(node, MirFloatOperation)
-    return node
+def _operation(mir: MirFloatView, vid: ValueId) -> MirFloatOperation:
+    return mir.operation_nodes[vid]
 
 
-def build(
-    mir: Mir,
-    module_name: str,
-    *,
-    instances: Mapping[type[HardwareOperator], int] | None = None,
-) -> Lir:
+def build(mir: Mir, module_name: str) -> Lir:
     """Schedule, bind, and register-allocate selected MIR into a pipelined microprogram."""
-    _check_supported_domains(mir)
-    fmt = _float_format_of(mir)
-    pool = resolve_pool(mir, instances)
-    sched = schedule_ops(mir, pool)
-    alloc = allocate_float(mir, sched.issue_cycle, sched.makespan)
-    consts, const_index = _build_const_pool(mir)
-    float_instances, float_instance_of = _float_instances(sched)
+    float_mir = MirFloatView.from_mir(mir)
+    pool = resolve_pool(float_mir)
+    sched = schedule_ops(float_mir, pool)
+    alloc = allocate_float(float_mir, sched.issue_cycle, sched.inst_of, sched.makespan)
+    swap = assign_commutative_ports(float_mir, sched, alloc)
+    consts, const_index = _build_const_pool(float_mir)
     return Lir(
         module_name=module_name,
-        float_instances=float_instances,
+        float_instances=sched.instances,
         float_consts=consts,
         float_regfile=FloatRegFileLayout(
-            fmt=fmt,
+            fmt=float_mir.fmt,
             nreg=alloc.nreg,
-            nrd=_compute_nrd(mir, sched, alloc),
-            nwr=_compute_nwr(mir, sched),
-            nload=_compute_nload(mir, alloc),
+            nrd=_compute_nrd(sched),
+            nwr=_compute_nwr(sched),
+            nload=_compute_nload(float_mir),
         ),
-        float_inputs=_build_inputs(mir, alloc),
-        float_ops=_build_ops(mir, sched, alloc, const_index, float_instance_of),
-        float_outputs=_build_outputs(mir, alloc, const_index),
+        float_inputs=_build_inputs(float_mir, alloc),
+        float_ops=_build_ops(float_mir, sched, alloc, const_index, swap),
+        float_outputs=_build_outputs(float_mir, alloc, const_index),
         makespan=sched.makespan,
-        op_count=sum(1 for node in mir.nodes.values() if isinstance(node, MirFloatOperation)),
-        max_chain_len=_max_chain_len(mir),
+        op_count=len(float_mir.operation_nodes),
+        max_chain_len=_max_chain_len(float_mir),
     )
 
 
-def _check_supported_domains(mir: Mir) -> None:
-    for vid, node in mir.nodes.items():
-        if isinstance(node, MirInput) and not isinstance(node, MirFloatInput):
-            raise UnsupportedConstruct(f"LIR construction does not support non-float MIR input {vid}")
-        if isinstance(node, MirConst) and not isinstance(node, MirFloatConst):
-            raise UnsupportedConstruct(f"LIR construction does not support non-float MIR constant {vid}")
-        if isinstance(node, MirOperation) and not isinstance(node, MirFloatOperation):
-            raise UnsupportedConstruct(f"LIR construction does not support non-float MIR operation {vid}")
-    for out in mir.outputs:
-        if not isinstance(out, MirFloatOutput):
-            raise UnsupportedConstruct(f"LIR construction does not support non-float MIR output {out.name!r}")
-
-
-def _float_instances(
-    sched: Schedule,
-) -> tuple[list[FloatOperatorInstance], dict[OperatorInstance, FloatOperatorInstance]]:
-    instances: list[FloatOperatorInstance] = []
-    instance_of: dict[OperatorInstance, FloatOperatorInstance] = {}
-    for inst in sched.instances:
-        if not isinstance(inst.operator, FloatHardwareOperator):
-            raise UnsupportedConstruct(
-                f"LIR construction does not support non-float hardware operator {inst.operator.mnemonic!r}"
-            )
-        float_inst = FloatOperatorInstance(inst.operator, inst.index)
-        instances.append(float_inst)
-        instance_of[inst] = float_inst
-    return instances, instance_of
-
-
-def _float_format_of(mir: Mir) -> FloatFormat:
-    formats: set[FloatFormat] = set()
-    for node in mir.nodes.values():
-        match node:
-            case MirFloatInput(scalar_type=scalar_type):
-                formats.add(scalar_type.fmt)
-            case MirFloatConst(scalar_type=scalar_type):
-                formats.add(scalar_type.fmt)
-            case MirFloatOperation(scalar_type=scalar_type):
-                formats.add(scalar_type.fmt)
-    if len(formats) != 1:
-        ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
-        raise ValueError(f"LIR requires exactly one floating-point format; got {ordered or 'none'}")
-    return next(iter(formats))
-
-
-def _build_const_pool(mir: Mir) -> tuple[list[float], dict[ValueId, int]]:
+def _build_const_pool(mir: MirFloatView) -> tuple[list[float], dict[ValueId, int]]:
     ids: list[ValueId] = []
     seen: set[ValueId] = set()
 
@@ -137,8 +71,7 @@ def _build_const_pool(mir: Mir) -> tuple[list[float], dict[ValueId, int]]:
         note(out.value)
     values: list[float] = []
     for vid in ids:
-        node = mir.nodes[vid]
-        assert isinstance(node, MirFloatConst)
+        node = mir.const_nodes[vid]
         if not math.isfinite(node.value):
             raise UnsupportedConstruct(f"non-finite constant {node.value!r} is not representable in the ZKF format")
         values.append(node.value)
@@ -146,7 +79,7 @@ def _build_const_pool(mir: Mir) -> tuple[list[float], dict[ValueId, int]]:
 
 
 def _operand(
-    mir: Mir, vid: ValueId, sign: FloatSignControl, alloc: FloatAllocation, const_index: dict[ValueId, int]
+    mir: MirFloatView, vid: ValueId, sign: FloatSignControl, alloc: FloatAllocation, const_index: dict[ValueId, int]
 ) -> FloatOperand:
     node = mir.nodes[vid]
     if isinstance(node, MirFloatConst):
@@ -155,11 +88,11 @@ def _operand(
 
 
 def _build_ops(
-    mir: Mir,
+    mir: MirFloatView,
     sched: Schedule,
     alloc: FloatAllocation,
     const_index: dict[ValueId, int],
-    float_instance_of: dict[OperatorInstance, FloatOperatorInstance],
+    swap: dict[ValueId, bool],
 ) -> list[FloatScheduledOp]:
     ops: list[FloatScheduledOp] = []
     for vid in sorted(sched.issue_cycle, key=lambda v: (sched.issue_cycle[v], v)):
@@ -168,9 +101,11 @@ def _build_ops(
             _operand(mir, operand, sign, alloc, const_index)
             for operand, sign in zip(node.operands, node.operand_signs, strict=True)
         ]
+        if swap.get(vid):  # commutative operator: exchange operands (with their sign sidebands) to shrink read muxes
+            operands.reverse()
         ops.append(
             FloatScheduledOp(
-                inst=float_instance_of[sched.inst_of[vid]],
+                inst=sched.inst_of[vid],
                 operands=operands,
                 result_sign=node.result_sign,
                 dst=FloatRegRef(alloc.assign[vid]),
@@ -181,19 +116,19 @@ def _build_ops(
     return ops
 
 
-def _build_inputs(mir: Mir, alloc: FloatAllocation) -> list[FloatInputLoad]:
+def _build_inputs(mir: MirFloatView, alloc: FloatAllocation) -> list[FloatInputLoad]:
     loads: list[FloatInputLoad] = []
     for vid in mir.input_ids:
         node = mir.nodes[vid]
-        assert isinstance(node, MirFloatInput)
+        if not isinstance(node, MirFloatInput):
+            continue
         loads.append(FloatInputLoad(node.name, FloatRegRef(alloc.assign[vid])))
     return loads
 
 
-def _build_outputs(mir: Mir, alloc: FloatAllocation, const_index: dict[ValueId, int]) -> list[FloatOutputWire]:
+def _build_outputs(mir: MirFloatView, alloc: FloatAllocation, const_index: dict[ValueId, int]) -> list[FloatOutputWire]:
     wires: list[FloatOutputWire] = []
     for out in mir.outputs:
-        assert isinstance(out, MirFloatOutput)
         node = mir.nodes[out.value]
         source: FloatRegRef | FloatConstRef
         if isinstance(node, MirFloatConst):
@@ -204,62 +139,38 @@ def _build_outputs(mir: Mir, alloc: FloatAllocation, const_index: dict[ValueId, 
     return wires
 
 
-def _compute_nrd(mir: Mir, sched: Schedule, alloc: FloatAllocation) -> int:
+def _compute_nrd(sched: Schedule) -> int:
     """
-    Combinational read ports: the peak distinct register reads in any issue cycle.
-    Outputs use the register file's passive ``view`` bus, so only operand reads count here.
+    Combinational read ports: one dedicated port per operator operand (the sum of instance arities).
+    Each ``(instance, operand-position)`` reads from its own fixed port, so the controller word carries only the
+    per-port register address and the per-cycle operand-routing mux disappears. Floored to >=1 so the regfile
+    parameter guard holds when the kernel has no operators.
     """
-    per_cycle: dict[int, set[int]] = {}
-    for vid, cycle in sched.issue_cycle.items():
-        node = _operation(mir, vid)
-        regs = per_cycle.setdefault(cycle, set())
-        for operand in node.operands:
-            if not isinstance(mir.nodes[operand], MirFloatConst):
-                regs.add(alloc.assign[operand])
-    max_reads = max((len(regs) for regs in per_cycle.values()), default=0)
-    return max(max_reads, 1)
+    return max(1, sum(inst.operator.arity for inst in sched.instances))
 
 
-def _compute_nwr(mir: Mir, sched: Schedule) -> int:
-    """Synchronous write ports: the peak operator commits landing on one cycle."""
-    per_commit: dict[int, int] = {}
-    for vid, cycle in sched.issue_cycle.items():
-        commit = cycle + _operation(mir, vid).operator.latency
-        per_commit[commit] = per_commit.get(commit, 0) + 1
-    peak_commits = max(per_commit.values(), default=0)
-    return max(peak_commits, 1)
-
-
-def _compute_nload(mir: Mir, alloc: FloatAllocation) -> int:
+def _compute_nwr(sched: Schedule) -> int:
     """
-    Immediate parallel-load lanes: enough to cover the highest register any input occupies.
-
-    Registers 0..nload-1 are exactly the input block for used inputs; unused inputs may share low registers.
+    Synchronous write ports: one dedicated port per operator instance.
+    Each instance's result wires straight to its own write port (no write-data routing mux) and the error/commit
+    gating is just that port's write-enable. Floored to >=1 so the regfile parameter guard holds with no operators.
     """
-    return max((alloc.assign[vid] for vid in mir.input_ids if vid in alloc.assign), default=-1) + 1
+    return max(1, len(sched.instances))
 
 
-def _max_chain_len(mir: Mir) -> int:
+def _compute_nload(mir: MirFloatView) -> int:
+    """
+    Immediate parallel-load lanes: one unique low register per input port.
+    Registers 0..nload-1 are exactly the input block in module port order, including unused inputs retained as ports.
+    """
+    return len(mir.input_ids)
+
+
+def _max_chain_len(mir: MirFloatView) -> int:
     depth: dict[ValueId, int] = {}
-    op_ids = sorted(vid for vid, node in mir.nodes.items() if isinstance(node, MirFloatOperation))
+    op_ids = sorted(mir.operation_nodes)
     for vid in op_ids:
         node = _operation(mir, vid)
-        operands = [operand for operand in node.operands if isinstance(mir.nodes[operand], MirFloatOperation)]
+        operands = [operand for operand in node.operands if operand in mir.operation_nodes]
         depth[vid] = 1 + max((depth[operand] for operand in operands), default=0)
     return max(depth.values(), default=0)
-
-
-def interface_of(lir: Lir) -> ModuleInterface:
-    scalar_type = FloatType(lir.float_regfile.fmt)
-    ports: list[Port] = [
-        ControlInputPort("clk", 1),
-        ControlInputPort("rst", 1),
-        ControlInputPort("in_valid", 1),
-        ControlOutputPort("in_ready", 1),
-        ControlOutputPort("out_valid", 1),
-        ControlInputPort("out_ready", 1),
-    ]
-    ports.extend(DataInputPort(f"in_{load.name}", scalar_type) for load in lir.float_inputs)
-    ports.extend(DataOutputPort(wire.name, scalar_type) for wire in lir.float_outputs)
-    ports.append(ControlOutputPort("err_cyc", lir.cyc_width))
-    return ModuleInterface(lir.module_name, ports)

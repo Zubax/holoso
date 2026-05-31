@@ -8,9 +8,11 @@ from typing import ClassVar
 import pytest
 
 from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso._errors import UnsupportedConstruct
 from holoso._frontend import lower
 from holoso._hir import optimize
 from holoso._lir import FloatRegRef
+from holoso._lir._schedule import DEPENDENCY_EDGE
 from holoso._mir import (
     lower as lower_to_mir,
     Mir,
@@ -19,10 +21,12 @@ from holoso._mir import (
     MirFloatInput,
     MirFloatOperation,
     MirFloatOutput,
+    MirFloatView,
+    MirInput,
     MirOperation,
 )
 from holoso._operators import FMulILog2Operator, FloatSignControl, HardwareOperator
-from holoso._lir import build, interface_of
+from holoso._lir import build
 from holoso._lir._schedule import resolve_pool, schedule_ops
 from holoso._type import FloatType, ScalarSignature, ScalarType
 
@@ -61,8 +65,22 @@ class OtherScalarType(ScalarType):
         return 1
 
 
+@dataclass(frozen=True, slots=True)
+class OtherMirInput(MirInput):
+    pass
+
+
 def _run(target, ops: OpConfig = OPS) -> Mir:  # type: ignore[no-untyped-def]
     return lower_to_mir(optimize(lower(target)), ops)
+
+
+def _view(mir: Mir) -> MirFloatView:
+    return MirFloatView.from_mir(mir)
+
+
+def _schedule(mir: Mir):
+    view = _view(mir)
+    return schedule_ops(view, resolve_pool(view))
 
 
 def _muls(mir: Mir) -> list[int]:
@@ -74,32 +92,17 @@ def test_schedule_respects_dependencies() -> None:
         return (a - b) * 0.25 + a * b
 
     mir = _run(f)
-    sched = schedule_ops(mir, resolve_pool(mir, None))
+    sched = _schedule(mir)
     for vid, cycle in sched.issue_cycle.items():
         op = mir.nodes[vid]
         assert isinstance(op, MirOperation)
-        assert cycle >= 1  # nothing issues on the accept cycle; inputs are readable from cycle 1
+        assert cycle >= 1  # nothing issues on the accept cycle
         for operand in op.operands:
             node = mir.nodes[operand]
             if isinstance(node, MirOperation):
-                # A consumer issues no earlier than the producer's commit + 1 (read-first writeback latency).
-                assert cycle >= sched.issue_cycle[operand] + node.operator.latency + 1
-
-
-def test_multi_issue_packs_independent_ops() -> None:
-    def f(a, b, c):  # type: ignore[no-untyped-def]
-        return a * b + b * c
-
-    mir = _run(f)
-    muls = _muls(mir)
-    assert len(muls) == 2
-
-    two = schedule_ops(mir, resolve_pool(mir, {FMulOperator: 2}))
-    assert two.issue_cycle[muls[0]] == two.issue_cycle[muls[1]]  # two instances -> both multiplies issue together
-    assert two.inst_of[muls[0]].index != two.inst_of[muls[1]].index  # ...on distinct instances
-
-    one = schedule_ops(mir, resolve_pool(mir, {FMulOperator: 1}))
-    assert one.issue_cycle[muls[0]] != one.issue_cycle[muls[1]]  # one instance forces them onto consecutive cycles
+                # A consumer issues no earlier than the producer's commit plus the register-file traversal edge
+                # (the read-first write edge plus the read and write latches).
+                assert cycle >= sched.issue_cycle[operand] + node.operator.latency + DEPENDENCY_EDGE
 
 
 def test_pipelined_issue_overlaps_a_slow_op() -> None:
@@ -108,7 +111,7 @@ def test_pipelined_issue_overlaps_a_slow_op() -> None:
         return a / b + (a + b + c)
 
     mir = _run(f)
-    sched = schedule_ops(mir, resolve_pool(mir, None))
+    sched = _schedule(mir)
     div = next(
         vid for vid, n in mir.nodes.items() if isinstance(n, MirOperation) and isinstance(n.operator, FDivOperator)
     )
@@ -134,7 +137,7 @@ def test_fmul_ilog2_same_k_shares_one_instance() -> None:
     mir = _run(f)
     il = _ilog2(mir)
     assert len(il) == 2
-    sched = schedule_ops(mir, resolve_pool(mir, None))
+    sched = _schedule(mir)
     assert sched.issue_cycle[il[0]] != sched.issue_cycle[il[1]]  # not concurrent
     assert sched.inst_of[il[0]] == sched.inst_of[il[1]]  # ...so they share the one instance
     assert sum(1 for i in sched.instances if isinstance(i.operator, FMulILog2Operator)) == 1
@@ -149,13 +152,9 @@ def test_fmul_ilog2_same_k_serializes_by_default_parallelizes_with_budget() -> N
     il = _ilog2(mir)
     assert len(il) == 2
 
-    one = schedule_ops(mir, resolve_pool(mir, None))  # default budget 1 -> serialize onto a single instance
+    one = _schedule(mir)  # default budget 1 -> serialize onto a single instance
     assert one.issue_cycle[il[0]] != one.issue_cycle[il[1]]
     assert sum(1 for i in one.instances if isinstance(i.operator, FMulILog2Operator)) == 1
-
-    two = schedule_ops(mir, resolve_pool(mir, {FMulILog2Operator: 2}))  # budget 2 -> co-issue on two instances
-    assert two.issue_cycle[il[0]] == two.issue_cycle[il[1]]
-    assert two.inst_of[il[0]].index != two.inst_of[il[1]].index
 
 
 def test_fmul_ilog2_different_k_never_shares() -> None:
@@ -165,7 +164,7 @@ def test_fmul_ilog2_different_k_never_shares() -> None:
     mir = _run(f)
     il = _ilog2(mir)
     assert len(il) == 2
-    sched = schedule_ops(mir, resolve_pool(mir, None))
+    sched = _schedule(mir)
     assert sched.inst_of[il[0]] != sched.inst_of[il[1]]  # different K -> different instances
     assert {sched.inst_of[v].operator.k for v in il} == {2, 3}
     assert {sched.inst_of[v].index for v in il} == {0}  # indices are local to each concrete operator value
@@ -185,8 +184,7 @@ def test_build_lir_small_kernel() -> None:
     assert all(isinstance(o.source, FloatRegRef) for o in lir.float_outputs)
     assert lir.makespan == max(op.commit_cycle for op in lir.float_ops)
 
-    iface = interface_of(lir)
-    names = [p.name for p in iface.ports]
+    names = [p.name for p in lir.ports]
     for expected in (
         "clk",
         "rst",
@@ -197,7 +195,7 @@ def test_build_lir_small_kernel() -> None:
         "in_a",
         "in_b",
         "out_0",
-        "err_cyc",
+        "err_pc",
     ):
         assert expected in names
 
@@ -217,9 +215,9 @@ def test_build_lir_ekf1() -> None:
     assert lir.float_regfile.nreg < lir.op_count + len(lir.float_inputs)
     # Inputs preload through the regfile's load port (registers 0..nload-1), so nload spans the input block.
     assert lir.float_regfile.nload == 17
-    # Port counts track internal parallelism, not I/O width.
-    assert lir.float_regfile.nwr == 3
-    assert lir.float_regfile.nrd == 5
+    # Dedicated ports: one read port per operator operand (sum of arities = 2+2+1+2), one write port per instance.
+    assert lir.float_regfile.nwr == 4
+    assert lir.float_regfile.nrd == 7
     # The 1/x21 numerator survives as a constant immediate.
     assert any(abs(c - 1.0) < 1e-12 for c in lir.float_consts)
 
@@ -286,6 +284,83 @@ def test_mir_float_subclasses_validate_float_invariants() -> None:
         MirFloatOutput("out_0", 0, object())
 
 
+def test_float_view_rejects_non_float_mir_before_scheduling() -> None:
+    mir = Mir(
+        nodes={0: OtherMirInput("a", OtherScalarType())},
+        input_ids=[0],
+        outputs=[MirFloatOutput("out_0", 0)],
+    )
+    with pytest.raises(UnsupportedConstruct, match="non-float MIR input"):
+        MirFloatView.from_mir(mir)
+
+
+def test_float_view_rejects_non_input_input_id() -> None:
+    mir = Mir(
+        nodes={0: MirFloatConst(FloatType(FMT), 1.0)},
+        input_ids=[0],
+        outputs=[MirFloatOutput("out_0", 0)],
+    )
+    with pytest.raises(ValueError, match="must reference a MirFloatInput"):
+        MirFloatView.from_mir(mir)
+
+
+def test_float_view_rejects_missing_input_id() -> None:
+    mir = Mir(
+        nodes={0: MirFloatConst(FloatType(FMT), 1.0)},
+        input_ids=[1],
+        outputs=[MirFloatOutput("out_0", 0)],
+    )
+    with pytest.raises(ValueError, match="does not reference a MIR node"):
+        MirFloatView.from_mir(mir)
+
+
 def test_fmul_ilog2_operator_rejects_out_of_range_k() -> None:
+    limit = (1 << FMT.wexp) - 2
+    assert FMulILog2Operator(FMT, k=-limit).k == -limit
+    assert FMulILog2Operator(FMT, k=limit - 1).k == limit - 1
     with pytest.raises(ValueError, match="k must satisfy"):
-        FMulILog2Operator(FMT, k=1 << (FMT.wexp - 1))
+        FMulILog2Operator(FMT, k=limit)
+    with pytest.raises(ValueError, match="k must satisfy"):
+        FMulILog2Operator(FMT, k=-limit - 1)
+
+
+def _read_mux_fan_in(lir) -> int:  # type: ignore[no-untyped-def]
+    return sum(max(0, len(regs) - 1) for regs in lir.read_set_per_port.values())
+
+
+def test_marked_commutative_operators_are_bit_exact_commutative() -> None:
+    # The port-assignment pass swaps a commutative operator's operands, which is only sound if the operator is
+    # exactly symmetric. Guard the FAddOperator/FMulOperator markings against a future non-commutative slip-up.
+    import random
+
+    from holoso._value import FloatValue, add_float_values, mul_float_values
+
+    rng = random.Random(0)
+    assert FAddOperator(FMT).is_commutative and FMulOperator(FMT).is_commutative
+    assert not FDivOperator(FMT).is_commutative
+    for evaluate in (add_float_values, mul_float_values):
+        for _ in range(5000):
+            a = FloatValue.from_float(FMT, rng.uniform(-2.0, 2.0) * 2.0 ** rng.randint(-22, 22))
+            b = FloatValue.from_float(FMT, rng.uniform(-2.0, 2.0) * 2.0 ** rng.randint(-22, 22))
+            assert evaluate(a, b).bits == evaluate(b, a).bits
+
+
+def test_commutative_port_assignment_never_increases_read_mux_fan_in(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import holoso._lir._build as build_module
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import ekf1
+
+    cfg = OpConfig(
+        FAddOperator(FMT, stage_decode=1),
+        FMulOperator(FMT, stage_input=1),
+        FDivOperator(FMT),
+        FMulILog2OperatorFamily(FMT),
+    )
+    monkeypatch.setattr(build_module, "assign_commutative_ports", lambda *args, **kwargs: {})
+    baseline = build(_run(ekf1.update_x_P, cfg), "ekf1")
+    monkeypatch.undo()
+    optimized = build(_run(ekf1.update_x_P, cfg), "ekf1")
+
+    assert _read_mux_fan_in(optimized) <= _read_mux_fan_in(baseline)
+    assert _read_mux_fan_in(optimized) < _read_mux_fan_in(baseline)  # ekf1 has commutative reach to reclaim

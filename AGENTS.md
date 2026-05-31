@@ -58,6 +58,8 @@ Minimize the public API surface.
 
 Importing anything from a package or subpackage is only allowed as long as it doesn't involve referencing
 underscore-prefixed names. Exceptions apply for importing from parent modules with the dot notation, and for unit tests.
+Accessing underscore-prefixed names from outside a class (or its descendants) is not allowed;
+all externally accessble entities must be non-underscore-prefixed.
 
 If a docstring comment doesn't fit on one line, add an initial line break like this:
 
@@ -92,6 +94,9 @@ In complex modules, it is best to avoid a large number of named nets that are on
 
 Leave unused module outputs unconnected, like `.out_foo()`, instead of creating unused wires.
 
+It is best to keep at most one `always @(posedge clk)` per module, unless there are strong reasons to do otherwise.
+This rule should be followed, in particular, in Verilog emitted by the compiler.
+
 ### Other
 
 Keep in-code documentation brief. Long-form belongs in design docs and other non-code files.
@@ -114,6 +119,25 @@ These are not hard rules but rather soft suggestions.
 Generated reports must be written in rich and colorful human-friendly HTML format, not Markdown.
 
 No need to add tests nor update the design docs for report-generation-related changes.
+
+## Timing closure
+
+Timing closure is an iterative process of hunting the next bottleneck and adding registers to break combinational paths:
+
+- Set the desired frequency and synthesize the design.
+- If f_max > f_target, exit.
+- Locate the critical path and break it with a new register stage, e.g. configure `fadd.stage_decode=1`.
+- Repeat.
+
+This process works regardless of whether the failure to meet timings is caused by too many logic levels or long routing.
+Special things to look out for:
+
+- Multipliers must begin and end with a register stage. If retiming has moved a register away from a DSP, 
+  it means that the adjacent hop is starving and needs a new register there, even if it's not on the critical path.
+- Splitting multiplication into parallel halves (e.g., `STAGE_PRODUCT=1`) is almost never a good idea unless the
+  multiplicand bitwidth exceeds the DSP slice input width.
+- Retiming is sneaky: a moved stage may cause a different path to become critical, so with retiming enabled one needs
+  to evaluate the adjacent stages as well.
 
 ## Verification
 

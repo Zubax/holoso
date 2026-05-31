@@ -1,6 +1,35 @@
+from pathlib import Path
+import shutil
 import nox
 
 nox.options.reuse_existing_virtualenvs = True
+
+
+@nox.session(python=False, default=False)
+def clean(session):
+    pats = [
+        "dist",
+        "build",
+        "*/build",
+        "html*",
+        ".coverage*",
+        ".*cache",
+        "src/*.egg-info",
+        "*.log",
+        "*.tmp",
+        ".nox",
+        "*.history",
+    ]
+    for w in pats:
+        for f in Path.cwd().glob(w):
+            session.log(f"Removing: {f}")
+            if f.is_dir():
+                shutil.rmtree(f, ignore_errors=True)
+            else:
+                f.unlink(missing_ok=True)
+    for f in Path.cwd().rglob("__pycache__"):
+        session.log(f"Removing: {f}")
+        shutil.rmtree(f, ignore_errors=True)
 
 
 @nox.session
@@ -44,8 +73,18 @@ def synth_examples(session: nox.Session) -> None:
     """
     session.install("-e", ".[test]")
 
-    def syn(*args: str) -> None:
-        session.run("python", "-m", "synth", *args, "--rtl", "lib/kulibin/float/hdl")
+    def syn(source: str, target: str, flows: list[str]) -> None:
+        flows = [flow for f in flows for flow in ("--flow", f)]
+        session.run("python", "-m", "synth", source, target, *flows, "--rtl", "lib/kulibin/float/hdl")
 
-    # TODO: the frequency is currently set to a very low setting; we will focus on timing closure a bit later.
-    syn("examples/ekf1.py", "update_x_P", "--name", "ekf1", "--freq", "44.0")
+    syn("examples/madd.py", "madd", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
+    syn("examples/poly3.py", "poly3", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
+    syn(
+        "examples/ekf1.py",
+        "update_x_P",
+        [
+            "yosys-ecp5:freq=100",
+            "diamond-ecp5:freq=100",
+            "vivado:freq=150",
+        ],
+    )

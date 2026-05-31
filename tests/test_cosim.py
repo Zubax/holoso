@@ -13,7 +13,7 @@ from holoso._backend.numerical import generate as build_model
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lir import build, interface_of
+from holoso._lir import build
 from holoso._mir import lower as lower_to_mir
 
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, sources
@@ -26,7 +26,6 @@ def _ops(fmt: FloatFormat) -> OpConfig:
 def _run_cosim(sim: str, fn: Callable[..., object], fmt: FloatFormat, name: str, ops: OpConfig | None = None) -> None:
     ops = _ops(fmt) if ops is None else ops
     lir = build(lower_to_mir(optimize(lower(fn)), ops), name)
-    interface = interface_of(lir)
     model = build_model(lir)
     # Generated sources live outside the cocotb build dir, which the runner wipes on clean=True.
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"{name}_w{fmt.wexp}_{fmt.wman}"
@@ -36,7 +35,7 @@ def _run_cosim(sim: str, fn: Callable[..., object], fmt: FloatFormat, name: str,
     verilog_path.write_text(generate_verilog(lir).verilog)
     # The generated bench embeds the bit-exact model and checks the DUT's output bits exactly.
     test_module = f"test_{name}"
-    (gen_dir / f"{test_module}.py").write_text(generate_testbench(model, interface).testbench)
+    (gen_dir / f"{test_module}.py").write_text(generate_testbench(model).testbench)
 
     runner = get_runner(sim)
     runner.build(
@@ -111,3 +110,36 @@ def test_cosim_staged_division(sim: str) -> None:
         FMulILog2OperatorFamily(fmt),
     )
     _run_cosim(sim, blend, fmt, "blend_staged", ops=ops)
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_poly3(sim: str) -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import poly3
+
+    _run_cosim(sim, poly3.poly3, FloatFormat(6, 18), "poly3")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_madd(sim: str) -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import madd
+
+    _run_cosim(sim, madd.madd, FloatFormat(6, 18), "madd")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_new_operator_stages(sim: str) -> None:
+    def kernel(a, b, c):  # type: ignore[no-untyped-def]
+        return (a - b) / c + a * b * 0.25  # fadd, fdiv, fmul, and fmul_ilog2 (the 2^-2 scale) all in one kernel
+
+    # Exercise the newly-shipped ZKF knobs end-to-end: fadd STAGE_INPUT/STAGE_NORMALIZE/STAGE_PACK, fmul STAGE_PACK,
+    # fdiv STAGE_PACK, and fmul_ilog2 STAGE_INPUT -- all folded into the latency model and the latched datapath.
+    fmt = FloatFormat(8, 24)
+    ops = OpConfig(
+        FAddOperator(fmt, stage_input=1, stage_normalize=2, stage_pack=1),
+        FMulOperator(fmt, stage_input=1, stage_pack=1),
+        FDivOperator(fmt, stage_pack=1),
+        FMulILog2OperatorFamily(fmt, stage_input=1),
+    )
+    _run_cosim(sim, kernel, fmt, "new_stages", ops=ops)

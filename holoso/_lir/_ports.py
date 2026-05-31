@@ -1,10 +1,10 @@
-"""The composition contract for a synthesized module."""
+"""Generated module port descriptions owned by LIR."""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import enum
 
-from ._type import ScalarType
+from .._type import ScalarType
 
 
 class Direction(enum.StrEnum):
@@ -75,21 +75,3 @@ class ControlOutputPort(ControlPort):
     @property
     def direction(self) -> Direction:
         return Direction.OUT
-
-
-@dataclass(frozen=True, slots=True)
-class ModuleInterface:
-    module_name: str
-    ports: list[Port]
-
-    @property
-    def input_ports(self) -> list[DataInputPort]:
-        return [p for p in self.ports if isinstance(p, DataInputPort)]
-
-    @property
-    def output_ports(self) -> list[DataOutputPort]:
-        return [p for p in self.ports if isinstance(p, DataOutputPort)]
-
-    @property
-    def control_ports(self) -> list[ControlPort]:
-        return [p for p in self.ports if isinstance(p, ControlPort)]

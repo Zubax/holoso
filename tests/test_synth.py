@@ -22,24 +22,34 @@ def _ops(fmt: FloatFormat = FMT32) -> OpConfig:
     return OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
 
 
+def _has_localparam(verilog: str, name: str, value: int) -> bool:
+    return (
+        re.search(rf"^localparam\s+(?:\[[^\]]+\]\s+)?{re.escape(name)}\s*=\s*{value};", verilog, re.MULTILINE)
+        is not None
+    )
+
+
 def test_synthesize_small_kernel_result() -> None:
     result = holoso.synthesize(_kernel, ops=_ops())
     assert result.module_name == "_kernel"
     assert "module _kernel" in result.verilog_output.verilog
-    assert "holoso_regfile" in result.verilog_output.support_files["holoso_support.v"]
-    assert '`include "holoso_support.vh"' in result.verilog_output.support_files["holoso_support.v"]
-    assert "`ifndef HOLOSO_REGFILE_VH" not in result.verilog_output.support_files["holoso_support.v"]
-    assert "`HOLOSO_REGFILE_LANE" in result.verilog_output.support_files["holoso_support.vh"]
+    # The full-crossbar register file is gone; storage is emitted inline as a sparse register array.
+    assert "holoso_regfile" not in result.verilog_output.support_files["holoso_support.v"]
+    assert "holoso_fadd" in result.verilog_output.support_files["holoso_support.v"]
+    assert "reg  [W-1:0] regs [0:NREG-1];" in result.verilog_output.verilog
+    # The support header is gone: nothing includes it and it is not bundled.
+    assert "holoso_support.vh" not in result.verilog_output.support_files
+    assert "`include" not in result.verilog_output.verilog
+    # Project policy: all sequential logic lives in exactly one clocked process.
+    assert result.verilog_output.verilog.count("always @(posedge clk)") == 1
     assert "@cocotb.test()" in result.cocotb_output.testbench
     assert "<html" in result.html_output.html.lower()
-    names = [p.name for p in result.interface.ports]
-    assert "in_a" in names and "out_0" in names and "err_cyc" in names
-    assert all(isinstance(p, holoso.DataInputPort) for p in result.interface.input_ports)
-    assert all(isinstance(p, holoso.DataOutputPort) for p in result.interface.output_ports)
-    assert any(isinstance(p, holoso.ControlOutputPort) and p.name == "err_cyc" for p in result.interface.control_ports)
-    assert all(
-        isinstance(p.scalar_type, holoso.FloatType) and p.scalar_type.fmt == FMT32 for p in result.interface.input_ports
-    )
+    names = [p.name for p in result.ports]
+    assert "in_a" in names and "out_0" in names and "err_pc" in names
+    assert all(isinstance(p, holoso.DataInputPort) for p in result.input_ports)
+    assert all(isinstance(p, holoso.DataOutputPort) for p in result.output_ports)
+    assert any(isinstance(p, holoso.ControlOutputPort) and p.name == "err_pc" for p in result.control_ports)
+    assert all(isinstance(p.scalar_type, holoso.FloatType) and p.scalar_type.fmt == FMT32 for p in result.input_ports)
 
 
 def test_op_config_rejects_mixed_float_formats() -> None:
@@ -56,9 +66,9 @@ def test_constant_only_module_keeps_operator_configured_format() -> None:
     fmt = FloatFormat(6, 18)
     result = holoso.synthesize(const_only, ops=_ops(fmt))
     assert result.numerical_model.float_format == fmt
-    assert "localparam WEXP  = 6;" in result.verilog_output.verilog
-    assert "localparam WMAN  = 18;" in result.verilog_output.verilog
-    assert all(p.width == fmt.width for p in result.interface.output_ports)
+    assert _has_localparam(result.verilog_output.verilog, "WEXP", 6)
+    assert _has_localparam(result.verilog_output.verilog, "WMAN", 18)
+    assert all(p.width == fmt.width for p in result.output_ports)
 
 
 def test_synthesize_threads_pipeline_stages() -> None:
@@ -72,8 +82,12 @@ def test_synthesize_threads_pipeline_stages() -> None:
             FMulILog2OperatorFamily(FMT32),
         ),
     )
-    assert "STAGE_" not in base.verilog_output.verilog  # default stages emit no STAGE_* instance params
+    # Every STAGE_* is emitted explicitly (defaults as 0), so the instantiation is self-describing and threading is
+    # visible in both directions: default operators show 0, configured ones show 1.
+    assert ".STAGE_DECODE(0)" in base.verilog_output.verilog
     assert ".STAGE_DECODE(1)" in staged.verilog_output.verilog and ".STAGE_PRODUCT(1)" in staged.verilog_output.verilog
+    assert ".LATENCY(4)" in base.verilog_output.verilog and ".LATENCY(1)" in base.verilog_output.verilog
+    assert ".LATENCY(5)" in staged.verilog_output.verilog and ".LATENCY(2)" in staged.verilog_output.verilog
 
 
 def test_rejects_non_finite_constants() -> None:
@@ -90,18 +104,20 @@ def test_rejects_non_finite_constants() -> None:
 
 def test_generated_testbench_is_valid_python() -> None:
     result = holoso.synthesize(_kernel, ops=_ops())
+    assert "holoso.FloatValue.from_bits(_FMT, bits)" in result.cocotb_output.testbench
+    assert "exp_bits = [value.bits for value in expected]" in result.cocotb_output.testbench
+    assert "_FMT.decode(bits)" not in result.cocotb_output.testbench
     compile(result.cocotb_output.testbench, "<generated-testbench>", "exec")
 
 
 def test_write_artifacts(tmp_path: Path) -> None:
     result = holoso.synthesize(_kernel, ops=_ops())
     paths = result.write(tmp_path)
-    assert set(paths) == {"_kernel.v", "holoso_support.v", "holoso_support.vh", "test__kernel.py", "_kernel.html"}
+    assert set(paths) == {"_kernel.v", "holoso_support.v", "test__kernel.py", "_kernel.html"}
     assert (tmp_path / "_kernel.v").exists()
     assert (tmp_path / "test__kernel.py").exists()
     assert (tmp_path / "_kernel.html").exists()
     assert (tmp_path / "holoso_support.v").exists()
-    assert (tmp_path / "holoso_support.vh").exists()
 
 
 def test_report_has_expected_sections() -> None:
@@ -120,15 +136,17 @@ def test_report_has_expected_sections() -> None:
         "module _kernel (",
         "input  wire [31:0] in_a",
         "output wire [31:0] out_0",
-        "output reg  [4:0] err_cyc",
+        "output wire [4:0] err_pc",
     ):
         assert token in result.verilog_output.verilog
         assert token in header_text
     assert "module _kernel #(" not in result.verilog_output.verilog
     assert "parameter WEXP" not in result.verilog_output.verilog
     assert "parameter WMAN" not in result.verilog_output.verilog
-    assert "localparam WEXP  = 8;" in result.verilog_output.verilog
-    assert "localparam WMAN  = 24;" in result.verilog_output.verilog
+    assert "reg  [CYCW-1:0] err_pc_q;" in result.verilog_output.verilog
+    assert "assign err_pc    = err_pc_q;" in result.verilog_output.verilog
+    assert _has_localparam(result.verilog_output.verilog, "WEXP", 8)
+    assert _has_localparam(result.verilog_output.verilog, "WMAN", 24)
     assert report.index("<h2>Interface</h2>") < report.index("<h2>Module Header</h2>")
     assert "--modhdr-width:" not in report
     assert "Runtime diagnostics available while the module is running." in header_text
@@ -152,7 +170,7 @@ def test_synthesize_ekf1() -> None:
     fmt = FloatFormat(6, 18)
     result = holoso.synthesize(ekf1.update_x_P, ops=_ops(fmt))
     assert result.module_name == "update_x_P"
-    assert len(result.interface.output_ports) == 9
+    assert len(result.output_ports) == 9
     compile(result.cocotb_output.testbench, "<generated-testbench>", "exec")
 
 

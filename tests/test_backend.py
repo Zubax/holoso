@@ -28,7 +28,7 @@ def _run(target, ops: OpConfig):  # type: ignore[no-untyped-def]
     return lower_to_mir(optimize(lower(target)), ops)
 
 
-def _elaborate(name: str, verilog: str, tmp_path: Path) -> None:
+def _compile(name: str, verilog: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
     vpath = tmp_path / f"{name}.v"
     vpath.write_text(verilog)
     cmd = [
@@ -43,7 +43,11 @@ def _elaborate(name: str, verilog: str, tmp_path: Path) -> None:
         str(vpath),
         *(str(s) for s in sources()),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def _elaborate(name: str, verilog: str, tmp_path: Path) -> None:
+    result = _compile(name, verilog, tmp_path)
     assert result.returncode == 0, result.stderr
 
 
@@ -58,9 +62,35 @@ def test_operator_instance_names_include_hardware_identity() -> None:
     )
 
     assert len(names) == len(set(names))
-    assert "fmul_ilog2_const_e6_m18_k_2_0" in names
-    assert "fmul_ilog2_const_e6_m18_k_3_0" in names
+    assert all(re.fullmatch(r"fmul_ilog2_const_[0-9a-f]{8}_0", name) for name in names)
+    assert all("stage_decode" not in name and "e6_m18" not in name and "_k_" not in name for name in names)
     assert all(name == name.lower() for name in names)
+
+
+@requires_iverilog
+def test_streaming_wrapper_requires_latency(tmp_path: Path) -> None:
+    verilog = """
+module missing_latency;
+    wire clk = 1'b0;
+    wire rst = 1'b0;
+    wire in_valid = 1'b0;
+    wire [31:0] a = 32'h0;
+    wire [31:0] b = 32'h0;
+    wire out_valid;
+    wire a_gt_b;
+    wire a_eq_b;
+    wire a_lt_b;
+
+    holoso_fcmp #(.WEXP(8), .WMAN(24)) u_cmp (
+        .clk(clk), .rst(rst), .in_valid(in_valid),
+        .a_sgnop(2'd0), .b_sgnop(2'd0), .a(a), .b(b),
+        .out_valid(out_valid), .a_gt_b(a_gt_b), .a_eq_b(a_eq_b), .a_lt_b(a_lt_b)
+    );
+endmodule
+"""
+    result = _compile("missing_latency", verilog, tmp_path)
+    assert result.returncode != 0
+    assert "_zkf_invalid_latency_mismatch" in result.stderr
 
 
 @requires_iverilog

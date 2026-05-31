@@ -118,14 +118,11 @@ class SynthArtifact:
 def assemble(result: SynthesisResult, wrapper: OocWrapper, extra_rtl: list[Path]) -> list[SourceFile]:
     """Bundle the wrapper, the generated module, the support files, and the caller-supplied RTL into one source set.
 
-    A generated module instantiates ``holoso_support.v`` (which includes ``holoso_support.vh``) plus additional RTL
-    primitives (the Kulibin float modules) that the caller supplies -- the harness does not go looking for them.
-    Everything is bundled as in-memory :class:`SourceFile`s so a recipe directory is self-contained; the only
-    include directory needed is the artifact root, which holds ``holoso_support.vh``.
+    A generated module instantiates backend-provided support files plus additional RTL primitives (the Kulibin float
+    modules) that the caller supplies -- the harness does not go looking for them. Everything is bundled as in-memory
+    :class:`SourceFile`s so a recipe directory is self-contained.
     """
-    files = [
-        SourceFile(Path("holoso_support.vh"), result.verilog_output.support_files["holoso_support.vh"]),
-        SourceFile(Path("holoso_support.v"), result.verilog_output.support_files["holoso_support.v"]),
+    files = [SourceFile(Path(name), content) for name, content in result.verilog_output.support_files.items()] + [
         SourceFile(Path(f"{result.module_name}.v"), result.verilog_output.verilog),
         SourceFile(Path(f"{wrapper.top}.v"), wrapper.verilog),
     ]
