@@ -268,8 +268,12 @@ writer-sets, stable ref labels, and write-timeline reconstruction so backends do
   operands oriented across its read ports to minimize the total read-set size. A register that an operand reads in one
   position and another reads in the other position would otherwise sit in both ports' read muxes; consistent
   orientation keeps it in one. This is a pure relabelling of which physical port reads which register --
-  no hardware, no latency -- and is seeded from the source orientation so it can only shrink the read muxes
-  (the Chen & Cong mux-aware port-assignment lever).
+  no hardware, no latency -- so it can only shrink the read muxes (the Chen & Cong mux-aware port-assignment lever).
+  Minimizing total read-set size over orientations is graph bipartisation; a local search stalls well above the
+  optimum (ekf1's multiplier traps at 50 register-arms), so it is solved exactly per instance as a small MILP
+  (HiGHS via `scipy.optimize.milp`), with the deterministic local search kept as a fallback when the MILP does not
+  prove optimality in its time budget. On ekf1 this takes read-mux fan-in from 89 to the optimum 78 (the multiplier's
+  two operand muxes from 29+27 to 46 register-arms).
 
 - `branch` is the real control transfer: the microprogram counter jumps, untaken ops never run, and the II is whatever
   the executed path costs (each path's count is itself exact).
