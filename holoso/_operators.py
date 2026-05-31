@@ -57,10 +57,12 @@ class HardwareOperator(ABC):
     A fully specified hardware operator configuration.
     Frozen-dataclass equality makes an instance the resource-sharing key: equal operators time-share one physical
     module. Each concrete operator owns its timing, reference semantics, notation, and HDL parameters.
+    Commutative operators allow port assignment orient each use's operands to shrink the per-port read muxes.
     """
 
     mnemonic: ClassVar[str]
     error_ports: ClassVar[list[str]] = []
+    is_commutative: ClassVar[bool] = False
 
     @property
     def module_name(self) -> str:
@@ -147,6 +149,7 @@ class FloatParameterizedHardwareOperator(ParameterizedHardwareOperator, ABC):
 @dataclass(frozen=True, slots=True)
 class FAddOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fadd"
+    is_commutative: ClassVar[bool] = True  # signed sum: a+b == b+a bit-for-bit (each operand carries its own sign)
     stage_input: int = 0
     stage_decode: int = 0
     stage_align: int = 0
@@ -199,6 +202,7 @@ class FAddOperator(FloatHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class FMulOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fmul"
+    is_commutative: ClassVar[bool] = True  # product: a*b == b*a bit-for-bit
     stage_input: int = 0
     stage_product: int = 0
     stage_pack: int = 0

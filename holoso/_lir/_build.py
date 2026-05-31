@@ -16,6 +16,7 @@ from ._ir import (
     FloatScheduledOp,
     Lir,
 )
+from ._portassign import assign_commutative_ports
 from ._regalloc import FloatAllocation, allocate_float
 from ._schedule import Schedule, resolve_pool, schedule_ops
 
@@ -30,6 +31,7 @@ def build(mir: Mir, module_name: str) -> Lir:
     pool = resolve_pool(float_mir)
     sched = schedule_ops(float_mir, pool)
     alloc = allocate_float(float_mir, sched.issue_cycle, sched.inst_of, sched.makespan)
+    swap = assign_commutative_ports(float_mir, sched, alloc)
     consts, const_index = _build_const_pool(float_mir)
     return Lir(
         module_name=module_name,
@@ -43,7 +45,7 @@ def build(mir: Mir, module_name: str) -> Lir:
             nload=_compute_nload(float_mir),
         ),
         float_inputs=_build_inputs(float_mir, alloc),
-        float_ops=_build_ops(float_mir, sched, alloc, const_index),
+        float_ops=_build_ops(float_mir, sched, alloc, const_index, swap),
         float_outputs=_build_outputs(float_mir, alloc, const_index),
         makespan=sched.makespan,
         op_count=len(float_mir.operation_nodes),
@@ -90,6 +92,7 @@ def _build_ops(
     sched: Schedule,
     alloc: FloatAllocation,
     const_index: dict[ValueId, int],
+    swap: dict[ValueId, bool],
 ) -> list[FloatScheduledOp]:
     ops: list[FloatScheduledOp] = []
     for vid in sorted(sched.issue_cycle, key=lambda v: (sched.issue_cycle[v], v)):
@@ -98,6 +101,8 @@ def _build_ops(
             _operand(mir, operand, sign, alloc, const_index)
             for operand, sign in zip(node.operands, node.operand_signs, strict=True)
         ]
+        if swap.get(vid):  # commutative operator: exchange operands (with their sign sidebands) to shrink read muxes
+            operands.reverse()
         ops.append(
             FloatScheduledOp(
                 inst=sched.inst_of[vid],

@@ -322,3 +322,45 @@ def test_fmul_ilog2_operator_rejects_out_of_range_k() -> None:
         FMulILog2Operator(FMT, k=limit)
     with pytest.raises(ValueError, match="k must satisfy"):
         FMulILog2Operator(FMT, k=-limit - 1)
+
+
+def _read_mux_fan_in(lir) -> int:  # type: ignore[no-untyped-def]
+    return sum(max(0, len(regs) - 1) for regs in lir.read_set_per_port.values())
+
+
+def test_marked_commutative_operators_are_bit_exact_commutative() -> None:
+    # The port-assignment pass swaps a commutative operator's operands, which is only sound if the operator is
+    # exactly symmetric. Guard the FAddOperator/FMulOperator markings against a future non-commutative slip-up.
+    import random
+
+    from holoso._value import FloatValue, add_float_values, mul_float_values
+
+    rng = random.Random(0)
+    assert FAddOperator(FMT).is_commutative and FMulOperator(FMT).is_commutative
+    assert not FDivOperator(FMT).is_commutative
+    for evaluate in (add_float_values, mul_float_values):
+        for _ in range(5000):
+            a = FloatValue.from_float(FMT, rng.uniform(-2.0, 2.0) * 2.0 ** rng.randint(-22, 22))
+            b = FloatValue.from_float(FMT, rng.uniform(-2.0, 2.0) * 2.0 ** rng.randint(-22, 22))
+            assert evaluate(a, b).bits == evaluate(b, a).bits
+
+
+def test_commutative_port_assignment_never_increases_read_mux_fan_in(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import holoso._lir._build as build_module
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import ekf1
+
+    cfg = OpConfig(
+        FAddOperator(FMT, stage_decode=1),
+        FMulOperator(FMT, stage_input=1),
+        FDivOperator(FMT),
+        FMulILog2OperatorFamily(FMT),
+    )
+    monkeypatch.setattr(build_module, "assign_commutative_ports", lambda *args, **kwargs: {})
+    baseline = build(_run(ekf1.update_x_P, cfg), "ekf1")
+    monkeypatch.undo()
+    optimized = build(_run(ekf1.update_x_P, cfg), "ekf1")
+
+    assert _read_mux_fan_in(optimized) <= _read_mux_fan_in(baseline)
+    assert _read_mux_fan_in(optimized) < _read_mux_fan_in(baseline)  # ekf1 has commutative reach to reclaim

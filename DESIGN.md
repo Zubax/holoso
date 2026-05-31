@@ -264,6 +264,13 @@ writer-sets, stable ref labels, and write-timeline reconstruction so backends do
 - Register allocation is reach-aware: it places values to minimize per-port read-set and per-register writer-set
   fan-in (the steering cost that matters on an FPGA), not the register count; widen `N` rather than spill.
 
+- Commutative port assignment (`_portassign.py`): after allocation, each use of a commutative operator has its two
+  operands oriented across its read ports to minimize the total read-set size. A register that an operand reads in one
+  position and another reads in the other position would otherwise sit in both ports' read muxes; consistent
+  orientation keeps it in one. This is a pure relabelling of which physical port reads which register --
+  no hardware, no latency -- and is seeded from the source orientation so it can only shrink the read muxes
+  (the Chen & Cong mux-aware port-assignment lever).
+
 - `branch` is the real control transfer: the microprogram counter jumps, untaken ops never run, and the II is whatever
   the executed path costs (each path's count is itself exact).
 
