@@ -42,6 +42,7 @@ from ._microcode import (
     Field,
     base_name,
     build_microcode,
+    code_width,
     cycle_summary,
     f_cidx,
     f_iv,
@@ -55,6 +56,7 @@ from ._microcode import (
     pack,
     port_const_map,
     read_ports,
+    write_target_lists,
 )
 
 _SUPPORT_FILES = {
@@ -123,7 +125,6 @@ def generate(lir: Lir) -> VerilogOutput:
 
     w = _Writer()
     rf = lir.float_regfile
-    waddr = max(1, (rf.nreg - 1).bit_length())
     cycw = lir.cyc_width
     pcw = max(1, lir.initiation_interval.bit_length())
     # Read-mux gather stride: round the float width up to the next power of two so the part-select bit offset
@@ -137,11 +138,12 @@ def generate(lir: Lir) -> VerilogOutput:
     port_consts = port_const_map(lir, read_port)
     read_sets = lir.read_set_per_port
     write_sets = lir.write_set_per_register
-    inst_targets: dict[FloatOperatorInstance, set[int]] = {}
-    for op in lir.float_ops:
-        inst_targets.setdefault(op.inst, set()).add(op.dst.index)
+    # Symmetric to the read-set index on the read side: the write-address field and the per-register write comparators
+    # carry the per-instance dense write-target index (ceil(log2 M) over each instance's M targets, not the whole
+    # file). The codebook is shared between the microcode and the comparators so they cannot drift.
+    write_lists = write_target_lists(lir)
 
-    fields = build_microcode(lir, read_port, port_consts, waddr)
+    fields = build_microcode(lir, read_port, port_consts, write_lists)
     ucw = finalize_fields(fields)
 
     issues_by_cycle, commits_by_cycle = lir.group_by_cycle
@@ -153,7 +155,7 @@ def generate(lir: Lir) -> VerilogOutput:
     last_pc = lir.initiation_interval  # = present_step + FETCH_LAG; the ROM is padded with NOPs up to here
 
     _emit_header(w, lir)
-    _emit_localparams(w, lir, waddr, cycw, pcw, ucw, rdmux_stride)
+    _emit_localparams(w, lir, cycw, pcw, ucw, rdmux_stride)
     _emit_declarations(w, lir)
     _emit_consts(w, lir)
     _emit_operators(w, lir)
@@ -161,7 +163,7 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_field_wires(w, fields)
     _emit_gather_wires(w, lir, read_sets, rdmux_pad)
     _emit_datapath_comb(w, lir, port_consts)
-    _emit_clocked(w, lir, read_port, port_consts, read_sets, write_sets, inst_targets, waddr)
+    _emit_clocked(w, lir, read_port, port_consts, read_sets, write_sets, write_lists)
     _emit_outputs(w, lir)
     w("\nendmodule\n")
     return VerilogOutput(verilog=w.render(), support_files=_SUPPORT_FILES)
@@ -206,7 +208,7 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
     w(f"// {title}", f"// {comment}")
 
 
-def _emit_localparams(w: _Writer, lir: Lir, waddr: int, cycw: int, pcw: int, ucw: int, rdmux_stride: int) -> None:
+def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int, rdmux_stride: int) -> None:
     fmt = lir.float_regfile.fmt
     compute = f"1..{lir.makespan} = compute, " if lir.makespan else ""
     nreg = max(1, lir.float_regfile.nreg)
@@ -215,7 +217,6 @@ localparam           WEXP  = {fmt.wexp};  // Float exponent bits fixed by the st
 localparam           WMAN  = {fmt.wman};  // Float mantissa bits fixed by the static schedule
 localparam           W     = WEXP + WMAN;
 localparam           NREG  = {nreg};  // >= 1; the bank is unused when no value needs a register
-localparam           WADDR = {waddr:2};  // register-index width used by the write selectors
 localparam           RDMUX_STRIDE = {rdmux_stride};  // read-mux gather element stride: W rounded up to a power of two
 localparam           CYCW  = {cycw:2};  // err_pc width: enough for any executing step (0..present)
 localparam           PCW   = {pcw:2};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
@@ -459,8 +460,7 @@ def _reg_write_stmts(
     reg: int,
     writers: list[FloatOperatorInstance],
     load_name: str | None,
-    inst_targets: dict[FloatOperatorInstance, set[int]],
-    waddr: int,
+    write_lists: dict[FloatOperatorInstance, list[int]],
 ) -> None:
     """Emit the write select for one register (input load plus only its actual writers) inside the clocked block."""
     clause = "if"
@@ -469,11 +469,13 @@ def _reg_write_stmts(
         clause = "else if"
     for inst in writers:
         sig, base = _sig(inst), base_name(inst)
-        # A register written by a single instance that only ever writes here needs no address compare.
-        if inst_targets.get(inst) == {reg}:
+        targets = write_lists[inst]
+        # An instance that only ever writes one register needs no address compare; otherwise compare against the
+        # dense write-target index this register occupies in the instance's codebook (matches the microcode value).
+        if len(targets) == 1:
             cond = f_we(base)
         else:
-            cond = f"{f_we(base)} && ({f_wa(base)} == {_lit(waddr, reg)})"
+            cond = f"{f_we(base)} && ({f_wa(base)} == {_lit(code_width(len(targets)), targets.index(reg))})"
         w(f"{clause} ({cond}) regs[{reg}] <= {sig}_y_q;")
         clause = "else if"
 
@@ -485,8 +487,7 @@ def _emit_clocked(
     port_consts: dict[int, list[int]],
     read_sets: dict[tuple[FloatOperatorInstance, int], list[int]],
     write_sets: dict[int, list[FloatOperatorInstance]],
-    inst_targets: dict[FloatOperatorInstance, set[int]],
-    waddr: int,
+    write_lists: dict[FloatOperatorInstance, list[int]],
 ) -> None:
     """Emit every sequential element in one always @(posedge clk): fetch, latches, writes, and control state."""
     nreg = max(1, lir.float_regfile.nreg)
@@ -528,7 +529,7 @@ always @(posedge clk) begin
         load_name = covered.get(reg)
         if load_name is None and not writers:
             continue  # an unused register (only the NREG>=1 floor with no values); leave it undriven
-        _reg_write_stmts(w, reg, writers, load_name, inst_targets, waddr)
+        _reg_write_stmts(w, reg, writers, load_name, write_lists)
     w("")
 
     w("// Control state: the only reset-gated registers.")

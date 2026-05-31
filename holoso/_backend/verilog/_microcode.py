@@ -35,6 +35,29 @@ def base_name(inst: FloatOperatorInstance) -> str:
     return f"{inst.operator.instance_stem}_{inst.index}"
 
 
+def code_width(count: int) -> int:
+    """Bit width of a dense code enumerating ``count`` distinct values (at least 1 bit)."""
+    return max(1, (count - 1).bit_length()) if count > 1 else 1
+
+
+def write_target_lists(lir: Lir) -> dict[FloatOperatorInstance, list[int]]:
+    """
+    Per instance, the sorted distinct registers it ever writes -- the write-address field's dense codebook.
+    The write-address field carries the position in this list, not the raw register index, so its width is
+    ``code_width(M)`` over the instance's ``M`` write targets rather than the whole register file. The per-register
+    write selector compares against the same position, so the recode is transparent (no decode logic on the consumer)
+    and mirrors the read side, where the read-address field carries the dense read-set index.
+    """
+    targets: dict[FloatOperatorInstance, list[int]] = {}
+    for op in lir.float_ops:
+        regs = targets.setdefault(op.inst, [])
+        if op.dst.index not in regs:
+            regs.append(op.dst.index)
+    for regs in targets.values():
+        regs.sort()
+    return targets
+
+
 # Microcode field names. Signal names (``s_<base>_*``) and field names (``mc_*_<base>``) live in disjoint namespaces.
 def f_rd(port: int) -> str:
     return f"mc_rd{port}"
@@ -104,7 +127,10 @@ def port_const_map(lir: Lir, read_port: dict[tuple[FloatOperatorInstance, int], 
 
 
 def build_microcode(
-    lir: Lir, read_port: dict[tuple[FloatOperatorInstance, int], int], port_consts: dict[int, list[int]], waddr: int
+    lir: Lir,
+    read_port: dict[tuple[FloatOperatorInstance, int], int],
+    port_consts: dict[int, list[int]],
+    write_lists: dict[FloatOperatorInstance, list[int]],
 ) -> dict[str, Field]:
     """
     Build the per-step value table of every control field from the static schedule.
@@ -128,24 +154,21 @@ def build_microcode(
     # single-reader or always-constant port keeps the constant value finalize_fields lifts out of the ROM.
     port_read_set = {read_port[key]: regs for key, regs in lir.read_set_per_port.items()}
 
-    def rd_width(port: int) -> int:
-        regs = port_read_set.get(port, [])
-        return max(1, (len(regs) - 1).bit_length()) if len(regs) > 1 else 1
-
     for inst in lir.float_instances:
         base = base_name(inst)
         add(f_iv(base), 1, 0)
         add(f_we(base), 1, 0)
-        add(f_wa(base), waddr, None)
+        # The write-address field carries the dense write-target index (0..M-1), symmetric to the read-address field.
+        add(f_wa(base), code_width(len(write_lists.get(inst, []))), None)
         add(f_ysgn(base), 2, None)
         for pos in range(inst.operator.arity):
             add(f_osgn(base, PORT_LETTERS[pos]), 2, None)
             port = read_port[(inst, pos)]
-            add(f_rd(port), rd_width(port), None)
+            add(f_rd(port), code_width(len(port_read_set.get(port, []))), None)
             if port in port_consts:
                 add(f_selc(port), 1, None)
                 if len(port_consts[port]) > 1:
-                    add(f_cidx(port), max(1, (len(port_consts[port]) - 1).bit_length()), None)
+                    add(f_cidx(port), code_width(len(port_consts[port])), None)
 
     for op in lir.float_ops:
         base = base_name(op.inst)
@@ -167,7 +190,7 @@ def build_microcode(
                     fields[f_selc(port)].values[rci] = 0
                 fields[f_rd(port)].values[rci] = port_read_set[port].index(operand.source.index)
         fields[f_we(base)].values[wcc] = 1
-        fields[f_wa(base)].values[wcc] = op.dst.index
+        fields[f_wa(base)].values[wcc] = write_lists[op.inst].index(op.dst.index)
 
     return fields
 

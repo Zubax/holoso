@@ -350,8 +350,10 @@ regalloc: reach-aware coloring (greedy port-affinity + a bounded SciPy dual-anne
   crossbar. Per read port the backend emits a mux spanning only that operand's read-set: a single-register operand is
   a bare wire, an always-constant operand is the immediate, and a multi-register operand is a gather bus (its read-set
   registers concatenated) indexed by a part-select -- see "Read mux" below. Per register it emits a write select
-  spanning only that register's writers (a single-writer register needs no address compare). The controller word
-  carries only the per-port read-set index and the per-register write enable/address.
+  spanning only that register's writers (a single-writer register needs no address compare). The two sides are
+  symmetric: the read-address field carries the dense read-set index and the write-address field the dense
+  write-target index (each `ceil(log2 set)` wide, not the file-wide register index), so the controller word carries
+  only those set-local indices plus the per-register write enable.
 
 - Inputs preload directly into the low registers `0..nload-1` on the accept step, folded into each such register's
   write select and gated by `in_valid`, rather than through write ports. `nload` spans the input block (the highest
@@ -388,11 +390,12 @@ explicit NOP word and the PC keeps advancing, and the ROM is NOP-padded past the
 scoreboard is needed because latencies are static.
 
 The control word stores selectors and addresses, never data: each operand's read mux is driven by its read-address
-field (spanning only the read-set), and each register's write select by the per-instance write-enable and destination
-(the operator result wires straight into its writeback latch). Constant operands keep using the `const_<i>` immediate
-wires through a small per-operand select, latched alongside the register read. A control field that is constant across
-the whole program -- very common for sign controls, and now also for single-reader read addresses and single-writer
-destinations -- is driven by a constant net and lifted out of the ROM, so synthesis prunes the logic it feeds; the
+field (the dense read-set index), and each register's write select by the per-instance write-enable and write-address
+field (the dense write-target index, against which the per-register comparator matches; the operator result wires
+straight into its writeback latch). Constant operands keep using the `const_<i>` immediate wires through a small
+per-operand select, latched alongside the register read. A control field that is constant across the whole program --
+very common for sign controls, and now also for single-reader read addresses and single-writer destinations -- is
+driven by a constant net and lifted out of the ROM, so synthesis prunes the logic it feeds; the
 Python packer that builds the ROM and the bit-slice offsets the module reads are produced together, so they cannot
 drift.
 
@@ -406,6 +409,16 @@ power of two restores zero DSP and the smallest area on all three flows. (yosys 
 to LUTs regardless.) The pad bits are constant-0 and pruned, so the rounding is free. The original form was an explicit
 per-arm `case` -- tool-robust but verbose; the gather is terser and, with the power-of-two stride, at least as small on
 every flow.
+
+Write select. Each register's writeback is a one-hot select over only its writers. For a register written by an
+instance that writes more than one register, the guard compares that instance's write-address field against the dense
+index this register occupies in the instance's sorted write-target set -- the same codebook the microcode packs, so
+the two cannot drift. This mirrors the read-set index on the read side: both fields carry a set-local index sized to
+the set, never the file-wide register index. A single-target instance needs no compare (its field is lifted out as a
+constant), and the schedule guarantees at most one writer per register per step, so the priority chain the emitter
+writes is logically one-hot. The recode is transparent -- the comparator simply matches a relabelled constant -- so it
+costs no decode logic; it only narrows the ROM word and the comparators, with no measured area or timing effect today
+but a smaller microcode word that helps once a kernel approaches a BRAM-width boundary.
 
 Errors are non-fatal and informative: each error-bearing operator's flag rides the same writeback latch as its result,
 and `err` ORs it gated by that instance's (latch-aligned) write-enable; the control block latches
