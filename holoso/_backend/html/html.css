@@ -1,5 +1,5 @@
 @import url('https://fonts.googleapis.com/css2?family=Ubuntu+Mono:wght@400;700&display=swap');
-:root { --c-input: #484; --c-state: #848; --c-live: #ddd; --c-ink: #445; --c-grid: #aaa; }
+:root { --c-input: #484; --c-state: #848; --c-live: #ddd; --c-ink: #445; --c-grid: #aaa; --c-hl: #aaa; }
 * { box-sizing: border-box; }
 body { font-family: "Ubuntu Mono", ui-monospace, monospace; margin: 0; background: #ffffff; color: #111827; font-size: 14px; }
 header { padding: 16px 28px; background: #111827; color: #f9fafb; }
@@ -50,13 +50,12 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
 .grid th.gband { position: relative; height: 15px; padding: 0; border-bottom: 1px solid #cbd5e1; }
 .grid th.gband span { position: absolute; left: 0; right: 0; bottom: 2px; overflow: hidden; text-align: center; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #4b5563; white-space: nowrap; }
 .grid td { height: 13px; font-size: 11px; line-height: 1; white-space: nowrap; border-top: 1px solid var(--c-grid); }
-/* Faint residence tint over the cycles a register holds a live value (the legend swatch reuses the same .sw.live
-   below). A class, not an inline style, so the higher-specificity row-hover rule below can override it. */
+/* Faint residence tint over the cycles a register holds a live value. */
 .grid td.live { background: var(--c-live); }
-/* Hovering any cell tints its whole clock row and (via the .colhl class the script sets) its whole column, forming a
-   crosshair -- both outrank .live so liveness is overridden under the cursor, while filled cells keep their inline
-   operator color. */
-.grid tr:hover td, .grid td.colhl { background: #ccc; }
+/* Hover crosshair without layout shifts. */
+.grid tr:hover td { box-shadow: inset 0 1px 0 var(--c-hl), inset 0 -1px 0 var(--c-hl); }
+.grid td.colhl { box-shadow: inset 1px 0 0 var(--c-hl), inset -1px 0 0 var(--c-hl); }
+.grid tr:hover td:hover { box-shadow: inset 0 0 0 2px var(--c-hl); }
 .grid td.gc { width: 13px; padding: 0; text-align: center; border-right: 1px solid var(--c-grid); overflow: hidden; }
 /* Operator-stage cells: same square geometry as the register cells; filled (inline) with the operator color on the
    cycles their pipeline stage is occupied. The block sits between the constants and OPERATIONS. */
