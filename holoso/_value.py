@@ -90,9 +90,7 @@ def add_float_values(a: FloatValue, b: FloatValue) -> FloatValue:
         return _canonical_inf(fmt, db.sign)
 
     result = _finite_fraction(fmt, da) + _finite_fraction(fmt, db)
-    if result == 0:
-        return _zero(fmt)
-    return _round_fraction_to_zkf(fmt, 1 if result < 0 else 0, abs(result))
+    return FloatValue.from_bits(fmt, fmt.pack(result))
 
 
 def mul_float_values(a: FloatValue, b: FloatValue) -> FloatValue:
@@ -147,7 +145,7 @@ def div_float_values(a: FloatValue, b: FloatValue) -> FloatValue:
         return _canonical_inf(fmt, result_sign)
 
     value = Fraction(da.significand, db.significand) * _pow2(da.exp - db.exp)
-    return _round_fraction_to_zkf(fmt, result_sign, value)
+    return FloatValue.from_bits(fmt, fmt.pack(-value if result_sign else value))
 
 
 def mul_ilog2_float_value(a: FloatValue, k: int) -> FloatValue:
@@ -247,29 +245,6 @@ def _pack_reference(
     return _from_parts(fmt, sign, exp_rounded, rounded_significand & _frac_mask(fmt))
 
 
-def _round_fraction_to_zkf(fmt: FloatFormat, sign: int, value: Fraction) -> FloatValue:
-    if value <= 0:
-        return _zero(fmt)
-
-    exp_unbiased = _floor_log2(value)
-    if exp_unbiased < _min_exp_unbiased(fmt):
-        if value >= _pow2(_min_exp_unbiased(fmt) - 1):
-            return _normal(fmt, sign, 1, 0)
-        return _zero(fmt)
-
-    scaled = value / _pow2(exp_unbiased) * (1 << _wfrac(fmt))
-    quotient, remainder = divmod(scaled.numerator, scaled.denominator)
-    twice_remainder = 2 * remainder
-    if twice_remainder > scaled.denominator or (twice_remainder == scaled.denominator and (quotient & 1) != 0):
-        quotient += 1
-    if quotient >= (1 << fmt.wman):
-        quotient >>= 1
-        exp_unbiased += 1
-    if exp_unbiased > _max_exp_unbiased(fmt):
-        return _canonical_inf(fmt, sign)
-    return _normal(fmt, sign, exp_unbiased + _bias(fmt), quotient & _frac_mask(fmt))
-
-
 def _zero(fmt: FloatFormat) -> FloatValue:
     return _from_parts(fmt, 0, 0, 0)
 
@@ -290,17 +265,6 @@ def _from_parts(fmt: FloatFormat, sign: int, exp: int, frac: int) -> FloatValue:
 
 def _pow2(exp: int) -> Fraction:
     return Fraction(1 << exp, 1) if exp >= 0 else Fraction(1, 1 << -exp)
-
-
-def _floor_log2(value: Fraction) -> int:
-    if value <= 0:
-        raise ValueError("log2 is defined for positive values only")
-    exp = value.numerator.bit_length() - value.denominator.bit_length()
-    while _pow2(exp + 1) <= value:
-        exp += 1
-    while _pow2(exp) > value:
-        exp -= 1
-    return exp
 
 
 def _sticky_below(value: int, high_bit: int) -> int:

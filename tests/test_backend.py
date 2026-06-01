@@ -8,7 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso import (
+    FAddOperator,
+    FDivOperator,
+    FloatFormat,
+    FMulILog2OperatorFamily,
+    FMulOperator,
+    OpConfig,
+    UnsupportedConstruct,
+)
 from holoso._backend.verilog import generate
 from holoso._frontend import lower
 from holoso._hir import optimize
@@ -123,6 +131,26 @@ def test_constant_only_module_elaborates(tmp_path: Path) -> None:
     fmt = FloatFormat(8, 24)
     lir = build(_run(const_only, _ops(fmt)), "const_only")
     _elaborate("const_only", generate(lir).verilog, tmp_path)
+
+
+def test_parameter_name_colliding_with_control_port_is_rejected() -> None:
+    # A parameter named 'valid'/'ready' becomes data port in_valid/in_ready, colliding with the control ports and
+    # producing un-elaboratable Verilog; LIR construction must reject it instead of emitting duplicate ports.
+    def collide(valid, ready):  # type: ignore[no-untyped-def]
+        return valid + ready
+
+    fmt = FloatFormat(6, 18)
+    with pytest.raises(UnsupportedConstruct, match="duplicate port"):
+        build(_run(collide, _ops(fmt)), "collide")
+
+
+def test_kernel_without_outputs_is_rejected() -> None:
+    def empty(x):  # type: ignore[no-untyped-def]
+        return ()
+
+    fmt = FloatFormat(6, 18)
+    with pytest.raises(UnsupportedConstruct, match="at least one output"):
+        build(_run(empty, _ops(fmt)), "empty")
 
 
 @requires_iverilog

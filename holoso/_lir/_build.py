@@ -27,13 +27,15 @@ def _operation(mir: MirFloatView, vid: ValueId) -> MirFloatOperation:
 
 def build(mir: Mir, module_name: str) -> Lir:
     """Schedule, bind, and register-allocate selected MIR into a pipelined microprogram."""
+    if not mir.outputs:
+        raise UnsupportedConstruct("Synthesized kernel must produce at least one output value")
     float_mir = MirFloatView.from_mir(mir)
     pool = resolve_pool(float_mir)
     sched = schedule_ops(float_mir, pool)
     alloc = allocate_float(float_mir, sched.issue_cycle, sched.inst_of, sched.makespan)
     swap = assign_commutative_ports(float_mir, sched, alloc)
     consts, const_index = _build_const_pool(float_mir)
-    return Lir(
+    lir = Lir(
         module_name=module_name,
         float_instances=sched.instances,
         float_consts=consts,
@@ -51,6 +53,9 @@ def build(mir: Mir, module_name: str) -> Lir:
         op_count=len(float_mir.operation_nodes),
         max_chain_len=_max_chain_len(float_mir),
     )
+    if len({port.name for port in lir.ports}) != len(lir.ports):
+        raise UnsupportedConstruct(f"Non-unique port names")
+    return lir
 
 
 def _build_const_pool(mir: MirFloatView) -> tuple[list[float], dict[ValueId, int]]:

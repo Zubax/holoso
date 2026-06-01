@@ -67,17 +67,21 @@ class FloatFormat:
             return 0  # canonical positive zero
         if math.isinf(magnitude):
             return self._pack(sign, self._exp_inf, 0)
+        return self.pack(Fraction(value))
 
+    def pack(self, value: Fraction) -> int:
+        """Round a signed exact rational to the nearest float (round-to-nearest, ties to even) and assemble it."""
+        if value == 0:
+            return 0  # canonical positive zero
+        sign = 1 if value < 0 else 0
+        magnitude = abs(value)
         wfrac = self._wfrac
-        exact = Fraction(magnitude)
-        exp = _floor_log2(exact)
+        exp = _floor_log2(magnitude)
         min_exp = 1 - self._bias
         max_exp = self._exp_inf - 1 - self._bias
-        if exp < min_exp:
-            # Underflow: round against the half-MIN_NORMAL boundary (ZKF has no subnormals).
-            return self._pack(sign, 1, 0) if exact >= _pow2(min_exp - 1) else 0
-
-        scaled = exact / _pow2(exp) * (1 << wfrac)
+        if exp < min_exp:  # Underflow: round against the half-MIN_NORMAL boundary (no subnormals).
+            return self._pack(sign, 1, 0) if magnitude >= _pow2(min_exp - 1) else 0
+        scaled = magnitude / _pow2(exp) * (1 << wfrac)
         quotient, remainder = divmod(scaled.numerator, scaled.denominator)
         twice = 2 * remainder
         if twice > scaled.denominator or (twice == scaled.denominator and (quotient & 1)):
@@ -138,6 +142,7 @@ class FloatFormat:
         return (1 << self.wexp) - 1
 
     def _pack(self, sign: int, exp: int, frac: int) -> int:
+        """Simply assemble raw sign/exponent/fraction fields without rounding."""
         wfrac = self._wfrac
         return ((sign & 1) << (self.width - 1)) | ((exp & self._exp_inf) << wfrac) | (frac & ((1 << wfrac) - 1))
 

@@ -143,3 +143,88 @@ def test_cosim_new_operator_stages(sim: str) -> None:
         FMulILog2OperatorFamily(fmt, stage_input=1),
     )
     _run_cosim(sim, kernel, fmt, "new_stages", ops=ops)
+
+
+# The generated bench only checks err_pc == 0 over a bounded input range, so it never exercises the div0 -> err_pc
+# path. This custom bench drives an exact zero divisor and asserts the diagnostic is set, then cleared on the next
+# accepted transaction. It cannot reuse the generated bench because the numerical model does not predict errors.
+_ERR_BENCH = """
+import cocotb
+from cocotb.clock import Clock
+from cocotb.triggers import FallingEdge, RisingEdge, Timer
+import holoso
+
+_FMT = holoso.FloatFormat(@@WEXP@@, @@WMAN@@)
+
+
+async def _transact(dut, a, b):
+    while int(dut.in_ready.value) != 1:
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+    dut.in_a.value = int(_FMT.encode(a))
+    dut.in_b.value = int(_FMT.encode(b))
+    dut.in_valid.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    dut.in_valid.value = 0
+    while int(dut.out_valid.value) != 1:
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+    err = int(dut.err_pc.value)
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    return err
+
+
+@cocotb.test()
+async def div0_errpc(dut):
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await FallingEdge(dut.clk)
+    dut.rst.value = 1
+    dut.in_valid.value = 0
+    for _ in range(4):
+        await RisingEdge(dut.clk)
+    dut.rst.value = 0
+    await FallingEdge(dut.clk)
+    dut.out_ready.value = 1
+
+    assert await _transact(dut, 6.0, 2.0) == 0, "clean divide spuriously flagged err_pc"
+    assert await _transact(dut, 1.0, 0.0) != 0, "divide-by-zero did not set err_pc"
+    assert await _transact(dut, 6.0, 2.0) == 0, "err_pc was not cleared on the next transaction"
+"""
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_div0_error(sim: str) -> None:
+    def kdiv(a, b):  # type: ignore[no-untyped-def]
+        return a / b
+
+    fmt = FloatFormat(6, 18)
+    name = "kdiv"
+    lir = build(lower_to_mir(optimize(lower(kdiv)), _ops(fmt)), name)
+    gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"{name}_err_w{fmt.wexp}_{fmt.wman}"
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"err_{name}_w{fmt.wexp}_{fmt.wman}"
+    (gen_dir / f"{name}.v").write_text(generate_verilog(lir).verilog)
+    test_module = f"test_{name}_err"
+    (gen_dir / f"{test_module}.py").write_text(
+        _ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
+    )
+
+    runner = get_runner(sim)
+    runner.build(
+        sources=[gen_dir / f"{name}.v", *sources()],
+        includes=[HDL_DIR],
+        hdl_toplevel=name,
+        build_args=build_args(sim),
+        build_dir=str(build_dir),
+        clean=True,
+        timescale=("1ns", "1ps"),
+    )
+    runner.test(
+        hdl_toplevel=name,
+        test_module=test_module,
+        test_dir=str(gen_dir),
+        build_dir=str(build_dir),
+        results_xml=str(build_dir / "results.xml"),
+    )

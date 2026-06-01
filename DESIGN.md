@@ -206,8 +206,10 @@ MIR builder, and value remap. The float lowerer maps each semantic float operato
 `FloatHardwareOperator` from the
 single root-level hardware-operator config and collapses semantic `float_neg`/`float_abs` chains into selected-float MIR
 `FloatSignControl` values on operator operands/results or output wires. Semantic `float_mul_pow2(k)` selects
-`fmul_ilog2_const` when the configured float format supports that exponent; otherwise it falls back to ordinary multiply
-by the constant `2^k`.
+`fmul_ilog2_const` when the configured float format supports that exponent; an exponent outside the operator's range is
+rejected with an explicit error. A fallback to an ordinary multiply by the constant `2^k` would have no practical
+utility: such an exponent always lies outside the format's representable range, so the constant itself would overflow to
+a (rejected) infinity or underflow to zero, making the multiply degenerate.
 
 `MirBuilder` is a single graph builder with typed construction methods; it does not own a global scalar type, so future
 mixed-type expressions can share one value namespace and add typed constructors for bool/int values. Hardware operators
