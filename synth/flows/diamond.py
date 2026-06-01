@@ -88,6 +88,7 @@ def _strategy(freq_MHz: float) -> str:
         "PROP_MAP_RegRetiming": "True",
         "PROP_MAP_TimingDriven": "True",
         "PROP_PAR_EffortParDes": "5",
+        "PROP_PAR_LowSkewClokNet": "True",  # Diamond property name spelling is intentional.
         "PROP_PAR_RoutePassParDes": "6",
         "PROP_PAR_RunParWithTrce": "True",
         "PROP_SYN_EdfFrequency": f"{freq_MHz:.0f}",
