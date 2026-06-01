@@ -14,6 +14,7 @@
         return;
     }
     var svg = wrap.querySelector("svg.edges");
+    var grid = wrap.querySelector("table.grid");
     var SVG_NS = "http://www.w3.org/2000/svg";
 
     // Elements grouped by operation, so a hover can light up just one operation's nodes. The result cells and the ops
@@ -119,11 +120,39 @@
         return false;
     }
 
+    // Column crosshair: hovering any cell highlights its whole column (the row is highlighted by CSS :hover), by
+    // toggling .colhl on that column's body cells. The active column is tracked so re-firing inside a cell is a no-op.
+    var columnCells = [];
+    var columnIndex = -1;
+
+    function highlightColumn(index) {
+        if (index === columnIndex) {
+            return;
+        }
+        columnCells.forEach(function (cell) {
+            cell.classList.remove("colhl");
+        });
+        columnCells = [];
+        columnIndex = index;
+        if (index < 0) {
+            return;
+        }
+        var rows = grid.rows;
+        for (var i = 0; i < rows.length; i++) {
+            var cell = rows[i].cells[index];
+            if (cell && cell.tagName === "TD") {  // body cells only; header cells span columns and are skipped
+                cell.classList.add("colhl");
+                columnCells.push(cell);
+            }
+        }
+    }
+
     wrap.addEventListener("mouseover", function (event) {
         var owner = event.target.closest("[data-op]");  // a result cell or an ops chip
         focus(owner ? owner.dataset.op : null);
 
         var cell = event.target.closest("td");
+        highlightColumn(cell && grid.contains(cell) ? cell.cellIndex : -1);
         if (!cell || !cell.classList.contains("gc")) {
             return;
         }
@@ -142,6 +171,7 @@
     wrap.addEventListener("mouseout", function (event) {
         if (!wrap.contains(event.relatedTarget)) {
             focus(null);
+            highlightColumn(-1);
         }
     });
 })();

@@ -177,8 +177,6 @@ def _constants(lir: Lir) -> str:
     return f"<h2>Constants</h2><div>{chips}</div>"
 
 
-_NEUTRAL = "#6b7280"  # input/output bookend chips (port boundary, not an operator)
-_LIVE_BG = "#edf2fb"  # legend swatch for the liveness tint; the grid cells use the ``.live`` CSS class (same color)
 type ColKey = FloatRegRef | FloatConstRef
 
 
@@ -385,7 +383,7 @@ def _schedule(lir: Lir) -> str:
             stage_tip[key] = f"{op.inst.operator.mnemonic}_{op.inst.index} s{k}: {tip}"
         group += 1
 
-    out = [_schedule_key(operator_colors), "<div id='schedwrap'><table class='grid'>"]
+    out = [_schedule_key(operator_colors, bool(lir.float_state_slots)), "<div id='schedwrap'><table class='grid'>"]
     # Header row 0: group bands over the register, constant and operator-pipeline blocks. clk/operations span all rows.
     out.append("<tr><th class='gh clkh' rowspan='3'><span>clk</span></th>")
     if nreg:
@@ -399,11 +397,15 @@ def _schedule(lir: Lir) -> str:
         out.append(f"<th class='gband{seam}' colspan='{n_stage}'><span>operator pipelines</span></th>")
     out.append("<th class='oph' rowspan='3'>operations</th>")
     out.append("<th class='oph pch' rowspan='3'>pc</th></tr>")
-    # Header row 1: register and constant column labels, and one group cell per operator spanning its stages.
+    # Header row 1: register and constant column labels, and one group cell per operator spanning its stages. A register
+    # that latches an input or retains state is labeled with that name (color-coded) beside its r-index.
+    reg_names = _register_names(lir)
     out.append("<tr>")
     for index in range(nreg):
         cls = "gh" + _border_suffix(index, dv.data_thin, dv.data_thick)
-        out.append(f"<th class='{cls}' rowspan='2'><span>r{index}</span></th>")
+        named = reg_names.get(index)
+        label = f"r{index}" if named is None else f"<span class='rn {named[1]}'>{_esc(named[0])}</span> r{index}"
+        out.append(f"<th class='{cls}' rowspan='2'><span>{label}</span></th>")
     for index in range(nconst):
         cls = "gh k" + _border_suffix(nreg + index, dv.data_thin, dv.data_thick)
         out.append(f"<th class='{cls}' rowspan='2'><span>c{index}</span></th>")
@@ -426,6 +428,8 @@ def _schedule(lir: Lir) -> str:
     # One displayed row per clock cycle, cycle-accurate to the hardware: the accept/input-load cycle (0), then the
     # compute, latch, and fetch-staging cycles 1..II. out_valid rises on the last row (the present cycle == II).
     in_cells: dict[ColKey, str] = {load.dst: _input_chip(f"in_{load.name}") for load in lir.float_inputs}
+    for slot in lir.float_state_slots:  # at cycle 0 the persistent registers hold their reset snapshot, not an input
+        in_cells[slot.reg] = _state_chip(f"{slot.name} = {slot.reset_value!r}")
     out.append(_bookend_row("in", in_cells, columns, live, 0, n_stage, dv))
 
     for cyc in compute_cycles:  # one row per compute cycle; idle cycles show only pipeline advance
@@ -496,26 +500,49 @@ def _columns_of(lir: Lir) -> list[ColKey]:
 
 
 def _input_chip(tip: str) -> str:
-    """A neutral input-write marker for the cycle-0 latch row."""
-    return f"<span class='wr' style='background:{_NEUTRAL}' title='{tip}'>&#9662;</span>"
+    """A neutral input-write marker for the cycle-0 latch row (``.wr.input`` carries its color)."""
+    return f"<span class='wr input' title='{tip}'>&#9662;</span>"
 
 
-def _schedule_key(operator_colors: dict[type[HardwareOperator], str]) -> str:
+def _state_chip(tip: str) -> str:
+    """A retained-state latch marker for the cycle-0 row: a persistent slot holding its reset snapshot (``.wr.state``)."""
+    return f"<span class='wr state' title='{tip}'>&#9662;</span>"
+
+
+def _register_names(lir: Lir) -> dict[int, tuple[str, str]]:
+    """
+    Map each register that has a stable role to ``(label, kind)``: the input lanes to the port they latch at accept and
+    the state slots to the attribute they retain. Other registers are anonymous scratch; both kinds may still be reused
+    by operations later, but their cycle-0 role is what the label names.
+    """
+    names: dict[int, tuple[str, str]] = {}
+    for load in lir.float_inputs:
+        names[load.dst.index] = (f"in_{load.name}", "input")
+    for slot in lir.float_state_slots:
+        names[slot.reg.index] = (slot.name, "state")
+    return names
+
+
+def _schedule_key(operator_colors: dict[type[HardwareOperator], str], has_state: bool) -> str:
     """A small legend above the grid: operator-kind colors plus the read/write chip shapes."""
     kinds = [
         f"<span class='wr' style='background:{color}'>{_esc(cls.mnemonic)}</span>"
         for cls, color in operator_colors.items()
     ]
+    state_key = (
+        "<span><span class='wr state'>&#9662;</span> retained state (cycle-0 snapshot)</span>" if has_state else ""
+    )
     return (
         "<h2>Schedule</h2><div class='gridkey'>"
         + " ".join(kinds)
-        + "<span><span class='sw' style='background:#374151'></span> filled cell = result committed (operator n)</span>"
-        + "<span><svg class='lk' width='24' height='12'><line x1='2' y1='3' x2='21' y2='10' stroke='#374151' "
-        "stroke-width='1'/><circle cx='21' cy='10' r='1.8' fill='#374151'/></svg> edge: result &rarr; its operands</span>"
-        + "<span><span class='sw' style='background:#374151'></span> operator-stage block: s0..sN occupancy as the "
+        + "<span><span class='sw ink'></span> filled cell = result committed (operator n)</span>"
+        + "<span><svg class='lk' width='24' height='12'><line x1='2' y1='3' x2='21' y2='10' stroke='currentColor' "
+        "stroke-width='1'/><circle cx='21' cy='10' r='1.8' fill='currentColor'/></svg> edge: result &rarr; its operands</span>"
+        + "<span><span class='sw ink'></span> operator-stage block: s0..sN occupancy as the "
         "pipeline advances</span>"
-        + f"<span><span class='sw' style='background:{_LIVE_BG}'></span> register holds a live value</span>"
-        + f"<span><span class='wr' style='background:{_NEUTRAL}'>&#9662;</span> module input latch</span>"
+        + "<span><span class='sw live'></span> register holds a live value</span>"
+        + "<span><span class='wr input'>&#9662;</span> module input latch</span>"
+        + state_key
         + f"<span>pc = microcode step executing this cycle (clk&minus;{FETCH_LAG} fetch lag)</span>"
         + "</div>"
     )
