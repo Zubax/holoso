@@ -77,13 +77,23 @@ def synth_examples(session: nox.Session) -> None:
         flows = [flow for f in flows for flow in ("--flow", f)]
         session.run("python", "-m", "synth", source, target, *flows, "--rtl", "lib/kulibin/float/hdl")
 
-    syn("examples/madd.py", "madd", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
-    syn("examples/poly3.py", "poly3", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
+    # Wide scalars require extra stages to close timings.
+    op_ecp5_e8w36 = (
+        "fadd.stage_decode=1,fadd.stage_align=1,fadd.stage_normalize=1,fadd.stage_pack=1,"
+        "fmul.stage_input=1,fmul.stage_pack=1"
+    )
     syn(
         "examples/trapezoidal_leaky_streaming_integrator.py",
         "TrapezoidalLeakyStreamingIntegrator",
-        ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"],
+        [
+            f"yosys-ecp5:freq=100,{op_ecp5_e8w36}",
+            f"diamond-ecp5:freq=100,{op_ecp5_e8w36}",
+            "vivado:freq=150",
+        ],
     )
+
+    syn("examples/madd.py", "madd", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
+    syn("examples/poly3.py", "poly3", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
     syn(
         "examples/ekf1.py",
         "update_x_P",
