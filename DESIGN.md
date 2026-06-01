@@ -3,7 +3,11 @@
 Holoso lowers a small subset of Python (numerical control/DSP kernels) into vendor-neutral, synthesizable Verilog.
 See `README.md` for scope and `PRIOR_ART.md` for why existing tools don't fit. This document records the architecture
 we are building toward; it is expected to change frequently, and often may not be up to date.
-Initial exploratory notes live in `DESIGN.draft.md` (outdated, superseded by this document).
+
+THIS IS NOT A SPECIFICATION. We don't have to commit to anything outlined here; it is expected that many of the
+proposed design decisions and trade-offs won't survive contact with reality, and we should be ready to discard
+them and redesign at any moment.
+This is a rough sketch of what the design *might* look like *if* our expectations are correct. 
 
 One must read the representative use-case examples under the `examples/` directory to understand the motivation.
 
@@ -70,11 +74,11 @@ model for verification, and once that is proven, move on to the actual HDL gener
 
 ## Python API
 
-`synthesize` takes the object -- a function or class, not a source file or path -- and returns an in-memory result;
+`synthesize` is the main entry point that returns an in-memory result;
 nothing touches the filesystem unless the caller asks.
 
 ```python
-def synthesize(target, *, ops: OpConfig, entry: str = "__call__", name: str | None = None) -> SynthesisResult: ...
+def synthesize(target, /, ops: OpConfig, *, name: str | None = None) -> SynthesisResult: ...
 
 @dataclass(frozen=True)
 class SynthesisResult:

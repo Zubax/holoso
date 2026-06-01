@@ -167,8 +167,13 @@ def generate(lir: Lir) -> VerilogOutput:
 
 
 def _emit_header(w: _Writer, lir: Lir) -> None:
+    from holoso import __url__, __version__
+
+    # Generation time is not included for reproducibility.
     fmt = lir.float_regfile.fmt
     w(f"""
+// Constructed by Holoso v{__version__} <{__url__}>. Do not edit.
+
 `timescale 1ns/1ps
 
 // Float format: exponent {fmt.wexp} bits, significand {fmt.wman} bits, total {fmt.width} bits.

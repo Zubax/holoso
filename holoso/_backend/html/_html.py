@@ -29,8 +29,6 @@ class HtmlOutput:
         return f"{type(self).__name__}(html_bytes={len(self.html.encode())})"
 
 
-_HOMEPAGE_URL = "https://github.com/Zubax/holoso"
-
 _CSS = resources.files(__package__).joinpath("html.css").read_text(encoding="utf-8")
 # Interactive layer; ``__DATA__`` is replaced by the per-module payload in ``_sched_script``.
 _SCHED_JS = resources.files(__package__).joinpath("html.js").read_text(encoding="utf-8")
@@ -50,13 +48,15 @@ def _op_text(op: FloatScheduledOp) -> str:
 
 
 def generate(lir: Lir, verilog_output: VerilogOutput) -> HtmlOutput:
+    from holoso import __url__, __version__
+
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    link = f"<a href='{_HOMEPAGE_URL}'>Holoso</a>"
     out: list[str] = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'>",
         f"<title>Module {_esc(lir.module_name)} - Holoso</title><style>{_CSS}</style></head><body>",
         f"<header><h1>Module {_esc(lir.module_name)}</h1>"
-        f"<div class='sub'>Synthesized by {link} at {generated}</div></header><main>",
+        f"<div class='sub'>Synthesized by <a href='{__url__}'>Holoso</a> v{__version__} at"
+        f" {generated}</div></header><main>",
     ]
     # The compact summary sections share one wrapping row (metrics, then the narrow constants and interface) so they
     # do not waste page height; the wide register-grid schedule follows below.
