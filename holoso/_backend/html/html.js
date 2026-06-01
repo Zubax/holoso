@@ -48,7 +48,10 @@
             var y1 = from.top - origin.top + from.height / 2;
             var x2 = to.left - origin.left + to.width / 2;
             var y2 = to.top - origin.top + to.height / 2;
-            var color = edge[2];
+            // "state" is a sentinel for a state boundary write; resolve it to the themed --c-state (color stays in CSS).
+            var color = edge[2] === "state"
+                ? getComputedStyle(document.documentElement).getPropertyValue("--c-state").trim()
+                : edge[2];
             var group = edge[3];
 
             var line = document.createElementNS(SVG_NS, "line");

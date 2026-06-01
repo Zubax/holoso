@@ -179,6 +179,21 @@ def allocate_float(
         if r_in is None or last_use[r_in] <= def_cycle[live_out]:
             pinned[live_out] = state_regs[slot.name]
 
+    # WAR backstop: each slot's new value must land no earlier than its live-in's last read, so the old value is fully
+    # consumed first (read-first allows equality). Coalescing enforced this for the operator case above, and a boundary
+    # copy lands at the present cycle (after all compute) so it holds there too -- assert it so a future schedulable
+    # bare-move that tried to commit early would fail loudly here rather than silently corrupt the carried-over state.
+    for slot in mir.state_slots:
+        r_in = read_of_slot.get(slot.name)
+        if r_in is None or slot.live_out == r_in:
+            continue  # write-only (no live-in), or a no-op writeback of the live-in itself: no new value lands
+        coalesced = pinned.get(slot.live_out) == state_regs[slot.name]
+        new_value_cycle = def_cycle[slot.live_out] if coalesced else present_cycle
+        assert last_use[r_in] <= new_value_cycle, (
+            f"state slot {slot.name!r} write-after-read violated: live-in last read at {last_use[r_in]} "
+            f"exceeds new-value write cycle {new_value_cycle}"
+        )
+
     movable = [vid for vid in operation_values if vid not in pinned]
     fresh_start = nload + len(mir.state_slots)
 

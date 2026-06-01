@@ -156,3 +156,8 @@ Special things to look out for:
 ## Verification
 
 Entirely driven by `nox`; read the `noxfile.py` for details.
+
+After every change, dispatch two review agents with fresh context to review your work:
+one will focus on the functional correctness, the other will focus on the architectural and design aspects.
+When both are done, review and consolidate their findings and act accordingly.
+Repeat in a loop until the agents return no actionable feedback.

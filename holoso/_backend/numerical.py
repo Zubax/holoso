@@ -11,7 +11,7 @@ reloads the snapshot the hardware loads at module reset.
 from dataclasses import dataclass, field
 
 from .._value import FloatValue
-from .._lir import FloatConstRef, FloatRegRef, Lir
+from .._lir import FloatConstRef, FloatOperand, FloatRegRef, Lir
 from .._lir import InputProducer, OperationProducer, StateProducer, latest_producer_before
 from .._operators import FloatSignControl
 from .._type import FloatFormat
@@ -88,21 +88,24 @@ class NumericalModel:
                 case StateProducer(index=index):
                     return self._state[index]
 
+        def eval_tap(operand: FloatOperand, cycle: int) -> FloatValue:
+            # One evaluation for every source tap: an operator operand, an output wire, or a state slot's live-out.
+            return _apply_sign(value(operand.source, cycle), operand.sign)
+
         # Evaluate in commit order: a producer commits before any consumer issues, so its value is ready in op_values.
         for j in sorted(
             range(len(lir.float_ops)), key=lambda k: (lir.float_ops[k].commit_cycle, lir.float_ops[k].issue_cycle)
         ):
             op = lir.float_ops[j]
-            operands = [_apply_sign(value(o.source, op.issue_cycle), o.sign) for o in op.operands]
+            operands = [eval_tap(o, op.issue_cycle) for o in op.operands]
             op_values[j] = _apply_sign(op.inst.operator.evaluate(*operands), op.result_sign)
 
-        present = lir.makespan + 1  # outputs present one cycle after the last commit; they read the final live value
-        outputs = tuple(_apply_sign(value(wire.source, present), wire.sign) for wire in lir.float_outputs)
-        # Advance the persistent state for the next call, reading each slot's live-out value as the hardware latches it
-        # at the boundary (a coalesced op result, or the copied source) -- computed from the old state, then committed.
-        self._state = [
-            _apply_sign(value(slot.source.source, present), slot.source.sign) for slot in lir.float_state_slots
-        ]
+        # Scheduler-frame settle cycle: the final value is live one cycle after the last commit. This is the model's
+        # logical frame, distinct from the hardware present_step (makespan + 2); the model is value- not cycle-exact.
+        settle = lir.makespan + 1
+        outputs = tuple(eval_tap(wire.tap, settle) for wire in lir.float_outputs)
+        # Advance the persistent state for the next call: each slot's live-out tap, read from old state then committed.
+        self._state = [eval_tap(slot.tap, settle) for slot in lir.float_state_slots]
         return outputs
 
     @property

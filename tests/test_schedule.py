@@ -181,7 +181,7 @@ def test_build_lir_small_kernel() -> None:
     assert {i.name for i in lir.float_inputs} == {"a", "b"}
     assert lir.float_regfile.nload == 2  # both inputs are preloaded via the regfile load port (registers 0..1)
     assert [o.name for o in lir.float_outputs] == ["out_0"]
-    assert all(isinstance(o.source, FloatRegRef) for o in lir.float_outputs)
+    assert all(isinstance(o.tap.source, FloatRegRef) for o in lir.float_outputs)
     assert lir.makespan == max(op.commit_cycle for op in lir.float_ops)
 
     names = [p.name for p in lir.ports]
@@ -198,6 +198,65 @@ def test_build_lir_small_kernel() -> None:
         "err_pc",
     ):
         assert expected in names
+
+
+def test_state_boundary_write_is_first_class() -> None:
+    from holoso._lir import FETCH_LAG, FloatOperand
+
+    class LeakyDelay:
+        def __init__(self) -> None:
+            self._p = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            out = self._p + x  # reads the old _p; the fadd result is the only output
+            self._p = x  # a bare-input copy -> a non-coalesced boundary write
+            return out
+
+    lir = build(_run(LeakyDelay().__call__), "leaky_delay")
+    (slot,) = lir.float_state_slots
+    assert lir.has_state and slot.needs_copy and isinstance(slot.tap, FloatOperand)
+    # The non-coalesced boundary write is now a first-class event in the liveness model: the slot register holds a live
+    # value on the present/boundary cycle (it was previously absent, which is why the report could not render it).
+    assert lir.initiation_interval in lir.float_liveness[slot.reg]
+    # Output wires carry the same FloatOperand tap primitive as state slots.
+    assert all(isinstance(w.tap, FloatOperand) for w in lir.float_outputs)
+    # The hardware-frame cycle helpers are the single source of truth the report reuses (no duplicated formulas).
+    op = lir.float_ops[0]
+    assert lir.result_landing_cycle(op) == op.commit_cycle + FETCH_LAG + 2
+    assert lir.operand_read_cycle(op) == op.issue_cycle + FETCH_LAG - 1
+
+
+def test_state_war_backstop_allows_noop_writeback() -> None:
+    # A no-op writeback (live-out is the live-in value itself) writes no new value, so the write-after-read backstop
+    # must not trip -- this previously aborted a legal build.
+    class Hold:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            out = self.s + x
+            self.s = self.s
+            return out
+
+    lir = build(_run(Hold().__call__), "hold")  # must not raise AssertionError
+    assert {s.name for s in lir.float_state_slots} == {"s"}
+
+
+def test_copy_slot_residence_unbroken_when_tapped_at_boundary() -> None:
+    # When an output taps a copy slot's register at the boundary, read-first means that read returns the live-in, so the
+    # live-in residence must stay continuous through the boundary (no false dead gap from the new boundary def).
+    class Delay:
+        def __init__(self) -> None:
+            self._d = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            prev = self._d
+            self._d = x
+            return prev
+
+    lir = build(_run(Delay().__call__), "delay")
+    (slot,) = lir.float_state_slots
+    assert sorted(lir.float_liveness[slot.reg]) == list(range(1, lir.initiation_interval + 1))
 
 
 def test_build_lir_ekf1() -> None:

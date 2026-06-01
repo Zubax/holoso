@@ -136,15 +136,15 @@ def _fsgnop(w: _Writer, raw: str, sign: FloatSignControl, dst: str, inst: str) -
 
 
 def _state_sign_wire(slot: FloatStateSlot) -> str | None:
-    """The sign-conditioning wire name for a slot's boundary copy, or None when the copied source needs no sign op."""
-    if slot.needs_copy and slot.source.sign != FloatSignControl():
+    """The sign-conditioning wire name for a slot's boundary copy, or None when the copied tap needs no sign op."""
+    if slot.needs_copy and slot.tap.sign != FloatSignControl():
         return f"state_{slot.name}_d"
     return None
 
 
 def _state_copy_rhs(slot: FloatStateSlot) -> str:
-    """The value latched into a non-coalesced slot register at the boundary: its sign-conditioned wire, or source."""
-    return _state_sign_wire(slot) or _source_net(slot.source.source)
+    """The value latched into a non-coalesced slot register at the boundary: its sign-conditioned wire, or its tap."""
+    return _state_sign_wire(slot) or _source_net(slot.tap.source)
 
 
 def generate(lir: Lir) -> VerilogOutput:
@@ -424,7 +424,7 @@ def _emit_state_next(w: _Writer, lir: Lir) -> None:
         if wire is None:
             continue
         w(f"wire [W-1:0] {wire};")
-        _fsgnop(w, _source_net(slot.source.source), slot.source.sign, wire, f"u_statesgn_{slot.name}")
+        _fsgnop(w, _source_net(slot.tap.source), slot.tap.sign, wire, f"u_statesgn_{slot.name}")
         emitted = True
     if emitted:
         w("")
@@ -613,9 +613,9 @@ assign out_valid = (pc == LASTPC);  // the result is valid in the array on PRESE
 assign err_pc    = err_pc_q;
 """)
     for index, wire in enumerate(lir.float_outputs):
-        raw = _source_net(wire.source)
-        if wire.sign == FloatSignControl():
+        raw = _source_net(wire.tap.source)
+        if wire.tap.sign == FloatSignControl():
             w(f"assign {wire.name} = {raw};")
         else:
-            _fsgnop(w, raw, wire.sign, wire.name, f"u_outsgn_{index}")
+            _fsgnop(w, raw, wire.tap.sign, wire.name, f"u_outsgn_{index}")
     w("")

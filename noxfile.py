@@ -77,7 +77,7 @@ def synth_examples(session: nox.Session) -> None:
         flows = [flow for f in flows for flow in ("--flow", f)]
         session.run("python", "-m", "synth", source, target, *flows, "--rtl", "lib/kulibin/float/hdl")
 
-    # Wide scalars require extra stages to close timings.
+    # Wide scalars require extra stages to close timings. If closure fails, feel free to throw in more stages here.
     op_ecp5_e8w36 = (
         "fadd.stage_decode=1,fadd.stage_align=1,fadd.stage_normalize=1,fadd.stage_pack=1,"
         "fmul.stage_input=1,fmul.stage_pack=1"

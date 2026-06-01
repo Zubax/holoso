@@ -4,6 +4,8 @@ Render a self-contained, light-themed single-page HTML report for a synthesized 
 The stylesheet and the interactive layer live alongside this module as ``html.css`` and ``html.js`` (declared as
 package data in ``pyproject.toml``); they are inlined into the self-contained report so it has no external dependency
 beyond the web font.
+
+Do not define any styles or colors here, do that in CSS.
 """
 
 import colorsys
@@ -296,17 +298,24 @@ def _live_intervals(rows: set[int]) -> list[list[int]]:
 
 
 def _cell_style(
-    col: ColKey, cyc: int, live: dict[FloatRegRef, set[int]], fills: dict[tuple[int, ColKey], str]
+    col: ColKey,
+    cyc: int,
+    live: dict[FloatRegRef, set[int]],
+    fills: dict[tuple[int, ColKey], str],
+    state_cells: set[tuple[int, ColKey]],
 ) -> tuple[str, str]:
     """
     Background for a register/constant cell, as ``(extra_class, inline_style)``. The single cycle on which a result
     commits is filled solid with its operator color via an inline style (this takes precedence, and being inline it
-    survives the row-hover tint); otherwise a live register gets the faint residence tint via the ``live`` class, so a
-    row-hover can override it. The operators' cycle-by-cycle occupancy lives in the separate operator-stage block.
+    survives the row-hover tint); a non-coalesced state boundary write is filled by the ``stw`` class (its color lives
+    in CSS); otherwise a live register gets the faint residence tint via the ``live`` class, so a row-hover can override
+    it. The operators' cycle-by-cycle occupancy lives in the separate operator-stage block.
     """
     color = fills.get((cyc, col))
     if color is not None:
         return "", f" style='background:{color}'"
+    if (cyc, col) in state_cells:
+        return " stw", ""
     if _is_live(col, cyc, live):
         return " live", ""
     return "", ""
@@ -349,6 +358,7 @@ def _schedule(lir: Lir) -> str:
     conflicts: set[tuple[int, int]] = set()
     # Result-commit cells, keyed by absolute (cycle, column): each operation lands its result on its commit cycle.
     fills: dict[tuple[int, ColKey], str] = {}
+    state_cells: set[tuple[int, ColKey]] = set()  # non-coalesced state boundary writes, filled by CSS class
     writes_at: dict[tuple[int, ColKey], str] = {}
     endpoints: set[tuple[int, int]] = set()  # (column ordinal, cycle) cells that anchor a dataflow edge
     cell_group: dict[tuple[int, int], int] = {}  # (column ordinal, cycle) -> operation group, for commit cells
@@ -358,9 +368,9 @@ def _schedule(lir: Lir) -> str:
     for op in lir.float_ops:
         tip = _esc(_op_text(op))
         color = operator_colors[type(op.inst.operator)]
-        # Physical clock cycles (cycle-accurate).
-        read_cyc = op.issue_cycle + FETCH_LAG - 1
-        write_cyc = op.commit_cycle + FETCH_LAG + 2
+        # Physical clock cycles (cycle-accurate), from the single Lir definitions shared with float_liveness.
+        read_cyc = lir.operand_read_cycle(op)
+        write_cyc = lir.result_landing_cycle(op)
         dcol: ColKey = op.dst
         dord = col_ord[dcol]
         writes_at[(write_cyc, dcol)] = writes_at.get((write_cyc, dcol), "") + _write_label(op.inst.index, tip)
@@ -383,7 +393,29 @@ def _schedule(lir: Lir) -> str:
             stage_tip[key] = f"{op.inst.operator.mnemonic}_{op.inst.index} s{k}: {tip}"
         group += 1
 
-    out = [_schedule_key(operator_colors, bool(lir.float_state_slots)), "<div id='schedwrap'><table class='grid'>"]
+    # State updates as first-class writes: a non-coalesced slot latches its tap into its register at the boundary (a
+    # coalesced slot is already drawn as its operator's commit above). Render it like a commit -- a filled cell, a write
+    # marker, a chip, and a dataflow edge from the tap, in the state color -- so the schedule shows the update rather
+    # than an invisible boundary side effect. The tap is read at the boundary (read-first), reg or constant.
+    boundary = lir.initiation_interval
+    for slot in lir.float_state_slots:
+        if not slot.needs_copy:
+            continue
+        dord = col_ord[slot.reg]
+        tip = _esc(f"{slot.name} <= {slot.tap.stable_label}")
+        writes_at[(boundary, slot.reg)] = (
+            writes_at.get((boundary, slot.reg), "") + f"<span class='wl' title='{tip}'>&#9662;</span>"
+        )
+        state_cells.add((boundary, slot.reg))
+        endpoints.add((dord, boundary))
+        cell_group[(dord, boundary)] = group
+        oord = col_ord[slot.tap.source]
+        endpoints.add((oord, boundary))
+        edges.append((f"g{dord}_{boundary}", f"g{oord}_{boundary}", "state", group))  # JS resolves to --c-state
+        chips_at.setdefault(boundary, []).append(f"<span class='opf state' data-op='{group}'>{tip}</span>")
+        group += 1
+
+    out = [_schedule_key(operator_colors, lir.has_state), "<div id='schedwrap'><table class='grid'>"]
     # Header row 0: group bands over the register, constant and operator-pipeline blocks. clk/operations span all rows.
     out.append("<tr><th class='gh clkh' rowspan='3'><span>clk</span></th>")
     if nreg:
@@ -437,7 +469,7 @@ def _schedule(lir: Lir) -> str:
         out.append(f"<td class='clk'>{cyc}</td>")
         for ordinal, col in enumerate(columns):
             content = writes_at.get((cyc, col), "")
-            extra, style = _cell_style(col, cyc, live, fills)
+            extra, style = _cell_style(col, cyc, live, fills, state_cells)
             attrs = f" id='g{ordinal}_{cyc}'" if (ordinal, cyc) in endpoints else ""
             if (ordinal, cyc) in cell_group:
                 attrs += f" data-op='{cell_group[(ordinal, cyc)]}'"
@@ -530,7 +562,10 @@ def _schedule_key(operator_colors: dict[type[HardwareOperator], str], has_state:
         for cls, color in operator_colors.items()
     ]
     state_key = (
-        "<span><span class='wr state'>&#9662;</span> retained state (cycle-0 snapshot)</span>" if has_state else ""
+        "<span><span class='wr state'>&#9662;</span> persistent state: reset snapshot (cycle 0)</span>"
+        "<span><span class='sw state'></span> state update latched at the boundary</span>"
+        if has_state
+        else ""
     )
     return (
         "<h2>Schedule</h2><div class='gridkey'>"

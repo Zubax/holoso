@@ -143,18 +143,17 @@ class FloatInputLoad(InputLoad):
 
 @dataclass(frozen=True, slots=True)
 class OutputWire:
-    """An output port driven from a typed register or constant immediate."""
+    """An output port: a named external sink driven at the present step by a typed source tap."""
 
     name: str
-    source: RegRef | ConstRef
+    tap: Operand
 
 
 @dataclass(frozen=True, slots=True)
 class FloatOutputWire(OutputWire):
-    """A float output port driven from a float register or constant immediate, with folded output sign control."""
+    """A float output port: the named external sink for a float source tap (register/constant + folded sign)."""
 
-    source: FloatRegRef | FloatConstRef
-    sign: FloatSignControl = FloatSignControl()
+    tap: FloatOperand
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,21 +162,21 @@ class FloatStateSlot:
     A persistent float state register: reset to ``reset_value``, holding the slot's live-in (carried over from the
     previous initiation) until it is overwritten, and holding the slot's live-out at the initiation boundary.
 
-    ``source`` is the live-out's location with its folded sign. When it is exactly ``reg`` with an identity sign the
-    live-out coalesced onto the slot register (its producing operator wrote it) and the backend emits no boundary copy;
-    otherwise the backend copies ``source`` into ``reg`` at the boundary. ``public`` slots also drive an ``out_<name>``
-    port through the ordinary output-wire path.
+    ``tap`` is the live-out's source tap (register/constant + folded sign), the same primitive an output wire taps; here
+    the sink is the slot register rather than a port. When the tap is exactly ``reg`` with an identity sign the live-out
+    coalesced onto the slot register (its producing operator wrote it) and the backend emits no boundary copy; otherwise
+    the backend latches the tap into ``reg`` at the boundary. ``public`` slots also drive an ``out_<name>`` port.
     """
 
     name: str
     reg: FloatRegRef
     reset_value: float
     public: bool
-    source: FloatOperand
+    tap: FloatOperand
 
     @property
     def needs_copy(self) -> bool:
-        return not (self.source.source == self.reg and self.source.sign == FloatSignControl())
+        return not (self.tap.source == self.reg and self.tap.sign == FloatSignControl())
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,9 +269,9 @@ class Lir:
     @property
     def present_step(self) -> int:
         """
-        The executing step on which the outputs are valid in the register array.
-        The last operator commits on the makespan cycle; the write latch delays the write in the write latch, so the
-        result lands on the next edge and is presented on cycle ``makespan + 2``.
+        The hardware executing step on which the outputs are valid in the register array (NOT the scheduler-frame cycle
+        ``makespan + 1`` the allocator and model use). The last operator commits on the makespan cycle; the write latch
+        delays the write, so the result lands on the next edge and is presented on the executing step ``makespan + 2``.
         """
         return self.makespan + 2
 
@@ -292,6 +291,23 @@ class Lir:
         one accept-relative cycle plus the fixed staging.
         """
         return self.present_step + FETCH_LAG
+
+    def result_landing_cycle(self, op: FloatScheduledOp) -> int:
+        """
+        Hardware-frame cycle on which an operator result lands in the register array ready to read: its commit cycle
+        plus the write latch, the read-first edge, and the fetch lag. For the last result this equals the initiation
+        interval. This is the single definition shared by liveness and the report so the two cannot drift.
+        """
+        return op.commit_cycle + FETCH_LAG + 2
+
+    def operand_read_cycle(self, op: FloatScheduledOp) -> int:
+        """Hardware-frame cycle on which an operator reads its operands (the read latch presents the address early)."""
+        return op.issue_cycle + FETCH_LAG - 1
+
+    @property
+    def has_state(self) -> bool:
+        """Whether the module retains persistent state across initiations."""
+        return bool(self.float_state_slots)
 
     @property
     def read_set_per_port(self) -> dict[tuple[FloatOperatorInstance, int], list[int]]:
@@ -347,32 +363,33 @@ class Lir:
         """
         Map each float register to the actual clock cycles on which it holds a live value.
 
-        This is cycle-accurate to the emitted hardware. Accounting for the read/write register-file latches and the
-        microcode-fetch staging: an input lands in the array on cycle 1; an operator result lands on
-        ``commit_cycle + FETCH_LAG + 2`` (the write latch, the read-first edge, then the fetch lag) -- which for the
-        last result is exactly the initiation interval; a register is read on ``issue_cycle + FETCH_LAG - 1`` (the read
-        latch presents the address a cycle early); and an output is read on the present cycle (the initiation interval).
-        Each row spans a value from when it lands in the array through its last read.
+        This is cycle-accurate to the emitted hardware, in the executing-step (hardware) frame. Timing comes from the
+        shared helpers: an input lands on cycle 1; an operator result lands on ``result_landing_cycle`` (which for the
+        last result is the initiation interval); an operand is read on ``operand_read_cycle``; and an output tap and a
+        non-coalesced slot's boundary write both happen on the present cycle (the initiation interval). Each row spans a
+        value from when it lands in the array through its last read.
         """
-        present = self.initiation_interval
+        present = self.initiation_interval  # hardware-frame present / boundary step
         defs: dict[FloatRegRef, list[int]] = {}
         uses: dict[FloatRegRef, list[int]] = {}
         for load in self.float_inputs:
             defs.setdefault(load.dst, []).append(1)
         for slot in self.float_state_slots:
             defs.setdefault(slot.reg, []).append(1)  # the live-in is resident in the slot register from the start
+            if slot.needs_copy:  # the non-coalesced live-out lands at the boundary and is carried to the next call
+                defs.setdefault(slot.reg, []).append(present)
         for op in self.float_ops:
-            defs.setdefault(op.dst, []).append(op.commit_cycle + FETCH_LAG + 2)
-            read = op.issue_cycle + FETCH_LAG - 1
+            defs.setdefault(op.dst, []).append(self.result_landing_cycle(op))
+            read = self.operand_read_cycle(op)
             for operand in op.operands:
                 if isinstance(operand.source, FloatRegRef):
                     uses.setdefault(operand.source, []).append(read)
         for wire in self.float_outputs:
-            if isinstance(wire.source, FloatRegRef):
-                uses.setdefault(wire.source, []).append(present)
-        for slot in self.float_state_slots:  # the live-out source is read at the boundary to persist the slot
-            if isinstance(slot.source.source, FloatRegRef):
-                uses.setdefault(slot.source.source, []).append(present)
+            if isinstance(wire.tap.source, FloatRegRef):
+                uses.setdefault(wire.tap.source, []).append(present)
+        for slot in self.float_state_slots:  # the live-out tap is read at the boundary to persist the slot
+            if isinstance(slot.tap.source, FloatRegRef):
+                uses.setdefault(slot.tap.source, []).append(present)
         live: dict[FloatRegRef, set[int]] = {}
         for reg in defs.keys() | uses.keys():
             writes = sorted(defs.get(reg, []))
@@ -380,7 +397,9 @@ class Lir:
             rows: set[int] = set()
             for i, start in enumerate(writes):
                 nxt = writes[i + 1] if i + 1 < len(writes) else present + 1
-                last = max((use for use in reads if start <= use < nxt), default=start)
+                # Read-first: a read on the next write's cycle still returns this value, so it belongs to this interval
+                # (a non-coalesced slot register read by an output at the boundary keeps its live-in residence intact).
+                last = max((use for use in reads if start <= use <= nxt), default=start)
                 rows.update(range(start, last + 1))
             live[reg] = rows
         return live

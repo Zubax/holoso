@@ -146,7 +146,7 @@ def _build_outputs(mir: MirFloatView, alloc: FloatAllocation, const_index: dict[
             source = FloatConstRef(const_index[out.value])
         else:
             source = FloatRegRef(alloc.assign[out.value])
-        wires.append(FloatOutputWire(out.name, source, out.sign))
+        wires.append(FloatOutputWire(out.name, FloatOperand(source, out.sign)))
     return wires
 
 
