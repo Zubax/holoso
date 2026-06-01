@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .._hir import ValueId
-from .._mir import MirFloatInput, MirFloatOperation, MirFloatView
+from .._mir import MirFloatInput, MirFloatOperation, MirFloatStateRead, MirFloatView
 from .._operators import FloatHardwareOperator, HardwareOperator
 from ._ir import FloatOperatorInstance
 
@@ -101,7 +101,9 @@ def schedule_ops(mir: MirFloatView, pool: Mapping[type[HardwareOperator], int]) 
             if operand in mir.operation_nodes:
                 if operand not in issue_cycle or cycle < commit_cycle(operand) + DEPENDENCY_EDGE:
                     return False
-            elif isinstance(mir.nodes[operand], MirFloatInput) and cycle < INPUT_DEPENDENCY_EDGE:
+            elif isinstance(mir.nodes[operand], (MirFloatInput, MirFloatStateRead)) and cycle < INPUT_DEPENDENCY_EDGE:
+                # A state read is already resident in its register (like a preloaded input), so only the read latch
+                # applies; the value carried over from the previous initiation is read through the same path.
                 return False
         return True
 

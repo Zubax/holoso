@@ -97,6 +97,20 @@ Leave unused module outputs unconnected, like `.out_foo()`, instead of creating 
 It is best to keep at most one `always @(posedge clk)` per module, unless there are strong reasons to do otherwise.
 This rule should be followed, in particular, in Verilog emitted by the compiler.
 
+The same register can be assigned multiple times only as long as the assignments reside in different branches that
+cannot be active at the same time and are explicitly segregated with a single condition that is explicit to the
+synthesizer. For example:
+
+```verilog
+reg [31:0] foo;
+// COMPLIANT:
+if (a) foo <= bar;
+else   foo <= baz;
+// BANNED even if it is known that a and b are mutually exclusive:
+if (a) foo <= bar;
+if (b) foo <= baz;
+```
+
 ### Other
 
 Keep in-code documentation brief. Long-form belongs in design docs and other non-code files.

@@ -80,6 +80,11 @@ def synth_examples(session: nox.Session) -> None:
     syn("examples/madd.py", "madd", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
     syn("examples/poly3.py", "poly3", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
     syn(
+        "examples/trapezoidal_leaky_streaming_integrator.py",
+        "TrapezoidalLeakyStreamingIntegrator",
+        ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"],
+    )
+    syn(
         "examples/ekf1.py",
         "update_x_P",
         [

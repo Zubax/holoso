@@ -236,6 +236,7 @@ def test_build_rejects_mir_with_mixed_float_formats() -> None:
         },
         input_ids=[0],
         outputs=[MirFloatOutput("out_0", 1)],
+        state_slots=[],
     )
     with pytest.raises(ValueError, match="exactly one floating-point format"):
         build(mir, "mixed")
@@ -289,6 +290,7 @@ def test_float_view_rejects_non_float_mir_before_scheduling() -> None:
         nodes={0: OtherMirInput("a", OtherScalarType())},
         input_ids=[0],
         outputs=[MirFloatOutput("out_0", 0)],
+        state_slots=[],
     )
     with pytest.raises(UnsupportedConstruct, match="non-float MIR input"):
         MirFloatView.from_mir(mir)
@@ -299,6 +301,7 @@ def test_float_view_rejects_non_input_input_id() -> None:
         nodes={0: MirFloatConst(FloatType(FMT), 1.0)},
         input_ids=[0],
         outputs=[MirFloatOutput("out_0", 0)],
+        state_slots=[],
     )
     with pytest.raises(ValueError, match="must reference a MirFloatInput"):
         MirFloatView.from_mir(mir)
@@ -309,6 +312,7 @@ def test_float_view_rejects_missing_input_id() -> None:
         nodes={0: MirFloatConst(FloatType(FMT), 1.0)},
         input_ids=[1],
         outputs=[MirFloatOutput("out_0", 0)],
+        state_slots=[],
     )
     with pytest.raises(ValueError, match="does not reference a MIR node"):
         MirFloatView.from_mir(mir)

@@ -129,6 +129,38 @@ def test_cosim_madd(sim: str) -> None:
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_trapezoidal_integrator(sim: str) -> None:
+    # A stateful class: the bound method becomes a streaming module whose persistent state (the leaky accumulator y and
+    # the one-sample delay _x_prev) is exercised across the whole random input sequence, bit-for-bit against the model.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator
+
+    _run_cosim(sim, TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__, FloatFormat(6, 18), "trapz_integrator")
+
+
+class _ShiftRegister2:
+    """A two-deep delay line returning the input from two steps ago; both state slots are non-coalesced copy slots."""
+
+    def __init__(self) -> None:
+        self._a = 0.0
+        self._b = 0.0
+
+    def __call__(self, x: float) -> float:
+        out = self._b
+        self._b = self._a
+        self._a = x
+        return out
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_shift_register_backpressure(sim: str) -> None:
+    # The returned value taps a copy-slot register and the chain advances every accept, so together with the testbench's
+    # random back-pressure this pins down that the boundary copy fires exactly once per accepted transaction -- no
+    # mid-handshake output mutation and no state over-advance while out_ready is held low.
+    _run_cosim(sim, _ShiftRegister2().__call__, FloatFormat(6, 18), "shift2")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_new_operator_stages(sim: str) -> None:
     def kernel(a, b, c):  # type: ignore[no-untyped-def]
         return (a - b) / c + a * b * 0.25  # fadd, fdiv, fmul, and fmul_ilog2 (the 2^-2 scale) all in one kernel

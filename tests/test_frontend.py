@@ -10,7 +10,7 @@ import pytest
 from holoso import MissingIntrinsic, UnsupportedConstruct
 from holoso._frontend import lower
 from holoso._frontend._lower import _port_name
-from holoso._hir import FloatAbs, FloatAdd, FloatDiv, FloatMul, FloatNeg, Operation
+from holoso._hir import FloatAbs, FloatAdd, FloatDiv, FloatMul, FloatNeg, Operation, StateRead, optimize
 
 from ._modelref import flatten_value, output_names
 
@@ -144,3 +144,88 @@ def test_missing_intrinsic_message() -> None:
 
     with pytest.raises(MissingIntrinsic, match="sqrt"):
         lower(f)
+
+
+def _integrator_class():  # type: ignore[no-untyped-def]
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator
+
+    return TrapezoidalLeakyStreamingIntegrator
+
+
+def test_stateful_method_state_slots_and_dedup() -> None:
+    integrator = _integrator_class()(k=2**-22)
+    hir = lower(integrator.__call__)
+    assert hir.input_names() == ["x"]  # self is dropped; remaining parameters become inputs
+    # `return self.y` is deduped onto the public state port out_y; the private _x_prev gets no port.
+    assert [o.name for o in hir.outputs] == ["out_y"]
+    slots = {s.name: s for s in hir.state_slots}
+    assert set(slots) == {"y", "_x_prev"}
+    assert slots["y"].public and slots["y"].reset_value == 0.0
+    assert not slots["_x_prev"].public and slots["_x_prev"].reset_value == 0.0
+    assert {n.slot for n in hir.nodes.values() if isinstance(n, StateRead)} == {"y", "_x_prev"}
+
+
+def test_stateful_readonly_attribute_is_folded_constant() -> None:
+    integrator = _integrator_class()(k=2**-22)
+    hir = optimize(lower(integrator.__call__))
+    # k is only read, so it is a folded constant, not a persistent slot or a state read.
+    assert "k" not in {s.name for s in hir.state_slots}
+    assert all(not (isinstance(n, StateRead) and n.slot == "k") for n in hir.nodes.values())
+
+
+def test_stateful_reset_state_is_the_instance_snapshot() -> None:
+    # The reset value is whatever the instance holds at synthesis time, including post-construction mutation.
+    integrator = _integrator_class()(k=2**-22)
+    integrator.y = 1.5  # type: ignore[attr-defined]
+    slots = {s.name: s for s in lower(integrator.__call__).state_slots}
+    assert slots["y"].reset_value == 1.5
+
+
+def test_init_method_target_is_rejected() -> None:
+    integrator = _integrator_class()(k=2**-22)
+    with pytest.raises(UnsupportedConstruct, match="__init__"):
+        lower(integrator.__init__)
+
+
+def test_class_object_target_is_rejected() -> None:
+    with pytest.raises(UnsupportedConstruct, match="bound method"):
+        lower(_integrator_class())
+
+
+def test_method_without_return_exposes_public_state() -> None:
+    class Accumulator:
+        def __init__(self) -> None:
+            self.total = 0.0
+
+        def update(self, x: float) -> None:
+            self.total = self.total + x
+
+    hir = lower(Accumulator().update)
+    assert [o.name for o in hir.outputs] == ["out_total"]
+    assert {s.name for s in hir.state_slots} == {"total"}
+
+
+def test_assigning_uninitialized_attribute_is_rejected() -> None:
+    class Bad:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def __call__(self, x: float) -> float:
+            self.scratch = x  # never initialized on the instance
+            return self.y
+
+    with pytest.raises(UnsupportedConstruct, match="not initialized"):
+        lower(Bad().__call__)
+
+
+def test_nested_attribute_access_is_rejected() -> None:
+    class Bad:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def __call__(self, x: float) -> float:
+            return x + self.y.real  # nested attribute access on self.y
+
+    with pytest.raises(UnsupportedConstruct, match="direct self"):
+        lower(Bad().__call__)

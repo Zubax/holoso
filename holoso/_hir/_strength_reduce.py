@@ -2,7 +2,7 @@
 
 import math
 
-from ._copy import copy_node
+from ._copy import copy_node, copy_state_slots
 from ._const import FloatConst
 from ._ir import Hir, HirBuilder, Operation, ValueId
 from ._operators import FloatDiv, FloatMul, FloatMulPow2
@@ -36,6 +36,7 @@ def run(hir: Hir) -> Hir:
         remap[old_id] = new_id
     for out in hir.outputs:
         builder.output(out.name, remap[out.value])
+    copy_state_slots(builder, hir, remap)
     return builder.finish()
 
 

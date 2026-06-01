@@ -14,8 +14,8 @@ latch. Each operator result passes through a writeback latch into a per-register
 instances that ever write that register (a single-writer register needs no address compare).
 
 All sequential logic -- the fetch pipeline, the read/write register-file latches, the register writes, and the
-reset-gated control state -- is emitted as a single ``always @(posedge clk)`` block (project policy); only the next-PC
-sequencer is a separate combinational ``always @*``. Control fields that are constant across the whole program are
+reset-gated control state -- is emitted as a single ``always @(posedge clk)`` block; only the next-PC sequencer
+is a separate combinational ``always @*``. Control fields that are constant across the whole program are
 driven by constant nets and omitted from the ROM, so synthesis prunes the logic they feed.
 """
 
@@ -31,9 +31,11 @@ from ..._lir import (
     FETCH_LAG,
     FETCH_STAGES,
     FloatConstRef,
+    FloatRegRef,
     Lir,
     FloatOperatorInstance,
     FloatScheduledOp,
+    FloatStateSlot,
     Port,
 )
 from ..._operators import FloatSignControl
@@ -123,6 +125,28 @@ def _cterm_expr(port: int, consts: list[int]) -> str:
     return f"const_{consts[0]}" if len(consts) == 1 else f"cterm{port}"
 
 
+def _source_net(source: FloatRegRef | FloatConstRef) -> str:
+    """The net carrying a register-or-constant source value: the pooled constant immediate, or the register read."""
+    return f"const_{source.index}" if isinstance(source, FloatConstRef) else f"regs[{source.index}]"
+
+
+def _fsgnop(w: _Writer, raw: str, sign: FloatSignControl, dst: str, inst: str) -> None:
+    """Emit a sign-conditioning wrapper instance applying ``sign`` to ``raw`` and driving ``dst``."""
+    w(f"holoso_fsgnop #(.WFULL(W)) {inst} (.x({raw}), .op(2'd{sign.encoded}), .y({dst}));")
+
+
+def _state_sign_wire(slot: FloatStateSlot) -> str | None:
+    """The sign-conditioning wire name for a slot's boundary copy, or None when the copied source needs no sign op."""
+    if slot.needs_copy and slot.source.sign != FloatSignControl():
+        return f"state_{slot.name}_d"
+    return None
+
+
+def _state_copy_rhs(slot: FloatStateSlot) -> str:
+    """The value latched into a non-coalesced slot register at the boundary: its sign-conditioned wire, or source."""
+    return _state_sign_wire(slot) or _source_net(slot.source.source)
+
+
 def generate(lir: Lir) -> VerilogOutput:
     # This emitter implements the mandatory v1 staging; the scheduler and microcode placement budget for exactly these.
     assert FETCH_STAGES == 3, "the Verilog emitter implements the 3-stage microcode fetch (may be configurable later)"
@@ -160,6 +184,7 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_microcode_rom(w, fields, ucw, depth, last_pc, issues_by_cycle, commits_by_step)
     _emit_field_wires(w, fields)
     _emit_datapath_comb(w, lir, port_consts)
+    _emit_state_next(w, lir)
     _emit_clocked(w, lir, read_port, port_consts, read_sets, write_sets, write_lists)
     _emit_outputs(w, lir)
     w("\nendmodule\n")
@@ -212,20 +237,19 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
 
 def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int) -> None:
     fmt = lir.float_regfile.fmt
-    compute = f"1..{lir.makespan} = compute, " if lir.makespan else ""
     nreg = max(1, lir.float_regfile.nreg)
     w(f"""
-localparam           WEXP  = {fmt.wexp};  // Float exponent bits fixed by the static schedule
-localparam           WMAN  = {fmt.wman};  // Float mantissa bits fixed by the static schedule
-localparam           W     = WEXP + WMAN;
-localparam           NREG  = {nreg};  // >= 1; the bank is unused when no value needs a register
-localparam           CYCW  = {cycw:2};  // err_pc width: enough for any executing step (0..present)
-localparam           PCW   = {pcw:2};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
-localparam           FETCH_LAG = {FETCH_LAG};  // executing step = pc - FETCH_LAG ({FETCH_STAGES}-stage control fetch)
-localparam [PCW-1:0] PRESENT   = {lir.present_step};  // executing step on which the outputs are valid in the array
-localparam [PCW-1:0] LASTPC    = {lir.initiation_interval};  // = PRESENT + FETCH_LAG; out_valid asserts here
-localparam           UCW   = {ucw};  // microcode word width after lifting out constant control fields
-// pc: 0 = idle/accept, {compute}present at executing step PRESENT; out_valid at pc==LASTPC (fetch leads execution).
+localparam           WEXP      ={fmt.wexp:3};  // Float exponent bits fixed by the static schedule
+localparam           WMAN      ={fmt.wman:3};  // Float mantissa bits fixed by the static schedule
+localparam           W         = WEXP + WMAN;
+localparam           NREG      ={nreg:3};  // >= 1; the bank is unused when no value needs a register
+localparam           CYCW      ={cycw:3};  // err_pc width: enough for any executing step (0..present)
+localparam           PCW       ={pcw:3};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
+localparam           FETCH_LAG ={FETCH_LAG:3};  // executing step = pc - FETCH_LAG ({FETCH_STAGES}-stage control fetch)
+localparam [PCW-1:0] PRESENT   ={lir.present_step:3};  // executing step on which the outputs are valid in the array
+localparam [PCW-1:0] LASTPC    ={lir.initiation_interval:3};  // = PRESENT + FETCH_LAG; out_valid asserts here
+localparam           UCW       ={ucw:3};  // microcode word width after lifting out constant control fields
+// pc: 0 = idle/accept, present at executing step PRESENT; out_valid at pc==LASTPC (fetch leads execution).
 
 """)
 
@@ -355,8 +379,6 @@ def _emit_datapath_comb(w: _Writer, lir: Lir, port_consts: dict[int, list[int]])
     for port in sorted(port_consts):
         if len(port_consts[port]) > 1:
             w(f"wire [W-1:0] cterm{port} = {_const_term_expr(port, port_consts[port])};")
-    if lir.float_inputs:
-        w("wire load_en = (pc == 0) && in_valid;  // accept the input transaction into the load lanes")
     w("")
 
     w("// Operator control (in_valid and sign controls are consumed inside the wrapper on the issue step).")
@@ -385,13 +407,27 @@ always @* begin
 """)
     w.push()
     w("""
-if (rst)               next_pc = 0;
-else if (pc == LASTPC) next_pc = out_ready ? 0 : LASTPC;  // present: hold until the result is taken
-else if (pc == 0)      next_pc = in_valid ? 1 : 0;        // accept: hold until a transaction arrives
-else                   next_pc = pc + 1'b1;               // advance the fetch
+if (rst)            next_pc = 0;
+else if (out_valid) next_pc = out_ready ? 0 : LASTPC;  // present: hold until the result is taken
+else if (in_ready)  next_pc = in_valid ? 1 : 0;        // accept: hold until a transaction arrives
+else                next_pc = pc + 1'b1;               // advance the fetch
 """)
     w.pop()
     w("end", "")
+
+
+def _emit_state_next(w: _Writer, lir: Lir) -> None:
+    """Sign-condition the persisted next value of any non-coalesced slot whose copied source carries a folded sign."""
+    emitted = False
+    for slot in lir.float_state_slots:
+        wire = _state_sign_wire(slot)
+        if wire is None:
+            continue
+        w(f"wire [W-1:0] {wire};")
+        _fsgnop(w, _source_net(slot.source.source), slot.source.sign, wire, f"u_statesgn_{slot.name}")
+        emitted = True
+    if emitted:
+        w("")
 
 
 def _read_latch_stmts(
@@ -468,9 +504,8 @@ def _emit_clocked(
     """Emit every sequential element in one always @(posedge clk): fetch, latches, writes, and control state."""
     nreg = max(1, lir.float_regfile.nreg)
     w("""
-// Project policy: all sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q);
-// the fetch pipeline, the read/write register-file latches, and the register array are reset-unconditional so they
-// stay out of the reset fan-out and can pack into dedicated BRAM-output / DSP flops.
+// All sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q), never data.
+// We never multi-assign any register by explicitly segregating competing assignments into different condition branches.
 always @(posedge clk) begin
 """)
     w.push()
@@ -497,20 +532,25 @@ always @(posedge clk) begin
             w(f"{sig}_{err_port}_q <= {sig}_{err_port};")
     w("")
 
+    # We MUST ensure that we DO NOT MULTI-ASSIGN any register in the same step; this is ensured by always placing each
+    # assignment to the same register into different branches of the same condition.
+    # Slot registers are updated in the reset-gated state block below (their snapshot and update share one rst
+    # condition); the input load and operator writeback here stay reset-unconditional and cover only non-slot registers.
+    state_regs = {slot.reg.index for slot in lir.float_state_slots}
+
     def emit_writeback() -> None:
         for reg in range(nreg):
             writers = write_sets.get(reg, [])
-            if writers:
+            if writers and reg not in state_regs:
                 _reg_write_stmts(w, reg, writers, write_lists)
 
-    has_writes = any(write_sets.get(reg) for reg in range(nreg))
+    has_writes = any(write_sets.get(reg) and reg not in state_regs for reg in range(nreg))
     if lir.float_inputs:
         # The accept-step input load and operator writeback are mutually exclusive in time (the schedule never commits
         # a result on the load step), but the tools cannot see that. Making writeback the else of the load encodes the
-        # exclusivity structurally -- load wins, writes are gated by !load_en -- so correctness never rests on the
-        # ordering of competing non-blocking assignments to the same register.
+        # exclusivity structurally -- load wins, writes are gated behind it.
         w("// Register update: input load on the accept step, else the per-register writeback select.")
-        w("if (load_en) begin")
+        w("if (in_ready && in_valid) begin")
         w.push()
         for load in sorted(lir.float_inputs, key=lambda load: load.dst.index):
             w(f"regs[{load.dst.index}] <= in_{load.name};")
@@ -526,17 +566,39 @@ always @(posedge clk) begin
         emit_writeback()
         w("")
 
-    w("// Control state: the only reset-gated registers.")
+    # Control and persistent state are the reset-gated registers. Each slot register's reset snapshot (under rst) and
+    # its update (a coalesced operator's writeback, or a delay-line boundary copy) are the two arms of this single rst
+    # condition, so their assignments are explicitly segregated for the synthesizer; pure datapath above is unreset.
+    fmt = lir.float_regfile.fmt
+    digits = (fmt.width + 3) // 4
+    copies = [slot for slot in lir.float_state_slots if slot.needs_copy]
+    w("// Control and persistent state: the reset-gated registers.")
     w("if (rst) begin")
     w.push()
     w("pc       <= 0;")
     w("err_pc_q <= 0;")
+    for slot in lir.float_state_slots:
+        bits = f"{fmt.width}'h{fmt.encode(slot.reset_value):0{digits}x}"
+        w(f"regs[{slot.reg.index}] <= {bits};  // {slot.name} reset snapshot")
     w.pop()
     w("end else begin")
     w.push()
     w("pc <= next_pc;")
-    w("if ((pc == 0) && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted")
-    w("if (err) err_pc_q <= pc - FETCH_LAG;        // execution lags the fetch PC by FETCH_LAG, so the step is pc-lag")
+    w("if (in_ready && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted")
+    w("if (err) err_pc_q <= pc - FETCH_LAG;      // execution lags the fetch PC by FETCH_LAG, so the step is pc-lag")
+    for slot in lir.float_state_slots:  # coalesced slots: their producing operator's writeback, moved under rst
+        if not slot.needs_copy and write_sets.get(slot.reg.index):
+            _reg_write_stmts(w, slot.reg.index, write_sets[slot.reg.index], write_lists)
+    if copies:
+        # Persist on the accepted-transaction edge only (pc leaves LASTPC iff out_ready); a held LASTPC under
+        # back-pressure must not re-copy, or a slot register tapped by an output would mutate while out_valid is high
+        # and a delay chain would over-advance. State thus advances exactly once per accepted transaction.
+        w("if (out_valid && out_ready) begin  // boundary: persist each delay-line/conditioned slot on acceptance")
+        w.push()
+        for slot in copies:
+            w(f"regs[{slot.reg.index}] <= {_state_copy_rhs(slot)};  // {slot.name}")
+        w.pop()
+        w("end")
     w.pop()
     w("end")
 
@@ -551,12 +613,9 @@ assign out_valid = (pc == LASTPC);  // the result is valid in the array on PRESE
 assign err_pc    = err_pc_q;
 """)
     for index, wire in enumerate(lir.float_outputs):
-        if isinstance(wire.source, FloatConstRef):
-            raw = f"const_{wire.source.index}"
-        else:
-            raw = f"regs[{wire.source.index}]"
+        raw = _source_net(wire.source)
         if wire.sign == FloatSignControl():
             w(f"assign {wire.name} = {raw};")
         else:
-            w(f"holoso_fsgnop #(.WFULL(W)) u_outsgn_{index} (.x({raw}), .op(2'd{wire.sign.encoded}), .y({wire.name}));")
+            _fsgnop(w, raw, wire.sign, wire.name, f"u_outsgn_{index}")
     w("")

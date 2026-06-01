@@ -115,6 +115,15 @@ explicit error.
 
 `result.write(out_dir)` is the only operation that touches the filesystem.
 
+A plain function synthesizes to a stateless module. A stateful module is requested by passing a bound method of a
+constructed instance, e.g. `synthesize(Integrator(k=...).__call__, ops)`: the method's `__self__` is the instance whose
+attribute snapshot seeds the reset state, and `__func__` is the analyzed method (any method except `__init__`). The
+constructor runs in plain Python, so constructor arguments are ordinary Python values frozen into the build -- there is
+no separate parameter marshalling. A future second mode for several methods sharing one state -- selected by passing the
+class together with a list of its methods plus a runtime method-selector port, which would let `__init__` run at runtime
+rather than being frozen -- is deferred: it needs heavier backend work (a selector and per-method schedules over shared
+state).
+
 ## Front-end
 
 Abstract interpretation over the Python AST/CFG with a binding-time lattice (static vs. dynamic), not tracing:
@@ -125,6 +134,16 @@ Abstract interpretation over the Python AST/CFG with a binding-time lattice (sta
 - `for`/`while` with a static trip count is unrolled; a dynamic trip count is rejected for now (the only case that needs
   a genuine variable-length loop -- a future feature).
 - `if` on a static test takes one branch; `if` on a dynamic test emits a real branch (see HIR below).
+
+Persistent state. A synthesized method's `self` is not a port: each instance attribute the method writes becomes a
+persistent register (a loop-carried value -- the initiation is the loop body, persistence the back-edge), and each
+attribute it only reads is a frozen constant folded from the snapshot. Within the method `self.attr` is an ordinary SSA
+variable, so reads and writes interleave freely with computation; the first read before any write is the register's
+live-in (carried over from the previous initiation), and the value bound at method exit is the live-out that must reside
+in the register at the boundary. Underscore-prefixed attributes stay internal; public attributes additionally drive an
+`out_<attr>` port, so a method need not return anything, and a returned value that is exactly a public attribute is
+deduped onto that one port. Straight-line stateful methods are implemented today (the trapezoidal-integrator example);
+state combined with dynamic branches awaits the branch/phi work below.
 
 Matrices/vectors are statically shaped and unrolled to scalar operations at synthesis time (as in the SymPy-CSE'd
 `ekf1` example); arrays never exist as hardware aggregates, only as compile-time bookkeeping over scalar registers.
@@ -179,10 +198,15 @@ out_port(name, value)
 
 Terminators: `jump(target)`, `branch(cond_bool, t, f)`, `ret` (commit state-writes + outputs, raise `done`).
 
-State. Persistent state = class attributes; `__init__` gives initial values (folded, or kw-only params -> Verilog
-`parameter`s). An unwritten persistent register holds its value. Reset reaches only state regs that are live-in at reset
-before any dominating write (in practice the boolean control flags); pure datapath state stays out of the reset cone.
-Registers that hold values assigned in `__init__` are explicitly assigned initial values at module reset.
+State. Persistent state = the instance attributes the method writes; the instance snapshot at synthesis time (whatever
+`__init__` and any later mutation produced) gives each register's reset value, loaded at module reset. A state slot is a
+loop-carried dependence resolved at register allocation by coalescing the live-out onto the slot register when its live
+range does not overlap the live-in -- the producing operator then writes the slot register directly, no copy. When they
+overlap (a one-sample delay line, or a write-then-read), the live-out keeps its own register and the backend copies it
+into the slot register at the boundary. Slot registers are normal allocatable registers, not reserved beyond holding
+the slot's own live-in and live-out: the cost that matters is mux fabric, not flip-flops, and a dedicated slot register
+adds no mux fan-in elsewhere. The persistent state registers are the one datapath exception that reset reaches (each
+loaded with its snapshot); pure datapath state stays out of the reset cone.
 
 Branch vs. select (the core control-flow decision):
 
@@ -372,7 +396,10 @@ regalloc: reach-aware coloring (greedy port-affinity + a bounded SciPy dual-anne
 
 - Inputs preload directly into the low registers `0..nload-1` on the accept step, captured together under a single
   `if (load_en)` block (gated by `in_valid`) rather than through write ports. `nload` spans the input block (the
-  highest input register index plus one). Outputs are tapped directly from their register by fixed index.
+  highest input register index plus one). Outputs are tapped directly from their register by fixed index. Persistent
+  state registers sit directly above the input block; a coalesced slot is written by its producing operator like any
+  other result, and a non-coalesced slot is copied into its register at the boundary (`pc == LASTPC`) by a small
+  reg->reg block beside the input load, capturing its source before the next accept overwrites it.
 
 - Selected-float MIR `FloatSignControl` value objects fold into operand/result sign-control sidebands, and `fconst` is an
   immediate on the input mux; both are free in the schedule. Sign controls are constructed ad hoc rather than
@@ -441,9 +468,10 @@ and `err` ORs it gated by that instance's (latch-aligned) write-enable; the cont
 `err_pc <= pc - FETCH_LAG` (the executing step) whenever `err`, so `err_pc` is 0 if the run hit no errors (reset at every
 accept; `|err_pc` means "any error"), else the last writeback step one occurred.
 
-Reset covers only the control registers (`pc`, `err_pc_q`); the fetch registers are reset-unconditional (so they pack
-into the BRAM output register) and settle to `ucode[0]` under reset. The control word and datapath skeleton are the only
-ZISC-specific part -- LIR itself is controller-agnostic.
+Reset covers the control registers (`pc`, `err_pc_q`) and the persistent state registers (each loaded with its reset
+snapshot, emitted after the writeback so the snapshot wins on the reset edge); the fetch registers and the rest of the
+datapath are reset-unconditional (so they pack into the BRAM output register) and settle to `ucode[0]` under reset. The
+control word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
 
 Each operator instance carries its own parameters and float format, fixed at construction from the `OpConfig` threaded
 through `synthesize`. The wrappers' configuration params come from `operator.hdl_params()`, while `operator.latency` is
@@ -496,14 +524,20 @@ exit:   y_out = phi[(b_init, ya), (b_run, yb)]
 
 `ya`/`yb` coalesce to the `y` register; the `phi` is free; only one arm runs; `first` resets to True; `y` is unreset.
 
+This example needs a dynamic branch (`if self._first`), so it awaits the branch/phi milestone. The branch-free
+trapezoidal integrator (`examples/trapezoidal_leaky_streaming_integrator.py`) is the state example synthesizable today:
+its accumulator `y` coalesces onto its slot register (the final `fadd` writes it directly) while the one-sample delay
+`_x_prev = x` is a boundary copy from the input register.
+
 ## First delivery (v0)
 
 Minimal end-to-end slice -- front-end -> HIR -> MIR -> scheduler -> LIR -> Verilog + testbench + report + model --
 on a single basic block: combinational, scalar-only, operators `fadd`/`fmul`/`fdiv`/`fmul_ilog2_const` plus semantic
 `FloatNeg`/`FloatAbs` folding and `FloatConst`
-(`fdiv` and its wrapper already exist in ZKF). No state, control flow, arrays, or bools (`M = 0`); intrinsics
-(`sqrt`, `sincos`, ...) raise the "implement this operator" error, pending ZKF support. State, branches, and arrays
-follow in later milestones.
+(`fdiv` and its wrapper already exist in ZKF). No control flow, arrays, or bools (`M = 0`); intrinsics
+(`sqrt`, `sincos`, ...) raise the "implement this operator" error, pending ZKF support. Straight-line persistent state
+(written attributes become slot registers reset to the instance snapshot, resolved by coalesce-or-boundary-copy) is now
+implemented; branches and arrays follow in later milestones.
 
 ## Deferred
 

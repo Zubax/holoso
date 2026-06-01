@@ -13,6 +13,7 @@ import argparse
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import importlib
+import inspect
 import math
 import os
 import shutil
@@ -201,7 +202,10 @@ def _collect_rtl(specs: list[str]) -> list[Path]:
 def _load_target(kernel: Path, entry: str) -> object:
     sys.path.insert(0, str(kernel.resolve().parent))
     module = importlib.import_module(kernel.stem)
-    return getattr(module, entry)
+    obj = getattr(module, entry)
+    if inspect.isclass(obj):
+        return obj().__call__  # TODO FIXME: add selector syntax to support non-__call__ methods; default to __call__.
+    return obj
 
 
 def _op_config(fmt: FloatFormat, op_knobs: list[_OperatorKnob]) -> OpConfig:

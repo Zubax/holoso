@@ -1,10 +1,9 @@
 """
 The cocotb backend: a self-contained, self-checking testbench for a generated module.
 
-``generate`` embeds the module's :class:`NumericalModel` (as a compressed, base64-encoded pickle) into a standalone
-cocotb test. At simulation time the testbench draws random input vectors, runs the embedded model to get the expected
-outputs, drives the DUT, and asserts the DUT's output bits match the model's exactly -- the model is bit-exact to the
-RTL, so the check needs no tolerance. The testbench imports ``holoso`` only to unpickle the model.
+``generate`` embeds the module's :class:`NumericalModel` into a standalone cocotb test.
+The testbench asserts the DUT's output bits match the model's exactly -- the model is bit-exact to the RTL,
+so the check needs no tolerance. The model and the DUT are reset and stepped in lock-step.
 """
 
 import base64
@@ -51,10 +50,12 @@ async def cosim(dut):
         await RisingEdge(dut.clk)
     dut.rst.value = 0
     await FallingEdge(dut.clk)
-    dut.out_ready.value = 1
+    dut.out_ready.value = 0
+    _MODEL.reset()  # match the DUT's just-applied reset; persistent state then advances in lock-step with the DUT
 
     for index in range(64):  # TODO configurable test count via plusargs
-        # The model is fed exactly the bits the DUT receives, so the comparison is bit-exact.
+        # The model is fed exactly the bits the DUT receives, so the comparison is bit-exact. For a stateful module
+        # this is one step of a sequence: the model and DUT carry their state forward together across iterations.
         # TODO: value range must be configurable via plusargs
         in_bits = [_FMT.encode(rng.uniform(-4, +4)) for _ in in_names]
         expected = _MODEL(*[holoso.FloatValue.from_bits(_FMT, bits) for bits in in_bits])
@@ -76,11 +77,24 @@ async def cosim(dut):
             await Timer(1, unit="ns")
         assert int(dut.err_pc.value) == 0, "vector %d: unexpected error at cycle %d" % (index, int(dut.err_pc.value))
 
+        # Random back-pressure: hold out_ready low for a stall. out_valid and the outputs must stay stable, and the
+        # persistent state must not advance until the transaction is actually accepted (out_valid && out_ready).
+        for _ in range(rng.randint(0, 3)):
+            assert int(dut.out_valid.value) == 1, "vector %d: out_valid dropped under back-pressure" % index
+            for name, want in zip(out_names, exp_bits):
+                got = int(getattr(dut, name).value)
+                assert got == want, "vector %d port %s changed under back-pressure" % (index, name)
+            await RisingEdge(dut.clk)
+            await Timer(1, unit="ns")
+
+        dut.out_ready.value = 1  # accept on the next edge
+        await Timer(1, unit="ns")
         for name, want in zip(out_names, exp_bits):
             got = int(getattr(dut, name).value)
             assert got == want, "vector %d port %s: got 0x%x expected 0x%x" % (index, name, got, want)
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
+        dut.out_ready.value = 0
 '''
 
 

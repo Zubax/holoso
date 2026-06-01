@@ -4,6 +4,7 @@ from collections.abc import Callable
 from typing import Any
 from dataclasses import dataclass, fields
 from pathlib import Path
+import inspect
 import logging
 
 from ._backend.cocotb import generate as generate_testbench, CocotbOutput
@@ -17,7 +18,15 @@ from ._lir import ControlPort, DataInputPort, DataOutputPort, Port, build
 from ._mir import lower as lower_to_mir
 from ._operators import OpConfig
 
-type Target = Callable[..., Any] | type[object]
+type Target = Callable[..., Any]
+"""
+Currently supported targets are:
+- A plain stateless function or lambda.
+- A bound method of a class instance -- stateful. Public attributes become additional output ports.
+- Later on we may potentially add support for multiple methods per class, where the generated module will provide
+  a selector port to choose which method to execute, all sharing the same state. In this case we would accept
+  a tuple containing the class type and a list of its unbound methods. This remains to be seen.
+"""
 
 _logger = logging.getLogger(__name__)
 
@@ -59,18 +68,16 @@ class SynthesisResult:
         return written
 
 
-def synthesize(target: Target, *, ops: OpConfig, entry: str = "__call__", name: str | None = None) -> SynthesisResult:
+def synthesize(target: Target, /, ops: OpConfig, *, name: str | None = None) -> SynthesisResult:
     """
-    Synthesize ``target`` (a function or class object) into a Verilog ZISC FSM, returned in memory.
-
+    Synthesize ``target`` (a plain function or a bound method of a constructed instance) into RTL.
     ``ops`` is the operator configuration, constructed explicitly by the caller: each field fixes one operator's
     float format and parameters, including any pipeline-stage knobs that lengthen its latency to ease timing closure.
-    ``entry`` selects the analyzed method for a class (default ``__call__``);
-    ``name`` overrides the generated module name.
+    ``name`` overrides the generated module name (inferred from target by default).
     """
     logging.basicConfig(level=logging.INFO, format="%(levelname)-5.5s %(name)s: %(message)s")  # no-op if already setup
-    module_name: str = name if name is not None else str(getattr(target, "__name__", "holoso_module"))
-    _logger.info("Synthesis start module=%r entry=%r target=%r", module_name, entry, target)
+    module_name: str = name or _default_module_name(target)
+    _logger.info("Synthesis start: module=%r target=%r", module_name, target)
     _logger.info("Configured operators:")
     for field in fields(ops):
         _logger.info("\t%s: %s", field.name, getattr(ops, field.name))
@@ -100,3 +107,12 @@ def synthesize(target: Target, *, ops: OpConfig, entry: str = "__call__", name: 
         cocotb_output=cocotb_output,
         html_output=html_output,
     )
+
+
+def _default_module_name(target: Target) -> str:
+    if inspect.ismethod(target):
+        n = type(target.__self__).__name__
+        if "__" not in target.__name__:
+            n += f"_{target.__name__}"
+        return n
+    return str(getattr(target, "__name__", "holoso_module"))

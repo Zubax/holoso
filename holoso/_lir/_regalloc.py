@@ -1,13 +1,21 @@
 """
 Reach-aware register allocation over the software-pipelined (cycle-accurate) schedule.
 
-Register-needing values are the input ports and operator results (constants are immediates, not registers). A value
-is *defined* (written into its register) at its commit cycle -- ``issue_cycle + latency`` for an op, cycle 0 for an
-input (the accept edge) -- and *last used* at the latest cycle it is read: the issue cycle of its last consuming op,
-or the output-presentation cycle ``makespan + 1`` if it drives an output. Two values may share a register when the
-older one's last use is no later than the newer one's definition cycle (``last_use <= def_cycle``); this is sound
-because the register file is read-first (a read on the definition cycle still returns the old value) and the read and
-write latches only widen that separation, so the rule is conservative.
+Register-needing values are the input ports, persistent state-slot live-ins, and operator results (constants are
+immediates, not registers). A value is *defined* (written into its register) at its commit cycle -- ``issue_cycle +
+latency`` for an op, cycle 0 for an input (the accept edge) or a state read (already resident from the previous
+initiation) -- and *last used* at the latest cycle it is read: the issue cycle of its last consuming op, or the
+output-presentation cycle ``makespan + 1`` if it drives an output or a state slot's persisted value. Two values may
+share a register when the older one's last use is no later than the newer one's definition cycle (``last_use <=
+def_cycle``); this is sound because the register file is read-first (a read on the definition cycle still returns the
+old value) and the read and write latches only widen that separation, so the rule is conservative.
+
+Persistent state is a loop-carried dependence: each slot owns a dedicated register that is reset to its snapshot, read
+for the live-in, and must hold the slot's live-out at the initiation boundary. When the live-out is an operator result
+whose live range does not overlap the live-in, it is *coalesced* onto the slot register (the operator writes it
+directly, no copy); otherwise the live-out keeps its own register and the backend copies it into the slot register at
+the boundary. Slot registers are not recycled by unrelated operations -- the saving is in mux fabric, not flip-flops,
+and a dedicated slot register adds no mux fan-in elsewhere.
 
 Unlike a CPU register allocator, the objective here is NOT to minimize the register count: flip-flops are abundant on
 an FPGA and interconnect is scarce, so the cost that matters is *steering* -- the fan-in of the per-port read muxes and
@@ -20,8 +28,9 @@ want to share a register so its write port fans into one place.
 
 The allocator is a port-affinity-biased graph coloring (a linear scan whose register choice minimizes the marginal
 increase in total mux fan-in), refined by simulated annealing. Input ports are pinned to the unique low registers
-``0..nload-1`` so the step-0 parallel-load lanes map one-to-one onto module input ports; operation results may still
-reuse those registers once the input value is dead. The register count simply grows; we have nowhere to spill.
+``0..nload-1`` so the step-0 parallel-load lanes map one-to-one onto module input ports; the state-slot registers sit
+directly above them; operation results may still reuse the input registers once an input value is dead. The register
+count simply grows; we have nowhere to spill.
 """
 
 from collections import Counter
@@ -32,13 +41,20 @@ import numpy as np
 from scipy.optimize import dual_annealing
 
 from .._hir import ValueId
-from .._mir import MirFloatConst, MirFloatInput, MirFloatOperation, MirFloatView
+from .._mir import MirFloatConst, MirFloatInput, MirFloatOperation, MirFloatStateRead, MirFloatView
+from .._operators import FloatSignControl
 from ._ir import FloatOperatorInstance
 
-# Read port identity (operator instance + operand position) and write-source identity (an instance, or the input load).
+# Read port identity (operator instance + operand position) and write-source identity (an instance, the input load, or
+# a per-slot state writer -- the boundary copy / reset that drives a slot register).
 type _Port = tuple[FloatOperatorInstance, int]
 type _Producer = FloatOperatorInstance | str
 _INPUT_LOAD: _Producer = "input_load"
+
+
+def _state_writer(name: str) -> _Producer:
+    return f"state:{name}"
+
 
 # Budget for the SciPy dual-annealing refinement. It only polishes an already-valid greedy seed (and is a no-op when
 # the seed is already at the reach floor), so the function-evaluation cap keeps build time bounded; raise it to trade
@@ -53,6 +69,7 @@ _logger = logging.getLogger(__name__)
 class FloatAllocation:
     assign: dict[ValueId, int]  # register-needing value -> register index
     nreg: int
+    state_regs: dict[str, int]  # state-slot name -> its dedicated persistent register index
 
 
 def _operation(mir: MirFloatView, vid: ValueId) -> MirFloatOperation:
@@ -107,18 +124,21 @@ def allocate_float(
         node = mir.nodes[vid]
         if isinstance(node, MirFloatOperation):
             return issue_cycle[vid] + node.operator.latency
-        return 0  # an input port, written at the accept edge
+        return 0  # an input port (accept edge) or a state read (already resident from the previous initiation)
 
     input_values = [vid for vid in mir.input_ids if isinstance(mir.nodes[vid], MirFloatInput)]
+    state_values = list(mir.state_read_nodes)  # live-in reads, one per slot that the method reads before writing
     operation_values = [vid for vid in issue_cycle if isinstance(mir.nodes[vid], MirFloatOperation)]
-    reg_values: list[ValueId] = [*input_values, *operation_values]
+    reg_values: list[ValueId] = [*input_values, *state_values, *operation_values]
     def_cycle = {vid: def_cycle_of(vid) for vid in reg_values}
     last_use: dict[ValueId, int] = {vid: def_cycle[vid] for vid in reg_values}
 
-    # Per-value consumer read ports (which operator operand positions read it) and its producer. Outputs read the
-    # register array directly (not through a read port), so they extend liveness but add no port reach.
+    # Per-value consumer read ports (which operator operand positions read it) and its producer. Outputs and persisted
+    # state live-outs read the register array directly (not through a read port), so they extend liveness but add no
+    # port reach.
     consumer_ports: dict[ValueId, set[_Port]] = {vid: set() for vid in reg_values}
     producer_key: dict[ValueId, _Producer] = {vid: _INPUT_LOAD for vid in input_values}
+    producer_key.update({vid: _state_writer(_state_read_name(mir, vid)) for vid in state_values})
     producer_key.update({vid: inst_of[vid] for vid in operation_values})
     for vid in operation_values:
         op = _operation(mir, vid)
@@ -130,27 +150,67 @@ def allocate_float(
     for out in mir.outputs:
         if out.value in last_use and not isinstance(mir.nodes[out.value], MirFloatConst):
             last_use[out.value] = max(last_use[out.value], present_cycle)
+    # A slot's live-out must survive to the boundary so it can be coalesced or copied into the slot register.
+    for slot in mir.state_slots:
+        if slot.live_out in last_use and not isinstance(mir.nodes[slot.live_out], MirFloatConst):
+            last_use[slot.live_out] = max(last_use[slot.live_out], present_cycle)
 
-    assign = _greedy(input_values, operation_values, def_cycle, last_use, consumer_ports, producer_key)
-    nreg = (max(assign.values()) + 1) if assign else 0
+    nload = len(input_values)
+    read_of_slot = {_state_read_name(mir, vid): vid for vid in state_values}
+    state_regs: dict[str, int] = {slot.name: nload + i for i, slot in enumerate(mir.state_slots)}
+    reserved = set(state_regs.values())
+
+    # Pin inputs to the low load lanes and each state slot's live-in to its dedicated persistent register.
+    pinned: dict[ValueId, int] = {vid: reg for reg, vid in enumerate(input_values)}
+    for name, reg in state_regs.items():
+        r_in = read_of_slot.get(name)
+        if r_in is not None:
+            pinned[r_in] = reg
+
+    # Coalesce a slot's live-out onto its register when it is an unconditioned operator result whose live range does
+    # not overlap the live-in; otherwise leave it for the backend to copy (and sign-condition) at the boundary.
+    for slot in mir.state_slots:
+        live_out = slot.live_out
+        if slot.sign != FloatSignControl() or live_out in pinned:
+            continue
+        if not isinstance(mir.nodes[live_out], MirFloatOperation):
+            continue
+        r_in = read_of_slot.get(slot.name)
+        if r_in is None or last_use[r_in] <= def_cycle[live_out]:
+            pinned[live_out] = state_regs[slot.name]
+
+    movable = [vid for vid in operation_values if vid not in pinned]
+    fresh_start = nload + len(mir.state_slots)
+
+    assign = _greedy(movable, pinned, reserved, fresh_start, def_cycle, last_use, consumer_ports, producer_key)
+    nreg = max((max(assign.values()) + 1) if assign else 0, fresh_start)
     greedy_cost = _objective(assign, consumer_ports, producer_key)
-    assign = _refine(assign, nreg, operation_values, def_cycle, last_use, consumer_ports, producer_key)
+    assign = _refine(assign, nreg, movable, reserved, def_cycle, last_use, consumer_ports, producer_key)
     refined_cost = _objective(assign, consumer_ports, producer_key)
     _assert_no_interference(assign, def_cycle, last_use)
     _logger.info(
-        "Float regalloc: values=%d input_pins=%d greedy_cost=%d refined_cost=%d registers=%d",
+        "Float regalloc: values=%d input_pins=%d state_slots=%d greedy_cost=%d refined_cost=%d registers=%d",
         len(reg_values),
         len(input_values),
+        len(mir.state_slots),
         greedy_cost,
         refined_cost,
         nreg,
     )
-    return FloatAllocation(assign=assign, nreg=nreg)
+    return FloatAllocation(assign=assign, nreg=nreg, state_regs=state_regs)
+
+
+def _state_read_name(mir: MirFloatView, vid: ValueId) -> str:
+    node = mir.nodes[vid]
+    assert isinstance(node, MirFloatStateRead)
+    return node.name
 
 
 def _greedy(
-    input_values: list[ValueId],
-    operation_values: list[ValueId],
+    movable: list[ValueId],
+    pinned: dict[ValueId, int],
+    reserved: set[int],
+    fresh_start: int,
     def_cycle: dict[ValueId, int],
     last_use: dict[ValueId, int],
     consumer_ports: dict[ValueId, set[_Port]],
@@ -180,14 +240,15 @@ def _greedy(
         write = 1 if (producer_key[vid] not in writers and len(writers) >= 1) else 0
         return read + write
 
-    # Inputs are pinned to the low registers backing the parallel-load lanes.
-    for reg, vid in enumerate(input_values):
+    # Pinned values (inputs, state live-ins, coalesced live-outs) take their fixed registers first.
+    for vid, reg in sorted(pinned.items(), key=lambda item: (item[1], item[0])):
         place(vid, reg)
-    active: list[tuple[int, int]] = [(last_use[vid], assign[vid]) for vid in input_values]  # (last_use, reg)
+    # Only the input lanes may later be reused once their value is dead; slot registers are reserved for their slot.
+    active: list[tuple[int, int]] = [(last_use[vid], reg) for vid, reg in pinned.items() if reg not in reserved]
     free: list[int] = []
-    next_reg = len(input_values)
+    next_reg = fresh_start
 
-    for vid in sorted(operation_values, key=lambda v: (def_cycle[v], v)):
+    for vid in sorted(movable, key=lambda v: (def_cycle[v], v)):
         d = def_cycle[vid]
         retained: list[tuple[int, int]] = []
         for lu, reg in active:
@@ -221,7 +282,8 @@ def _greedy(
 def _refine(
     seed: dict[ValueId, int],
     nreg: int,
-    operation_values: list[ValueId],
+    movable: list[ValueId],
+    reserved: set[int],
     def_cycle: dict[ValueId, int],
     last_use: dict[ValueId, int],
     consumer_ports: dict[ValueId, set[_Port]],
@@ -230,17 +292,19 @@ def _refine(
     """
     Refine the greedy assignment with SciPy's simulated annealing (``scipy.optimize.dual_annealing``).
 
-    Each operation value gets a continuous coordinate in ``[0, nreg)``; a decode in definition-cycle order maps it to
-    its preferred register, repairing interference by scanning to the next register free at that cycle. Every evaluated
-    point is therefore a valid (interference-free) coloring reusing only the ``nreg`` seed registers, and the annealer
+    Each movable operation value gets a continuous coordinate in ``[0, nreg)``; a decode in definition-cycle order maps
+    it to its preferred register, repairing interference by scanning to the next register free at that cycle. Pinned
+    values (inputs, state live-ins, coalesced live-outs) and the reserved state-slot registers are held fixed, so every
+    evaluated point is a valid (interference-free) coloring reusing only the ``nreg`` seed registers, and the annealer
     minimizes the mux-fan-in objective. The greedy seed is the starting point and the best point seen is kept, so the
-    pass can only improve on the seed. Inputs are pinned (they are not in ``operation_values``).
+    pass can only improve on the seed.
     """
-    order = sorted(operation_values, key=lambda vid: (def_cycle[vid], vid))
+    order = sorted(movable, key=lambda vid: (def_cycle[vid], vid))
     if len(order) < 2 or nreg <= 1:
         return seed
     op_set = set(order)
     pinned = [(vid, reg) for vid, reg in seed.items() if vid not in op_set]
+    reserved_sentinel = max(last_use.values(), default=0) + 1  # exceeds every last_use, so reserved regs never free
 
     def decode(coords: np.ndarray) -> dict[ValueId, int]:
         assign: dict[ValueId, int] = {}
@@ -250,10 +314,12 @@ def _refine(
         for vid, reg in pinned:
             assign[vid] = reg
             free_after[reg] = max(free_after[reg], last_use[vid])
+        for reg in reserved:  # slot registers belong to their slot for the whole initiation; never reuse them
+            free_after[reg] = reserved_sentinel
         for index, vid in enumerate(order):
             d = def_cycle[vid]
             pref = min(nreg - 1, max(0, int(coords[index])))
-            for offset in range(nreg):  # a register free at d always exists, since nreg covers the peak liveness
+            for offset in range(nreg):  # a non-reserved register free at d always exists (nreg covers peak liveness)
                 reg = (pref + offset) % nreg
                 if free_after[reg] <= d:
                     assign[vid] = reg

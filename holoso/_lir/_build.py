@@ -14,6 +14,7 @@ from ._ir import (
     FloatRegFileLayout,
     FloatRegRef,
     FloatScheduledOp,
+    FloatStateSlot,
     Lir,
 )
 from ._portassign import assign_commutative_ports
@@ -49,12 +50,15 @@ def build(mir: Mir, module_name: str) -> Lir:
         float_inputs=_build_inputs(float_mir, alloc),
         float_ops=_build_ops(float_mir, sched, alloc, const_index, swap),
         float_outputs=_build_outputs(float_mir, alloc, const_index),
+        float_state_slots=_build_state_slots(float_mir, alloc, const_index),
         makespan=sched.makespan,
         op_count=len(float_mir.operation_nodes),
         max_chain_len=_max_chain_len(float_mir),
     )
-    if len({port.name for port in lir.ports}) != len(lir.ports):
-        raise UnsupportedConstruct(f"Non-unique port names")
+    names = [port.name for port in lir.ports]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise UnsupportedConstruct(f"duplicate port name(s) in the module interface: {', '.join(duplicates)}")
     return lir
 
 
@@ -74,6 +78,8 @@ def _build_const_pool(mir: MirFloatView) -> tuple[list[float], dict[ValueId, int
                 note(operand)
     for out in mir.outputs:
         note(out.value)
+    for slot in mir.state_slots:
+        note(slot.live_out)
     values: list[float] = []
     for vid in ids:
         node = mir.const_nodes[vid]
@@ -142,6 +148,22 @@ def _build_outputs(mir: MirFloatView, alloc: FloatAllocation, const_index: dict[
             source = FloatRegRef(alloc.assign[out.value])
         wires.append(FloatOutputWire(out.name, source, out.sign))
     return wires
+
+
+def _build_state_slots(
+    mir: MirFloatView, alloc: FloatAllocation, const_index: dict[ValueId, int]
+) -> list[FloatStateSlot]:
+    slots: list[FloatStateSlot] = []
+    for slot in mir.state_slots:
+        node = mir.nodes[slot.live_out]
+        source: FloatRegRef | FloatConstRef
+        if isinstance(node, MirFloatConst):
+            source = FloatConstRef(const_index[slot.live_out])
+        else:
+            source = FloatRegRef(alloc.assign[slot.live_out])
+        reg = FloatRegRef(alloc.state_regs[slot.name])
+        slots.append(FloatStateSlot(slot.name, reg, slot.reset_value, slot.public, FloatOperand(source, slot.sign)))
+    return slots
 
 
 def _compute_nrd(sched: Schedule) -> int:

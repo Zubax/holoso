@@ -158,6 +158,29 @@ class FloatOutputWire(OutputWire):
 
 
 @dataclass(frozen=True, slots=True)
+class FloatStateSlot:
+    """
+    A persistent float state register: reset to ``reset_value``, holding the slot's live-in (carried over from the
+    previous initiation) until it is overwritten, and holding the slot's live-out at the initiation boundary.
+
+    ``source`` is the live-out's location with its folded sign. When it is exactly ``reg`` with an identity sign the
+    live-out coalesced onto the slot register (its producing operator wrote it) and the backend emits no boundary copy;
+    otherwise the backend copies ``source`` into ``reg`` at the boundary. ``public`` slots also drive an ``out_<name>``
+    port through the ordinary output-wire path.
+    """
+
+    name: str
+    reg: FloatRegRef
+    reset_value: float
+    public: bool
+    source: FloatOperand
+
+    @property
+    def needs_copy(self) -> bool:
+        return not (self.source.source == self.reg and self.source.sign == FloatSignControl())
+
+
+@dataclass(frozen=True, slots=True)
 class RegFileLayout:
     """A typed register file resource."""
 
@@ -192,7 +215,14 @@ class OperationProducer:
     index: int
 
 
-type FloatProducer = InputProducer | OperationProducer
+@dataclass(frozen=True, slots=True)
+class StateProducer:
+    """A state register's live-in: the value it carries over from the previous initiation (or the reset snapshot)."""
+
+    index: int  # index into Lir.float_state_slots
+
+
+type FloatProducer = InputProducer | OperationProducer | StateProducer
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +234,7 @@ class Lir:
     float_inputs: list[FloatInputLoad]  # ordered as the function parameters
     float_ops: list[FloatScheduledOp]  # the pipelined schedule, ordered by (issue_cycle, value ID)
     float_outputs: list[FloatOutputWire]
+    float_state_slots: list[FloatStateSlot]  # persistent registers, ordered as the instance attributes
     makespan: int  # last commit cycle (0 if no ops); the in_valid->out_valid latency is makespan + 1
     op_count: int
     max_chain_len: int  # longest dependency chain in hardware operators (for verification tolerance)
@@ -328,6 +359,8 @@ class Lir:
         uses: dict[FloatRegRef, list[int]] = {}
         for load in self.float_inputs:
             defs.setdefault(load.dst, []).append(1)
+        for slot in self.float_state_slots:
+            defs.setdefault(slot.reg, []).append(1)  # the live-in is resident in the slot register from the start
         for op in self.float_ops:
             defs.setdefault(op.dst, []).append(op.commit_cycle + FETCH_LAG + 2)
             read = op.issue_cycle + FETCH_LAG - 1
@@ -337,6 +370,9 @@ class Lir:
         for wire in self.float_outputs:
             if isinstance(wire.source, FloatRegRef):
                 uses.setdefault(wire.source, []).append(present)
+        for slot in self.float_state_slots:  # the live-out source is read at the boundary to persist the slot
+            if isinstance(slot.source.source, FloatRegRef):
+                uses.setdefault(slot.source.source, []).append(present)
         live: dict[FloatRegRef, set[int]] = {}
         for reg in defs.keys() | uses.keys():
             writes = sorted(defs.get(reg, []))
@@ -355,8 +391,12 @@ class Lir:
         writes: dict[FloatRegRef, list[tuple[int, FloatProducer]]] = {}
         for i, load in enumerate(self.float_inputs):
             writes.setdefault(load.dst, []).append((0, InputProducer(i)))
+        # A slot register starts each initiation holding its live-in (the value carried over from the previous one);
+        # a coalesced operator may then overwrite it later in the same initiation via its own OperationProducer entry.
+        for s, slot in enumerate(self.float_state_slots):
+            writes.setdefault(slot.reg, []).append((0, StateProducer(s)))
         for j, op in enumerate(self.float_ops):
             writes.setdefault(op.dst, []).append((op.commit_cycle, OperationProducer(j)))
         for events in writes.values():
-            events.sort()
+            events.sort(key=lambda event: event[0])
         return writes
