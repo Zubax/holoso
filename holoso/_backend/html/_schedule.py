@@ -410,7 +410,6 @@ def _schedule_key(operator_colors: dict[type[HardwareOperator], str], has_state:
         f"<span class='wr' style='background:{color}'>{_esc(cls.mnemonic)}</span>"
         for cls, color in operator_colors.items()
     ]
-
     items.extend(
         [
             _key_item("<span class='sw ink'></span>", "filled cell = result committed (operator n)"),
@@ -423,7 +422,6 @@ def _schedule_key(operator_colors: dict[type[HardwareOperator], str], has_state:
             _key_item("<span class='wr input'>&#9662;</span>", "module input latch"),
         ]
     )
-
     if has_state:
         items.extend(
             [
@@ -431,7 +429,6 @@ def _schedule_key(operator_colors: dict[type[HardwareOperator], str], has_state:
                 _key_item("<span class='sw state'></span>", "state update latched at the boundary"),
             ]
         )
-
     items.append(f"<span>pc = microcode step executing this cycle (clk&minus;{FETCH_LAG} fetch lag)</span>")
     return "<h2>Schedule</h2><div class='gridkey'>" + " ".join(items) + "</div>"
 
