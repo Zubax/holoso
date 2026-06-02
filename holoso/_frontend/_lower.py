@@ -63,6 +63,9 @@ class _Lowerer:
         self._written_attrs: set[str] = set()
         self._state_order: list[str] = []
         self._state_env: dict[str, ValueId] = {}
+        # Returned leaves are buffered rather than emitted on sight: dropping a return that carries a public attribute's
+        # value needs that attribute's live-out ValueId, which is only settled once the whole body has been lowered.
+        self._returns: list[tuple[_Path, ValueId]] = []
 
     def _loc(self, node: ast.AST) -> SourceLocation:
         lineno = getattr(node, "lineno", 1)
@@ -82,7 +85,8 @@ class _Lowerer:
             raise SourceUnavailable(f"could not locate a 'def {self._fn.__name__}' in the retrieved source")
         self._bind_parameters(fndef)
         self._lower_body(fndef)
-        self._finish_state()
+        self._register_state_slots()
+        self._emit_outputs()
         return self._builder.finish()
 
     def _bind_parameters(self, fndef: ast.FunctionDef) -> None:
@@ -147,9 +151,7 @@ class _Lowerer:
 
     def _lower_return(self, value: ast.expr) -> None:
         for path, expr in _flatten_return(value):
-            if self._is_public_state_read(expr):
-                continue  # observed directly via its out_<attr> port; suppress the redundant positional output
-            self._builder.output(_port_name(path), self._lower_expr(expr))
+            self._returns.append((path, self._lower_expr(expr)))
 
     def _lower_expr(self, node: ast.expr) -> ValueId:
         match node:
@@ -223,8 +225,14 @@ class _Lowerer:
                 raise UnsupportedConstruct(f"unsupported binary operator {type(op).__name__}", loc)
 
     def _collect_written_attrs(self, fndef: ast.FunctionDef) -> None:
-        """Find the instance attributes the method assigns; these become persistent state, the rest stay constant."""
+        """
+        Find the instance attributes the method assigns in its reachable basic block; these become persistent state,
+        the rest stay constant. Scanning stops at the first return, mirroring ``_lower_body``: statements after it are
+        unreachable and never lowered, so collecting their writes would later look up an attribute that has no value.
+        """
         for stmt in fndef.body:
+            if isinstance(stmt, ast.Return):
+                break
             targets: list[ast.expr] = []
             match stmt:
                 case ast.Assign(targets=ts):
@@ -275,14 +283,6 @@ class _Lowerer:
     def _assign_attr(self, target: ast.Attribute, value: ValueId) -> None:
         self._state_env[self._attr_of(target)] = value
 
-    def _is_public_state_read(self, expr: ast.expr) -> bool:
-        return (
-            isinstance(expr, ast.Attribute)
-            and self._is_self_attr(expr)
-            and expr.attr in self._written_attrs
-            and not expr.attr.startswith("_")
-        )
-
     def _coerce_scalar(self, attr: str, value: object) -> float:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise UnsupportedConstruct(
@@ -290,15 +290,30 @@ class _Lowerer:
             )
         return float(value)
 
-    def _finish_state(self) -> None:
-        """Register each written attribute as a persistent slot and expose public ones through an out_<attr> port."""
+    @staticmethod
+    def _is_public(attr: str) -> bool:
+        """A public attribute (no leading underscore) drives an out_<attr> port; an underscored one stays internal."""
+        return not attr.startswith("_")
+
+    def _register_state_slots(self) -> None:
+        """Register each written attribute as a persistent state slot, reset to its instance-snapshot value."""
         for attr in self._state_order:
-            live_out = self._state_env[attr]
             reset_value = self._coerce_scalar(attr, self._snapshot[attr])
-            public = not attr.startswith("_")
-            self._builder.state_slot(attr, reset_value, public, live_out)
-            if public:
-                self._builder.output(_port_name([attr]), live_out)
+            self._builder.state_slot(attr, reset_value, self._is_public(attr), self._state_env[attr])
+
+    def _emit_outputs(self) -> None:
+        """
+        A returned leaf is dropped when its value equals a public slot's live-out: that wire is already exposed through
+        the slot's out_<attr> port, so deduping it loses nothing. The key is the value (ValueId), not the spelling, so
+        an alias and a coincidentally-equal expression collapse alike.
+        """
+        public_live_outs = {self._state_env[attr] for attr in self._state_order if self._is_public(attr)}
+        for path, vid in self._returns:
+            if vid not in public_live_outs:
+                self._builder.output(_port_name(path), vid)
+        for attr in self._state_order:
+            if self._is_public(attr):
+                self._builder.output(_port_name([attr]), self._state_env[attr])
 
 
 def _flatten_return(node: ast.expr) -> list[tuple[_Path, ast.expr]]:

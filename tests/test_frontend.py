@@ -166,6 +166,86 @@ def test_stateful_method_state_slots_and_dedup() -> None:
     assert {n.slot for n in hir.nodes.values() if isinstance(n, StateRead)} == {"y", "_x_prev"}
 
 
+def test_returned_public_state_alias_is_deduped() -> None:
+    # The dedup is by dataflow, not spelling: returning a public attribute through an alias must still collapse onto its
+    # out_<attr> port rather than emitting a second positional output for the same value.
+    class Aliased:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            self.y = x
+            y = self.y
+            return y
+
+    hir = lower(Aliased().__call__)
+    assert [o.name for o in hir.outputs] == ["out_y"]
+
+
+def test_mixed_return_dedupes_public_alias_keeps_distinct_leaf() -> None:
+    class Mixed:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            self.y = x * 2.0
+            a = self.y
+            return (a, x)  # a aliases public self.y (deduped to out_y); x is distinct (keeps its positional out_1)
+
+    hir = lower(Mixed().__call__)
+    assert [o.name for o in hir.outputs] == ["out_1", "out_y"]
+
+
+def test_return_value_equal_to_public_state_is_deduped_even_without_aliasing() -> None:
+    # Dedup keys on the value, not provenance: returning x while x is also a public slot's live-out collapses onto that
+    # slot's port even though the return never names the attribute. This is safe -- out_last carries the very same wire,
+    # so the value stays observable; a separate out_0 would only duplicate it.
+    class Passthrough:
+        def __init__(self) -> None:
+            self.last = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            self.last = x
+            return x
+
+    hir = lower(Passthrough().__call__)
+    assert [o.name for o in hir.outputs] == ["out_last"]
+
+
+def test_unreachable_state_write_is_ignored() -> None:
+    # A state write after the return is unreachable and never lowered; collecting it must not be attempted (it used to
+    # crash with a KeyError). The method synthesizes as if the dead line were not there.
+    class Dead:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            return x
+            self.y = x  # unreachable
+
+    hir = lower(Dead().__call__)
+    assert [o.name for o in hir.outputs] == ["out_0"]
+    assert hir.state_slots == []
+
+
+def test_attribute_written_only_in_dead_code_reads_as_constant() -> None:
+    # An attribute whose only assignment is unreachable is not state: a reachable read of it folds to its snapshot
+    # constant, so it gets no slot and no out_<attr> port (whether it is state depends on its write being reachable).
+    class Stale:
+        def __init__(self) -> None:
+            self.y = 5.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            r = x + self.y  # y folds to its snapshot 5.0 -- its only write is dead
+            return r
+            self.y = x  # unreachable
+
+    hir = lower(Stale().__call__)
+    assert hir.state_slots == []
+    assert [o.name for o in hir.outputs] == ["out_0"]
+    assert all(not (isinstance(n, StateRead) and n.slot == "y") for n in hir.nodes.values())
+
+
 def test_stateful_readonly_attribute_is_folded_constant() -> None:
     integrator = _integrator_class()(k=2**-22)
     hir = optimize(lower(integrator.__call__))

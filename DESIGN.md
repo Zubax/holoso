@@ -141,8 +141,10 @@ attribute it only reads is a frozen constant folded from the snapshot. Within th
 variable, so reads and writes interleave freely with computation; the first read before any write is the register's
 live-in (carried over from the previous initiation), and the value bound at method exit is the live-out that must reside
 in the register at the boundary. Underscore-prefixed attributes stay internal; public attributes additionally drive an
-`out_<attr>` port, so a method need not return anything, and a returned value that is exactly a public attribute is
-deduped onto that one port. Straight-line stateful methods are implemented today (the trapezoidal-integrator example);
+`out_<attr>` port, so a method need not return anything, and a returned value that is, by dataflow, a public attribute
+(the same SSA value, however it was spelled or aliased) is deduped onto that one port. An attribute assigned only in
+unreachable code (after a return) is never lowered, so it stays a read-only folded constant -- whether an attribute is
+state follows reachability. Straight-line stateful methods are implemented today (the trapezoidal-integrator example);
 state combined with dynamic branches awaits the branch/phi work below.
 
 Matrices/vectors are statically shaped and unrolled to scalar operations at synthesis time (as in the SymPy-CSE'd
