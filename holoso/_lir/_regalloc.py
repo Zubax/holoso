@@ -22,25 +22,32 @@ the old live-in is fully read and the source is available when the source is an 
 reuse), the boundary at the latest. The slot registers themselves are not recycled; the saving is in mux fabric, not
 flip-flops, and a dedicated slot register adds no mux fan-in elsewhere.
 
-Unlike a CPU register allocator, the objective here is NOT to minimize the register count: flip-flops are abundant on
-an FPGA and interconnect is scarce, so the cost that matters is *steering* -- the fan-in of the per-port read muxes and
-the per-register write selects of the sparse register file synthesized in the backend. We therefore minimize total
-mux fan-in: ``sum_p max(0, |read-set(p)| - 1) + sum_r max(0, |writers(r)| - 1)``, where a read port ``p`` is one
-operator ``(instance, operand-position)`` and ``writers(r)`` are the distinct producers (operator instances plus the
-input-load) of the values placed in register ``r``. Two values read by the same port that do not interfere are best
-placed in the same register so that port reaches one register, not two; values produced by the same instance likewise
-want to share a register so its write port fans into one place.
+Unlike a CPU register allocator, the primary objective here is NOT to minimize the register count: flip-flops are
+abundant on an FPGA and interconnect is scarce, so the cost that matters most is *steering* -- the fan-in of the
+per-port read muxes and the per-register write selects of the sparse register file synthesized in the backend. The
+primary objective is therefore total mux fan-in: ``sum_p max(0, |read-set(p)| - 1) + sum_r max(0, |writers(r)| - 1)``,
+where a read port ``p`` is one operator ``(instance, operand-position)`` and ``writers(r)`` are the distinct producers
+(operator instances plus the input-load) of the values placed in register ``r``. Two values read by the same port that
+do not interfere are best placed in the same register so that port reaches one register, not two; values produced by
+the same instance likewise want to share a register so its write port fans into one place.
+
+Register count is a bounded *secondary* objective. A register costs flip-flops but no steering, so it is worth shedding
+only when doing so widens a write select modestly: the allocator colors twice -- once reach-minimal, once compacting
+dead registers up to a write-select cap -- and keeps whichever minimizes ``reach + _REG_PRICE * registers`` (see those
+constants). The reach-minimal coloring is always a candidate, so trading for fewer registers never raises steering by
+more than the price paid per register freed.
 
 The allocator is a port-affinity-biased graph coloring (a linear scan whose register choice minimizes the marginal
 increase in total mux fan-in), refined by simulated annealing. Input ports are pinned to the unique low registers
 ``0..nload-1`` so the step-0 parallel-load lanes map one-to-one onto module input ports; the state-slot registers sit
-directly above them; operation results may still reuse the input registers once an input value is dead. The register
-count simply grows; we have nowhere to spill.
+directly above them; operation results may still reuse the input registers once an input value is dead. There is no
+spilling: a value the cap cannot place by reuse simply opens a new register.
 """
 
 from collections import Counter
 from dataclasses import dataclass
 import logging
+import os
 
 import numpy as np
 from scipy.optimize import dual_annealing
@@ -66,6 +73,21 @@ def _state_writer(name: str) -> _Producer:
 # build time for a deeper search.
 _REFINE_MAXITER = 5000
 _REFINE_MAXFUN = 10000
+
+# Balance of reach against register count, layered on the hardware-accurate liveness. ``_WRITE_SELECT_CAP`` bounds how
+# wide a per-register write select the compaction may build (the ":1" of the select -- the number of distinct producers
+# sharing a register); reuse never widens a read mux beyond a fresh register, so the write select is the only mux a
+# compacted coloring can grow. ``_REG_PRICE`` is what one freed register is worth in mux-arm units: the allocator keeps
+# whichever coloring minimizes ``reach + _REG_PRICE * registers``. The price bounds the spectrum -- price 0 stays
+# reach-minimal (registers only break a reach tie), price -> inf takes every register the cap can free, and a fractional
+# price compacts only when a register comes near reach-free. The default 2.0 sheds one register off each bundled small
+# kernel with f_max held and selects no wider than 2:1.
+#
+# These two are EXPERIMENTAL / ADVANCED knobs with no user-facing surface; they are read once from the environment for
+# tuning and may be promoted to proper parameters if a real need arises.
+_WRITE_SELECT_CAP = int(os.getenv("HOLOSO_WRITE_SELECT_CAP", "2"))
+_REG_PRICE = float(os.getenv("HOLOSO_REG_PRICE", "2.0"))
+_NO_CAP = 1 << 30  # an effectively unbounded write-select budget, used for the reach-minimal coloring
 
 _logger = logging.getLogger(__name__)
 
@@ -258,20 +280,41 @@ def allocate_float(
 
     movable = [vid for vid in operation_values if vid not in pinned]
     fresh_start = nload + len(mir.state_slots)
+    cap, price = _WRITE_SELECT_CAP, _REG_PRICE
 
-    assign = _greedy(movable, pinned, reserved, fresh_start, write_hw, read_hw, consumer_ports, producer_key)
-    nreg = max((max(assign.values()) + 1) if assign else 0, fresh_start)
-    greedy_cost = _objective(assign, consumer_ports, producer_key)
-    assign = _refine(assign, nreg, movable, reserved, write_hw, read_hw, consumer_ports, producer_key)
-    refined_cost = _objective(assign, consumer_ports, producer_key)
+    def greedy_seed(compact: bool, budget: int) -> tuple[dict[ValueId, int], int]:
+        seed = _greedy(
+            movable, pinned, reserved, fresh_start, write_hw, read_hw, consumer_ports, producer_key, compact, budget
+        )
+        return seed, max((max(seed.values()) + 1) if seed else 0, fresh_start)
+
+    def refined(seed: dict[ValueId, int], nreg: int, budget: int) -> dict[ValueId, int]:
+        return _refine(seed, nreg, movable, reserved, write_hw, read_hw, consumer_ports, producer_key, budget)
+
+    base_seed, base_nreg = greedy_seed(compact=False, budget=_NO_CAP)
+    comp_seed, comp_nreg = greedy_seed(compact=True, budget=cap)
+    # Balance reach against register count. The reach-minimal coloring is the default, so the result never regresses on
+    # the proxy; the compacted coloring (write selects widened up to the budget to free flip-flops) uses fewer registers
+    # but more reach, so it is adopted only when it strictly lowers reach + price*registers (fewer registers breaking a
+    # tie). At price 0 it wins only by matching the reach floor with fewer registers, so the result stays reach-minimal;
+    # as price grows it buys registers back at up to that many mux arms each.
+    assign, nreg = refined(base_seed, base_nreg, _NO_CAP), base_nreg
+    if comp_nreg < base_nreg:
+        comp_assign = refined(comp_seed, comp_nreg, cap)
+        base_score = (_objective(assign, consumer_ports, producer_key) + price * base_nreg, base_nreg)
+        comp_score = (_objective(comp_assign, consumer_ports, producer_key) + price * comp_nreg, comp_nreg)
+        if comp_score < base_score:
+            assign, nreg = comp_assign, comp_nreg
     _assert_no_interference(assign, write_hw, read_hw)
     _logger.info(
-        "Float regalloc: values=%d input_pins=%d state_slots=%d greedy_cost=%d refined_cost=%d registers=%d",
+        "Float regalloc: values=%d input_pins=%d state_slots=%d cap=%d price=%g base_reg=%d comp_reg=%d registers=%d",
         len(reg_values),
         len(input_values),
         len(mir.state_slots),
-        greedy_cost,
-        refined_cost,
+        cap,
+        price,
+        base_nreg,
+        comp_nreg,
         nreg,
     )
     return FloatAllocation(assign=assign, nreg=nreg, state_regs=state_regs, install_cycles=install_cycles)
@@ -292,8 +335,15 @@ def _greedy(
     read_hw: dict[ValueId, int],
     consumer_ports: dict[ValueId, set[_Port]],
     producer_key: dict[ValueId, _Producer],
+    compact: bool,
+    cap: int,
 ) -> dict[ValueId, int]:
-    """Linear scan whose register choice minimizes the marginal increase in total mux fan-in (port-affinity bias)."""
+    """
+    Port-affinity-biased linear scan. With ``compact`` false it is reach-minimal: each value takes the register (a dead
+    one or a fresh one) of least marginal mux growth, opening a register only when reuse would actually cost steering.
+    With ``compact`` true it instead prefers any dead register whose write select stays within ``cap`` over a fresh one,
+    freeing flip-flops at the cost of a wider write select; ``cap`` is ignored when ``compact`` is false.
+    """
     assign: dict[ValueId, int] = {}
     reg_ports: dict[int, set[_Port]] = {}
     reg_writers: dict[int, set[_Producer]] = {}
@@ -317,6 +367,16 @@ def _greedy(
         write = 1 if (producer_key[vid] not in writers and len(writers) >= 1) else 0
         return read + write
 
+    def writers_after(reg: int, producer: _Producer) -> int:
+        return len(reg_writers.get(reg, frozenset()) | {producer})
+
+    def candidate_key(vid: ValueId, reg: int, is_fresh: int) -> tuple[int, int, int]:
+        # Compaction sorts reuse ahead of marginal mux growth (is_fresh leads), so any admissible dead register beats a
+        # fresh one; reach minimization sorts mux growth first and uses reuse only to break ties. ``is_fresh`` (0 dead,
+        # 1 fresh) then ``reg`` keep the order total either way.
+        cost = marginal_cost(vid, reg)
+        return (is_fresh, cost, reg) if compact else (cost, is_fresh, reg)
+
     # Pinned values (inputs, state live-ins, coalesced live-outs) take their fixed registers first.
     for vid, reg in sorted(pinned.items(), key=lambda item: (item[1], item[0])):
         place(vid, reg)
@@ -334,19 +394,19 @@ def _greedy(
             else:
                 retained.append((r, reg))
         active = retained
-        # Choose the candidate (a freed register or a brand-new one) with the least marginal mux growth; on a tie
-        # prefer reusing an existing register (key flag 0 < 1) and the lowest index, so the count grows only when
-        # reuse would actually cost steering.
-        best_key: tuple[int, int, int] | None = None
-        best_reg = next_reg
-        best_fresh = True
+        producer = producer_key[vid]
+        # Compaction and reach minimization share one ranking and differ only in what the register choice optimizes
+        # first (see ``candidate_key``). Reach-minimal opens a register only when reuse would cost steering; compaction
+        # admits only dead registers whose write select stays within the budget and takes any of them over a fresh one,
+        # so it frees flip-flops at the cost of a wider write select. A fresh register is always the fallback.
+        best_reg, best_fresh = next_reg, True
+        best_key = candidate_key(vid, next_reg, 1)
         for reg in free:
-            key = (marginal_cost(vid, reg), 0, reg)
-            if best_key is None or key < best_key:
+            if compact and writers_after(reg, producer) > cap:
+                continue
+            key = candidate_key(vid, reg, 0)
+            if key < best_key:
                 best_key, best_reg, best_fresh = key, reg, False
-        fresh_key = (marginal_cost(vid, next_reg), 1, next_reg)
-        if best_key is None or fresh_key < best_key:
-            best_reg, best_fresh = next_reg, True
         if best_fresh:
             next_reg += 1
         else:
@@ -365,13 +425,16 @@ def _refine(
     read_hw: dict[ValueId, int],
     consumer_ports: dict[ValueId, set[_Port]],
     producer_key: dict[ValueId, _Producer],
+    cap: int,
 ) -> dict[ValueId, int]:
     """
     Refine the greedy assignment with SciPy's simulated annealing (``scipy.optimize.dual_annealing``).
 
     Each movable operation value gets a continuous coordinate in ``[0, nreg)``; a decode in landing order maps it to its
     preferred register, repairing interference by scanning to the next register whose occupant's last read precedes this
-    value's landing. Pinned values (inputs, state live-ins, coalesced live-outs) and the reserved state-slot registers
+    value's landing and whose write select stays within ``cap`` (a last-resort fallback may exceed ``cap`` when no other
+    register is free, since decode cannot open a fresh one; see the decode body). Pinned values (inputs, state live-ins,
+    coalesced live-outs) and the reserved state-slot registers
     are held fixed, so every evaluated point is a valid (interference-free) coloring reusing only the ``nreg`` seed
     registers, and the annealer minimizes the mux-fan-in objective. The greedy seed is the starting point and the best
     point seen is kept, so the pass can only improve on the seed.
@@ -386,22 +449,39 @@ def _refine(
     def decode(coords: np.ndarray) -> dict[ValueId, int]:
         assign: dict[ValueId, int] = {}
         # free_after[reg] = max last read of any value placed in reg; the register is free for a value landing at w iff
-        # it is < w (read-first: every occupant is then read out before w). Landing order keeps this an O(1) check.
+        # it is < w (read-first). writers[reg] tracks the running producer set so the decode honors the same write-select
+        # budget the greedy did, rather than re-growing a select past the cap to shave a read arm. Landing order keeps
+        # the free check O(1).
         free_after = [-1] * nreg
+        writers: list[set[_Producer]] = [set() for _ in range(nreg)]
         for vid, reg in pinned:
             assign[vid] = reg
             free_after[reg] = max(free_after[reg], read_hw[vid])
+            writers[reg].add(producer_key[vid])
         for reg in reserved:  # slot registers belong to their slot for the whole initiation; never reuse them
             free_after[reg] = reserved_sentinel
         for index, vid in enumerate(order):
             w = write_hw[vid]
+            producer = producer_key[vid]
             pref = min(nreg - 1, max(0, int(coords[index])))
+            # Primary scan anchored at pref: the first free register whose write select stays within budget, so x0
+            # decodes back to the greedy seed. Decode must place every value within the fixed nreg registers -- it
+            # cannot open a fresh one as the greedy can -- so when none is within budget it falls back to the free
+            # register whose select grows least; this is the only path that may push a write select past the cap.
+            chosen = -1
             for offset in range(nreg):  # a non-reserved register free at w always exists (nreg covers peak liveness)
                 reg = (pref + offset) % nreg
-                if free_after[reg] < w:
-                    assign[vid] = reg
-                    free_after[reg] = read_hw[vid]  # >= w > the old occupant's last read, so this is the new max
+                if free_after[reg] < w and len(writers[reg] | {producer}) <= cap:
+                    chosen = reg
                     break
+            if chosen < 0:
+                chosen = min(
+                    (reg for reg in range(nreg) if free_after[reg] < w),
+                    key=lambda reg: (len(writers[reg] | {producer}), reg),
+                )
+            assign[vid] = chosen
+            free_after[chosen] = read_hw[vid]
+            writers[chosen].add(producer)
         return assign
 
     best = seed

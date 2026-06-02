@@ -294,8 +294,10 @@ writer-sets, stable ref labels, and write-timeline reconstruction so backends do
   a more CPU-conventional design was made, utilizing a full-reach crossbar register file, which resulted in untenable
   timing penalties due to the expensive read/write port multiplexors, hence the sparse optimized design was preferred.
 
-- Register allocation is reach-aware: it places values to minimize per-port read-set and per-register writer-set
-  fan-in (the steering cost that matters on an FPGA), not the register count; widen `N` rather than spill.
+- Register allocation is reach-aware: its primary objective is to minimize per-port read-set and per-register
+  writer-set fan-in (the steering cost that matters on an FPGA). Register count is a bounded secondary objective: it
+  colors reach-minimal and again compacting dead registers up to a write-select cap, keeping whichever minimizes
+  `reach + price * registers`, so it sheds a register only when that widens a write select modestly. No spill.
 
 - Commutative port assignment (`_portassign.py`): after allocation, each use of a commutative operator has its two
   operands oriented across its read ports to minimize the total read-set size. A register that an operand reads in one
@@ -377,9 +379,10 @@ for cycle = 1, 2, ...:                          # cycle 0 accepts/loads inputs
     for op in ready by critical_path desc:
         if an instance of op's concrete hardware operator is free this cycle:
             bind op to that instance; issue_cycle[op] = cycle
-regalloc: reach-aware coloring (greedy port-affinity + a bounded SciPy dual-annealing refinement); share a register
-  when the older value's last read precedes the newer's landing in the hardware frame, R(a) < W(b) -- the read/write
-  latch separation is reclaimed (the same liveness float_liveness renders), not merely tolerated; no spill
+regalloc: reach-aware coloring (greedy port-affinity + a bounded SciPy dual-annealing refinement) minimizing mux
+  fan-in, then register count as a bounded secondary objective (best of a reach-minimal and a cap-compacted coloring);
+  share a register when the older value's last read precedes the newer's landing in the hardware frame, R(a) < W(b) --
+  the read/write latch separation is reclaimed (the same liveness float_liveness renders), not merely tolerated; no spill
 ```
 
 - Instances are pooled by the fully specified hardware operator itself (a frozen, equal-by-value `HardwareOperator`):
