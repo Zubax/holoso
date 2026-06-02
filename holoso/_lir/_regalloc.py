@@ -4,18 +4,20 @@ Reach-aware register allocation over the software-pipelined (cycle-accurate) sch
 Register-needing values are the input ports, persistent state-slot live-ins, and operator results (constants are
 immediates, not registers). A value is *defined* (written into its register) at its commit cycle -- ``issue_cycle +
 latency`` for an op, cycle 0 for an input (the accept edge) or a state read (already resident from the previous
-initiation) -- and *last used* at the latest cycle it is read: the issue cycle of its last consuming op, or the
-output-presentation cycle ``makespan + 1`` if it drives an output or a state slot's persisted value. Two values may
-share a register when the older one's last use is no later than the newer one's definition cycle (``last_use <=
+initiation) -- and *last used* at the latest cycle it is read: the issue cycle of its last consuming op, the
+output-presentation cycle ``makespan + 1`` if it drives an output, or a slot's install cycle if it is the source of a
+persisted live-out. Two values may share a register when the older one's last use is no later than the newer one's
+definition cycle (``last_use <=
 def_cycle``); this is sound because the register file is read-first (a read on the definition cycle still returns the
 old value) and the read and write latches only widen that separation, so the rule is conservative.
 
 Persistent state is a loop-carried dependence: each slot owns a dedicated register that is reset to its snapshot, read
 for the live-in, and must hold the slot's live-out at the initiation boundary. When the live-out is an operator result
 whose live range does not overlap the live-in, it is *coalesced* onto the slot register (the operator writes it
-directly, no copy); otherwise the live-out keeps its own register and the backend copies it into the slot register at
-the boundary. Slot registers are not recycled by unrelated operations -- the saving is in mux fabric, not flip-flops,
-and a dedicated slot register adds no mux fan-in elsewhere.
+directly, no copy); otherwise the backend copies the live-out into the slot register at its install cycle: as early as
+the old live-in is fully read and the source is available when the source is an ordinary register (which then frees for
+reuse), the boundary at the latest. The slot registers themselves are not recycled; the saving is in mux fabric, not
+flip-flops, and a dedicated slot register adds no mux fan-in elsewhere.
 
 Unlike a CPU register allocator, the objective here is NOT to minimize the register count: flip-flops are abundant on
 an FPGA and interconnect is scarce, so the cost that matters is *steering* -- the fan-in of the per-port read muxes and
@@ -46,7 +48,7 @@ from .._operators import FloatSignControl
 from ._ir import FloatOperatorInstance
 
 # Read port identity (operator instance + operand position) and write-source identity (an instance, the input load, or
-# a per-slot state writer -- the boundary copy / reset that drives a slot register).
+# a per-slot state writer -- the writeback copy / reset that drives a slot register).
 type _Port = tuple[FloatOperatorInstance, int]
 type _Producer = FloatOperatorInstance | str
 _INPUT_LOAD: _Producer = "input_load"
@@ -70,6 +72,7 @@ class FloatAllocation:
     assign: dict[ValueId, int]  # register-needing value -> register index
     nreg: int
     state_regs: dict[str, int]  # state-slot name -> its dedicated persistent register index
+    install_cycles: dict[str, int]  # state-slot name -> scheduler-frame cycle its live-out lands in the slot register
 
 
 def _operation(mir: MirFloatView, vid: ValueId) -> MirFloatOperation:
@@ -150,10 +153,6 @@ def allocate_float(
     for out in mir.outputs:
         if out.value in last_use and not isinstance(mir.nodes[out.value], MirFloatConst):
             last_use[out.value] = max(last_use[out.value], present_cycle)
-    # A slot's live-out must survive to the boundary so it can be coalesced or copied into the slot register.
-    for slot in mir.state_slots:
-        if slot.live_out in last_use and not isinstance(mir.nodes[slot.live_out], MirFloatConst):
-            last_use[slot.live_out] = max(last_use[slot.live_out], present_cycle)
 
     nload = len(input_values)
     read_of_slot = {_state_read_name(mir, vid): vid for vid in state_values}
@@ -168,7 +167,7 @@ def allocate_float(
             pinned[r_in] = reg
 
     # Coalesce a slot's live-out onto its register when it is an unconditioned operator result whose live range does
-    # not overlap the live-in; otherwise leave it for the backend to copy (and sign-condition) at the boundary.
+    # not overlap the live-in; otherwise leave it for the backend to copy (and sign-condition) at its install cycle.
     for slot in mir.state_slots:
         live_out = slot.live_out
         if slot.sign != FloatSignControl() or live_out in pinned:
@@ -179,16 +178,47 @@ def allocate_float(
         if r_in is None or last_use[r_in] <= def_cycle[live_out]:
             pinned[live_out] = state_regs[slot.name]
 
+    # Schedule each slot's writeback and extend its source's last use to that install cycle, after which the source
+    # register is free for unrelated values. A non-coalesced live-out is copied at the boundary by default; but when its
+    # source is an ordinary (non-slot) register and no other slot reads this slot's register, the copy can fire as soon
+    # as the old live-in is fully read and the source is available (read-first lets the copy's write share the cycle of
+    # the live-in's last read). Coalesced, constant, chained (source is another slot), and read-by-another slots stay at
+    # the boundary, where holding the source to the present cycle is required and frees nothing.
+    tapped_by_other = {
+        _state_read_name(mir, slot.live_out)
+        for slot in mir.state_slots
+        if isinstance(mir.nodes[slot.live_out], MirFloatStateRead) and _state_read_name(mir, slot.live_out) != slot.name
+    }
+    install_cycles: dict[str, int] = {}
+    for slot in mir.state_slots:
+        live_out = slot.live_out
+        node = mir.nodes[live_out]
+        r_in = read_of_slot.get(slot.name)
+        coalesced = pinned.get(live_out) == state_regs[slot.name]
+        early = (
+            not coalesced and isinstance(node, (MirFloatInput, MirFloatOperation)) and slot.name not in tapped_by_other
+        )
+        if early:
+            cycle = def_cycle[live_out] + 1  # read-first: the copy reads a value committed strictly before its read
+            if r_in is not None:
+                cycle = max(cycle, last_use[r_in])  # do not overwrite the old live-in before its last read
+            cycle = min(cycle, present_cycle)
+        else:
+            cycle = present_cycle
+        install_cycles[slot.name] = cycle
+        if not isinstance(node, MirFloatConst):
+            last_use[live_out] = max(last_use[live_out], cycle)
+
     # WAR backstop: each slot's new value must land no earlier than its live-in's last read, so the old value is fully
-    # consumed first (read-first allows equality). Coalescing enforced this for the operator case above, and a boundary
-    # copy lands at the present cycle (after all compute) so it holds there too -- assert it so a future schedulable
-    # bare-move that tried to commit early would fail loudly here rather than silently corrupt the carried-over state.
+    # consumed first (read-first allows equality). This holds by construction -- coalescing requires it (above) and the
+    # install cycle is computed as >= last_use[r_in] -- so the assert is a guard that trips loudly if a future change
+    # weakens either path, rather than letting a copy scheduled too early silently corrupt the carried-over state.
     for slot in mir.state_slots:
         r_in = read_of_slot.get(slot.name)
         if r_in is None or slot.live_out == r_in:
             continue  # write-only (no live-in), or a no-op writeback of the live-in itself: no new value lands
         coalesced = pinned.get(slot.live_out) == state_regs[slot.name]
-        new_value_cycle = def_cycle[slot.live_out] if coalesced else present_cycle
+        new_value_cycle = def_cycle[slot.live_out] if coalesced else install_cycles[slot.name]
         assert last_use[r_in] <= new_value_cycle, (
             f"state slot {slot.name!r} write-after-read violated: live-in last read at {last_use[r_in]} "
             f"exceeds new-value write cycle {new_value_cycle}"
@@ -212,7 +242,7 @@ def allocate_float(
         refined_cost,
         nreg,
     )
-    return FloatAllocation(assign=assign, nreg=nreg, state_regs=state_regs)
+    return FloatAllocation(assign=assign, nreg=nreg, state_regs=state_regs, install_cycles=install_cycles)
 
 
 def _state_read_name(mir: MirFloatView, vid: ValueId) -> str:

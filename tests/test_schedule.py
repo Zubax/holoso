@@ -200,7 +200,7 @@ def test_build_lir_small_kernel() -> None:
         assert expected in names
 
 
-def test_state_boundary_write_is_first_class() -> None:
+def test_state_writeback_installs_early_and_is_first_class() -> None:
     from holoso._lir import FETCH_LAG, FloatOperand
 
     class LeakyDelay:
@@ -209,15 +209,22 @@ def test_state_boundary_write_is_first_class() -> None:
 
         def __call__(self, x):  # type: ignore[no-untyped-def]
             out = self._p + x  # reads the old _p; the fadd result is the only output
-            self._p = x  # a bare-input copy -> a non-coalesced boundary write
+            self._p = x  # a non-coalesced writeback whose source (the input x) is an ordinary register
             return out
 
     lir = build(_run(LeakyDelay().__call__), "leaky_delay")
     (slot,) = lir.float_state_slots
     assert lir.has_state and slot.needs_copy and isinstance(slot.tap, FloatOperand)
-    # The non-coalesced boundary write is now a first-class event in the liveness model: the slot register holds a live
-    # value on the present/boundary cycle (it was previously absent, which is why the report could not render it).
-    assert lir.initiation_interval in lir.float_liveness[slot.reg]
+    # The non-coalesced writeback is a first-class event in the liveness model: the slot register holds a live value on
+    # its install step (previously absent, which is why the report could not render it).
+    assert lir.state_copy_step(slot) in lir.float_liveness[slot.reg]
+    assert lir.state_copy_step(slot) == slot.install_cycle + FETCH_LAG + 1
+    # Nothing reads _p's register after the old live-in and its source is an ordinary register, so the copy installs
+    # before the boundary -- freeing the source register for the rest of the initiation rather than pinning it there.
+    assert lir.state_copy_step(slot) < lir.initiation_interval
+    # The carried live-out must survive to the boundary even though nothing reads it again this frame, so the slot
+    # register stays live from its install step through the boundary -- an early install is not the value's death.
+    assert set(range(lir.state_copy_step(slot), lir.initiation_interval + 1)) <= lir.float_liveness[slot.reg]
     # Output wires carry the same FloatOperand tap primitive as state slots.
     assert all(isinstance(w.tap, FloatOperand) for w in lir.float_outputs)
     # The hardware-frame cycle helpers are the single source of truth the report reuses (no duplicated formulas).
@@ -257,6 +264,22 @@ def test_copy_slot_residence_unbroken_when_tapped_at_boundary() -> None:
     lir = build(_run(Delay().__call__), "delay")
     (slot,) = lir.float_state_slots
     assert sorted(lir.float_liveness[slot.reg]) == list(range(1, lir.initiation_interval + 1))
+
+
+def test_state_early_copy_frees_source_register() -> None:
+    # The trapezoidal integrator's update is `_x_prev = in_x`. in_x's only late use is feeding that writeback, so the
+    # copy installs in_x into the _x_prev slot register early; in_x's register is then reused by a later operation
+    # instead of being pinned to the boundary -- the register-efficiency win this enables.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator
+
+    lir = build(_run(TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__), "trapz")
+    (xprev,) = [s for s in lir.float_state_slots if s.name == "_x_prev"]
+    (in_x,) = lir.float_inputs
+    assert xprev.needs_copy and in_x.dst == xprev.tap.source  # the copy's source is the input register
+    assert xprev.install_cycle <= lir.makespan  # installs before the boundary (present cycle == makespan + 1)
+    # The freed input register is reused: a later operation's result is assigned to it as well.
+    assert any(op.dst == in_x.dst for op in lir.float_ops)
 
 
 def test_build_lir_ekf1() -> None:

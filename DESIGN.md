@@ -206,7 +206,9 @@ State. Persistent state = the instance attributes the method writes; the instanc
 loop-carried dependence resolved at register allocation by coalescing the live-out onto the slot register when its live
 range does not overlap the live-in -- the producing operator then writes the slot register directly, no copy. When they
 overlap (a one-sample delay line, or a write-then-read), the live-out keeps its own register and the backend copies it
-into the slot register at the boundary. Slot registers are normal allocatable registers, not reserved beyond holding
+into the slot register at its install cycle -- as early as the old live-in is read and the source is available when the
+source is an ordinary register, so that source register frees for reuse, the boundary at the latest. Slot registers are
+normal allocatable registers, not reserved beyond holding
 the slot's own live-in and live-out: the cost that matters is mux fabric, not flip-flops, and a dedicated slot register
 adds no mux fan-in elsewhere. The persistent state registers are the one datapath exception that reset reaches (each
 loaded with its snapshot); pure datapath state stays out of the reset cone.
@@ -401,8 +403,9 @@ regalloc: reach-aware coloring (greedy port-affinity + a bounded SciPy dual-anne
   `if (load_en)` block (gated by `in_valid`) rather than through write ports. `nload` spans the input block (the
   highest input register index plus one). Outputs are tapped directly from their register by fixed index. Persistent
   state registers sit directly above the input block; a coalesced slot is written by its producing operator like any
-  other result, and a non-coalesced slot is copied into its register at the boundary (`pc == LASTPC`) by a small
-  reg->reg block beside the input load, capturing its source before the next accept overwrites it.
+  other result, and a non-coalesced slot is copied into its register on its install step (`pc == state_copy_step`, which
+  is `LASTPC` for a boundary copy) by a small reg->reg block beside the input load, capturing its source on that step;
+  an early install (when the source is an ordinary register read by nothing later) frees that source register for reuse.
 
 - Selected-float MIR `FloatSignControl` value objects fold into operand/result sign-control sidebands, and `fconst` is an
   immediate on the input mux; both are free in the schedule. Sign controls are constructed ad hoc rather than
@@ -530,7 +533,7 @@ exit:   y_out = phi[(b_init, ya), (b_run, yb)]
 This example needs a dynamic branch (`if self._first`), so it awaits the branch/phi milestone. The branch-free
 trapezoidal integrator (`examples/trapezoidal_leaky_streaming_integrator.py`) is the state example synthesizable today:
 its accumulator `y` coalesces onto its slot register (the final `fadd` writes it directly) while the one-sample delay
-`_x_prev = x` is a boundary copy from the input register.
+`_x_prev = x` installs the input register into the slot early, freeing that input register for a later temporary.
 
 ## First delivery (v0)
 
@@ -539,7 +542,7 @@ on a single basic block: combinational, scalar-only, operators `fadd`/`fmul`/`fd
 `FloatNeg`/`FloatAbs` folding and `FloatConst`
 (`fdiv` and its wrapper already exist in ZKF). No control flow, arrays, or bools (`M = 0`); intrinsics
 (`sqrt`, `sincos`, ...) raise the "implement this operator" error, pending ZKF support. Straight-line persistent state
-(written attributes become slot registers reset to the instance snapshot, resolved by coalesce-or-boundary-copy) is now
+(written attributes become slot registers reset to the instance snapshot, resolved by coalesce-or-scheduled-copy) is now
 implemented; branches and arrays follow in later milestones.
 
 ## Deferred

@@ -104,8 +104,10 @@ class NumericalModel:
         # logical frame, distinct from the hardware present_step (makespan + 2); the model is value- not cycle-exact.
         settle = lir.makespan + 1
         outputs = tuple(eval_tap(wire.tap, settle) for wire in lir.float_outputs)
-        # Advance the persistent state for the next call: each slot's live-out tap, read from old state then committed.
-        self._state = [eval_tap(slot.tap, settle) for slot in lir.float_state_slots]
+        # Advance the persistent state for the next call: each slot's live-out tap, read at its install cycle -- the
+        # boundary for a boundary copy, earlier for one scheduled early -- so the source is sampled before any later
+        # operation reuses that register (read-first: a write committed at the read cycle is not yet visible).
+        self._state = [eval_tap(slot.tap, slot.install_cycle) for slot in lir.float_state_slots]
         return outputs
 
     @property

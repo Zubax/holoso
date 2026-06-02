@@ -56,7 +56,7 @@ def render_schedule(lir: Lir) -> str:
     conflicts: set[tuple[int, int]] = set()
     # Result-commit cells, keyed by absolute (cycle, column): each operation lands its result on its commit cycle.
     fills: dict[tuple[int, ColKey], str] = {}
-    state_cells: set[tuple[int, ColKey]] = set()  # non-coalesced state boundary writes, filled by CSS class
+    state_cells: set[tuple[int, ColKey]] = set()  # non-coalesced state writebacks, filled by CSS class
     writes_at: dict[tuple[int, ColKey], str] = {}
     endpoints: set[tuple[int, int]] = set()  # (column ordinal, cycle) cells that anchor a dataflow edge
     cell_group: dict[tuple[int, int], int] = {}  # (column ordinal, cycle) -> operation group, for commit cells
@@ -91,26 +91,26 @@ def render_schedule(lir: Lir) -> str:
             stage_tip[key] = f"{op.inst.operator.mnemonic}_{op.inst.index} s{k}: {tip}"
         group += 1
 
-    # State updates as first-class writes: a non-coalesced slot latches its tap into its register at the boundary (a
+    # State updates as first-class writes: a non-coalesced slot latches its tap into its register on its install step (a
     # coalesced slot is already drawn as its operator's commit above). Render it like a commit -- a filled cell, a write
     # marker, a chip, and a dataflow edge from the tap, in the state color -- so the schedule shows the update rather
-    # than an invisible boundary side effect. The tap is read at the boundary (read-first), reg or constant.
-    boundary = lir.initiation_interval
+    # than an invisible side effect. The tap is read on the same step (read-first), reg or constant.
     for slot in lir.float_state_slots:
         if not slot.needs_copy:
             continue
+        step = lir.state_copy_step(slot)
         dord = col_ord[slot.reg]
         tip = _esc(f"{slot.name} <= {slot.tap.stable_label}")
-        writes_at[(boundary, slot.reg)] = (
-            writes_at.get((boundary, slot.reg), "") + f"<span class='wl' title='{tip}'>&#9662;</span>"
+        writes_at[(step, slot.reg)] = (
+            writes_at.get((step, slot.reg), "") + f"<span class='wl' title='{tip}'>&#9662;</span>"
         )
-        state_cells.add((boundary, slot.reg))
-        endpoints.add((dord, boundary))
-        cell_group[(dord, boundary)] = group
+        state_cells.add((step, slot.reg))
+        endpoints.add((dord, step))
+        cell_group[(dord, step)] = group
         oord = col_ord[slot.tap.source]
-        endpoints.add((oord, boundary))
-        edges.append((f"g{dord}_{boundary}", f"g{oord}_{boundary}", "state", group))  # JS resolves to --c-state
-        chips_at.setdefault(boundary, []).append(f"<span class='opf state' data-op='{group}'>{tip}</span>")
+        endpoints.add((oord, step))
+        edges.append((f"g{dord}_{step}", f"g{oord}_{step}", "state", group))  # JS resolves to --c-state
+        chips_at.setdefault(step, []).append(f"<span class='opf state' data-op='{group}'>{tip}</span>")
         group += 1
 
     out = [_schedule_key(operator_colors, lir.has_state), "<div id='schedwrap'><table class='grid'>"]
@@ -319,7 +319,7 @@ def _cell_style(
     """
     Background for a register/constant cell, as ``(extra_class, inline_style)``. The single cycle on which a result
     commits is filled solid with its operator color via an inline style (this takes precedence, and being inline it
-    survives the row-hover tint); a non-coalesced state boundary write is filled by the ``stw`` class (its color lives
+    survives the row-hover tint); a non-coalesced state writeback is filled by the ``stw`` class (its color lives
     in CSS); otherwise a live register gets the faint residence tint via the ``live`` class, so a row-hover can override
     it. The operators' cycle-by-cycle occupancy lives in the separate operator-stage block.
     """
@@ -426,7 +426,7 @@ def _schedule_key(operator_colors: dict[type[HardwareOperator], str], has_state:
         items.extend(
             [
                 _key_item("<span class='wr state'>&#9662;</span>", "persistent state: reset snapshot (cycle 0)"),
-                _key_item("<span class='sw state'></span>", "state update latched at the boundary"),
+                _key_item("<span class='sw state'></span>", "state update latched on its install step"),
             ]
         )
     items.append(f"<span>pc = microcode step executing this cycle (clk&minus;{FETCH_LAG} fetch lag)</span>")

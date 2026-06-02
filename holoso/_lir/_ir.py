@@ -160,12 +160,14 @@ class FloatOutputWire(OutputWire):
 class FloatStateSlot:
     """
     A persistent float state register: reset to ``reset_value``, holding the slot's live-in (carried over from the
-    previous initiation) until it is overwritten, and holding the slot's live-out at the initiation boundary.
+    previous initiation) until it is overwritten, and holding the slot's live-out from ``install_cycle`` onward.
 
     ``tap`` is the live-out's source tap (register/constant + folded sign), the same primitive an output wire taps; here
     the sink is the slot register rather than a port. When the tap is exactly ``reg`` with an identity sign the live-out
-    coalesced onto the slot register (its producing operator wrote it) and the backend emits no boundary copy; otherwise
-    the backend latches the tap into ``reg`` at the boundary. A public attribute's observable ``state_<name>`` port is a
+    coalesced onto the slot register (its producing operator wrote it) and the backend emits no copy; otherwise the
+    backend latches the tap into ``reg`` at ``install_cycle``: as early as the old live-in is read and the source is
+    available, the initiation boundary at the latest. Installing before the boundary lets the source register be reused
+    by unrelated operations for the rest of the initiation. A public attribute's observable ``state_<name>`` port is a
     separate output wire tapping the same value, not a property of the slot.
     """
 
@@ -173,6 +175,7 @@ class FloatStateSlot:
     reg: FloatRegRef
     reset_value: float
     tap: FloatOperand
+    install_cycle: int  # scheduler-frame cycle the live-out lands in reg (its max, makespan + 1, is the boundary)
 
     @property
     def needs_copy(self) -> bool:
@@ -304,6 +307,16 @@ class Lir:
         """Hardware-frame cycle on which an operator reads its operands (the read latch presents the address early)."""
         return op.issue_cycle + FETCH_LAG - 1
 
+    def state_copy_step(self, slot: FloatStateSlot) -> int:
+        """
+        The fetch-PC value -- equivalently the hardware-frame cycle -- on which a non-coalesced slot's writeback copy
+        fires: its scheduler-frame install cycle plus the write latch and the fetch lag. For a boundary install this is
+        ``initiation_interval`` (LASTPC), where it reduces to the accepted-transaction edge. The copy reads its source
+        and lands the new live-out in the slot register on this same step; shared by liveness and the emitter so the two
+        cannot drift.
+        """
+        return slot.install_cycle + FETCH_LAG + 1
+
     @property
     def has_state(self) -> bool:
         """Whether the module retains persistent state across initiations."""
@@ -365,9 +378,11 @@ class Lir:
 
         This is cycle-accurate to the emitted hardware, in the executing-step (hardware) frame. Timing comes from the
         shared helpers: an input lands on cycle 1; an operator result lands on ``result_landing_cycle`` (which for the
-        last result is the initiation interval); an operand is read on ``operand_read_cycle``; and an output tap and a
-        non-coalesced slot's boundary write both happen on the present cycle (the initiation interval). Each row spans a
-        value from when it lands in the array through its last read.
+        last result is the initiation interval); an operand is read on ``operand_read_cycle``; an output tap on the
+        present cycle; and a non-coalesced slot's writeback lands (and reads its source) on ``state_copy_step`` -- the
+        present cycle for a boundary copy, earlier for an early install. A slot register additionally stays live
+        through the present cycle, since its live-out must reside there for the next initiation. Each row spans a value
+        from when it lands in the array through its last read.
         """
         present = self.initiation_interval  # hardware-frame present / boundary step
         defs: dict[FloatRegRef, list[int]] = {}
@@ -376,8 +391,12 @@ class Lir:
             defs.setdefault(load.dst, []).append(1)
         for slot in self.float_state_slots:
             defs.setdefault(slot.reg, []).append(1)  # the live-in is resident in the slot register from the start
-            if slot.needs_copy:  # the non-coalesced live-out lands at the boundary and is carried to the next call
-                defs.setdefault(slot.reg, []).append(present)
+            # The live-out must reside in the slot register at the boundary to carry into the next initiation, so the
+            # register stays live through the boundary even when nothing reads it again this frame -- installing the
+            # new value early is not its death.
+            uses.setdefault(slot.reg, []).append(present)
+            if slot.needs_copy:  # the non-coalesced live-out lands on the install step and is carried to the next call
+                defs.setdefault(slot.reg, []).append(self.state_copy_step(slot))
         for op in self.float_ops:
             defs.setdefault(op.dst, []).append(self.result_landing_cycle(op))
             read = self.operand_read_cycle(op)
@@ -387,9 +406,9 @@ class Lir:
         for wire in self.float_outputs:
             if isinstance(wire.tap.source, FloatRegRef):
                 uses.setdefault(wire.tap.source, []).append(present)
-        for slot in self.float_state_slots:  # the live-out tap is read at the boundary to persist the slot
+        for slot in self.float_state_slots:  # the live-out tap is read on the install step to persist the slot
             if isinstance(slot.tap.source, FloatRegRef):
-                uses.setdefault(slot.tap.source, []).append(present)
+                uses.setdefault(slot.tap.source, []).append(self.state_copy_step(slot))
         live: dict[FloatRegRef, set[int]] = {}
         for reg in defs.keys() | uses.keys():
             writes = sorted(defs.get(reg, []))

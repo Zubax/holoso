@@ -137,7 +137,7 @@ def _fsgnop(w: _Writer, raw: str, sign: FloatSignControl, dst: str, inst: str) -
 
 def _state_sign_wire(slot: FloatStateSlot) -> str | None:
     """
-    The sign-conditioning wire name for a slot's boundary copy, or None when the copied tap needs no sign op. The stem
+    The sign-conditioning wire name for a slot's writeback copy, or None when the copied tap needs no sign op. The stem
     is deliberately not ``state_*``: a public attribute is exposed as a ``state_<attr>`` port, so a ``state_<name>_d``
     net would collide with the port of an attribute literally named ``<name>_d``.
     """
@@ -147,7 +147,7 @@ def _state_sign_wire(slot: FloatStateSlot) -> str | None:
 
 
 def _state_copy_rhs(slot: FloatStateSlot) -> str:
-    """The value latched into a non-coalesced slot register at the boundary: its sign-conditioned wire, or its tap."""
+    """The value latched into a non-coalesced slot register on its install step: sign-conditioned wire, or raw tap."""
     return _state_sign_wire(slot) or _source_net(slot.tap.source)
 
 
@@ -575,8 +575,8 @@ always @(posedge clk) begin
         w("")
 
     # Control and persistent state are the reset-gated registers. Each slot register's reset snapshot (under rst) and
-    # its update (a coalesced operator's writeback, or a delay-line boundary copy) are the two arms of this single rst
-    # condition, so their assignments are explicitly segregated for the synthesizer; pure datapath above is unreset.
+    # its update (a coalesced operator's writeback, or a writeback copy on its install step) are the two arms of this
+    # single rst condition, segregating those assignments for the synthesizer; the pure datapath above stays unreset.
     fmt = lir.float_regfile.fmt
     digits = (fmt.width + 3) // 4
     copies = [slot for slot in lir.float_state_slots if slot.needs_copy]
@@ -598,15 +598,14 @@ always @(posedge clk) begin
         if not slot.needs_copy and write_sets.get(slot.reg.index):
             _reg_write_stmts(w, slot.reg.index, write_sets[slot.reg.index], write_lists)
     if copies:
-        # Persist on the accepted-transaction edge only (pc leaves LASTPC iff out_ready); a held LASTPC under
-        # back-pressure must not re-copy, or a slot register tapped by an output would mutate while out_valid is high
-        # and a delay chain would over-advance. State thus advances exactly once per accepted transaction.
-        w("if (out_valid && out_ready) begin  // boundary: persist each delay-line/conditioned slot on acceptance")
-        w.push()
+        # Persist each non-coalesced slot on the step its writeback installs (state_copy_step; LASTPC for a boundary
+        # copy). An early install step is traversed exactly once per accepted transaction, so it self-gates; the LASTPC
+        # boundary step is held under back-pressure, so there the copy also waits for out_ready -- both fold into one
+        # guard so state advances exactly once and a held boundary never re-copies (else a delay chain would over-run).
+        pcw = max(1, lir.initiation_interval.bit_length())
         for slot in copies:
-            w(f"regs[{slot.reg.index}] <= {_state_copy_rhs(slot)};  // {slot.name}")
-        w.pop()
-        w("end")
+            cond = f"pc == {_lit(pcw, lir.state_copy_step(slot))} && (pc != LASTPC || out_ready)"
+            w(f"if ({cond}) regs[{slot.reg.index}] <= {_state_copy_rhs(slot)};  // {slot.name}")
     w.pop()
     w("end")
 

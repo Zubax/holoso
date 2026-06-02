@@ -162,7 +162,8 @@ def _build_state_slots(
         else:
             source = FloatRegRef(alloc.assign[slot.live_out])
         reg = FloatRegRef(alloc.state_regs[slot.name])
-        slots.append(FloatStateSlot(slot.name, reg, slot.reset_value, FloatOperand(source, slot.sign)))
+        tap = FloatOperand(source, slot.sign)
+        slots.append(FloatStateSlot(slot.name, reg, slot.reset_value, tap, alloc.install_cycles[slot.name]))
     return slots
 
 
