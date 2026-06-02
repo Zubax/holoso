@@ -91,15 +91,14 @@ def synth_examples(session: nox.Session) -> None:
             "vivado:freq=150",
         ],
     )
-
     syn("examples/madd.py", "madd", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
     syn("examples/poly3.py", "poly3", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
     syn(
         "examples/ekf1.py",
         "update_x_P",
         [
-            "yosys-ecp5:freq=100",
-            "diamond-ecp5:freq=100",
+            "yosys-ecp5:freq=100,fadd.stage_align=1",
+            "diamond-ecp5:freq=100,fadd.stage_align=1",
             "vivado:freq=150",
         ],
     )

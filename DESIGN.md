@@ -378,7 +378,8 @@ for cycle = 1, 2, ...:                          # cycle 0 accepts/loads inputs
         if an instance of op's concrete hardware operator is free this cycle:
             bind op to that instance; issue_cycle[op] = cycle
 regalloc: reach-aware coloring (greedy port-affinity + a bounded SciPy dual-annealing refinement); share a register
-  when last_use <= def (sound under read-first; the latches only widen the margin); no spill
+  when the older value's last read precedes the newer's landing in the hardware frame, R(a) < W(b) -- the read/write
+  latch separation is reclaimed (the same liveness float_liveness renders), not merely tolerated; no spill
 ```
 
 - Instances are pooled by the fully specified hardware operator itself (a frozen, equal-by-value `HardwareOperator`):

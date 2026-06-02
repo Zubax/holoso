@@ -97,17 +97,15 @@ class NumericalModel:
             range(len(lir.float_ops)), key=lambda k: (lir.float_ops[k].commit_cycle, lir.float_ops[k].issue_cycle)
         ):
             op = lir.float_ops[j]
-            operands = [eval_tap(o, op.issue_cycle) for o in op.operands]
+            operands = [eval_tap(o, lir.operand_read_cycle(op)) for o in op.operands]
             op_values[j] = _apply_sign(op.inst.operator.evaluate(*operands), op.result_sign)
 
-        # Scheduler-frame settle cycle: the final value is live one cycle after the last commit. This is the model's
-        # logical frame, distinct from the hardware present_step (makespan + 2); the model is value- not cycle-exact.
-        settle = lir.makespan + 1
-        outputs = tuple(eval_tap(wire.tap, settle) for wire in lir.float_outputs)
-        # Advance the persistent state for the next call: each slot's live-out tap, read at its install cycle -- the
-        # boundary for a boundary copy, earlier for one scheduled early -- so the source is sampled before any later
-        # operation reuses that register (read-first: a write committed at the read cycle is not yet visible).
-        self._state = [eval_tap(slot.tap, slot.install_cycle) for slot in lir.float_state_slots]
+        # Hardware-frame read cycles, matching float_liveness and the RTL: an output is resident in the array on the
+        # boundary step (the last result lands at the initiation interval), and each slot's live-out source is sampled
+        # on its writeback step -- before any later operation reuses that register (a value becomes readable on its
+        # landing cycle, so a read on the writeback step still resolves to the source that landed at or before it).
+        outputs = tuple(eval_tap(wire.tap, lir.initiation_interval) for wire in lir.float_outputs)
+        self._state = [eval_tap(slot.tap, lir.state_copy_step(slot)) for slot in lir.float_state_slots]
         return outputs
 
     @property

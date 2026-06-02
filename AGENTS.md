@@ -146,7 +146,7 @@ Timing closure is an iterative process of hunting the next bottleneck and adding
 This process works regardless of whether the failure to meet timings is caused by too many logic levels or long routing.
 Special things to look out for:
 
-- Multipliers must begin and end with a register stage. If retiming has moved a register away from a DSP, 
+- DSP tiles must begin and end with a register stage. If retiming has moved a register away from a DSP tile,
   it means that the adjacent hop is starving and needs a new register there, even if it's not on the critical path.
 - Splitting multiplication into parallel halves (e.g., `STAGE_PRODUCT=1`) is almost never a good idea unless the
   multiplicand bitwidth exceeds the DSP slice input width.

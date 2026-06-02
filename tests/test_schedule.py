@@ -227,7 +227,8 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
     assert set(range(lir.state_copy_step(slot), lir.initiation_interval + 1)) <= lir.float_liveness[slot.reg]
     # Output wires carry the same FloatOperand tap primitive as state slots.
     assert all(isinstance(w.tap, FloatOperand) for w in lir.float_outputs)
-    # The hardware-frame cycle helpers are the single source of truth the report reuses (no duplicated formulas).
+    # Pin the hardware-frame cycle formulas the report, model, and allocator all depend on (the write/read latch
+    # offsets around FETCH_LAG); the LIR methods route through the shared _ir helpers that own this arithmetic.
     op = lir.float_ops[0]
     assert lir.result_landing_cycle(op) == op.commit_cycle + FETCH_LAG + 2
     assert lir.operand_read_cycle(op) == op.issue_cycle + FETCH_LAG - 1
@@ -295,6 +296,11 @@ def test_build_lir_ekf1() -> None:
     assert sum(1 for inst in lir.float_instances if isinstance(inst.operator, FMulILog2Operator)) == 1
     # Register reuse: not every distinct value occupies its own register.
     assert lir.float_regfile.nreg < lir.op_count + len(lir.float_inputs)
+    # The interference test runs in the hardware frame (a value frees its register as soon as its last read precedes the
+    # next value's landing), not the scheduler-frame rule that left it several cycles too conservative and produced 42
+    # registers here. The bound is well below 42 to flag a regression of the hardware-accurate liveness without pinning
+    # the exact minimum (currently 38); cosim (test_cosim_ekf1) proves the relaxed sharing is correct.
+    assert lir.float_regfile.nreg <= 40
     # Inputs preload through the regfile's load port (registers 0..nload-1), so nload spans the input block.
     assert lir.float_regfile.nload == 17
     # Dedicated ports: one read port per operator operand (sum of arities = 2+2+1+2), one write port per instance.
@@ -302,6 +308,44 @@ def test_build_lir_ekf1() -> None:
     assert lir.float_regfile.nrd == 7
     # The 1/x21 numerator survives as a constant immediate.
     assert any(abs(c - 1.0) < 1e-12 for c in lir.float_consts)
+
+
+def test_register_sharing_is_hardware_disjoint() -> None:
+    # ekf1 time-multiplexes many values onto each register. Verify the hardware-frame interference invariant directly:
+    # within a register, each value's last read precedes the next value's landing, R(a) < W(b) -- the same liveness
+    # float_liveness renders and the relaxed allocator shares against. Reconstructed via the write-timeline resolution
+    # the numerical model uses, so the test tracks the allocator's actual sharing decisions, not a hardcoded schedule.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import ekf1
+    from holoso._lir import latest_producer_before
+
+    lir = build(_run(ekf1.update_x_P), "update_x_P")
+    timeline = lir.float_write_timeline
+    last_read: dict[tuple[int, str, int], int] = {}
+
+    def note(source: object, read_cycle: int) -> None:
+        if isinstance(source, FloatRegRef):
+            producer = latest_producer_before(timeline, source, read_cycle)
+            key = (source.index, type(producer).__name__, producer.index)
+            last_read[key] = max(last_read.get(key, read_cycle), read_cycle)
+
+    for op in lir.float_ops:
+        for operand in op.operands:
+            note(operand.source, lir.operand_read_cycle(op))
+    for wire in lir.float_outputs:
+        note(wire.tap.source, lir.initiation_interval)
+    for slot in lir.float_state_slots:
+        note(slot.tap.source, lir.state_copy_step(slot))
+
+    shared = 0
+    for reg, events in timeline.items():
+        shared += len(events) - 1
+        for (landing_a, producer_a), (landing_b, _b) in zip(events, events[1:]):
+            read_a = last_read.get((reg.index, type(producer_a).__name__, producer_a.index), landing_a)
+            assert (
+                read_a < landing_b
+            ), f"register {reg.index}: {producer_a} last read {read_a} overlaps landing {landing_b}"
+    assert shared > 0  # the kernel does pack multiple values per register, so the invariant is actually exercised
 
 
 def test_build_rejects_mir_with_mixed_float_formats() -> None:

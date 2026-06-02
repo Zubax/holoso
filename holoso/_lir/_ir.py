@@ -15,6 +15,29 @@ FETCH_STAGES = 3
 FETCH_LAG = FETCH_STAGES - 1
 
 
+# Executing-step (hardware) frame cycle offsets: the single source of truth shared by the LIR cycle helpers below, the
+# write timeline, the numerical model, and the register allocator, so a value's landing/read/copy/boundary cycle is
+# computed in exactly one place and the four consumers cannot drift (the bug this centralization prevents).
+def landing_cycle(commit_cycle: int) -> int:
+    """The cycle a result becomes readable in the array: its commit plus the write latch and the read-first edge."""
+    return commit_cycle + FETCH_LAG + 2
+
+
+def read_latch_cycle(issue_cycle: int) -> int:
+    """The cycle an operator reads its operands -- the read latch presents the address early."""
+    return issue_cycle + FETCH_LAG - 1
+
+
+def copy_step_cycle(install_cycle: int) -> int:
+    """The step a non-coalesced slot writeback fires and samples its source."""
+    return install_cycle + FETCH_LAG + 1
+
+
+def boundary_step(makespan: int) -> int:
+    """The boundary / initiation-interval step: the last result lands here and outputs are resident here."""
+    return makespan + 2 + FETCH_LAG
+
+
 @dataclass(frozen=True, slots=True)
 class OperatorInstance:
     """
@@ -273,8 +296,9 @@ class Lir:
     def present_step(self) -> int:
         """
         The hardware executing step on which the outputs are valid in the register array (NOT the scheduler-frame cycle
-        ``makespan + 1`` the allocator and model use). The last operator commits on the makespan cycle; the write latch
-        delays the write, so the result lands on the next edge and is presented on the executing step ``makespan + 2``.
+        ``makespan + 1`` used only to schedule state-slot installs). The last operator commits on the makespan cycle; the
+        write latch delays the write, so the result lands on the next edge and is presented on the executing step
+        ``makespan + 2``.
         """
         return self.makespan + 2
 
@@ -293,29 +317,28 @@ class Lir:
         so out_valid is asserted FETCH_LAG cycles later: ``present_step + FETCH_LAG``. Zero-op modules still present
         one accept-relative cycle plus the fixed staging.
         """
-        return self.present_step + FETCH_LAG
+        return boundary_step(self.makespan)
 
     def result_landing_cycle(self, op: FloatScheduledOp) -> int:
         """
-        Hardware-frame cycle on which an operator result lands in the register array ready to read: its commit cycle
-        plus the write latch, the read-first edge, and the fetch lag. For the last result this equals the initiation
-        interval. This is the single definition shared by liveness and the report so the two cannot drift.
+        Hardware-frame cycle on which an operator result lands in the register array ready to read. For the last result
+        this equals the initiation interval. This is the single definition shared by liveness, the write timeline, the
+        model, and the register allocator so they cannot drift.
         """
-        return op.commit_cycle + FETCH_LAG + 2
+        return landing_cycle(op.commit_cycle)
 
     def operand_read_cycle(self, op: FloatScheduledOp) -> int:
         """Hardware-frame cycle on which an operator reads its operands (the read latch presents the address early)."""
-        return op.issue_cycle + FETCH_LAG - 1
+        return read_latch_cycle(op.issue_cycle)
 
     def state_copy_step(self, slot: FloatStateSlot) -> int:
         """
         The fetch-PC value -- equivalently the hardware-frame cycle -- on which a non-coalesced slot's writeback copy
-        fires: its scheduler-frame install cycle plus the write latch and the fetch lag. For a boundary install this is
-        ``initiation_interval`` (LASTPC), where it reduces to the accepted-transaction edge. The copy reads its source
-        and lands the new live-out in the slot register on this same step; shared by liveness and the emitter so the two
-        cannot drift.
+        fires. For a boundary install this is ``initiation_interval`` (LASTPC), where it reduces to the accepted-
+        transaction edge. The copy reads its source and lands the new live-out in the slot register on this same step;
+        shared by liveness and the emitter so the two cannot drift.
         """
-        return slot.install_cycle + FETCH_LAG + 1
+        return copy_step_cycle(slot.install_cycle)
 
     @property
     def has_state(self) -> bool:
@@ -425,16 +448,20 @@ class Lir:
 
     @property
     def float_write_timeline(self) -> dict[FloatRegRef, list[tuple[int, FloatProducer]]]:
-        """Per-register write timeline (commit cycle, producer) used to resolve a register source at a read cycle."""
+        """
+        Per-register write timeline ``(landing cycle, producer)`` in the hardware/executing-step frame, used to resolve
+        a register source at a hardware read cycle. A value is readable from the cycle it lands in the array: inputs and
+        state live-ins on cycle 1, an operator result on ``result_landing_cycle``.
+        """
         writes: dict[FloatRegRef, list[tuple[int, FloatProducer]]] = {}
         for i, load in enumerate(self.float_inputs):
-            writes.setdefault(load.dst, []).append((0, InputProducer(i)))
+            writes.setdefault(load.dst, []).append((1, InputProducer(i)))
         # A slot register starts each initiation holding its live-in (the value carried over from the previous one);
         # a coalesced operator may then overwrite it later in the same initiation via its own OperationProducer entry.
         for s, slot in enumerate(self.float_state_slots):
-            writes.setdefault(slot.reg, []).append((0, StateProducer(s)))
+            writes.setdefault(slot.reg, []).append((1, StateProducer(s)))
         for j, op in enumerate(self.float_ops):
-            writes.setdefault(op.dst, []).append((op.commit_cycle, OperationProducer(j)))
+            writes.setdefault(op.dst, []).append((self.result_landing_cycle(op), OperationProducer(j)))
         for events in writes.values():
             events.sort(key=lambda event: event[0])
         return writes

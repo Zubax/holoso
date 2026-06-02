@@ -2,14 +2,17 @@
 Reach-aware register allocation over the software-pipelined (cycle-accurate) schedule.
 
 Register-needing values are the input ports, persistent state-slot live-ins, and operator results (constants are
-immediates, not registers). A value is *defined* (written into its register) at its commit cycle -- ``issue_cycle +
-latency`` for an op, cycle 0 for an input (the accept edge) or a state read (already resident from the previous
-initiation) -- and *last used* at the latest cycle it is read: the issue cycle of its last consuming op, the
-output-presentation cycle ``makespan + 1`` if it drives an output, or a slot's install cycle if it is the source of a
-persisted live-out. Two values may share a register when the older one's last use is no later than the newer one's
-definition cycle (``last_use <=
-def_cycle``); this is sound because the register file is read-first (a read on the definition cycle still returns the
-old value) and the read and write latches only widen that separation, so the rule is conservative.
+immediates, not registers). Whether two values may share a register is decided in the executing-step (hardware) frame,
+the same frame as ``Lir.float_liveness`` and the write timeline: a value *lands* -- becomes readable in the array -- at
+its write cycle (an operator result ``FETCH_LAG + 2`` after its commit, an input or a state live-in on cycle 1) and is
+*last read* at its read cycle (an operand ``FETCH_LAG - 1`` after the consumer's issue, an output on the boundary step,
+a non-coalesced live-out source on its writeback step). Two values may share a register when the older one's last read
+strictly precedes the newer one's landing, ``R(a) < W(b)``; the read-first edge is folded into the landing, so a read
+on a value's landing cycle resolves to that value, which is why the boundary is strict. This hardware-accurate rule
+shares registers the older scheduler-frame rule ``last_use <= def_cycle`` left apart -- that rule was several cycles too
+conservative because the read and write latches widen the real separation -- and is verified bit-exact against the RTL
+by cosimulation. (The state-slot install scheduling below stays in the scheduler frame, which is frame-invariant for
+deciding when a writeback may fire.)
 
 Persistent state is a loop-carried dependence: each slot owns a dedicated register that is reset to its snapshot, read
 for the live-in, and must hold the slot's live-out at the initiation boundary. When the live-out is an operator result
@@ -45,7 +48,7 @@ from scipy.optimize import dual_annealing
 from .._hir import ValueId
 from .._mir import MirFloatConst, MirFloatInput, MirFloatOperation, MirFloatStateRead, MirFloatView
 from .._operators import FloatSignControl
-from ._ir import FloatOperatorInstance
+from ._ir import FloatOperatorInstance, boundary_step, copy_step_cycle, landing_cycle, read_latch_cycle
 
 # Read port identity (operator instance + operand position) and write-source identity (an instance, the input load, or
 # a per-slot state writer -- the writeback copy / reset that drives a slot register).
@@ -102,16 +105,16 @@ def _objective(
 
 
 def _assert_no_interference(
-    assign: dict[ValueId, int], def_cycle: dict[ValueId, int], last_use: dict[ValueId, int]
+    assign: dict[ValueId, int], write_hw: dict[ValueId, int], read_hw: dict[ValueId, int]
 ) -> None:
-    """Backstop: no two values sharing a register may have overlapping live ranges (read-first: last_use<=def is OK)."""
+    """Backstop: two values sharing a register must be disjoint in hardware (read-first: ``R(a) < W(b)`` is OK)."""
     members: dict[int, list[ValueId]] = {}
     for vid, reg in assign.items():
         members.setdefault(reg, []).append(vid)
     for reg, vids in members.items():
         for i, a in enumerate(vids):
             for b in vids[i + 1 :]:
-                if not (last_use[a] <= def_cycle[b] or last_use[b] <= def_cycle[a]):
+                if not (read_hw[a] < write_hw[b] or read_hw[b] < write_hw[a]):
                     raise AssertionError(f"register {reg} shared by interfering values {a} and {b}")
 
 
@@ -224,15 +227,44 @@ def allocate_float(
             f"exceeds new-value write cycle {new_value_cycle}"
         )
 
+    # Hardware-frame liveness for register interference. The scheduler-frame def_cycle/last_use above drive only the
+    # state-slot install scheduling (which is frame-invariant); register sharing is decided here in the executing-step
+    # frame, mirroring Lir.float_liveness and float_write_timeline. A value lands -- becomes readable in the array -- at
+    # its write cycle and is last read at its read cycle: an operator result lands FETCH_LAG+2 after its commit and an
+    # operand is read FETCH_LAG-1 after issue; inputs and state live-ins are resident from cycle 1; an output stays
+    # resident through the boundary; a non-coalesced slot live-out source is read by the writeback copy on its install
+    # step. Two values may share a register when the older one's last read strictly precedes the newer one's landing,
+    # R(a) < W(b) -- the read-first edge is folded into the landing, so the model resolves a read on a landing cycle to
+    # that value, hence the strict boundary. This is less conservative than the scheduler-frame rule it replaces and
+    # frees registers the hardware can actually share.
+    present_hw = boundary_step(makespan)  # initiation interval: the last result lands here, outputs are resident here
+    write_hw: dict[ValueId, int] = {
+        vid: (landing_cycle(def_cycle[vid]) if isinstance(mir.nodes[vid], MirFloatOperation) else 1)
+        for vid in reg_values
+    }
+    read_hw: dict[ValueId, int] = dict(write_hw)  # a value with no reads frees its register on its own landing cycle
+    for vid in operation_values:
+        op_read = read_latch_cycle(issue_cycle[vid])
+        for operand in _operation(mir, vid).operands:
+            if operand in read_hw:  # constants are immediates, not register reads
+                read_hw[operand] = max(read_hw[operand], op_read)
+    for out in mir.outputs:
+        if out.value in read_hw and not isinstance(mir.nodes[out.value], MirFloatConst):
+            read_hw[out.value] = max(read_hw[out.value], present_hw)
+    for slot in mir.state_slots:
+        src = slot.live_out
+        if src in read_hw and not isinstance(mir.nodes[src], MirFloatConst):
+            read_hw[src] = max(read_hw[src], copy_step_cycle(install_cycles[slot.name]))
+
     movable = [vid for vid in operation_values if vid not in pinned]
     fresh_start = nload + len(mir.state_slots)
 
-    assign = _greedy(movable, pinned, reserved, fresh_start, def_cycle, last_use, consumer_ports, producer_key)
+    assign = _greedy(movable, pinned, reserved, fresh_start, write_hw, read_hw, consumer_ports, producer_key)
     nreg = max((max(assign.values()) + 1) if assign else 0, fresh_start)
     greedy_cost = _objective(assign, consumer_ports, producer_key)
-    assign = _refine(assign, nreg, movable, reserved, def_cycle, last_use, consumer_ports, producer_key)
+    assign = _refine(assign, nreg, movable, reserved, write_hw, read_hw, consumer_ports, producer_key)
     refined_cost = _objective(assign, consumer_ports, producer_key)
-    _assert_no_interference(assign, def_cycle, last_use)
+    _assert_no_interference(assign, write_hw, read_hw)
     _logger.info(
         "Float regalloc: values=%d input_pins=%d state_slots=%d greedy_cost=%d refined_cost=%d registers=%d",
         len(reg_values),
@@ -256,8 +288,8 @@ def _greedy(
     pinned: dict[ValueId, int],
     reserved: set[int],
     fresh_start: int,
-    def_cycle: dict[ValueId, int],
-    last_use: dict[ValueId, int],
+    write_hw: dict[ValueId, int],
+    read_hw: dict[ValueId, int],
     consumer_ports: dict[ValueId, set[_Port]],
     producer_key: dict[ValueId, _Producer],
 ) -> dict[ValueId, int]:
@@ -289,18 +321,18 @@ def _greedy(
     for vid, reg in sorted(pinned.items(), key=lambda item: (item[1], item[0])):
         place(vid, reg)
     # Only the input lanes may later be reused once their value is dead; slot registers are reserved for their slot.
-    active: list[tuple[int, int]] = [(last_use[vid], reg) for vid, reg in pinned.items() if reg not in reserved]
+    active: list[tuple[int, int]] = [(read_hw[vid], reg) for vid, reg in pinned.items() if reg not in reserved]
     free: list[int] = []
     next_reg = fresh_start
 
-    for vid in sorted(movable, key=lambda v: (def_cycle[v], v)):
-        d = def_cycle[vid]
+    for vid in sorted(movable, key=lambda v: (write_hw[v], v)):
+        w = write_hw[vid]
         retained: list[tuple[int, int]] = []
-        for lu, reg in active:
-            if lu <= d:  # read-first: a read on cycle d still sees the old value, so the register is free for vid
+        for r, reg in active:
+            if r < w:  # the occupant's last read precedes vid's landing, so the register is free for vid (read-first)
                 free.append(reg)
             else:
-                retained.append((lu, reg))
+                retained.append((r, reg))
         active = retained
         # Choose the candidate (a freed register or a brand-new one) with the least marginal mux growth; on a tie
         # prefer reusing an existing register (key flag 0 < 1) and the lowest index, so the count grows only when
@@ -320,7 +352,7 @@ def _greedy(
         else:
             free.remove(best_reg)
         place(vid, best_reg)
-        active.append((last_use[vid], best_reg))
+        active.append((read_hw[vid], best_reg))
     return assign
 
 
@@ -329,46 +361,46 @@ def _refine(
     nreg: int,
     movable: list[ValueId],
     reserved: set[int],
-    def_cycle: dict[ValueId, int],
-    last_use: dict[ValueId, int],
+    write_hw: dict[ValueId, int],
+    read_hw: dict[ValueId, int],
     consumer_ports: dict[ValueId, set[_Port]],
     producer_key: dict[ValueId, _Producer],
 ) -> dict[ValueId, int]:
     """
     Refine the greedy assignment with SciPy's simulated annealing (``scipy.optimize.dual_annealing``).
 
-    Each movable operation value gets a continuous coordinate in ``[0, nreg)``; a decode in definition-cycle order maps
-    it to its preferred register, repairing interference by scanning to the next register free at that cycle. Pinned
-    values (inputs, state live-ins, coalesced live-outs) and the reserved state-slot registers are held fixed, so every
-    evaluated point is a valid (interference-free) coloring reusing only the ``nreg`` seed registers, and the annealer
-    minimizes the mux-fan-in objective. The greedy seed is the starting point and the best point seen is kept, so the
-    pass can only improve on the seed.
+    Each movable operation value gets a continuous coordinate in ``[0, nreg)``; a decode in landing order maps it to its
+    preferred register, repairing interference by scanning to the next register whose occupant's last read precedes this
+    value's landing. Pinned values (inputs, state live-ins, coalesced live-outs) and the reserved state-slot registers
+    are held fixed, so every evaluated point is a valid (interference-free) coloring reusing only the ``nreg`` seed
+    registers, and the annealer minimizes the mux-fan-in objective. The greedy seed is the starting point and the best
+    point seen is kept, so the pass can only improve on the seed.
     """
-    order = sorted(movable, key=lambda vid: (def_cycle[vid], vid))
+    order = sorted(movable, key=lambda vid: (write_hw[vid], vid))
     if len(order) < 2 or nreg <= 1:
         return seed
     op_set = set(order)
     pinned = [(vid, reg) for vid, reg in seed.items() if vid not in op_set]
-    reserved_sentinel = max(last_use.values(), default=0) + 1  # exceeds every last_use, so reserved regs never free
+    reserved_sentinel = max(read_hw.values(), default=0) + 1  # exceeds every last read, so reserved regs never free
 
     def decode(coords: np.ndarray) -> dict[ValueId, int]:
         assign: dict[ValueId, int] = {}
-        # free_after[reg] = max last_use of any value placed in reg; the register is free at cycle d iff it is <= d
-        # (read-first: every occupant is then dead by d). Processing in def-cycle order keeps this an O(1) check.
+        # free_after[reg] = max last read of any value placed in reg; the register is free for a value landing at w iff
+        # it is < w (read-first: every occupant is then read out before w). Landing order keeps this an O(1) check.
         free_after = [-1] * nreg
         for vid, reg in pinned:
             assign[vid] = reg
-            free_after[reg] = max(free_after[reg], last_use[vid])
+            free_after[reg] = max(free_after[reg], read_hw[vid])
         for reg in reserved:  # slot registers belong to their slot for the whole initiation; never reuse them
             free_after[reg] = reserved_sentinel
         for index, vid in enumerate(order):
-            d = def_cycle[vid]
+            w = write_hw[vid]
             pref = min(nreg - 1, max(0, int(coords[index])))
-            for offset in range(nreg):  # a non-reserved register free at d always exists (nreg covers peak liveness)
+            for offset in range(nreg):  # a non-reserved register free at w always exists (nreg covers peak liveness)
                 reg = (pref + offset) % nreg
-                if free_after[reg] <= d:
+                if free_after[reg] < w:
                     assign[vid] = reg
-                    free_after[reg] = last_use[vid]  # >= d >= the old value, so this is the new running max
+                    free_after[reg] = read_hw[vid]  # >= w > the old occupant's last read, so this is the new max
                     break
         return assign
 
