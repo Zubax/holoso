@@ -57,7 +57,6 @@ class MirStateSlot:
 
     name: str
     reset_value: float
-    public: bool
     live_out: ValueId
 
 
@@ -337,13 +336,12 @@ class MirBuilder:
         self,
         name: str,
         reset_value: float,
-        public: bool,
         live_out: ValueId,
         sign: FloatSignControl = FloatSignControl(),
     ) -> None:
         if not isinstance(self._type_of(live_out), FloatType):
             raise ValueError(f"float state slot {name!r} must hold a floating-point value")
-        self._state_slots.append(MirFloatStateSlot(name, float(reset_value), public, live_out, sign))
+        self._state_slots.append(MirFloatStateSlot(name, float(reset_value), live_out, sign))
 
     def finish(self) -> Mir:
         return Mir(

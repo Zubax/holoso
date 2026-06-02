@@ -36,8 +36,13 @@ _KNOWN_INTRINSICS = frozenset(
 
 
 def _port_name(path: _Path) -> str:
-    """Map a leaf path to its output-port name, e.g. ``[0, "x"]`` -> ``out_0_x``."""
+    """Map a returned leaf path to its output-port name, e.g. ``[0, "x"]`` -> ``out_0_x``."""
     return "out" + "".join(f"_{key}" for key in path)
+
+
+def _state_port_name(attr: str) -> str:
+    """Map a public state attribute to its observable port name, e.g. ``"y"`` -> ``state_y``."""
+    return f"state_{attr}"
 
 
 class _Lowerer:
@@ -292,20 +297,21 @@ class _Lowerer:
 
     @staticmethod
     def _is_public(attr: str) -> bool:
-        """A public attribute (no leading underscore) drives an out_<attr> port; an underscored one stays internal."""
+        """A public attribute (no leading underscore) drives a state_<attr> port; an underscored one stays internal."""
         return not attr.startswith("_")
 
     def _register_state_slots(self) -> None:
         """Register each written attribute as a persistent state slot, reset to its instance-snapshot value."""
         for attr in self._state_order:
             reset_value = self._coerce_scalar(attr, self._snapshot[attr])
-            self._builder.state_slot(attr, reset_value, self._is_public(attr), self._state_env[attr])
+            self._builder.state_slot(attr, reset_value, self._state_env[attr])
 
     def _emit_outputs(self) -> None:
         """
-        A returned leaf is dropped when its value equals a public slot's live-out: that wire is already exposed through
-        the slot's out_<attr> port, so deduping it loses nothing. The key is the value (ValueId), not the spelling, so
-        an alias and a coincidentally-equal expression collapse alike.
+        Emit the returned outputs as out_<path> ports and the public state attributes as state_<attr> ports. A returned
+        leaf is dropped when its value equals a public slot's live-out: that wire is already exposed through the slot's
+        state_<attr> port, so deduping it loses nothing. The key is the value (ValueId), not the spelling, so an alias
+        and a coincidentally-equal expression collapse alike.
         """
         public_live_outs = {self._state_env[attr] for attr in self._state_order if self._is_public(attr)}
         for path, vid in self._returns:
@@ -313,7 +319,7 @@ class _Lowerer:
                 self._builder.output(_port_name(path), vid)
         for attr in self._state_order:
             if self._is_public(attr):
-                self._builder.output(_port_name([attr]), self._state_env[attr])
+                self._builder.output(_state_port_name(attr), self._state_env[attr])
 
 
 def _flatten_return(node: ast.expr) -> list[tuple[_Path, ast.expr]]:

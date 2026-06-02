@@ -157,18 +157,18 @@ def test_stateful_method_state_slots_and_dedup() -> None:
     integrator = _integrator_class()(k=2**-22)
     hir = lower(integrator.__call__)
     assert hir.input_names() == ["x"]  # self is dropped; remaining parameters become inputs
-    # `return self.y` is deduped onto the public state port out_y; the private _x_prev gets no port.
-    assert [o.name for o in hir.outputs] == ["out_y"]
+    # `return self.y` is deduped onto the public state port state_y; the private _x_prev gets no port, so the output
+    # list alone distinguishes public from private. Both slots reset to 0.
+    assert [o.name for o in hir.outputs] == ["state_y"]
     slots = {s.name: s for s in hir.state_slots}
     assert set(slots) == {"y", "_x_prev"}
-    assert slots["y"].public and slots["y"].reset_value == 0.0
-    assert not slots["_x_prev"].public and slots["_x_prev"].reset_value == 0.0
+    assert slots["y"].reset_value == 0.0 and slots["_x_prev"].reset_value == 0.0
     assert {n.slot for n in hir.nodes.values() if isinstance(n, StateRead)} == {"y", "_x_prev"}
 
 
 def test_returned_public_state_alias_is_deduped() -> None:
     # The dedup is by dataflow, not spelling: returning a public attribute through an alias must still collapse onto its
-    # out_<attr> port rather than emitting a second positional output for the same value.
+    # state_<attr> port rather than emitting a second positional output for the same value.
     class Aliased:
         def __init__(self) -> None:
             self.y = 0.0
@@ -179,7 +179,7 @@ def test_returned_public_state_alias_is_deduped() -> None:
             return y
 
     hir = lower(Aliased().__call__)
-    assert [o.name for o in hir.outputs] == ["out_y"]
+    assert [o.name for o in hir.outputs] == ["state_y"]
 
 
 def test_mixed_return_dedupes_public_alias_keeps_distinct_leaf() -> None:
@@ -190,16 +190,16 @@ def test_mixed_return_dedupes_public_alias_keeps_distinct_leaf() -> None:
         def __call__(self, x):  # type: ignore[no-untyped-def]
             self.y = x * 2.0
             a = self.y
-            return (a, x)  # a aliases public self.y (deduped to out_y); x is distinct (keeps its positional out_1)
+            return (a, x)  # a aliases public self.y (deduped to state_y); x is distinct (keeps its positional out_1)
 
     hir = lower(Mixed().__call__)
-    assert [o.name for o in hir.outputs] == ["out_1", "out_y"]
+    assert [o.name for o in hir.outputs] == ["out_1", "state_y"]
 
 
 def test_return_value_equal_to_public_state_is_deduped_even_without_aliasing() -> None:
     # Dedup keys on the value, not provenance: returning x while x is also a public slot's live-out collapses onto that
-    # slot's port even though the return never names the attribute. This is safe -- out_last carries the very same wire,
-    # so the value stays observable; a separate out_0 would only duplicate it.
+    # slot's port even though the return never names the attribute. This is safe -- state_last carries the very same
+    # wire, so the value stays observable; a separate out_0 would only duplicate it.
     class Passthrough:
         def __init__(self) -> None:
             self.last = 0.0
@@ -209,7 +209,7 @@ def test_return_value_equal_to_public_state_is_deduped_even_without_aliasing() -
             return x
 
     hir = lower(Passthrough().__call__)
-    assert [o.name for o in hir.outputs] == ["out_last"]
+    assert [o.name for o in hir.outputs] == ["state_last"]
 
 
 def test_unreachable_state_write_is_ignored() -> None:
@@ -282,7 +282,7 @@ def test_method_without_return_exposes_public_state() -> None:
             self.total = self.total + x
 
     hir = lower(Accumulator().update)
-    assert [o.name for o in hir.outputs] == ["out_total"]
+    assert [o.name for o in hir.outputs] == ["state_total"]
     assert {s.name for s in hir.state_slots} == {"total"}
 
 

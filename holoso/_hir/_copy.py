@@ -24,4 +24,4 @@ def copy_node(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) ->
 def copy_state_slots(builder: HirBuilder, hir: Hir, remap: dict[ValueId, ValueId]) -> None:
     """Re-emit every persistent state slot with its live-out value remapped (slots survive every rewrite pass)."""
     for slot in hir.state_slots:
-        builder.state_slot(slot.name, slot.reset_value, slot.public, remap[slot.live_out])
+        builder.state_slot(slot.name, slot.reset_value, remap[slot.live_out])

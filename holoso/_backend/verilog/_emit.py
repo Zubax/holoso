@@ -136,9 +136,13 @@ def _fsgnop(w: _Writer, raw: str, sign: FloatSignControl, dst: str, inst: str) -
 
 
 def _state_sign_wire(slot: FloatStateSlot) -> str | None:
-    """The sign-conditioning wire name for a slot's boundary copy, or None when the copied tap needs no sign op."""
+    """
+    The sign-conditioning wire name for a slot's boundary copy, or None when the copied tap needs no sign op. The stem
+    is deliberately not ``state_*``: a public attribute is exposed as a ``state_<attr>`` port, so a ``state_<name>_d``
+    net would collide with the port of an attribute literally named ``<name>_d``.
+    """
     if slot.needs_copy and slot.tap.sign != FloatSignControl():
-        return f"state_{slot.name}_d"
+        return f"statesgn_{slot.name}"
     return None
 
 
@@ -213,7 +217,11 @@ module {lir.module_name} (
     _emit_port_group(w, "INPUT PORTS", "Latched when in_valid && in_ready.")
     for input_port in [port for port in ports if isinstance(port, DataInputPort)]:
         _emit_port(w, input_port, input_port is not last)
-    _emit_port_group(w, "OUTPUT PORTS", "Valid when out_valid is pulsed.")
+    _emit_port_group(
+        w,
+        "OUTPUT/STATE PORTS",
+        "Valid when out_valid is pulsed. Publicly visible states are included here.",
+    )
     for output_port in [port for port in ports if isinstance(port, DataOutputPort)]:
         _emit_port(w, output_port, output_port is not last)
     _emit_port_group(w, "DIAGNOSTIC PORTS", "Runtime diagnostics available while the module is running.")

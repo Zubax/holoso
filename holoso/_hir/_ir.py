@@ -55,13 +55,12 @@ class StateSlot:
     """
     A persistent state register backing a written instance attribute. ``reset_value`` is the snapshot taken from the
     instance at synthesis time and loaded at module reset; ``live_out`` is the value the attribute holds at method exit
-    and that must reside in the slot's register at the initiation boundary. ``public`` attributes also drive an output
-    port.
+    and that must reside in the slot's register at the initiation boundary. Observability is not a slot property: a
+    public attribute is exposed by a separate ``state_<attr>`` output port that the frontend emits alongside the slot.
     """
 
     name: str
     reset_value: float
-    public: bool
     live_out: ValueId
 
 
@@ -134,8 +133,8 @@ class HirBuilder:
     def float_state_read(self, slot: str) -> ValueId:
         return self.state_read(slot, FloatType())
 
-    def state_slot(self, name: str, reset_value: float, public: bool, live_out: ValueId) -> None:
-        self._state_slots.append(StateSlot(name, float(reset_value), public, live_out))
+    def state_slot(self, name: str, reset_value: float, live_out: ValueId) -> None:
+        self._state_slots.append(StateSlot(name, float(reset_value), live_out))
 
     def float_const(self, value: float) -> ValueId:
         return self.const_node(FloatConst(float(value)))

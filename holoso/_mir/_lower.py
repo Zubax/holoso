@@ -161,7 +161,7 @@ class _FloatLowerer:
         base, sign = _collapse_signs(self.context.hir.nodes, slot.live_out)
         if not isinstance(self.context.hir.nodes[base].type, HirFloatType):
             return False
-        self.context.builder.float_state_slot(slot.name, slot.reset_value, slot.public, self.context.remap[base], sign)
+        self.context.builder.float_state_slot(slot.name, slot.reset_value, self.context.remap[base], sign)
         return True
 
 

@@ -154,6 +154,28 @@ def test_kernel_without_outputs_is_rejected() -> None:
 
 
 @requires_iverilog
+def test_state_port_name_does_not_collide_with_internal_sign_wire(tmp_path: Path) -> None:
+    # A public attribute `y_d` becomes the port state_y_d; a sibling slot `y` whose boundary copy carries a folded sign
+    # used to emit an internal wire also named state_y_d, producing a duplicate (multiply-driven) identifier. The
+    # internal sign wire must live outside the state_<attr> port namespace, so the module elaborates cleanly.
+    class Collide:
+        def __init__(self) -> None:
+            self.y = 0.0
+            self.y_d = 0.0
+            self._p = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            self.y_d = self._p
+            self.y = -self._p  # sign-flipped boundary copy -> internal sign-conditioning wire for slot y
+            self._p = x
+            return self.y
+
+    fmt = FloatFormat(8, 24)
+    lir = build(_run(Collide().__call__, _ops(fmt)), "collide_state")
+    _elaborate("collide_state", generate(lir).verilog, tmp_path)
+
+
+@requires_iverilog
 def test_ekf1_elaborates(tmp_path: Path) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1

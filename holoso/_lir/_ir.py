@@ -165,13 +165,13 @@ class FloatStateSlot:
     ``tap`` is the live-out's source tap (register/constant + folded sign), the same primitive an output wire taps; here
     the sink is the slot register rather than a port. When the tap is exactly ``reg`` with an identity sign the live-out
     coalesced onto the slot register (its producing operator wrote it) and the backend emits no boundary copy; otherwise
-    the backend latches the tap into ``reg`` at the boundary. ``public`` slots also drive an ``out_<name>`` port.
+    the backend latches the tap into ``reg`` at the boundary. A public attribute's observable ``state_<name>`` port is a
+    separate output wire tapping the same value, not a property of the slot.
     """
 
     name: str
     reg: FloatRegRef
     reset_value: float
-    public: bool
     tap: FloatOperand
 
     @property
