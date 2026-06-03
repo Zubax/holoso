@@ -40,7 +40,7 @@ def tests(session: nox.Session) -> None:
 
 @nox.session
 def cosim_examples(session: nox.Session) -> None:
-    """Long-running end-to-end cocotb cosimulation of the bundled examples (e.g. ekf1)."""
+    """Long-running end-to-end cocotb cosimulation of the bundled examples (e.g. ekf1_stateless)."""
     session.install("-e", ".[test]")
     session.run("python", "-m", "pytest", "-q", "tests/test_cosim.py")
 
@@ -73,12 +73,26 @@ def synth_examples(session: nox.Session) -> None:
     """
     session.install("-e", ".[test]")
 
-    def syn(source: str, target: str, flows: list[str]) -> None:
-        flows = [flow for f in flows for flow in ("--flow", f)]
-        session.run("python", "-m", "synth", source, target, *flows, "--rtl", "lib/kulibin/float/hdl")
+    def syn(
+        source: str,
+        target: str,
+        flows: list[str],
+        *,
+        wexp: int = 6,
+        wman: int = 18,
+        name: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> None:
+        prefix = "python", "-m", "synth"
+        flow_args = [arg for f in flows for arg in ("--flow", f)]
+        name_args = ["--name", name] if name is not None else []
+        rtl_args = ["--rtl", "lib/kulibin/float/hdl"]
+        session.run(
+            *prefix, source, target, f"--wexp={wexp}", f"--wman={wman}", *name_args, *flow_args, *rtl_args, env=env
+        )
 
     # Wide scalars require extra stages to close timings. If closure fails, feel free to throw in more stages here.
-    op_ecp5_e8w36 = (
+    op_integrator_wide_ecp5 = (
         "fadd.stage_decode=1,fadd.stage_align=1,fadd.stage_normalize=1,fadd.stage_pack=1,"
         "fmul.stage_input=1,fmul.stage_pack=1"
     )
@@ -86,19 +100,39 @@ def synth_examples(session: nox.Session) -> None:
         "examples/trapezoidal_leaky_streaming_integrator.py",
         "TrapezoidalLeakyStreamingIntegrator",
         [
-            f"yosys-ecp5:freq=100,{op_ecp5_e8w36}",
-            f"diamond-ecp5:freq=100,{op_ecp5_e8w36}",
+            f"yosys-ecp5:freq=100,{op_integrator_wide_ecp5}",
+            f"diamond-ecp5:freq=100,{op_integrator_wide_ecp5}",
             "vivado:freq=150",
         ],
     )
     syn("examples/madd.py", "madd", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
     syn("examples/poly3.py", "poly3", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
+
     syn(
-        "examples/ekf1.py",
+        "examples/ekf1_stateless.py",
         "update_x_P",
         [
             "yosys-ecp5:freq=100,fadd.stage_align=1",
             "diamond-ecp5:freq=100,fadd.stage_align=1",
             "vivado:freq=150",
         ],
+        name="ekf1_stateless_e6m18",
+    )
+    op_ekf1_wide = (
+        "fadd.stage_decode=1,fadd.stage_align=1,fadd.stage_normalize=1,fadd.stage_pack=1,"
+        "fmul.stage_input=1,fmul.stage_product=1,fmul.stage_pack=1,"
+        "fdiv.stage_input=1,fdiv.stage_pack=1,fdiv.stage_output=1"
+    )
+    syn(
+        "examples/ekf1_stateless.py",
+        "update_x_P",
+        [
+            f"yosys-ecp5:freq=100,{op_ekf1_wide}",
+            f"diamond-ecp5:freq=100,{op_ekf1_wide}",
+            f"vivado:freq=150,{op_ekf1_wide}",
+        ],
+        wexp=8,
+        wman=36,
+        name="ekf1_stateless_e8m36",
+        env={"HOLOSO_DIAMOND_HARD": "1"},
     )

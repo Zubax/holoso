@@ -2,6 +2,7 @@
 Lattice Diamond / LSE out-of-context synthesis verification flow.
 """
 
+import os
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -95,6 +96,19 @@ def _strategy(freq_MHz: float) -> str:
         "PROP_SYN_EdfInsertIO": "False",
         "PROP_SYN_UseLPF": "True",
     }
+    # Some wide-argument kernels need an extra push to close timings.
+    if int(os.getenv("HOLOSO_DIAMOND_HARD", "0").strip()) != 0:
+        properties.update(
+            {
+                "PROP_PAR_PlcIterParDes": "6",
+                "PROP_PAR_SaveBestRsltParDes": "1",
+                "PROP_PAR_MultiSeedSortMode": "Worst Slack",
+                "PROP_MAP_TimingDrivenPack": "True",
+                "PROP_MAP_TimingDrivenNodeRep": "True",
+                "PROP_PAR_RouteDlyRedParDes": "1",
+                "PROP_PAR_RouteResOptParDes": "1",
+            }
+        )
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         "<!DOCTYPE strategy>",

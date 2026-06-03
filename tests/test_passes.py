@@ -257,11 +257,11 @@ def test_selected_mir_has_only_input_const_operation_nodes() -> None:
     assert all(isinstance(n, (MirFloatInput, MirFloatConst, MirOperation)) for n in mir.nodes.values())
 
 
-def test_ekf1_lowering() -> None:
+def test_ekf1_stateless_lowering() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1
+    import ekf1_stateless
 
-    mir = _run(ekf1.update_x_P)
+    mir = _run(ekf1_stateless.update_x_P)
     assert all(isinstance(n, (MirFloatInput, MirFloatConst, MirOperation)) for n in mir.nodes.values())
     assert _op_count(mir, FDivOperator) == 1  # only x22 = 1 / x21
     assert _op_count(mir, FMulILog2Operator) >= 1  # the "2 * ..." terms

@@ -17,7 +17,7 @@ from ._ooc import OocWrapper
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BUILD_ROOT = REPO_ROOT / "build" / "synth"
-DEFAULT_TIMEOUT_S = float(os.environ.get("HOLOSO_SYNTH_TIMEOUT_S", "1800"))
+DEFAULT_TIMEOUT_S = float(os.environ.get("HOLOSO_SYNTH_TIMEOUT_S", "3600"))
 
 # Caller-supplied RTL is bundled under this subdirectory so a tool's library search can target just those files.
 RTL_SUBDIR = Path("rtl")

@@ -89,12 +89,12 @@ def test_write_artifacts(tmp_path: Path) -> None:
     assert (tmp_path / "holoso_support.v").exists()
 
 
-def test_synthesize_ekf1() -> None:
+def test_synthesize_ekf1_stateless() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1
+    import ekf1_stateless
 
     fmt = FloatFormat(6, 18)
-    result = holoso.synthesize(ekf1.update_x_P, ops=_ops(fmt))
+    result = holoso.synthesize(ekf1_stateless.update_x_P, ops=_ops(fmt))
     assert result.module_name == "update_x_P"
     assert len(result.output_ports) == 9
     compile(result.cocotb_output.testbench, "<generated-testbench>", "exec")

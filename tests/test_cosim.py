@@ -73,11 +73,11 @@ def test_cosim_division(sim: str) -> None:
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_ekf1(sim: str) -> None:
+def test_cosim_ekf1_stateless(sim: str) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1
+    import ekf1_stateless
 
-    _run_cosim(sim, ekf1.update_x_P, FloatFormat(6, 18), "update_x_P")
+    _run_cosim(sim, ekf1_stateless.update_x_P, FloatFormat(6, 18), "update_x_P")
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)

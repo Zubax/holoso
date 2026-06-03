@@ -176,10 +176,10 @@ def test_state_port_name_does_not_collide_with_internal_sign_wire(tmp_path: Path
 
 
 @requires_iverilog
-def test_ekf1_elaborates(tmp_path: Path) -> None:
+def test_ekf1_stateless_elaborates(tmp_path: Path) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1
+    import ekf1_stateless
 
     fmt = FloatFormat(6, 18)
-    lir = build(_run(ekf1.update_x_P, _ops(fmt)), "update_x_P")
+    lir = build(_run(ekf1_stateless.update_x_P, _ops(fmt)), "update_x_P")
     _elaborate("update_x_P", generate(lir).verilog, tmp_path)

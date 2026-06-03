@@ -283,11 +283,11 @@ def test_state_early_copy_frees_source_register() -> None:
     assert any(op.dst == in_x.dst for op in lir.float_ops)
 
 
-def test_build_lir_ekf1() -> None:
+def test_build_lir_ekf1_stateless() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1
+    import ekf1_stateless
 
-    lir = build(_run(ekf1.update_x_P), "update_x_P")
+    lir = build(_run(ekf1_stateless.update_x_P), "update_x_P")
     assert len(lir.float_inputs) == 17
     assert len(lir.float_outputs) == 9
     fdivs = [inst for inst in lir.float_instances if isinstance(inst.operator, FDivOperator)]
@@ -299,7 +299,7 @@ def test_build_lir_ekf1() -> None:
     # The interference test runs in the hardware frame (a value frees its register as soon as its last read precedes the
     # next value's landing), not the scheduler-frame rule that left it several cycles too conservative and produced 42
     # registers here. The bound is well below 42 to flag a regression of the hardware-accurate liveness without pinning
-    # the exact minimum (currently 38); cosim (test_cosim_ekf1) proves the relaxed sharing is correct.
+    # the exact minimum (currently 38); cosim (test_cosim_ekf1_stateless) proves the relaxed sharing is correct.
     assert lir.float_regfile.nreg <= 40
     # Inputs preload through the regfile's load port (registers 0..nload-1), so nload spans the input block.
     assert lir.float_regfile.nload == 17
@@ -311,15 +311,15 @@ def test_build_lir_ekf1() -> None:
 
 
 def test_register_sharing_is_hardware_disjoint() -> None:
-    # ekf1 time-multiplexes many values onto each register. Verify the hardware-frame interference invariant directly:
+    # ekf1_stateless time-multiplexes many values onto each register. Verify the hardware-frame interference invariant directly:
     # within a register, each value's last read precedes the next value's landing, R(a) < W(b) -- the same liveness
     # float_liveness renders and the relaxed allocator shares against. Reconstructed via the write-timeline resolution
     # the numerical model uses, so the test tracks the allocator's actual sharing decisions, not a hardcoded schedule.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1
+    import ekf1_stateless
     from holoso._lir import latest_producer_before
 
-    lir = build(_run(ekf1.update_x_P), "update_x_P")
+    lir = build(_run(ekf1_stateless.update_x_P), "update_x_P")
     timeline = lir.float_write_timeline
     last_read: dict[tuple[int, str, int], int] = {}
 
@@ -479,7 +479,7 @@ def test_commutative_port_assignment_never_increases_read_mux_fan_in(monkeypatch
     import holoso._lir._build as build_module
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1
+    import ekf1_stateless
 
     cfg = OpConfig(
         FAddOperator(FMT, stage_decode=1),
@@ -488,9 +488,9 @@ def test_commutative_port_assignment_never_increases_read_mux_fan_in(monkeypatch
         FMulILog2OperatorFamily(FMT),
     )
     monkeypatch.setattr(build_module, "assign_commutative_ports", lambda *args, **kwargs: {})
-    baseline = build(_run(ekf1.update_x_P, cfg), "ekf1")
+    baseline = build(_run(ekf1_stateless.update_x_P, cfg), "ekf1_stateless")
     monkeypatch.undo()
-    optimized = build(_run(ekf1.update_x_P, cfg), "ekf1")
+    optimized = build(_run(ekf1_stateless.update_x_P, cfg), "ekf1_stateless")
 
     assert _read_mux_fan_in(optimized) <= _read_mux_fan_in(baseline)
-    assert _read_mux_fan_in(optimized) < _read_mux_fan_in(baseline)  # ekf1 has commutative reach to reclaim
+    assert _read_mux_fan_in(optimized) < _read_mux_fan_in(baseline)  # ekf1_stateless has commutative reach to reclaim

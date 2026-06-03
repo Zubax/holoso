@@ -149,7 +149,7 @@ methods are implemented today (the trapezoidal-integrator example); state combin
 branch/phi work below.
 
 Matrices/vectors are statically shaped and unrolled to scalar operations at synthesis time (as in the SymPy-CSE'd
-`ekf1` example); arrays never exist as hardware aggregates, only as compile-time bookkeeping over scalar registers.
+ekf1 example); arrays never exist as hardware aggregates, only as compile-time bookkeeping over scalar registers.
 Reductions (`max`, `argmax`, `mean`, `@`) lower to compare/select trees and multiply chains. Input shapes are declared
 with jaxtyping (`Float64[np.ndarray, "4 4"]`, concrete dims only); interior shapes are inferred.
 
@@ -305,10 +305,10 @@ writer-sets, stable ref labels, and write-timeline reconstruction so backends do
   orientation keeps it in one. This is a pure relabelling of which physical port reads which register --
   no hardware, no latency -- so it can only shrink the read muxes (the Chen & Cong mux-aware port-assignment lever).
   Minimizing total read-set size over orientations is graph bipartisation; a local search stalls well above the
-  optimum (ekf1's multiplier traps at 50 register-arms), so it is solved exactly per instance as a small MILP
+  optimum (ekf1_stateless's multiplier traps at 50 register-arms), so it is solved exactly per instance as a small MILP
   (HiGHS via `scipy.optimize.milp`), with the deterministic local search kept as a fallback when the MILP does not
-  prove optimality in its time budget. On ekf1 this takes read-mux fan-in from 89 to the optimum 78 (the multiplier's
-  two operand muxes from 29+27 to 46 register-arms).
+  prove optimality in its time budget. On ekf1_stateless this takes read-mux fan-in from 89 to the optimum 78
+  (the multiplier's two operand muxes from 29+27 to 46 register-arms).
 
 - `branch` is the real control transfer: the microprogram counter jumps, untaken ops never run, and the II is whatever
   the executed path costs (each path's count is itself exact).
@@ -565,7 +565,7 @@ help timing closure -- to be added later.
 ## Fabric-area exploration
 
 The synthesized fabric is dominated by the per-operand read multiplexers: on a register-pressure-heavy kernel (the
-`ekf1` EKF update) they are roughly 60-65% of the LUTs, and a read mux's cost is approximately linear in
+ekf1 EKF update) they are roughly 60-65% of the LUTs, and a read mux's cost is approximately linear in
 `read-set-size * W`. The read-set sizes sit at the interference floor -- the values a port reads are largely
 simultaneously live, so they must occupy distinct registers -- so the muxes encode real liveness rather than
 allocation slack, which is what bounds most levers. The results below were measured end-to-end on Yosys+nextpnr-ECP5,
@@ -576,15 +576,15 @@ Adopted (lossless, f_max-neutral, in the committed design):
 - Read mux as a `case` over the dense read-set index rather than an indexed part-select into a packed gather bus:
   smallest and fastest of the encodings tried, and free of the DSP-inference trap (a variable part-select offset is a
   multiply that Diamond's LSE maps to DSP blocks). Nested-ternary muxes are catastrophic.
-- Commutative operand port assignment (see LIR / `_portassign.py`), solved exactly as a MILP: about 4-5% LUT on `ekf1`
+- Commutative operand port assignment (see LIR / `_portassign.py`), solved exactly as a MILP: about 4-5% LUT on ekf1
   across all three tools (read-mux fan-in 89 -> 78), at zero hardware or latency cost. Based on Chen & Cong.
 - Dense write-target index and a grouped input load: read/write symmetry and cleaner emission at neutral area. The
   per-register write select beats a per-instance write demux -- the scatter costs about 10% more LUTs.
 
-Explored and rejected for register-pressure-bound kernels like `ekf1`:
+Explored and rejected for register-pressure-bound kernels like `ekf1_stateless`:
 
 - LUTRAM register file: a multi-write workload needs a live-value table that costs as many LUTs as the FF+mux it
-  replaces; banking (Cong's RDR) helps only when access sets partition cleanly, which `ekf1`'s do not.
+  replaces; banking (Cong's RDR) helps only when access sets partition cleanly, which `ekf1_stateless`'s do not.
 - Register-file size cap via register-pressure-limited scheduling: `nreg` floors at the peak liveness (the
   parallel-loaded inputs plus long-lived state), so it trades large latency and f_max for a couple of percent.
 - Operator replication and FMA fusion: both raise read-operand traffic (more, or wider, read ports), enlarging total
@@ -600,10 +600,10 @@ Latency-for-area trades (set aside -- latency is itself a real cost, not a free 
 justify it):
 
 - Distributed/banked register file with scheduled inter-bank copies (Cong's RDR): banking narrows each port's mux but
-  serializes the schedule, buying area with latency. On `ekf1`, whose read muxes are already at the interference
+  serializes the schedule, buying area with latency. On ekf1, whose read muxes are already at the interference
   floor, the trade was not worthwhile.
 - Shared read bus / vertical microcode (serialize to one operator per cycle, two shared operand buses): measured at
-  about -6% total LUTs for about +55% latency on `ekf1`, f_max-safe -- a real latency cost for a modest area gain, so
+  about -6% total LUTs for about +55% latency on ekf1, f_max-safe -- a real latency cost for a modest area gain, so
   not pursued.
 
 ## References

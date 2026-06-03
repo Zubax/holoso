@@ -27,8 +27,8 @@ def test_flat_sequence_is_positional() -> None:
     assert output_names((1.0, 2.0, 3.0)) == ["out_0", "out_1", "out_2"]
 
 
-def test_nested_list_row_major_like_ekf1() -> None:
-    # ekf1's update_x_P returns a 9x1 nested list -> out_0_0 .. out_8_0
+def test_nested_list_row_major_like_ekf1_stateless() -> None:
+    # ekf1_stateless's update_x_P returns a 9x1 nested list -> out_0_0 .. out_8_0
     matrix = [[float(i)] for i in range(9)]
     assert output_names(matrix) == [f"out_{i}_0" for i in range(9)]
 
@@ -109,11 +109,11 @@ def test_division_lowers_to_div() -> None:
     assert len(divs) == 1
 
 
-def test_ekf1_structure() -> None:
+def test_ekf1_stateless_structure() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1
+    import ekf1_stateless
 
-    hir = lower(ekf1.update_x_P)
+    hir = lower(ekf1_stateless.update_x_P)
     assert len(hir.input_ids) == 17
     assert [o.name for o in hir.outputs] == [f"out_{i}_0" for i in range(9)]
     assert _arith_count(hir, FloatDiv) == 1  # only x22 = 1 / x21

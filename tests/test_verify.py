@@ -154,9 +154,9 @@ def test_model_is_bit_exact_for_wide_zkf_multiply_regression() -> None:
     assert got[0].bits == 0xC0B5B6B31D9
 
 
-def test_model_matches_reference_ekf1() -> None:
+def test_model_matches_reference_ekf1_stateless() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1
+    import ekf1_stateless
 
     rng = np.random.default_rng(12345)
     cov = spd_matrix(rng, 3, 0.5, 2.0)
@@ -179,9 +179,9 @@ def test_model_matches_reference_ekf1() -> None:
         "z_ct": bounded(rng, -1.0, 1.0),
         "z_shunt": bounded(rng, -1.0, 1.0),
     }
-    model = build_model(build(_run(ekf1.update_x_P), "ekf1"))
+    model = build_model(build(_run(ekf1_stateless.update_x_P), "ekf1_stateless"))
     got = model(*[inputs[name] for name in model.input_names])
-    ref = evaluate_reference(ekf1.update_x_P, inputs)
+    ref = evaluate_reference(ekf1_stateless.update_x_P, inputs)
     assert len(ref) == 9 and all(np.isfinite(ref))
     rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=max(abs(v) for v in inputs.values()))
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
