@@ -144,14 +144,26 @@ in the register at the boundary. Underscore-prefixed attributes stay internal; p
 `state_<attr>` output port (named apart from the `out_<n>` return ports), so a method need not return anything, and a
 returned value that is, by dataflow, a public attribute (the same SSA value, however it was spelled or aliased) is
 deduped onto that one port. An attribute assigned only in unreachable code (after a return) is never lowered, so it
-stays a read-only folded constant -- whether an attribute is state follows reachability. Straight-line stateful
-methods are implemented today (the trapezoidal-integrator example); state combined with dynamic branches awaits the
-branch/phi work below.
+stays a read-only folded constant -- whether an attribute is state follows reachability. A vector-valued attribute --
+a list, tuple, or 1-D numpy array -- decomposes into one scalar register per element, slotted (and, if public, ported)
+as `attr_0`, `attr_1`, ...; a scalar attribute keeps its bare name `attr` rather than an indexed slot. Straight-line
+stateful methods are implemented today (the trapezoidal-integrator example and the `ekf1_stateful` filter, which wraps
+the inlined `update_x_P`); state combined with dynamic branches awaits the branch/phi work below.
 
-Matrices/vectors are statically shaped and unrolled to scalar operations at synthesis time (as in the SymPy-CSE'd
-ekf1 example); arrays never exist as hardware aggregates, only as compile-time bookkeeping over scalar registers.
-Reductions (`max`, `argmax`, `mean`, `@`) lower to compare/select trees and multiply chains. Input shapes are declared
-with jaxtyping (`Float64[np.ndarray, "4 4"]`, concrete dims only); interior shapes are inferred.
+Matrices/vectors are statically shaped and unrolled to scalar operations at synthesis time; arrays never exist as
+hardware aggregates, only as compile-time bookkeeping over scalar registers. That bookkeeping is a front-end value that
+is either a scalar wire or an ordered aggregate of values: list/tuple literals, integer indexing, constant-bound
+slicing, `*`-unpacking into call arguments and list/tuple literals, elementwise scalar broadcast (vector `*` scalar),
+`.flatten()`, and the numpy array constructors (`np.asarray`/`np.array`/`np.asanyarray`, all identity on an aggregate)
+operate on aggregates and leave only scalar leaves in HIR -- the supported source is thus ordinary executable numpy.
+A pure function reachable through `__globals__` is inlined -- its body lowered in a fresh scope and its return
+consumed as an aggregate -- so kernels compose (the `ekf1_stateful` example inlines the stateless `update_x_P`).
+Positional and keyword-only parameters both become input ports. Reductions (`max`, `argmax`, `mean`, `@`) lower to
+compare/select trees and multiply chains. An aggregate attribute's shape is read from its reset value (list, tuple,
+or numpy array); a numpy field may also carry an explicit jaxtyping annotation (`Float64[np.ndarray, "3"]`, concrete
+dims only) validated against the value, while a shape-less annotation (`list[float]`, `numpy.typing.NDArray`) leaves
+the shape to the value. Parameters are scalar inputs today; a value-less vector input would declare its shape with
+jaxtyping. Interior shapes are inferred.
 
 ## Types
 
@@ -538,16 +550,6 @@ This example needs a dynamic branch (`if self._first`), so it awaits the branch/
 trapezoidal integrator (`examples/trapezoidal_leaky_streaming_integrator.py`) is the state example synthesizable today:
 its accumulator `y` coalesces onto its slot register (the final `fadd` writes it directly) while the one-sample delay
 `_x_prev = x` installs the input register into the slot early, freeing that input register for a later temporary.
-
-## First delivery (v0)
-
-Minimal end-to-end slice -- front-end -> HIR -> MIR -> scheduler -> LIR -> Verilog + testbench + report + model --
-on a single basic block: combinational, scalar-only, operators `fadd`/`fmul`/`fdiv`/`fmul_ilog2_const` plus semantic
-`FloatNeg`/`FloatAbs` folding and `FloatConst`
-(`fdiv` and its wrapper already exist in ZKF). No control flow, arrays, or bools (`M = 0`); intrinsics
-(`sqrt`, `sincos`, ...) raise the "implement this operator" error, pending ZKF support. Straight-line persistent state
-(written attributes become slot registers reset to the instance snapshot, resolved by coalesce-or-scheduled-copy) is now
-implemented; branches and arrays follow in later milestones.
 
 ## Deferred
 

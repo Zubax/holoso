@@ -4,6 +4,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
 import pytest
 from cocotb_tools.runner import get_runner
 
@@ -78,6 +79,25 @@ def test_cosim_ekf1_stateless(sim: str) -> None:
     import ekf1_stateless
 
     _run_cosim(sim, ekf1_stateless.update_x_P, FloatFormat(6, 18), "update_x_P")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_ekf1_stateful(sim: str) -> None:
+    # The stateful filter inlines the stateless kernel and threads its vector state (x, P_urt) across the random
+    # transaction sequence, bit-for-bit against the model -- exercising the aggregates, inlining, and per-element slots.
+    # Large measurement noise keeps the kernel's 1/x21 divisor dominated by the constant R_ct*R_shunt and the Kalman
+    # gain tiny, so the random 64-step sequence cannot drive that divisor to an exact zero (err_pc) however the state
+    # wanders. The DUT-vs-model bits agree regardless of stability; this config only keeps the err_pc check meaningful.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import ekf1_stateful
+
+    filt = ekf1_stateful.Ekf1(
+        x=[0.0, 0.0, 0.0],
+        P_urt=[1.0, 0.0, 0.0, 1.0, 0.0, 1.0],
+        R_diag=[1.0e3, 1.0e3],
+        Q_diag=np.array([1.0e-6, 1.0e-6, 1.0e-6]),
+    )
+    _run_cosim(sim, filt.update, FloatFormat(6, 18), "ekf1_stateful")
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)

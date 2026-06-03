@@ -5,6 +5,7 @@ import math
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from holoso import MissingIntrinsic, UnsupportedConstruct
@@ -309,3 +310,355 @@ def test_nested_attribute_access_is_rejected() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="direct self"):
         lower(Bad().__call__)
+
+
+# --- Compile-time aggregates -----------------------------------------------------------------------------------------
+
+
+def test_tuple_build_and_index() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        z = a, b
+        return [z[1], z[0]]  # swapped
+
+    assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
+
+
+def test_list_slice() -> None:
+    def f(a, b, c):  # type: ignore[no-untyped-def]
+        v = [a, b, c]
+        return v[1:3]
+
+    assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
+
+
+def test_vector_scalar_broadcast() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        v = [a, b]
+        return v * 0.5  # elementwise: one multiply per leaf
+
+    hir = lower(f)
+    assert _arith_count(hir, FloatMul) == 2
+    assert [o.name for o in hir.outputs] == ["out_0", "out_1"]
+
+
+def test_flatten_collapses_nesting() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        m = [[a], [b]]
+        return m.flatten()
+
+    assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
+
+
+def test_index_out_of_range_is_rejected() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        v = [a]
+        return v[3]
+
+    with pytest.raises(UnsupportedConstruct, match="out of range"):
+        lower(f)
+
+
+def test_indexing_a_scalar_is_rejected() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        return a[0]
+
+    with pytest.raises(UnsupportedConstruct, match="index or slice a scalar"):
+        lower(f)
+
+
+def test_star_unpacking_a_scalar_is_rejected() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        return [*a]
+
+    with pytest.raises(UnsupportedConstruct, match="unpack"):
+        lower(f)
+
+
+# --- Importing and inlining a pure function --------------------------------------------------------------------------
+
+
+def _addmul(p, q):  # type: ignore[no-untyped-def]
+    return [p + q, p * q]
+
+
+def test_inlined_global_function() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        return _addmul(a, b)
+
+    hir = lower(f)
+    assert [o.name for o in hir.outputs] == ["out_0", "out_1"]
+    assert _arith_count(hir, FloatAdd) == 1 and _arith_count(hir, FloatMul) == 1
+
+
+def test_inlined_global_with_star_args() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        v = [a, b]
+        return _addmul(*v)
+
+    hir = lower(f)
+    assert _arith_count(hir, FloatAdd) == 1 and _arith_count(hir, FloatMul) == 1
+
+
+def test_inline_arity_mismatch_is_rejected() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        return _addmul(a)  # _addmul takes two positional arguments
+
+    with pytest.raises(UnsupportedConstruct, match="positional arguments"):
+        lower(f)
+
+
+def cbrt(x):  # type: ignore[no-untyped-def]
+    return x * x  # a user-defined global whose name collides with the same-named intrinsic placeholder
+
+
+def test_user_global_function_shadows_intrinsic_name() -> None:
+    # A module-level def named like an intrinsic is the caller's own function; Python would call it, so it is inlined.
+    def f(a):  # type: ignore[no-untyped-def]
+        return cbrt(a)
+
+    assert _arith_count(lower(f), FloatMul) == 1  # the inlined x * x, not a MissingIntrinsic rejection
+
+
+def test_local_name_shadows_global_callable() -> None:
+    # A parameter named like a global function refers to the parameter (a value), which is not callable.
+    def f(_addmul, a):  # type: ignore[no-untyped-def]
+        return _addmul(a)
+
+    with pytest.raises(UnsupportedConstruct, match="not a callable"):
+        lower(f)
+
+
+def test_flatten_on_a_scalar_is_rejected() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        return a.flatten()
+
+    with pytest.raises(UnsupportedConstruct, match="aggregate"):
+        lower(f)
+
+
+def test_negative_boolean_literal_is_rejected() -> None:
+    def f():  # type: ignore[no-untyped-def]
+        return -True
+
+    with pytest.raises(UnsupportedConstruct, match="boolean"):
+        lower(f)
+
+
+def test_abs_accepts_a_star_unpacked_argument() -> None:
+    # Call-argument unpacking applies uniformly: abs(*v) on a one-element aggregate is abs of that single element.
+    def f(a):  # type: ignore[no-untyped-def]
+        v = [a]
+        return abs(*v)
+
+    assert _arith_count(lower(f), FloatAbs) == 1
+
+
+def test_unary_plus_is_scalar_identity_and_rejects_aggregates() -> None:
+    def scalar_ok(a):  # type: ignore[no-untyped-def]
+        return +a  # identity on a scalar
+
+    assert [o.name for o in lower(scalar_ok).outputs] == ["out_0"]
+
+    def aggregate_bad(a, b):  # type: ignore[no-untyped-def]
+        v = [a, b]
+        return +v  # unary plus does not apply to an aggregate
+
+    with pytest.raises(UnsupportedConstruct, match="scalar"):
+        lower(aggregate_bad)
+
+
+def test_method_style_abs_call_is_rejected() -> None:
+    # Only a bare-name abs(...) is the builtin; a method-style a.abs(b) must not be silently treated as it (which would
+    # drop the receiver) -- there is no supported scalar method, so it is an unsupported call.
+    def f(a, b):  # type: ignore[no-untyped-def]
+        return a.abs(b)
+
+    with pytest.raises(UnsupportedConstruct, match="abs"):
+        lower(f)
+
+
+# --- numpy-array aggregates and executable-numpy interop --------------------------------------------------------------
+
+
+def test_numpy_array_state_decomposes_like_a_list() -> None:
+    import numpy.typing as npt
+
+    @dataclasses.dataclass
+    class Filt:
+        v: npt.NDArray[np.float64]  # shape-less annotation: holoso infers the length from the reset value
+
+        def step(self, a):  # type: ignore[no-untyped-def]
+            self.v = self.v * a
+
+    hir = lower(Filt(np.array([1.0, 2.0, 3.0])).step)
+    assert {s.name for s in hir.state_slots} == {"v_0", "v_1", "v_2"}
+    assert [o.name for o in hir.outputs] == ["state_v_0", "state_v_1", "state_v_2"]
+
+
+def test_jaxtyping_array_field_lowers_and_is_validated() -> None:
+    from jaxtyping import Float64
+
+    @dataclasses.dataclass
+    class Filt:
+        v: Float64[np.ndarray, "3"]
+
+        def step(self, a):  # type: ignore[no-untyped-def]
+            self.v = self.v * a
+
+    assert {s.name for s in lower(Filt(np.array([1.0, 2.0, 3.0])).step).state_slots} == {"v_0", "v_1", "v_2"}
+    with pytest.raises(UnsupportedConstruct, match="declared array type"):
+        lower(Filt(np.array([1.0, 2.0, 3.0, 4.0])).step)  # value shape (4,) violates the declared "3"
+
+
+def test_numpy_integer_array_values_coerce_to_real() -> None:
+    @dataclasses.dataclass
+    class Filt:
+        v: np.ndarray  # type: ignore[type-arg]
+
+        def step(self, a):  # type: ignore[no-untyped-def]
+            self.v = self.v * a
+
+    assert {s.name for s in lower(Filt(np.array([2, 3])).step).state_slots} == {"v_0", "v_1"}
+
+
+def test_numpy_asarray_is_identity_on_an_aggregate() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        return np.asarray([a, b]).flatten()  # asarray of an array-like is identity in this compile-time model
+
+    assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
+
+
+def test_numpy_alias_shadowed_by_a_local_is_not_numpy() -> None:
+    # ``np`` is rebound to a local value, so ``np.asarray`` is a method call on that value, not the numpy function.
+    def f(a):  # type: ignore[no-untyped-def]
+        np = [a]
+        return np.asarray([a])
+
+    with pytest.raises(UnsupportedConstruct, match="asarray"):
+        lower(f)
+
+
+def test_name_assigned_later_is_local_before_its_assignment() -> None:
+    # A name assigned anywhere in a function is local throughout (Python's rule); using it as a global/builtin/numpy
+    # before that assignment is invalid Python (UnboundLocalError), so holoso rejects it rather than seeing the global.
+    def shadows_numpy(a):  # type: ignore[no-untyped-def]
+        y = np.asarray([a])
+        np = [a]  # noqa: F841  # makes np local for the whole body
+        return y
+
+    with pytest.raises(UnsupportedConstruct):
+        lower(shadows_numpy)
+
+    def shadows_builtin(a):  # type: ignore[no-untyped-def]
+        y = abs(a)
+        abs = [a]  # noqa: F841  # makes abs local for the whole body
+        return y
+
+    with pytest.raises(UnsupportedConstruct, match="local name"):
+        lower(shadows_builtin)
+
+
+def test_multidimensional_array_state_is_rejected() -> None:
+    @dataclasses.dataclass
+    class Filt:
+        m: np.ndarray  # type: ignore[type-arg]
+
+        def step(self, a):  # type: ignore[no-untyped-def]
+            self.m = self.m * a
+
+    with pytest.raises(UnsupportedConstruct, match="1-D"):
+        lower(Filt(np.array([[1.0, 2.0], [3.0, 4.0]])).step)
+
+
+def test_ekf1_stateful_structure() -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import ekf1_stateful
+
+    filt = ekf1_stateful.Ekf1(
+        x=[0.0, 0.0, 0.0], P_urt=[1.0, 0.0, 0.0, 1.0, 0.0, 1.0], R_diag=[1.0, 1.0], Q_diag=np.array([1.0, 1.0, 1.0])
+    )
+    hir = lower(filt.update)
+    assert hir.input_names() == ["dt", "u_shunt", "di_dt"]  # self dropped; keyword-only params become inputs
+    assert [o.name for o in hir.outputs] == ["state_x_0", "state_x_1", "state_x_2"] + [
+        f"state_P_urt_{i}" for i in range(6)
+    ]
+    assert {s.name for s in hir.state_slots} == {f"x_{i}" for i in range(3)} | {f"P_urt_{i}" for i in range(6)}
+    assert _arith_count(hir, FloatDiv) == 1  # the inlined kernel's single 1/x21
+
+
+# --- Vector-valued state and keyword-only inputs ---------------------------------------------------------------------
+
+
+def test_vector_state_decomposes_to_per_element_slots() -> None:
+    class Vec:
+        def __init__(self) -> None:
+            self.v = [1.0, 2.0, 3.0]
+
+        def update(self, a):  # type: ignore[no-untyped-def]
+            self.v = [self.v[0] + a, self.v[1], self.v[2]]
+
+    hir = lower(Vec().update)
+    assert {s.name: s.reset_value for s in hir.state_slots} == {"v_0": 1.0, "v_1": 2.0, "v_2": 3.0}
+    assert [o.name for o in hir.outputs] == ["state_v_0", "state_v_1", "state_v_2"]
+
+
+def test_vector_state_shape_mismatch_is_rejected() -> None:
+    class Vec:
+        def __init__(self) -> None:
+            self.v = [0.0, 0.0]
+
+        def update(self, a):  # type: ignore[no-untyped-def]
+            self.v = [a]  # the slot holds two scalars, but one is assigned
+
+    with pytest.raises(UnsupportedConstruct, match="2-element vector"):
+        lower(Vec().update)
+
+
+def test_vector_state_nested_shape_is_rejected() -> None:
+    # A nested aggregate has the right leaf count (2) but the wrong shape: the slot layout is a flat 2-vector, so the
+    # next transaction would reconstruct a flat shape that disagrees with the one written this transaction.
+    class Vec:
+        def __init__(self) -> None:
+            self.v = [0.0, 0.0]
+
+        def update(self, a, b):  # type: ignore[no-untyped-def]
+            self.v = [[a, b]]
+
+    with pytest.raises(UnsupportedConstruct, match="incompatible shape"):
+        lower(Vec().update)
+
+
+def test_vector_state_slot_name_collision_is_rejected() -> None:
+    # The vector ``v`` decomposes into slot ``v_0``, which would alias the distinct scalar attribute ``v_0``.
+    class Vec:
+        def __init__(self) -> None:
+            self.v = [1.0]
+            self.v_0 = 2.0
+
+        def update(self, a):  # type: ignore[no-untyped-def]
+            self.v = [a]
+            self.v_0 = a + 1.0
+
+    with pytest.raises(UnsupportedConstruct, match="aliasing collision"):
+        lower(Vec().update)
+
+
+def test_keyword_only_params_become_inputs() -> None:
+    def f(a, *, b, c):  # type: ignore[no-untyped-def]
+        return a + b + c
+
+    assert lower(f).input_names() == ["a", "b", "c"]
+
+
+def test_dataclass_instance_is_stateful() -> None:
+    @dataclasses.dataclass
+    class Acc:
+        total: float
+        gain: list  # type: ignore[type-arg]
+
+        def step(self, x):  # type: ignore[no-untyped-def]
+            self.total = self.total + x * self.gain[0]
+
+    hir = lower(Acc(0.0, [2.0]).step)
+    assert {s.name for s in hir.state_slots} == {"total"}  # gain is read-only config, not state
+    assert [o.name for o in hir.outputs] == ["state_total"]

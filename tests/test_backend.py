@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from holoso import (
@@ -183,3 +184,16 @@ def test_ekf1_stateless_elaborates(tmp_path: Path) -> None:
     fmt = FloatFormat(6, 18)
     lir = build(_run(ekf1_stateless.update_x_P, _ops(fmt)), "update_x_P")
     _elaborate("update_x_P", generate(lir).verilog, tmp_path)
+
+
+@requires_iverilog
+def test_ekf1_stateful_elaborates(tmp_path: Path) -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import ekf1_stateful
+
+    fmt = FloatFormat(6, 18)
+    filt = ekf1_stateful.Ekf1(
+        x=[0.0, 0.0, 0.0], P_urt=[1.0, 0.0, 0.0, 1.0, 0.0, 1.0], R_diag=[1.0, 1.0], Q_diag=np.array([1.0, 1.0, 1.0])
+    )
+    lir = build(_run(filt.update, _ops(fmt)), "ekf1_stateful")
+    _elaborate("ekf1_stateful", generate(lir).verilog, tmp_path)
