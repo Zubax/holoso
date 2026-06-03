@@ -11,7 +11,7 @@ from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFam
 from holoso._errors import UnsupportedConstruct
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lir import FloatRegRef
+from holoso._lir import FloatConstRef, FloatRegRef
 from holoso._lir._schedule import DEPENDENCY_EDGE
 from holoso._mir import (
     lower as lower_to_mir,
@@ -308,6 +308,84 @@ def test_build_lir_ekf1_stateless() -> None:
     assert lir.float_regfile.nrd == 7
     # The 1/x21 numerator survives as a constant immediate.
     assert any(abs(c - 1.0) < 1e-12 for c in lir.float_consts)
+
+
+def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
+    # +c and -c share a single nonnegative pool entry; the sign rides the (free) per-operand sign control.
+    def f(a):  # type: ignore[no-untyped-def]
+        return a * 1000.0 + a * (-1000.0)
+
+    lir = build(_run(f), "f")
+    assert [c for c in lir.float_consts if abs(c) == 1000.0] == [1000.0]
+    operands = [opnd for op in lir.float_ops for opnd in op.operands if isinstance(opnd.source, FloatConstRef)]
+    assert len({opnd.source.index for opnd in operands}) == 1  # both products read one pool entry
+    assert {opnd.sign for opnd in operands} == {FloatSignControl(), FloatSignControl(negate=True)}
+
+
+def test_negative_constant_operand_is_stored_as_magnitude_with_negate() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        return a + (-1000.0)
+
+    lir = build(_run(f), "f")
+    assert all(c >= 0.0 for c in lir.float_consts)
+    (operand,) = [opnd for op in lir.float_ops for opnd in op.operands if isinstance(opnd.source, FloatConstRef)]
+    assert lir.float_consts[operand.source.index] == 1000.0
+    assert operand.sign == FloatSignControl(negate=True)
+
+
+def test_constant_pool_is_canonically_nonnegative() -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import ekf1_stateful
+    import numpy as np
+
+    filt = ekf1_stateful.Ekf1(
+        x=[0.1e-3, 0.0, 0.0],
+        P_urt=[1e3, 0.0, 0.0, 1e6, 0.0, 1e-3],
+        R_diag=[1e3, 1e-6],
+        Q_diag=np.array([1e-3, 1e9, 1e-9]),
+    )
+    lir = build(_run(filt.update), "ekf1_stateful")
+    assert all(c >= 0.0 for c in lir.float_consts)
+    assert len(lir.float_consts) == 6  # the +1000.0 / -1000.0 pair collapsed (was 7)
+
+
+def test_underflowing_negative_constant_is_not_sign_folded() -> None:
+    # A negative value that rounds to +0 in ZKF (which has no -0) must NOT carry a folded negate: the magnitude already
+    # encodes to the canonical +0, so a negate over it would emit an illegal -0 rather than the +0 the value encodes to.
+    def f(a):  # type: ignore[no-untyped-def]
+        return a + (-1e-12)  # -1e-12 underflows to +0 in FloatFormat(6, 18)
+
+    lir = build(_run(f), "f")
+    (operand,) = [opnd for op in lir.float_ops for opnd in op.operands if isinstance(opnd.source, FloatConstRef)]
+    assert FMT.encode(lir.float_consts[operand.source.index]) == 0  # the pooled magnitude is a zero-encoding
+    assert operand.sign == FloatSignControl()  # identity, not negate
+
+
+def test_underflowing_negative_constant_output_stays_canonical_zero() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        return a + a, -1e-12  # the -1e-12 output underflows to +0; it must stay canonical, not fold to illegal -0
+
+    lir = build(_run(f), "f")
+    (wire,) = [w for w in lir.float_outputs if isinstance(w.tap.source, FloatConstRef)]
+    assert FMT.encode(lir.float_consts[wire.tap.source.index]) == 0
+    assert wire.tap.sign == FloatSignControl()
+
+
+def test_stateful_slot_register_gaps_are_reused() -> None:
+    # A coalesced state slot's register, dead through the middle of the frame, is reused for temporaries instead of
+    # being reserved, shedding registers (the stateful EKF dropped from 45 to ~39).
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import ekf1_stateful
+    import numpy as np
+
+    filt = ekf1_stateful.Ekf1(
+        x=[0.1e-3, 0.0, 0.0],
+        P_urt=[1e3, 0.0, 0.0, 1e6, 0.0, 1e-3],
+        R_diag=[1e3, 1e-6],
+        Q_diag=np.array([1e-3, 1e9, 1e-9]),
+    )
+    lir = build(_run(filt.update), "ekf1_stateful")
+    assert lir.float_regfile.nreg <= 40  # gap-reuse sheds ~6; a regression to the fully-reserved 45 trips this
 
 
 def test_register_sharing_is_hardware_disjoint() -> None:

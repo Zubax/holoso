@@ -19,8 +19,11 @@ for the live-in, and must hold the slot's live-out at the initiation boundary. W
 whose live range does not overlap the live-in, it is *coalesced* onto the slot register (the operator writes it
 directly, no copy); otherwise the backend copies the live-out into the slot register at its install cycle: as early as
 the old live-in is fully read and the source is available when the source is an ordinary register (which then frees for
-reuse), the boundary at the latest. The slot registers themselves are not recycled; the saving is in mux fabric, not
-flip-flops, and a dedicated slot register adds no mux fan-in elsewhere.
+reuse), the boundary at the latest. A coalesced slot register is itself reusable for unrelated temporaries during its
+dead gap -- after the live-in is last read and before the live-out operator returns, with the tenant folded into the
+slot's write select -- which sheds registers (and so narrows the regfile muxes) on stateful kernels without disturbing
+the loop-carried value. A non-coalesced slot, installed by a standalone copy the backend cannot fold a tenant into,
+stays reserved.
 
 Unlike a CPU register allocator, the primary objective here is NOT to minimize the register count: flip-flops are
 abundant on an FPGA and interconnect is scarce, so the cost that matters most is *steering* -- the fan-in of the
@@ -40,8 +43,8 @@ more than the price paid per register freed.
 The allocator is a port-affinity-biased graph coloring (a linear scan whose register choice minimizes the marginal
 increase in total mux fan-in), refined by simulated annealing. Input ports are pinned to the unique low registers
 ``0..nload-1`` so the step-0 parallel-load lanes map one-to-one onto module input ports; the state-slot registers sit
-directly above them; operation results may still reuse the input registers once an input value is dead. There is no
-spilling: a value the cap cannot place by reuse simply opens a new register.
+directly above them; operation results may reuse an input register once its value is dead, or a coalesced slot register
+during its dead gap. There is no spilling: a value the cap cannot place by reuse simply opens a new register.
 """
 
 from collections import Counter
@@ -68,6 +71,16 @@ def _state_writer(name: str) -> _Producer:
     return f"state:{name}"
 
 
+def _admits_tenant(slot_gaps: dict[int, tuple[int, int]], reg: int, read_cycle: int) -> bool:
+    """
+    Whether ``reg`` admits a tenant whose last read is ``read_cycle``. A non-slot register (``gap is None``) always
+    admits; a coalesced slot admits only a tenant dying before its live-out lands (``read_cycle < gap[1]``); a reserved
+    non-coalesced slot carries an empty gap (``gap[1] == gap[0]``) that admits nothing.
+    """
+    gap = slot_gaps.get(reg)
+    return gap is None or read_cycle < gap[1]
+
+
 # Budget for the SciPy dual-annealing refinement. It only polishes an already-valid greedy seed (and is a no-op when
 # the seed is already at the reach floor), so the function-evaluation cap keeps build time bounded; raise it to trade
 # build time for a deeper search.
@@ -88,6 +101,7 @@ _REFINE_MAXFUN = 10000
 _WRITE_SELECT_CAP = int(os.getenv("HOLOSO_WRITE_SELECT_CAP", "2"))
 _REG_PRICE = float(os.getenv("HOLOSO_REG_PRICE", "2.0"))
 _NO_CAP = 1 << 30  # an effectively unbounded write-select budget, used for the reach-minimal coloring
+_INFEASIBLE_COST = 1e18  # annealing penalty for an undecodable point (far above any real mux-fan-in objective)
 
 _logger = logging.getLogger(__name__)
 
@@ -182,7 +196,6 @@ def allocate_float(
     nload = len(input_values)
     read_of_slot = {_state_read_name(mir, vid): vid for vid in state_values}
     state_regs: dict[str, int] = {slot.name: nload + i for i, slot in enumerate(mir.state_slots)}
-    reserved = set(state_regs.values())
 
     # Pin inputs to the low load lanes and each state slot's live-in to its dedicated persistent register.
     pinned: dict[ValueId, int] = {vid: reg for reg, vid in enumerate(input_values)}
@@ -278,18 +291,33 @@ def allocate_float(
         if src in read_hw and not isinstance(mir.nodes[src], MirFloatConst):
             read_hw[src] = max(read_hw[src], copy_step_cycle(install_cycles[slot.name]))
 
+    # Each slot register is reusable for temporaries during its dead gap -- after the live-in is last read and before
+    # the live-out re-occupies it. Only a COALESCED slot is opened: the backend folds a tenant into the slot register's
+    # write select (the operator results writing it share one select), so the live-out landing is the reblock. A
+    # non-coalesced slot is installed by a standalone copy the backend cannot fold a tenant into, so it stays reserved
+    # (an empty gap, ``reblock == gap_start``, admits no tenant). A write-only slot's register is free from the start.
+    # ``slot_gaps[reg] = (gap_start, reblock)``; every slot register appears so it is excluded from generic reuse.
+    slot_gaps: dict[int, tuple[int, int]] = {}
+    for slot in mir.state_slots:
+        reg = state_regs[slot.name]
+        r_in = read_of_slot.get(slot.name)
+        gap_start = read_hw[r_in] if r_in is not None else 0
+        coalesced = pinned.get(slot.live_out) == reg
+        reblock = write_hw[slot.live_out] if coalesced else gap_start
+        slot_gaps[reg] = (gap_start, reblock)
+
     movable = [vid for vid in operation_values if vid not in pinned]
     fresh_start = nload + len(mir.state_slots)
     cap, price = _WRITE_SELECT_CAP, _REG_PRICE
 
     def greedy_seed(compact: bool, budget: int) -> tuple[dict[ValueId, int], int]:
         seed = _greedy(
-            movable, pinned, reserved, fresh_start, write_hw, read_hw, consumer_ports, producer_key, compact, budget
+            movable, pinned, slot_gaps, fresh_start, write_hw, read_hw, consumer_ports, producer_key, compact, budget
         )
         return seed, max((max(seed.values()) + 1) if seed else 0, fresh_start)
 
     def refined(seed: dict[ValueId, int], nreg: int, budget: int) -> dict[ValueId, int]:
-        return _refine(seed, nreg, movable, reserved, write_hw, read_hw, consumer_ports, producer_key, budget)
+        return _refine(seed, nreg, movable, slot_gaps, write_hw, read_hw, consumer_ports, producer_key, budget)
 
     base_seed, base_nreg = greedy_seed(compact=False, budget=_NO_CAP)
     comp_seed, comp_nreg = greedy_seed(compact=True, budget=cap)
@@ -306,6 +334,18 @@ def allocate_float(
         if comp_score < base_score:
             assign, nreg = comp_assign, comp_nreg
     _assert_no_interference(assign, write_hw, read_hw)
+    # The backend can only fold a tenant into a coalesced slot's write select; a non-coalesced slot register, installed
+    # by a standalone copy, must carry nothing but its own live-in. The empty gap above guarantees this -- the assert
+    # trips loudly if a future change opens a non-coalesced gap the emitter would silently drop.
+    for slot in mir.state_slots:
+        reg = state_regs[slot.name]
+        if pinned.get(slot.live_out) == reg:
+            continue
+        r_in = read_of_slot.get(slot.name)
+        occupants = [vid for vid, r in assign.items() if r == reg and vid != r_in]
+        assert (
+            not occupants
+        ), f"non-coalesced slot register {reg} ({slot.name!r}) has non-reserved occupants {occupants}"
     _logger.info(
         "Float regalloc: values=%d input_pins=%d state_slots=%d cap=%d price=%g base_reg=%d comp_reg=%d registers=%d",
         len(reg_values),
@@ -329,7 +369,7 @@ def _state_read_name(mir: MirFloatView, vid: ValueId) -> str:
 def _greedy(
     movable: list[ValueId],
     pinned: dict[ValueId, int],
-    reserved: set[int],
+    slot_gaps: dict[int, tuple[int, int]],
     fresh_start: int,
     write_hw: dict[ValueId, int],
     read_hw: dict[ValueId, int],
@@ -380,8 +420,10 @@ def _greedy(
     # Pinned values (inputs, state live-ins, coalesced live-outs) take their fixed registers first.
     for vid, reg in sorted(pinned.items(), key=lambda item: (item[1], item[0])):
         place(vid, reg)
-    # Only the input lanes may later be reused once their value is dead; slot registers are reserved for their slot.
-    active: list[tuple[int, int]] = [(read_hw[vid], reg) for vid, reg in pinned.items() if reg not in reserved]
+    # An input lane frees once its value is dead; a slot register frees during its dead gap (seeded at the gap start;
+    # the per-candidate reblock check below stops a tenant from overlapping the returning live-out).
+    active: list[tuple[int, int]] = [(read_hw[vid], reg) for vid, reg in pinned.items() if reg not in slot_gaps]
+    active.extend((gap_start, reg) for reg, (gap_start, _) in slot_gaps.items())
     free: list[int] = []
     next_reg = fresh_start
 
@@ -404,6 +446,8 @@ def _greedy(
         for reg in free:
             if compact and writers_after(reg, producer) > cap:
                 continue
+            if not _admits_tenant(slot_gaps, reg, read_hw[vid]):  # tenant must die before the slot's live-out returns
+                continue
             key = candidate_key(vid, reg, 0)
             if key < best_key:
                 best_key, best_reg, best_fresh = key, reg, False
@@ -420,7 +464,7 @@ def _refine(
     seed: dict[ValueId, int],
     nreg: int,
     movable: list[ValueId],
-    reserved: set[int],
+    slot_gaps: dict[int, tuple[int, int]],
     write_hw: dict[ValueId, int],
     read_hw: dict[ValueId, int],
     consumer_ports: dict[ValueId, set[_Port]],
@@ -434,22 +478,21 @@ def _refine(
     preferred register, repairing interference by scanning to the next register whose occupant's last read precedes this
     value's landing and whose write select stays within ``cap`` (a last-resort fallback may exceed ``cap`` when no other
     register is free, since decode cannot open a fresh one; see the decode body). Pinned values (inputs, state live-ins,
-    coalesced live-outs) and the reserved state-slot registers
-    are held fixed, so every evaluated point is a valid (interference-free) coloring reusing only the ``nreg`` seed
-    registers, and the annealer minimizes the mux-fan-in objective. The greedy seed is the starting point and the best
-    point seen is kept, so the pass can only improve on the seed.
+    coalesced live-outs) are held fixed; a slot register is reusable only inside its dead gap (free from the gap start,
+    re-blocked before its live-out returns). Every evaluated point is thus a valid (interference-free) coloring reusing
+    only the ``nreg`` seed registers, and the annealer minimizes the mux-fan-in objective. The greedy seed is the
+    starting point and the best point seen is kept, so the pass can only improve on the seed.
     """
     order = sorted(movable, key=lambda vid: (write_hw[vid], vid))
     if len(order) < 2 or nreg <= 1:
         return seed
     op_set = set(order)
     pinned = [(vid, reg) for vid, reg in seed.items() if vid not in op_set]
-    reserved_sentinel = max(read_hw.values(), default=0) + 1  # exceeds every last read, so reserved regs never free
 
-    def decode(coords: np.ndarray) -> dict[ValueId, int]:
+    def decode(coords: np.ndarray) -> dict[ValueId, int] | None:
         assign: dict[ValueId, int] = {}
         # free_after[reg] = max last read of any value placed in reg; the register is free for a value landing at w iff
-        # it is < w (read-first). writers[reg] tracks the running producer set so the decode honors the same write-select
+        # it is < w (read-first). writers[reg] tracks the running producer set so the decode honors the write-select
         # budget the greedy did, rather than re-growing a select past the cap to shave a read arm. Landing order keeps
         # the free check O(1).
         free_after = [-1] * nreg
@@ -458,8 +501,8 @@ def _refine(
             assign[vid] = reg
             free_after[reg] = max(free_after[reg], read_hw[vid])
             writers[reg].add(producer_key[vid])
-        for reg in reserved:  # slot registers belong to their slot for the whole initiation; never reuse them
-            free_after[reg] = reserved_sentinel
+        for reg, (gap_start, _) in slot_gaps.items():  # a slot register is free for tenants from its gap start, not
+            free_after[reg] = gap_start  # the live-out's read; the reblock (per candidate) guards the gap's end
         for index, vid in enumerate(order):
             w = write_hw[vid]
             producer = producer_key[vid]
@@ -469,16 +512,21 @@ def _refine(
             # cannot open a fresh one as the greedy can -- so when none is within budget it falls back to the free
             # register whose select grows least; this is the only path that may push a write select past the cap.
             chosen = -1
-            for offset in range(nreg):  # a non-reserved register free at w always exists (nreg covers peak liveness)
+            for offset in range(nreg):  # primary: a register free at w, within budget, and within its gap if a slot
                 reg = (pref + offset) % nreg
-                if free_after[reg] < w and len(writers[reg] | {producer}) <= cap:
+                admissible = free_after[reg] < w and _admits_tenant(slot_gaps, reg, read_hw[vid])
+                if admissible and len(writers[reg] | {producer}) <= cap:
                     chosen = reg
                     break
             if chosen < 0:
-                chosen = min(
-                    (reg for reg in range(nreg) if free_after[reg] < w),
-                    key=lambda reg: (len(writers[reg] | {producer}), reg),
-                )
+                free = [r for r in range(nreg) if free_after[r] < w and _admits_tenant(slot_gaps, r, read_hw[vid])]
+                if not free:
+                    # An infeasible annealer point: an earlier placement consumed the only register this value could
+                    # occupy. With gap admission the feasible set the unconstrained scan assumed nonempty can be empty
+                    # (a free register may be a slot register the value's gap rejects). Reject the point; the seed and
+                    # every accepted point stay valid, so the search still only improves.
+                    return None
+                chosen = min(free, key=lambda reg: (len(writers[reg] | {producer}), reg))
             assign[vid] = chosen
             free_after[chosen] = read_hw[vid]
             writers[chosen].add(producer)
@@ -490,6 +538,8 @@ def _refine(
     def cost(coords: np.ndarray) -> float:
         nonlocal best, best_cost
         candidate = decode(coords)
+        if candidate is None:
+            return _INFEASIBLE_COST  # an undecodable point: penalize so the annealer steers away; never beats `best`
         value = _objective(candidate, consumer_ports, producer_key)
         if value < best_cost:
             _logger.debug(

@@ -219,10 +219,11 @@ loop-carried dependence resolved at register allocation by coalescing the live-o
 range does not overlap the live-in -- the producing operator then writes the slot register directly, no copy. When they
 overlap (a one-sample delay line, or a write-then-read), the live-out keeps its own register and the backend copies it
 into the slot register at its install cycle -- as early as the old live-in is read and the source is available when the
-source is an ordinary register, so that source register frees for reuse, the boundary at the latest. Slot registers are
-normal allocatable registers, not reserved beyond holding
-the slot's own live-in and live-out: the cost that matters is mux fabric, not flip-flops, and a dedicated slot register
-adds no mux fan-in elsewhere. The persistent state registers are the one datapath exception that reset reaches (each
+source is an ordinary register, so that source register frees for reuse, the boundary at the latest. A coalesced slot's
+register is itself reusable for unrelated temporaries during its dead mid-frame gap (after the live-in's last read,
+before the live-out lands), the tenant folded into the slot's write select -- shedding registers on stateful kernels; a
+non-coalesced slot, installed by a standalone copy that cannot fold a tenant, stays reserved. The cost that matters is
+mux fabric, not flip-flops. The persistent state registers are the one datapath exception that reset reaches (each
 loaded with its snapshot); pure datapath state stays out of the reset cone.
 
 Branch vs. select (the core control-flow decision):
@@ -276,7 +277,7 @@ results, which is accepted.
 resources:
   float_instances: [inst(operator), ...]    # each inst binds a fully-specified FloatHardwareOperator
   float_regfile: fmt + N float regs         # FF bank; the backend synthesizes a sparse, schedule-specific mux fabric
-  float_consts: [fconst(value), ...]
+  float_consts: [fconst(magnitude), ...]    # nonnegative magnitudes; the sign rides the consumer's sign sideband
   float_inputs: [input_load(name, dst_reg), ...]
   float_outputs: [output_wire(name, source, sign), ...]
 
