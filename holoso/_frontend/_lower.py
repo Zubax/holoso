@@ -385,6 +385,12 @@ class _Lowerer:
                 operands = self._lower_args(node)
                 if len(operands) == 1:
                     return _Scalar(self._builder.operation(FloatAbs(), [self._scalar(operands[0], node)]))
+            if func.id in ("list", "tuple") and not node.keywords:
+                # list(seq)/tuple(seq) of an aggregate is identity here: it carries the element order the model holds,
+                # and the front-end already treats list and tuple aggregates co-equally (the list/tuple-literal case).
+                operands = self._lower_args(node)
+                if len(operands) == 1 and isinstance(operands[0], _Aggregate):
+                    return operands[0]
         name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
         if name in _KNOWN_INTRINSICS:
             raise MissingIntrinsic(f"implement this operator: {name}", self._loc(node))

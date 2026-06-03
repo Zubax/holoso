@@ -528,6 +528,30 @@ def test_numpy_asarray_is_identity_on_an_aggregate() -> None:
     assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
 
 
+def test_list_is_identity_on_an_aggregate() -> None:
+    def f(a, b, c):  # type: ignore[no-untyped-def]
+        v = [a, b, c]
+        return list(v[0:2])  # list() of a slice carries the same elements -- identity here
+
+    assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
+
+
+def test_list_of_a_scalar_is_rejected() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        return list(a)  # Python: list(scalar) is a TypeError -- a scalar is not iterable
+
+    with pytest.raises(UnsupportedConstruct, match="list"):
+        lower(f)
+
+
+def test_tuple_is_identity_on_an_aggregate() -> None:
+    def f(a, b, c):  # type: ignore[no-untyped-def]
+        v = [a, b, c]
+        return tuple(v[0:2])  # tuple() of a slice is identity here, co-equal with list()
+
+    assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
+
+
 def test_numpy_alias_shadowed_by_a_local_is_not_numpy() -> None:
     # ``np`` is rebound to a local value, so ``np.asarray`` is a method call on that value, not the numpy function.
     def f(a):  # type: ignore[no-untyped-def]

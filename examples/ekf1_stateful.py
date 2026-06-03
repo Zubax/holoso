@@ -38,9 +38,9 @@ class Ekf1:
     def update(self, *, dt: float, u_shunt: float, di_dt: float) -> None:
         z = [u_shunt, di_dt]
         q = self.Q_diag * dt  # process noise integrated over the step; each diagonal entry scales with dt
-        x_p = np.asarray(update_x_P(*self.P_urt, *q, *self.R_diag, dt, *self.x, *z)).flatten()
-        self.x = x_p[0:3]
-        self.P_urt = x_p[3:9]
+        x_p = np.asarray(update_x_P(*self.P_urt, *q, *self.R_diag, dt, *self.x, *z)).flatten()  # type: ignore
+        self.x = list(x_p[0:3])
+        self.P_urt = list(x_p[3:9])
 
 
 def main() -> None:

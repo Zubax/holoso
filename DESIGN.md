@@ -154,8 +154,8 @@ Matrices/vectors are statically shaped and unrolled to scalar operations at synt
 hardware aggregates, only as compile-time bookkeeping over scalar registers. That bookkeeping is a front-end value that
 is either a scalar wire or an ordered aggregate of values: list/tuple literals, integer indexing, constant-bound
 slicing, `*`-unpacking into call arguments and list/tuple literals, elementwise scalar broadcast (vector `*` scalar),
-`.flatten()`, and the numpy array constructors (`np.asarray`/`np.array`/`np.asanyarray`, all identity on an aggregate)
-operate on aggregates and leave only scalar leaves in HIR -- the supported source is thus ordinary executable numpy.
+`.flatten()`, and the sequence wrappers `list`/`tuple`/`np.asarray`/`np.array`/`np.asanyarray` (all identity on an
+aggregate) operate on aggregates and leave only scalar leaves in HIR -- the supported source is thus executable numpy.
 A pure function reachable through `__globals__` is inlined -- its body lowered in a fresh scope and its return
 consumed as an aggregate -- so kernels compose (the `ekf1_stateful` example inlines the stateless `update_x_P`).
 Positional and keyword-only parameters both become input ports. Reductions (`max`, `argmax`, `mean`, `@`) lower to
