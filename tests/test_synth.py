@@ -89,6 +89,23 @@ def test_write_artifacts(tmp_path: Path) -> None:
     assert (tmp_path / "holoso_support.v").exists()
 
 
+def test_rejects_invalid_and_reserved_module_names() -> None:
+    # An empty name is falsy, so it is not "invalid" -- it just falls back to the target-derived default.
+    for bad in ("1bad", "bad-name", "a/b", "has space", "../escape"):
+        with pytest.raises(ValueError, match="valid identifier"):
+            holoso.synthesize(_kernel, ops=_ops(), name=bad)
+    for reserved in ("holoso", "Holoso_x", "holoso_support", "HOLOSOmod"):
+        with pytest.raises(ValueError, match="reserved"):
+            holoso.synthesize(_kernel, ops=_ops(), name=reserved)
+
+
+def test_accepts_valid_module_name(tmp_path: Path) -> None:
+    result = holoso.synthesize(_kernel, ops=_ops(), name="good_name")
+    assert result.module_name == "good_name"
+    paths = result.write(tmp_path)
+    assert set(paths) == {"good_name.v", "holoso_support.v", "test_good_name.py", "good_name.html"}
+
+
 def test_synthesize_ekf1_stateless() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateless

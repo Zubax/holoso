@@ -55,6 +55,18 @@ def _state_port_name(slot: str) -> str:
     return f"state_{slot}"
 
 
+def _leaf_targets(target: ast.expr) -> Iterator[ast.expr]:
+    """Yield an assignment target's leaf targets, descending through tuple/list/starred unpacking."""
+    match target:
+        case ast.Starred(value=value):
+            yield from _leaf_targets(value)
+        case ast.Tuple(elts=elts) | ast.List(elts=elts):
+            for elt in elts:
+                yield from _leaf_targets(elt)
+        case _:
+            yield target
+
+
 class _Value(ABC):
     """
     A compile-time lowering value: a single scalar HIR wire or an ordered aggregate of values. Aggregates (vectors,
@@ -252,11 +264,12 @@ class _Lowerer:
                 return False  # docstring
             case ast.Pass():
                 return False
-            case ast.Assign(targets=[ast.Name(id=name)], value=value):
-                self._env[name] = self._lower_expr(value)
-                return False
-            case ast.Assign(targets=[ast.Attribute() as target], value=value):
-                self._assign_attr(target, self._lower_expr(value))
+            case ast.Assign(targets=targets, value=value):
+                # Lower the right-hand side once and bind it to every target; this covers single, chained, and
+                # tuple/list-unpacking assignment uniformly (the swap ``x, y = y, x`` reads both sources first).
+                rhs = self._lower_expr(value)
+                for target in targets:
+                    self._assign_target(target, rhs)
                 return False
             case ast.AnnAssign(target=ast.Name(id=name), value=ast.expr() as value):
                 self._env[name] = self._lower_expr(value)
@@ -280,6 +293,50 @@ class _Lowerer:
                 return True
             case _:
                 raise UnsupportedConstruct(f"unsupported statement {type(stmt).__name__}", self._loc(stmt))
+
+    def _assign_target(self, target: ast.expr, value: _Value) -> None:
+        """Bind one assignment target to ``value``, recursing into tuple/list targets to unpack an aggregate."""
+        match target:
+            case ast.Name(id=name):
+                self._env[name] = value
+            case ast.Attribute():
+                self._assign_attr(target, value)
+            case ast.Tuple(elts=elts) | ast.List(elts=elts):
+                for sub, item in self._unpack_targets(elts, value, target):
+                    self._assign_target(sub, item)
+            case _:
+                raise UnsupportedConstruct(f"unsupported assignment target {type(target).__name__}", self._loc(target))
+
+    def _unpack_targets(self, elts: list[ast.expr], value: _Value, node: ast.expr) -> list[tuple[ast.expr, _Value]]:
+        """
+        Pair each tuple-unpacking target with its value, mirroring Python: a single ``*rest`` target absorbs the
+        surplus items as an aggregate, every other target takes one item, and the source must be an aggregate whose
+        length matches the fixed (non-starred) targets.
+        """
+        if not isinstance(value, _Aggregate):
+            raise UnsupportedConstruct("cannot unpack a scalar value in a tuple assignment", self._loc(node))
+        items = value.items
+        stars = [index for index, elt in enumerate(elts) if isinstance(elt, ast.Starred)]
+        if not stars:
+            if len(elts) != len(items):
+                raise UnsupportedConstruct(
+                    f"cannot unpack {len(items)} values into {len(elts)} targets", self._loc(node)
+                )
+            return list(zip(elts, items))
+        if len(stars) > 1:
+            raise UnsupportedConstruct("only one starred target is allowed in a tuple assignment", self._loc(node))
+        star = stars[0]
+        starred = elts[star]
+        assert isinstance(starred, ast.Starred)
+        after = elts[star + 1 :]
+        if len(elts) - 1 > len(items):
+            raise UnsupportedConstruct(
+                f"cannot unpack {len(items)} values into at least {len(elts) - 1} targets", self._loc(node)
+            )
+        head = list(zip(elts[:star], items[:star]))
+        rest = _Aggregate(tuple(items[star : len(items) - len(after)]))  # the starred target binds the surplus
+        tail = list(zip(after, items[len(items) - len(after) :]))
+        return [*head, (starred.value, rest), *tail]
 
     def _lower_expr(self, node: ast.expr) -> _Value:
         match node:
@@ -381,6 +438,12 @@ class _Lowerer:
             callee = self._fn.__globals__.get(func.id)
             if isinstance(callee, types.FunctionType):
                 return self._inline_call(callee, node)
+            if callee is not None and not callable(callee):
+                # A non-callable global shadows the built-in (Python raises ``TypeError`` when calling it), so the name
+                # is not the intrinsic it spells; reject rather than silently lowering, e.g., ``abs`` to a FloatAbs.
+                raise UnsupportedConstruct(
+                    f"{func.id!r} is shadowed by a non-callable global; it cannot be called", self._loc(node)
+                )
             if func.id == "abs" and not node.keywords:
                 operands = self._lower_args(node)
                 if len(operands) == 1:
@@ -542,7 +605,8 @@ class _Lowerer:
         for stmt in fndef.body:
             match stmt:
                 case ast.Assign(targets=targets):
-                    names.update(target.id for target in targets if isinstance(target, ast.Name))
+                    leaves = (leaf for target in targets for leaf in _leaf_targets(target))
+                    names.update(leaf.id for leaf in leaves if isinstance(leaf, ast.Name))
                 case ast.AnnAssign(target=ast.Name(id=name)) | ast.AugAssign(target=ast.Name(id=name)):
                     names.add(name)
         return names
@@ -563,9 +627,9 @@ class _Lowerer:
             targets: list[ast.expr] = []
             match stmt:
                 case ast.Assign(targets=ts):
-                    targets = list(ts)
+                    targets = [leaf for t in ts for leaf in _leaf_targets(t)]
                 case ast.AnnAssign(target=t) | ast.AugAssign(target=t):
-                    targets = [t]
+                    targets = list(_leaf_targets(t))
             for target in targets:
                 if not self._is_self_attr(target):
                     continue

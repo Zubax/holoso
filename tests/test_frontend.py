@@ -3,6 +3,7 @@
 import dataclasses
 import math
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -374,6 +375,85 @@ def test_star_unpacking_a_scalar_is_rejected() -> None:
         lower(f)
 
 
+# --- Tuple-unpacking assignment --------------------------------------------------------------------------------------
+
+
+def test_tuple_unpacking_routes_values() -> None:
+    # The right-hand side is built once before any binding, so a swap reads both sources first (no clobber).
+    def swap(a, b):  # type: ignore[no-untyped-def]
+        x, y = b, a
+        return [x, y]
+
+    hir = lower(swap)
+    assert hir.input_names() == ["a", "b"]
+    assert [o.value for o in hir.outputs] == [hir.input_ids[1], hir.input_ids[0]]
+
+
+def test_starred_and_nested_unpacking_route_values() -> None:
+    def f(a, b, c):  # type: ignore[no-untyped-def]
+        first, *rest = [a, b, c]  # rest binds the surplus as an aggregate
+        r0, r1 = rest  # nested unpacking of that aggregate
+        return [first, r0, r1]
+
+    hir = lower(f)
+    assert [o.value for o in hir.outputs] == list(hir.input_ids)
+
+
+def test_chained_assignment_binds_every_target() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        x = y = a + a
+        return [x, y]
+
+    hir = lower(f)
+    out = [o.value for o in hir.outputs]
+    assert out[0] == out[1]  # both targets name the same single value
+
+
+def test_unpacking_a_scalar_source_is_rejected() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        x, y = a
+        return x + y
+
+    with pytest.raises(UnsupportedConstruct, match="unpack a scalar"):
+        lower(f)
+
+
+def test_unpacking_arity_mismatch_is_rejected() -> None:
+    def f(a, b, c):  # type: ignore[no-untyped-def]
+        x, y = [a, b, c]
+        return x + y
+
+    with pytest.raises(UnsupportedConstruct, match="unpack 3 values into 2"):
+        lower(f)
+
+
+def test_stateful_tuple_assignment_to_attributes() -> None:
+    # Unpacking into self attributes must register both as persistent state; the swap reads the live-ins first.
+    class Rotate:
+        def __init__(self) -> None:
+            self.x = 1.0
+            self.y = 2.0
+
+        def step(self, k):  # type: ignore[no-untyped-def]
+            self.x, self.y = self.y, self.x + k
+            return self.x
+
+    hir = lower(Rotate().step)
+    assert {s.name for s in hir.state_slots} == {"x", "y"}
+    assert "state_x" in {o.name for o in hir.outputs}
+
+
+def test_unpacked_name_shadows_global_callable() -> None:
+    # A name bound only via tuple unpacking is local, so a same-named global function is not inlined at a call site;
+    # this exercises _collect_local_names descending into unpacking targets.
+    def f(a):  # type: ignore[no-untyped-def]
+        _addmul, b = a, a  # _addmul is now a local value (Python would raise 'float not callable' when called)
+        return _addmul(b)
+
+    with pytest.raises(UnsupportedConstruct, match="not a callable"):
+        lower(f)
+
+
 # --- Importing and inlining a pure function --------------------------------------------------------------------------
 
 
@@ -475,6 +555,40 @@ def test_method_style_abs_call_is_rejected() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="abs"):
         lower(f)
+
+
+def _rebind_globals(fn, **overrides):  # type: ignore[no-untyped-def]
+    """A copy of ``fn`` whose module globals carry ``overrides`` (its source stays retrievable via the shared code)."""
+    return types.FunctionType(
+        fn.__code__, {**fn.__globals__, **overrides}, fn.__name__, fn.__defaults__, fn.__closure__
+    )
+
+
+def test_noncallable_global_shadowing_builtin_is_rejected() -> None:
+    # A non-callable global shadows the built-in (Python raises TypeError on the call), so the name is not the builtin
+    # it spells; holoso must reject rather than silently emitting FloatAbs / the list-tuple identity.
+    def use_abs(a):  # type: ignore[no-untyped-def]
+        return abs(a)
+
+    def use_list(a):  # type: ignore[no-untyped-def]
+        return list((a, a))
+
+    def use_tuple(a):  # type: ignore[no-untyped-def]
+        return tuple((a, a))
+
+    for fn, shadow in ((use_abs, {"abs": 5}), (use_list, {"list": 5}), (use_tuple, {"tuple": 5})):
+        with pytest.raises(UnsupportedConstruct, match="non-callable"):
+            lower(_rebind_globals(fn, **shadow))
+
+
+def test_callable_global_shadowing_abs_is_inlined_not_floatabs() -> None:
+    # A callable global named ``abs`` is the caller's own function; Python would call it, so holoso inlines it instead
+    # of emitting the FloatAbs builtin -- the non-callable guard must not disturb this legitimate shadow.
+    def use_abs(a):  # type: ignore[no-untyped-def]
+        return abs(a)
+
+    hir = lower(_rebind_globals(use_abs, abs=cbrt))  # cbrt is a module-level def returning x * x
+    assert _arith_count(hir, FloatAbs) == 0 and _arith_count(hir, FloatMul) == 1
 
 
 # --- numpy-array aggregates and executable-numpy interop --------------------------------------------------------------

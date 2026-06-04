@@ -594,3 +594,24 @@ def test_optional_stages_raise_latency_without_changing_numerics() -> None:
         want = [v.bits for v in models["default"](*values)]
         for name, model in models.items():
             assert [v.bits for v in model(*values)] == want, f"{name} diverged from default at {values}"
+
+
+def test_reach_floor_seed_skips_annealing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # The mux-fan-in objective bottoms out at 0 (every read port reaches one register, every register one producer). A
+    # greedy seed already there is globally optimal, so refinement must short-circuit rather than burn the budget.
+    import holoso._lir._regalloc as regalloc
+
+    calls: list[int] = []
+    real = regalloc.dual_annealing
+    monkeypatch.setattr(regalloc, "dual_annealing", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+
+    def floor_kernel(a, b):  # type: ignore[no-untyped-def]
+        return a + b  # no register sharing -> greedy seed is at the reach floor
+
+    def sharing_kernel(a, b, c):  # type: ignore[no-untyped-def]
+        return a * b + c  # the product and the sum reuse registers, lifting the objective above the floor
+
+    build(_run(floor_kernel), "floor")
+    assert calls == []  # early-exit: dual_annealing was never invoked
+    build(_run(sharing_kernel), "sharing")
+    assert calls  # a non-floor seed is still refined

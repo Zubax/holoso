@@ -533,6 +533,8 @@ def _refine(
 
     best = seed
     best_cost = _objective(seed, consumer_ports, producer_key)
+    if best_cost == 0:  # reach floor is structurally 0: the seed is globally optimal, so the anneal cannot improve it
+        return best
 
     def cost(coords: np.ndarray) -> float:
         nonlocal best, best_cost

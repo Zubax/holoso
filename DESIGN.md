@@ -130,12 +130,17 @@ as `attr_0`, `attr_1`, ...; a scalar attribute keeps its bare name `attr` rather
 Matrices/vectors are statically shaped and unrolled to scalar operations at synthesis time; arrays never exist as
 hardware aggregates, only as compile-time bookkeeping over scalar registers. That bookkeeping is a front-end value that
 is either a scalar wire or an ordered aggregate of values: list/tuple literals, integer indexing, constant-bound
-slicing, `*`-unpacking into call arguments and list/tuple literals, elementwise scalar broadcast (vector `*` scalar),
+slicing, `*`-unpacking into call arguments and list/tuple literals, tuple-unpacking assignment (`x, y = b, a`, with
+nested and single-starred targets, into locals or `self` attributes), elementwise scalar broadcast (vector `*` scalar),
 `.flatten()`, and the sequence wrappers `list`/`tuple`/`np.asarray`/`np.array`/`np.asanyarray` (all identity on an
 aggregate) operate on aggregates and leave only scalar leaves in HIR -- the supported source is thus executable numpy.
 
 A pure function reachable through `__globals__` is inlined -- its body lowered in a fresh scope and its return
 consumed as an aggregate -- so kernels compose (the `ekf1_stateful` example inlines the stateless `update_x_P`).
+Name resolution follows Python: a local binding (parameter or any assignment target, including unpacked ones) shadows a
+same-named global, and a global that shadows a built-in or intrinsic is honored only when it is callable -- a
+non-callable shadow (e.g. `abs = 5`) is rejected rather than silently lowered to the built-in it spells.
+
 Positional and keyword-only parameters both become input ports. Reductions (`max`, `argmax`, `mean`, `@`) lower to
 compare/select trees and multiply chains. An aggregate attribute's shape is read from its reset value (list, tuple,
 or numpy array); a numpy field may also carry an explicit jaxtyping annotation (`Float64[np.ndarray, "3"]`, concrete

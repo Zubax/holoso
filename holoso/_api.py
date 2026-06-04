@@ -6,6 +6,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 import inspect
 import logging
+import re
 
 from ._backend.cocotb import generate as generate_testbench, CocotbOutput
 from ._backend.html import generate as generate_html, HtmlOutput
@@ -77,6 +78,7 @@ def synthesize(target: Target, /, ops: OpConfig, *, name: str | None = None) -> 
     """
     logging.basicConfig(level=logging.INFO, format="%(levelname)-5.5s %(name)s: %(message)s")  # no-op if already setup
     module_name: str = name or _default_module_name(target)
+    _validate_module_name(module_name)
     _logger.info("Synthesis start: module=%r target=%r", module_name, target)
     _logger.info("Configured operators:")
     for field in fields(ops):
@@ -115,4 +117,18 @@ def _default_module_name(target: Target) -> str:
         if "__" not in target.__name__:
             n += f"_{target.__name__}"
         return n
-    return str(getattr(target, "__name__", "holoso_module"))
+    return str(getattr(target, "__name__", "kernel"))
+
+
+_MODULE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _validate_module_name(name: str) -> None:
+    """
+    Reject a module name that is unsafe as a Verilog identifier and output-file stem, or that intrudes on the reserved
+    ``holoso`` prefix (the bundled ``holoso_support`` file shares the output directory and would otherwise collide).
+    """
+    if _MODULE_NAME.fullmatch(name) is None:
+        raise ValueError(f"module name {name!r} is not a valid identifier; expected [A-Za-z_][A-Za-z0-9_]*")
+    if name.lower().startswith("holoso"):
+        raise ValueError(f"module name {name!r} uses the reserved 'holoso' prefix; choose another name")

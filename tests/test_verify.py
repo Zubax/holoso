@@ -105,6 +105,21 @@ def test_model_matches_reference_small_kernels() -> None:
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
+def test_tuple_unpacking_matches_python_reference() -> None:
+    # The reference runs the kernel as ordinary Python (which unpacks natively), so a bit-faithful hardware model must
+    # route the swapped operands identically before the arithmetic.
+    def f(a, b):  # type: ignore[no-untyped-def]
+        x, y = b, a
+        return [x - y, x * y]
+
+    inputs = {"a": 1.25, "b": -3.5}
+    model = build_model(build(_run(f), "f"))
+    got = model(*[inputs[name] for name in model.input_names])
+    ref = evaluate_reference(f, inputs)
+    rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=max(abs(v) for v in inputs.values()))
+    assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
+
+
 def test_model_uses_exact_ilog2_for_wide_supported_shift() -> None:
     def f(a):  # type: ignore[no-untyped-def]
         return a * 16.0
