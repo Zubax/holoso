@@ -1,3 +1,8 @@
+"""
+This is the central verification entry point for the project.
+Tests may take a long time to run; if there is no output, assume they are still running, not stuck,
+"""
+
 from pathlib import Path
 import shutil
 import nox

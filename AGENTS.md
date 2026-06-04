@@ -176,6 +176,7 @@ A robust closure procedure that accounts for this starts lean and adds back one 
 ## Verification
 
 Entirely driven by `nox`; read the `noxfile.py` for details.
+Tests may take a long time to run; if there is no output, assume they are still running, not stuck,
 
 After every change, dispatch two review agents with fresh context to review your work:
 one will focus on the functional correctness, the other will focus on the architectural and design aspects.
