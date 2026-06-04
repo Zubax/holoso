@@ -179,3 +179,10 @@ module iir_step(clock, reset, start_port, x, done_port, return_port);  // start/
 Bambu is the strongest option that delivers stateful, arbitrary-precision floating point, vendor-neutral Verilog,
 real operator-latency-aware scheduling, and a clean Verilog module interface.
 Its main downside is that it only supports C as the source input.
+
+## Non-alternnatives
+
+Python HDLs such as [MyHDL](https://www.myhdl.org/), [Amaranth](https://github.com/amaranth-lang/amaranth),
+[Migen](https://m-labs.hk/migen/), [PyRTL](https://ucsbarchlab.github.io/PyRTL/), et al
+describe RTL in Python rather than synthesizing it from algorithmic code --
+completely different tools for a different task, mentioned only for completeness.

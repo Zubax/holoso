@@ -44,14 +44,14 @@ def clean(session):
 def tests(session: nox.Session) -> None:
     """Fast unit tests; the slow cocotb cosimulation lives in the cosim_examples session."""
     session.install("-e", ".[test]")
-    session.run("python", "-m", "pytest", "-q", "-m", "not cosim", "tests")
+    session.run("python", "-m", "pytest", "-m", "not cosim", "tests")
 
 
 @nox.session
 def cosim_examples(session: nox.Session) -> None:
     """Long-running end-to-end cocotb cosimulation of the bundled examples across stage configurations."""
     session.install("-e", ".[test]")
-    session.run("python", "-m", "pytest", "-q", "-m", "cosim", "tests")
+    session.run("python", "-m", "pytest", "-m", "cosim", "tests")
 
 
 @nox.session
@@ -71,7 +71,7 @@ def black(session: nox.Session) -> None:
 def synth(session: nox.Session) -> None:
     """Run external FPGA synthesis/place-and-route checks."""
     session.install("-e", ".[test]")
-    session.run("python", "-m", "pytest", "-q", "-s", *(session.posargs or ("synth",)))
+    session.run("python", "-m", "pytest", "-s", *(session.posargs or ("synth",)))
 
 
 @nox.session
