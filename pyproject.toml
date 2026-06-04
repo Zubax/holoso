@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "holoso"
 dynamic = ["version"]
 requires-python = ">=3.14"
-description = "A narrow Python-to-Verilog synthesizer for numeric kernels."
+description = "A simple Python-to-Verilog synthesizer for numeric kernels, control systems, and DSP."
 dependencies = [
     "numpy~=2.4",
     "scipy~=1.17",
@@ -40,16 +40,15 @@ include = ["holoso*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["-p", "no:mypy"]
-markers = ["cosim: end-to-end cocotb cosimulation; slow, needs a simulator (run via the cosim_examples nox session)"]
+addopts = ["-v", "-p", "no:mypy"]
+markers = ["cosim: end-to-end cocotb cosimulation; slow, needs a simulator"]
 
 [tool.black]
 line-length = 120
 target-version = ["py314"]
 
 [tool.mypy]
-# mypy may not yet recognize 3.14 as a target; analyze under 3.13 semantics (we avoid 3.14-only syntax in typed code).
-python_version = "3.13"
+python_version = "3.14"
 strict = true
 files = ["holoso"]
 

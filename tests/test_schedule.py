@@ -615,3 +615,15 @@ def test_reach_floor_seed_skips_annealing(monkeypatch) -> None:  # type: ignore[
     assert calls == []  # early-exit: dual_annealing was never invoked
     build(_run(sharing_kernel), "sharing")
     assert calls  # a non-floor seed is still refined
+
+
+def test_zero_regalloc_effort_bypasses_annealing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import holoso._lir._regalloc as regalloc
+
+    monkeypatch.setattr(regalloc, "_REFINE_MAXITER", 0)
+    monkeypatch.setattr(regalloc, "dual_annealing", lambda *args, **kwargs: pytest.fail("annealing was not bypassed"))
+
+    def sharing_kernel(a, b, c):  # type: ignore[no-untyped-def]
+        return a * b + c
+
+    build(_run(sharing_kernel), "sharing")

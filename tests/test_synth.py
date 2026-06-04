@@ -97,9 +97,9 @@ def test_rejects_invalid_and_reserved_module_names() -> None:
     for reserved in ("holoso", "Holoso_x", "holoso_support", "HOLOSOmod"):
         with pytest.raises(ValueError, match="reserved"):
             holoso.synthesize(_kernel, ops=_ops(), name=reserved)
-    # Verilog reserved words would emit unparsable RTL (`module module (`); a same-spelled non-keyword is still fine.
+    # Reserved words would emit unparsable RTL (`module module (`); a same-spelled non-keyword is still fine.
     for keyword in ("module", "reg", "wire", "assign", "always"):
-        with pytest.raises(ValueError, match="Verilog keyword"):
+        with pytest.raises(ValueError, match="reserved keyword"):
             holoso.synthesize(_kernel, ops=_ops(), name=keyword)
     assert (
         holoso.synthesize(_kernel, ops=_ops(), name="Module").module_name == "Module"
