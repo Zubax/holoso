@@ -83,9 +83,8 @@ def _admits_tenant(slot_gaps: dict[int, tuple[int, int]], reg: int, read_cycle: 
 
 # Budget for the SciPy dual-annealing refinement. It only polishes an already-valid greedy seed (and is a no-op when
 # the seed is already at the reach floor), so the function-evaluation cap keeps build time bounded; raise it to trade
-# build time for a deeper search.
-_REFINE_MAXITER = 5000
-_REFINE_MAXFUN = 10000
+# build time for a deeper search. The environment override is for testing only; eventually we might add an API handle.
+_REFINE_MAXITER = int(os.getenv("HOLOSO_REGALLOC_EFFORT", "5000"))
 
 # Balance of reach against register count, layered on the hardware-accurate liveness. ``_WRITE_SELECT_CAP`` bounds how
 # wide a per-register write select the compaction may build (the ":1" of the select -- the number of distinct producers
@@ -554,5 +553,5 @@ def _refine(
 
     x0 = np.array([float(seed[vid]) for vid in order])
     bounds = [(0.0, nreg - 1e-6)] * len(order)
-    dual_annealing(cost, bounds, x0=x0, seed=0, maxiter=_REFINE_MAXITER, maxfun=_REFINE_MAXFUN, no_local_search=True)
+    dual_annealing(cost, bounds, x0=x0, seed=0, maxiter=_REFINE_MAXITER, no_local_search=True)
     return best

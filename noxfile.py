@@ -1,6 +1,9 @@
 """
 This is the central verification entry point for the project.
-Tests may take a long time to run; if there is no output, assume they are still running, not stuck,
+Tests may take a long time to run; if there is no output, assume they are still running, not stuck.
+
+Importrant: When running locally instead of CI, export HOLOSO_REGALLOC_EFFORT=100 to speed up test execution.
+This speeds up iteration significantly.
 """
 
 from pathlib import Path
