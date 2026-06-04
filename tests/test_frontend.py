@@ -576,7 +576,9 @@ def test_noncallable_global_shadowing_builtin_is_rejected() -> None:
     def use_tuple(a):  # type: ignore[no-untyped-def]
         return tuple((a, a))
 
-    for fn, shadow in ((use_abs, {"abs": 5}), (use_list, {"list": 5}), (use_tuple, {"tuple": 5})):
+    # ``None`` shadows too -- it is present-but-non-callable, distinct from an absent global (the _ABSENT sentinel).
+    shadows = ((use_abs, {"abs": 5}), (use_abs, {"abs": None}), (use_list, {"list": 5}), (use_tuple, {"tuple": 5}))
+    for fn, shadow in shadows:
         with pytest.raises(UnsupportedConstruct, match="non-callable"):
             lower(_rebind_globals(fn, **shadow))
 

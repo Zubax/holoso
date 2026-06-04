@@ -16,6 +16,8 @@ from .._hir import FloatAbs, FloatAdd, FloatDiv, FloatMul, FloatNeg, Hir, HirBui
 
 _Path = list[int | str]
 
+_ABSENT = object()  # sentinel distinguishing a missing global from one explicitly bound to None during name resolution
+
 # numpy array constructors that take one array-like and preserve its elements: in this compile-time model the operand is
 # already an aggregate, so they lower to identity. Recognizing them lets a kernel be ordinary executable numpy code.
 _NUMPY_IDENTITY = frozenset({"array", "asarray", "asanyarray"})
@@ -435,12 +437,13 @@ class _Lowerer:
         if isinstance(func, ast.Name):
             if self._is_local(func.id):
                 raise UnsupportedConstruct(f"{func.id!r} is a local name, not a callable function", self._loc(node))
-            callee = self._fn.__globals__.get(func.id)
+            callee = self._fn.__globals__.get(func.id, _ABSENT)
             if isinstance(callee, types.FunctionType):
                 return self._inline_call(callee, node)
-            if callee is not None and not callable(callee):
+            if callee is not _ABSENT and not callable(callee):
                 # A non-callable global shadows the built-in (Python raises ``TypeError`` when calling it), so the name
-                # is not the intrinsic it spells; reject rather than silently lowering, e.g., ``abs`` to a FloatAbs.
+                # is not the intrinsic it spells; reject rather than silently lowering, e.g., ``abs`` to a FloatAbs. The
+                # _ABSENT sentinel distinguishes a missing global from one explicitly bound to None, which also shadows.
                 raise UnsupportedConstruct(
                     f"{func.id!r} is shadowed by a non-callable global; it cannot be called", self._loc(node)
                 )
