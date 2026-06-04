@@ -531,6 +531,10 @@ def _refine(
             writers[chosen].add(producer)
         return assign
 
+    _logger.info("Regalloc refinement effort: %d", _REFINE_MAXITER)
+    if _REFINE_MAXITER <= 0:
+        return seed
+
     best = seed
     best_cost = _objective(seed, consumer_ports, producer_key)
     if best_cost == 0:  # reach floor is structurally 0: the seed is globally optimal, so the anneal cannot improve it
@@ -555,5 +559,5 @@ def _refine(
 
     x0 = np.array([float(seed[vid]) for vid in order])
     bounds = [(0.0, nreg - 1e-6)] * len(order)
-    dual_annealing(cost, bounds, x0=x0, seed=0, maxiter=_REFINE_MAXITER, no_local_search=True)
+    dual_annealing(cost, bounds, x0=x0, seed=0, maxiter=_REFINE_MAXITER, maxfun=_REFINE_MAXITER, no_local_search=True)
     return best

@@ -8,6 +8,9 @@ THIS IS NOT A SPECIFICATION. We don't have to commit to anything outlined here; 
 proposed design decisions and trade-offs won't survive contact with reality, and we should be ready to discard
 them and redesign at any moment.
 
+This document is intended to capture the design intent, not the implementation minutae. Do not pollute it with exact
+code references or a description of how the verification suite is built -- it's immaterial to the design.
+
 One must read the representative use-case examples under the `examples/` directory to understand the motivation.
 
 ## Direction
