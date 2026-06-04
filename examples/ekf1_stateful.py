@@ -30,10 +30,12 @@ class Ekf1:
     shape is stated explicitly with jaxtyping; ``Q_diag`` exercises the latter and the rest the former.
     """
 
-    x: list[float]  # state vector [x_R, x_g, x_i]
-    P_urt: list[float]  # covariance upper-right triangle [P00, P01, P02, P11, P12, P22]
-    R_diag: list[float]  # measurement-noise diagonal [R_ct, R_shunt]
-    Q_diag: Float64[np.ndarray, "3"]  # process-noise diagonal [Q_R, Q_g, Q_i]
+    x: list[float] = dataclasses.field(default_factory=lambda: [0.1e-3, 0.0, 0.0])  # state vector [x_R, x_g, x_i]
+    # covariance upper-right triangle [P00, P01, P02, P11, P12, P22]
+    P_urt: list[float] = dataclasses.field(default_factory=lambda: [1e3, 0.0, 0.0, 1e6, 0.0, 1e-3])
+    R_diag: list[float] = dataclasses.field(default_factory=lambda: [1e3, 1e-6])  # measurement noise [R_ct, R_shunt]
+    # process-noise diagonal [Q_R, Q_g, Q_i]
+    Q_diag: Float64[np.ndarray, "3"] = dataclasses.field(default_factory=lambda: np.array([1e-3, 1e9, 1e-9]))
 
     def update(self, *, dt: float, u_shunt: float, di_dt: float) -> None:
         z = [u_shunt, di_dt]
@@ -44,13 +46,8 @@ class Ekf1:
 
 
 def main() -> None:
-    # The values stored in the object at the time of synthesize() become its reset values.
-    filt = Ekf1(
-        x=[0.1e-3, 0.0, 0.0],
-        P_urt=[1e3, 0.0, 0.0, 1e6, 0.0, 1e-3],
-        R_diag=[1e3, 1e-6],
-        Q_diag=np.array([1e-3, 1e9, 1e-9]),
-    )
+    # The values stored in the object at the time of synthesize() become its reset values; here the dataclass defaults.
+    filt = Ekf1()
     # The kernel is float-format-agnostic, but each scalar width wants its own operator pipelining, so the OpConfig is
     # built per float format. The narrow 24-bit default (e6/m18) closes single-cycle, so its operators take no extra
     # stages; the wide 44-bit datapath (e8/m36) needs deeper operator pipelines to close timing.

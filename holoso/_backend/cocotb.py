@@ -4,11 +4,16 @@ The cocotb backend: a self-contained, self-checking testbench for a generated mo
 ``generate`` embeds the module's :class:`NumericalModel` into a standalone cocotb test.
 The testbench asserts the DUT's output bits match the model's exactly -- the model is bit-exact to the RTL,
 so the check needs no tolerance. The model and the DUT are reset and stepped in lock-step.
+
+The input sequence is either an explicit list of vectors supplied by the caller (replayed verbatim) or, when none is
+given, a default random sweep drawn from a fixed seed. The seed also drives the back-pressure stalls, so every generated
+bench is fully reproducible.
 """
 
 import base64
 import pickle
 import zlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .numerical import NumericalModel
@@ -35,12 +40,24 @@ import holoso
 _MODEL = pickle.loads(zlib.decompress(base64.b64decode("@@BLOB@@")))  # TODO https://github.com/Zubax/holoso/issues/12
 _FMT = _MODEL.float_format
 
+# An explicit input sequence -- rows of per-input ZKF bits ordered as _MODEL.input_names -- or None to draw the default
+# random sweep below. The fixed seed makes the default sweep and the back-pressure stalls reproducible.
+_VECTORS = @@VECTORS@@
+_SEED = 0x9E3779B97F4A7C15  # TODO: allow overriding the seed, count, and range via plusargs.
+_DEFAULT_COUNT = 64
+_DEFAULT_RANGE = (-4.0, +4.0)  # small bounded range keeps multi-operation kernels from overflowing into infinities
+
 
 @cocotb.test()
 async def cosim(dut):
-    rng = random.Random()  # TODO seed via plusargs
+    rng = random.Random(_SEED)
     in_names = _MODEL.input_names
     out_names = _MODEL.output_names
+    if _VECTORS is not None:
+        sequence = _VECTORS
+    else:
+        lo, hi = _DEFAULT_RANGE
+        sequence = [[_FMT.encode(rng.uniform(lo, hi)) for _ in in_names] for _ in range(_DEFAULT_COUNT)]
 
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await FallingEdge(dut.clk)
@@ -53,11 +70,9 @@ async def cosim(dut):
     dut.out_ready.value = 0
     _MODEL.reset()  # match the DUT's just-applied reset; persistent state then advances in lock-step with the DUT
 
-    for index in range(64):  # TODO configurable test count via plusargs
+    for index, in_bits in enumerate(sequence):
         # The model is fed exactly the bits the DUT receives, so the comparison is bit-exact. For a stateful module
         # this is one step of a sequence: the model and DUT carry their state forward together across iterations.
-        # TODO: value range must be configurable via plusargs
-        in_bits = [_FMT.encode(rng.uniform(-4, +4)) for _ in in_names]
         expected = _MODEL(*[holoso.FloatValue.from_bits(_FMT, bits) for bits in in_bits])
         exp_bits = [value.bits for value in expected]
 
@@ -108,13 +123,31 @@ class CocotbOutput:
         return f"{type(self).__name__}(testbench_bytes={len(self.testbench.encode())})"
 
 
-def generate(model: NumericalModel) -> CocotbOutput:
+def _embed_vectors(model: NumericalModel, vectors: list[Mapping[str, int]] | None) -> str:
+    """Render the explicit input sequence as a Python literal of input-name-ordered ZKF-bit rows, or ``None``."""
+    if vectors is None:
+        return "None"
+    order = model.input_names
+    rows: list[list[int]] = []
+    for index, vector in enumerate(vectors):
+        if missing := [name for name in order if name not in vector]:
+            raise ValueError(f"cosim vector {index} is missing inputs {missing}")
+        rows.append([int(vector[name]) for name in order])
+    return repr(rows)
+
+
+def generate(model: NumericalModel, vectors: list[Mapping[str, int]] | None = None) -> CocotbOutput:
     """
     Build a self-contained cocotb testbench that checks the DUT against the embedded bit-exact model.
 
-    A fixed set of random vectors is drawn at simulation time. Each input is a ZKF value uniform in a small bounded
-    range to keep multi-operation kernels from overflowing into infinities.
+    When ``vectors`` is given, each maps an input-port name to its ZKF bits and the bench replays the sequence verbatim
+    (one accepted transaction per vector, state carried across for stateful modules). When it is ``None``, the bench
+    draws a fixed-seed random sweep over a small bounded range instead. Either way the run is fully reproducible.
     """
     blob = base64.b64encode(zlib.compress(pickle.dumps(model, pickle.HIGHEST_PROTOCOL))).decode("ascii")
-    testbench = _TEMPLATE.replace("@@MODULE@@", model.lir.module_name).replace("@@BLOB@@", blob)
+    testbench = (
+        _TEMPLATE.replace("@@MODULE@@", model.lir.module_name)
+        .replace("@@VECTORS@@", _embed_vectors(model, vectors))
+        .replace("@@BLOB@@", blob)
+    )
     return CocotbOutput(testbench=testbench)

@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 
+from holoso import FAddOperator, FDivOperator, FMulILog2OperatorFamily, FMulOperator, OpConfig
 from holoso._type import FloatFormat
 from holoso._frontend._lower import _Path, _port_name
 
@@ -97,3 +98,47 @@ def spd_matrix(rng: np.random.Generator, n: int, diag_lo: float = 0.5, diag_hi: 
 def encode_inputs(fmt: FloatFormat, values: dict[str, float]) -> dict[str, int]:
     """Encode a name->float mapping to name->ZKF-bits (the bit pattern the DUT receives)."""
     return {name: fmt.encode(value) for name, value in values.items()}
+
+
+def format_edge_bits(fmt: FloatFormat) -> list[int]:
+    """
+    Canonical legal-ZKF edge bit patterns for one format: zero, ±0.5, ±1, ±smallest-normal, ±largest-finite.
+    Built directly from the bit layout so the extremes stay exact even where they would overflow a Python float.
+    """
+    frac_bits = fmt.wman - 1
+    sign_bit = 1 << (fmt.width - 1)
+    max_exp = (1 << fmt.wexp) - 2  # the all-ones exponent is infinity, so the largest finite exponent is one below it
+    magnitudes = [
+        0,  # canonical zero (ZKF has no negative zero, so it has no signed counterpart)
+        fmt.encode(0.5),
+        fmt.encode(1.0),
+        1 << frac_bits,  # smallest normal: exponent 1, zero fraction
+        (max_exp << frac_bits) | ((1 << frac_bits) - 1),  # largest finite: max exponent, all-ones fraction
+    ]
+    edges: list[int] = []
+    for magnitude in magnitudes:
+        edges.append(magnitude)
+        if magnitude != 0:
+            edges.append(sign_bit | magnitude)
+    return edges
+
+
+def default_ops(fmt: FloatFormat) -> OpConfig:
+    """The operator configuration with no optional pipeline stages: the minimum-latency baseline."""
+    return OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
+
+
+def staged_ops(fmt: FloatFormat) -> OpConfig:
+    """
+    A deeply pipelined configuration, distinct enough from the default to exercise the schedule, register allocation,
+    and handshake at a longer latency. Deliberately hardcoded -- it is a test fixture chosen for coverage, not a
+    derived enumeration of operator knobs, so it stays valid as new (not necessarily stage-shaped) knobs are added.
+    """
+    return OpConfig(
+        FAddOperator(
+            fmt, stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
+        ),
+        FMulOperator(fmt, stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
+        FDivOperator(fmt, stage_input=1, stage_pack=1, stage_output=1),
+        FMulILog2OperatorFamily(fmt, stage_input=1, stage_decode=1),
+    )

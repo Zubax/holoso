@@ -41,6 +41,7 @@ include = ["holoso*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-p", "no:mypy"]
+markers = ["cosim: end-to-end cocotb cosimulation; slow, needs a simulator (run via the cosim_examples nox session)"]
 
 [tool.black]
 line-length = 120

@@ -26,9 +26,12 @@ from holoso._mir import (
     MirOperation,
 )
 from holoso._operators import FMulILog2Operator, FloatSignControl, HardwareOperator
+from holoso._backend.numerical import generate as build_model
 from holoso._lir import build
 from holoso._lir._schedule import resolve_pool, schedule_ops
 from holoso._type import FloatType, ScalarSignature, ScalarType
+
+from ._modelref import default_ops, staged_ops
 
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT))
@@ -572,3 +575,22 @@ def test_commutative_port_assignment_never_increases_read_mux_fan_in(monkeypatch
 
     assert _read_mux_fan_in(optimized) <= _read_mux_fan_in(baseline)
     assert _read_mux_fan_in(optimized) < _read_mux_fan_in(baseline)  # ekf1_stateless has commutative reach to reclaim
+
+
+def test_optional_stages_raise_latency_without_changing_numerics() -> None:
+    # A kernel touching every operator family: fadd, fmul, fdiv, and the 2^-2 strength-reduced fmul_ilog2.
+    def kernel(a, b, c):  # type: ignore[no-untyped-def]
+        return (a - b) / c + a * b * 0.25
+
+    fmt = FloatFormat(8, 36)
+    configs = {"default": default_ops(fmt), "staged": staged_ops(fmt)}
+    lirs = {name: build(_run(kernel, ops), f"stages_{name}") for name, ops in configs.items()}
+    assert lirs["default"].initiation_interval < lirs["staged"].initiation_interval
+
+    # Optional stages only insert pipeline registers, so the numerical result is bit-identical across every config.
+    models = {name: build_model(lir) for name, lir in lirs.items()}
+    vectors = [(1.5, -0.5, 2.0), (3.25, 1.0, -4.0), (0.0, 2.5, 0.125), (-1.0, -1.0, 1e3)]
+    for values in vectors:
+        want = [v.bits for v in models["default"](*values)]
+        for name, model in models.items():
+            assert [v.bits for v in model(*values)] == want, f"{name} diverged from default at {values}"

@@ -34,15 +34,16 @@ def clean(session):
 
 @nox.session
 def tests(session: nox.Session) -> None:
+    """Fast unit tests; the slow cocotb cosimulation lives in the cosim_examples session."""
     session.install("-e", ".[test]")
-    session.run("python", "-m", "pytest", "-q", "tests")
+    session.run("python", "-m", "pytest", "-q", "-m", "not cosim", "tests")
 
 
 @nox.session
 def cosim_examples(session: nox.Session) -> None:
-    """Long-running end-to-end cocotb cosimulation of the bundled examples (e.g. ekf1_stateless)."""
+    """Long-running end-to-end cocotb cosimulation of the bundled examples across stage configurations."""
     session.install("-e", ".[test]")
-    session.run("python", "-m", "pytest", "-q", "tests/test_cosim.py")
+    session.run("python", "-m", "pytest", "-q", "-m", "cosim", "tests")
 
 
 @nox.session
@@ -98,12 +99,13 @@ def synth_examples(session: nox.Session) -> None:
     )
     syn(
         "examples/trapezoidal_leaky_streaming_integrator.py",
-        "TrapezoidalLeakyStreamingIntegrator",
+        "TrapezoidalLeakyStreamingIntegrator().__call__",
         [
             f"yosys-ecp5:freq=100,{op_integrator_wide_ecp5}",
             f"diamond-ecp5:freq=100,{op_integrator_wide_ecp5}",
             "vivado:freq=150",
         ],
+        name="TrapezoidalLeakyStreamingIntegrator",
     )
     syn("examples/madd.py", "madd", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
     syn("examples/poly3.py", "poly3", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
@@ -134,5 +136,28 @@ def synth_examples(session: nox.Session) -> None:
         wexp=8,
         wman=36,
         name="ekf1_stateless_e8m36",
+        env={"HOLOSO_DIAMOND_HARD": "1"},
+    )
+    syn(
+        "examples/ekf1_stateful.py",
+        "Ekf1().update",
+        [
+            "yosys-ecp5:freq=100,fadd.stage_decode=1,fadd.stage_align=1",
+            "diamond-ecp5:freq=100,fadd.stage_decode=1,fadd.stage_align=1",
+            "vivado:freq=150",
+        ],
+        name="ekf1_stateful_e6m18",
+    )
+    syn(
+        "examples/ekf1_stateful.py",
+        "Ekf1().update",
+        [
+            f"yosys-ecp5:freq=100,{op_ekf1_wide}",
+            f"diamond-ecp5:freq=100,{op_ekf1_wide},fadd.stage_input=1",
+            f"vivado:freq=150,{op_ekf1_wide}",
+        ],
+        wexp=8,
+        wman=36,
+        name="ekf1_stateful_e8m36",
         env={"HOLOSO_DIAMOND_HARD": "1"},
     )
