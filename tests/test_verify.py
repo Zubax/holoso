@@ -105,6 +105,21 @@ def test_model_matches_reference_small_kernels() -> None:
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
+def test_tuple_unpacking_matches_python_reference() -> None:
+    # The reference runs the kernel as ordinary Python (which unpacks natively), so a bit-faithful hardware model must
+    # route the swapped operands identically before the arithmetic.
+    def f(a, b):  # type: ignore[no-untyped-def]
+        x, y = b, a
+        return [x - y, x * y]
+
+    inputs = {"a": 1.25, "b": -3.5}
+    model = build_model(build(_run(f), "f"))
+    got = model(*[inputs[name] for name in model.input_names])
+    ref = evaluate_reference(f, inputs)
+    rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=max(abs(v) for v in inputs.values()))
+    assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
+
+
 def test_model_uses_exact_ilog2_for_wide_supported_shift() -> None:
     def f(a):  # type: ignore[no-untyped-def]
         return a * 16.0
@@ -154,9 +169,9 @@ def test_model_is_bit_exact_for_wide_zkf_multiply_regression() -> None:
     assert got[0].bits == 0xC0B5B6B31D9
 
 
-def test_model_matches_reference_ekf1() -> None:
+def test_model_matches_reference_ekf1_stateless() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1
+    import ekf1_stateless
 
     rng = np.random.default_rng(12345)
     cov = spd_matrix(rng, 3, 0.5, 2.0)
@@ -179,11 +194,55 @@ def test_model_matches_reference_ekf1() -> None:
         "z_ct": bounded(rng, -1.0, 1.0),
         "z_shunt": bounded(rng, -1.0, 1.0),
     }
-    model = build_model(build(_run(ekf1.update_x_P), "ekf1"))
+    model = build_model(build(_run(ekf1_stateless.update_x_P), "ekf1_stateless"))
     got = model(*[inputs[name] for name in model.input_names])
-    ref = evaluate_reference(ekf1.update_x_P, inputs)
+    ref = evaluate_reference(ekf1_stateless.update_x_P, inputs)
     assert len(ref) == 9 and all(np.isfinite(ref))
     rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=max(abs(v) for v in inputs.values()))
+    assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
+
+
+def test_model_matches_reference_aggregates() -> None:
+    def f(a, b, c):  # type: ignore[no-untyped-def]
+        v = [a, b, c]
+        head = v[0:2]
+        return [v[2], *head]  # index, slice, and unpack -> [c, a, b]
+
+    inputs = {"a": 1.0, "b": 2.0, "c": 3.0}
+    model = build_model(build(_run(f), "agg"))
+    got = model(*[inputs[name] for name in model.input_names])
+    ref = evaluate_reference(f, inputs)  # these aggregate ops run identically in plain Python
+    rtol, atol = default_tolerance(FMT, max(model.lir.op_count, 1), magnitude=3.0)
+    assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
+
+
+def test_model_matches_reference_ekf1_stateful() -> None:
+    examples = str(Path(__file__).resolve().parents[1] / "examples")
+    sys.path.insert(0, examples)
+    import ekf1_stateful
+
+    rng = np.random.default_rng(54321)
+    cov = spd_matrix(rng, 3, 0.5, 2.0)
+    p_urt = [float(cov[i, j]) for i, j in ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))]
+    x = [bounded(rng, -1.0, 1.0) for _ in range(3)]
+    r_diag = [log_uniform_positive(rng, 1e-1, 1.0) for _ in range(2)]
+    q_diag = [log_uniform_positive(rng, 1e-3, 1e-1) for _ in range(3)]
+    dt = bounded(rng, 1e-3, 1e-2)
+    step_inputs = {"dt": dt, "u_shunt": bounded(rng, -1.0, 1.0), "di_dt": bounded(rng, -1.0, 1.0)}
+
+    def fresh():  # type: ignore[no-untyped-def]
+        return ekf1_stateful.Ekf1(x=list(x), P_urt=list(p_urt), R_diag=list(r_diag), Q_diag=np.array(q_diag))
+
+    model = build_model(build(_run(fresh().update), "ekf1_stateful"))
+    got = model(*[step_inputs[name] for name in model.input_names])
+
+    # update() is ordinary executable numpy, so the reference is just one native step from the same reset; the new
+    # state in state-port order is x'(3) then P_urt'(6).
+    reference = fresh()
+    reference.update(**step_inputs)
+    ref = [float(v) for v in (*reference.x, *reference.P_urt)]
+    assert len(ref) == 9 and all(np.isfinite(ref))
+    rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=max(1.0, max(abs(v) for v in ref)))
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 

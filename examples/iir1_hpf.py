@@ -11,9 +11,7 @@ class IIR1HPF:
     The LPF state `m` is the estimated low-frequency/DC bias.
     """
 
-    def __init__(self, *, ALPHA: float = 2**-16):  # Alpha is an instantiation time parameter.
-        # If the implementation of IIR1LPF is not available to the synthesizer, it will instantiate its Verilog module
-        # blindly, but then the user has to provide the signature.
+    def __init__(self, *, ALPHA: float = 2**-16):
         self.lpf = IIR1LPF(ALPHA=ALPHA)
 
     def step(self, x: float) -> float:

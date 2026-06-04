@@ -29,29 +29,6 @@ def _has_localparam(verilog: str, name: str, value: int) -> bool:
     )
 
 
-def test_synthesize_small_kernel_result() -> None:
-    result = holoso.synthesize(_kernel, ops=_ops())
-    assert result.module_name == "_kernel"
-    assert "module _kernel" in result.verilog_output.verilog
-    # The full-crossbar register file is gone; storage is emitted inline as a sparse register array.
-    assert "holoso_regfile" not in result.verilog_output.support_files["holoso_support.v"]
-    assert "holoso_fadd" in result.verilog_output.support_files["holoso_support.v"]
-    assert "reg  [W-1:0] regs [0:NREG-1];" in result.verilog_output.verilog
-    # The support header is gone: nothing includes it and it is not bundled.
-    assert "holoso_support.vh" not in result.verilog_output.support_files
-    assert "`include" not in result.verilog_output.verilog
-    # Project policy: all sequential logic lives in exactly one clocked process.
-    assert result.verilog_output.verilog.count("always @(posedge clk)") == 1
-    assert "@cocotb.test()" in result.cocotb_output.testbench
-    assert "<html" in result.html_output.html.lower()
-    names = [p.name for p in result.ports]
-    assert "in_a" in names and "out_0" in names and "err_pc" in names
-    assert all(isinstance(p, holoso.DataInputPort) for p in result.input_ports)
-    assert all(isinstance(p, holoso.DataOutputPort) for p in result.output_ports)
-    assert any(isinstance(p, holoso.ControlOutputPort) and p.name == "err_pc" for p in result.control_ports)
-    assert all(isinstance(p.scalar_type, holoso.FloatType) and p.scalar_type.fmt == FMT32 for p in result.input_ports)
-
-
 def test_op_config_rejects_mixed_float_formats() -> None:
     fmt24 = FloatFormat(6, 18)
     ops = OpConfig(FAddOperator(FMT32), FMulOperator(fmt24), FDivOperator(FMT32), FMulILog2OperatorFamily(FMT32))
@@ -102,14 +79,6 @@ def test_rejects_non_finite_constants() -> None:
             holoso.synthesize(fn, ops=_ops())
 
 
-def test_generated_testbench_is_valid_python() -> None:
-    result = holoso.synthesize(_kernel, ops=_ops())
-    assert "holoso.FloatValue.from_bits(_FMT, bits)" in result.cocotb_output.testbench
-    assert "exp_bits = [value.bits for value in expected]" in result.cocotb_output.testbench
-    assert "_FMT.decode(bits)" not in result.cocotb_output.testbench
-    compile(result.cocotb_output.testbench, "<generated-testbench>", "exec")
-
-
 def test_write_artifacts(tmp_path: Path) -> None:
     result = holoso.synthesize(_kernel, ops=_ops())
     paths = result.write(tmp_path)
@@ -120,55 +89,36 @@ def test_write_artifacts(tmp_path: Path) -> None:
     assert (tmp_path / "holoso_support.v").exists()
 
 
-def test_report_has_expected_sections() -> None:
-    result = holoso.synthesize(_kernel, ops=_ops())
-    report = result.html_output.html
-    header_html = report.split("<pre class='modhdr'", 1)[1].split("</code></pre>", 1)[0]
-    header_html = header_html.split("<code>", 1)[1]
-    header_text = html.unescape(re.sub(r"<[^>]+>", "", header_html))
-
-    for token in ("Metrics", "Module Header", "Interface", "Schedule", "_kernel"):
-        assert token in report
-    for token in ("// CONTROL PORTS", "// INPUT PORTS", "// OUTPUT PORTS", "// DIAGNOSTIC PORTS"):
-        assert token in result.verilog_output.verilog
-        assert token in header_text
-    for token in (
-        "module _kernel (",
-        "input  wire [31:0] in_a",
-        "output wire [31:0] out_0",
-        "output wire [4:0] err_pc",
-    ):
-        assert token in result.verilog_output.verilog
-        assert token in header_text
-    assert "module _kernel #(" not in result.verilog_output.verilog
-    assert "parameter WEXP" not in result.verilog_output.verilog
-    assert "parameter WMAN" not in result.verilog_output.verilog
-    assert "reg  [CYCW-1:0] err_pc_q;" in result.verilog_output.verilog
-    assert "assign err_pc    = err_pc_q;" in result.verilog_output.verilog
-    assert _has_localparam(result.verilog_output.verilog, "WEXP", 8)
-    assert _has_localparam(result.verilog_output.verilog, "WMAN", 24)
-    assert report.index("<h2>Interface</h2>") < report.index("<h2>Module Header</h2>")
-    assert "--modhdr-width:" not in report
-    assert "Runtime diagnostics available while the module is running." in header_text
-    assert "vh-keyword" in report and "vh-comment" in report and "vh-number" in report
+def test_rejects_invalid_and_reserved_module_names() -> None:
+    # An empty name is falsy, so it is not "invalid" -- it just falls back to the target-derived default.
+    for bad in ("1bad", "bad-name", "a/b", "has space", "../escape"):
+        with pytest.raises(ValueError, match="valid identifier"):
+            holoso.synthesize(_kernel, ops=_ops(), name=bad)
+    for reserved in ("holoso", "Holoso_x", "holoso_support", "HOLOSOmod"):
+        with pytest.raises(ValueError, match="reserved"):
+            holoso.synthesize(_kernel, ops=_ops(), name=reserved)
+    # Verilog reserved words would emit unparsable RTL (`module module (`); a same-spelled non-keyword is still fine.
+    for keyword in ("module", "reg", "wire", "assign", "always"):
+        with pytest.raises(ValueError, match="Verilog keyword"):
+            holoso.synthesize(_kernel, ops=_ops(), name=keyword)
+    assert (
+        holoso.synthesize(_kernel, ops=_ops(), name="Module").module_name == "Module"
+    )  # case-sensitive: not a keyword
 
 
-def test_report_schedule_displays_exact_ii_cycle_rows() -> None:
-    result = holoso.synthesize(_kernel, ops=_ops())
-    grid = result.html_output.html.split("<table class='grid'>", 1)[1].split("</table>", 1)[0]
-    cycle_labels = re.findall(r"<td class='clk'>([^<]+)</td>", grid)
-
-    assert cycle_labels[0] == "in"
-    assert cycle_labels[1:] == [str(i) for i in range(1, len(cycle_labels))]
-    assert "out" not in cycle_labels
+def test_accepts_valid_module_name(tmp_path: Path) -> None:
+    result = holoso.synthesize(_kernel, ops=_ops(), name="good_name")
+    assert result.module_name == "good_name"
+    paths = result.write(tmp_path)
+    assert set(paths) == {"good_name.v", "holoso_support.v", "test_good_name.py", "good_name.html"}
 
 
-def test_synthesize_ekf1() -> None:
+def test_synthesize_ekf1_stateless() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1
+    import ekf1_stateless
 
     fmt = FloatFormat(6, 18)
-    result = holoso.synthesize(ekf1.update_x_P, ops=_ops(fmt))
+    result = holoso.synthesize(ekf1_stateless.update_x_P, ops=_ops(fmt))
     assert result.module_name == "update_x_P"
     assert len(result.output_ports) == 9
     compile(result.cocotb_output.testbench, "<generated-testbench>", "exec")

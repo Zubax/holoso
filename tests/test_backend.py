@@ -6,9 +6,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso import (
+    FAddOperator,
+    FDivOperator,
+    FloatFormat,
+    FMulILog2OperatorFamily,
+    FMulOperator,
+    OpConfig,
+    UnsupportedConstruct,
+)
 from holoso._backend.verilog import generate
 from holoso._frontend import lower
 from holoso._hir import optimize
@@ -125,11 +134,66 @@ def test_constant_only_module_elaborates(tmp_path: Path) -> None:
     _elaborate("const_only", generate(lir).verilog, tmp_path)
 
 
-@requires_iverilog
-def test_ekf1_elaborates(tmp_path: Path) -> None:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1
+def test_parameter_name_colliding_with_control_port_is_rejected() -> None:
+    # A parameter named 'valid'/'ready' becomes data port in_valid/in_ready, colliding with the control ports and
+    # producing un-elaboratable Verilog; LIR construction must reject it instead of emitting duplicate ports.
+    def collide(valid, ready):  # type: ignore[no-untyped-def]
+        return valid + ready
 
     fmt = FloatFormat(6, 18)
-    lir = build(_run(ekf1.update_x_P, _ops(fmt)), "update_x_P")
+    with pytest.raises(UnsupportedConstruct, match="duplicate port"):
+        build(_run(collide, _ops(fmt)), "collide")
+
+
+def test_kernel_without_outputs_is_rejected() -> None:
+    def empty(x):  # type: ignore[no-untyped-def]
+        return ()
+
+    fmt = FloatFormat(6, 18)
+    with pytest.raises(UnsupportedConstruct, match="at least one output"):
+        build(_run(empty, _ops(fmt)), "empty")
+
+
+@requires_iverilog
+def test_state_port_name_does_not_collide_with_internal_sign_wire(tmp_path: Path) -> None:
+    # A public attribute `y_d` becomes the port state_y_d; a sibling slot `y` whose boundary copy carries a folded sign
+    # used to emit an internal wire also named state_y_d, producing a duplicate (multiply-driven) identifier. The
+    # internal sign wire must live outside the state_<attr> port namespace, so the module elaborates cleanly.
+    class Collide:
+        def __init__(self) -> None:
+            self.y = 0.0
+            self.y_d = 0.0
+            self._p = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            self.y_d = self._p
+            self.y = -self._p  # sign-flipped boundary copy -> internal sign-conditioning wire for slot y
+            self._p = x
+            return self.y
+
+    fmt = FloatFormat(8, 24)
+    lir = build(_run(Collide().__call__, _ops(fmt)), "collide_state")
+    _elaborate("collide_state", generate(lir).verilog, tmp_path)
+
+
+@requires_iverilog
+def test_ekf1_stateless_elaborates(tmp_path: Path) -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import ekf1_stateless
+
+    fmt = FloatFormat(6, 18)
+    lir = build(_run(ekf1_stateless.update_x_P, _ops(fmt)), "update_x_P")
     _elaborate("update_x_P", generate(lir).verilog, tmp_path)
+
+
+@requires_iverilog
+def test_ekf1_stateful_elaborates(tmp_path: Path) -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import ekf1_stateful
+
+    fmt = FloatFormat(6, 18)
+    filt = ekf1_stateful.Ekf1(
+        x=[0.0, 0.0, 0.0], P_urt=[1.0, 0.0, 0.0, 1.0, 0.0, 1.0], R_diag=[1.0, 1.0], Q_diag=np.array([1.0, 1.0, 1.0])
+    )
+    lir = build(_run(filt.update, _ops(fmt)), "ekf1_stateful")
+    _elaborate("ekf1_stateful", generate(lir).verilog, tmp_path)

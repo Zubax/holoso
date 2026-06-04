@@ -7,13 +7,14 @@ def latest_producer_before(
     writes: dict[FloatRegRef, list[tuple[int, FloatProducer]]], source: FloatRegRef, read_cycle: int
 ) -> FloatProducer:
     """
-    Return the producer of the value a register holds when read at ``read_cycle``.
+    Return the producer of the value a register holds when read at hardware-frame ``read_cycle``.
 
-    The register file is read-first, so writes committed at the read cycle are not visible until the next cycle.
+    The timeline is keyed by each value's landing cycle -- the cycle it becomes readable in the array, which already
+    folds in the write latch and the read-first edge -- so a read on a value's landing cycle returns that value.
     """
     chosen: FloatProducer | None = None
-    for commit_cycle, producer in writes[source]:
-        if commit_cycle < read_cycle:
+    for landing_cycle, producer in writes[source]:
+        if landing_cycle <= read_cycle:
             chosen = producer
         else:
             break

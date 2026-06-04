@@ -15,6 +15,29 @@ FETCH_STAGES = 3
 FETCH_LAG = FETCH_STAGES - 1
 
 
+# Executing-step (hardware) frame cycle offsets: the single source of truth shared by the LIR cycle helpers below, the
+# write timeline, the numerical model, and the register allocator, so a value's landing/read/copy/boundary cycle is
+# computed in exactly one place and the four consumers cannot drift (the bug this centralization prevents).
+def landing_cycle(commit_cycle: int) -> int:
+    """The cycle a result becomes readable in the array: its commit plus the write latch and the read-first edge."""
+    return commit_cycle + FETCH_LAG + 2
+
+
+def read_latch_cycle(issue_cycle: int) -> int:
+    """The cycle an operator reads its operands -- the read latch presents the address early."""
+    return issue_cycle + FETCH_LAG - 1
+
+
+def copy_step_cycle(install_cycle: int) -> int:
+    """The step a non-coalesced slot writeback fires and samples its source."""
+    return install_cycle + FETCH_LAG + 1
+
+
+def boundary_step(makespan: int) -> int:
+    """The boundary / initiation-interval step: the last result lands here and outputs are resident here."""
+    return makespan + 2 + FETCH_LAG
+
+
 @dataclass(frozen=True, slots=True)
 class OperatorInstance:
     """
@@ -143,18 +166,43 @@ class FloatInputLoad(InputLoad):
 
 @dataclass(frozen=True, slots=True)
 class OutputWire:
-    """An output port driven from a typed register or constant immediate."""
+    """An output port: a named external sink driven at the present step by a typed source tap."""
 
     name: str
-    source: RegRef | ConstRef
+    tap: Operand
 
 
 @dataclass(frozen=True, slots=True)
 class FloatOutputWire(OutputWire):
-    """A float output port driven from a float register or constant immediate, with folded output sign control."""
+    """A float output port: the named external sink for a float source tap (register/constant + folded sign)."""
 
-    source: FloatRegRef | FloatConstRef
-    sign: FloatSignControl = FloatSignControl()
+    tap: FloatOperand
+
+
+@dataclass(frozen=True, slots=True)
+class FloatStateSlot:
+    """
+    A persistent float state register: reset to ``reset_value``, holding the slot's live-in (carried over from the
+    previous initiation) until it is overwritten, and holding the slot's live-out from ``install_cycle`` onward.
+
+    ``tap`` is the live-out's source tap (register/constant + folded sign), the same primitive an output wire taps; here
+    the sink is the slot register rather than a port. When the tap is exactly ``reg`` with an identity sign the live-out
+    coalesced onto the slot register (its producing operator wrote it) and the backend emits no copy; otherwise the
+    backend latches the tap into ``reg`` at ``install_cycle``: as early as the old live-in is read and the source is
+    available, the initiation boundary at the latest. Installing before the boundary lets the source register be reused
+    by unrelated operations for the rest of the initiation. A public attribute's observable ``state_<name>`` port is a
+    separate output wire tapping the same value, not a property of the slot.
+    """
+
+    name: str
+    reg: FloatRegRef
+    reset_value: float
+    tap: FloatOperand
+    install_cycle: int  # scheduler-frame cycle the live-out lands in reg (its max, makespan + 1, is the boundary)
+
+    @property
+    def needs_copy(self) -> bool:
+        return not (self.tap.source == self.reg and self.tap.sign == FloatSignControl())
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +240,14 @@ class OperationProducer:
     index: int
 
 
-type FloatProducer = InputProducer | OperationProducer
+@dataclass(frozen=True, slots=True)
+class StateProducer:
+    """A state register's live-in: the value it carries over from the previous initiation (or the reset snapshot)."""
+
+    index: int  # index into Lir.float_state_slots
+
+
+type FloatProducer = InputProducer | OperationProducer | StateProducer
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +259,7 @@ class Lir:
     float_inputs: list[FloatInputLoad]  # ordered as the function parameters
     float_ops: list[FloatScheduledOp]  # the pipelined schedule, ordered by (issue_cycle, value ID)
     float_outputs: list[FloatOutputWire]
+    float_state_slots: list[FloatStateSlot]  # persistent registers, ordered as the instance attributes
     makespan: int  # last commit cycle (0 if no ops); the in_valid->out_valid latency is makespan + 1
     op_count: int
     max_chain_len: int  # longest dependency chain in hardware operators (for verification tolerance)
@@ -239,9 +295,10 @@ class Lir:
     @property
     def present_step(self) -> int:
         """
-        The executing step on which the outputs are valid in the register array.
-        The last operator commits on the makespan cycle; the write latch delays the write in the write latch, so the
-        result lands on the next edge and is presented on cycle ``makespan + 2``.
+        The hardware executing step on which the outputs are valid in the register array (NOT the scheduler-frame cycle
+        ``makespan + 1`` used only to schedule state-slot installs). The last operator commits on the makespan cycle; the
+        write latch delays the write, so the result lands on the next edge and is presented on the executing step
+        ``makespan + 2``.
         """
         return self.makespan + 2
 
@@ -260,7 +317,33 @@ class Lir:
         so out_valid is asserted FETCH_LAG cycles later: ``present_step + FETCH_LAG``. Zero-op modules still present
         one accept-relative cycle plus the fixed staging.
         """
-        return self.present_step + FETCH_LAG
+        return boundary_step(self.makespan)
+
+    def result_landing_cycle(self, op: FloatScheduledOp) -> int:
+        """
+        Hardware-frame cycle on which an operator result lands in the register array ready to read. For the last result
+        this equals the initiation interval. This is the single definition shared by liveness, the write timeline, the
+        model, and the register allocator so they cannot drift.
+        """
+        return landing_cycle(op.commit_cycle)
+
+    def operand_read_cycle(self, op: FloatScheduledOp) -> int:
+        """Hardware-frame cycle on which an operator reads its operands (the read latch presents the address early)."""
+        return read_latch_cycle(op.issue_cycle)
+
+    def state_copy_step(self, slot: FloatStateSlot) -> int:
+        """
+        The fetch-PC value -- equivalently the hardware-frame cycle -- on which a non-coalesced slot's writeback copy
+        fires. For a boundary install this is ``initiation_interval`` (LASTPC), where it reduces to the accepted-
+        transaction edge. The copy reads its source and lands the new live-out in the slot register on this same step;
+        shared by liveness and the emitter so the two cannot drift.
+        """
+        return copy_step_cycle(slot.install_cycle)
+
+    @property
+    def has_state(self) -> bool:
+        """Whether the module retains persistent state across initiations."""
+        return bool(self.float_state_slots)
 
     @property
     def read_set_per_port(self) -> dict[tuple[FloatOperatorInstance, int], list[int]]:
@@ -316,27 +399,39 @@ class Lir:
         """
         Map each float register to the actual clock cycles on which it holds a live value.
 
-        This is cycle-accurate to the emitted hardware. Accounting for the read/write register-file latches and the
-        microcode-fetch staging: an input lands in the array on cycle 1; an operator result lands on
-        ``commit_cycle + FETCH_LAG + 2`` (the write latch, the read-first edge, then the fetch lag) -- which for the
-        last result is exactly the initiation interval; a register is read on ``issue_cycle + FETCH_LAG - 1`` (the read
-        latch presents the address a cycle early); and an output is read on the present cycle (the initiation interval).
-        Each row spans a value from when it lands in the array through its last read.
+        This is cycle-accurate to the emitted hardware, in the executing-step (hardware) frame. Timing comes from the
+        shared helpers: an input lands on cycle 1; an operator result lands on ``result_landing_cycle`` (which for the
+        last result is the initiation interval); an operand is read on ``operand_read_cycle``; an output tap on the
+        present cycle; and a non-coalesced slot's writeback lands (and reads its source) on ``state_copy_step`` -- the
+        present cycle for a boundary copy, earlier for an early install. A slot register additionally stays live
+        through the present cycle, since its live-out must reside there for the next initiation. Each row spans a value
+        from when it lands in the array through its last read.
         """
-        present = self.initiation_interval
+        present = self.initiation_interval  # hardware-frame present / boundary step
         defs: dict[FloatRegRef, list[int]] = {}
         uses: dict[FloatRegRef, list[int]] = {}
         for load in self.float_inputs:
             defs.setdefault(load.dst, []).append(1)
+        for slot in self.float_state_slots:
+            defs.setdefault(slot.reg, []).append(1)  # the live-in is resident in the slot register from the start
+            # The live-out must reside in the slot register at the boundary to carry into the next initiation, so the
+            # register stays live through the boundary even when nothing reads it again this frame -- installing the
+            # new value early is not its death.
+            uses.setdefault(slot.reg, []).append(present)
+            if slot.needs_copy:  # the non-coalesced live-out lands on the install step and is carried to the next call
+                defs.setdefault(slot.reg, []).append(self.state_copy_step(slot))
         for op in self.float_ops:
-            defs.setdefault(op.dst, []).append(op.commit_cycle + FETCH_LAG + 2)
-            read = op.issue_cycle + FETCH_LAG - 1
+            defs.setdefault(op.dst, []).append(self.result_landing_cycle(op))
+            read = self.operand_read_cycle(op)
             for operand in op.operands:
                 if isinstance(operand.source, FloatRegRef):
                     uses.setdefault(operand.source, []).append(read)
         for wire in self.float_outputs:
-            if isinstance(wire.source, FloatRegRef):
-                uses.setdefault(wire.source, []).append(present)
+            if isinstance(wire.tap.source, FloatRegRef):
+                uses.setdefault(wire.tap.source, []).append(present)
+        for slot in self.float_state_slots:  # the live-out tap is read on the install step to persist the slot
+            if isinstance(slot.tap.source, FloatRegRef):
+                uses.setdefault(slot.tap.source, []).append(self.state_copy_step(slot))
         live: dict[FloatRegRef, set[int]] = {}
         for reg in defs.keys() | uses.keys():
             writes = sorted(defs.get(reg, []))
@@ -344,19 +439,29 @@ class Lir:
             rows: set[int] = set()
             for i, start in enumerate(writes):
                 nxt = writes[i + 1] if i + 1 < len(writes) else present + 1
-                last = max((use for use in reads if start <= use < nxt), default=start)
+                # Read-first: a read on the next write's cycle still returns this value, so it belongs to this interval
+                # (a non-coalesced slot register read by an output at the boundary keeps its live-in residence intact).
+                last = max((use for use in reads if start <= use <= nxt), default=start)
                 rows.update(range(start, last + 1))
             live[reg] = rows
         return live
 
     @property
     def float_write_timeline(self) -> dict[FloatRegRef, list[tuple[int, FloatProducer]]]:
-        """Per-register write timeline (commit cycle, producer) used to resolve a register source at a read cycle."""
+        """
+        Per-register write timeline ``(landing cycle, producer)`` in the hardware/executing-step frame, used to resolve
+        a register source at a hardware read cycle. A value is readable from the cycle it lands in the array: inputs and
+        state live-ins on cycle 1, an operator result on ``result_landing_cycle``.
+        """
         writes: dict[FloatRegRef, list[tuple[int, FloatProducer]]] = {}
         for i, load in enumerate(self.float_inputs):
-            writes.setdefault(load.dst, []).append((0, InputProducer(i)))
+            writes.setdefault(load.dst, []).append((1, InputProducer(i)))
+        # A slot register starts each initiation holding its live-in (the value carried over from the previous one);
+        # a coalesced operator may then overwrite it later in the same initiation via its own OperationProducer entry.
+        for s, slot in enumerate(self.float_state_slots):
+            writes.setdefault(slot.reg, []).append((1, StateProducer(s)))
         for j, op in enumerate(self.float_ops):
-            writes.setdefault(op.dst, []).append((op.commit_cycle, OperationProducer(j)))
+            writes.setdefault(op.dst, []).append((self.result_landing_cycle(op), OperationProducer(j)))
         for events in writes.values():
-            events.sort()
+            events.sort(key=lambda event: event[0])
         return writes

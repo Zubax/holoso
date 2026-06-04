@@ -16,13 +16,14 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "cocotb~=2.0",
-    "pytest~=8.0",
+    "jaxtyping~=0.3",  # Holoso supports Jaxtyping annotations, but doesn't require Jaxtyping itself at the moment.
+    "pytest~=9.0",
 ]
 format = [
     "black~=26.5",
 ]
 typecheck = [
-    "mypy~=1.18",
+    "mypy~=2.1",
 ]
 
 [tool.setuptools.dynamic]
@@ -40,6 +41,7 @@ include = ["holoso*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-p", "no:mypy"]
+markers = ["cosim: end-to-end cocotb cosimulation; slow, needs a simulator (run via the cosim_examples nox session)"]
 
 [tool.black]
 line-length = 120

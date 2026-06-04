@@ -2,7 +2,7 @@
 Command-line entry point for the OOC synthesis-evaluation harness.
 Usage::
 
-    python -m synth <kernel.py> <entry> --wexp W --wman M --rtl PATH... --flow FLOW:freq=MHz[,OP.KNOB=VALUE...]
+    python -m synth <kernel.py> <expression> --wexp W --wman M --rtl PATH... --flow FLOW:freq=MHz[,OP.KNOB=VALUE...]
 
 Repeat ``--flow`` to run multiple flows, each with its own target frequency.
 Each flow may override operator knobs using fields such as ``fadd.stage_decode=1``.
@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import importlib
 import math
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass, fields
@@ -77,7 +78,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="python -m synth", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("kernel", help="path to the Python file containing the kernel")
-    parser.add_argument("entry", help="name of the function to synthesize")
+    parser.add_argument(
+        "expression",
+        help="Python expression evaluated in the kernel module to obtain the target;"
+        " e.g., `Ekf1(Q_diag=np.array([...])).update`. Must be a function or a method.",
+    )
     parser.add_argument("--wexp", type=int, default=6, help="float exponent bits")
     parser.add_argument("--wman", type=int, default=18, help="float significand bits")
     parser.add_argument(
@@ -87,7 +92,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="PATH",
         help="extra RTL the DUT needs: .v files or directories globbed for *.v",
     )
-    parser.add_argument("--name", default=None, help="generated module name (default: the entry name)")
+    parser.add_argument("--name", default=None, help="generated module name (automatic by default)")
     parser.add_argument(
         "--flow",
         action="append",
@@ -198,10 +203,15 @@ def _collect_rtl(specs: list[str]) -> list[Path]:
     return rtl
 
 
-def _load_target(kernel: Path, entry: str) -> object:
+def _load_target(kernel: Path, expression: str) -> object:
+    """
+    Resolve the synthesis target by evaluating ``expression`` in the kernel module's namespace. A bare function name
+    yields that function; an instance method -- optionally with a customized reset state -- is written out in full, e.g.
+    ``Ekf1(Q_diag=np.array([...])).update``, whose bound ``__self__`` snapshot seeds the reset values.
+    """
     sys.path.insert(0, str(kernel.resolve().parent))
     module = importlib.import_module(kernel.stem)
-    return getattr(module, entry)
+    return eval(expression, dict(vars(module)))
 
 
 def _op_config(fmt: FloatFormat, op_knobs: list[_OperatorKnob]) -> OpConfig:
@@ -279,9 +289,9 @@ def main() -> int:
         return 10
 
     fmt = FloatFormat(wexp=args.wexp, wman=args.wman)
-    name = args.name or args.entry
+    name = args.name or re.sub(r"\W+", "_", args.expression).strip("_")  # sanitize the expression into a module name
     rtl = _collect_rtl(args.rtl)
-    target = _load_target(Path(args.kernel), args.entry)
+    target = _load_target(Path(args.kernel), args.expression)
 
     out_dir = BUILD_ROOT / name
     shutil.rmtree(out_dir, ignore_errors=True)
@@ -296,7 +306,7 @@ def main() -> int:
             directory = out_dir / type(flow).__name__
             ops = _op_config(fmt, selected.request.op_knobs)
             print(
-                f"🛠️ Synthesizing {_MAGENTA}{args.kernel}::{args.entry}{_RESET} as "
+                f"🛠️ Synthesizing {_MAGENTA}{args.kernel}::{args.expression}{_RESET} as "
                 f"{_BOLD}{_MAGENTA}{name}{_RESET} using {_BOLD}{_CYAN}{flow.__class__.__name__}{_RESET} "
                 f"in {_BOLD}{directory}{_RESET}"
             )

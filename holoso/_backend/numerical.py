@@ -3,15 +3,16 @@ The numerical backend: a pure-Python functional model of a generated module, bit
 
 ``NumericalModel`` is a software interpreter for the scheduled LIR microprogram. It replays the schedule applying the
 same per-operator ZKF rounding the hardware does, so one ``__call__`` reproduces one module transaction bit-for-bit:
-flat input values in port order to a flat tuple of output values in port order. It holds the ``Lir`` and pickles via
-default pickle (every field is a frozen dataclass of plain values), so a generated testbench can embed it as its oracle.
+flat input values in port order to a flat tuple of output values in port order. A stateful module additionally carries
+its persistent state registers between calls, exactly as the hardware retains them between initiations; ``reset()``
+reloads the snapshot the hardware loads at module reset.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .._value import FloatValue
-from .._lir import FloatConstRef, FloatRegRef, Lir
-from .._lir import InputProducer, OperationProducer, latest_producer_before
+from .._lir import FloatConstRef, FloatOperand, FloatRegRef, Lir
+from .._lir import InputProducer, OperationProducer, StateProducer, latest_producer_before
 from .._operators import FloatSignControl
 from .._type import FloatFormat
 
@@ -33,20 +34,31 @@ def _coerce_input(value: ModelInput, fmt: FloatFormat, index: int) -> FloatValue
     raise TypeError(f"input {index} must be FloatValue or float, got {type(value).__name__}")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class NumericalModel:
     """
-    A pure, stateless, bit-exact functional model of a generated module: one ``__call__`` is one module transaction.
+    A bit-exact functional model of a generated module: one ``__call__`` is one module transaction.
 
     Call it with the input values in module-port order; it returns the output values in module-port order. The result
-    matches the generated Verilog bit-for-bit because every operator evaluates the same ZKF bits as the hardware. The
-    model holds the scheduled ``Lir`` and is picklable, so a generated testbench can embed it.
+    matches the generated Verilog bit-for-bit because every operator evaluates the same ZKF bits as the hardware. A
+    stateful module carries its persistent state registers between calls (``reset()`` reloads the reset snapshot),
+    mirroring how the hardware retains state across initiations and reloads it at reset. The model holds the scheduled
+    ``Lir`` and is picklable, so a generated testbench can embed it.
 
     TODO: When branching is implemented, the numerical model will need to be extended such that it also predicts the
           cycle latency of each transaction. This is necessary for cycle-accurate verification.
     """
 
     lir: Lir
+    _state: list[FloatValue] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reload every persistent state register with its reset snapshot, as the hardware does at module reset."""
+        fmt = self.lir.float_regfile.fmt
+        self._state = [FloatValue.from_float(fmt, slot.reset_value) for slot in self.lir.float_state_slots]
 
     def __call__(self, *inputs: ModelInput) -> tuple[FloatValue, ...]:
         lir = self.lir
@@ -56,9 +68,10 @@ class NumericalModel:
         consts = [FloatValue.from_float(fmt, value) for value in lir.float_consts]
         in_values = [_coerce_input(value, fmt, index) for index, value in enumerate(inputs)]
 
-        # Per-register write timeline: (commit_cycle, producer) in increasing commit order. Inputs are sampled at
-        # cycle 0; each op commits at its commit_cycle. Operands resolve against this so a register reused for several
-        # values over its lifetime yields the value that is live at the operand's read (issue) cycle, not the final one.
+        # Per-register write timeline: (commit_cycle, producer) in increasing commit order. A slot register starts the
+        # initiation holding its live-in (the value carried over from the previous call) and may be overwritten by a
+        # coalesced operator later. Inputs are sampled at cycle 0; each op commits at its commit_cycle. Operands resolve
+        # against this so a register reused for several values yields the value live at the operand's read cycle.
         writes = lir.float_write_timeline
 
         op_values: dict[int, FloatValue] = {}
@@ -72,17 +85,28 @@ class NumericalModel:
                     return in_values[index]
                 case OperationProducer(index=index):
                     return op_values[index]
+                case StateProducer(index=index):
+                    return self._state[index]
+
+        def eval_tap(operand: FloatOperand, cycle: int) -> FloatValue:
+            # One evaluation for every source tap: an operator operand, an output wire, or a state slot's live-out.
+            return _apply_sign(value(operand.source, cycle), operand.sign)
 
         # Evaluate in commit order: a producer commits before any consumer issues, so its value is ready in op_values.
         for j in sorted(
             range(len(lir.float_ops)), key=lambda k: (lir.float_ops[k].commit_cycle, lir.float_ops[k].issue_cycle)
         ):
             op = lir.float_ops[j]
-            operands = [_apply_sign(value(o.source, op.issue_cycle), o.sign) for o in op.operands]
+            operands = [eval_tap(o, lir.operand_read_cycle(op)) for o in op.operands]
             op_values[j] = _apply_sign(op.inst.operator.evaluate(*operands), op.result_sign)
 
-        present = lir.makespan + 1  # outputs present one cycle after the last commit; they read the final live value
-        return tuple(_apply_sign(value(wire.source, present), wire.sign) for wire in lir.float_outputs)
+        # Hardware-frame read cycles, matching float_liveness and the RTL: an output is resident in the array on the
+        # boundary step (the last result lands at the initiation interval), and each slot's live-out source is sampled
+        # on its writeback step -- before any later operation reuses that register (a value becomes readable on its
+        # landing cycle, so a read on the writeback step still resolves to the source that landed at or before it).
+        outputs = tuple(eval_tap(wire.tap, lir.initiation_interval) for wire in lir.float_outputs)
+        self._state = [eval_tap(slot.tap, lir.state_copy_step(slot)) for slot in lir.float_state_slots]
+        return outputs
 
     @property
     def input_names(self) -> tuple[str, ...]:

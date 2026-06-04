@@ -17,6 +17,14 @@ class MirInput:
 
 
 @dataclass(frozen=True, slots=True)
+class MirStateRead:
+    """A typed read of a persistent state slot's live-in value (the slot's register content at the initiation start)."""
+
+    name: str
+    scalar_type: ScalarType
+
+
+@dataclass(frozen=True, slots=True)
 class MirConst:
     """A typed scalar constant value."""
 
@@ -44,6 +52,15 @@ class MirOutput:
 
 
 @dataclass(frozen=True, slots=True)
+class MirStateSlot:
+    """A persistent state slot: a register holding ``live_out`` at the boundary, reset to ``reset_value``."""
+
+    name: str
+    reset_value: float
+    live_out: ValueId
+
+
+@dataclass(frozen=True, slots=True)
 class MirFloatInput(MirInput):
     """A floating-point module input port."""
 
@@ -52,6 +69,17 @@ class MirFloatInput(MirInput):
     def __post_init__(self) -> None:
         if not isinstance(self.scalar_type, FloatType):
             raise TypeError(f"MirFloatInput scalar_type must be FloatType, got {self.scalar_type!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class MirFloatStateRead(MirStateRead):
+    """A floating-point read of a persistent state slot's live-in value."""
+
+    scalar_type: FloatType
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scalar_type, FloatType):
+            raise TypeError(f"MirFloatStateRead scalar_type must be FloatType, got {self.scalar_type!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,8 +130,8 @@ class MirFloatOperation(MirOperation):
         return scalar_type
 
 
-type MirNode = MirInput | MirConst | MirOperation
-type MirFloatNode = MirFloatInput | MirFloatConst | MirFloatOperation
+type MirNode = MirInput | MirStateRead | MirConst | MirOperation
+type MirFloatNode = MirFloatInput | MirFloatStateRead | MirFloatConst | MirFloatOperation
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,12 +146,24 @@ class MirFloatOutput(MirOutput):
 
 
 @dataclass(frozen=True, slots=True)
+class MirFloatStateSlot(MirStateSlot):
+    """A floating-point persistent state slot with a folded sign control on its live-out value."""
+
+    sign: FloatSignControl = FloatSignControl()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sign, FloatSignControl):
+            raise TypeError(f"MirFloatStateSlot sign must be FloatSignControl, got {self.sign!r}")
+
+
+@dataclass(frozen=True, slots=True)
 class Mir:
     """A single-block selected graph ready for scheduling."""
 
     nodes: dict[ValueId, MirNode]
     input_ids: list[ValueId]
     outputs: list[MirOutput]
+    state_slots: list[MirStateSlot]
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +173,7 @@ class MirFloatView:
     nodes: dict[ValueId, MirFloatNode]
     input_ids: list[ValueId]
     outputs: list[MirFloatOutput]
+    state_slots: list[MirFloatStateSlot]
     fmt: FloatFormat
 
     @property
@@ -143,6 +184,10 @@ class MirFloatView:
             if isinstance(node, MirFloatInput):
                 result[vid] = node
         return result
+
+    @property
+    def state_read_nodes(self) -> dict[ValueId, MirFloatStateRead]:
+        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirFloatStateRead)}
 
     @property
     def const_nodes(self) -> dict[ValueId, MirFloatConst]:
@@ -164,11 +209,16 @@ class MirFloatView:
                 case MirFloatConst(scalar_type=scalar_type):
                     nodes[vid] = node
                     formats.add(scalar_type.fmt)
+                case MirFloatStateRead(scalar_type=scalar_type):
+                    nodes[vid] = node
+                    formats.add(scalar_type.fmt)
                 case MirFloatOperation(scalar_type=scalar_type):
                     nodes[vid] = node
                     formats.add(scalar_type.fmt)
                 case MirInput():
                     raise UnsupportedConstruct(f"LIR construction does not support non-float MIR input {vid}")
+                case MirStateRead():
+                    raise UnsupportedConstruct(f"LIR construction does not support non-float MIR state read {vid}")
                 case MirConst():
                     raise UnsupportedConstruct(f"LIR construction does not support non-float MIR constant {vid}")
                 case MirOperation():
@@ -178,6 +228,11 @@ class MirFloatView:
             if not isinstance(out, MirFloatOutput):
                 raise UnsupportedConstruct(f"LIR construction does not support non-float MIR output {out.name!r}")
             outputs.append(out)
+        state_slots: list[MirFloatStateSlot] = []
+        for slot in mir.state_slots:
+            if not isinstance(slot, MirFloatStateSlot):
+                raise UnsupportedConstruct(f"LIR construction does not support non-float MIR state slot {slot.name!r}")
+            state_slots.append(slot)
         for vid in mir.input_ids:
             input_node = nodes.get(vid)
             if input_node is None:
@@ -187,7 +242,13 @@ class MirFloatView:
         if len(formats) != 1:
             ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
             raise ValueError(f"LIR requires exactly one floating-point format; got {ordered or 'none'}")
-        return cls(nodes=nodes, input_ids=list(mir.input_ids), outputs=outputs, fmt=next(iter(formats)))
+        return cls(
+            nodes=nodes,
+            input_ids=list(mir.input_ids),
+            outputs=outputs,
+            state_slots=state_slots,
+            fmt=next(iter(formats)),
+        )
 
 
 class MirBuilder:
@@ -198,6 +259,7 @@ class MirBuilder:
         self._intern: dict[object, ValueId] = {}
         self._input_ids: list[ValueId] = []
         self._outputs: list[MirOutput] = []
+        self._state_slots: list[MirStateSlot] = []
 
     def _fresh(self, node: MirNode) -> ValueId:
         vid = len(self._nodes)
@@ -209,6 +271,8 @@ class MirBuilder:
         match node:
             case MirInput(scalar_type=scalar_type):
                 return scalar_type
+            case MirStateRead(scalar_type=scalar_type):
+                return scalar_type
             case MirConst(scalar_type=scalar_type):
                 return scalar_type
             case MirOperation() as operation:
@@ -219,6 +283,9 @@ class MirBuilder:
         vid = self._fresh(MirFloatInput(name, scalar_type))
         self._input_ids.append(vid)
         return vid
+
+    def float_state_read(self, name: str, scalar_type: FloatType) -> ValueId:
+        return self._fresh(MirFloatStateRead(name, scalar_type))
 
     def float_const(self, value: float, scalar_type: FloatType) -> ValueId:
         key = ("float_const", float(value), scalar_type)
@@ -265,9 +332,21 @@ class MirBuilder:
             raise ValueError(f"float output {name!r} must be driven by a floating-point value")
         self._outputs.append(MirFloatOutput(name, value, sign))
 
+    def float_state_slot(
+        self,
+        name: str,
+        reset_value: float,
+        live_out: ValueId,
+        sign: FloatSignControl = FloatSignControl(),
+    ) -> None:
+        if not isinstance(self._type_of(live_out), FloatType):
+            raise ValueError(f"float state slot {name!r} must hold a floating-point value")
+        self._state_slots.append(MirFloatStateSlot(name, float(reset_value), live_out, sign))
+
     def finish(self) -> Mir:
         return Mir(
             nodes=dict(self._nodes),
             input_ids=list(self._input_ids),
             outputs=list(self._outputs),
+            state_slots=list(self._state_slots),
         )

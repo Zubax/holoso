@@ -112,21 +112,32 @@ def update_x_P(P00, P01, P02, P11, P12, P22, Q_R, Q_g, Q_i, R_ct, R_shunt, dt, x
 
 
 def main() -> None:
-    float_format = holoso.FloatFormat(wexp=6, wman=18)  # Use 24-bit float with 6-bit exponent and 18-bit significand.
-    # Operators are constructed explicitly; each fixes its float format and pipeline stages.
-    # The pipeline stages are tuned per target chip, frequency, and synthesis flow.
-    ops = holoso.OpConfig(
-        holoso.FAddOperator(float_format),
-        holoso.FMulOperator(float_format),
-        holoso.FDivOperator(float_format),
-        holoso.FMulILog2OperatorFamily(float_format),
-    )
-    out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
-
-    # Generated Verilog module name defaults to the function name, unless overridden explicitly.
-    result = holoso.synthesize(update_x_P, ops=ops)
-    for filename, path in result.write(out_dir).items():
-        print(f"{filename}: {path}")
+    # The kernel is float-format-agnostic, but each scalar width wants its own operator pipelining, so the OpConfig is
+    # built per float format. The narrow 24-bit default (e6/m18) closes single-cycle, so its operators take no extra
+    # stages; the wide 44-bit datapath (e8/m36) needs deeper operator pipelines to close timing. These wide stages
+    # mirror the ones the synth_examples Nox session passes for the e8/m36 flows.
+    narrow = holoso.FloatFormat(wexp=6, wman=18)
+    wide = holoso.FloatFormat(wexp=8, wman=36)
+    configs = [
+        holoso.OpConfig(
+            holoso.FAddOperator(narrow),
+            holoso.FMulOperator(narrow),
+            holoso.FDivOperator(narrow),
+            holoso.FMulILog2OperatorFamily(narrow),
+        ),
+        holoso.OpConfig(
+            holoso.FAddOperator(wide, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
+            holoso.FMulOperator(wide, stage_input=1, stage_product=1, stage_pack=1),
+            holoso.FDivOperator(wide, stage_input=1, stage_pack=1, stage_output=1),
+            holoso.FMulILog2OperatorFamily(wide),
+        ),
+    ]
+    base = Path(__file__).resolve().parent / "build" / Path(__file__).stem
+    for ops in configs:
+        label = f"e{ops.float_format.wexp}m{ops.float_format.wman}"
+        result = holoso.synthesize(update_x_P, ops=ops)
+        for filename, path in result.write(base / label).items():
+            print(f"{label}/{filename}: {path}")
 
 
 if __name__ == "__main__":

@@ -9,8 +9,12 @@ from ._ir import (
     MirFloatNode as MirFloatNode,
     MirFloatOperation as MirFloatOperation,
     MirFloatOutput as MirFloatOutput,
+    MirFloatStateRead as MirFloatStateRead,
+    MirFloatStateSlot as MirFloatStateSlot,
     MirFloatView as MirFloatView,
     MirInput as MirInput,
     MirOperation as MirOperation,
+    MirStateRead as MirStateRead,
+    MirStateSlot as MirStateSlot,
 )
 from ._lower import lower as lower

@@ -15,6 +15,8 @@ from .._hir import (
     InPort,
     Node,
     Operation,
+    StateRead,
+    StateSlot,
     ValueId,
 )
 from .._operators import FloatHardwareOperator, OpConfig, FloatSignControl
@@ -59,6 +61,8 @@ class _LoweringContext:
             self._lower_node(old_id, self.hir.nodes[old_id])
         for out in self.hir.outputs:
             self._lower_output(out.name, out.value)
+        for slot in self.hir.state_slots:
+            self._lower_state_slot(slot)
         return self.builder.finish()
 
     def _lower_node(self, old_id: ValueId, node: Node) -> None:
@@ -77,6 +81,11 @@ class _LoweringContext:
             return
         raise UnsupportedConstruct(f"no MIR lowering rule for HIR output type {self.hir.nodes[value].type!r}")
 
+    def _lower_state_slot(self, slot: StateSlot) -> None:
+        if self.float_lowerer.lower_state_slot(slot):
+            return
+        raise UnsupportedConstruct(f"no MIR lowering rule for HIR state slot {slot.name!r}")
+
 
 class _FloatLowerer:
     def __init__(self, context: _LoweringContext) -> None:
@@ -87,6 +96,9 @@ class _FloatLowerer:
         match node:
             case InPort(name=name, type=HirFloatType()):
                 self.context.remap[old_id] = self.context.builder.float_input(name, self.float_type)
+                return True
+            case StateRead(slot=slot, type=HirFloatType()):
+                self.context.remap[old_id] = self.context.builder.float_state_read(slot, self.float_type)
                 return True
             case FloatConst(value=value):
                 self.context.remap[old_id] = self._lower_float_const(value)
@@ -132,6 +144,9 @@ class _FloatLowerer:
         try:
             operator = self.context.ops.fmul_ilog2.instantiate(k)
         except ValueError as exc:
+            # An out-of-range exponent is rejected rather than lowered to a constant multiply by 2**k: such a k always
+            # lies outside the format's representable range, so the constant would overflow to a (rejected) infinity or
+            # underflow to zero -- the fallback multiply would be degenerate, so there is nothing useful to fall back to.
             raise UnsupportedConstruct(f"unsupported power-of-two float scale 2**{k}: {exc}") from exc
         return self.context.builder.float_operation(operator, [self.context.remap[base]], [sign])
 
@@ -140,6 +155,13 @@ class _FloatLowerer:
         if not isinstance(self.context.hir.nodes[base].type, HirFloatType):
             return False
         self.context.builder.float_output(name, self.context.remap[base], sign)
+        return True
+
+    def lower_state_slot(self, slot: StateSlot) -> bool:
+        base, sign = _collapse_signs(self.context.hir.nodes, slot.live_out)
+        if not isinstance(self.context.hir.nodes[base].type, HirFloatType):
+            return False
+        self.context.builder.float_state_slot(slot.name, slot.reset_value, self.context.remap[base], sign)
         return True
 
 

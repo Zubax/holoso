@@ -29,7 +29,19 @@ class Operation:
         return self.operator.signature.result_type
 
 
-type Node = InPort | Const | Operation
+@dataclass(frozen=True, slots=True)
+class StateRead:
+    """
+    The live-in value of a persistent state slot: the content of its register at the start of an initiation, carried
+    over from the previous initiation (or the reset snapshot on the first one). Interned per slot, so every read of the
+    same attribute before it is first rewritten shares one value.
+    """
+
+    slot: str
+    type: Type
+
+
+type Node = InPort | Const | Operation | StateRead
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,12 +51,27 @@ class OutputPort:
 
 
 @dataclass(frozen=True, slots=True)
+class StateSlot:
+    """
+    A persistent state register backing a written instance attribute. ``reset_value`` is the snapshot taken from the
+    instance at synthesis time and loaded at module reset; ``live_out`` is the value the attribute holds at method exit
+    and that must reside in the slot's register at the initiation boundary. Observability is not a slot property: a
+    public attribute is exposed by a separate ``state_<attr>`` output port that the frontend emits alongside the slot.
+    """
+
+    name: str
+    reset_value: float
+    live_out: ValueId
+
+
+@dataclass(frozen=True, slots=True)
 class Hir:
-    """A complete single-block HIR: the value DAG, ordered inputs, and ordered named outputs."""
+    """A complete single-block HIR: the value DAG, ordered inputs, ordered named outputs, and persistent state slots."""
 
     nodes: dict[ValueId, Node]
     input_ids: list[ValueId]
     outputs: list[OutputPort]
+    state_slots: list[StateSlot]
 
     def input_names(self) -> list[str]:
         names: list[str] = []
@@ -63,6 +90,7 @@ class HirBuilder:
         self._intern: dict[Node, ValueId] = {}
         self._input_ids: list[ValueId] = []
         self._outputs: list[OutputPort] = []
+        self._state_slots: list[StateSlot] = []
 
     def _fresh(self, node: Node) -> ValueId:
         vid = len(self._nodes)
@@ -81,6 +109,8 @@ class HirBuilder:
         match node:
             case InPort(type=type):
                 return type
+            case StateRead(type=type):
+                return type
             case Const():
                 return node.type
             case Operation():
@@ -95,6 +125,16 @@ class HirBuilder:
 
     def float_input(self, name: str) -> ValueId:
         return self.input(name, FloatType())
+
+    def state_read(self, slot: str, type: Type) -> ValueId:
+        # Interned: repeated reads of a slot before it is first rewritten share one live-in value.
+        return self._interned(StateRead(slot, type))
+
+    def float_state_read(self, slot: str) -> ValueId:
+        return self.state_read(slot, FloatType())
+
+    def state_slot(self, name: str, reset_value: float, live_out: ValueId) -> None:
+        self._state_slots.append(StateSlot(name, float(reset_value), live_out))
 
     def float_const(self, value: float) -> ValueId:
         return self.const_node(FloatConst(float(value)))
@@ -119,4 +159,5 @@ class HirBuilder:
             nodes=dict(self._nodes),
             input_ids=list(self._input_ids),
             outputs=list(self._outputs),
+            state_slots=list(self._state_slots),
         )

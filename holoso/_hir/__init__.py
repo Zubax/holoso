@@ -8,6 +8,8 @@ from ._ir import (
     Node as Node,
     Operation as Operation,
     OutputPort as OutputPort,
+    StateRead as StateRead,
+    StateSlot as StateSlot,
     ValueId as ValueId,
 )
 from ._operators import (
