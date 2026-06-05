@@ -179,7 +179,21 @@ A robust closure procedure that accounts for this starts lean and adds back one 
 Entirely driven by `nox`; read the `noxfile.py` for details and follow its recommendations.
 Tests may take a long time to run; if there is no output, assume they are still running, not stuck,
 
-After every change, dispatch two review agents with fresh context to review your work:
-one will focus on the functional correctness, the other will focus on the architectural and design aspects.
-When both are done, review and consolidate their findings and act accordingly.
-Repeat in a loop until the agents return no actionable feedback.
+Whenever a defect is found (whether by a review agent or reported by a user), you MUST add a regression test that
+is verified to crash with the defect in place, and pass once the fix is implemented.
+
+## Review team
+
+After every change or milestone, or when explicitly prompted, dispatch three fresh-context review agents set to the
+MAXIMUM THINKING EFFORT to review your work:
+
+- one will focus on the FUNCTIONAL CORRECTNESS and ROBUSTNESS of the implementation;
+- one will focus on the ARCHITECTURAL CLEANLINESS, DESIGN PRACTICES, and CODE QUALITY;
+- one will be a distinct tool (if you are Claude, choose Codex, and vice versa) focusing on CORRECTNESS only.
+
+It is important that we use at least two distinct tools to maximize the diversity of perspectives and minimize
+blind spots. When all are done, review and consolidate their findings and act accordingly.
+If defects are found, ensure extensive regression tests are added.
+
+Repeat the review/refine loop until the agents return no actionable feedback for two (sic!) consecutive turns.
+The two no-feedback loops are needed for extra confidence.
