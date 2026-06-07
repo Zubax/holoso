@@ -114,7 +114,8 @@ Abstract interpretation over the Python AST/CFG with a binding-time lattice (sta
 - Static values (shapes, `__init__`-derived constants, compile-time tables) are evaluated concretely -- real
   Python/NumPy runs at synthesis time.
 - Dynamic values (input ports, persistent state) become SSA handles that accumulate HIR.
-- `for`/`while` with a static trip count is unrolled unless the iteration count is unreasonably large.
+- A `for` over a static `range` is unrolled (unless the count exceeds the unroll threshold); a `while` lowers to a
+  real back-edge loop.
 - `if` on a static test takes one branch; `if` on a dynamic test emits a real branch.
 
 Persistent state. A synthesized method's `self` is not a port: each instance attribute the method writes becomes a
@@ -204,15 +205,89 @@ loaded with its snapshot); pure datapath state stays out of the reset cone.
 Branch vs. select (the core control-flow decision):
 
 - A real `if`/`else` lowers to a `branch` terminator + a `phi` at the merge. Only one side executes; the merge is
-  resolved at register allocation by coalescing both definitions onto one register -- no runtime mux, the untaken
-  arm is never computed, and no spurious error is recorded. Branches are the default.
+  resolved at register allocation -- no runtime mux, the untaken arm is never computed, and no spurious error is
+  recorded. In v1 the resolution is by copy, not coalescing: each phi (and each persistent slot live-out) installs
+  its arm value into a fresh merged register with a pc-gated copy at the predecessor's tail (see the implemented CFG
+  backend below); coalescing the arms onto one register is a deferred liveness-aware optimization. Branches are the
+  default.
 - `select` (a mux, both inputs live) is reserved for data multiplexing (one-hot lookup, `where`-style picks) and for an
   optional if-conversion peephole that collapses a tiny, pure, cheap diamond. Conservative by default.
 
-The implemented HIR value set is float-only, but the node names are explicit (`FloatConst`, `FloatAdd`, etc.) so
-bool/int nodes can be added later without overloading float semantics. Negation and absolute value are ordinary
-semantic float operations in HIR. They are not represented as hardware details until selection.
-HIR operators expose a HIR-local `Signature`, and the builder rejects operands whose HIR types do not match.
+HIR is a real CFG of basic blocks (entry first, a single `Ret` exit) carrying an SSA value DAG; `bool` is implemented
+alongside float (`BoolConst`, bool `StateRead`, bool `Phi`), and a `StateSlot`'s reset is a typed `Const`
+(`FloatConst`/`BoolConst`) so a boolean state register (e.g. `iir1_lpf._first`) carries a boolean snapshot. The node
+names stay explicit (`FloatConst`, `FloatAdd`, etc.) so int nodes can be added later without overloading float
+semantics. Negation and absolute value are ordinary semantic float operations in HIR, not hardware details until
+selection. HIR operators expose a HIR-local `Signature`, and the builder rejects operands whose HIR types do not match.
+
+Interning is block-scoped for operations and global for the entry-dominating interned pure values (constants and
+state reads); inputs are entry-dominating too but never interned -- each parameter is a distinct, ordered port. An
+operation is CSE'd only within its own block, so an identical expression evaluated in two sibling `if` arms stays two
+distinct values (only the taken arm runs) -- a globally interned DAG would illegally share a value across
+non-dominating sibling arms. Frontend control flow is structured and reducible, so the env it threads only ever
+carries values that dominate the current point; merges emit one `Phi` per diverging scalar leaf (an attribute written
+on only one arm carries its live-in on the other). This CFG is carried through MIR (typed per-resource-family views: a
+float view and a boolean view sharing the block skeleton), scheduled and register-allocated per block, and lowered to
+RTL (branch microcode) and to the numerical model.
+
+Boolean values come from boolean state reads, boolean constants, and float comparisons. A comparison `a <relation> b`
+lowers to one float comparator operation (`FCmpOperator`, a latency-bearing hardware operator that reads two float
+registers and writes a boolean register). The comparator is relation-agnostic -- it produces the three one-hot order
+flags and one instance serves every relation, so the specific `lt`/`le`/... reduction rides on the scheduled boolean
+operation. The comparator is scheduled in the float timeline (it reads float registers); the numerical model evaluates
+it from the bit-exact float order (not a lossy float decode).
+In RTL each comparison instantiates one `holoso_fcmp` whose float operands are its fixed source registers/constants
+(hardwired, sign-conditioned), pulsed once at its in_valid PC; the one-hot order flags reduce combinationally to the
+relation's boolean, which is latched into its boolean register one comparator latency later (a pc-gated write), in time
+for the terminating branch. The comparison-driven examples (`pi_saturating`, `schmitt_trigger`) synthesize and
+cosimulate bit-exactly like `iir1_lpf`.
+
+A `for <name> in range(...)` loop over a static trip count fully unrolls (below an unroll threshold): the counter is a
+compile-time integer, not a runtime register, so each trip lowers the body once with the counter bound -- as a static
+integer for index/exponent/bound positions (a constant table `table[i]`, a power-of-two shift `2**-i`, a `range`
+argument) and as a float constant for value positions. Reassigning the counter name to a runtime value demotes it from
+a compile-time integer (a later branch on it is then a real runtime branch, and a static-index use of it is rejected),
+matching Python. Unrolling reuses the branch and comparison machinery directly:
+the unrolled body's per-iteration branches and comparisons lower exactly as written-out control flow. `cordic_sincos`
+(rotation-mode CORDIC, whose per-iteration `2**-i` shift forces unrolling and whose sign test is a per-iteration
+branch) synthesizes and cosimulates this way.
+
+A `while` (a variable, convergence-tested count) lowers to a real back-edge loop: preheader -> header -> body ->
+back-edge to the header. The header carries a phi for each scalar variable or persistent attribute the body reassigns,
+merging its preheader value with the value at the body's end; a loop-invariant value dominates the loop and needs no
+phi. A name the body reassigns to a runtime value (including a leaked `for` counter that was a compile-time integer in
+the preheader) stays demoted after the loop, exactly as a reassignment outside a loop does, so a later folded
+comparison or static-index use of it sees the runtime value rather than the stale compile-time one.
+The latch (back-edge) arm is a forward reference -- a body value defined after the header -- so the phi is opened
+with its preheader arm and closed once the body is lowered; the same open/close defers the arm through every HIR pass
+and the MIR lowering, which otherwise visit values in a dominance order the back edge violates. The block layout puts
+each loop body below its header and forces the single `Ret` block last (a loop body, a DFS leaf via its back edge,
+would otherwise sort after the exit), so a back-edge is just a jump to a lower address that the next-PC sequencer
+already handles. The per-block drain makes the loop-carried values land-stable before the header re-fetches, exactly
+as a branch merge reads land-stable phi inputs; `min_initiation_interval` weights the back-edge as not-taken (the loop
+exits on its first header test), a true lower bound, with the numerical model the authority on the realized count.
+`recip_newton` (Newton-Raphson reciprocal iterated until the update falls below a tolerance) synthesizes and
+cosimulates this way, on its convergent domain. A `for` above the unroll threshold is rejected rather than lowered to
+a counted back-edge loop (a counted loop would need a runtime integer counter; deferred).
+
+### DEFERRED
+
+Coalescing the `if` arms onto one register is a deferred liveness-aware optimization, as mentioned above.
+
+Variable-trip `for` loops.
+
+The lack of integer support (every number is a float) means that large integers may be compared inexactly; e.g.:
+
+```python
+if 9007199254740993 == 9007199254740992:  # Prone to miscompilation due to float precision limit.
+    r = a
+else:
+    r = a + 1.0
+```
+
+The ultimate fix is to support runtime integers properly (possibly reusing the same register file with floats).
+
+Early return support is missing (from loop body).
 
 ## HIR optimization and lowering to MIR
 
@@ -290,6 +365,35 @@ does not prove optimality in its time budget. On ekf1_stateless this takes read-
 `branch` is the real control transfer: the microprogram counter jumps, untaken ops never run, and the II is whatever
 the executed path costs (each path's count is itself exact).
 
+Implemented CFG backend (`if`/`else`, comparisons, unrolled `for`, and back-edge `while`).
+Blocks are laid out contiguously in reverse-postorder with the single canonical `Ret` forced last as the out_valid
+boundary (so a loop body, a DFS leaf via its back edge, stays below it); a back-edge is a jump to a lower address.
+Each block spans `boundary_step(block_makespan) + 1` fetch PCs (a per-block drain) and its terminator redirects the
+fetch PC at the block's boundary via a small `case(pc)` in `next_pc` that, for a `branch`, reads the condition's 1-bit
+register (`bregs`). A phi (and each persistent slot's live-out) is resolved not by coalescing in v1 but by installing
+each arm's value into the merged register with a pc-gated copy at the predecessor's tail -- operator results take fresh
+registers, so no register is overwritten mid-block (the per-block schedule is hazard-free and the arm installs form a
+parallel copy bundle). Reach-aware coalescing of arm operators onto the merged register (to cut register count), and
+cross-block software pipelining, are deferred optimizations. `min_initiation_interval` is the shortest-path lower
+bound (exact for a straight-line kernel, `SynthesisResult.latency_is_exact`); the numerical model reproduces output
+bits exactly but does not yet predict the actual per-transaction cycle latency (a deferred enhancement; the testbench
+checks output bits at the out_valid handshake).
+
+Compile-time-known branch conditions fold to a single arm so the other is never lowered (no spurious state from an
+unreachable write): a literal, a read-only boolean attribute, and a comparison whose operands are both compile-time
+floats (a literal, an unrolled loop counter, a read-only attribute, or `+`/`-`/`*` arithmetic of these). The
+comparison fold is fast-math (float64), exactly as the constant folder evaluates a relational of constants, accepted
+per the fast-math policy above; the model and the RTL follow the same folded arm, so they agree regardless. A
+comparison with any runtime operand stays a real branch resolved by the hardware comparator.
+
+### DEFERRED
+
+The numerical model should be refactored to have a `.tick()` method that advances the state by a single clk tick,
+allowing cycle-by-cycle cosimulation with immediate state divergence detection.
+
+Cross-block software pipelining (the v1 machine uses per-block drain barriers, and overlapping a block's tail with a
+successor's head is a separate, large scheduling effort.
+
 ## Operators
 
 HIR semantic float operations are value instances of the HIR-local `Operator` hierarchy.
@@ -349,7 +453,7 @@ for cycle = 1, 2, ...:                          # cycle 0 accepts/loads inputs
 regalloc: reach-aware coloring (greedy port-affinity + function minimization) minimizing mux
   fan-in, then register count as a bounded secondary objective (best of a reach-minimal and a cap-compacted coloring);
   share a register when the older value's last read precedes the newer's landing in the hardware frame, R(a) < W(b) --
-  the read/write latch separation is reclaimed (the same liveness float_liveness renders), not merely tolerated; no spill
+  the read/write latch separation is reclaimed (what float_liveness renders), not merely tolerated; no spill
 ```
 
 Instances are pooled by the fully specified hardware operator itself (a frozen, equal-by-value `HardwareOperator`):
