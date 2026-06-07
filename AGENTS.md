@@ -193,7 +193,8 @@ MAXIMUM THINKING EFFORT to review your work:
 
 It is important that we use at least two distinct tools to maximize the diversity of perspectives and minimize
 blind spots. When all are done, review and consolidate their findings and act accordingly.
-If defects are found, ensure extensive regression tests are added.
+If behavioral defects are found, ensure extensive regression tests are added.
 
-Repeat the review/refine loop until the agents return no actionable feedback for two (sic!) consecutive turns.
-The two no-feedback loops are needed for extra confidence.
+Repeat the review/refine loop until the agents return only trivial feedback (or none) for two (sic!) consecutive turns.
+Here, "trivial feedback" means stylistic/inconsequential issues such as wording, formatting, or anything else that
+does not affect correctness or maintainability of the codebase.
