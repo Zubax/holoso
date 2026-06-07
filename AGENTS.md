@@ -198,3 +198,7 @@ If behavioral defects are found, ensure extensive regression tests are added.
 Repeat the review/refine loop until the agents return only trivial feedback (or none) for two (sic!) consecutive turns.
 Here, "trivial feedback" means stylistic/inconsequential issues such as wording, formatting, or anything else that
 does not affect correctness or maintainability of the codebase.
+
+Iteration until no feedback has been attempted in the past but it is not practical because in the absence of significant
+issues the review agents tend to degrade to nitpicking such as linguistic style issues in comments etc. Hence, we
+stop iteration earlier, as soon as the feedback ceases to contain significant findings.
