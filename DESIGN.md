@@ -276,16 +276,7 @@ Coalescing the `if` arms onto one register is a deferred liveness-aware optimiza
 
 Variable-trip `for` loops.
 
-The lack of integer support (every number is a float) means that large integers may be compared inexactly; e.g.:
-
-```python
-if 9007199254740993 == 9007199254740992:  # Prone to miscompilation due to float precision limit.
-    r = a
-else:
-    r = a + 1.0
-```
-
-The ultimate fix is to support runtime integers properly (possibly reusing the same register file with floats).
+Integer operand support is missing; it needs to be added, possibly reusing the same register file with floats.
 
 Early return support is missing (from loop body).
 
@@ -387,6 +378,19 @@ per the fast-math policy above; the model and the RTL follow the same folded arm
 comparison with any runtime operand stays a real branch resolved by the hardware comparator.
 
 ### DEFERRED
+
+LIR currently has two build functions, one for straight-line single-block programs and one for CFG.
+A single-block program is a degenerate CFG and _build_cfg would produce correct hardware for it.
+The reason the split exists is purely optimization quality: `_build_single_block` carries at least two things the v1 CFG
+path does not: register coalescing (`allocate_float` reuses registers via linear liveness; the CFG path's
+`_allocate_cfg` gives every value a fresh register, installing phi/slot live-outs by copy, very inefficient),
+and commutative-port assignment (assign_commutative_ports, to hold down read-mux fan-in). `is_control_flow`
+(and the `is_straight_line` check in `build`) selects that optimized path, and it also drives the backend:
+the emitter and model have a simpler straight-line codegen (no next_pc branch decode, no per-block ROM layout)
+for kernels with no control flow. So removing it means committing to one path everywhere — which requires porting
+coalescing and commutative ports into the CFG allocator. The coalescing is the subtle part: it has to become
+path-aware (mutually-exclusive arms don't interfere; a phi/loop-carried value whose live-in and live-out overlap still
+needs copy-installation, not coalescing).
 
 The numerical model should be refactored to have a `.tick()` method that advances the state by a single clk tick,
 allowing cycle-by-cycle cosimulation with immediate state divergence detection.
