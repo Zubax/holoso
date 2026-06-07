@@ -15,7 +15,15 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso import (
+    FAddOperator,
+    FCmpOperator,
+    FDivOperator,
+    FloatFormat,
+    FMulILog2OperatorFamily,
+    FMulOperator,
+    OpConfig,
+)
 from holoso._backend.verilog import generate
 from holoso._frontend import lower
 from holoso._hir import optimize
@@ -25,7 +33,7 @@ from holoso._mir import lower as lower_to_mir
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
 
 FMT = FloatFormat(6, 18)
-OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT))
+OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
 
 
 def _divide(a, b):  # type: ignore[no-untyped-def]

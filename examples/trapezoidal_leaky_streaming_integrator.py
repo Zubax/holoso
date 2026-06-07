@@ -23,6 +23,7 @@ def main() -> None:
         holoso.FMulOperator(float_format),
         holoso.FDivOperator(float_format),
         holoso.FMulILog2OperatorFamily(float_format),
+        holoso.FCmpOperator(float_format),
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
 

@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from holoso import FAddOperator, FDivOperator, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso import FAddOperator, FCmpOperator, FDivOperator, FMulILog2OperatorFamily, FMulOperator, OpConfig
 from holoso._type import FloatFormat
 from holoso._frontend._lower import _Path, _port_name
 
@@ -125,7 +125,9 @@ def format_edge_bits(fmt: FloatFormat) -> list[int]:
 
 def default_ops(fmt: FloatFormat) -> OpConfig:
     """The operator configuration with no optional pipeline stages: the minimum-latency baseline."""
-    return OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
+    return OpConfig(
+        FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt), FCmpOperator(fmt)
+    )
 
 
 def staged_ops(fmt: FloatFormat) -> OpConfig:
@@ -141,4 +143,5 @@ def staged_ops(fmt: FloatFormat) -> OpConfig:
         FMulOperator(fmt, stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
         FDivOperator(fmt, stage_input=1, stage_pack=1, stage_output=1),
         FMulILog2OperatorFamily(fmt, stage_input=1, stage_decode=1),
+        FCmpOperator(fmt, stage_input=1),
     )

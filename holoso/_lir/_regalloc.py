@@ -203,6 +203,15 @@ def allocate_float(
         if r_in is not None:
             pinned[r_in] = reg
 
+    # A slot whose live-in is consumed as ANOTHER slot's live-out (a chained copy, e.g. ``self.a = self.b``) must keep
+    # its live-in to the boundary, where read-first lets that chained copy read the old value as this slot installs its
+    # new one. Such a slot can be neither coalesced nor early-installed: either would overwrite the live-in too soon.
+    tapped_by_other = {
+        _state_read_name(mir, slot.live_out)
+        for slot in mir.state_slots
+        if isinstance(mir.nodes[slot.live_out], MirFloatStateRead) and _state_read_name(mir, slot.live_out) != slot.name
+    }
+
     # Coalesce a slot's live-out onto its register when it is an unconditioned operator result whose live range does
     # not overlap the live-in; otherwise leave it for the backend to copy (and sign-condition) at its install cycle.
     for slot in mir.state_slots:
@@ -211,6 +220,8 @@ def allocate_float(
             continue
         if not isinstance(mir.nodes[live_out], MirFloatOperation):
             continue
+        if slot.name in tapped_by_other:
+            continue  # a chained copy reads this slot's live-in at the boundary, past the live-out's definition
         r_in = read_of_slot.get(slot.name)
         if r_in is None or last_use[r_in] <= def_cycle[live_out]:
             pinned[live_out] = state_regs[slot.name]
@@ -221,11 +232,6 @@ def allocate_float(
     # as the old live-in is fully read and the source is available (read-first lets the copy's write share the cycle of
     # the live-in's last read). Coalesced, constant, chained (source is another slot), and read-by-another slots stay at
     # the boundary, where holding the source to the present cycle is required and frees nothing.
-    tapped_by_other = {
-        _state_read_name(mir, slot.live_out)
-        for slot in mir.state_slots
-        if isinstance(mir.nodes[slot.live_out], MirFloatStateRead) and _state_read_name(mir, slot.live_out) != slot.name
-    }
     install_cycles: dict[str, int] = {}
     for slot in mir.state_slots:
         live_out = slot.live_out

@@ -31,6 +31,7 @@ from ._operators import (
     FDivOperator as FDivOperator,
     FMulILog2OperatorFamily as FMulILog2OperatorFamily,
     FMulOperator as FMulOperator,
+    FCmpOperator as FCmpOperator,
     OpConfig as OpConfig,
 )
 

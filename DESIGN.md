@@ -236,11 +236,13 @@ registers and writes a boolean register). The comparator is relation-agnostic --
 flags and one instance serves every relation, so the specific `lt`/`le`/... reduction rides on the scheduled boolean
 operation. The comparator is scheduled in the float timeline (it reads float registers); the numerical model evaluates
 it from the bit-exact float order (not a lossy float decode).
-In RTL each comparison instantiates one `holoso_fcmp` whose float operands are its fixed source registers/constants
-(hardwired, sign-conditioned), pulsed once at its in_valid PC; the one-hot order flags reduce combinationally to the
-relation's boolean, which is latched into its boolean register one comparator latency later (a pc-gated write), in time
-for the terminating branch. The comparison-driven examples (`pi_saturating`, `schmitt_trigger`) synthesize and
-cosimulate bit-exactly like `iir1_lpf`.
+In RTL all comparisons share one pooled `holoso_fcmp`, by the one-instance-per-operator convention. Each block holds
+at most one comparison (its branch condition) and blocks are mutually exclusive, so the comparisons execute
+sequentially and the comparator pipeline never holds two at once; a combinational mux keyed on the fetch PC presents
+the active comparison's (sign-conditioned) operands and pulses `in_valid` at its PC. The one-hot order flags reduce
+combinationally per each comparison's relation, and the result is latched into its boolean register one comparator
+latency later (a pc-gated write), in time for the terminating branch. The comparison-driven examples (`pi_saturating`,
+`schmitt_trigger`) synthesize and cosimulate bit-exactly like `iir1_lpf`.
 
 A `for <name> in range(...)` loop over a static trip count fully unrolls (below an unroll threshold): the counter is a
 compile-time integer, not a runtime register, so each trip lowers the body once with the counter bound -- as a static

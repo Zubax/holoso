@@ -7,7 +7,15 @@ import numpy as np
 import pytest
 from cocotb_tools.runner import get_runner
 
-from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso import (
+    FAddOperator,
+    FCmpOperator,
+    FDivOperator,
+    FloatFormat,
+    FMulILog2OperatorFamily,
+    FMulOperator,
+    OpConfig,
+)
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._frontend import lower
 from holoso._hir import optimize
@@ -76,6 +84,7 @@ def test_cosim_staged_kernel(sim: str) -> None:
         FMulOperator(fmt, stage_product=1),
         FDivOperator(fmt),
         FMulILog2OperatorFamily(fmt, stage_decode=1),
+        FCmpOperator(fmt),
     )
     run_cosim(sim, kernel, fmt, "kernel_staged", ops=ops)
 
@@ -92,6 +101,7 @@ def test_cosim_staged_division(sim: str) -> None:
         FMulOperator(fmt),
         FDivOperator(fmt, stage_input=1),
         FMulILog2OperatorFamily(fmt),
+        FCmpOperator(fmt),
     )
     run_cosim(sim, blend, fmt, "blend_staged", ops=ops)
 
@@ -157,6 +167,7 @@ def test_cosim_new_operator_stages(sim: str) -> None:
         FMulOperator(fmt, stage_input=1, stage_pack=1),
         FDivOperator(fmt, stage_pack=1),
         FMulILog2OperatorFamily(fmt, stage_input=1),
+        FCmpOperator(fmt),
     )
     run_cosim(sim, kernel, fmt, "new_stages", ops=ops)
 

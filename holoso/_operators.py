@@ -7,7 +7,7 @@ from hashlib import blake2s
 from typing import ClassVar
 
 from ._value import FloatValue, add_float_values, div_float_values, mul_float_values, mul_ilog2_float_value
-from ._type import FloatFormat, FloatType, ScalarSignature
+from ._type import BoolType, FloatFormat, FloatType, ScalarSignature
 
 
 def _instance_stem_text(text: str) -> str:
@@ -326,22 +326,61 @@ class FMulILog2OperatorFamily(FloatParameterizedHardwareOperator):
         return FMulILog2Operator(fmt=self.fmt, k=k, stage_input=self.stage_input, stage_decode=self.stage_decode)
 
 
+@dataclass(frozen=True, slots=True)
+class FCmpOperator(HardwareOperator):
+    """
+    A floating-point comparator: it produces the three mutually-exclusive one-hot order flags (a>b, a==b, a<b) with
+    input sign conditioning. The specific relation (lt/le/...) is selected at the consuming boolean operation by a
+    cheap reduction of the one-hot flags, so one comparator instance serves every relation.
+    ZKF has no NaN, so for ZKF the ordering is total.
+    """
+
+    mnemonic: ClassVar[str] = "fcmp"
+    fmt: FloatFormat
+    stage_input: int = 0
+
+    def __post_init__(self) -> None:
+        if self.stage_input not in (0, 1):
+            raise ValueError(f"stage_input must be 0 or 1; got {self.stage_input!r}")
+
+    @property
+    def instance_stem(self) -> str:
+        params = {"WEXP": self.fmt.wexp, "WMAN": self.fmt.wman}
+        params.update(self.hdl_params())
+        return _hashed_instance_stem(self.mnemonic, params)
+
+    @property
+    def latency(self) -> int:
+        return 1 + self.stage_input
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((FloatType(self.fmt), FloatType(self.fmt)), BoolType())
+
+    def render(self, *operands: str) -> str:
+        a, b = operands
+        return f"cmp({a},{b})"
+
+    def hdl_params(self) -> dict[str, int]:
+        return {"STAGE_INPUT": self.stage_input}
+
+
 @dataclass(frozen=True)
 class OpConfig:
     """
-    The hardware operator configuration threaded into synthesis.
-    Constructed explicitly by the caller (no defaults), held on the pipeline and never hashed. Each field fixes one
-    operator's format and parameters.
+    The hardware operator configuration threaded into synthesis. Constructed by the user before synthesis.
+    Each field fixes one operator's format and parameters.
     """
 
     fadd: FAddOperator
     fmul: FMulOperator
     fdiv: FDivOperator
     fmul_ilog2: FMulILog2OperatorFamily
+    fcmp: FCmpOperator
 
     @property
     def float_format(self) -> FloatFormat:
-        formats = {self.fadd.fmt, self.fmul.fmt, self.fdiv.fmt, self.fmul_ilog2.fmt}
+        formats = {self.fadd.fmt, self.fmul.fmt, self.fdiv.fmt, self.fmul_ilog2.fmt, self.fcmp.fmt}
         if len(formats) != 1:
             ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
             raise ValueError(f"all floating-point operators must use the same format; got {ordered}")

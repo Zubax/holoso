@@ -143,7 +143,7 @@ def build_microcode(
     is presented 1 step before the operator issues (so the latched operand arrives on the issue step), and the
     write-enable/address are presented 1 step after the operator commits (so they line up with the writeback latch).
     """
-    depth = lir.makespan + 3  # steps 0..present (present == makespan + WRITE_LATCH + 1)
+    depth = lir.last_pc + 1  # one control word per fetch PC: blocks are laid out across 0..last_pc with NOP gaps
     fields: dict[str, Field] = {}
 
     def add(name: str, width: int, default: int | None) -> None:

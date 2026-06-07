@@ -43,6 +43,7 @@ class SynthesisResult:
     output_ports: list[DataOutputPort]
     control_ports: list[ControlPort]
 
+    initiation_interval: tuple[int, int | None]  # (min II, max II or None if unbounded)
     verilog_output: VerilogOutput
     numerical_model: NumericalModel
     cocotb_output: CocotbOutput
@@ -97,13 +98,16 @@ def synthesize(target: Target, /, ops: OpConfig, *, name: str | None = None) -> 
     model = generate_model(lir)
     cocotb_output = generate_testbench(model)
 
-    _logger.info("Generated Verilog: %s", verilog_output)
+    latency_is_exact = len(lir.blocks) == 1  # a straight-line kernel has one fixed path; branches/loops vary by data
+    ii = (lir.min_initiation_interval, lir.min_initiation_interval if latency_is_exact else None)
+    _logger.info("Generated Verilog: %s; II [min,max]: %s cycles", verilog_output, ii)
     return SynthesisResult(
         module_name=module_name,
         ports=lir.ports,
         input_ports=lir.input_ports,
         output_ports=lir.output_ports,
         control_ports=lir.control_ports,
+        initiation_interval=ii,
         verilog_output=verilog_output,
         numerical_model=model,
         cocotb_output=cocotb_output,
@@ -120,9 +124,18 @@ def _default_module_name(target: Target) -> str:
     return str(getattr(target, "__name__", "kernel"))
 
 
+def _validate_module_name(name: str) -> None:
+    if _MODULE_NAME.fullmatch(name) is None:
+        raise ValueError(f"module name {name!r} is not a valid identifier; expected [A-Za-z_][A-Za-z0-9_]*")
+    if name in _BLACKLIST:
+        raise ValueError(f"module name {name!r} is a reserved keyword; choose another name")
+    if name.lower().startswith("holoso"):
+        raise ValueError(f"module name {name!r} uses the reserved 'holoso' prefix; choose another name")
+
+
 _MODULE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
-# Keywords from supported HDLs etc. that are not valid module names.
+# Keywords from supported HDLs etc. that are not valid module names. Includes Verilog and VHDL keywords.
 _BLACKLIST = frozenset("""
 always and assign automatic begin buf bufif0 bufif1 case casex casez cell cmos config deassign default defparam
 design disable edge else end endcase endconfig endfunction endgenerate endmodule endprimitive endspecify endtable
@@ -132,13 +145,19 @@ noshowcancelled not notif0 notif1 or output parameter pmos posedge primitive pul
 pulsestyle_onevent pulsestyle_ondetect rcmos real realtime reg release repeat rnmos rpmos rtran rtranif0 rtranif1
 scalared showcancelled signed small specify specparam strong0 strong1 supply0 supply1 table task time tran tranif0
 tranif1 tri tri0 tri1 triand trior trireg unsigned use uwire vectored wait wand weak0 weak1 while wire wor xnor xor
+abs access after alias all architecture array assert attribute block body buffer bus component configuration constant
+context disconnect downto elsif entity exit file generic group guarded impure in inertial is label linkage literal
+loop map mod new next null of on open others out package port postponed procedure process protected pure
+range record register reject rem report return rol ror select severity signal shared sla sll sra srl subtype
+then to transport type unaffected units until variable when with
+accept_on always_comb always_ff always_latch assume before bind bins binsof bit break byte chandle checker
+class clocking const constraint continue cover covergroup coverpoint cross dist do endchecker endclass
+endclocking endgroup endinterface endpackage endprogram endproperty endsequence enum expect export extends extern
+final first_match foreach forkjoin global iff ignore_bins illegal_bins implements implies import inside int interface
+intersect join_any join_none let logic longint matches modport nettype packed priority program property rand randc
+randcase randsequence ref reject_on restrict s_always s_eventually s_nexttime s_until s_until_with sequence shortint
+shortreal soft solve static string strong struct super sync_accept_on sync_reject_on tagged this throughout
+timeprecision timeunit typedef union unique unique0 var virtual void wait_order weak wildcard within
+assume_guarantee eventually fairness interconnect local nexttime restrict_guarantee untyped until_with vmode vprop vunit
+false none true as async await def del elif except finally from lambda nonlocal pass raise try yield
 """.split())
-
-
-def _validate_module_name(name: str) -> None:
-    if _MODULE_NAME.fullmatch(name) is None:
-        raise ValueError(f"module name {name!r} is not a valid identifier; expected [A-Za-z_][A-Za-z0-9_]*")
-    if name in _BLACKLIST:
-        raise ValueError(f"module name {name!r} is a reserved keyword; choose another name")
-    if name.lower().startswith("holoso"):
-        raise ValueError(f"module name {name!r} uses the reserved 'holoso' prefix; choose another name")

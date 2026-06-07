@@ -80,7 +80,7 @@ def _metrics(lir: Lir) -> str:
         ("regfile R/W ports", f"{lir.float_regfile.nrd} / {lir.float_regfile.nwr}"),
         ("schedule makespan", lir.makespan),
         ("operations", lir.op_count),
-        ("II (cycles)", lir.initiation_interval),
+        ("II min [cycles]", lir.initiation_interval),
         ("longest op chain", lir.max_chain_len),
     ]
     body = "".join(f"<tr><th>{_esc(label)}</th><td>{_esc(str(value))}</td></tr>" for label, value in rows)

@@ -124,12 +124,14 @@ def main() -> None:
             holoso.FMulOperator(narrow),
             holoso.FDivOperator(narrow),
             holoso.FMulILog2OperatorFamily(narrow),
+            holoso.FCmpOperator(narrow),
         ),
         holoso.OpConfig(
             holoso.FAddOperator(wide, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
             holoso.FMulOperator(wide, stage_input=1, stage_product=1, stage_pack=1),
             holoso.FDivOperator(wide, stage_input=1, stage_pack=1, stage_output=1),
             holoso.FMulILog2OperatorFamily(wide),
+            holoso.FCmpOperator(wide),
         ),
     ]
     base = Path(__file__).resolve().parent / "build" / Path(__file__).stem

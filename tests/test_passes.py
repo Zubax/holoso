@@ -5,7 +5,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
-from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
+import pytest
+
+from holoso import (
+    FAddOperator,
+    FCmpOperator,
+    FDivOperator,
+    FloatFormat,
+    FMulILog2OperatorFamily,
+    FMulOperator,
+    OpConfig,
+)
 from holoso._errors import UnsupportedConstruct
 from holoso._frontend import lower
 from holoso._hir import (
@@ -22,11 +32,13 @@ from holoso._hir import (
     optimize,
 )
 from holoso._hir._const_fold import run as fold_constants
+from holoso._lir import build
 from holoso._mir import lower as lower_to_mir, Mir, MirFloatConst, MirFloatInput, MirOperation
 from holoso._operators import FMulILog2Operator, FloatSignControl
+from holoso._backend.numerical import generate as build_model
 
 FMT = FloatFormat(6, 18)
-OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT))
+OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,9 +92,12 @@ def _consts(mir: Mir) -> list[float]:
 
 def test_hir_nodes_carry_float_type() -> None:
     builder = HirBuilder()
+    builder.block()
     a = builder.float_input("a")
     one = builder.float_const(1.0)
     y = builder.operation(FloatAdd(), [a, one])
+    builder.output("out_0", y)
+    builder.ret()
     hir = builder.finish()
 
     input_node = hir.nodes[a]
@@ -95,6 +110,7 @@ def test_hir_nodes_carry_float_type() -> None:
 
 def test_hir_builder_rejects_wrong_semantic_operand_type() -> None:
     builder = HirBuilder()
+    builder.block()
     a = builder.input("a", OtherType())
     b = builder.float_input("b")
     try:
@@ -107,8 +123,10 @@ def test_hir_builder_rejects_wrong_semantic_operand_type() -> None:
 
 def test_lower_rejects_non_float_hir_input_type() -> None:
     builder = HirBuilder()
+    builder.block()
     a = builder.input("a", OtherType())
     builder.output("out_0", a)
+    builder.ret()
     hir = builder.finish()
 
     try:
@@ -131,9 +149,11 @@ def test_hir_constant_folding_returns_float_const() -> None:
 
 def test_hir_constant_folding_preserves_const_subclass() -> None:
     builder = HirBuilder()
+    builder.block()
     x = builder.const_node(OtherConst(10))
     y = builder.operation(OtherFold(), [x])
     builder.output("out_0", y)
+    builder.ret()
 
     hir = fold_constants(builder.finish())
     node = hir.nodes[hir.outputs[0].value]
@@ -193,7 +213,9 @@ def test_wide_supported_pow2_uses_ilog2_operator() -> None:
         return a * 16.0
 
     fmt = FloatFormat(3, 4)
-    ops = OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
+    ops = OpConfig(
+        FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt), FCmpOperator(fmt)
+    )
     mir = _run(f, ops)
     selected = _ops(mir)
     assert [type(o.operator) for o in selected] == [FMulILog2Operator]
@@ -206,7 +228,9 @@ def test_unsupported_pow2_shift_is_rejected() -> None:
         return a * 64.0
 
     fmt = FloatFormat(3, 4)
-    ops = OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
+    ops = OpConfig(
+        FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt), FCmpOperator(fmt)
+    )
     try:
         _run(f, ops)
     except UnsupportedConstruct as ex:
@@ -267,3 +291,46 @@ def test_ekf1_stateless_lowering() -> None:
     assert _op_count(mir, FMulILog2Operator) >= 1  # the "2 * ..." terms
     assert len(mir.input_ids) == 17
     assert len(mir.outputs) == 9
+
+
+def test_unclosed_loop_phi_is_rejected() -> None:
+    # HirBuilder.finish validates that every phi has one arm per CFG predecessor: a loop-header phi opened (open_phi)
+    # but never closed (its back-edge arm missing) is a construction bug and must be caught, not emitted malformed.
+    builder = HirBuilder()
+    entry = builder.block()
+    header = builder.block()
+    x = builder.float_input("x")
+    builder.position_at(entry)
+    builder.jump(header)
+    builder.position_at(header)
+    builder.open_phi(HirFloatType(), (entry, x))  # only the preheader arm; the latch arm is never supplied
+    builder.jump(header)  # back-edge: the header now has two predecessors (entry, header) but the phi carries one arm
+    with pytest.raises(RuntimeError, match="predecessor"):
+        builder.finish()
+
+
+def _deep_cfg_kernel(p0):  # type: ignore[no-untyped-def]
+    # A doubly-nested unrolled loop (each trip count well under the unroll threshold) with a per-iteration branch.
+    # Unrolling chains ~2700 basic blocks, so the CFG reverse-postorder DFS recurses far deeper than Python's default
+    # recursion limit. The accumulator stays >=0, so every iteration takes the add arm: the result is the input + 900.
+    acc = p0
+    for _i in range(30):
+        for _j in range(30):
+            if acc > 0.0:
+                acc = acc + 1.0
+            else:
+                acc = acc - 1.0
+    return acc
+
+
+def test_deep_cfg_does_not_overflow_recursion() -> None:
+    # Regression: the HIR/MIR/LIR reverse-postorder traversals walked the block CFG recursively, so a deep CFG -- here
+    # nested unrolled loops chaining thousands of blocks -- overflowed Python's recursion limit with a RecursionError
+    # in _copy.reverse_postorder (and the symmetric _lir._build._mir_rpo). With recursion in place, optimize() raises;
+    # the iterative DFS compiles cleanly. Exercise the whole front-to-back pipeline (optimize, MIR lowering, LIR build)
+    # since each contains a CFG DFS, and check the bit-exact model against the plain-Python reference.
+    hir = lower(_deep_cfg_kernel)
+    assert len(hir.blocks) > 1000  # the CFG is genuinely deep (otherwise the regression would not bite)
+    model = build_model(build(_run(_deep_cfg_kernel), "deep"))
+    for x in (0.5, 2.0, 8.0):  # acc stays positive -> +900 every time; 0.5/2.0/8.0 are exact in ZKF
+        assert float(model(x)[0]) == _deep_cfg_kernel(x)

@@ -1,33 +1,37 @@
 """HIR constant folding."""
 
 from ._const import Const
-from ._copy import copy_node, copy_state_slots
-from ._ir import Hir, HirBuilder, Operation, ValueId
+from ._copy import copy_node, rebuild
+from ._ir import Hir, HirBuilder, Node, Operation, Phi, ValueId
 
 
 def run(hir: Hir) -> Hir:
-    """Fold operations whose operands are all constants into a single constant."""
-    builder = HirBuilder()
-    remap: dict[ValueId, ValueId] = {}
+    """
+    Fold operations whose operands are all constants into a single constant, and collapse a phi all of whose arms are
+    the same constant.
+    """
     cval: dict[ValueId, Const] = {}
-    for old_id in sorted(hir.nodes):
-        node = hir.nodes[old_id]
+
+    def uniform_const_arm(arms: tuple[tuple[int, ValueId], ...], remap: dict[ValueId, ValueId]) -> Const | None:
+        if not arms:
+            return None
+        values = [cval.get(remap[arm]) for _, arm in arms]
+        first = values[0]
+        return first if first is not None and all(value == first for value in values) else None
+
+    def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
+        folded: Const | None = None
         match node:
             case Const():
-                new_id = builder.const_node(node)
-                cval[new_id] = node
-            case Operation(operator=operator, operands=operands) if all(remap[operand] in cval for operand in operands):
-                values = [cval[remap[operand]] for operand in operands]
-                folded = operator.fold_constants(values)
-                if folded is None:
-                    new_id = copy_node(builder, node, remap)
-                else:
-                    new_id = builder.const_node(folded)
-                    cval[new_id] = folded
-            case _:
-                new_id = copy_node(builder, node, remap)
-        remap[old_id] = new_id
-    for out in hir.outputs:
-        builder.output(out.name, remap[out.value])
-    copy_state_slots(builder, hir, remap)
-    return builder.finish()
+                folded = node
+            case Operation(operator=operator, operands=operands) if all(remap[op] in cval for op in operands):
+                folded = operator.fold_constants([cval[remap[op]] for op in operands])
+            case Phi(arms=arms):
+                folded = uniform_const_arm(arms, remap)
+        if folded is None:
+            return copy_node(builder, node, remap)
+        new_id = builder.const_node(folded)
+        cval[new_id] = folded
+        return new_id
+
+    return rebuild(hir, build_value)

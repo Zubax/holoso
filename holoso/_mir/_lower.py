@@ -2,6 +2,9 @@
 
 from .._errors import UnsupportedConstruct
 from .._hir import (
+    BoolConst,
+    BoolType as HirBoolType,
+    Branch,
     Const,
     FloatAbs,
     FloatAdd,
@@ -11,16 +14,22 @@ from .._hir import (
     FloatMul,
     FloatMulPow2,
     FloatNeg,
+    FloatRelational,
     Hir,
     InPort,
+    Jump,
     Node,
     Operation,
+    Phi,
+    Ret,
+    reverse_postorder,
     StateRead,
     StateSlot,
+    Terminator,
     ValueId,
 )
 from .._operators import FloatHardwareOperator, OpConfig, FloatSignControl
-from .._type import FloatType as ScalarFloatType
+from .._type import BoolType as ScalarBoolType, FloatType as ScalarFloatType, ScalarType
 from ._ir import Mir, MirBuilder
 
 
@@ -57,16 +66,82 @@ class _LoweringContext:
         self.float_lowerer = _FloatLowerer(self)
 
     def run(self) -> Mir:
-        for old_id in sorted(self.hir.nodes):
-            self._lower_node(old_id, self.hir.nodes[old_id])
+        for _ in self.hir.blocks:
+            self.builder.block()  # preserve block ids 0..n-1
+        # Entry-global pure values first: inputs in signature order, then constants and state reads.
+        self.builder.position_at(self.hir.entry)
+        for vid in self.hir.input_ids:
+            self._lower_node(vid, self.hir.nodes[vid])
+        for vid in sorted(self.hir.nodes):
+            if isinstance(self.hir.nodes[vid], (Const, StateRead)):
+                self._lower_node(vid, self.hir.nodes[vid])
+        # Then each block's phis and operations in reverse-postorder (predecessors first), then its terminator, so
+        # every operand and phi arm is remapped before use even when branches nest.
+        blocks_by_id = {block.id: block for block in self.hir.blocks}
+        deferred: list[ValueId] = []  # loop-header phis whose latch arm is a body value lowered later; closed below
+        for bid in reverse_postorder(self.hir):
+            block = blocks_by_id[bid]
+            self.builder.position_at(bid)
+            for vid in block.phis:
+                self._lower_phi(vid, self.hir.nodes[vid], deferred)
+            for vid in block.operations:
+                self._lower_node(vid, self.hir.nodes[vid])
+            self._seal(block.terminator)
+        for vid in deferred:
+            self._close_phi(vid, self.hir.nodes[vid])
         for out in self.hir.outputs:
             self._lower_output(out.name, out.value)
         for slot in self.hir.state_slots:
             self._lower_state_slot(slot)
         return self.builder.finish()
 
+    def _seal(self, terminator: Terminator) -> None:
+        match terminator:
+            case Jump(target=target):
+                self.builder.jump(target)
+            case Branch(cond=cond, if_true=if_true, if_false=if_false):
+                self.builder.branch(self.remap[cond], if_true, if_false)
+            case Ret():
+                self.builder.ret()
+
+    def _lower_phi(self, old_id: ValueId, node: Node, deferred: list[ValueId]) -> None:
+        # A float arm may carry a folded sign (a branch assigning ``-x`` or ``abs(x)``); the merge install applies it.
+        # A boolean value is never under a negation/abs, so ``_collapse_signs`` gives the identity sign for a bool arm.
+        # A loop-header phi's latch arm is a body value lowered after the header: open the phi with its available arms
+        # now (so the body can reference it) and close it once every block is lowered.
+        assert isinstance(node, Phi)
+        bases = [(pred, _collapse_signs(self.hir.nodes, value)) for pred, value in node.arms]
+        scalar_type = self._phi_scalar_type(node)
+        if all(base in self.remap for _, (base, _) in bases):
+            arms = [(pred, self.remap[base], sign) for pred, (base, sign) in bases]
+            self.remap[old_id] = self.builder.phi(scalar_type, arms)
+        else:
+            known = [(pred, self.remap[base], sign) for pred, (base, sign) in bases if base in self.remap]
+            self.remap[old_id] = self.builder.open_phi(scalar_type, known[0])
+            deferred.append(old_id)
+
+    def _close_phi(self, old_id: ValueId, node: Node) -> None:
+        assert isinstance(node, Phi)
+        arms = [
+            (pred, self.remap[base], sign)
+            for pred, value in node.arms
+            for base, sign in [_collapse_signs(self.hir.nodes, value)]
+        ]
+        self.builder.set_phi_arms(self.remap[old_id], arms)
+
+    def _phi_scalar_type(self, node: Phi) -> ScalarType:
+        match node.type:
+            case HirFloatType():
+                return ScalarFloatType(self.ops.float_format)
+            case HirBoolType():
+                return ScalarBoolType()
+            case _:
+                raise UnsupportedConstruct(f"no MIR lowering rule for phi of type {node.type!r}")
+
     def _lower_node(self, old_id: ValueId, node: Node) -> None:
         if self.float_lowerer.lower_node(old_id, node):
+            return
+        if self._lower_bool_node(old_id, node):
             return
         match node:
             case Const(type=type):
@@ -76,6 +151,27 @@ class _LoweringContext:
             case Operation(operator=operator):
                 raise UnsupportedConstruct(f"no hardware lowering rule for HIR operator {operator.mnemonic!r}")
 
+    def _lower_bool_node(self, old_id: ValueId, node: Node) -> bool:
+        match node:
+            case StateRead(slot=slot, type=HirBoolType()):
+                self.remap[old_id] = self.builder.bool_state_read(slot, ScalarBoolType())
+                return True
+            case BoolConst(value=value):
+                self.remap[old_id] = self.builder.bool_const(value, ScalarBoolType())
+                return True
+            case Operation(operator=FloatRelational(op=relation), operands=(a, b)):
+                base_a, sign_a = _collapse_signs(self.hir.nodes, a)
+                base_b, sign_b = _collapse_signs(self.hir.nodes, b)
+                self.remap[old_id] = self.builder.bool_operation(
+                    self.ops.fcmp,
+                    [self.remap[base_a], self.remap[base_b]],
+                    [sign_a, sign_b],
+                    relation,
+                )
+                return True
+            case _:
+                return False
+
     def _lower_output(self, name: str, value: ValueId) -> None:
         if self.float_lowerer.lower_output(name, value):
             return
@@ -84,7 +180,20 @@ class _LoweringContext:
     def _lower_state_slot(self, slot: StateSlot) -> None:
         if self.float_lowerer.lower_state_slot(slot):
             return
+        if self._lower_bool_state_slot(slot):
+            return
         raise UnsupportedConstruct(f"no MIR lowering rule for HIR state slot {slot.name!r}")
+
+    def _lower_bool_state_slot(self, slot: StateSlot) -> bool:
+        base, sign = _collapse_signs(self.hir.nodes, slot.live_out)
+        if not isinstance(self.hir.nodes[base].type, HirBoolType):
+            return False
+        if sign != FloatSignControl():
+            raise UnsupportedConstruct("a boolean state slot cannot carry a sign control")
+        if not isinstance(slot.reset_value, BoolConst):
+            raise UnsupportedConstruct(f"boolean state slot {slot.name!r} must have a boolean reset value")
+        self.builder.bool_state_slot(slot.name, slot.reset_value.value, self.remap[base])
+        return True
 
 
 class _FloatLowerer:
@@ -161,7 +270,9 @@ class _FloatLowerer:
         base, sign = _collapse_signs(self.context.hir.nodes, slot.live_out)
         if not isinstance(self.context.hir.nodes[base].type, HirFloatType):
             return False
-        self.context.builder.float_state_slot(slot.name, slot.reset_value, self.context.remap[base], sign)
+        if not isinstance(slot.reset_value, FloatConst):
+            raise UnsupportedConstruct(f"floating-point state slot {slot.name!r} must have a float reset value")
+        self.context.builder.float_state_slot(slot.name, slot.reset_value.value, self.context.remap[base], sign)
         return True
 
 

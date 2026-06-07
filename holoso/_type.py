@@ -158,6 +158,15 @@ class FloatType(ScalarType):
         return self.fmt.width
 
 
+@dataclass(frozen=True, slots=True)
+class BoolType(ScalarType):
+    """A single-bit boolean scalar; the storage type of branch conditions and boolean state."""
+
+    @property
+    def width(self) -> int:
+        return 1
+
+
 def _pow2(exp: int) -> Fraction:
     return Fraction(1 << exp, 1) if exp >= 0 else Fraction(1, 1 << -exp)
 

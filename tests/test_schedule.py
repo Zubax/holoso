@@ -7,7 +7,15 @@ from typing import ClassVar
 
 import pytest
 
-from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso import (
+    FAddOperator,
+    FCmpOperator,
+    FDivOperator,
+    FloatFormat,
+    FMulILog2OperatorFamily,
+    FMulOperator,
+    OpConfig,
+)
 from holoso._errors import UnsupportedConstruct
 from holoso._frontend import lower
 from holoso._hir import optimize
@@ -16,6 +24,7 @@ from holoso._lir._schedule import DEPENDENCY_EDGE
 from holoso._mir import (
     lower as lower_to_mir,
     Mir,
+    MirBlock,
     MirBuilder,
     MirFloatConst,
     MirFloatInput,
@@ -24,6 +33,7 @@ from holoso._mir import (
     MirFloatView,
     MirInput,
     MirOperation,
+    MirRet,
 )
 from holoso._operators import FMulILog2Operator, FloatSignControl, HardwareOperator
 from holoso._backend.numerical import generate as build_model
@@ -34,7 +44,7 @@ from holoso._type import FloatType, ScalarSignature, ScalarType
 from ._modelref import default_ops, staged_ops
 
 FMT = FloatFormat(6, 18)
-OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT))
+OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
 
 
 @dataclass(frozen=True)
@@ -441,6 +451,7 @@ def test_build_rejects_mir_with_mixed_float_formats() -> None:
                 FloatSignControl(),
             ),
         },
+        blocks=[MirBlock(0, (), (1,), MirRet())],
         input_ids=[0],
         outputs=[MirFloatOutput("out_0", 1)],
         state_slots=[],
@@ -495,17 +506,19 @@ def test_mir_float_subclasses_validate_float_invariants() -> None:
 def test_float_view_rejects_non_float_mir_before_scheduling() -> None:
     mir = Mir(
         nodes={0: OtherMirInput("a", OtherScalarType())},
+        blocks=[MirBlock(0, (), (), MirRet())],
         input_ids=[0],
         outputs=[MirFloatOutput("out_0", 0)],
         state_slots=[],
     )
-    with pytest.raises(UnsupportedConstruct, match="non-float MIR input"):
+    with pytest.raises(UnsupportedConstruct, match="MIR input"):
         MirFloatView.from_mir(mir)
 
 
 def test_float_view_rejects_non_input_input_id() -> None:
     mir = Mir(
         nodes={0: MirFloatConst(FloatType(FMT), 1.0)},
+        blocks=[MirBlock(0, (), (), MirRet())],
         input_ids=[0],
         outputs=[MirFloatOutput("out_0", 0)],
         state_slots=[],
@@ -517,11 +530,12 @@ def test_float_view_rejects_non_input_input_id() -> None:
 def test_float_view_rejects_missing_input_id() -> None:
     mir = Mir(
         nodes={0: MirFloatConst(FloatType(FMT), 1.0)},
+        blocks=[MirBlock(0, (), (), MirRet())],
         input_ids=[1],
         outputs=[MirFloatOutput("out_0", 0)],
         state_slots=[],
     )
-    with pytest.raises(ValueError, match="does not reference a MIR node"):
+    with pytest.raises(ValueError, match="must reference a MirFloatInput"):
         MirFloatView.from_mir(mir)
 
 
@@ -567,6 +581,7 @@ def test_commutative_port_assignment_never_increases_read_mux_fan_in(monkeypatch
         FMulOperator(FMT, stage_input=1),
         FDivOperator(FMT),
         FMulILog2OperatorFamily(FMT),
+        FCmpOperator(FMT),
     )
     monkeypatch.setattr(build_module, "assign_commutative_ports", lambda *args, **kwargs: {})
     baseline = build(_run(ekf1_stateless.update_x_P, cfg), "ekf1_stateless")

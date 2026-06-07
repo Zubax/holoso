@@ -15,6 +15,11 @@ class FloatType(Type):
 
 
 @dataclass(frozen=True, slots=True)
+class BoolType(Type):
+    """A semantic single-bit boolean: branch conditions, comparison results, and boolean state."""
+
+
+@dataclass(frozen=True, slots=True)
 class Signature:
     """Operand/result types for a semantic HIR operator."""
 

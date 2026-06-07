@@ -148,6 +148,24 @@ def div_float_values(a: FloatValue, b: FloatValue) -> FloatValue:
     return FloatValue.from_bits(fmt, fmt.pack(-value if result_sign else value))
 
 
+def compare_float_values(a: FloatValue, b: FloatValue) -> int:
+    """
+    Exact total-order comparison of two values matching ``zkf_cmp``: -1 if ``a < b``, 0 if equal, +1 if ``a > b``.
+    ZKF has no NaN (the order is total) and no negative zero. Comparison is on exact values, not on a lossy float
+    decode, so it stays bit-exact always.
+    """
+    fmt = _matching_format(a, b)
+
+    def key(value: FloatValue) -> tuple[int, Fraction]:
+        decoded = _decode(value)
+        if decoded.is_inf:  # -inf sorts below every finite value, +inf above; the fraction tier is unused
+            return -1 if decoded.sign else 1, Fraction(0, 1)
+        return 0, _finite_fraction(fmt, decoded)
+
+    ka, kb = key(a), key(b)
+    return (ka > kb) - (ka < kb)
+
+
 def mul_ilog2_float_value(a: FloatValue, k: int) -> FloatValue:
     """Exact ZKF scaling by ``2**k`` matching ``zkf_mul_ilog2_const``."""
     if isinstance(k, bool) or not isinstance(k, int):

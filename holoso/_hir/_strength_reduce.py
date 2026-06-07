@@ -2,9 +2,9 @@
 
 import math
 
-from ._copy import copy_node, copy_state_slots
 from ._const import FloatConst
-from ._ir import Hir, HirBuilder, Operation, ValueId
+from ._copy import copy_node, rebuild
+from ._ir import Hir, HirBuilder, Node, Operation, ValueId
 from ._operators import FloatDiv, FloatMul, FloatMulPow2
 
 
@@ -18,26 +18,22 @@ def _ilog2_exact(c: float) -> int | None:
 
 def run(hir: Hir) -> Hir:
     """Rewrite exact power-of-two scaling and finite constant division before hardware selection."""
-    builder = HirBuilder()
-    remap: dict[ValueId, ValueId] = {}
     cval: dict[ValueId, float] = {}
-    for old_id in sorted(hir.nodes):
-        node = hir.nodes[old_id]
+
+    def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
         match node:
             case FloatConst(value=value):
                 new_id = builder.float_const(value)
                 cval[new_id] = value
+                return new_id
             case Operation(operator=FloatMul(), operands=(a, b)):
-                new_id = _reduce_mul(builder, remap[a], remap[b], cval)
+                return _reduce_mul(builder, remap[a], remap[b], cval)
             case Operation(operator=FloatDiv(), operands=(a, b)):
-                new_id = _reduce_div(builder, remap[a], remap[b], cval)
+                return _reduce_div(builder, remap[a], remap[b], cval)
             case _:
-                new_id = copy_node(builder, node, remap)
-        remap[old_id] = new_id
-    for out in hir.outputs:
-        builder.output(out.name, remap[out.value])
-    copy_state_slots(builder, hir, remap)
-    return builder.finish()
+                return copy_node(builder, node, remap)
+
+    return rebuild(hir, build_value)
 
 
 def _reduce_mul(builder: HirBuilder, a: ValueId, b: ValueId, cval: dict[ValueId, float]) -> ValueId:

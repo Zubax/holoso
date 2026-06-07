@@ -3,8 +3,12 @@ End-to-end cosimulation of every compilable example kernel: each is driven with 
 random sweep, and format edge cases, then checked bit-for-bit against its embedded model under a lean (no optional
 stages) and a deeply pipelined operator configuration at the wide e8m36 datapath.
 
-Excluded examples are frontend feature gaps (not verification scope), confirmed by an in-memory compile probe:
-  - iir1_lpf: ``UnsupportedConstruct: If`` -- the data-dependent first-sample branch is not lowerable.
+``iir1_lpf`` exercises real control flow: a boolean first-sample state and a data-dependent if/else, synthesized
+through the CFG/branch backend (the first sample takes ``y = x``, every later sample the IIR update). ``pi_saturating``
+and ``schmitt_trigger`` exercise float comparisons (``holoso_fcmp``) driving branches: three-way saturation with
+anti-windup, and two-threshold hysteresis (a state held untouched across the deadband).
+
+Still-excluded examples are frontend feature gaps (not verification scope), confirmed by an in-memory compile probe:
   - iir1_hpf: ``UnsupportedConstruct: call to 'float'``.
   - finite_set_current_controller: ``UnsupportedConstruct`` -- nested/foreign attribute access.
 """
@@ -38,6 +42,11 @@ import ekf1_stateful  # noqa: E402
 import ekf1_stateless  # noqa: E402
 import madd  # noqa: E402
 import poly3  # noqa: E402
+from cordic_sincos import CordicSinCos  # noqa: E402
+from iir1_lpf import IIR1LPF  # noqa: E402
+from pi_saturating import SaturatingPI  # noqa: E402
+from recip_newton import NewtonReciprocal  # noqa: E402
+from schmitt_trigger import SchmittTrigger  # noqa: E402
 from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator  # noqa: E402
 
 # The wide scalar datapath; the plan permits synthesizing only this configuration for the example matrix.
@@ -156,6 +165,64 @@ _SPECS = [
             "x": bounded(rng, -2.0, 2.0),
             **_draw_scalars(("c0", "c1", "c2", "c3"), -4.0, 4.0)(rng),
         },
+        edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="iir1_lpf",
+        inputs=("x",),
+        make_kernel=lambda: IIR1LPF().__call__,
+        nominal={"x": 1.0},
+        manual=[  # one continuous stream: the first sample latches y=x, then the IIR settles toward the input
+            *({"x": v} for v in (1.0, 1.0, 1.0, 1.0)),
+            *({"x": v} for v in (5.0, 5.0, 0.0, 0.0)),
+            *({"x": v} for v in (-2.0, 3.0, 0.5, -1.0)),
+        ],
+        draw_random=_draw_scalars(("x",), -4.0, 4.0),
+        edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="pi_saturating",
+        inputs=("setpoint", "measurement"),
+        make_kernel=lambda: SaturatingPI().__call__,
+        nominal={"setpoint": 1.0, "measurement": 0.0},
+        manual=[  # a stream that drives into and out of both saturation rails (each of the three arms is taken)
+            {"setpoint": sp, "measurement": m}
+            for sp, m in [(10.0, 0.0), (10.0, 0.0), (0.0, 0.0), (0.5, 0.0), (-10.0, 0.0), (-10.0, 0.0), (0.0, 0.0)]
+        ],
+        draw_random=_draw_scalars(("setpoint", "measurement"), -6.0, 6.0),
+        edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="schmitt_trigger",
+        inputs=("x",),
+        make_kernel=lambda: SchmittTrigger().__call__,
+        nominal={"x": 0.0},
+        manual=[  # up through HIGH, hold across the deadband, down through LOW, hold, back up (hysteresis)
+            {"x": v} for v in (0.0, 0.5, 1.5, 0.5, -0.5, -1.5, -0.5, 0.5, 2.0)
+        ],
+        draw_random=_draw_scalars(("x",), -3.0, 3.0),
+        edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="recip_newton",
+        inputs=("x",),
+        make_kernel=lambda: NewtonReciprocal().__call__,
+        nominal={"x": 1.0},
+        manual=[{"x": v} for v in (0.5, 0.75, 1.0, 1.3, 1.7, 2.0)],  # across the [0.5, 2.0] reciprocal domain
+        draw_random=_draw_scalars(("x",), 0.5, 2.0),
+        # The Newton iteration only converges on its domain; off-domain x diverges and the back-edge loop never
+        # terminates, so the edge sweep is pinned to the domain (a real loop, unlike the former fixed-count form).
+        protected=frozenset({"x"}),
+        protected_values=(0.5, 0.75, 1.0, 1.5, 2.0),
+        edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="cordic_sincos",
+        inputs=("theta",),
+        make_kernel=lambda: CordicSinCos().__call__,
+        nominal={"theta": 0.5},
+        manual=[{"theta": v} for v in (0.0, 0.3, 0.7, -0.5, 1.0, -1.0)],  # angles within the convergence range
+        draw_random=_draw_scalars(("theta",), -1.4, 1.4),
         edge_values=_WIDE_EDGES,
     ),
     ExampleSpec(

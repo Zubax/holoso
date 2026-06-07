@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .._hir import ValueId
-from .._mir import MirFloatInput, MirFloatOperation, MirFloatStateRead, MirFloatView
+from .._mir import MirFloatConst, MirFloatOperation, MirFloatView
 from .._operators import FloatHardwareOperator, HardwareOperator
 from ._ir import FloatOperatorInstance
 
@@ -42,9 +42,9 @@ def _op_ids(mir: MirFloatView) -> list[ValueId]:
     return list(mir.operation_nodes)
 
 
-def _operator_operands(mir: MirFloatView, vid: ValueId) -> list[ValueId]:
-    """Operand values that are themselves operators; inputs/consts are ready at cycle 1."""
-    return [operand for operand in _operation(mir, vid).operands if operand in mir.operation_nodes]
+def _operator_operands(mir: MirFloatView, vid: ValueId, schedulable: set[ValueId]) -> list[ValueId]:
+    """Operand values scheduled alongside ``vid`` (same block); all other operands are resident at block start."""
+    return [operand for operand in _operation(mir, vid).operands if operand in schedulable]
 
 
 def _present_classes(mir: MirFloatView) -> set[type[HardwareOperator]]:
@@ -65,11 +65,11 @@ def resolve_pool(mir: MirFloatView) -> dict[type[HardwareOperator], int]:
     return pool
 
 
-def _critical_path(mir: MirFloatView, op_ids: list[ValueId]) -> dict[ValueId, int]:
+def _critical_path(mir: MirFloatView, op_ids: list[ValueId], schedulable: set[ValueId]) -> dict[ValueId, int]:
     """Priority height: longest latency-weighted path to a sink, counting DEPENDENCY_EDGE per dependency edge."""
     consumers: dict[ValueId, list[ValueId]] = {vid: [] for vid in op_ids}
     for vid in op_ids:
-        for operand in _operator_operands(mir, vid):
+        for operand in _operator_operands(mir, vid, schedulable):
             consumers[operand].append(vid)
     height: dict[ValueId, int] = {}
     for vid in sorted(op_ids, reverse=True):  # consumers have larger IDs; process them first
@@ -78,13 +78,20 @@ def _critical_path(mir: MirFloatView, op_ids: list[ValueId]) -> dict[ValueId, in
     return height
 
 
-def schedule_ops(mir: MirFloatView, pool: Mapping[type[HardwareOperator], int]) -> Schedule:
-    """Place every selected operation on the earliest cycle its operands are ready and a free instance exists."""
-    op_ids = _op_ids(mir)
+def schedule_ops(
+    mir: MirFloatView, pool: Mapping[type[HardwareOperator], int], schedulable: set[ValueId] | None = None
+) -> Schedule:
+    """
+    Place every operation in ``schedulable`` (one block's ops; all float ops by default) on the earliest cycle its
+    operands are ready and a free instance exists. Operands outside ``schedulable`` are block live-ins resident at the
+    block start (a prior block's drained result, a state read, an input, or a phi); constants are immediates.
+    """
+    op_ids = sorted(schedulable) if schedulable is not None else _op_ids(mir)
     if not op_ids:
         return Schedule(issue_cycle={}, inst_of={}, instances=[], makespan=0)
+    schedulable_set = set(op_ids)
 
-    height = _critical_path(mir, op_ids)
+    height = _critical_path(mir, op_ids, schedulable_set)
     issue_cycle: dict[ValueId, int] = {}
     inst_count: dict[FloatHardwareOperator, int] = {}
     slot_of: dict[ValueId, tuple[FloatHardwareOperator, int]] = {}
@@ -93,17 +100,15 @@ def schedule_ops(mir: MirFloatView, pool: Mapping[type[HardwareOperator], int]) 
         return issue_cycle[vid] + _operation(mir, vid).operator.latency
 
     def is_ready(vid: ValueId, cycle: int) -> bool:
-        # A consumer may read an operator producer only DEPENDENCY_EDGE cycles after it commits (the read-first write
-        # edge plus the write and read latches). An input loads directly into the array at the accept edge and the
-        # fetch lag hides it, so an input-reading op needs only INPUT_DEPENDENCY_EDGE; constants are immediates with no
-        # read-timing constraint.
+        # A consumer may read a same-block operator producer only DEPENDENCY_EDGE cycles after it commits (the
+        # read-first write edge plus the write and read latches). Every other operand -- a state read, an input, a
+        # phi, or a result drained in from a prior block -- is resident at the block start, so it needs only
+        # INPUT_DEPENDENCY_EDGE (the read latch); constants are immediates with no read-timing constraint.
         for operand in _operation(mir, vid).operands:
-            if operand in mir.operation_nodes:
+            if operand in schedulable_set:
                 if operand not in issue_cycle or cycle < commit_cycle(operand) + DEPENDENCY_EDGE:
                     return False
-            elif isinstance(mir.nodes[operand], (MirFloatInput, MirFloatStateRead)) and cycle < INPUT_DEPENDENCY_EDGE:
-                # A state read is already resident in its register (like a preloaded input), so only the read latch
-                # applies; the value carried over from the previous initiation is read through the same path.
+            elif not isinstance(mir.nodes[operand], MirFloatConst) and cycle < INPUT_DEPENDENCY_EDGE:
                 return False
         return True
 

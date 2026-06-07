@@ -7,7 +7,8 @@ which typed storage resources, with which folded sign controls.
 
 from dataclasses import dataclass
 
-from .._operators import FloatHardwareOperator, FloatSignControl, HardwareOperator
+from .._hir import RelationalOp
+from .._operators import FCmpOperator, FloatHardwareOperator, FloatSignControl, HardwareOperator
 from .._type import FloatFormat, FloatType
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
@@ -206,6 +207,137 @@ class FloatStateSlot:
 
 
 @dataclass(frozen=True, slots=True)
+class BoolRegRef:
+    """A read/write of boolean register ``index`` in the 1-bit boolean register bank."""
+
+    index: int
+
+    @property
+    def stable_label(self) -> str:
+        return f"b{self.index}"
+
+
+@dataclass(frozen=True, slots=True)
+class BoolConstRef:
+    """A boolean immediate (``True``/``False``); the bool bank has no constant pool, the value rides inline."""
+
+    value: bool
+
+
+type BoolSource = BoolRegRef | BoolConstRef
+
+
+@dataclass(frozen=True, slots=True)
+class BoolOperand:
+    """A boolean operand: a boolean register read or an immediate True/False."""
+
+    source: BoolSource
+
+
+@dataclass(frozen=True, slots=True)
+class FloatCopy:
+    """
+    A register-to-register move installing a phi arm's value into the merged register at a predecessor's tail: ``dst``
+    takes ``source`` on the block-relative ``issue_cycle``. Used when a phi arm is not an operator result that can be
+    coalesced directly onto the merged register (e.g. an input, a constant, or a value defined in another block).
+    """
+
+    dst: FloatRegRef
+    source: FloatOperand
+    issue_cycle: int
+
+
+@dataclass(frozen=True, slots=True)
+class BoolWrite:
+    """A boolean register install of a phi arm (a bool const or another bool register) on a block-relative cycle."""
+
+    dst: BoolRegRef
+    source: BoolOperand
+    issue_cycle: int
+
+
+@dataclass(frozen=True, slots=True)
+class BoolScheduledOp:
+    """
+    A scheduled float comparator firing in a block: it reads float operands (with folded sign controls), and on
+    ``commit_cycle == issue_cycle + latency`` its one-hot order flags are reduced by ``relation`` into the boolean
+    register ``dst``. All comparisons share one pooled ``holoso_fcmp`` instance: each block holds at most one
+    comparison and blocks are mutually exclusive, so the emitter PC-muxes the single comparator's operands.
+    """
+
+    operator: FCmpOperator
+    operands: list[FloatOperand]
+    dst: BoolRegRef
+    relation: RelationalOp
+    issue_cycle: int
+    latency: int
+
+    @property
+    def commit_cycle(self) -> int:
+        return self.issue_cycle + self.latency
+
+
+@dataclass(frozen=True, slots=True)
+class Jump:
+    """Unconditional control transfer to block ``target``."""
+
+    target: int
+
+
+@dataclass(frozen=True, slots=True)
+class Branch:
+    """Conditional control transfer on boolean register ``cond``."""
+
+    cond: BoolRegRef
+    if_true: int
+    if_false: int
+
+
+@dataclass(frozen=True, slots=True)
+class Ret:
+    """The sole function exit: outputs and persistent state are resident at the block boundary."""
+
+
+type Terminator = Jump | Branch | Ret
+
+
+@dataclass(frozen=True, slots=True)
+class LirBlock:
+    """
+    One basic block of the scheduled microprogram, with block-relative cycles (block start is cycle 0). ``float_ops``,
+    ``float_copies``, and ``bool_writes`` are the block's datapath events; ``terminator`` redirects the fetch PC at the
+    block boundary. ``block_makespan`` is the last commit cycle inside the block (0 if it has no datapath events).
+    """
+
+    index: int
+    float_ops: list[FloatScheduledOp]
+    bool_ops: list[BoolScheduledOp]
+    float_copies: list[FloatCopy]
+    bool_writes: list[BoolWrite]
+    terminator: Terminator
+    block_makespan: int
+
+
+@dataclass(frozen=True, slots=True)
+class BoolStateSlot:
+    """
+    A persistent boolean state register: reset to ``reset_value``, holding the slot's live-in throughout the
+    transaction and installing its live-out (``live_out``, a boolean register or constant) at the boundary, read-first
+    -- so an output or branch that still reads the live-in sees the old value, exactly like a float slot.
+    """
+
+    name: str
+    reg: BoolRegRef
+    reset_value: bool
+    live_out: BoolOperand
+
+    @property
+    def needs_copy(self) -> bool:
+        """False only when the live-out already resides in the slot register (an unwritten slot); else install it."""
+        return not (isinstance(self.live_out.source, BoolRegRef) and self.live_out.source == self.reg)
+
+
+@dataclass(frozen=True, slots=True)
 class RegFileLayout:
     """A typed register file resource."""
 
@@ -213,6 +345,13 @@ class RegFileLayout:
     nrd: int
     nwr: int
     nload: int
+
+
+@dataclass(frozen=True, slots=True)
+class BoolRegFileLayout:
+    """The boolean register bank: ``nreg`` 1-bit registers (branch conditions and boolean state)."""
+
+    nreg: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,12 +396,21 @@ class Lir:
     float_consts: list[float]  # constant pool: index -> value
     float_regfile: FloatRegFileLayout
     float_inputs: list[FloatInputLoad]  # ordered as the function parameters
-    float_ops: list[FloatScheduledOp]  # the pipelined schedule, ordered by (issue_cycle, value ID)
+    float_ops: list[FloatScheduledOp]  # the pipelined schedule, flattened across blocks with ABSOLUTE issue cycles
     float_outputs: list[FloatOutputWire]
     float_state_slots: list[FloatStateSlot]  # persistent registers, ordered as the instance attributes
-    makespan: int  # last commit cycle (0 if no ops); the in_valid->out_valid latency is makespan + 1
+    makespan: int  # last absolute commit cycle (0 if no ops)
     op_count: int
     max_chain_len: int  # longest dependency chain in hardware operators (for verification tolerance)
+    # Control-flow overlay. A straight-line kernel has a single block ending in Ret; ``blocks[0]`` is the entry,
+    # ``block_base[i]`` is block i's absolute start PC, and ``last_pc`` is the out_valid boundary (the single Ret).
+    blocks: list[LirBlock]
+    block_base: list[int]
+    entry: int
+    last_pc: int  # LASTPC: the fetch PC at which out_valid asserts (the single Ret block's boundary)
+    min_initiation_interval: int  # shortest executable path latency; exact for branch-free kernels, else a lower bound
+    bool_regfile: BoolRegFileLayout
+    bool_state_slots: list[BoolStateSlot]  # persistent boolean registers (branch conditions, boolean attributes)
 
     @property
     def ports(self) -> list[Port]:
@@ -295,12 +443,11 @@ class Lir:
     @property
     def present_step(self) -> int:
         """
-        The hardware executing step on which the outputs are valid in the register array (NOT the scheduler-frame cycle
-        ``makespan + 1`` used only to schedule state-slot installs). The last operator commits on the makespan cycle; the
-        write latch delays the write, so the result lands on the next edge and is presented on the executing step
-        ``makespan + 2``.
+        The hardware executing step on which the outputs are valid in the register array: the fetch PC reaches
+        ``last_pc`` (the Ret boundary) and the executing step lags it by FETCH_LAG. For a straight-line kernel this is
+        ``makespan + 2`` (the last commit plus the write latch); for a CFG it is the Ret block's resident step.
         """
-        return self.makespan + 2
+        return self.last_pc - FETCH_LAG
 
     @property
     def cyc_width(self) -> int:
@@ -310,14 +457,11 @@ class Lir:
     @property
     def initiation_interval(self) -> int:
         """
-        Observable in_valid->out_valid latency.
-
-        Cycle 0 accepts and loads the inputs; compute cycles 1..makespan run the schedule. With the write latch the
-        result is presented on the executing step ``present_step``; the executing step lags the fetch PC by FETCH_LAG,
-        so out_valid is asserted FETCH_LAG cycles later: ``present_step + FETCH_LAG``. Zero-op modules still present
-        one accept-relative cycle plus the fixed staging.
+        The out_valid boundary PC (``last_pc``). For a straight-line kernel this equals the observable
+        in_valid->out_valid latency; with branches the per-path latency varies and is reported by the numerical model,
+        while ``min_initiation_interval`` is the statically-known lower bound (exact when branch-free).
         """
-        return boundary_step(self.makespan)
+        return self.last_pc
 
     def result_landing_cycle(self, op: FloatScheduledOp) -> int:
         """
@@ -343,7 +487,17 @@ class Lir:
     @property
     def has_state(self) -> bool:
         """Whether the module retains persistent state across initiations."""
-        return bool(self.float_state_slots)
+        return bool(self.float_state_slots) or bool(self.bool_state_slots)
+
+    @property
+    def is_control_flow(self) -> bool:
+        """
+        Whether this kernel took the control-flow build path (a CFG of blocks and/or a boolean register bank) rather
+        than the straight-line single-block path. The model and the emitter branch on this to select the CFG execution
+        / boundary-install path; both must agree, so the predicate lives here once.
+        TODO FIXME: THIS IS TEMPORARY. The straight-line/single-block path will be merged with CFG eventually.
+        """
+        return len(self.blocks) > 1 or bool(self.bool_state_slots)
 
     @property
     def read_set_per_port(self) -> dict[tuple[FloatOperatorInstance, int], list[int]]:

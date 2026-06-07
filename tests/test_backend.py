@@ -11,6 +11,7 @@ import pytest
 
 from holoso import (
     FAddOperator,
+    FCmpOperator,
     FDivOperator,
     FloatFormat,
     FMulILog2OperatorFamily,
@@ -30,7 +31,9 @@ requires_iverilog = pytest.mark.skipif(shutil.which("iverilog") is None, reason=
 
 
 def _ops(fmt: FloatFormat) -> OpConfig:
-    return OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
+    return OpConfig(
+        FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt), FCmpOperator(fmt)
+    )
 
 
 def _run(target, ops: OpConfig):  # type: ignore[no-untyped-def]
@@ -77,9 +80,27 @@ def test_operator_instance_names_include_hardware_identity() -> None:
 
 
 @requires_iverilog
-def test_streaming_wrapper_requires_latency(tmp_path: Path) -> None:
+def test_comparisons_share_one_pooled_fcmp_instance() -> None:
+    # Comparisons live in mutually-exclusive blocks and execute sequentially, so they share a single holoso_fcmp (the
+    # one-instance-per-operator convention), with the emitter PC-muxing its operands -- not one instance per comparison.
+    def kernel(x):  # type: ignore[no-untyped-def]
+        if x > 1.0:
+            y = x + 1.0
+        elif x < -1.0:
+            y = x - 1.0
+        else:
+            y = x
+        return y
+
+    verilog = generate(build(_run(kernel, _ops(FloatFormat(8, 24))), "two_cmp")).verilog
+    assert verilog.count("holoso_fcmp #") == 1  # one shared comparator for both comparisons, not one each
+
+
+def test_streaming_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
+    # holoso_fcmp defaults LATENCY to 1 + STAGE_INPUT (the only correct value), so an instance need not specify it. An
+    # explicitly wrong LATENCY must be caught by the zkf_cmp register-stage-count guard rather than silently elaborate.
     verilog = """
-module missing_latency;
+module wrong_latency;
     wire clk = 1'b0;
     wire rst = 1'b0;
     wire in_valid = 1'b0;
@@ -90,14 +111,14 @@ module missing_latency;
     wire a_eq_b;
     wire a_lt_b;
 
-    holoso_fcmp #(.WEXP(8), .WMAN(24)) u_cmp (
+    holoso_fcmp #(.WEXP(8), .WMAN(24), .STAGE_INPUT(0), .LATENCY(5)) u_cmp (
         .clk(clk), .rst(rst), .in_valid(in_valid),
         .a_sgnop(2'd0), .b_sgnop(2'd0), .a(a), .b(b),
         .out_valid(out_valid), .a_gt_b(a_gt_b), .a_eq_b(a_eq_b), .a_lt_b(a_lt_b)
     );
 endmodule
 """
-    result = _compile("missing_latency", verilog, tmp_path)
+    result = _compile("wrong_latency", verilog, tmp_path)
     assert result.returncode != 0
     assert "_zkf_invalid_latency_mismatch" in result.stderr
 

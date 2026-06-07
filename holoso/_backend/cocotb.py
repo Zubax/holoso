@@ -46,6 +46,7 @@ _VECTORS = @@VECTORS@@
 _SEED = 0x9E3779B97F4A7C15  # TODO: allow overriding the seed, count, and range via plusargs.
 _DEFAULT_COUNT = 64
 _DEFAULT_RANGE = (-4.0, +4.0)  # small bounded range keeps multi-operation kernels from overflowing into infinities
+_MAX_TRANSACTION_CYCLES = 1 << 20  # out_valid ceiling: well above any real transaction, tripped only by a runaway loop
 
 
 @cocotb.test()
@@ -86,10 +87,18 @@ async def cosim(dut):
         await Timer(1, unit="ns")
         dut.in_valid.value = 0
 
-        # TODO: verify exact latency after branch support makes the model predict per-transaction latency.
+        # TODO: verify exact latency after branch support makes the model predict per-transaction latency. A ceiling
+        # guards against a runaway data-dependent loop (the model already bounds its own iteration count): a divergence
+        # between the converged model and a non-terminating DUT surfaces as a clear failure rather than a hung sim.
+        waited = 0
         while int(dut.out_valid.value) != 1:
             await RisingEdge(dut.clk)
             await Timer(1, unit="ns")
+            waited += 1
+            assert waited < _MAX_TRANSACTION_CYCLES, "vector %d: out_valid not asserted within %d cycles" % (
+                index,
+                _MAX_TRANSACTION_CYCLES,
+            )
         assert int(dut.err_pc.value) == 0, "vector %d: unexpected error at cycle %d" % (index, int(dut.err_pc.value))
 
         # Random back-pressure: hold out_ready low for a stall. out_valid and the outputs must stay stable, and the

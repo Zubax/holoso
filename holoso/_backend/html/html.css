@@ -1,5 +1,5 @@
 @import url('https://fonts.googleapis.com/css2?family=Ubuntu+Mono:wght@400;700&display=swap');
-:root { --c-input: #484; --c-state: #848; --c-live: #ddd; --c-ink: #445; --c-grid: #aaa; --c-hl: #aaa; }
+:root { --c-input: #484; --c-state: #848; --c-live: #ddd; --c-ink: #445; --c-grid: #aaa; --c-hl: #aaa; --c-arrow: #b45309; }
 * { box-sizing: border-box; }
 body { font-family: "Ubuntu Mono", ui-monospace, monospace; margin: 0; background: #ffffff; color: #111827; font-size: 14px; }
 header { padding: 16px 28px; background: #111827; color: #f9fafb; }
@@ -93,6 +93,19 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
 /* Structural hazard: two operations claim one operator stage on one cycle. Impossible under the barrier schedule;
    the red ring is the alarm for a future multiple-issue bug. */
 .grid td.oc.conflict { box-shadow: inset 0 0 0 2px #f00; }
+/* Control-transfer arrows in the right margin (one channel each). The overlay is click-through (pointer-events: none),
+   so re-enable pointing on the arrow strokes alone for the hover tooltip; the channel band is reserved as wrapper
+   padding so the arrows sit outside the table, where there are no grid lines. */
+.edges .jarrow { pointer-events: visiblePainted; }
+.edges .jarrow polyline { stroke: var(--c-arrow); stroke-width: 1.25px; stroke-opacity: 0.9; }
+.edges .jarrow polygon { fill: var(--c-arrow); fill-opacity: 0.9; }
+.edges .jarrow:hover polyline { stroke: #000; stroke-width: 2.25px; stroke-opacity: 1; }
+.edges .jarrow:hover polygon { fill: #000; fill-opacity: 1; }
+/* Dotted feed from the tested boolean register to the arrow root; boldens with the arrow on hover. */
+.edges .jarrow line.jcond { stroke: var(--c-arrow); stroke-width: 1.5px; stroke-opacity: 1.0; stroke-dasharray: 1 2; }
+.edges .jarrow:hover line.jcond { stroke: #000; stroke-width: 2.25px; stroke-opacity: 1.0; }
+.edges .jarrow circle.jcond { fill: var(--c-arrow); }
+.edges .jarrow:hover circle.jcond { fill: #000; }
 .gridkey { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12px; color: var(--c-ink); margin: 0 0 15px; align-items: center; }
 .gridkey .rd, .gridkey .wr { font-size: 11px; }
 .gridkey .sw { display: inline-block; width: 14px; height: 13px; border: 1px solid #cbd5e1; vertical-align: middle; margin-right: 5px; }

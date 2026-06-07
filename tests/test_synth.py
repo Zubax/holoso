@@ -8,7 +8,15 @@ from pathlib import Path
 import pytest
 
 import holoso
-from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso import (
+    FAddOperator,
+    FCmpOperator,
+    FDivOperator,
+    FloatFormat,
+    FMulILog2OperatorFamily,
+    FMulOperator,
+    OpConfig,
+)
 
 
 def _kernel(a, b):  # type: ignore[no-untyped-def]  # module-level so inspect.getsource works
@@ -19,7 +27,9 @@ FMT32 = FloatFormat(8, 24)
 
 
 def _ops(fmt: FloatFormat = FMT32) -> OpConfig:
-    return OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
+    return OpConfig(
+        FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt), FCmpOperator(fmt)
+    )
 
 
 def _has_localparam(verilog: str, name: str, value: int) -> bool:
@@ -31,7 +41,13 @@ def _has_localparam(verilog: str, name: str, value: int) -> bool:
 
 def test_op_config_rejects_mixed_float_formats() -> None:
     fmt24 = FloatFormat(6, 18)
-    ops = OpConfig(FAddOperator(FMT32), FMulOperator(fmt24), FDivOperator(FMT32), FMulILog2OperatorFamily(FMT32))
+    ops = OpConfig(
+        FAddOperator(FMT32),
+        FMulOperator(fmt24),
+        FDivOperator(FMT32),
+        FMulILog2OperatorFamily(FMT32),
+        FCmpOperator(FMT32),
+    )
     with pytest.raises(ValueError, match="same format"):
         _ = ops.float_format
 
@@ -57,6 +73,7 @@ def test_synthesize_threads_pipeline_stages() -> None:
             FMulOperator(FMT32, stage_product=1),
             FDivOperator(FMT32),
             FMulILog2OperatorFamily(FMT32),
+            FCmpOperator(FMT32),
         ),
     )
     # Every STAGE_* is emitted explicitly (defaults as 0), so the instantiation is self-describing and threading is

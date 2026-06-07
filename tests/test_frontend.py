@@ -3,6 +3,7 @@
 import dataclasses
 import math
 import sys
+import textwrap
 import types
 from pathlib import Path
 
@@ -12,7 +13,23 @@ import pytest
 from holoso import MissingIntrinsic, UnsupportedConstruct
 from holoso._frontend import lower
 from holoso._frontend._lower import _port_name
-from holoso._hir import FloatAbs, FloatAdd, FloatDiv, FloatMul, FloatNeg, Operation, StateRead, optimize
+from holoso._hir import (
+    BoolConst,
+    BoolType,
+    Branch,
+    FloatAbs,
+    FloatAdd,
+    FloatConst,
+    FloatDiv,
+    FloatMul,
+    FloatNeg,
+    Jump,
+    Operation,
+    Phi,
+    Ret,
+    StateRead,
+    optimize,
+)
 
 from ._modelref import flatten_value, output_names
 
@@ -121,15 +138,529 @@ def test_ekf1_stateless_structure() -> None:
     assert _arith_count(hir, FloatDiv) == 1  # only x22 = 1 / x21
 
 
-def test_for_loop_is_unsupported() -> None:
+def test_static_for_loop_unrolls() -> None:
     def f(a):  # type: ignore[no-untyped-def]
         x = a
         for _ in range(3):
             x = x + a
         return x
 
-    with pytest.raises(UnsupportedConstruct):
+    hir = lower(f)
+    assert _arith_count(hir, FloatAdd) == 3  # one add per unrolled trip
+
+
+def test_for_loop_counter_is_a_compile_time_constant() -> None:
+    # The counter indexes a constant table and sets a power-of-two shift exponent; both fold per unrolled trip.
+    def f(a):  # type: ignore[no-untyped-def]
+        table = (1.0, 2.0, 4.0)
+        y = a
+        for i in range(3):
+            y = y + table[i] * (2.0**-i)
+        return y
+
+    lower(f)  # lowers without error: table[i] and 2**-i are resolved at compile time for each i
+
+
+def test_dead_arm_attr_write_does_not_block_readonly_fold() -> None:
+    # Regression (Codex): a write to a read-only boolean attribute inside a statically-dead `if False:` arm must not
+    # mark it as assigned -- otherwise the attribute is wrongly treated as runtime and a later guard on it is not
+    # folded, spuriously rejecting a return that the fold would have made unreachable.
+    class DeadFlagGuard:
+        def __init__(self) -> None:
+            self._flag = False
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if self._flag:  # _flag is read-only False -> folds away; the return arm is dead
+                return x
+            if False:
+                self._flag = True  # noqa -- dead arm: must not count as assigning _flag
+            self.y = x
+            return self.y
+
+    hir = lower(DeadFlagGuard().__call__)  # must not raise (the read-only fold removes the return-in-branch)
+    assert [slot.name for slot in hir.state_slots] == ["y"]  # only y is state; _flag stays a read-only constant
+
+
+def test_static_comparison_dead_arm_does_not_block_readonly_fold() -> None:
+    # Regression (Codex): a write under a statically-false COMPARISON guard (not just a literal bool) must not mark the
+    # attribute as assigned -- the read-only scan folds any attribute-free statically-known condition, as lowering does.
+    class StaticCmpDeadFlag:
+        def __init__(self) -> None:
+            self._flag = False
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if 1.0 < 0.0:
+                self._flag = True  # noqa -- dead arm (statically-false comparison): must not assign _flag
+            if self._flag:
+                return x
+            self.y = x
+            return self.y
+
+    hir = lower(StaticCmpDeadFlag().__call__)  # must not raise; _flag stays read-only so the return arm folds away
+    assert [slot.name for slot in hir.state_slots] == ["y"]
+
+
+def test_over_threshold_for_in_statically_dead_arm_is_skipped() -> None:
+    # Regression (Codex): an over-threshold for-loop in a statically-dead branch arm (here the else of a read-only
+    # True attribute guard) is unreachable; the fold removes the dead arm, so the loop is neither unrolled nor rejected.
+    class DeadOverThreshold:
+        def __init__(self) -> None:
+            self.flag = True
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if self.flag:
+                y = x
+            else:
+                for _ in range(1000):  # dead (flag read-only True): not unrolled, not rejected
+                    y = x
+            return y
+
+    hir = lower(DeadOverThreshold().__call__)
+    assert len(hir.blocks) == 1  # the dead else arm and its over-threshold loop are folded away
+
+
+def test_zero_trip_for_write_does_not_mark_attribute_assigned() -> None:
+    # Regression (user): a write inside `for _ in range(0)` never executes, so the read-only scan must not count it as
+    # an assignment -- otherwise a later guard on the attribute becomes a runtime branch and a return in the (actually
+    # dead) arm is wrongly rejected. The scan mirrors the static trip count, as lowering and the state scan do.
+    class ZeroForFlag:
+        def __init__(self) -> None:
+            self._flag = False
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            for _ in range(0):
+                self._flag = True  # noqa -- zero-trip loop: never runs
+            if self._flag:
+                return x
+            self.y = x
+            return self.y
+
+    hir = lower(ZeroForFlag().__call__)
+    assert [slot.name for slot in hir.state_slots] == ["y"]  # _flag stays a read-only constant; only y is state
+
+
+def test_nested_function_scope_does_not_shadow_global() -> None:
+    # Regression (Codex): a name bound in a nested (here dead) def is a separate scope; it must not make the OUTER
+    # function treat that name as local, which would shadow the numpy alias (or a builtin) at an earlier use.
+    def kernel(x):  # type: ignore[no-untyped-def]
+        y = np.asarray([x])
+        return y[0]
+
+        def helper():  # type: ignore[no-untyped-def]  # noqa -- dead nested scope; its ``np`` is not the outer's
+            np = 1
+            return np
+
+    lower(kernel)  # must not raise: the nested ``np`` does not shadow the module-level numpy alias here
+
+
+def test_globally_shadowed_range_is_rejected(tmp_path: Path) -> None:
+    # Regression (Codex): Python resolves a module global before the builtin, so a shadowed `range` is not the
+    # unrollable builtin and must be rejected, not silently unrolled. The frontend needs real source, so the kernel
+    # lives in a temp module that shadows `range` at module scope.
+    import importlib.util
+
+    source = textwrap.dedent("""
+        range = lambda n: [0, 0, 0]
+
+        def kernel(a):
+            y = a
+            for _ in range(3):
+                y = y + 1.0
+            return y
+        """)
+    module_path = tmp_path / "_shadowed_range_mod.py"
+    module_path.write_text(source)
+    spec = importlib.util.spec_from_file_location("_shadowed_range_mod", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with pytest.raises(UnsupportedConstruct, match="range"):
+        lower(module.kernel)
+
+
+def test_constant_boolean_attribute_branch_folds() -> None:
+    # Regression (Codex): a branch on a read-only boolean attribute has a compile-time-known condition; only the taken
+    # arm lowers, so a write in the dead arm does not become spurious persistent state.
+    class Disabled:
+        def __init__(self) -> None:
+            self.flag = False
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if self.flag:
+                self.y = x
+            return self.y
+
+    hir = lower(Disabled().__call__)
+    assert [slot.name for slot in hir.state_slots] == []  # folded: y never written, no state, no branch
+    assert len(hir.blocks) == 1
+
+
+def test_numpy_boolean_attribute_branch_folds() -> None:
+    # Regression (Codex): a read-only np.bool_ attribute must fold like a Python bool (it is exposed as boolean state
+    # elsewhere), so the disabled arm's write does not become spurious state.
+    class NpDisabled:
+        def __init__(self) -> None:
+            self.flag = np.bool_(False)
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if self.flag:
+                self.y = x
+            return self.y
+
+    hir = lower(NpDisabled().__call__)
+    assert [slot.name for slot in hir.state_slots] == []
+    assert len(hir.blocks) == 1
+
+
+def test_static_integer_comparison_branch_folds() -> None:
+    # Regression (Codex): a comparison of static integers (an unrolled loop counter against a bound) is known at
+    # compile time and folds to one arm; a write gated by a statically-false guard must not become spurious state, and
+    # no dynamic branch is emitted (integers are exact in any ZKF format, so the fold matches the comparator).
+    class GuardAlwaysFalse:
+        def __init__(self) -> None:
+            self.x = 0.0
+
+        def __call__(self, v):  # type: ignore[no-untyped-def]
+            for i in range(3):
+                if i > 5:  # never true over range(3): x must not become state
+                    self.x = v
+            return self.x
+
+    folded = lower(GuardAlwaysFalse().__call__)
+    assert [slot.name for slot in folded.state_slots] == []  # statically-dead write, no spurious state
+    assert len(folded.blocks) == 1  # every guard folded, no branch emitted
+
+    class GuardReal:
+        def __init__(self) -> None:
+            self.acc = 0.0
+
+        def __call__(self, v):  # type: ignore[no-untyped-def]
+            for i in range(3):
+                if i > 0:  # true for i in {1, 2}: acc genuinely accumulates
+                    self.acc = self.acc + v
+            return self.acc
+
+    real = lower(GuardReal().__call__)
+    assert [slot.name for slot in real.state_slots] == ["acc"]
+    assert _arith_count(real, FloatAdd) == 2  # one accumulate per folded-true trip (i=1, i=2), none for i=0
+
+
+def test_static_float_comparison_branch_folds() -> None:
+    # Regression (Codex finding 1, fast-math): a comparison of compile-time floats (a literal, a read-only float
+    # attribute, or arithmetic of these) folds to one arm so a guarded write under a statically-false condition does
+    # not become spurious state. Folding is float64 (fast-math, accepted per DESIGN.md); model and RTL follow the same
+    # arm regardless.
+    class ConfigGate:
+        def __init__(self) -> None:
+            self.threshold = 0.0  # read-only config: 0.0 > 1.0 is statically false
+            self.gain = 2.0
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if self.threshold > 1.0:
+                self.y = x
+            if self.gain * 3.0 > 10.0:  # 6.0 > 10.0 is statically false
+                self.y = x
+            return self.y
+
+    folded = lower(ConfigGate().__call__)
+    assert [slot.name for slot in folded.state_slots] == []  # both float guards fold false: no spurious state
+    assert len(folded.blocks) == 1  # no runtime branch emitted
+
+    class ConfigEnabled:
+        def __init__(self) -> None:
+            self.threshold = 5.0
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if self.threshold > 1.0:  # 5.0 > 1.0 statically true: the write is taken
+                self.y = x
+            return self.y
+
+    enabled = lower(ConfigEnabled().__call__)
+    assert [slot.name for slot in enabled.state_slots] == ["y"]
+    assert len(enabled.blocks) == 1
+
+
+def test_dead_assignment_after_return_does_not_suppress_fold() -> None:
+    # Regression (Codex finding 3): the read-only-attribute scan stops at a return (like lowering), so an assignment
+    # in dead code after a return does not mask the attribute's read-only-ness and the branch on it still folds.
+    class DeadAfterReturn:
+        def __init__(self) -> None:
+            self.flag = False
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if self.flag:  # flag is read-only -> folds to the (empty) else arm
+                self.y = x
+            result = self.y
+            return result
+            self.flag = False  # noqa -- dead code: must not count as an assignment of flag
+
+    hir = lower(DeadAfterReturn().__call__)
+    assert [slot.name for slot in hir.state_slots] == []  # folded: y never written, no spurious state
+    assert len(hir.blocks) == 1  # no runtime branch emitted
+
+
+def test_boolean_comparison_operand_is_rejected() -> None:
+    # Regression (Codex): comparing booleans (e.g. `self.flag == True`) must raise a clear UnsupportedConstruct, not an
+    # internal error from feeding a boolean into the float comparator.
+    class BoolCompare:
+        def __init__(self) -> None:
+            self.flag = False
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if self.flag == True:  # noqa: E712 -- exercising the rejection
+                self.y = x
+            return self.y
+
+    with pytest.raises(UnsupportedConstruct, match="floating-point"):
+        lower(BoolCompare().__call__)
+
+
+def test_public_boolean_state_attribute_is_rejected() -> None:
+    # Regression (Codex): a written public boolean attribute would be exposed as a boolean output port (unsupported);
+    # the frontend must reject it clearly up front rather than failing cryptically in MIR lowering.
+    class PublicBool:
+        def __init__(self) -> None:
+            self.flag = False
+            self.y = 0.0
+
+        def __call__(self, a, b):  # type: ignore[no-untyped-def]
+            self.flag = a < b
+            self.y = a
+            return self.y
+
+    with pytest.raises(UnsupportedConstruct, match="public boolean attribute"):
+        lower(PublicBool().__call__)
+
+
+def test_while_loop_lowers_to_back_edge() -> None:
+    # A while loop lowers to preheader -> header(loop phi + exit branch) -> body(back-edge jump) -> exit(ret).
+    def f(a):  # type: ignore[no-untyped-def]
+        x = a
+        while x < 10.0:
+            x = x + 1.0
+        return x
+
+    hir = lower(f)
+    assert len(hir.blocks) == 4
+    header = hir.blocks[1]
+    assert len(header.phis) == 1  # x is the single loop-carried value
+    assert isinstance(header.terminator, Branch)
+    body = hir.blocks[2]
+    assert isinstance(body.terminator, Jump)
+    assert body.terminator.target == header.id and body.id > header.id  # the back-edge to the (lower) header
+
+
+def test_while_loop_with_else_is_unsupported() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        x = a
+        while x < 10.0:
+            x = x + 1.0
+        else:
+            x = x + 100.0
+        return x
+
+    with pytest.raises(UnsupportedConstruct, match="else"):
         lower(f)
+
+
+def test_return_inside_while_is_unsupported() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        x = a
+        while x < 10.0:
+            return x
+        return x
+
+    with pytest.raises(UnsupportedConstruct, match="return"):
+        lower(f)
+
+
+def _helper_with_return_in_while(a):  # type: ignore[no-untyped-def]
+    while a > 0.0:
+        return a
+    return a + 1.0
+
+
+def test_return_inside_inlined_callee_while_is_unsupported() -> None:
+    # Regression (user): a return inside an inlined callee's while body is exempt from _reject_nested_return (the
+    # callee's own return is consumed locally), so _lower_while must reject it on the body's lowered-a-return result --
+    # otherwise the back-edge is emitted and the early return is silently dropped (the model would not reach Ret).
+    def kernel(x):  # type: ignore[no-untyped-def]
+        return _helper_with_return_in_while(x)
+
+    with pytest.raises(UnsupportedConstruct, match="return"):
+        lower(kernel)
+
+
+def test_statically_false_while_is_skipped() -> None:
+    # Regression (Codex): a statically-false while never runs, so its body is not lowered -- no spurious persistent
+    # state from a body write, and a return in the dead body does not reach the single-exit rejection (it is skipped).
+    class DeadWhileWrite:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            while False:
+                self.s = 1.0
+            return x
+
+    hir = lower(DeadWhileWrite().__call__)
+    assert [slot.name for slot in hir.state_slots] == []  # the dead body's write is not state
+    assert [o.name for o in hir.outputs] == ["out_0"]
+    assert len(hir.blocks) == 1  # the loop is skipped, no back-edge emitted
+
+    def dead_while_return(a):  # type: ignore[no-untyped-def]
+        while False:
+            return a
+        return a + 1.0
+
+    lowered = lower(dead_while_return)  # the dead body's return is skipped, not rejected
+    assert _arith_count(lowered, FloatAdd) == 1
+
+
+def test_for_loop_over_unroll_threshold_is_unsupported() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        x = a
+        for _ in range(1000):
+            x = x + a
+        return x
+
+    with pytest.raises(UnsupportedConstruct, match="unroll threshold"):
+        lower(f)
+
+
+def test_enormous_range_is_rejected_not_crashed() -> None:
+    # Regression (Codex F10): a trip count beyond a C ssize_t must be rejected cleanly, not crash with OverflowError
+    # from len(range(...)) (the unroll threshold is checked with a big-integer trip count).
+    def f(a):  # type: ignore[no-untyped-def]
+        x = a
+        for _ in range(100000000000000000000000000000000000000):
+            x = x + a
+        return x
+
+    with pytest.raises(UnsupportedConstruct, match="unroll threshold"):
+        lower(f)
+
+
+def test_range_zero_step_is_rejected() -> None:
+    def f(a):  # type: ignore[no-untyped-def]
+        x = a
+        for _ in range(0, 10, 0):
+            x = x + a
+        return x
+
+    with pytest.raises(UnsupportedConstruct, match="invalid range"):
+        lower(f)
+
+
+def test_divergent_loop_counter_as_static_index_is_rejected() -> None:
+    # A counter left differing by the two branch arms must not leak as a trusted compile-time index: using it to index
+    # a table afterwards is path-dependent and must be rejected, not silently compiled to one arm's value.
+    def f(a):  # type: ignore[no-untyped-def]
+        table = (10.0, 20.0)
+        if a > 0.0:
+            for i in range(1):  # leaves i == 0
+                pass
+        else:
+            for i in range(2):  # leaves i == 1
+                pass
+        return table[i]
+
+    with pytest.raises(UnsupportedConstruct, match="compile-time integer"):
+        lower(f)
+
+
+def test_agreeing_loop_counter_as_static_index_after_branch() -> None:
+    # When both arms leave the same counter value, it stays a usable compile-time index past the merge.
+    def f(a):  # type: ignore[no-untyped-def]
+        table = (10.0, 20.0)
+        if a > 0.0:
+            for i in range(1):
+                pass
+        else:
+            for i in range(1):
+                pass
+        return table[i]
+
+    lower(f)  # both arms leave i == 0, so table[i] resolves at compile time
+
+
+def test_attribute_written_only_in_while_is_not_read_only() -> None:
+    # Regression: the read-only-attribute scan (_collect_assigned) must descend `while` bodies, not just `if`/`for`.
+    # An attribute written only inside a while loop is genuinely runtime-varying state; if the scan misses the write it
+    # is misclassified as read-only and a later branch on it folds against the (stale) reset snapshot -- a SILENT
+    # MISCOMPILATION that takes a fixed arm for every input. Here ``acc`` becomes 3*x at runtime (reset 0.0), so the
+    # guard ``acc > 1.0`` is genuinely dynamic and must emit a real branch, not fold to the reset's (false) arm.
+    class WhileWrittenGuard:
+        def __init__(self) -> None:
+            self.acc = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            c = 3.0
+            while c > 0.0:
+                self.acc = self.acc + x
+                c = c - 1.0
+            if self.acc > 1.0:  # acc is runtime state, NOT the read-only reset 0.0: must stay a real branch
+                r = 100.0
+            else:
+                r = -100.0
+            return r
+
+    hir = lower(WhileWrittenGuard().__call__)
+    assert [slot.name for slot in hir.state_slots] == ["acc"]  # acc is persistent state
+    # The acc-guard must be a real runtime branch (plus the while's own exit branch): two branches, not one folded away.
+    assert sum(1 for b in hir.blocks if isinstance(b.terminator, Branch)) == 2
+
+
+def test_loop_carried_attr_in_statically_dead_arm_does_not_crash() -> None:
+    # Regression: _loop_assigned must be fold-aware, mirroring lowering. When an attribute's only write inside a while
+    # body sits in a statically-dead (constant-folded-away) `if` arm, that write is never reachable, so the attribute
+    # is not persistent state. A fold-unaware scan would still list it as loop-carried and crash _lower_while with a
+    # KeyError opening a header phi for a value that is not loaded as state.
+    class DeadArmCarry:
+        def __init__(self) -> None:
+            self.acc = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            c = 2.0
+            while c > 0.0:
+                if 0.5 > 1.0:  # statically false: the only write of acc is unreachable
+                    self.acc = self.acc + x
+                c = c - 1.0
+            return x
+
+    hir = lower(DeadArmCarry().__call__)
+    assert [slot.name for slot in hir.state_slots] == []  # the dead write makes acc no state at all
+
+
+def test_loop_carried_attr_written_only_in_live_folded_arm() -> None:
+    # Companion to the above: when the live (folded-true) arm carries the only write, the attribute IS state and the
+    # loop lowers without a spurious self-referential header phi for an unwritten value.
+    class LiveArmCarry:
+        def __init__(self) -> None:
+            self.b = 0.5
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            h = 1.0
+            while h > 0.0:
+                if 1.5 <= 2.0:  # statically true: this arm's write is the reachable one
+                    self.b = self.b + x
+                else:
+                    self.b = x  # folded-away arm: must not create a phantom carried value
+                h = h - 1.0
+            return self.b
+
+    hir = lower(LiveArmCarry().__call__)
+    assert [slot.name for slot in hir.state_slots] == ["b"]
 
 
 def test_unknown_global_is_unsupported() -> None:
@@ -164,7 +695,7 @@ def test_stateful_method_state_slots_and_dedup() -> None:
     assert [o.name for o in hir.outputs] == ["state_y"]
     slots = {s.name: s for s in hir.state_slots}
     assert set(slots) == {"y", "_x_prev"}
-    assert slots["y"].reset_value == 0.0 and slots["_x_prev"].reset_value == 0.0
+    assert slots["y"].reset_value.value == 0.0 and slots["_x_prev"].reset_value.value == 0.0
     assert {n.slot for n in hir.nodes.values() if isinstance(n, StateRead)} == {"y", "_x_prev"}
 
 
@@ -261,7 +792,7 @@ def test_stateful_reset_state_is_the_instance_snapshot() -> None:
     integrator = _integrator_class()(k=2**-22)
     integrator.y = 1.5  # type: ignore[attr-defined]
     slots = {s.name: s for s in lower(integrator.__call__).state_slots}
-    assert slots["y"].reset_value == 1.5
+    assert slots["y"].reset_value.value == 1.5
 
 
 def test_init_method_target_is_rejected() -> None:
@@ -516,11 +1047,13 @@ def test_flatten_on_a_scalar_is_rejected() -> None:
         lower(f)
 
 
-def test_negative_boolean_literal_is_rejected() -> None:
+def test_boolean_in_float_arithmetic_is_rejected() -> None:
+    # Boolean literals are supported as values (branch conditions, boolean state), but arithmetic on them is not:
+    # negating a boolean fails the float operator's operand-type check.
     def f():  # type: ignore[no-untyped-def]
         return -True
 
-    with pytest.raises(UnsupportedConstruct, match="boolean"):
+    with pytest.raises((UnsupportedConstruct, ValueError)):
         lower(f)
 
 
@@ -738,7 +1271,7 @@ def test_vector_state_decomposes_to_per_element_slots() -> None:
             self.v = [self.v[0] + a, self.v[1], self.v[2]]
 
     hir = lower(Vec().update)
-    assert {s.name: s.reset_value for s in hir.state_slots} == {"v_0": 1.0, "v_1": 2.0, "v_2": 3.0}
+    assert {s.name: s.reset_value.value for s in hir.state_slots} == {"v_0": 1.0, "v_1": 2.0, "v_2": 3.0}
     assert [o.name for o in hir.outputs] == ["state_v_0", "state_v_1", "state_v_2"]
 
 
@@ -802,3 +1335,69 @@ def test_dataclass_instance_is_stateful() -> None:
     hir = lower(Acc(0.0, [2.0]).step)
     assert {s.name for s in hir.state_slots} == {"total"}  # gain is read-only config, not state
     assert [o.name for o in hir.outputs] == ["state_total"]
+
+
+def test_first_sample_branch_lowers_to_branch_and_phis() -> None:
+    # examples/iir1_lpf.py: a boolean first-sample state and an if/else that both write self.y.
+    class Iir:
+        def __init__(self):  # type: ignore[no-untyped-def]
+            self.alpha = 2**-16
+            self.y = 0.0
+            self._first = True
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if self._first:
+                self._first = False
+                self.y = x
+            else:
+                self.y += self.alpha * (x - self.y)
+            return self.y
+
+    hir = optimize(lower(Iir().__call__))
+    # Four blocks: entry (branch on _first), then, else, merge (ret).
+    assert len(hir.blocks) == 4
+    assert isinstance(hir.blocks[0].terminator, Branch)
+    cond = hir.blocks[0].terminator.cond
+    assert isinstance(hir.nodes[cond], StateRead) and isinstance(hir.nodes[cond].type, BoolType)
+    assert isinstance(hir.blocks[-1].terminator, Ret)
+    merge_phis = [hir.nodes[p] for p in hir.blocks[-1].phis]
+    assert len(merge_phis) == 2 and all(isinstance(p, Phi) for p in merge_phis)
+    slots = {s.name: s for s in hir.state_slots}
+    assert isinstance(slots["_first"].reset_value, BoolConst) and slots["_first"].reset_value.value is True
+    assert isinstance(slots["y"].reset_value, FloatConst) and slots["y"].reset_value.value == 0.0
+    assert [o.name for o in hir.outputs] == ["state_y"]  # return self.y dedups onto the public state port
+
+
+def test_nested_if_lowers_through_optimize() -> None:
+    # Regression: block visitation must be topological -- an inner if's merge feeds the outer merge phi. The conditions
+    # are dynamic comparisons (a read-only boolean attribute would fold to one arm and emit no branch).
+    class C:
+        def __init__(self):  # type: ignore[no-untyped-def]
+            self.y = 0.0
+
+        def __call__(self, x, w):  # type: ignore[no-untyped-def]
+            if x > 0.0:
+                if w > 0.0:
+                    self.y = x
+            return self.y
+
+    hir = optimize(lower(C().__call__))
+    assert any(isinstance(b.terminator, Branch) for b in hir.blocks)
+    assert {s.name for s in hir.state_slots} == {"y"}
+
+
+def test_attribute_written_on_one_arm_becomes_a_phi() -> None:
+    # The update lives in only one arm (anti-windup style); its live-out is a phi against the live-in. The condition is
+    # a dynamic comparison so a real branch is emitted (a read-only boolean attribute would fold the branch away).
+    class Clamp:
+        def __init__(self):  # type: ignore[no-untyped-def]
+            self.acc = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if x > 0.0:
+                self.acc = x
+            return self.acc
+
+    hir = optimize(lower(Clamp().__call__))
+    slots = {s.name: s for s in hir.state_slots}
+    assert isinstance(hir.nodes[slots["acc"].live_out], Phi)  # merged: written value on one path, live-in on the other

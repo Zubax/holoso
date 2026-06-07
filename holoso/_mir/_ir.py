@@ -1,11 +1,13 @@
-"""Selected mid-level IR (MIR): concrete hardware operators with typed scalar sidebands."""
+"""Selected mid-level IR (MIR): concrete hardware operators with typed scalar sidebands, arranged into a CFG."""
 
 from dataclasses import dataclass
 
-from .._hir import ValueId
-from .._operators import FloatHardwareOperator, FloatSignControl, HardwareOperator
+from .._hir import RelationalOp, ValueId
+from .._operators import FCmpOperator, FloatHardwareOperator, FloatSignControl, HardwareOperator
 from .._errors import UnsupportedConstruct
-from .._type import FloatFormat, FloatType, ScalarType
+from .._type import BoolType, FloatFormat, FloatType, ScalarType
+
+type BlockId = int
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +97,67 @@ class MirFloatConst(MirConst):
 
 
 @dataclass(frozen=True, slots=True)
+class MirBoolStateRead(MirStateRead):
+    """A boolean read of a persistent state slot's live-in value."""
+
+    scalar_type: BoolType
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scalar_type, BoolType):
+            raise TypeError(f"MirBoolStateRead scalar_type must be BoolType, got {self.scalar_type!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class MirBoolConst(MirConst):
+    """A boolean constant."""
+
+    scalar_type: BoolType
+    value: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scalar_type, BoolType):
+            raise TypeError(f"MirBoolConst scalar_type must be BoolType, got {self.scalar_type!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class MirPhi:
+    """
+    An SSA merge at a block's entry: one ``(predecessor_block, value, sign)`` arm per incoming edge, of one scalar
+    type. The folded sign control lets a float arm carry a negation/abs (``y = -x`` on one branch) into the merge,
+    applied when the arm value is installed; a boolean arm always carries the identity sign.
+    """
+
+    scalar_type: ScalarType
+    arms: tuple[tuple[BlockId, ValueId, FloatSignControl], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MirBoolOperation:
+    """
+    A selected boolean-producing hardware operation: a float comparator (``FCmpOperator``) reading float operands with
+    folded sign controls, plus the relation that reduces its one-hot order flags to the boolean result. It is scheduled
+    in the float timeline (it reads float registers) but writes the boolean register bank.
+    """
+
+    operator: FCmpOperator
+    operands: list[ValueId]
+    operand_signs: list[FloatSignControl]
+    relation: RelationalOp
+
+    def __post_init__(self) -> None:
+        if len(self.operands) != self.operator.arity:
+            raise ValueError(
+                f"{self.operator.mnemonic} expects {self.operator.arity} operands, got {len(self.operands)}"
+            )
+        if len(self.operand_signs) != len(self.operands):
+            raise ValueError("operand_signs must match operands one-to-one")
+
+    @property
+    def scalar_type(self) -> BoolType:
+        return BoolType()
+
+
+@dataclass(frozen=True, slots=True)
 class MirFloatOperation(MirOperation):
     """A selected floating-point hardware-operator use with folded sign controls."""
 
@@ -130,8 +193,9 @@ class MirFloatOperation(MirOperation):
         return scalar_type
 
 
-type MirNode = MirInput | MirStateRead | MirConst | MirOperation
-type MirFloatNode = MirFloatInput | MirFloatStateRead | MirFloatConst | MirFloatOperation
+type MirNode = MirInput | MirStateRead | MirConst | MirOperation | MirPhi | MirBoolOperation
+type MirFloatNode = MirFloatInput | MirFloatStateRead | MirFloatConst | MirFloatOperation | MirPhi
+type MirBoolNode = MirBoolStateRead | MirBoolConst | MirPhi | MirBoolOperation
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,20 +221,70 @@ class MirFloatStateSlot(MirStateSlot):
 
 
 @dataclass(frozen=True, slots=True)
+class MirBoolStateSlot(MirStateSlot):
+    """A boolean persistent state slot. ``reset_value`` is the boolean snapshot; the live-out has no sign control."""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reset_value, bool):
+            raise TypeError(f"MirBoolStateSlot reset_value must be bool, got {self.reset_value!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class MirJump:
+    """Unconditional control transfer to ``target``."""
+
+    target: BlockId
+
+
+@dataclass(frozen=True, slots=True)
+class MirBranch:
+    """Conditional control transfer on a boolean value ``cond``."""
+
+    cond: ValueId
+    if_true: BlockId
+    if_false: BlockId
+
+
+@dataclass(frozen=True, slots=True)
+class MirRet:
+    """The sole function exit: commit state-writes and outputs."""
+
+
+type MirTerminator = MirJump | MirBranch | MirRet
+
+
+@dataclass(frozen=True, slots=True)
+class MirBlock:
+    """One basic block: entry phis, straight-line operations in evaluation order, and a terminator."""
+
+    id: BlockId
+    phis: tuple[ValueId, ...]
+    operations: tuple[ValueId, ...]
+    terminator: MirTerminator
+
+
+@dataclass(frozen=True, slots=True)
 class Mir:
-    """A single-block selected graph ready for scheduling."""
+    """A selected graph arranged into a CFG of basic blocks (``blocks[0]`` is the entry), ready for scheduling."""
 
     nodes: dict[ValueId, MirNode]
+    blocks: list[MirBlock]
     input_ids: list[ValueId]
     outputs: list[MirOutput]
     state_slots: list[MirStateSlot]
 
+    @property
+    def entry(self) -> BlockId:
+        return self.blocks[0].id
+
 
 @dataclass(frozen=True, slots=True)
 class MirFloatView:
-    """A MIR graph narrowed once to the float-only resource family implemented by LIR today."""
+    """The float resource family narrowed out of a MIR graph, carrying the shared CFG so scheduling runs per block."""
 
     nodes: dict[ValueId, MirFloatNode]
+    blocks: list[MirBlock]
+    entry: BlockId
     input_ids: list[ValueId]
     outputs: list[MirFloatOutput]
     state_slots: list[MirFloatStateSlot]
@@ -178,12 +292,7 @@ class MirFloatView:
 
     @property
     def input_nodes(self) -> dict[ValueId, MirFloatInput]:
-        result: dict[ValueId, MirFloatInput] = {}
-        for vid in self.input_ids:
-            node = self.nodes[vid]
-            if isinstance(node, MirFloatInput):
-                result[vid] = node
-        return result
+        return {vid: node for vid in self.input_ids if isinstance(node := self.nodes[vid], MirFloatInput)}
 
     @property
     def state_read_nodes(self) -> dict[ValueId, MirFloatStateRead]:
@@ -196,6 +305,14 @@ class MirFloatView:
     @property
     def operation_nodes(self) -> dict[ValueId, MirFloatOperation]:
         return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirFloatOperation)}
+
+    @property
+    def phi_nodes(self) -> dict[ValueId, MirPhi]:
+        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirPhi)}
+
+    def block_operations(self, block: MirBlock) -> list[ValueId]:
+        """The float operation ids defined in ``block``, in evaluation order."""
+        return [vid for vid in block.operations if isinstance(self.nodes.get(vid), MirFloatOperation)]
 
     @classmethod
     def from_mir(cls, mir: Mir) -> "MirFloatView":
@@ -215,35 +332,35 @@ class MirFloatView:
                 case MirFloatOperation(scalar_type=scalar_type):
                     nodes[vid] = node
                     formats.add(scalar_type.fmt)
+                case MirPhi(scalar_type=FloatType() as scalar_type):
+                    nodes[vid] = node
+                    formats.add(scalar_type.fmt)
+                case MirBoolStateRead() | MirBoolConst() | MirBoolOperation() | MirPhi():
+                    pass  # the bool resource family, handled separately by MirBoolView
                 case MirInput():
-                    raise UnsupportedConstruct(f"LIR construction does not support non-float MIR input {vid}")
+                    raise UnsupportedConstruct(f"LIR construction does not support MIR input {vid} of this type")
                 case MirStateRead():
-                    raise UnsupportedConstruct(f"LIR construction does not support non-float MIR state read {vid}")
+                    raise UnsupportedConstruct(f"LIR construction does not support MIR state read {vid} of this type")
                 case MirConst():
-                    raise UnsupportedConstruct(f"LIR construction does not support non-float MIR constant {vid}")
+                    raise UnsupportedConstruct(f"LIR construction does not support MIR constant {vid} of this type")
                 case MirOperation():
-                    raise UnsupportedConstruct(f"LIR construction does not support non-float MIR operation {vid}")
+                    raise UnsupportedConstruct(f"LIR construction does not support MIR operation {vid} of this type")
         outputs: list[MirFloatOutput] = []
         for out in mir.outputs:
             if not isinstance(out, MirFloatOutput):
                 raise UnsupportedConstruct(f"LIR construction does not support non-float MIR output {out.name!r}")
             outputs.append(out)
-        state_slots: list[MirFloatStateSlot] = []
-        for slot in mir.state_slots:
-            if not isinstance(slot, MirFloatStateSlot):
-                raise UnsupportedConstruct(f"LIR construction does not support non-float MIR state slot {slot.name!r}")
-            state_slots.append(slot)
+        state_slots = [slot for slot in mir.state_slots if isinstance(slot, MirFloatStateSlot)]
         for vid in mir.input_ids:
-            input_node = nodes.get(vid)
-            if input_node is None:
-                raise ValueError(f"MIR input ID {vid} does not reference a MIR node")
-            if not isinstance(input_node, MirFloatInput):
-                raise ValueError(f"MIR input ID {vid} must reference a MirFloatInput, got {input_node!r}")
+            if not isinstance(nodes.get(vid), MirFloatInput):
+                raise ValueError(f"MIR input ID {vid} must reference a MirFloatInput")
         if len(formats) != 1:
             ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
             raise ValueError(f"LIR requires exactly one floating-point format; got {ordered or 'none'}")
         return cls(
             nodes=nodes,
+            blocks=mir.blocks,
+            entry=mir.entry,
             input_ids=list(mir.input_ids),
             outputs=outputs,
             state_slots=state_slots,
@@ -251,19 +368,118 @@ class MirFloatView:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class MirBoolView:
+    """
+    The boolean resource family narrowed out of a MIR graph: bool state reads, constants, and phis, plus the bool
+    state slots and the shared CFG. In this slice the bool family carries no operators (only storage).
+    """
+
+    nodes: dict[ValueId, MirBoolNode]
+    blocks: list[MirBlock]
+    entry: BlockId
+    state_slots: list[MirBoolStateSlot]
+
+    @property
+    def state_read_nodes(self) -> dict[ValueId, MirBoolStateRead]:
+        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirBoolStateRead)}
+
+    @property
+    def const_nodes(self) -> dict[ValueId, MirBoolConst]:
+        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirBoolConst)}
+
+    @property
+    def phi_nodes(self) -> dict[ValueId, MirPhi]:
+        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirPhi)}
+
+    @property
+    def operation_nodes(self) -> dict[ValueId, MirBoolOperation]:
+        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirBoolOperation)}
+
+    def block_operations(self, block: MirBlock) -> list[ValueId]:
+        """The boolean operation ids (comparators) defined in ``block``, in evaluation order."""
+        return [vid for vid in block.operations if isinstance(self.nodes.get(vid), MirBoolOperation)]
+
+    @classmethod
+    def from_mir(cls, mir: Mir) -> "MirBoolView":
+        nodes: dict[ValueId, MirBoolNode] = {}
+        for vid, node in mir.nodes.items():
+            if isinstance(node, (MirBoolStateRead, MirBoolConst, MirBoolOperation)):
+                nodes[vid] = node
+            elif isinstance(node, MirPhi) and isinstance(node.scalar_type, BoolType):
+                nodes[vid] = node
+        state_slots = [slot for slot in mir.state_slots if isinstance(slot, MirBoolStateSlot)]
+        return cls(nodes=nodes, blocks=mir.blocks, entry=mir.entry, state_slots=state_slots)
+
+
+@dataclass
+class _MirBlockUC:
+    phis: list[ValueId]
+    operations: list[ValueId]
+    terminator: MirTerminator | None
+
+
 class MirBuilder:
-    """Builds a selected graph, preserving structural CSE for constants and selected operations."""
+    """
+    Builds a selected CFG. The first :meth:`block` is the entry. Inputs, constants, and state reads are entry-global
+    (constants and state reads interned); operations are interned within their block; phis are never interned. A block
+    is sealed by :meth:`jump` / :meth:`branch` / :meth:`ret`.
+    """
 
     def __init__(self) -> None:
         self._nodes: dict[ValueId, MirNode] = {}
-        self._intern: dict[object, ValueId] = {}
+        self._global_intern: dict[object, ValueId] = {}
+        self._block_intern: dict[object, ValueId] = {}
+        self._blocks: list[_MirBlockUC] = []
+        self._cur: BlockId | None = None
         self._input_ids: list[ValueId] = []
         self._outputs: list[MirOutput] = []
         self._state_slots: list[MirStateSlot] = []
 
+    # -- block management ------------------------------------------------------------------------------------------
+
+    def block(self) -> BlockId:
+        bid = len(self._blocks)
+        self._blocks.append(_MirBlockUC(phis=[], operations=[], terminator=None))
+        if self._cur is None:
+            self._cur = bid
+        return bid
+
+    def position_at(self, block: BlockId) -> None:
+        self._cur = block
+
+    @property
+    def current_block(self) -> BlockId:
+        if self._cur is None:
+            raise RuntimeError("no current block; call block() first")
+        return self._cur
+
+    def set_terminator(self, block: BlockId, terminator: MirTerminator) -> None:
+        self._blocks[block].terminator = terminator
+
+    def jump(self, target: BlockId) -> None:
+        self.set_terminator(self.current_block, MirJump(target))
+
+    def branch(self, cond: ValueId, if_true: BlockId, if_false: BlockId) -> None:
+        if not isinstance(self._type_of(cond), BoolType):
+            raise ValueError("a MIR branch condition must be a boolean value")
+        self.set_terminator(self.current_block, MirBranch(cond, if_true, if_false))
+
+    def ret(self) -> None:
+        self.set_terminator(self.current_block, MirRet())
+
+    # -- value construction ----------------------------------------------------------------------------------------
+
     def _fresh(self, node: MirNode) -> ValueId:
         vid = len(self._nodes)
         self._nodes[vid] = node
+        return vid
+
+    def _global(self, key: object, node: MirNode) -> ValueId:
+        vid = self._global_intern.get(key)
+        if vid is None:
+            vid = self._fresh(node)
+            self._global_intern[key] = vid
         return vid
 
     def _type_of(self, vid: ValueId) -> ScalarType:
@@ -275,6 +491,10 @@ class MirBuilder:
                 return scalar_type
             case MirConst(scalar_type=scalar_type):
                 return scalar_type
+            case MirPhi(scalar_type=scalar_type):
+                return scalar_type
+            case MirBoolOperation():
+                return BoolType()
             case MirOperation() as operation:
                 return operation.scalar_type
         raise TypeError(f"MIR node {vid} has no scalar type")
@@ -285,15 +505,20 @@ class MirBuilder:
         return vid
 
     def float_state_read(self, name: str, scalar_type: FloatType) -> ValueId:
-        return self._fresh(MirFloatStateRead(name, scalar_type))
+        return self._global(("float_state_read", name), MirFloatStateRead(name, scalar_type))
+
+    def bool_state_read(self, name: str, scalar_type: BoolType) -> ValueId:
+        return self._global(("bool_state_read", name), MirBoolStateRead(name, scalar_type))
 
     def float_const(self, value: float, scalar_type: FloatType) -> ValueId:
-        key = ("float_const", float(value), scalar_type)
-        vid = self._intern.get(key)
-        if vid is None:
-            vid = self._fresh(MirFloatConst(scalar_type=scalar_type, value=float(value)))
-            self._intern[key] = vid
-        return vid
+        return self._global(
+            ("float_const", float(value), scalar_type), MirFloatConst(scalar_type=scalar_type, value=float(value))
+        )
+
+    def bool_const(self, value: bool, scalar_type: BoolType) -> ValueId:
+        return self._global(
+            ("bool_const", bool(value), scalar_type), MirBoolConst(scalar_type=scalar_type, value=bool(value))
+        )
 
     def float_operation(
         self,
@@ -313,8 +538,8 @@ class MirBuilder:
                     f"operator {operator.mnemonic} expects operands of {signature.operand_types}, "
                     f"got {tuple(self._type_of(operand) for operand in operands)}"
                 )
-        key = (operator, tuple(operands), tuple(operand_signs), result_sign)
-        vid = self._intern.get(key)
+        key = (self.current_block, operator, tuple(operands), tuple(operand_signs), result_sign)
+        vid = self._block_intern.get(key)
         if vid is None:
             vid = self._fresh(
                 MirFloatOperation(
@@ -324,7 +549,44 @@ class MirBuilder:
                     result_sign=result_sign,
                 )
             )
-            self._intern[key] = vid
+            self._block_intern[key] = vid
+            self._blocks[self.current_block].operations.append(vid)
+        return vid
+
+    def phi(self, scalar_type: ScalarType, arms: list[tuple[BlockId, ValueId, FloatSignControl]]) -> ValueId:
+        vid = self._fresh(MirPhi(scalar_type=scalar_type, arms=tuple(arms)))
+        self._blocks[self.current_block].phis.append(vid)
+        return vid
+
+    def open_phi(self, scalar_type: ScalarType, entry_arm: tuple[BlockId, ValueId, FloatSignControl]) -> ValueId:
+        """Create a loop-header phi with only its entry arm; the latch arm is supplied later by set_phi_arms (the back
+        edge references a body value defined after the header in the lowering order)."""
+        return self.phi(scalar_type, [entry_arm])
+
+    def set_phi_arms(self, phi: ValueId, arms: list[tuple[BlockId, ValueId, FloatSignControl]]) -> None:
+        """Replace a phi's arms (closes a loop-header phi opened by open_phi once the latch value is lowered)."""
+        node = self._nodes[phi]
+        if not isinstance(node, MirPhi):
+            raise ValueError(f"value {phi} is not a phi")
+        self._nodes[phi] = MirPhi(scalar_type=node.scalar_type, arms=tuple(arms))
+
+    def bool_operation(
+        self,
+        operator: FCmpOperator,
+        operands: list[ValueId],
+        operand_signs: list[FloatSignControl],
+        relation: RelationalOp,
+    ) -> ValueId:
+        for operand in operands:
+            if not isinstance(self._type_of(operand), FloatType):
+                raise ValueError(f"{operator.mnemonic} expects floating-point operands")
+        node = MirBoolOperation(operator, list(operands), list(operand_signs), relation)
+        key = (self.current_block, "bool_op", operator, tuple(operands), tuple(operand_signs), relation)
+        vid = self._block_intern.get(key)
+        if vid is None:
+            vid = self._fresh(node)
+            self._block_intern[key] = vid
+            self._blocks[self.current_block].operations.append(vid)
         return vid
 
     def float_output(self, name: str, value: ValueId, sign: FloatSignControl = FloatSignControl()) -> None:
@@ -343,9 +605,22 @@ class MirBuilder:
             raise ValueError(f"float state slot {name!r} must hold a floating-point value")
         self._state_slots.append(MirFloatStateSlot(name, float(reset_value), live_out, sign))
 
+    def bool_state_slot(self, name: str, reset_value: bool, live_out: ValueId) -> None:
+        if not isinstance(self._type_of(live_out), BoolType):
+            raise ValueError(f"bool state slot {name!r} must hold a boolean value")
+        self._state_slots.append(MirBoolStateSlot(name, bool(reset_value), live_out))
+
     def finish(self) -> Mir:
+        if not self._blocks:
+            raise RuntimeError("cannot finish a MIR with no blocks")
+        blocks: list[MirBlock] = []
+        for bid, ub in enumerate(self._blocks):
+            if ub.terminator is None:
+                raise RuntimeError(f"MIR block {bid} was not sealed with a terminator")
+            blocks.append(MirBlock(bid, tuple(ub.phis), tuple(ub.operations), ub.terminator))
         return Mir(
             nodes=dict(self._nodes),
+            blocks=blocks,
             input_ids=list(self._input_ids),
             outputs=list(self._outputs),
             state_slots=list(self._state_slots),
