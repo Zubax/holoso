@@ -1,34 +1,8 @@
 """Lower optimized HIR to selected MIR."""
 
 from .._errors import UnsupportedConstruct
-from .._hir import (
-    BoolConst,
-    BoolType as HirBoolType,
-    Branch,
-    Const,
-    FloatAbs,
-    FloatAdd,
-    FloatConst,
-    FloatDiv,
-    FloatType as HirFloatType,
-    FloatMul,
-    FloatMulPow2,
-    FloatNeg,
-    FloatRelational,
-    Hir,
-    InPort,
-    Jump,
-    Node,
-    Operation,
-    Phi,
-    Ret,
-    reverse_postorder,
-    StateRead,
-    StateSlot,
-    Terminator,
-    ValueId,
-)
-from .._operators import FloatHardwareOperator, OpConfig, FloatSignControl
+from .._hir import *
+from .._operators import *
 from .._type import BoolType as ScalarBoolType, FloatType as ScalarFloatType, ScalarType
 from ._ir import Mir, MirBuilder
 
@@ -162,15 +136,37 @@ class _LoweringContext:
             case Operation(operator=FloatRelational(op=relation), operands=(a, b)):
                 base_a, sign_a = _collapse_signs(self.hir.nodes, a)
                 base_b, sign_b = _collapse_signs(self.hir.nodes, b)
-                self.remap[old_id] = self.builder.bool_operation(
-                    self.ops.fcmp,
+                self.remap[old_id] = self.builder.operation(
+                    FComparisonOperator(self.ops.fcmp, relation),
                     [self.remap[base_a], self.remap[base_b]],
                     [sign_a, sign_b],
-                    relation,
+                )
+                return True
+            case Operation(operator=BoolAnd(), operands=(a, b)):
+                self._lower_bool_logic(old_id, BoolAndOperator(), [a, b])
+                return True
+            case Operation(operator=BoolOr(), operands=(a, b)):
+                self._lower_bool_logic(old_id, BoolOrOperator(), [a, b])
+                return True
+            case Operation(operator=BoolNot(), operands=(a,)):
+                self._lower_bool_logic(old_id, BoolNotOperator(), [a])
+                return True
+            case Operation(operator=FloatToBool(), operands=(a,)):
+                # ``bool(x)`` reads a float operand (its sign is irrelevant: the exponent test is sign-invariant) and
+                # writes the boolean bank, like the comparison but with an inline exponent reduction in place of fcmp.
+                base, sign = _collapse_signs(self.hir.nodes, a)
+                self.remap[old_id] = self.builder.operation(
+                    FloatToBoolOperator(self.ops.float_format), [self.remap[base]], [sign]
                 )
                 return True
             case _:
                 return False
+
+    def _lower_bool_logic(self, old_id: ValueId, operator: HardwareOperator, operands: list[ValueId]) -> None:
+        # Boolean operands carry no sign control (booleans have no sign); they are remapped directly.
+        self.remap[old_id] = self.builder.operation(
+            operator, [self.remap[operand] for operand in operands], [FloatSignControl() for _ in operands]
+        )
 
     def _lower_output(self, name: str, value: ValueId) -> None:
         if self.float_lowerer.lower_output(name, value):
@@ -236,13 +232,19 @@ class _FloatLowerer:
                 return self._lower_binary_float(self.context.ops.fdiv, a, b)
             case Operation(operator=FloatMulPow2(k=k), operands=(a,)):
                 return self._lower_float_mul_pow2(a, k)
+            case Operation(operator=BoolToFloat(), operands=(a,)):
+                # ``float(cond)`` is a float-result combinational op reading a boolean operand (no sign control on a
+                # boolean): the one operator that crosses from the boolean bank into the float bank.
+                return self.context.builder.operation(
+                    BoolToFloatOperator(self.context.ops.float_format), [self.context.remap[a]], [FloatSignControl()]
+                )
             case _:
                 return None
 
     def _lower_binary_float(self, operator: FloatHardwareOperator, a: ValueId, b: ValueId) -> ValueId:
         base_a, sign_a = _collapse_signs(self.context.hir.nodes, a)
         base_b, sign_b = _collapse_signs(self.context.hir.nodes, b)
-        return self.context.builder.float_operation(
+        return self.context.builder.operation(
             operator,
             [self.context.remap[base_a], self.context.remap[base_b]],
             [sign_a, sign_b],
@@ -257,7 +259,7 @@ class _FloatLowerer:
             # lies outside the format's representable range, so the constant would overflow to a (rejected) infinity or
             # underflow to zero -- the fallback multiply would be degenerate, so there is nothing useful to fall back to.
             raise UnsupportedConstruct(f"unsupported power-of-two float scale 2**{k}: {exc}") from exc
-        return self.context.builder.float_operation(operator, [self.context.remap[base]], [sign])
+        return self.context.builder.operation(operator, [self.context.remap[base]], [sign])
 
     def lower_output(self, name: str, value: ValueId) -> bool:
         base, sign = _collapse_signs(self.context.hir.nodes, value)

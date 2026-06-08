@@ -6,25 +6,8 @@ import json
 from dataclasses import dataclass
 from importlib import resources
 
-from ..._lir import (
-    FETCH_LAG,
-    BoolRegRef,
-    BoolScheduledOp,
-    BoolSource,
-    Branch,
-    boundary_step,
-    copy_step_cycle,
-    FloatConstRef,
-    FloatOperand,
-    FloatRegRef,
-    FloatScheduledOp,
-    Jump,
-    landing_cycle,
-    Lir,
-    OperatorInstance,
-    read_latch_cycle,
-)
-from ..._operators import HardwareOperator
+from ..._lir import *
+from ..._operators import FComparisonOperator, HardwareOperator
 
 # Interactive layer; ``__DATA__`` is replaced by the per-module payload in ``_sched_script``.
 _SCHED_JS = resources.files(__package__).joinpath("html.js").read_text(encoding="utf-8")
@@ -75,12 +58,13 @@ def render_schedule(lir: Lir) -> str:
         stage_thick={n_stage - 1} if n_stage else set(),
     )
 
-    # Residence tint for both register banks: the float liveness comes from the LIR; the boolean liveness is derived
-    # here (the LIR has no equivalent) by the same def/use-interval method, then merged into one column-keyed map.
+    # Residence tint for both register banks, from the LIR's complete liveness (each accounts for the combinational
+    # ops -- comparisons, boolean logic, and the float<->bool casts -- as well as arithmetic, state, and branches),
+    # merged into one column-keyed map.
     live: dict[ColKey, set[int]] = {}
     for freg, frows in lir.float_liveness.items():
         live[freg] = frows
-    for breg, brows in _bool_liveness(lir).items():
+    for breg, brows in lir.bool_liveness.items():
         live[breg] = brows
     edges: list[tuple[str, str, str, int]] = []  # (commit id, operand id, color, operation group) for the overlay
     # Operator pipeline occupancy: instance ``inst`` is in stage ``k`` on cycle ``issue + k``. Keyed to the operation
@@ -135,9 +119,12 @@ def render_schedule(lir: Lir) -> str:
     comparator_inst = {inst.operator: inst for inst in _comparator_instances(lir)}
     for block in lir.blocks:
         base_pc = lir.block_base[block.index]
-        for bop in block.bool_ops:
-            inst = comparator_inst[bop.operator]
-            color = operator_colors[type(bop.operator)]
+        for bop in block.comb_ops:
+            operator = bop.operator
+            if not isinstance(operator, FComparisonOperator):
+                continue  # boolean logic and casts render in the next loop; only comparisons drive the pooled comparator
+            inst = comparator_inst[operator.comparator]
+            color = operator_colors[type(operator.comparator)]
             issue = base_pc + bop.issue_cycle
             read_cyc = read_latch_cycle(issue)
             write_cyc = landing_cycle(base_pc + bop.commit_cycle)
@@ -148,8 +135,9 @@ def render_schedule(lir: Lir) -> str:
             fills[(write_cyc, dcol)] = color
             endpoints.add((dord, write_cyc))
             cell_group[(dord, write_cyc)] = group
-            for operand in bop.operands:
-                oord = col_ord[operand.source]
+            for cmp_operand in bop.operands:
+                assert isinstance(cmp_operand, FloatOperand)  # comparison operands are float
+                oord = col_ord[cmp_operand.source]
                 endpoints.add((oord, read_cyc))
                 edges.append((f"g{dord}_{write_cyc}", f"g{oord}_{read_cyc}", color, group))
             chips_at.setdefault(write_cyc, []).append(
@@ -161,7 +149,42 @@ def render_schedule(lir: Lir) -> str:
                 if key in stage_fill and stage_fill[key][1] != group:
                     conflicts.add(key)
                 stage_fill[key] = (color, group)
-                stage_tip[key] = f"{bop.operator.mnemonic}_{inst.index} s{k}: {tip}"
+                stage_tip[key] = f"{operator.comparator.mnemonic}_{inst.index} s{k}: {tip}"
+            group += 1
+
+    # Boolean logic (and/or/not) and the float<->bool casts: latency-1 combinational ops with no pooled operator
+    # instance, so no pipeline-stage trail. Each commits a register -- a boolean one for logic and the float->bool cast,
+    # a float one for the bool->float cast -- so it renders like the comparison commit minus the stage trail: a colored
+    # result cell on the landing cycle, a write marker, dataflow edges from its operands (float or boolean, read a
+    # read-latch cycle before it issues; a boolean-constant operand has no source cell, hence no edge), and an ops chip,
+    # all in one hover group.
+    for block in lir.blocks:
+        base_pc = lir.block_base[block.index]
+        for bop in block.comb_ops:
+            if isinstance(bop.operator, FComparisonOperator):
+                continue  # comparisons are rendered above, with their pooled-comparator pipeline trail
+            color = operator_colors[type(bop.operator)]
+            read_cyc = read_latch_cycle(base_pc + bop.issue_cycle)
+            write_cyc = landing_cycle(base_pc + bop.commit_cycle)  # the result is readable on the landing cycle
+            tip = _esc(_comb_op_text(bop))
+            dcol = bop.dst
+            dord = col_ord[dcol]
+            writes_at[(write_cyc, dcol)] = (
+                writes_at.get((write_cyc, dcol), "") + f"<span class='wl' title='{tip}'>&#9656;</span>"
+            )
+            fills[(write_cyc, dcol)] = color
+            endpoints.add((dord, write_cyc))
+            cell_group[(dord, write_cyc)] = group
+            for comb_operand in bop.operands:
+                ocol = _comb_operand_col(comb_operand)
+                if ocol is None:
+                    continue  # a boolean-constant operand has no column / no source cell
+                oord = col_ord[ocol]
+                endpoints.add((oord, read_cyc))
+                edges.append((f"g{dord}_{write_cyc}", f"g{oord}_{read_cyc}", color, group))
+            chips_at.setdefault(write_cyc, []).append(
+                f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
+            )
             group += 1
 
     # Boolean phi/state installs: a block writes a boolean register (a constant or another boolean register) at its
@@ -225,19 +248,22 @@ def render_schedule(lir: Lir) -> str:
     if nreg:
         out.append(
             f"<th class='gband{_border_suffix(nreg - 1, dv.data_thin, dv.data_thick)}' colspan='{nreg}'>"
-            "<span>float</span></th>"
+            "<span title='float'>float</span></th>"
         )
     if nbreg:
         out.append(
             f"<th class='gband{_border_suffix(nreg + nbreg - 1, dv.data_thin, dv.data_thick)}' "
-            f"colspan='{nbreg}'><span>bool</span></th>"
+            f"colspan='{nbreg}'><span title='bool'>bool</span></th>"
         )
     if nconst:
         const_seam = _border_suffix(nreg + nbreg + nconst - 1, dv.data_thin, dv.data_thick)
-        out.append(f"<th class='gband{const_seam}' colspan='{nconst}'><span>constants</span></th>")
+        out.append(f"<th class='gband{const_seam}' colspan='{nconst}'><span title='constants'>constants</span></th>")
     if n_stage:
         seam = _border_suffix(n_stage - 1, dv.stage_thin, dv.stage_thick)
-        out.append(f"<th class='gband{seam}' colspan='{n_stage}'><span>operator pipelines</span></th>")
+        out.append(
+            f"<th class='gband{seam}' colspan='{n_stage}'>"
+            f"<span title='operator pipelines'>operator pipelines</span></th>"
+        )
     out.append("<th class='oph' rowspan='3'>operations</th>")
     out.append("<th class='oph pch' rowspan='3'>pc</th></tr>")
     # Header row 1: register and constant column labels, and one group cell per operator spanning its stages. A register
@@ -416,8 +442,10 @@ def _comparator_instances(lir: Lir) -> list[OperatorInstance]:
     """
     instances: dict[HardwareOperator, OperatorInstance] = {}
     for block in lir.blocks:
-        for op in block.bool_ops:
-            instances.setdefault(op.operator, OperatorInstance(op.operator, len(instances)))
+        for op in block.comb_ops:
+            operator = op.operator
+            if isinstance(operator, FComparisonOperator):  # all relations share one physical comparator instance
+                instances.setdefault(operator.comparator, OperatorInstance(operator.comparator, len(instances)))
     return list(instances.values())
 
 
@@ -429,15 +457,41 @@ def _bool_source_label(source: BoolSource) -> str:
     return source.stable_label if isinstance(source, BoolRegRef) else repr(source.value)
 
 
-def _comparison_expr(op: BoolScheduledOp) -> str:
+def _comparison_expr(op: CombScheduledOp) -> str:
     """The bare relational expression ``<a> <relation> <b>`` (with operand sign decoration), no destination prefix."""
-    a, b = (_operand_label(operand) for operand in op.operands)
-    return f"{a} {_RELATION_SYMBOL.get(op.relation.value, op.relation.value)} {b}"
+    assert isinstance(op.operator, FComparisonOperator)
+    relation = op.operator.relation
+    labels: list[str] = []
+    for operand in op.operands:
+        assert isinstance(operand, FloatOperand)  # comparison operands are float
+        labels.append(_operand_label(operand))
+    a, b = labels
+    return f"{a} {_RELATION_SYMBOL.get(relation.value, relation.value)} {b}"
 
 
-def _bool_op_text(op: BoolScheduledOp) -> str:
+def _bool_op_text(op: CombScheduledOp) -> str:
     """The comparison's expression for its chip/tooltip: ``b<dst> = <a> <relation> <b>`` with operand sign decoration."""
     return f"{op.dst.stable_label} = {_comparison_expr(op)}"
+
+
+def _comb_operand_col(operand: FloatOperand | BoolOperand) -> ColKey | None:
+    """The grid column a combinational op operand reads, or None for a boolean constant (it occupies no column)."""
+    source = operand.source
+    return None if isinstance(source, BoolConstRef) else source
+
+
+def _comb_operand_label(operand: FloatOperand | BoolOperand) -> str:
+    """A combinational op operand's display label: a float operand's sign-decorated column, a boolean register's ``bX``
+    column label, or an inline ``True``/``False`` for a boolean constant."""
+    if isinstance(operand, FloatOperand):
+        return _operand_label(operand)
+    source = operand.source
+    return _col_label(source) if isinstance(source, BoolRegRef) else repr(source.value)
+
+
+def _comb_op_text(op: CombScheduledOp) -> str:
+    """The expression for a non-comparison combinational op's chip/tooltip: ``<dst> = <operator>(<operands>)``."""
+    return f"{_col_label(op.dst)} = {op.operator.render(*[_comb_operand_label(o) for o in op.operands])}"
 
 
 def _stage_columns(lir: Lir) -> list[tuple[OperatorInstance, int]]:
@@ -502,56 +556,6 @@ def _live_intervals(rows: set[int]) -> list[list[int]]:
         else:
             intervals.append([value, value])
     return intervals
-
-
-def _bool_liveness(lir: Lir) -> dict[BoolRegRef, set[int]]:
-    """
-    The residence tint for the boolean register bank, derived here because the LIR has no ``bool_liveness`` and the
-    constraint is to add no field. It mirrors :attr:`Lir.float_liveness` in the executing-step frame: a boolean register
-    is defined when a comparison commits its result (``landing_cycle`` of the rebased commit), when a boolean phi/state
-    install lands (the rebased copy step), and -- for a persistent slot -- at the live-in resident from cycle 1; it is
-    used where a branch reads its condition (the terminator's boundary row) and at the boundary, where a slot's live-out
-    must reside for the next initiation (and its source is read, read-first). Each def-interval extends to its last use
-    before the next def, exactly as the float liveness does.
-    """
-    present = lir.initiation_interval
-    defs: dict[BoolRegRef, list[int]] = {}
-    uses: dict[BoolRegRef, list[int]] = {}
-    for slot in lir.bool_state_slots:
-        defs.setdefault(slot.reg, []).append(1)  # the live-in is resident in the slot register from the start
-        uses.setdefault(slot.reg, []).append(present)  # ...and the live-out must reside there through the boundary
-        if slot.needs_copy:
-            defs.setdefault(slot.reg, []).append(present)  # the new live-out lands at the boundary (read-first)
-            if isinstance(slot.live_out.source, BoolRegRef):
-                uses.setdefault(slot.live_out.source, []).append(present)  # its source is read at the boundary
-    for block in lir.blocks:
-        base_pc = lir.block_base[block.index]
-        for bop in block.bool_ops:
-            defs.setdefault(bop.dst, []).append(landing_cycle(base_pc + bop.commit_cycle))
-        for bwrite in block.bool_writes:
-            defs.setdefault(bwrite.dst, []).append(base_pc + copy_step_cycle(bwrite.issue_cycle))
-            if isinstance(bwrite.source.source, BoolRegRef):
-                uses.setdefault(bwrite.source.source, []).append(base_pc + copy_step_cycle(bwrite.issue_cycle))
-        if isinstance(block.terminator, Branch):  # the branch reads its condition at the block's boundary row
-            read = base_pc + boundary_step(block.block_makespan) + FETCH_LAG
-            uses.setdefault(block.terminator.cond, []).append(read)
-    return {reg: _residence_rows(defs.get(reg, []), uses.get(reg, []), present) for reg in defs.keys() | uses.keys()}
-
-
-def _residence_rows(defs: list[int], uses: list[int], present: int) -> set[int]:
-    """
-    Collapse a register's defs/uses into the set of live rows by the read-first rule shared with ``Lir.float_liveness``:
-    each def's value resides from its landing through the last use that still returns it (the last use no later than the
-    next def, since a read on the next def's cycle is read-first and still sees the old value), the boundary at latest.
-    """
-    writes = sorted(defs)
-    reads = sorted(uses)
-    rows: set[int] = set()
-    for i, start in enumerate(writes):
-        nxt = writes[i + 1] if i + 1 < len(writes) else present + 1
-        last = max((use for use in reads if start <= use <= nxt), default=start)
-        rows.update(range(start, last + 1))
-    return rows
 
 
 @dataclass(frozen=True, slots=True)
@@ -774,11 +778,16 @@ def _key_item(marker: str, text: str) -> str:
 
 
 def _operator_colors(lir: Lir) -> dict[type[HardwareOperator], str]:
-    kinds = sorted(
-        {type(inst.operator) for inst in _all_instances(lir)},
-        key=lambda kind: (kind.mnemonic, kind.__module__, kind.__qualname__),
-    )
-    return dict(zip(kinds, _html_palette(len(kinds)), strict=True))
+    # Instance-backed operators (float arithmetic and the pooled comparator) plus the instance-free combinational
+    # operators -- boolean logic and the float<->bool casts -- so every operator the schedule renders has a color. A
+    # comparison is colored by its FCmpOperator instance, so it is not added here.
+    kinds = {type(inst.operator) for inst in _all_instances(lir)}
+    for block in lir.blocks:
+        for bop in block.comb_ops:
+            if not isinstance(bop.operator, FComparisonOperator):
+                kinds.add(type(bop.operator))
+    ordered = sorted(kinds, key=lambda kind: (kind.mnemonic, kind.__module__, kind.__qualname__))
+    return dict(zip(ordered, _html_palette(len(ordered)), strict=True))
 
 
 def _html_palette(n: int, lightness: float = 0.2, saturation: float = 1.0, hue_start: float = 0.0) -> list[str]:

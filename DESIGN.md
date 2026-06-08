@@ -176,10 +176,11 @@ phi([(pred_block, value)])        # SSA merge
 
 # pure semantic operations (generic; selected into concrete hardware by a later pass)
 operation(operator, operands)      # float_add, float_mul, float_div, float_neg, float_abs, float_mul_pow2, ...
-relational(op, a, b) -> bool      # lt, le, eq, ...
-boolean(op, ...)     -> bool      # and, or, not, xor
-select(cond, a, b)                # DATA mux (not control flow)
-cast(a, to_ty)                    # bool <-> float
+relational(op, a, b) -> bool      # lt, le, eq, ...  (implemented; chained a<b<c desugars to band of the links)
+boolean(op, ...)     -> bool      # and, or, not  (implemented as combinational bool ops; xor not yet)
+cast(a, to_ty)                    # bool(x) / float(cond)  (implemented as combinational float<->bool casts)
+select(cond, a, b)                # DATA mux (not control flow); a future if-conversion of a ternary -- today a
+                                  # conditional expression x if c else y lowers to branch + typed phi (taken arm only)
 intrinsic(kind, args)             # sqrt, sincos, exp, ...   -> operator module, else hard error
 
 # sinks
@@ -230,19 +231,41 @@ on only one arm carries its live-in on the other). This CFG is carried through M
 float view and a boolean view sharing the block skeleton), scheduled and register-allocated per block, and lowered to
 RTL (branch microcode) and to the numerical model.
 
-Boolean values come from boolean state reads, boolean constants, and float comparisons. A comparison `a <relation> b`
-lowers to one float comparator operation (`FCmpOperator`, a latency-bearing hardware operator that reads two float
-registers and writes a boolean register). The comparator is relation-agnostic -- it produces the three one-hot order
-flags and one instance serves every relation, so the specific `lt`/`le`/... reduction rides on the scheduled boolean
-operation. The comparator is scheduled in the float timeline (it reads float registers); the numerical model evaluates
-it from the bit-exact float order (not a lossy float decode).
-In RTL all comparisons share one pooled `holoso_fcmp`, by the one-instance-per-operator convention. Each block holds
-at most one comparison (its branch condition) and blocks are mutually exclusive, so the comparisons execute
-sequentially and the comparator pipeline never holds two at once; a combinational mux keyed on the fetch PC presents
-the active comparison's (sign-conditioned) operands and pulses `in_valid` at its PC. The one-hot order flags reduce
-combinationally per each comparison's relation, and the result is latched into its boolean register one comparator
-latency later (a pc-gated write), in time for the terminating branch. The comparison-driven examples (`pi_saturating`,
-`schmitt_trigger`) synthesize and cosimulate bit-exactly like `iir1_lpf`.
+Boolean values come from boolean state reads, boolean constants, float comparisons, boolean logic, and float->bool
+casts; a bool->float cast crosses back the other way. These are one MIR/LIR operation node (`MirOperation` /
+`CombScheduledOp`), keyed on the operator's signature -- the node belongs to the resource family of its result type
+(float or bool) and its operands may reference either bank -- so the comparison, the logic gates, and both casts are
+all instances of one uniform combinational-operation category rather than special cases. Each is latency-1
+register-resident: it reads its register operand(s), applies inline combinational logic, and its result lands one
+cycle later, exactly like a comparison.
+
+  - A comparison `a <relation> b` reduces the shared comparator's three one-hot order flags by the relation, so one
+    physical `holoso_fcmp` serves every relation (pooling keys on the bare comparator, never on the relation).
+  - Boolean logic `and`/`or`/`not` are plain combinational `& | ~` (no module): `a and b` is `band(a, b)`, etc.;
+    both operands always evaluate (the operands here are pure booleans). A chained comparison `a < b < c` desugars to
+    `band(a < b, b < c)` with each operand evaluated once; a statically-known connective operand folds away.
+  - `bool(x)` is the float->bool cast: true iff the ZKF exponent field is nonzero (= `x != 0.0`, sign-agnostic).
+    `float(cond)` is the bool->float cast: ZKF `1.0`/`0.0`. Both are pc-gated combinational writebacks that invoke the
+    two functions in the shared `holoso_support.vh` (`` `include``d by the generated module), not modules and not inline
+    logic. Functions keep the "two `always @*` blocks only" discipline while confining the ZKF bit layout to that one
+    header, so the generated module's datapath carries no float-format assumption; the functions and the bit-exact
+    model share the same definition (cross-checked at build time).
+
+A conditional (ternary) expression `x if c else y` lowers to a `branch` on `c` plus a typed `phi` merging the two arm
+values -- only the taken arm computes -- exactly like an `if` statement lifted into expression position; a
+compile-time-known test selects one arm with no branch.
+
+Scheduling is one cross-bank, dependency-aware pass per block over float arithmetic and every combinational op
+together, with no barrier: a comparison or cast issues as soon as its own operands have landed, so a cross-domain
+chain (e.g. `float(x > 0) * k`: a float comparison feeding a bool->float cast feeding a float multiply) schedules
+correctly. Instance-backed float arithmetic binds a pooled physical instance; the combinational ops bind none. The
+single shared comparator serializes to one comparison per cycle (each gets a distinct in_valid PC); the boolean logic
+and casts are independent inline gates with no such contention. The numerical model evaluates the whole block in one
+commit-sorted pass so a float op reading a cast result reads it after it is written. A comparison/logic/float->bool
+result latches into a boolean register at a pc-gated write; a bool->float result latches into a float register one
+cycle later (the float write-latch + read-first edge), in time for a downstream float operator. The
+comparison/connective/cast examples (`pid`, `schmitt_trigger`, `signal_window`, `remainder`) synthesize and cosimulate
+bit-exactly like `iir1_lpf`.
 
 A `for <name> in range(...)` loop over a static trip count fully unrolls (below an unroll threshold): the counter is a
 compile-time integer, not a runtime register, so each trip lowers the body once with the counter bound -- as a static
@@ -373,11 +396,18 @@ bits exactly but does not yet predict the actual per-transaction cycle latency (
 checks output bits at the out_valid handshake).
 
 Compile-time-known branch conditions fold to a single arm so the other is never lowered (no spurious state from an
-unreachable write): a literal, a read-only boolean attribute, and a comparison whose operands are both compile-time
-floats (a literal, an unrolled loop counter, a read-only attribute, or `+`/`-`/`*` arithmetic of these). The
+unreachable write): a literal, a read-only boolean attribute, a comparison whose operands are both compile-time floats
+(a literal, an unrolled loop counter, a read-only attribute, or `+`/`-`/`*` arithmetic of these), and the connective /
+cast / ternary forms over these (`X or True`, `X and False`, equal-arm ternaries, `float(<cond>)` comparisons). The
 comparison fold is fast-math (float64), exactly as the constant folder evaluates a relational of constants, accepted
-per the fast-math policy above; the model and the RTL follow the same folded arm, so they agree regardless. A
-comparison with any runtime operand stays a real branch resolved by the hardware comparator.
+per the fast-math policy above; the model and the RTL follow the same folded arm, so they agree regardless. A condition
+with any runtime operand stays a real branch resolved by the hardware comparator. This reachability fold is one shared
+predicate across lowering and the attribute/loop scans (so they agree on which arms exist), but it is an AST-level
+approximation deliberately narrower than the (complete) HIR constant folder: a constant condition buried under a shape
+it does not inspect stays a runtime branch -- at worst leaving an unused state register or rejecting a return under a
+contrived tautology, never a miscompile. Unifying it with the complete folder (lower unconditionally, then fold
+constant branches in HIR) is tracked future work, unblocked once Phase-2 early returns let the return-placement check
+move after constant folding.
 
 ### DEFERRED
 

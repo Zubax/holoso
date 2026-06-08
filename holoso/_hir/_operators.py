@@ -17,9 +17,20 @@ def _float_signature(arity: int) -> Signature:
     return Signature((ty,) * arity, ty)
 
 
+def _bool_signature(arity: int) -> Signature:
+    ty = BoolType()
+    return Signature((ty,) * arity, ty)
+
+
 def _float_const(const: Const) -> FloatConst:
     if not isinstance(const, FloatConst):
         raise TypeError(f"expected FloatConst, got {const!r}")
+    return const
+
+
+def _bool_const(const: Const) -> BoolConst:
+    if not isinstance(const, BoolConst):
+        raise TypeError(f"expected BoolConst, got {const!r}")
     return const
 
 
@@ -41,6 +52,21 @@ class Operator(ABC):
     @abstractmethod
     def fold_constants(self, operands: list[Const]) -> Const | None:
         """Return the folded constant node, or ``None`` if this operation should not be constant-folded."""
+
+    def absorbing(self) -> Const | None:
+        """
+        The constant operand that forces the result to that constant regardless of the others (the absorbing element):
+        ``True`` for ``or``, ``False`` for ``and``. None if the operator has no absorbing element. The constant folder
+        uses it to fold a partially-constant expression like ``x or True`` to a constant.
+        """
+        return None
+
+    def identity(self) -> Const | None:
+        """
+        The constant operand that leaves the result equal to the other operand (the identity element): ``False`` for
+        ``or``, ``True`` for ``and``. None if the operator has none. The constant folder drops it (``x and True`` -> x).
+        """
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,3 +189,93 @@ class FloatRelational(Operator):
     def fold_constants(self, operands: list[Const]) -> Const:
         a, b = [_float_const(operand) for operand in operands]
         return BoolConst(_RELATIONAL_FN[self.op](a.value, b.value))
+
+
+@dataclass(frozen=True, slots=True)
+class BoolAnd(Operator):
+    """A boolean conjunction ``a and b`` (both operands genuine booleans)."""
+
+    mnemonic: ClassVar[str] = "band"
+
+    @property
+    def signature(self) -> Signature:
+        return _bool_signature(2)
+
+    def fold_constants(self, operands: list[Const]) -> Const:
+        a, b = [_bool_const(operand) for operand in operands]
+        return BoolConst(a.value and b.value)
+
+    def absorbing(self) -> Const:
+        return BoolConst(False)  # x and False == False
+
+    def identity(self) -> Const:
+        return BoolConst(True)  # x and True == x
+
+
+@dataclass(frozen=True, slots=True)
+class BoolOr(Operator):
+    """A boolean disjunction ``a or b`` (both operands genuine booleans)."""
+
+    mnemonic: ClassVar[str] = "bor"
+
+    @property
+    def signature(self) -> Signature:
+        return _bool_signature(2)
+
+    def fold_constants(self, operands: list[Const]) -> Const:
+        a, b = [_bool_const(operand) for operand in operands]
+        return BoolConst(a.value or b.value)
+
+    def absorbing(self) -> Const:
+        return BoolConst(True)  # x or True == True
+
+    def identity(self) -> Const:
+        return BoolConst(False)  # x or False == x
+
+
+@dataclass(frozen=True, slots=True)
+class BoolNot(Operator):
+    """A boolean negation ``not a``."""
+
+    mnemonic: ClassVar[str] = "bnot"
+
+    @property
+    def signature(self) -> Signature:
+        return _bool_signature(1)
+
+    def fold_constants(self, operands: list[Const]) -> Const:
+        (a,) = [_bool_const(operand) for operand in operands]
+        return BoolConst(not a.value)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatToBool(Operator):
+    """A scalar cast ``bool(x)``: a float is truthy iff it is nonzero (the ZKF exponent-nonzero test)."""
+
+    mnemonic: ClassVar[str] = "float_to_bool"
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((FloatType(),), BoolType())
+
+    def fold_constants(self, operands: list[Const]) -> None:
+        # Deliberately NOT folded at the (format-agnostic) HIR level: ``bool(c)`` is the ZKF exponent-nonzero test on
+        # the constant *encoded into the configured float format*, so a magnitude too small to represent (which encodes
+        # to zero) is False. A raw float64 ``c != 0.0`` here would disagree; the cast is evaluated by the hardware
+        # operator instead, where the format is known.
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class BoolToFloat(Operator):
+    """A scalar cast ``float(cond)``: ``1.0`` when the boolean is true, ``0.0`` when false."""
+
+    mnemonic: ClassVar[str] = "bool_to_float"
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((BoolType(),), FloatType())
+
+    def fold_constants(self, operands: list[Const]) -> Const:
+        (a,) = [_bool_const(operand) for operand in operands]
+        return FloatConst(1.0 if a.value else 0.0)

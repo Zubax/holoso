@@ -20,6 +20,10 @@ from ._ir import (
     ValueId as ValueId,
 )
 from ._operators import (
+    BoolAnd as BoolAnd,
+    BoolNot as BoolNot,
+    BoolOr as BoolOr,
+    BoolToFloat as BoolToFloat,
     FloatAbs as FloatAbs,
     FloatAdd as FloatAdd,
     FloatDiv as FloatDiv,
@@ -27,6 +31,7 @@ from ._operators import (
     FloatMulPow2 as FloatMulPow2,
     FloatNeg as FloatNeg,
     FloatRelational as FloatRelational,
+    FloatToBool as FloatToBool,
     Operator as Operator,
     RelationalOp as RelationalOp,
 )

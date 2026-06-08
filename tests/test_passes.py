@@ -19,6 +19,10 @@ from holoso import (
 from holoso._errors import UnsupportedConstruct
 from holoso._frontend import lower
 from holoso._hir import (
+    BoolAnd,
+    BoolConst,
+    BoolOr,
+    BoolType,
     Const,
     FloatAdd,
     FloatConst,
@@ -334,3 +338,25 @@ def test_deep_cfg_does_not_overflow_recursion() -> None:
     model = build_model(build(_run(_deep_cfg_kernel), "deep"))
     for x in (0.5, 2.0, 8.0):  # acc stays positive -> +900 every time; 0.5/2.0/8.0 are exact in ZKF
         assert float(model(x)[0]) == _deep_cfg_kernel(x)
+
+
+def test_const_fold_handles_absorbing_and_identity_boolean_connectives() -> None:
+    # Regression (user): the constant folder must fold every constant expression, including a partially-constant
+    # connective via its absorbing element (``x or True`` -> True, ``x and False`` -> False), and must drop the
+    # identity element (``x or False`` -> x, ``x and True`` -> x), which is what collapses the residual ``and`` a
+    # chained comparison leaves once a statically-true link folds.
+    builder = HirBuilder()
+    builder.block()
+    x = builder.input("x", BoolType())  # a dynamic boolean operand
+    true_, false_ = builder.bool_const(True), builder.bool_const(False)
+    builder.output("or_abs", builder.operation(BoolOr(), [x, true_]))
+    builder.output("and_abs", builder.operation(BoolAnd(), [x, false_]))
+    builder.output("or_id", builder.operation(BoolOr(), [x, false_]))
+    builder.output("and_id", builder.operation(BoolAnd(), [x, true_]))
+    builder.ret()
+    folded = fold_constants(builder.finish())
+    out = {o.name: folded.nodes[o.value] for o in folded.outputs}
+    assert out["or_abs"] == BoolConst(True)  # x or True  -> True   (absorbing)
+    assert out["and_abs"] == BoolConst(False)  # x and False -> False  (absorbing)
+    assert isinstance(out["or_id"], InPort) and out["or_id"].name == "x"  # x or False -> x  (identity dropped)
+    assert isinstance(out["and_id"], InPort) and out["and_id"].name == "x"  # x and True -> x  (identity dropped)

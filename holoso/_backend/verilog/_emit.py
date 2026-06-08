@@ -24,57 +24,13 @@ from importlib import resources
 from textwrap import dedent
 
 from ..._hir import RelationalOp
-from ..._lir import (
-    boundary_step,
-    BoolConstRef,
-    BoolOperand,
-    BoolScheduledOp,
-    BoolWrite,
-    Branch,
-    copy_step_cycle,
-    ControlPort,
-    DataInputPort,
-    DataOutputPort,
-    Direction,
-    FETCH_LAG,
-    FETCH_STAGES,
-    FloatConstRef,
-    FloatCopy,
-    FloatRegRef,
-    Jump,
-    Lir,
-    LirBlock,
-    FloatOperatorInstance,
-    FloatScheduledOp,
-    FloatStateSlot,
-    Port,
-    Ret,
-)
-from ..._operators import FloatSignControl
-from ._microcode import (
-    PORT_LETTERS,
-    Field,
-    base_name,
-    build_microcode,
-    code_width,
-    cycle_summary,
-    f_cidx,
-    f_iv,
-    f_osgn,
-    f_rd,
-    f_selc,
-    f_we,
-    f_wa,
-    f_ysgn,
-    finalize_fields,
-    pack,
-    port_const_map,
-    read_ports,
-    write_target_lists,
-)
+from ..._lir import *
+from ..._operators import *
+from ._microcode import *
 
 _SUPPORT_FILES = {
-    name: resources.files(__package__).joinpath(name).read_text(encoding="utf-8") for name in ("holoso_support.v",)
+    name: resources.files(__package__).joinpath(name).read_text(encoding="utf-8")
+    for name in ("holoso_support.v", "holoso_support.vh")
 }
 
 
@@ -179,9 +135,97 @@ def _fcmp_label(block_index: int, position: int) -> str:
     return f"{block_index}_{position}"
 
 
-def _fcmp_in_valid_pc(lir: Lir, block_index: int, op: BoolScheduledOp) -> int:
+def _block_comparisons(block: LirBlock) -> list[tuple[int, CombScheduledOp, FComparisonOperator]]:
+    """
+    The block's comparison operations with their per-block position index. Comparisons are the combinational ops that
+    drive the shared ``holoso_fcmp``; other combinational ops (boolean logic, casts) emit differently and are skipped.
+    """
+    result: list[tuple[int, CombScheduledOp, FComparisonOperator]] = []
+    for op in block.comb_ops:
+        operator = op.operator
+        if isinstance(operator, FComparisonOperator):
+            result.append((len(result), op, operator))
+    return result
+
+
+def _fcmp_in_valid_pc(lir: Lir, block_index: int, op: CombScheduledOp) -> int:
     """The fetch PC at which a comparator's in_valid pulses: late enough that its float operands have landed."""
     return lir.block_base[block_index] + op.issue_cycle + FETCH_LAG
+
+
+def _comb_writeback_pc(lir: Lir, block_index: int, op: CombScheduledOp) -> int:
+    """The fetch PC at which a combinational op latches its result: in_valid pc plus the operator latency."""
+    return _fcmp_in_valid_pc(lir, block_index, op) + op.latency
+
+
+def _block_logic_ops(lir: Lir) -> list[tuple[int, CombScheduledOp]]:
+    """Every boolean-logic op (AND/OR/NOT) with its block index; these emit as PC-gated inline ``& | ~`` writebacks."""
+    return [
+        (block.index, op) for block in lir.blocks for op in block.comb_ops if isinstance(op.operator, BoolLogicOperator)
+    ]
+
+
+def _block_ftobool_ops(lir: Lir) -> list[tuple[int, CombScheduledOp]]:
+    """Every float->bool cast with its block index; each emits as a PC-gated ``holoso_ftobool`` writeback."""
+    return [
+        (block.index, op)
+        for block in lir.blocks
+        for op in block.comb_ops
+        if isinstance(op.operator, FloatToBoolOperator)
+    ]
+
+
+def _block_ffrombool_ops(lir: Lir) -> list[tuple[int, CombScheduledOp]]:
+    """Every bool->float cast with its block index; each writes a float register, so it is timed on the float frame."""
+    return [
+        (block.index, op)
+        for block in lir.blocks
+        for op in block.comb_ops
+        if isinstance(op.operator, BoolToFloatOperator)
+    ]
+
+
+def _comb_float_writeback_pc(lir: Lir, block_index: int, op: CombScheduledOp) -> int:
+    """
+    The fetch PC at which a float-result combinational op latches its float register. A float result lands one cycle
+    later than a boolean one (the write latch plus the read-first edge of the float register file), matching the
+    microcode write-enable at ``commit + 1`` fetched FETCH_LAG ahead, so a downstream float operator reads it on time.
+    """
+    return lir.block_base[block_index] + op.commit_cycle + 1 + FETCH_LAG
+
+
+def _ffrombool_rhs(op: CombScheduledOp) -> str:
+    """The RHS of ``float(cond)``: the shared ``holoso_ffrombool`` cast applied to the boolean operand (ZKF 1.0/0.0)."""
+    (operand,) = op.operands
+    assert isinstance(operand, BoolOperand)  # the cast reads a boolean operand
+    return f"holoso_ffrombool({_bool_operand_rhs(operand)})"
+
+
+def _ftobool_rhs(op: CombScheduledOp) -> str:
+    """The RHS of ``bool(x)``: the shared ``holoso_ftobool`` cast applied to the operand (its sign is irrelevant)."""
+    (operand,) = op.operands
+    assert isinstance(operand, FloatOperand)  # the cast reads a float operand (its sign is irrelevant to the exponent)
+    return f"holoso_ftobool({_source_net(operand.source)})"
+
+
+def _bool_logic_rhs(op: CombScheduledOp) -> str:
+    """The combinational RHS of a boolean-logic op: a plain ``& | ~`` over its boolean register/constant operands."""
+    operands: list[str] = []
+    for operand in op.operands:
+        assert isinstance(operand, BoolOperand)  # boolean-logic operands are boolean
+        operands.append(_bool_operand_rhs(operand))
+    match op.operator:
+        case BoolAndOperator():
+            a, b = operands
+            return f"{a} & {b}"
+        case BoolOrOperator():
+            a, b = operands
+            return f"{a} | {b}"
+        case BoolNotOperator():
+            (a,) = operands
+            return f"~{a}"
+        case _:
+            raise AssertionError(f"not a boolean-logic operator: {op.operator!r}")
 
 
 def _emit_fcmp_instance(w: _Writer, lir: Lir) -> None:
@@ -192,7 +236,9 @@ def _emit_fcmp_instance(w: _Writer, lir: Lir) -> None:
     keyed on the fetch PC and ``in_valid`` pulsed at that PC. The one-hot order flags are reduced per each comparison's
     relation; the clocked process latches each result into its boolean register at the comparison's writeback PC.
     """
-    comparisons = [(block.index, position, op) for block in lir.blocks for position, op in enumerate(block.bool_ops)]
+    comparisons = [
+        (block.index, position, op, cmp) for block in lir.blocks for position, op, cmp in _block_comparisons(block)
+    ]
     if not comparisons:
         return
     sample = comparisons[0][2]  # one fcmp configuration serves every comparison: uniform params and latency
@@ -207,8 +253,9 @@ def _emit_fcmp_instance(w: _Writer, lir: Lir) -> None:
     w("fcmp_a_sgnop = 2'd0; fcmp_b_sgnop = 2'd0; fcmp_iv = 1'b0;")
     w("case (pc)")
     w.push()
-    for block_index, _position, op in comparisons:
+    for block_index, _position, op, _cmp in comparisons:
         a, b = op.operands
+        assert isinstance(a, FloatOperand) and isinstance(b, FloatOperand)  # comparison operands are float
         w(f"{_fcmp_in_valid_pc(lir, block_index, op)}: begin")
         w.push()
         w(f"fcmp_a = {_source_net(a.source)}; fcmp_a_sgnop = 2'd{a.sign.encoded};")
@@ -231,10 +278,10 @@ def _emit_fcmp_instance(w: _Writer, lir: Lir) -> None:
     w(".out_valid(), .a_gt_b(fcmp_gt), .a_eq_b(fcmp_eq), .a_lt_b(fcmp_lt)")
     w.pop()
     w(");")
-    for block_index, position, op in comparisons:
+    for block_index, position, _op, cmp in comparisons:
         label = _fcmp_label(block_index, position)
-        reduction = _fcmp_reduce(op.relation, "fcmp_gt", "fcmp_eq", "fcmp_lt")
-        w(f"wire fcmp_{label}_result = {reduction};  // {op.relation.value}")
+        reduction = _fcmp_reduce(cmp.relation, "fcmp_gt", "fcmp_eq", "fcmp_lt")
+        w(f"wire fcmp_{label}_result = {reduction};  // {cmp.relation.value}")
     w("")
 
 
@@ -267,6 +314,7 @@ def generate(lir: Lir) -> VerilogOutput:
 
     _emit_header(w, lir)
     _emit_localparams(w, lir, cycw, pcw, ucw)
+    _emit_support_header(w, lir)
     _emit_declarations(w, lir)
     _emit_consts(w, lir)
     _emit_operators(w, lir)
@@ -346,8 +394,22 @@ localparam [PCW-1:0] LASTPC    ={lir.initiation_interval:3};  // = PRESENT + FET
 localparam           UCW       ={ucw:3};  // microcode word width after lifting out constant control fields
 localparam           NBREG     ={max(1, lir.bool_regfile.nreg):3};  // 1-bit boolean register bank (branch conditions)
 // pc: 0 = idle/accept, present at executing step PRESENT; out_valid at pc==LASTPC (fetch leads execution).
-
 """)
+    # Cross-check the ZKF +1.0 formula against the codec at build time. This is the contract holoso_ffrombool's
+    # concatenation implements (bias exponent at the fraction MSb, zero sign/fraction); a format whose codec disagreed
+    # with it would be caught here rather than miscompiling.
+    assert (((1 << (fmt.wexp - 1)) - 1) << (fmt.wman - 1)) == fmt.encode(1.0)
+    w("")
+
+
+def _emit_support_header(w: _Writer, lir: Lir) -> None:
+    """
+    Include the shared support header unconditionally. Its functions (the float<->bool casts and the finiteness /
+    saturation helpers) are the single place that assumes the ZKF bit layout; they reference the WEXP / WMAN / W
+    localparams declared above, so the generated module's datapath invokes them by name and never open-codes the
+    layout. Defining a function the kernel does not call is free, so the header always ships and is always included.
+    """
+    w('\n`include "holoso_support.vh"\n')
 
 
 def _emit_declarations(w: _Writer, lir: Lir) -> None:
@@ -791,13 +853,44 @@ always @(posedge clk) begin
 
     # Comparator results land in their (fresh, never reset) boolean register one latency after in_valid, in time for
     # the terminating branch; each is written only here, so it cannot collide with any other boolean write.
-    if any(block.bool_ops for block in lir.blocks):
+    if any(_block_comparisons(block) for block in lir.blocks):
         w("// Comparator boolean writebacks (pc-gated, pure datapath).")
         for block in lir.blocks:
-            for position, op in enumerate(block.bool_ops):
+            for position, op, _cmp in _block_comparisons(block):
                 writeback_pc = _fcmp_in_valid_pc(lir, block.index, op) + op.latency
                 result = f"fcmp_{_fcmp_label(block.index, position)}_result"
                 w(f"if (pc == {writeback_pc}) bregs[{op.dst.index}] <= {result};")
+        w("")
+
+    # Boolean-logic writebacks: a pc-gated inline & | ~ over boolean registers, latched into a fresh boolean register
+    # (each written only here, so no collision). The result reg is read by a later op or the branch, one drain later.
+    logic_ops = _block_logic_ops(lir)
+    if logic_ops:
+        w("// Boolean logic writebacks (pc-gated, combinational).")
+        for block_index, op in logic_ops:
+            writeback_pc = _comb_writeback_pc(lir, block_index, op)
+            w(f"if (pc == {writeback_pc}) bregs[{op.dst.index}] <= {_bool_logic_rhs(op)};")
+        w("")
+
+    # Float->bool cast writebacks: a pc-gated ``holoso_ftobool`` call latched into a fresh boolean register.
+    ftobool_ops = _block_ftobool_ops(lir)
+    if ftobool_ops:
+        w("// Float-to-bool cast writebacks (pc-gated, combinational).")
+        for block_index, op in ftobool_ops:
+            writeback_pc = _comb_writeback_pc(lir, block_index, op)
+            assert isinstance(op.dst, BoolRegRef)
+            w(f"if (pc == {writeback_pc}) bregs[{op.dst.index}] <= {_ftobool_rhs(op)};")
+        w("")
+
+    # Bool->float cast writebacks: a pc-gated ``holoso_ffrombool`` call latched into a fresh float register, timed on
+    # the float frame so a downstream float operator reads it on time. The register is written only here (no collision).
+    ffrombool_ops = _block_ffrombool_ops(lir)
+    if ffrombool_ops:
+        w("// Bool-to-float cast writebacks (pc-gated, combinational).")
+        for block_index, op in ffrombool_ops:
+            writeback_pc = _comb_float_writeback_pc(lir, block_index, op)
+            assert isinstance(op.dst, FloatRegRef)
+            w(f"if (pc == {writeback_pc}) regs[{op.dst.index}] <= {_ffrombool_rhs(op)};")
         w("")
 
     # Control and persistent state are the reset-gated registers. Each slot register's reset snapshot (under rst) and

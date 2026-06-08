@@ -3,7 +3,6 @@
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar
 
 import pytest
 
@@ -19,7 +18,7 @@ from holoso import (
 from holoso._errors import UnsupportedConstruct
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lir import FloatConstRef, FloatRegRef
+from holoso._lir import FloatConstRef, FloatRegRef, landing_cycle
 from holoso._lir._schedule import DEPENDENCY_EDGE
 from holoso._mir import (
     lower as lower_to_mir,
@@ -28,47 +27,23 @@ from holoso._mir import (
     MirBuilder,
     MirFloatConst,
     MirFloatInput,
-    MirFloatOperation,
     MirFloatOutput,
     MirFloatView,
     MirInput,
     MirOperation,
     MirRet,
 )
-from holoso._operators import FMulILog2Operator, FloatSignControl, HardwareOperator
+from holoso._operators import FComparisonOperator, FMulILog2Operator, FloatSignControl
+from holoso._hir import RelationalOp
 from holoso._backend.numerical import generate as build_model
 from holoso._lir import build
 from holoso._lir._schedule import resolve_pool, schedule_ops
-from holoso._type import FloatType, ScalarSignature, ScalarType
+from holoso._type import FloatType, ScalarType
 
 from ._modelref import default_ops, staged_ops
 
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
-
-
-@dataclass(frozen=True)
-class _TestHardwareOperator(HardwareOperator):
-    @property
-    def latency(self) -> int:
-        return 1
-
-    @property
-    def signature(self) -> ScalarSignature:
-        ty = FloatType(FMT)
-        return ScalarSignature((ty,), ty)
-
-    def render(self, *operands: str) -> str:
-        (operand,) = operands
-        return f"{self.mnemonic}({operand})"
-
-    def hdl_params(self) -> dict[str, int]:
-        return {}
-
-
-@dataclass(frozen=True)
-class ATestHardwareOperator(_TestHardwareOperator):
-    mnemonic: ClassVar[str] = "atest"
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +68,7 @@ def _view(mir: Mir) -> MirFloatView:
 
 def _schedule(mir: Mir):
     view = _view(mir)
-    return schedule_ops(view, resolve_pool(view))
+    return schedule_ops(mir.nodes, resolve_pool(view), set(view.operation_nodes))
 
 
 def _muls(mir: Mir) -> list[int]:
@@ -134,6 +109,25 @@ def test_pipelined_issue_overlaps_a_slow_op() -> None:
     adds = [vid for vid, n in mir.nodes.items() if isinstance(n, MirOperation) and isinstance(n.operator, FAddOperator)]
     # Some fadd of the independent (a+b+c) chain issues before the divide commits -- genuine overlap, no barrier.
     assert any(sched.issue_cycle[vid] < div_commit for vid in adds)
+
+
+def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator() -> None:
+    # Regression: a chained comparison (here ``lo < x < hi``) puts two comparisons in one block. The pooled
+    # holoso_fcmp serves one comparison per cycle (PC-muxed), so the two must issue on distinct in_valid PCs. Before
+    # the fix the generalized scheduler let both issue on the same cycle -> they collided on the single comparator
+    # (one read the other's operands), corrupting the result in the RTL while the model still passed.
+    def f(x, lo, hi):  # type: ignore[no-untyped-def]
+        return 0.0 if lo < x < hi else x
+
+    lir = build(_run(f), "deadband")
+    in_valid_pcs = [
+        lir.block_base[block.index] + op.issue_cycle
+        for block in lir.blocks
+        for op in block.comb_ops
+        if isinstance(op.operator, FComparisonOperator)
+    ]
+    assert len(in_valid_pcs) >= 2  # the chained comparison lowers to two comparisons feeding a BoolAnd
+    assert len(set(in_valid_pcs)) == len(in_valid_pcs)  # each on a distinct PC: no shared-comparator collision
 
 
 def _ilog2(mir: Mir) -> list[int]:
@@ -444,7 +438,7 @@ def test_build_rejects_mir_with_mixed_float_formats() -> None:
     mir = Mir(
         nodes={
             0: MirFloatInput("a", FloatType(FMT)),
-            1: MirFloatOperation(
+            1: MirOperation(
                 FAddOperator(other),
                 [0, 0],
                 [FloatSignControl(), FloatSignControl()],
@@ -466,38 +460,39 @@ def test_mir_builder_rejects_mixed_float_operand_formats() -> None:
     a = builder.float_input("a", FloatType(FMT))
     b = builder.float_input("b", FloatType(other))
     with pytest.raises(ValueError, match="expects operands"):
-        builder.float_operation(
+        builder.operation(
             FAddOperator(FMT),
             [a, b],
             [FloatSignControl(), FloatSignControl()],
         )
 
 
-def test_mir_float_subclasses_validate_float_invariants() -> None:
+def test_mir_operation_validates_invariants() -> None:
     with pytest.raises(TypeError, match="scalar_type"):
         MirFloatInput("a", OtherScalarType())
     with pytest.raises(TypeError, match="scalar_type"):
         MirFloatConst(OtherScalarType(), 1.0)
-    with pytest.raises(TypeError, match="operator"):
-        MirFloatOperation(
-            ATestHardwareOperator(),
-            [0],
-            [FloatSignControl()],
-            FloatSignControl(),
-        )
     with pytest.raises(ValueError, match="operand"):
-        MirFloatOperation(
+        MirOperation(
             FAddOperator(FMT),
             [0],
             [FloatSignControl(), FloatSignControl()],
             FloatSignControl(),
         )
     with pytest.raises(ValueError, match="sign control"):
-        MirFloatOperation(
+        MirOperation(
             FAddOperator(FMT),
             [0, 0],
             [FloatSignControl()],
             FloatSignControl(),
+        )
+    # A bool-result comparison cannot carry a result sign control: booleans have no sign.
+    with pytest.raises(ValueError, match="non-float result"):
+        MirOperation(
+            FComparisonOperator(FCmpOperator(FMT), RelationalOp.LT),
+            [0, 0],
+            [FloatSignControl(), FloatSignControl()],
+            FloatSignControl(negate=True),
         )
     with pytest.raises(TypeError, match="sign"):
         MirFloatOutput("out_0", 0, object())
@@ -642,3 +637,27 @@ def test_zero_regalloc_effort_bypasses_annealing(monkeypatch) -> None:  # type: 
         return a * b + c
 
     build(_run(sharing_kernel), "sharing")
+
+
+def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
+    # Regression: the bool->float cast result lands at landing_cycle(commit) -- NOT one cycle later. An off-by-one
+    # marked it past its true landing (and, for a boundary cast, past the initiation interval, so its report cell fell
+    # off the grid) and left a consumer's read cycle outside its residence. Here a multiply consumes the cast result.
+    def f(x):  # type: ignore[no-untyped-def]
+        return float(x > 0.0) * x
+
+    lir = build(_run(f), "cast_mul")
+    interval = lir.initiation_interval
+    casts = [(lir.block_base[b.index], op) for b in lir.blocks for op in b.comb_ops if isinstance(op.dst, FloatRegRef)]
+    assert casts, "expected a bool->float cast result in the float bank"
+    for base, op in casts:
+        landing = landing_cycle(base + op.commit_cycle)
+        assert 1 <= landing <= interval  # within the rendered schedule grid, not one row past the boundary
+        assert (
+            landing in lir.float_liveness[op.dst]
+        )  # live exactly from its true landing (the off-by-one would miss it)
+    cast_regs = {op.dst for _, op in casts}
+    for fop in lir.float_ops:  # the consuming multiply must read the cast result within its residence (no late-def gap)
+        for operand in fop.operands:
+            if operand.source in cast_regs:
+                assert lir.operand_read_cycle(fop) in lir.float_liveness[operand.source]

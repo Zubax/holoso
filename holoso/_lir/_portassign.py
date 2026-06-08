@@ -25,7 +25,7 @@ import scipy.sparse as sp
 from scipy.optimize import Bounds, LinearConstraint, milp
 
 from .._hir import ValueId
-from .._mir import MirFloatOperation, MirFloatView
+from .._mir import MirOperation, MirFloatView
 from ._ir import FloatOperatorInstance
 from ._regalloc import FloatAllocation
 from ._schedule import Schedule
@@ -50,7 +50,7 @@ def assign_commutative_ports(mir: MirFloatView, sched: Schedule, alloc: FloatAll
     uses_by_instance: dict[FloatOperatorInstance, list[_Use]] = defaultdict(list)
     for vid in sched.issue_cycle:
         node = mir.nodes[vid]
-        if not (isinstance(node, MirFloatOperation) and node.operator.is_commutative):
+        if not (isinstance(node, MirOperation) and node.operator.is_commutative):
             continue
         first, second = (alloc.assign.get(operand) for operand in node.operands)
         uses_by_instance[sched.inst_of[vid]].append((vid, first, second))

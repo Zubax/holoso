@@ -9,8 +9,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .._hir import ValueId
-from .._mir import MirFloatConst, MirFloatOperation, MirFloatView
-from .._operators import FloatHardwareOperator, HardwareOperator
+from .._mir import MirBoolConst, MirFloatConst, MirNode, MirOperation, MirFloatView
+from .._operators import FComparisonOperator, FloatHardwareOperator, HardwareOperator
 from ._ir import FloatOperatorInstance
 
 # The extra cycles a consumer must wait beyond a producer's commit before it may read the result: one for the
@@ -34,100 +34,112 @@ class Schedule:
     makespan: int  # max commit cycle (issue_cycle + latency), or 0 if there are no ops
 
 
-def _operation(mir: MirFloatView, vid: ValueId) -> MirFloatOperation:
-    return mir.operation_nodes[vid]
+def _op(nodes: dict[ValueId, MirNode], vid: ValueId) -> MirOperation:
+    node = nodes[vid]
+    assert isinstance(node, MirOperation)
+    return node
 
 
-def _op_ids(mir: MirFloatView) -> list[ValueId]:
-    return list(mir.operation_nodes)
-
-
-def _operator_operands(mir: MirFloatView, vid: ValueId, schedulable: set[ValueId]) -> list[ValueId]:
+def _operator_operands(nodes: dict[ValueId, MirNode], vid: ValueId, schedulable: set[ValueId]) -> list[ValueId]:
     """Operand values scheduled alongside ``vid`` (same block); all other operands are resident at block start."""
-    return [operand for operand in _operation(mir, vid).operands if operand in schedulable]
-
-
-def _present_classes(mir: MirFloatView) -> set[type[HardwareOperator]]:
-    return {type(_operation(mir, vid).operator) for vid in _op_ids(mir)}
+    return [operand for operand in _op(nodes, vid).operands if operand in schedulable]
 
 
 def resolve_pool(mir: MirFloatView) -> dict[type[HardwareOperator], int]:
     """
-    The per-class instance budget: at least one of every operator class present in the graph.
+    The per-class instance budget: at least one of every float operator class present in the graph.
 
     The budget is applied per distinct hardware operator, so ``fmul_ilog2_const`` gets the requested number of
-    instances for each distinct ``K``.
+    instances for each distinct ``K``. Only the instance-backed float operators are pooled; the combinational
+    comparison/logic/cast operators carry no physical instance and need no budget.
     """
     pool: dict[type[HardwareOperator], int] = {}
-    for cls in _present_classes(mir):
-        requested = 1  # TODO: we can add heuristics for determining how many operator instances to use.
-        pool[cls] = max(1, requested)
+    for node in mir.operation_nodes.values():
+        if isinstance(node.operator, FloatHardwareOperator):  # only instance-backed float arithmetic is pooled
+            requested = 1  # TODO: we can add heuristics for determining how many operator instances to use.
+            pool[type(node.operator)] = max(1, requested)
     return pool
 
 
-def _critical_path(mir: MirFloatView, op_ids: list[ValueId], schedulable: set[ValueId]) -> dict[ValueId, int]:
+def _critical_path(
+    nodes: dict[ValueId, MirNode], op_ids: list[ValueId], schedulable: set[ValueId]
+) -> dict[ValueId, int]:
     """Priority height: longest latency-weighted path to a sink, counting DEPENDENCY_EDGE per dependency edge."""
     consumers: dict[ValueId, list[ValueId]] = {vid: [] for vid in op_ids}
     for vid in op_ids:
-        for operand in _operator_operands(mir, vid, schedulable):
+        for operand in _operator_operands(nodes, vid, schedulable):
             consumers[operand].append(vid)
     height: dict[ValueId, int] = {}
     for vid in sorted(op_ids, reverse=True):  # consumers have larger IDs; process them first
-        node = _operation(mir, vid)
+        node = _op(nodes, vid)
         height[vid] = node.operator.latency + max((DEPENDENCY_EDGE + height[c] for c in consumers[vid]), default=0)
     return height
 
 
 def schedule_ops(
-    mir: MirFloatView, pool: Mapping[type[HardwareOperator], int], schedulable: set[ValueId] | None = None
+    nodes: dict[ValueId, MirNode], pool: Mapping[type[HardwareOperator], int], schedulable: set[ValueId]
 ) -> Schedule:
     """
-    Place every operation in ``schedulable`` (one block's ops; all float ops by default) on the earliest cycle its
-    operands are ready and a free instance exists. Operands outside ``schedulable`` are block live-ins resident at the
-    block start (a prior block's drained result, a state read, an input, or a phi); constants are immediates.
+    Place every operation in ``schedulable`` (one block's operations, across both register banks) on the earliest cycle
+    its operands are ready and a free instance exists. A single dependency-aware pass spans float and boolean-result
+    operations: a comparison (or cast) issues as soon as its operands have landed, independently of the block's float
+    arithmetic, so cross-bank dependency chains (a value feeding a comparison feeding a cast) schedule correctly without
+    a barrier. Operands outside ``schedulable`` are block live-ins resident at the block start (a prior block's drained
+    result, a state read, an input, or a phi); constants are immediates. Only instance-backed float operators consume a
+    pool slot and bind a physical instance; the combinational comparison/logic/cast operators issue inline with none.
     """
-    op_ids = sorted(schedulable) if schedulable is not None else _op_ids(mir)
+    op_ids = sorted(schedulable)
     if not op_ids:
         return Schedule(issue_cycle={}, inst_of={}, instances=[], makespan=0)
     schedulable_set = set(op_ids)
 
-    height = _critical_path(mir, op_ids, schedulable_set)
+    height = _critical_path(nodes, op_ids, schedulable_set)
     issue_cycle: dict[ValueId, int] = {}
     inst_count: dict[FloatHardwareOperator, int] = {}
     slot_of: dict[ValueId, tuple[FloatHardwareOperator, int]] = {}
 
     def commit_cycle(vid: ValueId) -> int:
-        return issue_cycle[vid] + _operation(mir, vid).operator.latency
+        return issue_cycle[vid] + _op(nodes, vid).operator.latency
 
     def is_ready(vid: ValueId, cycle: int) -> bool:
         # A consumer may read a same-block operator producer only DEPENDENCY_EDGE cycles after it commits (the
         # read-first write edge plus the write and read latches). Every other operand -- a state read, an input, a
         # phi, or a result drained in from a prior block -- is resident at the block start, so it needs only
         # INPUT_DEPENDENCY_EDGE (the read latch); constants are immediates with no read-timing constraint.
-        for operand in _operation(mir, vid).operands:
+        for operand in _op(nodes, vid).operands:
             if operand in schedulable_set:
                 if operand not in issue_cycle or cycle < commit_cycle(operand) + DEPENDENCY_EDGE:
                     return False
-            elif not isinstance(mir.nodes[operand], MirFloatConst) and cycle < INPUT_DEPENDENCY_EDGE:
+            elif not isinstance(nodes[operand], (MirFloatConst, MirBoolConst)) and cycle < INPUT_DEPENDENCY_EDGE:
                 return False
         return True
 
     unscheduled = set(op_ids)
-    cap = sum(_operation(mir, vid).operator.latency for vid in op_ids) + DEPENDENCY_EDGE * len(op_ids) + 64
+    cap = sum(_op(nodes, vid).operator.latency for vid in op_ids) + DEPENDENCY_EDGE * len(op_ids) + 64
     cycle = 1
     while unscheduled:
         if cycle > cap:
             raise RuntimeError("scheduler made no progress")
         ready = sorted((vid for vid in unscheduled if is_ready(vid, cycle)), key=lambda vid: (-height[vid], vid))
         used: dict[FloatHardwareOperator, int] = {}
+        used_comparator = 0  # the single pooled holoso_fcmp serves one comparison per cycle (throughput 1, PC-muxed)
         for vid in ready:
-            operator = _operation(mir, vid).operator
-            slot = used.get(operator, 0)
-            if slot >= pool[type(operator)]:
-                continue
-            used[operator] = slot + 1
-            inst_count[operator] = max(inst_count.get(operator, 0), slot + 1)
-            slot_of[vid] = (operator, slot)
+            operator = _op(nodes, vid).operator
+            if isinstance(operator, FloatHardwareOperator):
+                # Instance-backed float arithmetic contends for a pooled physical instance and binds one.
+                slot = used.get(operator, 0)
+                if slot >= pool[type(operator)]:
+                    continue
+                used[operator] = slot + 1
+                inst_count[operator] = max(inst_count.get(operator, 0), slot + 1)
+                slot_of[vid] = (operator, slot)
+            elif isinstance(operator, FComparisonOperator):
+                # Every relation time-shares one comparator; serialize to one comparison per cycle so each gets a
+                # distinct in_valid PC (the emitter's operand mux is keyed on that PC). It binds no instance.
+                if used_comparator >= 1:
+                    continue
+                used_comparator += 1
+            # Other combinational operators (boolean logic, casts) are independent inline gates: no contention.
             issue_cycle[vid] = cycle
             unscheduled.discard(vid)
         cycle += 1

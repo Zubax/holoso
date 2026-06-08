@@ -7,8 +7,7 @@ which typed storage resources, with which folded sign controls.
 
 from dataclasses import dataclass
 
-from .._hir import RelationalOp
-from .._operators import FCmpOperator, FloatHardwareOperator, FloatSignControl, HardwareOperator
+from .._operators import FloatHardwareOperator, FloatSignControl, HardwareOperator
 from .._type import FloatFormat, FloatType
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
@@ -37,6 +36,23 @@ def copy_step_cycle(install_cycle: int) -> int:
 def boundary_step(makespan: int) -> int:
     """The boundary / initiation-interval step: the last result lands here and outputs are resident here."""
     return makespan + 2 + FETCH_LAG
+
+
+def residence_rows(defs: list[int], uses: list[int], present: int) -> set[int]:
+    """
+    Collapse a register's definition and use cycles into the set of cycles on which it holds a live value, by the
+    read-first rule: each value resides from its landing through its last use no later than the next definition (a read
+    on the next definition's cycle is read-first and still returns the old value), the boundary at latest. Shared by the
+    float- and boolean-bank liveness so both banks compute residence in exactly one place.
+    """
+    writes = sorted(defs)
+    reads = sorted(uses)
+    rows: set[int] = set()
+    for i, start in enumerate(writes):
+        nxt = writes[i + 1] if i + 1 < len(writes) else present + 1
+        last = max((use for use in reads if start <= use <= nxt), default=start)
+        rows.update(range(start, last + 1))
+    return rows
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,18 +273,21 @@ class BoolWrite:
 
 
 @dataclass(frozen=True, slots=True)
-class BoolScheduledOp:
+class CombScheduledOp:
     """
-    A scheduled float comparator firing in a block: it reads float operands (with folded sign controls), and on
-    ``commit_cycle == issue_cycle + latency`` its one-hot order flags are reduced by ``relation`` into the boolean
-    register ``dst``. All comparisons share one pooled ``holoso_fcmp`` instance: each block holds at most one
-    comparison and blocks are mutually exclusive, so the emitter PC-muxes the single comparator's operands.
+    A scheduled combinational operation firing in a block: it reads its register operands (each in its own bank, with
+    folded sign controls on float operands) and on ``commit_cycle == issue_cycle + latency`` latches the result into
+    ``dst`` (a boolean register, or -- for the bool->float cast -- a float register). It hosts every combinational
+    operator: a float comparison (``FComparisonOperator``, whose one-hot order flags reduce by the operator's relation;
+    all comparisons share one pooled ``holoso_fcmp`` PC-muxed across mutually-exclusive blocks, one per cycle), the
+    boolean logic gates (``BoolAnd``/``BoolOr``/``BoolNot``, inline ``& | ~``), and the float<->bool casts
+    (``FloatToBool`` / ``BoolToFloat``, each a call to a shared ``holoso_support.vh`` function). None bind a pooled
+    instance; the comparison aside, each is a sub-gate combinational writeback.
     """
 
-    operator: FCmpOperator
-    operands: list[FloatOperand]
-    dst: BoolRegRef
-    relation: RelationalOp
+    operator: HardwareOperator
+    operands: list[FloatOperand | BoolOperand]
+    dst: FloatRegRef | BoolRegRef
     issue_cycle: int
     latency: int
 
@@ -305,13 +324,13 @@ type Terminator = Jump | Branch | Ret
 class LirBlock:
     """
     One basic block of the scheduled microprogram, with block-relative cycles (block start is cycle 0). ``float_ops``,
-    ``float_copies``, and ``bool_writes`` are the block's datapath events; ``terminator`` redirects the fetch PC at the
-    block boundary. ``block_makespan`` is the last commit cycle inside the block (0 if it has no datapath events).
+    ``comb_ops``, ``float_copies``, and ``bool_writes`` are the block's datapath events; ``terminator`` redirects the
+    fetch PC at the block boundary. ``block_makespan`` is the last commit cycle inside the block (0 if it has none).
     """
 
     index: int
     float_ops: list[FloatScheduledOp]
-    bool_ops: list[BoolScheduledOp]
+    comb_ops: list[CombScheduledOp]
     float_copies: list[FloatCopy]
     bool_writes: list[BoolWrite]
     terminator: Terminator
@@ -492,12 +511,17 @@ class Lir:
     @property
     def is_control_flow(self) -> bool:
         """
-        Whether this kernel took the control-flow build path (a CFG of blocks and/or a boolean register bank) rather
-        than the straight-line single-block path. The model and the emitter branch on this to select the CFG execution
-        / boundary-install path; both must agree, so the predicate lives here once.
+        Whether this kernel took the control-flow build path rather than the straight-line single-block path. The model
+        and the emitter branch on this to select the CFG execution / boundary-install path; both must agree, so the
+        predicate lives here once. It is the exact negation of the builder's straight-line test: a straight-line LIR is
+        a single ``Ret`` block of float operations only (no combinational ops, phi-arm copies, boolean writes, or
+        boolean state); anything else -- multiple blocks, boolean state, or a comparison/logic/cast even in one block
+        (e.g. a branch-free ``float(x > 0)``) -- takes the CFG path.
         TODO FIXME: THIS IS TEMPORARY. The straight-line/single-block path will be merged with CFG eventually.
         """
-        return len(self.blocks) > 1 or bool(self.bool_state_slots)
+        if len(self.blocks) > 1 or self.bool_state_slots:
+            return True
+        return any(block.comb_ops or block.float_copies or block.bool_writes for block in self.blocks)
 
     @property
     def read_set_per_port(self) -> dict[tuple[FloatOperatorInstance, int], list[int]]:
@@ -586,19 +610,63 @@ class Lir:
         for slot in self.float_state_slots:  # the live-out tap is read on the install step to persist the slot
             if isinstance(slot.tap.source, FloatRegRef):
                 uses.setdefault(slot.tap.source, []).append(self.state_copy_step(slot))
-        live: dict[FloatRegRef, set[int]] = {}
-        for reg in defs.keys() | uses.keys():
-            writes = sorted(defs.get(reg, []))
-            reads = sorted(uses.get(reg, []))
-            rows: set[int] = set()
-            for i, start in enumerate(writes):
-                nxt = writes[i + 1] if i + 1 < len(writes) else present + 1
-                # Read-first: a read on the next write's cycle still returns this value, so it belongs to this interval
-                # (a non-coalesced slot register read by an output at the boundary keeps its live-in residence intact).
-                last = max((use for use in reads if start <= use <= nxt), default=start)
-                rows.update(range(start, last + 1))
-            live[reg] = rows
-        return live
+        # Combinational ops touch the float bank too: a comparison and a float->bool cast read float operands, and the
+        # bool->float cast writes a float register. Its result becomes readable at the same ``landing_cycle`` as any
+        # result (the float register file's tighter read-first edge offsets its one-cycle-later write, so a downstream
+        # float operator reads it on the landing cycle). Without these the residence of a cast/comparison operand or the
+        # cast result would be missing from the tint.
+        for block in self.blocks:
+            base_pc = self.block_base[block.index]
+            for bop in block.comb_ops:
+                read = read_latch_cycle(base_pc + bop.issue_cycle)
+                for comb_operand in bop.operands:
+                    if isinstance(comb_operand.source, FloatRegRef):
+                        uses.setdefault(comb_operand.source, []).append(read)
+                if isinstance(bop.dst, FloatRegRef):
+                    defs.setdefault(bop.dst, []).append(landing_cycle(base_pc + bop.commit_cycle))
+        return {reg: residence_rows(defs.get(reg, []), uses.get(reg, []), present) for reg in defs.keys() | uses.keys()}
+
+    @property
+    def bool_liveness(self) -> dict[BoolRegRef, set[int]]:
+        """
+        Map each boolean register to the cycles on which it holds a live value, the boolean-bank counterpart of
+        :attr:`float_liveness` in the same executing-step frame. A boolean register is defined when a comparison,
+        boolean-logic op, or float->bool cast commits its result, when a boolean phi/state install lands, and -- for a
+        persistent slot -- at the live-in resident from cycle 1; it is read by a boolean-logic op or a bool->float cast
+        taking it as an operand, by a branch testing it as a condition, by a phi/state install copying it, and at the
+        boundary where a slot's live-out must persist for the next initiation.
+        """
+        present = self.initiation_interval
+        defs: dict[BoolRegRef, list[int]] = {}
+        uses: dict[BoolRegRef, list[int]] = {}
+        for slot in self.bool_state_slots:
+            defs.setdefault(slot.reg, []).append(1)  # the live-in is resident from the start
+            uses.setdefault(slot.reg, []).append(present)  # ...and the live-out must reside through the boundary
+            if slot.needs_copy:
+                defs.setdefault(slot.reg, []).append(present)  # the new live-out lands at the boundary (read-first)
+                if isinstance(slot.live_out.source, BoolRegRef):
+                    uses.setdefault(slot.live_out.source, []).append(present)
+        for block in self.blocks:
+            base_pc = self.block_base[block.index]
+            for bop in block.comb_ops:
+                read = read_latch_cycle(base_pc + bop.issue_cycle)
+                for operand in bop.operands:
+                    if isinstance(operand.source, BoolRegRef):  # boolean-logic and bool->float cast read bool operands
+                        uses.setdefault(operand.source, []).append(read)
+                if isinstance(
+                    bop.dst, BoolRegRef
+                ):  # comparison / boolean logic / float->bool cast write a bool register
+                    defs.setdefault(bop.dst, []).append(landing_cycle(base_pc + bop.commit_cycle))
+            for bwrite in block.bool_writes:
+                step = base_pc + copy_step_cycle(bwrite.issue_cycle)
+                defs.setdefault(bwrite.dst, []).append(step)
+                if isinstance(bwrite.source.source, BoolRegRef):
+                    uses.setdefault(bwrite.source.source, []).append(step)
+            if isinstance(block.terminator, Branch):  # the branch reads its condition at the block's boundary row
+                uses.setdefault(block.terminator.cond, []).append(
+                    base_pc + boundary_step(block.block_makespan) + FETCH_LAG
+                )
+        return {reg: residence_rows(defs.get(reg, []), uses.get(reg, []), present) for reg in defs.keys() | uses.keys()}
 
     @property
     def float_write_timeline(self) -> dict[FloatRegRef, list[tuple[int, FloatProducer]]]:

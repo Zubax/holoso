@@ -483,17 +483,26 @@ def test_model_branch_reset_restarts_the_first_sample_arm() -> None:
     assert float(model(5.0)[0]) == FMT.decode(FMT.encode(5.0))  # first-sample arm again
 
 
-class _SaturatingPI:
+class _PID:
     def __init__(self) -> None:
         self.kp = 0.5
         self.ki = 0.0625
+        self.kd = 0.25
         self.limit = 4.0
         self.integral = 0.0
+        self.prev_error = 0.0
+        self._started = False  # boolean state: the first update has no derivative
 
     def __call__(self, setpoint, measurement):  # type: ignore[no-untyped-def]
         error = setpoint - measurement
         candidate = self.integral + self.ki * error
-        u = self.kp * error + candidate
+        if self._started:
+            derivative = self.kd * (error - self.prev_error)
+        else:
+            derivative = 0.0
+        self.prev_error = error
+        self._started = True
+        u = self.kp * error + candidate + derivative
         if u > self.limit:
             u = self.limit
         elif u < -self.limit:
@@ -503,17 +512,67 @@ class _SaturatingPI:
         return u
 
 
-def test_model_pi_controller_all_arms_and_anti_windup() -> None:
-    # A float comparison drives each of the three arms; the integrator must freeze while saturated (anti-windup).
-    model = build_model(build(_run(_SaturatingPI().__call__), "pi"))
-    reference = _SaturatingPI()
+def test_model_pid_controller_all_arms_anti_windup_and_first_update() -> None:
+    # A float comparison drives each saturation arm; the integrator freezes while saturated (anti-windup); the boolean
+    # ``_started`` state suppresses the derivative on the first update (no prev_error yet) and enables it after.
+    model = build_model(build(_run(_PID().__call__), "pid"))
+    reference = _PID()
     ui = model.output_names.index("out_0")
     rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=10.0)
-    stream = [(10.0, 0.0), (10.0, 0.0), (0.0, 0.0), (0.5, 0.0), (-10.0, 0.0), (-10.0, 0.0), (0.0, 0.0)]
+    stream = [(10.0, 0.0), (10.0, 0.5), (0.0, 1.0), (0.5, 0.5), (-10.0, 0.0), (-10.0, -0.5), (0.0, 0.0)]
     for setpoint, measurement in stream:
         got = float(model(setpoint, measurement)[ui])
         assert within(got, reference(setpoint, measurement), rtol, atol)
     assert abs(reference.integral) < 0.1  # the integrator stayed bounded despite the saturating commands
+
+
+def _remainder(x, y):  # type: ignore[no-untyped-def]
+    ax = abs(x)
+    ay = abs(y)
+    scaled = ay
+    while scaled + scaled <= ax:
+        scaled = scaled + scaled
+    r = ax
+    quotient_is_odd = 0.0
+    while scaled > ay:  # halve down to -- but not past -- the unit place (|y|*0.5 can clamp back in subnormal-free ZKF)
+        if r >= scaled:
+            r = r - scaled
+        scaled = scaled * 0.5
+    if r >= ay:
+        r = r - ay
+        quotient_is_odd = 1.0
+    twice_r = r + r
+    if twice_r > ay:
+        r = r - ay
+    elif twice_r == ay:
+        if quotient_is_odd > 0.5:
+            r = r - ay
+    return -r if x < 0.0 and r != 0.0 else r  # canonical +0.0 for a negative exact multiple (ZKF has no negative zero)
+
+
+def test_model_remainder_iterative_reduction_is_exact_and_matches_ieee() -> None:
+    # The data-dependent scaled-subtraction reduction is exact (every subtraction is Sterbenz-exact, no rounding), so
+    # the model reproduces math.remainder bit-for-bit -- including the round-to-nearest-even ties (6/4 -> -2, 2/4 -> 2)
+    # and a negative exact multiple, which must yield +0.0 (no negative zero) -- for any normal-magnitude result (these
+    # cases are; a subnormal-sized remainder would flush to +0 in subnormal-free ZKF). Regression: a divisor equal to
+    # the smallest normal must still TERMINATE -- halving the unit place would clamp back to it and loop forever, which
+    # the explicit unit-place handling avoids.
+    import math
+
+    model = build_model(build(_run(_remainder), "remainder"))
+    ui = model.output_names.index("out_0")
+    min_normal = 2.0 ** (1 - (2 ** (FMT.wexp - 1) - 1))
+    cases = [(5.0, 3.0), (10.0, 3.0), (7.5, 2.0), (-7.5, 2.0), (13.0, 4.0), (6.0, 4.0), (2.0, 4.0), (0.0, 2.0)]
+    cases += [
+        (-3.0, 3.0),
+        (-6.0, 3.0),
+        (-9.0, 3.0),
+    ]  # negative exact multiples: result must be the legal +0.0, not -0.0
+    cases += [(0.0, min_normal), (min_normal, min_normal), (3.0 * min_normal, 2.0 * min_normal)]
+    for x, y in cases:
+        out = model(x, y)[ui]
+        assert float(out) == math.remainder(x, y)
+        assert FMT.is_legal(out.bits)  # a negative exact multiple must not emit an illegal ZKF negative zero
 
 
 class _SchmittTrigger:
@@ -1016,7 +1075,7 @@ def test_synthesis_result_reports_latency_metric() -> None:
     flat_min, flat_max = flat.initiation_interval
     assert flat_min > 0 and flat_max == flat_min  # exact: min == max
 
-    branching = holoso.synthesize(_SaturatingPI().__call__, ops)
+    branching = holoso.synthesize(_PID().__call__, ops)
     branching_min, branching_max = branching.initiation_interval
     assert branching_min > 0 and branching_max is None  # inexact: unbounded max
 
@@ -1032,3 +1091,112 @@ def test_model_branch_state_is_picklable() -> None:
         fresh(v)
     for v in (3.0, 4.0, 5.0):
         assert float(restored(v)[0]) == float(fresh(v)[0])
+
+
+def test_model_boolean_connectives_and_chained_and_ternary_are_exact() -> None:
+    # Connectives (and/or/not), a chained comparison, and ternaries all lower to combinational bool ops feeding
+    # branch+phi merges; the model must reproduce the Python reference exactly across every arm.
+    def kernel(x, lo, hi):  # type: ignore[no-untyped-def]
+        deadband = 0.0 if lo < x < hi else x  # chained comparison + ternary
+        gate = 1.0 if (x > lo and x < hi) else 0.0  # and-connective in a condition
+        outside = 1.0 if (x < lo or x > hi) else 0.0  # or-connective
+        inverted = -1.0 if not (x > lo) else 1.0  # not
+        clamp = hi if x > hi else (lo if x < lo else x)  # nested ternary
+        return (deadband, gate, outside, inverted, clamp)
+
+    model = build_model(build(_run(kernel), "bool_kernel"))
+    for x in (-2.0, -1.0, 0.0, 0.5, 1.0, 1.5, 2.0):
+        got = tuple(float(v) for v in model(x, 0.0, 1.0))
+        ref = tuple(float(v) for v in evaluate_reference(kernel, {"x": x, "lo": 0.0, "hi": 1.0}))
+        assert got == ref, f"x={x}: {got} != {ref}"
+
+
+def test_model_bool_cast_matches_float_nonzero() -> None:
+    # bool(x) is the ZKF exponent-nonzero test: true iff the value is nonzero *after* encoding into the format (a
+    # magnitude too small to represent rounds to zero, like any ZKF value), including for +0.0 and -0.0.
+    def kernel(x, y):  # type: ignore[no-untyped-def]
+        return y if bool(x) else 0.0
+
+    model = build_model(build(_run(kernel), "bool_cast"))
+    for x in (0.0, -0.0, 0.5, -0.5, 1.0, -1.0, 123.0, 2.0**-20):
+        got = float(model(x, 7.0)[0])
+        ref = 7.0 if float(FloatValue.from_float(FMT, x)) != 0.0 else 0.0
+        assert got == ref, f"x={x}: {got} != {ref}"
+
+
+def test_model_cross_domain_cast_chain_is_exact() -> None:
+    # Regression: a branch-free float->bool->float->float chain (float(x>0)*k) builds via the CFG path even with a
+    # single block (it has combinational ops, no branch); the model must take the same path and be bit-exact.
+    def kernel(x, k):  # type: ignore[no-untyped-def]
+        gate = float(x > 0.0) * k  # cross-domain chain
+        cast = float(x < 0.0)  # branch-free bool->float
+        return (gate, cast)
+
+    model = build_model(build(_run(kernel), "cross_domain"))
+    for x in (-2.0, -1.0, 0.0, 1.0, 2.0):
+        got = tuple(float(v) for v in model(x, 5.0))
+        ref = tuple(float(v) for v in evaluate_reference(kernel, {"x": x, "k": 5.0}))
+        assert got == ref, f"x={x}: {got} != {ref}"
+
+
+def test_model_bool_cast_of_underflowing_constant_is_false() -> None:
+    # Regression (Codex): bool(c) of a compile-time constant is the ZKF exponent-nonzero test on the constant *encoded
+    # into the format*, not a raw float64 ``c != 0.0``. In FMT(6,18) the tiny magnitude 2**-200 encodes to zero, so the
+    # cast is False -- the HIR const-folder must not fold it to True.
+    assert FMT.encode(2.0**-200) == 0  # the constant underflows to ZKF zero in this format
+
+    def kernel(a):  # type: ignore[no-untyped-def]
+        return a if bool(2.0**-200) else -a  # the gate is False -> the model returns -a
+
+    model = build_model(build(_run(kernel), "tiny_bool"))
+    for a in (1.0, -2.0, 3.5):
+        assert float(model(a)[0]) == -a
+
+
+def test_connective_branch_does_not_create_a_phantom_state_slot() -> None:
+    # Regression (review): folding ``if u > 0.0 or True:`` to its live arm must keep the persistent-state scan
+    # (``_scan_attr_writes``) and lowering in lockstep. Before the shared ``_static_condition`` predicate the scan
+    # descended both arms (strict ``_static_bool`` does not fold ``X or True``) while lowering folded one, so the dead
+    # else-arm's ``self.y`` became a state slot with no value and ``_register_state_slots`` crashed with KeyError.
+    class K:
+        def __init__(self):
+            self.x = 0.0
+            self.y = 0.0
+
+        def __call__(self, u):  # type: ignore[no-untyped-def]
+            if u > 0.0 or True:
+                self.x = self.x + u
+            else:
+                self.y = self.y + u  # unreachable: must not become persistent state
+            return self.x
+
+    hir = lower(K().__call__)
+    assert [slot.name for slot in hir.state_slots] == ["x"]  # y is not a phantom slot
+    assert len(hir.blocks) == 1  # the connective guard folded; no branch
+    model = build_model(build(_run(K().__call__), "phantom_if"))
+    assert float(model(2.0)[0]) == 2.0
+    assert float(model(3.0)[0]) == 5.0  # accumulates 2 + 3, exact in this format
+
+
+def test_connective_branch_in_a_loop_body_does_not_carry_a_phantom_attribute() -> None:
+    # Same desync hazard via the loop-carried scan (``_loop_assigned``): a folded connective ``if`` inside a loop body
+    # must not open a loop-header phi for an attribute the body never actually writes.
+    class K:
+        def __init__(self):
+            self.acc = 0.0
+            self.dead = 0.0
+
+        def __call__(self, u):  # type: ignore[no-untyped-def]
+            n = 0.0
+            while n < 3.0:
+                if u > 0.0 or True:
+                    self.acc = self.acc + u
+                else:
+                    self.dead = self.dead + u  # unreachable
+                n = n + 1.0
+            return self.acc
+
+    hir = lower(K().__call__)
+    assert [slot.name for slot in hir.state_slots] == ["acc"]  # dead is not carried
+    model = build_model(build(_run(K().__call__), "phantom_loop"))
+    assert float(model(1.0)[0]) == 3.0  # three trips accumulate u

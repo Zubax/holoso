@@ -56,7 +56,7 @@ import numpy as np
 from scipy.optimize import dual_annealing
 
 from .._hir import ValueId
-from .._mir import MirFloatConst, MirFloatInput, MirFloatOperation, MirFloatStateRead, MirFloatView
+from .._mir import MirFloatConst, MirFloatInput, MirOperation, MirFloatStateRead, MirFloatView
 from .._operators import FloatSignControl
 from ._ir import FloatOperatorInstance, boundary_step, copy_step_cycle, landing_cycle, read_latch_cycle
 
@@ -113,7 +113,7 @@ class FloatAllocation:
     install_cycles: dict[str, int]  # state-slot name -> scheduler-frame cycle its live-out lands in the slot register
 
 
-def _operation(mir: MirFloatView, vid: ValueId) -> MirFloatOperation:
+def _operation(mir: MirFloatView, vid: ValueId) -> MirOperation:
     return mir.operation_nodes[vid]
 
 
@@ -163,13 +163,13 @@ def allocate_float(
 
     def def_cycle_of(vid: ValueId) -> int:
         node = mir.nodes[vid]
-        if isinstance(node, MirFloatOperation):
+        if isinstance(node, MirOperation):
             return issue_cycle[vid] + node.operator.latency
         return 0  # an input port (accept edge) or a state read (already resident from the previous initiation)
 
     input_values = [vid for vid in mir.input_ids if isinstance(mir.nodes[vid], MirFloatInput)]
     state_values = list(mir.state_read_nodes)  # live-in reads, one per slot that the method reads before writing
-    operation_values = [vid for vid in issue_cycle if isinstance(mir.nodes[vid], MirFloatOperation)]
+    operation_values = [vid for vid in issue_cycle if isinstance(mir.nodes[vid], MirOperation)]
     reg_values: list[ValueId] = [*input_values, *state_values, *operation_values]
     def_cycle = {vid: def_cycle_of(vid) for vid in reg_values}
     last_use: dict[ValueId, int] = {vid: def_cycle[vid] for vid in reg_values}
@@ -218,7 +218,7 @@ def allocate_float(
         live_out = slot.live_out
         if slot.sign != FloatSignControl() or live_out in pinned:
             continue
-        if not isinstance(mir.nodes[live_out], MirFloatOperation):
+        if not isinstance(mir.nodes[live_out], MirOperation):
             continue
         if slot.name in tapped_by_other:
             continue  # a chained copy reads this slot's live-in at the boundary, past the live-out's definition
@@ -238,9 +238,7 @@ def allocate_float(
         node = mir.nodes[live_out]
         r_in = read_of_slot.get(slot.name)
         coalesced = pinned.get(live_out) == state_regs[slot.name]
-        early = (
-            not coalesced and isinstance(node, (MirFloatInput, MirFloatOperation)) and slot.name not in tapped_by_other
-        )
+        early = not coalesced and isinstance(node, (MirFloatInput, MirOperation)) and slot.name not in tapped_by_other
         if early:
             cycle = def_cycle[live_out] + 1  # read-first: the copy reads a value committed strictly before its read
             if r_in is not None:
@@ -279,8 +277,7 @@ def allocate_float(
     # frees registers the hardware can actually share.
     present_hw = boundary_step(makespan)  # initiation interval: the last result lands here, outputs are resident here
     write_hw: dict[ValueId, int] = {
-        vid: (landing_cycle(def_cycle[vid]) if isinstance(mir.nodes[vid], MirFloatOperation) else 1)
-        for vid in reg_values
+        vid: (landing_cycle(def_cycle[vid]) if isinstance(mir.nodes[vid], MirOperation) else 1) for vid in reg_values
     }
     read_hw: dict[ValueId, int] = dict(write_hw)  # a value with no reads frees its register on its own landing cycle
     for vid in operation_values:

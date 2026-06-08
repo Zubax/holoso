@@ -10,11 +10,11 @@ reloads the snapshot the hardware loads at module reset.
 
 from dataclasses import dataclass, field
 
-from .._value import compare_float_values, FloatValue
-from .._lir import FloatConstRef, FloatOperand, FloatRegRef, Lir
+from .._value import FloatValue
+from .._lir import CombScheduledOp, FloatConstRef, FloatOperand, FloatRegRef, FloatScheduledOp, Lir
 from .._lir import InputProducer, OperationProducer, StateProducer, latest_producer_before
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
-from .._operators import FloatSignControl
+from .._operators import *
 from .._type import FloatFormat
 
 type ModelInput = FloatValue | float
@@ -142,16 +142,38 @@ class NumericalModel:
         current = lir.entry
         for _ in range(1_000_000):  # bounded against a non-terminating kernel; ample for any real loop trip count
             block = blocks[current]
-            # Operator results land in fresh registers (no in-block reuse), so commit-order evaluation reading the
-            # current register file is hazard-free.
-            for op in sorted(block.float_ops, key=lambda o: (o.commit_cycle, o.dst.index)):
-                result = op.inst.operator.evaluate(*(fval(operand) for operand in op.operands))
-                fregs[op.dst.index] = _apply_sign(result, op.result_sign)
-            # Comparators read the (now committed) float registers and write the boolean bank; the relation reduces
-            # the exact three-way ZKF order to a boolean (exact, not via a lossy float decode).
-            for bop in sorted(block.bool_ops, key=lambda o: (o.commit_cycle, o.dst.index)):
-                left, right = (fval(operand) for operand in bop.operands)
-                bregs[bop.dst.index] = bop.relation.holds(compare_float_values(left, right))
+            # All operations -- float arithmetic and combinational ops across both banks -- evaluate in a single
+            # commit-sorted pass, so a cross-domain chain (a float op reading a float<-bool cast reading a comparison)
+            # reads each producer after it is written. Results land in fresh registers (no in-block reuse), so
+            # commit-order evaluation reading the current register file is hazard-free.
+            scheduled: list[FloatScheduledOp | CombScheduledOp] = [*block.float_ops, *block.comb_ops]
+            scheduled.sort(key=lambda o: (o.commit_cycle, 0 if isinstance(o, FloatScheduledOp) else 1, o.dst.index))
+            for op in scheduled:
+                if isinstance(op, FloatScheduledOp):
+                    result = op.inst.operator.evaluate(*(fval(operand) for operand in op.operands))
+                    fregs[op.dst.index] = _apply_sign(result, op.result_sign)
+                    continue
+                match op.operator:
+                    case FComparisonOperator() as cmp:
+                        left, right = op.operands
+                        assert isinstance(left, FloatOperand) and isinstance(right, FloatOperand)
+                        bregs[op.dst.index] = cmp.evaluate(fval(left), fval(right))
+                    case BoolLogicOperator() as logic:
+                        bool_inputs: list[bool] = []
+                        for operand in op.operands:
+                            assert isinstance(operand, BoolOperand)
+                            bool_inputs.append(bval(operand))
+                        bregs[op.dst.index] = logic.evaluate(*bool_inputs)
+                    case FloatToBoolOperator() as to_bool:
+                        (operand,) = op.operands
+                        assert isinstance(operand, FloatOperand)
+                        bregs[op.dst.index] = to_bool.evaluate(fval(operand))
+                    case BoolToFloatOperator() as to_float:
+                        (operand,) = op.operands
+                        assert isinstance(operand, BoolOperand)
+                        fregs[op.dst.index] = to_float.evaluate(bval(operand))
+                    case _:
+                        raise RuntimeError(f"no model evaluation for combinational operator {op.operator!r}")
             # Phi-arm installs are a parallel copy bundle (a swap reads both old values), so read every source before
             # writing any destination -- both for the float copies and the boolean writes.
             copied = [fval(copy.source) for copy in block.float_copies]

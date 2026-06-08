@@ -1,5 +1,6 @@
 """Tests for holoso_fisfinite (combinational; y=1 iff exponent != all-ones)."""
 
+from pathlib import Path
 import cocotb
 import numpy as np
 import pytest
@@ -45,9 +46,9 @@ def test_holoso_fisfinite(sim: str) -> None:
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / "fisfinite"
     runner.build(
-        sources=sources(),
+        sources=[*sources(), Path(__file__).resolve().parent / "holoso_support_fn_tb.v"],
         includes=[HDL_DIR],
-        hdl_toplevel="holoso_fisfinite",
+        hdl_toplevel="holoso_fisfinite_tb",
         parameters={"WEXP": 8, "WMAN": 24},
         build_args=build_args(sim),
         build_dir=build_dir,
@@ -55,7 +56,7 @@ def test_holoso_fisfinite(sim: str) -> None:
         timescale=("1ns", "1ps"),
     )
     runner.test(
-        hdl_toplevel="holoso_fisfinite",
+        hdl_toplevel="holoso_fisfinite_tb",
         test_module="tests.hdl.test_fisfinite",
         test_dir=REPO_ROOT,
         build_dir=build_dir,

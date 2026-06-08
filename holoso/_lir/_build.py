@@ -10,10 +10,9 @@ from .._mir import (
     MirBoolConst,
     MirBoolView,
     MirBranch,
-    MirBoolOperation,
     MirFloatConst,
     MirFloatInput,
-    MirFloatOperation,
+    MirOperation,
     MirFloatView,
     MirJump,
     MirPhi,
@@ -21,35 +20,10 @@ from .._mir import (
     MirTerminator,
 )
 from .._operators import FloatHardwareOperator, FloatSignControl
-from ._ir import (
-    BoolOperand,
-    BoolConstRef,
-    BoolRegFileLayout,
-    BoolRegRef,
-    BoolScheduledOp,
-    BoolStateSlot,
-    BoolWrite,
-    boundary_step,
-    Branch,
-    FloatConstRef,
-    FloatCopy,
-    FloatInputLoad,
-    FloatOperand,
-    FloatOperatorInstance,
-    FloatOutputWire,
-    FloatRegFileLayout,
-    FloatRegRef,
-    FloatScheduledOp,
-    FloatStateSlot,
-    Jump,
-    Lir,
-    LirBlock,
-    Ret,
-    Terminator,
-)
+from ._ir import *
 from ._portassign import assign_commutative_ports
 from ._regalloc import FloatAllocation, allocate_float
-from ._schedule import DEPENDENCY_EDGE, Schedule, resolve_pool, schedule_ops
+from ._schedule import Schedule, resolve_pool, schedule_ops
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +34,7 @@ class _PooledConst:
     sign: FloatSignControl
 
 
-def _operation(mir: MirFloatView, vid: ValueId) -> MirFloatOperation:
+def _operation(mir: MirFloatView, vid: ValueId) -> MirOperation:
     return mir.operation_nodes[vid]
 
 
@@ -89,7 +63,7 @@ def build(mir: Mir, module_name: str) -> Lir:
 
 def _build_single_block(mir: Mir, float_mir: MirFloatView, module_name: str) -> Lir:
     pool = resolve_pool(float_mir)
-    sched = schedule_ops(float_mir, pool)
+    sched = schedule_ops(mir.nodes, pool, set(float_mir.operation_nodes))
     alloc = allocate_float(float_mir, sched.issue_cycle, sched.inst_of, sched.makespan)
     swap = assign_commutative_ports(float_mir, sched, alloc)
     consts, const_pool = _build_const_pool(float_mir)
@@ -113,7 +87,7 @@ def _build_single_block(mir: Mir, float_mir: MirFloatView, module_name: str) -> 
         makespan=sched.makespan,
         op_count=len(float_mir.operation_nodes),
         max_chain_len=_max_chain_len(float_mir),
-        blocks=[LirBlock(0, float_ops, [], [], [], Ret(), sched.makespan)],
+        blocks=[LirBlock(0, float_ops, [], [], [], Ret(), sched.makespan)],  # comb_ops/copies/bool_writes: none
         block_base=[0],
         entry=0,
         last_pc=boundary,
@@ -180,7 +154,11 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
     bool_mir = MirBoolView.from_mir(mir)
     pool = resolve_pool(float_mir)
     block_sched: dict[int, Schedule] = {
-        block.id: schedule_ops(float_mir, pool, schedulable=set(float_mir.block_operations(block)))
+        block.id: schedule_ops(
+            mir.nodes,
+            pool,
+            schedulable=set(float_mir.block_operations(block)) | set(bool_mir.block_operations(block)),
+        )
         for block in mir.blocks
     }
     inst_of: dict[ValueId, FloatOperatorInstance] = {}
@@ -196,32 +174,25 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
     blocks: list[LirBlock] = []
     for block in mir.blocks:
         sched = block_sched[block.id]
+        # One cross-bank schedule per block. Operations split by category, not by result bank: instance-backed float
+        # arithmetic (the scheduler bound it an instance) becomes a FloatScheduledOp; every combinational operator
+        # (comparison, boolean logic, and the float<->bool casts -- including the float-result ``float(cond)``) becomes
+        # a CombScheduledOp. Each issues as soon as its own operands have landed, with no barrier.
         float_ops = [
             _build_cfg_op(float_mir, vid, sched, inst_of, alloc, const_pool)
-            for vid in sorted(sched.issue_cycle, key=lambda v: (sched.issue_cycle[v], v))
-        ]
-        op_makespan = max((op.commit_cycle for op in float_ops), default=0)
-        # Comparators read float registers, so they issue after the block's float results are readable. Every block
-        # holds at most one comparison (its branch condition) and blocks are mutually exclusive, so all comparisons
-        # share one pooled holoso_fcmp instance (the emitter PC-muxes its operands); no per-comparison instance.
-        bool_issue = op_makespan + DEPENDENCY_EDGE
-        bool_ops = [
-            BoolScheduledOp(
-                operator=bool_mir.operation_nodes[vid].operator,
-                operands=[
-                    _cfg_operand_signed(float_mir, operand, sign, alloc, const_pool)
-                    for operand, sign in zip(
-                        bool_mir.operation_nodes[vid].operands, bool_mir.operation_nodes[vid].operand_signs
-                    )
-                ],
-                dst=BoolRegRef(alloc.bool_reg[vid]),
-                relation=bool_mir.operation_nodes[vid].relation,
-                issue_cycle=bool_issue,
-                latency=bool_mir.operation_nodes[vid].operator.latency,
+            for vid in sorted(
+                (v for v in sched.issue_cycle if v in inst_of),
+                key=lambda v: (sched.issue_cycle[v], v),
             )
-            for vid in bool_mir.block_operations(block)
         ]
-        work_makespan = max([op_makespan, *(bop.commit_cycle for bop in bool_ops)])
+        comb_ops = [
+            _build_cfg_comb_op(float_mir, bool_mir, vid, sched.issue_cycle[vid], alloc, const_pool)
+            for vid in sorted(
+                (v for v in sched.issue_cycle if v not in inst_of),
+                key=lambda v: (sched.issue_cycle[v], v),
+            )
+        ]
+        work_makespan = sched.makespan
         install = work_makespan + 1
         copies = [
             FloatCopy(FloatRegRef(dst), _cfg_operand_signed(float_mir, src, sign, alloc, const_pool), install)
@@ -237,7 +208,7 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
             LirBlock(
                 block.id,
                 float_ops,
-                bool_ops,
+                comb_ops,
                 copies,
                 bool_writes,
                 _cfg_terminator(block.terminator, alloc),
@@ -315,6 +286,49 @@ def _cfg_bool_operand(bool_mir: MirBoolView, vid: ValueId, alloc: _CfgAllocation
     if isinstance(node, MirBoolConst):
         return BoolOperand(BoolConstRef(node.value))
     return BoolOperand(BoolRegRef(alloc.bool_reg[vid]))
+
+
+def _cfg_comb_operand(
+    float_mir: MirFloatView,
+    bool_mir: MirBoolView,
+    vid: ValueId,
+    sign: FloatSignControl,
+    alloc: _CfgAllocation,
+    pool: dict[ValueId, _PooledConst],
+) -> FloatOperand | BoolOperand:
+    """
+    One operand of a combinational op, resolved in its own bank: a boolean value reads the bool bank (no sign), a
+    floating-point value reads the float bank (with its folded sign control).
+    """
+    if vid in bool_mir.nodes:
+        return _cfg_bool_operand(bool_mir, vid, alloc)
+    return _cfg_operand_signed(float_mir, vid, sign, alloc, pool)
+
+
+def _build_cfg_comb_op(
+    float_mir: MirFloatView,
+    bool_mir: MirBoolView,
+    vid: ValueId,
+    issue_cycle: int,
+    alloc: _CfgAllocation,
+    pool: dict[ValueId, _PooledConst],
+) -> CombScheduledOp:
+    """
+    Build one combinational scheduled op. Operands are resolved per bank; the destination follows the result bank --
+    a bool-result op (comparison, logic, float->bool) writes a bool register, the float-result ``float(cond)`` a float
+    register.
+    """
+    node = float_mir.operation_nodes.get(vid) or bool_mir.operation_nodes[vid]
+    operands = [
+        _cfg_comb_operand(float_mir, bool_mir, operand, sign, alloc, pool)
+        for operand, sign in zip(node.operands, node.operand_signs)
+    ]
+    dst: FloatRegRef | BoolRegRef = (
+        FloatRegRef(alloc.float_reg[vid]) if vid in float_mir.operation_nodes else BoolRegRef(alloc.bool_reg[vid])
+    )
+    return CombScheduledOp(
+        operator=node.operator, operands=operands, dst=dst, issue_cycle=issue_cycle, latency=node.operator.latency
+    )
 
 
 def _build_cfg_op(
@@ -509,7 +523,7 @@ def _allocate_cfg(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) -> _
 
 
 def _build_const_pool(
-    mir: MirFloatView, bool_operations: dict[ValueId, MirBoolOperation] | None = None
+    mir: MirFloatView, bool_operations: dict[ValueId, MirOperation] | None = None
 ) -> tuple[list[float], dict[ValueId, _PooledConst]]:
     """
     Build the immediate/ROM pool keyed by magnitude: every constant is stored as a nonnegative value, and its sign is
@@ -517,20 +531,20 @@ def _build_const_pool(
     This is value-preserving because ``encode(|c|)`` with the sign bit set equals ``encode(c)`` bit-for-bit -- except
     for a magnitude that encodes to zero, where the sign must NOT be folded: ZKF has no negative zero, so a folded
     negate over a zero-encoding magnitude would emit an illegal ``-0`` instead of the canonical ``+0`` that the signed
-    value itself encodes to. Such constants therefore keep an identity sign control. ``bool_operations`` (float
-    comparators) contribute their float operand constants too.
+    value itself encodes to. Such constants therefore keep an identity sign control. ``bool_operations`` (the bool-result
+    combinational ops -- comparisons, boolean logic, the float->bool cast) contribute their float operand constants too.
     """
     ids: list[ValueId] = []
     seen: set[ValueId] = set()
 
     def note(vid: ValueId) -> None:
-        node = mir.nodes[vid]
+        node = mir.nodes.get(vid)  # a bool operand of a bool-result op is not in the float view; skip it
         if isinstance(node, MirFloatConst) and vid not in seen:
             seen.add(vid)
             ids.append(vid)
 
     for node in mir.nodes.values():
-        if isinstance(node, MirFloatOperation):
+        if isinstance(node, MirOperation):
             for operand in node.operands:
                 note(operand)
         elif isinstance(node, MirPhi):  # a constant phi arm becomes a copy source, so it must be pooled

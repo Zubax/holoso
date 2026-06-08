@@ -13,23 +13,7 @@ from typing import Any
 import numpy as np
 
 from .._errors import MissingIntrinsic, SourceLocation, SourceUnavailable, UnsupportedConstruct
-from .._hir import (
-    BlockId,
-    BoolConst,
-    BoolType,
-    Const,
-    FloatAbs,
-    FloatAdd,
-    FloatConst,
-    FloatDiv,
-    FloatMul,
-    FloatNeg,
-    FloatRelational,
-    Hir,
-    HirBuilder,
-    RelationalOp,
-    ValueId,
-)
+from .._hir import *
 
 _Path = list[int | str]
 
@@ -271,6 +255,10 @@ class _Lowerer:
         # Instance attributes assigned anywhere in the body (syntactic, ignoring reachability). A boolean attribute NOT
         # in this set is read-only, so a branch on it has a compile-time-known condition (see ``_static_bool``).
         self._assigned_attrs: set[str] = set()
+        # True only while that read-only set is itself being built: a static fold may then not consult an attribute's
+        # read-only-ness (the set is incomplete), so attribute leaves read as opaque -- yet an absorbing connective
+        # (``self.flag or True``) still folds, since the absorbing operand alone decides it.
+        self._scanning_readonly_attrs: bool = False
         # The names each lowered function binds (parameters and assignment targets); shadow resolution consults these.
         self._local_names: dict[types.FunctionType, set[str]] = {}
 
@@ -416,8 +404,17 @@ class _Lowerer:
         contributes no state), mirroring a folded ``if``; a statically-true condition is lowered as a normal (infinite)
         loop, faithful to the source.
         """
-        if self._static_bool(test) is False:
-            return False  # the loop never runs: nothing to lower, environment and state unchanged
+        if self._static_condition(test) is False:
+            # The loop never runs, but its condition is still type-checked here (a non-boolean operand is rejected, as
+            # in an ``if``) -- a statically-false loop is the one path where the condition is otherwise never lowered in
+            # a header. The lowered condition is dead and DCE-removed; environment and state are unchanged.
+            skipped = self._scalar(self._lower_bool(test), test)
+            if not isinstance(self._builder.type_of(skipped), BoolType):
+                raise UnsupportedConstruct(
+                    "a while condition must be a boolean value (a comparison or a boolean state/variable)",
+                    self._loc(test),
+                )
+            return False
         # A counter the body reassigns is a runtime loop-header phi inside the loop, so it must be dropped from the
         # static-int map before the condition, body, and carried-set are folded/lowered (a leaked ``for`` counter the
         # loop rebinds is no longer a compile-time int; a folded comparison / static index / shift exponent must see it
@@ -443,7 +440,7 @@ class _Lowerer:
         for attr, (phi, _) in attr_phis.items():
             self._state_env[attr] = _Scalar(phi)
 
-        cond = self._scalar(self._lower_expr(test), test)
+        cond = self._scalar(self._lower_bool(test), test)
         if not isinstance(self._builder.type_of(cond), BoolType):
             raise UnsupportedConstruct("a while condition must be a boolean value (a comparison or a boolean)", loc)
         self._builder.branch(cond, body_block, exit_block)
@@ -534,7 +531,7 @@ class _Lowerer:
                     case ast.Return():
                         return
                     case ast.If(test=test, body=b, orelse=o):
-                        constant = self._static_bool(test)
+                        constant = self._static_condition(test)
                         if constant is not None:
                             walk(b if constant else o)  # a folded ``if`` contributes only its taken arm
                         else:
@@ -551,7 +548,7 @@ class _Lowerer:
                             names.add(counter)
                         self._walk_loop_assigned(counter, iterable, b, walk)
                     case ast.While(test=test, body=b):
-                        if self._static_bool(test) is not False:  # a statically-false loop reassigns nothing
+                        if self._static_condition(test) is not False:  # a statically-false loop reassigns nothing
                             _, _, nested = self._loop_carried(b)  # counters the nested loop rebinds to runtime
                             saved = dict(self._static_ints)
                             self._static_ints = {n: v for n, v in saved.items() if n not in nested}
@@ -659,6 +656,34 @@ class _Lowerer:
             case _:
                 return None
 
+    def _resolves_to_builtin(self, name: str) -> bool:
+        """
+        Whether a bare ``name`` resolves to the actual Python builtin -- absent from the module globals, or explicitly
+        rebound to the builtin itself -- rather than being shadowed by a user global (a local, or any other object).
+        A shadow is what Python would call, so the name is not the builtin cast/intrinsic it spells.
+        """
+        if self._is_local(name):
+            return False
+        callee = self._fn.__globals__.get(name, _ABSENT)
+        return callee is _ABSENT or callee is getattr(builtins, name, None)
+
+    def _cast_call(self, node: ast.expr) -> tuple[str, ast.expr] | None:
+        """
+        If ``node`` is an unshadowed builtin ``bool(x)`` / ``float(x)`` call on a single positional argument, return
+        ``(builtin name, argument)``; else None. Lets the static evaluators see through a cast exactly as lowering does.
+        """
+        if (
+            not isinstance(node, ast.Call)
+            or node.keywords
+            or len(node.args) != 1
+            or isinstance(node.args[0], ast.Starred)
+        ):
+            return None
+        func = node.func
+        if not isinstance(func, ast.Name) or func.id not in ("bool", "float") or not self._resolves_to_builtin(func.id):
+            return None
+        return func.id, node.args[0]
+
     def _static_bool(self, test: ast.expr) -> bool | None:
         """
         Evaluate a branch condition known at compile time -- a literal ``True``/``False``, a read-only boolean
@@ -671,24 +696,141 @@ class _Lowerer:
         """
         if isinstance(test, ast.Constant) and isinstance(test.value, bool):
             return test.value
-        if isinstance(test, ast.Compare) and len(test.ops) == 1 and len(test.comparators) == 1:
-            relation = self._RELATIONAL_OPS.get(type(test.ops[0]))
-            if relation is not None:
-                left_int, right_int = self._static_int(test.left), self._static_int(test.comparators[0])
-                if left_int is not None and right_int is not None:
-                    # Two compile-time integers are compared exactly as integers: a float64 fold would round operands
-                    # beyond 2**53 and misfold, e.g. ``9007199254740993 == 9007199254740992``.
-                    return relation.holds((left_int > right_int) - (left_int < right_int))
-                left, right = self._static_float(test.left), self._static_float(test.comparators[0])
-                if left is not None and right is not None and left == left and right == right:
-                    return relation.holds(
-                        (left > right) - (left < right)
-                    )  # both non-NaN; NaN is left to the comparator
-        if self._is_self_attr(test):
+        cast = self._cast_call(test)
+        if cast is not None and cast[0] == "bool":
+            # ``bool(<static bool>)`` is identity; ``bool(<static float>)`` is format-dependent (its argument is not a
+            # static bool, so this returns None and defers to the format-aware hardware cast).
+            return self._static_bool(cast[1])
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            inner = self._static_bool(test.operand)
+            return None if inner is None else (not inner)
+        if isinstance(test, ast.BoolOp):
+            # Fold strictly left to right, exactly as Python evaluates: ``or`` stops at the first True operand, ``and``
+            # at the first False one. An unknown operand reached before any absorbing operand leaves the result runtime
+            # (returning None), so that operand is still lowered and type-checked by ``_lower_connective`` rather than
+            # being silently folded away -- which is what rejects a non-boolean operand such as ``x or True``.
+            absorbing = isinstance(test.op, ast.Or)
+            for operand in test.values:
+                folded = self._static_bool(operand)
+                if folded is None:
+                    return None
+                if folded == absorbing:
+                    return absorbing
+            return not absorbing  # every operand folded to the identity
+        if isinstance(test, ast.IfExp):
+            condition = self._static_bool(test.test)
+            if condition is None:
+                return None
+            return self._static_bool(test.body if condition else test.orelse)
+        if isinstance(test, ast.Compare):
+            # ``a OP1 b OP2 c`` is the conjunction of its consecutive pairs, short-circuiting on the first failing link.
+            operands = [test.left, *test.comparators]
+            for op, left, right in zip(test.ops, operands, operands[1:]):
+                relation = self._RELATIONAL_OPS.get(type(op))
+                if relation is None:
+                    return None
+                holds = self._static_relation(relation, left, right)
+                if holds is None:
+                    return None
+                if not holds:
+                    return False
+            return True
+        if self._is_self_attr(test) and not self._scanning_readonly_attrs:
             assert isinstance(test, ast.Attribute)
             value = self._snapshot.get(test.attr)
             if isinstance(value, (bool, np.bool_)) and test.attr not in self._assigned_attrs:
                 return bool(value)  # a read-only boolean attribute keeps its snapshot value (never assigned)
+        return None
+
+    def _static_condition(self, test: ast.expr) -> bool | None:
+        """
+        The compile-time value of a branch or loop condition for REACHABILITY -- which arm runs -- folding a connective
+        by its absorbing element: ``X or True`` is True and ``X and False`` is False whatever the other operands are.
+        This assumes the operands are boolean; operand-type validity is enforced separately when the condition is
+        lowered (``_lower_connective`` rejects a non-boolean operand), so this drives only reachability. Unlike
+        ``_static_bool`` -- which folds strictly left to right so a not-yet-type-checked operand is still lowered and
+        rejected -- it is sound here precisely because the lowering of the condition does the type-checking. It is the
+        one predicate the lowering fold (``_lower_if`` / ``_lower_ifexp`` / ``_lower_while``) and the attribute and loop
+        scans share, so they descend exactly the same arms; a divergence would make a folded-away arm's write a
+        persistent-state slot with no value (a crash). A leaf or unrelated comparison defers to ``_static_bool``. This
+        is a sound, deliberately incomplete approximation of the (complete) HIR constant folder -- it folds the forms a
+        kernel realistically writes (connectives, casts, equal-arm ternaries, a ``float(<cond>)`` comparison); a
+        constant condition buried under some other shape stays runtime, at worst rejecting a ``return`` or leaving an
+        unused state register under a contrived tautology (Phase 2's early returns lift the return limit).
+        """
+        match test:
+            case ast.BoolOp(op=op, values=values):
+                absorbing = isinstance(op, ast.Or)
+                saw_unknown = False
+                for value in values:
+                    folded = self._static_condition(value)
+                    if folded is None:
+                        saw_unknown = True
+                    elif folded == absorbing:
+                        return absorbing  # an absorbing operand fixes the result regardless of the rest
+                return None if saw_unknown else (not absorbing)  # all operands folded to the identity element
+            case ast.UnaryOp(op=ast.Not(), operand=operand):
+                inner = self._static_condition(operand)
+                return None if inner is None else (not inner)
+            case ast.IfExp(test=condition, body=body, orelse=orelse):
+                chosen = self._static_condition(condition)
+                if chosen is not None:
+                    return self._static_condition(body if chosen else orelse)
+                then_value = self._static_condition(body)  # a runtime test still folds when both arms agree
+                return then_value if then_value is not None and then_value == self._static_condition(orelse) else None
+            case ast.Compare(left=left, ops=[op], comparators=[right]) if (
+                self._reach_float_cast(left) is not None or self._reach_float_cast(right) is not None
+            ):
+                # A comparison with a ``float(<connective>)`` operand: the strict ``_static_bool`` path defers the cast
+                # argument and cannot fold it, so reachability folds it here (else the const condition leaks a branch
+                # and a dead-arm state slot). Other comparisons fall through to ``_static_bool`` (which keeps int-exact
+                # folding); a chained float-cast comparison is rare enough to leave runtime.
+                relation = self._RELATIONAL_OPS.get(type(op))
+                if relation is None:
+                    return None
+                left_value = self._reach_float_cast(left)
+                left_value = self._static_float(left) if left_value is None else left_value
+                right_value = self._reach_float_cast(right)
+                right_value = self._static_float(right) if right_value is None else right_value
+                if left_value is None or right_value is None or left_value != left_value or right_value != right_value:
+                    return None
+                return relation.holds((left_value > right_value) - (left_value < right_value))
+            case _:
+                cast = self._cast_call(test)
+                if cast is not None and cast[0] == "bool":
+                    return self._static_condition(cast[1])  # ``bool(<cond>)`` carries the truthiness of its argument
+                return self._static_bool(test)
+
+    def _reach_float_cast(self, node: ast.expr) -> float | None:
+        """
+        The compile-time float of an unshadowed ``float(<connective>)`` cast for reachability (``1.0``/``0.0``), or None
+        if ``node`` is not a float() of a statically-known condition. Distinct from ``_static_float`` (whose cast case
+        defers its argument to the strict ``_static_bool``), so a comparison like ``float(X or True) > 0.5`` folds.
+        """
+        cast = self._cast_call(node)
+        if cast is None or cast[0] != "float":
+            return None
+        condition = self._static_condition(cast[1])
+        return None if condition is None else (1.0 if condition else 0.0)
+
+    def _static_relation(self, relation: RelationalOp, left: ast.expr, right: ast.expr) -> bool | None:
+        """
+        Fold one relational link of compile-time operands, or None if either is not compile-time. Two integers are
+        compared exactly (a float64 fold would round operands beyond 2**53 and misfold, e.g.
+        ``9007199254740993 == 9007199254740992``); otherwise the fast-math float64 fold is used (accepted per
+        DESIGN.md), leaving a NaN operand to the comparator.
+        """
+        left_int, right_int = self._static_int(left), self._static_int(right)
+        if left_int is not None and right_int is not None:
+            return relation.holds((left_int > right_int) - (left_int < right_int))
+        left_float, right_float = self._static_float(left), self._static_float(right)
+        if (
+            left_float is not None
+            and right_float is not None
+            and left_float == left_float
+            and right_float == right_float
+        ):
+            return relation.holds((left_float > right_float) - (left_float < right_float))
         return None
 
     def _syntactically_assigned_attrs(self, fndef: ast.FunctionDef) -> set[str]:
@@ -697,21 +839,27 @@ class _Lowerer:
         read-only attribute (one never assigned, so it keeps its snapshot value). Reachability mirrors ``_lower_stmts``:
         it stops at a ``return`` and folds a literal-constant ``if`` (and a statically-false ``while``) to its live
         arm, so a write in statically-dead code does not mask a read-only attribute. A condition that depends on a
-        read-only attribute is deliberately NOT folded here -- doing so would read the very set being built -- so such
-        a dead arm is descended conservatively (a safe over-approximation: an attribute is only ever treated as written
-        when it might not be, never the reverse).
+        read-only attribute is not resolved here -- the set is still being built -- so an attribute leaf reads as opaque
+        and only an absorbing connective (``self.flag or True``) or an attribute-free condition folds; an unfoldable
+        attribute condition is descended conservatively (a safe over-approximation: an attribute is only ever treated as
+        written when it might not be, never the reverse).
         """
         attrs: set[str] = set()
-        self._collect_assigned(fndef.body, attrs)
+        self._scanning_readonly_attrs = True
+        try:
+            self._collect_assigned(fndef.body, attrs)
+        finally:
+            self._scanning_readonly_attrs = False
         return attrs
 
-    def _is_attr_free(self, node: ast.expr) -> bool:
-        """Whether an expression reads no ``self`` attribute, so ``_static_bool`` can fold it during the read-only scan
-        without consulting the read-only-attribute set that scan is itself building (a literal, a static comparison of
-        literals, etc.). An attribute condition is left for the fold-aware lowering, where the set is already known."""
-        return not any(isinstance(sub, ast.expr) and self._is_self_attr(sub) for sub in ast.walk(node))
+    def _collect_assigned(self, stmts: list[ast.stmt], attrs: set[str]) -> bool:
+        """
+        Record the instance attributes assigned on a reachable path into ``attrs``; return True if a ``return`` is
+        reached so the caller stops, exactly as lowering does. A folded ``if`` whose taken arm returns makes the rest
+        of the enclosing list unreachable -- without propagating that, an attribute assigned after such an ``if`` would
+        be wrongly counted as written and lose its read-only fold.
+        """
 
-    def _collect_assigned(self, stmts: list[ast.stmt], attrs: set[str]) -> None:
         def record(targets: list[ast.expr]) -> None:
             for leaf in (leaf for target in targets for leaf in _leaf_targets(target)):
                 if self._is_self_attr(leaf) and isinstance(leaf, ast.Attribute):
@@ -720,23 +868,30 @@ class _Lowerer:
         for stmt in stmts:
             match stmt:
                 case ast.Return():
-                    return  # statements after a return are unreachable, exactly as lowering stops here
+                    return True  # statements after a return are unreachable, exactly as lowering stops here
                 case ast.If(test=test, body=body, orelse=orelse):
                     # Fold a statically-known guard to its live arm, as lowering does, so a write in the dead arm is not
-                    # counted as an assignment (which would wrongly mark a read-only attribute as written and suppress
-                    # a later fold). Only an ATTRIBUTE-FREE condition is folded here: an attribute condition would read
-                    # the very read-only set being built, so it is conservatively descended on both arms (safe).
-                    constant = self._static_bool(test) if self._is_attr_free(test) else None
+                    # counted as an assignment (which would wrongly mark a read-only attribute as written and suppress a
+                    # later fold). Attribute leaves read as opaque while this set is being built (``_scanning_readonly
+                    # _attrs``), so an absorbing connective still folds but a value-dependent attribute condition is
+                    # conservatively descended on both arms.
+                    constant = self._static_condition(test)
                     if constant is not None:
-                        self._collect_assigned(body if constant else orelse, attrs)
+                        if self._collect_assigned(body if constant else orelse, attrs):
+                            return True  # the taken arm returned; the rest of this list is unreachable
                     else:
                         self._collect_assigned(body, attrs)
                         self._collect_assigned(orelse, attrs)
-                case ast.While(test=test, body=body) if self._is_attr_free(test) and self._static_bool(test) is False:
+                case ast.While(test=test, body=body) if self._static_condition(test) is False:
                     pass  # a statically-false while never runs; its body assigns nothing reachable (lowering skips it)
                 case ast.For(iter=iterable, body=body, orelse=orelse):
-                    # A static range with zero trips never runs its body (lowering unrolls it zero times), so a write
-                    # there is not a reachable assignment; mirror that. A non-static range is treated as binding.
+                    # A zero-trip static range never runs its body, so a write there is not reachable; mirror only that.
+                    # The counter is deliberately NOT bound here: folding a counter-dependent inner condition would
+                    # require this scan to replicate the full static-int discipline of ``_scan_attr_writes``
+                    # (invalidate-on-reassign, per-arm snapshot/restore), and binding without it risks a stale-counter
+                    # miscompile. So a write reachable only on a counter value no trip takes is conservatively counted --
+                    # a safe over-approximation (at worst an unused state register for a dead for-body write, never a
+                    # wrong result). Unifying the three scans' loop traversal is tracked future work.
                     if self._for_counter_is_bound(iterable):
                         self._collect_assigned(body, attrs)
                     self._collect_assigned(orelse, attrs)
@@ -747,6 +902,7 @@ class _Lowerer:
                     record(targets)
                 case ast.AnnAssign(target=target) | ast.AugAssign(target=target):
                     record([target])
+        return False
 
     def _lower_if(self, test: ast.expr, body: list[ast.stmt], orelse: list[ast.stmt]) -> bool:
         """
@@ -755,14 +911,18 @@ class _Lowerer:
         whose phis reconcile the two arms' environments and persistent state. Returns True only if both arms returned
         (never, for now: a return inside an arm is rejected).
         """
-        constant = self._static_bool(test)
-        if constant is not None:
-            return self._lower_stmts(body if constant else orelse)
-        cond = self._scalar(self._lower_expr(test), test)
+        # Lower the condition first: this type-checks its operands (rejecting a non-boolean one). Then fold reachability
+        # via ``_static_condition`` -- the same predicate the attribute/loop scans use, so a folded ``if X or True:``
+        # takes one arm in place (no branch, no spurious return-inside-a-branch rejection) without the scans and the
+        # lowering disagreeing about which arms exist.
+        cond = self._scalar(self._lower_bool(test), test)
         if not isinstance(self._builder.type_of(cond), BoolType):
             raise UnsupportedConstruct(
                 "an if condition must be a boolean value (a comparison or a boolean state/variable)", self._loc(test)
             )
+        constant = self._static_condition(test)
+        if constant is not None:
+            return self._lower_stmts(body if constant else orelse)
         loc = self._loc(test)
         before_env, before_state = dict(self._env), dict(self._state_env)
         before_static = dict(self._static_ints)
@@ -858,6 +1018,12 @@ class _Lowerer:
             case (_Scalar(id=ia), _Scalar(id=ib)):
                 if ia == ib:
                     return a
+                if self._builder.type_of(ia) != self._builder.type_of(ib):
+                    raise UnsupportedConstruct(
+                        "the two branches produce values of different scalar types (a conditional's arms, and a "
+                        "variable's value across an if, must have the same type)",
+                        loc,
+                    )
                 return _Scalar(self._builder.phi(self._builder.type_of(ia), [(pred_a, ia), (pred_b, ib)]))
             case (_Aggregate(items=items_a), _Aggregate(items=items_b)) if len(items_a) == len(items_b):
                 return _Aggregate(
@@ -968,14 +1134,16 @@ class _Lowerer:
             case ast.UnaryOp(op=ast.UAdd(), operand=operand):
                 # Unary plus is scalar identity; like negation, it rejects an aggregate operand.
                 return _Scalar(self._scalar(self._lower_expr(operand), node))
+            case ast.UnaryOp(op=ast.Not()):
+                return self._lower_bool(node)
             case ast.BinOp(left=left, op=ast.Pow(), right=right):
                 return _Scalar(self._lower_pow(left, right))
             case ast.BinOp(left=left, op=op, right=right):
                 return self._apply_binop(op, self._lower_expr(left), self._lower_expr(right), self._loc(node))
-            case ast.Compare(left=left, ops=[op], comparators=[right]):
-                return self._lower_compare(op, self._lower_expr(left), self._lower_expr(right), self._loc(node))
-            case ast.Compare():
-                raise UnsupportedConstruct("chained comparisons (a < b < c) are not yet supported", self._loc(node))
+            case ast.Compare() | ast.BoolOp():
+                return self._lower_bool(node)
+            case ast.IfExp(test=test, body=body, orelse=orelse):
+                return self._lower_ifexp(test, body, orelse, self._loc(node))
             case ast.Call():
                 return self._lower_call(node)
             case ast.Attribute():
@@ -1047,16 +1215,37 @@ class _Lowerer:
                 raise UnsupportedConstruct(
                     f"{func.id!r} is shadowed by a non-callable global; it cannot be called", self._loc(node)
                 )
-            if func.id == "abs" and not node.keywords:
+            # A bare name is one of the recognized builtins (abs/list/tuple/bool/float) only when it is the actual
+            # builtin. A callable GLOBAL of the same name (a class, partial, or callable instance) is a shadow Python
+            # would call instead, so it must not be mistaken for the builtin cast/abs; it falls through to the
+            # unsupported-call rejection below.
+            builtin_unshadowed = self._resolves_to_builtin(func.id)
+            if func.id == "abs" and not node.keywords and builtin_unshadowed:
                 operands = self._lower_args(node)
                 if len(operands) == 1:
                     return _Scalar(self._builder.operation(FloatAbs(), [self._scalar(operands[0], node)]))
-            if func.id in ("list", "tuple") and not node.keywords:
+            if func.id in ("list", "tuple") and not node.keywords and builtin_unshadowed:
                 # list(seq)/tuple(seq) of an aggregate is identity here: it carries the element order the model holds,
                 # and the front-end already treats list and tuple aggregates co-equally (the list/tuple-literal case).
                 operands = self._lower_args(node)
                 if len(operands) == 1 and isinstance(operands[0], _Aggregate):
                     return operands[0]
+            if func.id == "bool" and not node.keywords and builtin_unshadowed:
+                operands = self._lower_args(node)
+                if len(operands) != 1:
+                    raise UnsupportedConstruct("bool() takes a single scalar argument", self._loc(node))
+                operand = self._scalar(operands[0], node)  # an aggregate argument is rejected here
+                if isinstance(self._builder.type_of(operand), BoolType):
+                    return _Scalar(operand)  # bool(<bool>) is identity
+                return _Scalar(self._builder.operation(FloatToBool(), [operand]))
+            if func.id == "float" and not node.keywords and builtin_unshadowed:
+                operands = self._lower_args(node)
+                if len(operands) != 1:
+                    raise UnsupportedConstruct("float() takes a single scalar argument", self._loc(node))
+                operand = self._scalar(operands[0], node)  # an aggregate argument is rejected here
+                if isinstance(self._builder.type_of(operand), BoolType):
+                    return _Scalar(self._builder.operation(BoolToFloat(), [operand]))
+                return _Scalar(operand)  # float(<float>) is identity
         name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
         if name in _KNOWN_INTRINSICS:
             raise MissingIntrinsic(f"implement this operator: {name}", self._loc(node))
@@ -1178,6 +1367,10 @@ class _Lowerer:
         matching the constant folder and accepted per DESIGN.md; it drives compile-time branch decisions and the
         negative-power base.
         """
+        cast = self._cast_call(node)
+        if cast is not None and cast[0] == "float":
+            condition = self._static_bool(cast[1])  # float(<static bool>) -> 1.0 / 0.0; float(<static float>) identity
+            return (1.0 if condition else 0.0) if condition is not None else self._static_float(cast[1])
         match node:
             case ast.Constant(value=(int() | float()) as value) if not isinstance(value, bool):
                 return float(value)
@@ -1200,7 +1393,7 @@ class _Lowerer:
                     case _:
                         return None
             case _:
-                if self._is_self_attr(node):
+                if self._is_self_attr(node) and not self._scanning_readonly_attrs:
                     assert isinstance(node, ast.Attribute)
                     attr_value = self._snapshot.get(node.attr)
                     if isinstance(attr_value, (int, float)) and not isinstance(attr_value, bool):
@@ -1250,6 +1443,119 @@ class _Lowerer:
         ):
             raise UnsupportedConstruct("comparison operands must be floating-point, not boolean", loc)
         return _Scalar(self._builder.operation(FloatRelational(relop), [left_id, right_id]))
+
+    def _lower_bool(self, node: ast.expr) -> _Value:
+        """
+        Lower a boolean-valued expression to a bool scalar: a comparison (single or chained), a connective
+        (``and``/``or``/``not``), a boolean literal/variable/read-only attribute, or (cross-bank) a cast. A connective
+        builds a combinational ``BoolAnd``/``BoolOr``/``BoolNot`` over its operands (both operands always evaluated --
+        the operands here are pure booleans); a compile-time-known result folds to a constant with no operation, and a
+        statically-known connective operand is dropped (its identity) or short-circuits the whole (its absorbing value),
+        matching Python. A non-boolean operand in a boolean position is rejected.
+        """
+        constant = self._static_bool(node)
+        if constant is not None:
+            return _Scalar(self._builder.bool_const(constant))
+        match node:
+            case ast.BoolOp(op=ast.And(), values=values):
+                return self._lower_connective(values, BoolAnd(), absorbing=False)
+            case ast.BoolOp(op=ast.Or(), values=values):
+                return self._lower_connective(values, BoolOr(), absorbing=True)
+            case ast.UnaryOp(op=ast.Not(), operand=operand):
+                return _Scalar(self._builder.operation(BoolNot(), [self._bool_scalar(operand)]))
+            case ast.Compare(left=left, ops=ops, comparators=comparators):
+                return self._lower_compare_chain(left, ops, comparators, self._loc(node))
+            case _:
+                # A value-position expression (a bool literal, a bool variable, a read-only attribute, ...): lower it
+                # plainly; whether the result must be boolean is enforced by the caller with a context-specific message.
+                return self._lower_expr(node)
+
+    def _bool_scalar(self, node: ast.expr) -> ValueId:
+        """Lower a boolean sub-expression to a single bool ValueId (rejecting an aggregate or a non-boolean value)."""
+        scalar = self._scalar(self._lower_bool(node), node)
+        if not isinstance(self._builder.type_of(scalar), BoolType):
+            raise UnsupportedConstruct("expected a boolean value here (a comparison or a boolean)", self._loc(node))
+        return scalar
+
+    def _lower_connective(self, values: list[ast.expr], op: Operator, absorbing: bool) -> _Value:
+        # ``and`` has absorbing False / identity True; ``or`` is the dual. A statically-absorbing operand short-circuits
+        # the whole connective (later operands are not evaluated, as in Python); a statically-identity operand is
+        # dropped; the remaining dynamic operands are reduced left-to-right by the combinational logic operator.
+        dynamic: list[ValueId] = []
+        for value in values:
+            static = self._static_bool(value)
+            if static is None:
+                dynamic.append(self._bool_scalar(value))
+            elif static == absorbing:
+                return _Scalar(self._builder.bool_const(absorbing))
+            # else: the identity value -- drop it and continue
+        if not dynamic:
+            return _Scalar(self._builder.bool_const(not absorbing))  # every operand folded to the identity
+        result = dynamic[0]
+        for operand in dynamic[1:]:
+            result = self._builder.operation(op, [result, operand])
+        return _Scalar(result)
+
+    def _lower_compare_chain(
+        self, left: ast.expr, ops: list[ast.cmpop], comparators: list[ast.expr], loc: SourceLocation
+    ) -> _Value:
+        # ``a OP1 b OP2 c`` is ``(a OP1 b) and (b OP2 c)`` with each operand evaluated exactly once (the shared middle
+        # operand feeds two comparisons). The conjunction is the combinational ``BoolAnd``; a single comparison needs no
+        # ``and`` at all.
+        operands = [self._lower_expr(left), *(self._lower_expr(comparator) for comparator in comparators)]
+        comparisons = [
+            self._scalar(self._lower_compare(op, operands[i], operands[i + 1], loc), loc) for i, op in enumerate(ops)
+        ]
+        result = comparisons[0]
+        for comparison in comparisons[1:]:
+            result = self._builder.operation(BoolAnd(), [result, comparison])
+        return _Scalar(result)
+
+    def _lower_ifexp(self, test: ast.expr, body: ast.expr, orelse: ast.expr, loc: SourceLocation) -> _Value:
+        """
+        Lower a conditional expression ``body if test else orelse``. The test is lowered first (type-checking its
+        operands and folding a connective/cast to a constant where it can, including ``x or True`` -> True); a test
+        that reduces to a constant -- or two arms that share one compile-time value -- selects the value with no branch,
+        otherwise a ``branch`` into fresh arm blocks lowers each arm there (only the taken arm computes at run time) and
+        merges the two values in a phi.
+        """
+        cond = self._bool_scalar(test)
+        constant = self._static_condition(test)
+        if constant is not None:
+            return self._lower_expr(body if constant else orelse)
+        # Equal compile-time arms make the value independent of the test, so no branch is needed. This is a VALUE proof,
+        # so it must use the strict ``_static_bool`` / ``_static_float`` (which fold only genuinely-static operands),
+        # NOT the reachability-only ``_static_condition`` -- the latter assumes operands are boolean and would elide the
+        # branch (and the arm lowering that type-checks them) for an arm like ``float(x or True) > 0.5``.
+        both_bool = self._static_bool(body)
+        if both_bool is not None and both_bool == self._static_bool(orelse):
+            return _Scalar(self._builder.bool_const(both_bool))
+        both_float = self._static_float(body)
+        if both_float is not None and both_float == self._static_float(orelse):
+            return _Scalar(self._builder.float_const(both_float))
+        return self._branch_value(cond, lambda: self._lower_expr(body), lambda: self._lower_expr(orelse), loc)
+
+    def _branch_value(
+        self, cond: ValueId, then_value: Callable[[], _Value], else_value: Callable[[], _Value], loc: SourceLocation
+    ) -> _Value:
+        """
+        Branch on ``cond`` into fresh then/else blocks, evaluate a value in each (a pure expression, so it mutates no
+        environment), and merge the two results into a phi at the merge block, leaving the builder positioned there so
+        the enclosing expression resumes after the merge. Unlike a statement arm this never carries a ``return``, so the
+        branch-nesting guard is not raised.
+        """
+        then_block, else_block, merge_block = self._builder.block(), self._builder.block(), self._builder.block()
+        self._builder.branch(cond, then_block, else_block)
+        self._builder.position_at(then_block)
+        then = then_value()
+        then_end = self._builder.current_block
+        self._builder.jump(merge_block)
+        self._builder.position_at(else_block)
+        else_ = else_value()
+        else_end = self._builder.current_block
+        self._builder.jump(merge_block)
+        self._builder.position_at(merge_block)
+        return self._merge_values(then, else_, then_end, else_end, loc)
 
     def _broadcast(self, value: _Value, scalar: ValueId) -> _Value:
         """Multiply every scalar leaf of ``value`` by ``scalar``, preserving shape (the one elementwise vector op)."""
@@ -1325,7 +1631,7 @@ class _Lowerer:
             if isinstance(stmt, ast.Return):
                 return True
             if isinstance(stmt, ast.If):
-                constant = self._static_bool(stmt.test)
+                constant = self._static_condition(stmt.test)
                 if constant is not None:
                     if self._scan_attr_writes(stmt.body if constant else stmt.orelse):
                         return True  # the taken arm returned; statements after the if are unreachable
@@ -1346,7 +1652,7 @@ class _Lowerer:
                 # runtime loop phi inside it, so demote it from the static-int map before scanning (so a folded branch
                 # there agrees with lowering). The loop does not end the enclosing scan (it may run zero times); a
                 # return inside it is rejected at lowering.
-                if self._static_bool(stmt.test) is not False:
+                if self._static_condition(stmt.test) is not False:
                     _, _, demoted = self._loop_carried(stmt.body)
                     saved = self._static_ints
                     self._static_ints = {n: v for n, v in saved.items() if n not in demoted}

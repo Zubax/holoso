@@ -4,12 +4,19 @@ random sweep, and format edge cases, then checked bit-for-bit against its embedd
 stages) and a deeply pipelined operator configuration at the wide e8m36 datapath.
 
 ``iir1_lpf`` exercises real control flow: a boolean first-sample state and a data-dependent if/else, synthesized
-through the CFG/branch backend (the first sample takes ``y = x``, every later sample the IIR update). ``pi_saturating``
-and ``schmitt_trigger`` exercise float comparisons (``holoso_fcmp``) driving branches: three-way saturation with
-anti-windup, and two-threshold hysteresis (a state held untouched across the deadband).
+through the CFG/branch backend (the first sample takes ``y = x``, every later sample the IIR update). ``pid`` and
+``schmitt_trigger`` exercise float comparisons (``holoso_fcmp``) driving branches: a PID with three-way saturation +
+anti-windup, a derivative-on-error channel, and a boolean ``_started`` state that suppresses the first-update
+derivative spike; and two-threshold hysteresis (a state held untouched across the deadband).
+
+``signal_window`` exercises the Phase 1 expression forms: boolean connectives, a chained comparison, nested
+conditional (ternary) expressions (branch + phi), and both float<->bool casts, including a cross-domain
+comparison -> bool -> float-cast -> float-multiply chain. ``remainder`` is a pure function computing the IEEE 754
+remainder by data-dependent iterative reduction (two magnitude-ratio-bounded back-edge loops, no division).
 
 Still-excluded examples are frontend feature gaps (not verification scope), confirmed by an in-memory compile probe:
-  - iir1_hpf: ``UnsupportedConstruct: call to 'float'``.
+  - iir1_hpf: ``UnsupportedConstruct: call to 'lpf'`` -- a foreign call on an instance-attribute sub-filter (the
+    frontend inlines only global functions, not a nested object); ``float()`` itself is now supported.
   - finite_set_current_controller: ``UnsupportedConstruct`` -- nested/foreign attribute access.
 """
 
@@ -44,9 +51,11 @@ import madd  # noqa: E402
 import poly3  # noqa: E402
 from cordic_sincos import CordicSinCos  # noqa: E402
 from iir1_lpf import IIR1LPF  # noqa: E402
-from pi_saturating import SaturatingPI  # noqa: E402
+from pid import PID  # noqa: E402
 from recip_newton import NewtonReciprocal  # noqa: E402
+from remainder import remainder  # noqa: E402
 from schmitt_trigger import SchmittTrigger  # noqa: E402
+from signal_window import signal_window  # noqa: E402
 from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator  # noqa: E402
 
 # The wide scalar datapath; the plan permits synthesizing only this configuration for the example matrix.
@@ -151,6 +160,27 @@ _SPECS = [
         edge_values=_WIDE_EDGES,
     ),
     ExampleSpec(
+        name="signal_window",
+        inputs=("x", "lo", "hi"),
+        make_kernel=lambda: signal_window,
+        nominal={"x": 0.0, "lo": -1.0, "hi": 1.0},
+        manual=[
+            {"x": 0.5, "lo": -1.0, "hi": 1.0},  # inside and nonzero -> live
+            {"x": 0.0, "lo": -1.0, "hi": 1.0},  # inside but zero -> not live
+            {"x": 2.0, "lo": -1.0, "hi": 1.0},  # above -> clamped to hi, outside
+            {"x": -2.0, "lo": -1.0, "hi": 1.0},  # below -> clamped to lo, outside
+            {"x": 1.0, "lo": -1.0, "hi": 1.0},  # on the hi boundary -> outside (x >= hi), not strictly inside
+            {"x": -1.0, "lo": -1.0, "hi": 1.0},  # on the lo boundary
+            {"x": 0.25, "lo": -0.5, "hi": 0.5},  # a narrower window
+        ],
+        draw_random=lambda rng: {
+            "x": bounded(rng, -3.0, 3.0),
+            "lo": bounded(rng, -2.0, 0.0),
+            "hi": bounded(rng, 0.0, 2.0),
+        },
+        edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
         name="poly3",
         inputs=("x", "c0", "c1", "c2", "c3"),
         make_kernel=lambda: poly3.poly3,
@@ -181,13 +211,13 @@ _SPECS = [
         edge_values=_WIDE_EDGES,
     ),
     ExampleSpec(
-        name="pi_saturating",
+        name="pid",
         inputs=("setpoint", "measurement"),
-        make_kernel=lambda: SaturatingPI().__call__,
+        make_kernel=lambda: PID().__call__,
         nominal={"setpoint": 1.0, "measurement": 0.0},
-        manual=[  # a stream that drives into and out of both saturation rails (each of the three arms is taken)
+        manual=[  # first update (D suppressed), then a varying measurement (D active) driving both saturation rails
             {"setpoint": sp, "measurement": m}
-            for sp, m in [(10.0, 0.0), (10.0, 0.0), (0.0, 0.0), (0.5, 0.0), (-10.0, 0.0), (-10.0, 0.0), (0.0, 0.0)]
+            for sp, m in [(10.0, 0.0), (10.0, 0.5), (0.0, 1.0), (0.5, 0.5), (-10.0, 0.0), (-10.0, -0.5), (0.0, 0.0)]
         ],
         draw_random=_draw_scalars(("setpoint", "measurement"), -6.0, 6.0),
         edge_values=_WIDE_EDGES,
@@ -215,6 +245,23 @@ _SPECS = [
         protected=frozenset({"x"}),
         protected_values=(0.5, 0.75, 1.0, 1.5, 2.0),
         edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="remainder",
+        inputs=("x", "y"),
+        make_kernel=lambda: remainder,
+        nominal={"x": 5.0, "y": 2.0},
+        manual=[  # reduction across magnitude ratios, both signs, and round-to-even ties (6/4 -> -2, 2/4 -> 2)
+            {"x": x, "y": y}
+            for x, y in [(5.0, 3.0), (10.0, 3.0), (7.5, 2.0), (-7.5, 2.0), (13.0, 4.0), (6.0, 4.0), (2.0, 4.0),
+                         (1.0, 4.0), (100.0, 7.0), (0.5, 0.25), (3.0, 3.0), (0.0, 2.0)]
+        ],  # fmt: skip
+        draw_random=lambda rng: {"x": bounded(rng, -8.0, 8.0), "y": log_uniform_positive(rng, 0.25, 4.0)},
+        # The divisor must stay nonzero (y == 0 makes the scaled-subtraction loop run forever), and the magnitude
+        # ratio is bounded to keep the data-dependent trip count -- hence the simulation length -- small.
+        protected=frozenset({"y"}),
+        protected_values=(0.25, 0.5, 1.0, 2.0, 4.0),
+        edge_values=(0.0, 0.5, -0.5, 1.0, -1.0, 3.0, -3.0, 8.0),
     ),
     ExampleSpec(
         name="cordic_sincos",

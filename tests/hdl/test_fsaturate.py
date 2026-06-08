@@ -1,5 +1,6 @@
 """Tests for holoso_fsaturate (combinational; +inf -> +max, -inf -> -max, finite passes through)."""
 
+from pathlib import Path
 import cocotb
 import numpy as np
 import pytest
@@ -47,9 +48,9 @@ def test_holoso_fsaturate(sim: str) -> None:
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / "fsaturate"
     runner.build(
-        sources=sources(),
+        sources=[*sources(), Path(__file__).resolve().parent / "holoso_support_fn_tb.v"],
         includes=[HDL_DIR],
-        hdl_toplevel="holoso_fsaturate",
+        hdl_toplevel="holoso_fsaturate_tb",
         parameters={"WEXP": 8, "WMAN": 24},
         build_args=build_args(sim),
         build_dir=build_dir,
@@ -57,7 +58,7 @@ def test_holoso_fsaturate(sim: str) -> None:
         timescale=("1ns", "1ps"),
     )
     runner.test(
-        hdl_toplevel="holoso_fsaturate",
+        hdl_toplevel="holoso_fsaturate_tb",
         test_module="tests.hdl.test_fsaturate",
         test_dir=REPO_ROOT,
         build_dir=build_dir,

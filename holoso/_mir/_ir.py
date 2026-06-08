@@ -2,8 +2,8 @@
 
 from dataclasses import dataclass
 
-from .._hir import RelationalOp, ValueId
-from .._operators import FCmpOperator, FloatHardwareOperator, FloatSignControl, HardwareOperator
+from .._hir import ValueId
+from .._operators import FloatSignControl, HardwareOperator
 from .._errors import UnsupportedConstruct
 from .._type import BoolType, FloatFormat, FloatType, ScalarType
 
@@ -35,10 +35,36 @@ class MirConst:
 
 @dataclass(frozen=True, slots=True)
 class MirOperation:
-    """A selected hardware-operator use with the fields shared by all scalar domains."""
+    """
+    A selected hardware-operator use: operands with folded float sign controls and a folded result sign. The operation
+    belongs to the resource family of its result type (float or bool); the views slice it by that result type. A float
+    operand carries a sign control; a bool operand carries the identity sign (booleans have no sign), and a bool result
+    carries the identity result sign. A comparison reads float operands and produces a boolean; the bool-to-float cast
+    reads a boolean operand and produces a float -- operands may reference either resource family.
+    """
 
     operator: HardwareOperator
     operands: list[ValueId]
+    operand_signs: list[FloatSignControl]
+    result_sign: FloatSignControl = FloatSignControl()
+
+    def __post_init__(self) -> None:
+        signature = self.operator.signature
+        if len(self.operands) != signature.arity:
+            raise ValueError(f"{self.operator.mnemonic} expects {signature.arity} operand(s), got {len(self.operands)}")
+        if len(self.operand_signs) != signature.arity:
+            raise ValueError(
+                f"{self.operator.mnemonic} expects {signature.arity} sign control(s), got {len(self.operand_signs)}"
+            )
+        for sign, operand_type in zip(self.operand_signs, signature.operand_types, strict=True):
+            if not isinstance(sign, FloatSignControl):
+                raise TypeError(f"operand_signs must contain FloatSignControl values, got {self.operand_signs!r}")
+            if not isinstance(operand_type, FloatType) and sign != FloatSignControl():
+                raise ValueError("a non-float operand cannot carry a sign control")
+        if not isinstance(self.result_sign, FloatSignControl):
+            raise TypeError(f"result_sign must be FloatSignControl, got {self.result_sign!r}")
+        if not isinstance(signature.result_type, FloatType) and self.result_sign != FloatSignControl():
+            raise ValueError("a non-float result cannot carry a sign control")
 
     @property
     def scalar_type(self) -> ScalarType:
@@ -131,71 +157,9 @@ class MirPhi:
     arms: tuple[tuple[BlockId, ValueId, FloatSignControl], ...]
 
 
-@dataclass(frozen=True, slots=True)
-class MirBoolOperation:
-    """
-    A selected boolean-producing hardware operation: a float comparator (``FCmpOperator``) reading float operands with
-    folded sign controls, plus the relation that reduces its one-hot order flags to the boolean result. It is scheduled
-    in the float timeline (it reads float registers) but writes the boolean register bank.
-    """
-
-    operator: FCmpOperator
-    operands: list[ValueId]
-    operand_signs: list[FloatSignControl]
-    relation: RelationalOp
-
-    def __post_init__(self) -> None:
-        if len(self.operands) != self.operator.arity:
-            raise ValueError(
-                f"{self.operator.mnemonic} expects {self.operator.arity} operands, got {len(self.operands)}"
-            )
-        if len(self.operand_signs) != len(self.operands):
-            raise ValueError("operand_signs must match operands one-to-one")
-
-    @property
-    def scalar_type(self) -> BoolType:
-        return BoolType()
-
-
-@dataclass(frozen=True, slots=True)
-class MirFloatOperation(MirOperation):
-    """A selected floating-point hardware-operator use with folded sign controls."""
-
-    operator: FloatHardwareOperator
-    operands: list[ValueId]
-    operand_signs: list[FloatSignControl]
-    result_sign: FloatSignControl
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.operator, FloatHardwareOperator):
-            raise TypeError(f"MirFloatOperation operator must be FloatHardwareOperator, got {self.operator!r}")
-        signature = self.operator.signature
-        if not isinstance(signature.result_type, FloatType):
-            raise TypeError(f"MirFloatOperation result type must be FloatType, got {signature.result_type!r}")
-        if any(not isinstance(operand_type, FloatType) for operand_type in signature.operand_types):
-            raise TypeError(f"MirFloatOperation operand types must all be FloatType, got {signature.operand_types!r}")
-        if len(self.operands) != signature.arity:
-            raise ValueError(f"{self.operator.mnemonic} expects {signature.arity} operand(s), got {len(self.operands)}")
-        if len(self.operand_signs) != signature.arity:
-            raise ValueError(
-                f"{self.operator.mnemonic} expects {signature.arity} sign control(s), got {len(self.operand_signs)}"
-            )
-        if any(not isinstance(sign, FloatSignControl) for sign in self.operand_signs):
-            raise TypeError(f"operand_signs must contain FloatSignControl values, got {self.operand_signs!r}")
-        if not isinstance(self.result_sign, FloatSignControl):
-            raise TypeError(f"result_sign must be FloatSignControl, got {self.result_sign!r}")
-
-    @property
-    def scalar_type(self) -> FloatType:
-        scalar_type = self.operator.signature.result_type
-        if not isinstance(scalar_type, FloatType):
-            raise TypeError(f"MirFloatOperation result type must be FloatType, got {scalar_type!r}")
-        return scalar_type
-
-
-type MirNode = MirInput | MirStateRead | MirConst | MirOperation | MirPhi | MirBoolOperation
-type MirFloatNode = MirFloatInput | MirFloatStateRead | MirFloatConst | MirFloatOperation | MirPhi
-type MirBoolNode = MirBoolStateRead | MirBoolConst | MirPhi | MirBoolOperation
+type MirNode = MirInput | MirStateRead | MirConst | MirOperation | MirPhi
+type MirFloatNode = MirFloatInput | MirFloatStateRead | MirFloatConst | MirOperation | MirPhi
+type MirBoolNode = MirBoolStateRead | MirBoolConst | MirPhi | MirOperation
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,16 +267,20 @@ class MirFloatView:
         return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirFloatConst)}
 
     @property
-    def operation_nodes(self) -> dict[ValueId, MirFloatOperation]:
-        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirFloatOperation)}
+    def operation_nodes(self) -> dict[ValueId, MirOperation]:
+        return {
+            vid: node
+            for vid, node in self.nodes.items()
+            if isinstance(node, MirOperation) and isinstance(node.scalar_type, FloatType)
+        }
 
     @property
     def phi_nodes(self) -> dict[ValueId, MirPhi]:
         return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirPhi)}
 
     def block_operations(self, block: MirBlock) -> list[ValueId]:
-        """The float operation ids defined in ``block``, in evaluation order."""
-        return [vid for vid in block.operations if isinstance(self.nodes.get(vid), MirFloatOperation)]
+        """The float-result operation ids defined in ``block``, in evaluation order."""
+        return [vid for vid in block.operations if vid in self.operation_nodes]
 
     @classmethod
     def from_mir(cls, mir: Mir) -> "MirFloatView":
@@ -329,22 +297,20 @@ class MirFloatView:
                 case MirFloatStateRead(scalar_type=scalar_type):
                     nodes[vid] = node
                     formats.add(scalar_type.fmt)
-                case MirFloatOperation(scalar_type=scalar_type):
+                case MirOperation(scalar_type=FloatType() as scalar_type):
                     nodes[vid] = node
                     formats.add(scalar_type.fmt)
                 case MirPhi(scalar_type=FloatType() as scalar_type):
                     nodes[vid] = node
                     formats.add(scalar_type.fmt)
-                case MirBoolStateRead() | MirBoolConst() | MirBoolOperation() | MirPhi():
-                    pass  # the bool resource family, handled separately by MirBoolView
+                case MirBoolStateRead() | MirBoolConst() | MirPhi() | MirOperation():
+                    pass  # the bool resource family (bool state/const/phi and bool-result ops), handled by MirBoolView
                 case MirInput():
                     raise UnsupportedConstruct(f"LIR construction does not support MIR input {vid} of this type")
                 case MirStateRead():
                     raise UnsupportedConstruct(f"LIR construction does not support MIR state read {vid} of this type")
                 case MirConst():
                     raise UnsupportedConstruct(f"LIR construction does not support MIR constant {vid} of this type")
-                case MirOperation():
-                    raise UnsupportedConstruct(f"LIR construction does not support MIR operation {vid} of this type")
         outputs: list[MirFloatOutput] = []
         for out in mir.outputs:
             if not isinstance(out, MirFloatOutput):
@@ -371,8 +337,9 @@ class MirFloatView:
 @dataclass(frozen=True, slots=True)
 class MirBoolView:
     """
-    The boolean resource family narrowed out of a MIR graph: bool state reads, constants, and phis, plus the bool
-    state slots and the shared CFG. In this slice the bool family carries no operators (only storage).
+    The boolean resource family narrowed out of a MIR graph: bool state reads, constants, phis, and bool-result
+    operations (comparisons, and -- in later slices -- boolean logic and float-to-bool casts), plus the bool state
+    slots and the shared CFG.
     """
 
     nodes: dict[ValueId, MirBoolNode]
@@ -393,18 +360,24 @@ class MirBoolView:
         return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirPhi)}
 
     @property
-    def operation_nodes(self) -> dict[ValueId, MirBoolOperation]:
-        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirBoolOperation)}
+    def operation_nodes(self) -> dict[ValueId, MirOperation]:
+        return {
+            vid: node
+            for vid, node in self.nodes.items()
+            if isinstance(node, MirOperation) and isinstance(node.scalar_type, BoolType)
+        }
 
     def block_operations(self, block: MirBlock) -> list[ValueId]:
-        """The boolean operation ids (comparators) defined in ``block``, in evaluation order."""
-        return [vid for vid in block.operations if isinstance(self.nodes.get(vid), MirBoolOperation)]
+        """The bool-result operation ids defined in ``block``, in evaluation order."""
+        return [vid for vid in block.operations if vid in self.operation_nodes]
 
     @classmethod
     def from_mir(cls, mir: Mir) -> "MirBoolView":
         nodes: dict[ValueId, MirBoolNode] = {}
         for vid, node in mir.nodes.items():
-            if isinstance(node, (MirBoolStateRead, MirBoolConst, MirBoolOperation)):
+            if isinstance(node, (MirBoolStateRead, MirBoolConst)):
+                nodes[vid] = node
+            elif isinstance(node, MirOperation) and isinstance(node.scalar_type, BoolType):
                 nodes[vid] = node
             elif isinstance(node, MirPhi) and isinstance(node.scalar_type, BoolType):
                 nodes[vid] = node
@@ -493,8 +466,6 @@ class MirBuilder:
                 return scalar_type
             case MirPhi(scalar_type=scalar_type):
                 return scalar_type
-            case MirBoolOperation():
-                return BoolType()
             case MirOperation() as operation:
                 return operation.scalar_type
         raise TypeError(f"MIR node {vid} has no scalar type")
@@ -520,13 +491,17 @@ class MirBuilder:
             ("bool_const", bool(value), scalar_type), MirBoolConst(scalar_type=scalar_type, value=bool(value))
         )
 
-    def float_operation(
+    def operation(
         self,
-        operator: FloatHardwareOperator,
+        operator: HardwareOperator,
         operands: list[ValueId],
         operand_signs: list[FloatSignControl],
         result_sign: FloatSignControl = FloatSignControl(),
     ) -> ValueId:
+        """
+        Append a hardware-operator use, interned within the current block. The result family follows the operator's
+        result type; operands are type-checked against the operator signature and may reference either resource family.
+        """
         signature = operator.signature
         if len(operands) != signature.arity:
             raise ValueError(f"{operator.mnemonic} expects {signature.arity} operand(s), got {len(operands)}")
@@ -542,7 +517,7 @@ class MirBuilder:
         vid = self._block_intern.get(key)
         if vid is None:
             vid = self._fresh(
-                MirFloatOperation(
+                MirOperation(
                     operator=operator,
                     operands=list(operands),
                     operand_signs=list(operand_signs),
@@ -569,25 +544,6 @@ class MirBuilder:
         if not isinstance(node, MirPhi):
             raise ValueError(f"value {phi} is not a phi")
         self._nodes[phi] = MirPhi(scalar_type=node.scalar_type, arms=tuple(arms))
-
-    def bool_operation(
-        self,
-        operator: FCmpOperator,
-        operands: list[ValueId],
-        operand_signs: list[FloatSignControl],
-        relation: RelationalOp,
-    ) -> ValueId:
-        for operand in operands:
-            if not isinstance(self._type_of(operand), FloatType):
-                raise ValueError(f"{operator.mnemonic} expects floating-point operands")
-        node = MirBoolOperation(operator, list(operands), list(operand_signs), relation)
-        key = (self.current_block, "bool_op", operator, tuple(operands), tuple(operand_signs), relation)
-        vid = self._block_intern.get(key)
-        if vid is None:
-            vid = self._fresh(node)
-            self._block_intern[key] = vid
-            self._blocks[self.current_block].operations.append(vid)
-        return vid
 
     def float_output(self, name: str, value: ValueId, sign: FloatSignControl = FloatSignControl()) -> None:
         if not isinstance(self._type_of(value), FloatType):

@@ -6,8 +6,16 @@ from dataclasses import dataclass
 from hashlib import blake2s
 from typing import ClassVar
 
-from ._value import FloatValue, add_float_values, div_float_values, mul_float_values, mul_ilog2_float_value
+from ._value import (
+    FloatValue,
+    add_float_values,
+    compare_float_values,
+    div_float_values,
+    mul_float_values,
+    mul_ilog2_float_value,
+)
 from ._type import BoolType, FloatFormat, FloatType, ScalarSignature
+from ._hir import RelationalOp
 
 
 def _instance_stem_text(text: str) -> str:
@@ -363,6 +371,180 @@ class FCmpOperator(HardwareOperator):
 
     def hdl_params(self) -> dict[str, int]:
         return {"STAGE_INPUT": self.stage_input}
+
+
+@dataclass(frozen=True, slots=True)
+class FComparisonOperator(HardwareOperator):
+    """
+    A floating-point comparison ``a <relation> b`` producing a boolean. It reduces the shared comparator's three
+    one-hot order flags by the selected relation, so every relation time-shares one physical ``holoso_fcmp`` instance:
+    pooling, instantiation, and instance identity key on the bare comparator, never on the relation. This is the
+    combinational, latency-bearing bool-producing operator carried by a boolean-result operation node.
+    """
+
+    mnemonic: ClassVar[str] = "fcmp"
+    comparator: FCmpOperator
+    relation: RelationalOp
+
+    @property
+    def instance_stem(self) -> str:
+        return self.comparator.instance_stem
+
+    @property
+    def fmt(self) -> FloatFormat:
+        return self.comparator.fmt
+
+    @property
+    def latency(self) -> int:
+        return self.comparator.latency
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return self.comparator.signature
+
+    def render(self, *operands: str) -> str:
+        a, b = operands
+        return f"{a}{self.relation.value}{b}"
+
+    def hdl_params(self) -> dict[str, int]:
+        return self.comparator.hdl_params()
+
+    def evaluate(self, *operands: FloatValue) -> bool:
+        a, b = operands
+        return self.relation.holds(compare_float_values(a, b))
+
+
+@dataclass(frozen=True, slots=True)
+class BoolLogicOperator(HardwareOperator, ABC):
+    """
+    A combinational boolean-logic operator (AND/OR/NOT). It is latency-1 register-resident -- it reads its boolean
+    register operands, applies a plain ``& | ~`` gate, and latches the result -- with no pipelined module and no pooled
+    instance, so it is never added to :class:`OpConfig`.
+    """
+
+    @property
+    def latency(self) -> int:
+        return 1
+
+    def hdl_params(self) -> dict[str, int]:
+        return {}
+
+    @abstractmethod
+    def evaluate(self, *operands: bool) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class BoolAndOperator(BoolLogicOperator):
+    mnemonic: ClassVar[str] = "band"
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((BoolType(), BoolType()), BoolType())
+
+    def render(self, *operands: str) -> str:
+        a, b = operands
+        return f"{a}&{b}"
+
+    def evaluate(self, *operands: bool) -> bool:
+        a, b = operands
+        return a and b
+
+
+@dataclass(frozen=True, slots=True)
+class BoolOrOperator(BoolLogicOperator):
+    mnemonic: ClassVar[str] = "bor"
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((BoolType(), BoolType()), BoolType())
+
+    def render(self, *operands: str) -> str:
+        a, b = operands
+        return f"{a}|{b}"
+
+    def evaluate(self, *operands: bool) -> bool:
+        a, b = operands
+        return a or b
+
+
+@dataclass(frozen=True, slots=True)
+class BoolNotOperator(BoolLogicOperator):
+    mnemonic: ClassVar[str] = "bnot"
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((BoolType(),), BoolType())
+
+    def render(self, *operands: str) -> str:
+        (a,) = operands
+        return f"~{a}"
+
+    def evaluate(self, *operands: bool) -> bool:
+        (a,) = operands
+        return not a
+
+
+@dataclass(frozen=True, slots=True)
+class FloatToBoolOperator(HardwareOperator):
+    """
+    A combinational float->bool cast ``bool(x)``: true iff the operand is nonzero, i.e. its ZKF exponent field is
+    nonzero (sign- and mantissa-agnostic). Latency-1 register-resident; the backend latches a call to the shared
+    ``holoso_ftobool`` cast function (no module, no pool), so it is never added to :class:`OpConfig`.
+    """
+
+    mnemonic: ClassVar[str] = "ftobool"
+    fmt: FloatFormat
+
+    @property
+    def latency(self) -> int:
+        return 1
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((FloatType(self.fmt),), BoolType())
+
+    def render(self, *operands: str) -> str:
+        (a,) = operands
+        return f"bool({a})"
+
+    def hdl_params(self) -> dict[str, int]:
+        return {}
+
+    def evaluate(self, *operands: FloatValue) -> bool:
+        (a,) = operands
+        return a.exponent != 0
+
+
+@dataclass(frozen=True, slots=True)
+class BoolToFloatOperator(HardwareOperator):
+    """
+    A combinational bool->float cast ``float(cond)``: ZKF ``1.0`` when true, ``+0.0`` when false. Latency-1
+    register-resident; the backend latches a call to the shared ``holoso_ffrombool`` cast function (no module, no
+    pool); it reads a boolean register and writes a float register, the one operator that crosses from the boolean
+    bank into the float bank. Never added to :class:`OpConfig`.
+    """
+
+    mnemonic: ClassVar[str] = "ffrombool"
+    fmt: FloatFormat
+
+    @property
+    def latency(self) -> int:
+        return 1
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((BoolType(),), FloatType(self.fmt))
+
+    def render(self, *operands: str) -> str:
+        (a,) = operands
+        return f"float({a})"
+
+    def hdl_params(self) -> dict[str, int]:
+        return {}
+
+    def evaluate(self, *operands: bool) -> FloatValue:
+        (a,) = operands
+        return FloatValue.from_float(self.fmt, 1.0 if a else 0.0)
 
 
 @dataclass(frozen=True)
