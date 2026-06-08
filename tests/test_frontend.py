@@ -1619,6 +1619,75 @@ def test_walrus_target_shadowing_a_global_int_is_a_runtime_local() -> None:
         lower(f)
 
 
+def test_reassigning_the_instance_parameter_self_is_rejected() -> None:
+    # ``self`` is the fixed instance the attributes resolve against, not a value: ``self.x`` keeps reading the original
+    # instance regardless of any later ``self = ...``, so rebinding it (any form) would silently miscompile -- rejected.
+    class _PlainAssign:
+        def __init__(self) -> None:
+            self.a = 1.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            self = x
+            return self.a
+
+    class _Walrus:
+        def __init__(self) -> None:
+            self.a = 1.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            y = (self := x)
+            return self.a + y
+
+    class _Augmented:
+        def __init__(self) -> None:
+            self.a = 1.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            self += x
+            return self.a
+
+    class _ForCounter:
+        def __init__(self) -> None:
+            self.a = 1.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            for self in range(2):
+                pass
+            return self.a
+
+    class _Unpack:
+        def __init__(self) -> None:
+            self.a = 1.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            self, y = x, x
+            return self.a + y
+
+    for ctor in (_PlainAssign, _Walrus, _Augmented, _ForCounter, _Unpack):
+        with pytest.raises(UnsupportedConstruct, match="instance parameter"):
+            lower(ctor().__call__)
+
+
+def test_writing_a_self_attribute_and_a_plain_local_named_self_are_accepted() -> None:
+    # The rejection must not touch a legitimate attribute write (persistent state) or a plain (non-method) function
+    # whose local happens to be named ``self`` -- there is no instance there, so ``self`` is an ordinary local.
+    class _StateWrite:
+        def __init__(self) -> None:
+            self.a = 1.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            self.a = self.a + x
+            return self.a
+
+    lower(_StateWrite().__call__)  # no exception
+
+    def plain(x):  # type: ignore[no-untyped-def]
+        self = x  # an ordinary local in a plain function (no instance)
+        return self + 1.0
+
+    lower(plain)  # no exception
+
+
 def test_conditional_expression_lowers_to_branch_and_phi() -> None:
     def f(x, y, c):  # type: ignore[no-untyped-def]
         return x if c > 0.0 else y

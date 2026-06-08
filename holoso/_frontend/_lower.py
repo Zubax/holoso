@@ -385,12 +385,13 @@ class _Lowerer:
                     self._assign_target(target, rhs)
                 return False
             case ast.AnnAssign(target=ast.Name(id=name), value=ast.expr() as value):
-                self._bind_name(name, self._lower_expr(value))
+                self._bind_name(name, self._lower_expr(value), self._loc(stmt))
                 return False
             case ast.AnnAssign(target=ast.Attribute() as target, value=ast.expr() as value):
                 self._assign_attr(target, self._lower_expr(value))
                 return False
             case ast.AugAssign(target=ast.Name(id=name), op=op, value=value):
+                self._reject_self_rebinding(name, self._loc(stmt))
                 if name not in self._env:
                     raise UnsupportedConstruct(f"augmented assignment to unknown name {name!r}", self._loc(stmt))
                 self._bind_name(name, self._apply_binop(op, self._env[name], self._lower_expr(value), self._loc(stmt)))
@@ -438,6 +439,7 @@ class _Lowerer:
         The counter leaks its final value after the loop, matching Python's ``for`` scoping (an empty range leaves any
         pre-loop binding untouched); restoring it instead would silently miscompile a nested loop that reuses the name.
         """
+        self._reject_self_rebinding(name, loc)  # ``for self in ...`` rebinds the instance parameter -- rejected
         trips = self._static_range(iterable, loc)
         count = _range_trip_count(trips)  # big-int count: reject without materializing, even for range(10**40)
         if count > _UNROLL_THRESHOLD:
@@ -1129,15 +1131,25 @@ class _Lowerer:
     def _read_slot(self, shape: "_StateAttr", slot: str) -> ValueId:
         return self._builder.bool_state_read(slot) if shape.is_bool else self._builder.float_state_read(slot)
 
-    def _bind_name(self, name: str, value: _Value) -> None:
+    def _bind_name(self, name: str, value: _Value, loc: SourceLocation | None = None) -> None:
         """
         Bind a local name to a (runtime) value. Crucially, this drops any compile-time-integer binding the name held:
         a ``for`` counter (or any name) reassigned to a runtime value is no longer a compile-time constant, so a later
         static-context use of it -- a folded branch condition, an array index, a shift exponent, a range bound -- must
         see it as runtime (rejected or lowered as such), never resolve to the stale counter value.
         """
+        self._reject_self_rebinding(name, loc)
         self._env[name] = value
         self._invalidate_static_int(name)
+
+    def _reject_self_rebinding(self, name: str, loc: SourceLocation | None) -> None:
+        """
+        Reject rebinding the instance parameter (``self``). It is the fixed instance the attributes resolve against, not
+        a value: ``self.x`` always reads the original instance regardless of any later ``self = ...``, so allowing the
+        rebinding would silently miscompile (Python instead makes ``self`` a plain local and ``self.x`` then faults).
+        """
+        if self._self_name is not None and name == self._self_name:
+            raise UnsupportedConstruct(f"cannot assign to the instance parameter {name!r}", loc)
 
     def _invalidate_static_int(self, name: str) -> None:
         """
@@ -1154,7 +1166,7 @@ class _Lowerer:
         """Bind one assignment target to ``value``, recursing into tuple/list targets to unpack an aggregate."""
         match target:
             case ast.Name(id=name):
-                self._bind_name(name, value)
+                self._bind_name(name, value, self._loc(target))
             case ast.Attribute():
                 self._assign_attr(target, value)
             case ast.Tuple(elts=elts) | ast.List(elts=elts):
@@ -1242,7 +1254,7 @@ class _Lowerer:
                 # Python), and yield it. A bool- or float-valued value routes through the normal lowering (a Compare /
                 # BoolOp value is delegated to _lower_bool from here), so a walrus is transparent to its value's type.
                 bound = self._lower_expr(value)
-                self._bind_name(name, bound)
+                self._bind_name(name, bound, self._loc(node))
                 return bound
             case _:
                 raise UnsupportedConstruct(f"unsupported expression {type(node).__name__}", self._loc(node))

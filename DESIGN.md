@@ -129,7 +129,10 @@ returned value that is, by dataflow, a public attribute (the same SSA value, how
 deduped onto that one port. An attribute assigned only in unreachable code (after a return) is never lowered, so it
 stays a read-only folded constant -- whether an attribute is state follows reachability. A vector-valued attribute --
 a list, tuple, or 1-D numpy array -- decomposes into one scalar register per element, slotted (and, if public, ported)
-as `attr_0`, `attr_1`, ...; a scalar attribute keeps its bare name `attr` rather than an indexed slot.
+as `attr_0`, `attr_1`, ...; a scalar attribute keeps its bare name `attr` rather than an indexed slot. Reassigning
+`self` itself (in any form -- `self = ...`, `self := ...`, `for self in ...`) is rejected: it is the fixed instance the
+attributes resolve against, so `self.attr` would keep reading the original instance and the rebinding would silently
+miscompile.
 
 Matrices/vectors are statically shaped and unrolled to scalar operations at synthesis time; arrays never exist as
 hardware aggregates, only as compile-time bookkeeping over scalar registers. That bookkeeping is a front-end value that
