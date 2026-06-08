@@ -18,34 +18,31 @@ import holoso
 
 
 def remainder(x: float, y: float) -> float:
-    ax = abs(x)
-    ay = abs(y)
+    ax, ay = abs(x), abs(y)
     scaled = ay
-    while scaled + scaled <= ax:  # largest 2**k * |y| not exceeding |x|
-        scaled = scaled + scaled
+    while scaled * 2 <= ax:  # largest 2**k * |y| not exceeding |x|
+        scaled += scaled
     r = ax
-    quotient_is_odd = 0.0  # low bit of the integer quotient, for round-to-even tie-breaking TODO FIXME make it boolean!
+    quotient_is_odd = False  # low bit of the integer quotient, for round-to-even tie-breaking
     while scaled > ay:  # subtract scaled divisors, halving down to -- but not past -- the unit place |y|
         if r >= scaled:
-            r = r - scaled
-        scaled = scaled * 0.5
+            r -= scaled
+        scaled *= 0.5
     # The unit place (scaled == ay) is handled explicitly rather than by halving once more: in ZKF there are no
     # subnormals, so |y| * 0.5 of a tiny |y| can clamp back to |y| and never fall below it, so the loop must not depend
     # on scaled dropping under |y| to stop.
     if r >= ay:
-        r = r - ay
-        quotient_is_odd = 1.0  # subtracting at the unit place sets the quotient's least-significant bit
+        r -= ay
+        quotient_is_odd = True  # subtracting at the unit place sets the quotient's least-significant bit
     # r is now fmod(|x|, |y|) in [0, |y|). Round the quotient to nearest, ties to even: pull r down by |y| when it is
     # past the half, or exactly at the half with an odd quotient.
-    twice_r = r + r
-    if twice_r > ay:
-        r = r - ay
+    if (twice_r := r * 2) > ay:
+        r -= ay
     elif twice_r == ay:
-        if quotient_is_odd > 0.5:
-            r = r - ay
-    # Apply x's sign to a nonzero result (r is the centered remainder, which the rounding step may have made negative);
-    # an exact-zero remainder of a negative x must stay the canonical +0.0, since ZKF has no negative zero.
-    return -r if x < 0.0 and r != 0.0 else r
+        if quotient_is_odd:
+            r -= ay
+    # Apply x's sign to a nonzero result (r is the centered remainder, which the rounding step may have made negative).
+    return -r if x < 0 else r  # Might return negative zero, which is fine.
 
 
 def main() -> None:

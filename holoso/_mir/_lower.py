@@ -1,8 +1,50 @@
 """Lower optimized HIR to selected MIR."""
 
 from .._errors import UnsupportedConstruct
-from .._hir import *
-from .._operators import *
+from .._hir import (
+    BoolAnd,
+    BoolConst,
+    BoolNot,
+    BoolOr,
+    BoolToFloat,
+    BoolType as HirBoolType,
+    Branch,
+    Const,
+    FloatAbs,
+    FloatAdd,
+    FloatConst,
+    FloatDiv,
+    FloatMul,
+    FloatMulPow2,
+    FloatNeg,
+    FloatRelational,
+    FloatToBool,
+    FloatType as HirFloatType,
+    Hir,
+    InPort,
+    Jump,
+    Node,
+    Operation,
+    Phi,
+    Ret,
+    StateRead,
+    StateSlot,
+    Terminator,
+    ValueId,
+    reverse_postorder,
+)
+from .._operators import (
+    BoolAndOperator,
+    BoolNotOperator,
+    BoolOrOperator,
+    BoolToFloatOperator,
+    FComparisonOperator,
+    FloatHardwareOperator,
+    FloatSignControl,
+    FloatToBoolOperator,
+    HardwareOperator,
+    OpConfig,
+)
 from .._type import BoolType as ScalarBoolType, FloatType as ScalarFloatType, ScalarType
 from ._ir import Mir, MirBuilder
 

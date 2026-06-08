@@ -85,6 +85,66 @@ def _leaf_targets(target: ast.expr) -> Iterator[ast.expr]:
             yield target
 
 
+def _contains_walrus(node: ast.AST) -> bool:
+    """Whether an expression subtree contains a walrus ``:=`` (the subset has no nested scope in expression position)."""
+    return any(isinstance(sub, ast.NamedExpr) for sub in ast.walk(node))
+
+
+def _walrus_target_names(node: ast.AST) -> set[str]:
+    """The target names of every walrus ``(name := value)`` in an expression subtree (a walrus target is always a plain
+    name -- Python forbids targeting an attribute or subscript)."""
+    return {
+        sub.target.id for sub in ast.walk(node) if isinstance(sub, ast.NamedExpr) and isinstance(sub.target, ast.Name)
+    }
+
+
+def _statement_walrus_names(stmt: ast.stmt) -> set[str]:
+    """
+    The walrus target names bound when ``stmt`` is reached: those in its OWN expressions (an ``if``/``while`` test, a
+    ``for`` iterable, an assignment/return value) but NOT in the bodies of a nested ``if``/``for``/``while`` (those are
+    scanned at their own reachability). Lowering binds a walrus target like any assignment, so the local-name and
+    reachability scans register these to stay in lockstep with it.
+    """
+    match stmt:
+        case ast.If(test=expr) | ast.While(test=expr) | ast.For(iter=expr):
+            return _walrus_target_names(expr)
+        case ast.Assign(value=expr) | ast.AugAssign(value=expr) | ast.Expr(value=expr):
+            return _walrus_target_names(expr)
+        case ast.AnnAssign(value=expr) | ast.Return(value=expr) if expr is not None:
+            return _walrus_target_names(expr)
+        case _:
+            return set()
+
+
+def _scope_local_walrus_targets(node: ast.AST) -> set[str]:
+    """
+    Every walrus target name bound in ``node``'s OWN scope, descending into nested statements/expressions but NOT into a
+    nested function/lambda/comprehension/class (a walrus there binds in that scope, not this one). Unlike the
+    reachability scans, this is purely syntactic: a walrus target is a function local throughout the body -- as in
+    Python -- even inside a dead or out-of-subset statement, so it shadows a same-named global everywhere.
+    """
+    names: set[str] = set()
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            # The body is a separate scope, but a nested def/lambda/class's default-argument, decorator, and base
+            # expressions execute in THIS scope, so a walrus in one of them binds an enclosing local (comprehensions
+            # are out of subset). The body itself is not descended into.
+            enclosing: list[ast.expr] = []
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                enclosing += [d for d in (*child.args.defaults, *child.args.kw_defaults) if d is not None]
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                enclosing += child.decorator_list
+            if isinstance(child, ast.ClassDef):
+                enclosing += child.bases
+            for expr in enclosing:
+                names |= _walrus_target_names(expr)
+            continue
+        if isinstance(child, ast.NamedExpr) and isinstance(child.target, ast.Name):
+            names.add(child.target.id)
+        names |= _scope_local_walrus_targets(child)
+    return names
+
+
 class _Value(ABC):
     """
     A compile-time lowering value: a single scalar HIR wire or an ordered aggregate of values. Aggregates (vectors,
@@ -404,6 +464,11 @@ class _Lowerer:
         contributes no state), mirroring a folded ``if``; a statically-true condition is lowered as a normal (infinite)
         loop, faithful to the source.
         """
+        if _contains_walrus(test):
+            # A walrus in the condition rebinds every iteration and its post-test value is what the name holds at the
+            # loop exit (the loop leaves from the header after the test), which the header-phi exit value does not
+            # capture. Rejected rather than miscompiled; bind it in the body instead.
+            raise UnsupportedConstruct("a walrus ':=' in a while condition is not supported", loc)
         if self._static_condition(test) is False:
             # The loop never runs, but its condition is still type-checked here (a non-boolean operand is rejected, as
             # in an ``if``) -- a statically-false loop is the one path where the condition is otherwise never lowered in
@@ -527,6 +592,9 @@ class _Lowerer:
 
         def walk(body: list[ast.stmt]) -> None:
             for stmt in body:
+                for name in _statement_walrus_names(stmt):  # a walrus in this statement's test/value rebinds a name
+                    names.add(name)
+                    self._invalidate_static_int(name)  # mirror lowering: a reassigned name is no longer static
                 match stmt:
                     case ast.Return():
                         return
@@ -911,6 +979,27 @@ class _Lowerer:
         whose phis reconcile the two arms' environments and persistent state. Returns True only if both arms returned
         (never, for now: a return inside an arm is rejected).
         """
+        # Fold a nested if-without-else into one combined-``and`` branch: ``if A: (if B: S)`` with no ``else`` on either
+        # is exactly ``if (A and B): S``, so it lowers to a single branch (one ``jump``) instead of two. A boolean test
+        # in this subset is a pure combinational value (no side effects, no faulting), so evaluating B unconditionally
+        # is equivalent, and the left-to-right ``and`` lowering preserves any walrus binding in A before B reads it.
+        # The reachability scans recurse into both arms irrespective of nesting, so they record the same conditional
+        # writes either way -- the fold does not desync them from lowering. Applied repeatedly, ``if A: if B: if C: S``
+        # collapses to a single ``A and B and C`` branch.
+        if not orelse:
+            tests = [test]
+            # Do not absorb an inner test that carries a walrus: in the nested form its binding is conditional on the
+            # outer test, but ``A and B`` evaluates B unconditionally, so folding would over-bind the walrus.
+            while (
+                len(body) == 1
+                and isinstance(body[0], ast.If)
+                and not body[0].orelse
+                and not _contains_walrus(body[0].test)
+            ):
+                tests.append(body[0].test)
+                body = body[0].body
+            if len(tests) > 1:
+                test = ast.copy_location(ast.BoolOp(op=ast.And(), values=tests), tests[0])
         # Lower the condition first: this type-checks its operands (rejecting a non-boolean one). Then fold reachability
         # via ``_static_condition`` -- the same predicate the attribute/loop scans use, so a folded ``if X or True:``
         # takes one arm in place (no branch, no spurious return-inside-a-branch rejection) without the scans and the
@@ -1148,6 +1237,13 @@ class _Lowerer:
                 return self._lower_call(node)
             case ast.Attribute():
                 return self._read_attr(node)
+            case ast.NamedExpr(target=ast.Name(id=name), value=value):
+                # Walrus ``(name := value)``: evaluate the value, bind it to the name (visible to later code, as in
+                # Python), and yield it. A bool- or float-valued value routes through the normal lowering (a Compare /
+                # BoolOp value is delegated to _lower_bool from here), so a walrus is transparent to its value's type.
+                bound = self._lower_expr(value)
+                self._bind_name(name, bound)
+                return bound
             case _:
                 raise UnsupportedConstruct(f"unsupported expression {type(node).__name__}", self._loc(node))
 
@@ -1519,6 +1615,11 @@ class _Lowerer:
         otherwise a ``branch`` into fresh arm blocks lowers each arm there (only the taken arm computes at run time) and
         merges the two values in a phi.
         """
+        if _contains_walrus(body) or _contains_walrus(orelse):
+            # An arm is evaluated only when selected, but ``_branch_value`` lowers each from a shared environment it does
+            # not snapshot/merge, so a walrus binding in an arm would leak across arms. The test may carry a walrus (it
+            # always evaluates); an arm walrus is rejected rather than silently mis-scoped.
+            raise UnsupportedConstruct("a walrus ':=' in a conditional-expression arm is not supported", loc)
         cond = self._bool_scalar(test)
         constant = self._static_condition(test)
         if constant is not None:
@@ -1570,6 +1671,28 @@ class _Lowerer:
         loc = where if isinstance(where, SourceLocation) else self._loc(where)
         raise UnsupportedConstruct(f"expected a scalar value here, got a {len(value.leaves())}-element aggregate", loc)
 
+    def _reject_shortcircuit_walrus(self, fndef: ast.FunctionDef) -> None:
+        """
+        Reject a walrus inside an ``and``/``or`` operand or a chained comparison. Such an operand may be short-circuited
+        -- statically dropped by the connective fold, or unevaluated in Python -- so whether its binding happens cannot
+        be reconciled between the reachability scans (which see the syntactic walrus) and lowering (which may never
+        evaluate it). A walrus is supported only where it is evaluated unconditionally: a single comparison or bare
+        test, an assignment/return value, an ``and``/``or``-free ``if``/``while`` test.
+        """
+        for node in ast.walk(fndef):
+            operands: list[ast.expr] = []
+            if isinstance(node, ast.BoolOp):
+                operands = node.values
+            elif isinstance(node, ast.Compare) and len(node.ops) > 1:
+                operands = [node.left, *node.comparators]
+            for operand in operands:
+                if _contains_walrus(operand):
+                    raise UnsupportedConstruct(
+                        "a walrus ':=' inside an 'and'/'or' or a chained comparison is not supported "
+                        "(its operand may be short-circuited)",
+                        self._loc(operand),
+                    )
+
     def _collect_local_names(self, fndef: ast.FunctionDef) -> set[str]:
         """
         Every name the function binds: its parameters and the targets it assigns or iterates (including inside nested
@@ -1578,7 +1701,9 @@ class _Lowerer:
         Python itself raises ``UnboundLocalError`` rather than seeing the global. A nested ``def``/``lambda``/``class``
         is a SEPARATE scope: its bound names are not local here, so the traversal does not descend into one.
         """
+        self._reject_shortcircuit_walrus(fndef)  # a walrus in a short-circuitable operand is rejected before any scan
         names = {arg.arg for arg in (*fndef.args.posonlyargs, *fndef.args.args, *fndef.args.kwonlyargs)}
+        names |= _scope_local_walrus_targets(fndef)  # a walrus ``(name := ...)`` binds ``name`` as a function local
 
         def walk(body: list[ast.stmt]) -> None:
             for stmt in body:
@@ -1628,6 +1753,8 @@ class _Lowerer:
         into the sibling -- the same hazard branch lowering guards); a ``for`` unrolls via ``_scan_loop_attr_writes``.
         """
         for stmt in stmts:
+            for name in _statement_walrus_names(stmt):
+                self._invalidate_static_int(name)  # mirror lowering: a walrus-reassigned name is no longer static
             if isinstance(stmt, ast.Return):
                 return True
             if isinstance(stmt, ast.If):

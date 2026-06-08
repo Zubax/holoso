@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """
 A PID controller with output saturation, integral anti-windup (conditional integration), and a derivative channel.
-
-The controller computes ``u = kp*e + (integral + ki*e) + kd*(e - e_prev)`` and saturates it to +-limit. As in the PI
-version the integrator only accumulates when the output is within range (the saturation ``else`` arm), so it cannot
-wind up while saturated. The derivative acts on the error. The very first update is treated specially: with no previous
-error yet, a naive derivative would see ``prev_error == 0`` and emit a large spurious spike, so the first update forces
-the derivative to 0 and merely records the error. This adds a boolean ``_started`` state and a branch on it, on top of
-the float ``integral`` and ``prev_error`` state and the three-way saturation branch.
+The controller computes ``u = kp*e + (integral + ki*e) + kd*(e - e_prev)`` and saturates it to +-limit.
+The very first update is treated specially to avoid the initial spike.
 """
 
 from pathlib import Path

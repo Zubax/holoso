@@ -1459,6 +1459,166 @@ def test_chained_comparison_evaluates_each_operand_once() -> None:
     assert _op_count(hir, FloatAdd) == 1  # subtraction lowers to add(+neg); only one, so x was built once
 
 
+def _branch_count(hir) -> int:  # type: ignore[no-untyped-def]
+    return sum(1 for block in hir.blocks if isinstance(block.terminator, Branch))
+
+
+def test_nested_if_without_else_folds_into_one_and_branch() -> None:
+    # ``if A: (if B: S)`` with no ``else`` on either is exactly ``if (A and B): S``: the frontend folds it to a single
+    # branch (one combinational ``and``), NOT two nested jumps. Folded repeatedly, ``if A: if B: if C: S`` collapses to
+    # one ``A and B and C`` branch. Regression: the nested form must compile identically to the hand-written ``and``.
+    def nested(x, lo, hi):  # type: ignore[no-untyped-def]
+        r = 0.0
+        if x > lo:
+            if x < hi:
+                r = 1.0
+        return r
+
+    def manual(x, lo, hi):  # type: ignore[no-untyped-def]
+        r = 0.0
+        if x > lo and x < hi:
+            r = 1.0
+        return r
+
+    def triple(x, lo, hi):  # type: ignore[no-untyped-def]
+        r = 0.0
+        if x > lo:
+            if x < hi:
+                if x != 0.0:
+                    r = 1.0
+        return r
+
+    assert _branch_count(lower(nested)) == 1  # one branch, not two
+    assert _branch_count(lower(nested)) == _branch_count(lower(manual))
+    assert _op_count(lower(nested), BoolAnd) == 1  # the conjunction the fold synthesized
+    assert _branch_count(lower(triple)) == 1  # still a single branch
+    assert _op_count(lower(triple), BoolAnd) == 2  # A and B and C -> two binary ANDs
+
+
+def test_nested_if_with_outer_else_does_not_fold() -> None:
+    # The fold must NOT trigger when the outer ``if`` has an ``else``: ``if A: (if B: S) else: T`` is not
+    # ``if (A and B): S``, because T runs whenever ``not A``, whereas ``not (A and B)`` also covers A-and-not-B. Both
+    # branches must survive and no spurious conjunction is synthesized.
+    def f(x, lo, hi):  # type: ignore[no-untyped-def]
+        r = 0.0
+        if x > lo:
+            if x < hi:
+                r = 1.0
+        else:
+            r = 2.0
+        return r
+
+    assert _branch_count(lower(f)) == 2
+    assert _op_count(lower(f), BoolAnd) == 0
+
+
+def test_nested_if_fold_is_suppressed_when_the_inner_test_has_a_walrus() -> None:
+    # The fold must NOT absorb an inner test that carries a walrus: nested, the walrus binds only when the outer test
+    # holds, but ``A and B`` evaluates B unconditionally -- folding would over-bind it. The two branches must survive.
+    def f(x):  # type: ignore[no-untyped-def]
+        r = 0.0
+        if x > 0.0:
+            if (t := x * 3.0) < 100.0:
+                r = t
+        return r
+
+    assert _branch_count(lower(f)) == 2  # not folded into a single ``and`` branch
+
+
+def test_walrus_in_conditional_expression_arm_is_rejected() -> None:
+    # A ternary arm is evaluated only when selected; a walrus binding there cannot leak across arms, so it is rejected.
+    def f(x):  # type: ignore[no-untyped-def]
+        return (t := 1.0) if x > 0.0 else (t := 2.0)
+
+    with pytest.raises(UnsupportedConstruct, match="walrus"):
+        lower(f)
+
+
+def test_walrus_in_and_or_operand_is_rejected() -> None:
+    # An ``and``/``or`` operand may be short-circuited (statically dropped by the connective fold, or unevaluated in
+    # Python), so whether its walrus binds cannot be reconciled between the scans and lowering -- rejected. (Regression:
+    # the scan invalidated the target unconditionally while lowering short-circuited past it, desyncing the two.)
+    def f(x, y):  # type: ignore[no-untyped-def]
+        if x > 0.0 and (t := y) > 0.0:
+            return t
+        return 0.0
+
+    with pytest.raises(UnsupportedConstruct, match="walrus"):
+        lower(f)
+
+
+def test_walrus_in_chained_comparison_is_rejected() -> None:
+    def f(x):  # type: ignore[no-untyped-def]
+        if x < 0.0 < (t := 5.0):
+            return t
+        return 0.0
+
+    with pytest.raises(UnsupportedConstruct, match="walrus"):
+        lower(f)
+
+
+_DEAD_WALRUS_GLOBAL = 3  # a module global a dead-code walrus shadows below
+
+
+def test_walrus_in_dead_or_unsupported_statement_still_scopes_the_name_local() -> None:
+    # Local-name collection is syntactic, as in Python: a walrus target is a function local throughout the body even in
+    # dead or out-of-subset code, so it shadows a same-named global. Here the earlier ``range(_DEAD_WALRUS_GLOBAL)`` must
+    # see the runtime local (rejected), NOT silently fold the module int 3 from the global.
+    def f(x):  # type: ignore[no-untyped-def]
+        v = x
+        for _ in range(_DEAD_WALRUS_GLOBAL):
+            v = v + 1.0
+        return v
+        assert (_DEAD_WALRUS_GLOBAL := 2)  # noqa -- unreachable, but makes the name a local for the whole function
+
+    with pytest.raises(UnsupportedConstruct):
+        lower(f)
+
+
+def test_walrus_in_a_nested_scope_default_scopes_the_name_in_the_enclosing_function() -> None:
+    # A nested def/lambda is a separate scope, but its default-argument expressions execute in the ENCLOSING scope, so a
+    # walrus there binds an enclosing local (as in Python). The earlier ``range(_DEAD_WALRUS_GLOBAL)`` must therefore see
+    # the runtime local, not the module int -- even though the lambda is dead code that lowering never reaches.
+    def f(x):  # type: ignore[no-untyped-def]
+        v = x
+        for _ in range(_DEAD_WALRUS_GLOBAL):
+            v = v + 1.0
+        return v
+        h = lambda y=(_DEAD_WALRUS_GLOBAL := 1): y  # noqa: E731 -- dead, but its default's walrus is an enclosing local
+
+    with pytest.raises(UnsupportedConstruct):
+        lower(f)
+
+
+def test_walrus_in_while_condition_is_rejected() -> None:
+    # A while-condition walrus rebinds every iteration and its post-test value is the loop-exit value, which the header
+    # phi does not capture; rejected rather than miscompiled.
+    def f(x):  # type: ignore[no-untyped-def]
+        while (x := x - 1.0) > 0.0:
+            pass
+        return x
+
+    with pytest.raises(UnsupportedConstruct, match="walrus"):
+        lower(f)
+
+
+_WALRUS_SHADOWED_INT = 3  # a module global an inner walrus shadows in the test below
+
+
+def test_walrus_target_shadowing_a_global_int_is_a_runtime_local() -> None:
+    # Python makes a walrus target a function local for the whole body, shadowing a same-named module global. Using it
+    # as a static range bound must therefore see the runtime local (rejected), NOT silently fold the global's value.
+    def f(x):  # type: ignore[no-untyped-def]
+        v = x
+        if (_WALRUS_SHADOWED_INT := x) > 0.0:
+            for _ in range(_WALRUS_SHADOWED_INT):  # the local float, not the module int 3
+                v = v + 1.0
+        return v
+
+    with pytest.raises(UnsupportedConstruct):
+        lower(f)
+
+
 def test_conditional_expression_lowers_to_branch_and_phi() -> None:
     def f(x, y, c):  # type: ignore[no-untyped-def]
         return x if c > 0.0 else y

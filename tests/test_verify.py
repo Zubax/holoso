@@ -527,52 +527,79 @@ def test_model_pid_controller_all_arms_anti_windup_and_first_update() -> None:
 
 
 def _remainder(x, y):  # type: ignore[no-untyped-def]
-    ax = abs(x)
-    ay = abs(y)
+    # Mirrors examples/remainder.py: boolean quotient parity, a walrus-bound ``twice_r``, augmented assignment, and the
+    # nested unit-place tie branch (``elif twice_r == ay: if quotient_is_odd:``) that the frontend folds to one branch.
+    ax, ay = abs(x), abs(y)
     scaled = ay
-    while scaled + scaled <= ax:
-        scaled = scaled + scaled
+    while scaled * 2 <= ax:
+        scaled += scaled
     r = ax
-    quotient_is_odd = 0.0
+    quotient_is_odd = False
     while scaled > ay:  # halve down to -- but not past -- the unit place (|y|*0.5 can clamp back in subnormal-free ZKF)
         if r >= scaled:
-            r = r - scaled
-        scaled = scaled * 0.5
+            r -= scaled
+        scaled *= 0.5
     if r >= ay:
-        r = r - ay
-        quotient_is_odd = 1.0
-    twice_r = r + r
-    if twice_r > ay:
-        r = r - ay
+        r -= ay
+        quotient_is_odd = True
+    if (twice_r := r * 2) > ay:
+        r -= ay
     elif twice_r == ay:
-        if quotient_is_odd > 0.5:
-            r = r - ay
-    return -r if x < 0.0 and r != 0.0 else r  # canonical +0.0 for a negative exact multiple (ZKF has no negative zero)
+        if quotient_is_odd:
+            r -= ay
+    return -r if x < 0 else r
+
+
+def _walrus(x):  # type: ignore[no-untyped-def]
+    # ``(t := x*2)`` evaluates the subexpression once, binds ``t``, and yields it to the comparison; ``t`` then stays
+    # visible to both arms (it is bound in the test, before the branch), as in Python.
+    if (t := x * 2.0) > 4.0:
+        r = t + 1.0
+    else:
+        r = t
+    return r
+
+
+def test_model_walrus_binds_once_and_stays_visible_after_the_test() -> None:
+    model = build_model(build(_run(_walrus), "walrus"))
+    for x in (3.0, 1.0, 2.0, -5.0, 0.0):  # >2 takes the then arm (reads t), else reads the same bound t
+        assert float(model(x)[0]) == _walrus(x)
+
+
+def _walrus_loop(x):  # type: ignore[no-untyped-def]
+    # A walrus reassigning a pre-defined accumulator inside a loop body must be loop-carried (a header phi), so the
+    # accumulation persists across iterations rather than resetting to the preheader value each trip.
+    acc = 0.0
+    i = 0.0
+    while i < 4.0:
+        y = (acc := acc + x)  # noqa: F841 -- the walrus side effect (rebinding acc) is the point
+        i = i + 1.0
+    return acc
+
+
+def test_model_walrus_reassigned_loop_variable_is_loop_carried() -> None:
+    model = build_model(build(_run(_walrus_loop), "walrus_loop"))
+    for x in (2.5, 1.0, -3.0):  # the defect (walrus invisible to the loop scan) returns 0.0 instead of 4*x
+        assert float(model(x)[0]) == _walrus_loop(x)
 
 
 def test_model_remainder_iterative_reduction_is_exact_and_matches_ieee() -> None:
     # The data-dependent scaled-subtraction reduction is exact (every subtraction is Sterbenz-exact, no rounding), so
     # the model reproduces math.remainder bit-for-bit -- including the round-to-nearest-even ties (6/4 -> -2, 2/4 -> 2)
-    # and a negative exact multiple, which must yield +0.0 (no negative zero) -- for any normal-magnitude result (these
-    # cases are; a subnormal-sized remainder would flush to +0 in subnormal-free ZKF). Regression: a divisor equal to
-    # the smallest normal must still TERMINATE -- halving the unit place would clamp back to it and loop forever, which
-    # the explicit unit-place handling avoids.
+    # and negative exact multiples (which produce a -0.0, accepted by the example) -- for any normal-magnitude result
+    # (these cases are; a subnormal-sized remainder would flush to +0 in subnormal-free ZKF). Regression: a divisor
+    # equal to the smallest normal must still TERMINATE -- halving the unit place would clamp back to it and loop
+    # forever, which the explicit unit-place handling avoids.
     import math
 
     model = build_model(build(_run(_remainder), "remainder"))
     ui = model.output_names.index("out_0")
     min_normal = 2.0 ** (1 - (2 ** (FMT.wexp - 1) - 1))
     cases = [(5.0, 3.0), (10.0, 3.0), (7.5, 2.0), (-7.5, 2.0), (13.0, 4.0), (6.0, 4.0), (2.0, 4.0), (0.0, 2.0)]
-    cases += [
-        (-3.0, 3.0),
-        (-6.0, 3.0),
-        (-9.0, 3.0),
-    ]  # negative exact multiples: result must be the legal +0.0, not -0.0
+    cases += [(-3.0, 3.0), (-6.0, 3.0), (-9.0, 3.0)]  # negative exact multiples (the -0.0 the example accepts)
     cases += [(0.0, min_normal), (min_normal, min_normal), (3.0 * min_normal, 2.0 * min_normal)]
     for x, y in cases:
-        out = model(x, y)[ui]
-        assert float(out) == math.remainder(x, y)
-        assert FMT.is_legal(out.bits)  # a negative exact multiple must not emit an illegal ZKF negative zero
+        assert float(model(x, y)[ui]) == math.remainder(x, y)
 
 
 class _SchmittTrigger:

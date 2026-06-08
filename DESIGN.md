@@ -253,7 +253,17 @@ cycle later, exactly like a comparison.
 
 A conditional (ternary) expression `x if c else y` lowers to a `branch` on `c` plus a typed `phi` merging the two arm
 values -- only the taken arm computes -- exactly like an `if` statement lifted into expression position; a
-compile-time-known test selects one arm with no branch.
+compile-time-known test selects one arm with no branch. A walrus `(name := expr)` binds `name` as a function local (so
+the local-name and reachability scans treat it like any assignment) and yields the value. It is supported only where it
+is evaluated unconditionally -- an `if` test, an assignment/return value, or any expression not under a short-circuit --
+and rejected where its binding could be short-circuited or conditional and so cannot be reconciled between the scans and
+lowering: inside an `and`/`or` operand or a chained comparison, a conditional-expression arm, or a `while` condition.
+
+A nested `if` with no `else` on either level is folded to a single combined-`and` branch: `if A: (if B: S)` becomes
+`if (A and B): S`, so it emits one branch instead of two (and `if A: if B: if C: S` collapses to one `A and B and C`).
+This is exact because a boolean test in this subset is a pure combinational value, so evaluating `B` unconditionally is
+equivalent; the fold is disabled the moment the outer `if` carries an `else` (then `if (A and B)` would mis-route the
+`else`).
 
 Scheduling is one cross-bank, dependency-aware pass per block over float arithmetic and every combinational op
 together, with no barrier: a comparison or cast issues as soon as its own operands have landed, so a cross-domain

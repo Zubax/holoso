@@ -202,3 +202,6 @@ does not affect correctness or maintainability of the codebase.
 Iteration until no feedback has been attempted in the past but it is not practical because in the absence of significant
 issues the review agents tend to degrade to nitpicking such as linguistic style issues in comments etc. Hence, we
 stop iteration earlier, as soon as the feedback ceases to contain significant findings.
+
+Note: review agents in maximum thinking mode may go silent for a very long time, up to an hour or so;
+do not interrupt them prematurely, be ready to wait for as long as it takes.

@@ -15,7 +15,8 @@
 // FLOATING POINT BASIC OPERATORS
 //
 // Using Zubax Kulibin float -- an IEEE 754-like format with simplifications: no NaN, no subnormals, no negative 0.
-// Refer to the Kulibin library for details.
+// Refer to the Kulibin library for details. Note that even though it technically has no negative zero, it is not an
+// error to produce it -- all operators ignore the sign bit when the magnitude is zero.
 //
 // Parameters: WEXP -- exponent bit width, WMAN -- mantissa/significand bit width (incl. hidden bit).
 // The total width is WFULL=WEXP+WMAN (the significand MSb is absent but there is also the sign bit, like IEEE 754).
