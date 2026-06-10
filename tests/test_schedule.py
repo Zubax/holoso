@@ -191,7 +191,6 @@ def test_build_lir_small_kernel() -> None:
     assert [o.name for o in lir.float_outputs] == ["out_0"]
     assert all(isinstance(o.tap, FloatOperand) for o in lir.float_outputs)
     assert all(isinstance(o.tap.source, RegRef) for o in lir.float_outputs)
-    assert lir.makespan == max(op.commit_cycle for op in lir.ops)
 
     names = [p.name for p in lir.ports]
     for expected in (
@@ -223,7 +222,7 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
 
     lir = build(_run(LeakyDelay().__call__), "leaky_delay")
     (slot,) = lir.float_state_slots
-    assert lir.has_state and slot.needs_copy and isinstance(slot.tap, FloatOperand)
+    assert bool(lir.float_state_slots or lir.bool_state_slots) and slot.needs_copy and isinstance(slot.tap, FloatOperand)
     assert isinstance(slot.tap.source, RegRef)
     # The non-coalesced writeback is a first-class event in the liveness model: the slot register holds a live value on
     # its install step (previously absent, which is why the report could not render it).
@@ -288,7 +287,8 @@ def test_state_early_copy_frees_source_register() -> None:
     (xprev,) = [s for s in lir.float_state_slots if s.name == "_x_prev"]
     (in_x,) = [load for load in lir.float_inputs if load.name == "x"]
     assert xprev.needs_copy and in_x.dst == xprev.tap.source  # the copy's source is the input register
-    assert xprev.install_cycle <= lir.makespan  # installs before the boundary (present cycle == makespan + 1)
+    makespan = max((op.commit_cycle for op in lir.ops), default=0)
+    assert xprev.install_cycle <= makespan  # installs before the boundary (present cycle == makespan + 1)
     # The freed input register is reused: a later operation's result is assigned to it as well.
     assert any(op.dst == in_x.dst for op in lir.ops)
 
@@ -305,7 +305,7 @@ def test_build_lir_ekf1_stateless() -> None:
     # The two K=1 power-of-two scalings are non-concurrent, so they pool onto a single shared instance.
     assert sum(1 for inst in lir.instances if isinstance(inst.operator, FMulILog2Operator)) == 1
     # Register reuse: not every distinct value occupies its own register.
-    assert lir.regfile.nreg < lir.op_count + len(lir.float_inputs)
+    assert lir.regfile.nreg < len(lir.ops) + len(lir.float_inputs)
     # The interference test runs in the hardware frame (a value frees its register as soon as its last read precedes the
     # next value's landing), not the scheduler-frame rule that left it several cycles too conservative and produced 42
     # registers here. The bound is well below 42 to flag a regression of the hardware-accurate liveness without pinning

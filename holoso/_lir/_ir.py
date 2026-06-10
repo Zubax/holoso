@@ -422,9 +422,6 @@ class Lir:
     ops: list[FloatScheduledOp]  # the pipelined schedule, flattened across blocks with ABSOLUTE issue cycles
     outputs: list[FloatOutputWire | BoolOutputWire]
     float_state_slots: list[FloatStateSlot]  # persistent registers, ordered as the instance attributes
-    makespan: int  # last absolute commit cycle (0 if no ops)
-    op_count: int
-    max_chain_len: int  # longest dependency chain in hardware operators (for verification tolerance)
     # Control-flow overlay. A straight-line kernel has a single block ending in Ret; ``blocks[0]`` is the entry,
     # ``block_base[i]`` is block i's absolute start PC, and ``last_pc`` is the out_valid boundary (the single Ret).
     blocks: list[LirBlock]
@@ -536,11 +533,6 @@ class Lir:
         shared by liveness and the emitter so the two cannot drift.
         """
         return copy_step_cycle(slot.install_cycle)
-
-    @property
-    def has_state(self) -> bool:
-        """Whether the module retains persistent state across initiations."""
-        return bool(self.float_state_slots) or bool(self.bool_state_slots)
 
     @property
     def is_control_flow(self) -> bool:

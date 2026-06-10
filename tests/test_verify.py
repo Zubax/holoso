@@ -127,7 +127,7 @@ def test_model_matches_reference_small_kernels() -> None:
     model = build_model(build(_run(f), "f"))
     got = model(*[inputs[name] for name in model.input_names])
     ref = evaluate_reference(f, inputs)
-    rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=max(abs(v) for v in inputs.values()))
+    rtol, atol = default_tolerance(FMT, len(model.lir.ops), magnitude=max(abs(v) for v in inputs.values()))
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
@@ -142,7 +142,7 @@ def test_tuple_unpacking_matches_python_reference() -> None:
     model = build_model(build(_run(f), "f"))
     got = model(*[inputs[name] for name in model.input_names])
     ref = evaluate_reference(f, inputs)
-    rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=max(abs(v) for v in inputs.values()))
+    rtol, atol = default_tolerance(FMT, len(model.lir.ops), magnitude=max(abs(v) for v in inputs.values()))
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
@@ -358,7 +358,7 @@ def test_model_matches_reference_ekf1_stateless() -> None:
     got = model(*[inputs[name] for name in model.input_names])
     ref = evaluate_reference(ekf1_stateless.update_x_P, inputs)
     assert len(ref) == 9 and all(np.isfinite(ref))
-    rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=max(abs(v) for v in inputs.values()))
+    rtol, atol = default_tolerance(FMT, len(model.lir.ops), magnitude=max(abs(v) for v in inputs.values()))
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
@@ -372,7 +372,7 @@ def test_model_matches_reference_aggregates() -> None:
     model = build_model(build(_run(f), "agg"))
     got = model(*[inputs[name] for name in model.input_names])
     ref = evaluate_reference(f, inputs)  # these aggregate ops run identically in plain Python
-    rtol, atol = default_tolerance(FMT, max(model.lir.op_count, 1), magnitude=3.0)
+    rtol, atol = default_tolerance(FMT, max(len(model.lir.ops), 1), magnitude=3.0)
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
@@ -402,7 +402,7 @@ def test_model_matches_reference_ekf1_stateful() -> None:
     reference.update(**step_inputs)
     ref = [float(v) for v in (*reference.x, *reference.P_urt)]
     assert len(ref) == 9 and all(np.isfinite(ref))
-    rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=max(1.0, max(abs(v) for v in ref)))
+    rtol, atol = default_tolerance(FMT, len(model.lir.ops), magnitude=max(1.0, max(abs(v) for v in ref)))
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
@@ -465,7 +465,7 @@ def test_model_executes_first_sample_branch() -> None:
     model = build_model(build(_run(_Iir1Lpf().__call__), "iir1_lpf"))
     reference = _Iir1Lpf()
     stream = [1.0, 2.0, 3.0, 0.5, -1.0, 8.0]
-    rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=8.0)
+    rtol, atol = default_tolerance(FMT, len(model.lir.ops), magnitude=8.0)
     for index, x in enumerate(stream):
         (got,) = model(x)
         if index == 0:
@@ -518,7 +518,7 @@ def test_model_pid_controller_all_arms_anti_windup_and_first_update() -> None:
     model = build_model(build(_run(_PID().__call__), "pid"))
     reference = _PID()
     ui = model.output_names.index("out_0")
-    rtol, atol = default_tolerance(FMT, model.lir.op_count, magnitude=10.0)
+    rtol, atol = default_tolerance(FMT, len(model.lir.ops), magnitude=10.0)
     stream = [(10.0, 0.0), (10.0, 0.5), (0.0, 1.0), (0.5, 0.5), (-10.0, 0.0), (-10.0, -0.5), (0.0, 0.0)]
     for setpoint, measurement in stream:
         got = float(model(setpoint, measurement)[ui])

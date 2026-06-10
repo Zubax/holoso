@@ -78,10 +78,7 @@ def _metrics(lir: Lir) -> str:
         ("operator instances", " ".join(f"{count}×{kind}" for kind, count in op_counts.items())),
         ("registers", lir.regfile.nreg),
         ("regfile R/W ports", f"{lir.regfile.nrd} / {lir.regfile.nwr}"),
-        ("schedule makespan", lir.makespan),
-        ("operations", lir.op_count),
         ("II min [cycles]", lir.initiation_interval),
-        ("longest op chain", lir.max_chain_len),
     ]
     body = "".join(f"<tr><th>{_esc(label)}</th><td>{_esc(str(value))}</td></tr>" for label, value in rows)
     return f"<h2>Metrics</h2><table class='metrics'>{body}</table>"

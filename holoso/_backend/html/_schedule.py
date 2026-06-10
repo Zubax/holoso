@@ -239,7 +239,7 @@ def render_schedule(lir: Lir) -> str:
             endpoints.add((col_ord[arrow.cond], arrow.src_cyc))
 
     out = [
-        _schedule_key(operator_colors, lir.has_state, bool(arrows)),
+        _schedule_key(operator_colors, bool(lir.float_state_slots or lir.bool_state_slots), bool(arrows)),
         "<div id='schedwrap'><table class='grid'>",
     ]
     # Header row 0: group bands over the register banks (wide, bool), the constant block and the operator pipelines.

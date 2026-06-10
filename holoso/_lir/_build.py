@@ -90,9 +90,6 @@ def _build_single_block(mir: Mir, float_mir: MirFloatView, module_name: str) -> 
         ops=ops,
         outputs=outputs,
         float_state_slots=_build_state_slots(float_mir, alloc, const_pool),
-        makespan=sched.makespan,
-        op_count=len(float_mir.operation_nodes),
-        max_chain_len=_max_chain_len(float_mir),
         blocks=[LirBlock(0, ops, [], [], [], Ret(), sched.makespan)],  # comb_ops/copies/bool_writes: none
         block_base=[0],
         entry=0,
@@ -224,7 +221,6 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
 
     block_base, last_pc, min_ii = _layout_blocks(mir, blocks)
     flat_ops = [_rebase_op(op, block_base[block.id]) for block in mir.blocks for op in blocks[block.id].ops]
-    makespan = max((op.commit_cycle for op in flat_ops), default=0)
 
     # The slot register holds the live-in (read-only in the body); its live-out is a distinct value installed at the
     # Ret boundary (install_cycle is unused on the CFG path -- the emitter installs at LASTPC, the model at Ret).
@@ -264,9 +260,6 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
         ops=flat_ops,
         outputs=outputs,
         float_state_slots=float_state_slots,
-        makespan=makespan,
-        op_count=len(float_mir.operation_nodes),
-        max_chain_len=_max_chain_len(float_mir),
         blocks=blocks,
         block_base=block_base,
         entry=mir.entry,
@@ -725,12 +718,3 @@ def _compute_nload(mir: MirFloatView) -> int:
     """
     return len(mir.input_ids)
 
-
-def _max_chain_len(mir: MirFloatView) -> int:
-    depth: dict[ValueId, int] = {}
-    op_ids = sorted(mir.operation_nodes)
-    for vid in op_ids:
-        node = _operation(mir, vid)
-        operands = [operand for operand in node.operands if operand in mir.operation_nodes]
-        depth[vid] = 1 + max((depth[operand] for operand in operands), default=0)
-    return max(depth.values(), default=0)
