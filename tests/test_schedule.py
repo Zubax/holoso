@@ -222,7 +222,9 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
 
     lir = build(_run(LeakyDelay().__call__), "leaky_delay")
     (slot,) = lir.float_state_slots
-    assert bool(lir.float_state_slots or lir.bool_state_slots) and slot.needs_copy and isinstance(slot.tap, FloatOperand)
+    assert (
+        bool(lir.float_state_slots or lir.bool_state_slots) and slot.needs_copy and isinstance(slot.tap, FloatOperand)
+    )
     assert isinstance(slot.tap.source, RegRef)
     # The non-coalesced writeback is a first-class event in the liveness model: the slot register holds a live value on
     # its install step (previously absent, which is why the report could not render it).
@@ -241,6 +243,48 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
     op = lir.ops[0]
     assert lir.result_landing_cycle(op) == op.commit_cycle + FETCH_LAG + 2
     assert lir.operand_read_cycle(op) == op.issue_cycle + FETCH_LAG - 1
+
+
+def test_cfg_phi_merge_register_shows_residence() -> None:
+    # A diamond whose merged result is read only by the output: its register is written by the per-arm phi copies and
+    # read at the boundary, never by an operator. Before phi-copy residence was added to reg_liveness, such a register
+    # had a use but no def and so collapsed to an empty (untinted) live set -- the CFG-report liveness gap.
+    def f(x, y):  # type: ignore[no-untyped-def]
+        if x > 0.0:
+            z = x + y
+        else:
+            z = x - y
+        return z
+
+    lir = build(_run(f), "diamond")
+    assert any(block.copies for block in lir.blocks), "the merge must be resolved by phi-arm copies"
+    (out,) = lir.float_outputs
+    assert isinstance(out.tap.source, RegRef)
+    assert lir.reg_liveness.get(out.tap.source), "the phi-merged output register must be tinted live in the report"
+
+
+def test_cfg_write_only_state_slot_is_reserved() -> None:
+    # A state slot written on every arm but never read before the write has no live-in, so its dedicated register is
+    # never pinned to a value. The colorer must still reserve it (it sits below fresh_start and is installed by the
+    # boundary copy) -- a temporary considering it as a reuse candidate must skip it rather than fault on the missing
+    # pool entry.
+    class WriteOnlyBranch:
+        def __init__(self) -> None:
+            self.acc = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if x > 0.0:
+                self.acc = x * 2.0
+            else:
+                self.acc = x * 3.0
+            return self.acc
+
+    lir = build(_run(WriteOnlyBranch().__call__), "write_only")
+    (slot,) = lir.float_state_slots
+    assert slot.name == "acc"
+    assert slot.reg.index not in {op.dst.index for op in lir.ops}  # reserved: no operator result lands on it
+    model = build_model(lir)
+    assert float(model(3.0)[0]) == 6.0 and float(model(-2.0)[0]) == -6.0
 
 
 def test_state_war_backstop_allows_noop_writeback() -> None:

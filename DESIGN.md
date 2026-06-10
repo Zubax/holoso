@@ -215,10 +215,9 @@ Branch vs. select (the core control-flow decision):
 
 - A real `if`/`else` lowers to a `branch` terminator + a `phi` at the merge. Only one side executes; the merge is
   resolved at register allocation -- no runtime mux, the untaken arm is never computed, and no spurious error is
-  recorded. In v1 the resolution is by copy, not coalescing: each phi (and each persistent slot live-out) installs
-  its arm value into a fresh merged register with a pc-gated copy at the predecessor's tail (see the implemented CFG
-  backend below); coalescing the arms onto one register is a deferred liveness-aware optimization. Branches are the
-  default.
+  recorded. Each arm value is installed into the merged register at the predecessor's tail: directly, when the arm
+  operator's result can coalesce onto the merged register, otherwise by a pc-gated copy (see LIR below). Branches are
+  the default.
 - `select` (a mux, both inputs live) is reserved for data multiplexing (one-hot lookup, `where`-style picks) and for an
   optional if-conversion peephole that collapses a tiny, pure, cheap diamond. Conservative by default.
 
@@ -317,8 +316,6 @@ a counted back-edge loop (a counted loop would need a runtime integer counter; d
 
 ### DEFERRED
 
-Coalescing the `if` arms onto one register is a deferred liveness-aware optimization, as mentioned above.
-
 Variable-trip `for` loops.
 
 Integer operand support is missing; it needs typed int operands/constants/operators that reference the same wide
@@ -387,10 +384,18 @@ registers it actually reads, each register's write select only its actual writer
 a more CPU-conventional design was made, utilizing a full-reach crossbar register file, which resulted in untenable
 timing penalties due to the expensive read/write port multiplexors, hence the sparse optimized design was preferred.
 
-Register allocation is reach-aware: its primary objective is to minimize per-port read-set and per-register
-writer-set fan-in (the steering cost that matters on an FPGA). Register count is a bounded secondary objective: it
-colors reach-minimal and again compacting dead registers up to a write-select cap, keeping whichever minimizes
-`reach + price * registers`, so it sheds a register only when that widens a write select modestly. No spill.
+Register allocation is reach-aware over the whole control-flow graph. Whether two values may share a register is
+decided on a hardware-frame interference graph built from per-block liveness: a value resides in a block from the
+block's first step when it is carried in from a predecessor or is a phi result, from its operator's landing cycle when
+it is defined in the block, and through the block boundary when it is live out; two values interfere when their
+residences overlap in some block under the read-first rule (the older value's last read must precede the newer's
+landing). Path-awareness is free -- the two arms of an `if` are live in no common block, so their temporaries reuse the
+same registers, which is what keeps a heavily-branched kernel (e.g., a 12-iteration CORDIC) to a handful of wide
+registers. The primary objective is to minimize per-port read-set and per-register writer-set fan-in
+(the steering cost that matters on an FPGA). Register count is a bounded secondary objective: it colors reach-minimal
+and again compacting dead registers up to a write-select cap, keeping whichever minimizes `reach + price * registers`,
+so it sheds a register only when that widens a write select modestly. No spill. The coloring is a port-affinity greedy
+seed refined by simulated annealing over the same objective.
 
 Commutative port assignment: after allocation, each use of a commutative operator has its two operands oriented across
 its read ports to minimize the total read-set size. A register that an operand reads in one position and another reads
@@ -406,19 +411,16 @@ does not prove optimality in its time budget. On ekf1_stateless this takes read-
 `branch` is the real control transfer: the microprogram counter jumps, untaken ops never run, and the II is whatever
 the executed path costs (each path's count is itself exact).
 
-Implemented CFG backend (`if`/`else`, comparisons, unrolled `for`, and back-edge `while`).
+CFG backend (`if`/`else`, comparisons, unrolled `for`, and back-edge `while`).
 Blocks are laid out contiguously in reverse-postorder with the single canonical `Ret` forced last as the out_valid
 boundary (so a loop body, a DFS leaf via its back edge, stays below it); a back-edge is a jump to a lower address.
 Each block spans `boundary_step(block_makespan) + 1` fetch PCs (a per-block drain) and its terminator redirects the
 fetch PC at the block's boundary via a small `case(pc)` in `next_pc` that, for a `branch`, reads the condition's 1-bit
-register (`bregs`). A phi (and each persistent slot's live-out) is resolved not by coalescing in v1 but by installing
-each arm's value into the merged register with a pc-gated copy at the predecessor's tail -- operator results take fresh
-registers, so no register is overwritten mid-block (the per-block schedule is hazard-free and the arm installs form a
-parallel copy bundle). Reach-aware coalescing of arm operators onto the merged register (to cut register count), and
-cross-block software pipelining, are deferred optimizations. `min_initiation_interval` is the shortest-path lower
-bound (exact for a straight-line kernel, `SynthesisResult.latency_is_exact`); the numerical model reproduces output
-bits exactly but does not yet predict the actual per-transaction cycle latency (a deferred enhancement; the testbench
-checks output bits at the out_valid handshake).
+register (`bregs`). A phi (and each persistent slot's live-out) is resolved at register allocation as above: coalesced
+onto the merged register when its live range does not overlap, else installed by a pc-gated copy at the predecessor's
+tail (a parallel copy bundle, read-first, so a swap is correct). `min_initiation_interval` is the shortest-path lower
+bound (exact when the kernel has a single forward path); the numerical model reproduces output bits exactly but does
+not yet predict the actual per-transaction cycle latency (the testbench checks output bits at the out_valid handshake).
 
 Compile-time-known branch conditions fold to a single arm so the other is never lowered (no spurious state from an
 unreachable write): a literal, a read-only boolean attribute, a comparison whose operands are both compile-time floats
@@ -436,24 +438,23 @@ move after constant folding.
 
 ### DEFERRED
 
-LIR currently has two build functions, one for straight-line single-block programs and one for CFG.
-A single-block program is a degenerate CFG and _build_cfg would produce correct hardware for it.
-The reason the split exists is purely optimization quality: `_build_single_block` carries at least two things the v1 CFG
-path does not: register coalescing (`allocate_registers` reuses registers via linear liveness; the CFG path's
-`_allocate_cfg` gives every value a fresh register, installing phi/slot live-outs by copy, very inefficient),
-and commutative-port assignment (assign_commutative_ports, to hold down read-mux fan-in). `is_control_flow`
-(and the `is_straight_line` check in `build`) selects that optimized path, and it also drives the backend:
-the emitter and model have a simpler straight-line codegen (no next_pc branch decode, no per-block ROM layout)
-for kernels with no control flow. So removing it means committing to one path everywhere — which requires porting
-coalescing and commutative ports into the CFG allocator. The coalescing is the subtle part: it has to become
-path-aware (mutually-exclusive arms don't interfere; a phi/loop-carried value whose live-in and live-out overlap still
-needs copy-installation, not coalescing).
+Phi-arm and persistent-slot coalescing: an arm or live-out is currently always installed by a pc-gated copy rather
+than coalesced onto the merged/slot register, and the boolean register bank still takes a fresh register per value
+instead of reusing by liveness. Both wait on one backend change -- every register written by a single consolidated
+statement (a priority chain over its input-load, operator-writeback, pc-gated copy/cast, and state-install writers) --
+so that an operator result and a copy may safely share a register. With that, coalescing is path-aware (mutually
+exclusive arms do not interfere; a phi or loop-carried value whose live-in and live-out overlap still needs
+copy-installation), and commutative-port assignment applies over the whole op stream.
 
-The numerical model should be refactored to have a `.tick()` method that advances the state by a single clk tick,
-allowing cycle-by-cycle cosimulation with immediate state divergence detection.
+Cross-block software pipelining: the machine uses per-block drain barriers; overlapping a fall-through block's head
+with its predecessor's tail (branches and loop back-edges stay hard PC barriers -- the ZISC cannot fetch a successor
+before the redirect resolves) is a separate scheduling effort, complemented by if-converting small pure diamonds to a
+`select` mux so branchy kernels become branch-free and pipeline fully.
 
-Cross-block software pipelining (the v1 machine uses per-block drain barriers, and overlapping a block's tail with a
-successor's head is a separate, large scheduling effort.
+The numerical model should advance one clk per `.tick()`, replaying PCs and latches like the hardware, so it stays
+correct under register reuse and cross-block overlap by construction and enables cycle-accurate lockstep cosimulation
+with immediate state-divergence detection (today it reproduces output bits exactly but not the per-transaction cycle
+latency).
 
 ## Operators
 
@@ -483,7 +484,7 @@ Operator latency tuning knobs are named after the HDL parameters (as defined in 
 
 ## Scheduler
 
-The LIR scheduler module implements software-pipelined list scheduling over selected single-block MIR.
+The LIR scheduler module implements software-pipelined list scheduling over each block of the selected MIR.
 Operator latencies are fully static and data-independent (and most of them are throughput-1, zero-bubble),
 so the entire schedule is computed at compile time: each op is assigned an issue cycle and a bound instance,
 and the backend just replays it with a cycle counter. The scheduler itself is domain-agnostic;
@@ -536,11 +537,12 @@ so the controller VLIW word carries only those narrow set-local indices plus the
 
 Inputs preload directly into the low registers of their own bank on the accept step, captured together under a single
 `if (in_ready && in_valid)` block rather than through write ports. Wide-bank `nload` currently spans the float input
-block (the highest float input register index plus one); boolean inputs are allocated analogously in the boolean bank. Outputs
-are tapped directly from their register by fixed index. Persistent state registers sit directly above the input block
-in their bank; a coalesced slot is written by its producing operator like any other result, and a non-coalesced slot
-is copied into its register on its install step (`pc == state_copy_step`, which is `LASTPC`
-for a boundary copy) by a small reg->reg block beside the input load, capturing its source on that step;
+block (the highest float input register index plus one); boolean inputs are allocated analogously in the boolean bank.
+Outputs are tapped directly from their register by fixed index.
+Persistent state registers sit directly above the input block in their bank; a coalesced slot is written by
+its producing operator like any other result, and a non-coalesced slot is copied into its register on its install
+step (`pc == state_copy_step`, which is `LASTPC` for a boundary copy)
+by a small reg->reg block beside the input load, capturing its source on that step;
 an early install (when the source is an ordinary register read by nothing later) frees that source register for reuse.
 
 Selected-float MIR `FloatSignControl` value objects fold into operand/result sign-control sidebands, and `fconst` is an

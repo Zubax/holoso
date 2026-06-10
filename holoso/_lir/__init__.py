@@ -27,6 +27,7 @@ from ._ir import (
     copy_step_cycle as copy_step_cycle,
     landing_cycle as landing_cycle,
     read_latch_cycle as read_latch_cycle,
+    wide_operand_read_cycle as wide_operand_read_cycle,
     InputProducer as InputProducer,
     Jump as Jump,
     LirBlock as LirBlock,

@@ -6,6 +6,8 @@ Read the `README.md`.
 Whenever introducing nontrivial changes, update `DESIGN.md` as well to keep it fully up-to-date and non-conflicting
 with the implementation. However, do not attempt to capture minor implementation minutiae there, keep it high-level.
 
+Do not commit anything unless asked explicitly to do so.
+
 ## Conventions
 
 ### Reset strategy

@@ -7,7 +7,13 @@ which typed storage resources, with which folded sign controls.
 
 from dataclasses import dataclass
 
-from .._operators import FloatHardwareOperator, FloatSignControl, HardwareOperator
+from .._operators import (
+    FComparisonOperator,
+    FloatHardwareOperator,
+    FloatSignControl,
+    FloatToBoolOperator,
+    HardwareOperator,
+)
 from .._type import BoolType, FloatFormat, FloatType
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
@@ -26,6 +32,22 @@ def landing_cycle(commit_cycle: int) -> int:
 def read_latch_cycle(issue_cycle: int) -> int:
     """The cycle an operator reads its operands -- the read latch presents the address early."""
     return issue_cycle + FETCH_LAG - 1
+
+
+def wide_operand_read_cycle(operator: HardwareOperator, issue_cycle: int) -> int:
+    """
+    The hardware-frame cycle on which ``operator`` samples a wide-register operand, the single definition shared by the
+    register allocator's interference, ``reg_liveness``, and the numerical model so none can drift. An instance-backed
+    float operator reads through the read latch (address presented a step early). The shared comparator reads its
+    operands combinationally on its ``in_valid`` step (``issue + FETCH_LAG``); the float->bool cast reads on its
+    writeback step, ``latency`` further on. Both are a step or more later than a latched read, so a wide register read
+    by a comparison or cast stays reserved exactly as long as the emitter holds it.
+    """
+    if isinstance(operator, FComparisonOperator):
+        return issue_cycle + FETCH_LAG
+    if isinstance(operator, FloatToBoolOperator):
+        return issue_cycle + FETCH_LAG + operator.latency
+    return read_latch_cycle(issue_cycle)
 
 
 def copy_step_cycle(install_cycle: int) -> int:
@@ -644,12 +666,20 @@ class Lir:
         for block in self.blocks:
             base_pc = self.block_base[block.index]
             for bop in block.comb_ops:
-                read = read_latch_cycle(base_pc + bop.issue_cycle)
+                read = wide_operand_read_cycle(bop.operator, base_pc + bop.issue_cycle)
                 for comb_operand in bop.operands:
                     if isinstance(comb_operand.source, RegRef):
                         uses.setdefault(comb_operand.source, []).append(read)
                 if isinstance(bop.dst, RegRef):
                     defs.setdefault(bop.dst, []).append(landing_cycle(base_pc + bop.commit_cycle))
+            # A phi-arm copy installs its value into the merged register at the predecessor's tail and reads its source
+            # there (the wide-bank analog of ``bool_writes`` below). Without this a merged register's residence -- and,
+            # under reuse, the source register's last read -- would be missing from the tint.
+            for copy in block.copies:
+                step = base_pc + copy_step_cycle(copy.issue_cycle)
+                defs.setdefault(copy.dst, []).append(step)
+                if isinstance(copy.source.source, RegRef):
+                    uses.setdefault(copy.source.source, []).append(step)
         return {reg: residence_rows(defs.get(reg, []), uses.get(reg, []), present) for reg in defs.keys() | uses.keys()}
 
     @property
@@ -677,6 +707,9 @@ class Lir:
         for block in self.blocks:
             base_pc = self.block_base[block.index]
             for bop in block.comb_ops:
+                # Boolean operands are always read through the read latch; only WIDE operands need the comparator/cast
+                # offsets of wide_operand_read_cycle, and the operators that read wide registers (comparison, float->bool)
+                # take no boolean operand -- so read_latch_cycle is the right frame for every operand reached here.
                 read = read_latch_cycle(base_pc + bop.issue_cycle)
                 for operand in bop.operands:
                     if isinstance(operand.source, BoolRegRef):  # boolean-logic and bool->float cast read bool operands

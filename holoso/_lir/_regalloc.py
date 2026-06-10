@@ -117,6 +117,208 @@ def _operation(mir: MirFloatView, vid: ValueId) -> MirOperation:
     return mir.operation_nodes[vid]
 
 
+@dataclass(frozen=True, slots=True)
+class ColoringProblem:
+    """
+    A register-coloring instance decoupled from any single timeline: register sharing is decided by an explicit
+    interference graph (see :mod:`._liveness`), so the same engine colors a straight-line block or a whole CFG, and
+    either register bank.
+
+    ``movable`` are the values to place (in a stable order); ``pinned`` fixes inputs and state live-ins to their
+    registers; ``pool`` tags every value with a write-path class (operator-written vs pc-gated copy) so the two never
+    land on one register while the emitter keeps them on separate write statements; ``interferes`` is the symmetric
+    adjacency; ``consumer_ports`` and ``producer_key`` drive the mux-fan-in objective; ``fresh_start`` is the first
+    register index above the pinned block.
+    """
+
+    movable: list[ValueId]
+    pinned: dict[ValueId, int]
+    pool: dict[ValueId, int]
+    interferes: dict[ValueId, set[ValueId]]
+    consumer_ports: dict[ValueId, set[_Port]]
+    producer_key: dict[ValueId, _Producer]
+    fresh_start: int
+
+
+def color(problem: ColoringProblem) -> tuple[dict[ValueId, int], int]:
+    """
+    Color one bank by the reach-aware objective: a port-affinity greedy seed (reach-minimal and cap-compacted), the
+    cheaper of the two by ``reach + price * registers``, refined by simulated annealing. Reduces to the straight-line
+    coloring on a single block because the interference graph there is exactly the interval-overlap graph.
+    """
+    cap, price = _REG_REUSE_WRITE_CAP, _REG_PRICE
+
+    def greedy_seed(compact: bool, budget: int) -> tuple[dict[ValueId, int], int]:
+        seed = _color_greedy(problem, compact, budget)
+        return seed, max((max(seed.values()) + 1) if seed else 0, problem.fresh_start)
+
+    base_seed, base_nreg = greedy_seed(compact=False, budget=_NO_CAP)
+    comp_seed, comp_nreg = greedy_seed(compact=True, budget=cap)
+    assign, nreg = _color_refine(problem, base_seed, base_nreg, _NO_CAP), base_nreg
+    if comp_nreg < base_nreg:
+        comp_assign = _color_refine(problem, comp_seed, comp_nreg, cap)
+        base_score = (_objective(assign, problem.consumer_ports, problem.producer_key) + price * base_nreg, base_nreg)
+        comp_score = (
+            _objective(comp_assign, problem.consumer_ports, problem.producer_key) + price * comp_nreg,
+            comp_nreg,
+        )
+        if comp_score < base_score:
+            assign, nreg = comp_assign, comp_nreg
+    _assert_graph_coloring(assign, problem.interferes)
+    return assign, nreg
+
+
+def _color_greedy(problem: ColoringProblem, compact: bool, cap: int) -> dict[ValueId, int]:
+    """
+    Port-affinity-biased graph coloring. Each value takes a same-pool register whose occupants it does not interfere
+    with, of least marginal mux growth (``compact`` ranks any admissible reused register ahead of a fresh one); a fresh
+    register is the fallback. With one block and one pool this reproduces the straight-line linear scan exactly.
+    """
+    assign: dict[ValueId, int] = {}
+    reg_ports: dict[int, set[_Port]] = {}
+    reg_writers: dict[int, set[_Producer]] = {}
+    reg_members: dict[int, set[ValueId]] = {}
+    reg_pool: dict[int, int] = {}
+    port_reach: Counter[_Port] = Counter()
+
+    def place(vid: ValueId, reg: int) -> None:
+        assign[vid] = reg
+        reg_pool.setdefault(reg, problem.pool[vid])
+        ports = reg_ports.setdefault(reg, set())
+        for port in problem.consumer_ports[vid]:
+            if port not in ports:
+                ports.add(port)
+                port_reach[port] += 1
+        reg_writers.setdefault(reg, set()).add(problem.producer_key[vid])
+        reg_members.setdefault(reg, set()).add(vid)
+
+    def marginal_cost(vid: ValueId, reg: int) -> int:
+        ports: frozenset[_Port] | set[_Port] = reg_ports.get(reg, frozenset())
+        writers: frozenset[_Producer] | set[_Producer] = reg_writers.get(reg, frozenset())
+        read = sum(1 for port in problem.consumer_ports[vid] if port not in ports and port_reach[port] >= 1)
+        write = 1 if (problem.producer_key[vid] not in writers and len(writers) >= 1) else 0
+        return read + write
+
+    def candidate_key(vid: ValueId, reg: int, is_fresh: int) -> tuple[int, int, int]:
+        cost = marginal_cost(vid, reg)
+        return (is_fresh, cost, reg) if compact else (cost, is_fresh, reg)
+
+    def admissible(vid: ValueId, reg: int) -> bool:
+        if reg not in reg_pool:  # a reserved register below fresh_start with no occupant (e.g. a write-only state slot)
+            return False
+        if reg_pool[reg] != problem.pool[vid]:
+            return False
+        if not problem.interferes[vid].isdisjoint(reg_members[reg]):
+            return False
+        if compact and len(reg_writers[reg] | {problem.producer_key[vid]}) > cap:
+            return False
+        return True
+
+    for vid, reg in sorted(problem.pinned.items(), key=lambda item: (item[1], item[0])):
+        place(vid, reg)
+    next_reg = problem.fresh_start
+    for vid in problem.movable:
+        best_reg, best_fresh = next_reg, True
+        best_key = candidate_key(vid, next_reg, 1)
+        for reg in range(next_reg):
+            if not admissible(vid, reg):
+                continue
+            key = candidate_key(vid, reg, 0)
+            if key < best_key:
+                best_key, best_reg, best_fresh = key, reg, False
+        if best_fresh:
+            next_reg += 1
+        place(vid, best_reg)
+    return assign
+
+
+def _color_refine(problem: ColoringProblem, seed: dict[ValueId, int], nreg: int, cap: int) -> dict[ValueId, int]:
+    """
+    Refine the greedy coloring with ``scipy.optimize.dual_annealing``. Each movable value gets a continuous coordinate
+    in ``[0, nreg)``; a decode repairs it to the nearest same-pool register free of interference and within the
+    write-select budget. Every evaluated point is a valid coloring and the seed is the start, so the pass only improves.
+    """
+    order = problem.movable
+    if len(order) < 2 or nreg <= 1:
+        return seed
+    op_set = set(order)
+    pinned = [(vid, reg) for vid, reg in seed.items() if vid not in op_set]
+    seed_pool: dict[int, int] = {}
+    for vid, reg in seed.items():
+        seed_pool.setdefault(reg, problem.pool[vid])
+
+    def decode(coords: np.ndarray) -> dict[ValueId, int] | None:
+        assign: dict[ValueId, int] = {}
+        members: list[set[ValueId]] = [set() for _ in range(nreg)]
+        writers: list[set[_Producer]] = [set() for _ in range(nreg)]
+        for vid, reg in pinned:
+            assign[vid] = reg
+            members[reg].add(vid)
+            writers[reg].add(problem.producer_key[vid])
+
+        def fits(vid: ValueId, reg: int, within_cap: bool) -> bool:
+            if reg not in seed_pool:  # a reserved register with no seed occupant (e.g. a write-only state slot)
+                return False
+            if seed_pool[reg] != problem.pool[vid]:
+                return False
+            if not problem.interferes[vid].isdisjoint(members[reg]):
+                return False
+            return not within_cap or len(writers[reg] | {problem.producer_key[vid]}) <= cap
+
+        for index, vid in enumerate(order):
+            pref = min(nreg - 1, max(0, int(coords[index])))
+            chosen = -1
+            for offset in range(nreg):
+                reg = (pref + offset) % nreg
+                if fits(vid, reg, within_cap=True):
+                    chosen = reg
+                    break
+            if chosen < 0:
+                free = [r for r in range(nreg) if fits(vid, r, within_cap=False)]
+                if not free:
+                    return None
+                chosen = min(free, key=lambda reg: (len(writers[reg] | {problem.producer_key[vid]}), reg))
+            assign[vid] = chosen
+            members[chosen].add(vid)
+            writers[chosen].add(problem.producer_key[vid])
+        return assign
+
+    if _REFINE_MAXITER <= 0:
+        return seed
+    best = seed
+    best_cost = _objective(seed, problem.consumer_ports, problem.producer_key)
+    if best_cost == 0:
+        return best
+
+    def cost(coords: np.ndarray) -> float:
+        nonlocal best, best_cost
+        candidate = decode(coords)
+        if candidate is None:
+            return _INFEASIBLE_COST
+        value = _objective(candidate, problem.consumer_ports, problem.producer_key)
+        if value < best_cost:
+            best, best_cost = candidate, value
+        return float(value)
+
+    x0 = np.array([float(seed[vid]) for vid in order])
+    bounds = [(0.0, nreg - 1e-6)] * len(order)
+    dual_annealing(cost, bounds, x0=x0, seed=0, maxiter=_REFINE_MAXITER, maxfun=_REFINE_MAXITER, no_local_search=True)
+    return best
+
+
+def _assert_graph_coloring(assign: dict[ValueId, int], interferes: dict[ValueId, set[ValueId]]) -> None:
+    """Backstop: two values sharing a register must not interfere."""
+    by_reg: dict[int, list[ValueId]] = {}
+    for vid, reg in assign.items():
+        by_reg.setdefault(reg, []).append(vid)
+    for reg, vids in by_reg.items():
+        members = set(vids)
+        for vid in vids:
+            clash = interferes[vid] & members
+            if clash:
+                raise AssertionError(f"register {reg} shared by interfering values {vid} and {sorted(clash)}")
+
+
 def _objective(
     assign: dict[ValueId, int],
     consumer_ports: dict[ValueId, set[_Port]],
