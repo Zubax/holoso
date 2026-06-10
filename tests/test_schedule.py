@@ -18,7 +18,7 @@ from holoso import (
 from holoso._errors import UnsupportedConstruct
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lir import FloatConstRef, FloatRegRef, landing_cycle
+from holoso._lir import FloatConstRef, FloatOperand, RegRef, landing_cycle
 from holoso._lir._schedule import DEPENDENCY_EDGE
 from holoso._mir import (
     lower as lower_to_mir,
@@ -183,13 +183,15 @@ def test_build_lir_small_kernel() -> None:
 
     lir = build(_run(f), "kernel")
     assert lir.module_name == "kernel"
-    assert lir.float_regfile.fmt == FMT
-    assert lir.float_regfile.nreg >= 1
+    assert lir.float_format == FMT
+    assert lir.regfile.width == lir.float_format.width
+    assert lir.regfile.nreg >= 1
     assert {i.name for i in lir.float_inputs} == {"a", "b"}
-    assert lir.float_regfile.nload == 2  # both inputs are preloaded via the regfile load port (registers 0..1)
+    assert lir.regfile.nload == 2  # both inputs are preloaded via the regfile load port (registers 0..1)
     assert [o.name for o in lir.float_outputs] == ["out_0"]
-    assert all(isinstance(o.tap.source, FloatRegRef) for o in lir.float_outputs)
-    assert lir.makespan == max(op.commit_cycle for op in lir.float_ops)
+    assert all(isinstance(o.tap, FloatOperand) for o in lir.float_outputs)
+    assert all(isinstance(o.tap.source, RegRef) for o in lir.float_outputs)
+    assert lir.makespan == max(op.commit_cycle for op in lir.ops)
 
     names = [p.name for p in lir.ports]
     for expected in (
@@ -208,7 +210,7 @@ def test_build_lir_small_kernel() -> None:
 
 
 def test_state_writeback_installs_early_and_is_first_class() -> None:
-    from holoso._lir import FETCH_LAG, FloatOperand
+    from holoso._lir import FETCH_LAG
 
     class LeakyDelay:
         def __init__(self) -> None:
@@ -222,21 +224,22 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
     lir = build(_run(LeakyDelay().__call__), "leaky_delay")
     (slot,) = lir.float_state_slots
     assert lir.has_state and slot.needs_copy and isinstance(slot.tap, FloatOperand)
+    assert isinstance(slot.tap.source, RegRef)
     # The non-coalesced writeback is a first-class event in the liveness model: the slot register holds a live value on
     # its install step (previously absent, which is why the report could not render it).
-    assert lir.state_copy_step(slot) in lir.float_liveness[slot.reg]
+    assert lir.state_copy_step(slot) in lir.reg_liveness[slot.reg]
     assert lir.state_copy_step(slot) == slot.install_cycle + FETCH_LAG + 1
     # Nothing reads _p's register after the old live-in and its source is an ordinary register, so the copy installs
     # before the boundary -- freeing the source register for the rest of the initiation rather than pinning it there.
     assert lir.state_copy_step(slot) < lir.initiation_interval
     # The carried live-out must survive to the boundary even though nothing reads it again this frame, so the slot
     # register stays live from its install step through the boundary -- an early install is not the value's death.
-    assert set(range(lir.state_copy_step(slot), lir.initiation_interval + 1)) <= lir.float_liveness[slot.reg]
+    assert set(range(lir.state_copy_step(slot), lir.initiation_interval + 1)) <= lir.reg_liveness[slot.reg]
     # Output wires carry the same FloatOperand tap primitive as state slots.
     assert all(isinstance(w.tap, FloatOperand) for w in lir.float_outputs)
     # Pin the hardware-frame cycle formulas the report, model, and allocator all depend on (the write/read latch
     # offsets around FETCH_LAG); the LIR methods route through the shared _ir helpers that own this arithmetic.
-    op = lir.float_ops[0]
+    op = lir.ops[0]
     assert lir.result_landing_cycle(op) == op.commit_cycle + FETCH_LAG + 2
     assert lir.operand_read_cycle(op) == op.issue_cycle + FETCH_LAG - 1
 
@@ -271,7 +274,7 @@ def test_copy_slot_residence_unbroken_when_tapped_at_boundary() -> None:
 
     lir = build(_run(Delay().__call__), "delay")
     (slot,) = lir.float_state_slots
-    assert sorted(lir.float_liveness[slot.reg]) == list(range(1, lir.initiation_interval + 1))
+    assert sorted(lir.reg_liveness[slot.reg]) == list(range(1, lir.initiation_interval + 1))
 
 
 def test_state_early_copy_frees_source_register() -> None:
@@ -287,7 +290,7 @@ def test_state_early_copy_frees_source_register() -> None:
     assert xprev.needs_copy and in_x.dst == xprev.tap.source  # the copy's source is the input register
     assert xprev.install_cycle <= lir.makespan  # installs before the boundary (present cycle == makespan + 1)
     # The freed input register is reused: a later operation's result is assigned to it as well.
-    assert any(op.dst == in_x.dst for op in lir.float_ops)
+    assert any(op.dst == in_x.dst for op in lir.ops)
 
 
 def test_build_lir_ekf1_stateless() -> None:
@@ -297,22 +300,22 @@ def test_build_lir_ekf1_stateless() -> None:
     lir = build(_run(ekf1_stateless.update_x_P), "update_x_P")
     assert len(lir.float_inputs) == 17
     assert len(lir.float_outputs) == 9
-    fdivs = [inst for inst in lir.float_instances if isinstance(inst.operator, FDivOperator)]
+    fdivs = [inst for inst in lir.instances if isinstance(inst.operator, FDivOperator)]
     assert len(fdivs) == 1
     # The two K=1 power-of-two scalings are non-concurrent, so they pool onto a single shared instance.
-    assert sum(1 for inst in lir.float_instances if isinstance(inst.operator, FMulILog2Operator)) == 1
+    assert sum(1 for inst in lir.instances if isinstance(inst.operator, FMulILog2Operator)) == 1
     # Register reuse: not every distinct value occupies its own register.
-    assert lir.float_regfile.nreg < lir.op_count + len(lir.float_inputs)
+    assert lir.regfile.nreg < lir.op_count + len(lir.float_inputs)
     # The interference test runs in the hardware frame (a value frees its register as soon as its last read precedes the
     # next value's landing), not the scheduler-frame rule that left it several cycles too conservative and produced 42
     # registers here. The bound is well below 42 to flag a regression of the hardware-accurate liveness without pinning
     # the exact minimum (currently 38); cosim (test_cosim_ekf1_stateless) proves the relaxed sharing is correct.
-    assert lir.float_regfile.nreg <= 40
+    assert lir.regfile.nreg <= 40
     # Inputs preload through the regfile's load port (registers 0..nload-1), so nload spans the input block.
-    assert lir.float_regfile.nload == 17
+    assert lir.regfile.nload == 17
     # Dedicated ports: one read port per operator operand (sum of arities = 2+2+1+2), one write port per instance.
-    assert lir.float_regfile.nwr == 4
-    assert lir.float_regfile.nrd == 7
+    assert lir.regfile.nwr == 4
+    assert lir.regfile.nrd == 7
     # The 1/x21 numerator survives as a constant immediate.
     assert any(abs(c - 1.0) < 1e-12 for c in lir.float_consts)
 
@@ -324,7 +327,7 @@ def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
 
     lir = build(_run(f), "f")
     assert [c for c in lir.float_consts if abs(c) == 1000.0] == [1000.0]
-    operands = [opnd for op in lir.float_ops for opnd in op.operands if isinstance(opnd.source, FloatConstRef)]
+    operands = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, FloatConstRef)]
     assert len({opnd.source.index for opnd in operands}) == 1  # both products read one pool entry
     assert {opnd.sign for opnd in operands} == {FloatSignControl(), FloatSignControl(negate=True)}
 
@@ -335,7 +338,7 @@ def test_negative_constant_operand_is_stored_as_magnitude_with_negate() -> None:
 
     lir = build(_run(f), "f")
     assert all(c >= 0.0 for c in lir.float_consts)
-    (operand,) = [opnd for op in lir.float_ops for opnd in op.operands if isinstance(opnd.source, FloatConstRef)]
+    (operand,) = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, FloatConstRef)]
     assert lir.float_consts[operand.source.index] == 1000.0
     assert operand.sign == FloatSignControl(negate=True)
 
@@ -363,7 +366,7 @@ def test_underflowing_negative_constant_is_not_sign_folded() -> None:
         return a + (-1e-12)  # -1e-12 underflows to +0 in FloatFormat(6, 18)
 
     lir = build(_run(f), "f")
-    (operand,) = [opnd for op in lir.float_ops for opnd in op.operands if isinstance(opnd.source, FloatConstRef)]
+    (operand,) = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, FloatConstRef)]
     assert FMT.encode(lir.float_consts[operand.source.index]) == 0  # the pooled magnitude is a zero-encoding
     assert operand.sign == FloatSignControl()  # identity, not negate
 
@@ -392,29 +395,29 @@ def test_stateful_slot_register_gaps_are_reused() -> None:
         Q_diag=np.array([1e-3, 1e9, 1e-9]),
     )
     lir = build(_run(filt.update), "ekf1_stateful")
-    assert lir.float_regfile.nreg <= 40  # gap-reuse sheds ~6; a regression to the fully-reserved 45 trips this
+    assert lir.regfile.nreg <= 40  # gap-reuse sheds ~6; a regression to the fully-reserved 45 trips this
 
 
 def test_register_sharing_is_hardware_disjoint() -> None:
     # ekf1_stateless time-multiplexes many values onto each register. Verify the hardware-frame interference invariant directly:
     # within a register, each value's last read precedes the next value's landing, R(a) < W(b) -- the same liveness
-    # float_liveness renders and the relaxed allocator shares against. Reconstructed via the write-timeline resolution
+    # reg_liveness renders and the relaxed allocator shares against. Reconstructed via the write-timeline resolution
     # the numerical model uses, so the test tracks the allocator's actual sharing decisions, not a hardcoded schedule.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateless
     from holoso._lir import latest_producer_before
 
     lir = build(_run(ekf1_stateless.update_x_P), "update_x_P")
-    timeline = lir.float_write_timeline
+    timeline = lir.write_timeline
     last_read: dict[tuple[int, str, int], int] = {}
 
     def note(source: object, read_cycle: int) -> None:
-        if isinstance(source, FloatRegRef):
+        if isinstance(source, RegRef):
             producer = latest_producer_before(timeline, source, read_cycle)
             key = (source.index, type(producer).__name__, producer.index)
             last_read[key] = max(last_read.get(key, read_cycle), read_cycle)
 
-    for op in lir.float_ops:
+    for op in lir.ops:
         for operand in op.operands:
             note(operand.source, lir.operand_read_cycle(op))
     for wire in lir.float_outputs:
@@ -652,16 +655,14 @@ def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
 
     lir = build(_run(f), "cast_mul")
     interval = lir.initiation_interval
-    casts = [(lir.block_base[b.index], op) for b in lir.blocks for op in b.comb_ops if isinstance(op.dst, FloatRegRef)]
-    assert casts, "expected a bool->float cast result in the float bank"
+    casts = [(lir.block_base[b.index], op) for b in lir.blocks for op in b.comb_ops if isinstance(op.dst, RegRef)]
+    assert casts, "expected a bool->float cast result in the wide bank"
     for base, op in casts:
         landing = landing_cycle(base + op.commit_cycle)
         assert 1 <= landing <= interval  # within the rendered schedule grid, not one row past the boundary
-        assert (
-            landing in lir.float_liveness[op.dst]
-        )  # live exactly from its true landing (the off-by-one would miss it)
+        assert landing in lir.reg_liveness[op.dst]  # live exactly from its true landing (the off-by-one would miss it)
     cast_regs = {op.dst for _, op in casts}
-    for fop in lir.float_ops:  # the consuming multiply must read the cast result within its residence (no late-def gap)
+    for fop in lir.ops:  # the consuming multiply must read the cast result within its residence (no late-def gap)
         for operand in fop.operands:
             if operand.source in cast_regs:
-                assert lir.operand_read_cycle(fop) in lir.float_liveness[operand.source]
+                assert lir.operand_read_cycle(fop) in lir.reg_liveness[operand.source]

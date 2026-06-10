@@ -66,6 +66,8 @@ def test_report_renders_for_each_example(name: str) -> None:
     assert "<h2>Schedule</h2>" in html  # the schedule section is present
     assert "class='gridkey'" in html  # the legend is present
     assert "register holds a live value" in html  # the register-liveness tint is explained
+    assert "title='registers'>registers" in html
+    assert "r0" in html
     assert "class='live'" in html or "live'>" in html  # at least one register is tinted live
 
 
@@ -83,3 +85,4 @@ def test_report_shows_persistent_boolean_state() -> None:
     # pid carries a boolean ``_started`` state; the report must show persistent state and a boolean register bank.
     html = _report("pid")
     assert "persistent state" in html
+    assert "b0" in html

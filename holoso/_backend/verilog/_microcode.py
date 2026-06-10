@@ -49,7 +49,7 @@ def write_target_lists(lir: Lir) -> dict[FloatOperatorInstance, list[int]]:
     and mirrors the read side, where the read-address field carries the dense read-set index.
     """
     targets: dict[FloatOperatorInstance, list[int]] = {}
-    for op in lir.float_ops:
+    for op in lir.ops:
         regs = targets.setdefault(op.inst, [])
         if op.dst.index not in regs:
             regs.append(op.dst.index)
@@ -107,7 +107,7 @@ def cycle_summary(issues: list[FloatScheduledOp], commits: list[FloatScheduledOp
 def read_ports(lir: Lir) -> dict[tuple[FloatOperatorInstance, int], int]:
     """One dedicated read port per operator operand, numbered in instance/operand order (counts to ``nrd``)."""
     read_port: dict[tuple[FloatOperatorInstance, int], int] = {}
-    for inst in lir.float_instances:
+    for inst in lir.instances:
         for pos in range(inst.operator.arity):
             read_port[(inst, pos)] = len(read_port)
     return read_port
@@ -116,7 +116,7 @@ def read_ports(lir: Lir) -> dict[tuple[FloatOperatorInstance, int], int]:
 def port_const_map(lir: Lir, read_port: dict[tuple[FloatOperatorInstance, int], int]) -> dict[int, list[int]]:
     """Read port -> the distinct constant-pool indices it ever sources (drives the per-operand constant select)."""
     port_consts: dict[int, list[int]] = {}
-    for op in lir.float_ops:
+    for op in lir.ops:
         for pos, operand in enumerate(op.operands):
             if isinstance(operand.source, FloatConstRef):
                 port = read_port[(op.inst, pos)]
@@ -154,7 +154,7 @@ def build_microcode(
     # single-reader or always-constant port keeps the constant value finalize_fields lifts out of the ROM.
     port_read_set = {read_port[key]: regs for key, regs in lir.read_set_per_port.items()}
 
-    for inst in lir.float_instances:
+    for inst in lir.instances:
         base = base_name(inst)
         add(f_iv(base), 1, 0)
         add(f_we(base), 1, 0)
@@ -170,7 +170,7 @@ def build_microcode(
                 if len(port_consts[port]) > 1:
                     add(f_cidx(port), code_width(len(port_consts[port])), None)
 
-    for op in lir.float_ops:
+    for op in lir.ops:
         base = base_name(op.inst)
         ci = op.issue_cycle  # in_valid and sign controls, consumed inside the wrapper on the issue step
         rci = op.issue_cycle - 1  # read-address group, presented early so the read latch delivers on issue

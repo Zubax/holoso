@@ -25,7 +25,7 @@ from .._mir import (
 from .._operators import FloatHardwareOperator, FloatSignControl
 from ._ir import *
 from ._portassign import assign_commutative_ports
-from ._regalloc import FloatAllocation, allocate_float
+from ._regalloc import RegisterAllocation, allocate_registers
 from ._schedule import Schedule, resolve_pool, schedule_ops
 
 
@@ -67,32 +67,33 @@ def build(mir: Mir, module_name: str) -> Lir:
 def _build_single_block(mir: Mir, float_mir: MirFloatView, module_name: str) -> Lir:
     pool = resolve_pool(float_mir)
     sched = schedule_ops(mir.nodes, pool, set(float_mir.operation_nodes))
-    alloc = allocate_float(float_mir, sched.issue_cycle, sched.inst_of, sched.makespan)
+    alloc = allocate_registers(float_mir, sched.issue_cycle, sched.inst_of, sched.makespan)
     swap = assign_commutative_ports(float_mir, sched, alloc)
     consts, const_pool = _build_const_pool(float_mir)
-    float_ops = _build_ops(float_mir, sched, alloc, const_pool, swap)
+    ops = _build_ops(float_mir, sched, alloc, const_pool, swap)
     inputs: list[FloatInputLoad | BoolInputLoad] = list(_build_inputs(float_mir, alloc))
     outputs: list[FloatOutputWire | BoolOutputWire] = list(_build_outputs(float_mir, alloc, const_pool))
     boundary = boundary_step(sched.makespan)
     return Lir(
         module_name=module_name,
-        float_instances=sched.instances,
+        instances=sched.instances,
         float_consts=consts,
-        float_regfile=FloatRegFileLayout(
-            fmt=float_mir.fmt,
+        float_format=float_mir.fmt,
+        regfile=RegFileLayout(
+            width=float_mir.fmt.width,
             nreg=alloc.nreg,
             nrd=_compute_nrd(sched),
             nwr=_compute_nwr(sched),
             nload=_compute_nload(float_mir),
         ),
         inputs=inputs,
-        float_ops=float_ops,
+        ops=ops,
         outputs=outputs,
         float_state_slots=_build_state_slots(float_mir, alloc, const_pool),
         makespan=sched.makespan,
         op_count=len(float_mir.operation_nodes),
         max_chain_len=_max_chain_len(float_mir),
-        blocks=[LirBlock(0, float_ops, [], [], [], Ret(), sched.makespan)],  # comb_ops/copies/bool_writes: none
+        blocks=[LirBlock(0, ops, [], [], [], Ret(), sched.makespan)],  # comb_ops/copies/bool_writes: none
         block_base=[0],
         entry=0,
         last_pc=boundary,
@@ -112,7 +113,7 @@ class _CfgAllocation:
     bool_reg: dict[ValueId, int]
     bool_slot_reg: dict[str, int]
     nbreg: int
-    float_copies: dict[int, list[tuple[int, ValueId, FloatSignControl]]]  # block -> [(dst reg, source, folded sign)]
+    copies: dict[int, list[tuple[int, ValueId, FloatSignControl]]]  # block -> [(dst reg, source, folded sign)]
     bool_writes: dict[int, list[tuple[int, ValueId]]]  # block index -> [(dst bool register, source value)]
 
 
@@ -181,9 +182,9 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
         sched = block_sched[block.id]
         # One cross-bank schedule per block. Operations split by category, not by result bank: instance-backed float
         # arithmetic (the scheduler bound it an instance) becomes a FloatScheduledOp; every combinational operator
-        # (comparison, boolean logic, and the float<->bool casts -- including the float-result ``float(cond)``) becomes
+        # (comparison, boolean logic, and the wide-result ``float(cond)`` cast) becomes
         # a CombScheduledOp. Each issues as soon as its own operands have landed, with no barrier.
-        float_ops = [
+        ops = [
             _build_cfg_op(float_mir, vid, sched, inst_of, alloc, const_pool)
             for vid in sorted(
                 (v for v in sched.issue_cycle if v in inst_of),
@@ -200,8 +201,8 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
         work_makespan = sched.makespan
         install = work_makespan + 1
         copies = [
-            FloatCopy(FloatRegRef(dst), _cfg_operand_signed(float_mir, src, sign, alloc, const_pool), install)
-            for dst, src, sign in alloc.float_copies.get(block.id, [])
+            FloatCopy(RegRef(dst), _cfg_operand_signed(float_mir, src, sign, alloc, const_pool), install)
+            for dst, src, sign in alloc.copies.get(block.id, [])
         ]
         bool_writes = [
             BoolWrite(BoolRegRef(dst), _cfg_bool_operand(bool_mir, src, alloc), install)
@@ -212,7 +213,7 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
         blocks.append(
             LirBlock(
                 block.id,
-                float_ops,
+                ops,
                 comb_ops,
                 copies,
                 bool_writes,
@@ -222,7 +223,7 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
         )
 
     block_base, last_pc, min_ii = _layout_blocks(mir, blocks)
-    flat_ops = [_rebase_op(op, block_base[block.id]) for block in mir.blocks for op in blocks[block.id].float_ops]
+    flat_ops = [_rebase_op(op, block_base[block.id]) for block in mir.blocks for op in blocks[block.id].ops]
     makespan = max((op.commit_cycle for op in flat_ops), default=0)
 
     # The slot register holds the live-in (read-only in the body); its live-out is a distinct value installed at the
@@ -230,7 +231,7 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
     float_state_slots = [
         FloatStateSlot(
             slot.name,
-            FloatRegRef(alloc.float_slot_reg[slot.name]),
+            RegRef(alloc.float_slot_reg[slot.name]),
             slot.reset_value,
             _cfg_operand_signed(float_mir, slot.live_out, slot.sign, alloc, const_pool),
             0,
@@ -249,17 +250,18 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
     outputs = _build_cfg_outputs(mir, float_mir, bool_mir, alloc, const_pool)
     return Lir(
         module_name=module_name,
-        float_instances=instances,
+        instances=instances,
         float_consts=consts,
-        float_regfile=FloatRegFileLayout(
-            fmt=float_mir.fmt,
+        float_format=float_mir.fmt,
+        regfile=RegFileLayout(
+            width=float_mir.fmt.width,
             nreg=max(1, alloc.nreg),
             nrd=max(1, sum(inst.operator.arity for inst in instances)),
             nwr=max(1, len(instances)),
             nload=len(float_mir.input_ids),
         ),
         inputs=_build_cfg_inputs(mir, float_mir, bool_mir, alloc),
-        float_ops=flat_ops,
+        ops=flat_ops,
         outputs=outputs,
         float_state_slots=float_state_slots,
         makespan=makespan,
@@ -282,7 +284,7 @@ def _cfg_operand(
     if isinstance(node, MirFloatConst):
         entry = pool[vid]
         return FloatOperand(FloatConstRef(entry.index), entry.sign)
-    return FloatOperand(FloatRegRef(alloc.float_reg[vid]))
+    return FloatOperand(RegRef(alloc.float_reg[vid]))
 
 
 def _cfg_bool_operand(bool_mir: MirBoolView, vid: ValueId, alloc: _CfgAllocation) -> BoolOperand:
@@ -302,7 +304,7 @@ def _cfg_comb_operand(
 ) -> FloatOperand | BoolOperand:
     """
     One operand of a combinational op, resolved in its own bank: a boolean value reads the bool bank (no sign), a
-    floating-point value reads the float bank (with its folded sign control).
+    floating-point value reads the wide bank (with its folded sign control).
     """
     if vid in bool_mir.nodes:
         return _cfg_bool_operand(bool_mir, vid, alloc)
@@ -319,7 +321,7 @@ def _build_cfg_comb_op(
 ) -> CombScheduledOp:
     """
     Build one combinational scheduled op. Operands are resolved per bank; the destination follows the result bank --
-    a bool-result op (comparison, logic, float->bool) writes a bool register, the float-result ``float(cond)`` a float
+    a bool-result op (comparison, logic, float->bool) writes a bool register, the float-result ``float(cond)`` a wide
     register.
     """
     node = float_mir.operation_nodes.get(vid) or bool_mir.operation_nodes[vid]
@@ -327,8 +329,8 @@ def _build_cfg_comb_op(
         _cfg_comb_operand(float_mir, bool_mir, operand, sign, alloc, pool)
         for operand, sign in zip(node.operands, node.operand_signs)
     ]
-    dst: FloatRegRef | BoolRegRef = (
-        FloatRegRef(alloc.float_reg[vid]) if vid in float_mir.operation_nodes else BoolRegRef(alloc.bool_reg[vid])
+    dst: RegRef | BoolRegRef = (
+        RegRef(alloc.float_reg[vid]) if vid in float_mir.operation_nodes else BoolRegRef(alloc.bool_reg[vid])
     )
     return CombScheduledOp(
         operator=node.operator, operands=operands, dst=dst, issue_cycle=issue_cycle, latency=node.operator.latency
@@ -352,7 +354,7 @@ def _build_cfg_op(
         inst=inst_of[vid],
         operands=operands,
         result_sign=node.result_sign,
-        dst=FloatRegRef(alloc.float_reg[vid]),
+        dst=RegRef(alloc.float_reg[vid]),
         issue_cycle=sched.issue_cycle[vid],
         latency=node.operator.latency,
     )
@@ -369,7 +371,7 @@ def _cfg_operand_signed(
     if isinstance(node, MirFloatConst):
         entry = pool[vid]
         return FloatOperand(FloatConstRef(entry.index), entry.sign.then(sign))
-    return FloatOperand(FloatRegRef(alloc.float_reg[vid]), sign)
+    return FloatOperand(RegRef(alloc.float_reg[vid]), sign)
 
 
 def _build_cfg_outputs(
@@ -389,9 +391,7 @@ def _build_cfg_outputs(
                     FloatOutputWire(out.name, FloatOperand(FloatConstRef(entry.index), entry.sign.then(out.sign)))
                 )
             else:
-                outputs.append(
-                    FloatOutputWire(out.name, FloatOperand(FloatRegRef(alloc.float_reg[out.value]), out.sign))
-                )
+                outputs.append(FloatOutputWire(out.name, FloatOperand(RegRef(alloc.float_reg[out.value]), out.sign)))
         elif isinstance(out, MirBoolOutput):
             outputs.append(BoolOutputWire(out.name, _cfg_bool_operand(bool_mir, out.value, alloc)))
         else:
@@ -473,7 +473,7 @@ def _layout_blocks(mir: Mir, blocks: list[LirBlock]) -> tuple[list[int], int, in
 
 def _allocate_cfg(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) -> _CfgAllocation:
     """
-    Assign float and boolean registers across the CFG. Inputs pin to the low load lanes and each state slot to a
+    Assign wide and boolean registers across the CFG. Inputs pin to the low load lanes and each state slot to a
     dedicated register; every operator result and every phi takes a fresh register (no cross-block reuse). A phi is
     resolved by installing each arm's value into the phi's fresh register with a copy at the predecessor's tail; the
     copies are a parallel (simultaneous) bundle, so a swap is read-then-write correct. The state slot register itself
@@ -495,10 +495,10 @@ def _allocate_cfg(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) -> _
         next_free += 1
     nreg = next_free
 
-    float_copies: dict[int, list[tuple[int, ValueId, FloatSignControl]]] = {}
+    copies: dict[int, list[tuple[int, ValueId, FloatSignControl]]] = {}
     for vid, phi in float_mir.phi_nodes.items():
         for pred, value, sign in phi.arms:
-            float_copies.setdefault(pred, []).append((float_reg[vid], value, sign))
+            copies.setdefault(pred, []).append((float_reg[vid], value, sign))
 
     bool_reg: dict[ValueId, int] = {vid: i for i, vid in enumerate(bool_mir.input_ids)}
     bool_slot_reg = {slot.name: len(bool_mir.input_ids) + i for i, slot in enumerate(bool_mir.state_slots)}
@@ -534,7 +534,7 @@ def _allocate_cfg(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) -> _
         bool_reg=bool_reg,
         bool_slot_reg=bool_slot_reg,
         nbreg=nbreg,
-        float_copies=float_copies,
+        copies=copies,
         bool_writes=bool_writes,
     )
 
@@ -596,20 +596,20 @@ def _operand(
     mir: MirFloatView,
     vid: ValueId,
     sign: FloatSignControl,
-    alloc: FloatAllocation,
+    alloc: RegisterAllocation,
     pool: dict[ValueId, _PooledConst],
 ) -> FloatOperand:
     node = mir.nodes[vid]
     if isinstance(node, MirFloatConst):
         entry = pool[vid]
         return FloatOperand(FloatConstRef(entry.index), entry.sign.then(sign))
-    return FloatOperand(FloatRegRef(alloc.assign[vid]), sign)
+    return FloatOperand(RegRef(alloc.assign[vid]), sign)
 
 
 def _build_ops(
     mir: MirFloatView,
     sched: Schedule,
-    alloc: FloatAllocation,
+    alloc: RegisterAllocation,
     pool: dict[ValueId, _PooledConst],
     swap: dict[ValueId, bool],
 ) -> list[FloatScheduledOp]:
@@ -627,7 +627,7 @@ def _build_ops(
                 inst=sched.inst_of[vid],
                 operands=operands,
                 result_sign=node.result_sign,
-                dst=FloatRegRef(alloc.assign[vid]),
+                dst=RegRef(alloc.assign[vid]),
                 issue_cycle=sched.issue_cycle[vid],
                 latency=node.operator.latency,
             )
@@ -635,13 +635,13 @@ def _build_ops(
     return ops
 
 
-def _build_inputs(mir: MirFloatView, alloc: FloatAllocation) -> list[FloatInputLoad]:
+def _build_inputs(mir: MirFloatView, alloc: RegisterAllocation) -> list[FloatInputLoad]:
     loads: list[FloatInputLoad] = []
     for vid in mir.input_ids:
         node = mir.nodes[vid]
         if not isinstance(node, MirFloatInput):
             continue
-        loads.append(FloatInputLoad(node.name, FloatRegRef(alloc.assign[vid])))
+        loads.append(FloatInputLoad(node.name, RegRef(alloc.assign[vid])))
     return loads
 
 
@@ -653,7 +653,7 @@ def _build_cfg_inputs(
         float_node = float_mir.nodes.get(vid)
         bool_node = bool_mir.nodes.get(vid)
         if isinstance(float_node, MirFloatInput):
-            loads.append(FloatInputLoad(float_node.name, FloatRegRef(alloc.float_reg[vid])))
+            loads.append(FloatInputLoad(float_node.name, RegRef(alloc.float_reg[vid])))
         elif isinstance(bool_node, MirBoolInput):
             loads.append(BoolInputLoad(bool_node.name, BoolRegRef(alloc.bool_reg[vid])))
         else:
@@ -662,38 +662,38 @@ def _build_cfg_inputs(
 
 
 def _build_outputs(
-    mir: MirFloatView, alloc: FloatAllocation, pool: dict[ValueId, _PooledConst]
+    mir: MirFloatView, alloc: RegisterAllocation, pool: dict[ValueId, _PooledConst]
 ) -> list[FloatOutputWire]:
     wires: list[FloatOutputWire] = []
     for out in mir.outputs:
         node = mir.nodes[out.value]
-        source: FloatRegRef | FloatConstRef
+        source: RegRef | FloatConstRef
         if isinstance(node, MirFloatConst):
             entry = pool[out.value]
             source = FloatConstRef(entry.index)
             sign = entry.sign.then(out.sign)
         else:
-            source = FloatRegRef(alloc.assign[out.value])
+            source = RegRef(alloc.assign[out.value])
             sign = out.sign
         wires.append(FloatOutputWire(out.name, FloatOperand(source, sign)))
     return wires
 
 
 def _build_state_slots(
-    mir: MirFloatView, alloc: FloatAllocation, pool: dict[ValueId, _PooledConst]
+    mir: MirFloatView, alloc: RegisterAllocation, pool: dict[ValueId, _PooledConst]
 ) -> list[FloatStateSlot]:
     slots: list[FloatStateSlot] = []
     for slot in mir.state_slots:
         node = mir.nodes[slot.live_out]
-        source: FloatRegRef | FloatConstRef
+        source: RegRef | FloatConstRef
         if isinstance(node, MirFloatConst):
             entry = pool[slot.live_out]
             source = FloatConstRef(entry.index)
             sign = entry.sign.then(slot.sign)
         else:
-            source = FloatRegRef(alloc.assign[slot.live_out])
+            source = RegRef(alloc.assign[slot.live_out])
             sign = slot.sign
-        reg = FloatRegRef(alloc.state_regs[slot.name])
+        reg = RegRef(alloc.state_regs[slot.name])
         tap = FloatOperand(source, sign)
         slots.append(FloatStateSlot(slot.name, reg, slot.reset_value, tap, alloc.install_cycles[slot.name]))
     return slots

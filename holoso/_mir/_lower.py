@@ -290,7 +290,7 @@ class _FloatLowerer:
                 return self._lower_float_mul_pow2(a, k)
             case Operation(operator=BoolToFloat(), operands=(a,)):
                 # ``float(cond)`` is a float-result combinational op reading a boolean operand (no sign control on a
-                # boolean): the one operator that crosses from the boolean bank into the float bank.
+                # boolean): the one operator that crosses from the boolean bank into the wide bank.
                 return self.context.builder.operation(
                     BoolToFloatOperator(self.context.ops.float_format), [self.context.remap[a]], [FloatSignControl()]
                 )

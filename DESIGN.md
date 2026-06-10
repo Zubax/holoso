@@ -53,7 +53,8 @@ MIR -- "which hardware to use": selected hardware operators, with typed input/co
 still unscheduled.This is the first stage allowed to inspect hardware operator configs or operand numerical limits.
 
 LIR -- "the microprogram": the scheduled, bound, register-allocated op stream for the synthesized machine.
-It has generic resource/operation base classes plus typed resource families such as the current float register file.
+It has generic resource/operation base classes plus typed storage: the shared wide data register file (integer+float)
+and the separate 1-bit boolean bank.
 LIR owns the IR, MIR-to-LIR construction, scheduling, binding, and register allocation.
 RTL controller-agnostic; this is the seam where a second controller backend can be added later.
 
@@ -165,8 +166,10 @@ Runtime values are only:
 Typical FPGA-friendly formats have WMAN as a multiple of the native DSP tile argument width, which is commonly 18.
 Example good values: WEXP=8 WMAN=36 (44 bits) for precision; WEXP=6 WMAN=18 (24 bits) for simpler targets.
 - `bool` -- 1 bit.
-- Eventually, a separate fixed-width `int` type may appear. It may either utilize a separate register file or
-be overlaid with the float register file.
+- Eventually, a separate fixed-width `int` type may appear. The LIR wide data register file is already neutral
+storage so future non-boolean scalar values can use the same bank when their physical width matches the build.
+The expectation is that the register word width will be set to max(float width, integer width), which are
+expected to be very similar in relevant use cases (hence minimal waste; e.g., e8m36 = 44 bit, plenty for numericals).
 
 Compile-time ints/shapes/structure are resolved in the front-end and never reach HIR.
 
@@ -279,8 +282,8 @@ correctly. Instance-backed float arithmetic binds a pooled physical instance; th
 single shared comparator serializes to one comparison per cycle (each gets a distinct in_valid PC); the boolean logic
 and casts are independent inline gates with no such contention. The numerical model evaluates the whole block in one
 commit-sorted pass so a float op reading a cast result reads it after it is written. A comparison/logic/float->bool
-result latches into a boolean register at a pc-gated write; a bool->float result latches into a float register one
-cycle later (the float write-latch + read-first edge), in time for a downstream float operator. The
+result latches into a boolean register at a pc-gated write; a bool->float result latches into a wide register one
+cycle later (the wide-bank write-latch + read-first edge), in time for a downstream float operator. The
 comparison/connective/cast examples (`pid`, `schmitt_trigger`, `signal_window`, `remainder`) synthesize and cosimulate
 bit-exactly like `iir1_lpf`.
 
@@ -318,7 +321,8 @@ Coalescing the `if` arms onto one register is a deferred liveness-aware optimiza
 
 Variable-trip `for` loops.
 
-Integer operand support is missing; it needs to be added, possibly reusing the same register file with floats.
+Integer operand support is missing; it needs typed int operands/constants/operators that reference the same wide
+register bank when their physical width matches the build.
 
 Early return support is missing (from loop body).
 
@@ -358,8 +362,10 @@ which is accepted. This is analogous to fast-math optimizations in C/C++ compile
 
 ```
 resources:
-  float_instances: [inst(operator), ...]    # each inst binds a fully-specified FloatHardwareOperator
-  float_regfile: fmt + N float regs         # FF bank; the backend synthesizes a sparse, schedule-specific mux fabric
+  instances: [inst(operator), ...]          # each inst binds a fully-specified FloatHardwareOperator
+  float_format: fmt                         # ZKF semantics for float operators and constants
+  regfile: width + N wide regs              # FF bank; the backend synthesizes a sparse, schedule-specific mux fabric
+  bool_regfile: N 1-bit bool regs           # branch conditions and boolean values/state
   float_consts: [fconst(magnitude), ...]    # nonnegative magnitudes; the sign rides the consumer's sign sideband
   inputs: [input_load(name, typed_dst_reg), ...]  # ordered float and boolean input ports
   outputs: [output_wire(name, typed_source), ...]  # ordered float and boolean result/state ports
@@ -433,7 +439,7 @@ move after constant folding.
 LIR currently has two build functions, one for straight-line single-block programs and one for CFG.
 A single-block program is a degenerate CFG and _build_cfg would produce correct hardware for it.
 The reason the split exists is purely optimization quality: `_build_single_block` carries at least two things the v1 CFG
-path does not: register coalescing (`allocate_float` reuses registers via linear liveness; the CFG path's
+path does not: register coalescing (`allocate_registers` reuses registers via linear liveness; the CFG path's
 `_allocate_cfg` gives every value a fresh register, installing phi/slot live-outs by copy, very inefficient),
 and commutative-port assignment (assign_commutative_ports, to hold down read-mux fan-in). `is_control_flow`
 (and the `is_straight_line` check in `build`) selects that optimized path, and it also drives the backend:
@@ -508,7 +514,7 @@ for cycle = 1, 2, ...:                          # cycle 0 accepts/loads inputs
 regalloc: reach-aware coloring (greedy port-affinity + function minimization) minimizing mux
   fan-in, then register count as a bounded secondary objective (best of a reach-minimal and a cap-compacted coloring);
   share a register when the older value's last read precedes the newer's landing in the hardware frame, R(a) < W(b) --
-  the read/write latch separation is reclaimed (what float_liveness renders), not merely tolerated; no spill
+  the read/write latch separation is reclaimed (what reg_liveness renders), not merely tolerated; no spill
 ```
 
 Instances are pooled by the fully specified hardware operator itself (a frozen, equal-by-value `HardwareOperator`):
@@ -529,8 +535,8 @@ write-address field the dense write-target index (each `ceil(log2 set)` wide, no
 so the controller VLIW word carries only those narrow set-local indices plus the per-register write enable.
 
 Inputs preload directly into the low registers of their own bank on the accept step, captured together under a single
-`if (in_ready && in_valid)` block rather than through write ports. Float `nload` spans the float input block (the
-highest float input register index plus one); boolean inputs are allocated analogously in the boolean bank. Outputs
+`if (in_ready && in_valid)` block rather than through write ports. Wide-bank `nload` currently spans the float input
+block (the highest float input register index plus one); boolean inputs are allocated analogously in the boolean bank. Outputs
 are tapped directly from their register by fixed index. Persistent state registers sit directly above the input block
 in their bank; a coalesced slot is written by its producing operator like any other result, and a non-coalesced slot
 is copied into its register on its install step (`pc == state_copy_step`, which is `LASTPC`

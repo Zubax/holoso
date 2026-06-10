@@ -27,7 +27,7 @@ from scipy.optimize import Bounds, LinearConstraint, milp
 from .._hir import ValueId
 from .._mir import MirOperation, MirFloatView
 from ._ir import FloatOperatorInstance
-from ._regalloc import FloatAllocation
+from ._regalloc import RegisterAllocation
 from ._schedule import Schedule
 
 # One commutative use: its value id and the registers its two operands occupy (``None`` for a constant operand, which
@@ -41,7 +41,7 @@ _MILP_TIME_LIMIT_S = 3600.0
 _logger = logging.getLogger(__name__)
 
 
-def assign_commutative_ports(mir: MirFloatView, sched: Schedule, alloc: FloatAllocation) -> dict[ValueId, bool]:
+def assign_commutative_ports(mir: MirFloatView, sched: Schedule, alloc: RegisterAllocation) -> dict[ValueId, bool]:
     """
     Per commutative operator instance, orient each use's operands to minimise the total read-set size across its two
     read ports. Returns ``{use value id: swap?}`` -- ``True`` means the emitter should exchange the two operands.

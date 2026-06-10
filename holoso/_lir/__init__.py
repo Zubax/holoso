@@ -18,7 +18,7 @@ from ._ir import (
     FloatOperand as FloatOperand,
     FloatOutputWire as FloatOutputWire,
     FloatOperatorInstance as FloatOperatorInstance,
-    FloatRegRef as FloatRegRef,
+    RegRef as RegRef,
     FloatScheduledOp as FloatScheduledOp,
     FloatStateSlot as FloatStateSlot,
     FETCH_LAG as FETCH_LAG,
@@ -32,6 +32,8 @@ from ._ir import (
     LirBlock as LirBlock,
     OperationProducer as OperationProducer,
     OperatorInstance as OperatorInstance,
+    Producer as Producer,
+    RegFileLayout as RegFileLayout,
     Ret as Ret,
     StateProducer as StateProducer,
 )

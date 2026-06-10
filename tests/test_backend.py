@@ -23,7 +23,7 @@ from holoso import (
 from holoso._backend.verilog import generate
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lir import build
+from holoso._lir import BoolRegRef, RegRef, build
 from holoso._mir import lower as lower_to_mir
 
 from .hdl.hdl_float_oracle import HDL_DIR, sources
@@ -187,6 +187,8 @@ def test_boolean_input_port_is_one_bit_and_loaded() -> None:
     fmt = FloatFormat(8, 24)
     lir = build(_run(passthrough, _ops(fmt)), "bool_input")
     assert [load.name for load in lir.inputs] == ["flag"]
+    assert isinstance(lir.bool_inputs[0].dst, BoolRegRef)
+    assert not isinstance(lir.bool_inputs[0].dst, RegRef)
     (port,) = lir.input_ports
     assert port.name == "in_flag"
     assert isinstance(port.scalar_type, BoolType)
@@ -213,7 +215,10 @@ def test_boolean_only_stateful_module_elaborates(tmp_path: Path) -> None:
     (port,) = lir.output_ports
     assert port.name == "state_flag"
     assert isinstance(port.scalar_type, BoolType)
-    _elaborate("bool_toggle", generate(lir).verilog, tmp_path)
+    verilog = generate(lir).verilog
+    assert re.search(r"\bassign state_flag = (?:1'b[01]|bregs\[\d+\]);", verilog)
+    assert not re.search(r"\bregs\[\d+\] <=", verilog)
+    _elaborate("bool_toggle", verilog, tmp_path)
 
 
 def test_parameter_name_colliding_with_control_port_is_rejected() -> None:

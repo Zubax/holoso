@@ -200,8 +200,8 @@
         }
     }
 
-    // Whether register `label` (e.g. "f41" or "b0") holds a live value on `cycle`, from its residence intervals. The
-    // map is keyed by the full label, so the float and boolean banks never collide on a shared bank index.
+    // Whether register `label` (e.g. "r41" or "b0") holds a live value on `cycle`, from its residence intervals. The
+    // map is keyed by the full label, so the wide and boolean banks never collide on a shared bank index.
     function isAlive(label, cycle) {
         var intervals = liveness[label];
         if (!intervals) {

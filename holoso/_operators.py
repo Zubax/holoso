@@ -520,8 +520,8 @@ class BoolToFloatOperator(HardwareOperator):
     """
     A combinational bool->float cast ``float(cond)``: ZKF ``1.0`` when true, ``+0.0`` when false. Latency-1
     register-resident; the backend latches a call to the shared ``holoso_ffrombool`` cast function (no module, no
-    pool); it reads a boolean register and writes a float register, the one operator that crosses from the boolean
-    bank into the float bank. Never added to :class:`OpConfig`.
+    pool); it reads a boolean register and writes a wide register, the one operator that crosses from the boolean
+    bank into the wide bank. Never added to :class:`OpConfig`.
     """
 
     mnemonic: ClassVar[str] = "ffrombool"

@@ -78,7 +78,7 @@ class FloatOperatorInstance(OperatorInstance):
 
 @dataclass(frozen=True, slots=True)
 class RegRef:
-    """A read/write of typed register ``index`` in one register bank."""
+    """A read/write of wide data register ``index`` in the shared register bank."""
 
     index: int
 
@@ -92,8 +92,18 @@ class RegRef:
 
 
 @dataclass(frozen=True, slots=True)
-class FloatRegRef(RegRef):
-    """A read/write of float register ``index`` in the float register bank."""
+class BoolRegRef:
+    """A read/write of boolean register ``index`` in the 1-bit boolean register bank."""
+
+    index: int
+
+    @property
+    def stable_label(self) -> str:
+        return f"b{self.index}"
+
+    @property
+    def is_register(self) -> bool:
+        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,9 +135,9 @@ class Operand:
 
 @dataclass(frozen=True, slots=True)
 class FloatOperand(Operand):
-    """A float operator input: a float register read or float constant immediate, with folded sign control."""
+    """A float operator input: a wide-register read or float constant immediate, with folded sign control."""
 
-    source: FloatRegRef | FloatConstRef
+    source: RegRef | FloatConstRef
     sign: FloatSignControl = FloatSignControl()
 
     @property
@@ -145,7 +155,7 @@ class ScheduledOp:
     """
 
     inst: OperatorInstance
-    dst: RegRef
+    dst: RegRef | BoolRegRef
     issue_cycle: int
     latency: int
 
@@ -161,7 +171,7 @@ class FloatScheduledOp(ScheduledOp):
     inst: FloatOperatorInstance
     operands: list[FloatOperand]
     result_sign: FloatSignControl
-    dst: FloatRegRef
+    dst: RegRef
     issue_cycle: int
     latency: int
 
@@ -171,14 +181,14 @@ class InputLoad:
     """An input port sampled into a typed register at in_valid."""
 
     name: str
-    dst: RegRef
+    dst: RegRef | BoolRegRef
 
 
 @dataclass(frozen=True, slots=True)
 class FloatInputLoad(InputLoad):
-    """A float input port sampled into a float register at in_valid."""
+    """A float input port sampled into a wide register at in_valid."""
 
-    dst: FloatRegRef
+    dst: RegRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,7 +207,7 @@ class FloatStateSlot:
     """
 
     name: str
-    reg: FloatRegRef
+    reg: RegRef
     reset_value: float
     tap: FloatOperand
     install_cycle: int  # scheduler-frame cycle the live-out lands in reg (its max, makespan + 1, is the boundary)
@@ -205,17 +215,6 @@ class FloatStateSlot:
     @property
     def needs_copy(self) -> bool:
         return not (self.tap.source == self.reg and self.tap.sign == FloatSignControl())
-
-
-@dataclass(frozen=True, slots=True)
-class BoolRegRef(RegRef):
-    """A read/write of boolean register ``index`` in the 1-bit boolean register bank."""
-
-    index: int
-
-    @property
-    def stable_label(self) -> str:
-        return f"b{self.index}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,7 +271,7 @@ class FloatCopy:
     coalesced directly onto the merged register (e.g. an input, a constant, or a value defined in another block).
     """
 
-    dst: FloatRegRef
+    dst: RegRef
     source: FloatOperand
     issue_cycle: int
 
@@ -291,7 +290,7 @@ class CombScheduledOp:
     """
     A scheduled combinational operation firing in a block: it reads its register operands (each in its own bank, with
     folded sign controls on float operands) and on ``commit_cycle == issue_cycle + latency`` latches the result into
-    ``dst`` (a boolean register, or -- for the bool->float cast -- a float register). It hosts every combinational
+    ``dst`` (a boolean register, or -- for the bool->float cast -- a wide register). It hosts every combinational
     operator: a float comparison (``FComparisonOperator``, whose one-hot order flags reduce by the operator's relation;
     all comparisons share one pooled ``holoso_fcmp`` PC-muxed across mutually-exclusive blocks, one per cycle), the
     boolean logic gates (``BoolAnd``/``BoolOr``/``BoolNot``, inline ``& | ~``), and the float<->bool casts
@@ -301,7 +300,7 @@ class CombScheduledOp:
 
     operator: HardwareOperator
     operands: list[FloatOperand | BoolOperand]
-    dst: FloatRegRef | BoolRegRef
+    dst: RegRef | BoolRegRef
     issue_cycle: int
     latency: int
 
@@ -337,15 +336,15 @@ type Terminator = Jump | Branch | Ret
 @dataclass(frozen=True, slots=True)
 class LirBlock:
     """
-    One basic block of the scheduled microprogram, with block-relative cycles (block start is cycle 0). ``float_ops``,
-    ``comb_ops``, ``float_copies``, and ``bool_writes`` are the block's datapath events; ``terminator`` redirects the
+    One basic block of the scheduled microprogram, with block-relative cycles (block start is cycle 0). ``ops``,
+    ``comb_ops``, ``copies``, and ``bool_writes`` are the block's datapath events; ``terminator`` redirects the
     fetch PC at the block boundary. ``block_makespan`` is the last commit cycle inside the block (0 if it has none).
     """
 
     index: int
-    float_ops: list[FloatScheduledOp]
+    ops: list[FloatScheduledOp]
     comb_ops: list[CombScheduledOp]
-    float_copies: list[FloatCopy]
+    copies: list[FloatCopy]
     bool_writes: list[BoolWrite]
     terminator: Terminator
     block_makespan: int
@@ -372,8 +371,9 @@ class BoolStateSlot:
 
 @dataclass(frozen=True, slots=True)
 class RegFileLayout:
-    """A typed register file resource."""
+    """The shared wide data register file resource."""
 
+    width: int
     nreg: int
     nrd: int
     nwr: int
@@ -388,17 +388,6 @@ class BoolRegFileLayout:
 
 
 @dataclass(frozen=True, slots=True)
-class FloatRegFileLayout(RegFileLayout):
-    """The floating-point register file resource and its scalar format."""
-
-    fmt: FloatFormat
-    nreg: int  # number of float registers (N)
-    nrd: int  # combinational read ports
-    nwr: int  # synchronous write ports
-    nload: int  # immediate parallel-load lanes: registers 0..nload-1 are loaded from load_data at in_valid
-
-
-@dataclass(frozen=True, slots=True)
 class InputProducer:
     """A write to a register that came from an input-load lane ``index`` (in module-port order)."""
 
@@ -407,7 +396,7 @@ class InputProducer:
 
 @dataclass(frozen=True, slots=True)
 class OperationProducer:
-    """A write to a register that came from operation ``index`` in ``Lir.float_ops``."""
+    """A write to a register that came from operation ``index`` in ``Lir.ops``."""
 
     index: int
 
@@ -419,17 +408,18 @@ class StateProducer:
     index: int  # index into Lir.float_state_slots
 
 
-type FloatProducer = InputProducer | OperationProducer | StateProducer
+type Producer = InputProducer | OperationProducer | StateProducer
 
 
 @dataclass(frozen=True, slots=True)
 class Lir:
     module_name: str
-    float_instances: list[FloatOperatorInstance]
+    instances: list[FloatOperatorInstance]
     float_consts: list[float]  # constant pool: index -> value
-    float_regfile: FloatRegFileLayout
+    float_format: FloatFormat
+    regfile: RegFileLayout
     inputs: list[FloatInputLoad | BoolInputLoad]  # ordered as the function parameters
-    float_ops: list[FloatScheduledOp]  # the pipelined schedule, flattened across blocks with ABSOLUTE issue cycles
+    ops: list[FloatScheduledOp]  # the pipelined schedule, flattened across blocks with ABSOLUTE issue cycles
     outputs: list[FloatOutputWire | BoolOutputWire]
     float_state_slots: list[FloatStateSlot]  # persistent registers, ordered as the instance attributes
     makespan: int  # last absolute commit cycle (0 if no ops)
@@ -445,9 +435,12 @@ class Lir:
     bool_regfile: BoolRegFileLayout
     bool_state_slots: list[BoolStateSlot]  # persistent boolean registers (branch conditions, boolean attributes)
 
+    def __post_init__(self) -> None:
+        assert self.regfile.width == self.float_format.width
+
     @property
     def ports(self) -> list[Port]:
-        float_type = FloatType(self.float_regfile.fmt)
+        float_type = FloatType(self.float_format)
         bool_type = BoolType()
         ports: list[Port] = [
             ControlInputPort("clk", 1),
@@ -562,7 +555,7 @@ class Lir:
         """
         if len(self.blocks) > 1 or self.bool_inputs or self.bool_state_slots or self.bool_outputs:
             return True
-        return any(block.comb_ops or block.float_copies or block.bool_writes for block in self.blocks)
+        return any(block.comb_ops or block.copies or block.bool_writes for block in self.blocks)
 
     @property
     def read_set_per_port(self) -> dict[tuple[FloatOperatorInstance, int], list[int]]:
@@ -575,9 +568,9 @@ class Lir:
         single register needs no mux at all, and one that reads several needs a mux spanning only those registers.
         """
         sets: dict[tuple[FloatOperatorInstance, int], set[int]] = {}
-        for op in self.float_ops:
+        for op in self.ops:
             for pos, operand in enumerate(op.operands):
-                if isinstance(operand.source, FloatRegRef):
+                if isinstance(operand.source, RegRef):
                     sets.setdefault((op.inst, pos), set()).add(operand.source.index)
         return {port: sorted(regs) for port, regs in sets.items()}
 
@@ -592,7 +585,7 @@ class Lir:
         (they are a distinct, address-free write source folded into the same select).
         """
         sets: dict[int, list[FloatOperatorInstance]] = {}
-        for op in self.float_ops:
+        for op in self.ops:
             writers = sets.setdefault(op.dst.index, [])
             if op.inst not in writers:
                 writers.append(op.inst)
@@ -605,7 +598,7 @@ class Lir:
         """The schedule grouped into per-cycle issues and commits, each canonically ordered."""
         issues: dict[int, list[FloatScheduledOp]] = {}
         commits: dict[int, list[FloatScheduledOp]] = {}
-        for op in self.float_ops:
+        for op in self.ops:
             issues.setdefault(op.issue_cycle, []).append(op)
             commits.setdefault(op.commit_cycle, []).append(op)
         for group in (issues, commits):
@@ -614,9 +607,9 @@ class Lir:
         return issues, commits
 
     @property
-    def float_liveness(self) -> dict[FloatRegRef, set[int]]:
+    def reg_liveness(self) -> dict[RegRef, set[int]]:
         """
-        Map each float register to the actual clock cycles on which it holds a live value.
+        Map each wide register to the actual clock cycles on which it holds a live value.
 
         This is cycle-accurate to the emitted hardware, in the executing-step (hardware) frame. Timing comes from the
         shared helpers: an input lands on cycle 1; an operator result lands on ``result_landing_cycle`` (which for the
@@ -627,8 +620,8 @@ class Lir:
         from when it lands in the array through its last read.
         """
         present = self.initiation_interval  # hardware-frame present / boundary step
-        defs: dict[FloatRegRef, list[int]] = {}
-        uses: dict[FloatRegRef, list[int]] = {}
+        defs: dict[RegRef, list[int]] = {}
+        uses: dict[RegRef, list[int]] = {}
         for load in self.float_inputs:
             defs.setdefault(load.dst, []).append(1)
         for slot in self.float_state_slots:
@@ -639,21 +632,21 @@ class Lir:
             uses.setdefault(slot.reg, []).append(present)
             if slot.needs_copy:  # the non-coalesced live-out lands on the install step and is carried to the next call
                 defs.setdefault(slot.reg, []).append(self.state_copy_step(slot))
-        for op in self.float_ops:
+        for op in self.ops:
             defs.setdefault(op.dst, []).append(self.result_landing_cycle(op))
             read = self.operand_read_cycle(op)
             for operand in op.operands:
-                if isinstance(operand.source, FloatRegRef):
+                if isinstance(operand.source, RegRef):
                     uses.setdefault(operand.source, []).append(read)
         for wire in self.float_outputs:
-            if isinstance(wire.tap.source, FloatRegRef):
+            if isinstance(wire.tap.source, RegRef):
                 uses.setdefault(wire.tap.source, []).append(present)
         for slot in self.float_state_slots:  # the live-out tap is read on the install step to persist the slot
-            if isinstance(slot.tap.source, FloatRegRef):
+            if isinstance(slot.tap.source, RegRef):
                 uses.setdefault(slot.tap.source, []).append(self.state_copy_step(slot))
-        # Combinational ops touch the float bank too: a comparison and a float->bool cast read float operands, and the
-        # bool->float cast writes a float register. Its result becomes readable at the same ``landing_cycle`` as any
-        # result (the float register file's tighter read-first edge offsets its one-cycle-later write, so a downstream
+        # Combinational ops touch the wide bank too: a comparison and a float->bool cast read float operands, and the
+        # bool->float cast writes a wide register. Its result becomes readable at the same ``landing_cycle`` as any
+        # result (the wide register file's tighter read-first edge offsets its one-cycle-later write, so a downstream
         # float operator reads it on the landing cycle). Without these the residence of a cast/comparison operand or the
         # cast result would be missing from the tint.
         for block in self.blocks:
@@ -661,9 +654,9 @@ class Lir:
             for bop in block.comb_ops:
                 read = read_latch_cycle(base_pc + bop.issue_cycle)
                 for comb_operand in bop.operands:
-                    if isinstance(comb_operand.source, FloatRegRef):
+                    if isinstance(comb_operand.source, RegRef):
                         uses.setdefault(comb_operand.source, []).append(read)
-                if isinstance(bop.dst, FloatRegRef):
+                if isinstance(bop.dst, RegRef):
                     defs.setdefault(bop.dst, []).append(landing_cycle(base_pc + bop.commit_cycle))
         return {reg: residence_rows(defs.get(reg, []), uses.get(reg, []), present) for reg in defs.keys() | uses.keys()}
 
@@ -671,7 +664,7 @@ class Lir:
     def bool_liveness(self) -> dict[BoolRegRef, set[int]]:
         """
         Map each boolean register to the cycles on which it holds a live value, the boolean-bank counterpart of
-        :attr:`float_liveness` in the same executing-step frame. A boolean register is defined when a comparison,
+        :attr:`reg_liveness` in the same executing-step frame. A boolean register is defined when a comparison,
         boolean-logic op, or float->bool cast commits its result, when a boolean phi/state install lands, and -- for a
         persistent slot -- at the live-in resident from cycle 1; it is read by a boolean-logic op or a bool->float cast
         taking it as an operand, by a branch testing it as a condition, by a phi/state install copying it, and at the
@@ -715,20 +708,20 @@ class Lir:
         return {reg: residence_rows(defs.get(reg, []), uses.get(reg, []), present) for reg in defs.keys() | uses.keys()}
 
     @property
-    def float_write_timeline(self) -> dict[FloatRegRef, list[tuple[int, FloatProducer]]]:
+    def write_timeline(self) -> dict[RegRef, list[tuple[int, Producer]]]:
         """
         Per-register write timeline ``(landing cycle, producer)`` in the hardware/executing-step frame, used to resolve
         a register source at a hardware read cycle. A value is readable from the cycle it lands in the array: inputs and
         state live-ins on cycle 1, an operator result on ``result_landing_cycle``.
         """
-        writes: dict[FloatRegRef, list[tuple[int, FloatProducer]]] = {}
+        writes: dict[RegRef, list[tuple[int, Producer]]] = {}
         for i, load in enumerate(self.float_inputs):
             writes.setdefault(load.dst, []).append((1, InputProducer(i)))
         # A slot register starts each initiation holding its live-in (the value carried over from the previous one);
         # a coalesced operator may then overwrite it later in the same initiation via its own OperationProducer entry.
         for s, slot in enumerate(self.float_state_slots):
             writes.setdefault(slot.reg, []).append((1, StateProducer(s)))
-        for j, op in enumerate(self.float_ops):
+        for j, op in enumerate(self.ops):
             writes.setdefault(op.dst, []).append((self.result_landing_cycle(op), OperationProducer(j)))
         for events in writes.values():
             events.sort(key=lambda event: event[0])

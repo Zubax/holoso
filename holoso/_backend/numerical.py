@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from .._value import FloatValue
 from .._lir import BoolInputLoad, BoolOutputWire, CombScheduledOp, FloatConstRef, FloatInputLoad, FloatOperand
-from .._lir import FloatOutputWire, FloatRegRef
+from .._lir import FloatOutputWire, RegRef
 from .._lir import FloatScheduledOp, Lir
 from .._lir import InputProducer, OperationProducer, StateProducer, latest_producer_before
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
@@ -70,7 +70,7 @@ class NumericalModel:
 
     def reset(self) -> None:
         """Reload every persistent state register with its reset snapshot, as the hardware does at module reset."""
-        fmt = self.lir.float_regfile.fmt
+        fmt = self.lir.float_format
         self._state = [FloatValue.from_float(fmt, slot.reset_value) for slot in self.lir.float_state_slots]
         self._bool_state = [slot.reset_value for slot in self.lir.bool_state_slots]
 
@@ -78,7 +78,7 @@ class NumericalModel:
         lir = self.lir
         if len(inputs) != len(lir.inputs):
             raise ValueError(f"expected {len(lir.inputs)} inputs, got {len(inputs)}")
-        fmt = lir.float_regfile.fmt
+        fmt = lir.float_format
         float_values: list[FloatValue] = []
         bool_values: list[bool] = []
         for index, (load, raw_input) in enumerate(zip(lir.inputs, inputs, strict=True)):
@@ -95,11 +95,11 @@ class NumericalModel:
         # initiation holding its live-in (the value carried over from the previous call) and may be overwritten by a
         # coalesced operator later. Inputs are sampled at cycle 0; each op commits at its commit_cycle. Operands resolve
         # against this so a register reused for several values yields the value live at the operand's read cycle.
-        writes = lir.float_write_timeline
+        writes = lir.write_timeline
 
         op_values: dict[int, FloatValue] = {}
 
-        def source_value(source: FloatRegRef | FloatConstRef, read_cycle: int) -> FloatValue:
+        def source_value(source: RegRef | FloatConstRef, read_cycle: int) -> FloatValue:
             if isinstance(source, FloatConstRef):
                 return consts[source.index]
             producer = latest_producer_before(writes, source, read_cycle)
@@ -116,14 +116,12 @@ class NumericalModel:
             return _apply_sign(source_value(operand.source, cycle), operand.sign)
 
         # Evaluate in commit order: a producer commits before any consumer issues, so its value is ready in op_values.
-        for j in sorted(
-            range(len(lir.float_ops)), key=lambda k: (lir.float_ops[k].commit_cycle, lir.float_ops[k].issue_cycle)
-        ):
-            op = lir.float_ops[j]
+        for j in sorted(range(len(lir.ops)), key=lambda k: (lir.ops[k].commit_cycle, lir.ops[k].issue_cycle)):
+            op = lir.ops[j]
             operands = [eval_tap(o, lir.operand_read_cycle(op)) for o in op.operands]
             op_values[j] = _apply_sign(op.inst.operator.evaluate(*operands), op.result_sign)
 
-        # Hardware-frame read cycles, matching float_liveness and the RTL: an output is resident in the array on the
+        # Hardware-frame read cycles, matching reg_liveness and the RTL: an output is resident in the array on the
         # boundary step (the last result lands at the initiation interval), and each slot's live-out source is sampled
         # on its writeback step -- before any later operation reuses that register (a value becomes readable on its
         # landing cycle, so a read on the writeback step still resolves to the source that landed at or before it).
@@ -138,13 +136,13 @@ class NumericalModel:
         selects the successor; at Ret the outputs are read and the persistent state is taken from the slot registers.
         """
         lir = self.lir
-        fmt = lir.float_regfile.fmt
+        fmt = lir.float_format
         consts = [FloatValue.from_float(fmt, const_value) for const_value in lir.float_consts]
-        fregs: dict[int, FloatValue] = {
+        regs: dict[int, FloatValue] = {
             load.dst.index: input_value for load, input_value in zip(lir.float_inputs, float_values)
         }
         for fslot, state_value in zip(lir.float_state_slots, self._state):
-            fregs[fslot.reg.index] = state_value
+            regs[fslot.reg.index] = state_value
         bregs: dict[int, bool] = {
             load.dst.index: input_value for load, input_value in zip(lir.bool_inputs, bool_values)
         }
@@ -153,7 +151,7 @@ class NumericalModel:
 
         def fval(operand: FloatOperand) -> FloatValue:
             source = operand.source
-            base = consts[source.index] if isinstance(source, FloatConstRef) else fregs[source.index]
+            base = consts[source.index] if isinstance(source, FloatConstRef) else regs[source.index]
             return _apply_sign(base, operand.sign)
 
         def bval(operand: BoolOperand) -> bool:
@@ -168,12 +166,12 @@ class NumericalModel:
             # commit-sorted pass, so a cross-domain chain (a float op reading a float<-bool cast reading a comparison)
             # reads each producer after it is written. Results land in fresh registers (no in-block reuse), so
             # commit-order evaluation reading the current register file is hazard-free.
-            scheduled: list[FloatScheduledOp | CombScheduledOp] = [*block.float_ops, *block.comb_ops]
+            scheduled: list[FloatScheduledOp | CombScheduledOp] = [*block.ops, *block.comb_ops]
             scheduled.sort(key=lambda o: (o.commit_cycle, 0 if isinstance(o, FloatScheduledOp) else 1, o.dst.index))
             for op in scheduled:
                 if isinstance(op, FloatScheduledOp):
                     result = op.inst.operator.evaluate(*(fval(operand) for operand in op.operands))
-                    fregs[op.dst.index] = _apply_sign(result, op.result_sign)
+                    regs[op.dst.index] = _apply_sign(result, op.result_sign)
                     continue
                 match op.operator:
                     case FComparisonOperator() as cmp:
@@ -193,14 +191,15 @@ class NumericalModel:
                     case BoolToFloatOperator() as to_float:
                         (operand,) = op.operands
                         assert isinstance(operand, BoolOperand)
-                        fregs[op.dst.index] = to_float.evaluate(bval(operand))
+                        assert isinstance(op.dst, RegRef)
+                        regs[op.dst.index] = to_float.evaluate(bval(operand))
                     case _:
                         raise RuntimeError(f"no model evaluation for combinational operator {op.operator!r}")
             # Phi-arm installs are a parallel copy bundle (a swap reads both old values), so read every source before
             # writing any destination -- both for the float copies and the boolean writes.
-            copied = [fval(copy.source) for copy in block.float_copies]
-            for copy, copy_value in zip(block.float_copies, copied):
-                fregs[copy.dst.index] = copy_value
+            copied = [fval(copy.source) for copy in block.copies]
+            for copy, copy_value in zip(block.copies, copied):
+                regs[copy.dst.index] = copy_value
             written = [bval(write.source) for write in block.bool_writes]
             for write, write_value in zip(block.bool_writes, written):
                 bregs[write.dst.index] = write_value
@@ -236,7 +235,7 @@ class NumericalModel:
 
     @property
     def float_format(self) -> FloatFormat:
-        return self.lir.float_regfile.fmt
+        return self.lir.float_format
 
     def __str__(self) -> str:
         return (

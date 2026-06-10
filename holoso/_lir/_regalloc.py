@@ -3,7 +3,7 @@ Reach-aware register allocation over the software-pipelined (cycle-accurate) sch
 
 Register-needing values are the input ports, persistent state-slot live-ins, and operator results (constants are
 immediates, not registers). Whether two values may share a register is decided in the executing-step (hardware) frame,
-the same frame as ``Lir.float_liveness`` and the write timeline: a value *lands* -- becomes readable in the array -- at
+the same frame as ``Lir.reg_liveness`` and the write timeline: a value *lands* -- becomes readable in the array -- at
 its write cycle (an operator result ``FETCH_LAG + 2`` after its commit, an input or a state live-in on cycle 1) and is
 *last read* at its read cycle (an operand ``FETCH_LAG - 1`` after the consumer's issue, an output on the boundary step,
 a non-coalesced live-out source on its writeback step). Two values may share a register when the older one's last read
@@ -106,7 +106,7 @@ _logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
-class FloatAllocation:
+class RegisterAllocation:
     assign: dict[ValueId, int]  # register-needing value -> register index
     nreg: int
     state_regs: dict[str, int]  # state-slot name -> its dedicated persistent register index
@@ -153,12 +153,12 @@ def _assert_no_interference(
                     raise AssertionError(f"register {reg} shared by interfering values {a} and {b}")
 
 
-def allocate_float(
+def allocate_registers(
     mir: MirFloatView,
     issue_cycle: dict[ValueId, int],
     inst_of: dict[ValueId, FloatOperatorInstance],
     makespan: int,
-) -> FloatAllocation:
+) -> RegisterAllocation:
     present_cycle = makespan + 1
 
     def def_cycle_of(vid: ValueId) -> int:
@@ -267,7 +267,7 @@ def allocate_float(
 
     # Hardware-frame liveness for register interference. The scheduler-frame def_cycle/last_use above drive only the
     # state-slot install scheduling (which is frame-invariant); register sharing is decided here in the executing-step
-    # frame, mirroring Lir.float_liveness and float_write_timeline. A value lands -- becomes readable in the array -- at
+    # frame, mirroring Lir.reg_liveness and write_timeline. A value lands -- becomes readable in the array -- at
     # its write cycle and is last read at its read cycle: an operator result lands FETCH_LAG+2 after its commit and an
     # operand is read FETCH_LAG-1 after issue; inputs and state live-ins are resident from cycle 1; an output stays
     # resident through the boundary; a non-coalesced slot live-out source is read by the writeback copy on its install
@@ -359,7 +359,7 @@ def allocate_float(
         comp_nreg,
         nreg,
     )
-    return FloatAllocation(assign=assign, nreg=nreg, state_regs=state_regs, install_cycles=install_cycles)
+    return RegisterAllocation(assign=assign, nreg=nreg, state_regs=state_regs, install_cycles=install_cycles)
 
 
 def _state_read_name(mir: MirFloatView, vid: ValueId) -> str:

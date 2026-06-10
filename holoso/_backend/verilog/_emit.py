@@ -93,7 +93,7 @@ def _cterm_expr(port: int, consts: list[int]) -> str:
     return f"const_{consts[0]}" if len(consts) == 1 else f"cterm{port}"
 
 
-def _source_net(source: FloatRegRef | FloatConstRef) -> str:
+def _source_net(source: RegRef | FloatConstRef) -> str:
     """The net carrying a register-or-constant source value: the pooled constant immediate, or the register read."""
     return f"const_{source.index}" if isinstance(source, FloatConstRef) else f"regs[{source.index}]"
 
@@ -176,7 +176,7 @@ def _block_ftobool_ops(lir: Lir) -> list[tuple[int, CombScheduledOp]]:
 
 
 def _block_ffrombool_ops(lir: Lir) -> list[tuple[int, CombScheduledOp]]:
-    """Every bool->float cast with its block index; each writes a float register, so it is timed on the float frame."""
+    """Every bool->float cast with its block index; each writes a wide register, so it is timed on the wide frame."""
     return [
         (block.index, op)
         for block in lir.blocks
@@ -187,8 +187,8 @@ def _block_ffrombool_ops(lir: Lir) -> list[tuple[int, CombScheduledOp]]:
 
 def _comb_float_writeback_pc(lir: Lir, block_index: int, op: CombScheduledOp) -> int:
     """
-    The fetch PC at which a float-result combinational op latches its float register. A float result lands one cycle
-    later than a boolean one (the write latch plus the read-first edge of the float register file), matching the
+    The fetch PC at which a float-result combinational op latches its wide register. A float result lands one cycle
+    later than a boolean one (the write latch plus the read-first edge of the wide register file), matching the
     microcode write-enable at ``commit + 1`` fetched FETCH_LAG ahead, so a downstream float operator reads it on time.
     """
     return lir.block_base[block_index] + op.commit_cycle + 1 + FETCH_LAG
@@ -334,7 +334,7 @@ def _emit_header(w: _Writer, lir: Lir) -> None:
     from holoso import __url__, __version__
 
     # Generation time is not included for reproducibility.
-    fmt = lir.float_regfile.fmt
+    fmt = lir.float_format
     w(f"""
 // Constructed by Holoso v{__version__} <{__url__}>. Do not edit.
 
@@ -379,13 +379,13 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
 
 
 def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int) -> None:
-    fmt = lir.float_regfile.fmt
-    nreg = max(1, lir.float_regfile.nreg)
+    fmt = lir.float_format
+    nreg = max(1, lir.regfile.nreg)
     w(f"""
 localparam           WEXP      ={fmt.wexp:3};  // Float exponent bits fixed by the static schedule
 localparam           WMAN      ={fmt.wman:3};  // Float mantissa bits fixed by the static schedule
 localparam           W         = WEXP + WMAN;
-localparam           NREG      ={nreg:3};  // >= 1; the bank is unused when no value needs a register
+localparam           NREG      ={nreg:3};  // >= 1; the wide bank is unused when no value needs a register
 localparam           CYCW      ={cycw:3};  // err_pc width: enough for any executing step (0..present)
 localparam           PCW       ={pcw:3};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
 localparam           FETCH_LAG ={FETCH_LAG:3};  // executing step = pc - FETCH_LAG ({FETCH_STAGES}-stage control fetch)
@@ -424,7 +424,7 @@ def _emit_declarations(w: _Writer, lir: Lir) -> None:
         reg          bregs [0:NBREG-1];  // 1-bit boolean register bank: branch conditions and boolean state
 
         """)
-    for inst in lir.float_instances:
+    for inst in lir.instances:
         sig = _sig(inst)
         w(f"wire         {sig}_iv;")
         for letter in PORT_LETTERS[: inst.operator.arity]:
@@ -440,7 +440,7 @@ def _emit_declarations(w: _Writer, lir: Lir) -> None:
 
 
 def _emit_consts(w: _Writer, lir: Lir) -> None:
-    fmt = lir.float_regfile.fmt
+    fmt = lir.float_format
     width = fmt.width
     digits = (width + 3) // 4
     for index, value in enumerate(lir.float_consts):
@@ -450,7 +450,7 @@ def _emit_consts(w: _Writer, lir: Lir) -> None:
 
 
 def _emit_operators(w: _Writer, lir: Lir) -> None:
-    for inst in lir.float_instances:
+    for inst in lir.instances:
         sig = _sig(inst)
         letters = PORT_LETTERS[: inst.operator.arity]
         # WEXP/WMAN frame the float format; hdl_params() lists K (ilog2) and every STAGE_* explicitly. LATENCY is
@@ -539,7 +539,7 @@ def _emit_datapath_comb(w: _Writer, lir: Lir, port_consts: dict[int, list[int]])
     w("")
 
     w("// Operator control (in_valid and sign controls are consumed inside the wrapper on the issue step).")
-    for inst in lir.float_instances:
+    for inst in lir.instances:
         sig, base = _sig(inst), base_name(inst)
         w(f"assign {sig}_iv = {f_iv(base)};")
         w(f"assign {sig}_ys = {f_ysgn(base)};")
@@ -551,7 +551,7 @@ def _emit_datapath_comb(w: _Writer, lir: Lir, port_consts: dict[int, list[int]])
     # write-enable and the error sideband are aligned to the writeback latch (commit + write latch).
     err_terms = [
         f"({f_we(base_name(inst))} & {_sig(inst)}_{port}_q)"
-        for inst in lir.float_instances
+        for inst in lir.instances
         for port in inst.operator.error_ports
     ]
     err_rhs = " | ".join(err_terms) if err_terms else "1'b0"
@@ -642,11 +642,11 @@ def _bool_write_rhs(write: BoolWrite) -> str:
     return _bool_operand_rhs(write.source)
 
 
-def _float_copies_grouped(lir: Lir) -> dict[int, list[tuple[int, str]]]:
-    """Destination float register -> [(install PC, source net)], over every phi-arm copy in the program."""
+def _copies_grouped(lir: Lir) -> dict[int, list[tuple[int, str]]]:
+    """Destination wide register -> [(install PC, source net)], over every phi-arm copy in the program."""
     grouped: dict[int, list[tuple[int, str]]] = {}
     for block in lir.blocks:
-        for copy_index, copy in enumerate(block.float_copies):
+        for copy_index, copy in enumerate(block.copies):
             grouped.setdefault(copy.dst.index, []).append(
                 (_float_copy_pc(lir, block, copy), _float_copy_rhs(block.index, copy_index, copy))
             )
@@ -676,7 +676,7 @@ def _emit_copy_sign_wires(w: _Writer, lir: Lir) -> None:
     """Emit a sign-conditioning wire for each float copy whose installed source carries a folded sign control."""
     emitted = False
     for block in lir.blocks:
-        for copy_index, copy in enumerate(block.float_copies):
+        for copy_index, copy in enumerate(block.copies):
             if copy.source.sign != FloatSignControl():
                 wire = _copy_sign_wire(block.index, copy_index)
                 w(f"wire [W-1:0] {wire};")
@@ -772,12 +772,12 @@ def _emit_clocked(
     write_lists: dict[FloatOperatorInstance, list[int]],
 ) -> None:
     """Emit every sequential element in one always @(posedge clk): fetch, latches, writes, and control state."""
-    nreg = max(1, lir.float_regfile.nreg)
+    nreg = max(1, lir.regfile.nreg)
     float_slot_regs = {slot.reg.index for slot in lir.float_state_slots}
     bool_slot_regs = {slot.reg.index for slot in lir.bool_state_slots}
-    float_copies = _float_copies_grouped(lir)  # phi-arm register installs, pc-gated, grouped by destination register
+    grouped_copies = _copies_grouped(lir)  # phi-arm register installs, pc-gated, grouped by destination register
     bool_writes = _bool_writes_grouped(lir)
-    nonslot_copy_regs = {reg for reg in float_copies if reg not in float_slot_regs}
+    nonslot_copy_regs = {reg for reg in grouped_copies if reg not in float_slot_regs}
     nonslot_bwrite_regs = {reg for reg in bool_writes if reg not in bool_slot_regs}
     is_cfg = lir.is_control_flow  # the CFG path installs slots at the Ret boundary
     w("""
@@ -794,7 +794,7 @@ always @(posedge clk) begin
     w("")
 
     w("// Operand read latches: a sparse mux over each operand's read-set, registered before the wrapper.")
-    for inst in lir.float_instances:
+    for inst in lir.instances:
         sig = _sig(inst)
         for pos in range(inst.operator.arity):
             port = read_port[(inst, pos)]
@@ -802,7 +802,7 @@ always @(posedge clk) begin
     w("")
 
     w("// Writeback latches: the operator result (and any error sideband) registered before the register write.")
-    for inst in lir.float_instances:
+    for inst in lir.instances:
         sig = _sig(inst)
         w(f"{sig}_y_q <= {sig}_y;")
         for err_port in inst.operator.error_ports:
@@ -849,7 +849,7 @@ always @(posedge clk) begin
     # register. These registers are written only by their installs, so they never collide with the writeback above.
     if nonslot_copy_regs or nonslot_bwrite_regs:
         w("// Phi-arm installs into non-slot merge registers (pc-gated, one per register).")
-        _emit_pc_writes(w, "regs", nonslot_copy_regs, float_copies)
+        _emit_pc_writes(w, "regs", nonslot_copy_regs, grouped_copies)
         _emit_pc_writes(w, "bregs", nonslot_bwrite_regs, bool_writes)
         w("")
 
@@ -884,23 +884,23 @@ always @(posedge clk) begin
             w(f"if (pc == {writeback_pc}) bregs[{op.dst.index}] <= {_ftobool_rhs(op)};")
         w("")
 
-    # Bool->float cast writebacks: a pc-gated ``holoso_ffrombool`` call latched into a fresh float register, timed on
-    # the float frame so a downstream float operator reads it on time. The register is written only here (no collision).
+    # Bool->float cast writebacks: a pc-gated ``holoso_ffrombool`` call latched into a fresh wide register, timed on
+    # the wide frame so a downstream float operator reads it on time. The register is written only here (no collision).
     ffrombool_ops = _block_ffrombool_ops(lir)
     if ffrombool_ops:
         w("// Bool-to-float cast writebacks (pc-gated, combinational).")
         for block_index, op in ffrombool_ops:
             writeback_pc = _comb_float_writeback_pc(lir, block_index, op)
-            assert isinstance(op.dst, FloatRegRef)
+            assert isinstance(op.dst, RegRef)
             w(f"if (pc == {writeback_pc}) regs[{op.dst.index}] <= {_ffrombool_rhs(op)};")
         w("")
 
     # Control and persistent state are the reset-gated registers. Each slot register's reset snapshot (under rst) and
     # its update (a coalesced operator's writeback, or a writeback copy on its install step) are the two arms of this
     # single rst condition, segregating those assignments for the synthesizer; the pure datapath above stays unreset.
-    fmt = lir.float_regfile.fmt
+    fmt = lir.float_format
     digits = (fmt.width + 3) // 4
-    copies = [slot for slot in lir.float_state_slots if slot.needs_copy]
+    state_copies = [slot for slot in lir.float_state_slots if slot.needs_copy]
     w("// Control and persistent state: the reset-gated registers.")
     w("if (rst) begin")
     w.push()
@@ -932,13 +932,13 @@ always @(posedge clk) begin
             if bslot.needs_copy:
                 rhs = _bool_operand_rhs(bslot.live_out)
                 w(f"if (pc == LASTPC && out_ready) bregs[{bslot.reg.index}] <= {rhs};  // {bslot.name}")
-    elif copies:
+    elif state_copies:
         # Single-block: persist each non-coalesced slot on the step its writeback installs (state_copy_step; LASTPC for
         # a boundary copy). An early install step is traversed exactly once per accepted transaction, so it self-gates;
         # the LASTPC boundary step is held under back-pressure, so there the copy also waits for out_ready -- both fold
         # into one guard so state advances exactly once and a held boundary never re-copies (else a delay overruns).
         pcw = max(1, lir.initiation_interval.bit_length())
-        for slot in copies:
+        for slot in state_copies:
             cond = f"pc == {_lit(pcw, lir.state_copy_step(slot))} && (pc != LASTPC || out_ready)"
             w(f"if ({cond}) regs[{slot.reg.index}] <= {_state_copy_rhs(slot)};  // {slot.name}")
     w.pop()

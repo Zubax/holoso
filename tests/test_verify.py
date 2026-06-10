@@ -295,7 +295,7 @@ def test_model_handles_unused_input_ports() -> None:
     model = build_model(build(_run(f), "f"))
     assert [load.name for load in model.lir.float_inputs] == ["a", "b"]
     assert [load.dst.index for load in model.lir.float_inputs] == [0, 1]
-    assert model.lir.float_regfile.nload == 2
+    assert model.lir.regfile.nload == 2
     assert model(1.0, 2.0)[0] == FloatValue.from_float(FMT, 2.0)
 
 

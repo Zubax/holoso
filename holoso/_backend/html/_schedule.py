@@ -27,7 +27,7 @@ _ARROW_KEY_MARKER = (
 
 
 def render_schedule(lir: Lir) -> str:
-    nreg, nbreg, nconst = lir.float_regfile.nreg, lir.bool_regfile.nreg, len(lir.float_consts)
+    nreg, nbreg, nconst = lir.regfile.nreg, lir.bool_regfile.nreg, len(lir.float_consts)
     columns = _columns_of(lir)
     col_ord = {col: ordinal for ordinal, col in enumerate(columns)}
     operator_colors = _operator_colors(lir)
@@ -45,8 +45,8 @@ def render_schedule(lir: Lir) -> str:
         stage_base.setdefault(inst, sidx)
     group_ends = {stage_base[inst] + inst.operator.latency - 1 for inst in _all_instances(lir)}
 
-    # Column seams: a 2px black seam marks every register-bank boundary (float|bool, bool|constants) and the two block
-    # boundaries (the last data column | pipeline, and pipeline | OPERATIONS); a 1px seam marks the legacy float|const
+    # Column seams: a 2px black seam marks every register-bank boundary (wide|bool, bool|constants) and the two block
+    # boundaries (the last data column | pipeline, and pipeline | OPERATIONS); a 1px seam marks the legacy wide|const
     # seam of a kernel without a boolean bank and the seams between operator groups.
     data_thin, data_thick = _data_seams(nreg, nbreg, nconst)
     if columns:
@@ -62,7 +62,7 @@ def render_schedule(lir: Lir) -> str:
     # ops -- comparisons, boolean logic, and the float<->bool casts -- as well as arithmetic, state, and branches),
     # merged into one column-keyed map.
     live: dict[ColKey, set[int]] = {}
-    for freg, frows in lir.float_liveness.items():
+    for freg, frows in lir.reg_liveness.items():
         live[freg] = frows
     for breg, brows in lir.bool_liveness.items():
         live[breg] = brows
@@ -83,10 +83,10 @@ def render_schedule(lir: Lir) -> str:
     chips_at: dict[int, list[str]] = {}  # cycle -> chips for the operations committing on that row
 
     group = 0  # global per-operation id, linking a commit cell with its edges/chip for the hover-focus behavior
-    for op in lir.float_ops:
+    for op in lir.ops:
         tip = _esc(_op_text(op))
         color = operator_colors[type(op.inst.operator)]
-        # Physical clock cycles (cycle-accurate), from the single Lir definitions shared with float_liveness.
+        # Physical clock cycles (cycle-accurate), from the single Lir definitions shared with reg_liveness.
         read_cyc = lir.operand_read_cycle(op)
         write_cyc = lir.result_landing_cycle(op)
         dcol: ColKey = op.dst
@@ -242,18 +242,18 @@ def render_schedule(lir: Lir) -> str:
         _schedule_key(operator_colors, lir.has_state, bool(arrows)),
         "<div id='schedwrap'><table class='grid'>",
     ]
-    # Header row 0: group bands over the register banks (float, bool), the constant block and the operator pipelines.
+    # Header row 0: group bands over the register banks (wide, bool), the constant block and the operator pipelines.
     # clk/operations span all rows. Each band carries the seam of its rightmost data column so the bank edges align.
     out.append("<tr><th class='gh clkh' rowspan='3'><span>clk</span></th>")
     if nreg:
         out.append(
             f"<th class='gband{_border_suffix(nreg - 1, dv.data_thin, dv.data_thick)}' colspan='{nreg}'>"
-            "<span title='float'>float</span></th>"
+            "<span title='registers'>registers</span></th>"
         )
     if nbreg:
         out.append(
             f"<th class='gband{_border_suffix(nreg + nbreg - 1, dv.data_thin, dv.data_thick)}' "
-            f"colspan='{nbreg}'><span title='bool'>bool</span></th>"
+            f"colspan='{nbreg}'><span title='bool registers'>bool registers</span></th>"
         )
     if nconst:
         const_seam = _border_suffix(nreg + nbreg + nconst - 1, dv.data_thin, dv.data_thick)
@@ -273,7 +273,7 @@ def render_schedule(lir: Lir) -> str:
     for index in range(nreg):
         cls = "gh" + _border_suffix(index, dv.data_thin, dv.data_thick)
         out.append(
-            f"<th class='{cls}' rowspan='2'><span>{_named_label('f', index, reg_names.get(('f', index)))}"
+            f"<th class='{cls}' rowspan='2'><span>{_named_label('r', index, reg_names.get(('r', index)))}"
             "</span></th>"
         )
     for index in range(nbreg):
@@ -330,7 +330,7 @@ def render_schedule(lir: Lir) -> str:
     return "".join(out)
 
 
-type ColKey = FloatRegRef | BoolRegRef | FloatConstRef
+type ColKey = RegRef | BoolRegRef | FloatConstRef
 
 
 def _esc(text: str) -> str:
@@ -339,12 +339,11 @@ def _esc(text: str) -> str:
 
 def _col_label(col: ColKey) -> str:
     """
-    The report's display label for a grid column: ``fX`` for a float register, ``bX`` for a boolean register, ``cX`` for
-    a float constant. This is the single labeling authority for the schedule -- the headers, tooltips, dataflow operand
-    expressions, arrow conditions, and the JS payload all route through it, so the float bank reads ``fX`` everywhere
-    even though the LIR's own ``stable_label`` (which the report must not change) still names a float register ``rX``.
+    The report's display label for a grid column: ``rX`` for a wide register, ``bX`` for a boolean register, ``cX`` for
+    a float constant. This is the single labeling authority for the schedule: the headers, tooltips, dataflow operand
+    expressions, arrow conditions, and the JS payload all route through it.
     """
-    return f"f{col.index}" if isinstance(col, FloatRegRef) else col.stable_label
+    return col.stable_label
 
 
 def _operand_label(operand: FloatOperand) -> str:
@@ -359,7 +358,7 @@ def _op_text(op: FloatScheduledOp) -> str:
 
 def _is_live(col: ColKey, row_id: int, live: dict[ColKey, set[int]]) -> bool:
     """Whether register column ``col`` holds a live value on grid row ``row_id`` (constants are never tinted)."""
-    return isinstance(col, (FloatRegRef, BoolRegRef)) and col in live and row_id in live[col]
+    return isinstance(col, (RegRef, BoolRegRef)) and col in live and row_id in live[col]
 
 
 def _write_label(index: int, tip: str) -> str:
@@ -381,8 +380,8 @@ class _Dividers:
     """
     Right-border seams between grid columns, kept on the *left* cell's right edge (under ``border-collapse`` the left
     cell wins an equal-width conflict, so a left border on the right column would not show). A ``thick`` 2px seam marks
-    every register-bank boundary (float|bool, bool|constants) and the two block boundaries (the data block |
-    operator-pipeline and operator-pipeline | OPERATIONS); a ``thin`` 1px seam marks the legacy float|constants seam of a
+    every register-bank boundary (wide|bool, bool|constants) and the two block boundaries (the data block |
+    operator-pipeline and operator-pipeline | OPERATIONS); a ``thin`` 1px seam marks the legacy wide|constants seam of a
     boolean-free kernel and the seams between operator groups. Data and stage columns index separately.
     """
 
@@ -396,19 +395,19 @@ def _data_seams(nreg: int, nbreg: int, nconst: int) -> tuple[set[int], set[int]]
     """
     Right-border seams within the register/constant block, as ``(thin, thick)`` left-cell column-index sets.
 
-    A thick 2px black seam marks each register-bank boundary: float|bool and bool|constants. With no boolean bank the
-    float bank abuts the constants directly; that legacy seam stays the lighter 1px so a float-only kernel renders
+    A thick 2px black seam marks each register-bank boundary: wide|bool and bool|constants. With no boolean bank the
+    wide bank abuts the constants directly; that legacy seam stays the lighter 1px so a float-only kernel renders
     exactly as before. Empty banks contribute no seam. The constants|pipeline block boundary is added by the caller.
     """
     thin: set[int] = set()
     thick: set[int] = set()
     if nbreg:
         if nreg:
-            thick.add(nreg - 1)  # float | bool
+            thick.add(nreg - 1)  # wide | bool
         if nconst:
             thick.add(nreg + nbreg - 1)  # bool | constants
     elif nreg and nconst:
-        thin.add(nreg - 1)  # legacy float | constants (no boolean bank)
+        thin.add(nreg - 1)  # legacy wide | constants (no boolean bank)
     return thin, thick
 
 
@@ -432,7 +431,7 @@ def _oc_class(sidx: int, dv: _Dividers) -> str:
 
 def _all_instances(lir: Lir) -> list[OperatorInstance]:
     """Every operator instance shown in the schedule: the float operator instances then the pooled comparator(s)."""
-    return [*lir.float_instances, *_comparator_instances(lir)]
+    return [*lir.instances, *_comparator_instances(lir)]
 
 
 def _comparator_instances(lir: Lir) -> list[OperatorInstance]:
@@ -672,7 +671,7 @@ def _sched_script(
     Build the interactive layer: substitute the per-module data into the readable script template (:data:`_SCHED_JS`).
 
     The data is the edge list, the column labels, the constant values, the per-register live-row intervals (keyed by the
-    full column label so the float and boolean banks never collide on a shared index), and the control-transfer arrows.
+    full column label so the wide and boolean banks never collide on a shared index), and the control-transfer arrows.
     Each arrow carries ``cond``: the cell id of the boolean register it reads (so the overlay draws a dotted feed from
     that register to the arrow's root), or ``None`` for an unconditional jump. This is enough for the script to draw the
     dataflow and arrow overlays and synthesize hover tooltips on demand; without JS the grid still renders fully.
@@ -698,10 +697,10 @@ def _sched_script(
 
 def _columns_of(lir: Lir) -> list[ColKey]:
     """
-    The grid columns in bank order: float registers (``fX``), then boolean registers (``bX``), then float constants
+    The grid columns in bank order: wide registers (``rX``), then boolean registers (``bX``), then float constants
     (``cX``). This is exactly the order the table renders, so a column ordinal indexes straight into this list.
     """
-    cols: list[ColKey] = [FloatRegRef(i) for i in range(lir.float_regfile.nreg)]
+    cols: list[ColKey] = [RegRef(i) for i in range(lir.regfile.nreg)]
     cols += [BoolRegRef(i) for i in range(lir.bool_regfile.nreg)]
     cols += [FloatConstRef(i) for i in range(len(lir.float_consts))]
     return cols
@@ -719,25 +718,25 @@ def _state_chip(tip: str) -> str:
 
 def _register_names(lir: Lir) -> dict[tuple[str, int], tuple[str, str]]:
     """
-    Map each register that has a stable role to ``(label, kind)``, keyed by ``(bank, index)`` where bank is ``"f"`` for
-    a float register or ``"b"`` for a boolean one: the float input lanes to the port they latch at accept, the float
+    Map each register that has a stable role to ``(label, kind)``, keyed by ``(bank, index)`` where bank is ``"r"`` for
+    a wide register or ``"b"`` for a boolean one: the float input lanes to the port they latch at accept, the float
     state slots to the attribute they retain, and the boolean state slots to the boolean attribute they retain. Other
     registers are anonymous scratch; both kinds may still be reused later, but their cycle-0 role is what the label names.
     """
     names: dict[tuple[str, int], tuple[str, str]] = {}
     for fload in lir.float_inputs:
-        names[("f", fload.dst.index)] = (f"in_{fload.name}", "input")
+        names[("r", fload.dst.index)] = (f"in_{fload.name}", "input")
     for bload in lir.bool_inputs:
         names[("b", bload.dst.index)] = (f"in_{bload.name}", "input")
     for slot in lir.float_state_slots:
-        names[("f", slot.reg.index)] = (slot.name, "state")
+        names[("r", slot.reg.index)] = (slot.name, "state")
     for bslot in lir.bool_state_slots:
         names[("b", bslot.reg.index)] = (bslot.name, "state")
     return names
 
 
 def _named_label(bank: str, index: int, named: tuple[str, str] | None) -> str:
-    """A column header label ``<bank><index>`` (e.g. ``f3``, ``b0``), prefixed with its color-coded role name if any."""
+    """A column header label ``<bank><index>`` (e.g. ``r3``, ``b0``), prefixed with its color-coded role name if any."""
     base = f"{bank}{index}"
     if named is None:
         return base
