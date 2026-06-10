@@ -208,7 +208,7 @@ class FloatStateSlot:
 
 
 @dataclass(frozen=True, slots=True)
-class BoolRegRef:
+class BoolRegRef(RegRef):
     """A read/write of boolean register ``index`` in the 1-bit boolean register bank."""
 
     index: int
@@ -216,6 +216,13 @@ class BoolRegRef:
     @property
     def stable_label(self) -> str:
         return f"b{self.index}"
+
+
+@dataclass(frozen=True, slots=True)
+class BoolInputLoad(InputLoad):
+    """A boolean input port sampled into a boolean register at in_valid."""
+
+    dst: BoolRegRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,7 +428,7 @@ class Lir:
     float_instances: list[FloatOperatorInstance]
     float_consts: list[float]  # constant pool: index -> value
     float_regfile: FloatRegFileLayout
-    float_inputs: list[FloatInputLoad]  # ordered as the function parameters
+    inputs: list[FloatInputLoad | BoolInputLoad]  # ordered as the function parameters
     float_ops: list[FloatScheduledOp]  # the pipelined schedule, flattened across blocks with ABSOLUTE issue cycles
     outputs: list[FloatOutputWire | BoolOutputWire]
     float_state_slots: list[FloatStateSlot]  # persistent registers, ordered as the instance attributes
@@ -450,7 +457,12 @@ class Lir:
             ControlOutputPort("out_valid", 1),
             ControlInputPort("out_ready", 1),
         ]
-        ports.extend(DataInputPort(f"in_{load.name}", float_type) for load in self.float_inputs)
+        for load in self.inputs:
+            match load:
+                case FloatInputLoad():
+                    ports.append(DataInputPort(f"in_{load.name}", float_type))
+                case BoolInputLoad():
+                    ports.append(DataInputPort(f"in_{load.name}", bool_type))
         for wire in self.outputs:
             match wire:
                 case FloatOutputWire():
@@ -459,6 +471,14 @@ class Lir:
                     ports.append(DataOutputPort(wire.name, bool_type))
         ports.append(ControlOutputPort("err_pc", self.cyc_width))
         return ports
+
+    @property
+    def float_inputs(self) -> list[FloatInputLoad]:
+        return [load for load in self.inputs if isinstance(load, FloatInputLoad)]
+
+    @property
+    def bool_inputs(self) -> list[BoolInputLoad]:
+        return [load for load in self.inputs if isinstance(load, BoolInputLoad)]
 
     @property
     def float_outputs(self) -> list[FloatOutputWire]:
@@ -535,12 +555,12 @@ class Lir:
         Whether this kernel took the control-flow build path rather than the straight-line single-block path. The model
         and the emitter branch on this to select the CFG execution / boundary-install path; both must agree, so the
         predicate lives here once. It is the exact negation of the builder's straight-line test: a straight-line LIR is
-        a single ``Ret`` block of float operations only (no combinational ops, phi-arm copies, boolean writes, or
-        boolean state); anything else -- multiple blocks, boolean state, or a comparison/logic/cast even in one block
-        (e.g. a branch-free ``float(x > 0)``) -- takes the CFG path.
+        a single ``Ret`` block of float operations only (no boolean inputs, combinational ops, phi-arm copies, boolean
+        writes, or boolean state); anything else -- multiple blocks, a boolean input/state/output, or a
+        comparison/logic/cast even in one block (e.g. a branch-free ``float(x > 0)``) -- takes the CFG path.
         TODO FIXME: THIS IS TEMPORARY. The straight-line/single-block path will be merged with CFG eventually.
         """
-        if len(self.blocks) > 1 or self.bool_state_slots or self.bool_outputs:
+        if len(self.blocks) > 1 or self.bool_inputs or self.bool_state_slots or self.bool_outputs:
             return True
         return any(block.comb_ops or block.float_copies or block.bool_writes for block in self.blocks)
 
@@ -667,6 +687,8 @@ class Lir:
                 defs.setdefault(slot.reg, []).append(present)  # the new live-out lands at the boundary (read-first)
                 if isinstance(slot.live_out.source, BoolRegRef):
                     uses.setdefault(slot.live_out.source, []).append(present)
+        for load in self.bool_inputs:
+            defs.setdefault(load.dst, []).append(1)
         for block in self.blocks:
             base_pc = self.block_base[block.index]
             for bop in block.comb_ops:

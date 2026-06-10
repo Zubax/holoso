@@ -822,15 +822,17 @@ always @(posedge clk) begin
                 _reg_write_stmts(w, reg, writers, write_lists)
 
     has_writes = any(write_sets.get(reg) and reg not in state_regs for reg in range(nreg))
-    if lir.float_inputs:
+    if lir.inputs:
         # The accept-step input load and operator writeback are mutually exclusive in time (the schedule never commits
         # a result on the load step), but the tools cannot see that. Making writeback the else of the load encodes the
         # exclusivity structurally -- load wins, writes are gated behind it.
         w("// Register update: input load on the accept step, else the per-register writeback select.")
         w("if (in_ready && in_valid) begin")
         w.push()
-        for load in sorted(lir.float_inputs, key=lambda load: load.dst.index):
-            w(f"regs[{load.dst.index}] <= in_{load.name};")
+        for fload in sorted(lir.float_inputs, key=lambda load: load.dst.index):
+            w(f"regs[{fload.dst.index}] <= in_{fload.name};")
+        for bload in sorted(lir.bool_inputs, key=lambda load: load.dst.index):
+            w(f"bregs[{bload.dst.index}] <= in_{bload.name};")
         w.pop()
         if has_writes:
             w("end else begin")

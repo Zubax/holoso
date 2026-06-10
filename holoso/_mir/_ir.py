@@ -100,6 +100,17 @@ class MirFloatInput(MirInput):
 
 
 @dataclass(frozen=True, slots=True)
+class MirBoolInput(MirInput):
+    """A boolean module input port."""
+
+    scalar_type: BoolType
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scalar_type, BoolType):
+            raise TypeError(f"MirBoolInput scalar_type must be BoolType, got {self.scalar_type!r}")
+
+
+@dataclass(frozen=True, slots=True)
 class MirFloatStateRead(MirStateRead):
     """A floating-point read of a persistent state slot's live-in value."""
 
@@ -159,7 +170,7 @@ class MirPhi:
 
 type MirNode = MirInput | MirStateRead | MirConst | MirOperation | MirPhi
 type MirFloatNode = MirFloatInput | MirFloatStateRead | MirFloatConst | MirOperation | MirPhi
-type MirBoolNode = MirBoolStateRead | MirBoolConst | MirPhi | MirOperation
+type MirBoolNode = MirBoolInput | MirBoolStateRead | MirBoolConst | MirPhi | MirOperation
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,7 +320,7 @@ class MirFloatView:
                 case MirPhi(scalar_type=FloatType() as scalar_type):
                     nodes[vid] = node
                     formats.add(scalar_type.fmt)
-                case MirBoolStateRead() | MirBoolConst() | MirPhi() | MirOperation():
+                case MirBoolInput() | MirBoolStateRead() | MirBoolConst() | MirPhi() | MirOperation():
                     pass  # the bool resource family (bool state/const/phi and bool-result ops), handled by MirBoolView
                 case MirInput():
                     raise UnsupportedConstruct(f"LIR construction does not support MIR input {vid} of this type")
@@ -323,8 +334,9 @@ class MirFloatView:
                 outputs.append(out)
         state_slots = [slot for slot in mir.state_slots if isinstance(slot, MirFloatStateSlot)]
         for vid in mir.input_ids:
-            if not isinstance(nodes.get(vid), MirFloatInput):
-                raise ValueError(f"MIR input ID {vid} must reference a MirFloatInput")
+            if not isinstance(mir.nodes.get(vid), (MirFloatInput, MirBoolInput)):
+                raise ValueError(f"MIR input ID {vid} must reference a MirFloatInput or MirBoolInput")
+        input_ids = [vid for vid in mir.input_ids if isinstance(nodes.get(vid), MirFloatInput)]
         unexpected = formats - {mir.float_format}
         if unexpected:
             ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
@@ -335,7 +347,7 @@ class MirFloatView:
             nodes=nodes,
             blocks=mir.blocks,
             entry=mir.entry,
-            input_ids=list(mir.input_ids),
+            input_ids=input_ids,
             outputs=outputs,
             state_slots=state_slots,
             fmt=mir.float_format,
@@ -353,8 +365,13 @@ class MirBoolView:
     nodes: dict[ValueId, MirBoolNode]
     blocks: list[MirBlock]
     entry: BlockId
+    input_ids: list[ValueId]
     outputs: list[MirBoolOutput]
     state_slots: list[MirBoolStateSlot]
+
+    @property
+    def input_nodes(self) -> dict[ValueId, MirBoolInput]:
+        return {vid: node for vid in self.input_ids if isinstance(node := self.nodes[vid], MirBoolInput)}
 
     @property
     def state_read_nodes(self) -> dict[ValueId, MirBoolStateRead]:
@@ -384,7 +401,7 @@ class MirBoolView:
     def from_mir(cls, mir: Mir) -> "MirBoolView":
         nodes: dict[ValueId, MirBoolNode] = {}
         for vid, node in mir.nodes.items():
-            if isinstance(node, (MirBoolStateRead, MirBoolConst)):
+            if isinstance(node, (MirBoolInput, MirBoolStateRead, MirBoolConst)):
                 nodes[vid] = node
             elif isinstance(node, MirOperation) and isinstance(node.scalar_type, BoolType):
                 nodes[vid] = node
@@ -392,7 +409,15 @@ class MirBoolView:
                 nodes[vid] = node
         outputs = [out for out in mir.outputs if isinstance(out, MirBoolOutput)]
         state_slots = [slot for slot in mir.state_slots if isinstance(slot, MirBoolStateSlot)]
-        return cls(nodes=nodes, blocks=mir.blocks, entry=mir.entry, outputs=outputs, state_slots=state_slots)
+        input_ids = [vid for vid in mir.input_ids if isinstance(nodes.get(vid), MirBoolInput)]
+        return cls(
+            nodes=nodes,
+            blocks=mir.blocks,
+            entry=mir.entry,
+            input_ids=input_ids,
+            outputs=outputs,
+            state_slots=state_slots,
+        )
 
 
 @dataclass
@@ -483,6 +508,11 @@ class MirBuilder:
 
     def float_input(self, name: str, scalar_type: FloatType) -> ValueId:
         vid = self._fresh(MirFloatInput(name, scalar_type))
+        self._input_ids.append(vid)
+        return vid
+
+    def bool_input(self, name: str, scalar_type: BoolType) -> ValueId:
+        vid = self._fresh(MirBoolInput(name, scalar_type))
         self._input_ids.append(vid)
         return vid
 

@@ -95,9 +95,9 @@ def spd_matrix(rng: np.random.Generator, n: int, diag_lo: float = 0.5, diag_hi: 
     return lower @ lower.T
 
 
-def encode_inputs(fmt: FloatFormat, values: dict[str, float]) -> dict[str, int]:
+def encode_inputs(fmt: FloatFormat, values: dict[str, float | bool]) -> dict[str, int]:
     """Encode a name->float mapping to name->ZKF-bits (the bit pattern the DUT receives)."""
-    return {name: fmt.encode(value) for name, value in values.items()}
+    return {name: int(value) if type(value) is bool else fmt.encode(value) for name, value in values.items()}
 
 
 def format_edge_bits(fmt: FloatFormat) -> list[int]:

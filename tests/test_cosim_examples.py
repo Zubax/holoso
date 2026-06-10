@@ -52,6 +52,8 @@ import poly3  # noqa: E402
 from cordic_sincos import CordicSinCos  # noqa: E402
 from iir1_lpf import IIR1LPF  # noqa: E402
 from pid import PID  # noqa: E402
+from phase_frequency_detector import PhaseFrequencyDetector  # noqa: E402
+from quadrature_encoder import QuadratureEncoder  # noqa: E402
 from recip_newton import NewtonReciprocal  # noqa: E402
 from remainder import remainder  # noqa: E402
 from schmitt_trigger import SchmittTrigger  # noqa: E402
@@ -80,10 +82,10 @@ class ExampleSpec:
     name: str
     inputs: tuple[str, ...]
     make_kernel: Callable[[], Callable[..., object]]
-    nominal: dict[str, float]  # baseline for the per-input edge sweep (each input perturbed in turn)
-    manual: list[dict[str, float]]  # sensible vectors; an ordered sequence for stateful kernels
-    draw_random: Callable[[np.random.Generator], dict[str, float]]
-    edge_values: tuple[float, ...]
+    nominal: dict[str, float | bool]  # baseline for the per-input edge sweep (each input perturbed in turn)
+    manual: list[dict[str, float | bool]]  # sensible vectors; an ordered sequence for stateful kernels
+    draw_random: Callable[[np.random.Generator], dict[str, float | bool]]
+    edge_values: tuple[float | bool, ...]
     protected: frozenset[str] = frozenset()  # inputs swept only over positive edges to keep a divisor away from zero
     protected_values: tuple[float, ...] = ()
 
@@ -232,6 +234,55 @@ _SPECS = [
         ],
         draw_random=_draw_scalars(("x",), -3.0, 3.0),
         edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="quadrature_encoder",
+        inputs=("a", "b"),
+        make_kernel=lambda: QuadratureEncoder().__call__,
+        nominal={"a": False, "b": False},
+        manual=[
+            {"a": False, "b": False},  # no transition
+            {"a": False, "b": True},  # forward sequence: 00 -> 01 -> 11 -> 10 -> 00
+            {"a": True, "b": True},
+            {"a": True, "b": False},
+            {"a": False, "b": False},
+            {"a": True, "b": False},  # reverse sequence: 00 -> 10 -> 11 -> 01 -> 00
+            {"a": True, "b": True},
+            {"a": False, "b": True},
+            {"a": False, "b": False},
+            {"a": True, "b": True},  # invalid simultaneous change
+            {"a": False, "b": False},
+            {"a": False, "b": True},
+        ],
+        draw_random=lambda rng: {
+            "a": bool(rng.integers(0, 2)),
+            "b": bool(rng.integers(0, 2)),
+        },
+        edge_values=(False, True),
+    ),
+    ExampleSpec(
+        name="phase_frequency_detector",
+        inputs=("ref_edge", "fb_edge", "clear"),
+        make_kernel=lambda: PhaseFrequencyDetector().__call__,
+        nominal={"ref_edge": False, "fb_edge": False, "clear": False},
+        manual=[
+            {"ref_edge": False, "fb_edge": False, "clear": True},
+            {"ref_edge": True, "fb_edge": False, "clear": False},  # reference leads -> up
+            {"ref_edge": False, "fb_edge": False, "clear": False},  # hold up while waiting
+            {"ref_edge": False, "fb_edge": True, "clear": False},  # feedback arrives -> reset
+            {"ref_edge": False, "fb_edge": True, "clear": False},  # feedback leads -> down
+            {"ref_edge": False, "fb_edge": False, "clear": False},  # hold down while waiting
+            {"ref_edge": True, "fb_edge": False, "clear": False},  # reference arrives -> reset
+            {"ref_edge": True, "fb_edge": True, "clear": False},  # simultaneous edges cancel
+            {"ref_edge": True, "fb_edge": False, "clear": False},
+            {"ref_edge": False, "fb_edge": False, "clear": True},  # asynchronous software-visible clear
+        ],
+        draw_random=lambda rng: {
+            "ref_edge": bool(rng.integers(0, 2)),
+            "fb_edge": bool(rng.integers(0, 2)),
+            "clear": bool(rng.integers(0, 2)),
+        },
+        edge_values=(False, True),
     ),
     ExampleSpec(
         name="recip_newton",

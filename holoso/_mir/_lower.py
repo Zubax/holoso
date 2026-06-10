@@ -169,6 +169,9 @@ class _LoweringContext:
 
     def _lower_bool_node(self, old_id: ValueId, node: Node) -> bool:
         match node:
+            case InPort(name=name, type=HirBoolType()):
+                self.remap[old_id] = self.builder.bool_input(name, ScalarBoolType())
+                return True
             case StateRead(slot=slot, type=HirBoolType()):
                 self.remap[old_id] = self.builder.bool_state_read(slot, ScalarBoolType())
                 return True

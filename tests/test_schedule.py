@@ -521,7 +521,7 @@ def test_float_view_rejects_non_input_input_id() -> None:
         outputs=[MirFloatOutput("out_0", 0)],
         state_slots=[],
     )
-    with pytest.raises(ValueError, match="must reference a MirFloatInput"):
+    with pytest.raises(ValueError, match="must reference a MirFloatInput or MirBoolInput"):
         MirFloatView.from_mir(mir)
 
 
@@ -534,7 +534,7 @@ def test_float_view_rejects_missing_input_id() -> None:
         outputs=[MirFloatOutput("out_0", 0)],
         state_slots=[],
     )
-    with pytest.raises(ValueError, match="must reference a MirFloatInput"):
+    with pytest.raises(ValueError, match="must reference a MirFloatInput or MirBoolInput"):
         MirFloatView.from_mir(mir)
 
 

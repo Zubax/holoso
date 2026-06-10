@@ -131,9 +131,13 @@ In Markdown, it is best to avoid bold `**` and italics `*` for emphasis; prefer 
 Prefer prose over lists, and avoid excessive formatting in general.
 These are not hard rules but rather soft suggestions.
 
+Don't hesitate to use rich Unicode where appropriate; e.g., in HTML reports, prefer `×` over `*` for multiplication,
+`µs` over `us` for microseconds, `🠄` instead of `=`/`<=`/`:=` for assignment, `≤` instead of `<=` for less-or-equal,
+and so on. Sensible use of emojis is also encouraged, especially in command-line output.
+
 Generated reports must be written in rich and colorful human-friendly HTML format, not Markdown.
 
-No need to add tests nor update the design docs for report-generation-related changes.
+No need to add tests nor update the design docs for report-generation-related changes (e.g., HTML backend).
 
 ## Timing closure
 

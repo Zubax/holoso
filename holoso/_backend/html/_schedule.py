@@ -196,7 +196,7 @@ def render_schedule(lir: Lir) -> str:
             step = base_pc + copy_step_cycle(bwrite.issue_cycle)
             dcol = bwrite.dst
             dord = col_ord[dcol]
-            tip = _esc(f"{bwrite.dst.stable_label} <= {_bool_source_label(bwrite.source.source)}")
+            tip = _esc(f"{bwrite.dst.stable_label} 🠄 {_bool_source_label(bwrite.source.source)}")
             writes_at[(step, dcol)] = writes_at.get((step, dcol), "") + f"<span class='wl' title='{tip}'>&#9662;</span>"
             state_cells.add((step, dcol))
             endpoints.add((dord, step))
@@ -217,7 +217,7 @@ def render_schedule(lir: Lir) -> str:
             continue
         step = lir.state_copy_step(slot)
         dord = col_ord[slot.reg]
-        tip = _esc(f"{slot.name} <= {_operand_label(slot.tap)}")
+        tip = _esc(f"{slot.name} 🠄 {_operand_label(slot.tap)}")
         writes_at[(step, slot.reg)] = (
             writes_at.get((step, slot.reg), "") + f"<span class='wl' title='{tip}'>&#9662;</span>"
         )
@@ -303,7 +303,7 @@ def render_schedule(lir: Lir) -> str:
 
     # One displayed row per clock cycle, cycle-accurate to the hardware: the accept/input-load cycle (0), then the
     # compute, latch, and fetch-staging cycles 1..II. out_valid rises on the last row (the present cycle == II).
-    in_cells: dict[ColKey, str] = {load.dst: _input_chip(f"in_{load.name}") for load in lir.float_inputs}
+    in_cells: dict[ColKey, str] = {load.dst: _input_chip(f"in_{load.name}") for load in lir.inputs}
     for slot in lir.float_state_slots:  # at cycle 0 the persistent registers hold their reset snapshot, not an input
         in_cells[slot.reg] = _state_chip(f"{slot.name} = {slot.reset_value!r}")
     for bslot in lir.bool_state_slots:  # boolean persistent slots likewise show their reset snapshot in their bX column
@@ -449,7 +449,7 @@ def _comparator_instances(lir: Lir) -> list[OperatorInstance]:
     return list(instances.values())
 
 
-_RELATION_SYMBOL = {"lt": "<", "le": "<=", "gt": ">", "ge": ">=", "eq": "==", "ne": "!="}
+_RELATION_SYMBOL = {"lt": "<", "le": "≤", "gt": ">", "ge": "≥", "eq": "=", "ne": "≠"}
 
 
 def _bool_source_label(source: BoolSource) -> str:
@@ -466,12 +466,12 @@ def _comparison_expr(op: CombScheduledOp) -> str:
         assert isinstance(operand, FloatOperand)  # comparison operands are float
         labels.append(_operand_label(operand))
     a, b = labels
-    return f"{a} {_RELATION_SYMBOL.get(relation.value, relation.value)} {b}"
+    return f"{a}{_RELATION_SYMBOL.get(relation.value, relation.value)}{b}"
 
 
 def _bool_op_text(op: CombScheduledOp) -> str:
-    """The comparison's expression for its chip/tooltip: ``b<dst> = <a> <relation> <b>`` with operand sign decoration."""
-    return f"{op.dst.stable_label} = {_comparison_expr(op)}"
+    """The comparison's expression for its chip/tooltip: ``b<dst> 🠄 <a> <relation> <b>`` with operand sign decoration."""
+    return f"{op.dst.stable_label} 🠄 {_comparison_expr(op)}"
 
 
 def _comb_operand_col(operand: FloatOperand | BoolOperand) -> ColKey | None:
@@ -490,8 +490,8 @@ def _comb_operand_label(operand: FloatOperand | BoolOperand) -> str:
 
 
 def _comb_op_text(op: CombScheduledOp) -> str:
-    """The expression for a non-comparison combinational op's chip/tooltip: ``<dst> = <operator>(<operands>)``."""
-    return f"{_col_label(op.dst)} = {op.operator.render(*[_comb_operand_label(o) for o in op.operands])}"
+    """The expression for a non-comparison combinational op's chip/tooltip: ``<dst> 🠄 <operator>(<operands>)``."""
+    return f"{_col_label(op.dst)} 🠄 {op.operator.render(*[_comb_operand_label(o) for o in op.operands])}"
 
 
 def _stage_columns(lir: Lir) -> list[tuple[OperatorInstance, int]]:
@@ -725,8 +725,10 @@ def _register_names(lir: Lir) -> dict[tuple[str, int], tuple[str, str]]:
     registers are anonymous scratch; both kinds may still be reused later, but their cycle-0 role is what the label names.
     """
     names: dict[tuple[str, int], tuple[str, str]] = {}
-    for load in lir.float_inputs:
-        names[("f", load.dst.index)] = (f"in_{load.name}", "input")
+    for fload in lir.float_inputs:
+        names[("f", fload.dst.index)] = (f"in_{fload.name}", "input")
+    for bload in lir.bool_inputs:
+        names[("b", bload.dst.index)] = (f"in_{bload.name}", "input")
     for slot in lir.float_state_slots:
         names[("f", slot.reg.index)] = (slot.name, "state")
     for bslot in lir.bool_state_slots:

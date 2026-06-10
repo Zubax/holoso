@@ -8,6 +8,7 @@ from .._hir import ValueId
 from .._mir import (
     Mir,
     MirBoolConst,
+    MirBoolInput,
     MirBoolOutput,
     MirBoolView,
     MirBranch,
@@ -70,6 +71,7 @@ def _build_single_block(mir: Mir, float_mir: MirFloatView, module_name: str) -> 
     swap = assign_commutative_ports(float_mir, sched, alloc)
     consts, const_pool = _build_const_pool(float_mir)
     float_ops = _build_ops(float_mir, sched, alloc, const_pool, swap)
+    inputs: list[FloatInputLoad | BoolInputLoad] = list(_build_inputs(float_mir, alloc))
     outputs: list[FloatOutputWire | BoolOutputWire] = list(_build_outputs(float_mir, alloc, const_pool))
     boundary = boundary_step(sched.makespan)
     return Lir(
@@ -83,7 +85,7 @@ def _build_single_block(mir: Mir, float_mir: MirFloatView, module_name: str) -> 
             nwr=_compute_nwr(sched),
             nload=_compute_nload(float_mir),
         ),
-        float_inputs=_build_inputs(float_mir, alloc),
+        inputs=inputs,
         float_ops=float_ops,
         outputs=outputs,
         float_state_slots=_build_state_slots(float_mir, alloc, const_pool),
@@ -256,9 +258,7 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
             nwr=max(1, len(instances)),
             nload=len(float_mir.input_ids),
         ),
-        float_inputs=[
-            FloatInputLoad(node.name, FloatRegRef(alloc.float_reg[vid])) for vid, node in float_mir.input_nodes.items()
-        ],
+        inputs=_build_cfg_inputs(mir, float_mir, bool_mir, alloc),
         float_ops=flat_ops,
         outputs=outputs,
         float_state_slots=float_state_slots,
@@ -500,11 +500,11 @@ def _allocate_cfg(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) -> _
         for pred, value, sign in phi.arms:
             float_copies.setdefault(pred, []).append((float_reg[vid], value, sign))
 
-    bool_slot_reg = {slot.name: i for i, slot in enumerate(bool_mir.state_slots)}
-    bool_reg: dict[ValueId, int] = {}
+    bool_reg: dict[ValueId, int] = {vid: i for i, vid in enumerate(bool_mir.input_ids)}
+    bool_slot_reg = {slot.name: len(bool_mir.input_ids) + i for i, slot in enumerate(bool_mir.state_slots)}
     for bvid, bnode in bool_mir.state_read_nodes.items():
         bool_reg[bvid] = bool_slot_reg[bnode.name]
-    nbreg = len(bool_mir.state_slots)
+    nbreg = len(bool_mir.input_ids) + len(bool_mir.state_slots)
     for vid in (*bool_mir.phi_nodes, *bool_mir.operation_nodes):  # phis and comparator results: each a fresh register
         bool_reg[vid] = nbreg
         nbreg += 1
@@ -642,6 +642,22 @@ def _build_inputs(mir: MirFloatView, alloc: FloatAllocation) -> list[FloatInputL
         if not isinstance(node, MirFloatInput):
             continue
         loads.append(FloatInputLoad(node.name, FloatRegRef(alloc.assign[vid])))
+    return loads
+
+
+def _build_cfg_inputs(
+    mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView, alloc: _CfgAllocation
+) -> list[FloatInputLoad | BoolInputLoad]:
+    loads: list[FloatInputLoad | BoolInputLoad] = []
+    for vid in mir.input_ids:
+        float_node = float_mir.nodes.get(vid)
+        bool_node = bool_mir.nodes.get(vid)
+        if isinstance(float_node, MirFloatInput):
+            loads.append(FloatInputLoad(float_node.name, FloatRegRef(alloc.float_reg[vid])))
+        elif isinstance(bool_node, MirBoolInput):
+            loads.append(BoolInputLoad(bool_node.name, BoolRegRef(alloc.bool_reg[vid])))
+        else:
+            raise AssertionError(f"unhandled MIR input {vid}")
     return loads
 
 

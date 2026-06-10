@@ -146,12 +146,31 @@ class _ShiftRegister2:
         return out
 
 
+class _UnusedBoolInputAccumulator:
+    def __init__(self) -> None:
+        self.y = 0.0
+
+    def __call__(self, flag: bool, x):  # type: ignore[no-untyped-def]
+        self.y = self.y + x + 1.0
+        return self.y
+
+
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_shift_register_backpressure(sim: str) -> None:
     # The returned value taps a copy-slot register and the chain advances every accept, so together with the testbench's
     # random back-pressure this pins down that the boundary copy fires exactly once per accepted transaction -- no
     # mid-handshake output mutation and no state over-advance while out_ready is held low.
     run_cosim(sim, _ShiftRegister2().__call__, FloatFormat(6, 18), "shift2")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_unused_bool_input_keeps_cfg_state_timing(sim: str) -> None:
+    fmt = FloatFormat(6, 18)
+    vectors = [
+        {"flag": 0, "x": fmt.encode(2.0)},
+        {"flag": 1, "x": fmt.encode(4.0)},
+    ]
+    run_cosim(sim, _UnusedBoolInputAccumulator().__call__, fmt, "unused_bool_state", vectors=vectors)
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)

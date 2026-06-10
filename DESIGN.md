@@ -148,7 +148,9 @@ Name resolution follows Python: a local binding (parameter or any assignment tar
 same-named global, and a global that shadows a built-in or intrinsic is honored only when it is callable -- a
 non-callable shadow (e.g. `abs = 5`) is rejected rather than silently lowered to the built-in it spells.
 
-Positional and keyword-only parameters both become input ports. Reductions (`max`, `argmax`, `mean`, `@`) lower to
+Positional and keyword-only parameters both become input ports. Parameters annotated as `bool` become 1-bit boolean
+ports; unannotated and float-annotated scalar parameters become floating-point ports. Reductions (`max`, `argmax`,
+`mean`, `@`) lower to
 compare/select trees and multiply chains. An aggregate attribute's shape is read from its reset value (list, tuple,
 or numpy array); a numpy field may also carry an explicit jaxtyping annotation (`Float64[np.ndarray, "3"]`, concrete
 dims only) validated against the value, while a shape-less annotation (`list[float]`, `numpy.typing.NDArray`) leaves
@@ -218,7 +220,7 @@ Branch vs. select (the core control-flow decision):
   optional if-conversion peephole that collapses a tiny, pure, cheap diamond. Conservative by default.
 
 HIR is a real CFG of basic blocks (entry first, a single `Ret` exit) carrying an SSA value DAG; `bool` is implemented
-alongside float (`BoolConst`, bool `StateRead`, bool `Phi`), and a `StateSlot`'s reset is a typed `Const`
+alongside float (`BoolConst`, bool `InPort`, bool `StateRead`, bool `Phi`), and a `StateSlot`'s reset is a typed `Const`
 (`FloatConst`/`BoolConst`) so a boolean state register (e.g. `iir1_lpf._first`) carries a boolean snapshot. The node
 names stay explicit (`FloatConst`, `FloatAdd`, etc.) so int nodes can be added later without overloading float
 semantics. Negation and absolute value are ordinary semantic float operations in HIR, not hardware details until
@@ -234,9 +236,10 @@ on only one arm carries its live-in on the other). This CFG is carried through M
 float view and a boolean view sharing the block skeleton), scheduled and register-allocated per block, and lowered to
 RTL (branch microcode) and to the numerical model.
 
-Boolean values come from boolean state reads, boolean constants, float comparisons, boolean logic, and float->bool
-casts; a bool->float cast crosses back the other way. These are one MIR/LIR operation node (`MirOperation` /
-`CombScheduledOp`), keyed on the operator's signature -- the node belongs to the resource family of its result type
+Boolean values come from boolean input ports, boolean state reads, boolean constants, float comparisons,
+boolean logic, and float->bool casts; a bool->float cast crosses back the other way. These are one MIR/LIR operation
+node (`MirOperation` / `CombScheduledOp`), keyed on the operator's signature -- the node belongs to the resource
+family of its result type
 (float or bool) and its operands may reference either bank -- so the comparison, the logic gates, and both casts are
 all instances of one uniform combinational-operation category rather than special cases. Each is latency-1
 register-resident: it reads its register operand(s), applies inline combinational logic, and its result lands one
@@ -358,7 +361,7 @@ resources:
   float_instances: [inst(operator), ...]    # each inst binds a fully-specified FloatHardwareOperator
   float_regfile: fmt + N float regs         # FF bank; the backend synthesizes a sparse, schedule-specific mux fabric
   float_consts: [fconst(magnitude), ...]    # nonnegative magnitudes; the sign rides the consumer's sign sideband
-  float_inputs: [input_load(name, dst_reg), ...]
+  inputs: [input_load(name, typed_dst_reg), ...]  # ordered float and boolean input ports
   outputs: [output_wire(name, typed_source), ...]  # ordered float and boolean result/state ports
 
 scheduled float op:
@@ -525,11 +528,12 @@ address compare). The two sides are symmetric: the read-address field carries th
 write-address field the dense write-target index (each `ceil(log2 set)` wide, not the file-wide register index),
 so the controller VLIW word carries only those narrow set-local indices plus the per-register write enable.
 
-Inputs preload directly into the low registers `0..nload-1` on the accept step, captured together under a single
-`if (in_ready && in_valid)` block rather than through write ports. `nload` spans the input block (the highest input
-register index plus one). Outputs are tapped directly from their register by fixed index. Persistent state registers
-sit directly above the input block; a coalesced slot is written by its producing operator like any other result,
-and a non-coalesced slot is copied into its register on its install step (`pc == state_copy_step`, which is `LASTPC`
+Inputs preload directly into the low registers of their own bank on the accept step, captured together under a single
+`if (in_ready && in_valid)` block rather than through write ports. Float `nload` spans the float input block (the
+highest float input register index plus one); boolean inputs are allocated analogously in the boolean bank. Outputs
+are tapped directly from their register by fixed index. Persistent state registers sit directly above the input block
+in their bank; a coalesced slot is written by its producing operator like any other result, and a non-coalesced slot
+is copied into its register on its install step (`pc == state_copy_step`, which is `LASTPC`
 for a boundary copy) by a small reg->reg block beside the input load, capturing its source on that step;
 an early install (when the source is an ordinary register read by nothing later) frees that source register for reuse.
 

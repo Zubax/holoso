@@ -666,6 +666,42 @@ def test_model_boolean_only_state_output() -> None:
         assert model()[0] is reference()
 
 
+def test_model_boolean_input_and_mixed_outputs() -> None:
+    def gate(flag: bool, x):  # type: ignore[no-untyped-def]
+        if flag:
+            y = x
+        else:
+            y = -x
+        return flag, y
+
+    model = build_model(build(_run(gate), "bool_gate"))
+    assert model.input_names == ("flag", "x")
+    got_flag, got_y = model(True, 2.0)
+    assert got_flag is True
+    assert float(got_y) == 2.0
+    got_flag, got_y = model(False, 2.0)
+    assert got_flag is False
+    assert float(got_y) == -2.0
+    with pytest.raises(TypeError, match="input 0 must be bool"):
+        model(1.0, 2.0)
+
+
+class _UnusedBoolInputStateAccumulator:
+    def __init__(self) -> None:
+        self.y = 0.0
+
+    def __call__(self, flag: bool, x):  # type: ignore[no-untyped-def]
+        self.y = self.y + x + 1.0
+        return self.y
+
+
+def test_model_unused_boolean_input_keeps_cfg_state_timing() -> None:
+    model = build_model(build(_run(_UnusedBoolInputStateAccumulator().__call__), "unused_bool"))
+    assert model.lir.is_control_flow
+    assert float(model(False, 2.0)[0]) == 3.0
+    assert float(model(True, 4.0)[0]) == 8.0
+
+
 def test_compare_float_values_exact_for_wide_formats() -> None:
     # The model's comparison must be exact, not via a lossy float64 decode: two values differing only in the lowest
     # mantissa bit of a >53-bit mantissa must compare unequal (decode would collapse them).

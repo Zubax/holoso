@@ -18,6 +18,7 @@ from .._hir import *
 _Path = list[int | str]
 
 _ABSENT = object()  # sentinel distinguishing a missing global from one explicitly bound to None during name resolution
+_NO_PARAMETER_ANNOTATION = object()
 
 # A static ``for`` loop with at most this many trips fully unrolls; a larger count is rejected (a counted back-edge
 # loop would need a runtime integer counter, which is not implemented -- use a ``while`` for a variable trip count).
@@ -359,7 +360,17 @@ class _Lowerer:
             self._check_state_slot_names()
         # Positional then keyword-only parameters each become a scalar input port, in declaration order.
         for arg in [*params, *args.kwonlyargs]:
-            self._env[arg.arg] = _Scalar(self._builder.float_input(arg.arg))
+            self._env[arg.arg] = _Scalar(self._input(arg))
+
+    def _input(self, arg: ast.arg) -> ValueId:
+        annotation = self._fn.__annotations__.get(arg.arg, _NO_PARAMETER_ANNOTATION)
+        if annotation is _NO_PARAMETER_ANNOTATION or annotation is float:
+            return self._builder.float_input(arg.arg)
+        if annotation is bool:
+            return self._builder.bool_input(arg.arg)
+        raise UnsupportedConstruct(
+            f"unsupported parameter annotation for {arg.arg!r}: expected float or bool", self._loc(arg)
+        )
 
     def _lower_body(self, fndef: ast.FunctionDef) -> None:
         returned = self._lower_stmts(fndef.body)

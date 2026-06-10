@@ -4,6 +4,7 @@ from ._build import build as build
 from ._ir import Lir as Lir
 from ._ir import (
     BoolConstRef as BoolConstRef,
+    BoolInputLoad as BoolInputLoad,
     BoolOperand as BoolOperand,
     BoolOutputWire as BoolOutputWire,
     BoolRegRef as BoolRegRef,
@@ -13,6 +14,7 @@ from ._ir import (
     CombScheduledOp as CombScheduledOp,
     FloatConstRef as FloatConstRef,
     FloatCopy as FloatCopy,
+    FloatInputLoad as FloatInputLoad,
     FloatOperand as FloatOperand,
     FloatOutputWire as FloatOutputWire,
     FloatOperatorInstance as FloatOperatorInstance,

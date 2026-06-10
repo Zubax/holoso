@@ -26,6 +26,8 @@ import poly3  # noqa: E402
 from cordic_sincos import CordicSinCos  # noqa: E402
 from iir1_lpf import IIR1LPF  # noqa: E402
 from pid import PID  # noqa: E402
+from phase_frequency_detector import PhaseFrequencyDetector  # noqa: E402
+from quadrature_encoder import QuadratureEncoder  # noqa: E402
 from recip_newton import NewtonReciprocal  # noqa: E402
 from remainder import remainder  # noqa: E402
 from schmitt_trigger import SchmittTrigger  # noqa: E402
@@ -43,6 +45,8 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "iir1_lpf": lambda: IIR1LPF().__call__,
     "pid": lambda: PID().__call__,
     "schmitt_trigger": lambda: SchmittTrigger().__call__,
+    "quadrature_encoder": lambda: QuadratureEncoder().__call__,
+    "phase_frequency_detector": lambda: PhaseFrequencyDetector().__call__,
     "recip_newton": lambda: NewtonReciprocal().__call__,
     "remainder": lambda: remainder,
     "cordic_sincos": lambda: CordicSinCos().__call__,

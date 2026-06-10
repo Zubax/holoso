@@ -11,14 +11,15 @@ reloads the snapshot the hardware loads at module reset.
 from dataclasses import dataclass, field
 
 from .._value import FloatValue
-from .._lir import BoolOutputWire, CombScheduledOp, FloatConstRef, FloatOperand, FloatOutputWire, FloatRegRef
+from .._lir import BoolInputLoad, BoolOutputWire, CombScheduledOp, FloatConstRef, FloatInputLoad, FloatOperand
+from .._lir import FloatOutputWire, FloatRegRef
 from .._lir import FloatScheduledOp, Lir
 from .._lir import InputProducer, OperationProducer, StateProducer, latest_producer_before
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
 from .._operators import *
 from .._type import FloatFormat
 
-type ModelInput = FloatValue | float
+type ModelInput = FloatValue | float | bool
 type ModelOutput = FloatValue | bool
 
 
@@ -35,6 +36,12 @@ def _coerce_input(value: ModelInput, fmt: FloatFormat, index: int) -> FloatValue
     if type(value) is float:
         return FloatValue.from_float(fmt, value)
     raise TypeError(f"input {index} must be FloatValue or float, got {type(value).__name__}")
+
+
+def _coerce_bool_input(value: ModelInput, index: int) -> bool:
+    if type(value) is bool:
+        return value
+    raise TypeError(f"input {index} must be bool, got {type(value).__name__}")
 
 
 @dataclass(slots=True)
@@ -69,13 +76,20 @@ class NumericalModel:
 
     def __call__(self, *inputs: ModelInput) -> tuple[ModelOutput, ...]:
         lir = self.lir
-        if len(inputs) != len(lir.float_inputs):
-            raise ValueError(f"expected {len(lir.float_inputs)} inputs, got {len(inputs)}")
+        if len(inputs) != len(lir.inputs):
+            raise ValueError(f"expected {len(lir.inputs)} inputs, got {len(inputs)}")
         fmt = lir.float_regfile.fmt
-        in_values = [_coerce_input(value, fmt, index) for index, value in enumerate(inputs)]
+        float_values: list[FloatValue] = []
+        bool_values: list[bool] = []
+        for index, (load, raw_input) in enumerate(zip(lir.inputs, inputs, strict=True)):
+            match load:
+                case FloatInputLoad():
+                    float_values.append(_coerce_input(raw_input, fmt, index))
+                case BoolInputLoad():
+                    bool_values.append(_coerce_bool_input(raw_input, index))
         if lir.is_control_flow:
-            return self._run_cfg(in_values)
-        consts = [FloatValue.from_float(fmt, value) for value in lir.float_consts]
+            return self._run_cfg(float_values, bool_values)
+        consts = [FloatValue.from_float(fmt, const_value) for const_value in lir.float_consts]
 
         # Per-register write timeline: (commit_cycle, producer) in increasing commit order. A slot register starts the
         # initiation holding its live-in (the value carried over from the previous call) and may be overwritten by a
@@ -85,13 +99,13 @@ class NumericalModel:
 
         op_values: dict[int, FloatValue] = {}
 
-        def value(source: FloatRegRef | FloatConstRef, read_cycle: int) -> FloatValue:
+        def source_value(source: FloatRegRef | FloatConstRef, read_cycle: int) -> FloatValue:
             if isinstance(source, FloatConstRef):
                 return consts[source.index]
             producer = latest_producer_before(writes, source, read_cycle)
             match producer:
                 case InputProducer(index=index):
-                    return in_values[index]
+                    return float_values[index]
                 case OperationProducer(index=index):
                     return op_values[index]
                 case StateProducer(index=index):
@@ -99,7 +113,7 @@ class NumericalModel:
 
         def eval_tap(operand: FloatOperand, cycle: int) -> FloatValue:
             # One evaluation for every source tap: an operator operand, an output wire, or a state slot's live-out.
-            return _apply_sign(value(operand.source, cycle), operand.sign)
+            return _apply_sign(source_value(operand.source, cycle), operand.sign)
 
         # Evaluate in commit order: a producer commits before any consumer issues, so its value is ready in op_values.
         for j in sorted(
@@ -117,7 +131,7 @@ class NumericalModel:
         self._state = [eval_tap(slot.tap, lir.state_copy_step(slot)) for slot in lir.float_state_slots]
         return outputs
 
-    def _run_cfg(self, in_values: list[FloatValue]) -> tuple[ModelOutput, ...]:
+    def _run_cfg(self, float_values: list[FloatValue], bool_values: list[bool]) -> tuple[ModelOutput, ...]:
         """
         Execute a control-flow microprogram by following the taken path block by block. Each block evaluates its
         scheduled float ops (in commit order), installs its phi-arm copies and boolean writes, then its terminator
@@ -125,11 +139,17 @@ class NumericalModel:
         """
         lir = self.lir
         fmt = lir.float_regfile.fmt
-        consts = [FloatValue.from_float(fmt, value) for value in lir.float_consts]
-        fregs: dict[int, FloatValue] = {load.dst.index: value for load, value in zip(lir.float_inputs, in_values)}
-        for slot, value in zip(lir.float_state_slots, self._state):
-            fregs[slot.reg.index] = value
-        bregs: dict[int, bool] = {slot.reg.index: value for slot, value in zip(lir.bool_state_slots, self._bool_state)}
+        consts = [FloatValue.from_float(fmt, const_value) for const_value in lir.float_consts]
+        fregs: dict[int, FloatValue] = {
+            load.dst.index: input_value for load, input_value in zip(lir.float_inputs, float_values)
+        }
+        for fslot, state_value in zip(lir.float_state_slots, self._state):
+            fregs[fslot.reg.index] = state_value
+        bregs: dict[int, bool] = {
+            load.dst.index: input_value for load, input_value in zip(lir.bool_inputs, bool_values)
+        }
+        for bslot, bool_state_value in zip(lir.bool_state_slots, self._bool_state):
+            bregs[bslot.reg.index] = bool_state_value
 
         def fval(operand: FloatOperand) -> FloatValue:
             source = operand.source
@@ -208,7 +228,7 @@ class NumericalModel:
 
     @property
     def input_names(self) -> tuple[str, ...]:
-        return tuple(load.name for load in self.lir.float_inputs)
+        return tuple(load.name for load in self.lir.inputs)
 
     @property
     def output_names(self) -> tuple[str, ...]:

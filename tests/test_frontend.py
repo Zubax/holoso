@@ -22,6 +22,7 @@ from holoso._hir import (
     Branch,
     FloatAbs,
     FloatAdd,
+    FloatType,
     FloatConst,
     FloatDiv,
     FloatMul,
@@ -29,6 +30,7 @@ from holoso._hir import (
     FloatNeg,
     FloatRelational,
     FloatToBool,
+    InPort,
     Jump,
     Operation,
     Phi,
@@ -105,6 +107,36 @@ def test_small_kernel_inputs_outputs_and_ops() -> None:
     assert _arith_count(hir, FloatMul) == 2  # (a-b)*0.25 and a*b
     assert _arith_count(hir, FloatAdd) == 2  # subtraction (add+neg) and the final add
     assert _arith_count(hir, FloatNeg) == 1  # the negation introduced by subtraction
+
+
+def test_bool_parameter_annotation_becomes_bool_input() -> None:
+    def passthrough(flag: bool):  # type: ignore[no-untyped-def]
+        return flag
+
+    hir = lower(passthrough)
+    assert hir.input_names() == ["flag"]
+    node = hir.nodes[hir.input_ids[0]]
+    assert isinstance(node, InPort)
+    assert isinstance(node.type, BoolType)
+    assert [o.name for o in hir.outputs] == ["out_0"]
+
+
+def test_float_parameter_annotation_remains_float_input() -> None:
+    def passthrough(value: float):  # type: ignore[no-untyped-def]
+        return value
+
+    hir = lower(passthrough)
+    node = hir.nodes[hir.input_ids[0]]
+    assert isinstance(node, InPort)
+    assert isinstance(node.type, FloatType)
+
+
+def test_unsupported_scalar_parameter_annotation_is_rejected() -> None:
+    def passthrough(value: int):  # type: ignore[no-untyped-def]
+        return value
+
+    with pytest.raises(UnsupportedConstruct, match="parameter annotation"):
+        lower(passthrough)
 
 
 def test_pow_expands_to_multiply_chain() -> None:

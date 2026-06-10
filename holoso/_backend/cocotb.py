@@ -53,16 +53,29 @@ def _output_bits(value):
     return int(value) if isinstance(value, bool) else value.bits
 
 
+def _input_bits(load, rng, lo, hi):
+    if type(load).__name__ == "BoolInputLoad":
+        return rng.randint(0, 1)
+    return _FMT.encode(rng.uniform(lo, hi))
+
+
+def _input_value(load, bits):
+    if type(load).__name__ == "BoolInputLoad":
+        return bool(bits)
+    return holoso.FloatValue.from_bits(_FMT, bits)
+
+
 @cocotb.test()
 async def cosim(dut):
     rng = random.Random(_SEED)
+    input_loads = _MODEL.lir.inputs
     in_names = _MODEL.input_names
     out_names = _MODEL.output_names
     if _VECTORS is not None:
         sequence = _VECTORS
     else:
         lo, hi = _DEFAULT_RANGE
-        sequence = [[_FMT.encode(rng.uniform(lo, hi)) for _ in in_names] for _ in range(_DEFAULT_COUNT)]
+        sequence = [[_input_bits(load, rng, lo, hi) for load in input_loads] for _ in range(_DEFAULT_COUNT)]
 
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await FallingEdge(dut.clk)
@@ -78,7 +91,7 @@ async def cosim(dut):
     for index, in_bits in enumerate(sequence):
         # The model is fed exactly the bits the DUT receives, so the comparison is bit-exact. For a stateful module
         # this is one step of a sequence: the model and DUT carry their state forward together across iterations.
-        expected = _MODEL(*[holoso.FloatValue.from_bits(_FMT, bits) for bits in in_bits])
+        expected = _MODEL(*[_input_value(load, bits) for load, bits in zip(input_loads, in_bits)])
         exp_bits = [_output_bits(value) for value in expected]
 
         while int(dut.in_ready.value) != 1:

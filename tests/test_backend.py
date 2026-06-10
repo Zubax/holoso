@@ -180,6 +180,23 @@ def test_boolean_output_port_is_one_bit_and_assigned() -> None:
     assert re.search(r"\bassign state_y = (?:1'b[01]|bregs\[\d+\]);", verilog)
 
 
+def test_boolean_input_port_is_one_bit_and_loaded() -> None:
+    def passthrough(flag: bool):  # type: ignore[no-untyped-def]
+        return flag
+
+    fmt = FloatFormat(8, 24)
+    lir = build(_run(passthrough, _ops(fmt)), "bool_input")
+    assert [load.name for load in lir.inputs] == ["flag"]
+    (port,) = lir.input_ports
+    assert port.name == "in_flag"
+    assert isinstance(port.scalar_type, BoolType)
+    assert port.width == 1
+    verilog = generate(lir).verilog
+    assert re.search(r"\binput  wire in_flag\b", verilog)
+    assert re.search(r"\bbregs\[\d+\] <= in_flag;", verilog)
+    assert re.search(r"\bassign out_0 = bregs\[\d+\];", verilog)
+
+
 @requires_iverilog
 def test_boolean_only_stateful_module_elaborates(tmp_path: Path) -> None:
     class Toggle:
