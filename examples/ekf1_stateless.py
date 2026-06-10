@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""
+A pure stateless combined EKF update step; it accepts the old P matrix URT, Q diagonal, R diagonal, the old x states,
+and the new measurements, and returns the flattened updated P URT and x. It has been constructed from symbolic
+equations using SymPy. This code is rich in math, which Holoso handles very efficiently.
+"""
 
 from pathlib import Path
 import holoso
@@ -6,14 +11,8 @@ import holoso
 
 def update_x_P(P00, P01, P02, P11, P12, P22, Q_R, Q_g, Q_i, R_ct, R_shunt, dt, x_R, x_g, x_i, z_ct, z_shunt):
     """
-    All inputs are floating point scalars that are translated into Verilog `input wire [WFULL-1:0]` ports,
-    where WFULL = WEXP + WMAN, where WEXP and WMAN are the bit width of the exponent field and the significand
-    (including the hidden bit).
-    The float format to use in the generated Verilog is specified by constructing the operators with
-    `holoso.FloatFormat(wexp: int, wman: int)`.
-
-    The return type may be a scalar or a sequence, potentially nested (such as matrices); in the latter case the
-    sequences are flattened in the row-major order, and each element thereof becomes a separate Verilog output port.
+    All inputs are floating point scalars. The float format to use in the generated RTL code is specified at synthesis.
+    The return values are flattened in the row-major order, and each element thereof becomes a separate RTL output port.
     """
     x0 = R_ct * R_shunt
     x1 = x_R**2
@@ -26,7 +25,7 @@ def update_x_P(P00, P01, P02, P11, P12, P22, Q_R, Q_g, Q_i, R_ct, R_shunt, dt, x
     x8 = x5 * x7
     x9 = P02 + P12 * dt
     x10 = x6 * x_R
-    x11 = 2 * x10
+    x11 = 2 * x10  # Optimized into a float arithmetic shift instead of multiplication.
     x12 = x11 * x9
     x13 = P11 + Q_g
     x14 = R_shunt * x13
@@ -112,10 +111,7 @@ def update_x_P(P00, P01, P02, P11, P12, P22, Q_R, Q_g, Q_i, R_ct, R_shunt, dt, x
 
 
 def main() -> None:
-    # The kernel is float-format-agnostic, but each scalar width wants its own operator pipelining, so the OpConfig is
-    # built per float format. The narrow 24-bit default (e6/m18) closes single-cycle, so its operators take no extra
-    # stages; the wide 44-bit datapath (e8/m36) needs deeper operator pipelines to close timing. These wide stages
-    # mirror the ones the synth_examples Nox session passes for the e8/m36 flows.
+    # Each scalar width wants its own operator pipelining to close timings, so the OpConfig is built per float format.
     narrow = holoso.FloatFormat(wexp=6, wman=18)
     wide = holoso.FloatFormat(wexp=8, wman=36)
     configs = [

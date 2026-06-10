@@ -86,7 +86,7 @@ def _admits_tenant(slot_gaps: dict[int, tuple[int, int]], reg: int, read_cycle: 
 # build time for a deeper search. The environment override is for testing only; eventually we might add an API handle.
 _REFINE_MAXITER = int(os.getenv("HOLOSO_REGALLOC_EFFORT", "5000"))
 
-# Balance of reach against register count, layered on the hardware-accurate liveness. ``_WRITE_SELECT_CAP`` bounds how
+# Balance of reach against register count, layered on the hardware-accurate liveness. ``_REG_REUSE_WRITE_CAP`` bounds how
 # wide a per-register write select the compaction may build (the ":1" of the select -- the number of distinct producers
 # sharing a register); reuse never widens a read mux beyond a fresh register, so the write select is the only mux a
 # compacted coloring can grow. ``_REG_PRICE`` is what one freed register is worth in mux-arm units: the allocator keeps
@@ -97,7 +97,7 @@ _REFINE_MAXITER = int(os.getenv("HOLOSO_REGALLOC_EFFORT", "5000"))
 #
 # These two are EXPERIMENTAL / ADVANCED knobs with no user-facing surface; they are read once from the environment for
 # tuning and may be promoted to proper parameters if a real need arises.
-_WRITE_SELECT_CAP = int(os.getenv("HOLOSO_WRITE_SELECT_CAP", "2"))
+_REG_REUSE_WRITE_CAP = int(os.getenv("HOLOSO_REG_REUSE_WRITE_CAP", "2"))
 _REG_PRICE = float(os.getenv("HOLOSO_REG_PRICE", "2.0"))
 _NO_CAP = 1 << 30  # an effectively unbounded write-select budget, used for the reach-minimal coloring
 _INFEASIBLE_COST = 1e18  # annealing penalty for an undecodable point (far above any real mux-fan-in objective)
@@ -310,7 +310,7 @@ def allocate_float(
 
     movable = [vid for vid in operation_values if vid not in pinned]
     fresh_start = nload + len(mir.state_slots)
-    cap, price = _WRITE_SELECT_CAP, _REG_PRICE
+    cap, price = _REG_REUSE_WRITE_CAP, _REG_PRICE
 
     def greedy_seed(compact: bool, budget: int) -> tuple[dict[ValueId, int], int]:
         seed = _greedy(

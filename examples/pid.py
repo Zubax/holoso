@@ -6,7 +6,6 @@ The very first update is treated specially to avoid the initial spike.
 """
 
 from pathlib import Path
-
 import holoso
 
 

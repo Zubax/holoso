@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
-Rotation-mode CORDIC computing ``(cos theta, sin theta)`` with no multiplier on the rotation: each iteration is an
+Rotation-mode CORDIC computing cos(theta), sin(theta) with no multiplier on the rotation: each iteration is an
 add/subtract and a power-of-two scale ``2**-i`` (an exact shift), with a per-iteration sign decision driving the
-direction of micro-rotation. The fixed arctan table and the aggregate gain fold at compile time; the loop unrolls
-because the shift amount ``2**-i`` is a per-iteration compile-time constant (a runtime variable shift is not a Holoso
-operator). The result is a flat sequence of sign-branch diamonds -- comparisons feeding branches over a small datapath.
+direction of micro-rotation. The fixed arctan table and the aggregate gain fold at compile time; the loop unrolls.
+The result is a flat sequence of sign-branch diamonds -- comparisons feeding branches over a small datapath.
+
+TODO FIXME: This is currently not accepted due to failure to unroll the loop; this should be fixed in the frontend.
 """
 
 import math
 from pathlib import Path
-
 import holoso
-
-ITERATIONS = 12
 
 
 class CordicSinCos:
-    def __init__(self, *, iterations: int = ITERATIONS) -> None:
+    def __init__(self, *, iterations: int = 12) -> None:
         self.iterations: int = iterations
         gain = 1.0
         for i in range(iterations):
@@ -28,7 +26,7 @@ class CordicSinCos:
         x = self.gain
         y = 0.0
         z = theta  # residual angle, driven toward zero
-        for i in range(ITERATIONS):
+        for i in range(self.iterations):  # TODO: currently fails: range(...) needs 1 to 3 static integer arguments
             if z >= 0.0:
                 x_next = x - y * (2.0**-i)
                 y_next = y + x * (2.0**-i)
@@ -52,7 +50,7 @@ def main() -> None:
         holoso.FCmpOperator(float_format),
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
-    result = holoso.synthesize(CordicSinCos().__call__, ops)
+    result = holoso.synthesize(CordicSinCos(iterations=12).__call__, ops)
     for filename, path in result.write(out_dir).items():
         print(f"{filename}: {path}")
 

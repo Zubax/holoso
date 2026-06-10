@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""
+A simple polynomial demo kernel; a pure multiply-add dependency chain (alternating fmul and fadd) in which every
+intermediate is single-use, making it the forwarding-ideal counterpoint to the reuse-heavy ekf1_stateless kernel.
+"""
 
 from pathlib import Path
 import holoso
@@ -7,8 +11,6 @@ import holoso
 def poly3(x, c0, c1, c2, c3):
     """
     Degree-3 polynomial evaluated in Horner form: ((c3 * x + c2) * x + c1) * x + c0.
-    A pure multiply-add dependency chain (alternating fmul and fadd) in which every intermediate is single-use,
-    making it the forwarding-ideal counterpoint to the reuse-heavy ekf1_stateless kernel.
     """
     return ((c3 * x + c2) * x + c1) * x + c0
 

@@ -8,11 +8,12 @@ the header re-tests the condition each iteration (unlike the fixed-count loops, 
 """
 
 from pathlib import Path
-
 import holoso
 
 
 class NewtonReciprocal:
+    """Computes 1/x with the given tolerance."""
+
     def __init__(self, *, tolerance: float = 2.0**-12) -> None:
         self.tolerance: float = tolerance
 

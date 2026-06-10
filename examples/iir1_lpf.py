@@ -1,11 +1,15 @@
-from pathlib import Path
+#!/usr/bin/env python3
+"""
+A single-pole low-pass IIR filter.
+"""
 
+from pathlib import Path
 import holoso
 
 
 class IIR1LPF:
     """
-    A single-pole low-pass IIR filter. Difference equation: y[n] = y[n-1] + alpha * (x[n] - y[n-1])
+    A single-pole low-pass IIR filter. Difference equation: y[n] = y[n-1] + alpha * (x[n] - y[n-1]).
     """
 
     def __init__(self, *, ALPHA: float = 2**-16):

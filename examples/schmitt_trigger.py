@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 A Schmitt trigger: a comparator with hysteresis. The output latches high once the input rises above ``HIGH`` and low
-once it falls below ``LOW``; between the two thresholds it holds its previous value (the hysteresis deadband). The
-output state is carried as a float (0.0 / 1.0) so it is observable on a data port, and the two threshold tests are
-data-dependent branches that leave the state untouched in the deadband (a one-arm write merged against the live-in).
+once it falls below ``LOW``; between the two thresholds it holds its previous value (the hysteresis deadband).
+The two threshold tests are data-dependent branches that leave the state untouched in the deadband.
+TODO FIXME: boolean ports are not yet supported.
 """
 
 from pathlib import Path
@@ -12,17 +12,17 @@ import holoso
 
 
 class SchmittTrigger:
-    def __init__(self, *, high: float = 1.0, low: float = -1.0) -> None:
+    def __init__(self, *, high: float = 1.0, low: float = -1.0, initial: bool = False) -> None:
         self.high: float = high
         self.low: float = low
-        self.y: float = 0.0  # persistent output state: 1.0 (high) or 0.0 (low), held in the deadband
+        self.y: bool = initial  # persistent output state held in the deadband
 
-    def __call__(self, x: float, /) -> float:
+    def __call__(self, x: float, /) -> bool:
         if x > self.high:
-            self.y = 1.0
+            self.y = True
         elif x < self.low:
-            self.y = 0.0
-        return self.y
+            self.y = False
+        return self.y  # Duplicates the public member `y`, so this output port will be elided.
 
 
 def main() -> None:
