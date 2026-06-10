@@ -249,6 +249,27 @@ def test_zero_trip_for_write_does_not_mark_attribute_assigned() -> None:
     assert [slot.name for slot in hir.state_slots] == ["y"]  # _flag stays a read-only constant; only y is state
 
 
+def test_zero_trip_self_attr_range_write_does_not_mark_attribute_assigned() -> None:
+    # A read-only integer attribute used as a static range bound must be visible to the read-only assignment scan too.
+    # Otherwise the scan treats the zero-trip loop body as reachable and later fails to fold the read-only flag guard.
+    class ZeroSelfRangeFlag:
+        def __init__(self) -> None:
+            self.iterations = 0
+            self._flag = False
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            for _ in range(self.iterations):
+                self._flag = True  # noqa -- zero-trip loop: never runs
+            if self._flag:
+                return x
+            self.y = x
+            return self.y
+
+    hir = lower(ZeroSelfRangeFlag().__call__)
+    assert [slot.name for slot in hir.state_slots] == ["y"]
+
+
 def test_nested_function_scope_does_not_shadow_global() -> None:
     # Regression (Codex): a name bound in a nested (here dead) def is a separate scope; it must not make the OUTER
     # function treat that name as local, which would shadow the numpy alias (or a builtin) at an earlier use.
@@ -431,9 +452,8 @@ def test_boolean_comparison_operand_is_rejected() -> None:
         lower(BoolCompare().__call__)
 
 
-def test_public_boolean_state_attribute_is_rejected() -> None:
-    # Regression (Codex): a written public boolean attribute would be exposed as a boolean output port (unsupported);
-    # the frontend must reject it clearly up front rather than failing cryptically in MIR lowering.
+def test_public_boolean_state_attribute_is_output() -> None:
+    # A written public boolean attribute is exposed as a 1-bit state_<attr> output, just like a float state attribute.
     class PublicBool:
         def __init__(self) -> None:
             self.flag = False
@@ -444,8 +464,9 @@ def test_public_boolean_state_attribute_is_rejected() -> None:
             self.y = a
             return self.y
 
-    with pytest.raises(UnsupportedConstruct, match="public boolean attribute"):
-        lower(PublicBool().__call__)
+    hir = lower(PublicBool().__call__)
+    assert [o.name for o in hir.outputs] == ["state_flag", "state_y"]
+    assert {slot.name for slot in hir.state_slots} == {"flag", "y"}
 
 
 def test_while_loop_lowers_to_back_edge() -> None:
@@ -695,7 +716,7 @@ def _integrator_class():  # type: ignore[no-untyped-def]
 def test_stateful_method_state_slots_and_dedup() -> None:
     integrator = _integrator_class()(k=2**-22)
     hir = lower(integrator.__call__)
-    assert hir.input_names() == ["x"]  # self is dropped; remaining parameters become inputs
+    assert hir.input_names() == ["x", "dt"]  # self is dropped; remaining parameters become inputs
     # `return self.y` is deduped onto the public state port state_y; the private _x_prev gets no port, so the output
     # list alone distinguishes public from private. Both slots reset to 0.
     assert [o.name for o in hir.outputs] == ["state_y"]

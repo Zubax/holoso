@@ -952,10 +952,16 @@ assign in_ready  = (pc == 0);
 assign out_valid = (pc == LASTPC);  // the result is valid in the array on PRESENT; execution lags the fetch by FETCH_LAG
 assign err_pc    = err_pc_q;
 """)
-    for index, wire in enumerate(lir.float_outputs):
-        raw = _source_net(wire.tap.source)
-        if wire.tap.sign == FloatSignControl():
-            w(f"assign {wire.name} = {raw};")
-        else:
-            _fsgnop(w, raw, wire.tap.sign, wire.name, f"u_outsgn_{index}")
+    float_index = 0
+    for wire in lir.outputs:
+        match wire:
+            case BoolOutputWire():
+                w(f"assign {wire.name} = {_bool_operand_rhs(wire.tap)};")
+            case FloatOutputWire():
+                raw = _source_net(wire.tap.source)
+                if wire.tap.sign == FloatSignControl():
+                    w(f"assign {wire.name} = {raw};")
+                else:
+                    _fsgnop(w, raw, wire.tap.sign, wire.name, f"u_outsgn_{float_index}")
+                float_index += 1
     w("")

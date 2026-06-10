@@ -4,6 +4,7 @@ from ._ir import (
     Mir as Mir,
     MirBlock as MirBlock,
     MirBoolConst as MirBoolConst,
+    MirBoolOutput as MirBoolOutput,
     MirBoolView as MirBoolView,
     MirBranch as MirBranch,
     MirBuilder as MirBuilder,

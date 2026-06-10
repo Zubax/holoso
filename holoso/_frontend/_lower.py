@@ -319,6 +319,10 @@ class _Lowerer:
         # read-only-ness (the set is incomplete), so attribute leaves read as opaque -- yet an absorbing connective
         # (``self.flag or True``) still folds, since the absorbing operand alone decides it.
         self._scanning_readonly_attrs: bool = False
+        # The reachable assignments seen so far while building ``_assigned_attrs``. Integer range bounds may consult
+        # this partial set: a write that has already been reached makes the attribute non-static from that point on,
+        # while a read-only integer attribute remains usable for zero-trip and nested static-range reachability.
+        self._readonly_scan_assigned_attrs: set[str] | None = None
         # The names each lowered function binds (parameters and assignment targets); shadow resolution consults these.
         self._local_names: dict[types.FunctionType, set[str]] = {}
 
@@ -697,14 +701,23 @@ class _Lowerer:
     def _static_int(self, node: ast.expr) -> int | None:
         """Evaluate an expression to a compile-time integer (counter, index, or exponent), or None if it is not one."""
         match node:
-            case ast.Constant(value=int(value)) if not isinstance(value, bool):
-                return value
+            case ast.Constant(value=int(literal)) if not isinstance(literal, bool):
+                return literal
             case ast.Name(id=name) if name in self._static_ints:
                 return self._static_ints[name]
             case ast.Name(id=name) if not self._is_local(name):
                 # A module-level integer constant (e.g. ITERATIONS = 12) used as a loop bound, index, or exponent.
-                value = self._fn.__globals__.get(name, _ABSENT)
-                return value if type(value) is int else None
+                global_value = self._fn.__globals__.get(name, _ABSENT)
+                return global_value if type(global_value) is int else None
+            case ast.Attribute() if self._is_self_attr(node):
+                assert isinstance(node, ast.Attribute)
+                attr_value = self._snapshot.get(node.attr)
+                if type(attr_value) is not int:
+                    return None
+                assigned = self._readonly_scan_assigned_attrs
+                if assigned is None:
+                    assigned = self._assigned_attrs
+                return attr_value if node.attr not in assigned else None
             case ast.UnaryOp(op=ast.USub(), operand=operand):
                 inner = self._static_int(operand)
                 return None if inner is None else -inner
@@ -916,10 +929,12 @@ class _Lowerer:
         """
         attrs: set[str] = set()
         self._scanning_readonly_attrs = True
+        self._readonly_scan_assigned_attrs = attrs
         try:
             self._collect_assigned(fndef.body, attrs)
         finally:
             self._scanning_readonly_attrs = False
+            self._readonly_scan_assigned_attrs = None
         return attrs
 
     def _collect_assigned(self, stmts: list[ast.stmt], attrs: set[str]) -> bool:
@@ -1815,14 +1830,6 @@ class _Lowerer:
                     raise UnsupportedConstruct(
                         f"attribute self.{attr} is assigned but not initialized on the instance "
                         "(all persistent state must have an initial value)",
-                        self._loc(target),
-                    )
-                if self._is_public(attr) and self._shape(attr).is_bool:
-                    # A public attribute is exposed as a state_<attr> output; a boolean output port is not yet
-                    # supported. Reject here with a clear message rather than failing cryptically later in MIR.
-                    raise UnsupportedConstruct(
-                        f"public boolean attribute self.{attr} would be a boolean output port, which is not yet "
-                        "supported; rename it with a leading underscore to keep the boolean state internal",
                         self._loc(target),
                     )
                 if attr not in self._state_order:

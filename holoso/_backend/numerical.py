@@ -11,13 +11,15 @@ reloads the snapshot the hardware loads at module reset.
 from dataclasses import dataclass, field
 
 from .._value import FloatValue
-from .._lir import CombScheduledOp, FloatConstRef, FloatOperand, FloatRegRef, FloatScheduledOp, Lir
+from .._lir import BoolOutputWire, CombScheduledOp, FloatConstRef, FloatOperand, FloatOutputWire, FloatRegRef
+from .._lir import FloatScheduledOp, Lir
 from .._lir import InputProducer, OperationProducer, StateProducer, latest_producer_before
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
 from .._operators import *
 from .._type import FloatFormat
 
 type ModelInput = FloatValue | float
+type ModelOutput = FloatValue | bool
 
 
 def _apply_sign(value: FloatValue, sign: FloatSignControl) -> FloatValue:
@@ -65,7 +67,7 @@ class NumericalModel:
         self._state = [FloatValue.from_float(fmt, slot.reset_value) for slot in self.lir.float_state_slots]
         self._bool_state = [slot.reset_value for slot in self.lir.bool_state_slots]
 
-    def __call__(self, *inputs: ModelInput) -> tuple[FloatValue, ...]:
+    def __call__(self, *inputs: ModelInput) -> tuple[ModelOutput, ...]:
         lir = self.lir
         if len(inputs) != len(lir.float_inputs):
             raise ValueError(f"expected {len(lir.float_inputs)} inputs, got {len(inputs)}")
@@ -115,7 +117,7 @@ class NumericalModel:
         self._state = [eval_tap(slot.tap, lir.state_copy_step(slot)) for slot in lir.float_state_slots]
         return outputs
 
-    def _run_cfg(self, in_values: list[FloatValue]) -> tuple[FloatValue, ...]:
+    def _run_cfg(self, in_values: list[FloatValue]) -> tuple[ModelOutput, ...]:
         """
         Execute a control-flow microprogram by following the taken path block by block. Each block evaluates its
         scheduled float ops (in commit order), installs its phi-arm copies and boolean writes, then its terminator
@@ -191,7 +193,14 @@ class NumericalModel:
                     # Read-first at the boundary: the slot register is read-only in the body, so an output (or any read
                     # of a slot's live-in, e.g. ``return old``) sees the OLD slot value here; the new persistent state
                     # is each slot's live-out -- a distinct value (a phi/operator/input/const), tapped with its sign.
-                    outputs = tuple(fval(wire.tap) for wire in lir.float_outputs)
+                    def out_value(wire: FloatOutputWire | BoolOutputWire) -> ModelOutput:
+                        match wire:
+                            case FloatOutputWire():
+                                return fval(wire.tap)
+                            case BoolOutputWire():
+                                return bval(wire.tap)
+
+                    outputs = tuple(out_value(wire) for wire in lir.outputs)
                     self._state = [fval(slot.tap) for slot in lir.float_state_slots]
                     self._bool_state = [bval(slot.live_out) for slot in lir.bool_state_slots]
                     return outputs
@@ -203,7 +212,7 @@ class NumericalModel:
 
     @property
     def output_names(self) -> tuple[str, ...]:
-        return tuple(wire.name for wire in self.lir.float_outputs)
+        return tuple(wire.name for wire in self.lir.outputs)
 
     @property
     def float_format(self) -> FloatFormat:

@@ -5,6 +5,7 @@ from ._ir import Lir as Lir
 from ._ir import (
     BoolConstRef as BoolConstRef,
     BoolOperand as BoolOperand,
+    BoolOutputWire as BoolOutputWire,
     BoolRegRef as BoolRegRef,
     BoolSource as BoolSource,
     BoolWrite as BoolWrite,
@@ -13,6 +14,7 @@ from ._ir import (
     FloatConstRef as FloatConstRef,
     FloatCopy as FloatCopy,
     FloatOperand as FloatOperand,
+    FloatOutputWire as FloatOutputWire,
     FloatOperatorInstance as FloatOperatorInstance,
     FloatRegRef as FloatRegRef,
     FloatScheduledOp as FloatScheduledOp,

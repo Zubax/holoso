@@ -624,6 +624,48 @@ def test_model_schmitt_trigger_hysteresis() -> None:
         assert float(model(x)[0]) == reference(x)  # 0.0/1.0 are exact in ZKF
 
 
+class _BoolSchmittTrigger:
+    def __init__(self) -> None:
+        self.high = 1.0
+        self.low = -1.0
+        self.y = False
+
+    def __call__(self, x):  # type: ignore[no-untyped-def]
+        if x > self.high:
+            self.y = True
+        elif x < self.low:
+            self.y = False
+        return self.y
+
+
+def test_model_public_boolean_state_output() -> None:
+    model = build_model(build(_run(_BoolSchmittTrigger().__call__), "bool_schmitt"))
+    reference = _BoolSchmittTrigger()
+    assert model.output_names == ("state_y",)
+    for x in [0.0, 0.5, 1.5, 0.5, -0.5, -1.5, -0.5, 0.5, 2.0]:
+        got = model(x)[0]
+        assert isinstance(got, bool)
+        assert got is reference(x)
+
+
+class _BoolToggle:
+    def __init__(self) -> None:
+        self.flag = False
+
+    def __call__(self) -> bool:
+        self.flag = not self.flag
+        return self.flag
+
+
+def test_model_boolean_only_state_output() -> None:
+    model = build_model(build(_run(_BoolToggle().__call__), "bool_toggle"))
+    reference = _BoolToggle()
+    assert model.input_names == ()
+    assert model.output_names == ("state_flag",)
+    for _ in range(6):
+        assert model()[0] is reference()
+
+
 def test_compare_float_values_exact_for_wide_formats() -> None:
     # The model's comparison must be exact, not via a lossy float64 decode: two values differing only in the lowest
     # mantissa bit of a >53-bit mantissa must compare unequal (decode would collapse them).
@@ -666,6 +708,7 @@ def test_model_unrolled_for_loop_newton_reciprocal() -> None:
 
 class _CordicSinCos:
     def __init__(self, iterations: int = 12) -> None:
+        self.iterations = iterations
         gain = 1.0
         for i in range(iterations):
             gain *= 1.0 / np.sqrt(1.0 + 2.0 ** (-2 * i))
@@ -674,7 +717,7 @@ class _CordicSinCos:
 
     def __call__(self, theta):  # type: ignore[no-untyped-def]
         x, y, z = self.gain, 0.0, theta
-        for i in range(12):
+        for i in range(self.iterations):
             if z >= 0.0:
                 x_next, y_next, z = x - y * (2.0**-i), y + x * (2.0**-i), z - self.angles[i]
             else:

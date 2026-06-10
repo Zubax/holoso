@@ -8,7 +8,7 @@ which typed storage resources, with which folded sign controls.
 from dataclasses import dataclass
 
 from .._operators import FloatHardwareOperator, FloatSignControl, HardwareOperator
-from .._type import FloatFormat, FloatType
+from .._type import BoolType, FloatFormat, FloatType
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
 FETCH_STAGES = 3
@@ -182,21 +182,6 @@ class FloatInputLoad(InputLoad):
 
 
 @dataclass(frozen=True, slots=True)
-class OutputWire:
-    """An output port: a named external sink driven at the present step by a typed source tap."""
-
-    name: str
-    tap: Operand
-
-
-@dataclass(frozen=True, slots=True)
-class FloatOutputWire(OutputWire):
-    """A float output port: the named external sink for a float source tap (register/constant + folded sign)."""
-
-    tap: FloatOperand
-
-
-@dataclass(frozen=True, slots=True)
 class FloatStateSlot:
     """
     A persistent float state register: reset to ``reset_value``, holding the slot's live-in (carried over from the
@@ -248,6 +233,28 @@ class BoolOperand:
     """A boolean operand: a boolean register read or an immediate True/False."""
 
     source: BoolSource
+
+
+@dataclass(frozen=True, slots=True)
+class OutputWire:
+    """An output port: a named external sink driven at the present step by a typed source tap."""
+
+    name: str
+    tap: FloatOperand | BoolOperand
+
+
+@dataclass(frozen=True, slots=True)
+class FloatOutputWire(OutputWire):
+    """A float output port: the named external sink for a float source tap (register/constant + folded sign)."""
+
+    tap: FloatOperand
+
+
+@dataclass(frozen=True, slots=True)
+class BoolOutputWire(OutputWire):
+    """A boolean output port: the named external sink for a boolean register or immediate."""
+
+    tap: BoolOperand
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,7 +423,7 @@ class Lir:
     float_regfile: FloatRegFileLayout
     float_inputs: list[FloatInputLoad]  # ordered as the function parameters
     float_ops: list[FloatScheduledOp]  # the pipelined schedule, flattened across blocks with ABSOLUTE issue cycles
-    float_outputs: list[FloatOutputWire]
+    outputs: list[FloatOutputWire | BoolOutputWire]
     float_state_slots: list[FloatStateSlot]  # persistent registers, ordered as the instance attributes
     makespan: int  # last absolute commit cycle (0 if no ops)
     op_count: int
@@ -433,7 +440,8 @@ class Lir:
 
     @property
     def ports(self) -> list[Port]:
-        scalar_type = FloatType(self.float_regfile.fmt)
+        float_type = FloatType(self.float_regfile.fmt)
+        bool_type = BoolType()
         ports: list[Port] = [
             ControlInputPort("clk", 1),
             ControlInputPort("rst", 1),
@@ -442,10 +450,23 @@ class Lir:
             ControlOutputPort("out_valid", 1),
             ControlInputPort("out_ready", 1),
         ]
-        ports.extend(DataInputPort(f"in_{load.name}", scalar_type) for load in self.float_inputs)
-        ports.extend(DataOutputPort(wire.name, scalar_type) for wire in self.float_outputs)
+        ports.extend(DataInputPort(f"in_{load.name}", float_type) for load in self.float_inputs)
+        for wire in self.outputs:
+            match wire:
+                case FloatOutputWire():
+                    ports.append(DataOutputPort(wire.name, float_type))
+                case BoolOutputWire():
+                    ports.append(DataOutputPort(wire.name, bool_type))
         ports.append(ControlOutputPort("err_pc", self.cyc_width))
         return ports
+
+    @property
+    def float_outputs(self) -> list[FloatOutputWire]:
+        return [wire for wire in self.outputs if isinstance(wire, FloatOutputWire)]
+
+    @property
+    def bool_outputs(self) -> list[BoolOutputWire]:
+        return [wire for wire in self.outputs if isinstance(wire, BoolOutputWire)]
 
     @property
     def input_ports(self) -> list[DataInputPort]:
@@ -519,7 +540,7 @@ class Lir:
         (e.g. a branch-free ``float(x > 0)``) -- takes the CFG path.
         TODO FIXME: THIS IS TEMPORARY. The straight-line/single-block path will be merged with CFG eventually.
         """
-        if len(self.blocks) > 1 or self.bool_state_slots:
+        if len(self.blocks) > 1 or self.bool_state_slots or self.bool_outputs:
             return True
         return any(block.comb_ops or block.float_copies or block.bool_writes for block in self.blocks)
 
@@ -666,6 +687,9 @@ class Lir:
                 uses.setdefault(block.terminator.cond, []).append(
                     base_pc + boundary_step(block.block_makespan) + FETCH_LAG
                 )
+        for wire in self.bool_outputs:
+            if isinstance(wire.tap.source, BoolRegRef):
+                uses.setdefault(wire.tap.source, []).append(present)
         return {reg: residence_rows(defs.get(reg, []), uses.get(reg, []), present) for reg in defs.keys() | uses.keys()}
 
     @property

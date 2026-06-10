@@ -77,7 +77,7 @@ class _LoweringContext:
     def __init__(self, hir: Hir, ops: OpConfig) -> None:
         self.hir = hir
         self.ops = ops
-        self.builder = MirBuilder()
+        self.builder = MirBuilder(ops.float_format)
         self.remap: dict[ValueId, ValueId] = {}
         self.float_lowerer = _FloatLowerer(self)
 
@@ -213,7 +213,18 @@ class _LoweringContext:
     def _lower_output(self, name: str, value: ValueId) -> None:
         if self.float_lowerer.lower_output(name, value):
             return
+        if self._lower_bool_output(name, value):
+            return
         raise UnsupportedConstruct(f"no MIR lowering rule for HIR output type {self.hir.nodes[value].type!r}")
+
+    def _lower_bool_output(self, name: str, value: ValueId) -> bool:
+        base, sign = _collapse_signs(self.hir.nodes, value)
+        if not isinstance(self.hir.nodes[base].type, HirBoolType):
+            return False
+        if sign != FloatSignControl():
+            raise UnsupportedConstruct("a boolean output cannot carry a sign control")
+        self.builder.bool_output(name, self.remap[base])
+        return True
 
     def _lower_state_slot(self, slot: StateSlot) -> None:
         if self.float_lowerer.lower_state_slot(slot):

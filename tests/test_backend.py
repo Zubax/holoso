@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from holoso import (
+    BoolType,
     FAddOperator,
     FCmpOperator,
     FDivOperator,
@@ -153,6 +154,49 @@ def test_constant_only_module_elaborates(tmp_path: Path) -> None:
     fmt = FloatFormat(8, 24)
     lir = build(_run(const_only, _ops(fmt)), "const_only")
     _elaborate("const_only", generate(lir).verilog, tmp_path)
+
+
+def test_boolean_output_port_is_one_bit_and_assigned() -> None:
+    class Trigger:
+        def __init__(self) -> None:
+            self.high = 1.0
+            self.low = -1.0
+            self.y = False
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if x > self.high:
+                self.y = True
+            elif x < self.low:
+                self.y = False
+            return self.y
+
+    fmt = FloatFormat(8, 24)
+    lir = build(_run(Trigger().__call__, _ops(fmt)), "bool_trigger")
+    (port,) = [port for port in lir.output_ports if port.name == "state_y"]
+    assert isinstance(port.scalar_type, BoolType)
+    assert port.width == 1
+    verilog = generate(lir).verilog
+    assert re.search(r"\boutput wire state_y\b", verilog)
+    assert re.search(r"\bassign state_y = (?:1'b[01]|bregs\[\d+\]);", verilog)
+
+
+@requires_iverilog
+def test_boolean_only_stateful_module_elaborates(tmp_path: Path) -> None:
+    class Toggle:
+        def __init__(self) -> None:
+            self.flag = False
+
+        def __call__(self) -> bool:
+            self.flag = not self.flag
+            return self.flag
+
+    fmt = FloatFormat(8, 24)
+    lir = build(_run(Toggle().__call__, _ops(fmt)), "bool_toggle")
+    assert lir.input_ports == []
+    (port,) = lir.output_ports
+    assert port.name == "state_flag"
+    assert isinstance(port.scalar_type, BoolType)
+    _elaborate("bool_toggle", generate(lir).verilog, tmp_path)
 
 
 def test_parameter_name_colliding_with_control_port_is_rejected() -> None:

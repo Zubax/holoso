@@ -8,10 +8,12 @@ from .._hir import ValueId
 from .._mir import (
     Mir,
     MirBoolConst,
+    MirBoolOutput,
     MirBoolView,
     MirBranch,
     MirFloatConst,
     MirFloatInput,
+    MirFloatOutput,
     MirOperation,
     MirFloatView,
     MirJump,
@@ -68,6 +70,7 @@ def _build_single_block(mir: Mir, float_mir: MirFloatView, module_name: str) -> 
     swap = assign_commutative_ports(float_mir, sched, alloc)
     consts, const_pool = _build_const_pool(float_mir)
     float_ops = _build_ops(float_mir, sched, alloc, const_pool, swap)
+    outputs: list[FloatOutputWire | BoolOutputWire] = list(_build_outputs(float_mir, alloc, const_pool))
     boundary = boundary_step(sched.makespan)
     return Lir(
         module_name=module_name,
@@ -82,7 +85,7 @@ def _build_single_block(mir: Mir, float_mir: MirFloatView, module_name: str) -> 
         ),
         float_inputs=_build_inputs(float_mir, alloc),
         float_ops=float_ops,
-        float_outputs=_build_outputs(float_mir, alloc, const_pool),
+        outputs=outputs,
         float_state_slots=_build_state_slots(float_mir, alloc, const_pool),
         makespan=sched.makespan,
         op_count=len(float_mir.operation_nodes),
@@ -241,6 +244,7 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
         )
         for bslot in bool_mir.state_slots
     ]
+    outputs = _build_cfg_outputs(mir, float_mir, bool_mir, alloc, const_pool)
     return Lir(
         module_name=module_name,
         float_instances=instances,
@@ -256,7 +260,7 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
             FloatInputLoad(node.name, FloatRegRef(alloc.float_reg[vid])) for vid, node in float_mir.input_nodes.items()
         ],
         float_ops=flat_ops,
-        float_outputs=_build_cfg_outputs(float_mir, alloc, const_pool),
+        outputs=outputs,
         float_state_slots=float_state_slots,
         makespan=makespan,
         op_count=len(float_mir.operation_nodes),
@@ -369,17 +373,30 @@ def _cfg_operand_signed(
 
 
 def _build_cfg_outputs(
-    float_mir: MirFloatView, alloc: _CfgAllocation, pool: dict[ValueId, _PooledConst]
-) -> list[FloatOutputWire]:
-    wires: list[FloatOutputWire] = []
-    for out in float_mir.outputs:
-        node = float_mir.nodes[out.value]
-        if isinstance(node, MirFloatConst):
-            entry = pool[out.value]
-            wires.append(FloatOutputWire(out.name, FloatOperand(FloatConstRef(entry.index), entry.sign.then(out.sign))))
+    mir: Mir,
+    float_mir: MirFloatView,
+    bool_mir: MirBoolView,
+    alloc: _CfgAllocation,
+    pool: dict[ValueId, _PooledConst],
+) -> list[FloatOutputWire | BoolOutputWire]:
+    outputs: list[FloatOutputWire | BoolOutputWire] = []
+    for out in mir.outputs:
+        if isinstance(out, MirFloatOutput):
+            node = float_mir.nodes[out.value]
+            if isinstance(node, MirFloatConst):
+                entry = pool[out.value]
+                outputs.append(
+                    FloatOutputWire(out.name, FloatOperand(FloatConstRef(entry.index), entry.sign.then(out.sign)))
+                )
+            else:
+                outputs.append(
+                    FloatOutputWire(out.name, FloatOperand(FloatRegRef(alloc.float_reg[out.value]), out.sign))
+                )
+        elif isinstance(out, MirBoolOutput):
+            outputs.append(BoolOutputWire(out.name, _cfg_bool_operand(bool_mir, out.value, alloc)))
         else:
-            wires.append(FloatOutputWire(out.name, FloatOperand(FloatRegRef(alloc.float_reg[out.value]), out.sign)))
-    return wires
+            raise AssertionError(f"unhandled MIR output {out!r}")
+    return outputs
 
 
 def _cfg_terminator(terminator: MirTerminator, alloc: _CfgAllocation) -> Terminator:

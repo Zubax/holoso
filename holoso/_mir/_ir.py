@@ -174,6 +174,11 @@ class MirFloatOutput(MirOutput):
 
 
 @dataclass(frozen=True, slots=True)
+class MirBoolOutput(MirOutput):
+    """A boolean module output."""
+
+
+@dataclass(frozen=True, slots=True)
 class MirFloatStateSlot(MirStateSlot):
     """A floating-point persistent state slot with a folded sign control on its live-out value."""
 
@@ -231,6 +236,7 @@ class MirBlock:
 class Mir:
     """A selected graph arranged into a CFG of basic blocks (``blocks[0]`` is the entry), ready for scheduling."""
 
+    float_format: FloatFormat
     nodes: dict[ValueId, MirNode]
     blocks: list[MirBlock]
     input_ids: list[ValueId]
@@ -313,16 +319,18 @@ class MirFloatView:
                     raise UnsupportedConstruct(f"LIR construction does not support MIR constant {vid} of this type")
         outputs: list[MirFloatOutput] = []
         for out in mir.outputs:
-            if not isinstance(out, MirFloatOutput):
-                raise UnsupportedConstruct(f"LIR construction does not support non-float MIR output {out.name!r}")
-            outputs.append(out)
+            if isinstance(out, MirFloatOutput):
+                outputs.append(out)
         state_slots = [slot for slot in mir.state_slots if isinstance(slot, MirFloatStateSlot)]
         for vid in mir.input_ids:
             if not isinstance(nodes.get(vid), MirFloatInput):
                 raise ValueError(f"MIR input ID {vid} must reference a MirFloatInput")
-        if len(formats) != 1:
+        unexpected = formats - {mir.float_format}
+        if unexpected:
             ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
-            raise ValueError(f"LIR requires exactly one floating-point format; got {ordered or 'none'}")
+            raise ValueError(
+                f"LIR requires MIR float values to use configured format {mir.float_format}; got {ordered}"
+            )
         return cls(
             nodes=nodes,
             blocks=mir.blocks,
@@ -330,7 +338,7 @@ class MirFloatView:
             input_ids=list(mir.input_ids),
             outputs=outputs,
             state_slots=state_slots,
-            fmt=next(iter(formats)),
+            fmt=mir.float_format,
         )
 
 
@@ -345,6 +353,7 @@ class MirBoolView:
     nodes: dict[ValueId, MirBoolNode]
     blocks: list[MirBlock]
     entry: BlockId
+    outputs: list[MirBoolOutput]
     state_slots: list[MirBoolStateSlot]
 
     @property
@@ -381,8 +390,9 @@ class MirBoolView:
                 nodes[vid] = node
             elif isinstance(node, MirPhi) and isinstance(node.scalar_type, BoolType):
                 nodes[vid] = node
+        outputs = [out for out in mir.outputs if isinstance(out, MirBoolOutput)]
         state_slots = [slot for slot in mir.state_slots if isinstance(slot, MirBoolStateSlot)]
-        return cls(nodes=nodes, blocks=mir.blocks, entry=mir.entry, state_slots=state_slots)
+        return cls(nodes=nodes, blocks=mir.blocks, entry=mir.entry, outputs=outputs, state_slots=state_slots)
 
 
 @dataclass
@@ -399,7 +409,8 @@ class MirBuilder:
     is sealed by :meth:`jump` / :meth:`branch` / :meth:`ret`.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, float_format: FloatFormat) -> None:
+        self._float_format = float_format
         self._nodes: dict[ValueId, MirNode] = {}
         self._global_intern: dict[object, ValueId] = {}
         self._block_intern: dict[object, ValueId] = {}
@@ -550,6 +561,11 @@ class MirBuilder:
             raise ValueError(f"float output {name!r} must be driven by a floating-point value")
         self._outputs.append(MirFloatOutput(name, value, sign))
 
+    def bool_output(self, name: str, value: ValueId) -> None:
+        if not isinstance(self._type_of(value), BoolType):
+            raise ValueError(f"bool output {name!r} must be driven by a boolean value")
+        self._outputs.append(MirBoolOutput(name, value))
+
     def float_state_slot(
         self,
         name: str,
@@ -575,6 +591,7 @@ class MirBuilder:
                 raise RuntimeError(f"MIR block {bid} was not sealed with a terminator")
             blocks.append(MirBlock(bid, tuple(ub.phis), tuple(ub.operations), ub.terminator))
         return Mir(
+            float_format=self._float_format,
             nodes=dict(self._nodes),
             blocks=blocks,
             input_ids=list(self._input_ids),

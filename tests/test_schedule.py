@@ -283,7 +283,7 @@ def test_state_early_copy_frees_source_register() -> None:
 
     lir = build(_run(TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__), "trapz")
     (xprev,) = [s for s in lir.float_state_slots if s.name == "_x_prev"]
-    (in_x,) = lir.float_inputs
+    (in_x,) = [load for load in lir.float_inputs if load.name == "x"]
     assert xprev.needs_copy and in_x.dst == xprev.tap.source  # the copy's source is the input register
     assert xprev.install_cycle <= lir.makespan  # installs before the boundary (present cycle == makespan + 1)
     # The freed input register is reused: a later operation's result is assigned to it as well.
@@ -436,6 +436,7 @@ def test_register_sharing_is_hardware_disjoint() -> None:
 def test_build_rejects_mir_with_mixed_float_formats() -> None:
     other = FloatFormat(8, 24)
     mir = Mir(
+        FMT,
         nodes={
             0: MirFloatInput("a", FloatType(FMT)),
             1: MirOperation(
@@ -450,13 +451,13 @@ def test_build_rejects_mir_with_mixed_float_formats() -> None:
         outputs=[MirFloatOutput("out_0", 1)],
         state_slots=[],
     )
-    with pytest.raises(ValueError, match="exactly one floating-point format"):
+    with pytest.raises(ValueError, match="configured format"):
         build(mir, "mixed")
 
 
 def test_mir_builder_rejects_mixed_float_operand_formats() -> None:
     other = FloatFormat(8, 24)
-    builder = MirBuilder()
+    builder = MirBuilder(FMT)
     a = builder.float_input("a", FloatType(FMT))
     b = builder.float_input("b", FloatType(other))
     with pytest.raises(ValueError, match="expects operands"):
@@ -500,6 +501,7 @@ def test_mir_operation_validates_invariants() -> None:
 
 def test_float_view_rejects_non_float_mir_before_scheduling() -> None:
     mir = Mir(
+        FMT,
         nodes={0: OtherMirInput("a", OtherScalarType())},
         blocks=[MirBlock(0, (), (), MirRet())],
         input_ids=[0],
@@ -512,6 +514,7 @@ def test_float_view_rejects_non_float_mir_before_scheduling() -> None:
 
 def test_float_view_rejects_non_input_input_id() -> None:
     mir = Mir(
+        FMT,
         nodes={0: MirFloatConst(FloatType(FMT), 1.0)},
         blocks=[MirBlock(0, (), (), MirRet())],
         input_ids=[0],
@@ -524,6 +527,7 @@ def test_float_view_rejects_non_input_input_id() -> None:
 
 def test_float_view_rejects_missing_input_id() -> None:
     mir = Mir(
+        FMT,
         nodes={0: MirFloatConst(FloatType(FMT), 1.0)},
         blocks=[MirBlock(0, (), (), MirRet())],
         input_ids=[1],

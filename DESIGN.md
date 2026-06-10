@@ -240,7 +240,8 @@ casts; a bool->float cast crosses back the other way. These are one MIR/LIR oper
 (float or bool) and its operands may reference either bank -- so the comparison, the logic gates, and both casts are
 all instances of one uniform combinational-operation category rather than special cases. Each is latency-1
 register-resident: it reads its register operand(s), applies inline combinational logic, and its result lands one
-cycle later, exactly like a comparison.
+cycle later, exactly like a comparison. Boolean leaves may also drive 1-bit output ports directly, including public
+boolean state attributes exposed as `state_<attr>`.
 
   - A comparison `a <relation> b` reduces the shared comparator's three one-hot order flags by the relation, so one
     physical `holoso_fcmp` serves every relation (pooling keys on the bare comparator, never on the relation).
@@ -336,7 +337,9 @@ practical utility: such an exponent always lies outside the format's representab
 overflow to a (rejected) infinity or underflow to zero, making the multiply degenerate.
 
 `MirBuilder` is a single graph builder with typed construction methods; it does not own a global scalar type, so
-mixed-type expressions can share one value namespace. Hardware operators expose a concrete `ScalarSignature`,
+mixed-type expressions can share one value namespace. It does carry the configured float format explicitly, so modules
+with no float values still elaborate with a known scalar width for constants, localparams, and helper functions.
+Hardware operators expose a concrete `ScalarSignature`,
 and MIR construction validates operands against the selected operator's signature. HIR-to-MIR lowering rejects
 semantic domains that do not yet have a selected MIR representation.
 
@@ -356,7 +359,7 @@ resources:
   float_regfile: fmt + N float regs         # FF bank; the backend synthesizes a sparse, schedule-specific mux fabric
   float_consts: [fconst(magnitude), ...]    # nonnegative magnitudes; the sign rides the consumer's sign sideband
   float_inputs: [input_load(name, dst_reg), ...]
-  float_outputs: [output_wire(name, source, sign), ...]
+  outputs: [output_wire(name, typed_source), ...]  # ordered float and boolean result/state ports
 
 scheduled float op:
   (inst, operands+sign_controls, dst_reg, issue_cycle)  # commits at issue_cycle + latency

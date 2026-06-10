@@ -274,15 +274,17 @@ _SPECS = [
     ),
     ExampleSpec(
         name="integrator",
-        inputs=("x",),
+        inputs=("x", "dt"),
         make_kernel=lambda: TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__,
-        nominal={"x": 1.0},
+        nominal={"x": 1.0, "dt": 1.0e-3},
         manual=[  # one continuous stream: settle at zero, a step, an impulse, then a ramp
-            *({"x": v} for v in (0.0, 0.0, 1.0, 1.0, 1.0, 1.0)),
-            *({"x": v} for v in (0.0, 5.0, 0.0, 0.0)),
-            *({"x": v} for v in (1.0, 2.0, 3.0, 4.0)),
+            *({"x": v, "dt": 1.0e-3} for v in (0.0, 0.0, 1.0, 1.0, 1.0, 1.0)),
+            *({"x": v, "dt": 2.0e-3} for v in (0.0, 5.0, 0.0, 0.0)),
+            *({"x": v, "dt": 5.0e-4} for v in (1.0, 2.0, 3.0, 4.0)),
         ],
-        draw_random=_draw_scalars(("x",), -4.0, 4.0),
+        draw_random=lambda rng: {"x": bounded(rng, -4.0, 4.0), "dt": log_uniform_positive(rng, 1.0e-4, 1.0e-2)},
+        protected=frozenset({"dt"}),
+        protected_values=(0.0, 1.0e-4, 1.0e-3, 1.0e-2),
         edge_values=_WIDE_EDGES,
     ),
     ExampleSpec(

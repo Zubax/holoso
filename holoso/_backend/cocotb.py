@@ -49,6 +49,10 @@ _DEFAULT_RANGE = (-4.0, +4.0)  # small bounded range keeps multi-operation kerne
 _MAX_TRANSACTION_CYCLES = 1 << 20  # out_valid ceiling: well above any real transaction, tripped only by a runaway loop
 
 
+def _output_bits(value):
+    return int(value) if isinstance(value, bool) else value.bits
+
+
 @cocotb.test()
 async def cosim(dut):
     rng = random.Random(_SEED)
@@ -75,7 +79,7 @@ async def cosim(dut):
         # The model is fed exactly the bits the DUT receives, so the comparison is bit-exact. For a stateful module
         # this is one step of a sequence: the model and DUT carry their state forward together across iterations.
         expected = _MODEL(*[holoso.FloatValue.from_bits(_FMT, bits) for bits in in_bits])
-        exp_bits = [value.bits for value in expected]
+        exp_bits = [_output_bits(value) for value in expected]
 
         while int(dut.in_ready.value) != 1:
             await RisingEdge(dut.clk)
