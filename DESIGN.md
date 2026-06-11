@@ -436,15 +436,18 @@ contrived tautology, never a miscompile. Unifying it with the complete folder (l
 constant branches in HIR) is tracked future work, unblocked once Phase-2 early returns let the return-placement check
 move after constant folding.
 
+There is a hardware-frame interference-graph coloring engine that colors both the wide and boolean register banks,
+and one emitter in which every register is driven by a single consolidated write chain (a priority over its input-load,
+operator-writeback, pc-gated copy/cast, and state-install drivers).
+Persistent-slot live-outs coalesce onto the slot register when their range does not overlap the live-in
+(else a pc-gated copy installs them, as early as the live-in is read), a coalesced slot register hosts gap
+tenants, and commutative-port assignment orients every commutative use across the whole op stream.
+
 ### DEFERRED
 
-Phi-arm and persistent-slot coalescing: an arm or live-out is currently always installed by a pc-gated copy rather
-than coalesced onto the merged/slot register, and the boolean register bank still takes a fresh register per value
-instead of reusing by liveness. Both wait on one backend change -- every register written by a single consolidated
-statement (a priority chain over its input-load, operator-writeback, pc-gated copy/cast, and state-install writers) --
-so that an operator result and a copy may safely share a register. With that, coalescing is path-aware (mutually
-exclusive arms do not interfere; a phi or loop-carried value whose live-in and live-out overlap still needs
-copy-installation), and commutative-port assignment applies over the whole op stream.
+Phi-arm coalescing: a phi arm is still installed by a pc-gated copy rather than coalesced onto the merged register
+(path-aware coalescing -- mutually exclusive arms do not interfere; a loop-carried phi whose live-in and live-out
+overlap still needs copy-installation).
 
 Cross-block software pipelining: the machine uses per-block drain barriers; overlapping a fall-through block's head
 with its predecessor's tail (branches and loop back-edges stay hard PC barriers -- the ZISC cannot fetch a successor
@@ -453,8 +456,8 @@ before the redirect resolves) is a separate scheduling effort, complemented by i
 
 The numerical model should advance one clk per `.tick()`, replaying PCs and latches like the hardware, so it stays
 correct under register reuse and cross-block overlap by construction and enables cycle-accurate lockstep cosimulation
-with immediate state-divergence detection (today it reproduces output bits exactly but not the per-transaction cycle
-latency).
+with immediate state-divergence detection (today it reproduces output bits exactly, block by block, but not the
+per-transaction cycle latency).
 
 ## Operators
 

@@ -14,7 +14,6 @@ from .._value import FloatValue
 from .._lir import BoolInputLoad, BoolOutputWire, CombScheduledOp, FloatConstRef, FloatInputLoad, FloatOperand
 from .._lir import FloatOutputWire, RegRef
 from .._lir import FloatScheduledOp, Lir
-from .._lir import InputProducer, OperationProducer, StateProducer, latest_producer_before
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
 from .._lir import landing_cycle, wide_operand_read_cycle
 from .._operators import *
@@ -103,47 +102,7 @@ class NumericalModel:
                     float_values.append(_coerce_input(raw_input, fmt, index))
                 case BoolInputLoad():
                     bool_values.append(_coerce_bool_input(raw_input, index))
-        if lir.is_control_flow:
-            return self._run_cfg(float_values, bool_values)
-        consts = [FloatValue.from_float(fmt, const_value) for const_value in lir.float_consts]
-
-        # Per-register write timeline: (commit_cycle, producer) in increasing commit order. A slot register starts the
-        # initiation holding its live-in (the value carried over from the previous call) and may be overwritten by a
-        # coalesced operator later. Inputs are sampled at cycle 0; each op commits at its commit_cycle. Operands resolve
-        # against this so a register reused for several values yields the value live at the operand's read cycle.
-        writes = lir.write_timeline
-
-        op_values: dict[int, FloatValue] = {}
-
-        def source_value(source: RegRef | FloatConstRef, read_cycle: int) -> FloatValue:
-            if isinstance(source, FloatConstRef):
-                return consts[source.index]
-            producer = latest_producer_before(writes, source, read_cycle)
-            match producer:
-                case InputProducer(index=index):
-                    return float_values[index]
-                case OperationProducer(index=index):
-                    return op_values[index]
-                case StateProducer(index=index):
-                    return self._state[index]
-
-        def eval_tap(operand: FloatOperand, cycle: int) -> FloatValue:
-            # One evaluation for every source tap: an operator operand, an output wire, or a state slot's live-out.
-            return _apply_sign(source_value(operand.source, cycle), operand.sign)
-
-        # Evaluate in commit order: a producer commits before any consumer issues, so its value is ready in op_values.
-        for j in sorted(range(len(lir.ops)), key=lambda k: (lir.ops[k].commit_cycle, lir.ops[k].issue_cycle)):
-            op = lir.ops[j]
-            operands = [eval_tap(o, lir.operand_read_cycle(op)) for o in op.operands]
-            op_values[j] = _apply_sign(op.inst.operator.evaluate(*operands), op.result_sign)
-
-        # Hardware-frame read cycles, matching reg_liveness and the RTL: an output is resident in the array on the
-        # boundary step (the last result lands at the initiation interval), and each slot's live-out source is sampled
-        # on its writeback step -- before any later operation reuses that register (a value becomes readable on its
-        # landing cycle, so a read on the writeback step still resolves to the source that landed at or before it).
-        outputs = tuple(eval_tap(wire.tap, lir.initiation_interval) for wire in lir.float_outputs)
-        self._state = [eval_tap(slot.tap, lir.state_copy_step(slot)) for slot in lir.float_state_slots]
-        return outputs
+        return self._run_cfg(float_values, bool_values)
 
     def _run_cfg(self, float_values: list[FloatValue], bool_values: list[bool]) -> tuple[ModelOutput, ...]:
         """
@@ -264,7 +223,11 @@ class NumericalModel:
                                 return bval(wire.tap)
 
                     outputs = tuple(out_value(wire) for wire in lir.outputs)
-                    self._state = [fval(slot.tap) for slot in lir.float_state_slots]
+                    # The slot's live-out is sampled on its install step (block-relative), not at the boundary: an
+                    # early-installed slot's source register may be reused later in the Ret block, so reading it at the
+                    # boundary would see the tenant. For a boundary install this step is the boundary, so it degenerates.
+                    base = lir.block_base[block.index]
+                    self._state = [fread(slot.tap, lir.state_copy_step(slot) - base) for slot in lir.float_state_slots]
                     self._bool_state = [bval(slot.live_out) for slot in lir.bool_state_slots]
                     return outputs
         raise RuntimeError("control flow did not reach a return; the CFG may not terminate")

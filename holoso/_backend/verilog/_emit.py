@@ -662,16 +662,6 @@ def _bool_writes_grouped(lir: Lir) -> dict[int, list[tuple[int, str]]]:
     return grouped
 
 
-def _emit_pc_writes(w: _Writer, lhs: str, regs: set[int], grouped: dict[int, list[tuple[int, str]]]) -> None:
-    """Emit, for each destination register in ``regs``, a one-hot priority chain of pc-gated installs (sorted by PC)."""
-    for reg in sorted(regs):
-        entries = sorted(grouped.get(reg, []))
-        clause = "if"
-        for install_pc, rhs in entries:
-            w(f"{clause} (pc == {install_pc}) {lhs}[{reg}] <= {rhs};")
-            clause = "else if"
-
-
 def _emit_copy_sign_wires(w: _Writer, lir: Lir) -> None:
     """Emit a sign-conditioning wire for each float copy whose installed source carries a folded sign control."""
     emitted = False
@@ -739,26 +729,86 @@ def _read_latch_stmts(
         w("end")
 
 
-def _reg_write_stmts(
-    w: _Writer, reg: int, writers: list[FloatOperatorInstance], write_lists: dict[FloatOperatorInstance, list[int]]
-) -> None:
-    """
-    Emit the write select for one register: a select spanning only that register's writer instances.
+def _writeback_cond(inst: FloatOperatorInstance, reg: int, write_lists: dict[FloatOperatorInstance, list[int]]) -> str:
+    """The guard under which operator ``inst`` writes ``reg``: its write-enable, plus a write-address compare when the
+    instance targets more than one register (the dense write-target index this register occupies in its codebook)."""
+    base = base_name(inst)
+    targets = write_lists[inst]
+    if len(targets) == 1:
+        return f_we(base)
+    return f"{f_we(base)} && ({f_wa(base)} == {_lit(code_width(len(targets)), targets.index(reg))})"
 
-    Each register's flop gets one clock-enabled write (the input load is grouped separately, above), so the write
-    logic stays one register per flop rather than scattering a register's drivers across per-instance blocks. A
-    single-target instance needs no address compare; otherwise the guard compares the instance's write-address field
-    against the dense write-target index this register occupies in the instance's codebook (the microcode value).
+
+def _wide_writer_entries(
+    lir: Lir, write_sets: dict[int, list[FloatOperatorInstance]], write_lists: dict[FloatOperatorInstance, list[int]]
+) -> dict[int, list[tuple[str, str]]]:
     """
+    Per wide register, the ordered ``(condition, rhs)`` of every driver other than its state-slot install: the
+    accept-step input load (highest priority), each operator writeback, each pc-gated bool->float cast, and each
+    pc-gated phi-arm copy. The conditions are pairwise mutually exclusive (the load step, the per-instance write-enable
+    steps, and the distinct cast/copy PCs never coincide for one register -- the schedule and the allocator's
+    interference guarantee it), so the emitter folds them into one priority chain and a register is driven by exactly
+    one statement, however many sources reuse or coalesce onto it.
+    """
+    entries: dict[int, list[tuple[str, str]]] = {}
+    for fload in sorted(lir.float_inputs, key=lambda load: load.dst.index):
+        entries.setdefault(fload.dst.index, []).append(("in_ready && in_valid", f"in_{fload.name}"))
+    for reg in sorted(write_sets):
+        for inst in write_sets[reg]:
+            entries.setdefault(reg, []).append((_writeback_cond(inst, reg, write_lists), f"{_sig(inst)}_y_q"))
+    for block_index, op in _block_ffrombool_ops(lir):
+        entries.setdefault(op.dst.index, []).append(
+            (f"pc == {_comb_float_writeback_pc(lir, block_index, op)}", _ffrombool_rhs(op))
+        )
+    for reg, items in _copies_grouped(lir).items():
+        for install_pc, rhs in sorted(items):
+            entries.setdefault(reg, []).append((f"pc == {install_pc}", rhs))
+    return entries
+
+
+def _bool_writer_entries(lir: Lir) -> dict[int, list[tuple[str, str]]]:
+    """Per boolean register, the ordered ``(condition, rhs)`` of every driver other than its state-slot install: the
+    input load, each comparator / boolean-logic / float->bool result, and each pc-gated phi-arm write."""
+    entries: dict[int, list[tuple[str, str]]] = {}
+    for bload in sorted(lir.bool_inputs, key=lambda load: load.dst.index):
+        entries.setdefault(bload.dst.index, []).append(("in_ready && in_valid", f"in_{bload.name}"))
+    for block in lir.blocks:
+        for position, op, _cmp in _block_comparisons(block):
+            wb = _fcmp_in_valid_pc(lir, block.index, op) + op.latency
+            entries.setdefault(op.dst.index, []).append(
+                (f"pc == {wb}", f"fcmp_{_fcmp_label(block.index, position)}_result")
+            )
+    for block_index, op in _block_logic_ops(lir):
+        entries.setdefault(op.dst.index, []).append(
+            (f"pc == {_comb_writeback_pc(lir, block_index, op)}", _bool_logic_rhs(op))
+        )
+    for block_index, op in _block_ftobool_ops(lir):
+        entries.setdefault(op.dst.index, []).append(
+            (f"pc == {_comb_writeback_pc(lir, block_index, op)}", _ftobool_rhs(op))
+        )
+    for reg, items in _bool_writes_grouped(lir).items():
+        for install_pc, rhs in sorted(items):
+            entries.setdefault(reg, []).append((f"pc == {install_pc}", rhs))
+    return entries
+
+
+def _wide_state_install_entry(lir: Lir, slot: FloatStateSlot) -> list[tuple[str, str]]:
+    """The slot register's live-out install, appended under the reset-else as the lowest-priority arm of its chain. A
+    coalesced slot has no install (its producing operator already writes the slot register); a non-coalesced one is
+    installed read-first on its writeback step (``state_copy_step``, the absolute install PC -- which reduces to
+    ``LASTPC`` for a boundary install), out_ready-gated so a held boundary copies exactly once."""
+    if not slot.needs_copy:
+        return []
+    pcw = max(1, lir.initiation_interval.bit_length())
+    cond = f"pc == {_lit(pcw, lir.state_copy_step(slot))} && (pc != LASTPC || out_ready)"
+    return [(cond, _state_copy_rhs(slot))]
+
+
+def _emit_chain(w: _Writer, lhs: str, entries: list[tuple[str, str]]) -> None:
+    """Emit one register's whole write as a single priority chain ``if (c0) lhs<=r0; else if (c1) ...`` (one driver)."""
     clause = "if"
-    for inst in writers:
-        sig, base = _sig(inst), base_name(inst)
-        targets = write_lists[inst]
-        if len(targets) == 1:
-            cond = f_we(base)
-        else:
-            cond = f"{f_we(base)} && ({f_wa(base)} == {_lit(code_width(len(targets)), targets.index(reg))})"
-        w(f"{clause} ({cond}) regs[{reg}] <= {sig}_y_q;")
+    for cond, rhs in entries:
+        w(f"{clause} ({cond}) {lhs} <= {rhs};")
         clause = "else if"
 
 
@@ -772,17 +822,20 @@ def _emit_clocked(
     write_lists: dict[FloatOperatorInstance, list[int]],
 ) -> None:
     """Emit every sequential element in one always @(posedge clk): fetch, latches, writes, and control state."""
+    # We MUST ensure that we DO NOT MULTI-ASSIGN any register in the same step; this is ensured by always placing each
+    # assignment to the same register into different branches of the same condition.
     nreg = max(1, lir.regfile.nreg)
-    float_slot_regs = {slot.reg.index for slot in lir.float_state_slots}
-    bool_slot_regs = {slot.reg.index for slot in lir.bool_state_slots}
-    grouped_copies = _copies_grouped(lir)  # phi-arm register installs, pc-gated, grouped by destination register
-    bool_writes = _bool_writes_grouped(lir)
-    nonslot_copy_regs = {reg for reg in grouped_copies if reg not in float_slot_regs}
-    nonslot_bwrite_regs = {reg for reg in bool_writes if reg not in bool_slot_regs}
-    is_cfg = lir.is_control_flow  # the CFG path installs slots at the Ret boundary
+    nbreg = max(1, lir.bool_regfile.nreg)
+    float_slots = {slot.reg.index: slot for slot in lir.float_state_slots}
+    bool_slots = {slot.reg.index: slot for slot in lir.bool_state_slots}
+    # Each register's whole write is one priority chain over all its drivers (input load, operator writebacks, casts,
+    # phi copies, comparator/logic results, and -- for a slot -- its boundary install), so a register is never assigned
+    # by two separate statements. The conditions within a chain are pairwise mutually exclusive by construction.
+    wide = _wide_writer_entries(lir, write_sets, write_lists)
+    boolw = _bool_writer_entries(lir)
     w("""
-// All sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q), never data.
-// We never multi-assign any register by explicitly segregating competing assignments into different condition branches.
+// All sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q) and the persistent
+// state registers; every other register is reset-unconditional. Each register is driven by exactly one write chain.
 always @(posedge clk) begin
 """)
     w.push()
@@ -809,98 +862,23 @@ always @(posedge clk) begin
             w(f"{sig}_{err_port}_q <= {sig}_{err_port};")
     w("")
 
-    # We MUST ensure that we DO NOT MULTI-ASSIGN any register in the same step; this is ensured by always placing each
-    # assignment to the same register into different branches of the same condition.
-    # Slot registers are updated in the reset-gated state block below (their snapshot and update share one rst
-    # condition); the input load and operator writeback here stay reset-unconditional and cover only non-slot registers.
-    state_regs = {slot.reg.index for slot in lir.float_state_slots}
-
-    def emit_writeback() -> None:
-        for reg in range(nreg):
-            writers = write_sets.get(reg, [])
-            if writers and reg not in state_regs:
-                _reg_write_stmts(w, reg, writers, write_lists)
-
-    has_writes = any(write_sets.get(reg) and reg not in state_regs for reg in range(nreg))
-    if lir.inputs:
-        # The accept-step input load and operator writeback are mutually exclusive in time (the schedule never commits
-        # a result on the load step), but the tools cannot see that. Making writeback the else of the load encodes the
-        # exclusivity structurally -- load wins, writes are gated behind it.
-        w("// Register update: input load on the accept step, else the per-register writeback select.")
-        w("if (in_ready && in_valid) begin")
-        w.push()
-        for fload in sorted(lir.float_inputs, key=lambda load: load.dst.index):
-            w(f"regs[{fload.dst.index}] <= in_{fload.name};")
-        for bload in sorted(lir.bool_inputs, key=lambda load: load.dst.index):
-            w(f"bregs[{bload.dst.index}] <= in_{bload.name};")
-        w.pop()
-        if has_writes:
-            w("end else begin")
-            w.push()
-            emit_writeback()
-            w.pop()
-        w("end", "")
-    elif has_writes:
-        w("// Register writes: a select spanning only each register's writers.")
-        emit_writeback()
+    # Non-slot registers: one reset-unconditional write chain each (so they settle to ucode[0] under reset and pack into
+    # the BRAM output register). A register with no drivers is simply omitted.
+    nonslot_wide = [reg for reg in range(nreg) if reg not in float_slots and wide.get(reg)]
+    nonslot_bool = [reg for reg in range(nbreg) if reg not in bool_slots and boolw.get(reg)]
+    if nonslot_wide or nonslot_bool:
+        w("// Register write chains (reset-unconditional): one priority chain per register over all its drivers.")
+        for reg in nonslot_wide:
+            _emit_chain(w, f"regs[{reg}]", wide[reg])
+        for reg in nonslot_bool:
+            _emit_chain(w, f"bregs[{reg}]", boolw[reg])
         w("")
 
-    # Phi-arm installs into non-slot merge registers (pure datapath, unreset): a one-hot pc-gated copy/write per
-    # register. These registers are written only by their installs, so they never collide with the writeback above.
-    if nonslot_copy_regs or nonslot_bwrite_regs:
-        w("// Phi-arm installs into non-slot merge registers (pc-gated, one per register).")
-        _emit_pc_writes(w, "regs", nonslot_copy_regs, grouped_copies)
-        _emit_pc_writes(w, "bregs", nonslot_bwrite_regs, bool_writes)
-        w("")
-
-    # Comparator results land in their (fresh, never reset) boolean register one latency after in_valid, in time for
-    # the terminating branch; each is written only here, so it cannot collide with any other boolean write.
-    if any(_block_comparisons(block) for block in lir.blocks):
-        w("// Comparator boolean writebacks (pc-gated, pure datapath).")
-        for block in lir.blocks:
-            for position, op, _cmp in _block_comparisons(block):
-                writeback_pc = _fcmp_in_valid_pc(lir, block.index, op) + op.latency
-                result = f"fcmp_{_fcmp_label(block.index, position)}_result"
-                w(f"if (pc == {writeback_pc}) bregs[{op.dst.index}] <= {result};")
-        w("")
-
-    # Boolean-logic writebacks: a pc-gated inline & | ~ over boolean registers, latched into a fresh boolean register
-    # (each written only here, so no collision). The result reg is read by a later op or the branch, one drain later.
-    logic_ops = _block_logic_ops(lir)
-    if logic_ops:
-        w("// Boolean logic writebacks (pc-gated, combinational).")
-        for block_index, op in logic_ops:
-            writeback_pc = _comb_writeback_pc(lir, block_index, op)
-            w(f"if (pc == {writeback_pc}) bregs[{op.dst.index}] <= {_bool_logic_rhs(op)};")
-        w("")
-
-    # Float->bool cast writebacks: a pc-gated ``holoso_ftobool`` call latched into a fresh boolean register.
-    ftobool_ops = _block_ftobool_ops(lir)
-    if ftobool_ops:
-        w("// Float-to-bool cast writebacks (pc-gated, combinational).")
-        for block_index, op in ftobool_ops:
-            writeback_pc = _comb_writeback_pc(lir, block_index, op)
-            assert isinstance(op.dst, BoolRegRef)
-            w(f"if (pc == {writeback_pc}) bregs[{op.dst.index}] <= {_ftobool_rhs(op)};")
-        w("")
-
-    # Bool->float cast writebacks: a pc-gated ``holoso_ffrombool`` call latched into a fresh wide register, timed on
-    # the wide frame so a downstream float operator reads it on time. The register is written only here (no collision).
-    ffrombool_ops = _block_ffrombool_ops(lir)
-    if ffrombool_ops:
-        w("// Bool-to-float cast writebacks (pc-gated, combinational).")
-        for block_index, op in ffrombool_ops:
-            writeback_pc = _comb_float_writeback_pc(lir, block_index, op)
-            assert isinstance(op.dst, RegRef)
-            w(f"if (pc == {writeback_pc}) regs[{op.dst.index}] <= {_ffrombool_rhs(op)};")
-        w("")
-
-    # Control and persistent state are the reset-gated registers. Each slot register's reset snapshot (under rst) and
-    # its update (a coalesced operator's writeback, or a writeback copy on its install step) are the two arms of this
-    # single rst condition, segregating those assignments for the synthesizer; the pure datapath above stays unreset.
+    # Control and persistent state are the reset-gated registers: the slot snapshot (under rst) and the slot's update
+    # chain (its coalesced operator writebacks and/or its boundary install, under the else) are the two arms of one rst
+    # condition, segregating those assignments for the synthesizer.
     fmt = lir.float_format
     digits = (fmt.width + 3) // 4
-    state_copies = [slot for slot in lir.float_state_slots if slot.needs_copy]
     w("// Control and persistent state: the reset-gated registers.")
     w("if (rst) begin")
     w.push()
@@ -917,30 +895,15 @@ always @(posedge clk) begin
     w("pc <= next_pc;")
     w("if (in_ready && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted")
     w("if (err) err_pc_q <= pc - FETCH_LAG;      // execution lags the fetch PC by FETCH_LAG, so the step is pc-lag")
-    for slot in lir.float_state_slots:  # coalesced slots: their producing operator's writeback, moved under rst
-        if not slot.needs_copy and write_sets.get(slot.reg.index):
-            _reg_write_stmts(w, slot.reg.index, write_sets[slot.reg.index], write_lists)
-    if is_cfg:
-        # The slot register is read-only in the body (its phi/live-out lives in a fresh register); install its live-out
-        # at the single Ret boundary (LASTPC), read-first and out_ready-gated. Read-first: the combinational output net
-        # samples the OLD slot value at LASTPC (so `return old` sees the live-in) while this latches the new value for
-        # the next transaction; out_ready makes it fire exactly once, never re-copying while the boundary is held.
-        for slot in lir.float_state_slots:
-            if slot.needs_copy:
-                w(f"if (pc == LASTPC && out_ready) regs[{slot.reg.index}] <= {_state_copy_rhs(slot)};  // {slot.name}")
-        for bslot in lir.bool_state_slots:
-            if bslot.needs_copy:
-                rhs = _bool_operand_rhs(bslot.live_out)
-                w(f"if (pc == LASTPC && out_ready) bregs[{bslot.reg.index}] <= {rhs};  // {bslot.name}")
-    elif state_copies:
-        # Single-block: persist each non-coalesced slot on the step its writeback installs (state_copy_step; LASTPC for
-        # a boundary copy). An early install step is traversed exactly once per accepted transaction, so it self-gates;
-        # the LASTPC boundary step is held under back-pressure, so there the copy also waits for out_ready -- both fold
-        # into one guard so state advances exactly once and a held boundary never re-copies (else a delay overruns).
-        pcw = max(1, lir.initiation_interval.bit_length())
-        for slot in state_copies:
-            cond = f"pc == {_lit(pcw, lir.state_copy_step(slot))} && (pc != LASTPC || out_ready)"
-            w(f"if ({cond}) regs[{slot.reg.index}] <= {_state_copy_rhs(slot)};  // {slot.name}")
+    for reg, slot in sorted(float_slots.items()):
+        chain = wide.get(reg, []) + _wide_state_install_entry(lir, slot)
+        if chain:
+            _emit_chain(w, f"regs[{reg}]", chain)
+    for reg, bslot in sorted(bool_slots.items()):
+        install = [("pc == LASTPC && out_ready", _bool_operand_rhs(bslot.live_out))] if bslot.needs_copy else []
+        chain = boolw.get(reg, []) + install
+        if chain:
+            _emit_chain(w, f"bregs[{reg}]", chain)
     w.pop()
     w("end")
 

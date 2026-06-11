@@ -27,8 +27,6 @@ from scipy.optimize import Bounds, LinearConstraint, milp
 from .._hir import ValueId
 from .._mir import MirOperation, MirFloatView
 from ._ir import FloatOperatorInstance
-from ._regalloc import RegisterAllocation
-from ._schedule import Schedule
 
 # One commutative use: its value id and the registers its two operands occupy (``None`` for a constant operand, which
 # is sourced from the immediate path and never enters a read-set).
@@ -41,19 +39,23 @@ _MILP_TIME_LIMIT_S = 3600.0
 _logger = logging.getLogger(__name__)
 
 
-def assign_commutative_ports(mir: MirFloatView, sched: Schedule, alloc: RegisterAllocation) -> dict[ValueId, bool]:
+def assign_commutative_ports(
+    mir: MirFloatView, inst_of: dict[ValueId, FloatOperatorInstance], assign: dict[ValueId, int]
+) -> dict[ValueId, bool]:
     """
     Per commutative operator instance, orient each use's operands to minimise the total read-set size across its two
     read ports. Returns ``{use value id: swap?}`` -- ``True`` means the emitter should exchange the two operands.
-    Solved exactly per instance; total read-mux fan-in is minimised (and never exceeds the source orientation).
+    Solved exactly per instance; total read-mux fan-in is minimised (and never exceeds the source orientation). It is
+    cycle-agnostic: it depends only on which registers each commutative use's two operands occupy and which physical
+    instance the use binds, so one call orients every commutative use across the whole flattened CFG.
     """
     uses_by_instance: dict[FloatOperatorInstance, list[_Use]] = defaultdict(list)
-    for vid in sched.issue_cycle:
-        node = mir.nodes[vid]
+    for vid, inst in inst_of.items():
+        node = mir.nodes.get(vid)
         if not (isinstance(node, MirOperation) and node.operator.is_commutative):
             continue
-        first, second = (alloc.assign.get(operand) for operand in node.operands)
-        uses_by_instance[sched.inst_of[vid]].append((vid, first, second))
+        first, second = (assign.get(operand) for operand in node.operands)
+        uses_by_instance[inst].append((vid, first, second))
     swap: dict[ValueId, bool] = {}
     fan_in_before = 0
     fan_in_after = 0

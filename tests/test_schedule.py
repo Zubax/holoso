@@ -287,6 +287,51 @@ def test_cfg_write_only_state_slot_is_reserved() -> None:
     assert float(model(3.0)[0]) == 6.0 and float(model(-2.0)[0]) == -6.0
 
 
+def test_cfg_state_slot_coalesces_onto_its_register() -> None:
+    # A control-flow kernel (the float(x>0) cast forces the CFG path) whose state live-out is an operator result that
+    # lands after the live-in is fully read coalesces onto the slot register: the producing operator writes it directly,
+    # so the slot needs no install copy -- the same coalescing the straight-line allocator did, now in the CFG path.
+    class Filt:
+        def __init__(self) -> None:
+            self.state = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            self.state = self.state * 0.9 + x
+            return float(x > 0.0) * self.state
+
+    lir = build(_run(Filt().__call__), "filt")
+    assert any(block.comb_ops for block in lir.blocks)  # the float(x>0) cast is a combinational op
+    (slot,) = lir.float_state_slots
+    assert not slot.needs_copy, "the slot live-out must coalesce onto the slot register (no install copy)"
+    assert slot.tap.source == slot.reg
+    model = build_model(lir)
+    model.reset()
+    first = float(model(2.0)[0])  # state <- 0*0.9 + 2 = 2; out = float(2>0)*2 = 2
+    second = float(model(1.0)[0])  # state <- 2*0.9 + 1 ~ 2.8; out ~ 2.8 -- proves the coalesced state carried over
+    assert abs(first - 2.0) < 1e-3 and 2.5 < second < 3.0
+
+
+def test_cfg_branch_conditions_reuse_boolean_registers() -> None:
+    # Sequential data-dependent branches: each condition is computed, tested at its boundary, and dead before the next,
+    # so the boolean bank reuses one register across them instead of allocating one per branch.
+    def f(x, y, z):  # type: ignore[no-untyped-def]
+        a = x
+        if x > 0.0:
+            a = a + 1.0
+        if y > 0.0:
+            a = a + 2.0
+        if z > 0.0:
+            a = a + 4.0
+        return a
+
+    lir = build(_run(f), "branches")
+    comparisons = sum(1 for b in lir.blocks for op in b.comb_ops if isinstance(op.operator, FComparisonOperator))
+    assert comparisons >= 3
+    assert lir.bool_regfile.nreg < comparisons  # the three conditions share boolean registers
+    model = build_model(lir)
+    assert abs(float(model(1.0, -1.0, 1.0)[0]) - 6.0) < 1e-3  # a=1; +1 (x>0); skip (y<=0); +4 (z>0) = 6
+
+
 def test_state_war_backstop_allows_noop_writeback() -> None:
     # A no-op writeback (live-out is the live-in value itself) writes no new value, so the write-after-read backstop
     # must not trip -- this previously aborted a legal build.

@@ -123,20 +123,20 @@ BASELINE: dict[str, Metrics] = {
     "ekf1_stateful": Metrics(True, nreg=38, bnreg=0, steering=86, min_ii=132),
 }
 
-# Wide-register ceilings for control-flow kernels: the hardware-frame liveness allocation must keep each at or below
-# the figure the convergence achieved, so the gate proves the reuse win (a fresh-per-value regression would blow past
-# these) rather than merely guarding the pre-convergence baseline. CORDIC is the headline -- 143 fresh registers down
-# to 11. The three at 1 are boolean-dominated kernels whose wide bank was already minimal.
-CFG_TARGET: dict[str, int] = {
-    "signal_window": 8,
-    "iir1_lpf": 4,
-    "pid": 10,
-    "schmitt_trigger": 1,
-    "quadrature_encoder": 1,
-    "phase_frequency_detector": 1,
-    "recip_newton": 5,
-    "remainder": 8,
-    "cordic_sincos": 11,
+# Wide- and boolean-register ceilings for control-flow kernels: the unified interference allocator (both banks) must
+# keep each at or below the figure the convergence achieved, so the gate proves the reuse win (a fresh-per-value
+# regression would blow past these) rather than merely guarding the pre-convergence baseline. CORDIC is the headline --
+# 143 wide / 12 boolean fresh registers down to 10 / 1.
+CFG_TARGET: dict[str, tuple[int, int]] = {  # name -> (max wide registers, max boolean registers)
+    "signal_window": (6, 6),
+    "iir1_lpf": (3, 2),
+    "pid": (9, 2),
+    "schmitt_trigger": (1, 2),
+    "quadrature_encoder": (1, 15),
+    "phase_frequency_detector": (1, 8),
+    "recip_newton": (4, 1),
+    "remainder": (7, 3),
+    "cordic_sincos": (10, 1),
 }
 
 
@@ -150,7 +150,9 @@ def test_metrics_do_not_regress(name: str) -> None:
             base, field
         ), f"{name}: {field} regressed {getattr(base, field)} -> {getattr(got, field)}"
     if not base.straight_line:
-        assert got.nreg <= CFG_TARGET[name], f"{name}: nreg {got.nreg} exceeds CFG target {CFG_TARGET[name]}"
+        nreg_cap, bnreg_cap = CFG_TARGET[name]
+        assert got.nreg <= nreg_cap, f"{name}: nreg {got.nreg} exceeds CFG target {nreg_cap}"
+        assert got.bnreg <= bnreg_cap, f"{name}: bnreg {got.bnreg} exceeds CFG target {bnreg_cap}"
 
 
 def test_build_is_deterministic() -> None:

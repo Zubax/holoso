@@ -15,6 +15,7 @@ from .._mir import (
     MirFloatConst,
     MirFloatInput,
     MirFloatOutput,
+    MirFloatStateRead,
     MirOperation,
     MirFloatView,
     MirJump,
@@ -26,7 +27,7 @@ from .._operators import FloatHardwareOperator, FloatSignControl
 from ._ir import *
 from ._liveness import BankLiveness, compute_interference
 from ._portassign import assign_commutative_ports
-from ._regalloc import ColoringProblem, RegisterAllocation, allocate_registers, color
+from ._regalloc import ColoringProblem, color
 from ._schedule import Schedule, resolve_pool, schedule_ops
 
 
@@ -44,61 +45,17 @@ def _operation(mir: MirFloatView, vid: ValueId) -> MirOperation:
 
 def build(mir: Mir, module_name: str) -> Lir:
     """
-    Schedule, bind, and register-allocate selected MIR into a pipelined microprogram.
+    Schedule, bind, and register-allocate selected MIR into a pipelined microprogram. A straight-line kernel is the
+    degenerate single-``Ret``-block control-flow graph, so there is one build path for every kernel.
     """
     if not mir.outputs:
         raise UnsupportedConstruct("Synthesized kernel must produce at least one output value")
-    float_mir = MirFloatView.from_mir(mir)
-    bool_mir = MirBoolView.from_mir(mir)
-    # TODO FIXME: THIS IS TEMPORARY. The straight-line/single-block path will be merged with CFG eventually.
-    is_straight_line = (
-        len(mir.blocks) == 1
-        and isinstance(mir.blocks[0].terminator, MirRet)
-        and not bool_mir.state_slots
-        and not bool_mir.nodes
-    )
-    lir = _build_single_block(mir, float_mir, module_name) if is_straight_line else _build_cfg(mir, module_name)
+    lir = _build_cfg(mir, module_name)
     names = [port.name for port in lir.ports]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise UnsupportedConstruct(f"duplicate port name(s) in the module interface: {', '.join(duplicates)}")
     return lir
-
-
-def _build_single_block(mir: Mir, float_mir: MirFloatView, module_name: str) -> Lir:
-    pool = resolve_pool(float_mir)
-    sched = schedule_ops(mir.nodes, pool, set(float_mir.operation_nodes))
-    alloc = allocate_registers(float_mir, sched.issue_cycle, sched.inst_of, sched.makespan)
-    swap = assign_commutative_ports(float_mir, sched, alloc)
-    consts, const_pool = _build_const_pool(float_mir)
-    ops = _build_ops(float_mir, sched, alloc, const_pool, swap)
-    inputs: list[FloatInputLoad | BoolInputLoad] = list(_build_inputs(float_mir, alloc))
-    outputs: list[FloatOutputWire | BoolOutputWire] = list(_build_outputs(float_mir, alloc, const_pool))
-    boundary = boundary_step(sched.makespan)
-    return Lir(
-        module_name=module_name,
-        instances=sched.instances,
-        float_consts=consts,
-        float_format=float_mir.fmt,
-        regfile=RegFileLayout(
-            width=float_mir.fmt.width,
-            nreg=alloc.nreg,
-            nrd=_compute_nrd(sched),
-            nwr=_compute_nwr(sched),
-            nload=_compute_nload(float_mir),
-        ),
-        inputs=inputs,
-        ops=ops,
-        outputs=outputs,
-        float_state_slots=_build_state_slots(float_mir, alloc, const_pool),
-        blocks=[LirBlock(0, ops, [], [], [], Ret(), sched.makespan)],  # comb_ops/copies/bool_writes: none
-        block_base=[0],
-        entry=0,
-        last_pc=boundary,
-        min_initiation_interval=boundary,
-        bool_regfile=BoolRegFileLayout(nreg=0),
-        bool_state_slots=[],
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +64,7 @@ class _CfgAllocation:
 
     float_reg: dict[ValueId, int]
     float_slot_reg: dict[str, int]
+    float_install: dict[str, int]  # slot name -> Ret-block-relative scheduler-frame install cycle of its live-out
     nreg: int
     bool_reg: dict[ValueId, int]
     bool_slot_reg: dict[str, int]
@@ -141,10 +99,10 @@ def _mir_rpo(mir: Mir) -> list[int]:
 
 def _build_cfg(mir: Mir, module_name: str) -> Lir:
     """
-    Build a multi-block (control-flow) microprogram: schedule each block independently, pool operator instances across
-    the mutually-exclusive blocks, allocate registers installing every phi and slot live-out via a copy (no coalescing
-    in v1 -- each takes a fresh register), and lay the blocks out in the ROM with the single ``Ret`` as the out_valid
-    boundary.
+    Build the microprogram for any kernel (a straight-line kernel is the degenerate single-``Ret``-block graph):
+    schedule each block independently, pool operator instances across the mutually-exclusive blocks, color both register
+    banks by hardware-frame liveness (reusing registers, coalescing state live-outs), install non-coalesced phi and slot
+    live-outs by pc-gated copy, and lay the blocks out in the ROM with the single ``Ret`` as the out_valid boundary.
     """
     float_mir = MirFloatView.from_mir(mir)
     bool_mir = MirBoolView.from_mir(mir)
@@ -166,6 +124,7 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
     instances = [FloatOperatorInstance(operator, i) for operator in inst_count for i in range(inst_count[operator])]
     consts, const_pool = _build_const_pool(float_mir, bool_mir.operation_nodes)
     alloc = _allocate_cfg(mir, float_mir, bool_mir, block_sched, inst_of)
+    swap = assign_commutative_ports(float_mir, inst_of, alloc.float_reg)
 
     blocks: list[LirBlock] = []
     for block in mir.blocks:
@@ -175,7 +134,7 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
         # (comparison, boolean logic, and the wide-result ``float(cond)`` cast) becomes
         # a CombScheduledOp. Each issues as soon as its own operands have landed, with no barrier.
         ops = [
-            _build_cfg_op(float_mir, vid, sched, inst_of, alloc, const_pool)
+            _build_cfg_op(float_mir, vid, sched, inst_of, alloc, const_pool, swap)
             for vid in sorted(
                 (v for v in sched.issue_cycle if v in inst_of),
                 key=lambda v: (sched.issue_cycle[v], v),
@@ -215,15 +174,17 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
     block_base, last_pc, min_ii = _layout_blocks(mir, blocks)
     flat_ops = [_rebase_op(op, block_base[block.id]) for block in mir.blocks for op in blocks[block.id].ops]
 
-    # The slot register holds the live-in (read-only in the body); its live-out is a distinct value installed at the
-    # Ret boundary (install_cycle is unused on the CFG path -- the emitter installs at LASTPC, the model at Ret).
+    # A coalesced slot's live-out tap resolves to the slot register itself (its operator wrote it directly, no copy); a
+    # non-coalesced slot taps the live-out's own register, installed at ``install_cycle`` -- absolutized here by adding
+    # the Ret block's base, since the install fires inside the (last-laid-out) Ret block.
+    ret_block = next(b.id for b in mir.blocks if isinstance(b.terminator, MirRet))
     float_state_slots = [
         FloatStateSlot(
             slot.name,
             RegRef(alloc.float_slot_reg[slot.name]),
             slot.reset_value,
             _cfg_operand_signed(float_mir, slot.live_out, slot.sign, alloc, const_pool),
-            0,
+            block_base[ret_block] + alloc.float_install[slot.name],
         )
         for slot in float_mir.state_slots
     ]
@@ -261,16 +222,6 @@ def _build_cfg(mir: Mir, module_name: str) -> Lir:
         bool_regfile=BoolRegFileLayout(nreg=alloc.nbreg),
         bool_state_slots=bool_state_slots,
     )
-
-
-def _cfg_operand(
-    float_mir: MirFloatView, vid: ValueId, alloc: _CfgAllocation, pool: dict[ValueId, _PooledConst]
-) -> FloatOperand:
-    node = float_mir.nodes[vid]
-    if isinstance(node, MirFloatConst):
-        entry = pool[vid]
-        return FloatOperand(FloatConstRef(entry.index), entry.sign)
-    return FloatOperand(RegRef(alloc.float_reg[vid]))
 
 
 def _cfg_bool_operand(bool_mir: MirBoolView, vid: ValueId, alloc: _CfgAllocation) -> BoolOperand:
@@ -330,12 +281,15 @@ def _build_cfg_op(
     inst_of: dict[ValueId, FloatOperatorInstance],
     alloc: _CfgAllocation,
     pool: dict[ValueId, _PooledConst],
+    swap: dict[ValueId, bool],
 ) -> FloatScheduledOp:
     node = float_mir.operation_nodes[vid]
     operands = [
         _cfg_operand_signed(float_mir, operand, sign, alloc, pool)
         for operand, sign in zip(node.operands, node.operand_signs, strict=True)
     ]
+    if swap.get(vid):  # commutative operator: exchange operands (with their sign sidebands) to shrink read muxes
+        operands.reverse()
     return FloatScheduledOp(
         inst=inst_of[vid],
         operands=operands,
@@ -494,14 +448,15 @@ def _allocate_float_cfg(
     block_sched: dict[int, Schedule],
     inst_of: dict[ValueId, FloatOperatorInstance],
     block_makespan: dict[int, int],
-) -> tuple[dict[ValueId, int], dict[str, int], int]:
+) -> tuple[dict[ValueId, int], dict[str, int], int, dict[str, int]]:
     """
     Color the wide bank across the whole CFG by hardware-frame liveness, reusing registers wherever values do not
-    interfere. Inputs pin to the low load lanes and each state live-in to its dedicated slot register; instance-backed
-    operator results share one write-path pool, phi results another (installed by pc-gated copy), and each bool->float
-    cast keeps its own pc-gated register -- the pools keep the emitter's distinct write statements off one register
-    until the unified write-chain refactor. State live-outs are still installed by a boundary copy here (coalescing is a
-    later step), so the slot register holds only its read-only live-in.
+    interfere. Inputs pin to the low load lanes and each state live-in to its dedicated slot register. A state slot's
+    live-out coalesces onto the slot register when it is an instance-backed operator result whose range does not overlap
+    the live-in (the operator writes it directly, no copy); otherwise a pc-gated copy installs it -- as early as the
+    live-in is read when the live-out is defined in the Ret block (freeing the source register), the boundary at the
+    latest. A coalesced slot register hosts gap tenants; a non-coalesced one is reserved for its read-only live-in. The
+    returned ``install`` cycles are Ret-block-relative (absolutized by ``_build_cfg``).
     """
     nload = len(float_mir.input_ids)
     slots = float_mir.state_slots
@@ -538,60 +493,117 @@ def _allocate_float_cfg(
                     reads[block.id].append((operand, rc))
 
     ret_block = next(b.id for b in mir.blocks if isinstance(b.terminator, MirRet))
-    boundary: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
-    for out in mir.outputs:
-        if isinstance(out, MirFloatOutput) and out.value in values:
-            boundary[ret_block].add(out.value)
-    for slot in slots:
-        if slot.live_out in values:
-            boundary[ret_block].add(slot.live_out)
-    # The slot register is read-only and reserved for its whole transaction: the boundary install overwrites it
-    # read-first, and the emitter keeps slot registers out of the operator writeback select, so a movable must never be
-    # colored onto one. Holding the live-in live to the Ret boundary makes the slot register interfere with every
-    # temporary, reserving it (coalescing it onto a tenant is a later step with the matching emitter support).
-    for vid in float_mir.state_read_nodes:
-        boundary[ret_block].add(vid)
     arm_out: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
     for phi in phi_nodes.values():
         for pred, arm, _sign in phi.arms:
             if arm in values:
                 arm_out[pred].add(arm)
+    boundary_outputs: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
+    for out in mir.outputs:
+        if isinstance(out, MirFloatOutput) and out.value in values:
+            boundary_outputs[ret_block].add(out.value)
 
-    interferes = compute_interference(
-        BankLiveness(
-            blocks=[b.id for b in mir.blocks],
-            entry=mir.entry,
-            succ=_succ_map(mir),
-            makespan=block_makespan,
-            resident=frozenset({*float_mir.input_ids, *float_mir.state_read_nodes}),
-            op_commit=op_commit,
-            op_block=op_block,
-            phi_block=phi_block,
-            reads=reads,
-            boundary_users={b: frozenset(s) for b, s in boundary.items()},
-            arm_out={b: frozenset(s) for b, s in arm_out.items()},
+    def graph(
+        boundary: dict[int, set[ValueId]], block_reads: dict[int, list[tuple[ValueId, int]]]
+    ) -> dict[ValueId, set[ValueId]]:
+        return compute_interference(
+            BankLiveness(
+                blocks=[b.id for b in mir.blocks],
+                entry=mir.entry,
+                succ=_succ_map(mir),
+                makespan=block_makespan,
+                resident=frozenset({*float_mir.input_ids, *float_mir.state_read_nodes}),
+                op_commit=op_commit,
+                op_block=op_block,
+                phi_block=phi_block,
+                reads=block_reads,
+                boundary_users={b: frozenset(s) for b, s in boundary.items()},
+                arm_out={b: frozenset(s) for b, s in arm_out.items()},
+            )
         )
-    )
+
+    # A slot whose live-in is consumed as ANOTHER slot's live-out (a chained copy, ``self.a = self.b``) must keep its
+    # live-in to the boundary, so it can neither coalesce nor early-install. The coalescing oracle reads every live-out
+    # at the boundary (it must persist) and every live-in at its actual last read, so a live-out that lands after its
+    # live-in is fully read shows as non-interfering and coalesces -- the interference-frame form of the WAR test.
+    livein_of = {slot.name: state_read_of.get(slot.name) for slot in slots}
+    tapped_by_other: set[str] = set()
+    for slot in slots:
+        node = float_mir.nodes[slot.live_out]
+        if isinstance(node, MirFloatStateRead) and node.name != slot.name:
+            tapped_by_other.add(node.name)
+    boundary_oracle = {b: set(s) for b, s in boundary_outputs.items()}
+    for slot in slots:
+        if slot.live_out in values:
+            boundary_oracle[ret_block].add(slot.live_out)
+    coalesce_graph = graph(boundary_oracle, reads)
+    coalesced: dict[str, ValueId] = {}  # slot name -> its live-out, pinned onto the slot register (operator writes it)
+    for slot in slots:
+        live_out = slot.live_out
+        r_in = livein_of[slot.name]
+        if slot.sign != FloatSignControl() or live_out not in inst_of or slot.name in tapped_by_other:
+            continue  # a folded sign or a non-instance live-out cannot be written into the slot register directly
+        if r_in is not None and live_out in coalesce_graph.get(r_in, set()):
+            continue  # the live-out's range overlaps the live-in's -- it must be copied, not coalesced
+        coalesced[slot.name] = live_out
+
+    # Early install for non-coalesced slots: install the live-out as early as the live-in is fully read and the source
+    # is available, freeing the source register -- but only when the live-out is defined in the Ret block (the unique,
+    # last, once-per-transaction exit), else at the Ret boundary. On one block (every op is in the Ret block) this is
+    # exactly the single-block early install. Cycles are Ret-block-relative in the scheduler frame.
+    ret_present = block_makespan[ret_block] + 1
+    last_issue_in_ret: dict[ValueId, int] = {}
+    for vid, issue in block_sched[ret_block].issue_cycle.items():
+        node = mir.nodes.get(vid)
+        if isinstance(node, MirOperation):
+            for operand in node.operands:
+                last_issue_in_ret[operand] = max(last_issue_in_ret.get(operand, 0), issue)
+    install: dict[str, int] = {}
+    for slot in slots:
+        name, live_out, r_in = slot.name, slot.live_out, livein_of[slot.name]
+        node = float_mir.nodes[live_out]
+        defined_in_ret = isinstance(node, MirFloatInput) or (
+            live_out in op_nodes and op_block.get(live_out) == ret_block
+        )
+        early = name not in coalesced and defined_in_ret and (r_in is None or r_in not in boundary_outputs[ret_block])
+        if early:
+            cycle = (op_commit[live_out] if live_out in op_nodes else 0) + 1  # read-first: a strictly older commit
+            if r_in is not None:
+                cycle = max(cycle, last_issue_in_ret.get(r_in, 0))  # do not overwrite the live-in before its last read
+            install[name] = min(cycle, ret_present)
+        else:
+            install[name] = ret_present
+
+    # Final interference. A non-coalesced slot reserves its live-in to the boundary (the install reads it read-first, so
+    # the register holds nothing else); a coalesced slot keeps its live-in's actual range, so a gap tenant lands between
+    # the live-in's last read and the live-out's landing. A boundary-installed live-out is read at the boundary; an
+    # early-installed one is read by its copy at the install step, freeing its source register for a tenant after that.
+    boundary_final = {b: set(s) for b, s in boundary_outputs.items()}
+    reads_final = {b: list(r) for b, r in reads.items()}
+    for slot in slots:
+        name, live_out, r_in = slot.name, slot.live_out, livein_of[slot.name]
+        if name in coalesced:
+            if live_out in values:
+                boundary_final[ret_block].add(live_out)  # persists in the slot register to the next initiation
+            continue
+        if r_in is not None:
+            boundary_final[ret_block].add(r_in)
+        if live_out not in values:
+            continue
+        if install[name] < ret_present:
+            reads_final[ret_block].append((live_out, copy_step_cycle(install[name])))
+        else:
+            boundary_final[ret_block].add(live_out)
+    interferes = graph(boundary_final, reads_final)
 
     pinned: dict[ValueId, int] = {vid: i for i, vid in enumerate(float_mir.input_ids)}
     for name, reg in float_slot_reg.items():
-        r_in = state_read_of.get(name)
+        r_in = livein_of[name]
         if r_in is not None:
             pinned[r_in] = reg
-    pool: dict[ValueId, int] = {vid: 0 for vid in float_mir.input_ids}
-    pool.update({vid: 0 for vid in float_mir.state_read_nodes})
-    cast_pool = 2
-    movable: list[ValueId] = []
-    for vid in op_nodes:
-        if vid in inst_of:
-            pool[vid] = 0  # instance-backed: operator write-select pool
-        else:
-            pool[vid] = cast_pool  # a bool->float cast: its own pc-gated register, never reused (emitter limitation)
-            cast_pool += 1
-        movable.append(vid)
-    for vid in phi_nodes:
-        pool[vid] = 1  # phi result: pc-gated copy pool
-        movable.append(vid)
+    for name, live_out in coalesced.items():  # the coalesced live-out shares its slot register (the operator writes it)
+        pinned[live_out] = float_slot_reg[name]
+    movable: list[ValueId] = [vid for vid in (*op_nodes, *phi_nodes) if vid not in pinned]
 
     rpo_pos = {bid: i for i, bid in enumerate(_mir_rpo(mir))}
     block_of = {**op_block, **phi_block}
@@ -614,14 +626,122 @@ def _allocate_float_cfg(
         ColoringProblem(
             movable=movable,
             pinned=pinned,
-            pool=pool,
             interferes=interferes,
             consumer_ports=consumer_ports,
             producer_key=producer_key,
             fresh_start=fresh_start,
         )
     )
-    return assign, float_slot_reg, nreg
+    # Backstop: a non-coalesced slot register must carry nothing but its own live-in (its install copy folds no tenant).
+    for slot in slots:
+        if slot.name in coalesced:
+            continue
+        reg = float_slot_reg[slot.name]
+        occupants = [vid for vid, r in assign.items() if r == reg and vid != livein_of[slot.name]]
+        assert not occupants, f"non-coalesced slot register {reg} ({slot.name!r}) has occupants {occupants}"
+    return assign, float_slot_reg, nreg, install
+
+
+def _allocate_bool_cfg(
+    mir: Mir, bool_mir: MirBoolView, block_sched: dict[int, Schedule], block_makespan: dict[int, int]
+) -> tuple[dict[ValueId, int], dict[str, int], int]:
+    """
+    Color the boolean bank across the CFG, reusing 1-bit registers across non-interfering values. Liveness is
+    conservative -- every boolean value is held to its block's boundary -- which disables intra-block reuse but lets the
+    mutually-exclusive and sequential branch conditions in distinct blocks collapse onto a few registers. Inputs pin to
+    the low load lanes and each state live-in to its dedicated slot register (reserved to the boundary).
+    """
+    nbin = len(bool_mir.input_ids)
+    bslots = bool_mir.state_slots
+    bool_slot_reg = {slot.name: nbin + i for i, slot in enumerate(bslots)}
+    state_read_of = {node.name: vid for vid, node in bool_mir.state_read_nodes.items()}
+    fresh_start = nbin + len(bslots)
+    op_nodes = bool_mir.operation_nodes
+    phi_nodes = bool_mir.phi_nodes
+    values = {*bool_mir.input_ids, *bool_mir.state_read_nodes, *op_nodes, *phi_nodes}
+
+    op_block: dict[ValueId, int] = {}
+    op_commit: dict[ValueId, int] = {}
+    phi_block: dict[ValueId, int] = {}
+    for block in mir.blocks:
+        sched = block_sched[block.id]
+        for vid in block.operations:
+            if vid in op_nodes:
+                op_block[vid] = block.id
+                op_commit[vid] = sched.issue_cycle[vid] + op_nodes[vid].operator.latency
+        for vid in block.phis:
+            if vid in phi_nodes:
+                phi_block[vid] = block.id
+
+    reads: dict[int, list[tuple[ValueId, int]]] = {block.id: [] for block in mir.blocks}
+    boundary: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
+    for block in mir.blocks:
+        bnd = boundary_step(block_makespan[block.id])
+        for vid in block_sched[block.id].issue_cycle:
+            node = mir.nodes.get(vid)
+            if isinstance(node, MirOperation):
+                for operand in node.operands:
+                    if operand in values:
+                        reads[block.id].append((operand, bnd))  # conservative: read at the block boundary
+        if isinstance(block.terminator, MirBranch) and block.terminator.cond in values:
+            boundary[block.id].add(block.terminator.cond)
+    ret_block = next(b.id for b in mir.blocks if isinstance(b.terminator, MirRet))
+    for out in mir.outputs:
+        if isinstance(out, MirBoolOutput) and out.value in values:
+            boundary[ret_block].add(out.value)
+    for slot in bslots:
+        if slot.live_out in values:
+            boundary[ret_block].add(slot.live_out)
+        r_in = state_read_of.get(slot.name)
+        if r_in is not None:
+            boundary[ret_block].add(r_in)  # reserve the slot register (its live-in is held read-first to the boundary)
+    arm_out: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
+    for phi in phi_nodes.values():
+        for pred, arm, _sign in phi.arms:
+            if arm in values:
+                arm_out[pred].add(arm)
+
+    interferes = compute_interference(
+        BankLiveness(
+            blocks=[b.id for b in mir.blocks],
+            entry=mir.entry,
+            succ=_succ_map(mir),
+            makespan=block_makespan,
+            resident=frozenset({*bool_mir.input_ids, *bool_mir.state_read_nodes}),
+            op_commit=op_commit,
+            op_block=op_block,
+            phi_block=phi_block,
+            reads=reads,
+            boundary_users={b: frozenset(s) for b, s in boundary.items()},
+            arm_out={b: frozenset(s) for b, s in arm_out.items()},
+        )
+    )
+
+    pinned: dict[ValueId, int] = {vid: i for i, vid in enumerate(bool_mir.input_ids)}
+    for name, reg in bool_slot_reg.items():
+        r_in = state_read_of.get(name)
+        if r_in is not None:
+            pinned[r_in] = reg
+    rpo_pos = {bid: i for i, bid in enumerate(_mir_rpo(mir))}
+    block_of = {**op_block, **phi_block}
+    movable = sorted(
+        (vid for vid in (*op_nodes, *phi_nodes)),
+        key=lambda vid: (rpo_pos[block_of[vid]], landing_cycle(op_commit.get(vid, -3)), vid),
+    )
+    # One coloring engine for both banks. The boolean bank has no read multiplexer and a one-hot pc-gated write chain,
+    # so it carries no read ports and a single uniform producer -- the steering objective then degenerates to register
+    # count, and the reach-aware colorer reduces to count-minimizing first-fit.
+    assign, nbreg = color(
+        ColoringProblem(
+            movable=movable,
+            pinned=pinned,
+            interferes=interferes,
+            consumer_ports={vid: set() for vid in values},
+            producer_key={vid: "bool" for vid in values},
+            fresh_start=fresh_start,
+        )
+    )
+    return assign, bool_slot_reg, nbreg
 
 
 def _allocate_cfg(
@@ -632,32 +752,25 @@ def _allocate_cfg(
     inst_of: dict[ValueId, FloatOperatorInstance],
 ) -> _CfgAllocation:
     """
-    Assign wide and boolean registers across the CFG. The wide bank is colored by hardware-frame liveness
-    (:func:`_allocate_float_cfg`), reusing registers across mutually-exclusive and non-overlapping live ranges; the
-    boolean bank still takes a fresh register per value (a later step colors it too). A phi is resolved by installing
-    each arm's value into the phi's register with a copy at the predecessor's tail; the copies are a parallel
-    (simultaneous) bundle, so a swap is read-then-write correct. The state slot register holds its read-only live-in and
-    the boundary installs the live-out into it at the single Ret exit, read-first.
+    Assign wide and boolean registers across the CFG. Both banks are colored by hardware-frame liveness, reusing
+    registers across mutually-exclusive and non-overlapping live ranges (:func:`_allocate_float_cfg`,
+    :func:`_allocate_bool_cfg`). A phi is resolved by installing each arm's value into the phi's register with a copy at
+    the predecessor's tail; the copies are a parallel (simultaneous) bundle, so a swap is read-then-write correct.
     """
     block_makespan = {
         b.id: block_sched[b.id].makespan + (1 if b.id in _block_has_install(mir, float_mir, bool_mir) else 0)
         for b in mir.blocks
     }
-    float_reg, float_slot_reg, nreg = _allocate_float_cfg(mir, float_mir, block_sched, inst_of, block_makespan)
+    float_reg, float_slot_reg, nreg, float_install = _allocate_float_cfg(
+        mir, float_mir, block_sched, inst_of, block_makespan
+    )
 
     copies: dict[int, list[tuple[int, ValueId, FloatSignControl]]] = {}
     for vid, phi in float_mir.phi_nodes.items():
         for pred, value, sign in phi.arms:
             copies.setdefault(pred, []).append((float_reg[vid], value, sign))
 
-    bool_reg: dict[ValueId, int] = {vid: i for i, vid in enumerate(bool_mir.input_ids)}
-    bool_slot_reg = {slot.name: len(bool_mir.input_ids) + i for i, slot in enumerate(bool_mir.state_slots)}
-    for bvid, bnode in bool_mir.state_read_nodes.items():
-        bool_reg[bvid] = bool_slot_reg[bnode.name]
-    nbreg = len(bool_mir.input_ids) + len(bool_mir.state_slots)
-    for vid in (*bool_mir.phi_nodes, *bool_mir.operation_nodes):  # phis and comparator results: each a fresh register
-        bool_reg[vid] = nbreg
-        nbreg += 1
+    bool_reg, bool_slot_reg, nbreg = _allocate_bool_cfg(mir, bool_mir, block_sched, block_makespan)
 
     bool_writes: dict[int, list[tuple[int, ValueId]]] = {}
     for vid, phi in bool_mir.phi_nodes.items():
@@ -680,6 +793,7 @@ def _allocate_cfg(
     return _CfgAllocation(
         float_reg=float_reg,
         float_slot_reg=float_slot_reg,
+        float_install=float_install,
         nreg=nreg,
         bool_reg=bool_reg,
         bool_slot_reg=bool_slot_reg,
@@ -742,59 +856,6 @@ def _build_const_pool(
     return values, pool
 
 
-def _operand(
-    mir: MirFloatView,
-    vid: ValueId,
-    sign: FloatSignControl,
-    alloc: RegisterAllocation,
-    pool: dict[ValueId, _PooledConst],
-) -> FloatOperand:
-    node = mir.nodes[vid]
-    if isinstance(node, MirFloatConst):
-        entry = pool[vid]
-        return FloatOperand(FloatConstRef(entry.index), entry.sign.then(sign))
-    return FloatOperand(RegRef(alloc.assign[vid]), sign)
-
-
-def _build_ops(
-    mir: MirFloatView,
-    sched: Schedule,
-    alloc: RegisterAllocation,
-    pool: dict[ValueId, _PooledConst],
-    swap: dict[ValueId, bool],
-) -> list[FloatScheduledOp]:
-    ops: list[FloatScheduledOp] = []
-    for vid in sorted(sched.issue_cycle, key=lambda v: (sched.issue_cycle[v], v)):
-        node = _operation(mir, vid)
-        operands = [
-            _operand(mir, operand, sign, alloc, pool)
-            for operand, sign in zip(node.operands, node.operand_signs, strict=True)
-        ]
-        if swap.get(vid):  # commutative operator: exchange operands (with their sign sidebands) to shrink read muxes
-            operands.reverse()
-        ops.append(
-            FloatScheduledOp(
-                inst=sched.inst_of[vid],
-                operands=operands,
-                result_sign=node.result_sign,
-                dst=RegRef(alloc.assign[vid]),
-                issue_cycle=sched.issue_cycle[vid],
-                latency=node.operator.latency,
-            )
-        )
-    return ops
-
-
-def _build_inputs(mir: MirFloatView, alloc: RegisterAllocation) -> list[FloatInputLoad]:
-    loads: list[FloatInputLoad] = []
-    for vid in mir.input_ids:
-        node = mir.nodes[vid]
-        if not isinstance(node, MirFloatInput):
-            continue
-        loads.append(FloatInputLoad(node.name, RegRef(alloc.assign[vid])))
-    return loads
-
-
 def _build_cfg_inputs(
     mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView, alloc: _CfgAllocation
 ) -> list[FloatInputLoad | BoolInputLoad]:
@@ -809,68 +870,3 @@ def _build_cfg_inputs(
         else:
             raise AssertionError(f"unhandled MIR input {vid}")
     return loads
-
-
-def _build_outputs(
-    mir: MirFloatView, alloc: RegisterAllocation, pool: dict[ValueId, _PooledConst]
-) -> list[FloatOutputWire]:
-    wires: list[FloatOutputWire] = []
-    for out in mir.outputs:
-        node = mir.nodes[out.value]
-        source: RegRef | FloatConstRef
-        if isinstance(node, MirFloatConst):
-            entry = pool[out.value]
-            source = FloatConstRef(entry.index)
-            sign = entry.sign.then(out.sign)
-        else:
-            source = RegRef(alloc.assign[out.value])
-            sign = out.sign
-        wires.append(FloatOutputWire(out.name, FloatOperand(source, sign)))
-    return wires
-
-
-def _build_state_slots(
-    mir: MirFloatView, alloc: RegisterAllocation, pool: dict[ValueId, _PooledConst]
-) -> list[FloatStateSlot]:
-    slots: list[FloatStateSlot] = []
-    for slot in mir.state_slots:
-        node = mir.nodes[slot.live_out]
-        source: RegRef | FloatConstRef
-        if isinstance(node, MirFloatConst):
-            entry = pool[slot.live_out]
-            source = FloatConstRef(entry.index)
-            sign = entry.sign.then(slot.sign)
-        else:
-            source = RegRef(alloc.assign[slot.live_out])
-            sign = slot.sign
-        reg = RegRef(alloc.state_regs[slot.name])
-        tap = FloatOperand(source, sign)
-        slots.append(FloatStateSlot(slot.name, reg, slot.reset_value, tap, alloc.install_cycles[slot.name]))
-    return slots
-
-
-def _compute_nrd(sched: Schedule) -> int:
-    """
-    Combinational read ports: one dedicated port per operator operand (the sum of instance arities).
-    Each ``(instance, operand-position)`` reads from its own fixed port, so the controller word carries only the
-    per-port register address and the per-cycle operand-routing mux disappears. Floored to >=1 so the regfile
-    parameter guard holds when the kernel has no operators.
-    """
-    return max(1, sum(inst.operator.arity for inst in sched.instances))
-
-
-def _compute_nwr(sched: Schedule) -> int:
-    """
-    Synchronous write ports: one dedicated port per operator instance.
-    Each instance's result wires straight to its own write port (no write-data routing mux) and the error/commit
-    gating is just that port's write-enable. Floored to >=1 so the regfile parameter guard holds with no operators.
-    """
-    return max(1, len(sched.instances))
-
-
-def _compute_nload(mir: MirFloatView) -> int:
-    """
-    Immediate parallel-load lanes: one unique low register per input port.
-    Registers 0..nload-1 are exactly the input block in module port order, including unused inputs retained as ports.
-    """
-    return len(mir.input_ids)

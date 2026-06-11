@@ -137,6 +137,8 @@ Don't hesitate to use rich Unicode where appropriate; e.g., in HTML reports, pre
 `µs` over `us` for microseconds, `🠄` instead of `=`/`<=`/`:=` for assignment, `≤` instead of `<=` for less-or-equal,
 and so on. Sensible use of emojis is also encouraged, especially in command-line output.
 
+Use logging extensively. Ensure that every significant action/decision/condition is logged.
+
 Generated reports must be written in rich and colorful human-friendly HTML format, not Markdown.
 
 No need to add tests nor update the design docs for report-generation-related changes (e.g., HTML backend).

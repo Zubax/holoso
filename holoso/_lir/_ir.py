@@ -557,21 +557,6 @@ class Lir:
         return copy_step_cycle(slot.install_cycle)
 
     @property
-    def is_control_flow(self) -> bool:
-        """
-        Whether this kernel took the control-flow build path rather than the straight-line single-block path. The model
-        and the emitter branch on this to select the CFG execution / boundary-install path; both must agree, so the
-        predicate lives here once. It is the exact negation of the builder's straight-line test: a straight-line LIR is
-        a single ``Ret`` block of float operations only (no boolean inputs, combinational ops, phi-arm copies, boolean
-        writes, or boolean state); anything else -- multiple blocks, a boolean input/state/output, or a
-        comparison/logic/cast even in one block (e.g. a branch-free ``float(x > 0)``) -- takes the CFG path.
-        TODO FIXME: THIS IS TEMPORARY. The straight-line/single-block path will be merged with CFG eventually.
-        """
-        if len(self.blocks) > 1 or self.bool_inputs or self.bool_state_slots or self.bool_outputs:
-            return True
-        return any(block.comb_ops or block.copies or block.bool_writes for block in self.blocks)
-
-    @property
     def read_set_per_port(self) -> dict[tuple[FloatOperatorInstance, int], list[int]]:
         """
         For each operator read port -- identified by its ``(instance, operand-position)`` pair -- the sorted distinct

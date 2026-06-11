@@ -697,7 +697,7 @@ class _UnusedBoolInputStateAccumulator:
 
 def test_model_unused_boolean_input_keeps_cfg_state_timing() -> None:
     model = build_model(build(_run(_UnusedBoolInputStateAccumulator().__call__), "unused_bool"))
-    assert model.lir.is_control_flow
+    assert model.lir.bool_inputs  # an unused boolean input is still a port and a boolean register load
     assert float(model(False, 2.0)[0]) == 3.0
     assert float(model(True, 4.0)[0]) == 8.0
 
