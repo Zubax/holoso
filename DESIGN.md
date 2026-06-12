@@ -239,24 +239,29 @@ float view and a boolean view sharing the block skeleton), scheduled and registe
 RTL (branch microcode) and to the numerical model.
 
 Boolean values come from boolean input ports, boolean state reads, boolean constants, float comparisons,
-boolean logic, and float->bool casts; a bool->float cast crosses back the other way. These are one MIR/LIR operation
-node (`MirOperation` / `CombScheduledOp`), keyed on the operator's signature -- the node belongs to the resource
-family of its result type
-(float or bool) and its operands may reference either bank -- so the comparison, the logic gates, and both casts are
-all instances of one uniform combinational-operation category rather than special cases. Each is latency-1
-register-resident: it reads its register operand(s), applies inline combinational logic, and its result lands one
-cycle later, exactly like a comparison. Boolean leaves may also drive 1-bit output ports directly, including public
-boolean state attributes exposed as `state_<attr>`.
+boolean logic, and float->bool casts; a bool->float cast crosses back the other way. A `MirOperation` produces ONE
+value -- the `output_port`-th result of its operator, with a typed conditioner per port (a folded sign control on a
+float port, an optional free inversion on a boolean one) -- and belongs to the resource family of its tapped port's
+type, while its operands may reference either bank. Operators split structurally into POOLED (a physical streaming
+module the scheduler pools and contends: the float arithmetic and the comparator) and INLINE (a pure expression
+folded into a register write: boolean logic and the casts); an operator may have several typed output ports, and
+operations sharing one block, operator, operands, and operand conditioners while tapping distinct ports fuse into a
+single firing. Boolean leaves may also drive 1-bit output ports directly, including public boolean state attributes
+exposed as `state_<attr>`.
 
-  - A comparison `a <relation> b` reduces the shared comparator's three one-hot order flags by the relation, so one
-    physical `holoso_fcmp` serves every relation (pooling keys on the bare comparator, never on the relation).
-  - Boolean logic `and`/`or`/`not` are plain combinational `& | ~` (no module): `a and b` is `band(a, b)`, etc.;
-    both operands always evaluate (the operands here are pure booleans). A chained comparison `a < b < c` desugars to
-    `band(a < b, b < c)` with each operand evaluated once; a statically-known connective operand folds away.
+  - A comparison `a <relation> b` taps exactly one of the comparator's three one-hot order flags with an optional
+    inversion (the ZKF ordering is total: lt/gt/eq directly, le = ~gt, ge = ~lt, ne = ~eq), so one physical
+    `holoso_fcmp` serves every relation as an ordinary pooled instance, and several relations over one operand pair
+    share a single firing. The inversion is fabric-side (an XOR folded into the register write), the boolean dual of
+    the wide lanes' hardware `y_sgnop`.
+  - Boolean logic `and`/`or`/`not` are inline `& | ~` gates (each operator owns its `verilog_expr`): `a and b` is
+    `band(a, b)`, etc.; both operands always evaluate (the operands here are pure booleans). A chained comparison
+    `a < b < c` desugars to `band(a < b, b < c)` with each operand evaluated once; a statically-known connective
+    operand folds away.
   - `bool(x)` is the float->bool cast: true iff the ZKF exponent field is nonzero (= `x != 0.0`, sign-agnostic).
-    `float(cond)` is the bool->float cast: ZKF `1.0`/`0.0`. Both are pc-gated combinational writebacks that invoke the
+    `float(cond)` is the bool->float cast: ZKF `1.0`/`0.0`. Both are pc-gated inline writebacks that invoke the
     two functions in the shared `holoso_support.vh` (`` `include``d by the generated module), not modules and not inline
-    logic. Functions keep the "two `always @*` blocks only" discipline while confining the ZKF bit layout to that one
+    logic. Functions keep the "one `always @*` block only" discipline while confining the ZKF bit layout to that one
     header, so the generated module's datapath carries no float-format assumption; the functions and the bit-exact
     model share the same definition (cross-checked at build time).
 
@@ -274,17 +279,20 @@ This is exact because a boolean test in this subset is a pure combinational valu
 equivalent; the fold is disabled the moment the outer `if` carries an `else` (then `if (A and B)` would mis-route the
 `else`).
 
-Scheduling is one cross-bank, dependency-aware pass per block over float arithmetic and every combinational op
-together, with no barrier: a comparison or cast issues as soon as its own operands have landed, so a cross-domain
-chain (e.g. `float(x > 0) * k`: a float comparison feeding a bool->float cast feeding a float multiply) schedules
-correctly. Instance-backed float arithmetic binds a pooled physical instance; the combinational ops bind none. The
-single shared comparator serializes to one comparison per cycle (each gets a distinct in_valid PC); the boolean logic
-and casts are independent inline gates with no such contention. The numerical model evaluates the whole block in one
-commit-sorted pass so a float op reading a cast result reads it after it is written. A comparison/logic/float->bool
-result latches into a boolean register at a pc-gated write; a bool->float result latches into a wide register one
-cycle later (the wide-bank write-latch + read-first edge), in time for a downstream float operator. The
-comparison/connective/cast examples (`pid`, `schmitt_trigger`, `signal_window`, `remainder`) synthesize and cosimulate
-bit-exactly like `iir1_lpf`.
+Scheduling is one cross-bank, dependency-aware pass per block over every firing together, with no barrier: a
+comparison or cast issues as soon as its own operands have landed, so a cross-domain chain (e.g. `float(x > 0) * k`:
+a float comparison feeding a bool->float cast feeding a float multiply) schedules correctly. Pooled firings contend
+for physical instances through per-instance busy windows (an instance accepts a new firing every
+`initiation_interval` cycles -- 1 for today's fully pipelined operators; the comparator is ordinary in this regard);
+inline firings have no contention. The numerical model evaluates the whole block in one commit-sorted pass so a
+float op reading a cast result reads it after it is written. Timing is a property of the register bank, never of the
+individual operator: the wide bank reads through a read latch and writes through a writeback latch, while the
+boolean bank is latch-free -- a boolean result is written directly at its microcode-gated commit step and is
+readable the next step, and an inline op reads all its operands on the single step its write fires; a bool->float
+result lands in a wide register on the wide bank's ordinary landing. The bank-true dependency edges this yields (see
+Scheduler) let boolean-logic and cast chains schedule back-to-back, which directly shortens logic-dense kernels. The
+comparison/connective/cast examples (`pid`, `schmitt_trigger`, `signal_window`, `remainder`) synthesize and
+cosimulate bit-exactly like `iir1_lpf`.
 
 A `for <name> in range(...)` loop over a static trip count fully unrolls (below an unroll threshold): the counter is a
 compile-time integer, not a runtime register, so each trip lowers the body once with the counter bound -- as a static
@@ -359,7 +367,7 @@ which is accepted. This is analogous to fast-math optimizations in C/C++ compile
 
 ```
 resources:
-  instances: [inst(operator), ...]          # each inst binds a fully-specified FloatHardwareOperator
+  instances: [inst(operator), ...]          # each inst binds a fully-specified pooled hardware operator
   float_format: fmt                         # ZKF semantics for float operators and constants
   regfile: width + N wide regs              # FF bank; the backend synthesizes a sparse, schedule-specific mux fabric
   bool_regfile: N 1-bit bool regs           # branch conditions and boolean values/state
@@ -367,8 +375,10 @@ resources:
   inputs: [input_load(name, typed_dst_reg), ...]  # ordered float and boolean input ports
   outputs: [output_wire(name, typed_source), ...]  # ordered float and boolean result/state ports
 
-scheduled float op:
-  (inst, operands+sign_controls, dst_reg, issue_cycle)  # commits at issue_cycle + latency
+pooled firing:
+  (inst, operands+conditioners, [write(port, dst_reg, conditioner), ...], issue_cycle)  # commits at issue + latency
+inline firing:
+  (operator, operands+conditioners, write(port, dst_reg, conditioner), issue_cycle)     # one pc-gated statement
 makespan: the last commit cycle. The observable in_valid->out_valid latency (initiation_interval) is
   makespan + WRITE_LATCH + 1 + FETCH_LAG -- the schedule, the writeback latch landing the final result, and the
   microcode-fetch lag (see Scheduler and Backend).
@@ -387,9 +397,15 @@ timing penalties due to the expensive read/write port multiplexors, hence the sp
 Register allocation is reach-aware over the whole control-flow graph. Whether two values may share a register is
 decided on a hardware-frame interference graph built from per-block liveness: a value resides in a block from the
 block's first step when it is carried in from a predecessor or is a phi result, from its operator's landing cycle when
-it is defined in the block, and through the block boundary when it is live out; two values interfere when their
-residences overlap in some block under the read-first rule (the older value's last read must precede the newer's
-landing). Path-awareness is free -- the two arms of an `if` are live in no common block, so their temporaries reuse the
+it is defined in the block, and through the block boundary when it is live out; a phi result additionally resides at
+the tail of every arm predecessor, because its install copy physically writes the phi register there -- one step
+before the boundary where a branch terminator reads its condition, so an unmodeled install could clobber the very
+condition selecting the successor. (This conservatively also forbids a phi from sharing its own arm values'
+registers, although that same-step read-first self-copy would be harmless; a copy-coalescing pass could reclaim it.
+A branch on a phi installed in the branching block itself is rejected outright -- there the conflict is the value
+with itself and no assignment can help.) Two values interfere when their residences overlap in some block under the
+read-first rule (the older value's last read must precede the newer's landing). Path-awareness is free -- the two arms
+of an `if` are live in no common block, so their temporaries reuse the
 same registers, which is what keeps a heavily-branched kernel (e.g., a 12-iteration CORDIC) to a handful of wide
 registers. The primary objective is to minimize per-port read-set and per-register writer-set fan-in
 (the steering cost that matters on an FPGA). Register count is a bounded secondary objective: it colors reach-minimal
@@ -397,10 +413,13 @@ and again compacting dead registers up to a write-select cap, keeping whichever 
 so it sheds a register only when that widens a write select modestly. No spill. The coloring is a port-affinity greedy
 seed refined by simulated annealing over the same objective.
 
-Commutative port assignment: after allocation, each use of a commutative operator has its two operands oriented across
-its read ports to minimize the total read-set size. A register that an operand reads in one position and another reads
-in the other position would otherwise sit in both ports' read muxes; consistent orientation keeps it in one.
-This is a pure relabelling of which physical port reads which register -- no hardware, no latency --
+Commutative port assignment: after allocation, each firing of a commutative operator has its two operands oriented
+across its read ports to minimize the total read-set size. A register that an operand reads in one position and
+another reads in the other position would otherwise sit in both ports' read muxes; consistent orientation keeps it
+in one. Commutation is declared as an input swap with an induced output-port permutation (identity for the
+single-output arithmetic; the comparator's gt and lt flags transpose while eq is fixed, exact because the ZKF
+ordering is total and compare antisymmetric), so a swapped firing's taps move to the permuted ports and the value is
+bit-identical. This is a pure relabelling of which physical port reads which register -- no hardware, no latency --
 so it can only shrink the read muxes (the Chen & Cong mux-aware port-assignment lever).
 Minimizing total read-set size over orientations is graph bipartisation; a local search stalls well above the
 optimum (e.g., ekf1_stateless's multiplier traps at 50 register-arms), so it is solved exactly per instance as a
@@ -441,7 +460,8 @@ and one emitter in which every register is driven by a single consolidated write
 operator-writeback, pc-gated copy/cast, and state-install drivers).
 Persistent-slot live-outs coalesce onto the slot register when their range does not overlap the live-in
 (else a pc-gated copy installs them, as early as the live-in is read), a coalesced slot register hosts gap
-tenants, and commutative-port assignment orients every commutative use across the whole op stream.
+tenants, and commutative-port assignment orients every commutative firing (the comparator included) across the
+whole op stream.
 
 ### DEFERRED
 
@@ -501,17 +521,20 @@ so a Python-model/RTL operator latency drift fails during elaboration or synthes
 The resulting cycle count is exact, never an estimate.
 
 We issue each op on the earliest cycle its operands are ready and a free instance exists -- without waiting for
-unrelated ops (no barrier). The register file is read-first and carries mandatory read- and write-port latches,
-so a data-dependent consumer is held `DEPENDENCY_EDGE = 1 + WRITE_LATCH + READ_LATCH` cycles past the producer's commit
-(the read-first write edge plus the write and read latches). Inputs are the exception:
-they load directly into the array at the accept edge (bypassing the write latch) and the microcode fetch lag hides
-that load before the first control word reaches the datapath, so an input-reading op waits only
-`INPUT_DEPENDENCY_EDGE` -- the read latch alone.
+unrelated ops (no barrier). The commit-to-issue spacing a dependence requires is not one constant: it is derived,
+pairwise, from the producer's result-bank landing and the consumer's read mechanism by one shared rule
+(`dependency_edge`), the same per-bank cycle helpers every other consumer of the timing model uses. The latched wide
+bank charges its writeback latch and read-first edge against the consumer's read latch (edge 3 for a float-arithmetic
+consumer); the latch-free boolean bank only the read-first edge, against an inline consumer's fire-step read (edge 0
+for a logic op reading a comparison -- back-to-back), clamped so an inline consumer always commits strictly after its
+producer (the commit-ordered model evaluation relies on that). Inputs are the exception: they load directly into the
+array at the accept edge and the microcode fetch lag hides that load before the first control word reaches the
+datapath, so an input-reading op waits only `INPUT_DEPENDENCY_EDGE`.
 
 ```
 for cycle = 1, 2, ...:                          # cycle 0 accepts/loads inputs
-    ready = unscheduled ops whose every operator-operand committed (commit + DEPENDENCY_EDGE <= cycle); and,
-            if the op reads an input, cycle >= INPUT_DEPENDENCY_EDGE (the load is hidden by the fetch lag)
+    ready = unscheduled ops with every operator-operand committed (commit + dependency_edge(producer, consumer) <=
+            cycle, the edge derived per bank pair); and, if the op reads an input, cycle >= INPUT_DEPENDENCY_EDGE
     for op in ready by critical_path desc:
         if an instance of op's concrete hardware operator is free this cycle:
             bind op to that instance; issue_cycle[op] = cycle
@@ -529,9 +552,10 @@ have instance index `0`; their `instance_stem` keeps emitted names unique.
 The configurable per-class budget (default 1) caps instances of each distinct operator value of that class: equal ops
 time-share, serializing when more than the budget would co-issue.
 
-Read/write ports are dedicated -- one read port per operator operand (`nrd` = sum of instance arities), one write
-port per operator instance (`nwr` = instance count), independent of I/O width -- but the storage is sparse, not a
-crossbar. Per read port the backend emits a mux spanning only that operand's read-set: a single-register operand is
+Read/write ports are dedicated -- one read port per operator operand (`nrd` = sum of instance arities), one wide
+write port per tapped WIDE output-port lane (`nwr` counts only tapped lanes: the comparator contributes none, a
+future sorter one per USED output), independent of I/O width -- but the storage is sparse, not a crossbar. Per
+read port the backend emits a mux spanning only that operand's read-set: a single-register operand is
 a bare wire, an always-constant operand is the immediate, and a multi-register operand is a `case` over its read-set
 index. Per register it emits a write select spanning only that register's writers (a single-writer register needs no
 address compare). The two sides are symmetric: the read-address field carries the dense read-set index and the
@@ -558,10 +582,11 @@ pipelined overlap, is the better trade.
 
 ## Backend (VLIW/ZISC)
 
-Mechanical from LIR: an inline flop bank `regs[0:NREG-1]`, one operator instance per `FloatOperatorInstance`, and one
-continuous assignment per pooled constant -- its ZKF bit pattern precomputed in Python by `FloatFormat.encode`. There is
-no general-purpose multiport register-file module; storage is emitted as a sparse, schedule-specific fabric (read muxes
-spanning each operand's read-set, write selects spanning each register's writers), with read- and write-port latches.
+Mechanical from LIR: an inline flop bank `regs[0:NREG-1]` plus the 1-bit `bregs`, one module per pooled operator
+instance, and one continuous assignment per pooled constant -- its ZKF bit pattern precomputed in Python by
+`FloatFormat.encode`. There is no general-purpose multiport register-file module; storage is emitted as a sparse,
+schedule-specific fabric (read muxes spanning each operand's read-set, write selects spanning each register's
+writers). The wide bank carries read- and write-port latches; the boolean bank is latch-free.
 The controller is a microcode ROM: one pre-decoded VLIW control word per step, stored in a (BRAM-inferable) ROM
 read through a 3-stage fetch -- a PC latch (`ucode_addr_q`, splitting the `pc -> next_pc -> ROM-address` cone), the
 array read (`ucode_q`), and a second register (`ucode_word`) that packs into the BRAM's dedicated output register
@@ -580,9 +605,14 @@ explicit NOP word and the PC keeps advancing, and the ROM is NOP-padded past the
 No scoreboard is needed because latencies are static -- this is a fundamental property of this design.
 
 The control word stores selectors and addresses, never data: each operand's read mux is driven by its read-address
-field (the dense read-set index), and each register's write select by the per-instance write-enable and write-address
-field (the dense write-target index, against which the per-register comparator matches; the operator result wires
-straight into its writeback latch). Constant operands keep using the `const_<i>` immediate wires through a small
+field (the dense read-set index), and each register's write select by per-OUTPUT-PORT-LANE write-enable and
+write-address fields (the dense write-target index, against which the per-register comparator matches). A wide lane's
+result wires through its writeback latch with its enables one step after the commit; a boolean lane is latch-free --
+its enables ride the commit step itself and its inversion conditioner is a fabric XOR at the write, which is exactly
+what leaves a branch condition one cycle of slack at the block boundary. An inline firing (boolean logic, a cast) is
+a single PC-gated statement rendered by the operator's own expression, not a microcode lane: it fires once at a
+statically known step, so a PC compare is the cheapest correct realization. Constant operands keep using the
+`const_<i>` immediate wires through a small
 per-operand select, latched alongside the register read. A control field that is constant across the whole program --
 very common for sign controls, and now also for single-reader read addresses and single-writer destinations -- is
 driven by a constant net and lifted out of the ROM, so synthesis prunes the logic it feeds;

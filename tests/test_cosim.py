@@ -23,7 +23,7 @@ from holoso._lir import build
 from holoso._mir import lower as lower_to_mir
 
 from ._cosim import run_cosim
-from ._modelref import default_ops
+from ._modelref import ChainedSlots, branch_boundary_kernel, default_ops, fcmp_staged_ops
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, sources
 
 pytestmark = pytest.mark.cosim
@@ -104,6 +104,16 @@ def test_cosim_staged_division(sim: str) -> None:
         FCmpOperator(fmt),
     )
     run_cosim(sim, blend, fmt, "blend_staged", ops=ops)
+
+
+@pytest.mark.parametrize("stage_input", [0, 1])
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_comparison_at_branch_boundary(sim: str, stage_input: int) -> None:
+    # The boundary-slack corner kernel (see _modelref.branch_boundary_kernel), exercised at both comparator latencies
+    # (stage_input 0 -> 1 cycle, 1 -> 2 cycles). The white-box twin in test_schedule.py
+    # (test_branch_comparison_commits_at_block_makespan) pins that this kernel actually hits the corner.
+    fmt = FloatFormat(6, 18)
+    run_cosim(sim, branch_boundary_kernel, fmt, f"cmp_branch_s{stage_input}", ops=fcmp_staged_ops(fmt, stage_input))
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -274,3 +284,23 @@ def test_cosim_div0_error(sim: str) -> None:
         build_dir=str(build_dir),
         results_xml=str(build_dir / "results.xml"),
     )
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_mirrored_comparisons_swap_orientation(sim: str) -> None:
+    # RTL twin of test_schedule.test_commutative_comparator_swap_permutes_output_taps: mirrored comparisons over one
+    # operand pair make the port assignment orient one comparator firing swapped (its lt tap moving to gt), so the
+    # emitted module must still produce both relations bit-exactly through the permuted lane.
+    def kernel(a, b):  # type: ignore[no-untyped-def]
+        below = a < b
+        above = b < a
+        return [float(below), float(above)]
+
+    run_cosim(sim, kernel, FloatFormat(6, 18), "mirrored_cmp")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_chained_slots_keep_the_old_value_across_the_install(sim: str) -> None:
+    # RTL twin of test_schedule.test_chained_slot_live_in_blocks_early_install: before the fix, "_b"'s early install
+    # clobbered the value "_a"'s boundary copy reads, so the DUT diverged from the model on the second transaction.
+    run_cosim(sim, ChainedSlots().__call__, FloatFormat(6, 18), "chained_slots")

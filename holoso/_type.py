@@ -18,10 +18,13 @@ class ScalarType(ABC):
 
 @dataclass(frozen=True, slots=True)
 class ScalarSignature:
-    """Operand/result types for a concrete hardware operator."""
+    """
+    Operand- and result-port types for a concrete hardware operator. An operator may produce several results (e.g. a
+    comparator's three one-hot order flags, a sorter's min and max), one per output port, each independently typed.
+    """
 
     operand_types: tuple[ScalarType, ...]
-    result_type: ScalarType
+    result_types: tuple[ScalarType, ...]
 
     @property
     def arity(self) -> int:

@@ -14,7 +14,7 @@ from ._value import (
     mul_float_values,
     mul_ilog2_float_value,
 )
-from ._type import BoolType, FloatFormat, FloatType, ScalarSignature
+from ._type import BoolType, FloatFormat, FloatType, ScalarSignature, ScalarType
 from ._hir import RelationalOp
 
 
@@ -59,18 +59,117 @@ class FloatSignControl:
         return (1 if self.negate else 0) | (2 if self.absolute else 0)
 
 
+@dataclass(frozen=True, slots=True)
+class BoolInversion:
+    """
+    A hardware-side boolean conditioner: an optional inversion, the single-bit dual of :class:`FloatSignControl`.
+    Free in fabric (it folds into whatever LUT consumes or produces the bit); it is what lets one comparator output
+    port serve two relations (e.g. ``a<b`` is the ``lt`` flag, ``a>=b`` the same flag inverted).
+    """
+
+    invert: bool = False
+
+    def then(self, outer: "BoolInversion") -> "BoolInversion":
+        return BoolInversion(invert=self.invert ^ outer.invert)
+
+    def apply(self, value: bool) -> bool:
+        return value ^ self.invert
+
+    def decorate(self, text: str) -> str:
+        return f"~{text}" if self.invert else text
+
+    @property
+    def encoded(self) -> int:
+        return 1 if self.invert else 0
+
+
+type PortConditioner = FloatSignControl | BoolInversion
+
+
+def identity_conditioner(scalar_type: ScalarType) -> PortConditioner:
+    """The identity conditioner of a port's type: a float port carries a sign control, a boolean port an inversion."""
+    if isinstance(scalar_type, FloatType):
+        return FloatSignControl()
+    if isinstance(scalar_type, BoolType):
+        return BoolInversion()
+    raise TypeError(f"no conditioner is defined for ports of {scalar_type!r}")
+
+
 @dataclass(frozen=True)
 class HardwareOperator(ABC):
     """
     A fully specified hardware operator configuration.
     Frozen-dataclass equality makes an instance the resource-sharing key: equal operators time-share one physical
-    module. Each concrete operator owns its timing, reference semantics, notation, and HDL parameters.
+    module. Each concrete operator owns its timing, reference semantics, notation, and port types -- possibly several
+    typed output ports (a comparator's three one-hot order flags, a sorter's min and max).
     Commutative operators allow port assignment orient each use's operands to shrink the per-port read muxes.
+    The two structural families are :class:`PooledHardwareOperator` (a physical streaming module) and
+    :class:`InlineHardwareOperator` (a pure expression folded into a register write).
     """
 
     mnemonic: ClassVar[str]
+    # Commutation symmetry: swapping the two operands permutes the output ports through this map (``new_port =
+    # swap_output_permutation[old_port]``); ``None`` means non-commutative. Single-output commutative operators use
+    # the identity ``(0,)``; the comparator's order flags transpose (``gt`` and ``lt`` exchange, ``eq`` is fixed).
+    # The permutation must preserve each port's type, so a swapped firing's taps stay in their banks.
+    swap_output_permutation: ClassVar[tuple[int, ...] | None] = None
+
+    @property
+    @abstractmethod
+    def latency(self) -> int:
+        """Exact cycle latency of this fully specified operator instance."""
+
+    @property
+    def initiation_interval(self) -> int:
+        """
+        Minimum cycles between successive issues on one physical instance (1 = fully pipelined) -- the per-operator
+        sense of II. Distinct from the module-level ``Lir.initiation_interval``, the whole-transaction cost, which is
+        this project's deliberate usage (see DESIGN.md, Direction).
+        """
+        return 1
+
+    @abstractmethod
+    def render(self, *operands: str) -> str:
+        """Human-friendly expression for the report and trace comments."""
+
+    @property
+    def is_commutative(self) -> bool:
+        """Whether operand swap (with the induced output-port permutation) preserves bit-exact semantics."""
+        return self.swap_output_permutation is not None
+
+    def render_output(self, port: int, conditioner: "PortConditioner", *operands: str) -> str:
+        """
+        Human-friendly form of one tapped output port. The default covers single-output operators only; a
+        multi-output operator must override it (silently rendering every tap as the whole-operator expression would
+        mislabel the report).
+        """
+        assert len(self.signature.result_types) == 1 and port == 0, f"{self.mnemonic} must override render_output"
+        return conditioner.decorate(self.render(*operands))
+
+    @property
+    @abstractmethod
+    def signature(self) -> ScalarSignature:
+        """Concrete operand- and result-port types."""
+
+    @property
+    def arity(self) -> int:
+        return self.signature.arity
+
+    @abstractmethod
+    def evaluate(self, *operands: "FloatValue | bool") -> tuple["FloatValue | bool", ...]:
+        """Bit-exact reference semantics: one value per output port, aligned with ``signature.result_types``."""
+
+
+@dataclass(frozen=True)
+class PooledHardwareOperator(HardwareOperator, ABC):
+    """
+    An operator backed by a physical streaming module instance (in_valid/out_valid, per-float-port sign conditioners).
+    The scheduler pools and contends equal operators over shared instances; every port is microcode-driven in the
+    generated RTL (read-address lanes for operands, write-enable lanes per output port).
+    """
+
     error_ports: ClassVar[list[str]] = []
-    is_commutative: ClassVar[bool] = False
+    output_hdl_ports: ClassVar[list[str]] = ["y"]  # module port name per output, aligned with result_types
 
     @property
     def module_name(self) -> str:
@@ -84,27 +183,29 @@ class HardwareOperator(ABC):
         """
         return _hashed_instance_stem(self.mnemonic, self.hdl_params())
 
-    @property
-    @abstractmethod
-    def latency(self) -> int:
-        """Exact cycle latency of this fully specified operator instance."""
-
-    @abstractmethod
-    def render(self, *operands: str) -> str:
-        """Human-friendly expression for the report and trace comments."""
-
     @abstractmethod
     def hdl_params(self) -> dict[str, int]:
         """Operator-specific ``#(.NAME(v))`` params; the backend prepends ``WEXP``/``WMAN``."""
 
-    @property
-    @abstractmethod
-    def signature(self) -> ScalarSignature:
-        """Concrete operand/result types."""
+
+@dataclass(frozen=True)
+class InlineHardwareOperator(HardwareOperator, ABC):
+    """
+    A pure combinational operator folded into a register write: each firing is one PC-gated statement that reads its
+    operands and writes its single result on one step. No module, no pooling, no contention.
+    """
 
     @property
-    def arity(self) -> int:
-        return self.signature.arity
+    def latency(self) -> int:
+        return 1
+
+    def render(self, *operands: str) -> str:
+        """Defaults to the Verilog expression with the whitespace squeezed out; override where that reads poorly."""
+        return self.verilog_expr(*operands).replace(" ", "")
+
+    @abstractmethod
+    def verilog_expr(self, *operand_nets: str) -> str:
+        """The combinational RHS of this operator over the given operand net expressions."""
 
 
 class ParameterizedHardwareOperator(ABC):
@@ -118,7 +219,7 @@ class ParameterizedHardwareOperator(ABC):
 
 
 @dataclass(frozen=True, slots=True)
-class FloatHardwareOperator(HardwareOperator, ABC):
+class FloatHardwareOperator(PooledHardwareOperator, ABC):
     """A fully specified floating-point operator bound to one ZKF format."""
 
     fmt: FloatFormat
@@ -131,20 +232,19 @@ class FloatHardwareOperator(HardwareOperator, ABC):
 
     def float_signature(self, arity: int) -> ScalarSignature:
         ty = FloatType(self.fmt)
-        return ScalarSignature((ty,) * arity, ty)
+        return ScalarSignature((ty,) * arity, (ty,))
 
-    def _validated_operands(self, operands: tuple[FloatValue, ...], arity: int) -> tuple[FloatValue, ...]:
+    def _validated_operands(self, operands: tuple["FloatValue | bool", ...], arity: int) -> tuple[FloatValue, ...]:
         if len(operands) != arity:
             raise ValueError(f"{self.mnemonic} expected {arity} operands, got {len(operands)}")
+        validated: list[FloatValue] = []
         for index, operand in enumerate(operands):
             if not isinstance(operand, FloatValue):
                 raise TypeError(f"{self.mnemonic} operand {index} must be FloatValue, got {type(operand).__name__}")
             if operand.fmt != self.fmt:
                 raise ValueError(f"{self.mnemonic} operand {index} has {operand.fmt}, expected {self.fmt}")
-        return operands
-
-    @abstractmethod
-    def evaluate(self, *operands: FloatValue) -> FloatValue: ...
+            validated.append(operand)
+        return tuple(validated)
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,7 +257,7 @@ class FloatParameterizedHardwareOperator(ParameterizedHardwareOperator, ABC):
 @dataclass(frozen=True, slots=True)
 class FAddOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fadd"
-    is_commutative: ClassVar[bool] = True  # signed sum: a+b == b+a bit-for-bit (each operand carries its own sign)
+    swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)  # signed sum: a+b == b+a bit-for-bit
     stage_input: int = 0
     stage_decode: int = 0
     stage_align: int = 0
@@ -188,9 +288,9 @@ class FAddOperator(FloatHardwareOperator):
     def signature(self) -> ScalarSignature:
         return self.float_signature(2)
 
-    def evaluate(self, *operands: FloatValue) -> FloatValue:
+    def evaluate(self, *operands: FloatValue | bool) -> tuple[FloatValue, ...]:
         a, b = self._validated_operands(operands, 2)
-        return add_float_values(a, b)
+        return (add_float_values(a, b),)
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -210,7 +310,7 @@ class FAddOperator(FloatHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class FMulOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fmul"
-    is_commutative: ClassVar[bool] = True  # product: a*b == b*a bit-for-bit
+    swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)  # product: a*b == b*a bit-for-bit
     stage_input: int = 0
     stage_product: int = 0
     stage_pack: int = 0
@@ -229,9 +329,9 @@ class FMulOperator(FloatHardwareOperator):
     def signature(self) -> ScalarSignature:
         return self.float_signature(2)
 
-    def evaluate(self, *operands: FloatValue) -> FloatValue:
+    def evaluate(self, *operands: FloatValue | bool) -> tuple[FloatValue, ...]:
         a, b = self._validated_operands(operands, 2)
-        return mul_float_values(a, b)
+        return (mul_float_values(a, b),)
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -268,9 +368,9 @@ class FDivOperator(FloatHardwareOperator):
     def signature(self) -> ScalarSignature:
         return self.float_signature(2)
 
-    def evaluate(self, *operands: FloatValue) -> FloatValue:
+    def evaluate(self, *operands: FloatValue | bool) -> tuple[FloatValue, ...]:
         a, b = self._validated_operands(operands, 2)
-        return div_float_values(a, b)
+        return (div_float_values(a, b),)
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -305,9 +405,9 @@ class FMulILog2Operator(FloatHardwareOperator):
     def signature(self) -> ScalarSignature:
         return self.float_signature(1)
 
-    def evaluate(self, *operands: FloatValue) -> FloatValue:
+    def evaluate(self, *operands: FloatValue | bool) -> tuple[FloatValue, ...]:
         (a,) = self._validated_operands(operands, 1)
-        return mul_ilog2_float_value(a, self.k)
+        return (mul_ilog2_float_value(a, self.k),)
 
     def render(self, *operands: str) -> str:
         (a,) = operands
@@ -335,16 +435,43 @@ class FMulILog2OperatorFamily(FloatParameterizedHardwareOperator):
 
 
 @dataclass(frozen=True, slots=True)
-class FCmpOperator(HardwareOperator):
+class FCmpOperator(FloatHardwareOperator):
     """
-    A floating-point comparator: it produces the three mutually-exclusive one-hot order flags (a>b, a==b, a<b) with
-    input sign conditioning. The specific relation (lt/le/...) is selected at the consuming boolean operation by a
-    cheap reduction of the one-hot flags, so one comparator instance serves every relation.
-    ZKF has no NaN, so for ZKF the ordering is total.
+    A floating-point comparator: a pooled streaming module producing the three mutually-exclusive one-hot order flags
+    (a>b, a==b, a<b) with input sign conditioning. A comparison ``a <relation> b`` taps exactly one flag with an
+    optional inversion (ZKF has no NaN, so the ordering is total and every relation is one flag or its complement);
+    one instance therefore serves every relation, and several relations over the same operands fuse into one firing.
     """
 
     mnemonic: ClassVar[str] = "fcmp"
-    fmt: FloatFormat
+    output_hdl_ports: ClassVar[list[str]] = ["a_gt_b", "a_eq_b", "a_lt_b"]
+
+    # RelationalOp -> (output port 0..2 = gt/eq/lt, inversion): the single place the relation/flag mapping is defined.
+    # A relation maps onto exactly one port with an optional inversion (consumers go through `tap_of`):
+    # gt, eq, lt directly; le = ~gt, ne = ~eq, ge = ~lt.
+    _TAP_OF_RELATION: ClassVar[dict[RelationalOp, tuple[int, BoolInversion]]] = {
+        RelationalOp.GT: (0, BoolInversion()),
+        RelationalOp.EQ: (1, BoolInversion()),
+        RelationalOp.LT: (2, BoolInversion()),
+        RelationalOp.LE: (0, BoolInversion(invert=True)),
+        RelationalOp.NE: (1, BoolInversion(invert=True)),
+        RelationalOp.GE: (2, BoolInversion(invert=True)),
+    }
+    _RELATION_OF_TAP: ClassVar[dict[tuple[int, BoolInversion], RelationalOp]] = {
+        tap: rel for rel, tap in _TAP_OF_RELATION.items()
+    }
+    _RELATION_SYMBOL: ClassVar[dict[RelationalOp, str]] = {
+        RelationalOp.LT: "<",
+        RelationalOp.LE: "≤",
+        RelationalOp.GT: ">",
+        RelationalOp.GE: "≥",
+        RelationalOp.EQ: "=",
+        RelationalOp.NE: "≠",
+    }
+    # The ZKF ordering is total and compare is antisymmetric, so cmp(b,a) is cmp(a,b) with gt and lt transposed
+    # (eq fixed) -- the comparator is commutative under that flag exchange, which lets port assignment orient its
+    # operands freely.
+    swap_output_permutation: ClassVar[tuple[int, ...]] = (2, 1, 0)
     stage_input: int = 0
 
     def __post_init__(self) -> None:
@@ -352,85 +479,44 @@ class FCmpOperator(HardwareOperator):
             raise ValueError(f"stage_input must be 0 or 1; got {self.stage_input!r}")
 
     @property
-    def instance_stem(self) -> str:
-        params = {"WEXP": self.fmt.wexp, "WMAN": self.fmt.wman}
-        params.update(self.hdl_params())
-        return _hashed_instance_stem(self.mnemonic, params)
-
-    @property
     def latency(self) -> int:
         return 1 + self.stage_input
 
     @property
     def signature(self) -> ScalarSignature:
-        return ScalarSignature((FloatType(self.fmt), FloatType(self.fmt)), BoolType())
+        ty = FloatType(self.fmt)
+        return ScalarSignature((ty, ty), (BoolType(), BoolType(), BoolType()))
 
     def render(self, *operands: str) -> str:
         a, b = operands
         return f"cmp({a},{b})"
 
+    @classmethod
+    def tap_of(cls, relation: RelationalOp) -> tuple[int, "BoolInversion"]:
+        """The (output port, inversion) pair implementing a relation; every relation is one flag or its complement."""
+        return cls._TAP_OF_RELATION[relation]
+
+    def render_output(self, port: int, conditioner: "PortConditioner", *operands: str) -> str:
+        """Human-friendly form of one tapped flag, recovered as the relation it implements (e.g. ``a≥b``)."""
+        assert isinstance(conditioner, BoolInversion)
+        a, b = operands
+        return f"{a}{self._RELATION_SYMBOL[self._RELATION_OF_TAP[(port, conditioner)]]}{b}"
+
     def hdl_params(self) -> dict[str, int]:
         return {"STAGE_INPUT": self.stage_input}
 
-
-@dataclass(frozen=True, slots=True)
-class FComparisonOperator(HardwareOperator):
-    """
-    A floating-point comparison ``a <relation> b`` producing a boolean. It reduces the shared comparator's three
-    one-hot order flags by the selected relation, so every relation time-shares one physical ``holoso_fcmp`` instance:
-    pooling, instantiation, and instance identity key on the bare comparator, never on the relation. This is the
-    combinational, latency-bearing bool-producing operator carried by a boolean-result operation node.
-    """
-
-    mnemonic: ClassVar[str] = "fcmp"
-    comparator: FCmpOperator
-    relation: RelationalOp
-
-    @property
-    def instance_stem(self) -> str:
-        return self.comparator.instance_stem
-
-    @property
-    def fmt(self) -> FloatFormat:
-        return self.comparator.fmt
-
-    @property
-    def latency(self) -> int:
-        return self.comparator.latency
-
-    @property
-    def signature(self) -> ScalarSignature:
-        return self.comparator.signature
-
-    def render(self, *operands: str) -> str:
-        a, b = operands
-        return f"{a}{self.relation.value}{b}"
-
-    def hdl_params(self) -> dict[str, int]:
-        return self.comparator.hdl_params()
-
-    def evaluate(self, *operands: FloatValue) -> bool:
-        a, b = operands
-        return self.relation.holds(compare_float_values(a, b))
+    def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
+        a, b = self._validated_operands(operands, 2)
+        ordering = compare_float_values(a, b)
+        return ordering > 0, ordering == 0, ordering < 0
 
 
 @dataclass(frozen=True, slots=True)
-class BoolLogicOperator(HardwareOperator, ABC):
+class BoolLogicOperator(InlineHardwareOperator, ABC):
     """
-    A combinational boolean-logic operator (AND/OR/NOT). It is latency-1 register-resident -- it reads its boolean
-    register operands, applies a plain ``& | ~`` gate, and latches the result -- with no pipelined module and no pooled
-    instance, so it is never added to :class:`OpConfig`.
+    A boolean-logic operator (AND/OR/NOT): a plain ``& | ~`` gate folded into its boolean register's write. Never
+    added to :class:`OpConfig` -- it has no module and no configuration.
     """
-
-    @property
-    def latency(self) -> int:
-        return 1
-
-    def hdl_params(self) -> dict[str, int]:
-        return {}
-
-    @abstractmethod
-    def evaluate(self, *operands: bool) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -439,15 +525,15 @@ class BoolAndOperator(BoolLogicOperator):
 
     @property
     def signature(self) -> ScalarSignature:
-        return ScalarSignature((BoolType(), BoolType()), BoolType())
+        return ScalarSignature((BoolType(), BoolType()), (BoolType(),))
 
-    def render(self, *operands: str) -> str:
-        a, b = operands
-        return f"{a}&{b}"
+    def verilog_expr(self, *operand_nets: str) -> str:
+        a, b = operand_nets
+        return f"{a} & {b}"
 
-    def evaluate(self, *operands: bool) -> bool:
+    def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
         a, b = operands
-        return a and b
+        return (bool(a) and bool(b),)
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,15 +542,15 @@ class BoolOrOperator(BoolLogicOperator):
 
     @property
     def signature(self) -> ScalarSignature:
-        return ScalarSignature((BoolType(), BoolType()), BoolType())
+        return ScalarSignature((BoolType(), BoolType()), (BoolType(),))
 
-    def render(self, *operands: str) -> str:
-        a, b = operands
-        return f"{a}|{b}"
+    def verilog_expr(self, *operand_nets: str) -> str:
+        a, b = operand_nets
+        return f"{a} | {b}"
 
-    def evaluate(self, *operands: bool) -> bool:
+    def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
         a, b = operands
-        return a or b
+        return (bool(a) or bool(b),)
 
 
 @dataclass(frozen=True, slots=True)
@@ -473,78 +559,73 @@ class BoolNotOperator(BoolLogicOperator):
 
     @property
     def signature(self) -> ScalarSignature:
-        return ScalarSignature((BoolType(),), BoolType())
+        return ScalarSignature((BoolType(),), (BoolType(),))
 
-    def render(self, *operands: str) -> str:
-        (a,) = operands
+    def verilog_expr(self, *operand_nets: str) -> str:
+        (a,) = operand_nets
         return f"~{a}"
 
-    def evaluate(self, *operands: bool) -> bool:
+    def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
         (a,) = operands
-        return not a
+        return (not a,)
 
 
 @dataclass(frozen=True, slots=True)
-class FloatToBoolOperator(HardwareOperator):
+class FloatToBoolOperator(InlineHardwareOperator):
     """
-    A combinational float->bool cast ``bool(x)``: true iff the operand is nonzero, i.e. its ZKF exponent field is
-    nonzero (sign- and mantissa-agnostic). Latency-1 register-resident; the backend latches a call to the shared
-    ``holoso_ftobool`` cast function (no module, no pool), so it is never added to :class:`OpConfig`.
+    A float->bool cast ``bool(x)``: true iff the operand is nonzero, i.e. its ZKF exponent field is nonzero (sign- and
+    mantissa-agnostic). Folded into the boolean register write as a call to the shared ``holoso_ftobool`` function;
+    never added to :class:`OpConfig`.
     """
 
     mnemonic: ClassVar[str] = "ftobool"
     fmt: FloatFormat
 
     @property
-    def latency(self) -> int:
-        return 1
-
-    @property
     def signature(self) -> ScalarSignature:
-        return ScalarSignature((FloatType(self.fmt),), BoolType())
+        return ScalarSignature((FloatType(self.fmt),), (BoolType(),))
 
     def render(self, *operands: str) -> str:
         (a,) = operands
         return f"bool({a})"
 
-    def hdl_params(self) -> dict[str, int]:
-        return {}
+    def verilog_expr(self, *operand_nets: str) -> str:
+        (a,) = operand_nets
+        return f"holoso_ftobool({a})"
 
-    def evaluate(self, *operands: FloatValue) -> bool:
+    def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
         (a,) = operands
-        return a.exponent != 0
+        assert isinstance(a, FloatValue)
+        return (a.exponent != 0,)
 
 
 @dataclass(frozen=True, slots=True)
-class BoolToFloatOperator(HardwareOperator):
+class BoolToFloatOperator(InlineHardwareOperator):
     """
-    A combinational bool->float cast ``float(cond)``: ZKF ``1.0`` when true, ``+0.0`` when false. Latency-1
-    register-resident; the backend latches a call to the shared ``holoso_ffrombool`` cast function (no module, no
-    pool); it reads a boolean register and writes a wide register, the one operator that crosses from the boolean
-    bank into the wide bank. Never added to :class:`OpConfig`.
+    A bool->float cast ``float(cond)``: ZKF ``1.0`` when true, ``+0.0`` when false. Folded into the wide register
+    write as a call to the shared ``holoso_ffrombool`` function; it reads a boolean register and writes a wide
+    register, the one operator that crosses from the boolean bank into the wide bank. Never added to
+    :class:`OpConfig`.
     """
 
     mnemonic: ClassVar[str] = "ffrombool"
     fmt: FloatFormat
 
     @property
-    def latency(self) -> int:
-        return 1
-
-    @property
     def signature(self) -> ScalarSignature:
-        return ScalarSignature((BoolType(),), FloatType(self.fmt))
+        return ScalarSignature((BoolType(),), (FloatType(self.fmt),))
 
     def render(self, *operands: str) -> str:
         (a,) = operands
         return f"float({a})"
 
-    def hdl_params(self) -> dict[str, int]:
-        return {}
+    def verilog_expr(self, *operand_nets: str) -> str:
+        (a,) = operand_nets
+        return f"holoso_ffrombool({a})"
 
-    def evaluate(self, *operands: bool) -> FloatValue:
+    def evaluate(self, *operands: FloatValue | bool) -> tuple[FloatValue, ...]:
         (a,) = operands
-        return FloatValue.from_float(self.fmt, 1.0 if a else 0.0)
+        return (FloatValue.from_float(self.fmt, 1.0 if a else 0.0),)
 
 
 @dataclass(frozen=True)

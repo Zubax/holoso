@@ -15,17 +15,21 @@ instances that ever write that register (a single-writer register needs no addre
 
 All sequential logic -- the fetch pipeline, the read/write register-file latches, the register writes, and the
 reset-gated control state -- is emitted as a single ``always @(posedge clk)`` block; the only combinational
-``always @*`` blocks are the next-PC sequencer and the shared comparator's operand mux. Control fields that are
-constant across the whole program are driven by constant nets and omitted from the ROM, so synthesis prunes them.
+``always @*`` block is the next-PC sequencer. Control fields that are constant across the whole program are driven
+by constant nets and omitted from the ROM, so synthesis prunes them. Pooled instances -- the comparator included --
+are driven uniformly through microcode lanes: read-address/latch lanes per operand, a write lane per tapped output
+port (wide lanes through the writeback latch, latch-free boolean lanes written directly at their commit step with a
+fabric-XOR inversion conditioner). Inline operators (boolean logic, the float<->bool casts) are single PC-gated
+statements rendered by the operator's own ``verilog_expr``.
 """
 
 from dataclasses import dataclass
 from importlib import resources
 from textwrap import dedent
 
-from ..._hir import RelationalOp
 from ..._lir import *
 from ..._operators import *
+from ..._type import FloatType
 from ._microcode import *
 
 _SUPPORT_FILES = {
@@ -76,7 +80,7 @@ class _Writer:
         return "\n".join(self._lines) + "\n"
 
 
-def _sig(inst: FloatOperatorInstance) -> str:
+def _sig(inst: OperatorInstance) -> str:
     return f"s_{base_name(inst)}"
 
 
@@ -119,170 +123,39 @@ def _state_copy_rhs(slot: FloatStateSlot) -> str:
     return _state_sign_wire(slot) or _source_net(slot.tap.source)
 
 
-def _fcmp_reduce(relation: RelationalOp, gt: str, eq: str, lt: str) -> str:
-    """Reduce the comparator's three one-hot order flags to the boolean the relation selects."""
-    return {
-        RelationalOp.LT: lt,
-        RelationalOp.LE: f"{lt} | {eq}",
-        RelationalOp.GT: gt,
-        RelationalOp.GE: f"{gt} | {eq}",
-        RelationalOp.EQ: eq,
-        RelationalOp.NE: f"{gt} | {lt}",
-    }[relation]
-
-
-def _fcmp_label(block_index: int, position: int) -> str:
-    return f"{block_index}_{position}"
-
-
-def _block_comparisons(block: LirBlock) -> list[tuple[int, CombScheduledOp, FComparisonOperator]]:
+def _inline_fire_pc(lir: Lir, block_index: int, op: InlineScheduledOp) -> int:
     """
-    The block's comparison operations with their per-block position index. Comparisons are the combinational ops that
-    drive the shared ``holoso_fcmp``; other combinational ops (boolean logic, casts) emit differently and are skipped.
+    The fetch PC at which an inline firing's single PC-gated statement executes: the bank-true fire step (the commit
+    step for a boolean destination, one later for a wide one, aligned with the wide bank's write-latch enables).
     """
-    result: list[tuple[int, CombScheduledOp, FComparisonOperator]] = []
-    for op in block.comb_ops:
-        operator = op.operator
-        if isinstance(operator, FComparisonOperator):
-            result.append((len(result), op, operator))
-    return result
+    return lir.block_base[block_index] + inline_fire_cycle(op.commit_cycle, isinstance(op.write.dst, RegRef))
 
 
-def _fcmp_in_valid_pc(lir: Lir, block_index: int, op: CombScheduledOp) -> int:
-    """The fetch PC at which a comparator's in_valid pulses: late enough that its float operands have landed."""
-    return lir.block_base[block_index] + op.issue_cycle + FETCH_LAG
+def _inline_sign_wire(block_index: int, op_index: int, pos: int) -> str:
+    return f"inlsgn_{block_index}_{op_index}_{pos}"
 
 
-def _comb_writeback_pc(lir: Lir, block_index: int, op: CombScheduledOp) -> int:
-    """The fetch PC at which a combinational op latches its result: in_valid pc plus the operator latency."""
-    return _fcmp_in_valid_pc(lir, block_index, op) + op.latency
-
-
-def _block_logic_ops(lir: Lir) -> list[tuple[int, CombScheduledOp]]:
-    """Every boolean-logic op (AND/OR/NOT) with its block index; these emit as PC-gated inline ``& | ~`` writebacks."""
-    return [
-        (block.index, op) for block in lir.blocks for op in block.comb_ops if isinstance(op.operator, BoolLogicOperator)
-    ]
-
-
-def _block_ftobool_ops(lir: Lir) -> list[tuple[int, CombScheduledOp]]:
-    """Every float->bool cast with its block index; each emits as a PC-gated ``holoso_ftobool`` writeback."""
-    return [
-        (block.index, op)
-        for block in lir.blocks
-        for op in block.comb_ops
-        if isinstance(op.operator, FloatToBoolOperator)
-    ]
-
-
-def _block_ffrombool_ops(lir: Lir) -> list[tuple[int, CombScheduledOp]]:
-    """Every bool->float cast with its block index; each writes a wide register, so it is timed on the wide frame."""
-    return [
-        (block.index, op)
-        for block in lir.blocks
-        for op in block.comb_ops
-        if isinstance(op.operator, BoolToFloatOperator)
-    ]
-
-
-def _comb_float_writeback_pc(lir: Lir, block_index: int, op: CombScheduledOp) -> int:
+def _inline_rhs(block_index: int, op_index: int, op: InlineScheduledOp) -> str:
     """
-    The fetch PC at which a float-result combinational op latches its wide register. A float result lands one cycle
-    later than a boolean one (the write latch plus the read-first edge of the wide register file), matching the
-    microcode write-enable at ``commit + 1`` fetched FETCH_LAG ahead, so a downstream float operator reads it on time.
+    The RHS of one inline firing: the operator's own combinational expression over its operand nets (a float operand
+    routes through its sign-conditioning wire when its folded sign is non-identity), with the result conditioner
+    applied -- an inversion folds into the expression; sign-conditioned wide inline results have no producer yet.
     """
-    return lir.block_base[block_index] + op.commit_cycle + 1 + FETCH_LAG
-
-
-def _ffrombool_rhs(op: CombScheduledOp) -> str:
-    """The RHS of ``float(cond)``: the shared ``holoso_ffrombool`` cast applied to the boolean operand (ZKF 1.0/0.0)."""
-    (operand,) = op.operands
-    assert isinstance(operand, BoolOperand)  # the cast reads a boolean operand
-    return f"holoso_ffrombool({_bool_operand_rhs(operand)})"
-
-
-def _ftobool_rhs(op: CombScheduledOp) -> str:
-    """The RHS of ``bool(x)``: the shared ``holoso_ftobool`` cast applied to the operand (its sign is irrelevant)."""
-    (operand,) = op.operands
-    assert isinstance(operand, FloatOperand)  # the cast reads a float operand (its sign is irrelevant to the exponent)
-    return f"holoso_ftobool({_source_net(operand.source)})"
-
-
-def _bool_logic_rhs(op: CombScheduledOp) -> str:
-    """The combinational RHS of a boolean-logic op: a plain ``& | ~`` over its boolean register/constant operands."""
-    operands: list[str] = []
-    for operand in op.operands:
-        assert isinstance(operand, BoolOperand)  # boolean-logic operands are boolean
-        operands.append(_bool_operand_rhs(operand))
-    match op.operator:
-        case BoolAndOperator():
-            a, b = operands
-            return f"{a} & {b}"
-        case BoolOrOperator():
-            a, b = operands
-            return f"{a} | {b}"
-        case BoolNotOperator():
-            (a,) = operands
-            return f"~{a}"
-        case _:
-            raise AssertionError(f"not a boolean-logic operator: {op.operator!r}")
-
-
-def _emit_fcmp_instance(w: _Writer, lir: Lir) -> None:
-    """
-    The single shared ``holoso_fcmp``, by the one-instance-per-operator convention. Every comparison drives it in
-    turn: each issues at a distinct fetch PC -- comparisons live in mutually-exclusive blocks and execute sequentially,
-    so the comparator pipeline never holds two at once -- with its float operands presented by a combinational mux
-    keyed on the fetch PC and ``in_valid`` pulsed at that PC. The one-hot order flags are reduced per each comparison's
-    relation; the clocked process latches each result into its boolean register at the comparison's writeback PC.
-    """
-    comparisons = [
-        (block.index, position, op, cmp) for block in lir.blocks for position, op, cmp in _block_comparisons(block)
-    ]
-    if not comparisons:
-        return
-    sample = comparisons[0][2]  # one fcmp configuration serves every comparison: uniform params and latency
-    params = "".join(f".{name}({value}), " for name, value in sample.operator.hdl_params().items())
-
-    w("reg  [W-1:0] fcmp_a, fcmp_b;  // shared comparator operands, PC-muxed across every comparison")
-    w("reg  [1:0]   fcmp_a_sgnop, fcmp_b_sgnop;")
-    w("reg          fcmp_iv;")
-    w("always @* begin  // present the active comparison's operands to the one shared comparator")
-    w.push()
-    w("fcmp_a = {W{1'b0}};  fcmp_b = {W{1'b0}};")
-    w("fcmp_a_sgnop = 2'd0; fcmp_b_sgnop = 2'd0; fcmp_iv = 1'b0;")
-    w("case (pc)")
-    w.push()
-    for block_index, _position, op, _cmp in comparisons:
-        a, b = op.operands
-        assert isinstance(a, FloatOperand) and isinstance(b, FloatOperand)  # comparison operands are float
-        w(f"{_fcmp_in_valid_pc(lir, block_index, op)}: begin")
-        w.push()
-        w(f"fcmp_a = {_source_net(a.source)}; fcmp_a_sgnop = 2'd{a.sign.encoded};")
-        w(f"fcmp_b = {_source_net(b.source)}; fcmp_b_sgnop = 2'd{b.sign.encoded};")
-        w("fcmp_iv = 1'b1;")
-        w.pop()
-        w("end")
-    w("default: ;")
-    w.pop()
-    w("endcase")
-    w.pop()
-    w("end")
-
-    w("wire fcmp_gt, fcmp_eq, fcmp_lt;")
-    w(f"holoso_fcmp #(.WEXP(WEXP), .WMAN(WMAN), {params}.LATENCY({sample.latency})) u_fcmp (")
-    w.push()
-    w(".clk(clk), .rst(rst), .in_valid(fcmp_iv),")
-    w(".a_sgnop(fcmp_a_sgnop), .b_sgnop(fcmp_b_sgnop),")
-    w(".a(fcmp_a), .b(fcmp_b),")
-    w(".out_valid(), .a_gt_b(fcmp_gt), .a_eq_b(fcmp_eq), .a_lt_b(fcmp_lt)")
-    w.pop()
-    w(");")
-    for block_index, position, _op, cmp in comparisons:
-        label = _fcmp_label(block_index, position)
-        reduction = _fcmp_reduce(cmp.relation, "fcmp_gt", "fcmp_eq", "fcmp_lt")
-        w(f"wire fcmp_{label}_result = {reduction};  // {cmp.relation.value}")
-    w("")
+    nets: list[str] = []
+    for pos, operand in enumerate(op.operands):
+        if isinstance(operand, FloatOperand):
+            if operand.sign != FloatSignControl():
+                nets.append(_inline_sign_wire(block_index, op_index, pos))
+            else:
+                nets.append(_source_net(operand.source))
+        else:
+            nets.append(_bool_operand_rhs(operand))
+    expr = op.operator.verilog_expr(*nets)
+    conditioner = op.write.conditioner
+    if isinstance(conditioner, BoolInversion):
+        return conditioner.decorate(f"({expr})") if conditioner.invert else expr
+    assert conditioner == FloatSignControl(), "no pass produces sign-conditioned wide inline results yet"
+    return expr
 
 
 def generate(lir: Lir) -> VerilogOutput:
@@ -306,24 +179,28 @@ def generate(lir: Lir) -> VerilogOutput:
     ucw = finalize_fields(fields)
 
     issues_by_cycle, commits_by_cycle = lir.group_by_cycle
-    commits_by_step: dict[int, list[FloatScheduledOp]] = {}  # the writeback latch delays the commit step by one
+    # Commit annotations land on each firing's write step: bool-only firings write ON the commit step (latch-free
+    # bank), anything with a wide lane one step later (the writeback latch).
+    commits_by_step: dict[int, list[PooledScheduledOp]] = {}
     for commit_cycle, ops in commits_by_cycle.items():
-        commits_by_step.setdefault(commit_cycle + 1, []).extend(ops)
+        for op in ops:
+            wide = any(isinstance(write.dst, RegRef) for write in op.writes)
+            commits_by_step.setdefault(commit_cycle + (1 if wide else 0), []).append(op)
 
     depth = lir.last_pc + 1  # one microcode word per fetch PC (0..last_pc); inter-block drains and the tail pack to NOP
 
     _emit_header(w, lir)
     _emit_localparams(w, lir, cycw, pcw, ucw)
     _emit_support_header(w, lir)
-    _emit_declarations(w, lir)
+    _emit_declarations(w, lir, write_lists)
     _emit_consts(w, lir)
-    _emit_operators(w, lir)
-    _emit_fcmp_instance(w, lir)
+    _emit_operators(w, lir, write_lists)
     _emit_microcode_rom(w, fields, ucw, depth, issues_by_cycle, commits_by_step)
     _emit_field_wires(w, fields)
-    _emit_datapath_comb(w, lir, port_consts)
+    _emit_datapath_comb(w, lir, port_consts, write_lists)
     _emit_state_next(w, lir)
     _emit_copy_sign_wires(w, lir)
+    _emit_inline_sign_wires(w, lir)
     _emit_clocked(w, lir, read_port, port_consts, read_sets, write_sets, write_lists)
     _emit_outputs(w, lir)
     w("\nendmodule\n")
@@ -412,7 +289,7 @@ def _emit_support_header(w: _Writer, lir: Lir) -> None:
     w('\n`include "holoso_support.vh"\n')
 
 
-def _emit_declarations(w: _Writer, lir: Lir) -> None:
+def _emit_declarations(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorInstance, int], list[int]]) -> None:
     w("""
         reg  [PCW-1:0]  pc;            // fetch program counter; the executing step lags it by FETCH_LAG
         reg  [PCW-1:0]  next_pc;       // combinational next-state presented to the ROM each cycle
@@ -427,12 +304,22 @@ def _emit_declarations(w: _Writer, lir: Lir) -> None:
     for inst in lir.instances:
         sig = _sig(inst)
         w(f"wire         {sig}_iv;")
-        for letter in PORT_LETTERS[: inst.operator.arity]:
+        for pos, operand_type in enumerate(inst.operator.signature.operand_types):
+            assert isinstance(operand_type, FloatType), "pooled operators read only wide operands today"
+            letter = PORT_LETTERS[pos]
             w(f"wire [1:0]   {sig}_{letter}s;")
             w(f"reg  [W-1:0] {sig}_{letter};")  # read-latched operand (the read mux output, registered)
-        w(f"wire [1:0]   {sig}_ys;")
-        w(f"wire [W-1:0] {sig}_y;")
-        w(f"reg  [W-1:0] {sig}_y_q;")  # writeback latch between the operator output and the register write
+        # One lane per TAPPED output port: a wide lane gets its conditioner wire and a writeback latch; a latch-free
+        # boolean lane is the raw 1-bit module output, written into bregs directly at its commit step.
+        for q, result_type in enumerate(inst.operator.signature.result_types):
+            if (inst, q) not in write_lists:
+                continue  # a never-tapped output port: no nets, the module port is left unconnected
+            if isinstance(result_type, FloatType):
+                w(f"wire [1:0]   {sig}_y{q}s;")
+                w(f"wire [W-1:0] {sig}_y{q};")
+                w(f"reg  [W-1:0] {sig}_y{q}_q;")  # writeback latch between the operator output and the register write
+            else:
+                w(f"wire         {sig}_y{q};")
         for port in inst.operator.error_ports:
             w(f"wire         {sig}_{port};")
             w(f"reg          {sig}_{port}_q;")  # error sideband rides the same writeback latch as the result
@@ -449,30 +336,42 @@ def _emit_consts(w: _Writer, lir: Lir) -> None:
         w("")
 
 
-def _emit_operators(w: _Writer, lir: Lir) -> None:
+def _emit_operators(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorInstance, int], list[int]]) -> None:
     for inst in lir.instances:
         sig = _sig(inst)
-        letters = PORT_LETTERS[: inst.operator.arity]
+        operator = inst.operator
+        letters = PORT_LETTERS[: operator.arity]
         # WEXP/WMAN frame the float format; hdl_params() lists K (ilog2) and every STAGE_* explicitly. LATENCY is
         # emitted separately from the scheduler model, so a model/RTL drift fails during wrapper elaboration.
         parts = [".WEXP(WEXP)", ".WMAN(WMAN)"] + [
-            f".{param}({value})" for param, value in inst.operator.hdl_params().items()
+            f".{param}({value})" for param, value in operator.hdl_params().items()
         ]
-        parts.append(f".LATENCY({inst.operator.latency})")
+        parts.append(f".LATENCY({operator.latency})")
         params = ", ".join(parts)
-        w(f"{inst.operator.module_name} #(", f"    {params}", f") u_{base_name(inst)} (")
+        w(f"{operator.module_name} #(", f"    {params}", f") u_{base_name(inst)} (")
         w.push()
         w(f".clk(clk), .rst(rst), .in_valid({sig}_iv),")
         for letter in letters:
             w(f".{letter}_sgnop({sig}_{letter}s),")
-        w(f".y_sgnop({sig}_ys),")
+        # A float output port carries a hardware sign conditioner (piped inside the wrapper); an untapped one is tied
+        # to the identity. Boolean output ports have none -- their inversion conditioner is fabric-side at the write.
+        for q, result_type in enumerate(operator.signature.result_types):
+            if isinstance(result_type, FloatType):
+                conditioner = f"{sig}_y{q}s" if (inst, q) in write_lists else "2'd0"
+                w(f".{operator.output_hdl_ports[q]}_sgnop({conditioner}),")
         for letter in letters:
             w(f".{letter}({sig}_{letter}),")
         # out_valid is left unconnected: the static schedule already knows when each result is ready.
         w(".out_valid(),")
-        w(f".y({sig}_y)" + ("," if inst.operator.error_ports else ""))
-        for port in inst.operator.error_ports:
-            w(f".{port}({sig}_{port})")
+        outputs = [
+            f".{operator.output_hdl_ports[q]}({f'{sig}_y{q}' if (inst, q) in write_lists else ''})"
+            for q in range(len(operator.signature.result_types))
+        ]
+        for line_index, line in enumerate(outputs):
+            last = line_index == len(outputs) - 1 and not operator.error_ports
+            w(line + ("" if last else ","))
+        for port_index, port in enumerate(operator.error_ports):
+            w(f".{port}({sig}_{port})" + ("," if port_index < len(operator.error_ports) - 1 else ""))
         w.pop()
         w(");", "")
 
@@ -482,8 +381,8 @@ def _emit_microcode_rom(
     fields: dict[str, Field],
     ucw: int,
     depth: int,
-    issues_by_cycle: dict[int, list[FloatScheduledOp]],
-    commits_by_step: dict[int, list[FloatScheduledOp]],
+    issues_by_cycle: dict[int, list[PooledScheduledOp]],
+    commits_by_step: dict[int, list[PooledScheduledOp]],
 ) -> None:
     digits = (ucw + 3) // 4
     w("""
@@ -531,7 +430,9 @@ def _const_term_expr(port: int, consts: list[int]) -> str:
     return expr
 
 
-def _emit_datapath_comb(w: _Writer, lir: Lir, port_consts: dict[int, list[int]]) -> None:
+def _emit_datapath_comb(
+    w: _Writer, lir: Lir, port_consts: dict[int, list[int]], write_lists: dict[tuple[OperatorInstance, int], list[int]]
+) -> None:
     """Combinational datapath: constant terms, the input-load enable, operator control, the err flag, and next_pc."""
     for port in sorted(port_consts):
         if len(port_consts[port]) > 1:
@@ -542,18 +443,28 @@ def _emit_datapath_comb(w: _Writer, lir: Lir, port_consts: dict[int, list[int]])
     for inst in lir.instances:
         sig, base = _sig(inst), base_name(inst)
         w(f"assign {sig}_iv = {f_iv(base)};")
-        w(f"assign {sig}_ys = {f_ysgn(base)};")
+        for q, result_type in enumerate(inst.operator.signature.result_types):
+            if isinstance(result_type, FloatType) and (inst, q) in write_lists:
+                w(f"assign {sig}_y{q}s = {f_ysgn(base, q)};")
         for pos in range(inst.operator.arity):
             w(f"assign {sig}_{PORT_LETTERS[pos]}s = {f_osgn(base, PORT_LETTERS[pos])};")
     w("")
 
-    # An error matters only on the step its operator commits, which is exactly that instance's write-enable; both the
-    # write-enable and the error sideband are aligned to the writeback latch (commit + write latch).
-    err_terms = [
-        f"({f_we(base_name(inst))} & {_sig(inst)}_{port}_q)"
-        for inst in lir.instances
-        for port in inst.operator.error_ports
-    ]
+    # An error matters only on the step its operator commits, which is exactly its wide lanes' write-enable window;
+    # both the write-enables and the error sideband are aligned to the writeback latch (commit + write latch).
+    err_terms: list[str] = []
+    for inst in lir.instances:
+        if not inst.operator.error_ports:
+            continue
+        lane_wes = [
+            f_we(base_name(inst), q)
+            for q, result_type in enumerate(inst.operator.signature.result_types)
+            if isinstance(result_type, FloatType) and (inst, q) in write_lists
+        ]
+        assert lane_wes, "an error-bearing operator must have a tapped wide lane to align its sideband with"
+        gate = lane_wes[0] if len(lane_wes) == 1 else "(" + " | ".join(lane_wes) + ")"
+        for err_port in inst.operator.error_ports:
+            err_terms.append(f"({gate} & {_sig(inst)}_{err_port}_q)")
     err_rhs = " | ".join(err_terms) if err_terms else "1'b0"
     w(f"assign err = {err_rhs};", "")
 
@@ -676,6 +587,21 @@ def _emit_copy_sign_wires(w: _Writer, lir: Lir) -> None:
         w("")
 
 
+def _emit_inline_sign_wires(w: _Writer, lir: Lir) -> None:
+    """Emit a sign-conditioning wire for each inline-firing float operand carrying a non-identity folded sign."""
+    emitted = False
+    for block in lir.blocks:
+        for op_index, op in enumerate(block.inline_ops):
+            for pos, operand in enumerate(op.operands):
+                if isinstance(operand, FloatOperand) and operand.sign != FloatSignControl():
+                    wire = _inline_sign_wire(block.index, op_index, pos)
+                    w(f"wire [W-1:0] {wire};")
+                    _fsgnop(w, _source_net(operand.source), operand.sign, wire, f"u_{wire}")
+                    emitted = True
+    if emitted:
+        w("")
+
+
 def _emit_state_next(w: _Writer, lir: Lir) -> None:
     """Sign-condition the persisted next value of any non-coalesced slot whose copied source carries a folded sign."""
     emitted = False
@@ -729,63 +655,81 @@ def _read_latch_stmts(
         w("end")
 
 
-def _writeback_cond(inst: FloatOperatorInstance, reg: int, write_lists: dict[FloatOperatorInstance, list[int]]) -> str:
-    """The guard under which operator ``inst`` writes ``reg``: its write-enable, plus a write-address compare when the
-    instance targets more than one register (the dense write-target index this register occupies in its codebook)."""
+def _writeback_cond(
+    inst: OperatorInstance, port: int, reg: int, write_lists: dict[tuple[OperatorInstance, int], list[int]]
+) -> str:
+    """
+    The guard under which lane ``(inst, port)`` writes ``reg``: its write-enable, plus a write-address compare when
+    the lane targets more than one register (the dense write-target index this register occupies in its codebook).
+    """
     base = base_name(inst)
-    targets = write_lists[inst]
+    targets = write_lists[(inst, port)]
     if len(targets) == 1:
-        return f_we(base)
-    return f"{f_we(base)} && ({f_wa(base)} == {_lit(code_width(len(targets)), targets.index(reg))})"
+        return f_we(base, port)
+    return f"{f_we(base, port)} && ({f_wa(base, port)} == {_lit(code_width(len(targets)), targets.index(reg))})"
 
 
 def _wide_writer_entries(
-    lir: Lir, write_sets: dict[int, list[FloatOperatorInstance]], write_lists: dict[FloatOperatorInstance, list[int]]
+    lir: Lir,
+    write_sets: dict[int, list[tuple[OperatorInstance, int]]],
+    write_lists: dict[tuple[OperatorInstance, int], list[int]],
 ) -> dict[int, list[tuple[str, str]]]:
     """
     Per wide register, the ordered ``(condition, rhs)`` of every driver other than its state-slot install: the
-    accept-step input load (highest priority), each operator writeback, each pc-gated bool->float cast, and each
-    pc-gated phi-arm copy. The conditions are pairwise mutually exclusive (the load step, the per-instance write-enable
-    steps, and the distinct cast/copy PCs never coincide for one register -- the schedule and the allocator's
-    interference guarantee it), so the emitter folds them into one priority chain and a register is driven by exactly
-    one statement, however many sources reuse or coalesce onto it.
+    accept-step input load (highest priority), each pooled lane's writeback, each pc-gated wide-result inline firing
+    (the bool->float cast), and each pc-gated phi-arm copy. The conditions are pairwise mutually exclusive (the load
+    step, the per-lane write-enable steps, and the distinct inline/copy PCs never coincide for one register -- the
+    schedule and the allocator's interference guarantee it), so the emitter folds them into one priority chain and a
+    register is driven by exactly one statement, however many sources reuse or coalesce onto it.
     """
     entries: dict[int, list[tuple[str, str]]] = {}
     for fload in sorted(lir.float_inputs, key=lambda load: load.dst.index):
         entries.setdefault(fload.dst.index, []).append(("in_ready && in_valid", f"in_{fload.name}"))
     for reg in sorted(write_sets):
-        for inst in write_sets[reg]:
-            entries.setdefault(reg, []).append((_writeback_cond(inst, reg, write_lists), f"{_sig(inst)}_y_q"))
-    for block_index, op in _block_ffrombool_ops(lir):
-        entries.setdefault(op.dst.index, []).append(
-            (f"pc == {_comb_float_writeback_pc(lir, block_index, op)}", _ffrombool_rhs(op))
-        )
+        for inst, port in write_sets[reg]:
+            entries.setdefault(reg, []).append(
+                (_writeback_cond(inst, port, reg, write_lists), f"{_sig(inst)}_y{port}_q")
+            )
+    for block in lir.blocks:
+        for op_index, inline_op in enumerate(block.inline_ops):
+            if isinstance(inline_op.write.dst, RegRef):
+                entries.setdefault(inline_op.write.dst.index, []).append(
+                    (
+                        f"pc == {_inline_fire_pc(lir, block.index, inline_op)}",
+                        _inline_rhs(block.index, op_index, inline_op),
+                    )
+                )
     for reg, items in _copies_grouped(lir).items():
         for install_pc, rhs in sorted(items):
             entries.setdefault(reg, []).append((f"pc == {install_pc}", rhs))
     return entries
 
 
-def _bool_writer_entries(lir: Lir) -> dict[int, list[tuple[str, str]]]:
-    """Per boolean register, the ordered ``(condition, rhs)`` of every driver other than its state-slot install: the
-    input load, each comparator / boolean-logic / float->bool result, and each pc-gated phi-arm write."""
+def _bool_writer_entries(
+    lir: Lir, write_lists: dict[tuple[OperatorInstance, int], list[int]]
+) -> dict[int, list[tuple[str, str]]]:
+    """
+    Per boolean register, the ordered ``(condition, rhs)`` of every driver other than its state-slot install: the
+    input load, each pooled boolean lane (microcode-gated, latch-free, with its fabric-XOR inversion conditioner),
+    each pc-gated bool-result inline firing, and each pc-gated phi-arm write.
+    """
     entries: dict[int, list[tuple[str, str]]] = {}
     for bload in sorted(lir.bool_inputs, key=lambda load: load.dst.index):
         entries.setdefault(bload.dst.index, []).append(("in_ready && in_valid", f"in_{bload.name}"))
+    bool_write_sets = lir.bool_write_set_per_register
+    for reg in sorted(bool_write_sets):
+        for inst, port in bool_write_sets[reg]:
+            rhs = f"{_sig(inst)}_y{port} ^ {f_binv(base_name(inst), port)}"
+            entries.setdefault(reg, []).append((_writeback_cond(inst, port, reg, write_lists), rhs))
     for block in lir.blocks:
-        for position, op, _cmp in _block_comparisons(block):
-            wb = _fcmp_in_valid_pc(lir, block.index, op) + op.latency
-            entries.setdefault(op.dst.index, []).append(
-                (f"pc == {wb}", f"fcmp_{_fcmp_label(block.index, position)}_result")
-            )
-    for block_index, op in _block_logic_ops(lir):
-        entries.setdefault(op.dst.index, []).append(
-            (f"pc == {_comb_writeback_pc(lir, block_index, op)}", _bool_logic_rhs(op))
-        )
-    for block_index, op in _block_ftobool_ops(lir):
-        entries.setdefault(op.dst.index, []).append(
-            (f"pc == {_comb_writeback_pc(lir, block_index, op)}", _ftobool_rhs(op))
-        )
+        for op_index, inline_op in enumerate(block.inline_ops):
+            if isinstance(inline_op.write.dst, BoolRegRef):
+                entries.setdefault(inline_op.write.dst.index, []).append(
+                    (
+                        f"pc == {_inline_fire_pc(lir, block.index, inline_op)}",
+                        _inline_rhs(block.index, op_index, inline_op),
+                    )
+                )
     for reg, items in _bool_writes_grouped(lir).items():
         for install_pc, rhs in sorted(items):
             entries.setdefault(reg, []).append((f"pc == {install_pc}", rhs))
@@ -815,11 +759,11 @@ def _emit_chain(w: _Writer, lhs: str, entries: list[tuple[str, str]]) -> None:
 def _emit_clocked(
     w: _Writer,
     lir: Lir,
-    read_port: dict[tuple[FloatOperatorInstance, int], int],
+    read_port: dict[tuple[OperatorInstance, int], int],
     port_consts: dict[int, list[int]],
-    read_sets: dict[tuple[FloatOperatorInstance, int], list[int]],
-    write_sets: dict[int, list[FloatOperatorInstance]],
-    write_lists: dict[FloatOperatorInstance, list[int]],
+    read_sets: dict[tuple[OperatorInstance, int], list[int]],
+    write_sets: dict[int, list[tuple[OperatorInstance, int]]],
+    write_lists: dict[tuple[OperatorInstance, int], list[int]],
 ) -> None:
     """Emit every sequential element in one always @(posedge clk): fetch, latches, writes, and control state."""
     # We MUST ensure that we DO NOT MULTI-ASSIGN any register in the same step; this is ensured by always placing each
@@ -832,7 +776,7 @@ def _emit_clocked(
     # phi copies, comparator/logic results, and -- for a slot -- its boundary install), so a register is never assigned
     # by two separate statements. The conditions within a chain are pairwise mutually exclusive by construction.
     wide = _wide_writer_entries(lir, write_sets, write_lists)
-    boolw = _bool_writer_entries(lir)
+    boolw = _bool_writer_entries(lir, write_lists)
     w("""
 // All sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q) and the persistent
 // state registers; every other register is reset-unconditional. Each register is driven by exactly one write chain.
@@ -854,10 +798,13 @@ always @(posedge clk) begin
             _read_latch_stmts(w, f"{sig}_{PORT_LETTERS[pos]}", port, read_sets.get((inst, pos), []), port_consts)
     w("")
 
-    w("// Writeback latches: the operator result (and any error sideband) registered before the register write.")
+    w("// Writeback latches: each WIDE lane's result (and any error sideband) registered before the register")
+    w("// write; a boolean lane is latch-free and written directly at its commit step.")
     for inst in lir.instances:
         sig = _sig(inst)
-        w(f"{sig}_y_q <= {sig}_y;")
+        for q, result_type in enumerate(inst.operator.signature.result_types):
+            if isinstance(result_type, FloatType) and (inst, q) in write_lists:
+                w(f"{sig}_y{q}_q <= {sig}_y{q};")
         for err_port in inst.operator.error_ports:
             w(f"{sig}_{err_port}_q <= {sig}_{err_port};")
     w("")

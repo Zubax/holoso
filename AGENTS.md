@@ -64,6 +64,9 @@ underscore-prefixed names. Exceptions apply for importing from parent modules wi
 Accessing underscore-prefixed names from outside a class (or its descendants) is not allowed;
 all externally accessble entities must be non-underscore-prefixed.
 
+Avoid files longer than about ~3000 lines (this is a soft limit).
+If a file grows beyond that, consider refactoring into smaller modules.
+
 If a docstring comment doesn't fit on one line, add an initial line break like this:
 
 ```python

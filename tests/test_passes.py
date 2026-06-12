@@ -256,7 +256,7 @@ def test_subtraction_folds_into_second_operand_sign() -> None:
 
     ops = _ops(_run(f))
     assert len(ops) == 1
-    assert isinstance(ops[0].operator, FAddOperator) and ops[0].operand_signs[1] == FloatSignControl(negate=True)
+    assert isinstance(ops[0].operator, FAddOperator) and ops[0].operand_conditioners[1] == FloatSignControl(negate=True)
 
 
 def test_operand_negation_folds_into_operator() -> None:
@@ -265,7 +265,7 @@ def test_operand_negation_folds_into_operator() -> None:
 
     ops = _ops(_run(f))
     assert len(ops) == 1
-    assert isinstance(ops[0].operator, FMulOperator) and ops[0].operand_signs[1] == FloatSignControl(negate=True)
+    assert isinstance(ops[0].operator, FMulOperator) and ops[0].operand_conditioners[1] == FloatSignControl(negate=True)
 
 
 def test_pure_sign_output_adds_no_operation() -> None:

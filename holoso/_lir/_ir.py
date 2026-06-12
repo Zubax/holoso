@@ -8,11 +8,11 @@ which typed storage resources, with which folded sign controls.
 from dataclasses import dataclass
 
 from .._operators import (
-    FComparisonOperator,
-    FloatHardwareOperator,
     FloatSignControl,
-    FloatToBoolOperator,
     HardwareOperator,
+    InlineHardwareOperator,
+    PooledHardwareOperator,
+    PortConditioner,
 )
 from .._type import BoolType, FloatFormat, FloatType
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
@@ -22,32 +22,78 @@ FETCH_LAG = FETCH_STAGES - 1
 
 
 # Executing-step (hardware) frame cycle offsets: the single source of truth shared by the LIR cycle helpers below, the
-# write timeline, the numerical model, and the register allocator, so a value's landing/read/copy/boundary cycle is
-# computed in exactly one place and the four consumers cannot drift (the bug this centralization prevents).
-def landing_cycle(commit_cycle: int) -> int:
-    """The cycle a result becomes readable in the array: its commit plus the write latch and the read-first edge."""
+# write timeline, the numerical model, the scheduler's dependency edges, and the register allocator, so a value's
+# landing/read/copy/boundary cycle is computed in exactly one place and the consumers cannot drift (the bug this
+# centralization prevents). Timing is a property of the REGISTER BANK and of the operation class (instance-backed vs
+# inline), never of an individual operator: the wide bank reads through a read latch and writes through a writeback
+# latch; the boolean bank is latch-free (results are written directly at their commit step and read directly).
+def wide_landing_cycle(commit_cycle: int) -> int:
+    """The cycle a wide result is readable in the array: its commit plus the write latch and the read-first edge."""
     return commit_cycle + FETCH_LAG + 2
 
 
-def read_latch_cycle(issue_cycle: int) -> int:
-    """The cycle an operator reads its operands -- the read latch presents the address early."""
+def bool_landing_cycle(commit_cycle: int) -> int:
+    """The cycle a boolean result becomes readable: written directly at its commit step, visible the next step."""
+    return commit_cycle + FETCH_LAG + 1
+
+
+def pooled_wide_read_cycle(issue_cycle: int) -> int:
+    """The cycle an instance-backed operator samples a wide operand -- the read latch presents the address early."""
     return issue_cycle + FETCH_LAG - 1
 
 
-def wide_operand_read_cycle(operator: HardwareOperator, issue_cycle: int) -> int:
+def pooled_bool_read_cycle(issue_cycle: int) -> int:
+    """The cycle an instance-backed operator samples a boolean operand: latch-free, directly on its in_valid step."""
+    return issue_cycle + FETCH_LAG
+
+
+def inline_fire_cycle(commit_cycle: int, dst_is_wide: bool) -> int:
     """
-    The hardware-frame cycle on which ``operator`` samples a wide-register operand, the single definition shared by the
-    register allocator's interference, ``reg_liveness``, and the numerical model so none can drift. An instance-backed
-    float operator reads through the read latch (address presented a step early). The shared comparator reads its
-    operands combinationally on its ``in_valid`` step (``issue + FETCH_LAG``); the float->bool cast reads on its
-    writeback step, ``latency`` further on. Both are a step or more later than a latched read, so a wide register read
-    by a comparison or cast stays reserved exactly as long as the emitter holds it.
+    The cycle an inline combinational operation (boolean logic, a float<->bool cast) fires: it is one PC-gated
+    statement that reads ALL its operands and writes its destination on this single step -- the commit step for a
+    boolean destination, one later for a wide one (aligned with the wide bank's write-latch write enables).
     """
-    if isinstance(operator, FComparisonOperator):
-        return issue_cycle + FETCH_LAG
-    if isinstance(operator, FloatToBoolOperator):
-        return issue_cycle + FETCH_LAG + operator.latency
-    return read_latch_cycle(issue_cycle)
+    return commit_cycle + FETCH_LAG + (1 if dst_is_wide else 0)
+
+
+def operand_read_cycle(operator: HardwareOperator, issue_cycle: int) -> int:
+    """
+    The hardware-frame cycle on which an operation samples its register operands (an operation reads all its operands
+    on one cycle), the single definition shared by the register allocator's interference, the liveness views, and the
+    numerical model so none can drift. A pooled instance reads through the wide read latch; no pooled operator reads
+    a boolean operand yet, ENFORCED here -- when one appears it is presented latch-free on the in_valid step
+    (``pooled_bool_read_cycle``) and this dispatch must grow per-operand granularity, reconciled with
+    ``dependency_edge``. An inline operation fires -- and reads -- on its writeback step.
+    """
+    if isinstance(operator, PooledHardwareOperator):
+        assert all(isinstance(ty, FloatType) for ty in operator.signature.operand_types), operator.mnemonic
+        return pooled_wide_read_cycle(issue_cycle)
+    dst_is_wide = isinstance(operator.signature.result_types[0], FloatType)
+    return inline_fire_cycle(issue_cycle + operator.latency, dst_is_wide)
+
+
+def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: HardwareOperator) -> int:
+    """
+    The minimum same-block scheduling distance from a producer's commit to a consumer's issue (``issue_consumer >=
+    commit_producer + edge``), derived from the landing of the producer's tapped output port's bank and the
+    consumer's operand-read timing so the scheduler, the liveness views, and the model share one rule. The clamp
+    keeps an inline consumer's commit strictly after its producer's, which the model's commit-ordered evaluation
+    relies on. The zero-offset evaluation below is exact because every cycle helper is affine in its cycle argument
+    with unit slope, so the difference at zero is the frame-independent spacing; a helper that ever loses that
+    affinity breaks this derivation. No pooled operator reads a boolean operand yet, ENFORCED here in lockstep with
+    ``operand_read_cycle`` (which charges every pooled consumer the wide read latch): the first bool-reading pooled
+    operator must reconcile its presentation -- latch-free on the in_valid step, ``pooled_bool_read_cycle`` -- in
+    both helpers at once.
+    """
+    producer_wide = isinstance(producer.signature.result_types[producer_port], FloatType)
+    landing = wide_landing_cycle(0) if producer_wide else bool_landing_cycle(0)
+    if isinstance(consumer, PooledHardwareOperator):
+        assert producer_wide, f"{consumer.mnemonic}: pooled operators read only wide operands today"
+        read = pooled_wide_read_cycle(0)
+    else:
+        dst_is_wide = isinstance(consumer.signature.result_types[0], FloatType)
+        read = inline_fire_cycle(consumer.latency, dst_is_wide)
+    return max(landing - read, 1 - consumer.latency)
 
 
 def copy_step_cycle(install_cycle: int) -> int:
@@ -80,22 +126,35 @@ def residence_rows(defs: list[int], uses: list[int], present: int) -> set[int]:
 @dataclass(frozen=True, slots=True)
 class OperatorInstance:
     """
-    One physical operator module, e.g. ``u_fadd_326215ea_0`` or ``u_fmul_ilog2_const_7296114c_0``.
+    One physical operator module, e.g. ``u_fadd_326215ea_0`` or ``u_fcmp_7296114c_0``.
 
-    ``operator`` is the fully specified hardware operator it elaborates; ``index`` numbers the copies of that operator
-    value. The scheduler pools operations by the hardware-operator instance: equal operators may time-share one module.
+    ``operator`` is the fully specified pooled hardware operator it elaborates; ``index`` numbers the copies of that
+    operator value. The scheduler pools firings by the hardware-operator instance: equal operators may time-share one
+    module, each instance accepting a new firing every ``initiation_interval`` cycles.
     """
 
-    operator: HardwareOperator
+    operator: PooledHardwareOperator
     index: int  # 0-based within this concrete operator value
 
-
-@dataclass(frozen=True, slots=True)
-class FloatOperatorInstance(OperatorInstance):
-    """One physical floating-point operator module."""
-
-    operator: FloatHardwareOperator
-    index: int
+    def __post_init__(self) -> None:
+        # Every pooled operator passes through here, so its three hand-synchronized per-port declarations are
+        # validated once at the source: HDL port names align with the result types, and the commutation permutation
+        # (when declared) is a type-preserving bijection -- a bad future declaration fails here, not in emission.
+        result_types = self.operator.signature.result_types
+        assert len(self.operator.output_hdl_ports) == len(result_types), self.operator.mnemonic
+        permutation = self.operator.swap_output_permutation
+        if permutation is not None:
+            assert sorted(permutation) == list(range(len(result_types))), self.operator.mnemonic
+            assert all(result_types[permutation[p]] == result_types[p] for p in range(len(permutation)))
+        # Busy windows are tracked per block, so cross-block soundness needs the instance provably idle by the time
+        # any successor block can issue on it. The worst case is a firing committing exactly at its block's makespan
+        # (issue = makespan - latency): the boundary redirect fires ``boundary_step(0)`` steps past the makespan, the
+        # successor's base begins one step later, and its first issue one step after that -- an issue-to-issue gap of
+        # exactly ``latency + boundary_step(0) + 2``. A deeper-throttled operator needs cross-block busy tracking.
+        assert self.operator.initiation_interval <= self.operator.latency + boundary_step(0) + 2, (
+            f"{self.operator.mnemonic}: initiation_interval {self.operator.initiation_interval} needs cross-block "
+            f"busy tracking (max supported is latency + {boundary_step(0) + 2})"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +185,14 @@ class BoolRegRef:
     @property
     def is_register(self) -> bool:
         return True
+
+
+def result_landing_cycle(dst: RegRef | BoolRegRef, commit_cycle: int) -> int:
+    """
+    The cycle a result lands per its destination bank -- the single dispatch every consumer (liveness, the write
+    timeline, the numerical model, the report) routes through, so the per-bank rule cannot drift between them.
+    """
+    return wide_landing_cycle(commit_cycle) if isinstance(dst, RegRef) else bool_landing_cycle(commit_cycle)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,37 +232,6 @@ class FloatOperand(Operand):
     @property
     def stable_label(self) -> str:
         return self.sign.decorate(self.source.stable_label)
-
-
-@dataclass(frozen=True, slots=True)
-class ScheduledOp:
-    """
-    One operator firing in the software-pipelined schedule.
-
-    ``inst`` is the bound physical instance, ``issue_cycle`` is the cycle its ``in_valid`` is asserted, and the result
-    commits to ``dst`` at ``commit_cycle == issue_cycle + latency``.
-    """
-
-    inst: OperatorInstance
-    dst: RegRef | BoolRegRef
-    issue_cycle: int
-    latency: int
-
-    @property
-    def commit_cycle(self) -> int:
-        return self.issue_cycle + self.latency
-
-
-@dataclass(frozen=True, slots=True)
-class FloatScheduledOp(ScheduledOp):
-    """One floating-point operator firing in the software-pipelined schedule."""
-
-    inst: FloatOperatorInstance
-    operands: list[FloatOperand]
-    result_sign: FloatSignControl
-    dst: RegRef
-    issue_cycle: int
-    latency: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +298,78 @@ class BoolOperand:
 
     source: BoolSource
 
+    @property
+    def stable_label(self) -> str:
+        if isinstance(self.source, BoolConstRef):
+            return "1" if self.source.value else "0"
+        return self.source.stable_label
+
+
+@dataclass(frozen=True, slots=True)
+class PortWrite:
+    """
+    One tapped output port of a firing: the ``port``-th result lands in ``dst`` through its type's conditioner (a
+    folded sign control on a wide destination, an optional inversion on a boolean one). Untapped ports of the firing
+    simply have no PortWrite -- the module output is left unconnected.
+    """
+
+    port: int
+    dst: RegRef | BoolRegRef
+    conditioner: PortConditioner
+
+
+@dataclass(frozen=True, slots=True)
+class PooledScheduledOp:
+    """
+    One pooled-instance firing in the software-pipelined schedule: ``inst`` asserts ``in_valid`` on ``issue_cycle``
+    (its operands sampled per the bank read discipline), and on ``commit_cycle == issue_cycle + latency`` every
+    tapped output port lands in its destination register. The writes are sorted by port and pairwise distinct in
+    both port and destination -- members of one firing land simultaneously, so the allocator always gives them
+    distinct registers.
+    """
+
+    inst: OperatorInstance
+    operands: list[FloatOperand | BoolOperand]
+    writes: list[PortWrite]
+    issue_cycle: int
+    latency: int
+
+    @property
+    def operator(self) -> PooledHardwareOperator:
+        return self.inst.operator
+
+    def __post_init__(self) -> None:
+        assert self.writes, "a firing with no tapped output cannot exist (an unused operation has no MIR node)"
+        ports = [write.port for write in self.writes]
+        assert ports == sorted(set(ports)), f"write ports must be sorted and distinct: {ports}"
+        assert len({write.dst for write in self.writes}) == len(self.writes), "write destinations must be distinct"
+
+    @property
+    def commit_cycle(self) -> int:
+        return self.issue_cycle + self.latency
+
+
+@dataclass(frozen=True, slots=True)
+class InlineScheduledOp:
+    """
+    One inline-operator firing: a single PC-gated statement that reads its operands and writes its one result on its
+    fire step (the commit step for a boolean destination, one later for a wide one).
+    """
+
+    operator: InlineHardwareOperator
+    operands: list[FloatOperand | BoolOperand]
+    write: PortWrite
+    issue_cycle: int
+    latency: int
+
+    @property
+    def writes(self) -> list[PortWrite]:
+        return [self.write]
+
+    @property
+    def commit_cycle(self) -> int:
+        return self.issue_cycle + self.latency
+
 
 @dataclass(frozen=True, slots=True)
 class OutputWire:
@@ -308,30 +416,6 @@ class BoolWrite:
 
 
 @dataclass(frozen=True, slots=True)
-class CombScheduledOp:
-    """
-    A scheduled combinational operation firing in a block: it reads its register operands (each in its own bank, with
-    folded sign controls on float operands) and on ``commit_cycle == issue_cycle + latency`` latches the result into
-    ``dst`` (a boolean register, or -- for the bool->float cast -- a wide register). It hosts every combinational
-    operator: a float comparison (``FComparisonOperator``, whose one-hot order flags reduce by the operator's relation;
-    all comparisons share one pooled ``holoso_fcmp`` PC-muxed across mutually-exclusive blocks, one per cycle), the
-    boolean logic gates (``BoolAnd``/``BoolOr``/``BoolNot``, inline ``& | ~``), and the float<->bool casts
-    (``FloatToBool`` / ``BoolToFloat``, each a call to a shared ``holoso_support.vh`` function). None bind a pooled
-    instance; the comparison aside, each is a sub-gate combinational writeback.
-    """
-
-    operator: HardwareOperator
-    operands: list[FloatOperand | BoolOperand]
-    dst: RegRef | BoolRegRef
-    issue_cycle: int
-    latency: int
-
-    @property
-    def commit_cycle(self) -> int:
-        return self.issue_cycle + self.latency
-
-
-@dataclass(frozen=True, slots=True)
 class Jump:
     """Unconditional control transfer to block ``target``."""
 
@@ -358,14 +442,15 @@ type Terminator = Jump | Branch | Ret
 @dataclass(frozen=True, slots=True)
 class LirBlock:
     """
-    One basic block of the scheduled microprogram, with block-relative cycles (block start is cycle 0). ``ops``,
-    ``comb_ops``, ``copies``, and ``bool_writes`` are the block's datapath events; ``terminator`` redirects the
-    fetch PC at the block boundary. ``block_makespan`` is the last commit cycle inside the block (0 if it has none).
+    One basic block of the scheduled microprogram, with block-relative cycles (block start is cycle 0). ``ops``
+    (pooled firings), ``inline_ops``, ``copies``, and ``bool_writes`` are the block's datapath events; ``terminator``
+    redirects the fetch PC at the block boundary. ``block_makespan`` is the last commit cycle inside the block (0 if
+    it has none).
     """
 
     index: int
-    ops: list[FloatScheduledOp]
-    comb_ops: list[CombScheduledOp]
+    ops: list[PooledScheduledOp]
+    inline_ops: list[InlineScheduledOp]
     copies: list[FloatCopy]
     bool_writes: list[BoolWrite]
     terminator: Terminator
@@ -430,18 +515,29 @@ class StateProducer:
     index: int  # index into Lir.float_state_slots
 
 
-type Producer = InputProducer | OperationProducer | StateProducer
+@dataclass(frozen=True, slots=True)
+class InlineProducer:
+    """A wide-register write that came from an inline firing: ``Lir.blocks[block].inline_ops[index]``."""
+
+    block: int
+    index: int
+
+
+type Producer = InputProducer | OperationProducer | StateProducer | InlineProducer
+
+# The common surface of the two firing classes (operator/operands/writes/issue/commit), as the model consumes it.
+type ScheduledOp = PooledScheduledOp | InlineScheduledOp
 
 
 @dataclass(frozen=True, slots=True)
 class Lir:
     module_name: str
-    instances: list[FloatOperatorInstance]
+    instances: list[OperatorInstance]
     float_consts: list[float]  # constant pool: index -> value
     float_format: FloatFormat
     regfile: RegFileLayout
     inputs: list[FloatInputLoad | BoolInputLoad]  # ordered as the function parameters
-    ops: list[FloatScheduledOp]  # the pipelined schedule, flattened across blocks with ABSOLUTE issue cycles
+    ops: list[PooledScheduledOp]  # the pipelined pooled firings, flattened across blocks with ABSOLUTE issue cycles
     outputs: list[FloatOutputWire | BoolOutputWire]
     float_state_slots: list[FloatStateSlot]  # persistent registers, ordered as the instance attributes
     # Control-flow overlay. A straight-line kernel has a single block ending in Ret; ``blocks[0]`` is the entry,
@@ -535,18 +631,6 @@ class Lir:
         """
         return self.last_pc
 
-    def result_landing_cycle(self, op: FloatScheduledOp) -> int:
-        """
-        Hardware-frame cycle on which an operator result lands in the register array ready to read. For the last result
-        this equals the initiation interval. This is the single definition shared by liveness, the write timeline, the
-        model, and the register allocator so they cannot drift.
-        """
-        return landing_cycle(op.commit_cycle)
-
-    def operand_read_cycle(self, op: FloatScheduledOp) -> int:
-        """Hardware-frame cycle on which an operator reads its operands (the read latch presents the address early)."""
-        return read_latch_cycle(op.issue_cycle)
-
     def state_copy_step(self, slot: FloatStateSlot) -> int:
         """
         The fetch-PC value -- equivalently the hardware-frame cycle -- on which a non-coalesced slot's writeback copy
@@ -557,7 +641,7 @@ class Lir:
         return copy_step_cycle(slot.install_cycle)
 
     @property
-    def read_set_per_port(self) -> dict[tuple[FloatOperatorInstance, int], list[int]]:
+    def read_set_per_port(self) -> dict[tuple[OperatorInstance, int], list[int]]:
         """
         For each operator read port -- identified by its ``(instance, operand-position)`` pair -- the sorted distinct
         register indices it ever reads across the schedule.
@@ -566,7 +650,7 @@ class Lir:
         Ports that never read a register are absent. This drives the sparse per-port read mux: a port that reads a
         single register needs no mux at all, and one that reads several needs a mux spanning only those registers.
         """
-        sets: dict[tuple[FloatOperatorInstance, int], set[int]] = {}
+        sets: dict[tuple[OperatorInstance, int], set[int]] = {}
         for op in self.ops:
             for pos, operand in enumerate(op.operands):
                 if isinstance(operand.source, RegRef):
@@ -574,35 +658,52 @@ class Lir:
         return {port: sorted(regs) for port, regs in sets.items()}
 
     @property
-    def write_set_per_register(self) -> dict[int, list[FloatOperatorInstance]]:
+    def write_set_per_register(self) -> dict[int, list[tuple[OperatorInstance, int]]]:
         """
-        For each register index, the operator instances that ever write it (each through its own dedicated write port),
-        in a canonical order.
+        For each WIDE register index, the ``(instance, output port)`` lanes that ever write it, in a canonical order.
 
-        This drives the sparse per-register write select: a register written by a single instance needs no write-port
+        This drives the sparse per-register write select: a register written by a single lane needs no write-port
         mux. The input-load writers of registers ``0..nload-1`` are tracked separately via ``lir.float_inputs``
         (they are a distinct, address-free write source folded into the same select).
         """
-        sets: dict[int, list[FloatOperatorInstance]] = {}
+        return self._write_sets(RegRef)
+
+    @property
+    def bool_write_set_per_register(self) -> dict[int, list[tuple[OperatorInstance, int]]]:
+        """The boolean-bank counterpart of :attr:`write_set_per_register`, in the same canonical lane order."""
+        return self._write_sets(BoolRegRef)
+
+    def _write_sets(self, bank: type[RegRef] | type[BoolRegRef]) -> dict[int, list[tuple[OperatorInstance, int]]]:
+        sets: dict[int, list[tuple[OperatorInstance, int]]] = {}
         for op in self.ops:
-            writers = sets.setdefault(op.dst.index, [])
-            if op.inst not in writers:
-                writers.append(op.inst)
+            for write in op.writes:
+                if not isinstance(write.dst, bank):
+                    continue
+                writers = sets.setdefault(write.dst.index, [])
+                if (op.inst, write.port) not in writers:
+                    writers.append((op.inst, write.port))
         for writers in sets.values():
-            writers.sort(key=lambda inst: (inst.operator.instance_stem, inst.index))
+            writers.sort(key=lambda lane: (lane[0].operator.instance_stem, lane[0].index, lane[1]))
         return sets
 
     @property
-    def group_by_cycle(self) -> tuple[dict[int, list[FloatScheduledOp]], dict[int, list[FloatScheduledOp]]]:
+    def group_by_cycle(self) -> tuple[dict[int, list[PooledScheduledOp]], dict[int, list[PooledScheduledOp]]]:
         """The schedule grouped into per-cycle issues and commits, each canonically ordered."""
-        issues: dict[int, list[FloatScheduledOp]] = {}
-        commits: dict[int, list[FloatScheduledOp]] = {}
+        issues: dict[int, list[PooledScheduledOp]] = {}
+        commits: dict[int, list[PooledScheduledOp]] = {}
         for op in self.ops:
             issues.setdefault(op.issue_cycle, []).append(op)
             commits.setdefault(op.commit_cycle, []).append(op)
         for group in (issues, commits):
             for ops in group.values():
-                ops.sort(key=lambda op: (op.inst.operator.instance_stem, op.inst.index, op.dst.index, op.issue_cycle))
+                ops.sort(
+                    key=lambda op: (
+                        op.inst.operator.instance_stem,
+                        op.inst.index,
+                        op.writes[0].dst.index,
+                        op.issue_cycle,
+                    )
+                )
         return issues, commits
 
     @property
@@ -632,8 +733,10 @@ class Lir:
             if slot.needs_copy:  # the non-coalesced live-out lands on the install step and is carried to the next call
                 defs.setdefault(slot.reg, []).append(self.state_copy_step(slot))
         for op in self.ops:
-            defs.setdefault(op.dst, []).append(self.result_landing_cycle(op))
-            read = self.operand_read_cycle(op)
+            for write in op.writes:
+                if isinstance(write.dst, RegRef):
+                    defs.setdefault(write.dst, []).append(result_landing_cycle(write.dst, op.commit_cycle))
+            read = operand_read_cycle(op.inst.operator, op.issue_cycle)
             for operand in op.operands:
                 if isinstance(operand.source, RegRef):
                     uses.setdefault(operand.source, []).append(read)
@@ -643,20 +746,21 @@ class Lir:
         for slot in self.float_state_slots:  # the live-out tap is read on the install step to persist the slot
             if isinstance(slot.tap.source, RegRef):
                 uses.setdefault(slot.tap.source, []).append(self.state_copy_step(slot))
-        # Combinational ops touch the wide bank too: a comparison and a float->bool cast read float operands, and the
-        # bool->float cast writes a wide register. Its result becomes readable at the same ``landing_cycle`` as any
-        # result (the wide register file's tighter read-first edge offsets its one-cycle-later write, so a downstream
-        # float operator reads it on the landing cycle). Without these the residence of a cast/comparison operand or the
-        # cast result would be missing from the tint.
+        # Inline ops touch the wide bank too: a float->bool cast reads a float operand and the bool->float cast
+        # writes a wide register, whose result lands at the wide bank's ``wide_landing_cycle`` like any wide result
+        # (its PC-gated write is aligned with the write-latch write enables). Without these the residence of a cast
+        # operand or result would be missing from the tint.
         for block in self.blocks:
             base_pc = self.block_base[block.index]
-            for bop in block.comb_ops:
-                read = wide_operand_read_cycle(bop.operator, base_pc + bop.issue_cycle)
-                for comb_operand in bop.operands:
-                    if isinstance(comb_operand.source, RegRef):
-                        uses.setdefault(comb_operand.source, []).append(read)
-                if isinstance(bop.dst, RegRef):
-                    defs.setdefault(bop.dst, []).append(landing_cycle(base_pc + bop.commit_cycle))
+            for bop in block.inline_ops:
+                read = operand_read_cycle(bop.operator, base_pc + bop.issue_cycle)
+                for inline_operand in bop.operands:
+                    if isinstance(inline_operand.source, RegRef):
+                        uses.setdefault(inline_operand.source, []).append(read)
+                if isinstance(bop.write.dst, RegRef):
+                    defs.setdefault(bop.write.dst, []).append(
+                        result_landing_cycle(bop.write.dst, base_pc + bop.commit_cycle)
+                    )
             # A phi-arm copy installs its value into the merged register at the predecessor's tail and reads its source
             # there (the wide-bank analog of ``bool_writes`` below). Without this a merged register's residence -- and,
             # under reuse, the source register's last read -- would be missing from the tint.
@@ -689,29 +793,30 @@ class Lir:
                     uses.setdefault(slot.live_out.source, []).append(present)
         for load in self.bool_inputs:
             defs.setdefault(load.dst, []).append(1)
+        # Pooled firings write the boolean bank too (the comparator's tapped flags); their issue cycles are absolute.
+        for op in self.ops:
+            for write in op.writes:
+                if isinstance(write.dst, BoolRegRef):
+                    defs.setdefault(write.dst, []).append(result_landing_cycle(write.dst, op.commit_cycle))
         for block in self.blocks:
             base_pc = self.block_base[block.index]
-            for bop in block.comb_ops:
-                # Boolean operands are always read through the read latch; only WIDE operands need the comparator/cast
-                # offsets of wide_operand_read_cycle, and the operators that read wide registers (comparison, float->bool)
-                # take no boolean operand -- so read_latch_cycle is the right frame for every operand reached here.
-                read = read_latch_cycle(base_pc + bop.issue_cycle)
+            for bop in block.inline_ops:
+                # Boolean operands are read by inline ops on their single fire step (operand_read_cycle).
+                read = operand_read_cycle(bop.operator, base_pc + bop.issue_cycle)
                 for operand in bop.operands:
-                    if isinstance(operand.source, BoolRegRef):  # boolean-logic and bool->float cast read bool operands
+                    if isinstance(operand.source, BoolRegRef):  # boolean logic and the bool->float cast read booleans
                         uses.setdefault(operand.source, []).append(read)
-                if isinstance(
-                    bop.dst, BoolRegRef
-                ):  # comparison / boolean logic / float->bool cast write a bool register
-                    defs.setdefault(bop.dst, []).append(landing_cycle(base_pc + bop.commit_cycle))
+                if isinstance(bop.write.dst, BoolRegRef):  # boolean logic and the float->bool cast write booleans
+                    defs.setdefault(bop.write.dst, []).append(
+                        result_landing_cycle(bop.write.dst, base_pc + bop.commit_cycle)
+                    )
             for bwrite in block.bool_writes:
                 step = base_pc + copy_step_cycle(bwrite.issue_cycle)
                 defs.setdefault(bwrite.dst, []).append(step)
                 if isinstance(bwrite.source.source, BoolRegRef):
                     uses.setdefault(bwrite.source.source, []).append(step)
-            if isinstance(block.terminator, Branch):  # the branch reads its condition at the block's boundary row
-                uses.setdefault(block.terminator.cond, []).append(
-                    base_pc + boundary_step(block.block_makespan) + FETCH_LAG
-                )
+            if isinstance(block.terminator, Branch):  # the next-PC case reads the condition at the block's boundary PC
+                uses.setdefault(block.terminator.cond, []).append(base_pc + boundary_step(block.block_makespan))
         for wire in self.bool_outputs:
             if isinstance(wire.tap.source, BoolRegRef):
                 uses.setdefault(wire.tap.source, []).append(present)
@@ -732,7 +837,23 @@ class Lir:
         for s, slot in enumerate(self.float_state_slots):
             writes.setdefault(slot.reg, []).append((1, StateProducer(s)))
         for j, op in enumerate(self.ops):
-            writes.setdefault(op.dst, []).append((self.result_landing_cycle(op), OperationProducer(j)))
+            for write in op.writes:
+                if isinstance(write.dst, RegRef):
+                    writes.setdefault(write.dst, []).append(
+                        (result_landing_cycle(write.dst, op.commit_cycle), OperationProducer(j))
+                    )
+        # Inline firings write the wide bank too (the bool->float cast); without them a cast-fed operand would
+        # resolve to no producer at all.
+        for block in self.blocks:
+            base_pc = self.block_base[block.index]
+            for k, inline_op in enumerate(block.inline_ops):
+                if isinstance(inline_op.write.dst, RegRef):
+                    writes.setdefault(inline_op.write.dst, []).append(
+                        (
+                            result_landing_cycle(inline_op.write.dst, base_pc + inline_op.commit_cycle),
+                            InlineProducer(block.index, k),
+                        )
+                    )
         for events in writes.values():
             events.sort(key=lambda event: event[0])
         return writes

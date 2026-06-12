@@ -37,12 +37,12 @@ import numpy as np
 from scipy.optimize import dual_annealing
 
 from .._hir import ValueId
-from ._ir import FloatOperatorInstance
+from ._ir import OperatorInstance
 
 # Read port identity (operator instance + operand position) and write-source identity: an operator instance, the input
 # load, or a per-slot state writer -- opaque keys for grouping the read-mux and write-select fan-in objective.
-type _Port = tuple[FloatOperatorInstance, int]
-type _Producer = FloatOperatorInstance | str
+type _Port = tuple[OperatorInstance, int]
+type _Producer = OperatorInstance | str
 
 
 # Budget for the SciPy dual-annealing refinement. It only polishes an already-valid greedy seed (and is a no-op when

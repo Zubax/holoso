@@ -82,8 +82,9 @@ def test_operator_instance_names_include_hardware_identity() -> None:
 
 @requires_iverilog
 def test_comparisons_share_one_pooled_fcmp_instance() -> None:
-    # Comparisons live in mutually-exclusive blocks and execute sequentially, so they share a single holoso_fcmp (the
-    # one-instance-per-operator convention), with the emitter PC-muxing its operands -- not one instance per comparison.
+    # Comparisons live in mutually-exclusive blocks and execute sequentially, so they share a single holoso_fcmp
+    # (the one-instance-per-operator pooling convention), its operands riding the ordinary microcode read-latch
+    # lanes -- not one instance per comparison.
     def kernel(x):  # type: ignore[no-untyped-def]
         if x > 1.0:
             y = x + 1.0
@@ -284,3 +285,152 @@ def test_ekf1_stateful_elaborates(tmp_path: Path) -> None:
     )
     lir = build(_run(filt.update, _ops(fmt)), "ekf1_stateful")
     _elaborate("ekf1_stateful", generate(lir).verilog, tmp_path)
+
+
+def test_bool_lane_write_enable_rides_the_commit_step_and_wide_one_later() -> None:
+    # The sharpest trap of the per-bank discipline: a latch-free BOOLEAN lane's write-enable must sit at ROM step
+    # ``commit`` (the flag is valid on that executing step; one later would land the result past the branch's
+    # boundary read, which has exactly one cycle of slack), while a WIDE lane's sits at ``commit + 1`` to ride the
+    # writeback latch. Checked white-box against the microcode tables of a kernel with both lane kinds.
+    from holoso._backend.verilog._microcode import (
+        base_name,
+        build_microcode,
+        f_we,
+        port_const_map,
+        read_ports,
+        write_target_lists,
+    )
+    from holoso._lir import BoolRegRef as LirBoolRegRef
+    from ._modelref import branch_boundary_kernel, fcmp_staged_ops
+
+    fmt = FloatFormat(6, 18)
+    lir = build(_run(branch_boundary_kernel, fcmp_staged_ops(fmt, 1)), "lane_steps")
+    read_port = read_ports(lir)
+    write_lists = write_target_lists(lir)
+    fields = build_microcode(lir, read_port, port_const_map(lir, read_port), write_lists)
+    checked_bool = checked_wide = 0
+    for op in lir.ops:
+        for write in op.writes:
+            field = fields[f_we(base_name(op.inst), write.port)]
+            if isinstance(write.dst, LirBoolRegRef):
+                assert field.values[op.commit_cycle] == 1, "boolean lane write-enable must ride the commit step"
+                checked_bool += 1
+            else:
+                assert field.values[op.commit_cycle + 1] == 1, "wide lane write-enable must ride the writeback latch"
+                checked_wide += 1
+    assert checked_bool >= 1 and checked_wide >= 2  # the kernel has a comparison and several float results
+
+
+def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Path) -> None:
+    # No shipped operator has several WIDE outputs yet (fsort will), so the per-port wide lane machinery -- separate
+    # writeback latches, write-enable/address fields, and sign-conditioner fields per output -- is exercised with a
+    # synthetic two-output operator on a hand-built Lir, down to Icarus elaboration against a matching stub module.
+    from dataclasses import dataclass
+    from typing import ClassVar
+
+    from holoso._lir import (
+        FloatInputLoad,
+        FloatOperand,
+        FloatOutputWire,
+        Jump,
+        Lir,
+        LirBlock,
+        OperatorInstance,
+        PooledScheduledOp,
+        PortWrite,
+        RegFileLayout,
+        Ret,
+    )
+    from holoso._lir._ir import BoolRegFileLayout
+    from holoso._operators import FloatHardwareOperator, FloatSignControl
+    from holoso._type import ScalarSignature, FloatType as ScalarFloatType
+
+    @dataclass(frozen=True, slots=True)
+    class _SortLike(FloatHardwareOperator):
+        mnemonic: ClassVar[str] = "fsortlike"
+        output_hdl_ports: ClassVar[list[str]] = ["min", "max"]
+
+        @property
+        def latency(self) -> int:
+            return 1
+
+        @property
+        def signature(self) -> ScalarSignature:
+            ty = ScalarFloatType(self.fmt)
+            return ScalarSignature((ty, ty), (ty, ty))
+
+        def render(self, *operands: str) -> str:
+            return f"sortlike({operands[0]},{operands[1]})"
+
+        def hdl_params(self) -> dict[str, int]:
+            return {}
+
+        def evaluate(self, *operands):  # type: ignore[no-untyped-def]
+            a, b = self._validated_operands(operands, 2)
+            return (a, b)  # semantics are irrelevant here; only the lane structure is under test
+
+    fmt = FloatFormat(6, 18)
+    inst = OperatorInstance(_SortLike(fmt), 0)
+    op = PooledScheduledOp(
+        inst=inst,
+        operands=[FloatOperand(RegRef(0)), FloatOperand(RegRef(1))],
+        writes=[
+            PortWrite(0, RegRef(2), FloatSignControl()),
+            PortWrite(1, RegRef(3), FloatSignControl(negate=True)),
+        ],
+        issue_cycle=1,
+        latency=1,
+    )
+    lir = Lir(
+        module_name="sortlike_probe",
+        instances=[inst],
+        float_consts=[],
+        float_format=fmt,
+        regfile=RegFileLayout(width=fmt.width, nreg=4, nrd=2, nwr=2, nload=2),
+        inputs=[FloatInputLoad("a", RegRef(0)), FloatInputLoad("b", RegRef(1))],
+        ops=[op],
+        outputs=[FloatOutputWire("out_0", FloatOperand(RegRef(2))), FloatOutputWire("out_1", FloatOperand(RegRef(3)))],
+        float_state_slots=[],
+        blocks=[LirBlock(0, [op], [], [], [], Ret(), op.commit_cycle)],
+        block_base=[0],
+        entry=0,
+        last_pc=op.commit_cycle + 4,
+        min_initiation_interval=op.commit_cycle + 4,
+        bool_regfile=BoolRegFileLayout(nreg=0),
+        bool_state_slots=[],
+    )
+    verilog = generate(lir).verilog
+    # Both wide lanes exist independently: per-port writeback latches, write-enables, and sign-conditioner fields.
+    for q in (0, 1):
+        assert "s_fsortlike_" in verilog and f"_y{q}_q" in verilog
+        assert re.search(rf"mc_we_fsortlike_\w+_0_y{q}\b", verilog)
+        assert re.search(rf"mc_fsortlike_\w+_0_y{q}s\b", verilog)
+    assert ".min(" in verilog and ".max(" in verilog and ".min_sgnop(" in verilog and ".max_sgnop(" in verilog
+    # Elaborate under Icarus against a stub module with the expected port list.
+    if shutil.which("iverilog") is None:
+        pytest.skip("iverilog not installed")
+    stub = """
+module holoso_fsortlike#(parameter WEXP=6, parameter WMAN=18, parameter integer LATENCY=0) (
+    input  wire clk, input wire rst, input wire in_valid,
+    input  wire [1:0] a_sgnop, input wire [1:0] b_sgnop,
+    input  wire [1:0] min_sgnop, input wire [1:0] max_sgnop,
+    input  wire [WEXP+WMAN-1:0] a, input wire [WEXP+WMAN-1:0] b,
+    output wire out_valid,
+    output wire [WEXP+WMAN-1:0] min, output wire [WEXP+WMAN-1:0] max
+);
+    assign out_valid = 1'b0;
+    assign min = a;
+    assign max = b;
+endmodule
+"""
+    top = tmp_path / "sortlike_probe.v"
+    top.write_text(verilog)
+    (tmp_path / "stub.v").write_text(stub)
+    result = subprocess.run(
+        ["iverilog", "-g2012", "-I", str(HDL_DIR), "-s", "sortlike_probe", "-o", str(tmp_path / "out")]
+        + [str(top), str(tmp_path / "stub.v")]
+        + [str(s) for s in sources()],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

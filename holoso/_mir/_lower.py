@@ -35,10 +35,10 @@ from .._hir import (
 )
 from .._operators import (
     BoolAndOperator,
+    BoolInversion,
     BoolNotOperator,
     BoolOrOperator,
     BoolToFloatOperator,
-    FComparisonOperator,
     FloatHardwareOperator,
     FloatSignControl,
     FloatToBoolOperator,
@@ -179,12 +179,18 @@ class _LoweringContext:
                 self.remap[old_id] = self.builder.bool_const(value, ScalarBoolType())
                 return True
             case Operation(operator=FloatRelational(op=relation), operands=(a, b)):
+                # A relation is one comparator output port with an optional inversion (the ZKF ordering is total and
+                # the flags one-hot), so every relation -- and every comparison over the same operand pair -- selects
+                # into the same pooled fcmp operator and can fuse into one firing.
                 base_a, sign_a = _collapse_signs(self.hir.nodes, a)
                 base_b, sign_b = _collapse_signs(self.hir.nodes, b)
+                port, inversion = self.ops.fcmp.tap_of(relation)
                 self.remap[old_id] = self.builder.operation(
-                    FComparisonOperator(self.ops.fcmp, relation),
+                    self.ops.fcmp,
                     [self.remap[base_a], self.remap[base_b]],
                     [sign_a, sign_b],
+                    output_port=port,
+                    output_conditioner=inversion,
                 )
                 return True
             case Operation(operator=BoolAnd(), operands=(a, b)):
@@ -208,9 +214,9 @@ class _LoweringContext:
                 return False
 
     def _lower_bool_logic(self, old_id: ValueId, operator: HardwareOperator, operands: list[ValueId]) -> None:
-        # Boolean operands carry no sign control (booleans have no sign); they are remapped directly.
+        # Boolean operands carry the identity inversion (folding a NOT into a consumer is a later optimization).
         self.remap[old_id] = self.builder.operation(
-            operator, [self.remap[operand] for operand in operands], [FloatSignControl() for _ in operands]
+            operator, [self.remap[operand] for operand in operands], [BoolInversion() for _ in operands]
         )
 
     def _lower_output(self, name: str, value: ValueId) -> None:
@@ -289,10 +295,9 @@ class _FloatLowerer:
             case Operation(operator=FloatMulPow2(k=k), operands=(a,)):
                 return self._lower_float_mul_pow2(a, k)
             case Operation(operator=BoolToFloat(), operands=(a,)):
-                # ``float(cond)`` is a float-result combinational op reading a boolean operand (no sign control on a
-                # boolean): the one operator that crosses from the boolean bank into the wide bank.
+                # ``float(cond)`` crosses from the boolean bank into the wide bank.
                 return self.context.builder.operation(
-                    BoolToFloatOperator(self.context.ops.float_format), [self.context.remap[a]], [FloatSignControl()]
+                    BoolToFloatOperator(self.context.ops.float_format), [self.context.remap[a]], [BoolInversion()]
                 )
             case _:
                 return None

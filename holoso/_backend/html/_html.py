@@ -15,7 +15,7 @@ from datetime import datetime
 from importlib import resources
 
 from ..._lir import Lir
-from ..._operators import HardwareOperator
+from ..._operators import PooledHardwareOperator
 from ..verilog import VerilogOutput
 from ._schedule import render_schedule
 
@@ -89,7 +89,7 @@ def _stage_config(lir: Lir) -> str:
         "<h2>Operator Params</h2><table class='metrics cfg'>",
         "<tr><th>operator</th><th>HDL param</th><th>value</th></tr>",
     ]
-    seen: dict[HardwareOperator, None] = {}  # distinct operators present, in instance order
+    seen: dict[PooledHardwareOperator, None] = {}  # distinct operators present, in instance order
     for inst in lir.instances:
         seen.setdefault(inst.operator, None)
     rows = 0

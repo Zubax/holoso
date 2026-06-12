@@ -125,9 +125,32 @@ def format_edge_bits(fmt: FloatFormat) -> list[int]:
 
 def default_ops(fmt: FloatFormat) -> OpConfig:
     """The operator configuration with no optional pipeline stages: the minimum-latency baseline."""
+    return fcmp_staged_ops(fmt, 0)
+
+
+def fcmp_staged_ops(fmt: FloatFormat, stage_input: int) -> OpConfig:
+    """Default operators with only the comparator's stage knob varied (latency ``1 + stage_input``)."""
     return OpConfig(
-        FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt), FCmpOperator(fmt)
+        FAddOperator(fmt),
+        FMulOperator(fmt),
+        FDivOperator(fmt),
+        FMulILog2OperatorFamily(fmt),
+        FCmpOperator(fmt, stage_input=stage_input),
     )
+
+
+def branch_boundary_kernel(a, b, c):  # type: ignore[no-untyped-def]
+    """
+    The boundary-slack corner kernel shared by the cosim test and its white-box schedule twin: the comparison is the
+    LAST commit in its block and feeds the branch, so its result lands in the condition register exactly one step
+    before the terminator reads it. The two tests must exercise the same kernel, so it lives here.
+    """
+    t = a * b + c
+    if t > c:
+        y = t + 1.0
+    else:
+        y = t - 1.0
+    return y
 
 
 def staged_ops(fmt: FloatFormat) -> OpConfig:
@@ -145,3 +168,19 @@ def staged_ops(fmt: FloatFormat) -> OpConfig:
         FMulILog2OperatorFamily(fmt, stage_input=1, stage_decode=1),
         FCmpOperator(fmt, stage_input=1),
     )
+
+
+class ChainedSlots:
+    """
+    Chained persistent slots: ``_a`` captures ``_b``'s OLD value while ``_b`` advances, behind a long float tail.
+    Shared by the schedule-level regression test and its RTL cosim twin -- the two must exercise the same kernel.
+    """
+
+    def __init__(self) -> None:
+        self._a = 0.0
+        self._b = 0.0
+
+    def __call__(self, x):  # type: ignore[no-untyped-def]
+        self._a = self._b
+        self._b = x + 1.0
+        return self._a * 2.0 + (x * 1.5) / (x - 0.5)

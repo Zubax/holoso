@@ -131,6 +131,28 @@ def test_model_matches_reference_small_kernels() -> None:
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
+def test_model_matches_reference_dense_boolean_chain() -> None:
+    # A boolean-dense chain at the tightest legal scheduling distance: comparisons -> logic (not/and) -> bool->float
+    # cast -> float arithmetic -> float->bool cast. The latch-free boolean bank lets a logic op issue ON its
+    # producer's commit cycle and the wide-result cast one later, so this pins the model's per-bank read/landing
+    # frames against the exact Python reference at exactly that spacing. All values are chosen exactly representable,
+    # so every comparison, cast, and product is exact and the outputs must match the reference bit-for-bit.
+    def f(a, b, c, d, k):  # type: ignore[no-untyped-def]
+        inside = a < b and not (c < d)
+        gated = float(inside) * k
+        live = bool(gated + a)
+        return [gated, live]
+
+    model = build_model(build(_run(f), "dense_bool"))
+    values = (-1.5, -0.25, 0.0, 0.25, 1.5)
+    for a in values:
+        for b in values:
+            inputs = {"a": a, "b": b, "c": b, "d": a, "k": 2.0}
+            got = model(*[inputs[name] for name in model.input_names])
+            ref = evaluate_reference(f, inputs)
+            assert [float(g) for g in got] == ref, f"diverged at {inputs}"
+
+
 def test_tuple_unpacking_matches_python_reference() -> None:
     # The reference runs the kernel as ordinary Python (which unpacks natively), so a bit-faithful hardware model must
     # route the swapped operands identically before the arithmetic.

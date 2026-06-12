@@ -3,7 +3,13 @@
 from dataclasses import dataclass
 
 from .._hir import ValueId
-from .._operators import FloatSignControl, HardwareOperator
+from .._operators import (
+    FloatSignControl,
+    HardwareOperator,
+    InlineHardwareOperator,
+    PortConditioner,
+    identity_conditioner,
+)
 from .._errors import UnsupportedConstruct
 from .._type import BoolType, FloatFormat, FloatType, ScalarType
 
@@ -33,42 +39,54 @@ class MirConst:
     scalar_type: ScalarType
 
 
+def _check_conditioner(conditioner: PortConditioner, port_type: ScalarType, role: str) -> None:
+    """A port's conditioner must be the type's own: a sign control on a float port, an inversion on a boolean one."""
+    expected = type(identity_conditioner(port_type))  # the single owner of the type -> conditioner-class mapping
+    if not isinstance(conditioner, expected):
+        raise TypeError(f"{role} conditioner must be {expected.__name__} for {port_type!r}, got {conditioner!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class MirOperation:
     """
-    A selected hardware-operator use: operands with folded float sign controls and a folded result sign. The operation
-    belongs to the resource family of its result type (float or bool); the views slice it by that result type. A float
-    operand carries a sign control; a bool operand carries the identity sign (booleans have no sign), and a bool result
-    carries the identity result sign. A comparison reads float operands and produces a boolean; the bool-to-float cast
-    reads a boolean operand and produces a float -- operands may reference either resource family.
+    A selected hardware-operator use producing ONE value: the ``output_port``-th result of ``operator``, conditioned
+    by ``output_conditioner``. Every port carries its type's conditioner (a folded sign control on a float port, an
+    optional inversion on a boolean port). Operations sharing one block, operator, operands, and operand conditioners
+    while tapping DISTINCT output ports fuse into a single firing at LIR build -- a multi-output module computes all
+    its results at once. The operation belongs to the resource family of its tapped port's type (float or bool); the
+    views slice it by that type. Operands may reference either resource family (a comparison reads float operands and
+    produces booleans; the bool->float cast the reverse).
     """
 
     operator: HardwareOperator
     operands: list[ValueId]
-    operand_signs: list[FloatSignControl]
-    result_sign: FloatSignControl = FloatSignControl()
+    operand_conditioners: list[PortConditioner]
+    output_port: int
+    output_conditioner: PortConditioner
 
     def __post_init__(self) -> None:
         signature = self.operator.signature
+        if isinstance(self.operator, InlineHardwareOperator) and len(signature.result_types) != 1:
+            raise TypeError(f"inline operator {self.operator.mnemonic} must have exactly one result port")
         if len(self.operands) != signature.arity:
             raise ValueError(f"{self.operator.mnemonic} expects {signature.arity} operand(s), got {len(self.operands)}")
-        if len(self.operand_signs) != signature.arity:
+        if len(self.operand_conditioners) != signature.arity:
             raise ValueError(
-                f"{self.operator.mnemonic} expects {signature.arity} sign control(s), got {len(self.operand_signs)}"
+                f"{self.operator.mnemonic} expects {signature.arity} conditioner(s),"
+                f" got {len(self.operand_conditioners)}"
             )
-        for sign, operand_type in zip(self.operand_signs, signature.operand_types, strict=True):
-            if not isinstance(sign, FloatSignControl):
-                raise TypeError(f"operand_signs must contain FloatSignControl values, got {self.operand_signs!r}")
-            if not isinstance(operand_type, FloatType) and sign != FloatSignControl():
-                raise ValueError("a non-float operand cannot carry a sign control")
-        if not isinstance(self.result_sign, FloatSignControl):
-            raise TypeError(f"result_sign must be FloatSignControl, got {self.result_sign!r}")
-        if not isinstance(signature.result_type, FloatType) and self.result_sign != FloatSignControl():
-            raise ValueError("a non-float result cannot carry a sign control")
+        for conditioner, operand_type in zip(self.operand_conditioners, signature.operand_types, strict=True):
+            _check_conditioner(conditioner, operand_type, "operand")
+        if not 0 <= self.output_port < len(signature.result_types):
+            raise ValueError(
+                f"{self.operator.mnemonic} has {len(signature.result_types)} output port(s);"
+                f" port {self.output_port} does not exist"
+            )
+        _check_conditioner(self.output_conditioner, signature.result_types[self.output_port], "output")
 
     @property
     def scalar_type(self) -> ScalarType:
-        return self.operator.signature.result_type
+        return self.operator.signature.result_types[self.output_port]
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,11 +179,19 @@ class MirPhi:
     """
     An SSA merge at a block's entry: one ``(predecessor_block, value, sign)`` arm per incoming edge, of one scalar
     type. The folded sign control lets a float arm carry a negation/abs (``y = -x`` on one branch) into the merge,
-    applied when the arm value is installed; a boolean arm always carries the identity sign.
+    applied when the arm value is installed. A boolean arm must carry the identity sign -- enforced here rather than
+    silently dropped downstream; boolean arm inversions arrive with the NOT-folding pass, which will generalize the
+    arm sideband to the typed conditioner.
     """
 
     scalar_type: ScalarType
     arms: tuple[tuple[BlockId, ValueId, FloatSignControl], ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scalar_type, FloatType):
+            for _pred, _value, sign in self.arms:
+                if sign != FloatSignControl():
+                    raise TypeError(f"a non-float phi arm cannot carry a sign control, got {sign!r}")
 
 
 type MirNode = MirInput | MirStateRead | MirConst | MirOperation | MirPhi
@@ -358,8 +384,7 @@ class MirFloatView:
 class MirBoolView:
     """
     The boolean resource family narrowed out of a MIR graph: bool state reads, constants, phis, and bool-result
-    operations (comparisons, and -- in later slices -- boolean logic and float-to-bool casts), plus the bool state
-    slots and the shared CFG.
+    operations (comparator taps, boolean logic, and float->bool casts), plus the bool state slots and the shared CFG.
     """
 
     nodes: dict[ValueId, MirBoolNode]
@@ -536,33 +561,49 @@ class MirBuilder:
         self,
         operator: HardwareOperator,
         operands: list[ValueId],
-        operand_signs: list[FloatSignControl],
-        result_sign: FloatSignControl = FloatSignControl(),
+        operand_conditioners: list[PortConditioner],
+        output_port: int = 0,
+        output_conditioner: PortConditioner | None = None,
     ) -> ValueId:
         """
-        Append a hardware-operator use, interned within the current block. The result family follows the operator's
-        result type; operands are type-checked against the operator signature and may reference either resource family.
+        Append a hardware-operator use producing the ``output_port``-th result, interned within the current block.
+        The value's resource family follows the tapped port's type; operands are type-checked against the operator
+        signature and may reference either resource family. ``output_conditioner`` defaults to the tapped port's
+        identity conditioner. The intern key includes the tapped port and both conditioner sides, so two relations
+        over one comparator firing stay distinct values while identical taps collapse.
         """
         signature = operator.signature
         if len(operands) != signature.arity:
             raise ValueError(f"{operator.mnemonic} expects {signature.arity} operand(s), got {len(operands)}")
-        if len(operand_signs) != signature.arity:
-            raise ValueError(f"{operator.mnemonic} expects {signature.arity} sign control(s), got {len(operand_signs)}")
+        if len(operand_conditioners) != signature.arity:
+            raise ValueError(
+                f"{operator.mnemonic} expects {signature.arity} conditioner(s), got {len(operand_conditioners)}"
+            )
         for operand, expected_type in zip(operands, signature.operand_types, strict=True):
             if self._type_of(operand) != expected_type:
                 raise ValueError(
                     f"operator {operator.mnemonic} expects operands of {signature.operand_types}, "
                     f"got {tuple(self._type_of(operand) for operand in operands)}"
                 )
-        key = (self.current_block, operator, tuple(operands), tuple(operand_signs), result_sign)
+        if output_conditioner is None:
+            output_conditioner = identity_conditioner(signature.result_types[output_port])
+        key = (
+            self.current_block,
+            operator,
+            tuple(operands),
+            tuple(operand_conditioners),
+            output_port,
+            output_conditioner,
+        )
         vid = self._block_intern.get(key)
         if vid is None:
             vid = self._fresh(
                 MirOperation(
                     operator=operator,
                     operands=list(operands),
-                    operand_signs=list(operand_signs),
-                    result_sign=result_sign,
+                    operand_conditioners=list(operand_conditioners),
+                    output_port=output_port,
+                    output_conditioner=output_conditioner,
                 )
             )
             self._block_intern[key] = vid

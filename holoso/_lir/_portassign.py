@@ -25,8 +25,8 @@ import scipy.sparse as sp
 from scipy.optimize import Bounds, LinearConstraint, milp
 
 from .._hir import ValueId
-from .._mir import MirOperation, MirFloatView
-from ._ir import FloatOperatorInstance
+from .._mir import MirNode, MirOperation
+from ._ir import OperatorInstance
 
 # One commutative use: its value id and the registers its two operands occupy (``None`` for a constant operand, which
 # is sourced from the immediate path and never enters a read-set).
@@ -40,22 +40,27 @@ _logger = logging.getLogger(__name__)
 
 
 def assign_commutative_ports(
-    mir: MirFloatView, inst_of: dict[ValueId, FloatOperatorInstance], assign: dict[ValueId, int]
+    nodes: dict[ValueId, MirNode],
+    inst_of: dict[ValueId, OperatorInstance],
+    leaders: set[ValueId],
+    assign: dict[ValueId, int],
 ) -> dict[ValueId, bool]:
     """
-    Per commutative operator instance, orient each use's operands to minimise the total read-set size across its two
-    read ports. Returns ``{use value id: swap?}`` -- ``True`` means the emitter should exchange the two operands.
-    Solved exactly per instance; total read-mux fan-in is minimised (and never exceeds the source orientation). It is
-    cycle-agnostic: it depends only on which registers each commutative use's two operands occupy and which physical
-    instance the use binds, so one call orients every commutative use across the whole flattened CFG.
+    Per commutative operator instance, orient each FIRING's operands to minimise the total read-set size across its
+    two read ports. Returns ``{firing leader: swap?}`` -- ``True`` means the build exchanges the two operands and
+    permutes the firing's output-port taps through the operator's ``swap_output_permutation``. Solved exactly per
+    instance; total read-mux fan-in is minimised (and never exceeds the source orientation). It is cycle-agnostic: it
+    depends only on which wide registers each commutative firing's two operands occupy and which physical instance it
+    binds, so one call orients every commutative firing across the whole flattened CFG -- the comparator's firings
+    included, whose taps are boolean but whose operand muxes are ordinary wide read ports.
     """
-    uses_by_instance: dict[FloatOperatorInstance, list[_Use]] = defaultdict(list)
-    for vid, inst in inst_of.items():
-        node = mir.nodes.get(vid)
+    uses_by_instance: dict[OperatorInstance, list[_Use]] = defaultdict(list)
+    for vid in sorted(leaders):
+        node = nodes[vid]
         if not (isinstance(node, MirOperation) and node.operator.is_commutative):
             continue
         first, second = (assign.get(operand) for operand in node.operands)
-        uses_by_instance[inst].append((vid, first, second))
+        uses_by_instance[inst_of[vid]].append((vid, first, second))
     swap: dict[ValueId, bool] = {}
     fan_in_before = 0
     fan_in_after = 0

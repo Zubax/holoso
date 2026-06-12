@@ -18,8 +18,17 @@ from holoso import (
 from holoso._errors import UnsupportedConstruct
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lir import FloatConstRef, FloatOperand, RegRef, landing_cycle
-from holoso._lir._schedule import DEPENDENCY_EDGE
+from holoso._lir import (
+    Branch,
+    FloatConstRef,
+    FloatOperand,
+    InlineProducer,
+    RegRef,
+    latest_producer_before,
+    operand_read_cycle,
+    result_landing_cycle,
+)
+from holoso._lir._ir import dependency_edge, wide_landing_cycle
 from holoso._mir import (
     lower as lower_to_mir,
     Mir,
@@ -33,14 +42,14 @@ from holoso._mir import (
     MirOperation,
     MirRet,
 )
-from holoso._operators import FComparisonOperator, FMulILog2Operator, FloatSignControl
+from holoso._operators import BoolInversion, BoolNotOperator, FMulILog2Operator, FloatSignControl
 from holoso._hir import RelationalOp
 from holoso._backend.numerical import generate as build_model
 from holoso._lir import build
 from holoso._lir._schedule import resolve_pool, schedule_ops
-from holoso._type import FloatType, ScalarType
+from holoso._type import BoolType, FloatType, ScalarType
 
-from ._modelref import default_ops, staged_ops
+from ._modelref import ChainedSlots, branch_boundary_kernel, default_ops, fcmp_staged_ops, staged_ops
 
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
@@ -68,7 +77,7 @@ def _view(mir: Mir) -> MirFloatView:
 
 def _schedule(mir: Mir):
     view = _view(mir)
-    return schedule_ops(mir.nodes, resolve_pool(view), set(view.operation_nodes))
+    return schedule_ops(mir.nodes, resolve_pool(mir.nodes), set(view.operation_nodes))
 
 
 def _muls(mir: Mir) -> list[int]:
@@ -88,9 +97,10 @@ def test_schedule_respects_dependencies() -> None:
         for operand in op.operands:
             node = mir.nodes[operand]
             if isinstance(node, MirOperation):
-                # A consumer issues no earlier than the producer's commit plus the register-file traversal edge
-                # (the read-first write edge plus the read and write latches).
-                assert cycle >= sched.issue_cycle[operand] + node.operator.latency + DEPENDENCY_EDGE
+                # A consumer issues no earlier than the producer's commit plus the pair's dependency edge (derived
+                # from the producer's result-bank landing and the consumer's operand-read mechanism).
+                edge = dependency_edge(node.operator, node.output_port, op.operator)
+                assert cycle >= sched.issue_cycle[operand] + node.operator.latency + edge
 
 
 def test_pipelined_issue_overlaps_a_slow_op() -> None:
@@ -112,10 +122,11 @@ def test_pipelined_issue_overlaps_a_slow_op() -> None:
 
 
 def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator() -> None:
-    # Regression: a chained comparison (here ``lo < x < hi``) puts two comparisons in one block. The pooled
-    # holoso_fcmp serves one comparison per cycle (PC-muxed), so the two must issue on distinct in_valid PCs. Before
-    # the fix the generalized scheduler let both issue on the same cycle -> they collided on the single comparator
-    # (one read the other's operands), corrupting the result in the RTL while the model still passed.
+    # Regression: a chained comparison (here ``lo < x < hi``) puts two comparator firings with distinct operand
+    # pairs in one block. The single pooled holoso_fcmp instance serves one firing per initiation interval, so the
+    # two must issue on distinct cycles. Before the contention rule the scheduler let both issue on the same cycle
+    # -> they collided on the single comparator (one read the other's operands), corrupting the result in the RTL
+    # while the model still passed.
     def f(x, lo, hi):  # type: ignore[no-untyped-def]
         return 0.0 if lo < x < hi else x
 
@@ -123,11 +134,84 @@ def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator() -> None
     in_valid_pcs = [
         lir.block_base[block.index] + op.issue_cycle
         for block in lir.blocks
-        for op in block.comb_ops
-        if isinstance(op.operator, FComparisonOperator)
+        for op in block.ops
+        if isinstance(op.inst.operator, FCmpOperator)
     ]
-    assert len(in_valid_pcs) >= 2  # the chained comparison lowers to two comparisons feeding a BoolAnd
-    assert len(set(in_valid_pcs)) == len(in_valid_pcs)  # each on a distinct PC: no shared-comparator collision
+    assert len(in_valid_pcs) >= 2  # the chained comparison lowers to two comparator firings feeding a BoolAnd
+    assert len(set(in_valid_pcs)) == len(in_valid_pcs)  # instance contention spaces them: no comparator collision
+
+
+@pytest.mark.parametrize("stage_input", [0, 1])
+def test_branch_comparison_commits_at_block_makespan(stage_input: int) -> None:
+    # White-box twin of test_cosim.py test_cosim_comparison_at_branch_boundary: pins that the SHARED kernel
+    # (_modelref.branch_boundary_kernel) actually hits the boundary-slack corner -- the comparison is the last commit
+    # in its block and feeds the branch -- at both comparator latencies. If a schedule change ever moves the
+    # comparison off the makespan, this fails before the cosim silently de-targets.
+    lir = build(_run(branch_boundary_kernel, fcmp_staged_ops(FMT, stage_input)), "cmp_at_boundary")
+    branch_blocks = [block for block in lir.blocks if isinstance(block.terminator, Branch)]
+    assert len(branch_blocks) == 1
+    (block,) = branch_blocks
+    comparisons = [op for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
+    assert len(comparisons) == 1
+    (cmp_op,) = comparisons
+    assert cmp_op.latency == 1 + stage_input
+    assert cmp_op.commit_cycle == block.block_makespan
+
+
+def test_phi_install_does_not_clobber_the_branch_condition() -> None:
+    # Regression (review): a phi-arm install physically writes the phi's register at the predecessor's tail, one step
+    # BEFORE the branch terminator reads its condition at the boundary. The interference model used to define the phi
+    # only at the merge head, so when an arm came from a branching block the phi could share the very register holding
+    # that block's branch condition -- the install then overwrote the condition and the branch took the wrong arm
+    # (model and RTL agreed with each other, so only a semantics check catches it). The frontend currently routes
+    # every phi arm through a dedicated jump block, so this CFG is built directly; cross-block scheduling will make
+    # such shapes routine.
+    builder = MirBuilder(FMT)
+    entry = builder.block()
+    then = builder.block()
+    merge = builder.block()
+    builder.position_at(entry)
+    flag = builder.bool_input("flag", BoolType())
+    other = builder.bool_input("other", BoolType())
+    builder.branch(flag, then, merge)
+    builder.position_at(then)
+    inverted = builder.operation(BoolNotOperator(), [other], [BoolInversion()])
+    builder.jump(merge)
+    builder.position_at(merge)
+    merged = builder.phi(BoolType(), [(entry, other, FloatSignControl()), (then, inverted, FloatSignControl())])
+    builder.bool_output("out", merged)
+    builder.ret()
+    model = build_model(build(builder.finish(), "phi_cond_clobber"))
+    for flag_value in (False, True):
+        for other_value in (False, True):
+            want = (not other_value) if flag_value else other_value
+            assert model(flag_value, other_value)[0] is want, f"flag={flag_value} other={other_value}"
+
+
+def test_branch_on_phi_installed_in_the_branching_block_is_rejected() -> None:
+    # Soundness boundary (review): if a branch condition is a phi taking an arm from the branching block itself, the
+    # arm's install lands in the condition register exactly when the terminator reads it -- the branch would consult
+    # the NEXT iteration's value, and no register assignment can avoid a value conflicting with itself. The build must
+    # refuse this shape (the frontend never emits it; a future cross-block pass might) rather than miscompile: before
+    # the guard, a self-loop header `phi = phi(entry: cond, header: not phi); branch(phi, header, exit)` ran its body
+    # one trip short with model and RTL agreeing on the wrong count.
+    builder = MirBuilder(FMT)
+    entry = builder.block()
+    header = builder.block()
+    exit_block = builder.block()
+    builder.position_at(entry)
+    start = builder.bool_input("start", BoolType())
+    builder.jump(header)
+    builder.position_at(header)
+    looping = builder.open_phi(BoolType(), (entry, start, FloatSignControl()))
+    inverted = builder.operation(BoolNotOperator(), [looping], [BoolInversion()])
+    builder.set_phi_arms(looping, [(entry, start, FloatSignControl()), (header, inverted, FloatSignControl())])
+    builder.branch(looping, header, exit_block)
+    builder.position_at(exit_block)
+    builder.bool_output("out", looping)
+    builder.ret()
+    with pytest.raises(UnsupportedConstruct, match="arm from the same block"):
+        build(builder.finish(), "self_loop_cond")
 
 
 def _ilog2(mir: Mir) -> list[int]:
@@ -239,10 +323,10 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
     # Output wires carry the same FloatOperand tap primitive as state slots.
     assert all(isinstance(w.tap, FloatOperand) for w in lir.float_outputs)
     # Pin the hardware-frame cycle formulas the report, model, and allocator all depend on (the write/read latch
-    # offsets around FETCH_LAG); the LIR methods route through the shared _ir helpers that own this arithmetic.
+    # offsets around FETCH_LAG); every consumer routes through the shared _ir helpers that own this arithmetic.
     op = lir.ops[0]
-    assert lir.result_landing_cycle(op) == op.commit_cycle + FETCH_LAG + 2
-    assert lir.operand_read_cycle(op) == op.issue_cycle + FETCH_LAG - 1
+    assert result_landing_cycle(op.writes[0].dst, op.commit_cycle) == op.commit_cycle + FETCH_LAG + 2
+    assert operand_read_cycle(op.inst.operator, op.issue_cycle) == op.issue_cycle + FETCH_LAG - 1
 
 
 def test_cfg_phi_merge_register_shows_residence() -> None:
@@ -282,7 +366,9 @@ def test_cfg_write_only_state_slot_is_reserved() -> None:
     lir = build(_run(WriteOnlyBranch().__call__), "write_only")
     (slot,) = lir.float_state_slots
     assert slot.name == "acc"
-    assert slot.reg.index not in {op.dst.index for op in lir.ops}  # reserved: no operator result lands on it
+    assert slot.reg.index not in {
+        write.dst.index for op in lir.ops for write in op.writes
+    }  # reserved: no operator result lands on it
     model = build_model(lir)
     assert float(model(3.0)[0]) == 6.0 and float(model(-2.0)[0]) == -6.0
 
@@ -300,7 +386,7 @@ def test_cfg_state_slot_coalesces_onto_its_register() -> None:
             return float(x > 0.0) * self.state
 
     lir = build(_run(Filt().__call__), "filt")
-    assert any(block.comb_ops for block in lir.blocks)  # the float(x>0) cast is a combinational op
+    assert any(block.inline_ops for block in lir.blocks)  # the float(x>0) cast is an inline op
     (slot,) = lir.float_state_slots
     assert not slot.needs_copy, "the slot live-out must coalesce onto the slot register (no install copy)"
     assert slot.tap.source == slot.reg
@@ -325,7 +411,7 @@ def test_cfg_branch_conditions_reuse_boolean_registers() -> None:
         return a
 
     lir = build(_run(f), "branches")
-    comparisons = sum(1 for b in lir.blocks for op in b.comb_ops if isinstance(op.operator, FComparisonOperator))
+    comparisons = sum(1 for b in lir.blocks for op in b.ops if isinstance(op.inst.operator, FCmpOperator))
     assert comparisons >= 3
     assert lir.bool_regfile.nreg < comparisons  # the three conditions share boolean registers
     model = build_model(lir)
@@ -379,7 +465,7 @@ def test_state_early_copy_frees_source_register() -> None:
     makespan = max((op.commit_cycle for op in lir.ops), default=0)
     assert xprev.install_cycle <= makespan  # installs before the boundary (present cycle == makespan + 1)
     # The freed input register is reused: a later operation's result is assigned to it as well.
-    assert any(op.dst == in_x.dst for op in lir.ops)
+    assert any(write.dst == in_x.dst for op in lir.ops for write in op.writes)
 
 
 def test_build_lir_ekf1_stateless() -> None:
@@ -402,7 +488,8 @@ def test_build_lir_ekf1_stateless() -> None:
     assert lir.regfile.nreg <= 40
     # Inputs preload through the regfile's load port (registers 0..nload-1), so nload spans the input block.
     assert lir.regfile.nload == 17
-    # Dedicated ports: one read port per operator operand (sum of arities = 2+2+1+2), one write port per instance.
+    # Dedicated ports: one read port per operator operand (sum of arities = 2+2+1+2), one write port per tapped wide
+    # output-port lane (the comparator's boolean taps contribute none).
     assert lir.regfile.nwr == 4
     assert lir.regfile.nrd == 7
     # The 1/x21 numerator survives as a constant immediate.
@@ -508,7 +595,7 @@ def test_register_sharing_is_hardware_disjoint() -> None:
 
     for op in lir.ops:
         for operand in op.operands:
-            note(operand.source, lir.operand_read_cycle(op))
+            note(operand.source, operand_read_cycle(op.inst.operator, op.issue_cycle))
     for wire in lir.float_outputs:
         note(wire.tap.source, lir.initiation_interval)
     for slot in lir.float_state_slots:
@@ -535,6 +622,7 @@ def test_build_rejects_mir_with_mixed_float_formats() -> None:
                 FAddOperator(other),
                 [0, 0],
                 [FloatSignControl(), FloatSignControl()],
+                0,
                 FloatSignControl(),
             ),
         },
@@ -566,27 +654,23 @@ def test_mir_operation_validates_invariants() -> None:
     with pytest.raises(TypeError, match="scalar_type"):
         MirFloatConst(OtherScalarType(), 1.0)
     with pytest.raises(ValueError, match="operand"):
+        MirOperation(FAddOperator(FMT), [0], [FloatSignControl(), FloatSignControl()], 0, FloatSignControl())
+    with pytest.raises(ValueError, match="conditioner"):
+        MirOperation(FAddOperator(FMT), [0, 0], [FloatSignControl()], 0, FloatSignControl())
+    # A boolean output port carries an inversion, never a sign control: booleans have no sign.
+    with pytest.raises(TypeError, match="output conditioner"):
         MirOperation(
-            FAddOperator(FMT),
-            [0],
-            [FloatSignControl(), FloatSignControl()],
-            FloatSignControl(),
-        )
-    with pytest.raises(ValueError, match="sign control"):
-        MirOperation(
-            FAddOperator(FMT),
-            [0, 0],
-            [FloatSignControl()],
-            FloatSignControl(),
-        )
-    # A bool-result comparison cannot carry a result sign control: booleans have no sign.
-    with pytest.raises(ValueError, match="non-float result"):
-        MirOperation(
-            FComparisonOperator(FCmpOperator(FMT), RelationalOp.LT),
+            FCmpOperator(FMT),
             [0, 0],
             [FloatSignControl(), FloatSignControl()],
+            2,
             FloatSignControl(negate=True),
         )
+    # A boolean operand carries an inversion too; a sign control on it is a type error.
+    with pytest.raises(TypeError, match="operand conditioner"):
+        MirOperation(BoolNotOperator(), [0], [FloatSignControl()], 0, BoolInversion())
+    with pytest.raises(ValueError, match="does not exist"):
+        MirOperation(FAddOperator(FMT), [0, 0], [FloatSignControl(), FloatSignControl()], 1, FloatSignControl())
     with pytest.raises(TypeError, match="sign"):
         MirFloatOutput("out_0", 0, object())
 
@@ -736,7 +820,7 @@ def test_zero_regalloc_effort_bypasses_annealing(monkeypatch) -> None:  # type: 
 
 
 def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
-    # Regression: the bool->float cast result lands at landing_cycle(commit) -- NOT one cycle later. An off-by-one
+    # Regression: the bool->float cast result lands at wide_landing_cycle(commit) -- NOT one cycle later. An off-by-one
     # marked it past its true landing (and, for a boundary cast, past the initiation interval, so its report cell fell
     # off the grid) and left a consumer's read cycle outside its residence. Here a multiply consumes the cast result.
     def f(x):  # type: ignore[no-untyped-def]
@@ -744,14 +828,176 @@ def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
 
     lir = build(_run(f), "cast_mul")
     interval = lir.initiation_interval
-    casts = [(lir.block_base[b.index], op) for b in lir.blocks for op in b.comb_ops if isinstance(op.dst, RegRef)]
+    casts = [
+        (lir.block_base[b.index], op) for b in lir.blocks for op in b.inline_ops if isinstance(op.write.dst, RegRef)
+    ]
     assert casts, "expected a bool->float cast result in the wide bank"
     for base, op in casts:
-        landing = landing_cycle(base + op.commit_cycle)
+        landing = wide_landing_cycle(base + op.commit_cycle)
         assert 1 <= landing <= interval  # within the rendered schedule grid, not one row past the boundary
-        assert landing in lir.reg_liveness[op.dst]  # live exactly from its true landing (the off-by-one would miss it)
-    cast_regs = {op.dst for _, op in casts}
+        assert landing in lir.reg_liveness[op.write.dst]  # live from its true landing (the off-by-one would miss it)
+    cast_regs = {op.write.dst for _, op in casts}
     for fop in lir.ops:  # the consuming multiply must read the cast result within its residence (no late-def gap)
         for operand in fop.operands:
             if operand.source in cast_regs:
-                assert lir.operand_read_cycle(fop) in lir.reg_liveness[operand.source]
+                assert operand_read_cycle(fop.inst.operator, fop.issue_cycle) in lir.reg_liveness[operand.source]
+
+
+def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
+    # Two DIFFERENT relations over the same operand pair tap two distinct output ports of one comparator activation,
+    # so they fuse into a single firing: one instance issue, one operand read, two boolean writes -- the multi-output
+    # machinery exercised end to end on the boolean side. The model must still produce both values correctly.
+    def f(a, b):  # type: ignore[no-untyped-def]
+        below = a < b
+        same = a == b
+        return [float(below), float(same)]
+
+    lir = build(_run(f), "fused_relations")
+    firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
+    assert len(firings) == 1, "lt and eq taps of one operand pair must fuse into one comparator firing"
+    (firing,) = firings
+    assert [write.port for write in firing.writes] == sorted(write.port for write in firing.writes)
+    assert len(firing.writes) == 2
+    assert len({write.dst for write in firing.writes}) == 2  # simultaneous landings get distinct registers
+    model = build_model(lir)
+    for a, b in [(1.0, 2.0), (2.0, 1.0), (1.5, 1.5)]:
+        below, same = (float(v) for v in model(a, b))
+        assert below == float(a < b) and same == float(a == b), f"a={a} b={b}"
+
+
+def test_same_port_taps_with_different_inversions_do_not_fuse() -> None:
+    # ``a < b`` taps the lt flag plainly and ``a >= b`` taps the SAME flag inverted: one output-port lane writes once
+    # per firing, so these must stay two firings, spaced by instance contention. Both values must still be correct.
+    def f(a, b):  # type: ignore[no-untyped-def]
+        below = a < b
+        not_below = a >= b
+        return [float(below), float(not_below)]
+
+    lir = build(_run(f), "split_inversions")
+    firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
+    assert len(firings) == 2, "same-port taps cannot share a firing"
+    assert len({op.issue_cycle for op in firings}) == 2  # the single instance serializes them
+    model = build_model(lir)
+    for a, b in [(1.0, 2.0), (2.0, 1.0), (1.5, 1.5)]:
+        below, not_below = (float(v) for v in model(a, b))
+        assert below == float(a < b) and not_below == float(a >= b), f"a={a} b={b}"
+
+
+class _ThrottledAdd(FAddOperator):
+    """A test-only adder whose instance accepts a new firing only every 3 cycles (initiation interval 3)."""
+
+    @property
+    def initiation_interval(self) -> int:
+        return 3
+
+
+def test_initiation_interval_spaces_firings_on_one_instance() -> None:
+    # Two independent additions contend for the single throttled instance: the second may not issue until the
+    # first's busy window elapses, so their issues are at least II cycles apart (with II=1 they would share cycle 1).
+    builder = MirBuilder(FMT)
+    builder.block()
+    a = builder.float_input("a", FloatType(FMT))
+    b = builder.float_input("b", FloatType(FMT))
+    slow = _ThrottledAdd(FMT)
+    first = builder.operation(slow, [a, b], [FloatSignControl(), FloatSignControl()])
+    second = builder.operation(slow, [b, a], [FloatSignControl(), FloatSignControl()])
+    builder.float_output("out_0", first)
+    builder.float_output("out_1", second)
+    builder.ret()
+    mir = builder.finish()
+    sched = schedule_ops(mir.nodes, resolve_pool(mir.nodes), {first, second})
+    spacing = abs(sched.issue_cycle[second] - sched.issue_cycle[first])
+    assert spacing >= 3, f"II=3 must space same-instance firings by at least 3 cycles, got {spacing}"
+    assert sched.inst_of[first] == sched.inst_of[second]  # one pooled instance serves both
+
+
+class _HeavilyThrottledAdd(FAddOperator):
+    """
+    A test-only adder throttled to the deepest initiation interval the per-block busy windows support
+    (latency + the inter-block drain gap; validated in ``OperatorInstance.__post_init__``).
+    """
+
+    @property
+    def initiation_interval(self) -> int:
+        return 10  # latency 4 + the maximum cross-block-safe excess of 6
+
+
+def test_progress_cap_accommodates_long_initiation_intervals() -> None:
+    # Regression (review): the scheduler's no-progress cap charged each firing only its latency plus the dependency
+    # edge, so many independent firings contending for one instance with a long initiation interval exhausted the
+    # cap while making perfectly legal progress -- a spurious "scheduler made no progress" abort on a legal kernel.
+    # The cap now charges max(latency, initiation_interval) per firing (the old latency-only cap aborted at this
+    # II with this many firings). Same-port duplicates do not fuse, so the
+    # hand-built identical operations below are forty separate firings serialized on one instance.
+    slow = _HeavilyThrottledAdd(FMT)
+    nodes = {0: MirFloatInput("a", FloatType(FMT)), 1: MirFloatInput("b", FloatType(FMT))}
+    count = 40
+    for i in range(count):
+        nodes[2 + i] = MirOperation(slow, [0, 1], [FloatSignControl(), FloatSignControl()], 0, FloatSignControl())
+    sched = schedule_ops(nodes, {type(slow): 1}, set(range(2, 2 + count)))
+    issues = sorted(sched.issue_cycle.values())
+    assert len(issues) == count
+    assert all(later - earlier >= 10 for earlier, later in zip(issues, issues[1:]))
+
+
+def test_write_timeline_resolves_inline_wide_producers() -> None:
+    # Regression (review): the write timeline recorded only pooled firings' wide writes, so a register written by an
+    # inline bool->float cast and read by a float operator resolved to NO producer at all -- latest_producer_before
+    # raised KeyError on the cast-fed multiply below.
+    def f(x):  # type: ignore[no-untyped-def]
+        return float(x > 0.0) * x
+
+    lir = build(_run(f), "cast_timeline")
+    timeline = lir.write_timeline
+    resolved = 0
+    for op in lir.ops:
+        read = operand_read_cycle(op.inst.operator, op.issue_cycle)
+        for operand in op.operands:
+            if isinstance(operand.source, RegRef):
+                latest_producer_before(timeline, operand.source, read)  # must not raise for any operand
+                resolved += 1
+    assert resolved >= 2  # the multiply reads both x and the cast result
+    assert any(
+        isinstance(producer, InlineProducer) for events in timeline.values() for _, producer in events
+    ), "the cast's wide write must appear in the timeline with its inline producer"
+
+
+def test_commutative_comparator_swap_permutes_output_taps() -> None:
+    # The comparator is commutative under the gt/lt flag exchange. Two mirrored comparisons over one operand pair
+    # otherwise read (a,b) and (b,a) -- two registers per read port; the port assignment orients one of them swapped,
+    # shrinking each port's read-set to a single register, and the swapped firing's lt tap moves to gt. Bit-exact
+    # because the ZKF ordering is total and compare is antisymmetric.
+    def f(a, b):  # type: ignore[no-untyped-def]
+        below = a < b
+        above = b < a
+        return [float(below), float(above)]
+
+    lir = build(_run(f), "mirrored")
+    firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
+    assert len(firings) == 2
+    sources = [tuple(operand.source for operand in op.operands) for op in firings]
+    assert sources[0] == sources[1], "the MILP must orient both firings to read the same registers per port"
+    gt_port, lt_port = (FCmpOperator.tap_of(rel)[0] for rel in (RelationalOp.GT, RelationalOp.LT))
+    ports = sorted(write.port for op in firings for write in op.writes)
+    assert ports == sorted((gt_port, lt_port)), "exactly one firing's lt tap must move to gt under the swap"
+    model = build_model(lir)
+    for a, b in [(1.0, 2.0), (2.0, 1.0), (1.5, 1.5)]:
+        below, above = (float(v) for v in model(a, b))
+        assert below == float(a < b) and above == float(b < a), f"a={a} b={b}"
+
+
+def test_chained_slot_live_in_blocks_early_install() -> None:
+    # Regression (review; pre-existing at HEAD): a slot whose live-in feeds ANOTHER slot's live-out ("self._a =
+    # self._b") was documented as unable to early-install, but only the coalescing test consulted that fact -- the
+    # early-install decision did not, so "_b"'s new value landed before "_a"'s boundary copy captured the old one.
+    # The RTL then returned the NEW "_b" through "_a" while the model kept the old one (cosim diverged on the second
+    # transaction). The tapped slot must now install at the boundary, and the model must match plain Python.
+    lir = build(_run(ChainedSlots().__call__), "chained_slots")
+    slots = {slot.name: slot for slot in lir.float_state_slots}
+    assert lir.state_copy_step(slots["_b"]) == lir.initiation_interval, "the tapped slot must not install early"
+    reference = ChainedSlots()
+    model = build_model(lir)
+    for x in (2.0, 3.0, 4.0):
+        got = float(model(x)[0])
+        want = reference(x)
+        assert abs(got - want) <= 1e-2 * max(1.0, abs(want)), f"x={x}: {got} vs {want}"

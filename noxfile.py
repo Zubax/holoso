@@ -44,7 +44,11 @@ def clean(session):
 def tests(session: nox.Session) -> None:
     """Fast unit tests; the slow cocotb cosimulation lives in the cosim_examples session."""
     session.install("-e", ".[test]")
-    session.run("python", "-m", "pytest", "-m", "not cosim", "tests")
+    # MIR value numbering is PYTHONHASHSEED-dependent upstream of the allocator (frontend/HIR lowering iterates
+    # hash-ordered containers), and the coloring tie-breaks key on value ids, so steering can land anywhere in a
+    # small band of equal-quality colorings. Pinning the seed makes the frozen baselines in test_metrics
+    # reproducible; making value numbering itself seed-independent is tracked as follow-up compiler work.
+    session.run("python", "-m", "pytest", "-m", "not cosim", "tests", env={"PYTHONHASHSEED": "0"})
 
 
 @nox.session

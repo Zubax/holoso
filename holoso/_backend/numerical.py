@@ -11,21 +11,16 @@ reloads the snapshot the hardware loads at module reset.
 from dataclasses import dataclass, field
 
 from .._value import FloatValue
-from .._lir import BoolInputLoad, BoolOutputWire, CombScheduledOp, FloatConstRef, FloatInputLoad, FloatOperand
-from .._lir import FloatOutputWire, RegRef
-from .._lir import FloatScheduledOp, Lir
+from .._lir import BoolInputLoad, BoolOutputWire, FloatConstRef, FloatInputLoad, FloatOperand
+from .._lir import FloatOutputWire, InlineScheduledOp, PooledScheduledOp, RegRef, ScheduledOp
+from .._lir import Lir
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
-from .._lir import landing_cycle, wide_operand_read_cycle
+from .._lir import operand_read_cycle, result_landing_cycle
 from .._operators import *
 from .._type import FloatFormat
 
 type ModelInput = FloatValue | float | bool
 type ModelOutput = FloatValue | bool
-
-
-def _apply_sign(value: FloatValue, sign: FloatSignControl) -> FloatValue:
-    """Apply a folded sign control exactly as ``holoso_fsgnop`` does in the RTL."""
-    return sign.apply_value(value)
 
 
 def _coerce_input(value: ModelInput, fmt: FloatFormat, index: int) -> FloatValue:
@@ -50,6 +45,7 @@ def _resident[T](timeline: list[tuple[int, T]], read_cycle: int) -> T:
     not exceed it. The timeline is seeded with the value carried in from the previous block (landing 0) and extended in
     landing order as the block's operators commit, so a register reused for several values yields the live one.
     """
+    assert timeline[0][0] <= read_cycle, "a register is read before its first value lands"
     value = timeline[0][1]
     for landing, written in timeline:
         if landing <= read_cycle:
@@ -127,7 +123,7 @@ class NumericalModel:
         def fval(operand: FloatOperand) -> FloatValue:
             source = operand.source
             base = consts[source.index] if isinstance(source, FloatConstRef) else regs[source.index]
-            return _apply_sign(base, operand.sign)
+            return operand.sign.apply_value(base)
 
         def bval(operand: BoolOperand) -> bool:
             source = operand.source
@@ -151,49 +147,46 @@ class NumericalModel:
                     if isinstance(source, FloatConstRef)
                     else _resident(ftl[source.index], read_cycle)
                 )
-                return _apply_sign(base, operand.sign)
+                return operand.sign.apply_value(base)
 
             def bread(operand: BoolOperand, read_cycle: int) -> bool:
                 source = operand.source
                 return source.value if isinstance(source, BoolConstRef) else _resident(btl[source.index], read_cycle)
 
-            # All operations -- float arithmetic and combinational ops across both banks -- evaluate in a single
-            # commit-sorted pass, so a producer is computed before any consumer; the read-cycle resolution above makes
-            # the reads register-reuse-correct even when a consumer commits after a later writer of one of its operands.
-            scheduled: list[FloatScheduledOp | CombScheduledOp] = [*block.ops, *block.comb_ops]
-            scheduled.sort(key=lambda o: (o.commit_cycle, 0 if isinstance(o, FloatScheduledOp) else 1, o.dst.index))
+            # All operations -- pooled firings and inline ops across both banks -- evaluate in a single
+            # commit-sorted pass, so a producer is computed before any consumer (dependency edges guarantee strictly
+            # increasing commits along every dependence); the read-cycle resolution above makes the reads
+            # register-reuse-correct even when a consumer commits after a later writer of one of its operands.
+            scheduled: list[ScheduledOp] = [*block.ops, *block.inline_ops]
+            scheduled.sort(
+                key=lambda o: (o.commit_cycle, 0 if isinstance(o, PooledScheduledOp) else 1, o.writes[0].dst.index)
+            )
             for op in scheduled:
-                operator = op.inst.operator if isinstance(op, FloatScheduledOp) else op.operator
-                read = wide_operand_read_cycle(operator, op.issue_cycle)
-                land = landing_cycle(op.commit_cycle)
-                if isinstance(op, FloatScheduledOp):
-                    result = op.inst.operator.evaluate(*(fread(operand, read) for operand in op.operands))
-                    ftl.setdefault(op.dst.index, []).append((land, _apply_sign(result, op.result_sign)))
-                    continue
-                match op.operator:
-                    case FComparisonOperator() as cmp:
-                        left, right = op.operands
-                        assert isinstance(left, FloatOperand) and isinstance(right, FloatOperand)
-                        btl.setdefault(op.dst.index, []).append(
-                            (land, cmp.evaluate(fread(left, read), fread(right, read)))
-                        )
-                    case BoolLogicOperator() as logic:
-                        inputs: list[bool] = []
-                        for operand in op.operands:
-                            assert isinstance(operand, BoolOperand)
-                            inputs.append(bread(operand, read))
-                        btl.setdefault(op.dst.index, []).append((land, logic.evaluate(*inputs)))
-                    case FloatToBoolOperator() as to_bool:
-                        (operand,) = op.operands
-                        assert isinstance(operand, FloatOperand)
-                        btl.setdefault(op.dst.index, []).append((land, to_bool.evaluate(fread(operand, read))))
-                    case BoolToFloatOperator() as to_float:
-                        (operand,) = op.operands
-                        assert isinstance(operand, BoolOperand)
-                        assert isinstance(op.dst, RegRef)
-                        ftl.setdefault(op.dst.index, []).append((land, to_float.evaluate(bread(operand, read))))
-                    case _:
-                        raise RuntimeError(f"no model evaluation for combinational operator {op.operator!r}")
+                read = operand_read_cycle(op.operator, op.issue_cycle)
+                values = [
+                    fread(operand, read) if isinstance(operand, FloatOperand) else bread(operand, read)
+                    for operand in op.operands
+                ]
+                results = op.operator.evaluate(*values)
+                # Every tapped output port lands per its destination bank: the wide bank pays the writeback latch,
+                # the latch-free boolean bank only the read-first edge -- the same rule the RTL write enables
+                # implement. Landings stay strictly increasing per register (interference forbids same-landing
+                # sharing), which _resident's timeline resolution relies on.
+                for write in op.writes:
+                    land = result_landing_cycle(write.dst, op.commit_cycle)
+                    result = results[write.port]
+                    if isinstance(write.dst, RegRef):
+                        assert isinstance(result, FloatValue) and isinstance(write.conditioner, FloatSignControl)
+                        timeline = ftl.setdefault(write.dst.index, [])
+                        assert not timeline or timeline[-1][0] < land, "wide landings must be strictly increasing"
+                        timeline.append((land, write.conditioner.apply_value(result)))
+                    else:
+                        assert isinstance(result, bool) and isinstance(write.conditioner, BoolInversion)
+                        bool_timeline = btl.setdefault(write.dst.index, [])
+                        assert (
+                            not bool_timeline or bool_timeline[-1][0] < land
+                        ), "boolean landings must be strictly increasing"
+                        bool_timeline.append((land, write.conditioner.apply(result)))
             # The values resident at the block boundary: the last write to each register (or the carried-in value). The
             # phi-arm copies, the terminator, and the Ret reads all fire at the drained tail, so they read these.
             regs = {reg: timeline[-1][1] for reg, timeline in ftl.items()}
@@ -203,9 +196,9 @@ class NumericalModel:
             copied = [fval(copy.source) for copy in block.copies]
             for copy, copy_value in zip(block.copies, copied):
                 regs[copy.dst.index] = copy_value
-            written = [bval(write.source) for write in block.bool_writes]
-            for write, write_value in zip(block.bool_writes, written):
-                bregs[write.dst.index] = write_value
+            written = [bval(bool_write.source) for bool_write in block.bool_writes]
+            for bool_write, write_value in zip(block.bool_writes, written):
+                bregs[bool_write.dst.index] = write_value
             match block.terminator:
                 case Jump(target=target):
                     current = target
