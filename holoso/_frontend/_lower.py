@@ -506,7 +506,9 @@ class _Lowerer:
         reassigned_names, carried_attrs, demoted = self._loop_carried(body)
         exit_static = {name: value for name, value in self._static_ints.items() if name not in demoted}
         self._static_ints = dict(exit_static)
-        for attr in carried_attrs:
+        # Sorted: materializing a live-in creates a StateRead node, so the iteration order here decides value
+        # numbering (the same seed-independence rule as the branch-arm merges).
+        for attr in sorted(carried_attrs):
             self._ensure_state_loaded(attr)  # a state attr first written in the loop enters the header phi as live-in
         preheader_env, preheader_state = dict(self._env), dict(self._state_env)
         preheader = self._builder.current_block
@@ -1087,7 +1089,7 @@ class _Lowerer:
         """
         return {
             name: then_static[name]
-            for name in then_static.keys() & else_static.keys()
+            for name in sorted(then_static.keys() & else_static.keys())  # sorted for hygiene only (lookup-only map)
             if then_static[name] == else_static[name]
         }
 
@@ -1103,9 +1105,11 @@ class _Lowerer:
         Merge the two arms' locals: a name bound in both arms becomes a phi when the arms disagree. A name bound in
         only one arm is conditionally defined and drops out of scope (using it afterwards is an unknown-name error).
         """
+        # Sorted: the merge order decides phi creation order, hence value numbering all the way down to the emitted
+        # RTL; hash-ordered iteration here would leak PYTHONHASHSEED into the output.
         return {
             name: self._merge_values(then_env[name], else_env[name], pred_then, pred_else, loc)
-            for name in then_env.keys() & else_env.keys()
+            for name in sorted(then_env.keys() & else_env.keys())
         }
 
     def _merge_state(

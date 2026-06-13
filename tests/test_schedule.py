@@ -17,8 +17,11 @@ from holoso import (
 )
 from holoso._errors import UnsupportedConstruct
 from holoso._frontend import lower
+from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
 from holoso._lir import (
+    BoolOperand,
+    BoolRegRef,
     Branch,
     FloatConstRef,
     FloatOperand,
@@ -42,14 +45,14 @@ from holoso._mir import (
     MirOperation,
     MirRet,
 )
-from holoso._operators import BoolInversion, BoolNotOperator, FMulILog2Operator, FloatSignControl
+from holoso._operators import BoolAndOperator, BoolInversion, FMulILog2Operator, FloatSignControl, SelectOperator
 from holoso._hir import RelationalOp
 from holoso._backend.numerical import generate as build_model
 from holoso._lir import build
 from holoso._lir._schedule import resolve_pool, schedule_ops
 from holoso._type import BoolType, FloatType, ScalarType
 
-from ._modelref import ChainedSlots, branch_boundary_kernel, default_ops, fcmp_staged_ops, staged_ops
+from ._modelref import ChainedSlots, SelectHold, branch_boundary_kernel, default_ops, fcmp_staged_ops, staged_ops
 
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
@@ -175,10 +178,10 @@ def test_phi_install_does_not_clobber_the_branch_condition() -> None:
     other = builder.bool_input("other", BoolType())
     builder.branch(flag, then, merge)
     builder.position_at(then)
-    inverted = builder.operation(BoolNotOperator(), [other], [BoolInversion()])
+    inverted = builder.operation(BoolAndOperator(), [other, other], [BoolInversion(True), BoolInversion(True)])
     builder.jump(merge)
     builder.position_at(merge)
-    merged = builder.phi(BoolType(), [(entry, other, FloatSignControl()), (then, inverted, FloatSignControl())])
+    merged = builder.phi(BoolType(), [(entry, other, BoolInversion()), (then, inverted, BoolInversion())])
     builder.bool_output("out", merged)
     builder.ret()
     model = build_model(build(builder.finish(), "phi_cond_clobber"))
@@ -203,9 +206,9 @@ def test_branch_on_phi_installed_in_the_branching_block_is_rejected() -> None:
     start = builder.bool_input("start", BoolType())
     builder.jump(header)
     builder.position_at(header)
-    looping = builder.open_phi(BoolType(), (entry, start, FloatSignControl()))
-    inverted = builder.operation(BoolNotOperator(), [looping], [BoolInversion()])
-    builder.set_phi_arms(looping, [(entry, start, FloatSignControl()), (header, inverted, FloatSignControl())])
+    looping = builder.open_phi(BoolType(), (entry, start, BoolInversion()))
+    inverted = builder.operation(BoolAndOperator(), [looping, looping], [BoolInversion(True), BoolInversion(True)])
+    builder.set_phi_arms(looping, [(entry, start, BoolInversion()), (header, inverted, BoolInversion())])
     builder.branch(looping, header, exit_block)
     builder.position_at(exit_block)
     builder.bool_output("out", looping)
@@ -329,7 +332,9 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
     assert operand_read_cycle(op.inst.operator, op.issue_cycle) == op.issue_cycle + FETCH_LAG - 1
 
 
-def test_cfg_phi_merge_register_shows_residence() -> None:
+def test_cfg_phi_merge_register_shows_residence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # the subject is the branchy phi-copy machinery
+
     # A diamond whose merged result is read only by the output: its register is written by the per-arm phi copies and
     # read at the boundary, never by an operator. Before phi-copy residence was added to reg_liveness, such a register
     # had a use but no def and so collapsed to an empty (untinted) live set -- the CFG-report liveness gap.
@@ -397,7 +402,9 @@ def test_cfg_state_slot_coalesces_onto_its_register() -> None:
     assert abs(first - 2.0) < 1e-3 and 2.5 < second < 3.0
 
 
-def test_cfg_branch_conditions_reuse_boolean_registers() -> None:
+def test_cfg_branch_conditions_reuse_boolean_registers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # the subject is branch-condition register reuse
+
     # Sequential data-dependent branches: each condition is computed, tested at its boundary, and dead before the next,
     # so the boolean bank reuses one register across them instead of allocating one per branch.
     def f(x, y, z):  # type: ignore[no-untyped-def]
@@ -668,7 +675,7 @@ def test_mir_operation_validates_invariants() -> None:
         )
     # A boolean operand carries an inversion too; a sign control on it is a type error.
     with pytest.raises(TypeError, match="operand conditioner"):
-        MirOperation(BoolNotOperator(), [0], [FloatSignControl()], 0, BoolInversion())
+        MirOperation(BoolAndOperator(), [0, 0], [FloatSignControl(), BoolInversion()], 0, BoolInversion())
     with pytest.raises(ValueError, match="does not exist"):
         MirOperation(FAddOperator(FMT), [0, 0], [FloatSignControl(), FloatSignControl()], 1, FloatSignControl())
     with pytest.raises(TypeError, match="sign"):
@@ -1001,3 +1008,213 @@ def test_chained_slot_live_in_blocks_early_install() -> None:
         got = float(model(x)[0])
         want = reference(x)
         assert abs(got - want) <= 1e-2 * max(1.0, abs(want)), f"x={x}: {got} vs {want}"
+
+
+def test_select_folds_arm_signs_into_operand_conditioners() -> None:
+    # ``x if c else -x`` costs exactly one comparison and one select: the arm negation rides the select's operand
+    # conditioner (the inline dual of the pooled operators' sign sidebands), never a separate float operation.
+    def f(x, c):  # type: ignore[no-untyped-def]
+        y = x if c > 0.0 else -x
+        return y
+
+    lir = build(_run(f), "signed_select")
+    assert len(lir.blocks) == 1, "the diamond must fully if-convert"
+    selects = [op for block in lir.blocks for op in block.inline_ops if isinstance(op.operator, SelectOperator)]
+    assert len(selects) == 1
+    (select,) = selects
+    cond, arm_true, arm_false = select.operands
+    assert isinstance(arm_true, FloatOperand) and arm_true.sign == FloatSignControl()
+    assert isinstance(arm_false, FloatOperand) and arm_false.sign == FloatSignControl(negate=True)
+    assert not [op for block in lir.blocks for op in block.ops if not isinstance(op.inst.operator, FCmpOperator)]
+    model = build_model(lir)
+    for x in (2.0, -3.0):
+        for c in (1.0, -1.0):
+            assert float(model(x, c)[0]) == (x if c > 0.0 else -x)
+
+
+def test_state_early_install_respects_a_select_reader() -> None:
+    # Pins the read-step frame of the state early-install bound: an inline select reads its operands at its fire
+    # step (issue + latency + FETCH_LAG + 1), one cycle past where an issue-frame bound would have allowed the
+    # slot's install copy to fire -- an early install bounded by issue cycles would overwrite the live-in before
+    # the select reads it (RTL would take the NEW value through ``old`` while the model keeps the old one).
+    lir = build(_run(SelectHold().step), "select_hold")
+    selects = [
+        (block, op) for block in lir.blocks for op in block.inline_ops if isinstance(op.operator, SelectOperator)
+    ]
+    assert len(selects) == 1
+    ((block, select),) = selects
+    (slot,) = lir.float_state_slots
+    select_read_pc = lir.block_base[block.index] + operand_read_cycle(select.operator, select.issue_cycle)
+    assert lir.state_copy_step(slot) >= select_read_pc, "the install must not precede the select's operand read"
+    reference = SelectHold()
+    model = build_model(lir)
+    for x, c in [(2.0, 1.0), (3.0, -1.0), (4.0, 1.0), (5.0, -1.0)]:
+        got = float(model(x, c)[0])
+        want = reference.step(x, c)
+        assert abs(got - want) <= 1e-2 * max(1.0, abs(want)), f"x={x} c={c}: {got} vs {want}"
+
+
+def test_not_folds_into_every_sink_position() -> None:
+    # A semantic NOT never materializes hardware: it becomes a free inversion conditioner at each consumer. The
+    # kernel routes one comparison's negation into a logic operand, a bool output, and a bool->float cast; the LIR
+    # must contain NO inline op beyond the band and the cast, and the inversions must ride the operand sidebands.
+    def f(a, b, c):  # type: ignore[no-untyped-def]
+        flag = not (a > b)
+        out_logic = flag and (c > 0.0)
+        return [float(flag), float(out_logic)]
+
+    lir = build(_run(f), "not_sinks")
+    inline_mnemonics = sorted(op.operator.mnemonic for block in lir.blocks for op in block.inline_ops)
+    assert inline_mnemonics == ["band", "ffrombool", "ffrombool"], inline_mnemonics
+    band = next(op for block in lir.blocks for op in block.inline_ops if op.operator.mnemonic == "band")
+    flag_operand, _ = band.operands
+    assert isinstance(flag_operand, BoolOperand) and flag_operand.inversion == BoolInversion(True)
+    model = build_model(lir)
+    for a, b, c in [(1.0, 2.0, 1.0), (2.0, 1.0, 1.0), (1.0, 2.0, -1.0)]:
+        flag = not (a > b)
+        got = [float(v) for v in model(a, b, c)]
+        assert got == [float(flag), float(flag and (c > 0.0))], f"{a},{b},{c}: {got}"
+
+
+def test_not_on_a_branch_condition_swaps_the_targets() -> None:
+    # ``if not cond`` costs nothing: the branch takes the complementary target instead of inverting the register.
+    # The division arms keep the diamond a real branch (if-conversion refuses them).
+    def f(a, b):  # type: ignore[no-untyped-def]
+        if not (a > b):
+            y = a / (b * b + 1.0)
+        else:
+            y = b / (a * a + 1.0)
+        return y
+
+    lir = build(_run(f), "not_branch")
+    assert not any(block.inline_ops for block in lir.blocks), "the NOT must not materialize any gate"
+    model = build_model(lir)
+    for a, b in [(1.0, 2.0), (2.0, 1.0)]:
+        want = a / (b * b + 1.0) if not (a > b) else b / (a * a + 1.0)
+        got = float(model(a, b)[0])
+        assert abs(got - want) <= 1e-2 * max(1.0, abs(want))
+
+
+def test_double_negation_cancels() -> None:
+    def f(a, b):  # type: ignore[no-untyped-def]
+        flag = not (not (a > b))
+        return float(flag)
+
+    lir = build(_run(f), "double_not")
+    casts = [op for block in lir.blocks for op in block.inline_ops if op.operator.mnemonic == "ffrombool"]
+    (cast,) = casts
+    (operand,) = cast.operands
+    assert isinstance(operand, BoolOperand) and operand.inversion == BoolInversion()
+    model = build_model(lir)
+    assert float(model(2.0, 1.0)[0]) == 1.0 and float(model(1.0, 2.0)[0]) == 0.0
+
+
+def test_value_consumed_in_both_polarities_shares_one_producer() -> None:
+    # ``x`` and ``not x`` share one comparator tap and one boolean register: the polarity lives on each consumer.
+    def f(a, b):  # type: ignore[no-untyped-def]
+        flag = a > b
+        return [float(flag), float(not flag)]
+
+    lir = build(_run(f), "both_polarities")
+    comparisons = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
+    assert len(comparisons) == 1 and len(comparisons[0].writes) == 1, "one tap serves both polarities"
+    model = build_model(lir)
+    for a, b in [(2.0, 1.0), (1.0, 2.0)]:
+        assert [float(v) for v in model(a, b)] == [float(a > b), float(not (a > b))]
+
+
+class _InvertedState:
+    """A boolean state slot whose live-out is the negation of its own live-in: a self-toggling flag."""
+
+    def __init__(self) -> None:
+        self._flip = False
+
+    def step(self, x):  # type: ignore[no-untyped-def]
+        old = self._flip
+        self._flip = not self._flip
+        return x if old else -x
+
+
+def test_bool_state_slot_carries_a_live_out_inversion() -> None:
+    # The toggle's live-out is its own live-in inverted: the inversion rides the slot's install (needs_copy must be
+    # True even though the source register IS the slot register), and the model must toggle across transactions.
+    lir = build(_run(_InvertedState().step), "toggle")
+    (slot,) = lir.bool_state_slots
+    assert slot.needs_copy, "an inverted live-out needs its install copy even from the slot's own register"
+    reference = _InvertedState()
+    model = build_model(lir)
+    for x in (1.0, 2.0, 3.0, 4.0):
+        assert float(model(x)[0]) == reference.step(x)
+
+
+def test_inverted_bool_phi_arm_installs_with_opposite_polarities() -> None:
+    # The headline M3 generalization end to end: a bool phi whose two arms reference the SAME base value under
+    # opposite inversions (one arm rewrites the flag as its own negation). The two install copies must carry
+    # opposite-polarity sources, and the model must take the correct value on both paths. The division keeps the
+    # diamond a real branch (bool-phi diamonds are refused by if-conversion anyway; the div makes it doubly so).
+    def f(a, b, c):  # type: ignore[no-untyped-def]
+        flag = a > b
+        if c > 0.0:
+            flag = not flag
+            d = a / (c * c + 1.0)
+        else:
+            d = b
+        return [float(flag), d]
+
+    lir = build(_run(f), "inverted_arm")
+    sources = [(write.source.source, write.source.inversion) for block in lir.blocks for write in block.bool_writes]
+    flag_sources = [(src, inv) for src, inv in sources if isinstance(src, BoolRegRef)]
+    assert len(flag_sources) == 2, flag_sources
+    (src_a, inv_a), (src_b, inv_b) = flag_sources
+    assert src_a == src_b, "both arms read the same base flag register"
+    assert {inv_a, inv_b} == {BoolInversion(), BoolInversion(True)}, "the arms carry opposite polarities"
+    model = build_model(lir)
+    for a, b, c in [(2.0, 1.0, 1.0), (2.0, 1.0, -1.0), (1.0, 2.0, 1.0), (1.0, 2.0, -1.0)]:
+        flag = a > b
+        want_flag = (not flag) if c > 0.0 else flag
+        got = [float(v) for v in model(a, b, c)]
+        assert got[0] == float(want_flag), f"{a},{b},{c}: {got}"
+
+
+def test_boolean_registers_are_reused_within_a_block() -> None:
+    # Exact per-consumer read steps free a condition's register once its last reader fires, so a chain of sequential
+    # selects whose conditions die mid-block shares a few boolean registers instead of one per condition. The chain
+    # is data-dependent (each select feeds the next comparison), so the conditions' lifetimes are disjoint.
+    def f(x):  # type: ignore[no-untyped-def]
+        for _ in range(6):
+            x = (x - 1.0) if x > 1.0 else (x + 1.0)
+        return x
+
+    lir = build(_run(f), "breg_reuse")
+    conditions = sum(1 for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator))
+    assert conditions == 6, "the unrolled chain carries six comparisons"
+    assert lir.bool_regfile.nreg <= 2, f"disjoint condition lifetimes must share registers, got {lir.bool_regfile.nreg}"
+    model = build_model(lir)
+    for x in (0.0, 3.5, -2.0):
+        want = x
+        for _ in range(6):
+            want = (want - 1.0) if want > 1.0 else (want + 1.0)
+        got = float(model(x)[0])
+        assert abs(got - want) <= 1e-3 * max(1.0, abs(want))
+
+
+def test_boolean_logic_chain_reuses_registers_on_the_tight_same_bank_edge() -> None:
+    # The band/bor same-bank reuse path (distinct from the select-cond reader exercised above): a deep boolean
+    # reduction over many comparisons produces intermediate flags that die as the next gate consumes them, on the
+    # tightest read-first edge (an inline gate reads its operand on exactly the step the next result's write-enable
+    # fires; bool_landing = fire + 1 keeps R(a) < W(b)). The chain must collapse onto a handful of registers.
+    def f(a, b, c, d, e, g):  # type: ignore[no-untyped-def]
+        return 1.0 if (a > b and c > d and e > g and a > d and b > e) else 0.0
+
+    lir = build(_run(f), "bool_chain")
+    comparisons = sum(1 for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator))
+    ands = sum(1 for block in lir.blocks for op in block.inline_ops if op.operator.mnemonic == "band")
+    assert comparisons == 5 and ands >= 4, (comparisons, ands)
+    assert lir.bool_regfile.nreg <= 3, f"the chained flags must reuse registers, got {lir.bool_regfile.nreg}"
+    model = build_model(lir)
+    import itertools
+
+    for vals in itertools.product([0.0, 1.0], repeat=6):
+        a, b, c, d, e, g = vals
+        want = 1.0 if (a > b and c > d and e > g and a > d and b > e) else 0.0
+        assert float(model(*vals)[0]) == want, vals

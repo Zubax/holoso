@@ -220,5 +220,5 @@ Iteration until no feedback has been attempted in the past but it is not practic
 issues the review agents tend to degrade to nitpicking.
 Hence, we stop iteration earlier, as soon as the feedback ceases to contain significant findings.
 
-Review agents in maximum thinking mode may go silent for a very long time, up to an hour or so;
-do not interrupt them prematurely, be ready to wait for as long as it takes.
+Review agents in maximum thinking mode may go silent for a long time.
+Set a generous timeout of about 1 hour or so, use your best judgement.

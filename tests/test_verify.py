@@ -1203,9 +1203,15 @@ def test_synthesis_result_reports_latency_metric() -> None:
     flat_min, flat_max = flat.initiation_interval
     assert flat_min > 0 and flat_max == flat_min  # exact: min == max
 
-    branching = holoso.synthesize(_PID().__call__, ops)
+    def looping(x):  # type: ignore[no-untyped-def]
+        w = x
+        while w > 1.0:
+            w = w - 1.0
+        return w
+
+    branching = holoso.synthesize(looping, ops)
     branching_min, branching_max = branching.initiation_interval
-    assert branching_min > 0 and branching_max is None  # inexact: unbounded max
+    assert branching_min > 0 and branching_max is None  # inexact: a data-dependent loop has unbounded max
 
 
 def test_model_branch_state_is_picklable() -> None:

@@ -1,4 +1,7 @@
-"""Shared HIR rewrite helpers: a CFG-aware rebuild driver used by every pass."""
+"""
+Shared HIR rewrite helpers: a CFG-aware rebuild driver for passes that keep the block structure; if-conversion,
+which dissolves blocks, rebuilds by hand.
+"""
 
 from collections.abc import Callable, Set
 from typing import assert_never

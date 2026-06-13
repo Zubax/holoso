@@ -514,7 +514,7 @@ class FCmpOperator(FloatHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class BoolLogicOperator(InlineHardwareOperator, ABC):
     """
-    A boolean-logic operator (AND/OR/NOT): a plain ``& | ~`` gate folded into its boolean register's write. Never
+    A boolean-logic operator (AND/OR): a plain ``& |`` gate folded into its boolean register's write. Never
     added to :class:`OpConfig` -- it has no module and no configuration.
     """
 
@@ -554,23 +554,6 @@ class BoolOrOperator(BoolLogicOperator):
 
 
 @dataclass(frozen=True, slots=True)
-class BoolNotOperator(BoolLogicOperator):
-    mnemonic: ClassVar[str] = "bnot"
-
-    @property
-    def signature(self) -> ScalarSignature:
-        return ScalarSignature((BoolType(),), (BoolType(),))
-
-    def verilog_expr(self, *operand_nets: str) -> str:
-        (a,) = operand_nets
-        return f"~{a}"
-
-    def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
-        (a,) = operands
-        return (not a,)
-
-
-@dataclass(frozen=True, slots=True)
 class FloatToBoolOperator(InlineHardwareOperator):
     """
     A float->bool cast ``bool(x)``: true iff the operand is nonzero, i.e. its ZKF exponent field is nonzero (sign- and
@@ -597,6 +580,37 @@ class FloatToBoolOperator(InlineHardwareOperator):
         (a,) = operands
         assert isinstance(a, FloatValue)
         return (a.exponent != 0,)
+
+
+@dataclass(frozen=True, slots=True)
+class SelectOperator(InlineHardwareOperator):
+    """
+    A data mux ``cond ? a : b`` over wide values, folded into the destination register write as a ternary over the
+    operand nets. Produced exclusively by HIR if-conversion; never added to :class:`OpConfig`. Each operand is a
+    dedicated direct (unlatched) register read -- an area/timing characteristic of inline operators; the cost is one
+    mux per merged value, the same order as the per-arm phi-copy installs the branch would otherwise need.
+    """
+
+    mnemonic: ClassVar[str] = "select"
+    fmt: FloatFormat
+
+    @property
+    def signature(self) -> ScalarSignature:
+        ty = FloatType(self.fmt)
+        return ScalarSignature((BoolType(), ty, ty), (ty,))
+
+    def render(self, *operands: str) -> str:
+        cond, a, b = operands
+        return f"{cond}?{a}:{b}"
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        cond, a, b = operand_nets
+        return f"({cond} ? {a} : {b})"
+
+    def evaluate(self, *operands: "FloatValue | bool") -> tuple[FloatValue]:
+        cond, a, b = operands
+        assert isinstance(cond, bool) and isinstance(a, FloatValue) and isinstance(b, FloatValue)
+        return (a if cond else b,)
 
 
 @dataclass(frozen=True, slots=True)

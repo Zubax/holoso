@@ -34,6 +34,7 @@ from ._operators import (
     FloatToBool as FloatToBool,
     Operator as Operator,
     RelationalOp as RelationalOp,
+    Select as Select,
 )
 from ._optimize import optimize as optimize
 from ._types import BoolType as BoolType, FloatType as FloatType, Signature as Signature, Type as Type

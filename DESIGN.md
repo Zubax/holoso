@@ -31,6 +31,11 @@ it varies across programs and across branch paths. This is a compiler problem mo
 
 Encourage departure from IEEE 754 where it makes sense for a numerical control/DSP system (e.g., drop NaN/subnormals).
 
+Compilation is deterministic and reproducible: identical input produces byte-identical output across invocations
+(except for diagnostic outputs and reports, which may include variable data such as timestamps etc.).
+Name-keyed merge/materialization points iterate in sorted order and every stochastic
+optimization pass runs with a fixed seed.
+
 ## Pipeline
 
 ```mermaid
@@ -185,10 +190,10 @@ phi([(pred_block, value)])        # SSA merge
 # pure semantic operations (generic; selected into concrete hardware by a later pass)
 operation(operator, operands)      # float_add, float_mul, float_div, float_neg, float_abs, float_mul_pow2, ...
 relational(op, a, b) -> bool      # lt, le, eq, ...  (implemented; chained a<b<c desugars to band of the links)
-boolean(op, ...)     -> bool      # and, or, not  (implemented as combinational bool ops; xor not yet)
+boolean(op, ...)     -> bool      # and/or are combinational gates; not folds into consumers; xor not yet
 cast(a, to_ty)                    # bool(x) / float(cond)  (implemented as combinational float<->bool casts)
-select(cond, a, b)                # DATA mux (not control flow); a future if-conversion of a ternary -- today a
-                                  # conditional expression x if c else y lowers to branch + typed phi (taken arm only)
+select(cond, a, b)                # DATA mux (not control flow), produced by diamond if-conversion; a conditional
+                                  # expression first lowers to branch + typed phi and may then convert (see below)
 intrinsic(kind, args)             # sqrt, sincos, exp, ...   -> operator module, else hard error
 
 # sinks
@@ -218,8 +223,15 @@ Branch vs. select (the core control-flow decision):
   recorded. Each arm value is installed into the merged register at the predecessor's tail: directly, when the arm
   operator's result can coalesce onto the merged register, otherwise by a pc-gated copy (see LIR below). Branches are
   the default.
-- `select` (a mux, both inputs live) is reserved for data multiplexing (one-hot lookup, `where`-style picks) and for an
-  optional if-conversion peephole that collapses a tiny, pure, cheap diamond. Conservative by default.
+- `select` (a mux, both inputs live) implements data multiplexing: the if-conversion peephole collapses a small,
+  pure, cheap branch diamond into per-phi selects, making the region straight-line (so it pipelines and reuses
+  registers like any other). Both arms execute, so conversion is gated: every arm operation must be SPECULATABLE
+  (an operator property; division is not -- a speculated div-by-zero would assert the module error flag for a path
+  never taken), each arm must fit the `HOLOSO_IFCONV_MAX_OPS` budget (0 disables the pass), and v1 converts diamonds
+  merging float phis only (a boolean merge stays a real branch). Arm sign chains fold into the select's operand
+  conditioners, so `x if c else -x` costs one comparison and one mux. Each select operand is a dedicated direct
+  (unlatched) register read; the cost is one mux per merged value, the same order as the per-arm phi-copy installs
+  the branch would otherwise need.
 
 HIR is a real CFG of basic blocks (entry first, a single `Ret` exit) carrying an SSA value DAG; `bool` is implemented
 alongside float (`BoolConst`, bool `InPort`, bool `StateRead`, bool `Phi`), and a `StateSlot`'s reset is a typed `Const`
@@ -254,10 +266,14 @@ exposed as `state_<attr>`.
     `holoso_fcmp` serves every relation as an ordinary pooled instance, and several relations over one operand pair
     share a single firing. The inversion is fabric-side (an XOR folded into the register write), the boolean dual of
     the wide lanes' hardware `y_sgnop`.
-  - Boolean logic `and`/`or`/`not` are inline `& | ~` gates (each operator owns its `verilog_expr`): `a and b` is
+  - Boolean logic `and`/`or` are inline `& |` gates (each operator owns its `verilog_expr`): `a and b` is
     `band(a, b)`, etc.; both operands always evaluate (the operands here are pure booleans). A chained comparison
     `a < b < c` desugars to `band(a < b, b < c)` with each operand evaluated once; a statically-known connective
-    operand folds away.
+    operand folds away. `not` NEVER materializes hardware: NOT chains fold at MIR lowering into the consumer's
+    sideband -- an operand/output/state/phi-arm inversion conditioner (the 1-bit dual of the float sign control,
+    free in fabric), or a branch-target swap on a condition -- always on the CONSUMER side, so one comparator tap
+    and one register serve both polarities of a value (a producer-side flip would split the tap into two
+    non-fusible firings).
   - `bool(x)` is the float->bool cast: true iff the ZKF exponent field is nonzero (= `x != 0.0`, sign-agnostic).
     `float(cond)` is the bool->float cast: ZKF `1.0`/`0.0`. Both are pc-gated inline writebacks that invoke the
     two functions in the shared `holoso_support.vh` (`` `include``d by the generated module), not modules and not inline
@@ -326,16 +342,23 @@ a counted back-edge loop (a counted loop would need a runtime integer counter; d
 
 Variable-trip `for` loops.
 
-Integer operand support is missing; it needs typed int operands/constants/operators that reference the same wide
-register bank when their physical width matches the build.
+Diamond if-conversion of boolean-phi merges (today only float-phi diamonds convert to select;
+a boolean merge needs a (c & t) | (~c & f) logic mux rather than the wide select).
 
 Early return support is missing (from loop body).
+
+Integer operand support is missing; it needs typed int operands/constants/operators that reference the same wide
+register bank when their physical width matches the build.
 
 ## HIR optimization and lowering to MIR
 
 HIR optimization is hardware-agnostic: const-fold + algebraic simplify (SymPy-assisted) - CSE - strength reduction
 (`x*2^k`, `x/2^k` -> semantic `float_mul_pow2`; `x/c` -> `x*(1/c)` for finite non-power-of-two constants; `x**n` ->
-multiply chain) - optional if-conversion - DCE. Constant folding is typed: an operator receives constant nodes and
+multiply chain) - diamond if-conversion (after folding, so arm costs are final -- a constant condition that
+escapes the frontend's folding is refused; before DCE, which sweeps a converted diamond's condition cone when
+nothing else reads it: conversion turns control dependence into data dependence, so a fully-unused diamond's
+condition is dead code like any other; converted diamonds splice into their branching block and block ids
+recompact) - DCE. Constant folding is typed: an operator receives constant nodes and
 returns a folded `Const` node. The HIR builder can re-intern an arbitrary `Const` node with `const_node()`,
 so bool/int constants do not need float-specific rebuilding in shared passes.
 
@@ -471,8 +494,8 @@ overlap still needs copy-installation).
 
 Cross-block software pipelining: the machine uses per-block drain barriers; overlapping a fall-through block's head
 with its predecessor's tail (branches and loop back-edges stay hard PC barriers -- the ZISC cannot fetch a successor
-before the redirect resolves) is a separate scheduling effort, complemented by if-converting small pure diamonds to a
-`select` mux so branchy kernels become branch-free and pipeline fully.
+before the redirect resolves) is a separate scheduling effort. The complementary half -- if-converting small pure
+diamonds to `select` muxes so branchy kernels become branch-free and pipeline fully -- has landed (see HIR).
 
 The numerical model should advance one clk per `.tick()`, replaying PCs and latches like the hardware, so it stays
 correct under register reuse and cross-block overlap by construction and enables cycle-accurate lockstep cosimulation

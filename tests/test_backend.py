@@ -217,7 +217,7 @@ def test_boolean_only_stateful_module_elaborates(tmp_path: Path) -> None:
     assert port.name == "state_flag"
     assert isinstance(port.scalar_type, BoolType)
     verilog = generate(lir).verilog
-    assert re.search(r"\bassign state_flag = (?:1'b[01]|bregs\[\d+\]);", verilog)
+    assert re.search(r"\bassign state_flag = (?:1'b[01]|~?bregs\[\d+\]);", verilog)  # the tap may ride an inversion
     assert not re.search(r"\bregs\[\d+\] <=", verilog)
     _elaborate("bool_toggle", verilog, tmp_path)
 

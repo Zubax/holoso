@@ -127,7 +127,8 @@ class NumericalModel:
 
         def bval(operand: BoolOperand) -> bool:
             source = operand.source
-            return source.value if isinstance(source, BoolConstRef) else bregs[source.index]
+            base = source.value if isinstance(source, BoolConstRef) else bregs[source.index]
+            return operand.inversion.apply(base)
 
         blocks = {block.index: block for block in lir.blocks}
         current = lir.entry
@@ -151,7 +152,8 @@ class NumericalModel:
 
             def bread(operand: BoolOperand, read_cycle: int) -> bool:
                 source = operand.source
-                return source.value if isinstance(source, BoolConstRef) else _resident(btl[source.index], read_cycle)
+                base = source.value if isinstance(source, BoolConstRef) else _resident(btl[source.index], read_cycle)
+                return operand.inversion.apply(base)
 
             # All operations -- pooled firings and inline ops across both banks -- evaluate in a single
             # commit-sorted pass, so a producer is computed before any consumer (dependency edges guarantee strictly

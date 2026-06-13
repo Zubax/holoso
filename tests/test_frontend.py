@@ -18,25 +18,26 @@ from holoso._hir import (
     BoolConst,
     BoolNot,
     BoolOr,
+    BoolToFloat,
     BoolType,
     Branch,
     FloatAbs,
     FloatAdd,
-    FloatType,
     FloatConst,
     FloatDiv,
     FloatMul,
-    BoolToFloat,
     FloatNeg,
     FloatRelational,
     FloatToBool,
+    FloatType,
     InPort,
     Jump,
     Operation,
+    optimize,
     Phi,
     Ret,
+    Select,
     StateRead,
-    optimize,
 )
 
 from ._modelref import flatten_value, output_names
@@ -1440,8 +1441,13 @@ def test_nested_if_lowers_through_optimize() -> None:
                     self.y = x
             return self.y
 
-    hir = optimize(lower(C().__call__))
-    assert any(isinstance(b.terminator, Branch) for b in hir.blocks)
+    raw = lower(C().__call__)
+    assert any(isinstance(b.terminator, Branch) for b in raw.blocks)  # the lowering itself emits real nested branches
+    hir = optimize(raw)
+    # Both nested diamonds are small and pure, so if-conversion collapses them: no branch survives and the merges
+    # became selects -- the optimized pipeline must still carry the slot through.
+    assert not any(isinstance(b.terminator, Branch) for b in hir.blocks)
+    assert any(isinstance(n, Operation) and isinstance(n.operator, Select) for n in hir.nodes.values())
     assert {s.name for s in hir.state_slots} == {"y"}
 
 
@@ -1457,9 +1463,14 @@ def test_attribute_written_on_one_arm_becomes_a_phi() -> None:
                 self.acc = x
             return self.acc
 
-    hir = optimize(lower(Clamp().__call__))
+    raw = lower(Clamp().__call__)
+    slots = {s.name: s for s in raw.state_slots}
+    assert isinstance(raw.nodes[slots["acc"].live_out], Phi)  # merged: written value on one path, live-in on the other
+    # The empty-else diamond then if-converts: the merge becomes select(cond, written, live_in) -- a data mux.
+    hir = optimize(raw)
     slots = {s.name: s for s in hir.state_slots}
-    assert isinstance(hir.nodes[slots["acc"].live_out], Phi)  # merged: written value on one path, live-in on the other
+    live_out = hir.nodes[slots["acc"].live_out]
+    assert isinstance(live_out, Operation) and isinstance(live_out.operator, Select)
 
 
 def _op_count(hir, op_type):  # type: ignore[no-untyped-def]

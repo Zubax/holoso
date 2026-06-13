@@ -23,7 +23,7 @@ from holoso._lir import build
 from holoso._mir import lower as lower_to_mir
 
 from ._cosim import run_cosim
-from ._modelref import ChainedSlots, branch_boundary_kernel, default_ops, fcmp_staged_ops
+from ._modelref import ChainedSlots, SelectHold, branch_boundary_kernel, default_ops, fcmp_staged_ops
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, sources
 
 pytestmark = pytest.mark.cosim
@@ -304,3 +304,77 @@ def test_cosim_chained_slots_keep_the_old_value_across_the_install(sim: str) -> 
     # RTL twin of test_schedule.test_chained_slot_live_in_blocks_early_install: before the fix, "_b"'s early install
     # clobbered the value "_a"'s boundary copy reads, so the DUT diverged from the model on the second transaction.
     run_cosim(sim, ChainedSlots().__call__, FloatFormat(6, 18), "chained_slots")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_select_kernels(sim: str) -> None:
+    # If-converted selects in RTL: both polarities of a max kernel, an arm-sign select (the negation rides the
+    # operand conditioner), and a comparison -> select -> arithmetic cross-bank chain, in one kernel.
+    def kernel(a, b):  # type: ignore[no-untyped-def]
+        m = a if a > b else b
+        s = a if b > 0.0 else -a
+        return m * 2.0 + s
+
+    run_cosim(sim, kernel, FloatFormat(6, 18), "select_mix")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_select_reads_state_live_in_before_early_install(sim: str) -> None:
+    # RTL twin of test_schedule.test_state_early_install_respects_a_select_reader: the slot's early install must not
+    # fire before the Ret-block select reads the OLD live-in value.
+    run_cosim(sim, SelectHold().step, FloatFormat(6, 18), "select_hold")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_not_folding_sinks(sim: str) -> None:
+    # NOT-folding in RTL: inverted logic operands, an inverted bool output path (via the casts), both polarities of
+    # one comparison, and a self-toggling inverted boolean state slot, across several transactions.
+    class Toggle:
+        def __init__(self) -> None:
+            self._flip = False
+
+        def step(self, a, b):  # type: ignore[no-untyped-def]
+            old = self._flip
+            self._flip = not self._flip
+            gate = not (a > b)
+            both = gate and (not (b > a))
+            return float(gate) + 2.0 * float(both) + (4.0 if old else 0.0)
+
+    run_cosim(sim, Toggle().step, FloatFormat(6, 18), "not_sinks")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_inverted_bool_phi_arm(sim: str) -> None:
+    # RTL twin of test_schedule.test_inverted_bool_phi_arm_installs_with_opposite_polarities: the conditional flag
+    # negation rides the phi-arm install's inversion.
+    def kernel(a, b, c):  # type: ignore[no-untyped-def]
+        flag = a > b
+        if c > 0.0:
+            flag = not flag
+            d = a / (c * c + 1.0)
+        else:
+            d = b
+        return [float(flag), d]
+
+    run_cosim(sim, kernel, FloatFormat(6, 18), "inverted_arm")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_not_over_loop_phi_and_inverted_public_state(sim: str) -> None:
+    # Two NOT-folding corners under RTL: a flag negated per trip of a while loop (the self-arm inversion install
+    # fires once per iteration through the back edge), and a PUBLIC boolean state attribute whose live-out is a
+    # negation (the state_<attr> port and the install both ride inversions).
+    class LoopToggle:
+        def __init__(self) -> None:
+            self.armed = False
+
+        def step(self, x):  # type: ignore[no-untyped-def]
+            flag = x > 0.0
+            w = x
+            while w > 1.0:
+                flag = not flag
+                w = w - 1.0
+            self.armed = not (x > 2.0)
+            return float(flag)
+
+    run_cosim(sim, LoopToggle().step, FloatFormat(6, 18), "loop_toggle")

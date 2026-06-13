@@ -8,6 +8,7 @@ which typed storage resources, with which folded sign controls.
 from dataclasses import dataclass
 
 from .._operators import (
+    BoolInversion,
     FloatSignControl,
     HardwareOperator,
     InlineHardwareOperator,
@@ -294,15 +295,25 @@ type BoolSource = BoolRegRef | BoolConstRef
 
 @dataclass(frozen=True, slots=True)
 class BoolOperand:
-    """A boolean operand: a boolean register read or an immediate True/False."""
+    """
+    A boolean operand: a boolean register read or an immediate True/False, with an optional folded inversion -- the
+    1-bit dual of :class:`FloatOperand`'s sign control, free in fabric. An inverted immediate folds to its negated
+    value at construction, so a constant operand always carries the identity inversion.
+    """
 
     source: BoolSource
+    inversion: BoolInversion = BoolInversion()
+
+    def __post_init__(self) -> None:
+        if isinstance(self.source, BoolConstRef) and self.inversion.invert:
+            object.__setattr__(self, "source", BoolConstRef(not self.source.value))
+            object.__setattr__(self, "inversion", BoolInversion())
 
     @property
     def stable_label(self) -> str:
         if isinstance(self.source, BoolConstRef):
             return "1" if self.source.value else "0"
-        return self.source.stable_label
+        return self.inversion.decorate(self.source.stable_label)
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,7 +399,7 @@ class FloatOutputWire(OutputWire):
 
 @dataclass(frozen=True, slots=True)
 class BoolOutputWire(OutputWire):
-    """A boolean output port: the named external sink for a boolean register or immediate."""
+    """A boolean output port: the named external sink for a boolean register or immediate, with a folded inversion."""
 
     tap: BoolOperand
 
@@ -408,7 +419,10 @@ class FloatCopy:
 
 @dataclass(frozen=True, slots=True)
 class BoolWrite:
-    """A boolean register install of a phi arm (a bool const or another bool register) on a block-relative cycle."""
+    """
+    A boolean register install of a phi arm (a bool const or another bool register, with the arm's folded inversion)
+    on a block-relative cycle.
+    """
 
     dst: BoolRegRef
     source: BoolOperand
@@ -461,7 +475,8 @@ class LirBlock:
 class BoolStateSlot:
     """
     A persistent boolean state register: reset to ``reset_value``, holding the slot's live-in throughout the
-    transaction and installing its live-out (``live_out``, a boolean register or constant) at the boundary, read-first
+    transaction and installing its live-out (``live_out``, a boolean register or constant with a folded inversion)
+    at the boundary, read-first
     -- so an output or branch that still reads the live-in sees the old value, exactly like a float slot.
     """
 
@@ -472,8 +487,15 @@ class BoolStateSlot:
 
     @property
     def needs_copy(self) -> bool:
-        """False only when the live-out already resides in the slot register (an unwritten slot); else install it."""
-        return not (isinstance(self.live_out.source, BoolRegRef) and self.live_out.source == self.reg)
+        """
+        False only when the live-out already resides in the slot register UNINVERTED (an unwritten slot); a live-out
+        under an inversion needs the install copy to apply it, even from the slot's own register.
+        """
+        return not (
+            isinstance(self.live_out.source, BoolRegRef)
+            and self.live_out.source == self.reg
+            and not self.live_out.inversion.invert
+        )
 
 
 @dataclass(frozen=True, slots=True)

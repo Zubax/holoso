@@ -143,13 +143,15 @@ def branch_boundary_kernel(a, b, c):  # type: ignore[no-untyped-def]
     """
     The boundary-slack corner kernel shared by the cosim test and its white-box schedule twin: the comparison is the
     LAST commit in its block and feeds the branch, so its result lands in the condition register exactly one step
-    before the terminator reads it. The two tests must exercise the same kernel, so it lives here.
+    before the terminator reads it. The two tests must exercise the same kernel, so it lives here. The division in
+    the else arm is unspeculatable, which keeps the diamond a REAL branch under default if-conversion -- the corner
+    under test exists only on a branchy schedule.
     """
     t = a * b + c
     if t > c:
         y = t + 1.0
     else:
-        y = t - 1.0
+        y = (t - 1.0) / (b * b + 1.0)  # structurally nonzero divisor: the bench asserts err_pc == 0 per vector
     return y
 
 
@@ -184,3 +186,19 @@ class ChainedSlots:
         self._a = self._b
         self._b = x + 1.0
         return self._a * 2.0 + (x * 1.5) / (x - 0.5)
+
+
+class SelectHold:
+    """
+    A Ret-block select is the slot live-in's LAST reader while the new live-out commits early: pins the read-step
+    frame of the state early-install bound. Shared by the white-box schedule test and its RTL cosim twin.
+    """
+
+    def __init__(self) -> None:
+        self._h = 1.0
+
+    def step(self, x, c):  # type: ignore[no-untyped-def]
+        old = self._h
+        self._h = x + 1.0
+        y = old if c > 0.0 else x
+        return y * 2.0 + (x * 1.5) / (x * x + 0.5)  # structurally nonzero divisor (the bench asserts err_pc == 0)

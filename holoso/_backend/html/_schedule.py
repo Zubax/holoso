@@ -162,7 +162,7 @@ def render_schedule(lir: Lir) -> str:
             step = base_pc + copy_step_cycle(bwrite.issue_cycle)
             dcol = bwrite.dst
             dord = col_ord[dcol]
-            tip = _esc(f"{bwrite.dst.stable_label} 🠄 {_bool_source_label(bwrite.source.source)}")
+            tip = _esc(f"{bwrite.dst.stable_label} 🠄 {_operand_label(bwrite.source)}")
             writes_at[(step, dcol)] = writes_at.get((step, dcol), "") + f"<span class='wl' title='{tip}'>&#9662;</span>"
             state_cells.add((step, dcol))
             endpoints.add((dord, step))
@@ -387,11 +387,6 @@ def _oc_class(sidx: int, dv: _Dividers) -> str:
     return "oc" + _border_suffix(sidx, dv.stage_thin, dv.stage_thick)
 
 
-def _bool_source_label(source: BoolSource) -> str:
-    """The label of a boolean source for a tooltip: the register's ``bX`` label or the inline ``True``/``False``."""
-    return source.stable_label if isinstance(source, BoolRegRef) else repr(source.value)
-
-
 def _operand_col(operand: FloatOperand | BoolOperand) -> ColKey | None:
     """The grid column an operand reads, or None for a boolean constant (it occupies no column)."""
     source = operand.source
@@ -406,7 +401,9 @@ def _operand_label(operand: FloatOperand | BoolOperand) -> str:
     if isinstance(operand, FloatOperand):
         return operand.sign.decorate(_col_label(operand.source))
     source = operand.source
-    return _col_label(source) if isinstance(source, BoolRegRef) else repr(source.value)
+    if isinstance(source, BoolRegRef):
+        return operand.inversion.decorate(_col_label(source))
+    return repr(source.value)
 
 
 def _inline_op_text(op: InlineScheduledOp) -> str:

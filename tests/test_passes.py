@@ -35,6 +35,8 @@ from holoso._hir import (
     Type,
     optimize,
 )
+from holoso._hir import FloatDiv as HirFloatDiv, Phi, Select
+from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir._const_fold import run as fold_constants
 from holoso._lir import build
 from holoso._mir import lower as lower_to_mir, Mir, MirFloatConst, MirFloatInput, MirOperation
@@ -360,3 +362,150 @@ def test_const_fold_handles_absorbing_and_identity_boolean_connectives() -> None
     assert out["and_abs"] == BoolConst(False)  # x and False -> False  (absorbing)
     assert isinstance(out["or_id"], InPort) and out["or_id"].name == "x"  # x or False -> x  (identity dropped)
     assert isinstance(out["and_id"], InPort) and out["and_id"].name == "x"  # x and True -> x  (identity dropped)
+
+
+def _hir_of(target):  # type: ignore[no-untyped-def]
+    return optimize(lower(target))
+
+
+def test_if_conversion_collapses_a_pure_diamond() -> None:
+    # A small pure diamond becomes one straight-line block: the merge phi is replaced by a select over the branch
+    # condition, the branch disappears, and the arms' operations run unconditionally.
+    def f(a, b):  # type: ignore[no-untyped-def]
+        if a > b:
+            y = a + b
+        else:
+            y = a - b
+        return y
+
+    hir = _hir_of(f)
+    assert len(hir.blocks) == 1
+    selects = [n for n in hir.nodes.values() if isinstance(n, Operation) and isinstance(n.operator, Select)]
+    assert len(selects) == 1
+
+
+def test_if_conversion_refuses_an_unspeculatable_arm() -> None:
+    # Division must not be speculated: a div-by-zero on the not-taken path would assert the module error flag.
+    def f(a, b):  # type: ignore[no-untyped-def]
+        if a > b:
+            y = a + b
+        else:
+            y = a / b
+        return y
+
+    hir = _hir_of(f)
+    assert len(hir.blocks) == 4  # the diamond survives as a real branch
+    assert not any(isinstance(n, Operation) and isinstance(n.operator, Select) for n in hir.nodes.values())
+
+
+def test_if_conversion_respects_the_arm_size_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 1)
+
+    def f(a, b):  # type: ignore[no-untyped-def]
+        if a > b:
+            y = (a + b) * a + b  # three operations: over the per-arm budget of one
+        else:
+            y = a - b
+        return y
+
+    hir = _hir_of(f)
+    assert len(hir.blocks) == 4
+
+
+def test_if_conversion_knob_zero_disables_the_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
+
+    def f(a, b):  # type: ignore[no-untyped-def]
+        if a > b:
+            y = a + b
+        else:
+            y = a - b
+        return y
+
+    hir = _hir_of(f)
+    assert len(hir.blocks) == 4 and not any(
+        isinstance(n, Operation) and isinstance(n.operator, Select) for n in hir.nodes.values()
+    )
+
+
+def test_if_conversion_refuses_a_boolean_phi_merge() -> None:
+    # v1 converts float phis only: a diamond merging a boolean stays a real branch.
+    def f(a, b, c):  # type: ignore[no-untyped-def]
+        if a > b:
+            flag = b > c
+        else:
+            flag = a > c
+        return float(flag)
+
+    hir = _hir_of(f)
+    assert len(hir.blocks) == 4
+    assert not any(isinstance(n, Operation) and isinstance(n.operator, Select) for n in hir.nodes.values())
+
+
+def test_if_conversion_collapses_nested_chains_to_one_block() -> None:
+    # Sequential diamonds collapse one after another, recompacting block ids each time, leaving a single block.
+    def f(x, y):  # type: ignore[no-untyped-def]
+        if x > 0.0:
+            a = x + y
+        else:
+            a = x - y
+        if y > 0.0:
+            b = a * 2.0
+        else:
+            b = a * 4.0
+        return b
+
+    hir = _hir_of(f)
+    assert len(hir.blocks) == 1
+    selects = [n for n in hir.nodes.values() if isinstance(n, Operation) and isinstance(n.operator, Select)]
+    assert len(selects) == 2
+
+
+def test_if_conversion_repoints_loop_header_phi_arms() -> None:
+    # A diamond inside a while body: the dissolved merge block fed the loop-header phis, whose arms must repoint to
+    # the spliced block (the localized pin for the repoint path; the examples exercise it only end-to-end).
+    def f(x):  # type: ignore[no-untyped-def]
+        w = x
+        while w > 0.0:
+            if w > 2.0:
+                step = 2.0
+            else:
+                step = 1.0
+            w = w - step
+        return w
+
+    hir = _hir_of(f)
+    selects = [n for n in hir.nodes.values() if isinstance(n, Operation) and isinstance(n.operator, Select)]
+    assert len(selects) == 1
+    block_ids = {b.id for b in hir.blocks}
+    for node in hir.nodes.values():
+        if isinstance(node, Phi):
+            assert all(pred in block_ids for pred, _ in node.arms), "phi arms must reference surviving blocks only"
+
+
+def test_speculatable_hir_operators_map_to_error_free_hardware() -> None:
+    # The speculation flag and the hardware error sideband are two declarations of one fact: division is the only
+    # error-bearing operator today, and it must stay unspeculatable. A future error-bearing operator must declare
+    # speculatable=False (the default) on its HIR side, or if-conversion would assert the module error flag for a
+    # never-taken path.
+    assert FDivOperator(FMT).error_ports and not HirFloatDiv.speculatable
+
+
+def test_dead_diamond_frees_its_condition_cone() -> None:
+    # Conversion turns control dependence into data dependence: when a diamond's merged results are entirely unused,
+    # its condition cone becomes ordinary dead code -- INCLUDING an error-bearing division feeding only the
+    # condition, which then reports nothing (exactly as an unused division without a branch around it reports
+    # nothing today). This pins the documented semantics of the error sideband: executed operators only.
+    def f(a, b, x):  # type: ignore[no-untyped-def]
+        if bool(a / b):
+            y = x + 1.0
+        else:
+            y = x - 1.0
+        _ = y  # the merged result is never returned: the whole diamond, condition cone included, is dead
+        return x
+
+    hir = _hir_of(f)
+    assert len(hir.blocks) == 1
+    assert not any(
+        isinstance(n, Operation) and isinstance(n.operator, HirFloatDiv) for n in hir.nodes.values()
+    ), "the unused condition cone (division included) is dead code after conversion"

@@ -545,8 +545,9 @@ def _float_copy_rhs(block_index: int, copy_index: int, copy: FloatCopy) -> str:
 def _bool_operand_rhs(operand: BoolOperand) -> str:
     source = operand.source
     if isinstance(source, BoolConstRef):
-        return "1'b1" if source.value else "1'b0"
-    return f"bregs[{source.index}]"
+        return "1'b1" if source.value else "1'b0"  # an inverted immediate folded at construction
+    net = f"bregs[{source.index}]"
+    return f"~{net}" if operand.inversion.invert else net
 
 
 def _bool_write_rhs(write: BoolWrite) -> str:

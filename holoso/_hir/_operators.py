@@ -39,6 +39,12 @@ class Operator(ABC):
     """A reusable semantic operation definition referenced by HIR operation nodes."""
 
     mnemonic: ClassVar[str]
+    # Whether evaluating this operation on a not-taken path is unobservable: a speculatable operation has no error
+    # sideband and no effect beyond its result value, so if-conversion may execute it unconditionally. Division is
+    # not speculatable (a speculated div-by-zero would assert the module's error flag for a branch never taken).
+    # The default is False so a future error-bearing operator that omits the declaration is a missed optimization
+    # rather than a silent spurious-error bug; pure operators opt in explicitly.
+    speculatable: ClassVar[bool] = False
 
     @property
     @abstractmethod
@@ -72,6 +78,7 @@ class Operator(ABC):
 @dataclass(frozen=True, slots=True)
 class FloatAdd(Operator):
     mnemonic: ClassVar[str] = "add"
+    speculatable: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:
@@ -85,6 +92,7 @@ class FloatAdd(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatMul(Operator):
     mnemonic: ClassVar[str] = "mul"
+    speculatable: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:
@@ -111,6 +119,7 @@ class FloatDiv(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatNeg(Operator):
     mnemonic: ClassVar[str] = "neg"
+    speculatable: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:
@@ -124,6 +133,7 @@ class FloatNeg(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatAbs(Operator):
     mnemonic: ClassVar[str] = "abs"
+    speculatable: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:
@@ -139,6 +149,7 @@ class FloatMulPow2(Operator):
     """Exact semantic scaling by a power of two, introduced by strength reduction."""
 
     mnemonic: ClassVar[str] = "mul_pow2"
+    speculatable: ClassVar[bool] = True
     k: int
 
     @property
@@ -180,6 +191,7 @@ class FloatRelational(Operator):
     """A float comparison ``a <op> b`` returning a boolean."""
 
     mnemonic: ClassVar[str] = "frelational"
+    speculatable: ClassVar[bool] = True
     op: RelationalOp
 
     @property
@@ -196,6 +208,7 @@ class BoolAnd(Operator):
     """A boolean conjunction ``a and b`` (both operands genuine booleans)."""
 
     mnemonic: ClassVar[str] = "band"
+    speculatable: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:
@@ -217,6 +230,7 @@ class BoolOr(Operator):
     """A boolean disjunction ``a or b`` (both operands genuine booleans)."""
 
     mnemonic: ClassVar[str] = "bor"
+    speculatable: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:
@@ -238,6 +252,7 @@ class BoolNot(Operator):
     """A boolean negation ``not a``."""
 
     mnemonic: ClassVar[str] = "bnot"
+    speculatable: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:
@@ -249,10 +264,30 @@ class BoolNot(Operator):
 
 
 @dataclass(frozen=True, slots=True)
+class Select(Operator):
+    """
+    A data mux ``a if cond else b`` over float values, produced exclusively by the if-conversion pass, which
+    refuses constant conditions -- so a constant-condition select never exists, and since selects are created after
+    the constant folder runs, ``fold_constants`` never sees one.
+    """
+
+    mnemonic: ClassVar[str] = "select"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((BoolType(), FloatType(), FloatType()), FloatType())
+
+    def fold_constants(self, operands: list[Const]) -> None:
+        return None
+
+
+@dataclass(frozen=True, slots=True)
 class FloatToBool(Operator):
     """A scalar cast ``bool(x)``: a float is truthy iff it is nonzero (the ZKF exponent-nonzero test)."""
 
     mnemonic: ClassVar[str] = "float_to_bool"
+    speculatable: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:
@@ -271,6 +306,7 @@ class BoolToFloat(Operator):
     """A scalar cast ``float(cond)``: ``1.0`` when the boolean is true, ``0.0`` when false."""
 
     mnemonic: ClassVar[str] = "bool_to_float"
+    speculatable: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:

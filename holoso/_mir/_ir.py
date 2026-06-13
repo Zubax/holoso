@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from .._hir import ValueId
 from .._operators import (
+    BoolInversion,
     FloatSignControl,
     HardwareOperator,
     InlineHardwareOperator,
@@ -177,21 +178,17 @@ class MirBoolConst(MirConst):
 @dataclass(frozen=True, slots=True)
 class MirPhi:
     """
-    An SSA merge at a block's entry: one ``(predecessor_block, value, sign)`` arm per incoming edge, of one scalar
-    type. The folded sign control lets a float arm carry a negation/abs (``y = -x`` on one branch) into the merge,
-    applied when the arm value is installed. A boolean arm must carry the identity sign -- enforced here rather than
-    silently dropped downstream; boolean arm inversions arrive with the NOT-folding pass, which will generalize the
-    arm sideband to the typed conditioner.
+    An SSA merge at a block's entry: one ``(predecessor_block, value, conditioner)`` arm per incoming edge, of one
+    scalar type. The arm conditioner is the type's own sideband, applied when the arm value is installed: a folded
+    sign control on a float arm (``y = -x`` on one branch), an optional inversion on a boolean arm (``f = not g``).
     """
 
     scalar_type: ScalarType
-    arms: tuple[tuple[BlockId, ValueId, FloatSignControl], ...]
+    arms: tuple[tuple[BlockId, ValueId, PortConditioner], ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.scalar_type, FloatType):
-            for _pred, _value, sign in self.arms:
-                if sign != FloatSignControl():
-                    raise TypeError(f"a non-float phi arm cannot carry a sign control, got {sign!r}")
+        for _pred, _value, conditioner in self.arms:
+            _check_conditioner(conditioner, self.scalar_type, "phi arm")
 
 
 type MirNode = MirInput | MirStateRead | MirConst | MirOperation | MirPhi
@@ -212,7 +209,13 @@ class MirFloatOutput(MirOutput):
 
 @dataclass(frozen=True, slots=True)
 class MirBoolOutput(MirOutput):
-    """A boolean module output."""
+    """A boolean module output with an optional folded inversion on the driven value."""
+
+    inversion: BoolInversion = BoolInversion()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.inversion, BoolInversion):
+            raise TypeError(f"MirBoolOutput inversion must be BoolInversion, got {self.inversion!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,11 +231,15 @@ class MirFloatStateSlot(MirStateSlot):
 
 @dataclass(frozen=True, slots=True)
 class MirBoolStateSlot(MirStateSlot):
-    """A boolean persistent state slot. ``reset_value`` is the boolean snapshot; the live-out has no sign control."""
+    """A boolean persistent state slot with an optional folded inversion on its live-out value."""
+
+    inversion: BoolInversion = BoolInversion()
 
     def __post_init__(self) -> None:
         if not isinstance(self.reset_value, bool):
             raise TypeError(f"MirBoolStateSlot reset_value must be bool, got {self.reset_value!r}")
+        if not isinstance(self.inversion, BoolInversion):
+            raise TypeError(f"MirBoolStateSlot inversion must be BoolInversion, got {self.inversion!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -610,17 +617,17 @@ class MirBuilder:
             self._blocks[self.current_block].operations.append(vid)
         return vid
 
-    def phi(self, scalar_type: ScalarType, arms: list[tuple[BlockId, ValueId, FloatSignControl]]) -> ValueId:
+    def phi(self, scalar_type: ScalarType, arms: list[tuple[BlockId, ValueId, PortConditioner]]) -> ValueId:
         vid = self._fresh(MirPhi(scalar_type=scalar_type, arms=tuple(arms)))
         self._blocks[self.current_block].phis.append(vid)
         return vid
 
-    def open_phi(self, scalar_type: ScalarType, entry_arm: tuple[BlockId, ValueId, FloatSignControl]) -> ValueId:
+    def open_phi(self, scalar_type: ScalarType, entry_arm: tuple[BlockId, ValueId, PortConditioner]) -> ValueId:
         """Create a loop-header phi with only its entry arm; the latch arm is supplied later by set_phi_arms (the back
         edge references a body value defined after the header in the lowering order)."""
         return self.phi(scalar_type, [entry_arm])
 
-    def set_phi_arms(self, phi: ValueId, arms: list[tuple[BlockId, ValueId, FloatSignControl]]) -> None:
+    def set_phi_arms(self, phi: ValueId, arms: list[tuple[BlockId, ValueId, PortConditioner]]) -> None:
         """Replace a phi's arms (closes a loop-header phi opened by open_phi once the latch value is lowered)."""
         node = self._nodes[phi]
         if not isinstance(node, MirPhi):
@@ -632,10 +639,10 @@ class MirBuilder:
             raise ValueError(f"float output {name!r} must be driven by a floating-point value")
         self._outputs.append(MirFloatOutput(name, value, sign))
 
-    def bool_output(self, name: str, value: ValueId) -> None:
+    def bool_output(self, name: str, value: ValueId, inversion: BoolInversion = BoolInversion()) -> None:
         if not isinstance(self._type_of(value), BoolType):
             raise ValueError(f"bool output {name!r} must be driven by a boolean value")
-        self._outputs.append(MirBoolOutput(name, value))
+        self._outputs.append(MirBoolOutput(name, value, inversion))
 
     def float_state_slot(
         self,
@@ -648,10 +655,12 @@ class MirBuilder:
             raise ValueError(f"float state slot {name!r} must hold a floating-point value")
         self._state_slots.append(MirFloatStateSlot(name, float(reset_value), live_out, sign))
 
-    def bool_state_slot(self, name: str, reset_value: bool, live_out: ValueId) -> None:
+    def bool_state_slot(
+        self, name: str, reset_value: bool, live_out: ValueId, inversion: BoolInversion = BoolInversion()
+    ) -> None:
         if not isinstance(self._type_of(live_out), BoolType):
             raise ValueError(f"bool state slot {name!r} must hold a boolean value")
-        self._state_slots.append(MirBoolStateSlot(name, bool(reset_value), live_out))
+        self._state_slots.append(MirBoolStateSlot(name, bool(reset_value), live_out, inversion))
 
     def finish(self) -> Mir:
         if not self._blocks:

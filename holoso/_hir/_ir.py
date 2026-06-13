@@ -82,6 +82,21 @@ class Ret:
 type Terminator = Jump | Branch | Ret
 
 
+def predecessors(blocks: list["Block"]) -> dict[BlockId, set[BlockId]]:
+    """Per block, the set of CFG predecessor block ids (the one edge walk shared by validation and passes)."""
+    preds: dict[BlockId, set[BlockId]] = {block.id: set() for block in blocks}
+    for block in blocks:
+        match block.terminator:
+            case Jump(target=target):
+                preds[target].add(block.id)
+            case Branch(if_true=if_true, if_false=if_false):
+                preds[if_true].add(block.id)
+                preds[if_false].add(block.id)
+            case Ret():
+                pass
+    return preds
+
+
 @dataclass(frozen=True, slots=True)
 class Block:
     """
@@ -335,23 +350,14 @@ class HirBuilder:
         by :meth:`open_phi` and never closed (a back-edge arm left missing) and a stale or invented arm predecessor --
         construction bugs that would otherwise produce a malformed merge.
         """
-        predecessors: dict[BlockId, set[BlockId]] = {block.id: set() for block in blocks}
-        for block in blocks:
-            match block.terminator:
-                case Jump(target=target):
-                    predecessors[target].add(block.id)
-                case Branch(if_true=if_true, if_false=if_false):
-                    predecessors[if_true].add(block.id)
-                    predecessors[if_false].add(block.id)
-                case Ret():
-                    pass
+        preds = predecessors(blocks)
         for block in blocks:
             for phi_id in block.phis:
                 phi = self._nodes[phi_id]
                 assert isinstance(phi, Phi)
                 arm_preds = sorted(pred for pred, _ in phi.arms)
-                if arm_preds != sorted(predecessors[block.id]):
+                if arm_preds != sorted(preds[block.id]):
                     raise RuntimeError(
                         f"phi {phi_id} in block {block.id} has arms for predecessors {arm_preds}, "
-                        f"expected {sorted(predecessors[block.id])}"
+                        f"expected {sorted(preds[block.id])}"
                     )
