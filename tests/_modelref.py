@@ -8,8 +8,15 @@ from typing import Any
 import numpy as np
 
 from holoso import FAddOperator, FCmpOperator, FDivOperator, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso._backend.numerical import NumericalSimulator, generate as generate
+from holoso._lir import Lir
 from holoso._type import FloatFormat
 from holoso._frontend._lower import _Path, _port_name
+
+
+def build_model(lir: Lir) -> NumericalSimulator:
+    """Elaborate a runnable simulator for a built LIR -- the common test path (``generate`` returns the handle)."""
+    return generate(lir).elaborate()
 
 
 def flatten_value(root: object) -> list[tuple[_Path, Any]]:

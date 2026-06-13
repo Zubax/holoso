@@ -77,15 +77,19 @@ class Metrics:
     """
     The non-regression figures sampled off a built :class:`Lir`.
 
-    ``steering`` is the total sparse-regfile mux fan-in -- read-mux fan-in plus write-select fan-in -- which is exactly
-    the allocator's primary objective. The read/write split between the two can shift between equal-cost colorings;
-    their sum is what the gate asserts on.
+    ``steering`` is the total sparse-regfile mux fan-in -- read-mux fan-in plus the GROUND-TRUTH write-select fan-in
+    (:attr:`Lir.write_select_fanin`, which counts every write-chain driver the backend synthesizes: pooled lanes,
+    inline casts, phi-arm copies, and slot installs). Counting the copies matters here: phi-arm coalescing trades
+    pc-gated copies for shared pooled writeback lanes, so a copy-blind proxy would mis-report a coalescing win as a
+    regression. ``copies`` is the total phi-arm install count (float copies plus boolean writes), the direct measure
+    of how many phi arms still install by copy rather than coalescing onto the merged register.
     """
 
     straight_line: bool
     nreg: int
     bnreg: int
     steering: int
+    copies: int
     min_ii: int
 
 
@@ -115,16 +119,13 @@ def _measure(name: str) -> Metrics:
         and lir.bool_regfile.nreg == 0
     )
     read_fanin = sum(max(0, len(regs) - 1) for regs in lir.read_set_per_port.values())
-    write_fanin = sum(
-        max(0, len(lanes) - 1)
-        for sets in (lir.write_set_per_register, lir.bool_write_set_per_register)
-        for lanes in sets.values()
-    )
+    copies = sum(len(block.copies) + len(block.bool_writes) for block in lir.blocks)
     return Metrics(
         straight_line=straight,
         nreg=lir.regfile.nreg,
         bnreg=lir.bool_regfile.nreg,
-        steering=read_fanin + write_fanin,
+        steering=read_fanin + lir.write_select_fanin,
+        copies=copies,
         min_ii=lir.min_initiation_interval,
     )
 
@@ -135,36 +136,39 @@ def _measure(name: str) -> Metrics:
 # - Registers and steering reflect the unified cross-block allocator: liveness-bounded reuse with coalesced state
 #   slots, the per-(instance, port) lane accounting of BOTH banks' write selects, the comparator's read ports
 #   counted (and steered) like any other operand muxes, and commutative orientation (the comparator swaps with its
-#   gt/lt tap exchange). Cordic's steering sits two arms above the best coloring observed in its near-equal-cost
-#   band -- the disclosed price of deterministic (seed-independent) value numbering; recovering the better coloring
-#   via higher annealing effort is optional follow-up.
+#   gt/lt tap exchange). steering now counts the GROUND-TRUTH write-select fan-in (the emitter's full per-register
+#   write chain incl. phi-arm copies), so the figures are larger than the former pooled-lane-only proxy but reflect
+#   real hardware. Cordic's read-mux steering sits a couple of arms above the best coloring observed in its
+#   near-equal-cost band -- the disclosed price of deterministic value numbering; deeper annealing is optional.
+# - copies and the phi-dense steering/registers reflect phi-arm coalescing (M5): a phi whose register-backed,
+#   identity-conditioner arms do not interfere with it (the install-free oracle decides) shares their register, so
+#   the install copy vanishes. iir1_lpf's two slot-feeding copies, remainder's diamond copies, and the boolean
+#   phi-arm writes of schmitt/quadrature/pfd coalesce away, dropping copies AND registers (recip_newton 5->4 wide,
+#   quadrature 13->8 bool) AND the true write-select fan-in (remainder 10->7); recip_newton keeps its one
+#   loop-carried copy (its phi overlaps the back-edge arm), proving the oracle refuses unsound merges.
 # - min_ii reflects the bank-true dependency edges (latch-free boolean bank), diamond if-conversion (small pure
 #   branch diamonds are select muxes: signal_window/pid/cordic lost their branch round-trips and cordic is a single
 #   block; remainder keeps its while-loop branches and its bool-phi diamond, converting only its float diamonds),
 #   and NOT-folding (a semantic NOT is a free consumer-side inversion, never a gate or a register write).
-# - bnreg reflects exact per-consumer boolean read steps: a condition consumed mid-block frees its register for a
-#   later value in the same block, so the select-dense kernels share a handful of registers across many conditions
-#   (boundary-consumed values -- branch conditions, outputs, state live-outs, phi-arm sources -- still extend to
-#   the boundary). schmitt/quadrature/pfd keep real branches: their diamonds merge boolean phis, which v1
-#   if-conversion deliberately refuses.
-# - The straight-line float-only kernels are byte-identical to the pre-convergence freeze, proving the unified
-#   path subsumes the former straight-line path. Phi installs are modeled as real predecessor-tail writes, which
-#   costs a few honest registers on the phi-dense kernels relative to the old (unsoundly shared) figures.
+#   Coalescing is layout-neutral (it is pure post-schedule register reassignment), so min_ii is unchanged by it.
+# - bnreg reflects exact per-consumer boolean read steps and phi coalescing: a condition consumed mid-block frees
+#   its register for a later value in the same block, and a boolean phi merging onto its arms drops its own register.
+#   schmitt/quadrature/pfd keep real branches: their diamonds merge boolean phis, which v1 if-conversion refuses.
 BASELINE: dict[str, Metrics] = {
-    "madd": Metrics(True, nreg=4, bnreg=0, steering=1, min_ii=20),
-    "poly3": Metrics(True, nreg=5, bnreg=0, steering=3, min_ii=35),
-    "signal_window": Metrics(False, nreg=6, bnreg=6, steering=1, min_ii=13),
-    "iir1_lpf": Metrics(False, nreg=3, bnreg=2, steering=1, min_ii=15),
-    "pid": Metrics(False, nreg=9, bnreg=3, steering=6, min_ii=40),
-    "schmitt_trigger": Metrics(False, nreg=1, bnreg=3, steering=1, min_ii=17),
-    "quadrature_encoder": Metrics(False, nreg=1, bnreg=13, steering=0, min_ii=19),
-    "phase_frequency_detector": Metrics(False, nreg=1, bnreg=12, steering=0, min_ii=15),
-    "recip_newton": Metrics(False, nreg=5, bnreg=1, steering=1, min_ii=26),
-    "remainder": Metrics(False, nreg=7, bnreg=4, steering=7, min_ii=57),
-    "cordic_sincos": Metrics(False, nreg=9, bnreg=3, steering=24, min_ii=150),
-    "integrator": Metrics(True, nreg=5, bnreg=0, steering=2, min_ii=24),
-    "ekf1_stateless": Metrics(True, nreg=39, bnreg=0, steering=81, min_ii=129),
-    "ekf1_stateful": Metrics(True, nreg=38, bnreg=0, steering=86, min_ii=132),
+    "madd": Metrics(True, nreg=4, bnreg=0, steering=3, copies=0, min_ii=20),
+    "poly3": Metrics(True, nreg=5, bnreg=0, steering=5, copies=0, min_ii=35),
+    "signal_window": Metrics(False, nreg=4, bnreg=6, steering=7, copies=0, min_ii=13),
+    "iir1_lpf": Metrics(False, nreg=3, bnreg=2, steering=3, copies=2, min_ii=15),
+    "pid": Metrics(False, nreg=9, bnreg=3, steering=10, copies=0, min_ii=40),
+    "schmitt_trigger": Metrics(False, nreg=1, bnreg=2, steering=4, copies=3, min_ii=17),
+    "quadrature_encoder": Metrics(False, nreg=1, bnreg=8, steering=16, copies=9, min_ii=19),
+    "phase_frequency_detector": Metrics(False, nreg=1, bnreg=8, steering=14, copies=14, min_ii=15),
+    "recip_newton": Metrics(False, nreg=4, bnreg=1, steering=4, copies=2, min_ii=26),
+    "remainder": Metrics(False, nreg=6, bnreg=4, steering=18, copies=4, min_ii=57),
+    "cordic_sincos": Metrics(False, nreg=9, bnreg=3, steering=54, copies=0, min_ii=150),
+    "integrator": Metrics(True, nreg=5, bnreg=0, steering=4, copies=0, min_ii=24),
+    "ekf1_stateless": Metrics(True, nreg=39, bnreg=0, steering=95, copies=0, min_ii=129),
+    "ekf1_stateful": Metrics(True, nreg=38, bnreg=0, steering=89, copies=0, min_ii=132),
 }
 
 
@@ -173,7 +177,7 @@ def test_metrics_do_not_regress(name: str) -> None:
     base = BASELINE[name]
     got = _measure(name)
     assert got.straight_line == base.straight_line, f"{name}: control-flow classification changed"
-    for field in ("nreg", "bnreg", "steering", "min_ii"):
+    for field in ("nreg", "bnreg", "steering", "copies", "min_ii"):
         assert getattr(got, field) <= getattr(
             base, field
         ), f"{name}: {field} regressed {getattr(base, field)} -> {getattr(got, field)}"

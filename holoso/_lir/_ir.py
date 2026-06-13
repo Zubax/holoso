@@ -6,6 +6,7 @@ which typed storage resources, with which folded sign controls.
 """
 
 from dataclasses import dataclass
+from typing import assert_never
 
 from .._operators import (
     BoolInversion,
@@ -15,7 +16,7 @@ from .._operators import (
     PooledHardwareOperator,
     PortConditioner,
 )
-from .._type import BoolType, FloatFormat, FloatType
+from .._type import BoolType, FloatFormat, FloatType, ScalarType
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
 FETCH_STAGES = 3
@@ -404,6 +405,23 @@ class BoolOutputWire(OutputWire):
     tap: BoolOperand
 
 
+def scalar_type_of(
+    node: FloatInputLoad | BoolInputLoad | FloatOutputWire | BoolOutputWire, fmt: FloatFormat
+) -> ScalarType:
+    """
+    The scalar type carried by an input load or output wire: a float port carries the module format ``fmt``, a boolean
+    port is a single bit. The single dispatch every consumer routes through (RTL ports and the numerical model alike),
+    so the float/boolean choice cannot drift between them.
+    """
+    match node:
+        case FloatInputLoad() | FloatOutputWire():
+            return FloatType(fmt)
+        case BoolInputLoad() | BoolOutputWire():
+            return BoolType()
+        case _:
+            assert_never(node)
+
+
 @dataclass(frozen=True, slots=True)
 class FloatCopy:
     """
@@ -577,8 +595,7 @@ class Lir:
 
     @property
     def ports(self) -> list[Port]:
-        float_type = FloatType(self.float_format)
-        bool_type = BoolType()
+        fmt = self.float_format
         ports: list[Port] = [
             ControlInputPort("clk", 1),
             ControlInputPort("rst", 1),
@@ -587,18 +604,8 @@ class Lir:
             ControlOutputPort("out_valid", 1),
             ControlInputPort("out_ready", 1),
         ]
-        for load in self.inputs:
-            match load:
-                case FloatInputLoad():
-                    ports.append(DataInputPort(f"in_{load.name}", float_type))
-                case BoolInputLoad():
-                    ports.append(DataInputPort(f"in_{load.name}", bool_type))
-        for wire in self.outputs:
-            match wire:
-                case FloatOutputWire():
-                    ports.append(DataOutputPort(wire.name, float_type))
-                case BoolOutputWire():
-                    ports.append(DataOutputPort(wire.name, bool_type))
+        ports += [DataInputPort(f"in_{load.name}", scalar_type_of(load, fmt)) for load in self.inputs]
+        ports += [DataOutputPort(wire.name, scalar_type_of(wire, fmt)) for wire in self.outputs]
         ports.append(ControlOutputPort("err_pc", self.cyc_width))
         return ports
 
@@ -707,6 +714,43 @@ class Lir:
         for writers in sets.values():
             writers.sort(key=lambda lane: (lane[0].operator.instance_stem, lane[0].index, lane[1]))
         return sets
+
+    @property
+    def write_select_fanin(self) -> int:
+        """
+        The ground-truth per-register write-select fan-in summed over both banks: for every register, the number of
+        distinct drivers in its write chain beyond the first (``max(0, drivers - 1)``). The backend drives each register
+        with one priority chain over exactly these drivers -- the input load, every pooled writeback lane, every inline
+        (cast) write, every phi-arm copy/write, and a non-coalesced slot's install. A register's live-in carry is the
+        chain's implicit hold (the unmatched-condition fall-through), not a mux input, so it is not counted. This is the
+        true steering cost the sparse register file synthesizes, counting the phi-arm copies that ``write_set_per_register``
+        (pooled lanes only) omits, so it stays meaningful as coalescing trades copies for shared writeback lanes.
+        """
+        wide: dict[int, int] = {}
+        boolc: dict[int, int] = {}
+        for fload in self.float_inputs:
+            wide[fload.dst.index] = wide.get(fload.dst.index, 0) + 1
+        for bload in self.bool_inputs:
+            boolc[bload.dst.index] = boolc.get(bload.dst.index, 0) + 1
+        for reg, lanes in self.write_set_per_register.items():
+            wide[reg] = wide.get(reg, 0) + len(lanes)
+        for reg, lanes in self.bool_write_set_per_register.items():
+            boolc[reg] = boolc.get(reg, 0) + len(lanes)
+        for block in self.blocks:
+            for inline_op in block.inline_ops:
+                target = wide if isinstance(inline_op.write.dst, RegRef) else boolc
+                target[inline_op.write.dst.index] = target.get(inline_op.write.dst.index, 0) + 1
+            for copy in block.copies:
+                wide[copy.dst.index] = wide.get(copy.dst.index, 0) + 1
+            for bwrite in block.bool_writes:
+                boolc[bwrite.dst.index] = boolc.get(bwrite.dst.index, 0) + 1
+        for slot in self.float_state_slots:
+            if slot.needs_copy:
+                wide[slot.reg.index] = wide.get(slot.reg.index, 0) + 1
+        for bslot in self.bool_state_slots:
+            if bslot.needs_copy:
+                boolc[bslot.reg.index] = boolc.get(bslot.reg.index, 0) + 1
+        return sum(max(0, n - 1) for n in wide.values()) + sum(max(0, n - 1) for n in boolc.values())
 
     @property
     def group_by_cycle(self) -> tuple[dict[int, list[PooledScheduledOp]], dict[int, list[PooledScheduledOp]]]:

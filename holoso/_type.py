@@ -160,6 +160,9 @@ class FloatType(ScalarType):
     def width(self) -> int:
         return self.fmt.width
 
+    def __str__(self) -> str:
+        return f"float{self.fmt.width}"
+
 
 @dataclass(frozen=True, slots=True)
 class BoolType(ScalarType):
@@ -168,6 +171,9 @@ class BoolType(ScalarType):
     @property
     def width(self) -> int:
         return 1
+
+    def __str__(self) -> str:
+        return "bool"
 
 
 def _pow2(exp: int) -> Fraction:

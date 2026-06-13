@@ -79,13 +79,17 @@ class ColoringProblem:
     objective; ``fresh_start`` is the first register index above the pinned block. There is no write-path restriction:
     the emitter drives every register with a single priority chain over all its writers, so any two non-interfering
     values may share a register regardless of whether they are produced by an operator, a phi-arm copy, or a cast.
+
+    ``producer_key`` is a SET of producers per value, not a single one: a coalesced phi class is one ``movable`` entry
+    backed by every arm operator that writes its register, so the write-select fan-in counts the union of those
+    producers. A non-coalesced value carries a singleton set, recovering the one-producer-per-value objective exactly.
     """
 
     movable: list[ValueId]
     pinned: dict[ValueId, int]
     interferes: dict[ValueId, set[ValueId]]
     consumer_ports: dict[ValueId, set[_Port]]
-    producer_key: dict[ValueId, _Producer]
+    producer_key: dict[ValueId, frozenset[_Producer]]
     fresh_start: int
 
 
@@ -136,14 +140,17 @@ def _color_greedy(problem: ColoringProblem, compact: bool, cap: int) -> dict[Val
             if port not in ports:
                 ports.add(port)
                 port_reach[port] += 1
-        reg_writers.setdefault(reg, set()).add(problem.producer_key[vid])
+        reg_writers.setdefault(reg, set()).update(problem.producer_key[vid])
         reg_members.setdefault(reg, set()).add(vid)
 
     def marginal_cost(vid: ValueId, reg: int) -> int:
         ports: frozenset[_Port] | set[_Port] = reg_ports.get(reg, frozenset())
         writers: frozenset[_Producer] | set[_Producer] = reg_writers.get(reg, frozenset())
         read = sum(1 for port in problem.consumer_ports[vid] if port not in ports and port_reach[port] >= 1)
-        write = 1 if (problem.producer_key[vid] not in writers and len(writers) >= 1) else 0
+        # Exact incremental write-select growth (union of the value's producers into the register's), so a coalesced
+        # class's several producers are charged honestly; a singleton set reduces to the one-producer +1-or-0 step.
+        merged = writers | problem.producer_key[vid]
+        write = max(0, len(merged) - 1) - max(0, len(writers) - 1)
         return read + write
 
     def candidate_key(vid: ValueId, reg: int, is_fresh: int) -> tuple[int, int, int]:
@@ -155,7 +162,7 @@ def _color_greedy(problem: ColoringProblem, compact: bool, cap: int) -> dict[Val
             return False
         if not problem.interferes[vid].isdisjoint(reg_members[reg]):
             return False
-        if compact and len(reg_writers[reg] | {problem.producer_key[vid]}) > cap:
+        if compact and len(reg_writers[reg] | problem.producer_key[vid]) > cap:
             return False
         return True
 
@@ -197,14 +204,14 @@ def _color_refine(problem: ColoringProblem, seed: dict[ValueId, int], nreg: int,
         for vid, reg in pinned:
             assign[vid] = reg
             members[reg].add(vid)
-            writers[reg].add(problem.producer_key[vid])
+            writers[reg].update(problem.producer_key[vid])
 
         def fits(vid: ValueId, reg: int, within_cap: bool) -> bool:
             if reg not in seed_regs:  # a reserved register with no seed occupant (e.g. a write-only state slot)
                 return False
             if not problem.interferes[vid].isdisjoint(members[reg]):
                 return False
-            return not within_cap or len(writers[reg] | {problem.producer_key[vid]}) <= cap
+            return not within_cap or len(writers[reg] | problem.producer_key[vid]) <= cap
 
         for index, vid in enumerate(order):
             pref = min(nreg - 1, max(0, int(coords[index])))
@@ -218,10 +225,10 @@ def _color_refine(problem: ColoringProblem, seed: dict[ValueId, int], nreg: int,
                 free = [r for r in range(nreg) if fits(vid, r, within_cap=False)]
                 if not free:
                     return None
-                chosen = min(free, key=lambda reg: (len(writers[reg] | {problem.producer_key[vid]}), reg))
+                chosen = min(free, key=lambda reg: (len(writers[reg] | problem.producer_key[vid]), reg))
             assign[vid] = chosen
             members[chosen].add(vid)
-            writers[chosen].add(problem.producer_key[vid])
+            writers[chosen].update(problem.producer_key[vid])
         return assign
 
     if _REFINE_MAXITER <= 0:
@@ -263,7 +270,7 @@ def _assert_graph_coloring(assign: dict[ValueId, int], interferes: dict[ValueId,
 def _objective(
     assign: dict[ValueId, int],
     consumer_ports: dict[ValueId, set[_Port]],
-    producer_key: dict[ValueId, _Producer],
+    producer_key: dict[ValueId, frozenset[_Producer]],
 ) -> int:
     """Total sparse-regfile mux fan-in: read-mux fan-in across ports plus write-select fan-in across registers."""
     members: dict[int, list[ValueId]] = {}
@@ -274,7 +281,7 @@ def _objective(
     for reg, vids in members.items():
         writers: set[_Producer] = set()
         for vid in vids:
-            writers.add(producer_key[vid])
+            writers |= producer_key[vid]
             for port in consumer_ports[vid]:
                 port_regs.setdefault(port, set()).add(reg)
         write += max(0, len(writers) - 1)

@@ -21,20 +21,17 @@ class CordicSinCos:
         self.angles: tuple[float, ...] = tuple(math.atan(2.0**-i) for i in range(iterations))
 
     def __call__(self, theta: float, /) -> tuple[float, float]:
-        x = self.gain
-        y = 0.0
-        z = theta  # residual angle, driven toward zero
+        x, y, z = self.gain, 0.0, theta  # theta is the residual angle, driven toward zero
         for i in range(self.iterations):
             if z >= 0.0:
                 x_next = x - y * (2.0**-i)
                 y_next = y + x * (2.0**-i)
-                z = z - self.angles[i]
+                z -= self.angles[i]
             else:
                 x_next = x + y * (2.0**-i)
                 y_next = y - x * (2.0**-i)
-                z = z + self.angles[i]
-            x = x_next
-            y = y_next
+                z += self.angles[i]
+            x, y = x_next, y_next
         return x, y  # (cos theta, sin theta)
 
 

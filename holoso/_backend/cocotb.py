@@ -1,9 +1,11 @@
 """
 The cocotb backend: a self-contained, self-checking testbench for a generated module.
 
-``generate`` embeds the module's :class:`NumericalModel` into a standalone cocotb test.
-The testbench asserts the DUT's output bits match the model's exactly -- the model is bit-exact to the RTL,
-so the check needs no tolerance. The model and the DUT are reset and stepped in lock-step.
+``generate`` embeds the module's :class:`NumericalModel` handle into a standalone cocotb test. The bench unpickles the
+handle, elaborates a :class:`NumericalSimulator`, and ticks it in cycle-by-cycle lockstep with the DUT: each clock it
+asserts that ``out_valid``/``in_ready`` agree (so the model reaches ``out_valid`` on exactly the DUT's cycle -- the
+data-dependent latency check) and that the output bits match when valid, back-pressure included. The model is bit-exact
+to the RTL, so the output check needs no tolerance.
 
 The input sequence is either an explicit list of vectors supplied by the caller (replayed verbatim) or, when none is
 given, a default random sweep drawn from a fixed seed. The seed also drives the back-pressure stalls, so every generated
@@ -37,10 +39,12 @@ from cocotb.triggers import FallingEdge, RisingEdge, Timer
 # Currently it is needed for unpickling.
 import holoso
 
-_MODEL = pickle.loads(zlib.decompress(base64.b64decode("@@BLOB@@")))  # TODO https://github.com/Zubax/holoso/issues/12
-_FMT = _MODEL.float_format
+# Unpickle the opaque model handle and elaborate the runnable simulator the bench drives in lockstep with the DUT.
+_SIM = pickle.loads(zlib.decompress(base64.b64decode("@@BLOB@@"))).elaborate()  # TODO issues/12
+_IN_PORTS = _SIM.inputs  # logical input ports (name + scalar type), in module-port order
+_OUT_PORTS = _SIM.outputs
 
-# An explicit input sequence -- rows of per-input ZKF bits ordered as _MODEL.input_names -- or None to draw the default
+# An explicit input sequence -- rows of per-input ZKF bits ordered as the input ports -- or None to draw the default
 # random sweep below. The fixed seed makes the default sweep and the back-pressure stalls reproducible.
 _VECTORS = @@VECTORS@@
 _SEED = 0x9E3779B97F4A7C15  # TODO: allow overriding the seed, count, and range via plusargs.
@@ -53,89 +57,102 @@ def _output_bits(value):
     return int(value) if isinstance(value, bool) else value.bits
 
 
-def _input_bits(load, rng, lo, hi):
-    if type(load).__name__ == "BoolInputLoad":
-        return rng.randint(0, 1)
-    return _FMT.encode(rng.uniform(lo, hi))
+def _input_bits(port, rng, lo, hi):
+    # Encode one random input per its scalar type: a boolean draws a single bit, a float a ZKF-encoded sample.
+    match port.scalar_type:
+        case holoso.BoolType():
+            return rng.randint(0, 1)
+        case holoso.FloatType(fmt=fmt):
+            return fmt.encode(rng.uniform(lo, hi))
+        case other:
+            raise TypeError("unsupported input scalar type: %r" % (other,))
 
 
-def _input_value(load, bits):
-    if type(load).__name__ == "BoolInputLoad":
-        return bool(bits)
-    return holoso.FloatValue.from_bits(_FMT, bits)
+def _input_value(port, bits):
+    match port.scalar_type:
+        case holoso.BoolType():
+            return bool(bits)
+        case holoso.FloatType(fmt=fmt):
+            return holoso.FloatValue.from_bits(fmt, bits)
+        case other:
+            raise TypeError("unsupported input scalar type: %r" % (other,))
 
 
 @cocotb.test()
 async def cosim(dut):
     rng = random.Random(_SEED)
-    input_loads = _MODEL.lir.inputs
-    in_names = _MODEL.input_names
-    out_names = _MODEL.output_names
     if _VECTORS is not None:
         sequence = _VECTORS
     else:
         lo, hi = _DEFAULT_RANGE
-        sequence = [[_input_bits(load, rng, lo, hi) for load in input_loads] for _ in range(_DEFAULT_COUNT)]
+        sequence = [[_input_bits(p, rng, lo, hi) for p in _IN_PORTS] for _ in range(_DEFAULT_COUNT)]
 
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await FallingEdge(dut.clk)
     dut.rst.value = 1
     dut.in_valid.value = 0
+    dut.out_ready.value = 0
     for _ in range(4):
         await RisingEdge(dut.clk)
     dut.rst.value = 0
     await FallingEdge(dut.clk)
-    dut.out_ready.value = 0
-    _MODEL.reset()  # match the DUT's just-applied reset; persistent state then advances in lock-step with the DUT
+    _SIM.reset()  # the simulator and the DUT are now both idle at pc==0 (in_ready), aligned cycle for cycle from here
 
-    for index, in_bits in enumerate(sequence):
-        # The model is fed exactly the bits the DUT receives, so the comparison is bit-exact. For a stateful module
-        # this is one step of a sequence: the model and DUT carry their state forward together across iterations.
-        expected = _MODEL(*[_input_value(load, bits) for load, bits in zip(input_loads, in_bits)])
-        exp_bits = [_output_bits(value) for value in expected]
-
-        while int(dut.in_ready.value) != 1:
-            await RisingEdge(dut.clk)
-            await Timer(1, unit="ns")
-        for name, bits in zip(in_names, in_bits):
-            getattr(dut, "in_" + name).value = int(bits)
-        dut.in_valid.value = 1
+    async def lockstep(in_valid, out_ready):
+        # Advance ONE clock on the DUT and the simulator with the identical handshake, then assert they still agree. The
+        # simulator is the cycle-accurate reference, so out_valid asserting on the same cycle is the latency check, and
+        # in_ready agreeing keeps the accept handshake aligned.
+        dut.in_valid.value = 1 if in_valid else 0
+        dut.out_ready.value = 1 if out_ready else 0
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
-        dut.in_valid.value = 0
+        _SIM.tick(in_valid, out_ready)
+        assert _SIM.out_valid == bool(int(dut.out_valid.value)), "out_valid diverged: model %d dut %d" % (
+            int(_SIM.out_valid),
+            int(dut.out_valid.value),
+        )
+        assert _SIM.in_ready == bool(int(dut.in_ready.value)), "in_ready diverged: model %d dut %d" % (
+            int(_SIM.in_ready),
+            int(dut.in_ready.value),
+        )
 
-        # TODO: verify exact latency after branch support makes the model predict per-transaction latency. A ceiling
-        # guards against a runaway data-dependent loop (the model already bounds its own iteration count): a divergence
-        # between the converged model and a non-terminating DUT surfaces as a clear failure rather than a hung sim.
+    def check_outputs(index):
+        for port, value in zip(_OUT_PORTS, _SIM.output_values):
+            want = _output_bits(value)
+            got = int(getattr(dut, port.name).value)
+            assert got == want, "vector %d port %s: got 0x%x expected 0x%x" % (index, port.name, got, want)
+
+    for index, in_bits in enumerate(sequence):
         waited = 0
-        while int(dut.out_valid.value) != 1:
-            await RisingEdge(dut.clk)
-            await Timer(1, unit="ns")
+        while not _SIM.in_ready:  # idle until both can accept; they advance together so they reach it together
+            await lockstep(False, False)
             waited += 1
-            assert waited < _MAX_TRANSACTION_CYCLES, "vector %d: out_valid not asserted within %d cycles" % (
+            assert waited < _MAX_TRANSACTION_CYCLES, "vector %d: in_ready not reached" % index
+        # Accept: present the same input bits to the DUT and the simulator, then pulse in_valid for one cycle.
+        for port, bits in zip(_IN_PORTS, in_bits):
+            getattr(dut, "in_" + port.name).value = int(bits)
+        _SIM.set_inputs(*[_input_value(p, bits) for p, bits in zip(_IN_PORTS, in_bits)])
+        await lockstep(True, False)  # accept edge: pc 0 -> 1
+        # Run to out_valid in lockstep. The simulator reaches it on the same cycle as the DUT (the lockstep asserts so
+        # each cycle), which is the cycle-accurate, data-dependent latency check -- no separate prediction needed.
+        waited = 0
+        while not _SIM.out_valid:
+            await lockstep(False, False)
+            waited += 1
+            assert waited < _MAX_TRANSACTION_CYCLES, "vector %d: out_valid not reached within %d cycles" % (
                 index,
                 _MAX_TRANSACTION_CYCLES,
             )
         assert int(dut.err_pc.value) == 0, "vector %d: unexpected error at cycle %d" % (index, int(dut.err_pc.value))
-
-        # Random back-pressure: hold out_ready low for a stall. out_valid and the outputs must stay stable, and the
-        # persistent state must not advance until the transaction is actually accepted (out_valid && out_ready).
+        check_outputs(index)
+        # Random back-pressure: hold out_ready low. out_valid and the outputs must stay stable on both, and neither
+        # advances its persistent state until the transaction is accepted (out_valid && out_ready).
         for _ in range(rng.randint(0, 3)):
-            assert int(dut.out_valid.value) == 1, "vector %d: out_valid dropped under back-pressure" % index
-            for name, want in zip(out_names, exp_bits):
-                got = int(getattr(dut, name).value)
-                assert got == want, "vector %d port %s changed under back-pressure" % (index, name)
-            await RisingEdge(dut.clk)
-            await Timer(1, unit="ns")
-
-        dut.out_ready.value = 1  # accept on the next edge
-        await Timer(1, unit="ns")
-        for name, want in zip(out_names, exp_bits):
-            got = int(getattr(dut, name).value)
-            assert got == want, "vector %d port %s: got 0x%x expected 0x%x" % (index, name, got, want)
-        await RisingEdge(dut.clk)
-        await Timer(1, unit="ns")
-        dut.out_ready.value = 0
+            assert _SIM.out_valid, "vector %d: simulator dropped out_valid under back-pressure" % index
+            check_outputs(index)
+            await lockstep(False, False)
+        check_outputs(index)
+        await lockstep(False, True)  # accept the output: both advance the persistent state, pc -> 0
 '''
 
 
@@ -149,16 +166,15 @@ class CocotbOutput:
         return f"{type(self).__name__}(testbench_bytes={len(self.testbench.encode())})"
 
 
-def _embed_vectors(model: NumericalModel, vectors: list[Mapping[str, int]] | None) -> str:
+def _embed_vectors(input_names: list[str], vectors: list[Mapping[str, int]] | None) -> str:
     """Render the explicit input sequence as a Python literal of input-name-ordered ZKF-bit rows, or ``None``."""
     if vectors is None:
         return "None"
-    order = model.input_names
     rows: list[list[int]] = []
     for index, vector in enumerate(vectors):
-        if missing := [name for name in order if name not in vector]:
+        if missing := [name for name in input_names if name not in vector]:
             raise ValueError(f"cosim vector {index} is missing inputs {missing}")
-        rows.append([int(vector[name]) for name in order])
+        rows.append([int(vector[name]) for name in input_names])
     return repr(rows)
 
 
@@ -172,8 +188,8 @@ def generate(model: NumericalModel, vectors: list[Mapping[str, int]] | None = No
     """
     blob = base64.b64encode(zlib.compress(pickle.dumps(model, pickle.HIGHEST_PROTOCOL))).decode("ascii")
     testbench = (
-        _TEMPLATE.replace("@@MODULE@@", model.lir.module_name)
-        .replace("@@VECTORS@@", _embed_vectors(model, vectors))
+        _TEMPLATE.replace("@@MODULE@@", model.module_name)
+        .replace("@@VECTORS@@", _embed_vectors([port.name for port in model.inputs], vectors))
         .replace("@@BLOB@@", blob)
     )
     return CocotbOutput(testbench=testbench)

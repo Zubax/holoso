@@ -43,7 +43,7 @@ class SynthesisResult:
     output_ports: list[DataOutputPort]
     control_ports: list[ControlPort]
 
-    initiation_interval: tuple[int, int | None]  # (min II, max II or None if unbounded)
+    initiation_interval: tuple[int, int | None]  # (min II, max II or None if data-dependent)
     verilog_output: VerilogOutput
     numerical_model: NumericalModel
     cocotb_output: CocotbOutput

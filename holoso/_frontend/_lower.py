@@ -196,12 +196,12 @@ class _StateAttr:
     """
     The scalar-slot decomposition of one instance attribute, derived from the reset snapshot: a scalar occupies a single
     bare-named slot, a vector one indexed slot per element. It is the single source of an attribute's shape -- its slot
-    names, its typed reset values, and whether an assigned value must be a scalar or a same-length flat aggregate.
-    ``is_bool`` marks a single-bit boolean attribute (a scalar only; boolean vectors are not supported).
+    names, its typed reset values, and whether an assigned value must be a scalar or a same-length flat aggregate. The
+    element type lives in the typed ``resets`` (a :class:`BoolConst` reset marks a boolean attribute, a scalar only since
+    boolean vectors are not supported), so no separate type flag is carried.
     """
 
     is_vector: bool
-    is_bool: bool
     slots: list[str]
     resets: list[Const]
 
@@ -1159,7 +1159,9 @@ class _Lowerer:
         return shape.compose(tuple(_Scalar(self._read_slot(shape, slot)) for slot in shape.slots))
 
     def _read_slot(self, shape: "_StateAttr", slot: str) -> ValueId:
-        return self._builder.bool_state_read(slot) if shape.is_bool else self._builder.float_state_read(slot)
+        if isinstance(shape.resets[0], BoolConst):  # a slot's bank follows the attribute's reset-snapshot type
+            return self._builder.bool_state_read(slot)
+        return self._builder.float_state_read(slot)
 
     def _bind_name(self, name: str, value: _Value, loc: SourceLocation | None = None) -> None:
         """
@@ -1935,12 +1937,12 @@ class _Lowerer:
         value = self._snapshot[attr]
         self._check_annotation(attr, value)
         if isinstance(value, (bool, np.bool_)):  # checked before the numeric paths: bool is an int subclass
-            return _StateAttr(is_vector=False, is_bool=True, slots=[attr], resets=[BoolConst(bool(value))])
+            return _StateAttr(is_vector=False, slots=[attr], resets=[BoolConst(bool(value))])
         elements = self._aggregate_elements(attr, value)
         if elements is None:
-            return _StateAttr(False, False, [attr], [FloatConst(self._coerce_real(attr, value))])
+            return _StateAttr(False, [attr], [FloatConst(self._coerce_real(attr, value))])
         slots = [f"{attr}_{index}" for index in range(len(elements))]
-        return _StateAttr(True, False, slots, [FloatConst(self._coerce_real(attr, element)) for element in elements])
+        return _StateAttr(True, slots, [FloatConst(self._coerce_real(attr, element)) for element in elements])
 
     def _aggregate_elements(self, attr: str, value: object) -> list[object] | None:
         """The ordered elements of a 1-D aggregate value (list, tuple, or numpy array), or None for a scalar."""

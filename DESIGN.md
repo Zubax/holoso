@@ -73,8 +73,36 @@ implemented in the emitted RTL code.
 The normal policy during development is to stabilize the synthesis logic down to the LIR using the numerical
 model for verification, and once that is proven, move on to the actual HDL generation and testbenches.
 
-Generated RTL testbenches (Cocotb at the moment, others may appear later) run the RTL simulator in lockstep with the
-numerical model, feeding the same inputs and ensuring bit-exact output equivalence. For true end-to-end verification,
+The numerical-model backend splits into a serializable handle and a runtime machine. `generate()` returns a
+`NumericalModel`: an opaque, trivially-picklable wrapper that carries only the LIR (kept private, so the LIR never
+enters the public API) -- the artifact a generated testbench embeds. Its `elaborate()` builds a `NumericalSimulator`:
+the runnable per-clock state machine, an ordinary (non-pickled) object. The split keeps the serializable artifact pure
+data and frees the simulator from fighting pickle.
+
+Both expose the kernel's logical signature as read-only metadata: `inputs`/`outputs` are lists of `NumericalModelPort`, each a
+logical (parameter/return) name paired with a `ScalarType` (`FloatType`/`BoolType`, extensible to integers). Carrying
+the strong type rather than a boolean flag means a driver decides a port's encoding by matching its type, and the
+signature stays honest as new scalar types are added. The handle exposes this without elaborating; the simulator adds the
+runtime view (`output_values`, `in_ready`/`out_valid`).
+
+The simulator mirrors the generated RTL: it holds the same fetch PC and the same register files (`regs`/`bregs`), and
+`tick()` advances exactly one `posedge clk`, driving `next_pc` with the same sequencer the Verilog emits
+(reset/out_valid/in_ready/terminator redirect, back-pressure included). The timing is read off the shared cycle
+helpers, which are in the fetch-PC frame -- `operand_read_cycle` and the landing helpers give the literal PC values at
+which an operand is sampled and a result becomes readable -- so each tick commits the landings due at the current PC and
+samples the reads due there. The only mutable state beyond the register files is the small in-flight buffer (the model's
+stand-in for the operator pipeline + writeback latch: a result is computed when its operands are sampled but written to
+the register file only at its landing PC, exactly as the hardware does; inputs, having no latency, are written to their
+lanes directly). It is therefore bit-exact AND cycle-exact, stays correct when blocks overlap (the foundation for
+cross-block pipelining), and runs an arbitrarily deep loop in bounded memory (the same PCs simply re-fire on each
+revisit, and the buffer only ever holds the handful of in-flight results). The persistent state is just the slot
+registers within `regs`/`bregs`, carried across transactions. A `run()` convenience drives `tick()` over one whole
+transaction for callers that only want the outputs; the per-transaction cycle count is recovered by counting ticks.
+
+Generated RTL testbenches (Cocotb at the moment, others may appear later) run the RTL simulator in cycle-by-cycle
+lockstep with the elaborated numerical simulator: each cycle ticks both with the same handshake and asserts that
+`out_valid` agrees (so the model reaches it on exactly the DUT's cycle -- the data-dependent latency check) and that the
+output bits match when valid, back-pressure included. For true end-to-end verification,
 the original Python code can be verified against the numerical model itself but it is at the moment up to the user,
 mostly because robust verification requires knowledge of the semantics of the original code.
 
@@ -420,13 +448,12 @@ timing penalties due to the expensive read/write port multiplexors, hence the sp
 Register allocation is reach-aware over the whole control-flow graph. Whether two values may share a register is
 decided on a hardware-frame interference graph built from per-block liveness: a value resides in a block from the
 block's first step when it is carried in from a predecessor or is a phi result, from its operator's landing cycle when
-it is defined in the block, and through the block boundary when it is live out; a phi result additionally resides at
-the tail of every arm predecessor, because its install copy physically writes the phi register there -- one step
-before the boundary where a branch terminator reads its condition, so an unmodeled install could clobber the very
-condition selecting the successor. (This conservatively also forbids a phi from sharing its own arm values'
-registers, although that same-step read-first self-copy would be harmless; a copy-coalescing pass could reclaim it.
-A branch on a phi installed in the branching block itself is rejected outright -- there the conflict is the value
-with itself and no assignment can help.) Two values interfere when their residences overlap in some block under the
+it is defined in the block, and through the block boundary when it is live out; a phi result whose arm is installed by
+a copy additionally resides at the tail of every such arm predecessor, because the install copy physically writes the
+phi register there -- one step before the boundary where a branch terminator reads its condition, so an unmodeled
+install could clobber the very condition selecting the successor. (A branch on a phi installed in the branching block
+itself is rejected outright -- there the conflict is the value with itself and no assignment can help.) Two values
+interfere when their residences overlap in some block under the
 read-first rule (the older value's last read must precede the newer's landing). Path-awareness is free -- the two arms
 of an `if` are live in no common block, so their temporaries reuse the
 same registers, which is what keeps a heavily-branched kernel (e.g., a 12-iteration CORDIC) to a handful of wide
@@ -435,6 +462,22 @@ registers. The primary objective is to minimize per-port read-set and per-regist
 and again compacting dead registers up to a write-select cap, keeping whichever minimizes `reach + price * registers`,
 so it sheds a register only when that widens a write select modestly. No spill. The coloring is a port-affinity greedy
 seed refined by simulated annealing over the same objective.
+
+Phi-arm coalescing eliminates most install copies: before coloring, each phi and its register-backed,
+identity-conditioner arms are merged into one congruence class by union-find whenever no member of one side
+interferes with any member of the other. The merge is judged on an install-free interference oracle
+(the conservatism above, which forecloses a phi from sharing its own arm registers,
+is exactly what coalescing reclaims): a coalesced arm carries no install copy, so its
+value flows straight into the merged register. The final interference is then rebuilt with only the residual
+(non-coalesced) arm installs, the class leaders are colored, and the colors expand to every member --
+so the steering objective counts the union of each class's read ports and write producers honestly.
+State-slot registers are reserved (their reservation and early-install machinery owns them),
+so an arm pinned there keeps its copy; an arm a sibling arm reads under a non-identity conditioner keeps its copy too
+(coalescing it would create an in-place self-conditioned copy the install-free oracle cannot see).
+A loop-carried phi whose live-in overlaps its back-edge arm interferes in the oracle and keeps its copy; a diamond's
+mutually-exclusive arms, and a loop carry read strictly before its update lands, coalesce away.
+The pass is pure post-schedule register reassignment over value-preserving moves, so it never changes the
+emitted behaviour or the PC layout -- only the register and copy counts.
 
 Commutative port assignment: after allocation, each firing of a commutative operator has its two operands oriented
 across its read ports to minimize the total read-set size. A register that an operand reads in one position and
@@ -461,8 +504,8 @@ fetch PC at the block's boundary via a small `case(pc)` in `next_pc` that, for a
 register (`bregs`). A phi (and each persistent slot's live-out) is resolved at register allocation as above: coalesced
 onto the merged register when its live range does not overlap, else installed by a pc-gated copy at the predecessor's
 tail (a parallel copy bundle, read-first, so a swap is correct). `min_initiation_interval` is the shortest-path lower
-bound (exact when the kernel has a single forward path); the numerical model reproduces output bits exactly but does
-not yet predict the actual per-transaction cycle latency (the testbench checks output bits at the out_valid handshake).
+bound (exact when the kernel has a single forward path); the numerical model predicts the exact per-transaction cycle
+latency from the block path it takes (the testbench locksteps on that out_valid cycle, see Backend).
 
 Compile-time-known branch conditions fold to a single arm so the other is never lowered (no spurious state from an
 unreachable write): a literal, a read-only boolean attribute, a comparison whose operands are both compile-time floats
@@ -488,19 +531,12 @@ whole op stream.
 
 ### DEFERRED
 
-Phi-arm coalescing: a phi arm is still installed by a pc-gated copy rather than coalesced onto the merged register
-(path-aware coalescing -- mutually exclusive arms do not interfere; a loop-carried phi whose live-in and live-out
-overlap still needs copy-installation).
-
 Cross-block software pipelining: the machine uses per-block drain barriers; overlapping a fall-through block's head
 with its predecessor's tail (branches and loop back-edges stay hard PC barriers -- the ZISC cannot fetch a successor
 before the redirect resolves) is a separate scheduling effort. The complementary half -- if-converting small pure
-diamonds to `select` muxes so branchy kernels become branch-free and pipeline fully -- has landed (see HIR).
-
-The numerical model should advance one clk per `.tick()`, replaying PCs and latches like the hardware, so it stays
-correct under register reuse and cross-block overlap by construction and enables cycle-accurate lockstep cosimulation
-with immediate state-divergence detection (today it reproduces output bits exactly, block by block, but not the
-per-transaction cycle latency).
+diamonds to `select` muxes so branchy kernels become branch-free and pipeline fully -- has landed (see HIR). The
+per-clock numerical model is the oracle this rests on: it already commits each result on its true landing PC rather
+than at a per-block boundary, so it stays correct once blocks overlap.
 
 ## Operators
 

@@ -23,11 +23,11 @@ from pathlib import Path
 import holoso
 
 
-def signal_window(x: float, lo: float, hi: float) -> tuple[float, float, float, float, float]:
+def signal_window(x: float, lo: float, hi: float) -> tuple[float, bool, bool, bool, float]:
     clamped = hi if x > hi else (lo if x < lo else x)
-    inside = float(lo < x < hi)
-    outside = 1.0 if (x <= lo or x >= hi) else 0.0
-    live = float(bool(x) and lo < x < hi)
+    inside = lo < x < hi
+    outside = x <= lo or x >= hi
+    live = bool(x) and lo < x < hi
     gated = float(lo < x < hi) * x
     return clamped, inside, outside, live, gated
 

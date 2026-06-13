@@ -26,6 +26,7 @@ from holoso._lir import (
     FloatConstRef,
     FloatOperand,
     InlineProducer,
+    Jump,
     RegRef,
     latest_producer_before,
     operand_read_cycle,
@@ -47,7 +48,7 @@ from holoso._mir import (
 )
 from holoso._operators import BoolAndOperator, BoolInversion, FMulILog2Operator, FloatSignControl, SelectOperator
 from holoso._hir import RelationalOp
-from holoso._backend.numerical import generate as build_model
+from ._modelref import build_model
 from holoso._lir import build
 from holoso._lir._schedule import resolve_pool, schedule_ops
 from holoso._type import BoolType, FloatType, ScalarType
@@ -188,7 +189,7 @@ def test_phi_install_does_not_clobber_the_branch_condition() -> None:
     for flag_value in (False, True):
         for other_value in (False, True):
             want = (not other_value) if flag_value else other_value
-            assert model(flag_value, other_value)[0] is want, f"flag={flag_value} other={other_value}"
+            assert model.run(flag_value, other_value)[0] is want, f"flag={flag_value} other={other_value}"
 
 
 def test_branch_on_phi_installed_in_the_branching_block_is_rejected() -> None:
@@ -335,14 +336,15 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
 def test_cfg_phi_merge_register_shows_residence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # the subject is the branchy phi-copy machinery
 
-    # A diamond whose merged result is read only by the output: its register is written by the per-arm phi copies and
-    # read at the boundary, never by an operator. Before phi-copy residence was added to reg_liveness, such a register
-    # had a use but no def and so collapsed to an empty (untinted) live set -- the CFG-report liveness gap.
-    def f(x, y):  # type: ignore[no-untyped-def]
+    # A diamond merging two CONSTANT arms: constants are not register-backed, so neither coalesces -- the merged
+    # register is written ONLY by the per-arm phi copies and read at the boundary, never by an operator. Before
+    # phi-copy residence was added to reg_liveness, such a register had a use but no def and so collapsed to an empty
+    # (untinted) live set -- the CFG-report liveness gap.
+    def f(x):  # type: ignore[no-untyped-def]
         if x > 0.0:
-            z = x + y
+            z = 1.0
         else:
-            z = x - y
+            z = 2.0
         return z
 
     lir = build(_run(f), "diamond")
@@ -375,7 +377,7 @@ def test_cfg_write_only_state_slot_is_reserved() -> None:
         write.dst.index for op in lir.ops for write in op.writes
     }  # reserved: no operator result lands on it
     model = build_model(lir)
-    assert float(model(3.0)[0]) == 6.0 and float(model(-2.0)[0]) == -6.0
+    assert float(model.run(3.0)[0]) == 6.0 and float(model.run(-2.0)[0]) == -6.0
 
 
 def test_cfg_state_slot_coalesces_onto_its_register() -> None:
@@ -397,8 +399,8 @@ def test_cfg_state_slot_coalesces_onto_its_register() -> None:
     assert slot.tap.source == slot.reg
     model = build_model(lir)
     model.reset()
-    first = float(model(2.0)[0])  # state <- 0*0.9 + 2 = 2; out = float(2>0)*2 = 2
-    second = float(model(1.0)[0])  # state <- 2*0.9 + 1 ~ 2.8; out ~ 2.8 -- proves the coalesced state carried over
+    first = float(model.run(2.0)[0])  # state <- 0*0.9 + 2 = 2; out = float(2>0)*2 = 2
+    second = float(model.run(1.0)[0])  # state <- 2*0.9 + 1 ~ 2.8; out ~ 2.8 -- proves the coalesced state carried over
     assert abs(first - 2.0) < 1e-3 and 2.5 < second < 3.0
 
 
@@ -422,7 +424,83 @@ def test_cfg_branch_conditions_reuse_boolean_registers(monkeypatch: pytest.Monke
     assert comparisons >= 3
     assert lir.bool_regfile.nreg < comparisons  # the three conditions share boolean registers
     model = build_model(lir)
-    assert abs(float(model(1.0, -1.0, 1.0)[0]) - 6.0) < 1e-3  # a=1; +1 (x>0); skip (y<=0); +4 (z>0) = 6
+    assert abs(float(model.run(1.0, -1.0, 1.0)[0]) - 6.0) < 1e-3  # a=1; +1 (x>0); skip (y<=0); +4 (z>0) = 6
+
+
+def _coalescing_self_copies(lir) -> int:  # type: ignore[no-untyped-def]
+    """Count no-op identity copies (``r <= r`` with identity sign): a coalescable arm the pass should have merged."""
+    return sum(
+        1
+        for block in lir.blocks
+        for copy in block.copies
+        if isinstance(copy.source.source, RegRef)
+        and copy.source.source == copy.dst
+        and copy.source.sign == FloatSignControl()
+    )
+
+
+def test_diamond_op_result_arms_coalesce(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A forced float diamond merges two op-result arms in mutually exclusive blocks; with no interference they coalesce
+    # onto the merged register, so the phi installs NO copy at all (and certainly no no-op self-copy). The result stays
+    # correct on both arms -- bit-exact value preservation against the RTL is the cosim's job; here we pin the win.
+    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # keep the diamond a real phi merge, not a select
+
+    def f(x, y):  # type: ignore[no-untyped-def]
+        if x > 0.0:
+            z = x + y
+        else:
+            z = x * y
+        return z * x  # an operator use of the merged value, not only the boundary output
+
+    lir = build(_run(f), "phicoal")
+    assert sum(len(b.copies) for b in lir.blocks) == 0, "the diamond's op-result arms must coalesce away their copies"
+    assert _coalescing_self_copies(lir) == 0
+    model = build_model(lir)
+    for a, b in ((2.0, 3.0), (-2.0, 3.0), (1.5, -4.0)):
+        ref = (a + b) * a if a > 0.0 else (a * b) * a
+        got = float(model.run(a, b)[0])
+        assert abs(got - ref) <= 1e-2 * max(1.0, abs(ref)), f"{a},{b}: {got} vs {ref}"
+
+
+def test_loop_carried_phi_coalesces_when_non_interfering() -> None:
+    # A directed loop whose carried value is read once (read-first) before its update lands: the header phi and its
+    # back-edge arm (an op result) do not interfere, so they coalesce -- the loop body installs no register-source copy.
+    # Only the entry constants (acc=0, i=0) keep their copies.
+    def f(x):  # type: ignore[no-untyped-def]
+        acc = 0.0
+        i = 0.0
+        while i < 3.0:
+            acc = acc + x
+            i = i + 1.0
+        return acc
+
+    lir = build(_run(f), "accum")
+    register_source_copies = [
+        copy for block in lir.blocks for copy in block.copies if isinstance(copy.source.source, RegRef)
+    ]
+    assert not register_source_copies, "the non-interfering back-edge arms must coalesce (no register-source copy)"
+    assert _coalescing_self_copies(lir) == 0
+    model = build_model(lir)
+    for x in (0.5, 1.0, 2.0, 3.0):
+        assert abs(float(model.run(x)[0]) - 3.0 * x) <= 1e-2 * max(1.0, 3.0 * x)
+
+
+def test_interfering_loop_carried_phi_keeps_its_copy() -> None:
+    # The dual: Newton's reciprocal carries a value read several times across the body, so the header phi overlaps the
+    # back-edge update (the new value lands while the old is still needed). The oracle must refuse that merge -- the
+    # back-edge arm (an operator result) stays installed by a copy at the loop body's tail.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    from recip_newton import NewtonReciprocal  # noqa: PLC0415  (example kernels live under examples/)
+
+    lir = build(_run(NewtonReciprocal().__call__), "recip")
+    back_edge_op_copies = [
+        copy
+        for block in lir.blocks
+        if isinstance(block.terminator, Jump) and lir.block_base[block.terminator.target] <= lir.block_base[block.index]
+        for copy in block.copies
+        if isinstance(copy.source.source, RegRef)
+    ]
+    assert back_edge_op_copies, "the interfering loop-carried Newton update must keep its back-edge install copy"
 
 
 def test_state_war_backstop_allows_noop_writeback() -> None:
@@ -788,9 +866,9 @@ def test_optional_stages_raise_latency_without_changing_numerics() -> None:
     models = {name: build_model(lir) for name, lir in lirs.items()}
     vectors = [(1.5, -0.5, 2.0), (3.25, 1.0, -4.0), (0.0, 2.5, 0.125), (-1.0, -1.0, 1e3)]
     for values in vectors:
-        want = [v.bits for v in models["default"](*values)]
+        want = [v.bits for v in models["default"].run(*values)]
         for name, model in models.items():
-            assert [v.bits for v in model(*values)] == want, f"{name} diverged from default at {values}"
+            assert [v.bits for v in model.run(*values)] == want, f"{name} diverged from default at {values}"
 
 
 def test_reach_floor_seed_skips_annealing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -868,7 +946,7 @@ def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
     assert len({write.dst for write in firing.writes}) == 2  # simultaneous landings get distinct registers
     model = build_model(lir)
     for a, b in [(1.0, 2.0), (2.0, 1.0), (1.5, 1.5)]:
-        below, same = (float(v) for v in model(a, b))
+        below, same = (float(v) for v in model.run(a, b))
         assert below == float(a < b) and same == float(a == b), f"a={a} b={b}"
 
 
@@ -886,7 +964,7 @@ def test_same_port_taps_with_different_inversions_do_not_fuse() -> None:
     assert len({op.issue_cycle for op in firings}) == 2  # the single instance serializes them
     model = build_model(lir)
     for a, b in [(1.0, 2.0), (2.0, 1.0), (1.5, 1.5)]:
-        below, not_below = (float(v) for v in model(a, b))
+        below, not_below = (float(v) for v in model.run(a, b))
         assert below == float(a < b) and not_below == float(a >= b), f"a={a} b={b}"
 
 
@@ -989,7 +1067,7 @@ def test_commutative_comparator_swap_permutes_output_taps() -> None:
     assert ports == sorted((gt_port, lt_port)), "exactly one firing's lt tap must move to gt under the swap"
     model = build_model(lir)
     for a, b in [(1.0, 2.0), (2.0, 1.0), (1.5, 1.5)]:
-        below, above = (float(v) for v in model(a, b))
+        below, above = (float(v) for v in model.run(a, b))
         assert below == float(a < b) and above == float(b < a), f"a={a} b={b}"
 
 
@@ -1005,7 +1083,7 @@ def test_chained_slot_live_in_blocks_early_install() -> None:
     reference = ChainedSlots()
     model = build_model(lir)
     for x in (2.0, 3.0, 4.0):
-        got = float(model(x)[0])
+        got = float(model.run(x)[0])
         want = reference(x)
         assert abs(got - want) <= 1e-2 * max(1.0, abs(want)), f"x={x}: {got} vs {want}"
 
@@ -1029,7 +1107,7 @@ def test_select_folds_arm_signs_into_operand_conditioners() -> None:
     model = build_model(lir)
     for x in (2.0, -3.0):
         for c in (1.0, -1.0):
-            assert float(model(x, c)[0]) == (x if c > 0.0 else -x)
+            assert float(model.run(x, c)[0]) == (x if c > 0.0 else -x)
 
 
 def test_state_early_install_respects_a_select_reader() -> None:
@@ -1049,7 +1127,7 @@ def test_state_early_install_respects_a_select_reader() -> None:
     reference = SelectHold()
     model = build_model(lir)
     for x, c in [(2.0, 1.0), (3.0, -1.0), (4.0, 1.0), (5.0, -1.0)]:
-        got = float(model(x, c)[0])
+        got = float(model.run(x, c)[0])
         want = reference.step(x, c)
         assert abs(got - want) <= 1e-2 * max(1.0, abs(want)), f"x={x} c={c}: {got} vs {want}"
 
@@ -1072,7 +1150,7 @@ def test_not_folds_into_every_sink_position() -> None:
     model = build_model(lir)
     for a, b, c in [(1.0, 2.0, 1.0), (2.0, 1.0, 1.0), (1.0, 2.0, -1.0)]:
         flag = not (a > b)
-        got = [float(v) for v in model(a, b, c)]
+        got = [float(v) for v in model.run(a, b, c)]
         assert got == [float(flag), float(flag and (c > 0.0))], f"{a},{b},{c}: {got}"
 
 
@@ -1091,7 +1169,7 @@ def test_not_on_a_branch_condition_swaps_the_targets() -> None:
     model = build_model(lir)
     for a, b in [(1.0, 2.0), (2.0, 1.0)]:
         want = a / (b * b + 1.0) if not (a > b) else b / (a * a + 1.0)
-        got = float(model(a, b)[0])
+        got = float(model.run(a, b)[0])
         assert abs(got - want) <= 1e-2 * max(1.0, abs(want))
 
 
@@ -1106,7 +1184,7 @@ def test_double_negation_cancels() -> None:
     (operand,) = cast.operands
     assert isinstance(operand, BoolOperand) and operand.inversion == BoolInversion()
     model = build_model(lir)
-    assert float(model(2.0, 1.0)[0]) == 1.0 and float(model(1.0, 2.0)[0]) == 0.0
+    assert float(model.run(2.0, 1.0)[0]) == 1.0 and float(model.run(1.0, 2.0)[0]) == 0.0
 
 
 def test_value_consumed_in_both_polarities_shares_one_producer() -> None:
@@ -1120,7 +1198,7 @@ def test_value_consumed_in_both_polarities_shares_one_producer() -> None:
     assert len(comparisons) == 1 and len(comparisons[0].writes) == 1, "one tap serves both polarities"
     model = build_model(lir)
     for a, b in [(2.0, 1.0), (1.0, 2.0)]:
-        assert [float(v) for v in model(a, b)] == [float(a > b), float(not (a > b))]
+        assert [float(v) for v in model.run(a, b)] == [float(a > b), float(not (a > b))]
 
 
 class _InvertedState:
@@ -1144,7 +1222,7 @@ def test_bool_state_slot_carries_a_live_out_inversion() -> None:
     reference = _InvertedState()
     model = build_model(lir)
     for x in (1.0, 2.0, 3.0, 4.0):
-        assert float(model(x)[0]) == reference.step(x)
+        assert float(model.run(x)[0]) == reference.step(x)
 
 
 def test_inverted_bool_phi_arm_installs_with_opposite_polarities() -> None:
@@ -1172,7 +1250,7 @@ def test_inverted_bool_phi_arm_installs_with_opposite_polarities() -> None:
     for a, b, c in [(2.0, 1.0, 1.0), (2.0, 1.0, -1.0), (1.0, 2.0, 1.0), (1.0, 2.0, -1.0)]:
         flag = a > b
         want_flag = (not flag) if c > 0.0 else flag
-        got = [float(v) for v in model(a, b, c)]
+        got = [float(v) for v in model.run(a, b, c)]
         assert got[0] == float(want_flag), f"{a},{b},{c}: {got}"
 
 
@@ -1194,7 +1272,7 @@ def test_boolean_registers_are_reused_within_a_block() -> None:
         want = x
         for _ in range(6):
             want = (want - 1.0) if want > 1.0 else (want + 1.0)
-        got = float(model(x)[0])
+        got = float(model.run(x)[0])
         assert abs(got - want) <= 1e-3 * max(1.0, abs(want))
 
 
@@ -1217,4 +1295,4 @@ def test_boolean_logic_chain_reuses_registers_on_the_tight_same_bank_edge() -> N
     for vals in itertools.product([0.0, 1.0], repeat=6):
         a, b, c, d, e, g = vals
         want = 1.0 if (a > b and c > d and e > g and a > d and b > e) else 0.0
-        assert float(model(*vals)[0]) == want, vals
+        assert float(model.run(*vals)[0]) == want, vals

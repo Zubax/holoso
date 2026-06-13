@@ -41,7 +41,7 @@ from holoso._hir._const_fold import run as fold_constants
 from holoso._lir import build
 from holoso._mir import lower as lower_to_mir, Mir, MirFloatConst, MirFloatInput, MirOperation
 from holoso._operators import FMulILog2Operator, FloatSignControl
-from holoso._backend.numerical import generate as build_model
+from ._modelref import build_model
 
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
@@ -339,7 +339,7 @@ def test_deep_cfg_does_not_overflow_recursion() -> None:
     assert len(hir.blocks) > 1000  # the CFG is genuinely deep (otherwise the regression would not bite)
     model = build_model(build(_run(_deep_cfg_kernel), "deep"))
     for x in (0.5, 2.0, 8.0):  # acc stays positive -> +900 every time; 0.5/2.0/8.0 are exact in ZKF
-        assert float(model(x)[0]) == _deep_cfg_kernel(x)
+        assert float(model.run(x)[0]) == _deep_cfg_kernel(x)
 
 
 def test_const_fold_handles_absorbing_and_identity_boolean_connectives() -> None:

@@ -18,7 +18,7 @@ class PhaseFrequencyDetector:
         self.down: bool = False
 
     def __call__(self, ref_edge: bool, fb_edge: bool, clear: bool, /) -> tuple[bool, bool]:
-        if clear:  # Once we added support for multiple methods, this 'clear' input would be a separate method.
+        if clear:  # Once we added support for multiple methods, this 'clear' branch would be a separate method.
             self._ref_pending = False
             self._fb_pending = False
             self.up = False

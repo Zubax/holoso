@@ -37,6 +37,8 @@ from ._portassign import assign_commutative_ports
 from ._regalloc import ColoringProblem, color
 from ._schedule import Schedule, resolve_pool, schedule_ops
 
+type _Producer = OperatorInstance | str  # write-source identity for the steering objective (see ._regalloc)
+
 
 @dataclass(frozen=True, slots=True)
 class _PooledConst:
@@ -87,6 +89,7 @@ class _FloatBankAlloc:
     slot_reg: dict[str, int]
     nreg: int
     install: dict[str, int]  # slot name -> Ret-block-relative scheduler-frame install cycle of its live-out
+    coalesced: frozenset[tuple[int, ValueId]]  # (pred, phi) arms coalesced onto the merged register (no copy)
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +99,7 @@ class _BoolBankAlloc:
     reg: dict[ValueId, int]
     slot_reg: dict[str, int]
     nreg: int
+    coalesced: frozenset[tuple[int, ValueId]]  # (pred, phi) arms coalesced onto the merged register (no copy)
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +184,10 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
     alloc = _allocate(mir, float_mir, bool_mir, block_sched, inst_of)
     leaders = {leader for sched in block_sched.values() for leader in sched.firings}
     swap = assign_commutative_ports(mir.nodes, inst_of, leaders, alloc.float_reg)
+    # The +1 install step is a property of the CFG shape (does any phi take an arm from this block, or does it branch on
+    # a const), decided before allocation so the layout and liveness agree on each block's makespan. Phi coalescing may
+    # delete every copy in such a block, but the block keeps its drain step regardless, so layout/liveness stay valid.
+    has_install_blocks = _block_has_install(mir, float_mir, bool_mir)
 
     blocks: list[LirBlock] = []
     for block in mir.blocks:
@@ -209,7 +217,7 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
             BoolWrite(BoolRegRef(w.dst), _bool_operand(bool_mir, w.source, alloc, w.inversion), install)
             for w in alloc.bool_writes.get(block.id, [])
         ]
-        has_install = bool(copies or bool_writes)
+        has_install = block.id in has_install_blocks
         block_makespan = install if has_install else work_makespan
         # The latch-free bool bank gives a branch condition exactly one cycle of slack: a bool result committing at the
         # makespan lands one step before the terminator's boundary read. The schedule's makespan covers every commit by
@@ -587,6 +595,148 @@ def _block_has_install(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView)
     return has
 
 
+@dataclass(frozen=True, slots=True)
+class _PhiCoalescing:
+    """One bank's phi-arm coalescing outcome: the class leader of every merged value and the arms that lost their copy."""
+
+    leader: dict[ValueId, ValueId]  # value -> class leader (a value never merged maps to itself, implicitly)
+    coalesced: frozenset[tuple[int, ValueId]]  # (pred, phi) arms that share the merged register (no install copy)
+
+
+def _coalesce_phis(
+    phi_nodes: Mapping[ValueId, MirPhi],
+    phi_order: list[ValueId],
+    candidate_arms: dict[ValueId, list[tuple[int, ValueId]]],
+    oracle: dict[ValueId, set[ValueId]],
+    pinned: dict[ValueId, int],
+    reserved_regs: set[int],
+) -> _PhiCoalescing:
+    """
+    Union-find phi-arm coalescing for one bank. Each phi result and its register-backed, identity-conditioner arms
+    (``candidate_arms``) merge into one congruence class whenever the merge introduces no interference -- judged on
+    ``oracle``, the install-free interference graph, since a coalesced class carries no install copy. The arms and the
+    phi then share a register and the install copy vanishes. A class carries at most one pinned register; a class may
+    not land on a ``reserved`` register (the state-slot registers, whose reservation/early-install machinery owns
+    them), so a slot live-in/out arm keeps its copy. ``phi_order`` is the deterministic processing order (block
+    reverse-postorder, then value id); arms are processed in their phi-arm order. The merge admits iff NO member of one
+    class interferes with ANY member of the other -- exact because ``oracle`` restricted to coalesced-class members
+    equals the final (residual-install) interference restricted to them.
+    """
+    parent: dict[ValueId, ValueId] = {}
+    members: dict[ValueId, set[ValueId]] = {}
+    pin: dict[ValueId, int] = {}
+
+    def find(x: ValueId) -> ValueId:
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:  # path compression
+            parent[x], x = root, parent[x]
+        return root
+
+    def ensure(x: ValueId) -> None:
+        if x not in parent:
+            parent[x] = x
+            members[x] = {x}
+            if x in pinned:
+                pin[x] = pinned[x]
+
+    for phi_vid in phi_order:
+        ensure(phi_vid)
+        for _pred, arm in candidate_arms.get(phi_vid, []):
+            ensure(arm)
+            la, lb = find(phi_vid), find(arm)
+            if la == lb:
+                continue
+            pa, pb = pin.get(la), pin.get(lb)
+            if pa is not None and pb is not None and pa != pb:
+                continue  # the two classes are pinned to different registers
+            merged_pin = pa if pa is not None else pb
+            if merged_pin is not None and merged_pin in reserved_regs:
+                continue  # a class touching a reserved (state-slot) register may not absorb a phi
+            if any(not oracle[m].isdisjoint(members[lb]) for m in members[la]):
+                continue  # some member of one class interferes with some member of the other
+            lo, hi = (la, lb) if la < lb else (lb, la)  # leader = lowest value id, for determinism
+            parent[hi] = lo
+            members[lo] |= members.pop(hi)
+            if merged_pin is not None:
+                pin[lo] = merged_pin
+            pin.pop(hi, None)
+
+    leader = {v: find(v) for v in parent}
+    coalesced = frozenset(
+        (pred, phi_vid)
+        for phi_vid in phi_nodes
+        for pred, arm in candidate_arms.get(phi_vid, [])
+        if leader.get(arm, arm) == leader.get(phi_vid, phi_vid)
+    )
+    return _PhiCoalescing(leader, coalesced)
+
+
+def _color_quotient(
+    leader: dict[ValueId, ValueId],
+    movable: list[ValueId],
+    pinned: dict[ValueId, int],
+    interferes: dict[ValueId, set[ValueId]],
+    consumer_ports: dict[ValueId, set[tuple[OperatorInstance, int]]],
+    producer_key: dict[ValueId, frozenset[_Producer]],
+    fresh_start: int,
+) -> tuple[dict[ValueId, int], int]:
+    """
+    Color the per-value interference graph after collapsing each coalescing class to its leader, then expand the
+    leader's color back onto every member. The quotient unions each class's consumer ports and producers so the
+    steering objective stays exact (a coalesced register really is read/written by every member's port/producer). A
+    class with a pinned member pins its leader. Reduces to the plain per-value coloring when ``leader`` is the identity
+    (every value its own singleton class, e.g. a kernel with no coalescable phi arms).
+    """
+
+    def lead(v: ValueId) -> ValueId:
+        return leader.get(v, v)
+
+    leaders = sorted({lead(v) for v in interferes})
+    q_pinned: dict[ValueId, int] = {}
+    for vid, reg in pinned.items():
+        head = lead(vid)
+        assert q_pinned.setdefault(head, reg) == reg, f"coalescing class {head} spans two pinned registers"
+    q_interferes: dict[ValueId, set[ValueId]] = {head: set() for head in leaders}
+    q_ports: dict[ValueId, set[tuple[OperatorInstance, int]]] = {head: set() for head in leaders}
+    q_producers: dict[ValueId, set[_Producer]] = {head: set() for head in leaders}
+    for vid in sorted(interferes):
+        head = lead(vid)
+        q_ports[head] |= consumer_ports.get(vid, set())
+        q_producers[head] |= producer_key[vid]
+        for other in interferes[vid]:
+            head_other = lead(other)
+            if head_other != head:
+                q_interferes[head].add(head_other)
+                q_interferes[head_other].add(head)
+    q_movable: list[ValueId] = []
+    seen: set[ValueId] = set()
+    for vid in movable:  # leaders of the movable values, first occurrence, preserving the deterministic order
+        head = lead(vid)
+        if head in q_pinned or head in seen:
+            continue
+        seen.add(head)
+        q_movable.append(head)
+    q_assign, nreg = color(
+        ColoringProblem(
+            movable=q_movable,
+            pinned=q_pinned,
+            interferes=q_interferes,
+            consumer_ports=q_ports,
+            producer_key={head: frozenset(producers) for head, producers in q_producers.items()},
+            fresh_start=fresh_start,
+        )
+    )
+    assign = {vid: q_assign[lead(vid)] for vid in interferes}
+    # Loud backstop on the EXPANDED per-value coloring against the FULL (residual-install) interference: a stronger
+    # check than color()'s own assert over the collapsed quotient, catching any unsound union or oracle drift.
+    for vid, neighbours in interferes.items():
+        clash = [other for other in neighbours if assign[other] == assign[vid]]
+        assert not clash, f"coalescing produced interfering co-assignment: {vid} with {sorted(clash)}"
+    return assign, nreg
+
+
 def _allocate_float_bank(
     mir: Mir,
     float_mir: MirFloatView,
@@ -623,7 +773,9 @@ def _allocate_float_bank(
             boundary_outputs[ret_block].add(out.value)
 
     def graph(
-        boundary: dict[int, set[ValueId]], block_reads: dict[int, list[tuple[ValueId, int]]]
+        boundary: dict[int, set[ValueId]],
+        block_reads: dict[int, list[tuple[ValueId, int]]],
+        install_facts: dict[int, frozenset[ValueId]],
     ) -> dict[ValueId, set[ValueId]]:
         return compute_interference(
             BankLiveness(
@@ -638,7 +790,7 @@ def _allocate_float_bank(
                 reads=block_reads,
                 boundary_users={b: frozenset(s) for b, s in boundary.items()},
                 arm_out=arm_out,
-                installs=installs,
+                installs=install_facts,
             )
         )
 
@@ -656,7 +808,7 @@ def _allocate_float_bank(
     for slot in slots:
         if slot.live_out in values:
             boundary_oracle[ret_block].add(slot.live_out)
-    coalesce_graph = graph(boundary_oracle, reads)
+    coalesce_graph = graph(boundary_oracle, reads, installs)
     coalesced: dict[str, ValueId] = {}  # slot name -> its live-out, pinned onto the slot register (operator writes it)
     for slot in slots:
         live_out = slot.live_out
@@ -726,7 +878,6 @@ def _allocate_float_bank(
             reads_final[ret_block].append((live_out, copy_step_cycle(install[name])))
         else:
             boundary_final[ret_block].add(live_out)
-    interferes = graph(boundary_final, reads_final)
 
     pinned: dict[ValueId, int] = {vid: i for i, vid in enumerate(float_mir.input_ids)}
     for name, reg in float_slot_reg.items():
@@ -735,6 +886,32 @@ def _allocate_float_bank(
             pinned[r_in] = reg
     for name, live_out in coalesced.items():  # the coalesced live-out shares its slot register (the operator writes it)
         pinned[live_out] = float_slot_reg[name]
+
+    # Phi-arm coalescing: merge each phi with its register-backed, identity-sign arms when the install-free oracle shows
+    # no interference, so the arm value flows into the merged register with no install copy. The slot registers are
+    # reserved (their reservation/early-install machinery owns them), so a slot-pinned arm keeps its copy. The final
+    # interference then carries only the residual installs (the arms that did NOT coalesce), tightening reuse.
+    oracle = graph(boundary_final, reads_final, {b.id: frozenset() for b in mir.blocks})
+    candidate_arms: dict[ValueId, list[tuple[int, ValueId]]] = {}
+    for vid, phi in phi_nodes.items():
+        # A value another arm of THIS phi reads under a non-identity sign cannot coalesce: its residual copy would
+        # become a same-step self-conditioned copy (``r <= -r``) into the merged register, which the install-free
+        # oracle cannot see and which the final interference rightly flags. Such a (rare) phi keeps all its copies.
+        conditioned = {arm for _p, arm, cond in phi.arms if arm in values and cond != FloatSignControl()}
+        candidate_arms[vid] = [
+            (pred, arm)
+            for pred, arm, conditioner in phi.arms
+            if arm in values and conditioner == FloatSignControl() and arm not in conditioned
+        ]
+    phi_order = _movable_order(mir, list(phi_nodes), {}, phi_block, {})
+    coalescing = _coalesce_phis(phi_nodes, phi_order, candidate_arms, oracle, pinned, set(float_slot_reg.values()))
+    residual_installs: dict[int, set[ValueId]] = {b.id: set() for b in mir.blocks}
+    for vid, phi in phi_nodes.items():
+        for pred, _arm, _conditioner in phi.arms:
+            if (pred, vid) not in coalescing.coalesced:
+                residual_installs[pred].add(vid)
+    interferes = graph(boundary_final, reads_final, {b: frozenset(s) for b, s in residual_installs.items()})
+
     movable = _movable_order(
         mir, [vid for vid in (*op_nodes, *phi_nodes) if vid not in pinned], op_block, phi_block, op_commit
     )
@@ -749,29 +926,23 @@ def _allocate_float_bank(
         for pos, operand in enumerate(use_node.operands):
             if operand in values:
                 consumer_ports[operand].add((inst, pos))
-    producer_key: dict[ValueId, OperatorInstance | str] = {vid: "input" for vid in float_mir.input_ids}
-    producer_key.update({vid: f"state:{node.name}" for vid, node in float_mir.state_read_nodes.items()})
-    producer_key.update({vid: (inst_of[vid] if vid in inst_of else f"cast:{vid}") for vid in op_nodes})
-    producer_key.update({vid: f"phi:{vid}" for vid in phi_nodes})
+    producer_key: dict[ValueId, frozenset[_Producer]] = {vid: frozenset({"input"}) for vid in float_mir.input_ids}
+    producer_key.update({vid: frozenset({f"state:{node.name}"}) for vid, node in float_mir.state_read_nodes.items()})
+    producer_key.update({vid: frozenset({inst_of[vid] if vid in inst_of else f"cast:{vid}"}) for vid in op_nodes})
+    producer_key.update({vid: frozenset({f"phi:{vid}"}) for vid in phi_nodes})
 
-    assign, nreg = color(
-        ColoringProblem(
-            movable=movable,
-            pinned=pinned,
-            interferes=interferes,
-            consumer_ports=consumer_ports,
-            producer_key=producer_key,
-            fresh_start=fresh_start,
-        )
+    assign, nreg = _color_quotient(
+        coalescing.leader, movable, pinned, interferes, consumer_ports, producer_key, fresh_start
     )
     # Backstop: a non-coalesced slot register must carry nothing but its own live-in (its install copy folds no tenant).
+    # Phi coalescing never lands on a slot register (it is reserved), so this invariant is unaffected by it.
     for slot in slots:
         if slot.name in coalesced:
             continue
         reg = float_slot_reg[slot.name]
         occupants = [vid for vid, r in assign.items() if r == reg and vid != livein_of[slot.name]]
         assert not occupants, f"non-coalesced slot register {reg} ({slot.name!r}) has occupants {occupants}"
-    return _FloatBankAlloc(assign, float_slot_reg, nreg, install)
+    return _FloatBankAlloc(assign, float_slot_reg, nreg, install, coalescing.coalesced)
 
 
 @dataclass(frozen=True, slots=True)
@@ -879,45 +1050,70 @@ def _allocate_bool_bank(
         if r_in is not None:
             boundary[ret_block].add(r_in)  # reserve the slot register (its live-in is held read-first to the boundary)
     phi_facts = _phi_install_facts(mir, phi_nodes, values)
-    arm_out, installs = phi_facts.arm_out, phi_facts.installs
+    arm_out = phi_facts.arm_out
 
-    interferes = compute_interference(
-        BankLiveness(
-            blocks=[b.id for b in mir.blocks],
-            entry=mir.entry,
-            succ=_succ_map(mir),
-            makespan=block_makespan,
-            resident=frozenset({*bool_mir.input_ids, *bool_mir.state_read_nodes}),
-            op_landing={vid: bool_landing_cycle(commit) for vid, commit in op_commit.items()},
-            op_block=op_block,
-            phi_block=phi_block,
-            reads=reads,
-            boundary_users={b: frozenset(s) for b, s in boundary.items()},
-            arm_out=arm_out,
-            installs=installs,
+    def graph(install_facts: dict[int, frozenset[ValueId]]) -> dict[ValueId, set[ValueId]]:
+        return compute_interference(
+            BankLiveness(
+                blocks=[b.id for b in mir.blocks],
+                entry=mir.entry,
+                succ=_succ_map(mir),
+                makespan=block_makespan,
+                resident=frozenset({*bool_mir.input_ids, *bool_mir.state_read_nodes}),
+                op_landing={vid: bool_landing_cycle(commit) for vid, commit in op_commit.items()},
+                op_block=op_block,
+                phi_block=phi_block,
+                reads=reads,
+                boundary_users={b: frozenset(s) for b, s in boundary.items()},
+                arm_out=arm_out,
+                installs=install_facts,
+            )
         )
-    )
 
     pinned: dict[ValueId, int] = {vid: i for i, vid in enumerate(bool_mir.input_ids)}
     for name, reg in bool_slot_reg.items():
         r_in = state_read_of.get(name)
         if r_in is not None:
             pinned[r_in] = reg
+
+    # Phi-arm coalescing (see _coalesce_phis): merge each boolean phi with its register-backed, identity-inversion arms
+    # when the install-free oracle shows no interference; the slot registers stay reserved. The final interference then
+    # carries only the residual installs (the non-coalesced arms).
+    oracle = graph({b.id: frozenset() for b in mir.blocks})
+    candidate_arms: dict[ValueId, list[tuple[int, ValueId]]] = {}
+    for vid, phi in phi_nodes.items():
+        # A value another arm of THIS phi reads under a non-identity inversion cannot coalesce: its residual copy
+        # would become a same-step self-inverting copy (``b <= ~b``) into the merged register that the install-free
+        # oracle cannot see and the final interference rightly flags (the M3 ``not flag`` opposite-arm shape).
+        conditioned = {arm for _p, arm, cond in phi.arms if arm in values and cond != BoolInversion()}
+        candidate_arms[vid] = [
+            (pred, arm)
+            for pred, arm, conditioner in phi.arms
+            if arm in values and conditioner == BoolInversion() and arm not in conditioned
+        ]
+    phi_order = _movable_order(mir, list(phi_nodes), {}, phi_block, {})
+    coalescing = _coalesce_phis(phi_nodes, phi_order, candidate_arms, oracle, pinned, set(bool_slot_reg.values()))
+    residual_installs: dict[int, set[ValueId]] = {b.id: set() for b in mir.blocks}
+    for vid, phi in phi_nodes.items():
+        for pred, _arm, _conditioner in phi.arms:
+            if (pred, vid) not in coalescing.coalesced:
+                residual_installs[pred].add(vid)
+    interferes = graph({b: frozenset(s) for b, s in residual_installs.items()})
+
     movable = _movable_order(mir, [*op_nodes, *phi_nodes], op_block, phi_block, op_commit)
     # One coloring engine for both banks. The boolean bank has no read multiplexer and a one-hot pc-gated write chain,
     # so it carries no read ports and a single uniform producer -- the steering objective then degenerates to register
     # count, and the reach-aware colorer reduces to count-minimizing first-fit.
-    assign, nbreg = color(
-        ColoringProblem(
-            movable=movable,
-            pinned=pinned,
-            interferes=interferes,
-            consumer_ports={vid: set() for vid in values},
-            producer_key={vid: "bool" for vid in values},
-            fresh_start=fresh_start,
-        )
+    assign, nbreg = _color_quotient(
+        coalescing.leader,
+        movable,
+        pinned,
+        interferes,
+        {vid: set() for vid in values},
+        {vid: frozenset({"bool"}) for vid in values},
+        fresh_start,
     )
-    return _BoolBankAlloc(assign, bool_slot_reg, nbreg)
+    return _BoolBankAlloc(assign, bool_slot_reg, nbreg, coalescing.coalesced)
 
 
 def _allocate(
@@ -940,10 +1136,14 @@ def _allocate(
     }
     float_alloc = _allocate_float_bank(mir, float_mir, block_sched, inst_of, block_makespan)
 
+    # A phi arm coalesced onto the merged register needs no install copy: the arm value already resides in the phi's
+    # register (they share a coloring class). Only the residual (non-coalesced) arms install by a pc-gated copy.
     copies: dict[int, list[_FloatArmInstall]] = {}
     for vid, phi in float_mir.phi_nodes.items():
         for pred, value, conditioner in phi.arms:
             assert isinstance(conditioner, FloatSignControl)  # a float phi arm carries the float sideband
+            if (pred, vid) in float_alloc.coalesced:
+                continue
             copies.setdefault(pred, []).append(_FloatArmInstall(float_alloc.reg[vid], value, conditioner))
 
     bool_alloc = _allocate_bool_bank(mir, bool_mir, block_sched, block_makespan)
@@ -952,6 +1152,8 @@ def _allocate(
     for vid, phi in bool_mir.phi_nodes.items():
         for pred, value, conditioner in phi.arms:
             assert isinstance(conditioner, BoolInversion)
+            if (pred, vid) in bool_alloc.coalesced:
+                continue
             bool_writes.setdefault(pred, []).append(_BoolArmInstall(bool_alloc.reg[vid], value, conditioner))
 
     # A constant branch condition (e.g. a read-only boolean attribute, or a folded test) has no register of its own;

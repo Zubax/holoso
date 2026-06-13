@@ -29,6 +29,7 @@ from ._ir import (
     inline_fire_cycle as inline_fire_cycle,
     operand_read_cycle as operand_read_cycle,
     result_landing_cycle as result_landing_cycle,
+    scalar_type_of as scalar_type_of,
     InlineProducer as InlineProducer,
     InputProducer as InputProducer,
     Jump as Jump,
