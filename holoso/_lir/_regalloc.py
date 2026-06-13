@@ -83,6 +83,9 @@ class ColoringProblem:
     ``producer_key`` is a SET of producers per value, not a single one: a coalesced phi class is one ``movable`` entry
     backed by every arm operator that writes its register, so the write-select fan-in counts the union of those
     producers. A non-coalesced value carries a singleton set, recovering the one-producer-per-value objective exactly.
+    A phi contributes a single placeholder producer (``phi:<vid>``) rather than one key per residual arm copy; this is a
+    deliberate approximation that the annealer tolerates (it may miscount a phi register's fan-in by a copy or two, and
+    never affects coloring validity) -- the honest steering cost is the ground-truth ``Lir.write_select_fanin``.
     """
 
     movable: list[ValueId]

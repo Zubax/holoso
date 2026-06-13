@@ -45,6 +45,34 @@ class TwoCarried:
         return self.s1 + self._s2
 
 
+def coalesce_conflict(x, b, cc):  # type: ignore[no-untyped-def]
+    """
+    The phi-coalescing residual-install hazard: ``a`` coalesces onto ``x`` while ``x`` is still live as ``z``'s arm,
+    so the soundness fixpoint must de-coalesce. The fixpoint's de-coalescing is set-driven, so this exercises that its
+    iteration order -- and the resulting register assignment -- is seed-independent. The division keeps the diamond a
+    real branch (un-if-converted), which is what creates the phi merge.
+    """
+    if b < cc:
+        a = x
+        z = 1.0
+        d = b
+    else:
+        a = -(x + 1.0)
+        z = x
+        d = x / b
+    return a, z, d
+
+
+def emit_coalesce_conflict() -> None:
+    """Subprocess entry: print the full Verilog of the phi-coalescing de-coalescing kernel."""
+    from holoso import FloatFormat, synthesize
+
+    from ._modelref import default_ops
+
+    result = synthesize(coalesce_conflict, default_ops(FloatFormat(6, 18)))
+    sys.stdout.write(result.verilog_output.verilog)
+
+
 def emit_cordic() -> None:
     """Subprocess entry: print the full Verilog of the branch-heavy cordic example."""
     sys.path.insert(0, str(_REPO / "examples"))
@@ -84,6 +112,15 @@ def _entry_output_under_seed(entry: str, seed: str) -> str:
 @pytest.mark.parametrize("other_seed", ["3", "31337"])
 def test_verilog_is_byte_identical_across_hash_seeds(other_seed: str) -> None:
     assert _entry_output_under_seed("emit_cordic", "0") == _entry_output_under_seed("emit_cordic", other_seed)
+
+
+@pytest.mark.parametrize("other_seed", ["3", "31337"])
+def test_phi_coalescing_de_coalescing_is_byte_identical_across_hash_seeds(other_seed: str) -> None:
+    # The coalescing soundness fixpoint forbids whole conflicting classes via a set; the byte-identical Verilog across
+    # seeds proves its de-coalescing decisions (and the register coloring that follows) are order-independent.
+    assert _entry_output_under_seed("emit_coalesce_conflict", "0") == _entry_output_under_seed(
+        "emit_coalesce_conflict", other_seed
+    )
 
 
 @pytest.mark.parametrize("other_seed", ["3", "31337"])

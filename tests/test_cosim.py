@@ -360,6 +360,27 @@ def test_cosim_inverted_bool_phi_arm(sim: str) -> None:
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_phi_coalescing_residual_install_conflict(sim: str) -> None:
+    # RTL twin of test_schedule.test_phi_coalescing_residual_install_conflict_is_resolved: phi ``a`` would coalesce onto
+    # input ``x``'s register, but ``x`` is still live as sibling phi ``z``'s identity arm (``z = x``) where ``a``'s
+    # residual sign-folded else-arm install writes that register, so the soundness fixpoint de-coalesces ``a``. This
+    # proves the de-coalesced residual install is bit-exact in RTL, not only against the Python cycle model. The
+    # division keeps the diamond a real branch (un-if-converted), which is what creates the phi merge.
+    def kernel(x, b, cc):  # type: ignore[no-untyped-def]
+        if b < cc:
+            a = x
+            z = 1.0
+            d = b
+        else:
+            a = -(x + 1.0)
+            z = x
+            d = x / b
+        return [a, z, d]
+
+    run_cosim(sim, kernel, FloatFormat(6, 18), "coal_conflict")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_not_over_loop_phi_and_inverted_public_state(sim: str) -> None:
     # Two NOT-folding corners under RTL: a flag negated per trip of a while loop (the self-arm inversion install
     # fires once per iteration through the back edge), and a PUBLIC boolean state attribute whose live-out is a

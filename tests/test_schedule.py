@@ -503,6 +503,100 @@ def test_interfering_loop_carried_phi_keeps_its_copy() -> None:
     assert back_edge_op_copies, "the interfering loop-carried Newton update must keep its back-edge install copy"
 
 
+def _check_float_kernel(fn, name, samples):  # type: ignore[no-untyped-def]
+    """Build ``fn`` (must not crash) and check the cycle model matches the float64 reference on ``samples``."""
+    lir = build(_run(fn), name)  # crash-before: the install-free oracle admitted an unsound merge -> backstop assert
+    model = build_model(lir)
+    for args in samples:
+        got = [float(v) for v in model.run(*args)]
+        ref = [float(v) for v in fn(*args)]
+        assert len(got) == len(ref)
+        for g, r in zip(got, ref):
+            assert abs(g - r) <= 1e-2 * max(1.0, abs(r)), f"{name}{args}: {got} vs {ref}"
+
+
+def test_phi_coalescing_residual_install_conflict_is_resolved() -> None:
+    # Regression: a phi (``a``) coalesces onto input ``x``'s register because the install-free oracle sees no overlap,
+    # yet ``x`` stays live in the else block as a sibling phi's identity arm (``z = x``) exactly where ``a``'s residual
+    # (sign-folded) else-arm install writes that shared register. The final, install-aware interference then flags the
+    # class against itself and the coloring backstop aborted the build. The fixpoint must de-coalesce ``a`` and build.
+    # The division keeps the diamond a real branch (un-if-converted), which is what creates the phi merge.
+    def k(x, b, cc):  # type: ignore[no-untyped-def]
+        if b < cc:
+            a = x
+            z = 1.0
+            d = b
+        else:
+            a = -(x + 1.0)
+            z = x
+            d = x / b
+        return a, z, d
+
+    _check_float_kernel(k, "coal_c1", [(2.0, 3.0, 5.0), (2.0, 3.0, 1.0), (-4.0, 2.0, 10.0), (1.5, 4.0, 0.5)])
+
+
+def test_phi_coalescing_conflict_resolved_under_reversed_declaration_order() -> None:
+    # The same hazard with the assignments and the return reversed: value ids -- hence the deterministic phi processing
+    # order the union-find follows -- change, so a DIFFERENT phi wins the merge onto ``x``. The fixpoint must converge
+    # regardless of which phi coalesced first; this pins the resolution as order-independent, not an artifact of one id
+    # assignment.
+    def k(x, b, cc):  # type: ignore[no-untyped-def]
+        if b < cc:
+            d = b
+            z = 1.0
+            a = x
+        else:
+            d = x / b
+            z = x
+            a = -(x + 1.0)
+        return d, z, a
+
+    _check_float_kernel(k, "coal_c2", [(2.0, 3.0, 5.0), (2.0, 3.0, 1.0), (-4.0, 2.0, 10.0), (1.5, 4.0, 0.5)])
+
+
+def test_phi_coalescing_conflict_resolved_with_swapped_branch_arms() -> None:
+    # The mirror: the coalescing identity arm sits in the else block and the sign-folded residual arm in the then block,
+    # so the conflict is exercised from the opposite branch polarity. Confirms the de-coalescing is arm-order agnostic.
+    def k(x, b, cc):  # type: ignore[no-untyped-def]
+        if b < cc:
+            a = -(x + 1.0)
+            z = x
+            d = x / b
+        else:
+            a = x
+            z = 1.0
+            d = b
+        return a, z, d
+
+    _check_float_kernel(k, "coal_c3", [(2.0, 3.0, 5.0), (2.0, 3.0, 1.0), (-4.0, 2.0, 10.0), (1.5, 4.0, 0.5)])
+
+
+def test_bool_phi_coalescing_residual_install_conflict_is_resolved() -> None:
+    # The boolean-bank twin of the residual-install conflict: phi ``a`` coalesces onto input ``q``'s 1-bit register
+    # while ``q`` stays live as sibling phi ``z``'s identity arm (``z = q``) where ``a``'s residual (inverted) else-arm
+    # install writes the shared register. A boolean phi keeps the diamond a real branch (bool phis are never
+    # if-converted). The fixpoint must de-coalesce and build; checked bit-exact across all eight boolean input vectors.
+    import itertools  # noqa: PLC0415
+
+    def k(p: bool, q: bool, r: bool):  # type: ignore[no-untyped-def]
+        if p:
+            a = q
+            z = True
+            d = r
+        else:
+            a = not q
+            z = q
+            d = q and r
+        return a, z, d
+
+    lir = build(_run(k), "coal_bool")  # crash-before: the bool oracle admitted the unsound merge -> backstop assert
+    model = build_model(lir)
+    for p, q, r in itertools.product([False, True], repeat=3):
+        got = [bool(int(v)) for v in model.run(p, q, r)]
+        ref = list(k(p, q, r))
+        assert got == ref, f"coal_bool({p},{q},{r}): {got} vs {ref}"
+
+
 def test_state_war_backstop_allows_noop_writeback() -> None:
     # A no-op writeback (live-out is the live-in value itself) writes no new value, so the write-after-read backstop
     # must not trip -- this previously aborted a legal build.

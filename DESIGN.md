@@ -468,9 +468,13 @@ identity-conditioner arms are merged into one congruence class by union-find whe
 interferes with any member of the other. The merge is judged on an install-free interference oracle
 (the conservatism above, which forecloses a phi from sharing its own arm registers,
 is exactly what coalescing reclaims): a coalesced arm carries no install copy, so its
-value flows straight into the merged register. The final interference is then rebuilt with only the residual
-(non-coalesced) arm installs, the class leaders are colored, and the colors expand to every member --
-so the steering objective counts the union of each class's read ports and write producers honestly.
+value flows straight into the merged register. The oracle only over-approximates coalescability -- it omits the
+residual (non-coalesced) arms' install writes -- so the final interference is rebuilt with those residual installs and
+checked: if any class then interferes with itself (a member is still live where a residual sibling arm's install writes
+the merged register), every arm-merge of the offending class is forbidden and coalescing re-runs, iterating to a
+fixpoint whose worst case -- all arms forbidden -- is the copy-everything baseline. The class leaders are then colored
+and the colors expand to every member -- so the steering objective counts the union of each class's read ports and
+write producers honestly.
 State-slot registers are reserved (their reservation and early-install machinery owns them),
 so an arm pinned there keeps its copy; an arm a sibling arm reads under a non-identity conditioner keeps its copy too
 (coalescing it would create an in-place self-conditioned copy the install-free oracle cannot see).
