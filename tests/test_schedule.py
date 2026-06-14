@@ -33,7 +33,14 @@ from holoso._lir import (
     operand_read_cycle,
     result_landing_cycle,
 )
-from holoso._lir._ir import FETCH_LAG, boundary_step, dependency_edge, pooled_writeback_word, wide_landing_cycle
+from holoso._lir._ir import (
+    FETCH_LAG,
+    boundary_step,
+    dependency_edge,
+    install_landing,
+    pooled_writeback_word,
+    wide_landing_cycle,
+)
 from holoso._mir import (
     lower as lower_to_mir,
     Mir,
@@ -250,6 +257,519 @@ def test_overlap_keeps_error_op_diagnostic_latch_in_frame() -> None:
     assert checked, "the error-bearing division did not land in a shrinkable branch block: corner not exercised"
 
 
+def test_spilled_result_landings_match_the_numerical_model() -> None:
+    # Regression (HTML report exactness): a result spilling past an overlap-shrunk terminator lands in EVERY successor
+    # arm, exactly where the numerical model re-keys its in-flight write at the redirect. write_landing_pcs -- which
+    # reg_liveness, bool_liveness, write_timeline, and the HTML schedule all stamp through -- must reproduce those PCs
+    # on every path, not the linear fall-through frame alone. Crash-before: the old fall-through-only stamping omitted
+    # the non-fall-through arm's landing, so the predicted set was a strict subset of the model's actual writes (the
+    # report drew the spilled value's residence on the wrong arm). Tied directly to the cosim oracle: every register the
+    # model writes (inputs bypass the writeback) is an op result here, so predicted landings must match it exactly.
+    from holoso._backend.numerical import NumericalSimulator
+
+    class _Recorder(NumericalSimulator):
+        def __init__(self, lir: object) -> None:
+            super().__init__(lir)  # type: ignore[arg-type]
+            self.writes: dict[tuple[str, int], set[int]] = {}
+
+        def _write(self, dst: object, value: object) -> None:
+            self.writes.setdefault((type(dst).__name__, dst.index), set()).add(self.pc)  # type: ignore[attr-defined]
+            super()._write(dst, value)  # type: ignore[arg-type]
+
+    vectors = [(0.5, 2.0, 1.5), (2.0, 0.5, 1.5), (1.0, 1.0, 1.0), (0.5, 0.0, 1.5), (3.0, 1.0, 2.0), (1.0, 3.0, 0.0)]
+    for kernel, name in [
+        (overlap_spill_kernel, "overlap_spill"),
+        (overlap_dead_arm_spill_kernel, "dead_arm_spill"),
+        (overlap_div_err_kernel, "overlap_div_err"),
+    ]:
+        lir = build(_run(kernel), name)
+        # These kernels write every register through an operation (no copies/installs/state), so the model's writeback
+        # set is exactly the op-result landings -- the cleanest tie to write_landing_pcs.
+        assert not any(block.copies or block.bool_writes for block in lir.blocks)
+        assert not lir.float_state_slots and not lir.bool_state_slots
+        predicted: dict[tuple[str, int], set[int]] = {}
+        multi_arm = 0
+        for block in lir.blocks:
+            for op in (*block.ops, *block.inline_ops):
+                for write in op.writes:
+                    pcs = lir.write_landing_pcs(block, write.dst, op.commit_cycle)
+                    predicted.setdefault((type(write.dst).__name__, write.dst.index), set()).update(pcs)
+                    multi_arm += len(pcs) > 1
+        assert multi_arm > 0, f"{name}: no result spills into multiple arms -- the regression is vacuous"
+        actual: dict[tuple[str, int], set[int]] = {}
+        sim = _Recorder(lir)
+        for x, y, z in vectors:  # the vectors drive BOTH arms, so the union covers every arm a spill lands in
+            sim.reset()
+            sim.writes = {}
+            sim.run(x, y, z)
+            for key, pcs in sim.writes.items():
+                actual.setdefault(key, set()).update(pcs)
+        assert predicted == actual, f"{name}: write_landing_pcs {predicted} != model writebacks {actual}"
+
+
+def test_overlapping_loop_kernel_landings_are_real_model_writes() -> None:
+    # recip_newton is a real overlapping LOOP kernel: its header branch shrinks below the drained boundary, so the
+    # diagnostics run through write_landing_pcs on a genuinely shrunk-terminator layout (the synthetic kernels above
+    # carry the multi-arm SPILLS; here every op result still lands in-block, exercising the shrunk-block path on a real,
+    # non-synthetic kernel). With loop-carried copies the model also writes registers via installs, so strict equality
+    # does not apply -- but every op-result landing write_landing_pcs predicts must be a real register write the model
+    # performs on some path. A subset tie to the cosim oracle, guarding against a regression that mis-frames the
+    # shrunk-block in-block landing.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    from recip_newton import NewtonReciprocal
+    from holoso._backend.numerical import NumericalSimulator
+
+    class _Recorder(NumericalSimulator):
+        def __init__(self, lir: object) -> None:
+            super().__init__(lir)  # type: ignore[arg-type]
+            self.writes: dict[int, set[int]] = {}
+
+        def _write(self, dst: object, value: object) -> None:
+            if isinstance(dst, RegRef):
+                self.writes.setdefault(dst.index, set()).add(self.pc)
+            super()._write(dst, value)  # type: ignore[arg-type]
+
+    lir = build(_run(NewtonReciprocal().__call__), "recip_newton")
+    assert any(
+        isinstance(block.terminator, Branch) and block.term_offset < boundary_step(block.block_makespan)
+        for block in lir.blocks
+    ), "recip_newton did not overlap: the real-kernel tie is not exercising a shrunk terminator"
+    predicted: dict[int, set[int]] = {}
+    for block in lir.blocks:
+        for op in (*block.ops, *block.inline_ops):
+            for write in op.writes:
+                if isinstance(write.dst, RegRef):
+                    predicted.setdefault(write.dst.index, set()).update(
+                        lir.write_landing_pcs(block, write.dst, op.commit_cycle)
+                    )
+    sim = _Recorder(lir)
+    actual: dict[int, set[int]] = {}
+    for seed in [0.5, 1.5, 2.5, 0.25, 1.0]:  # in-domain seeds (the Newton iteration converges for x < 3)
+        sim.reset()
+        sim.writes = {}
+        sim.run(seed)
+        for index, pcs in sim.writes.items():
+            actual.setdefault(index, set()).update(pcs)
+    for index, pcs in predicted.items():
+        assert pcs <= actual.get(
+            index, set()
+        ), f"reg {index}: landings {sorted(pcs)} not all model writebacks {sorted(actual.get(index, set()))}"
+
+
+def test_residence_tint_is_path_exact_across_a_merge() -> None:
+    # Regression (review P1, all three reviewers): the report's residence tint was not path-exact. Three manifestations,
+    # all fixed: (a) a single global residence_rows collapsed a register's def/use across mutually-exclusive arms, so a
+    # value live on two arms that rejoin at a merge had its lower-addressed arm truncated by the other arm's landing
+    # (live register tinted DEAD) -- fixed by per-block CFG residence (_cfg_residence); (b) the read-first `<=` bounds
+    # in residence_rows and the upward-exposed test treated a read on a value's own landing PC as reading the PRIOR
+    # occupant, painting a register's residence spuriously back toward the block entry (dead register tinted LIVE) --
+    # fixed by the write-then-read strict `<`; (c) a pc-gated install (a phi copy, a boolean write, or an early slot
+    # writeback) was tinted at its FIRE step, one cycle before the model commits it -- fixed by routing both
+    # the model and the diagnostic through ``install_landing`` (fire + 1), while a boundary slot install is read-first
+    # at the boundary. Tied to the model oracle in BOTH banks: reg_liveness/bool_liveness must equal the union over both
+    # branch arms (or, for the loop kernel, the executed trace) of the model's per-path residence, computed with an
+    # INDEPENDENT write-then-read liveness that does not share residence_rows' rule. Crash-before: false-arm mid-rows
+    # missing, pre-landing rows spuriously present, and -- for the install skew -- recip_newton's wide phi copies tinted
+    # at PC 13/45 (fire) instead of 14/46 and bw's boolean write tinted at its fire step instead of its landing.
+    from holoso._lir._ir import FloatOperand
+    from holoso._backend.numerical import NumericalSimulator
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    from recip_newton import NewtonReciprocal  # noqa: PLC0415 (example kernels live under examples/)
+
+    def join_spill(x, y, z):  # w spills from the entry into BOTH arms and is read after the merge
+        w = (x * z + y) * z + y
+        if x < y:
+            a = z + 1.0
+        else:
+            a = z / (y + 1.0)  # the division keeps this a real branch (not if-converted)
+        return w + a
+
+    def phi_merge(x, y):  # the merged value is produced in each arm (no entry spill), read after the merge
+        if x < y:
+            a = x + 1.0
+        else:
+            a = x / (y + 1.0)
+        return a * 2.0
+
+    def bool_write_merge(x, y):  # a boolean phi whose else arm reads the value inverted -> a non-coalesced bool_write
+        p = x < y
+        if x < 1.0:
+            c = p
+            d = x / (y + 1.0)
+        else:
+            c = not p
+            d = y * 2.0
+        return c, d
+
+    class _Trace(NumericalSimulator):
+        def __init__(self, lir: object) -> None:
+            super().__init__(lir)  # type: ignore[arg-type]
+            self.reads: set[int] = set()
+            self.writes: set[int] = set()
+            self.bool_reads: set[int] = set()
+            self.bool_writes: set[int] = set()
+            self.branch_read: tuple[int, int] | None = None  # (term_pc, cond index) read by this tick's redirect
+
+        def tick(self, in_valid: bool, out_ready: bool) -> None:
+            # The redirect samples a Branch condition directly out of bregs in _next_pc (not via _read), at the
+            # terminator PC before the PC advances; capture it so the oracle counts that read at term_pc.
+            terminator = self._terminators.get(self.pc) if self.pc != self._lir.last_pc else None
+            self.branch_read = (self.pc, terminator.cond.index) if isinstance(terminator, Branch) else None
+            super().tick(in_valid, out_ready)
+
+        def _read(self, operand: object) -> object:
+            if isinstance(operand, FloatOperand):
+                if isinstance(operand.source, RegRef):
+                    self.reads.add(operand.source.index)
+            elif isinstance(operand.source, BoolRegRef):  # type: ignore[attr-defined]
+                self.bool_reads.add(operand.source.index)  # type: ignore[attr-defined]
+            return super()._read(operand)  # type: ignore[arg-type]
+
+        def _write(self, dst: object, value: object) -> None:
+            if isinstance(dst, RegRef):
+                self.writes.add(dst.index)
+            elif isinstance(dst, BoolRegRef):
+                self.bool_writes.add(dst.index)
+            super()._write(dst, value)  # type: ignore[arg-type]
+
+    def model_residence(
+        lir: object, vectors: list[tuple[float, ...]]
+    ) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
+        wide: dict[int, set[int]] = {}
+        boolean: dict[int, set[int]] = {}
+        for vec in vectors:
+            sim = _Trace(lir)
+            sim.reset()
+            sim.set_inputs(*vec)
+            steps: list[tuple[int, frozenset[int], frozenset[int], frozenset[int], frozenset[int]]] = []
+
+            def tick(in_valid: bool, out_ready: bool) -> None:
+                sim.reads, sim.writes, sim.bool_reads, sim.bool_writes = set(), set(), set(), set()
+                sim.tick(in_valid, out_ready)
+                if sim.branch_read is not None:  # the redirect read the condition at term_pc, before this tick's _apply
+                    term_pc, cond = sim.branch_read
+                    steps.append((term_pc, frozenset(), frozenset(), frozenset({cond}), frozenset()))
+                steps.append(
+                    (
+                        sim.pc,
+                        frozenset(sim.reads),
+                        frozenset(sim.writes),
+                        frozenset(sim.bool_reads),
+                        frozenset(sim.bool_writes),
+                    )
+                )
+
+            tick(True, False)
+            guard = 0
+            while not sim.out_valid and guard < 100_000:
+                tick(False, False)
+                guard += 1
+            sim.reads, sim.bool_reads = set(), set()
+            _ = sim.output_values  # the output taps read their registers at the boundary PC
+            pc, rd, wr, brd, bwr = steps[-1]
+            steps[-1] = (pc, rd | frozenset(sim.reads), wr, brd | frozenset(sim.bool_reads), bwr)
+            live: set[int] = set()
+            blive: set[int] = set()
+            # Backward per-path liveness in the model's write-then-read order (a write lands then is read at the same
+            # PC), so a read on a value's landing reads THAT value, not the prior occupant: kill the carry with the
+            # write AFTER folding in the read. A def cell is resident even if its value is never read (it occupies the
+            # register that cycle). Crucially this oracle does NOT share residence_rows' rule, so it is an independent
+            # check -- the buggy `<=` and fire-step-install variants over-tint against it.
+            for step_pc, reads, writes, breads, bwrites in reversed(steps):
+                for reg in reads | live | writes:
+                    wide.setdefault(reg, set()).add(step_pc)
+                for reg in breads | blive | bwrites:
+                    boolean.setdefault(reg, set()).add(step_pc)
+                live = (reads | live) - writes
+                blive = (breads | blive) - bwrites
+        return wide, boolean
+
+    cases: list[tuple[str, object, list[tuple[float, ...]]]] = [
+        ("join_spill", build(_run(join_spill), "join_spill"), [(0.5, 2.0, 1.5), (2.0, 0.5, 1.5)]),
+        ("phi_merge", build(_run(phi_merge), "phi_merge"), [(0.5, 2.0), (2.0, 0.5)]),
+        ("bool_write_merge", build(_run(bool_write_merge), "bool_write_merge"), [(0.5, 2.0), (2.0, 0.5)]),
+        # recip_newton is a real overlapping LOOP kernel with two non-coalesced wide phi copies (the install skew site);
+        # its internal iteration covers the loop body, and the seed converges for a < 3.
+        ("recip_newton", build(_run(NewtonReciprocal().__call__), "recip_newton"), [(0.5,), (1.5,), (2.5,)]),
+    ]
+    for name, lir, vectors in cases:
+        last = lir.initiation_interval
+        # No upper clip beyond the grid; deliberately NO lower clip, so a spurious pre-landing row (e.g. PC 0, the bug
+        # the strict-`<` upward rule fixes) would surface as a mismatch rather than being silently discarded.
+        model_wide, model_bool = model_residence(lir, vectors)
+        for bank_tint, model_bank in ((lir.reg_liveness, model_wide), (lir.bool_liveness, model_bool)):
+            tint = {reg.index: {pc for pc in rows if pc <= last} for reg, rows in bank_tint.items()}
+            tint = {index: rows for index, rows in tint.items() if rows}
+            model = {index: {pc for pc in rows if pc <= last} for index, rows in model_bank.items()}
+            model = {index: rows for index, rows in model.items() if rows}
+            assert tint == model, f"{name}: residence tint {tint} != model per-path residence {model}"
+        # Convention-independent invariant (catches the same-PC def+use over-tint in either bank): no register holds a
+        # live value before the program's first executing step.
+        for reg, rows in {**lir.reg_liveness, **lir.bool_liveness}.items():
+            assert min(rows) >= 1, f"{name}: {reg} tinted resident at PC {min(rows)} < 1"
+
+
+def test_state_slot_residence_matches_the_model_under_carry() -> None:
+    # Regression (review): the READ-FIRST boundary-install path -- residence_rows' read_first_defs and _cfg_residence
+    # `upward` refinement -- governs only persistent state slots, which the stateless oracle above never builds. A
+    # boundary state install reads-then-writes at last_pc, so a read there (an output tap of the live-in, or an in-place
+    # install's own source) reads the PRIOR value; the prior strict-`<` rule mis-attributed it to the boundary def and
+    # truncated the carried live-in, tinting a LIVE slot register DEAD mid-frame. Tie reg_liveness/bool_liveness for the
+    # slot registers to a STEADY-STATE model oracle: drive many back-to-back transactions, compute backward
+    # write-then-read liveness over the concatenated executed trace (so a slot live-out carries into the next
+    # transaction's reads and a mid-frame gap surfaces), and union residence by PC over the middle transactions. Covers
+    # a single- and multi-block WIDE boundary slot and a single- and multi-block BOOLEAN boundary slot (the multi-block
+    # cases exercise the `upward` live-in marking of a carried slot). Crash-before: with read-first reverted
+    # the carried slot live-in tints DEAD between cycle 1 and its boundary read.
+    from holoso._lir._ir import Branch, FloatOperand
+    from holoso._backend.numerical import NumericalSimulator
+
+    class Delay:  # single-block wide boundary slot; the live-in is output-tapped at the boundary (read-first)
+        def __init__(self) -> None:
+            self._d = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            prev = self._d
+            self._d = x
+            return prev
+
+    class MBWide:  # multi-block wide boundary slot: a real branch (divide by a variable) carries _s to the Ret block
+        def __init__(self) -> None:
+            self._s = 0.0
+
+        def __call__(self, x, y):  # type: ignore[no-untyped-def]
+            out = self._s
+            if x > 0.0:
+                self._s = x + y
+            else:
+                self._s = x / y
+            return out
+
+    class BoolHold:  # multi-block boolean boundary slot; the live-in is output-tapped at the boundary (read-first)
+        def __init__(self) -> None:
+            self._f = False
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            out = self._f
+            if x > 0.0:
+                self._f = True
+            else:
+                self._f = x < -1.0
+            return out, x + 1.0
+
+    class BoolToggle:  # single-block boolean slot installed in place (_b <= ~_b), also read by the select
+        def __init__(self) -> None:
+            self._b = False
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            old = self._b
+            self._b = not self._b
+            return x if old else -x
+
+    class BoolSpin:  # in-place boolean slot (_b <= ~_b) whose live-in is read ONLY by its own install (source aliases
+        def __init__(self) -> None:  # the destination): the carry survives only if the boundary bundle is read-first
+            self._b = False
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            self._b = not self._b
+            return x
+
+    class _Trace(NumericalSimulator):
+        def __init__(self, lir: object) -> None:
+            super().__init__(lir)  # type: ignore[arg-type]
+            self.events: list[tuple[int, str | None, str | None, int | None]] = []  # (pc, r/w, f/b, index) in order
+            self.branch: tuple[int, int] | None = None
+
+        def tick(self, in_valid: bool, out_ready: bool) -> None:
+            term = self._terminators.get(self.pc) if self.pc != self._lir.last_pc else None
+            self.branch = (self.pc, term.cond.index) if isinstance(term, Branch) else None
+            super().tick(in_valid, out_ready)
+
+        def _read(self, operand: object) -> object:
+            source = operand.source  # type: ignore[attr-defined]
+            if isinstance(operand, FloatOperand):
+                if isinstance(source, RegRef):
+                    self.events.append((self.pc, "r", "f", source.index))
+            elif isinstance(source, BoolRegRef):
+                self.events.append((self.pc, "r", "b", source.index))
+            return super()._read(operand)  # type: ignore[arg-type]
+
+        def _write(self, dst: object, value: object) -> None:
+            if isinstance(dst, RegRef):
+                self.events.append((self.pc, "w", "f", dst.index))
+            if isinstance(dst, BoolRegRef):
+                self.events.append((self.pc, "w", "b", dst.index))
+            super()._write(dst, value)  # type: ignore[arg-type]
+
+    # A step is (pc, float reads, float writes, bool reads, bool writes, read_first). read_first marks the boundary
+    # install bundle, where the hardware reads every source then writes every destination on the boundary edge, so a
+    # read outlives a same-register write (an in-place ``b <= ~b`` keeps its live-in); others are write-then-read
+    # (a read on a value's landing reads the NEW value).
+    Step = tuple[int, frozenset[int], frozenset[int], frozenset[int], frozenset[int], bool]
+
+    def substeps(events: list[tuple[int, str | None, str | None, int | None]], read_first: bool) -> list[Step]:
+        # Group a temporal event stream into one step per contiguous run at the same PC (a None-kind entry just marks a
+        # PC visited, so a cycle that holds a value without touching it still contributes a step and fills the carry).
+        out: list[Step] = []
+        cur: int | None = None
+        rf: set[int] = set()
+        wf: set[int] = set()
+        rb: set[int] = set()
+        wb: set[int] = set()
+        for pc, kind, bank, idx in events:
+            if pc != cur:
+                if cur is not None:
+                    out.append((cur, frozenset(rf), frozenset(wf), frozenset(rb), frozenset(wb), read_first))
+                cur, rf, wf, rb, wb = pc, set(), set(), set(), set()
+            if idx is not None:
+                {("r", "f"): rf, ("w", "f"): wf, ("r", "b"): rb, ("w", "b"): wb}[(kind, bank)].add(idx)
+        if cur is not None:
+            out.append((cur, frozenset(rf), frozenset(wf), frozenset(rb), frozenset(wb), read_first))
+        return out
+
+    def model_slot_residence(
+        lir: object, vectors: list[tuple[float, ...]]
+    ) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
+        transactions = 16
+        last_pc = lir.last_pc
+        fin = [load.dst.index for load in lir.float_inputs]
+        bin_ = [load.dst.index for load in lir.bool_inputs]
+        sim = _Trace(lir)
+        sim.reset()
+        per_txn: list[list[Step]] = []
+        for k in range(transactions):
+            sim.set_inputs(*vectors[k % len(vectors)])
+            # set_inputs writes the input lanes directly (not via _write); model them as defs at the first step
+            events: list[tuple[int, str | None, str | None, int | None]] = [(1, "w", "f", i) for i in fin]
+            events += [(1, "w", "b", i) for i in bin_]
+
+            def run(in_valid: bool, out_ready: bool) -> None:
+                sim.events = []
+                sim.tick(in_valid, out_ready)
+                if sim.branch is not None:  # the redirect samples the condition at term_pc, before this tick's _apply
+                    events.append((sim.branch[0], "r", "b", sim.branch[1]))
+                events.extend(sim.events)
+                events.append((sim.pc, None, None, None))  # mark the landed PC visited even if it had no event
+
+            run(True, False)
+            guard = 0
+            while not sim.out_valid and guard < 10_000:
+                run(False, False)
+                guard += 1
+            sim.events = []
+            _ = sim.output_values  # the output taps read their registers at the boundary PC (write-then-read with them)
+            events.extend(sim.events)
+            steps = substeps(events, False)  # everything up to the accept edge is write-then-read
+            sim.events = []
+            sim.tick(False, True)  # accept: the boundary state install fires, then the PC advances and _apply runs
+            # The boundary install is a READ-FIRST parallel bundle at last_pc (read every source, then write every
+            # destination), so it is split out and tagged; the trailing _apply is ordinary write-then-read.
+            steps += substeps([e for e in sim.events if e[0] == last_pc], True)
+            steps += substeps([e for e in sim.events if e[0] != last_pc], False)
+            per_txn.append(steps)
+
+        flat = [step for steps in per_txn for step in steps]
+        wide: dict[int, set[int]] = {}
+        boolean: dict[int, set[int]] = {}
+        resid: list[tuple[int, frozenset[int], frozenset[int]]] = []
+        live_f: set[int] = set()
+        live_b: set[int] = set()
+        for pc, rf, wf, rb, wb, read_first in reversed(flat):
+            resid.append((pc, rf | live_f | wf, rb | live_b | wb))
+            if read_first:  # read-then-write bundle: a read outlives a same-register write (the live-in survives)
+                live_f = rf | (live_f - wf)
+                live_b = rb | (live_b - wb)
+            else:  # write-then-read landing: the write kills the carry, a read on the landing reads the new value
+                live_f = (rf | live_f) - wf
+                live_b = (rb | live_b) - wb
+        resid.reverse()
+        lo, hi = 3, transactions - 3  # the steady-state middle band, free of warm-up/drain edge effects
+        cursor = 0
+        for k, steps in enumerate(per_txn):
+            for _ in steps:
+                pc, residf, residb = resid[cursor]
+                cursor += 1
+                if lo <= k < hi:
+                    for reg in residf:
+                        wide.setdefault(reg, set()).add(pc)
+                    for reg in residb:
+                        boolean.setdefault(reg, set()).add(pc)
+        return wide, boolean
+
+    cases: list[tuple[str, object, list[tuple[float, ...]]]] = [
+        ("Delay", build(_run(Delay().__call__), "Delay"), [(0.5,), (-0.5,), (1.5,), (2.0,)]),
+        ("MBWide", build(_run(MBWide().__call__), "MBWide"), [(1.0, 2.0), (-1.0, 2.0), (1.5, 3.0), (-2.0, 4.0)]),
+        ("BoolHold", build(_run(BoolHold().__call__), "BoolHold"), [(1.0,), (-2.0,), (-0.5,), (2.0,)]),
+        ("BoolToggle", build(_run(BoolToggle().__call__), "BoolToggle"), [(0.5,), (1.5,), (-0.5,), (2.0,)]),
+        ("BoolSpin", build(_run(BoolSpin().__call__), "BoolSpin"), [(0.5,), (1.5,), (-0.5,), (2.0,)]),
+    ]
+    compared = 0
+    for name, lir, vectors in cases:
+        last = lir.initiation_interval
+        model_wide, model_bool = model_slot_residence(lir, vectors)
+        # Restrict the comparison to the slot registers the read-first path governs (scratch registers on a not-taken
+        # branch arm would be tinted by the static all-paths tint but absent from a single steady run -- path coverage,
+        # not a defect; a carried slot register is live on every path, so it must match exactly).
+        for slot in [*lir.float_state_slots]:
+            if slot.needs_copy:
+                tint = {pc for pc in lir.reg_liveness[slot.reg] if pc <= last}
+                model = {pc for pc in model_wide.get(slot.reg.index, set()) if 1 <= pc <= last}
+                assert tint == model, f"{name}: wide slot {slot.reg} tint {sorted(tint)} != model {sorted(model)}"
+                compared += 1
+        for slot in [*lir.bool_state_slots]:
+            if slot.needs_copy:
+                tint = {pc for pc in lir.bool_liveness[slot.reg] if pc <= last}
+                model = {pc for pc in model_bool.get(slot.reg.index, set()) if 1 <= pc <= last}
+                assert tint == model, f"{name}: bool slot {slot.reg} tint {sorted(tint)} != model {sorted(model)}"
+                compared += 1
+    # Guard against the kernels silently losing their non-coalesced slots (e.g. a future coalescing change) -- without
+    # this the loop above would vacuously pass and re-open the read-first coverage gap this test exists to close.
+    assert compared >= 5, f"expected every kernel to contribute a non-coalesced slot, compared only {compared}"
+
+
+def test_write_landing_recursion_handles_multi_hop_spill() -> None:
+    # Coverage for the multi-hop arm of the landing recursion. A result can spill past one overlap-shrunk terminator and
+    # RE-spill past a second (a near-empty overlapping intermediate block whose own offset is below the inherited
+    # landing). Frontends do not emit that shape -- a single hop lands at most FETCH_LAG cycles into a successor,
+    # below the offset of any successor carrying an op -- so the recursion is exercised here on a hand-built layout,
+    # pinning that it re-keys per terminator exactly as write_landing_pcs documents and terminates.
+    from holoso._lir._ir import LirBlock, Jump, Branch, Ret, BoolRegRef, _trace_landing
+
+    b0 = LirBlock(0, [], [], [], [], Branch(BoolRegRef(0), 1, 2), 0, 3)
+    b1 = LirBlock(1, [], [], [], [], Jump(3), 0, 1)  # inherited landing 3 > offset 1 -> re-spills into b3
+    b2 = LirBlock(2, [], [], [], [], Jump(3), 0, 5)  # inherited landing 3 <= offset 5 -> absorbs in-block
+    b3 = LirBlock(3, [], [], [], [], Ret(), 0, 4)
+    by_index = {block.index: block for block in (b0, b1, b2, b3)}
+    base = [0, 10, 20, 30]
+    # landing 7 in b0 spills (7 > 3) at block-local 3 into both arms; b1 re-spills 3 -> local 1 in b3 (base 30 + 1),
+    # b2 absorbs at base 20 + 3; a landing within b0's offset lands once, in-block.
+    assert sorted(_trace_landing(by_index, base, b0, 7)) == [23, 31]
+    assert _trace_landing(by_index, base, b0, 2) == [2]
+
+
+def test_control_arrows_anchor_at_the_terminator_pc() -> None:
+    # Regression (HTML report exactness): the grid row axis is the model fetch PC, so a control-transfer arrow must root
+    # at the terminator PC (where the redirect mux reads the condition register and that register's residence ends) and
+    # point at the destination block's base PC -- no FETCH_LAG offset. Crash-before: the arrow rooted FETCH_LAG rows
+    # below the terminator, where the condition register is already dead, so its dotted feed pointed at a blank cell.
+    from holoso._backend.html._schedule import _control_arrows
+
+    lir = build(_run(overlap_spill_kernel), "overlap_spill")
+    arrows = _control_arrows(lir)
+    assert arrows, "the branchy kernel must emit at least one control-transfer arrow"
+    term_pcs = {lir.term_pc(block) for block in lir.blocks}
+    bases = set(lir.block_base)
+    bool_live = lir.bool_liveness
+    for arrow in arrows:
+        assert arrow.src_cyc in term_pcs, f"arrow root {arrow.src_cyc} is not a terminator PC"
+        assert arrow.dst_cyc in bases, f"arrow target {arrow.dst_cyc} is not a block base PC"
+        if (
+            arrow.cond is not None
+        ):  # the branch reads its condition on its terminator row, so the register is live there
+            assert arrow.src_cyc in bool_live[arrow.cond], "the condition register is dead at the arrow's root row"
+
+
 def test_phi_install_does_not_clobber_the_branch_condition() -> None:
     # Regression (review): a phi-arm install physically writes the phi's register at the predecessor's tail, one step
     # BEFORE the branch terminator reads its condition at the boundary. The interference model used to define the phi
@@ -402,16 +922,18 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
         bool(lir.float_state_slots or lir.bool_state_slots) and slot.needs_copy and isinstance(slot.tap, FloatOperand)
     )
     assert isinstance(slot.tap.source, RegRef)
-    # The non-coalesced writeback is a first-class event in the liveness model: the slot register holds a live value on
-    # its install step (previously absent, which is why the report could not render it).
-    assert lir.state_copy_step(slot) in lir.reg_liveness[slot.reg]
+    # The non-coalesced writeback is a first-class event in the liveness model: the slot register holds a live value
+    # from the cycle the new value LANDS (one PC after the copy fires and samples its source, ``install_landing``;
+    # previously absent, which is why the report could not render it).
+    landing = install_landing(lir.state_copy_step(slot))
+    assert landing in lir.reg_liveness[slot.reg]
     assert lir.state_copy_step(slot) == slot.install_cycle + FETCH_LAG + 1
     # Nothing reads _p's register after the old live-in and its source is an ordinary register, so the copy installs
     # before the boundary -- freeing the source register for the rest of the initiation rather than pinning it there.
     assert lir.state_copy_step(slot) < lir.initiation_interval
     # The carried live-out must survive to the boundary even though nothing reads it again this frame, so the slot
-    # register stays live from its install step through the boundary -- an early install is not the value's death.
-    assert set(range(lir.state_copy_step(slot), lir.initiation_interval + 1)) <= lir.reg_liveness[slot.reg]
+    # register stays live from its landing through the boundary -- an early install is not the value's death.
+    assert set(range(landing, lir.initiation_interval + 1)) <= lir.reg_liveness[slot.reg]
     # Output wires carry the same FloatOperand tap primitive as state slots.
     assert all(isinstance(w.tap, FloatOperand) for w in lir.float_outputs)
     # Pin the hardware-frame cycle formulas the report, model, and allocator all depend on (the write/read latch

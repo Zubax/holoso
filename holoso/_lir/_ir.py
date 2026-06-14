@@ -5,8 +5,9 @@ A :class:`Lir` is controller-agnostic -- it describes which hardware operators i
 which typed storage resources, with which folded sign controls.
 """
 
+from bisect import bisect_right
 from dataclasses import dataclass
-from typing import assert_never
+from typing import TypeVar, assert_never
 
 from .._operators import (
     BoolInversion,
@@ -113,24 +114,56 @@ def copy_step_cycle(install_cycle: int) -> int:
     return install_cycle + FETCH_LAG + 1
 
 
+def install_landing(fire_step: int) -> int:
+    """
+    The step a pc-gated install -- a phi copy, a boolean write, or an early (non-boundary) slot writeback -- commits its
+    destination and becomes readable: one after the step it fires on and samples its source. The model writes the
+    destination into ``_pending`` one PC past the fire, so the numerical model and the liveness diagnostic route this +1
+    through this one helper and cannot drift. A boundary slot install is the lone exception: it reads-then-writes at
+    ``last_pc`` and does not pass through here.
+    """
+    return fire_step + 1
+
+
 def boundary_step(makespan: int) -> int:
     """The boundary / initiation-interval step: the last result lands here and outputs are resident here."""
     return makespan + 2 + FETCH_LAG
 
 
-def residence_rows(defs: list[int], uses: list[int], present: int) -> set[int]:
+def residence_rows(
+    defs: list[int], uses: list[int], present: int, read_first_defs: frozenset[int] = frozenset()
+) -> set[int]:
     """
-    Collapse a register's definition and use cycles into the set of cycles on which it holds a live value, by the
-    read-first rule: each value resides from its landing through its last use no later than the next definition (a read
-    on the next definition's cycle is read-first and still returns the old value), the boundary at latest. Shared by the
-    float- and boolean-bank liveness so both banks compute residence in exactly one place.
+    Collapse a register's definition and use cycles into the set of cycles on which it holds a live value: each value
+    resides from its landing through its last use STRICTLY before the next definition, the boundary at latest, plus the
+    landing cycle itself even when the value is never read (it still occupies the register that cycle). The strict bound
+    is the write-then-read register semantics the numerical model commits: a read on a later value's landing cycle reads
+    that NEW value, so it belongs to the next definition's residence, not the previous one -- a read on a value's OWN
+    landing (the common producer->consumer case, where the consumer reads on the producer's landing PC) still counts for
+    that value.
+
+    ``read_first_defs`` lists the definition PCs that are READ-FIRST rather than write-then-read: the boundary state
+    install, where the hardware samples the register (the live-in, for an output tap or the install's own source) on
+    the boundary edge BEFORE clocking in the new live-out. A read on such a def's PC therefore belongs to the PRIOR
+    value, not the def landing there -- the opposite attribution from a normal landing. So the prior value keeps reads
+    up to and INCLUDING a read-first next def, and a read-first def's own value keeps only reads strictly after it.
+    Shared by the float- and boolean-bank liveness so both banks compute residence in exactly one place.
     """
     writes = sorted(defs)
     reads = sorted(uses)
     rows: set[int] = set()
     for i, start in enumerate(writes):
         nxt = writes[i + 1] if i + 1 < len(writes) else present + 1
-        last = max((use for use in reads if start <= use <= nxt), default=start)
+        lo_excl = start in read_first_defs  # a read AT a read-first def reads the PRIOR value, not this one's landing
+        hi_incl = nxt in read_first_defs  # ...so the prior value keeps reads up to and INCLUDING a read-first next def
+        last = max(
+            (
+                use
+                for use in reads
+                if (use > start if lo_excl else use >= start) and (use <= nxt if hi_incl else use < nxt)
+            ),
+            default=start,
+        )
         rows.update(range(start, last + 1))
     return rows
 
@@ -209,6 +242,9 @@ def result_landing_cycle(dst: RegRef | BoolRegRef, commit_cycle: int) -> int:
     timeline, the numerical model, the report) routes through, so the per-bank rule cannot drift between them.
     """
     return wide_landing_cycle(commit_cycle) if isinstance(dst, RegRef) else bool_landing_cycle(commit_cycle)
+
+
+_BankReg = TypeVar("_BankReg", RegRef, BoolRegRef)  # one register bank's reference type (wide or boolean)
 
 
 @dataclass(frozen=True, slots=True)
@@ -485,6 +521,19 @@ class Ret:
 type Terminator = Jump | Branch | Ret
 
 
+def _terminator_arms(terminator: Terminator) -> list[int]:
+    """The successor block indices a terminator can redirect to: a jump's target, a branch's two arms, none for Ret."""
+    match terminator:
+        case Jump(target=target):
+            return [target]
+        case Branch(if_true=if_true, if_false=if_false):
+            return [if_true, if_false]
+        case Ret():
+            return []
+        case _:
+            assert_never(terminator)
+
+
 @dataclass(frozen=True, slots=True)
 class LirBlock:
     """
@@ -507,6 +556,20 @@ class LirBlock:
     terminator: Terminator
     block_makespan: int
     term_offset: int
+
+
+def _trace_landing(
+    by_index: dict[int, LirBlock], block_base: list[int], block: LirBlock, landing_cycle: int
+) -> list[int]:
+    """
+    Resolve a block-local ``landing_cycle`` to its absolute landing PC(s), following overlap spills across terminators
+    exactly as the numerical model re-keys its in-flight writes at a redirect (see :meth:`Lir.write_landing_pcs`).
+    """
+    if landing_cycle <= block.term_offset:
+        return [block_base[block.index] + landing_cycle]
+    spilled = landing_cycle - block.term_offset - 1
+    arms = _terminator_arms(block.terminator)
+    return [pc for arm in arms for pc in _trace_landing(by_index, block_base, by_index[arm], spilled)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -688,6 +751,25 @@ class Lir:
         """
         return self.block_base[block.index] + block.term_offset
 
+    def write_landing_pcs(self, block: LirBlock, dst: RegRef | BoolRegRef, commit_cycle: int) -> list[int]:
+        """
+        Every absolute fetch PC at which a result committed at ``block``-local ``commit_cycle`` lands in register
+        ``dst`` -- one per execution path that can reach it. A landing at or before the block's terminator offset lands
+        once, inside the block. A landing past an overlap-shrunk terminator spills into EACH successor arm's frame, at
+        ``block_base[arm] + (landing - term_offset - 1)``. This is exactly the numerical model's redirect re-keying of
+        its in-flight writes, so the report and the write timeline place a spilled result where the hardware actually
+        writes it on every path -- not in the linear fall-through frame. A drained block never spills, so a drained
+        kernel returns one PC per write.
+
+        The recursion re-keys at every terminator the landing crosses, mirroring the model exactly. A spilled result can
+        therefore re-spill across a second shrunk terminator -- which needs a near-empty overlapping intermediate block,
+        a shape current frontends do not emit, so in practice this resolves in one hop. The recursion is general-case
+        insurance, and terminates because spills only cross single-predecessor forward edges (a finite DAG; a back-edge
+        target is multi-predecessor and never overlaps).
+        """
+        by_index = {b.index: b for b in self.blocks}
+        return _trace_landing(by_index, self.block_base, block, result_landing_cycle(dst, commit_cycle))
+
     def state_copy_step(self, slot: FloatStateSlot) -> int:
         """
         The fetch-PC value -- equivalently the hardware-frame cycle -- on which a non-coalesced slot's writeback copy
@@ -800,6 +882,89 @@ class Lir:
                 )
         return issues, commits
 
+    def _cfg_residence(
+        self,
+        defs: dict[_BankReg, list[int]],
+        uses: dict[_BankReg, list[int]],
+        read_first: dict[_BankReg, set[int]] | None = None,
+    ) -> dict[_BankReg, set[int]]:
+        """
+        Collapse a bank's absolute def/use PCs into the rows each register holds a live value, computed PER BASIC BLOCK
+        (where the PC stream is straight-line, so ``residence_rows`` is exact) with backward register liveness carrying
+        a value across block boundaries. This is path-aware where a single global timeline is not: a value live on two
+        mutually-exclusive arms that rejoin at a merge stays resident on BOTH arms, instead of the later-addressed arm's
+        landing truncating the earlier one. For a straight-line kernel (one block) it reduces to a single
+        ``residence_rows`` over the whole frame.
+
+        ``defs``/``uses`` are absolute fetch PCs (the report grid's row axis); each falls inside exactly one block's
+        ``[base, term_pc]`` range (the ranges tile the frame contiguously in layout order). Within a block a live-in
+        register is given a pseudo-def at the block base and a live-out one a pseudo-use at the terminator PC, so the
+        per-block ``residence_rows`` extends the carried value across the whole block. ``read_first`` lists, per
+        register, the READ-FIRST def PCs (a boundary state install): a read on such a PC reads the PRIOR value, so it
+        both keeps that read out of the install's own residence and -- when the read is the register's earliest one in
+        its block -- marks the register live-in there (the carried value, not the install, supplies that read).
+        """
+        read_first = read_first or {}
+        order = sorted(range(len(self.blocks)), key=lambda i: self.block_base[i])
+        sorted_bases = [self.block_base[i] for i in order]
+        term_pc = {block.index: self.term_pc(block) for block in self.blocks}
+        succ = {block.index: _terminator_arms(block.terminator) for block in self.blocks}
+
+        def block_of(pc: int) -> int:
+            return order[bisect_right(sorted_bases, pc) - 1]
+
+        block_defs: dict[int, dict[_BankReg, list[int]]] = {block.index: {} for block in self.blocks}
+        block_uses: dict[int, dict[_BankReg, list[int]]] = {block.index: {} for block in self.blocks}
+        for reg, pcs in defs.items():
+            for pc in pcs:
+                block_defs[block_of(pc)].setdefault(reg, []).append(pc)
+        for reg, pcs in uses.items():
+            for pc in pcs:
+                block_uses[block_of(pc)].setdefault(reg, []).append(pc)
+
+        # Per-block register liveness sets: ``written`` is defined in the block; ``upward`` is read STRICTLY before its
+        # first def in the block, so it is needed at block entry (live-in). The strict ``<`` matters: a read on the
+        # landing cycle of its own def reads the just-committed value (the model lands the write, then reads, at that
+        # PC), not a live-in -- a same-PC def+use (e.g. an output tap or branch condition read on the cycle it lands)
+        # must NOT be treated as live-in, or its residence would be painted spuriously back to the block entry.
+        written: dict[int, set[_BankReg]] = {}
+        upward: dict[int, set[_BankReg]] = {}
+        for index in block_defs:
+            ds, us = block_defs[index], block_uses[index]
+            written[index] = set(ds)
+            # A register is live-in (upward-exposed) if its earliest read is not supplied by an in-block def: read with
+            # no def, or read strictly before the first def, or read AT a read-first def (which reads the prior value).
+            upward[index] = {
+                reg
+                for reg, reads in us.items()
+                if reg not in ds
+                or min(reads) < min(ds[reg])
+                or (min(reads) == min(ds[reg]) and min(ds[reg]) in read_first.get(reg, set()))
+            }
+        live_in: dict[int, set[_BankReg]] = {index: set() for index in block_defs}
+        live_out: dict[int, set[_BankReg]] = {index: set() for index in block_defs}
+        changed = True
+        while changed:  # backward dataflow over the block CFG; converges (monotone over a finite lattice)
+            changed = False
+            for index in block_defs:
+                out: set[_BankReg] = set().union(*(live_in[s] for s in succ[index]), set())
+                new_in = upward[index] | (out - written[index])
+                if out != live_out[index] or new_in != live_in[index]:
+                    live_out[index], live_in[index] = out, new_in
+                    changed = True
+
+        rows: dict[_BankReg, set[int]] = {}
+        for index in block_defs:
+            base, boundary = self.block_base[index], term_pc[index]
+            active = written[index] | upward[index] | live_in[index] | live_out[index]
+            for reg in active:
+                d = block_defs[index].get(reg, []) + ([base] if reg in live_in[index] else [])
+                u = block_uses[index].get(reg, []) + ([boundary] if reg in live_out[index] else [])
+                resident = residence_rows(d, u, boundary, frozenset(read_first.get(reg, set())))
+                if resident:
+                    rows.setdefault(reg, set()).update(resident)
+        return rows
+
     @property
     def reg_liveness(self) -> dict[RegRef, set[int]]:
         """
@@ -814,61 +979,70 @@ class Lir:
         from when it lands in the array through its last read.
 
         Diagnostic only -- consumed by the HTML schedule and the tests, never by the emitter or the numerical model.
-        Writes are stamped in the linear fall-through frame, so a result that spills past an overlap-shrunk terminator
-        into a NON-fall-through arm is cycle-approximate here (the runtime model re-keys it onto the taken arm; this
-        static view cannot know the path). It is exact for drained kernels and for fall-through arms.
+        Each op-result LANDING is stamped via ``write_landing_pcs`` at exactly the PC(s) the model writes it --
+        on every successor arm under overlap, not just the fall-through. A pc-gated install (a phi copy or an early
+        non-coalesced slot writeback) fires and samples its source on the copy step but lands its destination one PC
+        later via ``install_landing`` -- the same +1 the model commits -- while a boundary install reads-then-writes
+        at the boundary and lands there. Residence is then resolved per basic block by ``_cfg_residence`` (CFG-aware
+        register liveness), so a value live on two mutually-exclusive arms that rejoin at a merge stays resident on BOTH
+        arms. The result is cycle-exact to the numerical model on every register and every path -- not an approximation.
         """
         present = self.initiation_interval  # hardware-frame present / boundary step
         defs: dict[RegRef, list[int]] = {}
         uses: dict[RegRef, list[int]] = {}
+        read_first: dict[RegRef, set[int]] = {}
         for load in self.float_inputs:
             defs.setdefault(load.dst, []).append(1)
         for slot in self.float_state_slots:
             defs.setdefault(slot.reg, []).append(1)  # the live-in is resident in the slot register from the start
-            # The live-out must reside in the slot register at the boundary to carry into the next initiation, so the
-            # register stays live through the boundary even when nothing reads it again this frame -- installing the
-            # new value early is not its death.
-            uses.setdefault(slot.reg, []).append(present)
-            if slot.needs_copy:  # the non-coalesced live-out lands on the install step and is carried to the next call
-                defs.setdefault(slot.reg, []).append(self.state_copy_step(slot))
-        for op in self.ops:
-            for write in op.writes:
-                if isinstance(write.dst, RegRef):
-                    defs.setdefault(write.dst, []).append(result_landing_cycle(write.dst, op.commit_cycle))
-            read = operand_read_cycle(op.inst.operator, op.issue_cycle)
-            for operand in op.operands:
-                if isinstance(operand.source, RegRef):
-                    uses.setdefault(operand.source, []).append(read)
+            if not slot.needs_copy:
+                # A coalesced live-out is an ordinary result already in the slot register; it must reside through the
+                # boundary to carry into the next initiation, even when nothing reads it again this frame.
+                uses.setdefault(slot.reg, []).append(present)
+            elif (step := self.state_copy_step(slot)) < self.last_pc:
+                # An early pc-gated install lands its destination one PC after its fire step and must reside through the
+                # boundary to carry; installing the new value early is not the slot's death.
+                defs.setdefault(slot.reg, []).append(install_landing(step))
+                uses.setdefault(slot.reg, []).append(present)
+            else:
+                # A boundary install reads-then-writes at the boundary: the hardware samples the live-in there (read
+                # first) before clocking in the new live-out, so the boundary read belongs to the live-in (read_first),
+                # and the live-out is resident at the boundary by its def alone -- no carry use, or a dead live-in would
+                # be over-tinted across the whole frame.
+                defs.setdefault(slot.reg, []).append(step)
+                read_first.setdefault(slot.reg, set()).add(step)
         for wire in self.float_outputs:
             if isinstance(wire.tap.source, RegRef):
                 uses.setdefault(wire.tap.source, []).append(present)
         for slot in self.float_state_slots:  # the live-out tap is read on the install step to persist the slot
             if isinstance(slot.tap.source, RegRef):
                 uses.setdefault(slot.tap.source, []).append(self.state_copy_step(slot))
-        # Inline ops touch the wide bank too: a float->bool cast reads a float operand and the bool->float cast
-        # writes a wide register, whose result lands at the wide bank's ``wide_landing_cycle`` like any wide result
-        # (its PC-gated write is aligned with the write-latch write enables). Without these the residence of a cast
-        # operand or result would be missing from the tint.
+        # Every block's datapath events in the wide bank. A pooled or inline result lands at each PC its writeback
+        # reaches -- one per successor arm under overlap, the in-block landing under draining (``write_landing_pcs``).
+        # An inline float<->bool cast participates here too (a bool->float cast writes a wide register; a float->bool
+        # cast reads one). An operand read stays inside its block (a read never spills past the terminator). A phi-arm
+        # copy installs its value into the merged register at the predecessor's tail and reads its source there -- it
+        # needs no ``write_landing_pcs`` because an install-bearing block keeps the full drain (it never overlaps, see
+        # ``_build._schedule_with_overlap``), so an install landing is always in-block and cannot spill.
         for block in self.blocks:
             base_pc = self.block_base[block.index]
-            for bop in block.inline_ops:
-                read = operand_read_cycle(bop.operator, base_pc + bop.issue_cycle)
-                for inline_operand in bop.operands:
-                    if isinstance(inline_operand.source, RegRef):
-                        uses.setdefault(inline_operand.source, []).append(read)
-                if isinstance(bop.write.dst, RegRef):
-                    defs.setdefault(bop.write.dst, []).append(
-                        result_landing_cycle(bop.write.dst, base_pc + bop.commit_cycle)
-                    )
-            # A phi-arm copy installs its value into the merged register at the predecessor's tail and reads its source
-            # there (the wide-bank analog of ``bool_writes`` below). Without this a merged register's residence -- and,
-            # under reuse, the source register's last read -- would be missing from the tint.
-            for copy in block.copies:
+            block_ops: list[ScheduledOp] = [*block.ops, *block.inline_ops]
+            for op in block_ops:
+                read = operand_read_cycle(op.operator, base_pc + op.issue_cycle)
+                for write in op.writes:
+                    if isinstance(write.dst, RegRef):
+                        defs.setdefault(write.dst, []).extend(self.write_landing_pcs(block, write.dst, op.commit_cycle))
+                for operand in op.operands:
+                    if isinstance(operand.source, RegRef):
+                        uses.setdefault(operand.source, []).append(read)
+            for (
+                copy
+            ) in block.copies:  # a phi copy fires here and samples its source; its destination lands one PC later
                 step = base_pc + copy_step_cycle(copy.issue_cycle)
-                defs.setdefault(copy.dst, []).append(step)
+                defs.setdefault(copy.dst, []).append(install_landing(step))
                 if isinstance(copy.source.source, RegRef):
                     uses.setdefault(copy.source.source, []).append(step)
-        return {reg: residence_rows(defs.get(reg, []), uses.get(reg, []), present) for reg in defs.keys() | uses.keys()}
+        return self._cfg_residence(defs, uses, read_first)
 
     @property
     def bool_liveness(self) -> dict[BoolRegRef, set[int]]:
@@ -878,40 +1052,50 @@ class Lir:
         boolean-logic op, or float->bool cast commits its result, when a boolean phi/state install lands, and -- for a
         persistent slot -- at the live-in resident from cycle 1; it is read by a boolean-logic op or a bool->float cast
         taking it as an operand, by a branch testing it as a condition, by a phi/state install copying it, and at the
-        boundary where a slot's live-out must persist for the next initiation.
+        boundary where a slot's live-out must persist for the next initiation. A boolean result that spills past an
+        overlap-shrunk terminator is stamped on every successor arm via ``write_landing_pcs``, exactly as the numerical
+        model re-keys it; a phi/boolean write lands its destination one PC after its fire step via ``install_landing``
+        (the model's +1), while a boolean slot always installs read-first at the boundary. Residence is resolved by the
+        same per-block ``_cfg_residence`` as :attr:`reg_liveness`, so a spilled or merged boolean is cycle-exact too.
         """
         present = self.initiation_interval
         defs: dict[BoolRegRef, list[int]] = {}
         uses: dict[BoolRegRef, list[int]] = {}
+        read_first: dict[BoolRegRef, set[int]] = {}
         for slot in self.bool_state_slots:
             defs.setdefault(slot.reg, []).append(1)  # the live-in is resident from the start
-            uses.setdefault(slot.reg, []).append(present)  # ...and the live-out must reside through the boundary
             if slot.needs_copy:
-                defs.setdefault(slot.reg, []).append(present)  # the new live-out lands at the boundary (read-first)
+                # A boolean slot always installs read-first at the boundary: the live-out's def alone marks it resident
+                # there (no carry use, which would over-tint a dead live-in), and any boundary read of the slot register
+                # is the live-in (read_first). The install samples its source on the boundary edge.
+                defs.setdefault(slot.reg, []).append(present)
+                read_first.setdefault(slot.reg, set()).add(present)
                 if isinstance(slot.live_out.source, BoolRegRef):
                     uses.setdefault(slot.live_out.source, []).append(present)
+            else:
+                uses.setdefault(slot.reg, []).append(present)  # a coalesced live-out must reside through the boundary
         for load in self.bool_inputs:
             defs.setdefault(load.dst, []).append(1)
-        # Pooled firings write the boolean bank too (the comparator's tapped flags); their issue cycles are absolute.
-        for op in self.ops:
-            for write in op.writes:
-                if isinstance(write.dst, BoolRegRef):
-                    defs.setdefault(write.dst, []).append(result_landing_cycle(write.dst, op.commit_cycle))
+        # Every block's boolean-bank events: a pooled comparator's tapped flags and an inline op's boolean result land
+        # at each arm ``write_landing_pcs`` reaches; an inline op also reads boolean operands (no pooled operator reads
+        # one yet). A phi/state install writes its register at the block tail, and a branch reads its condition at the
+        # block's terminator PC.
         for block in self.blocks:
             base_pc = self.block_base[block.index]
-            for bop in block.inline_ops:
-                # Boolean operands are read by inline ops on their single fire step (operand_read_cycle).
-                read = operand_read_cycle(bop.operator, base_pc + bop.issue_cycle)
-                for operand in bop.operands:
-                    if isinstance(operand.source, BoolRegRef):  # boolean logic and the bool->float cast read booleans
+            block_ops: list[ScheduledOp] = [*block.ops, *block.inline_ops]
+            for op in block_ops:
+                read = operand_read_cycle(op.operator, base_pc + op.issue_cycle)
+                for write in op.writes:
+                    if isinstance(write.dst, BoolRegRef):
+                        defs.setdefault(write.dst, []).extend(self.write_landing_pcs(block, write.dst, op.commit_cycle))
+                for operand in op.operands:
+                    if isinstance(operand.source, BoolRegRef):
                         uses.setdefault(operand.source, []).append(read)
-                if isinstance(bop.write.dst, BoolRegRef):  # boolean logic and the float->bool cast write booleans
-                    defs.setdefault(bop.write.dst, []).append(
-                        result_landing_cycle(bop.write.dst, base_pc + bop.commit_cycle)
-                    )
-            for bwrite in block.bool_writes:
+            for (
+                bwrite
+            ) in block.bool_writes:  # the boolean write fires and samples here; its destination lands one PC later
                 step = base_pc + copy_step_cycle(bwrite.issue_cycle)
-                defs.setdefault(bwrite.dst, []).append(step)
+                defs.setdefault(bwrite.dst, []).append(install_landing(step))
                 if isinstance(bwrite.source.source, BoolRegRef):
                     uses.setdefault(bwrite.source.source, []).append(step)
             if isinstance(block.terminator, Branch):  # the next-PC case reads the condition at the block's boundary PC
@@ -919,7 +1103,7 @@ class Lir:
         for wire in self.bool_outputs:
             if isinstance(wire.tap.source, BoolRegRef):
                 uses.setdefault(wire.tap.source, []).append(present)
-        return {reg: residence_rows(defs.get(reg, []), uses.get(reg, []), present) for reg in defs.keys() | uses.keys()}
+        return self._cfg_residence(defs, uses, read_first)
 
     @property
     def write_timeline(self) -> dict[RegRef, list[tuple[int, Producer]]]:
@@ -929,9 +1113,11 @@ class Lir:
         state live-ins on cycle 1, an operator result on ``result_landing_cycle``.
 
         Diagnostic/analysis only (the write-timeline resolver and the tests; not consumed by the emitter or the
-        numerical model). Landings are stamped in the linear fall-through frame, so -- like ``reg_liveness`` -- a result
-        that spills past an overlap-shrunk terminator into a NON-fall-through arm is cycle-approximate; exact for drained
-        kernels and fall-through arms.
+        numerical model). A result that spills past an overlap-shrunk terminator gets one ``(landing, producer)`` entry
+        per successor arm it reaches (``write_landing_pcs``), placed exactly where the numerical model re-keys the
+        in-flight write; the resolver picks the latest landing at or before a read cycle, and since arms occupy disjoint
+        PC ranges that is always the arm the read executes in. A drained kernel has one entry per write (the linear
+        frame).
         """
         writes: dict[RegRef, list[tuple[int, Producer]]] = {}
         for i, load in enumerate(self.float_inputs):
@@ -940,24 +1126,21 @@ class Lir:
         # a coalesced operator may then overwrite it later in the same initiation via its own OperationProducer entry.
         for s, slot in enumerate(self.float_state_slots):
             writes.setdefault(slot.reg, []).append((1, StateProducer(s)))
-        for j, op in enumerate(self.ops):
-            for write in op.writes:
-                if isinstance(write.dst, RegRef):
-                    writes.setdefault(write.dst, []).append(
-                        (result_landing_cycle(write.dst, op.commit_cycle), OperationProducer(j))
-                    )
-        # Inline firings write the wide bank too (the bool->float cast); without them a cast-fed operand would
-        # resolve to no producer at all.
+        # ``self.ops`` is the per-block ``ops`` flattened in block order, so this index matches OperationProducer.
+        # Inline firings write the wide bank too (the bool->float cast); without them a cast-fed operand resolves to
+        # no producer at all.
+        op_index = 0
         for block in self.blocks:
-            base_pc = self.block_base[block.index]
+            for op in block.ops:
+                for write in op.writes:
+                    if isinstance(write.dst, RegRef):
+                        for pc in self.write_landing_pcs(block, write.dst, op.commit_cycle):
+                            writes.setdefault(write.dst, []).append((pc, OperationProducer(op_index)))
+                op_index += 1
             for k, inline_op in enumerate(block.inline_ops):
                 if isinstance(inline_op.write.dst, RegRef):
-                    writes.setdefault(inline_op.write.dst, []).append(
-                        (
-                            result_landing_cycle(inline_op.write.dst, base_pc + inline_op.commit_cycle),
-                            InlineProducer(block.index, k),
-                        )
-                    )
+                    for pc in self.write_landing_pcs(block, inline_op.write.dst, inline_op.commit_cycle):
+                        writes.setdefault(inline_op.write.dst, []).append((pc, InlineProducer(block.index, k)))
         for events in writes.values():
             events.sort(key=lambda event: event[0])
         return writes

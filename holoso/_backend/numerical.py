@@ -37,7 +37,7 @@ from .._lir import BoolInputLoad, FloatConstRef, FloatInputLoad, FloatOperand
 from .._lir import RegRef, ScheduledOp
 from .._lir import BoolRegRef, Lir
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
-from .._lir import copy_step_cycle, operand_read_cycle, result_landing_cycle, scalar_type_of
+from .._lir import copy_step_cycle, install_landing, operand_read_cycle, result_landing_cycle, scalar_type_of
 from .._operators import *
 from .._type import FloatFormat, ScalarType
 
@@ -328,7 +328,7 @@ class NumericalSimulator(_Kernel):
         # pc-gated write ``regs[dst] <= src`` at this PC is readable on the next.
         resolved = [(inst.dst, self._read(inst.source)) for inst in self._installs.get(pc, ())]
         for dst, value in resolved:
-            self._pending.setdefault(pc + 1, []).append((dst, value))
+            self._pending.setdefault(install_landing(pc), []).append((dst, value))
 
     def _read(self, operand: FloatOperand | BoolOperand) -> _Value:
         """Resolve an operand against the current register files (or the constant pool), applying its conditioner."""

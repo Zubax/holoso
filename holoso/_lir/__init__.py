@@ -27,6 +27,7 @@ from ._ir import (
     boundary_step as boundary_step,
     copy_step_cycle as copy_step_cycle,
     inline_fire_cycle as inline_fire_cycle,
+    install_landing as install_landing,
     operand_read_cycle as operand_read_cycle,
     pooled_writeback_word as pooled_writeback_word,
     result_landing_cycle as result_landing_cycle,

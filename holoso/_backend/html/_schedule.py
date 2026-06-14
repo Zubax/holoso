@@ -36,6 +36,11 @@ def render_schedule(lir: Lir) -> str:
     # flow kernel this lays out every block's PC range; one transaction follows a single path through it, so the grid
     # is the static program, not one transaction's cycle-accurate trace.
     compute_cycles = list(range(1, lir.initiation_interval + 1))
+    # Block boundaries: the grid row axis is the model fetch PC, and blocks tile it contiguously in layout order, so a
+    # non-Ret block ends at its terminator PC and the next block begins on the following row. A thick horizontal seam
+    # below each such row makes the block structure visible. The single Ret block ends at the grid's last row (the
+    # out_valid boundary), so it needs no seam. A straight-line kernel has one block and no seams.
+    boundary_rows = {lir.term_pc(block) for block in lir.blocks if not isinstance(block.terminator, Ret)}
 
     # The operator-stage block: one square column per pipeline stage of each operator, in instance order.
     stage_cols = _stage_columns(lir)
@@ -74,7 +79,9 @@ def render_schedule(lir: Lir) -> str:
     stage_fill: dict[tuple[int, int], tuple[str, int]] = {}  # (stage column, cycle) -> (operator color, group)
     stage_tip: dict[tuple[int, int], str] = {}
     conflicts: set[tuple[int, int]] = set()
-    # Result-commit cells, keyed by absolute (cycle, column): each operation lands its result on its commit cycle.
+    # Result-commit cells, keyed by absolute (cycle, column). A result lands on its commit's landing cycle; under
+    # cross-block overlap a result spilling past the shrunk terminator lands in EACH successor arm's frame, so one
+    # firing may stamp a commit cell on more than one row (``lir.write_landing_pcs``, exactly the model's landing PCs).
     fills: dict[tuple[int, ColKey], str] = {}
     state_cells: set[tuple[int, ColKey]] = set()  # non-coalesced state writebacks, filled by CSS class
     writes_at: dict[tuple[int, ColKey], str] = {}
@@ -83,44 +90,51 @@ def render_schedule(lir: Lir) -> str:
     chips_at: dict[int, list[str]] = {}  # cycle -> chips for the operations committing on that row
 
     group = 0  # global per-operation id, linking a commit cell with its edges/chip for the hover-focus behavior
-    for op in lir.ops:
-        color = operator_colors[type(op.inst.operator)]
-        # Physical clock cycles (cycle-accurate), from the single Lir definitions shared with reg_liveness. One
-        # firing renders one cell per tapped output port (all in one hover group), edges from its shared operands,
-        # and one pipeline trail.
-        read_cyc = operand_read_cycle(op.inst.operator, op.issue_cycle)
-        operand_labels = [_operand_label(operand) for operand in op.operands]
-        firing_tip = _esc(_op_text(op))
-        for write in op.writes:
-            write_cyc = result_landing_cycle(write.dst, op.commit_cycle)
-            tip = _esc(
-                f"{_col_label(write.dst)} 🠄 "
-                + op.inst.operator.render_output(write.port, write.conditioner, *operand_labels)
-            )
-            dcol: ColKey = write.dst
-            dord = col_ord[dcol]
-            writes_at[(write_cyc, dcol)] = writes_at.get((write_cyc, dcol), "") + _write_label(op.inst.index, tip)
-            fills[(write_cyc, dcol)] = color
-            endpoints.add((dord, write_cyc))
-            cell_group[(dord, write_cyc)] = group
-            for operand in op.operands:
-                ocol = _operand_col(operand)
-                if ocol is None:
-                    continue  # a boolean-constant operand has no column / no source cell
-                oord = col_ord[ocol]
-                endpoints.add((oord, read_cyc))  # operands are read a read-latch cycle before the operator issues
-                edges.append((f"g{dord}_{write_cyc}", f"g{oord}_{read_cyc}", color, group))
-            chips_at.setdefault(write_cyc, []).append(
-                f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
-            )
-        base = stage_base[op.inst]
-        for k in range(op.latency):  # stamp the pipeline trail: stage k of this operator is busy on issue + k + lag
-            key = (base + k, op.issue_cycle + k + FETCH_LAG)
-            if key in stage_fill and stage_fill[key][1] != group:
-                conflicts.add(key)
-            stage_fill[key] = (color, group)
-            stage_tip[key] = f"{op.inst.operator.mnemonic}_{op.inst.index} s{k}: {firing_tip}"
-        group += 1
+    for block in lir.blocks:
+        base_pc = lir.block_base[block.index]
+        for op in block.ops:
+            color = operator_colors[type(op.inst.operator)]
+            # Physical clock cycles (cycle-accurate), from the single Lir definitions shared with reg_liveness. One
+            # firing renders one cell per tapped output port (all in one hover group) on EACH arm its writeback reaches,
+            # edges from its shared operands, and one pipeline trail. Block-local cycles are rebased to absolute here.
+            issue_pc = base_pc + op.issue_cycle
+            read_cyc = operand_read_cycle(op.inst.operator, issue_pc)
+            operand_labels = [_operand_label(operand) for operand in op.operands]
+            firing_tip = _esc(_op_text(op))
+            for write in op.writes:
+                landing_pcs = lir.write_landing_pcs(block, write.dst, op.commit_cycle)
+                tip = _esc(
+                    f"{_col_label(write.dst)} 🠄 "
+                    + op.inst.operator.render_output(write.port, write.conditioner, *operand_labels)
+                )
+                dcol: ColKey = write.dst
+                dord = col_ord[dcol]
+                for write_cyc in landing_pcs:  # one commit cell per successor arm the writeback latch reaches
+                    writes_at[(write_cyc, dcol)] = writes_at.get((write_cyc, dcol), "") + _write_label(
+                        op.inst.index, tip
+                    )
+                    fills[(write_cyc, dcol)] = color
+                    endpoints.add((dord, write_cyc))
+                    cell_group[(dord, write_cyc)] = group
+                anchor = landing_pcs[0]  # draw the dataflow edges and the ops chip once, from the first arm's cell
+                for operand in op.operands:
+                    ocol = _operand_col(operand)
+                    if ocol is None:
+                        continue  # a boolean-constant operand has no column / no source cell
+                    oord = col_ord[ocol]
+                    endpoints.add((oord, read_cyc))  # operands are read a read-latch cycle before the operator issues
+                    edges.append((f"g{dord}_{anchor}", f"g{oord}_{read_cyc}", color, group))
+                chips_at.setdefault(anchor, []).append(
+                    f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
+                )
+            base = stage_base[op.inst]
+            for k in range(op.latency):  # stamp the pipeline trail: stage k of this operator is busy on issue + k + lag
+                key = (base + k, issue_pc + k + FETCH_LAG)
+                if key in stage_fill and stage_fill[key][1] != group:
+                    conflicts.add(key)
+                stage_fill[key] = (color, group)
+                stage_tip[key] = f"{op.inst.operator.mnemonic}_{op.inst.index} s{k}: {firing_tip}"
+            group += 1
 
     # Inline firings (boolean logic and the float<->bool casts): single PC-gated statements with no pooled instance,
     # so no pipeline-stage trail. Each renders a colored result cell on its bank's landing cycle, a write marker,
@@ -131,70 +145,72 @@ def render_schedule(lir: Lir) -> str:
         for bop in block.inline_ops:
             color = operator_colors[type(bop.operator)]
             read_cyc = operand_read_cycle(bop.operator, base_pc + bop.issue_cycle)
-            write_cyc = result_landing_cycle(bop.write.dst, base_pc + bop.commit_cycle)
+            landing_pcs = lir.write_landing_pcs(block, bop.write.dst, bop.commit_cycle)
             tip = _esc(_inline_op_text(bop))
             dcol = bop.write.dst
             dord = col_ord[dcol]
-            writes_at[(write_cyc, dcol)] = (
-                writes_at.get((write_cyc, dcol), "") + f"<span class='wl' title='{tip}'>&#9656;</span>"
-            )
-            fills[(write_cyc, dcol)] = color
-            endpoints.add((dord, write_cyc))
-            cell_group[(dord, write_cyc)] = group
+            for write_cyc in landing_pcs:  # one result cell per successor arm the writeback reaches (overlap spill)
+                writes_at[(write_cyc, dcol)] = (
+                    writes_at.get((write_cyc, dcol), "") + f"<span class='wl' title='{tip}'>&#9656;</span>"
+                )
+                fills[(write_cyc, dcol)] = color
+                endpoints.add((dord, write_cyc))
+                cell_group[(dord, write_cyc)] = group
+            anchor = landing_pcs[0]  # draw the dataflow edges and the ops chip once, from the first arm's cell
             for inline_operand in bop.operands:
                 ocol = _operand_col(inline_operand)
                 if ocol is None:
                     continue  # a boolean-constant operand has no column / no source cell
                 oord = col_ord[ocol]
                 endpoints.add((oord, read_cyc))
-                edges.append((f"g{dord}_{write_cyc}", f"g{oord}_{read_cyc}", color, group))
-            chips_at.setdefault(write_cyc, []).append(
+                edges.append((f"g{dord}_{anchor}", f"g{oord}_{read_cyc}", color, group))
+            chips_at.setdefault(anchor, []).append(
                 f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
             )
             group += 1
 
-    # Boolean phi/state installs: a block writes a boolean register (a constant or another boolean register) at its
-    # install step, exactly like a non-coalesced float-slot copy. Render it as a state-style write -- a filled cell, a
-    # write marker, a chip, and a dataflow edge from the source if it is a register -- in its bX column.
+    # Installs -- wide phi-arm copies, boolean phi/state writes, and non-coalesced state writebacks -- are first-class
+    # write events the schedule must show, not invisible side effects. Each samples its source on its FIRE step and
+    # latches its destination on its LANDING row; the caller passes both, computed per kind exactly as the numerical
+    # model's decode does, so the marker row matches the residence tint and the model commit. Render each like a state
+    # commit -- a filled cell, a write marker, and a chip at the landing row, plus a dataflow edge to the source read
+    # on the fire row (a constant source occupies no column, hence no edge).
+    def install_event(
+        dst: ColKey, label: str, source: FloatOperand | BoolOperand, fire_step: int, landing: int
+    ) -> None:
+        nonlocal group
+        dord = col_ord[dst]
+        tip = _esc(f"{label} 🠄 {_operand_label(source)}")
+        writes_at[(landing, dst)] = writes_at.get((landing, dst), "") + f"<span class='wl' title='{tip}'>&#9662;</span>"
+        state_cells.add((landing, dst))
+        endpoints.add((dord, landing))
+        cell_group[(dord, landing)] = group
+        ocol = _operand_col(source)
+        if ocol is not None:  # a constant source occupies no column, so it anchors no edge
+            oord = col_ord[ocol]
+            endpoints.add((oord, fire_step))
+            edges.append((f"g{dord}_{landing}", f"g{oord}_{fire_step}", "state", group))  # JS resolves to --c-state
+        chips_at.setdefault(landing, []).append(f"<span class='opf state' data-op='{group}'>{tip}</span>")
+        group += 1
+
+    # The landing per install kind mirrors the model's decode: a pc-gated install (a phi copy, a boolean write) always
+    # lands at ``install_landing`` (fire + 1); a float slot lands there only if it fires before the boundary, else it is
+    # a read-first boundary install at ``last_pc``; a boolean slot always installs read-first at ``last_pc``.
     for block in lir.blocks:
         base_pc = lir.block_base[block.index]
-        for bwrite in block.bool_writes:
-            step = base_pc + copy_step_cycle(bwrite.issue_cycle)
-            dcol = bwrite.dst
-            dord = col_ord[dcol]
-            tip = _esc(f"{bwrite.dst.stable_label} 🠄 {_operand_label(bwrite.source)}")
-            writes_at[(step, dcol)] = writes_at.get((step, dcol), "") + f"<span class='wl' title='{tip}'>&#9662;</span>"
-            state_cells.add((step, dcol))
-            endpoints.add((dord, step))
-            cell_group[(dord, step)] = group
-            if isinstance(bwrite.source.source, BoolRegRef):  # a bool constant has no source cell, so no edge
-                oord = col_ord[bwrite.source.source]
-                endpoints.add((oord, step))
-                edges.append((f"g{dord}_{step}", f"g{oord}_{step}", "state", group))
-            chips_at.setdefault(step, []).append(f"<span class='opf state' data-op='{group}'>{tip}</span>")
-            group += 1
-
-    # State updates as first-class writes: a non-coalesced slot latches its tap into its register on its install step (a
-    # coalesced slot is already drawn as its operator's commit above). Render it like a commit -- a filled cell, a write
-    # marker, a chip, and a dataflow edge from the tap, in the state color -- so the schedule shows the update rather
-    # than an invisible side effect. The tap is read on the same step (read-first), reg or constant.
-    for slot in lir.float_state_slots:
-        if not slot.needs_copy:
-            continue
-        step = lir.state_copy_step(slot)
-        dord = col_ord[slot.reg]
-        tip = _esc(f"{slot.name} 🠄 {_operand_label(slot.tap)}")
-        writes_at[(step, slot.reg)] = (
-            writes_at.get((step, slot.reg), "") + f"<span class='wl' title='{tip}'>&#9662;</span>"
-        )
-        state_cells.add((step, slot.reg))
-        endpoints.add((dord, step))
-        cell_group[(dord, step)] = group
-        oord = col_ord[slot.tap.source]
-        endpoints.add((oord, step))
-        edges.append((f"g{dord}_{step}", f"g{oord}_{step}", "state", group))  # JS resolves to --c-state
-        chips_at.setdefault(step, []).append(f"<span class='opf state' data-op='{group}'>{tip}</span>")
-        group += 1
+        for copy in block.copies:  # a non-coalesced wide phi-arm merge copy
+            fire = base_pc + copy_step_cycle(copy.issue_cycle)
+            install_event(copy.dst, copy.dst.stable_label, copy.source, fire, install_landing(fire))
+        for bwrite in block.bool_writes:  # a boolean phi/state install (a constant or another boolean register)
+            fire = base_pc + copy_step_cycle(bwrite.issue_cycle)
+            install_event(bwrite.dst, bwrite.dst.stable_label, bwrite.source, fire, install_landing(fire))
+    for slot in lir.float_state_slots:  # a non-coalesced float slot latches its tap (early, or read-first at boundary)
+        if slot.needs_copy:
+            fire = lir.state_copy_step(slot)
+            install_event(slot.reg, slot.name, slot.tap, fire, install_landing(fire) if fire < lir.last_pc else fire)
+    for bslot in lir.bool_state_slots:  # a non-coalesced boolean slot installs its live-out read-first at the boundary
+        if bslot.needs_copy:
+            install_event(bslot.reg, bslot.name, bslot.live_out, lir.last_pc, lir.last_pc)
 
     # Control-transfer arrows: anchor each conditional arrow's root to the boolean register it tests by making that
     # register's cell at the source row a dataflow endpoint, so the overlay can draw the dotted feed to it -- the
@@ -205,7 +221,9 @@ def render_schedule(lir: Lir) -> str:
             endpoints.add((col_ord[arrow.cond], arrow.src_cyc))
 
     out = [
-        _schedule_key(operator_colors, bool(lir.float_state_slots or lir.bool_state_slots), bool(arrows)),
+        _schedule_key(
+            operator_colors, bool(lir.float_state_slots or lir.bool_state_slots), bool(arrows), bool(boundary_rows)
+        ),
         "<div id='schedwrap'><table class='grid'>",
     ]
     # Header row 0: group bands over the register banks (wide, bool), the constant block and the operator pipelines.
@@ -277,7 +295,7 @@ def render_schedule(lir: Lir) -> str:
     out.append(_bookend_row("in", in_cells, columns, live, 0, n_stage, dv))
 
     for cyc in compute_cycles:  # one row per compute cycle; idle cycles show only pipeline advance
-        out.append("<tr>")
+        out.append("<tr class='bbk'>" if cyc in boundary_rows else "<tr>")  # thick seam below a block's last row
         out.append(f"<td class='clk'>{cyc}</td>")
         for ordinal, col in enumerate(columns):
             content = writes_at.get((cyc, col), "")
@@ -497,15 +515,17 @@ def _control_arrows(lir: Lir) -> list[_Arrow]:
     """
     The control transfers that are not the fall-through to the physically next ROM step, one arrow each: a ``Jump`` to a
     non-adjacent block, and each ``Branch`` arm whose target is not the fall-through (usually one arm falls through and
-    the other jumps). The source row is the block's boundary PC, the target row is the destination block's base PC; each
-    is mapped to its grid row by the FETCH_LAG offset, and an arrow is skipped if either row falls outside the grid. A
-    branch arm carries the condition register it reads (for the tooltip and the dotted feed); a jump carries ``None``.
+    the other jumps). The grid row axis is the fetch PC, so the source row is the terminator PC (where the redirect
+    mux reads the condition register and the residence of that register ends) and the target row is the destination
+    block's base PC (where the model lands after the redirect) -- no offset. An arrow is skipped if either row falls
+    outside the grid. A branch arm carries the condition register it reads (for the tooltip and the dotted feed); a jump
+    carries ``None``.
     """
     present = lir.initiation_interval
     arrows: list[_Arrow] = []
 
     def emit(term_pc: int, target: int, tip: str, cond: BoolRegRef | None) -> None:
-        src_cyc, dst_cyc = term_pc + FETCH_LAG, lir.block_base[target] + FETCH_LAG
+        src_cyc, dst_cyc = term_pc, lir.block_base[target]
         if 1 <= src_cyc <= present and 1 <= dst_cyc <= present:
             arrows.append(_Arrow(src_cyc, dst_cyc, tip, cond))
 
@@ -662,7 +682,9 @@ def _named_label(bank: str, index: int, named: tuple[str, str] | None) -> str:
     return f"<span class='rn {named[1]}'>{_esc(named[0])}</span> {base}"
 
 
-def _schedule_key(operator_colors: dict[type[HardwareOperator], str], has_state: bool, has_arrows: bool) -> str:
+def _schedule_key(
+    operator_colors: dict[type[HardwareOperator], str], has_state: bool, has_arrows: bool, has_blocks: bool
+) -> str:
     """A small legend above the grid: operator-kind colors plus the read/write chip shapes."""
     items = [
         f"<span class='wr' style='background:{color}'>{_esc(cls.mnemonic)}</span>"
@@ -689,6 +711,8 @@ def _schedule_key(operator_colors: dict[type[HardwareOperator], str], has_state:
         )
     if has_arrows:
         items.append(_key_item(_ARROW_KEY_MARKER, "control transfer: branch / jump (hover for the condition)"))
+    if has_blocks:
+        items.append(_key_item("<span class='sw bbkey'></span>", "basic-block boundary (terminator row)"))
     items.append(f"<span>pc = microcode step executing this cycle (clk&minus;{FETCH_LAG} fetch lag)</span>")
     return "<h2>Schedule</h2><div class='gridkey'>" + " ".join(items) + "</div>"
 

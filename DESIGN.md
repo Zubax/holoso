@@ -535,12 +535,14 @@ is multi-predecessor), and the forward-DAG carry converges in a single reverse-p
 itself multi-predecessor, still shrinks its own terminator out when its body and exit successors are single-predecessor.
 A block carrying a phi/const install keeps the full drain (the install word must stay in-block). The per-clock numerical
 model commits each result on its true landing PC and, at a shrunk terminator's redirect, re-keys the still-in-flight
-landings onto the taken successor's frame -- a no-op for a
-fall-through arm or a drained block -- so it stays bit- and cycle-exact across the overlap. The STATIC diagnostic
-timelines (`reg_liveness`, `write_timeline`, and the HTML schedule), by contrast, cannot know the taken path: they
-stamp every write in the linear fall-through frame, so a result that spills into a NON-fall-through arm is
-cycle-approximate there. These views feed only the report and the tests -- never the emitter or the numerical model --
-so this does not affect generated RTL or execution; rendering them per CFG path is deferred report work.
+landings onto the taken successor's frame -- a no-op for a fall-through arm or a drained block -- so it stays bit- and
+cycle-exact across the overlap. The static diagnostic timelines (`reg_liveness`, `write_timeline`, and the HTML
+schedule) stamp a spilled result on EVERY successor arm it can reach, at exactly the PCs that same redirect re-keying
+produces, and resolve register residence per basic block with CFG-aware liveness, so a value live on two mutually-
+exclusive arms that rejoin at a merge stays resident on both arms. The report is therefore path-exact -- both the
+landings and the residence tint match the numerical model's per-path behavior, rather than a single linear timeline that
+would place a spill in the fall-through frame and let one arm's landing truncate the other's residence at a merge. These
+views still feed only the report and the tests, never the emitter or the numerical model.
 
 Compile-time-known branch conditions fold to a single arm so the other is never lowered (no spurious state from an
 unreachable write): a literal, a read-only boolean attribute, a comparison whose operands are both compile-time floats

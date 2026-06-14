@@ -67,6 +67,9 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
 .grid td.rbk, .grid th.rbk { border-right: 1px solid #000; }
 /* Heavy 2px seams at the two block boundaries: constants | operator-pipeline and operator-pipeline | OPERATIONS. */
 .grid td.rbk2, .grid th.rbk2 { border-right: 2px solid #000; }
+/* Horizontal basic-block boundary: a heavy 2px seam below the terminator row of each non-Ret block, so a control-flow
+   kernel's block structure reads off the grid (the row axis is the model fetch PC; blocks tile it in layout order). */
+.grid tr.bbk > td, .grid tr.bbk > th { border-bottom: 2px solid #000; }
 .clk { color: #9aa1ab; text-align: right; font-size: 10px; padding: 0 3px; border-right: 1px solid #000; }
 .pc { color: #9aa1ab; text-align: right; font-size: 10px; padding: 0 3px; border-left: 1px solid #000; }
 .stepn { font-weight: 700; color: #111827; padding: 0 4px; border-right: 1px solid #000; white-space: nowrap; }
@@ -112,4 +115,5 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
 .gridkey .sw.live { background: var(--c-live); }
 .gridkey .sw.ink { background: var(--c-ink); }
 .gridkey .sw.state { background: var(--c-state); }
+.gridkey .sw.bbkey { background: transparent; border: none; border-bottom: 2px solid #000; height: 7px; }
 .gridkey .lk { vertical-align: middle; margin-right: 5px; }
