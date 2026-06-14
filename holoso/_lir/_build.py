@@ -27,6 +27,7 @@ from .._mir import (
 from .._operators import (
     BoolInversion,
     FloatSignControl,
+    HardwareOperator,
     InlineHardwareOperator,
     PooledHardwareOperator,
     PortConditioner,
@@ -141,6 +142,147 @@ def _mir_rpo(mir: Mir) -> list[int]:
     return order[::-1]
 
 
+def _value_word_and_landing(mir: Mir, float_mir: MirFloatView, vid: ValueId, issue: int) -> tuple[int, int]:
+    """
+    For a scheduled value, the (last in-block control WORD, result LANDING) in its block-local frame. The word is the
+    latest fetch step the op still drives -- a pooled lane's write-enable (the wide bank one step after commit, the
+    boolean bank on it) or an inline op's combinational fire step; the result lands later, after the bank's pipeline.
+    Cross-block overlap may place ``term_offset`` between the two: the word stays in the block, the landing spills into
+    the (single-predecessor) successor frame.
+    """
+    operator = _mir_operation(mir, vid).operator
+    commit = issue + operator.latency
+    wide = vid in float_mir.operation_nodes
+    landing = wide_landing_cycle(commit) if wide else bool_landing_cycle(commit)
+    if isinstance(operator, PooledHardwareOperator):
+        word = pooled_writeback_word(commit, wide)
+    else:
+        word = inline_fire_cycle(commit, wide)
+    return word, landing
+
+
+@dataclass(frozen=True, slots=True)
+class _OverlapLayout:
+    """
+    The per-block schedule plus the install-inclusive makespan, the (possibly overlap-shrunk) terminator offset, and
+    the spills each block receives -- the predecessor values landing in it past an overlapped terminator, mapped to
+    their block-local landing cycle (fed to the allocator's liveness so a spilled register stays reserved in the
+    block, and identical to the scheduler's ``livein_landing`` so the two cannot drift). Empty under draining.
+    """
+
+    block_sched: dict[int, Schedule]
+    block_makespan: dict[int, int]
+    block_term_offset: dict[int, int]
+    block_inflight: dict[int, dict[ValueId, int]]
+
+
+@dataclass(frozen=True, slots=True)
+class _SpillCarry:
+    """
+    The cross-block-overlap residue a block hands each single-predecessor successor: per-instance busy windows still
+    in flight at the shrunk terminator (``entry_busy``) and the values whose write spills past it (``livein_landing``,
+    the value's landing cycle in the successor-local frame). Both are in successor-local cycles (block start = 1).
+    """
+
+    entry_busy: dict[tuple[PooledHardwareOperator, int], int]
+    livein_landing: dict[ValueId, int]
+
+
+def _schedule_with_overlap(
+    mir: Mir,
+    float_mir: MirFloatView,
+    bool_mir: MirBoolView,
+    pool: Mapping[type[HardwareOperator], int],
+    has_install_blocks: set[int],
+) -> _OverlapLayout:
+    """
+    Schedule every block in reverse-postorder and derive each block's terminator offset, threading cross-block overlap
+    forward. A block whose every successor is single-predecessor (so a spill cannot reach a wrong path) and that carries
+    no phi/const install shrinks its terminator offset from the drained boundary ``boundary_step(makespan)`` down to the
+    issue-side envelope -- the latest cycle it still drives a control word, plus the branch condition's read floor. Its
+    in-flight results then land past the terminator, in the uniquely-reached successor frame; the successor inherits that
+    as ``entry_busy`` (the predecessor's per-instance busy residue) and ``livein_landing`` (the cycle each spilled value
+    lands in the successor), so its schedule neither reads a still-in-flight operand nor double-drives a busy instance.
+    Back-edge targets and merge blocks are multi-predecessor, so no overlap crosses them: the forward-DAG carry converges
+    in this single pass with no fixpoint. Under draining (every block multi-pred-bound or install-bearing) every offset
+    equals ``boundary_step(makespan)`` and the carries are empty -- the schedule is identical to an isolated per-block one.
+    """
+    succ = _succ_map(mir)
+    pred_count: dict[int, int] = {block.id: 0 for block in mir.blocks}
+    for targets in succ.values():
+        for target in targets:
+            pred_count[target] += 1
+    blocks_by_id = {block.id: block for block in mir.blocks}
+    block_sched: dict[int, Schedule] = {}
+    block_makespan: dict[int, int] = {}
+    block_term_offset: dict[int, int] = {}
+    block_inflight: dict[int, dict[ValueId, int]] = {}
+    # successor block -> the spill carry its single overlapping predecessor hands it (set at most once: a carried-into
+    # block is single-predecessor, so only that one predecessor overlaps into it).
+    carry: dict[int, _SpillCarry] = {}
+    for bid in _mir_rpo(mir):
+        block = blocks_by_id[bid]
+        inherited = carry.get(bid, _SpillCarry({}, {}))
+        livein_landing = inherited.livein_landing
+        block_inflight[bid] = livein_landing  # the spills this block receives (== its scheduler livein_landing)
+        sched = schedule_ops(
+            mir.nodes,
+            pool,
+            schedulable=set(float_mir.block_operations(block)) | set(bool_mir.block_operations(block)),
+            entry_busy=inherited.entry_busy,
+            livein_landing=livein_landing,
+        )
+        block_sched[bid] = sched
+        has_install = bid in has_install_blocks
+        makespan = sched.makespan + (1 if has_install else 0)
+        block_makespan[bid] = makespan
+        boundary = boundary_step(makespan)
+        targets = succ[bid]
+        overlaps = bool(targets) and not has_install and all(pred_count[target] == 1 for target in targets)
+        if overlaps:
+            # The branch's redirect mux reads its condition register at the terminator PC; keep that read in the block
+            # (a produced condition by its boolean landing, a live-in condition by the fetch-pipeline floor) and keep
+            # every operation's control word in the block. Only the writeback/read-first landing tail spills.
+            floor = 1
+            for vid, issue in sched.issue_cycle.items():
+                word, _landing = _value_word_and_landing(mir, float_mir, vid, issue)
+                floor = max(floor, word)
+                operator = _mir_operation(mir, vid).operator
+                if isinstance(operator, PooledHardwareOperator) and operator.error_ports:
+                    # The err_pc diagnostic latches ``pc - FETCH_LAG`` when this op's write-enable executes, which is
+                    # FETCH_LAG fetch steps after its write word. If the terminator redirected by then, err_pc would
+                    # capture the successor frame's PC instead of this op's step. Keep the latch inside the block: the
+                    # data writeback still rides the pipeline correctly, but the diagnostic needs the live PC in-frame.
+                    floor = max(floor, word + FETCH_LAG)
+            if isinstance(block.terminator, MirBranch):
+                cond = block.terminator.cond
+                if cond in sched.issue_cycle:  # produced in this block: keep its boolean landing inside the block
+                    cond_commit = sched.issue_cycle[cond] + _mir_operation(mir, cond).operator.latency
+                    floor = max(floor, bool_landing_cycle(cond_commit))
+                else:
+                    # A live-in condition was written in a prior block; its exact fetch-pipeline read floor at this
+                    # block's terminator is not locally known, so keep the drained boundary (no shrink) -- conservative.
+                    floor = boundary
+            term_offset = min(floor, boundary)
+        else:
+            term_offset = boundary
+        block_term_offset[bid] = term_offset
+        if overlaps:  # hand the spill residue to the (single-predecessor) successors this block uniquely reaches
+            busy = {inst: free - term_offset for inst, free in sched.busy_until.items() if free - term_offset > 0}
+            landing: dict[ValueId, int] = {}
+            for vid, issue in sched.issue_cycle.items():
+                _word, land = _value_word_and_landing(mir, float_mir, vid, issue)
+                if land > term_offset:
+                    landing[vid] = land - term_offset
+            for vid, land in livein_landing.items():  # a received spill that re-spills past this shrunk terminator
+                if land > term_offset:
+                    landing[vid] = max(landing.get(vid, 0), land - term_offset)
+            spill = _SpillCarry(busy, landing)
+            for target in targets:
+                carry[target] = spill
+    return _OverlapLayout(block_sched, block_makespan, block_term_offset, block_inflight)
+
+
 def _build_program(mir: Mir, module_name: str) -> Lir:
     """
     Build the microprogram for any kernel (a straight-line kernel is the degenerate single-``Ret``-block graph):
@@ -165,14 +307,14 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
                     f"would overwrite the condition before the branch reads it"
                 )
     pool = resolve_pool(mir.nodes)
-    block_sched: dict[int, Schedule] = {
-        block.id: schedule_ops(
-            mir.nodes,
-            pool,
-            schedulable=set(float_mir.block_operations(block)) | set(bool_mir.block_operations(block)),
-        )
-        for block in mir.blocks
-    }
+    # Schedule every block in reverse-postorder (a block after its forward-edge predecessors) and lay out each block's
+    # terminator offset, with cross-block software pipelining: a block whose successors are all single-predecessor
+    # shrinks its terminator below the drained boundary and spills its in-flight results into the successor, which
+    # inherits the busy/landing residue. The +1-install drain (decided next from the CFG shape) keeps install-bearing
+    # blocks unshrunk, matching this layout's makespan.
+    has_install_blocks = _block_has_install(mir, float_mir, bool_mir)
+    overlap = _schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks)
+    block_sched = overlap.block_sched
     inst_of: dict[ValueId, OperatorInstance] = {}
     inst_count: dict[PooledHardwareOperator, int] = {}
     for sched in block_sched.values():
@@ -181,13 +323,18 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
             inst_count[inst.operator] = max(inst_count.get(inst.operator, 0), inst.index + 1)
     instances = [OperatorInstance(operator, i) for operator in inst_count for i in range(inst_count[operator])]
     consts, const_pool = _build_const_pool(float_mir, bool_mir.operation_nodes)
-    alloc = _allocate(mir, float_mir, bool_mir, block_sched, inst_of)
+    alloc = _allocate(
+        mir,
+        float_mir,
+        bool_mir,
+        block_sched,
+        inst_of,
+        overlap.block_makespan,
+        overlap.block_term_offset,
+        overlap.block_inflight,
+    )
     leaders = {leader for sched in block_sched.values() for leader in sched.firings}
     swap = assign_commutative_ports(mir.nodes, inst_of, leaders, alloc.float_reg)
-    # The +1 install step is a property of the CFG shape (does any phi take an arm from this block, or does it branch on
-    # a const), decided before allocation so the layout and liveness agree on each block's makespan. Phi coalescing may
-    # delete every copy in such a block, but the block keeps its drain step regardless, so layout/liveness stay valid.
-    has_install_blocks = _block_has_install(mir, float_mir, bool_mir)
 
     blocks: list[LirBlock] = []
     for block in mir.blocks:
@@ -238,6 +385,9 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
                 bool_writes,
                 _build_terminator(block.terminator, alloc),
                 block_makespan,
+                # The terminator offset from the overlap layout: the drained boundary, or shrunk to the issue-side
+                # envelope when this block's in-flight results spill into single-predecessor successors.
+                overlap.block_term_offset[block.id],
             )
         )
 
@@ -488,9 +638,9 @@ class _BlockLayout:
 def _layout_blocks(mir: Mir, blocks: list[LirBlock]) -> _BlockLayout:
     """
     Lay blocks out in the ROM in reverse-postorder, returning their per-block base PCs, the out_valid PC, and the
-    shortest-path initiation interval. Each
-    block spans ``boundary_step(block_makespan) + 1`` fetch steps (its drained body); the single Ret block's boundary
-    is the out_valid PC. ``min_initiation_interval`` is the shortest root-to-Ret path's traversed length.
+    shortest-path initiation interval. Each block spans ``term_offset + 1`` fetch steps (its body up to and including the
+    terminator step; the successor frame begins at ``term_pc + 1``); the single Ret block's boundary is the out_valid PC.
+    ``min_initiation_interval`` is the shortest root-to-Ret path's traversed length.
     """
     successors: dict[int, list[int]] = {}
     for b in blocks:
@@ -509,13 +659,14 @@ def _layout_blocks(mir: Mir, blocks: list[LirBlock]) -> _BlockLayout:
     ret_index = next(b.index for b in blocks if isinstance(b.terminator, Ret))
     order = [bid for bid in _mir_rpo(mir) if bid != ret_index] + [ret_index]
     position = {bid: i for i, bid in enumerate(order)}
-    length = {b.index: boundary_step(b.block_makespan) + 1 for b in blocks}
+    term_offset = {b.index: b.term_offset for b in blocks}
+    length = {index: offset + 1 for index, offset in term_offset.items()}
     base: dict[int, int] = {}
     cursor = 0
     for index in order:  # reverse-postorder starts at the entry (block 0), so every block's base is assigned here
         base[index] = cursor
         cursor += length[index]
-    last_pc = base[ret_index] + boundary_step(next(b for b in blocks if b.index == ret_index).block_makespan)
+    last_pc = base[ret_index] + term_offset[ret_index]
     # Shortest path latency (traversed fetch steps) from entry to the Ret boundary. Back-edges are skipped: the minimum
     # latency is the path that exits each loop on its first header test (a loop weighted as not-taken), a true lower
     # bound (the model is the authority on the realized, data-dependent count).
@@ -530,7 +681,7 @@ def _layout_blocks(mir: Mir, blocks: list[LirBlock]) -> _BlockLayout:
             cand = here + length[index]
             if successor not in dist or cand < dist[successor]:
                 dist[successor] = cand
-    min_ii = dist.get(ret_index, 0) + boundary_step(next(b for b in blocks if b.index == ret_index).block_makespan)
+    min_ii = dist.get(ret_index, 0) + term_offset[ret_index]
     block_base = [base[i] for i in range(len(blocks))]
     return _BlockLayout(block_base, last_pc, min_ii)
 
@@ -842,6 +993,8 @@ def _allocate_float_bank(
     block_sched: dict[int, Schedule],
     inst_of: dict[ValueId, OperatorInstance],
     block_makespan: dict[int, int],
+    block_term_offset: dict[int, int],
+    block_inflight: dict[int, dict[ValueId, int]],
 ) -> _FloatBankAlloc:
     """
     Color the wide bank across the whole CFG by hardware-frame liveness, reusing registers wherever values do not
@@ -882,6 +1035,7 @@ def _allocate_float_bank(
                 entry=mir.entry,
                 succ=_succ_map(mir),
                 makespan=block_makespan,
+                term_offset=block_term_offset,
                 resident=frozenset({*float_mir.input_ids, *float_mir.state_read_nodes}),
                 op_landing={vid: wide_landing_cycle(commit) for vid, commit in op_commit.items()},
                 op_block=op_block,
@@ -890,6 +1044,7 @@ def _allocate_float_bank(
                 boundary_users={b: frozenset(s) for b, s in boundary.items()},
                 arm_out=arm_out,
                 installs=install_facts,
+                inflight_defs=block_inflight,
             )
         )
 
@@ -1101,7 +1256,12 @@ def _movable_order(
 
 
 def _allocate_bool_bank(
-    mir: Mir, bool_mir: MirBoolView, block_sched: dict[int, Schedule], block_makespan: dict[int, int]
+    mir: Mir,
+    bool_mir: MirBoolView,
+    block_sched: dict[int, Schedule],
+    block_makespan: dict[int, int],
+    block_term_offset: dict[int, int],
+    block_inflight: dict[int, dict[ValueId, int]],
 ) -> _BoolBankAlloc:
     """
     Color the boolean bank across the CFG, reusing 1-bit registers across non-interfering values. Operand reads are
@@ -1146,6 +1306,7 @@ def _allocate_bool_bank(
                 entry=mir.entry,
                 succ=_succ_map(mir),
                 makespan=block_makespan,
+                term_offset=block_term_offset,
                 resident=frozenset({*bool_mir.input_ids, *bool_mir.state_read_nodes}),
                 op_landing={vid: bool_landing_cycle(commit) for vid, commit in op_commit.items()},
                 op_block=op_block,
@@ -1154,6 +1315,7 @@ def _allocate_bool_bank(
                 boundary_users={b: frozenset(s) for b, s in boundary.items()},
                 arm_out=arm_out,
                 installs=install_facts,
+                inflight_defs=block_inflight,
             )
         )
 
@@ -1193,19 +1355,31 @@ def _allocate(
     bool_mir: MirBoolView,
     block_sched: dict[int, Schedule],
     inst_of: dict[ValueId, OperatorInstance],
+    block_makespan: dict[int, int],
+    block_term_offset: dict[int, int],
+    block_inflight: dict[int, dict[ValueId, int]],
 ) -> _Allocation:
     """
     Assign wide and boolean registers across the CFG. Both banks are colored by hardware-frame liveness, reusing
     registers across mutually-exclusive and non-overlapping live ranges (:func:`_allocate_float_bank`,
     :func:`_allocate_bool_bank`). A phi is resolved by installing each arm's value into the phi's register with a
     copy at the predecessor's tail; the copies are a parallel (simultaneous) bundle, so a swap is read-then-write
-    correct.
+    correct. ``block_makespan`` (install-inclusive) and ``block_term_offset`` (the drained boundary, or the overlap-
+    shrunk terminator) come from the overlap layout, so the liveness boundary matches the laid-out block spans exactly.
+    ``block_inflight`` carries each block's received cross-block spills (split per bank), reserving a spilled value's
+    register across every successor frame it lands in even where the value is dataflow-dead.
     """
-    block_makespan = {
-        b.id: block_sched[b.id].makespan + (1 if b.id in _block_has_install(mir, float_mir, bool_mir) else 0)
-        for b in mir.blocks
+    float_inflight = {
+        bid: {vid: land for vid, land in spills.items() if vid in float_mir.operation_nodes}
+        for bid, spills in block_inflight.items()
     }
-    float_alloc = _allocate_float_bank(mir, float_mir, block_sched, inst_of, block_makespan)
+    bool_inflight = {
+        bid: {vid: land for vid, land in spills.items() if vid in bool_mir.operation_nodes}
+        for bid, spills in block_inflight.items()
+    }
+    float_alloc = _allocate_float_bank(
+        mir, float_mir, block_sched, inst_of, block_makespan, block_term_offset, float_inflight
+    )
 
     # A phi arm coalesced onto the merged register needs no install copy: the arm value already resides in the phi's
     # register (they share a coloring class). Only the residual (non-coalesced) arms install by a pc-gated copy.
@@ -1217,7 +1391,7 @@ def _allocate(
                 continue
             copies.setdefault(pred, []).append(_FloatArmInstall(float_alloc.reg[vid], value, conditioner))
 
-    bool_alloc = _allocate_bool_bank(mir, bool_mir, block_sched, block_makespan)
+    bool_alloc = _allocate_bool_bank(mir, bool_mir, block_sched, block_makespan, block_term_offset, bool_inflight)
 
     bool_writes: dict[int, list[_BoolArmInstall]] = {}
     for vid, phi in bool_mir.phi_nodes.items():

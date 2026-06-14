@@ -58,6 +58,16 @@ def inline_fire_cycle(commit_cycle: int, dst_is_wide: bool) -> int:
     return commit_cycle + FETCH_LAG + (1 if dst_is_wide else 0)
 
 
+def pooled_writeback_word(commit_cycle: int, dst_is_wide: bool) -> int:
+    """
+    The fetch step on which a pooled lane drives its write-enable/address microcode word: the wide bank one step after
+    the commit (the writeback latch), the latch-free boolean bank on the commit step itself. Shared by the emitter's
+    microcode (where the word is placed) and the overlap layout (which keeps every write word inside the block), so the
+    two cannot drift -- the same single-source-of-truth contract as the landing/read helpers above.
+    """
+    return commit_cycle + (1 if dst_is_wide else 0)
+
+
 def operand_read_cycle(operator: HardwareOperator, issue_cycle: int) -> int:
     """
     The hardware-frame cycle on which an operation samples its register operands (an operation reads all its operands
@@ -148,11 +158,15 @@ class OperatorInstance:
         if permutation is not None:
             assert sorted(permutation) == list(range(len(result_types))), self.operator.mnemonic
             assert all(result_types[permutation[p]] == result_types[p] for p in range(len(permutation)))
-        # Busy windows are tracked per block, so cross-block soundness needs the instance provably idle by the time
-        # any successor block can issue on it. The worst case is a firing committing exactly at its block's makespan
-        # (issue = makespan - latency): the boundary redirect fires ``boundary_step(0)`` steps past the makespan, the
-        # successor's base begins one step later, and its first issue one step after that -- an issue-to-issue gap of
-        # exactly ``latency + boundary_step(0) + 2``. A deeper-throttled operator needs cross-block busy tracking.
+        # Cross-block instance reuse has two regimes. A single-predecessor successor inherits the predecessor's per-
+        # instance busy residue explicitly (``entry_busy``, the cross-block software-pipelining carry), so overlap onto
+        # it is sound for ANY initiation interval. A DRAINED edge -- onto a multi-predecessor successor (a merge, a loop
+        # header, the Ret), which carries no residue -- instead needs the instance provably idle by the time that
+        # successor first issues on it: the worst case is a firing committing at its block's makespan (issue =
+        # makespan - latency), and the redirect-plus-fetch gap to the successor's first issue is exactly
+        # ``latency + boundary_step(0) + 2`` (the makespan absorbs any entry_busy delay, since makespan tracks that
+        # firing's own commit). This bound guards those drained edges; a deeper-throttled operator on a back-edge loop
+        # would additionally need a post-layout re-entry-distance check, deferred until one exists.
         assert self.operator.initiation_interval <= self.operator.latency + boundary_step(0) + 2, (
             f"{self.operator.mnemonic}: initiation_interval {self.operator.initiation_interval} needs cross-block "
             f"busy tracking (max supported is latency + {boundary_step(0) + 2})"
@@ -477,7 +491,12 @@ class LirBlock:
     One basic block of the scheduled microprogram, with block-relative cycles (block start is cycle 0). ``ops``
     (pooled firings), ``inline_ops``, ``copies``, and ``bool_writes`` are the block's datapath events; ``terminator``
     redirects the fetch PC at the block boundary. ``block_makespan`` is the last commit cycle inside the block (0 if
-    it has none).
+    it has none). ``term_offset`` is the block-relative fetch cycle at which the terminator redirects the PC -- the
+    block's boundary step -- and is the single source of truth for the terminator PC (the successor frame begins one
+    step later, at ``term_pc + 1``). It is the full drain ``boundary_step(block_makespan)`` for a block that drains
+    (a multi-predecessor successor, a phi/const install, or a live-in branch condition), but cross-block software
+    pipelining shrinks it to the issue-side envelope when the block's in-flight results may spill into single-
+    predecessor successors -- so a consumer reads it here rather than re-deriving the boundary.
     """
 
     index: int
@@ -487,6 +506,7 @@ class LirBlock:
     bool_writes: list[BoolWrite]
     terminator: Terminator
     block_makespan: int
+    term_offset: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -660,6 +680,14 @@ class Lir:
         """
         return self.last_pc
 
+    def term_pc(self, block: LirBlock) -> int:
+        """
+        The absolute fetch PC at which ``block``'s terminator redirects the PC: its base plus its ``term_offset``. The
+        single derivation consumed by the emitter's next-PC sequencer, the numerical model, the HTML report, and the
+        boolean-condition liveness, so a terminator's address cannot drift between them.
+        """
+        return self.block_base[block.index] + block.term_offset
+
     def state_copy_step(self, slot: FloatStateSlot) -> int:
         """
         The fetch-PC value -- equivalently the hardware-frame cycle -- on which a non-coalesced slot's writeback copy
@@ -784,6 +812,11 @@ class Lir:
         present cycle for a boundary copy, earlier for an early install. A slot register additionally stays live
         through the present cycle, since its live-out must reside there for the next initiation. Each row spans a value
         from when it lands in the array through its last read.
+
+        Diagnostic only -- consumed by the HTML schedule and the tests, never by the emitter or the numerical model.
+        Writes are stamped in the linear fall-through frame, so a result that spills past an overlap-shrunk terminator
+        into a NON-fall-through arm is cycle-approximate here (the runtime model re-keys it onto the taken arm; this
+        static view cannot know the path). It is exact for drained kernels and for fall-through arms.
         """
         present = self.initiation_interval  # hardware-frame present / boundary step
         defs: dict[RegRef, list[int]] = {}
@@ -882,7 +915,7 @@ class Lir:
                 if isinstance(bwrite.source.source, BoolRegRef):
                     uses.setdefault(bwrite.source.source, []).append(step)
             if isinstance(block.terminator, Branch):  # the next-PC case reads the condition at the block's boundary PC
-                uses.setdefault(block.terminator.cond, []).append(base_pc + boundary_step(block.block_makespan))
+                uses.setdefault(block.terminator.cond, []).append(self.term_pc(block))
         for wire in self.bool_outputs:
             if isinstance(wire.tap.source, BoolRegRef):
                 uses.setdefault(wire.tap.source, []).append(present)
@@ -894,6 +927,11 @@ class Lir:
         Per-register write timeline ``(landing cycle, producer)`` in the hardware/executing-step frame, used to resolve
         a register source at a hardware read cycle. A value is readable from the cycle it lands in the array: inputs and
         state live-ins on cycle 1, an operator result on ``result_landing_cycle``.
+
+        Diagnostic/analysis only (the write-timeline resolver and the tests; not consumed by the emitter or the
+        numerical model). Landings are stamped in the linear fall-through frame, so -- like ``reg_liveness`` -- a result
+        that spills past an overlap-shrunk terminator into a NON-fall-through arm is cycle-approximate; exact for drained
+        kernels and fall-through arms.
         """
         writes: dict[RegRef, list[tuple[int, Producer]]] = {}
         for i, load in enumerate(self.float_inputs):

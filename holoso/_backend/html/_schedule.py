@@ -510,7 +510,7 @@ def _control_arrows(lir: Lir) -> list[_Arrow]:
             arrows.append(_Arrow(src_cyc, dst_cyc, tip, cond))
 
     for block in lir.blocks:
-        term_pc = lir.block_base[block.index] + boundary_step(block.block_makespan)
+        term_pc = lir.term_pc(block)
         fall_pc = term_pc + 1  # the physically next ROM step; a target landing here is the fall-through, drawn as none
         match block.terminator:
             case Jump(target=target):

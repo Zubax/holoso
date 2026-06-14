@@ -30,14 +30,15 @@ bank or the 1-bit boolean bank) and receives the symmetric interference adjacenc
 from dataclasses import dataclass, field
 
 from .._hir import ValueId
-from ._ir import boundary_step, copy_step_cycle
+from ._ir import copy_step_cycle
 
 
 @dataclass(frozen=True, slots=True)
 class BankLiveness:
     """
-    One register family's liveness inputs, in the per-block-drained schedule (every block's results land before the
-    next block fetches, so a cross-block live-in is resident from its block's first step).
+    One register family's liveness inputs. For a drained block every result lands before the next block fetches, so a
+    cross-block live-in is resident from its block's first step; under cross-block software pipelining a predecessor's
+    result may instead spill past its (shrunk) terminator and land inside this block, which ``inflight_defs`` records.
 
     All cycles are block-local in the executing-step frame (block start is step 1). ``op_landing`` is each in-block
     definition's bank-true landing cycle (the caller computes it with the shared ``_ir`` cycle helper of its bank:
@@ -57,6 +58,10 @@ class BankLiveness:
     # Block makespan, INCLUSIVE of the +1 install step when the block carries any install -- the same value the
     # layout uses -- so an install's copy step is exactly ``copy_step_cycle(makespan[block])``.
     makespan: dict[int, int]
+    # Per-block terminator offset (the boundary step where values live-out / consumed-at-boundary must still reside).
+    # Equals ``boundary_step(makespan[block])`` under per-block draining; a separate field so cross-block overlap can
+    # shrink it below the drain without disturbing the install copy step, which stays keyed on ``makespan``.
+    term_offset: dict[int, int]
     resident: frozenset[ValueId]  # inputs and state live-ins: resident from the start, defined at the entry
     op_landing: dict[ValueId, int]  # op-result value -> its bank-true landing cycle in its def block (block-local)
     op_block: dict[ValueId, int]  # op-result value -> its def block
@@ -65,6 +70,13 @@ class BankLiveness:
     boundary_users: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> boundary-read values
     arm_out: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> phi-arm values live out of it
     installs: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> phi dests installed at its tail
+    # Cross-block overlap: per block, a predecessor value whose in-flight write SPILLS past the predecessor's shrunk
+    # terminator and lands in THIS block, mapped to its block-local landing cycle. The writeback latch fires
+    # unconditionally (the predecessor drove its write-enable before the redirect), so the value's register is occupied
+    # in every successor frame it spills into -- from the block's first step through its landing -- whether or not the
+    # value is dataflow-live here. Modeling it as resident-from-step-1 keeps a sibling arm where the value is DEAD from
+    # reusing that register and being clobbered by the landing. Empty under per-block draining.
+    inflight_defs: dict[int, dict[ValueId, int]] = field(default_factory=dict)  # block -> {spilled value: landing}
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,9 +144,10 @@ def compute_interference(bank: BankLiveness) -> dict[ValueId, set[ValueId]]:
     interferes: dict[ValueId, set[ValueId]] = {vid: set() for vid in all_values}
 
     for block in bank.blocks:
-        boundary = boundary_step(bank.makespan[block])
+        boundary = bank.term_offset[block]
         installed = bank.installs.get(block, frozenset())
-        live_set = live.live_in[block] | defs[block] | installed
+        inflight = bank.inflight_defs.get(block, {})
+        live_set = live.live_in[block] | defs[block] | installed | inflight.keys()
         # A value's residence in this block: it lands on the block's first step when it is resident, a phi result, or a
         # live-in carried from a predecessor; on its operator's landing cycle when defined here; and on the install
         # step (one before the boundary) when its only presence is a phi install at this block's tail. It dies on its
@@ -156,6 +169,10 @@ def compute_interference(bank: BankLiveness) -> dict[ValueId, set[ValueId]]:
         for vid, cycle in bank.reads.get(block, []):
             if vid in read_at:
                 read_at[vid] = max(read_at[vid], cycle)
+        for vid, landing in inflight.items():
+            # A spilled value occupies its register at least until its in-flight write lands here (even with no reader
+            # in this block); a later value may reuse the register only after that landing (read-first below).
+            read_at[vid] = max(read_at[vid], landing)
         boundary_users = bank.boundary_users.get(block, frozenset())
         for vid in live_set:
             if vid in live.live_out[block] or vid in boundary_users or vid in installed:

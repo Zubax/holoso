@@ -179,13 +179,14 @@ def generate(lir: Lir) -> VerilogOutput:
     ucw = finalize_fields(fields)
 
     issues_by_cycle, commits_by_cycle = lir.group_by_cycle
-    # Commit annotations land on each firing's write step: bool-only firings write ON the commit step (latch-free
-    # bank), anything with a wide lane one step later (the writeback latch).
+    # Commit annotations land on each firing's write step (the same step the microcode places its write-enable): a
+    # bool-only firing writes ON the commit step (latch-free bank), one with a wide lane one step later (writeback
+    # latch). A pooled firing's taps are single-bank, so the firing's write step is pooled_writeback_word of that bank.
     commits_by_step: dict[int, list[PooledScheduledOp]] = {}
     for commit_cycle, ops in commits_by_cycle.items():
         for op in ops:
             wide = any(isinstance(write.dst, RegRef) for write in op.writes)
-            commits_by_step.setdefault(commit_cycle + (1 if wide else 0), []).append(op)
+            commits_by_step.setdefault(pooled_writeback_word(commit_cycle, wide), []).append(op)
 
     depth = lir.last_pc + 1  # one microcode word per fetch PC (0..last_pc); inter-block drains and the tail pack to NOP
 
@@ -506,7 +507,7 @@ def _terminator_redirects(lir: Lir) -> list[tuple[int, str]]:
     """
     redirects: list[tuple[int, str]] = []
     for block in lir.blocks:
-        term_pc = lir.block_base[block.index] + boundary_step(block.block_makespan)
+        term_pc = lir.term_pc(block)
         match block.terminator:
             case Jump(target=target):
                 target_pc = lir.block_base[target]

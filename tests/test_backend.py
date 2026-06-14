@@ -340,6 +340,7 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         PortWrite,
         RegFileLayout,
         Ret,
+        boundary_step,
     )
     from holoso._lir._ir import BoolRegFileLayout
     from holoso._operators import FloatHardwareOperator, FloatSignControl
@@ -391,7 +392,7 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         ops=[op],
         outputs=[FloatOutputWire("out_0", FloatOperand(RegRef(2))), FloatOutputWire("out_1", FloatOperand(RegRef(3)))],
         float_state_slots=[],
-        blocks=[LirBlock(0, [op], [], [], [], Ret(), op.commit_cycle)],
+        blocks=[LirBlock(0, [op], [], [], [], Ret(), op.commit_cycle, boundary_step(op.commit_cycle))],
         block_base=[0],
         entry=0,
         last_pc=op.commit_cycle + 4,

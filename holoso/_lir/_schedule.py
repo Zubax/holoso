@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from .._hir import ValueId
 from .._mir import MirBoolConst, MirFloatConst, MirNode, MirOperation
 from .._operators import HardwareOperator, PooledHardwareOperator, PortConditioner
-from ._ir import OperatorInstance, dependency_edge, pooled_wide_read_cycle, wide_landing_cycle
+from ._ir import OperatorInstance, dependency_edge, operand_read_cycle, pooled_wide_read_cycle, wide_landing_cycle
 
 # A pooled firing's fusion identity: the operator, its operand values, and their conditioners -- everything the
 # module activation consumes. Output ports and output conditioners are deliberately excluded (members differ there).
@@ -46,6 +46,10 @@ class Schedule:
     firings: dict[ValueId, list[ValueId]]  # pooled firing leader -> its members, sorted by output port
     instances: list[OperatorInstance]
     makespan: int  # max commit cycle (issue_cycle + latency), or 0 if there are no ops
+    # Per pooled instance slot, the first cycle it is free again (last firing's issue + initiation_interval). An
+    # overlapping successor inherits this residue as its ``entry_busy`` so a firing bound to the same physical slot
+    # waits out the predecessor's in-flight activation instead of double-driving it across the overlapped boundary.
+    busy_until: dict[tuple[PooledHardwareOperator, int], int]
 
 
 def _op(nodes: dict[ValueId, MirNode], vid: ValueId) -> MirOperation:
@@ -131,23 +135,30 @@ def _critical_path(
 
 
 def schedule_ops(
-    nodes: dict[ValueId, MirNode], pool: Mapping[type[HardwareOperator], int], schedulable: set[ValueId]
+    nodes: dict[ValueId, MirNode],
+    pool: Mapping[type[HardwareOperator], int],
+    schedulable: set[ValueId],
+    entry_busy: Mapping[tuple[PooledHardwareOperator, int], int] | None = None,
+    livein_landing: Mapping[ValueId, int] | None = None,
 ) -> Schedule:
     """
     Place every firing of ``schedulable`` (one block's operations, across both register banks) on the earliest cycle
     its operands are ready and -- for a pooled firing -- a free instance exists. A single dependency-aware pass spans
     float and boolean-result operations, so cross-bank chains (a value feeding a comparison feeding a cast) schedule
-    correctly without a barrier. Operands outside ``schedulable`` are block live-ins resident at the block start (a
-    prior block's drained result, a state read, an input, or a phi); constants are immediates. A pooled instance
-    accepts a new firing every ``initiation_interval`` cycles; inline firings have no contention. Busy windows are
-    per block: blocks execute sequentially with a drained gap between a firing's commit and any successor block's
-    first issue, so an instance is necessarily idle across the boundary for every operator whose initiation interval
-    stays within that gap of its latency -- validated per instance in ``OperatorInstance.__post_init__`` (all
-    shipped and planned operators qualify; sincos/atan2 are II == latency).
+    correctly without a barrier. Operands outside ``schedulable`` are block live-ins; under per-block draining each is
+    resident at the block start (a prior block's drained result, a state read, an input, or a phi), but a predecessor
+    result spilled past an OVERLAPPED boundary lands mid-block instead -- ``livein_landing`` carries its block-local
+    landing cycle, and a consumer's operand read must not precede it. A pooled instance accepts a new firing every
+    ``initiation_interval`` cycles; ``entry_busy`` seeds each instance's busy window with the residue inherited from an
+    overlapping predecessor (empty under draining, where an instance is necessarily idle by the boundary for every
+    operator whose initiation interval stays within ``OperatorInstance.__post_init__``'s bound). Both carries are empty
+    for a fully-drained block, leaving the schedule identical to an isolated per-block pass.
     """
+    entry_busy = entry_busy or {}
+    livein_landing = livein_landing or {}
     op_ids = sorted(schedulable)
     if not op_ids:
-        return Schedule(issue_cycle={}, inst_of={}, firings={}, instances=[], makespan=0)
+        return Schedule(issue_cycle={}, inst_of={}, firings={}, instances=[], makespan=0, busy_until=dict(entry_busy))
     schedulable_set = set(op_ids)
 
     firings = fuse_block_firings(nodes, schedulable_set)
@@ -155,7 +166,8 @@ def schedule_ops(
     issue_cycle: dict[ValueId, int] = {}
     inst_count: dict[PooledHardwareOperator, int] = {}
     slot_of: dict[ValueId, tuple[PooledHardwareOperator, int]] = {}  # per firing leader
-    busy_until: dict[tuple[PooledHardwareOperator, int], int] = {}  # instance slot -> first cycle it is free again
+    # instance slot -> first cycle it is free again, seeded with the busy residue inherited from overlapping predecessors
+    busy_until: dict[tuple[PooledHardwareOperator, int], int] = dict(entry_busy)
 
     def commit_cycle(vid: ValueId) -> int:
         return issue_cycle[vid] + _op(nodes, vid).operator.latency
@@ -173,6 +185,11 @@ def schedule_ops(
                     return False
                 producer = _op(nodes, operand)
                 if cycle < commit_cycle(operand) + dependency_edge(producer.operator, producer.output_port, consumer):
+                    return False
+            elif operand in livein_landing:
+                # A predecessor result spilled past an overlapped boundary lands mid-block; the consumer's operand read
+                # must not precede its block-local landing cycle (the read mechanism dispatches per consumer class).
+                if operand_read_cycle(consumer, cycle) < livein_landing[operand]:
                     return False
             elif not isinstance(nodes[operand], (MirFloatConst, MirBoolConst)) and cycle < INPUT_DEPENDENCY_EDGE:
                 return False
@@ -213,7 +230,12 @@ def schedule_ops(
     pooled_firings = {leader: members for leader, members in firings.items() if leader in slot_of}
     makespan = max((commit_cycle(vid) for vid in op_ids), default=0)
     return Schedule(
-        issue_cycle=issue_cycle, inst_of=inst_of, firings=pooled_firings, instances=instances, makespan=makespan
+        issue_cycle=issue_cycle,
+        inst_of=inst_of,
+        firings=pooled_firings,
+        instances=instances,
+        makespan=makespan,
+        busy_until=busy_until,
     )
 
 

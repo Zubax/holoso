@@ -1,5 +1,6 @@
 """Unit tests for pipelined scheduling, register allocation, and LIR construction."""
 
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,7 +33,7 @@ from holoso._lir import (
     operand_read_cycle,
     result_landing_cycle,
 )
-from holoso._lir._ir import dependency_edge, wide_landing_cycle
+from holoso._lir._ir import FETCH_LAG, boundary_step, dependency_edge, pooled_writeback_word, wide_landing_cycle
 from holoso._mir import (
     lower as lower_to_mir,
     Mir,
@@ -53,7 +54,17 @@ from holoso._lir import build
 from holoso._lir._schedule import resolve_pool, schedule_ops
 from holoso._type import BoolType, FloatType, ScalarType
 
-from ._modelref import ChainedSlots, SelectHold, branch_boundary_kernel, default_ops, fcmp_staged_ops, staged_ops
+from ._modelref import (
+    ChainedSlots,
+    SelectHold,
+    branch_boundary_kernel,
+    default_ops,
+    fcmp_staged_ops,
+    overlap_dead_arm_spill_kernel,
+    overlap_div_err_kernel,
+    overlap_spill_kernel,
+    staged_ops,
+)
 
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
@@ -160,6 +171,83 @@ def test_branch_comparison_commits_at_block_makespan(stage_input: int) -> None:
     (cmp_op,) = comparisons
     assert cmp_op.latency == 1 + stage_input
     assert cmp_op.commit_cycle == block.block_makespan
+
+
+def test_overlap_shrinks_branch_terminator_below_drained_boundary() -> None:
+    # Cross-block software pipelining (M7): a branch block whose every successor is single-predecessor shrinks its
+    # terminator offset below the drained boundary boundary_step(makespan), so its in-flight results spill into the
+    # successor frame instead of fully draining. Pins that the overlap actually engages (the recip_newton loop header,
+    # an in-block-condition branch to a single-pred body and a single-pred exit, is such a block).
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    from recip_newton import NewtonReciprocal
+
+    lir = build(_run(NewtonReciprocal().__call__), "recip_overlap")
+    shrunk = [
+        block
+        for block in lir.blocks
+        if isinstance(block.terminator, Branch) and block.term_offset < boundary_step(block.block_makespan)
+    ]
+    assert shrunk, "no branch block shrank its terminator: cross-block overlap did not engage"
+
+
+def test_overlap_spilled_result_lands_in_successor_frame() -> None:
+    # The overlap_spill_kernel corner (shared with test_cosim.py test_cosim_overlap_spill): the branch condition is an
+    # input comparison that commits early, while a wide chain in the same block commits much later, so the block shrinks
+    # to the chain's WRITE WORD and the chain result lands PAST the terminator -- in the single-predecessor arm frames.
+    # Pins that a wide result genuinely spills (result_landing_cycle beyond term_offset, while its write word stays in
+    # the block); the cosim twin proves the arm read waits for the in-flight landing rather than reading stale data.
+    lir = build(_run(overlap_spill_kernel), "overlap_spill")
+    spilled = [
+        (block, op, write)
+        for block in lir.blocks
+        if isinstance(block.terminator, Branch) and block.term_offset < boundary_step(block.block_makespan)
+        for op in block.ops
+        for write in op.writes
+        if isinstance(write.dst, RegRef) and result_landing_cycle(write.dst, op.commit_cycle) > block.term_offset
+    ]
+    assert spilled, "no wide result spilled past a shrunk terminator: the overlap corner did not trigger"
+    # The spilling write's control WORD stays in the block (only the writeback/read-first landing tail crosses the
+    # terminator) -- so the emitter places it normally and the single-writer microcode validator never sees a replica.
+    for block, op, _write in spilled:
+        assert op.commit_cycle + 1 <= block.term_offset
+
+
+def test_overlap_dead_arm_spill_does_not_clobber_a_sibling_live_value() -> None:
+    # Regression (review BLOCKER, found independently by the functional reviewer and Codex): under cross-block overlap a
+    # wide result spills into BOTH single-pred arms because its writeback latch fires unconditionally before the
+    # redirect. In an arm where that result is DEAD, the allocator must STILL reserve its register (inflight_defs); else
+    # the spill clobbers a value the arm actually uses -- a silent miscompile the cosim cannot catch, since the
+    # numerical model shares the same register file (model == RTL, both wrong). Checked against source semantics. The
+    # shared kernel's else arm reads `v` while `w` is dead and spills; crash-before, w (=15 for x=3,y=1,z=2) overwrote
+    # v's register and the else result was grossly wrong (~3.4 instead of 1.2).
+    model = build_model(build(_run(overlap_dead_arm_spill_kernel), "dead_arm_spill"))
+    for x, y, z in [(3.0, 1.0, 2.0), (4.0, 2.0, 0.5), (2.5, 0.5, 1.5)]:  # x > y selects the else arm, where w is dead
+        want = (x + y + z) / (z * z + 1.0)
+        (got,) = model.run(x, y, z)
+        assert math.isclose(
+            got, want, rel_tol=1e-2
+        ), f"x={x} y={y} z={z}: got {got}, want {want} (dead-arm spill clobber)"
+
+
+def test_overlap_keeps_error_op_diagnostic_latch_in_frame() -> None:
+    # Regression (review round 3, Codex P1): a division (the error-bearing op) whose writeback spills past a SHRUNK
+    # terminator latches err_pc as pc-FETCH_LAG when its write-enable EXECUTES -- FETCH_LAG fetch steps after its write
+    # word. If the terminator redirected to the non-fall-through arm by then, err_pc captures the wrong (successor)
+    # frame. The data writeback is unaffected (it rides the pipeline), so only a step-accurate err_pc check sees it; the
+    # shrink floor must keep the latch in-block: term_offset >= writeback_word + FETCH_LAG for an error-bearing op.
+    # Crash-before: term_offset was the bare write word (one FETCH_LAG short), so err_pc latched a redirected pc.
+    lir = build(_run(overlap_div_err_kernel), "overlap_div_err")
+    checked = False
+    for block in lir.blocks:
+        if not isinstance(block.terminator, Branch):
+            continue
+        for op in block.ops:
+            operator = op.inst.operator
+            if operator.error_ports:  # the division: its err diagnostic latch must not cross the terminator
+                assert block.term_offset < boundary_step(block.block_makespan)  # the corner: this block shrinks
+                assert block.term_offset >= pooled_writeback_word(op.commit_cycle, True) + FETCH_LAG
+                checked = True
+    assert checked, "the error-bearing division did not land in a shrinkable branch block: corner not exercised"
 
 
 def test_phi_install_does_not_clobber_the_branch_condition() -> None:

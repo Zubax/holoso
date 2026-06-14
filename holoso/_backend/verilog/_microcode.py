@@ -16,7 +16,7 @@ output gets no fields and is left unconnected.
 from dataclasses import dataclass
 from string import ascii_letters
 
-from ..._lir import FloatConstRef, FloatOperand, Lir, OperatorInstance, PooledScheduledOp, RegRef
+from ..._lir import FloatConstRef, FloatOperand, Lir, OperatorInstance, PooledScheduledOp, RegRef, pooled_writeback_word
 from ..._type import FloatType
 
 PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
@@ -162,9 +162,23 @@ def build_microcode(
     """
     depth = lir.last_pc + 1  # one control word per fetch PC: blocks are laid out across 0..last_pc with NOP gaps
     fields: dict[str, Field] = {}
+    defaults: dict[str, int | None] = {}
 
     def add(name: str, width: int, default: int | None) -> None:
         fields[name] = Field(name, width, [default] * depth)
+        defaults[name] = default
+
+    def put(name: str, step: int, value: int) -> None:
+        # Single-writer rule: a field's step slot may be set once to a non-default value (or repeatedly to the same
+        # value). Under per-block draining no two firings share a control word, so this never fires; once commit-side
+        # writebacks of in-flight results spill into successor words, it catches at build time any two spills colliding
+        # on one slot (e.g. a replica landing on a word another firing already drives) instead of silently clobbering.
+        field = fields[name]
+        current = field.values[step]
+        assert (
+            current == defaults[name] or current == value
+        ), f"microcode single-writer violation on field {name!r} step {step}: holds {current!r}, cannot write {value!r}"
+        field.values[step] = value
 
     # The read-address field selects within a port's read-set, not the whole register file: it carries the dense
     # read-set index (0..K-1), so its width is ceil(log2 K) and the emitter's read-mux case selects by it. A
@@ -197,34 +211,33 @@ def build_microcode(
         ci = op.issue_cycle  # in_valid and sign controls, consumed inside the wrapper on the issue step
         rci = op.issue_cycle - 1  # read-address group, presented early so the read latch delivers on issue
         assert 0 <= rci, f"microcode step out of range: rci={rci}, depth={depth}"
-        fields[f_iv(base)].values[ci] = 1
+        put(f_iv(base), ci, 1)
         for pos, operand in enumerate(op.operands):
             port = read_port[(op.inst, pos)]
             assert isinstance(operand, FloatOperand), "pooled operators read only wide operands today (no read lane)"
-            fields[f_osgn(base, PORT_LETTERS[pos])].values[ci] = operand.sign.encoded
+            put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.sign.encoded)
             if isinstance(operand.source, FloatConstRef):
-                fields[f_selc(port)].values[rci] = 1
+                put(f_selc(port), rci, 1)
                 if f_cidx(port) in fields:
-                    fields[f_cidx(port)].values[rci] = port_consts[port].index(operand.source.index)
+                    put(f_cidx(port), rci, port_consts[port].index(operand.source.index))
             elif isinstance(operand.source, RegRef):
                 if f_selc(port) in fields:
-                    fields[f_selc(port)].values[rci] = 0
-                fields[f_rd(port)].values[rci] = port_read_set[port].index(operand.source.index)
+                    put(f_selc(port), rci, 0)
+                put(f_rd(port), rci, port_read_set[port].index(operand.source.index))
         for write in op.writes:
             lane = (op.inst, write.port)
-            if isinstance(write.dst, RegRef):
-                # Wide lane: writeback latch alignment (one step after the commit); conditioner rides the wrapper.
-                wcc = op.commit_cycle + 1
-                assert wcc < depth, f"microcode step out of range: wcc={wcc}, depth={depth}"
-                fields[f_ysgn(base, write.port)].values[ci] = write.conditioner.encoded
+            wide = isinstance(write.dst, RegRef)
+            # Wide lane: writeback latch alignment (one step after the commit); the latch-free boolean lane fires ON the
+            # commit step (NOT one later -- a +1 would land the result past the branch's boundary read). The same step
+            # the overlap layout uses to keep every write word inside the block (see pooled_writeback_word).
+            wcc = pooled_writeback_word(op.commit_cycle, wide)
+            assert wcc < depth, f"microcode step out of range: wcc={wcc}, depth={depth}"
+            if wide:
+                put(f_ysgn(base, write.port), ci, write.conditioner.encoded)  # sign rides the wrapper at issue
             else:
-                # Boolean lane: latch-free, the write fires ON the commit step (NOT one later -- a +1 here would land
-                # the result past the branch's boundary read); the inversion is applied at the write.
-                wcc = op.commit_cycle
-                assert wcc < depth, f"microcode step out of range: wcc={wcc}, depth={depth}"
-                fields[f_binv(base, write.port)].values[wcc] = write.conditioner.encoded
-            fields[f_we(base, write.port)].values[wcc] = 1
-            fields[f_wa(base, write.port)].values[wcc] = write_lists[lane].index(write.dst.index)
+                put(f_binv(base, write.port), wcc, write.conditioner.encoded)  # inversion applied at the write
+            put(f_we(base, write.port), wcc, 1)
+            put(f_wa(base, write.port), wcc, write_lists[lane].index(write.dst.index))
 
     return fields
 

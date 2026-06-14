@@ -190,6 +190,18 @@ A robust closure procedure that accounts for this starts lean and adds back one 
 Entirely driven by `nox`; read the `noxfile.py` for details and follow its recommendations.
 Tests may take a long time to run; if there is no output, assume they are still running, not stuck,
 
+Treat all code as suspect and likely defective until proven otherwise through testing. A passing build, a clean type
+check, a green-looking review, or code that merely reads as correct is not evidence of correctness -- only a test that
+exercises the behavior and could have failed is. When in doubt, assume the path is untested and the behavior is wrong
+until a kernel demonstrates otherwise.
+
+Prefer API-level black-box kernel tests over intrusive tests: a specific kernel exercising the target path,
+driven through the public API (e.g., `holoso.synthesize(fn, ops).numerical_model.elaborate()` etc),
+asserting mostly on publicly observable behavior -- output values against a reference,
+persistent state across transactions, typed-port metadata, error diagnostics -- not on internal structures.
+Such black-box tests are more likely to survive a deep refactoring.
+White-box tests remain valuable only where pure black-box tests are impractical.
+
 Whenever a defect is found (whether by a review agent or reported by a user), you MUST add a regression test that
 is verified to crash with the defect in place, and pass once the fix is implemented.
 

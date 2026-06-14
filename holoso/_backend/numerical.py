@@ -37,7 +37,7 @@ from .._lir import BoolInputLoad, FloatConstRef, FloatInputLoad, FloatOperand
 from .._lir import RegRef, ScheduledOp
 from .._lir import BoolRegRef, Lir
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
-from .._lir import boundary_step, copy_step_cycle, operand_read_cycle, result_landing_cycle, scalar_type_of
+from .._lir import copy_step_cycle, operand_read_cycle, result_landing_cycle, scalar_type_of
 from .._operators import *
 from .._type import FloatFormat, ScalarType
 
@@ -206,6 +206,14 @@ class NumericalSimulator(_Kernel):
         PC, then apply that PC's datapath.
         """
         next_pc = self._next_pc(in_valid, out_ready)
+        if self.pc in self._terminators:
+            # A block whose terminator redirects earlier than its drained boundary (cross-block overlap) leaves
+            # in-flight results still landing past its terminator PC; those landings belong to whichever arm the
+            # redirect takes, so re-key the pending writes from the fall-through frame onto the taken successor's
+            # frame. For a fall-through arm (and for every fully-drained block) the shift is zero -- a no-op.
+            shift = next_pc - (self.pc + 1)
+            if shift:
+                self._pending = {(pc + shift if pc > self.pc else pc): writes for pc, writes in self._pending.items()}
         if self.pc == self._lir.last_pc and out_ready:  # accepted boundary edge: advance persistent state (read-first)
             installed = [(inst.dst, self._read(inst.source)) for inst in self._boundary]
             for dst, value in installed:
@@ -270,9 +278,8 @@ class NumericalSimulator(_Kernel):
                 self._installs.setdefault(base + copy_step_cycle(write.issue_cycle), []).append(
                     _Install(write.source, write.dst)
                 )
-            term_pc = base + boundary_step(block.block_makespan)
             if not isinstance(block.terminator, Ret):
-                self._terminators[term_pc] = block.terminator
+                self._terminators[lir.term_pc(block)] = block.terminator
         # A non-coalesced wide slot installs by a pc-gated copy -- early (before the boundary, like a phi copy) or at the
         # boundary (gated on the accepted-output edge). A boolean slot always installs at the accepted boundary edge.
         for slot in lir.float_state_slots:

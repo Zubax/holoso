@@ -28,6 +28,7 @@ from ._ir import (
     copy_step_cycle as copy_step_cycle,
     inline_fire_cycle as inline_fire_cycle,
     operand_read_cycle as operand_read_cycle,
+    pooled_writeback_word as pooled_writeback_word,
     result_landing_cycle as result_landing_cycle,
     scalar_type_of as scalar_type_of,
     InlineProducer as InlineProducer,

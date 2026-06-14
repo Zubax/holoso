@@ -162,6 +162,61 @@ def branch_boundary_kernel(a, b, c):  # type: ignore[no-untyped-def]
     return y
 
 
+def overlap_spill_kernel(x, y, z):  # type: ignore[no-untyped-def]
+    """
+    Cross-block software-pipelining corner shared by the cosim test and its white-box twin. The branch CONDITION
+    (``x < y``) depends only on inputs, so it commits early; a wide chain (``w``) computed in the same block commits
+    much later. The block's terminator therefore shrinks to ``w``'s write word (not the early condition), and ``w``
+    SPILLS past the terminator into BOTH (single-predecessor) arms, which read it -- so a consumer in an arm must wait
+    for ``w``'s in-flight landing in the successor frame. The unspeculatable division in the else arm keeps the diamond
+    a real branch under default if-conversion (so the spill crosses a genuine branch, replicated onto both arms).
+    """
+    w = (x * z + y) * z + y  # a wide chain whose result outlives the early comparison's commit
+    if x < y:
+        r = w + 1.0  # then-arm reads the spilled w
+    else:
+        r = w / (y * y + 1.0)  # else-arm reads the spilled w; the division keeps this a branch (structurally nonzero)
+    return r
+
+
+def overlap_dead_arm_spill_kernel(x, y, z):  # type: ignore[no-untyped-def]
+    """
+    Cross-block overlap SOUNDNESS corner: a value live ONLY in one arm shares no register hazard with a value the
+    sibling arm spills onto it. ``v`` is computed in the entry block and used only in the else arm; the wide chain
+    ``w`` commits late and spills past the shrunk terminator into BOTH arms (its writeback latch fires unconditionally
+    before the redirect). In the else arm ``w`` is DEAD -- if the allocator reuses ``w``'s register for ``v`` there,
+    the unconditional spill of ``w`` clobbers ``v`` before the arm reads it (a silent miscompile the cosim cannot
+    catch, since the numerical model shares the same register file). The else arm's value must therefore be checked
+    against the source semantics, not just RTL==model. The unspeculatable division keeps this a real branch.
+    """
+    v = x + y  # lives across the branch, read only in the else arm
+    w = (x * z + y) * z + y  # wide chain commits late -> spills into both arms; DEAD in the else arm
+    if x < y:
+        r = w * 2.0  # then-arm uses the spilled w
+    else:
+        a = v + z  # else-arm reads v (must survive w's dead-arm spill); w is unused here
+        r = a / (z * z + 1.0)
+    return r
+
+
+def overlap_div_err_kernel(x, y, z):  # type: ignore[no-untyped-def]
+    """
+    Cross-block overlap err_pc corner (shared by the white-box twin and the directed err_pc cosim). A division -- the
+    one error-bearing op -- commits late, so its writeback spills past the shrunk terminator. The data writeback rides
+    the pipeline into the taken arm correctly, but the err_pc diagnostic latches ``pc - FETCH_LAG`` when the write-
+    enable executes, FETCH_LAG steps after its write word; if the terminator redirected to the NON-fall-through arm by
+    then, err_pc would capture the successor frame instead of the division's step. The shrink floor must keep that
+    latch in-block. ``x < z`` selects the non-fall-through (true) arm, the only arm with a PC discontinuity; ``y == 0``
+    makes the division error. The else arm's division keeps this a real branch under default if-conversion.
+    """
+    q = x / y
+    if x < z:
+        r = q + 1.0  # non-fall-through arm: a PC redirect coincides with the division's err-latch cycle
+    else:
+        r = q / (z * z + 1.0)  # structurally nonzero divisor; keeps the diamond a real branch
+    return r
+
+
 def staged_ops(fmt: FloatFormat) -> OpConfig:
     """
     A deeply pipelined configuration, distinct enough from the default to exercise the schedule, register allocation,

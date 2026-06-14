@@ -107,6 +107,8 @@ the original Python code can be verified against the numerical model itself but 
 mostly because robust verification requires knowledge of the semantics of the original code.
 
 The HTML report is an essential tool for humans to understand what the compiler did and debug it when it goes wrong.
+It is VITAL to ensure that it provides an EXACT representation of the generated core behavior,
+not a simplified or approximated view.
 
 ## Python API
 
@@ -359,8 +361,10 @@ with its preheader arm and closed once the body is lowered; the same open/close 
 and the MIR lowering, which otherwise visit values in a dominance order the back edge violates. The block layout puts
 each loop body below its header and forces the single `Ret` block last (a loop body, a DFS leaf via its back edge,
 would otherwise sort after the exit), so a back-edge is just a jump to a lower address that the next-PC sequencer
-already handles. The per-block drain makes the loop-carried values land-stable before the header re-fetches, exactly
-as a branch merge reads land-stable phi inputs; `min_initiation_interval` weights the back-edge as not-taken (the loop
+already handles. The back-edge target -- the loop header -- is multi-predecessor, so no overlap crosses the back-edge:
+the body fully drains before jumping back, so the loop-carried values land-stable before the header re-fetches, exactly
+as a branch merge reads land-stable phi inputs (the header itself, though multi-predecessor, still shrinks its own
+terminator out when its body and exit successors are single-predecessor, as in recip_newton). `min_initiation_interval` weights the back-edge as not-taken (the loop
 exits on its first header test), a true lower bound, with the numerical model the authority on the realized count.
 `recip_newton` (Newton-Raphson reciprocal iterated until the update falls below a tolerance) synthesizes and
 cosimulates this way, on its convergent domain. A `for` above the unroll threshold is rejected rather than lowered to
@@ -503,13 +507,40 @@ the executed path costs (each path's count is itself exact).
 CFG backend (`if`/`else`, comparisons, unrolled `for`, and back-edge `while`).
 Blocks are laid out contiguously in reverse-postorder with the single canonical `Ret` forced last as the out_valid
 boundary (so a loop body, a DFS leaf via its back edge, stays below it); a back-edge is a jump to a lower address.
-Each block spans `boundary_step(block_makespan) + 1` fetch PCs (a per-block drain) and its terminator redirects the
-fetch PC at the block's boundary via a small `case(pc)` in `next_pc` that, for a `branch`, reads the condition's 1-bit
-register (`bregs`). A phi (and each persistent slot's live-out) is resolved at register allocation as above: coalesced
-onto the merged register when its live range does not overlap, else installed by a pc-gated copy at the predecessor's
-tail (a parallel copy bundle, read-first, so a swap is correct). `min_initiation_interval` is the shortest-path lower
-bound (exact when the kernel has a single forward path); the numerical model predicts the exact per-transaction cycle
-latency from the block path it takes (the testbench locksteps on that out_valid cycle, see Backend).
+Each block spans `term_offset + 1` fetch PCs and its terminator redirects the fetch PC at `term_offset` via a small
+`case(pc)` in `next_pc` that, for a `branch`, reads the condition's 1-bit register (`bregs`). `term_offset` is normally
+the drained boundary `boundary_step(block_makespan)`, but cross-block software pipelining shrinks it (see below) so a
+block's tail overlaps its successor. A phi (and each persistent slot's live-out) is resolved at register allocation as
+above: coalesced onto the merged register when its live range does not overlap, else installed by a pc-gated copy at
+the predecessor's tail (a parallel copy bundle, read-first, so a swap is correct). `min_initiation_interval` is the
+shortest-path lower bound (exact when the kernel has a single forward path); the numerical model predicts the exact
+per-transaction cycle latency from the block path it takes (the testbench locksteps on that out_valid cycle,
+see Backend).
+
+Cross-block software pipelining shrinks `term_offset` from the drained boundary down to the issue-side envelope --
+the latest fetch PC at which the block still drives a control word (an operation's write-enable; for a `branch`, the
+in-block condition's boolean landing so the redirect mux still reads it; and, for an error-bearing operation, one
+FETCH_LAG beyond its write-enable so its `err_pc` diagnostic -- which captures `pc - FETCH_LAG` when the write-enable
+EXECUTES, FETCH_LAG fetch steps after it is fetched -- latches the operation's own step rather than the redirected
+successor PC) -- whenever every successor is single-predecessor, so a spill cannot reach a wrong path. The block's
+in-flight results then land past its terminator, in the (uniquely-reached) successor frame: each write-enable word is
+FETCHED inside the block (before the redirect), but its writeback EXECUTES FETCH_LAG steps later -- after the redirect
+for late words -- carried by the pipeline into the successor frame, so the data lands correctly with no replicated
+microcode (the error-op floor above keeps that post-redirect execution's `err_pc` latch in-frame). The successor
+inherits the predecessor's per-instance busy residue (`entry_busy`) and the cycle each spilled value lands
+(`livein_landing`), so its schedule neither double-drives a still-busy operator instance nor reads a not-yet-landed
+operand. A block shrinks on its OWN successors; a multi-predecessor successor -- a merge, a loop header, or `Ret` --
+never RECEIVES a spill, so its live-ins stay drained and no overlap crosses a back-edge (whose target, the loop header,
+is multi-predecessor), and the forward-DAG carry converges in a single reverse-postorder pass. A loop header, though
+itself multi-predecessor, still shrinks its own terminator out when its body and exit successors are single-predecessor.
+A block carrying a phi/const install keeps the full drain (the install word must stay in-block). The per-clock numerical
+model commits each result on its true landing PC and, at a shrunk terminator's redirect, re-keys the still-in-flight
+landings onto the taken successor's frame -- a no-op for a
+fall-through arm or a drained block -- so it stays bit- and cycle-exact across the overlap. The STATIC diagnostic
+timelines (`reg_liveness`, `write_timeline`, and the HTML schedule), by contrast, cannot know the taken path: they
+stamp every write in the linear fall-through frame, so a result that spills into a NON-fall-through arm is
+cycle-approximate there. These views feed only the report and the tests -- never the emitter or the numerical model --
+so this does not affect generated RTL or execution; rendering them per CFG path is deferred report work.
 
 Compile-time-known branch conditions fold to a single arm so the other is never lowered (no spurious state from an
 unreachable write): a literal, a read-only boolean attribute, a comparison whose operands are both compile-time floats
@@ -535,12 +566,12 @@ whole op stream.
 
 ### DEFERRED
 
-Cross-block software pipelining: the machine uses per-block drain barriers; overlapping a fall-through block's head
-with its predecessor's tail (branches and loop back-edges stay hard PC barriers -- the ZISC cannot fetch a successor
-before the redirect resolves) is a separate scheduling effort. The complementary half -- if-converting small pure
-diamonds to `select` muxes so branchy kernels become branch-free and pipeline fully -- has landed (see HIR). The
-per-clock numerical model is the oracle this rests on: it already commits each result on its true landing PC rather
-than at a per-block boundary, so it stays correct once blocks overlap.
+Aggressive cross-block overlap: the landed pipelining shrinks a block's terminator only to its issue-side envelope, so
+the write-enable words stay inside the block and no microcode is replicated. Pushing further -- letting the write-enable
+words themselves spill past the terminator -- would shave the remaining per-block tail but needs the commit-side control
+fields replicated into every successor arm (each at its own translated offset) and a single-writer microcode validator
+to police the replicas (the validator is already in place). Overlap also stays off across a live-in branch condition
+(its exact fetch-pipeline read floor at the terminator is not locally known) and across any multi-predecessor edge.
 
 ## Operators
 

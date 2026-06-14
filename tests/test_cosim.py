@@ -19,11 +19,19 @@ from holoso import (
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lir import build
+from holoso._lir import build, pooled_writeback_word
 from holoso._mir import lower as lower_to_mir
 
 from ._cosim import run_cosim
-from ._modelref import ChainedSlots, SelectHold, branch_boundary_kernel, default_ops, fcmp_staged_ops
+from ._modelref import (
+    ChainedSlots,
+    SelectHold,
+    branch_boundary_kernel,
+    default_ops,
+    fcmp_staged_ops,
+    overlap_div_err_kernel,
+    overlap_spill_kernel,
+)
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, sources
 
 pytestmark = pytest.mark.cosim
@@ -114,6 +122,20 @@ def test_cosim_comparison_at_branch_boundary(sim: str, stage_input: int) -> None
     # (test_branch_comparison_commits_at_block_makespan) pins that this kernel actually hits the corner.
     fmt = FloatFormat(6, 18)
     run_cosim(sim, branch_boundary_kernel, fmt, f"cmp_branch_s{stage_input}", ops=fcmp_staged_ops(fmt, stage_input))
+
+
+@pytest.mark.parametrize("stage_input", [0, 1])
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_overlap_spill(sim: str, stage_input: int) -> None:
+    # Cross-block software pipelining (M7): the entry block shrinks its terminator to a wide chain's write word, and
+    # that result spills past the terminator into BOTH single-predecessor arms, which read it. If the arm read did not
+    # wait for the in-flight landing in the successor frame -- or the spill mis-aligned by even one frame -- the RTL
+    # would diverge from the cycle-accurate model here. The white-box twin
+    # (test_schedule.py test_overlap_spilled_result_lands_in_successor_frame) pins that the spill actually triggers.
+    # See _modelref.overlap_spill_kernel. Both comparator latencies move the early condition's landing relative to the
+    # spilling chain.
+    fmt = FloatFormat(6, 18)
+    run_cosim(sim, overlap_spill_kernel, fmt, f"overlap_spill_s{stage_input}", ops=fcmp_staged_ops(fmt, stage_input))
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -267,6 +289,98 @@ def test_cosim_div0_error(sim: str) -> None:
         _ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
     )
 
+    runner = get_runner(sim)
+    runner.build(
+        sources=[gen_dir / f"{name}.v", *sources()],
+        includes=[HDL_DIR],
+        hdl_toplevel=name,
+        build_args=build_args(sim),
+        build_dir=str(build_dir),
+        clean=True,
+        timescale=("1ns", "1ps"),
+    )
+    runner.test(
+        hdl_toplevel=name,
+        test_module=test_module,
+        test_dir=str(gen_dir),
+        build_dir=str(build_dir),
+        results_xml=str(build_dir / "results.xml"),
+    )
+
+
+# A 3-input variant of the err bench for the cross-block-overlap err_pc corner: it asserts the EXACT latched step
+# (not merely nonzero), since the regression set err_pc to a wrong-but-nonzero value (the redirected successor frame).
+_ERR_BENCH3 = """
+import cocotb
+from cocotb.clock import Clock
+from cocotb.triggers import FallingEdge, RisingEdge, Timer
+import holoso
+
+_FMT = holoso.FloatFormat(@@WEXP@@, @@WMAN@@)
+
+
+async def _transact(dut, x, y, z):
+    while int(dut.in_ready.value) != 1:
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+    dut.in_x.value = int(_FMT.encode(x))
+    dut.in_y.value = int(_FMT.encode(y))
+    dut.in_z.value = int(_FMT.encode(z))
+    dut.in_valid.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    dut.in_valid.value = 0
+    while int(dut.out_valid.value) != 1:
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+    err = int(dut.err_pc.value)
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    return err
+
+
+@cocotb.test()
+async def overlap_div0_errpc(dut):
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await FallingEdge(dut.clk)
+    dut.rst.value = 1
+    dut.in_valid.value = 0
+    for _ in range(4):
+        await RisingEdge(dut.clk)
+    dut.rst.value = 0
+    await FallingEdge(dut.clk)
+    dut.out_ready.value = 1
+
+    # x<z takes the NON-fall-through (true) arm; y==0 errs the entry-block division, whose writeback spills past the
+    # shrunk terminator. err_pc must still latch the division's own step (@@ERRPC@@), not the redirected successor PC.
+    assert await _transact(dut, 1.0, 2.0, 3.0) == 0, "clean divide on the overlapped arm spuriously flagged err_pc"
+    assert await _transact(dut, 0.0, 0.0, 1.0) == @@ERRPC@@, "div0 latched the wrong err_pc step across the redirect"
+    assert await _transact(dut, 1.0, 2.0, 3.0) == 0, "err_pc was not cleared after the erroring transaction"
+"""
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_overlap_div0_errpc(sim: str) -> None:
+    # M7 regression (review round 3, Codex P1): an error-bearing division whose writeback spills past a SHRUNK
+    # terminator must still latch err_pc to its OWN step, not the redirected non-fall-through successor frame. The data
+    # is correct regardless (model == RTL), so only this step-exact err_pc cosim catches the regression. White-box
+    # twin: test_schedule.py::test_overlap_keeps_error_op_diagnostic_latch_in_frame. See _modelref.overlap_div_err_kernel.
+    fmt = FloatFormat(6, 18)
+    name = "overlap_div_err"
+    lir = build(lower_to_mir(optimize(lower(overlap_div_err_kernel)), default_ops(fmt)), name)
+    entry = next(block for block in lir.blocks if block.index == lir.entry)
+    (fdiv,) = [op for op in entry.ops if op.inst.operator.error_ports]
+    err_pc = lir.block_base[entry.index] + pooled_writeback_word(fdiv.commit_cycle, True)
+    gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"{name}_w{fmt.wexp}_{fmt.wman}"
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"errpc_{name}_w{fmt.wexp}_{fmt.wman}"
+    (gen_dir / f"{name}.v").write_text(generate_verilog(lir).verilog)
+    test_module = f"test_{name}_errpc"
+    (gen_dir / f"{test_module}.py").write_text(
+        _ERR_BENCH3.replace("@@WEXP@@", str(fmt.wexp))
+        .replace("@@WMAN@@", str(fmt.wman))
+        .replace("@@ERRPC@@", str(err_pc))
+    )
     runner = get_runner(sim)
     runner.build(
         sources=[gen_dir / f"{name}.v", *sources()],

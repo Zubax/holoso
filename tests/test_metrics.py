@@ -149,7 +149,10 @@ def _measure(name: str) -> Metrics:
 # - min_ii reflects the bank-true dependency edges (latch-free boolean bank), diamond if-conversion (small pure
 #   branch diamonds are select muxes: signal_window/pid/cordic lost their branch round-trips and cordic is a single
 #   block; remainder keeps its while-loop branches and its bool-phi diamond, converting only its float diamonds),
-#   and NOT-folding (a semantic NOT is a free consumer-side inversion, never a gate or a register write).
+#   NOT-folding (a semantic NOT is a free consumer-side inversion, never a gate or a register write), and cross-block
+#   software pipelining (a branch block whose successors are all single-predecessor shrinks its terminator below the
+#   drained boundary, so its tail overlaps the successor): schmitt 17->16, quadrature 19->18, recip_newton 26->25,
+#   remainder 57->54 on the shortest forward path; pfd's shrinkable block is off its shortest path, so it is unchanged.
 #   Coalescing is layout-neutral (it is pure post-schedule register reassignment), so min_ii is unchanged by it.
 # - bnreg reflects exact per-consumer boolean read steps and phi coalescing: a condition consumed mid-block frees
 #   its register for a later value in the same block, and a boolean phi merging onto its arms drops its own register.
@@ -160,11 +163,11 @@ BASELINE: dict[str, Metrics] = {
     "signal_window": Metrics(False, nreg=4, bnreg=6, steering=7, copies=0, min_ii=13),
     "iir1_lpf": Metrics(False, nreg=3, bnreg=2, steering=3, copies=2, min_ii=15),
     "pid": Metrics(False, nreg=9, bnreg=3, steering=10, copies=0, min_ii=40),
-    "schmitt_trigger": Metrics(False, nreg=1, bnreg=2, steering=4, copies=3, min_ii=17),
-    "quadrature_encoder": Metrics(False, nreg=1, bnreg=8, steering=16, copies=9, min_ii=19),
+    "schmitt_trigger": Metrics(False, nreg=1, bnreg=2, steering=4, copies=3, min_ii=16),
+    "quadrature_encoder": Metrics(False, nreg=1, bnreg=8, steering=16, copies=9, min_ii=18),
     "phase_frequency_detector": Metrics(False, nreg=1, bnreg=8, steering=14, copies=14, min_ii=15),
-    "recip_newton": Metrics(False, nreg=4, bnreg=1, steering=4, copies=2, min_ii=26),
-    "remainder": Metrics(False, nreg=6, bnreg=4, steering=18, copies=4, min_ii=57),
+    "recip_newton": Metrics(False, nreg=4, bnreg=1, steering=4, copies=2, min_ii=25),
+    "remainder": Metrics(False, nreg=6, bnreg=4, steering=18, copies=4, min_ii=54),
     "cordic_sincos": Metrics(False, nreg=9, bnreg=3, steering=54, copies=0, min_ii=150),
     "integrator": Metrics(True, nreg=5, bnreg=0, steering=4, copies=0, min_ii=24),
     "ekf1_stateless": Metrics(True, nreg=39, bnreg=0, steering=95, copies=0, min_ii=129),
