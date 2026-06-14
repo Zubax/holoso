@@ -130,6 +130,17 @@ def boundary_step(makespan: int) -> int:
     return makespan + 2 + FETCH_LAG
 
 
+def successor_local_cycle(block_local_cycle: int, term_offset: int) -> int:
+    """
+    Map a block-local cycle that crosses an overlap-shrunk terminator into the single-predecessor successor's frame.
+    The successor frame begins at ``term_pc + 1``, so a cycle at absolute ``block_base + block_local_cycle`` sits at
+    ``block_local_cycle - term_offset - 1`` past the successor's base -- one continuous PC across the seam. This is the
+    single coordinate map shared by the scheduler's spill carry (both the value landings and the per-instance busy
+    residue), ``_trace_landing``, and the numerical model's redirect re-keying, so they cannot drift apart.
+    """
+    return block_local_cycle - term_offset - 1
+
+
 def residence_rows(
     defs: list[int], uses: list[int], present: int, read_first_defs: frozenset[int] = frozenset()
 ) -> set[int]:
@@ -305,22 +316,24 @@ class FloatInputLoad(InputLoad):
 class FloatStateSlot:
     """
     A persistent float state register: reset to ``reset_value``, holding the slot's live-in (carried over from the
-    previous initiation) until it is overwritten, and holding the slot's live-out from ``install_cycle`` onward.
+    previous initiation) until the install copy replaces it with the slot's live-out.
 
     ``tap`` is the live-out's source tap (register/constant + folded sign), the same primitive an output wire taps; here
     the sink is the slot register rather than a port. When the tap is exactly ``reg`` with an identity sign the live-out
     coalesced onto the slot register (its producing operator wrote it) and the backend emits no copy; otherwise the
-    backend latches the tap into ``reg`` at ``install_cycle``: as early as the old live-in is read and the source is
-    available, the initiation boundary at the latest. Installing before the boundary lets the source register be reused
-    by unrelated operations for the rest of the initiation. A public attribute's observable ``state_<name>`` port is a
-    separate output wire tapping the same value, not a property of the slot.
+    backend fires a reg->reg copy for it, scheduled at ``install_cycle`` -- as early as the old live-in is last read and
+    the source is available, the initiation boundary at the latest. The copy samples the tap on its fetch step
+    (``copy_step_cycle(install_cycle)``) and the new live-out lands one fetch step later (``install_landing``) for an
+    early install, or read-first at the boundary (``LASTPC``) for a boundary install. Installing before the boundary
+    lets the source register be reused by unrelated operations for the rest of the initiation. A public attribute's
+    observable ``state_<name>`` port is a separate output wire tapping the same value, not a property of the slot.
     """
 
     name: str
     reg: RegRef
     reset_value: float
     tap: FloatOperand
-    install_cycle: int  # scheduler-frame cycle the live-out lands in reg (its max, makespan + 1, is the boundary)
+    install_cycle: int  # scheduler-frame install cycle; hardware fire = copy_step_cycle(it); makespan+1 = boundary
 
     @property
     def needs_copy(self) -> bool:
@@ -567,7 +580,7 @@ def _trace_landing(
     """
     if landing_cycle <= block.term_offset:
         return [block_base[block.index] + landing_cycle]
-    spilled = landing_cycle - block.term_offset - 1
+    spilled = successor_local_cycle(landing_cycle, block.term_offset)
     arms = _terminator_arms(block.terminator)
     return [pc for arm in arms for pc in _trace_landing(by_index, block_base, by_index[arm], spilled)]
 
@@ -616,37 +629,6 @@ class BoolRegFileLayout:
 
     nreg: int
 
-
-@dataclass(frozen=True, slots=True)
-class InputProducer:
-    """A write to a register that came from an input-load lane ``index`` (in module-port order)."""
-
-    index: int
-
-
-@dataclass(frozen=True, slots=True)
-class OperationProducer:
-    """A write to a register that came from operation ``index`` in ``Lir.ops``."""
-
-    index: int
-
-
-@dataclass(frozen=True, slots=True)
-class StateProducer:
-    """A state register's live-in: the value it carries over from the previous initiation (or the reset snapshot)."""
-
-    index: int  # index into Lir.float_state_slots
-
-
-@dataclass(frozen=True, slots=True)
-class InlineProducer:
-    """A wide-register write that came from an inline firing: ``Lir.blocks[block].inline_ops[index]``."""
-
-    block: int
-    index: int
-
-
-type Producer = InputProducer | OperationProducer | StateProducer | InlineProducer
 
 # The common surface of the two firing classes (operator/operands/writes/issue/commit), as the model consumes it.
 type ScheduledOp = PooledScheduledOp | InlineScheduledOp
@@ -773,9 +755,10 @@ class Lir:
     def state_copy_step(self, slot: FloatStateSlot) -> int:
         """
         The fetch-PC value -- equivalently the hardware-frame cycle -- on which a non-coalesced slot's writeback copy
-        fires. For a boundary install this is ``initiation_interval`` (LASTPC), where it reduces to the accepted-
-        transaction edge. The copy reads its source and lands the new live-out in the slot register on this same step;
-        shared by liveness and the emitter so the two cannot drift.
+        fires and reads its source. For a boundary install this is ``initiation_interval`` (LASTPC), where it reduces to
+        the accepted-transaction edge and the live-out lands here read-first (the boundary read still sees the live-in).
+        An early pc-gated install instead lands its destination one PC later, via ``install_landing`` -- the same +1 the
+        model commits. Shared by liveness and the emitter so the two cannot drift.
         """
         return copy_step_cycle(slot.install_cycle)
 
@@ -973,10 +956,10 @@ class Lir:
         This is cycle-accurate to the emitted hardware, in the executing-step (hardware) frame. Timing comes from the
         shared helpers: an input lands on cycle 1; an operator result lands on ``result_landing_cycle`` (which for the
         last result is the initiation interval); an operand is read on ``operand_read_cycle``; an output tap on the
-        present cycle; and a non-coalesced slot's writeback lands (and reads its source) on ``state_copy_step`` -- the
-        present cycle for a boundary copy, earlier for an early install. A slot register additionally stays live
-        through the present cycle, since its live-out must reside there for the next initiation. Each row spans a value
-        from when it lands in the array through its last read.
+        present cycle; and a non-coalesced slot's writeback fires and samples its source on ``state_copy_step`` -- the
+        present cycle for a boundary copy, earlier for an early install (the landing follows below). A slot register
+        additionally stays live through the present cycle, since its live-out must reside there for the next initiation.
+        Each row spans a value from when it lands in the array through its last read.
 
         Diagnostic only -- consumed by the HTML schedule and the tests, never by the emitter or the numerical model.
         Each op-result LANDING is stamped via ``write_landing_pcs`` at exactly the PC(s) the model writes it --
@@ -1104,43 +1087,3 @@ class Lir:
             if isinstance(wire.tap.source, BoolRegRef):
                 uses.setdefault(wire.tap.source, []).append(present)
         return self._cfg_residence(defs, uses, read_first)
-
-    @property
-    def write_timeline(self) -> dict[RegRef, list[tuple[int, Producer]]]:
-        """
-        Per-register write timeline ``(landing cycle, producer)`` in the hardware/executing-step frame, used to resolve
-        a register source at a hardware read cycle. A value is readable from the cycle it lands in the array: inputs and
-        state live-ins on cycle 1, an operator result on ``result_landing_cycle``.
-
-        Diagnostic/analysis only (the write-timeline resolver and the tests; not consumed by the emitter or the
-        numerical model). A result that spills past an overlap-shrunk terminator gets one ``(landing, producer)`` entry
-        per successor arm it reaches (``write_landing_pcs``), placed exactly where the numerical model re-keys the
-        in-flight write; the resolver picks the latest landing at or before a read cycle, and since arms occupy disjoint
-        PC ranges that is always the arm the read executes in. A drained kernel has one entry per write (the linear
-        frame).
-        """
-        writes: dict[RegRef, list[tuple[int, Producer]]] = {}
-        for i, load in enumerate(self.float_inputs):
-            writes.setdefault(load.dst, []).append((1, InputProducer(i)))
-        # A slot register starts each initiation holding its live-in (the value carried over from the previous one);
-        # a coalesced operator may then overwrite it later in the same initiation via its own OperationProducer entry.
-        for s, slot in enumerate(self.float_state_slots):
-            writes.setdefault(slot.reg, []).append((1, StateProducer(s)))
-        # ``self.ops`` is the per-block ``ops`` flattened in block order, so this index matches OperationProducer.
-        # Inline firings write the wide bank too (the bool->float cast); without them a cast-fed operand resolves to
-        # no producer at all.
-        op_index = 0
-        for block in self.blocks:
-            for op in block.ops:
-                for write in op.writes:
-                    if isinstance(write.dst, RegRef):
-                        for pc in self.write_landing_pcs(block, write.dst, op.commit_cycle):
-                            writes.setdefault(write.dst, []).append((pc, OperationProducer(op_index)))
-                op_index += 1
-            for k, inline_op in enumerate(block.inline_ops):
-                if isinstance(inline_op.write.dst, RegRef):
-                    for pc in self.write_landing_pcs(block, inline_op.write.dst, inline_op.commit_cycle):
-                        writes.setdefault(inline_op.write.dst, []).append((pc, InlineProducer(block.index, k)))
-        for events in writes.values():
-            events.sort(key=lambda event: event[0])
-        return writes

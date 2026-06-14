@@ -119,7 +119,7 @@ def _state_sign_wire(slot: FloatStateSlot) -> str | None:
 
 
 def _state_copy_rhs(slot: FloatStateSlot) -> str:
-    """The value latched into a non-coalesced slot register on its install step: sign-conditioned wire, or raw tap."""
+    """The value a non-coalesced slot register's install copy latches: sign-conditioned wire, or raw tap."""
     return _state_sign_wire(slot) or _source_net(slot.tap.source)
 
 

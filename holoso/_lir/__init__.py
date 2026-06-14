@@ -32,16 +32,11 @@ from ._ir import (
     pooled_writeback_word as pooled_writeback_word,
     result_landing_cycle as result_landing_cycle,
     scalar_type_of as scalar_type_of,
-    InlineProducer as InlineProducer,
-    InputProducer as InputProducer,
     Jump as Jump,
     LirBlock as LirBlock,
-    OperationProducer as OperationProducer,
     OperatorInstance as OperatorInstance,
-    Producer as Producer,
     RegFileLayout as RegFileLayout,
     Ret as Ret,
-    StateProducer as StateProducer,
 )
 from ._ports import (
     ControlInputPort as ControlInputPort,
@@ -53,4 +48,3 @@ from ._ports import (
     Direction as Direction,
     Port as Port,
 )
-from ._analysis import latest_producer_before as latest_producer_before

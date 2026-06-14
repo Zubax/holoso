@@ -181,7 +181,9 @@ class _SpillCarry:
     """
     The cross-block-overlap residue a block hands each single-predecessor successor: per-instance busy windows still
     in flight at the shrunk terminator (``entry_busy``) and the values whose write spills past it (``livein_landing``,
-    the value's landing cycle in the successor-local frame). Both are in successor-local cycles (block start = 1).
+    the value's landing cycle in the successor-local frame). Both are successor-local cycles in the
+    ``absolute_pc = block_base + cycle`` frame the scheduler uses (via ``successor_local_cycle``), so a spill can land
+    as early as cycle 0 -- the successor's base PC, available before its first compute cycle.
     """
 
     entry_busy: dict[tuple[PooledHardwareOperator, int], int]
@@ -268,15 +270,23 @@ def _schedule_with_overlap(
             term_offset = boundary
         block_term_offset[bid] = term_offset
         if overlaps:  # hand the spill residue to the (single-predecessor) successors this block uniquely reaches
-            busy = {inst: free - term_offset for inst, free in sched.busy_until.items() if free - term_offset > 0}
+            # Both the per-instance busy residue and the value landings cross the shrunk terminator into the successor
+            # frame, so both translate through the SAME coordinate map (``successor_local_cycle``) that _trace_landing /
+            # Lir.write_landing_pcs and the model's redirect re-keying use -- the scheduler reserves and read-gates each
+            # register/instance at the cycle the pipeline truly frees/writes it, on one coordinate contract.
+            busy = {
+                inst: successor_local_cycle(free, term_offset)
+                for inst, free in sched.busy_until.items()
+                if successor_local_cycle(free, term_offset) > 0
+            }
             landing: dict[ValueId, int] = {}
             for vid, issue in sched.issue_cycle.items():
                 _word, land = _value_word_and_landing(mir, float_mir, vid, issue)
                 if land > term_offset:
-                    landing[vid] = land - term_offset
+                    landing[vid] = successor_local_cycle(land, term_offset)
             for vid, land in livein_landing.items():  # a received spill that re-spills past this shrunk terminator
                 if land > term_offset:
-                    landing[vid] = max(landing.get(vid, 0), land - term_offset)
+                    landing[vid] = max(landing.get(vid, 0), successor_local_cycle(land, term_offset))
             spill = _SpillCarry(busy, landing)
             for target in targets:
                 carry[target] = spill

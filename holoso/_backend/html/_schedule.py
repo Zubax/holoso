@@ -109,24 +109,29 @@ def render_schedule(lir: Lir) -> str:
                 )
                 dcol: ColKey = write.dst
                 dord = col_ord[dcol]
-                for write_cyc in landing_pcs:  # one commit cell per successor arm the writeback latch reaches
+                # One commit cell PER successor arm the writeback latch reaches, each with its OWN dataflow edges and
+                # ops chip on its landing row -- the report is path-exact, so a spilled result reads the same on every
+                # arm it lands in, not just the first. A single-landing (drained) write draws exactly one cell, edge
+                # set, and chip, identical to a non-overlapping schedule.
+                for write_cyc in landing_pcs:
                     writes_at[(write_cyc, dcol)] = writes_at.get((write_cyc, dcol), "") + _write_label(
                         op.inst.index, tip
                     )
                     fills[(write_cyc, dcol)] = color
                     endpoints.add((dord, write_cyc))
                     cell_group[(dord, write_cyc)] = group
-                anchor = landing_pcs[0]  # draw the dataflow edges and the ops chip once, from the first arm's cell
-                for operand in op.operands:
-                    ocol = _operand_col(operand)
-                    if ocol is None:
-                        continue  # a boolean-constant operand has no column / no source cell
-                    oord = col_ord[ocol]
-                    endpoints.add((oord, read_cyc))  # operands are read a read-latch cycle before the operator issues
-                    edges.append((f"g{dord}_{anchor}", f"g{oord}_{read_cyc}", color, group))
-                chips_at.setdefault(anchor, []).append(
-                    f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
-                )
+                    for operand in op.operands:
+                        ocol = _operand_col(operand)
+                        if ocol is None:
+                            continue  # a boolean-constant operand has no column / no source cell
+                        oord = col_ord[ocol]
+                        endpoints.add(
+                            (oord, read_cyc)
+                        )  # operands are read a read-latch cycle before the operator issues
+                        edges.append((f"g{dord}_{write_cyc}", f"g{oord}_{read_cyc}", color, group))
+                    chips_at.setdefault(write_cyc, []).append(
+                        f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
+                    )
             base = stage_base[op.inst]
             for k in range(op.latency):  # stamp the pipeline trail: stage k of this operator is busy on issue + k + lag
                 key = (base + k, issue_pc + k + FETCH_LAG)
@@ -149,24 +154,25 @@ def render_schedule(lir: Lir) -> str:
             tip = _esc(_inline_op_text(bop))
             dcol = bop.write.dst
             dord = col_ord[dcol]
-            for write_cyc in landing_pcs:  # one result cell per successor arm the writeback reaches (overlap spill)
+            # One result cell per successor arm the writeback reaches (overlap spill), each with its own edges and chip
+            # on its landing row -- path-exact, exactly as for pooled firings; a single-landing write is byte-identical.
+            for write_cyc in landing_pcs:
                 writes_at[(write_cyc, dcol)] = (
                     writes_at.get((write_cyc, dcol), "") + f"<span class='wl' title='{tip}'>&#9656;</span>"
                 )
                 fills[(write_cyc, dcol)] = color
                 endpoints.add((dord, write_cyc))
                 cell_group[(dord, write_cyc)] = group
-            anchor = landing_pcs[0]  # draw the dataflow edges and the ops chip once, from the first arm's cell
-            for inline_operand in bop.operands:
-                ocol = _operand_col(inline_operand)
-                if ocol is None:
-                    continue  # a boolean-constant operand has no column / no source cell
-                oord = col_ord[ocol]
-                endpoints.add((oord, read_cyc))
-                edges.append((f"g{dord}_{anchor}", f"g{oord}_{read_cyc}", color, group))
-            chips_at.setdefault(anchor, []).append(
-                f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
-            )
+                for inline_operand in bop.operands:
+                    ocol = _operand_col(inline_operand)
+                    if ocol is None:
+                        continue  # a boolean-constant operand has no column / no source cell
+                    oord = col_ord[ocol]
+                    endpoints.add((oord, read_cyc))
+                    edges.append((f"g{dord}_{write_cyc}", f"g{oord}_{read_cyc}", color, group))
+                chips_at.setdefault(write_cyc, []).append(
+                    f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
+                )
             group += 1
 
     # Installs -- wide phi-arm copies, boolean phi/state writes, and non-coalesced state writebacks -- are first-class
@@ -706,7 +712,10 @@ def _schedule_key(
         items.extend(
             [
                 _key_item("<span class='wr state'>&#9662;</span>", "persistent state: reset snapshot (cycle 0)"),
-                _key_item("<span class='sw state'></span>", "state update latched on its install step"),
+                _key_item(
+                    "<span class='sw state'></span>",
+                    "state update: live-out lands the step after its copy fires (boundary copy: read-first at LASTPC)",
+                ),
             ]
         )
     if has_arrows:

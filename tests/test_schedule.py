@@ -26,10 +26,8 @@ from holoso._lir import (
     Branch,
     FloatConstRef,
     FloatOperand,
-    InlineProducer,
     Jump,
     RegRef,
-    latest_producer_before,
     operand_read_cycle,
     result_landing_cycle,
 )
@@ -39,6 +37,7 @@ from holoso._lir._ir import (
     dependency_edge,
     install_landing,
     pooled_writeback_word,
+    successor_local_cycle,
     wide_landing_cycle,
 )
 from holoso._mir import (
@@ -72,6 +71,7 @@ from ._modelref import (
     overlap_spill_kernel,
     staged_ops,
 )
+from ._writetimeline import InlineProducer, build_write_timeline, latest_producer_before
 
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
@@ -260,8 +260,8 @@ def test_overlap_keeps_error_op_diagnostic_latch_in_frame() -> None:
 def test_spilled_result_landings_match_the_numerical_model() -> None:
     # Regression (HTML report exactness): a result spilling past an overlap-shrunk terminator lands in EVERY successor
     # arm, exactly where the numerical model re-keys its in-flight write at the redirect. write_landing_pcs -- which
-    # reg_liveness, bool_liveness, write_timeline, and the HTML schedule all stamp through -- must reproduce those PCs
-    # on every path, not the linear fall-through frame alone. Crash-before: the old fall-through-only stamping omitted
+    # reg_liveness, bool_liveness, the HTML schedule, and the write-timeline test helper all stamp through -- must
+    # reproduce those PCs on every path, not the linear fall-through frame alone. Crash-before: the old stamping omitted
     # the non-fall-through arm's landing, so the predicted set was a strict subset of the model's actual writes (the
     # report drew the spilled value's residence on the wrong arm). Tied directly to the cosim oracle: every register the
     # model writes (inputs bypass the writeback) is an op result here, so predicted landings must match it exactly.
@@ -354,6 +354,91 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes() -> None:
         assert pcs <= actual.get(
             index, set()
         ), f"reg {index}: landings {sorted(pcs)} not all model writebacks {sorted(actual.get(index, set()))}"
+
+
+def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late() -> None:
+    # Regression (P3a): the scheduler's cross-block spill carry (block_inflight / the scheduler's livein_landing) must
+    # place a spilled result at the SAME absolute PC the numerical model writes it -- both Lir.write_landing_pcs and
+    # _trace_landing map a block-local landing to block_base[arm] + (landing - term_offset - 1). The scheduler used its
+    # own land - term_offset frame, one PC later, so reservation and read-gating ran on a second coordinate contract.
+    # An arm whose ONLY constraint on its consumer is the spilled operand must read it at EXACTLY that landing PC.
+    # Crash-before: under the +1 frame the read-gated consumer issued one PC late (every read strictly after the model
+    # landing -- no equality), inflating the initiation interval by a cycle; pass-after: it reads at the landing.
+    for kernel, name in [(overlap_spill_kernel, "overlap_spill"), (overlap_dead_arm_spill_kernel, "dead_arm_spill")]:
+        lir = build(_run(kernel), name)
+        by_index = {block.index: block for block in lir.blocks}
+        spilled_any = False
+        tight = 0
+        for block in lir.blocks:
+            if not isinstance(block.terminator, Branch) or block.term_offset >= boundary_step(block.block_makespan):
+                continue
+            for op in block.ops:
+                for write in op.writes:
+                    if not isinstance(write.dst, RegRef):
+                        continue
+                    landing_pcs = lir.write_landing_pcs(block, write.dst, op.commit_cycle)
+                    if len(landing_pcs) <= 1:
+                        continue  # not a multi-arm spill
+                    spilled_any = True
+                    for arm in (block.terminator.if_true, block.terminator.if_false):
+                        arm_block = by_index[arm]
+                        base = lir.block_base[arm_block.index]
+                        arm_landing = next(
+                            (pc for pc in landing_pcs if base <= pc <= base + arm_block.term_offset), None
+                        )
+                        if arm_landing is None:
+                            continue
+                        # Match the consumer by the spilled register index. A later value time-sharing the register
+                        # would also land >= arm_landing, so this can never produce a false SAFETY pass; the TIGHTNESS
+                        # equality is the genuine spill consumer (empirically the only read at exactly arm_landing).
+                        for consumer in arm_block.ops:
+                            for operand in consumer.operands:
+                                if not (isinstance(operand.source, RegRef) and operand.source.index == write.dst.index):
+                                    continue
+                                read_pc = base + operand_read_cycle(consumer.inst.operator, consumer.issue_cycle)
+                                # SAFETY: never read the in-flight value before it physically lands -- an under-
+                                # reservation reads stale data, a miscompile the model shares (cosim cannot catch it).
+                                assert (
+                                    read_pc >= arm_landing
+                                ), f"{name}: reg{write.dst.index} read {read_pc} < landing {arm_landing}"
+                                tight += read_pc == arm_landing
+        assert spilled_any, f"{name}: no multi-arm spill -- the overlap corner is not exercised"
+        # TIGHTNESS: the read-gated arm reads the spill at exactly its model landing PC (one coordinate contract). The
+        # +1 frame pushes every such read one PC past the landing, so no equality would hold.
+        assert tight > 0, f"{name}: no consumer reads a spilled value at its model landing PC (scheduler off by one)"
+
+
+def test_entry_busy_gates_a_successor_firing_at_its_inherited_instance_free_cycle() -> None:
+    # Coverage for the OTHER half of the cross-block-overlap carry: ``entry_busy`` (the per-instance busy residue an
+    # overlapping predecessor hands its single-pred successor via ``successor_local_cycle`` at _build.py, the busy
+    # branch of the spill carry). The spilled-value READ timing has a regression above, but the busy residue is empty
+    # for every current kernel -- a residue survives only when an operator's initiation interval exceeds its latest
+    # write word, which no II=1 operator does -- so no end-to-end build exercises it. Pin its consumption directly:
+    # ``schedule_ops`` must hold a pooled firing off its instance until that instance frees in the successor frame.
+    def f(a, b):  # type: ignore[no-untyped-def]
+        return a * b  # one pooled firing; both operands are inputs (block-start ready), so nothing else can delay it
+
+    mir = _run(f)
+    view = _view(mir)
+    pool = resolve_pool(mir.nodes)
+    (mul,) = _muls(mir)
+    operator = mir.nodes[mul].operator
+    schedulable = set(view.operation_nodes)
+
+    # With no residue the firing issues on the first cycle (operands resident at block start) -- so any later issue is
+    # attributable to the residue alone, not a dependency or a livein_landing.
+    assert schedule_ops(mir.nodes, pool, schedulable).issue_cycle[mul] == 1
+
+    # The predecessor freed this instance at block-local ``free``; a successor whose terminator shrank to
+    # ``term_offset`` inherits that as ``successor_local_cycle(free, term_offset)`` -- exactly the map the busy branch
+    # of the spill carry applies. The firing must then issue precisely on that inherited free cycle, not before (a
+    # still-in-flight instance) and not at cycle 1 (ignoring the residue).
+    free, term_offset = 12, 4
+    inherited = successor_local_cycle(free, term_offset)  # 12 - 4 - 1 = 7
+    assert inherited > 1  # the residue is the genuinely binding constraint
+    sched = schedule_ops(mir.nodes, pool, schedulable, entry_busy={(operator, 0): inherited})
+    assert sched.issue_cycle[mul] == inherited
+    assert sched.busy_until[(operator, 0)] == inherited + operator.initiation_interval
 
 
 def test_residence_tint_is_path_exact_across_a_merge() -> None:
@@ -1364,16 +1449,15 @@ def test_stateful_slot_register_gaps_are_reused() -> None:
 
 
 def test_register_sharing_is_hardware_disjoint() -> None:
-    # ekf1_stateless time-multiplexes many values onto each register. Verify the hardware-frame interference invariant directly:
-    # within a register, each value's last read precedes the next value's landing, R(a) < W(b) -- the same liveness
-    # reg_liveness renders and the relaxed allocator shares against. Reconstructed via the write-timeline resolution
-    # the numerical model uses, so the test tracks the allocator's actual sharing decisions, not a hardcoded schedule.
+    # ekf1_stateless time-multiplexes many values onto each register. Verify the hardware-frame interference invariant
+    # directly: within a register, each value's last read precedes the next value's landing, R(a) < W(b) -- the same
+    # liveness reg_liveness renders and the relaxed allocator shares against. Reconstructed via the test-only write-
+    # timeline resolver over the model's landing PCs, so the test tracks the allocator's actual sharing decisions.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateless
-    from holoso._lir import latest_producer_before
 
     lir = build(_run(ekf1_stateless.update_x_P), "update_x_P")
-    timeline = lir.write_timeline
+    timeline = build_write_timeline(lir)
     last_read: dict[tuple[int, str, int], int] = {}
 
     def note(source: object, read_cycle: int) -> None:
@@ -1737,7 +1821,7 @@ def test_write_timeline_resolves_inline_wide_producers() -> None:
         return float(x > 0.0) * x
 
     lir = build(_run(f), "cast_timeline")
-    timeline = lir.write_timeline
+    timeline = build_write_timeline(lir)
     resolved = 0
     for op in lir.ops:
         read = operand_read_cycle(op.inst.operator, op.issue_cycle)

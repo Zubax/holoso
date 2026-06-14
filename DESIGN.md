@@ -442,7 +442,7 @@ makespan: the last commit cycle. The observable in_valid->out_valid latency (ini
 LIR exposes only a minimal API surface, following the design policies.
 It exports the LIR consumer contract: the LIR dataclasses and port classes backends need, plus `build()`.
 Shared LIR analysis helpers provide per-cycle grouping, register liveness, per-port read-sets / per-register
-writer-sets, stable ref labels, and write-timeline reconstruction so backends do not each re-derive them.
+writer-sets, and stable ref labels so backends do not each re-derive them.
 
 Storage is a sparse register file synthesized per kernel (see Backend): each operand's read mux spans only the
 registers it actually reads, each register's write select only its actual writers. Originally, an attempt to use
@@ -536,7 +536,7 @@ itself multi-predecessor, still shrinks its own terminator out when its body and
 A block carrying a phi/const install keeps the full drain (the install word must stay in-block). The per-clock numerical
 model commits each result on its true landing PC and, at a shrunk terminator's redirect, re-keys the still-in-flight
 landings onto the taken successor's frame -- a no-op for a fall-through arm or a drained block -- so it stays bit- and
-cycle-exact across the overlap. The static diagnostic timelines (`reg_liveness`, `write_timeline`, and the HTML
+cycle-exact across the overlap. The static diagnostic timelines (`reg_liveness`/`bool_liveness` and the HTML
 schedule) stamp a spilled result on EVERY successor arm it can reach, at exactly the PCs that same redirect re-keying
 produces, and resolve register residence per basic block with CFG-aware liveness, so a value live on two mutually-
 exclusive arms that rejoin at a merge stays resident on both arms. The report is therefore path-exact -- both the
@@ -663,10 +663,11 @@ Inputs preload directly into the low registers of their own bank on the accept s
 block (the highest float input register index plus one); boolean inputs are allocated analogously in the boolean bank.
 Outputs are tapped directly from their register by fixed index.
 Persistent state registers sit directly above the input block in their bank; a coalesced slot is written by
-its producing operator like any other result, and a non-coalesced slot is copied into its register on its install
-step (`pc == state_copy_step`, which is `LASTPC` for a boundary copy)
-by a small reg->reg block beside the input load, capturing its source on that step;
-an early install (when the source is an ordinary register read by nothing later) frees that source register for reuse.
+its producing operator like any other result, and a non-coalesced slot is updated by a small reg->reg block beside the
+input load that fires on its install step (`pc == state_copy_step`, which is `LASTPC` for a boundary copy) and samples
+its source there; the new live-out lands one step later (`install_landing`) for an early install, or read-first at
+`LASTPC` for a boundary copy. An early install (its source an ordinary register read by nothing later) frees that
+source register for reuse.
 
 Selected-float MIR `FloatSignControl` value objects fold into operand/result sign-control sidebands, and `fconst` is an
 immediate on the input mux; both are free in the schedule. Sign controls are constructed ad hoc rather than represented

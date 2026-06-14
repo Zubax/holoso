@@ -16,9 +16,9 @@ from holoso._backend.html import generate as generate_report
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lir import build
+from holoso._lir import build, RegRef
 from holoso._mir import lower as lower_to_mir
-from ._modelref import default_ops
+from ._modelref import default_ops, overlap_spill_kernel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -86,3 +86,35 @@ def test_report_shows_persistent_boolean_state() -> None:
     html = _report("pid")
     assert "persistent state" in html
     assert "b0" in html
+
+
+def test_report_draws_per_arm_edges_for_a_multi_arm_spill() -> None:
+    # Regression (P3b): under cross-block overlap a result spills into BOTH single-pred arms, landing at a distinct PC
+    # in each (Lir.write_landing_pcs). The schedule must draw that result's dataflow edges (and ops chip) on EVERY arm's
+    # landing row, not only the first -- else the non-fall-through arm shows a bare commit cell with no provenance and
+    # the report is not path-exact. Crash-before: edges/chips anchored only to landing_pcs[0], so the second arm's
+    # landing cell never appeared as an edge source.
+    import json
+
+    from holoso._backend.html._schedule import render_schedule
+
+    lir = build(lower_to_mir(optimize(lower(overlap_spill_kernel)), default_ops(_FMT)), "overlap_spill")
+    html = render_schedule(lir)
+    marker = "var data = "
+    payload, _ = json.JSONDecoder().raw_decode(html, html.index(marker) + len(marker))
+    edge_sources = {edge[0] for edge in payload["edges"]}
+
+    checked = 0
+    for block in lir.blocks:
+        for op in block.ops:
+            for write in op.writes:
+                if not isinstance(write.dst, RegRef):
+                    continue
+                landing_pcs = lir.write_landing_pcs(block, write.dst, op.commit_cycle)
+                if len(landing_pcs) <= 1:
+                    continue  # not a multi-arm spill
+                for pc in landing_pcs:  # a wide register's column ordinal is its index (the wide bank renders first)
+                    cell = f"g{write.dst.index}_{pc}"
+                    assert cell in edge_sources, f"no dataflow edge anchored to the arm landing cell {cell}"
+                checked += 1
+    assert checked > 0, "overlap_spill_kernel produced no multi-arm spill -- the regression is vacuous"
