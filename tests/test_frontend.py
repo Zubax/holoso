@@ -1397,8 +1397,10 @@ def test_dataclass_instance_is_stateful() -> None:
     assert [o.name for o in hir.outputs] == ["state_total"]
 
 
-def test_first_sample_branch_lowers_to_branch_and_phis() -> None:
-    # examples/iir1_lpf.py: a boolean first-sample state and an if/else that both write self.y.
+def test_first_sample_branch_if_converts_to_one_block() -> None:
+    # examples/iir1_lpf.py: a boolean first-sample state and an if/else that both write self.y. The diamond merges a
+    # float phi (y) AND a boolean phi (_first), so it if-converts (the float phi to a select, the boolean phi to a
+    # bool_select reduced by strength reduction) into a single straight-line block -- no branch survives.
     class Iir:
         def __init__(self):  # type: ignore[no-untyped-def]
             self.alpha = 2**-16
@@ -1414,14 +1416,10 @@ def test_first_sample_branch_lowers_to_branch_and_phis() -> None:
             return self.y
 
     hir = optimize(lower(Iir().__call__))
-    # Four blocks: entry (branch on _first), then, else, merge (ret).
-    assert len(hir.blocks) == 4
-    assert isinstance(hir.blocks[0].terminator, Branch)
-    cond = hir.blocks[0].terminator.cond
-    assert isinstance(hir.nodes[cond], StateRead) and isinstance(hir.nodes[cond].type, BoolType)
-    assert isinstance(hir.blocks[-1].terminator, Ret)
-    merge_phis = [hir.nodes[p] for p in hir.blocks[-1].phis]
-    assert len(merge_phis) == 2 and all(isinstance(p, Phi) for p in merge_phis)
+    assert len(hir.blocks) == 1
+    assert isinstance(hir.blocks[0].terminator, Ret)
+    assert not any(isinstance(b.terminator, Branch) for b in hir.blocks)
+    assert any(isinstance(n, Operation) and isinstance(n.operator, Select) for n in hir.nodes.values())  # y mux
     slots = {s.name: s for s in hir.state_slots}
     assert isinstance(slots["_first"].reset_value, BoolConst) and slots["_first"].reset_value.value is True
     assert isinstance(slots["y"].reset_value, FloatConst) and slots["y"].reset_value.value == 0.0

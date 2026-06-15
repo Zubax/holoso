@@ -125,9 +125,16 @@ def install_landing(fire_step: int) -> int:
     return fire_step + 1
 
 
-def boundary_step(makespan: int) -> int:
-    """The boundary / initiation-interval step: the last result lands here and outputs are resident here."""
-    return makespan + 2 + FETCH_LAG
+def boundary_step(makespan: int, wide_resident: bool) -> int:
+    """
+    The drained boundary / initiation-interval step: the cycle the block's latest boundary-resident result lands, where
+    its live-outs and consumed-at-boundary values are resident. ``wide_resident`` selects that latest value's bank: a
+    block holding any wide value at its boundary pays the latched wide landing (the read-first write-latch edge), while
+    an all-boolean boundary lands one step earlier on the latch-free boolean bank. The single source of truth shared by
+    the overlap layout (the terminator offset), the liveness boundary, and the numerical model, so the per-bank drain
+    cannot drift between them.
+    """
+    return wide_landing_cycle(makespan) if wide_resident else bool_landing_cycle(makespan)
 
 
 def successor_local_cycle(block_local_cycle: int, term_offset: int) -> int:
@@ -207,13 +214,19 @@ class OperatorInstance:
         # it is sound for ANY initiation interval. A DRAINED edge -- onto a multi-predecessor successor (a merge, a loop
         # header, the Ret), which carries no residue -- instead needs the instance provably idle by the time that
         # successor first issues on it: the worst case is a firing committing at its block's makespan (issue =
-        # makespan - latency), and the redirect-plus-fetch gap to the successor's first issue is exactly
-        # ``latency + boundary_step(0) + 2`` (the makespan absorbs any entry_busy delay, since makespan tracks that
-        # firing's own commit). This bound guards those drained edges; a deeper-throttled operator on a back-edge loop
-        # would additionally need a post-layout re-entry-distance check, deferred until one exists.
-        assert self.operator.initiation_interval <= self.operator.latency + boundary_step(0) + 2, (
+        # makespan - latency), and the redirect-plus-fetch gap to the successor's first issue is at least
+        # ``latency + boundary_step(0, wide_resident) + 2``, where ``wide_resident`` is THIS operator's own result bank.
+        # A wide-producing operator always fires in a wide-resident block (its float result holds the boundary), so its
+        # drained successor lays at the latched wide drain; a purely-boolean-producing operator (a comparator) can fire
+        # in an all-boolean block whose successor lays one PC earlier under the bank-aware drain -- the shorter gap, the
+        # worst case for that operator. The makespan absorbs any entry_busy delay, since it tracks that firing's own
+        # commit. This bound guards those drained edges; a deeper-throttled operator on a back-edge loop would
+        # additionally need a post-layout re-entry-distance check, deferred until one exists.
+        result_is_wide = any(isinstance(ty, FloatType) for ty in result_types)
+        drain = boundary_step(0, wide_resident=result_is_wide)
+        assert self.operator.initiation_interval <= self.operator.latency + drain + 2, (
             f"{self.operator.mnemonic}: initiation_interval {self.operator.initiation_interval} needs cross-block "
-            f"busy tracking (max supported is latency + {boundary_step(0) + 2})"
+            f"busy tracking (max supported is latency + {drain + 2})"
         )
 
 
@@ -555,9 +568,10 @@ class LirBlock:
     redirects the fetch PC at the block boundary. ``block_makespan`` is the last commit cycle inside the block (0 if
     it has none). ``term_offset`` is the block-relative fetch cycle at which the terminator redirects the PC -- the
     block's boundary step -- and is the single source of truth for the terminator PC (the successor frame begins one
-    step later, at ``term_pc + 1``). It is the full drain ``boundary_step(block_makespan)`` for a block that drains
-    (a multi-predecessor successor, a phi/const install, or a live-in branch condition), but cross-block software
-    pipelining shrinks it to the issue-side envelope when the block's in-flight results may spill into single-
+    step later, at ``term_pc + 1``). It is the full drain ``boundary_step(block_makespan, wide_resident)`` for a block
+    that drains (a multi-predecessor successor, a phi/const install, or a live-in branch condition) -- bank-aware, so a
+    block carrying only boolean values across its boundary drains one step earlier than a wide one -- but cross-block
+    software pipelining shrinks it to the issue-side envelope when the block's in-flight results may spill into single-
     predecessor successors -- so a consumer reads it here rather than re-deriving the boundary.
     """
 
@@ -1018,9 +1032,7 @@ class Lir:
                 for operand in op.operands:
                     if isinstance(operand.source, RegRef):
                         uses.setdefault(operand.source, []).append(read)
-            for (
-                copy
-            ) in block.copies:  # a phi copy fires here and samples its source; its destination lands one PC later
+            for copy in block.copies:  # phi copy fires here and samples its source; its destination lands one PC later
                 step = base_pc + copy_step_cycle(copy.issue_cycle)
                 defs.setdefault(copy.dst, []).append(install_landing(step))
                 if isinstance(copy.source.source, RegRef):
@@ -1074,9 +1086,7 @@ class Lir:
                 for operand in op.operands:
                     if isinstance(operand.source, BoolRegRef):
                         uses.setdefault(operand.source, []).append(read)
-            for (
-                bwrite
-            ) in block.bool_writes:  # the boolean write fires and samples here; its destination lands one PC later
+            for bwrite in block.bool_writes:  # bool write fires and samples here; its destination lands one PC later
                 step = base_pc + copy_step_cycle(bwrite.issue_cycle)
                 defs.setdefault(bwrite.dst, []).append(install_landing(step))
                 if isinstance(bwrite.source.source, BoolRegRef):

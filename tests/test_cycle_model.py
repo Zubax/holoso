@@ -1,6 +1,6 @@
 """
-Tests for the cycle-accurate :class:`NumericalModel`: the per-clock ``tick`` interface, the data-dependent latency a
-caller recovers by counting ticks, and bounded-memory execution of an arbitrarily deep loop.
+Tests for the cycle-accurate :class:`NumericalSimulator`: the per-clock ``tick`` interface, the data-dependent latency
+a caller recovers by counting ticks, and bounded-memory execution of an arbitrarily deep loop.
 
 The bit-exactness of the outputs themselves is covered by the broad model-equivalence suites (which call the model
 transaction-level via ``run``) and, against the RTL, by the cycle-accurate cosim lockstep. Here we exercise the
@@ -29,7 +29,13 @@ import madd  # noqa: E402
 import poly3  # noqa: E402
 from cordic_sincos import CordicSinCos  # noqa: E402
 from ekf1_stateless import update_x_P  # noqa: E402
+from iir1_lpf import IIR1LPF  # noqa: E402
+from octave_index import octave_index  # noqa: E402
+from phase_frequency_detector import PhaseFrequencyDetector  # noqa: E402
+from quadrature_encoder import QuadratureEncoder  # noqa: E402
 from recip_newton import NewtonReciprocal  # noqa: E402
+from remainder import remainder  # noqa: E402
+from schmitt_trigger import SchmittTrigger  # noqa: E402
 
 _FMT = FloatFormat(8, 36)
 
@@ -41,7 +47,7 @@ def _random_inputs(lir: Lir, rng: random.Random) -> list[object]:
     ]
 
 
-def _drive(model: NumericalModel, inputs: list[object]) -> tuple[tuple[object, ...], int]:
+def _drive(model: NumericalSimulator, inputs: list[object]) -> tuple[tuple[object, ...], int]:
     """
     Drive one transaction tick by tick (as a cosimulator would), returning the outputs and the in_valid->out_valid
     latency in cycles -- the count from just after the accept edge to out_valid, exactly the cosim bench's ``waited``.
@@ -123,3 +129,52 @@ def _count_down(n):  # type: ignore[no-untyped-def]
     while n > 0.0:
         n = n - 1.0
     return n
+
+
+# The realized worst-case in_valid->out_valid latency over a FIXED adversarial input sequence per kernel, frozen on the
+# B1+B2 build. This is the regression guard for the project's true goal -- realized per-transaction latency in multi-
+# block kernels -- which the static last_pc gate alone cannot express: a per-iteration drain regression is amplified by
+# the loop trip count (recip_newton, remainder), and a branchy kernel's worst arm may not be its longest static path.
+# Each tuple is (factory, input vectors, frozen worst-case waited). The vectors are chosen to hit the draining/long
+# paths (schmitt's deadband, quadrature's simultaneous-change fault, pfd's both-pending, the loops' high-trip inputs).
+# The bound is ``<=`` so a future optimization may lower it; a regression that re-inflates a per-block drain trips it.
+# If-conversion collapsed schmitt, pfd, and iir1_lpf to a single block (a fixed-latency transaction, down from tens of
+# cycles of branch-block drain); quadrature/recip/remainder stay multi-block and data-dependent. iir1_lpf is the
+# canonical "if-conversion RAISES min_ii but LOWERS realized latency" case (min_ii 15->21 as its rare cheap first-sample
+# path is unified away, yet every realized transaction is the steady-state 20 cycles, which only this guard pins -- the
+# static metrics gate sees only the raised min_ii).
+_T, _F = True, False
+_WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[list[object]], int]] = {
+    "schmitt_trigger": (lambda: SchmittTrigger().__call__, [[2.0], [-2.0], [0.0], [0.5], [-0.5], [3.0]], 6),
+    "iir1_lpf": (lambda: IIR1LPF().__call__, [[1.0], [-2.0], [0.5], [3.0], [-1.5], [0.0]], 20),
+    "quadrature_encoder": (
+        lambda: QuadratureEncoder().__call__,
+        [[_T, _F], [_T, _T], [_F, _F], [_F, _T], [_T, _T], [_F, _F]],
+        20,
+    ),
+    "phase_frequency_detector": (
+        lambda: PhaseFrequencyDetector().__call__,
+        [[_T, _F, _F], [_F, _T, _F], [_T, _T, _F], [_F, _F, _T], [_T, _F, _F], [_F, _F, _T]],
+        7,
+    ),
+    "recip_newton": (lambda: NewtonReciprocal().__call__, [[0.5], [1.0], [2.0], [1.7], [2.9], [0.35]], 248),
+    "remainder": (
+        lambda: remainder,
+        [[1.0, 1.0], [7.0, 3.0], [1000.0, 1.0], [123.0, 4.0], [50.0, 7.0], [2.5, 2.5]],
+        382,
+    ),
+    "octave_index": (lambda: octave_index, [[8.0], [0.1], [1.0], [32.0], [0.03], [-3.0]], 139),
+}
+
+
+@pytest.mark.parametrize("name", list(_WORST_CASE_LATENCY))
+def test_realized_worst_case_latency_does_not_regress(name: str) -> None:
+    # The realized per-transaction latency (the cosim bench's ``waited``) over a fixed adversarial input set must not
+    # exceed its frozen worst case. This is the teeth behind the latency-reduction work: a per-block drain regression
+    # re-inflates the count, amplified across loop trips. Freezing the post-optimization figure makes the gate fail on
+    # any future change that lengthens a transaction, while still allowing a genuine improvement (the bound is ``<=``).
+    factory, vectors, worst = _WORST_CASE_LATENCY[name]
+    lir = build(lower_to_mir(optimize(lower(factory())), default_ops(_FMT)), name)
+    model = NumericalSimulator(lir)
+    waited = [_drive(model, inputs)[1] for inputs in vectors]
+    assert max(waited) <= worst, f"{name}: realized worst-case latency regressed {worst} -> {max(waited)} ({waited})"

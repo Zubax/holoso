@@ -218,18 +218,23 @@ MAXIMUM THINKING EFFORT to review your work:
 
 - A subagent focusing on the FUNCTIONAL CORRECTNESS and ROBUSTNESS of the implementation.
 - A subagent focusing on the ARCHITECTURAL CLEANLINESS, DESIGN PRACTICES, and CODE QUALITY.
-- Distinct tools -- Codex, Gemini, Claude (check what's available, exclude yourself) -- focusing on CORRECTNESS only.
+- Distinct tools -- Codex, Antigravity (`agy`), Claude (check what's available, exclude yourself) --
+  focusing on CORRECTNESS only.
 
 It is important that we use all available distinct tools to maximize the diversity of perspectives
 and minimize blind spots. When all are done, review and consolidate their findings and act accordingly.
 If behavioral defects are found, ensure extensive regression tests are introduced.
 
-Repeat the review/refine loop until the agents return only trivial feedback (or none) for two (sic!) consecutive turns.
+Repeat the review/refine loop until the agents return only trivial feedback (or none) for three (sic!) consecutive turns.
 Here, "trivial feedback" means stylistic/inconsequential issues such as wording, formatting, trivial parameter
 validation, or anything else that does not materially affect the correctness or maintainability of the codebase.
 Iteration until no feedback has been attempted in the past but it is not practical because in the absence of significant
 issues the review agents tend to degrade to nitpicking.
 Hence, we stop iteration earlier, as soon as the feedback ceases to contain significant findings.
+
+The requirement of multiple consecutive reviews with no significant findings is intended to improve the coverage.
+We have seen in the past how a single review turn would come up blank while the next round (with zero code changes in
+between) would dig up a critical defect. Hence, we repeat turns generously across distinct agents for maximum assurance.
 
 Review agents in maximum thinking mode may go silent for a long time.
 Set a generous timeout of about 1 hour or so, use your best judgement.

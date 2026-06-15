@@ -392,7 +392,9 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         ops=[op],
         outputs=[FloatOutputWire("out_0", FloatOperand(RegRef(2))), FloatOutputWire("out_1", FloatOperand(RegRef(3)))],
         float_state_slots=[],
-        blocks=[LirBlock(0, [op], [], [], [], Ret(), op.commit_cycle, boundary_step(op.commit_cycle))],
+        blocks=[
+            LirBlock(0, [op], [], [], [], Ret(), op.commit_cycle, boundary_step(op.commit_cycle, wide_resident=True))
+        ],
         block_base=[0],
         entry=0,
         last_pc=op.commit_cycle + 4,

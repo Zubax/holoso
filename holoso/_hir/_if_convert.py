@@ -5,29 +5,29 @@ A diamond is ``P: Branch(c, T, F)`` where both arms are single-predecessor, phi-
 to one merge block ``M`` whose only predecessors they are. When every arm operation is speculatable (no error
 sideband -- division is excluded, since a speculated div-by-zero would raise the module's error flag for a path
 never taken) and each arm is small enough, the diamond is spliced into ``P``: both arms' operations run
-unconditionally, each of ``M``'s float phis becomes ``select(c, true_arm, false_arm)`` under its original value id
-(so downstream references need no rewrite), and ``M``'s terminator replaces the branch. The pass repeats until no
-diamond converts, so nested chains collapse from the inside out; the dead branch condition (when nothing else reads
-it) falls to DCE, which runs after this pass. Conversion turns control dependence into data dependence: a
-diamond whose merged results are entirely unused frees its condition cone for DCE like any other dead code, so an
-error-bearing operation feeding only such a condition stops reporting -- consistent with the error sideband's
-contract (executed operators only; an unused division is dead code with or without a branch around it).
+unconditionally, each of ``M``'s phis becomes a mux under its original value id -- ``select(c, true_arm, false_arm)``
+for a float phi, ``bool_select`` for a boolean phi (so downstream references need no rewrite) -- and ``M``'s
+terminator replaces the branch. The pass repeats until no diamond converts, so nested chains collapse from the inside
+out; the dead branch condition (when nothing else reads it) falls to DCE, which runs after this pass. Conversion turns
+control dependence into data dependence: a diamond whose merged results are entirely unused frees its condition cone
+for DCE like any other dead code, so an error-bearing operation feeding only such a condition stops reporting --
+consistent with the error sideband's contract (executed operators only; an unused division is dead code with or
+without a branch around it).
 
 Both arms are computed, so conversion only pays where arms are cheap: the per-arm operation budget is the
-``HOLOSO_IFCONV_MAX_OPS`` knob (developer-only, read once; 0 disables the pass entirely). Boolean phis are not
-converted (a boolean mux would need a logic tree rather than one select); a diamond with any non-float phi is left
-as a real branch.
+``HOLOSO_IFCONV_MAX_OPS`` knob (developer-only, read once; 0 disables the pass entirely). A diamond with any phi that
+is neither float nor boolean (none exist today) is left as a real branch. A boolean mux's constant arms (the common
+``True``/``False`` of a state-machine merge) reduce to ``and``/``or``/``not`` in the strength-reduction pass that
+re-runs after if-conversion.
 """
 
 import logging
 import os
 
-from typing import assert_never
-
 from ._const import BoolConst
-from ._ir import Block, BlockId, Branch, Hir, Jump, Operation, Phi, Ret, Terminator, ValueId, predecessors
-from ._operators import Select
-from ._types import FloatType
+from ._ir import Block, BlockId, Branch, Hir, Jump, Operation, Phi, ValueId, predecessors, renumber
+from ._operators import BoolSelect, Select
+from ._types import BoolType, FloatType
 
 _IFCONV_MAX_OPS = int(os.getenv("HOLOSO_IFCONV_MAX_OPS", "8"))
 
@@ -70,7 +70,7 @@ def _find_diamond(hir: Hir, preds: dict[BlockId, set[BlockId]]) -> tuple[Block, 
         merge = blocks_by_id[arm_t.terminator.target]
         if merge.id == block.id or preds[merge.id] != {arm_t.id, arm_f.id}:
             continue
-        if not all(isinstance(hir.nodes[vid].type, FloatType) for vid in merge.phis):
+        if not all(isinstance(hir.nodes[vid].type, (FloatType, BoolType)) for vid in merge.phis):
             continue
         return block, arm_t, arm_f, merge
     return None
@@ -86,7 +86,8 @@ def _splice(hir: Hir, diamond: tuple[Block, Block, Block, Block]) -> Hir:
         phi = nodes[vid]
         assert isinstance(phi, Phi)
         arm_value = dict(phi.arms)
-        nodes[vid] = Operation(Select(), (terminator.cond, arm_value[arm_t.id], arm_value[arm_f.id]))
+        op = Select() if isinstance(phi.type, FloatType) else BoolSelect()
+        nodes[vid] = Operation(op, (terminator.cond, arm_value[arm_t.id], arm_value[arm_f.id]))
     spliced = Block(
         id=pred.id,
         phis=pred.phis,
@@ -106,42 +107,6 @@ def _splice(hir: Hir, diamond: tuple[Block, Block, Block, Block]) -> Hir:
     return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=hir.outputs, state_slots=hir.state_slots)
 
 
-def _renumber(hir: Hir) -> Hir:
-    """
-    Compact block ids to a dense 0..n-1 range (the splices leave gaps, and the rebuild machinery downstream relies
-    on dense ids), rewriting terminator targets and phi arm predecessors.
-    """
-    new_id = {block.id: index for index, block in enumerate(hir.blocks)}
-    if all(old == new for old, new in new_id.items()):
-        return hir
-    nodes = dict(hir.nodes)
-    for vid, node in hir.nodes.items():
-        if isinstance(node, Phi):
-            nodes[vid] = Phi(type=node.type, arms=tuple((new_id[pred], value) for pred, value in node.arms))
-
-    def retarget(terminator: Terminator) -> Terminator:
-        match terminator:
-            case Jump(target=target):
-                return Jump(target=new_id[target])
-            case Branch(cond=cond, if_true=if_true, if_false=if_false):
-                return Branch(cond=cond, if_true=new_id[if_true], if_false=new_id[if_false])
-            case Ret():
-                return terminator
-            case _:
-                assert_never(terminator)
-
-    blocks = [
-        Block(
-            id=new_id[block.id],
-            phis=block.phis,
-            operations=block.operations,
-            terminator=retarget(block.terminator),
-        )
-        for block in hir.blocks
-    ]
-    return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=hir.outputs, state_slots=hir.state_slots)
-
-
 def run(hir: Hir) -> Hir:
     """Convert every eligible diamond, innermost first, until none remains; block ids are then recompacted."""
     if _IFCONV_MAX_OPS <= 0:
@@ -152,5 +117,5 @@ def run(hir: Hir) -> Hir:
         converted += 1
     if converted:
         _logger.info("If-conversion: %d diamond(s) collapsed to selects; %d blocks remain", converted, len(hir.blocks))
-        hir = _renumber(hir)
+        hir = renumber(hir)
     return hir

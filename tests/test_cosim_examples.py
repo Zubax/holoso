@@ -51,6 +51,7 @@ import madd  # noqa: E402
 import poly3  # noqa: E402
 from cordic_sincos import CordicSinCos  # noqa: E402
 from iir1_lpf import IIR1LPF  # noqa: E402
+from octave_index import octave_index  # noqa: E402
 from pid import PID  # noqa: E402
 from phase_frequency_detector import PhaseFrequencyDetector  # noqa: E402
 from quadrature_encoder import QuadratureEncoder  # noqa: E402
@@ -88,8 +89,11 @@ class ExampleSpec:
     edge_values: tuple[float | bool, ...]
     protected: frozenset[str] = frozenset()  # inputs swept only over positive edges to keep a divisor away from zero
     protected_values: tuple[float, ...] = ()
+    # The float format(s) to cosimulate at. The matrix is e8m36 by plan; a kernel that wants a second datapath (e.g.
+    # a shallow e6m18 alongside the deep e8m36, to exercise both pipeline depths) lists both here.
+    formats: tuple[FloatFormat, ...] = (_FMT,)
 
-    def vectors(self) -> list[dict[str, int]]:
+    def vectors(self, fmt: FloatFormat) -> list[dict[str, int]]:
         """The full reproducible input sequence as input-name -> ZKF-bits rows: manual, then random, then edges."""
         rng = np.random.default_rng(_SEED)
         rows: list[dict[str, float]] = [*self.manual]
@@ -97,7 +101,7 @@ class ExampleSpec:
         for name in self.inputs:
             values = self.protected_values if name in self.protected else self.edge_values
             rows += [{**self.nominal, name: value} for value in values]
-        return [encode_inputs(_FMT, row) for row in rows]
+        return [encode_inputs(fmt, row) for row in rows]
 
 
 def _draw_ekf_stateless(rng: np.random.Generator) -> dict[str, float]:
@@ -315,6 +319,20 @@ _SPECS = [
         edge_values=(0.0, 0.5, -0.5, 1.0, -1.0, 3.0, -3.0, 8.0),
     ),
     ExampleSpec(
+        name="octave_index",
+        inputs=("x",),
+        make_kernel=lambda: octave_index,
+        nominal={"x": 1.0},
+        manual=[{"x": v} for v in (1.0, 2.0, 8.0, 0.5, 0.1, 32.0, 0.03, -4.0, -0.25)],  # both ranges, both signs
+        # x must stay nonzero (x == 0 makes the magnitude loop run forever) and bounded in magnitude (the trip count is
+        # the octave distance, hence the simulation length); abs() folds the sign in, so the random sweep is positive.
+        draw_random=lambda rng: {"x": log_uniform_positive(rng, 2**-5, 2**5)},
+        protected=frozenset({"x"}),
+        protected_values=(0.25, 0.5, 1.0, 2.0, 8.0),
+        edge_values=(0.25, 0.5, 1.0, 2.0, 8.0),
+        formats=(FloatFormat(6, 18), _FMT),  # the shallow and deep datapaths, both bit-exact against the model
+    ),
+    ExampleSpec(
         name="cordic_sincos",
         inputs=("theta",),
         make_kernel=lambda: CordicSinCos().__call__,
@@ -388,10 +406,17 @@ _SPECS = [
 # handshake at two latency points; both are bit-exact against the same model.
 _OP_CONFIGS = [("default", default_ops), ("staged", staged_ops)]
 
+# One case per (spec, datapath format): every spec runs at e8m36, and a spec that lists a second format (octave_index
+# adds the shallow e6m18) also runs there -- exercising the merge-threaded loop at both pipeline depths.
+_SPEC_FORMATS = [
+    pytest.param(spec, fmt, id=f"{spec.name}-e{fmt.wexp}m{fmt.wman}") for spec in _SPECS for fmt in spec.formats
+]
+
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 @pytest.mark.parametrize("config", _OP_CONFIGS, ids=lambda c: c[0])
-@pytest.mark.parametrize("spec", _SPECS, ids=lambda s: s.name)
-def test_example_cosim(spec: ExampleSpec, config: tuple[str, object], sim: str) -> None:
+@pytest.mark.parametrize("spec,fmt", _SPEC_FORMATS)
+def test_example_cosim(spec: ExampleSpec, fmt: FloatFormat, config: tuple[str, object], sim: str) -> None:
     label, make_ops = config
-    run_cosim(sim, spec.make_kernel(), _FMT, f"{spec.name}_{label}", ops=make_ops(_FMT), vectors=spec.vectors())
+    name = f"{spec.name}_{label}_e{fmt.wexp}m{fmt.wman}"
+    run_cosim(sim, spec.make_kernel(), fmt, name, ops=make_ops(fmt), vectors=spec.vectors(fmt))

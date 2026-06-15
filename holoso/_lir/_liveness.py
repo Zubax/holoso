@@ -59,8 +59,9 @@ class BankLiveness:
     # layout uses -- so an install's copy step is exactly ``copy_step_cycle(makespan[block])``.
     makespan: dict[int, int]
     # Per-block terminator offset (the boundary step where values live-out / consumed-at-boundary must still reside).
-    # Equals ``boundary_step(makespan[block])`` under per-block draining; a separate field so cross-block overlap can
-    # shrink it below the drain without disturbing the install copy step, which stays keyed on ``makespan``.
+    # Equals the bank-aware ``boundary_step(makespan[block], wide_resident)`` under per-block draining; a separate field
+    # so cross-block overlap can shrink it below the drain without disturbing the install copy step, which stays keyed
+    # on ``makespan``.
     term_offset: dict[int, int]
     resident: frozenset[ValueId]  # inputs and state live-ins: resident from the start, defined at the entry
     op_landing: dict[ValueId, int]  # op-result value -> its bank-true landing cycle in its def block (block-local)

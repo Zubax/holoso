@@ -254,14 +254,20 @@ Branch vs. select (the core control-flow decision):
   operator's result can coalesce onto the merged register, otherwise by a pc-gated copy (see LIR below). Branches are
   the default.
 - `select` (a mux, both inputs live) implements data multiplexing: the if-conversion peephole collapses a small,
-  pure, cheap branch diamond into per-phi selects, making the region straight-line (so it pipelines and reuses
+  pure, cheap branch diamond into per-phi muxes, making the region straight-line (so it pipelines and reuses
   registers like any other). Both arms execute, so conversion is gated: every arm operation must be SPECULATABLE
   (an operator property; division is not -- a speculated div-by-zero would assert the module error flag for a path
-  never taken), each arm must fit the `HOLOSO_IFCONV_MAX_OPS` budget (0 disables the pass), and v1 converts diamonds
-  merging float phis only (a boolean merge stays a real branch). Arm sign chains fold into the select's operand
-  conditioners, so `x if c else -x` costs one comparison and one mux. Each select operand is a dedicated direct
-  (unlatched) register read; the cost is one mux per merged value, the same order as the per-arm phi-copy installs
-  the branch would otherwise need.
+  never taken), and each arm must fit the `HOLOSO_IFCONV_MAX_OPS` budget (0 disables the pass). A float-phi merge
+  converts to a wide `select`; a boolean-phi merge converts to a first-class `bool_select` (the 1-bit dual), which
+  strength reduction folds to a plain `and`/`or`/`not` whenever an arm is a boolean constant (`bool_select(c,True,f)`
+  -> `c or f`, `(c,t,False)` -> `c and t`, `(c,X,X)` -> `X`, etc.). A first-class bool mux keeps a nested diamond's
+  critical-path depth at one mux per level (a logic tree would double it) and reuses the same scheduler/liveness/model/
+  emitter paths the float select already drives. Running both arms unconditionally can RAISE the static
+  `min_initiation_interval` (the shortest path lengthens) while LOWERING the realized per-transaction latency, which is
+  the goal -- the regression guard is the realized-latency test, not the static lower bound. Arm sign chains (float) and
+  inversions (boolean) fold into the mux's operand conditioners, so `x if c else -x` costs one comparison and one mux.
+  Each operand is a dedicated direct (unlatched) register read; the cost is one mux per merged value, the same order as
+  the per-arm phi-copy installs the branch would otherwise need.
 
 HIR is a real CFG of basic blocks (entry first, a single `Ret` exit) carrying an SSA value DAG; `bool` is implemented
 alongside float (`BoolConst`, bool `InPort`, bool `StateRead`, bool `Phi`), and a `StateSlot`'s reset is a typed `Const`
@@ -374,9 +380,6 @@ a counted back-edge loop (a counted loop would need a runtime integer counter; d
 
 Variable-trip `for` loops.
 
-Diamond if-conversion of boolean-phi merges (today only float-phi diamonds convert to select;
-a boolean merge needs a (c & t) | (~c & f) logic mux rather than the wide select).
-
 Early return support is missing (from loop body).
 
 Integer operand support is missing; it needs typed int operands/constants/operators that reference the same wide
@@ -390,7 +393,19 @@ multiply chain) - diamond if-conversion (after folding, so arm costs are final -
 escapes the frontend's folding is refused; before DCE, which sweeps a converted diamond's condition cone when
 nothing else reads it: conversion turns control dependence into data dependence, so a fully-unused diamond's
 condition is dead code like any other; converted diamonds splice into their branching block and block ids
-recompact) - DCE. Constant folding is typed: an operator receives constant nodes and
+recompact) - merge threading - DCE. Merge threading eliminates an empty pass-through merge block: a non-convertible
+diamond (a variable-divisor division) whose merge feeds a following control structure leaves a block with phis but no
+operation, a single `Jump`, and (since every phi-arm predecessor is jump-terminated) all-`Jump` predecessors. Each
+predecessor's `Jump` is retargeted onto the merge's successor and the merge's phi arms compose into the successor's
+phis -- an arm `(M, v)` becoming one arm per merge predecessor (the predecessor's own arm of the merged phi, or the
+pass-through value) -- which can give a loop header a three-arm phi (two forward init arms plus the back-edge). The
+forbidden branch-block-arm shape cannot arise (a jump-terminated predecessor is never a branching block). It fires
+only when every merge phi is consumed solely as the successor-phi arm taken FROM the merge -- the one arm composition
+rewrites -- so deleting the merge phis dangles nothing; a merge phi reached any other way (a loop-invariant value the
+loop header carries on its back-edge arm, needing rematerialization as a loop-header self-latch phi) keeps its real
+branch (deferred). Threading deletes its own composed-away merge phis and drops the merge block; chained merges collapse
+to a fixpoint, and the result is re-validated (one arm per predecessor) so a malformed merge crashes loudly. Block ids
+then recompact (shared with if-conversion). Constant folding is typed: an operator receives constant nodes and
 returns a folded `Const` node. The HIR builder can re-intern an arbitrary `Const` node with `const_node()`,
 so bool/int constants do not need float-specific rebuilding in shared passes.
 
@@ -509,13 +524,19 @@ Blocks are laid out contiguously in reverse-postorder with the single canonical 
 boundary (so a loop body, a DFS leaf via its back edge, stays below it); a back-edge is a jump to a lower address.
 Each block spans `term_offset + 1` fetch PCs and its terminator redirects the fetch PC at `term_offset` via a small
 `case(pc)` in `next_pc` that, for a `branch`, reads the condition's 1-bit register (`bregs`). `term_offset` is normally
-the drained boundary `boundary_step(block_makespan)`, but cross-block software pipelining shrinks it (see below) so a
-block's tail overlaps its successor. A phi (and each persistent slot's live-out) is resolved at register allocation as
-above: coalesced onto the merged register when its live range does not overlap, else installed by a pc-gated copy at
-the predecessor's tail (a parallel copy bundle, read-first, so a swap is correct). `min_initiation_interval` is the
-shortest-path lower bound (exact when the kernel has a single forward path); the numerical model predicts the exact
-per-transaction cycle latency from the block path it takes (the testbench locksteps on that out_valid cycle,
-see Backend).
+the drained boundary `boundary_step(block_makespan, wide_resident)`, which is bank-aware: a block pays the latched wide
+landing if it holds any wide value at its boundary (a float def, a float phi-arm install, or a float output/state
+live-out at `Ret`) OR carries any tail install -- a phi copy, a boolean write, or a const-branch materialization is a
+pc-gated copy that lands one step LATER than a direct bank result, at the wide boundary regardless of its register's
+bank, so the terminator must not redirect before it lands. Only an install-free, float-free boundary lands a step
+earlier on the latch-free boolean bank (a comparator branch, the all-boolean `Ret` of a fully-coalesced kernel such as
+the quadrature encoder). Cross-block software pipelining shrinks `term_offset` further below this boundary (see below)
+so a block's tail overlaps its successor. A phi (and each persistent slot's live-out) is resolved at register
+allocation as above: coalesced onto the merged register when its live range does not overlap, else installed by a
+pc-gated copy at the predecessor's tail (a parallel copy bundle, read-first, so a swap is correct).
+`min_initiation_interval` is the shortest-path lower bound (exact when the kernel has a single forward path);
+the numerical model predicts the exact per-transaction cycle latency from the block path it takes
+(the testbench locksteps on that out_valid cycle, see Backend).
 
 Cross-block software pipelining shrinks `term_offset` from the drained boundary down to the issue-side envelope --
 the latest fetch PC at which the block still drives a control word (an operation's write-enable; for a `branch`, the
@@ -533,7 +554,14 @@ operand. A block shrinks on its OWN successors; a multi-predecessor successor --
 never RECEIVES a spill, so its live-ins stay drained and no overlap crosses a back-edge (whose target, the loop header,
 is multi-predecessor), and the forward-DAG carry converges in a single reverse-postorder pass. A loop header, though
 itself multi-predecessor, still shrinks its own terminator out when its body and exit successors are single-predecessor.
-A block carrying a phi/const install keeps the full drain (the install word must stay in-block). The per-clock numerical
+A block carrying a phi/const install keeps the full drain (the install word must stay in-block), but only when the
+install is REAL: the install set is computed to a fixpoint. `_block_has_install` first marks every phi-arm predecessor
+from the CFG shape, but a block whose arms all COALESCE onto the merged register installs nothing, so its +1 drain is
+spurious. The build lays out and allocates with the conservative set, recomputes the install set from the actual
+coalesced copies, and re-runs until it stops shrinking -- monotone (dropping a spurious drain frees registers a step
+earlier, only enabling more coalescing), so it converges over the finite block set. A coalesced-install block thus pays
+neither the +1 drain nor overlap-ineligibility (e.g. each `remainder` diamond arm, whose division result coalesces into
+the merged phi register). The per-clock numerical
 model commits each result on its true landing PC and, at a shrunk terminator's redirect, re-keys the still-in-flight
 landings onto the taken successor's frame -- a no-op for a fall-through arm or a drained block -- so it stays bit- and
 cycle-exact across the overlap. The static diagnostic timelines (`reg_liveness`/`bool_liveness` and the HTML
@@ -574,6 +602,17 @@ words themselves spill past the terminator -- would shave the remaining per-bloc
 fields replicated into every successor arm (each at its own translated offset) and a single-writer microcode validator
 to police the replicas (the validator is already in place). Overlap also stays off across a live-in branch condition
 (its exact fetch-pipeline read floor at the terminator is not locally known) and across any multi-predecessor edge.
+
+Empty merge-block elimination is implemented as the HIR merge-threading pass (see HIR optimization above): an empty
+pass-through merge whose predecessors are all jump-terminated is threaded onto them. Two cases stay a real branch and
+are NOT eliminated. An empty `else`-arm block (a one-sided `if cond: ...` with a non-convertible body) has the diamond
+BRANCH as its predecessor, so threading would make the branch contribute a phi arm -- the forbidden branch-block-arm
+shape -- and is refused by the all-predecessors-jump guard. A merge phi read outside a successor phi arm -- a loop-
+invariant value used in the loop body, which has no loop-header phi of its own -- would need rematerialization as a
+fresh loop-header phi with a self-referential latch arm; that shape is unproven against the RTL emitter and the marginal
+benefit (a niche kernel) does not justify it, so the guard refuses it (a merge phi must be consumed solely as successor
+phi arms). The residual drain of a non-eliminable empty arm block onto its multi-predecessor merge is exactly the
+aggressive cross-block overlap deferred in the previous paragraph.
 
 ## Operators
 

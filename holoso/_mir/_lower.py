@@ -6,6 +6,7 @@ from .._hir import (
     BoolConst,
     BoolNot,
     BoolOr,
+    BoolSelect,
     BoolToFloat,
     BoolType as HirBoolType,
     Branch,
@@ -39,6 +40,7 @@ from .._operators import (
     BoolAndOperator,
     BoolInversion,
     BoolOrOperator,
+    BoolSelectOperator,
     BoolToFloatOperator,
     FloatHardwareOperator,
     FloatSignControl,
@@ -243,6 +245,11 @@ class _LoweringContext:
                 return True
             case Operation(operator=BoolOr() as semantic, operands=(a, b)):
                 self._lower_bool_logic(old_id, _select_hardware(semantic, BoolOrOperator()), [a, b])
+                return True
+            case Operation(operator=BoolSelect() as semantic, operands=(cond, a, b)):
+                # The boolean if-conversion mux: a NOT chain on the condition or either arm folds into that operand's
+                # inversion conditioner, exactly like float Select's sign folding -- so ``a if not c else b`` is free.
+                self._lower_bool_logic(old_id, _select_hardware(semantic, BoolSelectOperator()), [cond, a, b])
                 return True
             case Operation(operator=BoolNot(), operands=(_,)):
                 # A NOT never materializes hardware: every consumer position collapses the chain into its own

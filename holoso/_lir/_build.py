@@ -200,14 +200,16 @@ def _schedule_with_overlap(
     """
     Schedule every block in reverse-postorder and derive each block's terminator offset, threading cross-block overlap
     forward. A block whose every successor is single-predecessor (so a spill cannot reach a wrong path) and that carries
-    no phi/const install shrinks its terminator offset from the drained boundary ``boundary_step(makespan)`` down to the
-    issue-side envelope -- the latest cycle it still drives a control word, plus the branch condition's read floor. Its
-    in-flight results then land past the terminator, in the uniquely-reached successor frame; the successor inherits that
-    as ``entry_busy`` (the predecessor's per-instance busy residue) and ``livein_landing`` (the cycle each spilled value
-    lands in the successor), so its schedule neither reads a still-in-flight operand nor double-drives a busy instance.
-    Back-edge targets and merge blocks are multi-predecessor, so no overlap crosses them: the forward-DAG carry converges
-    in this single pass with no fixpoint. Under draining (every block multi-pred-bound or install-bearing) every offset
-    equals ``boundary_step(makespan)`` and the carries are empty -- the schedule is identical to an isolated per-block one.
+    no phi/const install shrinks its terminator offset from the drained boundary down to the issue-side envelope -- the
+    latest cycle it still drives a control word, plus the branch condition's read floor. The drained boundary is bank-
+    aware (``boundary_step(makespan, wide_resident)``): a block carrying any wide value across its boundary pays the
+    latched wide landing, an all-boolean boundary drains one step earlier. Its in-flight results then land past the
+    terminator, in the uniquely-reached successor frame; the successor inherits that as ``entry_busy`` (the
+    predecessor's per-instance busy residue) and ``livein_landing`` (the cycle each spilled value lands), so its
+    schedule neither reads a still-in-flight operand nor double-drives a busy instance. Back-edge targets and merge
+    blocks are multi-predecessor, so no overlap crosses them: the forward-DAG carry converges in this single pass with
+    no fixpoint. Under draining (every block multi-pred-bound or install-bearing) every offset equals its bank-aware
+    ``boundary_step(makespan, wide_resident)`` and the carries are empty -- identical to an isolated per-block schedule.
     """
     succ = _succ_map(mir)
     pred_count: dict[int, int] = {block.id: 0 for block in mir.blocks}
@@ -215,6 +217,11 @@ def _schedule_with_overlap(
         for target in targets:
             pred_count[target] += 1
     blocks_by_id = {block.id: block for block in mir.blocks}
+    # A wide value resident at a block's boundary forces the latched wide drain; a block carrying only boolean values
+    # drains one step earlier. A block holds a wide boundary value iff it defines a float value, installs a float phi
+    # arm at its tail (the copy lands wide), or is the Ret whose outputs/state live-outs include a float value.
+    float_arm_preds = {pred for phi in float_mir.phi_nodes.values() for pred, _arm, _cond in phi.arms}
+    ret_boundary_is_wide = bool(float_mir.outputs) or bool(float_mir.state_slots)
     block_sched: dict[int, Schedule] = {}
     block_makespan: dict[int, int] = {}
     block_term_offset: dict[int, int] = {}
@@ -238,13 +245,18 @@ def _schedule_with_overlap(
         has_install = bid in has_install_blocks
         makespan = sched.makespan + (1 if has_install else 0)
         block_makespan[bid] = makespan
-        boundary = boundary_step(makespan)
         targets = succ[bid]
         overlaps = bool(targets) and not has_install and all(pred_count[target] == 1 for target in targets)
         if overlaps:
-            # The branch's redirect mux reads its condition register at the terminator PC; keep that read in the block
-            # (a produced condition by its boolean landing, a live-in condition by the fetch-pipeline floor) and keep
-            # every operation's control word in the block. Only the writeback/read-first landing tail spills.
+            # An overlapping block's terminator is the ISSUE-side envelope -- the latest control word still driven in
+            # the block, the produced branch condition's boolean landing, and (for a live-in condition, whose exact read
+            # floor is not locally known) the conservative wide drain -- NOT the bank-aware drained boundary. The
+            # landings spill past it into the (single-predecessor) successors. The cap is the wide drain, which always
+            # accommodates the floor (every control word commits by the makespan, so word + the error-latch slack fits
+            # within ``boundary_step(makespan, wide_resident=True)``); ``min`` is defensive. The bank-aware drain below
+            # governs only FULLY-DRAINED blocks -- a bool-only block branching on a live-in condition legitimately keeps
+            # the wide cap here, above its bool drain, so no ``term_offset <= bank-aware drain`` invariant holds.
+            cap = boundary_step(makespan, wide_resident=True)
             floor = 1
             for vid, issue in sched.issue_cycle.items():
                 word, _landing = _value_word_and_landing(mir, float_mir, vid, issue)
@@ -264,10 +276,27 @@ def _schedule_with_overlap(
                 else:
                     # A live-in condition was written in a prior block; its exact fetch-pipeline read floor at this
                     # block's terminator is not locally known, so keep the drained boundary (no shrink) -- conservative.
-                    floor = boundary
-            term_offset = min(floor, boundary)
+                    floor = cap
+            assert (
+                floor <= cap
+            ), f"block {bid}: a control word sits past the wide drain"  # the cap accommodates the floor
+            term_offset = min(floor, cap)
         else:
-            term_offset = boundary
+            # A fully-drained block holds its boundary-resident values to the latched WIDE landing when ANY of them lands
+            # there: a float def or a float output/state live-out at the Ret (the wide bank's write-latch + read-first
+            # edge), OR -- regardless of bank -- ANY tail install (``has_install``: a phi copy, a boolean write, or a
+            # const-branch materialization). An install is a pc-gated copy that lands one step LATER than a direct bank
+            # result (``install_landing(copy_step_cycle(...))`` == the wide landing), so a block whose boolean condition
+            # or phi register is written by such an install must keep the wide drain or the terminator would read it one
+            # PC before it lands. Only an install-free, float-free block drains a step earlier on the latch-free boolean
+            # bank (a comparator branch, the all-boolean Ret of a fully-coalesced kernel).
+            wide_resident = (
+                has_install
+                or bool(float_mir.block_operations(block))
+                or bid in float_arm_preds
+                or (isinstance(block.terminator, MirRet) and ret_boundary_is_wide)
+            )
+            term_offset = boundary_step(makespan, wide_resident=wide_resident)
         block_term_offset[bid] = term_offset
         if overlaps:  # hand the spill residue to the (single-predecessor) successors this block uniquely reaches
             # Both the per-instance busy residue and the value landings cross the shrunk terminator into the successor
@@ -291,6 +320,64 @@ def _schedule_with_overlap(
             for target in targets:
                 carry[target] = spill
     return _OverlapLayout(block_sched, block_makespan, block_term_offset, block_inflight)
+
+
+@dataclass(frozen=True, slots=True)
+class _LayoutAllocation:
+    """One full layout+allocation pass for a given install set: the overlap layout, pooled instances, the const pool,
+    and the register assignment of both banks. Re-run by the coalesced-install fixpoint as the install set shrinks."""
+
+    overlap: _OverlapLayout
+    inst_of: dict[ValueId, OperatorInstance]
+    instances: list[OperatorInstance]
+    consts: list[float]
+    const_pool: dict[ValueId, _PooledConst]
+    alloc: _Allocation
+
+
+def _layout_and_allocate(
+    mir: Mir,
+    float_mir: MirFloatView,
+    bool_mir: MirBoolView,
+    pool: Mapping[type[HardwareOperator], int],
+    has_install_blocks: set[int],
+) -> _LayoutAllocation:
+    """Lay out the blocks (cross-block overlap) and color both register banks for the given per-block install set."""
+    overlap = _schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks)
+    block_sched = overlap.block_sched
+    inst_of: dict[ValueId, OperatorInstance] = {}
+    inst_count: dict[PooledHardwareOperator, int] = {}
+    for sched in block_sched.values():
+        inst_of.update(sched.inst_of)
+        for inst in sched.instances:
+            inst_count[inst.operator] = max(inst_count.get(inst.operator, 0), inst.index + 1)
+    instances = [OperatorInstance(operator, i) for operator in inst_count for i in range(inst_count[operator])]
+    consts, const_pool = _build_const_pool(float_mir, bool_mir.operation_nodes)
+    alloc = _allocate(
+        mir,
+        float_mir,
+        bool_mir,
+        block_sched,
+        inst_of,
+        overlap.block_makespan,
+        overlap.block_term_offset,
+        overlap.block_inflight,
+    )
+    return _LayoutAllocation(overlap, inst_of, instances, consts, const_pool, alloc)
+
+
+def _actual_install_blocks(alloc: _Allocation, const_branch_blocks: set[int]) -> set[int]:
+    """
+    The blocks that actually install at their tail after coalescing: a real float copy or boolean write, or a const-
+    branch materialization (which is not a copy). A CFG-shape phi-arm predecessor whose every arm coalesced installs
+    nothing, so it should pay neither the +1 install makespan nor the overlap-ineligibility that ``_block_has_install``
+    assigns from the CFG shape alone -- it drops out of the install set here, which the fixpoint feeds back to the next
+    layout so the spurious drain is removed.
+    """
+    blocks = set(const_branch_blocks)
+    blocks.update(bid for bid, copies in alloc.copies.items() if copies)
+    blocks.update(bid for bid, writes in alloc.bool_writes.items() if writes)
+    return blocks
 
 
 def _build_program(mir: Mir, module_name: str) -> Lir:
@@ -320,29 +407,33 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
     # Schedule every block in reverse-postorder (a block after its forward-edge predecessors) and lay out each block's
     # terminator offset, with cross-block software pipelining: a block whose successors are all single-predecessor
     # shrinks its terminator below the drained boundary and spills its in-flight results into the successor, which
-    # inherits the busy/landing residue. The +1-install drain (decided next from the CFG shape) keeps install-bearing
-    # blocks unshrunk, matching this layout's makespan.
+    # inherits the busy/landing residue. The +1-install drain keeps install-bearing blocks unshrunk, matching makespan.
+    #
+    # The install set is computed to a fixpoint. ``_block_has_install`` marks a block install-bearing from the CFG shape
+    # (any phi arm originates in it), but a block whose every arm COALESCES onto the merged register installs nothing,
+    # so that +1 drain (and overlap-ineligibility) is spurious. So: lay out and allocate with the conservative CFG set,
+    # recompute the install set from the ACTUAL coalesced copies, and re-run until it stops shrinking. Convergence is by
+    # monotonicity -- dropping a block's spurious drain frees registers one step earlier, which only enables more
+    # coalescing, so the install set is non-increasing over a finite block set and reaches a fixpoint (the assert guards
+    # the monotonicity; the iteration count is bounded by the block count). Determinism is preserved: the allocator is
+    # seed-fixed and the install set is rebuilt the same way each pass.
+    const_branch_blocks = set(_const_branch_conditions(mir, bool_mir))
     has_install_blocks = _block_has_install(mir, float_mir, bool_mir)
-    overlap = _schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks)
+    for _ in range(len(mir.blocks) + 1):
+        result = _layout_and_allocate(mir, float_mir, bool_mir, pool, has_install_blocks)
+        actual = _actual_install_blocks(result.alloc, const_branch_blocks)
+        assert actual <= has_install_blocks, "the coalesced-install fixpoint must not grow the install set"
+        if actual == has_install_blocks:
+            break
+        has_install_blocks = actual
+    else:
+        raise AssertionError("coalesced-install fixpoint did not converge")  # unreachable: monotone over finite blocks
+    overlap = result.overlap
     block_sched = overlap.block_sched
-    inst_of: dict[ValueId, OperatorInstance] = {}
-    inst_count: dict[PooledHardwareOperator, int] = {}
-    for sched in block_sched.values():
-        inst_of.update(sched.inst_of)
-        for inst in sched.instances:
-            inst_count[inst.operator] = max(inst_count.get(inst.operator, 0), inst.index + 1)
-    instances = [OperatorInstance(operator, i) for operator in inst_count for i in range(inst_count[operator])]
-    consts, const_pool = _build_const_pool(float_mir, bool_mir.operation_nodes)
-    alloc = _allocate(
-        mir,
-        float_mir,
-        bool_mir,
-        block_sched,
-        inst_of,
-        overlap.block_makespan,
-        overlap.block_term_offset,
-        overlap.block_inflight,
-    )
+    inst_of = result.inst_of
+    instances = result.instances
+    consts, const_pool = result.consts, result.const_pool
+    alloc = result.alloc
     leaders = {leader for sched in block_sched.values() for leader in sched.firings}
     swap = assign_commutative_ports(mir.nodes, inst_of, leaders, alloc.float_reg)
 
@@ -739,6 +830,22 @@ def _phi_install_facts(mir: Mir, phi_nodes: dict[ValueId, MirPhi], values: set[V
     )
 
 
+def _const_branch_conditions(mir: Mir, bool_mir: MirBoolView) -> dict[int, ValueId]:
+    """
+    Per block, the constant branch condition it materializes at its tail. A block whose ``MirBranch`` tests a globally
+    interned boolean constant has no condition register, so the constant is written into a bool register in the
+    branching block. The single source of this CFG-shape fact, shared by ``_block_has_install`` and the install fixpoint
+    seed (which must agree, or the monotonicity assert trips) and the allocator's materialization (which also needs the
+    condition value to write).
+    """
+    conditions: dict[int, ValueId] = {}
+    for block in mir.blocks:
+        term = block.terminator
+        if isinstance(term, MirBranch) and term.cond in bool_mir.const_nodes:
+            conditions[block.id] = term.cond
+    return conditions
+
+
 def _block_has_install(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) -> set[int]:
     """
     Blocks whose drained tail carries a phi-arm install (a float copy, a bool write, or a const branch materialization),
@@ -749,10 +856,7 @@ def _block_has_install(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView)
     for phi in (*float_mir.phi_nodes.values(), *bool_mir.phi_nodes.values()):
         for pred, _value, _conditioner in phi.arms:
             has.add(pred)
-    for block in mir.blocks:
-        term = block.terminator
-        if isinstance(term, MirBranch) and term.cond in bool_mir.const_nodes:
-            has.add(block.id)
+    has.update(_const_branch_conditions(mir, bool_mir))
     return has
 
 
@@ -1417,15 +1521,11 @@ def _allocate(
     # branching block that uses it, else a path reaching the branch through a block that did not write it reads a stale
     # register. (A later static-branch-folding pass would instead drop the dead arm; until then this keeps it correct.)
     bool_reg, nbreg = bool_alloc.reg, bool_alloc.nreg
-    for block in mir.blocks:
-        terminator = block.terminator
-        if isinstance(terminator, MirBranch) and terminator.cond in bool_mir.const_nodes:
-            if terminator.cond not in bool_reg:
-                bool_reg[terminator.cond] = nbreg
-                nbreg += 1
-            bool_writes.setdefault(block.id, []).append(
-                _BoolArmInstall(bool_reg[terminator.cond], terminator.cond, BoolInversion())
-            )
+    for block_id, cond in _const_branch_conditions(mir, bool_mir).items():
+        if cond not in bool_reg:
+            bool_reg[cond] = nbreg
+            nbreg += 1
+        bool_writes.setdefault(block_id, []).append(_BoolArmInstall(bool_reg[cond], cond, BoolInversion()))
 
     return _Allocation(
         float_reg=float_alloc.reg,

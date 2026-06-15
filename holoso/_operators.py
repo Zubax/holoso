@@ -614,6 +614,34 @@ class SelectOperator(InlineHardwareOperator):
 
 
 @dataclass(frozen=True, slots=True)
+class BoolSelectOperator(InlineHardwareOperator):
+    """
+    A boolean mux ``cond ? a : b`` over 1-bit values, the dual of :class:`SelectOperator`, folded into the destination
+    boolean register write as a ternary over the operand nets. Format-agnostic (no ``fmt``); produced exclusively by
+    HIR if-conversion of a boolean-phi diamond; never added to :class:`OpConfig`.
+    """
+
+    mnemonic: ClassVar[str] = "bool_select"
+
+    @property
+    def signature(self) -> ScalarSignature:
+        ty = BoolType()
+        return ScalarSignature((ty, ty, ty), (ty,))
+
+    def render(self, *operands: str) -> str:
+        cond, a, b = operands
+        return f"{cond}?{a}:{b}"
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        cond, a, b = operand_nets
+        return f"({cond} ? {a} : {b})"
+
+    def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
+        cond, a, b = operands
+        return (bool(a) if bool(cond) else bool(b),)
+
+
+@dataclass(frozen=True, slots=True)
 class BoolToFloatOperator(InlineHardwareOperator):
     """
     A bool->float cast ``float(cond)``: ZKF ``1.0`` when true, ``+0.0`` when false. Folded into the wide register

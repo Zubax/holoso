@@ -35,7 +35,7 @@ from holoso._hir import (
     Type,
     optimize,
 )
-from holoso._hir import FloatDiv as HirFloatDiv, Phi, Select
+from holoso._hir import BoolSelect, FloatDiv as HirFloatDiv, Phi, Select
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir._const_fold import run as fold_constants
 from holoso._lir import build
@@ -428,8 +428,9 @@ def test_if_conversion_knob_zero_disables_the_pass(monkeypatch: pytest.MonkeyPat
     )
 
 
-def test_if_conversion_refuses_a_boolean_phi_merge() -> None:
-    # v1 converts float phis only: a diamond merging a boolean stays a real branch.
+def test_if_conversion_converts_a_boolean_phi_merge() -> None:
+    # Bool-phi if-conversion: a diamond merging a boolean collapses to one block, the merge becoming a bool_select
+    # (a float select is the wide dual). Both arms here are dynamic comparisons, so strength reduction keeps the mux.
     def f(a, b, c):  # type: ignore[no-untyped-def]
         if a > b:
             flag = b > c
@@ -438,8 +439,113 @@ def test_if_conversion_refuses_a_boolean_phi_merge() -> None:
         return float(flag)
 
     hir = _hir_of(f)
-    assert len(hir.blocks) == 4
+    assert len(hir.blocks) == 1
+    assert any(isinstance(n, Operation) and isinstance(n.operator, BoolSelect) for n in hir.nodes.values())
     assert not any(isinstance(n, Operation) and isinstance(n.operator, Select) for n in hir.nodes.values())
+
+
+def test_if_conversion_reduces_constant_armed_boolean_select() -> None:
+    # The state-machine merge shape: arms are boolean constants, so the bool_select reduces to and/or/not via strength
+    # reduction (no select node survives), exactly the schmitt/pfd collapse to a single straight-line block.
+    def f(a, b, hold: bool):  # type: ignore[no-untyped-def]
+        if a > b:
+            flag = True
+        else:
+            flag = hold  # passthrough arm
+        return float(flag)
+
+    hir = _hir_of(f)
+    assert len(hir.blocks) == 1
+    # bool_select(a>b, True, hold) == (a>b) or hold -- reduced away, no select of either flavor remains.
+    assert not any(
+        isinstance(n, Operation) and isinstance(n.operator, (BoolSelect, Select)) for n in hir.nodes.values()
+    )
+
+
+def test_bool_select_reductions_are_truth_table_correct() -> None:
+    # The bool-mux strength-reduction identities (a bool_select with constant arms collapses to and/or/not/passthrough)
+    # must be bit-exact. Each shape is run through the numerical model over every boolean input combination and checked
+    # against its Python reference; a wrong identity -- e.g. (c,False,True) reduced to c not ~c -- mismatches here.
+    import itertools
+
+    def s_tf(c: bool):  # type: ignore[no-untyped-def]   # (c, True, False) -> c
+        if c:
+            y = True
+        else:
+            y = False
+        return y
+
+    def s_ft(c: bool):  # type: ignore[no-untyped-def]   # (c, False, True) -> not c
+        if c:
+            y = False
+        else:
+            y = True
+        return y
+
+    def s_t_dyn(c: bool, f: bool):  # type: ignore[no-untyped-def]   # (c, True, f) -> c or f
+        if c:
+            y = True
+        else:
+            y = f
+        return y
+
+    def s_f_dyn(c: bool, f: bool):  # type: ignore[no-untyped-def]   # (c, False, f) -> (not c) and f
+        if c:
+            y = False
+        else:
+            y = f
+        return y
+
+    def s_dyn_t(c: bool, t: bool):  # type: ignore[no-untyped-def]   # (c, t, True) -> (not c) or t
+        if c:
+            y = t
+        else:
+            y = True
+        return y
+
+    def s_dyn_f(c: bool, t: bool):  # type: ignore[no-untyped-def]   # (c, t, False) -> c and t
+        if c:
+            y = t
+        else:
+            y = False
+        return y
+
+    def s_dyn_dyn(c: bool, t: bool, f: bool):  # type: ignore[no-untyped-def]   # (c, t, f) -> bool_select kept
+        if c:
+            y = t
+        else:
+            y = f
+        return y
+
+    def s_dyn_not_dyn(c: bool, t: bool, f: bool):  # type: ignore[no-untyped-def]  # (c, t, ~f) -> kept, arm inverted
+        if c:
+            y = t
+        else:
+            y = not f
+        return y
+
+    cases = [
+        (s_tf, lambda c: c, 1, False),
+        (s_ft, lambda c: not c, 1, False),
+        (s_t_dyn, lambda c, f: c or f, 2, False),
+        (s_f_dyn, lambda c, f: (not c) and f, 2, False),
+        (s_dyn_t, lambda c, t: (not c) or t, 2, False),
+        (s_dyn_f, lambda c, t: c and t, 2, False),
+        (s_dyn_dyn, lambda c, t, f: t if c else f, 3, True),
+        # A surviving bool_select whose arm carries a NOT-folded inversion: the inversion rides the arm conditioner
+        # (the generic inline-operand inversion path), distinct from the constant-arm reductions above.
+        (s_dyn_not_dyn, lambda c, t, f: t if c else (not f), 3, True),
+    ]
+    for fn, ref, arity, keeps_select in cases:
+        hir = _hir_of(fn)
+        has_select = any(isinstance(n, Operation) and isinstance(n.operator, BoolSelect) for n in hir.nodes.values())
+        assert (
+            has_select == keeps_select
+        ), f"{fn.__name__}: bool_select presence {has_select} != expected {keeps_select}"
+        model = build_model(build(lower_to_mir(hir, OPS), fn.__name__))
+        for combo in itertools.product([False, True], repeat=arity):
+            got = bool(model.run(*combo)[0])
+            assert got == bool(ref(*combo)), f"{fn.__name__}{combo}: got {got}, want {ref(*combo)}"
 
 
 def test_if_conversion_collapses_nested_chains_to_one_block() -> None:

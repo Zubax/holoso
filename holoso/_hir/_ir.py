@@ -1,6 +1,7 @@
 """HIR data model: an SSA value DAG arranged into a control-flow graph of basic blocks."""
 
 from dataclasses import dataclass
+from typing import assert_never
 
 from ._const import BoolConst, Const, FloatConst
 from ._operators import Operator
@@ -108,6 +109,57 @@ class Block:
     phis: tuple[ValueId, ...]
     operations: tuple[ValueId, ...]
     terminator: Terminator
+
+
+def renumber(hir: "Hir") -> "Hir":
+    """
+    Compact block ids to a dense 0..n-1 range, rewriting terminator targets and phi-arm predecessors. The CFG passes
+    (if-conversion, merge threading) delete blocks and leave gaps; the downstream rebuild machinery relies on dense ids.
+    Shared by every block-deleting pass so the recompaction rule lives in one place.
+    """
+    new_id = {block.id: index for index, block in enumerate(hir.blocks)}
+    if all(old == new for old, new in new_id.items()):
+        return hir
+    nodes = dict(hir.nodes)
+    for vid, node in hir.nodes.items():
+        if isinstance(node, Phi):
+            nodes[vid] = Phi(type=node.type, arms=tuple((new_id[pred], value) for pred, value in node.arms))
+
+    def retarget(terminator: Terminator) -> Terminator:
+        match terminator:
+            case Jump(target=target):
+                return Jump(target=new_id[target])
+            case Branch(cond=cond, if_true=if_true, if_false=if_false):
+                return Branch(cond=cond, if_true=new_id[if_true], if_false=new_id[if_false])
+            case Ret():
+                return terminator
+            case _:
+                assert_never(terminator)
+
+    blocks = [
+        Block(id=new_id[block.id], phis=block.phis, operations=block.operations, terminator=retarget(block.terminator))
+        for block in hir.blocks
+    ]
+    return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=hir.outputs, state_slots=hir.state_slots)
+
+
+def validate_phi_predecessors(hir: "Hir") -> None:
+    """
+    Every phi must carry exactly one arm per CFG predecessor of its block. Shared by the builder (a never-closed
+    loop-header phi, a stale arm) and the block-deleting CFG passes (if-conversion, merge threading), so a malformed
+    merge crashes loudly at its source rather than miscompiling downstream.
+    """
+    preds = predecessors(hir.blocks)
+    for block in hir.blocks:
+        for phi_id in block.phis:
+            phi = hir.nodes[phi_id]
+            assert isinstance(phi, Phi)
+            arm_preds = sorted(pred for pred, _ in phi.arms)
+            if arm_preds != sorted(preds[block.id]):
+                raise RuntimeError(
+                    f"phi {phi_id} in block {block.id} has arms for predecessors {arm_preds}, "
+                    f"expected {sorted(preds[block.id])}"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,29 +387,12 @@ class HirBuilder:
             if ub.terminator is None:
                 raise RuntimeError(f"block {bid} was not sealed with a terminator")
             blocks.append(Block(bid, tuple(ub.phis), tuple(ub.operations), ub.terminator))
-        self._validate_phi_predecessors(blocks)
-        return Hir(
+        hir = Hir(
             nodes=dict(self._nodes),
             blocks=blocks,
             input_ids=list(self._input_ids),
             outputs=list(self._outputs),
             state_slots=list(self._state_slots),
         )
-
-    def _validate_phi_predecessors(self, blocks: list[Block]) -> None:
-        """
-        Every phi must carry exactly one arm per CFG predecessor of its block. This catches a loop-header phi opened
-        by :meth:`open_phi` and never closed (a back-edge arm left missing) and a stale or invented arm predecessor --
-        construction bugs that would otherwise produce a malformed merge.
-        """
-        preds = predecessors(blocks)
-        for block in blocks:
-            for phi_id in block.phis:
-                phi = self._nodes[phi_id]
-                assert isinstance(phi, Phi)
-                arm_preds = sorted(pred for pred, _ in phi.arms)
-                if arm_preds != sorted(preds[block.id]):
-                    raise RuntimeError(
-                        f"phi {phi_id} in block {block.id} has arms for predecessors {arm_preds}, "
-                        f"expected {sorted(preds[block.id])}"
-                    )
+        validate_phi_predecessors(hir)
+        return hir

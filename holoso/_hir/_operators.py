@@ -283,6 +283,26 @@ class Select(Operator):
 
 
 @dataclass(frozen=True, slots=True)
+class BoolSelect(Operator):
+    """
+    A boolean mux ``a if cond else b`` over boolean values, the 1-bit dual of :class:`Select`. Produced exclusively by
+    if-conversion of a boolean-phi diamond; like ``Select`` it refuses constant conditions, so a constant-condition
+    bool select never exists and ``fold_constants`` never fires. Its constant arms (the common ``True``/``False`` arms
+    of a state-machine merge) are reduced to ``and``/``or``/``not``/passthrough by strength reduction.
+    """
+
+    mnemonic: ClassVar[str] = "bool_select"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((BoolType(), BoolType(), BoolType()), BoolType())
+
+    def fold_constants(self, operands: list[Const]) -> None:
+        return None
+
+
+@dataclass(frozen=True, slots=True)
 class FloatToBool(Operator):
     """A scalar cast ``bool(x)``: a float is truthy iff it is nonzero (the ZKF exponent-nonzero test)."""
 

@@ -199,6 +199,42 @@ def overlap_dead_arm_spill_kernel(x, y, z):  # type: ignore[no-untyped-def]
     return r
 
 
+def const_branch_kernel(x, y):  # type: ignore[no-untyped-def]
+    """
+    Empty const-branch block corner shared by the cosim test and its white-box twin. The inner condition ``1.0 / 5.0 >
+    0.0`` is constant-true but formed by DIVISION, which escapes the frontend's AST-level reachability fold (it evaluates
+    only +,-,* of literals), so the HIR const-folder reduces it to a BoolConst that if-conversion refuses -- leaving an
+    EMPTY const-branch block (the condition install + a branch, no float content). That const materialization is a
+    pc-gated install read AT the terminator and lands at the WIDE boundary, so the bank-aware drain must keep the wide
+    drain for it; shrinking to the boolean boundary made the branch read the condition one PC before it landed.
+    """
+    r = x
+    if x > y:
+        if (1.0 / 5.0) > 0.0:  # constant-true via division: an empty const-branch block, no float content
+            r = x + 1.0
+        else:
+            r = x + 2.0
+    return r
+
+
+def diamond_then_loop_kernel(x, y):  # type: ignore[no-untyped-def]
+    """
+    Empty merge-block elimination (B4) corner shared by the cosim test and its white-box twin. The variable-divisor
+    division keeps the diamond a REAL branch (unspeculatable), so its merge stays a separate block; that merge holds
+    only the merged phi (no operation) and jumps into the following loop header, making it an empty pass-through merge
+    whose predecessors (the two diamond arms) are both jump-terminated. Merge threading eliminates it, composing the
+    diamond's phi arms into the loop header's init arm -- producing a THREE-arm loop-header phi (two forward init arms
+    plus the back-edge), a shape no other kernel exercises against RTL. The loop drives the data-dependent latency.
+    """
+    if x > y:
+        r = x / y
+    else:
+        r = y / x
+    while r > 1.0:
+        r = r - 1.0
+    return r
+
+
 def overlap_div_err_kernel(x, y, z):  # type: ignore[no-untyped-def]
     """
     Cross-block overlap err_pc corner (shared by the white-box twin and the directed err_pc cosim). A division -- the

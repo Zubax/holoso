@@ -27,7 +27,9 @@ from holoso._lir import (
     FloatConstRef,
     FloatOperand,
     Jump,
+    LirBlock,
     RegRef,
+    Ret,
     operand_read_cycle,
     result_landing_cycle,
 )
@@ -65,6 +67,7 @@ from ._modelref import (
     SelectHold,
     branch_boundary_kernel,
     default_ops,
+    diamond_then_loop_kernel,
     fcmp_staged_ops,
     overlap_dead_arm_spill_kernel,
     overlap_div_err_kernel,
@@ -182,7 +185,8 @@ def test_branch_comparison_commits_at_block_makespan(stage_input: int) -> None:
 
 def test_overlap_shrinks_branch_terminator_below_drained_boundary() -> None:
     # Cross-block software pipelining (M7): a branch block whose every successor is single-predecessor shrinks its
-    # terminator offset below the drained boundary boundary_step(makespan), so its in-flight results spill into the
+    # terminator offset below the conservative wide drain boundary_step(makespan, wide_resident=True), so its in-flight
+    # results spill into the
     # successor frame instead of fully draining. Pins that the overlap actually engages (the recip_newton loop header,
     # an in-block-condition branch to a single-pred body and a single-pred exit, is such a block).
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
@@ -192,7 +196,8 @@ def test_overlap_shrinks_branch_terminator_below_drained_boundary() -> None:
     shrunk = [
         block
         for block in lir.blocks
-        if isinstance(block.terminator, Branch) and block.term_offset < boundary_step(block.block_makespan)
+        if isinstance(block.terminator, Branch)
+        and block.term_offset < boundary_step(block.block_makespan, wide_resident=True)
     ]
     assert shrunk, "no branch block shrank its terminator: cross-block overlap did not engage"
 
@@ -207,7 +212,8 @@ def test_overlap_spilled_result_lands_in_successor_frame() -> None:
     spilled = [
         (block, op, write)
         for block in lir.blocks
-        if isinstance(block.terminator, Branch) and block.term_offset < boundary_step(block.block_makespan)
+        if isinstance(block.terminator, Branch)
+        and block.term_offset < boundary_step(block.block_makespan, wide_resident=True)
         for op in block.ops
         for write in op.writes
         if isinstance(write.dst, RegRef) and result_landing_cycle(write.dst, op.commit_cycle) > block.term_offset
@@ -251,7 +257,9 @@ def test_overlap_keeps_error_op_diagnostic_latch_in_frame() -> None:
         for op in block.ops:
             operator = op.inst.operator
             if operator.error_ports:  # the division: its err diagnostic latch must not cross the terminator
-                assert block.term_offset < boundary_step(block.block_makespan)  # the corner: this block shrinks
+                assert block.term_offset < boundary_step(
+                    block.block_makespan, wide_resident=True
+                )  # the corner: this block shrinks
                 assert block.term_offset >= pooled_writeback_word(op.commit_cycle, True) + FETCH_LAG
                 checked = True
     assert checked, "the error-bearing division did not land in a shrinkable branch block: corner not exercised"
@@ -331,7 +339,8 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes() -> None:
 
     lir = build(_run(NewtonReciprocal().__call__), "recip_newton")
     assert any(
-        isinstance(block.terminator, Branch) and block.term_offset < boundary_step(block.block_makespan)
+        isinstance(block.terminator, Branch)
+        and block.term_offset < boundary_step(block.block_makespan, wide_resident=True)
         for block in lir.blocks
     ), "recip_newton did not overlap: the real-kernel tie is not exercising a shrunk terminator"
     predicted: dict[int, set[int]] = {}
@@ -356,6 +365,152 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes() -> None:
         ), f"reg {index}: landings {sorted(pcs)} not all model writebacks {sorted(actual.get(index, set()))}"
 
 
+def test_bool_only_block_drains_one_step_under_the_wide_boundary() -> None:
+    # B1 (bank-aware drained boundary): a drained block carrying only boolean values at its boundary AND no tail install
+    # lands one fetch step earlier than a wide one -- the latch-free boolean bank has no write-latch edge. But a tail
+    # INSTALL (a pc-gated boolean write/phi copy) lands one step LATER, at the wide boundary, so an install-bearing
+    # bool-only block must KEEP the wide drain (round-5 fix). quadrature_encoder is fully boolean (bool inputs/outputs/
+    # state): its install-free Ret drains at the BOOL boundary (the win), while its bool-install blocks drain WIDE.
+    # Crash-before: the pre-bank-aware single-bank drain put the Ret one PC too late (no bool shrink); the round-5 bug
+    # put the install blocks one PC too EARLY (bool shrink despite the install landing wide).
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    from quadrature_encoder import QuadratureEncoder
+
+    lir = build(_run(QuadratureEncoder().__call__), "quad_bank_drain")
+
+    def is_bool_only(block: LirBlock) -> bool:  # no wide register write and no float copy at the tail
+        return not block.copies and not any(
+            isinstance(w.dst, RegRef) for op in (*block.ops, *block.inline_ops) for w in op.writes
+        )
+
+    # The install-free, all-boolean Ret block: drains one step under the wide boundary (the bank-aware win).
+    ret = next(block for block in lir.blocks if isinstance(block.terminator, Ret))
+    assert is_bool_only(ret) and not ret.bool_writes, "quadrature_encoder Ret should be install-free and all-boolean"
+    assert ret.term_offset == boundary_step(ret.block_makespan, wide_resident=False)
+    assert ret.term_offset < boundary_step(ret.block_makespan, wide_resident=True), "Ret drained at the wide boundary"
+
+    # A bool-only block that carries a tail install keeps the WIDE drain: the pc-gated install lands at the wide
+    # boundary, so shrinking to the bool boundary would read it one PC before it lands (the round-5 miscompile).
+    bool_install_blocks = [b for b in lir.blocks if b.bool_writes and is_bool_only(b)]
+    assert bool_install_blocks, "no bool-only install-bearing block to exercise the install drain exception"
+    for block in bool_install_blocks:
+        assert block.term_offset == boundary_step(
+            block.block_makespan, wide_resident=True
+        ), "an install-bearing bool block shrank below the wide boundary where its install lands"
+
+
+def test_const_branch_install_block_keeps_the_wide_drain() -> None:
+    # Regression (review round 5, fuzz-found B1 miscompile): a constant branch condition formed by DIVISION escapes the
+    # frontend's AST-level reachability fold (which evaluates only +,-,* of literals), so the HIR const-folder reduces
+    # it to a BoolConst that if-conversion refuses -- leaving an EMPTY const-branch block (the condition install + a
+    # branch, no float content). That condition install is a pc-gated copy landing at the WIDE boundary, so the
+    # bank-aware drain must NOT shrink the block to the bool boundary, or the terminator reads the condition one PC
+    # before it lands. Crash-before: KeyError (model) / stale branch read (RTL); pass-after: bit-exact vs the reference.
+    def const_branch(x, y):  # type: ignore[no-untyped-def]
+        r = x
+        if x > y:
+            if (1.0 / 5.0) > 0.0:  # constant-true, not AST-foldable -> an empty const-branch block, no float content
+                r = x + 1.0
+            else:
+                r = x + 2.0
+        return r
+
+    lir = build(_run(const_branch), "const_branch")
+    # Structural teeth: the surviving const-branch block branches on a constant materialized by a tail bool write, so
+    # it must drain at the WIDE boundary (where that pc-gated install lands), not the bool boundary. Pins the drain
+    # itself, not only the output, so a future drain regression here is localized rather than silently model-correct.
+    const_blocks = [
+        b
+        for b in lir.blocks
+        if isinstance(b.terminator, Branch) and any(w.dst == b.terminator.cond for w in b.bool_writes)
+    ]
+    assert const_blocks, "the const-branch block did not survive; the corner is no longer exercised"
+    for block in const_blocks:
+        assert block.term_offset == boundary_step(
+            block.block_makespan, wide_resident=True
+        ), "a const-branch block shrank below the wide boundary where its condition install lands"
+    model = build_model(lir)
+    for x, y in [(2.0, 1.0), (1.0, 2.0), (5.0, 3.0), (-1.0, -2.0)]:
+        (got,) = model.run(x, y)
+        assert math.isclose(float(got), const_branch(x, y), rel_tol=1e-6)
+
+
+def test_coalesced_install_block_pays_no_spurious_install_drain() -> None:
+    # B2 (coalesced-install fixpoint): a phi-arm predecessor whose every arm coalesces onto the merged register installs
+    # nothing, so the +1 install makespan the CFG-shape predicate would assign is spurious and must be dropped. The two
+    # arms of this division diamond each produce a fresh quotient that coalesces into the merged phi register (zero
+    # install copies), yet each arm block is a CFG phi-arm predecessor. Crash-before: each arm block's makespan carried
+    # a spurious +1 install step, inflating its drain and last_pc; pass-after: makespan equals the work makespan.
+    def div_diamond(x: float, y: float) -> float:
+        if x > y:
+            r = x / y
+        else:
+            r = y / x
+        return r
+
+    lir = build(_run(div_diamond), "div_diamond")
+    arms = [b for b in lir.blocks if b.ops and not b.copies and not b.bool_writes and isinstance(b.terminator, Jump)]
+    assert len(arms) == 2, "the division diamond's two coalesced arm blocks are the B2 target"
+    for block in arms:
+        last_commit = max(op.commit_cycle for op in (*block.ops, *block.inline_ops))
+        assert block.block_makespan == last_commit, "a coalesced-install arm block paid a spurious +1 install drain"
+
+
+def test_empty_merge_block_is_threaded_into_its_successor() -> None:
+    # B4 (empty merge-block elimination): a non-convertible diamond (a variable-divisor division) whose merge feeds a
+    # following loop leaves an empty pass-through merge -- only the merged phi and a Jump, predecessors the two jump-
+    # terminated diamond arms. Merge threading eliminates it, composing the diamond's phi arms into the loop header's
+    # init arm. Crash-before (no merge threading): that empty Jump merge survives. The bit-exact RTL check of the
+    # resulting three-arm loop-header phi is the cosim twin (test_cosim.py test_cosim_diamond_then_loop).
+    lir = build(_run(diamond_then_loop_kernel), "diamond_then_loop")
+    by_index = {block.index: block for block in lir.blocks}
+    preds: dict[int, list[int]] = {block.index: [] for block in lir.blocks}
+    for block in lir.blocks:
+        terminator = block.terminator
+        targets = (
+            [terminator.target]
+            if isinstance(terminator, Jump)
+            else [terminator.if_true, terminator.if_false] if isinstance(terminator, Branch) else []
+        )
+        for target in targets:
+            preds[target].append(block.index)
+    survivors = [
+        block
+        for block in lir.blocks
+        if not (block.ops or block.inline_ops or block.copies or block.bool_writes)
+        and isinstance(block.terminator, Jump)
+        and preds[block.index]
+        and all(isinstance(by_index[pred].terminator, Jump) for pred in preds[block.index])
+    ]
+    assert not survivors, "an empty pass-through merge block survived; merge threading did not fire"
+    model = build_model(lir)
+    for x, y in [(7.0, 2.0), (2.0, 7.0), (100.0, 3.0), (0.5, 4.0)]:
+        (got,) = model.run(x, y)
+        assert math.isclose(float(got), diamond_then_loop_kernel(x, y), rel_tol=1e-2)
+
+
+def test_merge_threading_refuses_a_back_edge_carried_merge_phi() -> None:
+    # Regression (review round 2, Codex): merge threading deletes a merge block's phis after composing the arm each
+    # successor phi takes FROM the merge -- but ONLY that arm. A loop-invariant value the loop header carries on its
+    # BACK-EDGE arm is a successor-phi arm too, yet from a different predecessor, so composition would not rewrite it;
+    # deleting the merge phi would dangle. The guard must refuse such a merge (the deferred self-latch case).
+    # Crash-before: optimize() raised KeyError after threading deleted the still-referenced merge phi.
+    def loop_invariant_merge(a, den, c):  # type: ignore[no-untyped-def]
+        if a > 0.0:
+            x = a / den  # a real (non-speculatable) division branch -> a separate merge block holding phi x
+        else:
+            x = c
+        z = 0.0
+        while z < 1.0:  # x (the merge phi) is loop-invariant: carried on the loop header's back-edge arm, not rewritten
+            z = x
+        return z
+
+    model = build_model(build(_run(loop_invariant_merge), "loop_invariant_merge"))
+    for a, den, c in [(2.0, 2.0, 3.0), (-1.0, 4.0, 5.0), (3.0, 1.0, 0.0)]:  # x >= 1 so the latch loop terminates
+        (got,) = model.run(a, den, c)
+        assert math.isclose(float(got), loop_invariant_merge(a, den, c), rel_tol=1e-6)
+
+
 def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late() -> None:
     # Regression (P3a): the scheduler's cross-block spill carry (block_inflight / the scheduler's livein_landing) must
     # place a spilled result at the SAME absolute PC the numerical model writes it -- both Lir.write_landing_pcs and
@@ -370,7 +525,9 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late() -> None:
         spilled_any = False
         tight = 0
         for block in lir.blocks:
-            if not isinstance(block.terminator, Branch) or block.term_offset >= boundary_step(block.block_makespan):
+            if not isinstance(block.terminator, Branch) or block.term_offset >= boundary_step(
+                block.block_makespan, wide_resident=True
+            ):
                 continue
             for op in block.ops:
                 for write in op.writes:

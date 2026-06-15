@@ -23,6 +23,7 @@ from ._operators import (
     BoolAnd as BoolAnd,
     BoolNot as BoolNot,
     BoolOr as BoolOr,
+    BoolSelect as BoolSelect,
     BoolToFloat as BoolToFloat,
     FloatAbs as FloatAbs,
     FloatAdd as FloatAdd,
