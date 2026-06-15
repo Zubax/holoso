@@ -3,7 +3,7 @@
 import colorsys
 import html
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 
 from ..._lir import *
@@ -17,11 +17,12 @@ _EDGE_KEY_MARKER = (
     "<circle cx='21' cy='10' r='1.8' fill='currentColor'/>"
     "</svg>"
 )
-# A miniature of a margin control-transfer arrow (bracket out to a channel and back, with a left-pointing head).
+# Miniature of a margin control-transfer arrow (bracket out to a channel and back, with a left-pointing head).
 _ARROW_KEY_MARKER = (
     "<svg class='lk' width='24' height='12'>"
-    "<polyline points='3,3 20,3 20,9 3,9' fill='none' stroke='var(--c-arrow)' stroke-width='1.25'/>"
-    "<polygon points='3,9 8,6 8,12' fill='var(--c-arrow)'/>"
+    "<path d='M3,3 H20 V9 H3' fill='none' stroke='currentColor' stroke-width='1.25' "
+    "stroke-linejoin='round' stroke-linecap='round'/>"
+    "<polygon points='3,9 8,6 8,12' fill='currentColor'/>"
     "</svg>"
 )
 
@@ -504,17 +505,18 @@ def _live_intervals(rows: set[int]) -> list[list[int]]:
 class _Arrow:
     """
     One control-transfer arrow in the right margin: a non-fall-through jump from grid row ``src_cyc`` into row
-    ``dst_cyc``. ``tip`` is its hover label -- the branch arm's condition (the boolean register the branch evaluates),
-    or ``jump`` if unconditional -- as raw text (rendered via the SVG ``<title>``'s textContent, not HTML-escaped;
-    json.dumps makes it JS-safe). ``cond`` is the boolean register the branch reads, or ``None`` for an unconditional
-    jump; the overlay draws a dotted feed from that register's cell at the source row to the arrow's root, so the
-    register's residence visibly ends at the branch rather than in nothingness.
+    ``dst_cyc``. ``lane`` is the packed right-margin channel. ``tip`` is its hover label -- the branch arm's condition
+    (the boolean register the branch evaluates), or ``jump`` if unconditional -- as raw text (rendered via the SVG
+    ``<title>``'s textContent, not HTML-escaped; json.dumps makes it JS-safe). ``cond`` is the boolean register the branch
+    reads, or ``None`` for an unconditional jump; the overlay draws a dotted feed from that register's cell at the source
+    row to the arrow's root, so the register's residence visibly ends at the branch rather than in nothingness.
     """
 
     src_cyc: int
     dst_cyc: int
     tip: str
     cond: BoolRegRef | None
+    lane: int = 0
 
 
 def _control_arrows(lir: Lir) -> list[_Arrow]:
@@ -547,7 +549,29 @@ def _control_arrows(lir: Lir) -> list[_Arrow]:
                     emit(term_pc, if_true, _branch_arm_text(cond, taken=True), cond)
                 if lir.block_base[if_false] != fall_pc:
                     emit(term_pc, if_false, _branch_arm_text(cond, taken=False), cond)
-    return arrows
+    return _pack_arrow_lanes(arrows)
+
+
+def _pack_arrow_lanes(arrows: list[_Arrow]) -> list[_Arrow]:
+    """Interval-color the arrow row spans; shared endpoints stay separate because both arrows touch that row."""
+    lane_ends: list[int] = []
+    lanes = [0] * len(arrows)
+
+    def interval(arrow: _Arrow) -> tuple[int, int]:
+        return (min(arrow.src_cyc, arrow.dst_cyc), max(arrow.src_cyc, arrow.dst_cyc))
+
+    for index, arrow in sorted(enumerate(arrows), key=lambda item: (*interval(item[1]), item[0])):
+        start, end = interval(arrow)
+        for lane, busy_until in enumerate(lane_ends):
+            if busy_until < start:
+                lane_ends[lane] = end
+                break
+        else:
+            lane = len(lane_ends)
+            lane_ends.append(end)
+        lanes[index] = lane
+
+    return [replace(arrow, lane=lane) for arrow, lane in zip(arrows, lanes, strict=True)]
 
 
 def _branch_arm_text(cond: BoolRegRef, taken: bool) -> str:
@@ -617,9 +641,10 @@ def _sched_script(
 
     The data is the edge list, the column labels, the constant values, the per-register live-row intervals (keyed by the
     full column label so the wide and boolean banks never collide on a shared index), and the control-transfer arrows.
-    Each arrow carries ``cond``: the cell id of the boolean register it reads (so the overlay draws a dotted feed from
-    that register to the arrow's root), or ``None`` for an unconditional jump. This is enough for the script to draw the
-    dataflow and arrow overlays and synthesize hover tooltips on demand; without JS the grid still renders fully.
+    Each arrow carries its packed right-margin ``lane`` and ``cond``: the cell id of the boolean register it reads (so
+    the overlay draws a dotted feed from that register to the arrow's root), or ``None`` for an unconditional jump. This
+    is enough for the script to draw the dataflow and arrow overlays and synthesize hover tooltips on demand; without JS
+    the grid still renders fully.
     """
     cols = [_col_label(col) for col in _columns_of(lir)]
     data = {
@@ -631,6 +656,7 @@ def _sched_script(
             {
                 "from": a.src_cyc,
                 "to": a.dst_cyc,
+                "lane": a.lane,
                 "tip": a.tip,
                 "cond": (f"g{col_ord[a.cond]}_{a.src_cyc}" if a.cond is not None else None),
             }
@@ -719,7 +745,18 @@ def _schedule_key(
             ]
         )
     if has_arrows:
-        items.append(_key_item(_ARROW_KEY_MARKER, "control transfer: branch / jump (hover for the condition)"))
+        items.append(
+            _key_item(
+                f"<span style='color:var(--c-branch-arrow)'>{_ARROW_KEY_MARKER}</span>",
+                "conditional control transfer (hover for the condition)",
+            )
+        )
+        items.append(
+            _key_item(
+                f"<span style='color:var(--c-jump-arrow)'>{_ARROW_KEY_MARKER}</span>",
+                "unconditional control transfer",
+            )
+        )
     if has_blocks:
         items.append(_key_item("<span class='sw bbkey'></span>", "basic-block boundary (terminator row)"))
     items.append(f"<span>pc = microcode step executing this cycle (clk&minus;{FETCH_LAG} fetch lag)</span>")

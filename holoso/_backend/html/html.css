@@ -1,5 +1,5 @@
 @import url('https://fonts.googleapis.com/css2?family=Ubuntu+Mono:wght@400;700&display=swap');
-:root { --c-input: #484; --c-state: #848; --c-live: #ddd; --c-ink: #445; --c-grid: #aaa; --c-hl: #aaa; --c-arrow: #b45309; }
+:root { --c-input: #484; --c-state: #848; --c-live: #ddd; --c-ink: #445; --c-grid: #aaa; --c-hl: #aaa; --c-jump-arrow: #b0b; --c-branch-arrow: #333; }
 * { box-sizing: border-box; }
 body { font-family: "Ubuntu Mono", ui-monospace, monospace; margin: 0; background: #ffffff; color: #111827; font-size: 14px; }
 header { padding: 16px 28px; background: #111827; color: #f9fafb; }
@@ -73,12 +73,12 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
 .clk { color: #9aa1ab; text-align: right; font-size: 10px; padding: 0 3px; border-right: 1px solid #000; }
 .pc { color: #9aa1ab; text-align: right; font-size: 10px; padding: 0 3px; border-left: 1px solid #000; }
 .stepn { font-weight: 700; color: #111827; padding: 0 4px; border-right: 1px solid #000; white-space: nowrap; }
-.rd { display: inline-block; font-size: 9px; line-height: 11px; border: 1px solid; border-radius: 2px; padding: 0 1px; }
-.wr { display: inline-block; font-size: 9px; line-height: 11px; border-radius: 2px; padding: 0 1px; color: #fff; font-weight: 700; }
+.rd { position: relative; z-index: 1; display: inline-block; font-size: 9px; line-height: 11px; border: 1px solid; border-radius: 2px; padding: 0 1px; }
+.wr { position: relative; z-index: 1; display: inline-block; font-size: 9px; line-height: 11px; border-radius: 2px; padding: 0 1px; color: #fff; font-weight: 700; }
 /* Latch-chip role colors (cycle-0 input load vs. retained state), shared with the legend chips; operator-result chips carry their inline operator color instead. */
 .wr.input { background: var(--c-input); }
 .wr.state { background: var(--c-state); }
-.wl { color: #fff; font-size: 9px; font-weight: 700; line-height: 11px; }
+.wl { position: relative; z-index: 1; color: #fff; font-size: 9px; font-weight: 700; line-height: 11px; }
 /* Operations column: one cell per clock row, holding the chips for the operations that complete on that cycle. */
 .grid th.oph { text-align: left; vertical-align: bottom; padding: 0 4px 2px 4px; border-bottom: 1px solid #000; font-size: 10px; color: #4b5563; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
 /* Operator-group header: names one operator (e.g. green "fmul_0"; color carries the kind), spanning its stage columns.
@@ -86,7 +86,7 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
 .grid th.ohgrp { text-align: center; vertical-align: bottom; padding: 2px 1px 1px; font-size: 10px; font-weight: 700; }
 .grid th.ohgrp span { writing-mode: vertical-rl; white-space: nowrap; }
 .grid td.opcell { vertical-align: middle; padding: 0 4px; white-space: nowrap; }
-.opf { display: inline-block; background: var(--c-ink); color: #fff; font-size: 10px; font-weight: 700; border-radius: 3px; padding: 0 4px; margin: 0 2px 0 0; white-space: nowrap; }
+.opf { position: relative; z-index: 1; display: inline-block; background: var(--c-ink); color: #fff; font-size: 10px; font-weight: 700; border-radius: 3px; padding: 0 4px; margin: 0 2px 0 0; white-space: nowrap; }
 .opf.state { background: var(--c-state); }
 /* Hover-focus: only the hovered operation's own elements get the .hl class (its edges, result cells and ops chip). */
 .edges line.hl { stroke: #000; stroke-width: 2px; stroke-opacity: 1; }
@@ -96,18 +96,20 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
 /* Structural hazard: two operations claim one operator stage on one cycle. Impossible under the barrier schedule;
    the red ring is the alarm for a future multiple-issue bug. */
 .grid td.oc.conflict { box-shadow: inset 0 0 0 2px #f00; }
-/* Control-transfer arrows in the right margin (one channel each). The overlay is click-through (pointer-events: none),
-   so re-enable pointing on the arrow strokes alone for the hover tooltip; the channel band is reserved as wrapper
-   padding so the arrows sit outside the table, where there are no grid lines. */
+/* Control-transfer arrows in the right margin. The overlay is click-through (pointer-events: none), so re-enable
+   pointing on the arrow strokes alone for the hover tooltip; the channel band is reserved as wrapper padding so the
+   arrows sit outside the table, where there are no grid lines. */
 .edges .jarrow { pointer-events: visiblePainted; }
-.edges .jarrow polyline { stroke: var(--c-arrow); stroke-width: 1.25px; stroke-opacity: 0.9; }
-.edges .jarrow polygon { fill: var(--c-arrow); fill-opacity: 0.9; }
-.edges .jarrow:hover polyline { stroke: #000; stroke-width: 2.25px; stroke-opacity: 1; }
+.edges .jarrow.jjump { color: var(--c-jump-arrow); }
+.edges .jarrow.jbranch { color: var(--c-branch-arrow); }
+.edges .jarrow path.jbracket { stroke: currentColor; stroke-width: 1.25px; stroke-opacity: 0.9; stroke-linecap: round; stroke-linejoin: round; }
+.edges .jarrow polygon { fill: currentColor; fill-opacity: 0.9; }
+.edges .jarrow:hover path.jbracket { stroke: #000; stroke-width: 2.25px; stroke-opacity: 1; }
 .edges .jarrow:hover polygon { fill: #000; fill-opacity: 1; }
 /* Dotted feed from the tested boolean register to the arrow root; boldens with the arrow on hover. */
-.edges .jarrow line.jcond { stroke: var(--c-arrow); stroke-width: 1.5px; stroke-opacity: 1.0; stroke-dasharray: 1 2; }
+.edges .jarrow line.jcond { stroke: currentColor; stroke-width: 1.5px; stroke-opacity: 1.0; stroke-dasharray: 1 2; }
 .edges .jarrow:hover line.jcond { stroke: #000; stroke-width: 2.25px; stroke-opacity: 1.0; }
-.edges .jarrow circle.jcond { fill: var(--c-arrow); }
+.edges .jarrow circle.jcond { fill: currentColor; }
 .edges .jarrow:hover circle.jcond { fill: #000; }
 .gridkey { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12px; color: var(--c-ink); margin: 0 0 15px; align-items: center; }
 .gridkey .rd, .gridkey .wr { font-size: 11px; }

@@ -8,7 +8,7 @@
     var columns = data.columns;      // label per grid column, indexed by (cell index - 1)
     var constants = data.constants;  // { "c0": "1.0", ... }
     var liveness = data.liveness;    // { "<columnLabel>": [[start, end], ...] } live-row intervals, keyed by full label
-    var arrows = data.arrows;        // [{ from: <srcRowCyc>, to: <dstRowCyc>, tip: <condition or "jump"> }] margin jumps
+    var arrows = data.arrows;        // [{ from, to, lane, tip, cond }] margin control transfers
 
     var wrap = document.getElementById("schedwrap");
     if (!wrap) {
@@ -76,13 +76,14 @@
         });
     }
 
-    // Control-transfer arrows in the right margin: one channel (column) per non-fall-through jump, side by side so they
-    // never overlap. Each routes out of the grid at its source row, right into its own channel, vertically to the target
-    // row, then back left to the grid with an arrowhead. The margin is reserved as right padding on the wrapper so the
-    // grid's own scrollWidth covers the channels (and the overlay, sized to it, can paint them).
+    // Control-transfer arrows in the right margin: the backend packs arrows into the lowest non-overlapping channels.
+    // Each routes out of the grid at its source row, right into its channel, vertically to the target row, then back
+    // left to the grid with an arrowhead. The margin is reserved as right padding on the wrapper so the grid's own
+    // scrollWidth covers the channels (and the overlay, sized to it, can paint them).
     var CHANNEL_GAP = 9;    // clearance between the grid's right edge and the first channel, in px
     var CHANNEL_STEP = 11;  // spacing between adjacent channels, in px
     var HEAD = 5;           // arrowhead half-extent, in px
+    var CORNER = 5;         // bracket-corner radius, in px
 
     function rowCentreY(cyc, origin) {
         var cell = document.getElementById("pc_" + cyc);
@@ -93,6 +94,24 @@
         return rect.top - origin.top + rect.height / 2;
     }
 
+    function arrowPath(gridRight, channelX, y1, y2) {
+        var dx = channelX - gridRight;
+        var dy = y2 - y1;
+        var vdir = dy < 0 ? -1 : 1;
+        var radius = Math.min(CORNER, dx / 2, Math.abs(dy) / 2);
+        if (radius < 0.5) {
+            return "M" + gridRight + "," + y1 + " H" + channelX + " V" + y2 + " H" + gridRight;
+        }
+        return [
+            "M", gridRight, ",", y1,
+            " H", channelX - radius,
+            " Q", channelX, ",", y1, " ", channelX, ",", y1 + vdir * radius,
+            " V", y2 - vdir * radius,
+            " Q", channelX, ",", y2, " ", channelX - radius, ",", y2,
+            " H", gridRight,
+        ].join("");
+    }
+
     function drawArrows() {
         if (!arrows.length) {
             return;
@@ -101,25 +120,27 @@
         var gridRight = grid.getBoundingClientRect().right - origin.left;
         // Reserve the channel band as wrapper padding, then resize the overlay to the grown scrollWidth so it can paint
         // the full band (drawEdges sized it to the pre-padding width).
-        var band = CHANNEL_GAP + arrows.length * CHANNEL_STEP + HEAD;
+        var laneCount = arrows.reduce(function (count, arrow) {
+            return Math.max(count, arrow.lane + 1);
+        }, 0);
+        var band = CHANNEL_GAP + laneCount * CHANNEL_STEP + HEAD;
         wrap.style.paddingRight = band + "px";
         svg.setAttribute("width", wrap.scrollWidth);
         svg.setAttribute("height", wrap.scrollHeight);
-        arrows.forEach(function (arrow, i) {
+        arrows.forEach(function (arrow) {
             var y1 = rowCentreY(arrow.from, origin);
             var y2 = rowCentreY(arrow.to, origin);
             if (y1 === null || y2 === null) {
                 return;  // a row outside the rendered range -- skip the arrow safely
             }
-            var channelX = gridRight + CHANNEL_GAP + i * CHANNEL_STEP;
+            var channelX = gridRight + CHANNEL_GAP + arrow.lane * CHANNEL_STEP;
             var group = document.createElementNS(SVG_NS, "g");
-            group.setAttribute("class", "jarrow");
+            group.setAttribute("class", "jarrow " + (arrow.cond ? "jbranch" : "jjump"));
 
-            var bracket = document.createElementNS(SVG_NS, "polyline");
-            bracket.setAttribute("points",
-                gridRight + "," + y1 + " " + channelX + "," + y1 + " " +
-                channelX + "," + y2 + " " + gridRight + "," + y2);
+            var bracket = document.createElementNS(SVG_NS, "path");
+            bracket.setAttribute("d", arrowPath(gridRight, channelX, y1, y2));
             bracket.setAttribute("fill", "none");
+            bracket.setAttribute("class", "jbracket");
             group.appendChild(bracket);
 
             var head = document.createElementNS(SVG_NS, "polygon");  // arrowhead pointing left into the target row
