@@ -213,21 +213,20 @@ Use your best judgement as to which features do not need test coverage. For exam
 
 ## Review team
 
-After every change or milestone, or when explicitly prompted, dispatch three fresh-context review agents set to the
+After every change or milestone, or when explicitly prompted, dispatch several fresh-context review agents set to the
 MAXIMUM THINKING EFFORT to review your work:
 
-- one will focus on the FUNCTIONAL CORRECTNESS and ROBUSTNESS of the implementation;
-- one will focus on the ARCHITECTURAL CLEANLINESS, DESIGN PRACTICES, and CODE QUALITY;
-- one will be a distinct tool (if you are Claude, choose Codex, and vice versa) focusing on CORRECTNESS only.
+- A subagent focusing on the FUNCTIONAL CORRECTNESS and ROBUSTNESS of the implementation.
+- A subagent focusing on the ARCHITECTURAL CLEANLINESS, DESIGN PRACTICES, and CODE QUALITY.
+- Distinct tools -- Codex, Gemini, Claude (check what's available, exclude yourself) -- focusing on CORRECTNESS only.
 
-It is important that we use at least two distinct tools to maximize the diversity of perspectives and minimize
-blind spots. When all are done, review and consolidate their findings and act accordingly.
+It is important that we use all available distinct tools to maximize the diversity of perspectives
+and minimize blind spots. When all are done, review and consolidate their findings and act accordingly.
 If behavioral defects are found, ensure extensive regression tests are introduced.
 
 Repeat the review/refine loop until the agents return only trivial feedback (or none) for two (sic!) consecutive turns.
-Here, "trivial feedback" means stylistic/inconsequential issues such as wording, formatting,
-trivial parameter validation, or anything else that does not materially affect the correctness or
-maintainability of the codebase.
+Here, "trivial feedback" means stylistic/inconsequential issues such as wording, formatting, trivial parameter
+validation, or anything else that does not materially affect the correctness or maintainability of the codebase.
 Iteration until no feedback has been attempted in the past but it is not practical because in the absence of significant
 issues the review agents tend to degrade to nitpicking.
 Hence, we stop iteration earlier, as soon as the feedback ceases to contain significant findings.
