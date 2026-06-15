@@ -64,11 +64,14 @@ from holoso._type import BoolType, FloatType, ScalarType
 
 from ._modelref import (
     ChainedSlots,
+    COMPARATOR_OP_CASES,
+    OperatorCase,
+    PIPELINE_OP_CASES,
     SelectHold,
     branch_boundary_kernel,
+    const_branch_kernel,
     default_ops,
     diamond_then_loop_kernel,
-    fcmp_staged_ops,
     overlap_dead_arm_spill_kernel,
     overlap_div_err_kernel,
     overlap_spill_kernel,
@@ -146,7 +149,8 @@ def test_pipelined_issue_overlaps_a_slow_op() -> None:
     assert any(sched.issue_cycle[vid] < div_commit for vid in adds)
 
 
-def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator() -> None:
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator(config: OperatorCase) -> None:
     # Regression: a chained comparison (here ``lo < x < hi``) puts two comparator firings with distinct operand
     # pairs in one block. The single pooled holoso_fcmp instance serves one firing per initiation interval, so the
     # two must issue on distinct cycles. Before the contention rule the scheduler let both issue on the same cycle
@@ -155,7 +159,7 @@ def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator() -> None
     def f(x, lo, hi):  # type: ignore[no-untyped-def]
         return 0.0 if lo < x < hi else x
 
-    lir = build(_run(f), "deadband")
+    lir = build(_run(f, config.make_ops(FMT)), f"deadband_{config.label}")
     in_valid_pcs = [
         lir.block_base[block.index] + op.issue_cycle
         for block in lir.blocks
@@ -166,24 +170,26 @@ def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator() -> None
     assert len(set(in_valid_pcs)) == len(in_valid_pcs)  # instance contention spaces them: no comparator collision
 
 
-@pytest.mark.parametrize("stage_input", [0, 1])
-def test_branch_comparison_commits_at_block_makespan(stage_input: int) -> None:
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+def test_branch_comparison_commits_at_block_makespan(config: OperatorCase) -> None:
     # White-box twin of test_cosim.py test_cosim_comparison_at_branch_boundary: pins that the SHARED kernel
     # (_modelref.branch_boundary_kernel) actually hits the boundary-slack corner -- the comparison is the last commit
-    # in its block and feeds the branch -- at both comparator latencies. If a schedule change ever moves the
-    # comparison off the makespan, this fails before the cosim silently de-targets.
-    lir = build(_run(branch_boundary_kernel, fcmp_staged_ops(FMT, stage_input)), "cmp_at_boundary")
+    # in its block and feeds the branch -- at comparator-only and full-pipeline latency points. If a schedule change
+    # ever moves the comparison off the makespan, this fails before the cosim silently de-targets.
+    ops = config.make_ops(FMT)
+    lir = build(_run(branch_boundary_kernel, ops), f"cmp_at_boundary_{config.label}")
     branch_blocks = [block for block in lir.blocks if isinstance(block.terminator, Branch)]
     assert len(branch_blocks) == 1
     (block,) = branch_blocks
     comparisons = [op for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
     assert len(comparisons) == 1
     (cmp_op,) = comparisons
-    assert cmp_op.latency == 1 + stage_input
+    assert cmp_op.latency == config.fcmp_latency
     assert cmp_op.commit_cycle == block.block_makespan
 
 
-def test_overlap_shrinks_branch_terminator_below_drained_boundary() -> None:
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+def test_overlap_shrinks_branch_terminator_below_drained_boundary(config: OperatorCase) -> None:
     # Cross-block software pipelining (M7): a branch block whose every successor is single-predecessor shrinks its
     # terminator offset below the conservative wide drain boundary_step(makespan, wide_resident=True), so its in-flight
     # results spill into the
@@ -192,7 +198,7 @@ def test_overlap_shrinks_branch_terminator_below_drained_boundary() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     from recip_newton import NewtonReciprocal
 
-    lir = build(_run(NewtonReciprocal().__call__), "recip_overlap")
+    lir = build(_run(NewtonReciprocal().__call__, config.make_ops(FMT)), f"recip_overlap_{config.label}")
     shrunk = [
         block
         for block in lir.blocks
@@ -202,13 +208,14 @@ def test_overlap_shrinks_branch_terminator_below_drained_boundary() -> None:
     assert shrunk, "no branch block shrank its terminator: cross-block overlap did not engage"
 
 
-def test_overlap_spilled_result_lands_in_successor_frame() -> None:
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+def test_overlap_spilled_result_lands_in_successor_frame(config: OperatorCase) -> None:
     # The overlap_spill_kernel corner (shared with test_cosim.py test_cosim_overlap_spill): the branch condition is an
     # input comparison that commits early, while a wide chain in the same block commits much later, so the block shrinks
     # to the chain's WRITE WORD and the chain result lands PAST the terminator -- in the single-predecessor arm frames.
     # Pins that a wide result genuinely spills (result_landing_cycle beyond term_offset, while its write word stays in
     # the block); the cosim twin proves the arm read waits for the in-flight landing rather than reading stale data.
-    lir = build(_run(overlap_spill_kernel), "overlap_spill")
+    lir = build(_run(overlap_spill_kernel, config.make_ops(FMT)), f"overlap_spill_{config.label}")
     spilled = [
         (block, op, write)
         for block in lir.blocks
@@ -225,7 +232,8 @@ def test_overlap_spilled_result_lands_in_successor_frame() -> None:
         assert op.commit_cycle + 1 <= block.term_offset
 
 
-def test_overlap_dead_arm_spill_does_not_clobber_a_sibling_live_value() -> None:
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+def test_overlap_dead_arm_spill_does_not_clobber_a_sibling_live_value(config: OperatorCase) -> None:
     # Regression (review BLOCKER, found independently by the functional reviewer and Codex): under cross-block overlap a
     # wide result spills into BOTH single-pred arms because its writeback latch fires unconditionally before the
     # redirect. In an arm where that result is DEAD, the allocator must STILL reserve its register (inflight_defs); else
@@ -233,7 +241,9 @@ def test_overlap_dead_arm_spill_does_not_clobber_a_sibling_live_value() -> None:
     # numerical model shares the same register file (model == RTL, both wrong). Checked against source semantics. The
     # shared kernel's else arm reads `v` while `w` is dead and spills; crash-before, w (=15 for x=3,y=1,z=2) overwrote
     # v's register and the else result was grossly wrong (~3.4 instead of 1.2).
-    model = build_model(build(_run(overlap_dead_arm_spill_kernel), "dead_arm_spill"))
+    model = build_model(
+        build(_run(overlap_dead_arm_spill_kernel, config.make_ops(FMT)), f"dead_arm_spill_{config.label}")
+    )
     for x, y, z in [(3.0, 1.0, 2.0), (4.0, 2.0, 0.5), (2.5, 0.5, 1.5)]:  # x > y selects the else arm, where w is dead
         want = (x + y + z) / (z * z + 1.0)
         (got,) = model.run(x, y, z)
@@ -242,14 +252,15 @@ def test_overlap_dead_arm_spill_does_not_clobber_a_sibling_live_value() -> None:
         ), f"x={x} y={y} z={z}: got {got}, want {want} (dead-arm spill clobber)"
 
 
-def test_overlap_keeps_error_op_diagnostic_latch_in_frame() -> None:
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+def test_overlap_keeps_error_op_diagnostic_latch_in_frame(config: OperatorCase) -> None:
     # Regression (review round 3, Codex P1): a division (the error-bearing op) whose writeback spills past a SHRUNK
     # terminator latches err_pc as pc-FETCH_LAG when its write-enable EXECUTES -- FETCH_LAG fetch steps after its write
     # word. If the terminator redirected to the non-fall-through arm by then, err_pc captures the wrong (successor)
     # frame. The data writeback is unaffected (it rides the pipeline), so only a step-accurate err_pc check sees it; the
     # shrink floor must keep the latch in-block: term_offset >= writeback_word + FETCH_LAG for an error-bearing op.
     # Crash-before: term_offset was the bare write word (one FETCH_LAG short), so err_pc latched a redirected pc.
-    lir = build(_run(overlap_div_err_kernel), "overlap_div_err")
+    lir = build(_run(overlap_div_err_kernel, config.make_ops(FMT)), f"overlap_div_err_{config.label}")
     checked = False
     for block in lir.blocks:
         if not isinstance(block.terminator, Branch):
@@ -265,7 +276,8 @@ def test_overlap_keeps_error_op_diagnostic_latch_in_frame() -> None:
     assert checked, "the error-bearing division did not land in a shrinkable branch block: corner not exercised"
 
 
-def test_spilled_result_landings_match_the_numerical_model() -> None:
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase) -> None:
     # Regression (HTML report exactness): a result spilling past an overlap-shrunk terminator lands in EVERY successor
     # arm, exactly where the numerical model re-keys its in-flight write at the redirect. write_landing_pcs -- which
     # reg_liveness, bool_liveness, the HTML schedule, and the write-timeline test helper all stamp through -- must
@@ -290,7 +302,7 @@ def test_spilled_result_landings_match_the_numerical_model() -> None:
         (overlap_dead_arm_spill_kernel, "dead_arm_spill"),
         (overlap_div_err_kernel, "overlap_div_err"),
     ]:
-        lir = build(_run(kernel), name)
+        lir = build(_run(kernel, config.make_ops(FMT)), f"{name}_{config.label}")
         # These kernels write every register through an operation (no copies/installs/state), so the model's writeback
         # set is exactly the op-result landings -- the cleanest tie to write_landing_pcs.
         assert not any(block.copies or block.bool_writes for block in lir.blocks)
@@ -315,7 +327,8 @@ def test_spilled_result_landings_match_the_numerical_model() -> None:
         assert predicted == actual, f"{name}: write_landing_pcs {predicted} != model writebacks {actual}"
 
 
-def test_overlapping_loop_kernel_landings_are_real_model_writes() -> None:
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+def test_overlapping_loop_kernel_landings_are_real_model_writes(config: OperatorCase) -> None:
     # recip_newton is a real overlapping LOOP kernel: its header branch shrinks below the drained boundary, so the
     # diagnostics run through write_landing_pcs on a genuinely shrunk-terminator layout (the synthetic kernels above
     # carry the multi-arm SPILLS; here every op result still lands in-block, exercising the shrunk-block path on a real,
@@ -337,7 +350,7 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes() -> None:
                 self.writes.setdefault(dst.index, set()).add(self.pc)
             super()._write(dst, value)  # type: ignore[arg-type]
 
-    lir = build(_run(NewtonReciprocal().__call__), "recip_newton")
+    lir = build(_run(NewtonReciprocal().__call__, config.make_ops(FMT)), f"recip_newton_{config.label}")
     assert any(
         isinstance(block.terminator, Branch)
         and block.term_offset < boundary_step(block.block_makespan, wide_resident=True)
@@ -399,23 +412,15 @@ def test_bool_only_block_drains_one_step_under_the_wide_boundary() -> None:
         ), "an install-bearing bool block shrank below the wide boundary where its install lands"
 
 
-def test_const_branch_install_block_keeps_the_wide_drain() -> None:
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+def test_const_branch_install_block_keeps_the_wide_drain(config: OperatorCase) -> None:
     # Regression (review round 5, fuzz-found B1 miscompile): a constant branch condition formed by DIVISION escapes the
     # frontend's AST-level reachability fold (which evaluates only +,-,* of literals), so the HIR const-folder reduces
     # it to a BoolConst that if-conversion refuses -- leaving an EMPTY const-branch block (the condition install + a
     # branch, no float content). That condition install is a pc-gated copy landing at the WIDE boundary, so the
     # bank-aware drain must NOT shrink the block to the bool boundary, or the terminator reads the condition one PC
     # before it lands. Crash-before: KeyError (model) / stale branch read (RTL); pass-after: bit-exact vs the reference.
-    def const_branch(x, y):  # type: ignore[no-untyped-def]
-        r = x
-        if x > y:
-            if (1.0 / 5.0) > 0.0:  # constant-true, not AST-foldable -> an empty const-branch block, no float content
-                r = x + 1.0
-            else:
-                r = x + 2.0
-        return r
-
-    lir = build(_run(const_branch), "const_branch")
+    lir = build(_run(const_branch_kernel, config.make_ops(FMT)), f"const_branch_{config.label}")
     # Structural teeth: the surviving const-branch block branches on a constant materialized by a tail bool write, so
     # it must drain at the WIDE boundary (where that pc-gated install lands), not the bool boundary. Pins the drain
     # itself, not only the output, so a future drain regression here is localized rather than silently model-correct.
@@ -432,7 +437,7 @@ def test_const_branch_install_block_keeps_the_wide_drain() -> None:
     model = build_model(lir)
     for x, y in [(2.0, 1.0), (1.0, 2.0), (5.0, 3.0), (-1.0, -2.0)]:
         (got,) = model.run(x, y)
-        assert math.isclose(float(got), const_branch(x, y), rel_tol=1e-6)
+        assert math.isclose(float(got), const_branch_kernel(x, y), rel_tol=1e-6)
 
 
 def test_coalesced_install_block_pays_no_spurious_install_drain() -> None:
@@ -456,13 +461,14 @@ def test_coalesced_install_block_pays_no_spurious_install_drain() -> None:
         assert block.block_makespan == last_commit, "a coalesced-install arm block paid a spurious +1 install drain"
 
 
-def test_empty_merge_block_is_threaded_into_its_successor() -> None:
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+def test_empty_merge_block_is_threaded_into_its_successor(config: OperatorCase) -> None:
     # B4 (empty merge-block elimination): a non-convertible diamond (a variable-divisor division) whose merge feeds a
     # following loop leaves an empty pass-through merge -- only the merged phi and a Jump, predecessors the two jump-
     # terminated diamond arms. Merge threading eliminates it, composing the diamond's phi arms into the loop header's
     # init arm. Crash-before (no merge threading): that empty Jump merge survives. The bit-exact RTL check of the
     # resulting three-arm loop-header phi is the cosim twin (test_cosim.py test_cosim_diamond_then_loop).
-    lir = build(_run(diamond_then_loop_kernel), "diamond_then_loop")
+    lir = build(_run(diamond_then_loop_kernel, config.make_ops(FMT)), f"diamond_then_loop_{config.label}")
     by_index = {block.index: block for block in lir.blocks}
     preds: dict[int, list[int]] = {block.index: [] for block in lir.blocks}
     for block in lir.blocks:
@@ -511,7 +517,8 @@ def test_merge_threading_refuses_a_back_edge_carried_merge_phi() -> None:
         assert math.isclose(float(got), loop_invariant_merge(a, den, c), rel_tol=1e-6)
 
 
-def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late() -> None:
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late(config: OperatorCase) -> None:
     # Regression (P3a): the scheduler's cross-block spill carry (block_inflight / the scheduler's livein_landing) must
     # place a spilled result at the SAME absolute PC the numerical model writes it -- both Lir.write_landing_pcs and
     # _trace_landing map a block-local landing to block_base[arm] + (landing - term_offset - 1). The scheduler used its
@@ -520,7 +527,7 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late() -> None:
     # Crash-before: under the +1 frame the read-gated consumer issued one PC late (every read strictly after the model
     # landing -- no equality), inflating the initiation interval by a cycle; pass-after: it reads at the landing.
     for kernel, name in [(overlap_spill_kernel, "overlap_spill"), (overlap_dead_arm_spill_kernel, "dead_arm_spill")]:
-        lir = build(_run(kernel), name)
+        lir = build(_run(kernel, config.make_ops(FMT)), f"{name}_{config.label}")
         by_index = {block.index: block for block in lir.blocks}
         spilled_any = False
         tight = 0
@@ -1992,7 +1999,8 @@ def test_write_timeline_resolves_inline_wide_producers() -> None:
     ), "the cast's wide write must appear in the timeline with its inline producer"
 
 
-def test_commutative_comparator_swap_permutes_output_taps() -> None:
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+def test_commutative_comparator_swap_permutes_output_taps(config: OperatorCase) -> None:
     # The comparator is commutative under the gt/lt flag exchange. Two mirrored comparisons over one operand pair
     # otherwise read (a,b) and (b,a) -- two registers per read port; the port assignment orients one of them swapped,
     # shrinking each port's read-set to a single register, and the swapped firing's lt tap moves to gt. Bit-exact
@@ -2002,7 +2010,7 @@ def test_commutative_comparator_swap_permutes_output_taps() -> None:
         above = b < a
         return [float(below), float(above)]
 
-    lir = build(_run(f), "mirrored")
+    lir = build(_run(f, config.make_ops(FMT)), f"mirrored_{config.label}")
     firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
     assert len(firings) == 2
     sources = [tuple(operand.source for operand in op.operands) for op in firings]
@@ -2016,13 +2024,14 @@ def test_commutative_comparator_swap_permutes_output_taps() -> None:
         assert below == float(a < b) and above == float(b < a), f"a={a} b={b}"
 
 
-def test_chained_slot_live_in_blocks_early_install() -> None:
+@pytest.mark.parametrize("config", PIPELINE_OP_CASES, ids=lambda config: config.label)
+def test_chained_slot_live_in_blocks_early_install(config: OperatorCase) -> None:
     # Regression (review; pre-existing at HEAD): a slot whose live-in feeds ANOTHER slot's live-out ("self._a =
     # self._b") was documented as unable to early-install, but only the coalescing test consulted that fact -- the
     # early-install decision did not, so "_b"'s new value landed before "_a"'s boundary copy captured the old one.
     # The RTL then returned the NEW "_b" through "_a" while the model kept the old one (cosim diverged on the second
     # transaction). The tapped slot must now install at the boundary, and the model must match plain Python.
-    lir = build(_run(ChainedSlots().__call__), "chained_slots")
+    lir = build(_run(ChainedSlots().__call__, config.make_ops(FMT)), f"chained_slots_{config.label}")
     slots = {slot.name: slot for slot in lir.float_state_slots}
     assert lir.state_copy_step(slots["_b"]) == lir.initiation_interval, "the tapped slot must not install early"
     reference = ChainedSlots()
@@ -2055,12 +2064,13 @@ def test_select_folds_arm_signs_into_operand_conditioners() -> None:
             assert float(model.run(x, c)[0]) == (x if c > 0.0 else -x)
 
 
-def test_state_early_install_respects_a_select_reader() -> None:
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+def test_state_early_install_respects_a_select_reader(config: OperatorCase) -> None:
     # Pins the read-step frame of the state early-install bound: an inline select reads its operands at its fire
     # step (issue + latency + FETCH_LAG + 1), one cycle past where an issue-frame bound would have allowed the
     # slot's install copy to fire -- an early install bounded by issue cycles would overwrite the live-in before
     # the select reads it (RTL would take the NEW value through ``old`` while the model keeps the old one).
-    lir = build(_run(SelectHold().step), "select_hold")
+    lir = build(_run(SelectHold().step, config.make_ops(FMT)), f"select_hold_{config.label}")
     selects = [
         (block, op) for block in lir.blocks for op in block.inline_ops if isinstance(op.operator, SelectOperator)
     ]
@@ -2170,7 +2180,8 @@ def test_bool_state_slot_carries_a_live_out_inversion() -> None:
         assert float(model.run(x)[0]) == reference.step(x)
 
 
-def test_inverted_bool_phi_arm_installs_with_opposite_polarities() -> None:
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+def test_inverted_bool_phi_arm_installs_with_opposite_polarities(config: OperatorCase) -> None:
     # The headline M3 generalization end to end: a bool phi whose two arms reference the SAME base value under
     # opposite inversions (one arm rewrites the flag as its own negation). The two install copies must carry
     # opposite-polarity sources, and the model must take the correct value on both paths. The division keeps the
@@ -2184,7 +2195,7 @@ def test_inverted_bool_phi_arm_installs_with_opposite_polarities() -> None:
             d = b
         return [float(flag), d]
 
-    lir = build(_run(f), "inverted_arm")
+    lir = build(_run(f, config.make_ops(FMT)), f"inverted_arm_{config.label}")
     sources = [(write.source.source, write.source.inversion) for block in lir.blocks for write in block.bool_writes]
     flag_sources = [(src, inv) for src, inv in sources if isinstance(src, BoolRegRef)]
     assert len(flag_sources) == 2, flag_sources

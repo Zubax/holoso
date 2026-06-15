@@ -25,12 +25,13 @@ from holoso._mir import lower as lower_to_mir
 from ._cosim import run_cosim
 from ._modelref import (
     ChainedSlots,
+    COMPARATOR_OP_CASES,
+    OperatorCase,
+    PIPELINE_OP_CASES,
     SelectHold,
     branch_boundary_kernel,
     const_branch_kernel,
-    default_ops,
     diamond_then_loop_kernel,
-    fcmp_staged_ops,
     overlap_dead_arm_spill_kernel,
     overlap_div_err_kernel,
     overlap_spill_kernel,
@@ -117,43 +118,45 @@ def test_cosim_staged_division(sim: str) -> None:
     run_cosim(sim, blend, fmt, "blend_staged", ops=ops)
 
 
-@pytest.mark.parametrize("stage_input", [0, 1])
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_comparison_at_branch_boundary(sim: str, stage_input: int) -> None:
-    # The boundary-slack corner kernel (see _modelref.branch_boundary_kernel), exercised at both comparator latencies
-    # (stage_input 0 -> 1 cycle, 1 -> 2 cycles). The white-box twin in test_schedule.py
+def test_cosim_comparison_at_branch_boundary(sim: str, config: OperatorCase) -> None:
+    # The boundary-slack corner kernel (see _modelref.branch_boundary_kernel), exercised at both comparator-only and
+    # full-pipeline latency points. The white-box twin in test_schedule.py
     # (test_branch_comparison_commits_at_block_makespan) pins that this kernel actually hits the corner.
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, branch_boundary_kernel, fmt, f"cmp_branch_s{stage_input}", ops=fcmp_staged_ops(fmt, stage_input))
+    run_cosim(sim, branch_boundary_kernel, fmt, f"cmp_branch_{config.label}", ops=config.make_ops(fmt))
 
 
-@pytest.mark.parametrize("stage_input", [0, 1])
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_overlap_spill(sim: str, stage_input: int) -> None:
+def test_cosim_overlap_spill(sim: str, config: OperatorCase) -> None:
     # Cross-block software pipelining (M7): the entry block shrinks its terminator to a wide chain's write word, and
     # that result spills past the terminator into BOTH single-predecessor arms, which read it. If the arm read did not
     # wait for the in-flight landing in the successor frame -- or the spill mis-aligned by even one frame -- the RTL
     # would diverge from the cycle-accurate model here. The white-box twin
     # (test_schedule.py test_overlap_spilled_result_lands_in_successor_frame) pins that the spill actually triggers.
-    # See _modelref.overlap_spill_kernel. Both comparator latencies move the early condition's landing relative to the
-    # spilling chain.
+    # See _modelref.overlap_spill_kernel. The staged cases move the early condition's landing relative to the spilling
+    # chain, and the full staged case also moves the wide chain itself.
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, overlap_spill_kernel, fmt, f"overlap_spill_s{stage_input}", ops=fcmp_staged_ops(fmt, stage_input))
+    run_cosim(sim, overlap_spill_kernel, fmt, f"overlap_spill_{config.label}", ops=config.make_ops(fmt))
 
 
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_const_branch(sim: str) -> None:
+def test_cosim_const_branch(sim: str, config: OperatorCase) -> None:
     # Bank-aware drain (round-5 fix): an empty const-branch block's condition is a pc-gated install read AT the
     # terminator, landing at the wide boundary; the drain must not shrink it to the bool boundary or the branch reads
     # the condition one PC before it lands. The model crashes (KeyError) on the first transaction, but a stale-register
     # branch misdirect is a SILENT RTL miscompile only cosim discriminates (RTL vs model from one LIR). The white-box
     # twin (test_schedule.py test_const_branch_install_block_keeps_the_wide_drain) pins the block stays at the wide drain.
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, const_branch_kernel, fmt, "const_branch")
+    run_cosim(sim, const_branch_kernel, fmt, f"const_branch_{config.label}", ops=config.make_ops(fmt))
 
 
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_diamond_then_loop(sim: str) -> None:
+def test_cosim_diamond_then_loop(sim: str, config: OperatorCase) -> None:
     # Empty merge-block elimination (B4): threading the non-convertible diamond's empty merge onto its arms composes
     # its phi arms into the loop header, producing a THREE-arm loop-header phi (two forward init arms from the diamond
     # arms plus the back-edge) -- a phi shape no other kernel pushes through the RTL emitter. The model and RTL are
@@ -161,18 +164,25 @@ def test_cosim_diamond_then_loop(sim: str) -> None:
     # header phi having exactly two arms) from a self-consistent model. The white-box twin
     # (test_schedule.py test_empty_merge_block_is_threaded_into_its_successor) pins that the merge was actually removed.
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, diamond_then_loop_kernel, fmt, "diamond_then_loop")
+    run_cosim(sim, diamond_then_loop_kernel, fmt, f"diamond_then_loop_{config.label}", ops=config.make_ops(fmt))
 
 
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_overlap_dead_arm_spill(sim: str) -> None:
+def test_cosim_overlap_dead_arm_spill(sim: str, config: OperatorCase) -> None:
     # P3a tightened the cross-block spill carry to the model's true landing PC (land - term_offset - 1), changing the
     # emitted Verilog for this kernel. cosim is the orthogonal gate to the source-semantic dead-arm test: it proves the
     # RTL's register write timing stays lockstep with the model's _pending re-keying under the tighter read-gate (the
     # model and RTL are generated by different paths from one LIR). See _modelref.overlap_dead_arm_spill_kernel; the
     # silent clobber it guards against is caught by test_schedule.py, not here (model and RTL share the register file).
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, overlap_dead_arm_spill_kernel, fmt, "overlap_dead_arm_spill")
+    run_cosim(
+        sim,
+        overlap_dead_arm_spill_kernel,
+        fmt,
+        f"overlap_dead_arm_spill_{config.label}",
+        ops=config.make_ops(fmt),
+    )
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -224,22 +234,32 @@ class _UnusedBoolInputAccumulator:
         return self.y
 
 
+@pytest.mark.parametrize("config", PIPELINE_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_shift_register_backpressure(sim: str) -> None:
+def test_cosim_shift_register_backpressure(sim: str, config: OperatorCase) -> None:
     # The returned value taps a copy-slot register and the chain advances every accept, so together with the testbench's
     # random back-pressure this pins down that the boundary copy fires exactly once per accepted transaction -- no
     # mid-handshake output mutation and no state over-advance while out_ready is held low.
-    run_cosim(sim, _ShiftRegister2().__call__, FloatFormat(6, 18), "shift2")
+    fmt = FloatFormat(6, 18)
+    run_cosim(sim, _ShiftRegister2().__call__, fmt, f"shift2_{config.label}", ops=config.make_ops(fmt))
 
 
+@pytest.mark.parametrize("config", PIPELINE_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_unused_bool_input_keeps_cfg_state_timing(sim: str) -> None:
+def test_cosim_unused_bool_input_keeps_cfg_state_timing(sim: str, config: OperatorCase) -> None:
     fmt = FloatFormat(6, 18)
     vectors = [
         {"flag": 0, "x": fmt.encode(2.0)},
         {"flag": 1, "x": fmt.encode(4.0)},
     ]
-    run_cosim(sim, _UnusedBoolInputAccumulator().__call__, fmt, "unused_bool_state", vectors=vectors)
+    run_cosim(
+        sim,
+        _UnusedBoolInputAccumulator().__call__,
+        fmt,
+        f"unused_bool_state_{config.label}",
+        ops=config.make_ops(fmt),
+        vectors=vectors,
+    )
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -309,15 +329,16 @@ async def div0_errpc(dut):
 """
 
 
+@pytest.mark.parametrize("config", PIPELINE_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_div0_error(sim: str) -> None:
+def test_cosim_div0_error(sim: str, config: OperatorCase) -> None:
     def kdiv(a, b):  # type: ignore[no-untyped-def]
         return a / b
 
     fmt = FloatFormat(6, 18)
-    name = "kdiv"
-    lir = build(lower_to_mir(optimize(lower(kdiv)), default_ops(fmt)), name)
-    gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"{name}_err_w{fmt.wexp}_{fmt.wman}"
+    name = f"kdiv_{config.label}"
+    lir = build(lower_to_mir(optimize(lower(kdiv)), config.make_ops(fmt)), name)
+    gen_dir = REPO_ROOT / "build" / "holoso_gen" / sim / f"{name}_err_w{fmt.wexp}_{fmt.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"err_{name}_w{fmt.wexp}_{fmt.wman}"
     (gen_dir / f"{name}.v").write_text(generate_verilog(lir).verilog)
@@ -396,19 +417,20 @@ async def overlap_div0_errpc(dut):
 """
 
 
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_overlap_div0_errpc(sim: str) -> None:
+def test_cosim_overlap_div0_errpc(sim: str, config: OperatorCase) -> None:
     # M7 regression (review round 3, Codex P1): an error-bearing division whose writeback spills past a SHRUNK
     # terminator must still latch err_pc to its OWN step, not the redirected non-fall-through successor frame. The data
     # is correct regardless (model == RTL), so only this step-exact err_pc cosim catches the regression. White-box
     # twin: test_schedule.py::test_overlap_keeps_error_op_diagnostic_latch_in_frame. See _modelref.overlap_div_err_kernel.
     fmt = FloatFormat(6, 18)
-    name = "overlap_div_err"
-    lir = build(lower_to_mir(optimize(lower(overlap_div_err_kernel)), default_ops(fmt)), name)
+    name = f"overlap_div_err_{config.label}"
+    lir = build(lower_to_mir(optimize(lower(overlap_div_err_kernel)), config.make_ops(fmt)), name)
     entry = next(block for block in lir.blocks if block.index == lir.entry)
     (fdiv,) = [op for op in entry.ops if op.inst.operator.error_ports]
     err_pc = lir.block_base[entry.index] + pooled_writeback_word(fdiv.commit_cycle, True)
-    gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"{name}_w{fmt.wexp}_{fmt.wman}"
+    gen_dir = REPO_ROOT / "build" / "holoso_gen" / sim / f"{name}_errpc_w{fmt.wexp}_{fmt.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"errpc_{name}_w{fmt.wexp}_{fmt.wman}"
     (gen_dir / f"{name}.v").write_text(generate_verilog(lir).verilog)
@@ -437,8 +459,9 @@ def test_cosim_overlap_div0_errpc(sim: str) -> None:
     )
 
 
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_mirrored_comparisons_swap_orientation(sim: str) -> None:
+def test_cosim_mirrored_comparisons_swap_orientation(sim: str, config: OperatorCase) -> None:
     # RTL twin of test_schedule.test_commutative_comparator_swap_permutes_output_taps: mirrored comparisons over one
     # operand pair make the port assignment orient one comparator firing swapped (its lt tap moving to gt), so the
     # emitted module must still produce both relations bit-exactly through the permuted lane.
@@ -447,18 +470,22 @@ def test_cosim_mirrored_comparisons_swap_orientation(sim: str) -> None:
         above = b < a
         return [float(below), float(above)]
 
-    run_cosim(sim, kernel, FloatFormat(6, 18), "mirrored_cmp")
+    fmt = FloatFormat(6, 18)
+    run_cosim(sim, kernel, fmt, f"mirrored_cmp_{config.label}", ops=config.make_ops(fmt))
 
 
+@pytest.mark.parametrize("config", PIPELINE_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_chained_slots_keep_the_old_value_across_the_install(sim: str) -> None:
+def test_cosim_chained_slots_keep_the_old_value_across_the_install(sim: str, config: OperatorCase) -> None:
     # RTL twin of test_schedule.test_chained_slot_live_in_blocks_early_install: before the fix, "_b"'s early install
     # clobbered the value "_a"'s boundary copy reads, so the DUT diverged from the model on the second transaction.
-    run_cosim(sim, ChainedSlots().__call__, FloatFormat(6, 18), "chained_slots")
+    fmt = FloatFormat(6, 18)
+    run_cosim(sim, ChainedSlots().__call__, fmt, f"chained_slots_{config.label}", ops=config.make_ops(fmt))
 
 
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_select_kernels(sim: str) -> None:
+def test_cosim_select_kernels(sim: str, config: OperatorCase) -> None:
     # If-converted selects in RTL: both polarities of a max kernel, an arm-sign select (the negation rides the
     # operand conditioner), and a comparison -> select -> arithmetic cross-bank chain, in one kernel.
     def kernel(a, b):  # type: ignore[no-untyped-def]
@@ -466,18 +493,22 @@ def test_cosim_select_kernels(sim: str) -> None:
         s = a if b > 0.0 else -a
         return m * 2.0 + s
 
-    run_cosim(sim, kernel, FloatFormat(6, 18), "select_mix")
+    fmt = FloatFormat(6, 18)
+    run_cosim(sim, kernel, fmt, f"select_mix_{config.label}", ops=config.make_ops(fmt))
 
 
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_select_reads_state_live_in_before_early_install(sim: str) -> None:
+def test_cosim_select_reads_state_live_in_before_early_install(sim: str, config: OperatorCase) -> None:
     # RTL twin of test_schedule.test_state_early_install_respects_a_select_reader: the slot's early install must not
     # fire before the Ret-block select reads the OLD live-in value.
-    run_cosim(sim, SelectHold().step, FloatFormat(6, 18), "select_hold")
+    fmt = FloatFormat(6, 18)
+    run_cosim(sim, SelectHold().step, fmt, f"select_hold_{config.label}", ops=config.make_ops(fmt))
 
 
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_not_folding_sinks(sim: str) -> None:
+def test_cosim_not_folding_sinks(sim: str, config: OperatorCase) -> None:
     # NOT-folding in RTL: inverted logic operands, an inverted bool output path (via the casts), both polarities of
     # one comparison, and a self-toggling inverted boolean state slot, across several transactions.
     class Toggle:
@@ -491,11 +522,13 @@ def test_cosim_not_folding_sinks(sim: str) -> None:
             both = gate and (not (b > a))
             return float(gate) + 2.0 * float(both) + (4.0 if old else 0.0)
 
-    run_cosim(sim, Toggle().step, FloatFormat(6, 18), "not_sinks")
+    fmt = FloatFormat(6, 18)
+    run_cosim(sim, Toggle().step, fmt, f"not_sinks_{config.label}", ops=config.make_ops(fmt))
 
 
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_inverted_bool_phi_arm(sim: str) -> None:
+def test_cosim_inverted_bool_phi_arm(sim: str, config: OperatorCase) -> None:
     # RTL twin of test_schedule.test_inverted_bool_phi_arm_installs_with_opposite_polarities: the conditional flag
     # negation rides the phi-arm install's inversion.
     def kernel(a, b, c):  # type: ignore[no-untyped-def]
@@ -507,11 +540,13 @@ def test_cosim_inverted_bool_phi_arm(sim: str) -> None:
             d = b
         return [float(flag), d]
 
-    run_cosim(sim, kernel, FloatFormat(6, 18), "inverted_arm")
+    fmt = FloatFormat(6, 18)
+    run_cosim(sim, kernel, fmt, f"inverted_arm_{config.label}", ops=config.make_ops(fmt))
 
 
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_phi_coalescing_residual_install_conflict(sim: str) -> None:
+def test_cosim_phi_coalescing_residual_install_conflict(sim: str, config: OperatorCase) -> None:
     # RTL twin of test_schedule.test_phi_coalescing_residual_install_conflict_is_resolved: phi ``a`` would coalesce onto
     # input ``x``'s register, but ``x`` is still live as sibling phi ``z``'s identity arm (``z = x``) where ``a``'s
     # residual sign-folded else-arm install writes that register, so the soundness fixpoint de-coalesces ``a``. This
@@ -528,11 +563,13 @@ def test_cosim_phi_coalescing_residual_install_conflict(sim: str) -> None:
             d = x / b
         return [a, z, d]
 
-    run_cosim(sim, kernel, FloatFormat(6, 18), "coal_conflict")
+    fmt = FloatFormat(6, 18)
+    run_cosim(sim, kernel, fmt, f"coal_conflict_{config.label}", ops=config.make_ops(fmt))
 
 
+@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_not_over_loop_phi_and_inverted_public_state(sim: str) -> None:
+def test_cosim_not_over_loop_phi_and_inverted_public_state(sim: str, config: OperatorCase) -> None:
     # Two NOT-folding corners under RTL: a flag negated per trip of a while loop (the self-arm inversion install
     # fires once per iteration through the back edge), and a PUBLIC boolean state attribute whose live-out is a
     # negation (the state_<attr> port and the install both ride inversions).
@@ -549,4 +586,5 @@ def test_cosim_not_over_loop_phi_and_inverted_public_state(sim: str) -> None:
             self.armed = not (x > 2.0)
             return float(flag)
 
-    run_cosim(sim, LoopToggle().step, FloatFormat(6, 18), "loop_toggle")
+    fmt = FloatFormat(6, 18)
+    run_cosim(sim, LoopToggle().step, fmt, f"loop_toggle_{config.label}", ops=config.make_ops(fmt))

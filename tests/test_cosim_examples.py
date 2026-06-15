@@ -32,13 +32,13 @@ import pytest
 from holoso import FloatFormat
 from ._cosim import run_cosim
 from ._modelref import (
+    PIPELINE_OP_CASES,
+    OperatorCase,
     bounded,
-    default_ops,
     encode_inputs,
     format_edge_bits,
     log_uniform_positive,
     spd_matrix,
-    staged_ops,
 )
 from .hdl.hdl_float_oracle import SIMULATORS
 
@@ -404,7 +404,7 @@ _SPECS = [
 
 # Each example is exercised at the lean default schedule and a deeply pipelined one, to explore the schedule and
 # handshake at two latency points; both are bit-exact against the same model.
-_OP_CONFIGS = [("default", default_ops), ("staged", staged_ops)]
+_OP_CONFIGS = PIPELINE_OP_CASES
 
 # One case per (spec, datapath format): every spec runs at e8m36, and a spec that lists a second format (octave_index
 # adds the shallow e6m18) also runs there -- exercising the merge-threaded loop at both pipeline depths.
@@ -414,9 +414,8 @@ _SPEC_FORMATS = [
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
-@pytest.mark.parametrize("config", _OP_CONFIGS, ids=lambda c: c[0])
+@pytest.mark.parametrize("config", _OP_CONFIGS, ids=lambda c: c.label)
 @pytest.mark.parametrize("spec,fmt", _SPEC_FORMATS)
-def test_example_cosim(spec: ExampleSpec, fmt: FloatFormat, config: tuple[str, object], sim: str) -> None:
-    label, make_ops = config
-    name = f"{spec.name}_{label}_e{fmt.wexp}m{fmt.wman}"
-    run_cosim(sim, spec.make_kernel(), fmt, name, ops=make_ops(fmt), vectors=spec.vectors(fmt))
+def test_example_cosim(spec: ExampleSpec, fmt: FloatFormat, config: OperatorCase, sim: str) -> None:
+    name = f"{spec.name}_{config.label}_e{fmt.wexp}m{fmt.wman}"
+    run_cosim(sim, spec.make_kernel(), fmt, name, ops=config.make_ops(fmt), vectors=spec.vectors(fmt))

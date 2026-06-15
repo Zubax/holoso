@@ -3,6 +3,7 @@
 import dataclasses
 import math
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -12,6 +13,15 @@ from holoso._backend.numerical import NumericalSimulator, generate as generate
 from holoso._lir import Lir
 from holoso._type import FloatFormat
 from holoso._frontend._lower import _Path, _port_name
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorCase:
+    """A labeled operator configuration used by parametrized tests and generated module names."""
+
+    label: str
+    make_ops: Callable[[FloatFormat], OpConfig]
+    fcmp_latency: int
 
 
 def build_model(lir: Lir) -> NumericalSimulator:
@@ -146,6 +156,11 @@ def fcmp_staged_ops(fmt: FloatFormat, stage_input: int) -> OpConfig:
     )
 
 
+def fcmp_s1_ops(fmt: FloatFormat) -> OpConfig:
+    """Default operators with only the comparator input stage enabled."""
+    return fcmp_staged_ops(fmt, 1)
+
+
 def branch_boundary_kernel(a, b, c):  # type: ignore[no-untyped-def]
     """
     The boundary-slack corner kernel shared by the cosim test and its white-box schedule twin: the comparison is the
@@ -268,6 +283,18 @@ def staged_ops(fmt: FloatFormat) -> OpConfig:
         FMulILog2OperatorFamily(fmt, stage_input=1, stage_decode=1),
         FCmpOperator(fmt, stage_input=1),
     )
+
+
+PIPELINE_OP_CASES = (
+    OperatorCase("default", default_ops, 1),
+    OperatorCase("staged", staged_ops, 2),
+)
+
+COMPARATOR_OP_CASES = (
+    OperatorCase("default", default_ops, 1),
+    OperatorCase("fcmp_s1", fcmp_s1_ops, 2),
+    OperatorCase("staged", staged_ops, 2),
+)
 
 
 class ChainedSlots:
