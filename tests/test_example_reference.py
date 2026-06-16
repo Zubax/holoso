@@ -5,13 +5,15 @@ The cosimulation suite (``test_cosim_examples.py``) checks the emitted RTL again
 model -- but both descend from the same front-end lowering, so a front-end miscompile poisons the RTL and the model
 identically and the bit-for-bit check still passes. That suite proves ``RTL == compiler-model``; it cannot prove
 ``compiler-model == Python semantics``. This module closes that gap: it drives each example's numerical model AND a
-fresh plain-Python instance of the same kernel over the curated input sequence and asserts they agree. Boolean lanes
-and exact (integer/Sterbenz) float lanes must match bit-for-bit; a kernel whose float outputs accumulate rounding
-(``approximate``) is compared within a format-derived tolerance. Inputs are quantized into the format first, so the
-model and the reference see the same operands and only the per-operation rounding differs.
+fresh plain-Python instance of the same kernel over ``reference_vectors()`` (the manual sequence then the random draw)
+and asserts they agree. Boolean lanes and exact (integer/Sterbenz) float lanes must match bit-for-bit; a kernel whose
+float outputs accumulate rounding (``approximate``) is compared within a format-derived tolerance. Inputs are quantized
+into the format first, so the model and the reference see the same operands and only the per-operation rounding differs.
+The per-input format-edge sweep is excluded here -- the model legitimately diverges from float64 at the format extremes
+(an operation overflowing to the format's infinity stays finite in float64), which the cosim suite covers instead.
 
-The example specs (kernel factory, declared input order, curated vector sequence, datapath format) are shared with the
-cosimulation suite via ``_examples`` so the two views stay in lockstep.
+The example specs are shared with the cosimulation suite via ``_examples``: the cosim suite drives the full
+``raw_vectors()`` (manual + random + edges), this suite the ``reference_vectors()`` subset, over one source of truth.
 """
 
 import numpy as np
@@ -58,7 +60,7 @@ def test_example_matches_python_reference(spec: ExampleSpec, fmt: FloatFormat) -
     reference = spec.make_kernel()  # a fresh plain-Python instance, advanced in lockstep with the model
     instance = getattr(reference, "__self__", None)  # the bound receiver, for reading scalar public-state live-outs
     op_count = max(len(model._lir.ops), 1)
-    for row in spec.manual:
+    for row in spec.reference_vectors():  # manual then random; the model and float64 reference agree on this subset
         quantized = {name: _quantize(value, fmt) for name, value in row.items()}
         got = model.run(*[quantized[port.name] for port in model.inputs])
         leaves = [leaf for _, leaf in flatten_value(reference(*[quantized[name] for name in spec.inputs]))]

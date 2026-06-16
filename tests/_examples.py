@@ -86,11 +86,20 @@ class ExampleSpec:
         """The full reproducible input sequence as input-name -> ZKF-bits rows: manual, then random, then edges."""
         return [encode_inputs(fmt, row) for row in self.raw_vectors()]
 
+    def reference_vectors(self) -> list[dict[str, float | bool]]:
+        """
+        The manual sequence then the random draw -- the inputs on which the ZKF model and the float64 Python reference
+        agree to within the per-operation rounding tolerance, so the Python-reference suite drives this subset. The
+        per-input format-edge sweep is intentionally excluded: at the format extremes the model legitimately diverges
+        from float64 (an operation overflowing to the format's infinity stays finite in float64), a property of the
+        datapath rather than a compiler defect, and the cosim suite (RTL == model) covers those edges instead.
+        """
+        rng = np.random.default_rng(_SEED)
+        return [*self.manual, *(self.draw_random(rng) for _ in range(_RANDOM_COUNT))]
+
     def raw_vectors(self) -> list[dict[str, float | bool]]:
         """The full reproducible input sequence as raw float/bool rows: manual, then random, then per-input edges."""
-        rng = np.random.default_rng(_SEED)
-        rows: list[dict[str, float | bool]] = [*self.manual]
-        rows += [self.draw_random(rng) for _ in range(_RANDOM_COUNT)]
+        rows = self.reference_vectors()
         for name in self.inputs:
             values = self.protected_values if name in self.protected else self.edge_values
             rows += [{**self.nominal, name: value} for value in values]
