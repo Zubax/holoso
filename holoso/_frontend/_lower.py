@@ -311,6 +311,18 @@ class _Lowerer:
         # as handed to the synthesizer (whatever __init__ and any later mutation produced); its values seed reset.
         self._instance = instance
         self._self_name: str | None = None
+        if instance is not None:
+            # Validate the attribute-access protocol BEFORE reading any instance attribute. A class overriding
+            # ``__getattribute__``/``__setattr__``/... cannot be modeled as direct persistent state; rejecting it up
+            # front also keeps the reset snapshot's ``vars(instance)`` from leaking a raw exception when a hostile
+            # ``__getattribute__`` intercepts the ``__dict__`` lookup. An instance with no ``__dict__`` (a class with
+            # ``__slots__`` and no dict) holds its attributes in slot descriptors the direct-state model does not read.
+            self._check_standard_attribute_access()
+            if not hasattr(instance, "__dict__"):
+                raise UnsupportedConstruct(
+                    f"the synthesized instance of {type(instance).__name__} has no __dict__ (its class defines "
+                    "__slots__); its attributes cannot be snapshotted as reset state"
+                )
         self._snapshot: dict[str, object] = dict(vars(instance)) if instance is not None else {}
         self._shapes: dict[str, _StateAttr] = {}  # per-attribute decompositions, derived once from the snapshot
         self._state_order: list[str] = []
@@ -364,7 +376,6 @@ class _Lowerer:
                 )
             self._self_name = params[0].arg
             params = params[1:]
-            self._check_standard_attribute_access()
             self._assigned_attrs = self._syntactically_assigned_attrs(fndef)
             self._collect_written_attrs(fndef)
             self._check_state_slot_names()
@@ -1488,7 +1499,10 @@ class _Lowerer:
                 f"self.{func.attr}(...) resolves to a stored instance attribute, not a method", self._loc(node)
             )
         descriptor = self._class_mro_attr(func.attr)  # class MRO only: a metaclass method is not callable as self.m()
-        static_fn = descriptor.__func__ if isinstance(descriptor, staticmethod) else None
+        # Only an EXACT ``@staticmethod`` is inlined via its ``__func__``. A staticmethod SUBCLASS could override
+        # ``__get__`` (binding a different callable) or ``__getattribute__`` (spoofing ``__func__``), so its
+        # introspection is not faithful; it falls through to the unsupported-call rejection below.
+        static_fn = descriptor.__func__ if type(descriptor) is staticmethod else None
         if isinstance(static_fn, types.FunctionType):
             method, bound_self = static_fn, False  # a staticmethod takes no receiver
         elif isinstance(descriptor, types.FunctionType):
@@ -2065,14 +2079,17 @@ class _Lowerer:
 
     def _class_property_descriptor(self, attr: str) -> property | None:
         """
-        The class ``property`` descriptor backing ``attr`` (whose ``fget`` is its getter), or None if ``attr`` is not a
-        property. A property is the one descriptor the reader supports -- ``_read_attr`` inlines its getter, like a
-        zero-argument method -- so a read-only computed value reads as ``self.<name>``; any other data descriptor is
-        rejected (``_is_class_data_descriptor``), and a property is opaque to compile-time folding (always read via its
-        getter, never as a stored snapshot value).
+        The class ``property`` descriptor backing ``attr`` (whose ``fget`` is its getter), or None if ``attr`` is not an
+        EXACT ``property``. A property is the one descriptor the reader supports -- ``_read_attr`` inlines its getter,
+        like a zero-argument method -- so a read-only computed value reads as ``self.<name>``; any other data descriptor
+        is rejected (``_is_class_data_descriptor``), and a property is opaque to compile-time folding (always read via
+        its getter, never as a stored snapshot value). Only the exact ``property`` type is admitted: a SUBCLASS could
+        override ``__get__`` (so the read never calls ``fget``) or ``__getattribute__`` (so ``fget`` introspection
+        returns a spoofed callable), either of which makes inlining ``fget`` diverge from Python; a subclass falls
+        through to the data-descriptor rejection. The exact type cannot do either, so its ``fget`` is faithful.
         """
         descriptor = self._class_mro_attr(attr)
-        return descriptor if isinstance(descriptor, property) else None
+        return descriptor if type(descriptor) is property else None
 
     def _is_class_data_descriptor(self, attr: str) -> bool:
         """
@@ -2080,8 +2097,9 @@ class _Lowerer:
         ``property`` is one). Python resolves such a name through the descriptor for both read and write, taking
         precedence over any same-named instance ``__dict__`` entry, so that entry is dead state: it must never be folded
         as a stored value (``_readonly_snapshot_value``), written as a state slot (``_scan_attr_writes``), or read as
-        one (``_read_attr``). A non-data descriptor (a method, ``staticmethod``, ``cached_property``) or a plain class-
-        attribute value is instead shadowed BY the instance entry, which therefore IS the live value and stays state.
+        one (``_read_attr``). A non-data descriptor (a method, ``staticmethod``, ``cached_property``) is instead
+        shadowed BY a same-named instance entry when one exists, so it does not block that entry from being read/folded
+        as state; an attribute with no instance entry is simply unknown to the snapshot and rejected by the read path.
         """
         descriptor_type = type(self._class_mro_attr(attr))
         return hasattr(descriptor_type, "__set__") or hasattr(descriptor_type, "__delete__")

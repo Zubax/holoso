@@ -425,7 +425,7 @@ class _PropertyShadowsDict:
 
     def __call__(self, x: float) -> float:
         y = x
-        if self._mode:  # resolves through the property (True); before the fix the static fold read the snapshot False
+        if self._mode:  # via the property (True) -> multiply runs; a snapshot-reading fold would wrongly skip it
             y = x * 2.0
         return y
 
@@ -520,6 +520,88 @@ def test_data_descriptor_read_is_rejected() -> None:
         holoso.synthesize(_DataDescriptorRead().__call__, _ops())
 
 
+class _GetterOverridingProperty(property):
+    """A ``property`` subclass whose ``__get__`` ignores ``fget``: Python reads via the overridden ``__get__`` (False),
+    so inlining ``fget`` (True) would silently diverge. Inlining is faithful only when ``__get__`` is property's own."""
+
+    def __get__(self, instance, owner=None):  # type: ignore[override]
+        return False
+
+
+class _PropertySubclassRead:
+    @_GetterOverridingProperty
+    def flag(self) -> bool:
+        return (
+            True  # fget: what an isinstance(property) check would inline -- but the overridden __get__ never calls it
+        )
+
+    def __call__(self, x: float, /) -> float:
+        return x * 2.0 if self.flag else x  # Python reads False (via __get__) -> x; inlining fget would read True -> 2x
+
+
+def test_property_subclass_overriding_get_is_rejected() -> None:
+    # A property SUBCLASS that overrides __get__ does not call fget, so inlining fget would diverge from Python's read.
+    # The compiler admits only the EXACT property type, so every subclass (this one included) is rejected.
+    with pytest.raises(UnsupportedConstruct, match="descriptor"):
+        holoso.synthesize(_PropertySubclassRead().__call__, _ops())
+
+
+def _spoofed_getter(self) -> bool:  # type: ignore[no-untyped-def]  # getter signature so a naive inline succeeds
+    return False  # the callable a hostile fget spoof hands the compiler -- the opposite of the real getter below
+
+
+class _FgetSpoofingProperty(property):
+    """A ``property`` subclass that leaves ``__get__`` ALONE (so Python reads via the real getter) but overrides
+    ``__getattribute__`` to return a different callable for ``fget`` -- so introspecting ``fget`` would inline code that
+    diverges from what Python runs. Defeats a ``__get__``-identity guard; only the exact type is trustworthy."""
+
+    def __getattribute__(self, name):  # type: ignore[no-untyped-def]
+        if name == "fget":
+            return _spoofed_getter
+        return super().__getattribute__(name)
+
+
+class _PropertyFgetSpoof:
+    @_FgetSpoofingProperty
+    def flag(self) -> bool:
+        return True  # the REAL getter Python's property.__get__ calls; the spoofed fget returns False instead
+
+    def __call__(self, x: float, /) -> float:
+        return x * 2.0 if self.flag else x  # Python reads True (real getter) -> 2x; a spoofed fget reads False -> x
+
+
+def test_property_subclass_spoofing_fget_is_rejected() -> None:
+    # A property subclass can leave __get__ untouched (Python dispatches the real getter) yet override __getattribute__
+    # to spoof ``fget``, defeating a __get__-identity guard; inlining the introspected fget would diverge. Requiring the
+    # EXACT property type rejects every subclass, closing the whole category instead of guarding one override at a time.
+    with pytest.raises(UnsupportedConstruct, match="descriptor"):
+        holoso.synthesize(_PropertyFgetSpoof().__call__, _ops())
+
+
+class _GetterOverridingStaticmethod(staticmethod):
+    """A ``staticmethod`` subclass whose ``__get__`` returns a different callable than ``__func__``: Python calls the
+    overridden binding, so inlining ``__func__`` would diverge. Faithful only when ``__get__`` is staticmethod's own."""
+
+    def __get__(self, instance, owner=None):  # type: ignore[override]
+        return lambda v: v * 3.0
+
+
+class _StaticmethodSubclassCall:
+    @_GetterOverridingStaticmethod
+    def _scale(v: float) -> float:
+        return v * 2.0  # __func__: what reading descriptor.__func__ would inline -- but __get__ binds x*3 instead
+
+    def __call__(self, x: float, /) -> float:
+        return self._scale(x)  # Python calls __get__'s binding (x*3); inlining __func__ would compute x*2
+
+
+def test_staticmethod_subclass_overriding_get_is_rejected() -> None:
+    # A staticmethod SUBCLASS that overrides __get__ binds a different callable than __func__, so reading __func__ would
+    # diverge from Python. The compiler admits only the EXACT staticmethod type, so every subclass is rejected.
+    with pytest.raises(UnsupportedConstruct, match="call"):
+        holoso.synthesize(_StaticmethodSubclassCall().__call__, _ops())
+
+
 class _Meta(type):
     @property
     def flag(cls) -> bool:
@@ -561,6 +643,44 @@ def test_custom_attribute_access_protocol_is_rejected() -> None:
     # state model cannot mirror; it must be rejected up front rather than silently lowered as direct state access.
     with pytest.raises(UnsupportedConstruct, match="overrides"):
         holoso.synthesize(_CustomSetattr().__call__, _ops())
+
+
+class _Slotted:
+    __slots__ = ("_v",)  # no instance __dict__: the reset-state snapshot cannot read the attributes via vars()
+
+    def __init__(self) -> None:
+        self._v = False
+
+    def __call__(self, x: bool, /) -> bool:
+        self._v = x
+        return self._v
+
+
+def test_slots_instance_without_dict_is_rejected() -> None:
+    # A __slots__ instance has no __dict__, so the reset snapshot (vars(instance)) cannot read its attributes; this must
+    # be a clean UnsupportedConstruct, not the raw TypeError that vars() would otherwise raise.
+    with pytest.raises(UnsupportedConstruct, match="__slots__|__dict__"):
+        holoso.synthesize(_Slotted().__call__, _ops())
+
+
+class _RaisingGetattribute:
+    def __init__(self) -> None:
+        object.__setattr__(self, "_v", False)  # set the attribute without tripping the hostile __getattribute__ below
+
+    def __getattribute__(self, name: str) -> object:
+        if name == "__dict__":
+            raise RuntimeError("hostile __dict__ access")  # would break the reset snapshot's vars() read
+        return object.__getattribute__(self, name)
+
+    def __call__(self, x: bool, /) -> bool:
+        return x
+
+
+def test_getattribute_override_is_rejected_before_snapshot() -> None:
+    # A __getattribute__ override is rejected like the other protocol overrides -- and crucially BEFORE the reset
+    # snapshot reads vars(instance); otherwise a hostile __dict__ access leaks a raw exception, not a clean rejection.
+    with pytest.raises(UnsupportedConstruct, match="overrides"):
+        holoso.synthesize(_RaisingGetattribute().__call__, _ops())
 
 
 # --------------------------------------------------------------------------------------------------------------------

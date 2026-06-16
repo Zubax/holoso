@@ -22,11 +22,11 @@ from holoso import BoolType, FloatFormat
 from ._examples import SPECS, ExampleSpec
 from ._modelref import default_ops, default_tolerance, flatten_value, within
 
-# ``ekf1_stateful`` reports its result purely as persistent PUBLIC VECTOR state (``update`` returns nothing); that
+# A kernel whose result is purely persistent PUBLIC VECTOR state (``spec.vector_public_state`` -- ``ekf1_stateful``,
+# whose ``update`` returns nothing) is excluded: this generic harness compares scalar lanes only, and that kernel's
 # aggregate-state read-back is already validated against the Python reference in ``test_verify.py``. Every other example
-# returns its outputs (optionally alongside scalar public state), which this generic harness compares directly.
-_VECTOR_STATE_EXAMPLES = frozenset({"ekf1_stateful"})
-
+# returns its outputs (optionally alongside scalar public state), which this harness compares directly.
+#
 # A public state attribute drives an output port named ``state_<attr>``; a return value drives ``out_<n>``. The model
 # emits the surviving return leaves as the leading ``out_`` ports (a returned public attribute is folded into its
 # ``state_`` port), so the two are matched by walking the outputs and consuming return leaves in order. This positional
@@ -37,7 +37,7 @@ _STATE_PREFIX = "state_"
 _CASES = [
     pytest.param(spec, spec.formats[0], id=f"{spec.name}-e{spec.formats[0].wexp}m{spec.formats[0].wman}")
     for spec in SPECS
-    if spec.name not in _VECTOR_STATE_EXAMPLES
+    if not spec.vector_public_state
 ]
 
 

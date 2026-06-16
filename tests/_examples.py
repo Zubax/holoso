@@ -77,6 +77,10 @@ class ExampleSpec:
     # must allow a format-derived tolerance. False (the default) means every float output is exact in the format --
     # boolean logic, integer-valued counters/bytes, or exact (Sterbenz) reductions -- and must match Python bit-for-bit.
     approximate: bool = False
+    # Whether the kernel reports its result purely as persistent PUBLIC VECTOR state (no scalar return or scalar state).
+    # The generic Python-reference harness (``test_example_reference``) compares only scalar lanes, so such a kernel is
+    # excluded there; its aggregate-state read-back is validated against Python separately in ``test_verify``.
+    vector_public_state: bool = False
 
     def vectors(self, fmt: FloatFormat) -> list[dict[str, int]]:
         """The full reproducible input sequence as input-name -> ZKF-bits rows: manual, then random, then edges."""
@@ -333,16 +337,35 @@ SPECS = [
         name="majority_voter",
         inputs=("enabled", "a", "b", "c", "d", "e"),
         make_kernel=lambda: MajorityVoter().__call__,
-        nominal={"enabled": False, "a": False, "b": False, "c": False, "d": False, "e": False},
+        # nominal ``enabled`` is True so the per-input edge sweep actually enters the ``if enabled:`` diagnostic block
+        # (perturbing one channel against an all-low background flips the voted value and trips that channel's fault).
+        nominal={"enabled": True, "a": False, "b": False, "c": False, "d": False, "e": False},
         manual=[
-            # The opening unanimous row observes every fault lane LOW before any can latch -- so a stuck-high lane is
-            # caught -- then each subsequent row trips a distinct lane, exercising every output from False to True.
-            {"enabled": True, "a": True, "b": True, "c": True, "d": True, "e": True},  # unanimous high -> no fault
-            {"enabled": True, "a": True, "b": True, "c": True, "d": False, "e": False},  # d, e disagree -> latch d, e
+            # The opening row observes every fault lane LOW (all channels agree with voted=False) before any can latch,
+            # so a stuck-high lane is caught. The fault XOR is then exercised against BOTH voted polarities: a high
+            # channel disagreeing with a low majority (voted False) AND a low channel disagreeing with a high majority
+            # (voted True) -- so a miscompile of the voted value feeding the latches cannot hide behind a constant.
+            {"enabled": True, "a": False, "b": False, "c": False, "d": False, "e": False},  # voted False, no fault
+            {
+                "enabled": True,
+                "a": True,
+                "b": False,
+                "c": False,
+                "d": False,
+                "e": False,
+            },  # voted False, a disagrees ->a
+            {"enabled": True, "a": True, "b": True, "c": True, "d": False, "e": False},  # voted True, d, e disagree
             {"enabled": False, "a": False, "b": False, "c": False, "d": False, "e": False},  # disabled: faults hold
-            {"enabled": True, "a": False, "b": True, "c": True, "d": True, "e": False},  # voted high, a disagrees -> a
-            {"enabled": True, "a": True, "b": False, "c": False, "d": True, "e": True},  # voted high, b, c disagree
-            {"enabled": True, "a": True, "b": True, "c": True, "d": True, "e": True},  # unanimous again, all hold
+            {"enabled": True, "a": True, "b": True, "c": False, "d": True, "e": True},  # voted True, c disagrees -> c
+            {
+                "enabled": True,
+                "a": False,
+                "b": True,
+                "c": False,
+                "d": False,
+                "e": False,
+            },  # voted False, b disagrees ->b
+            {"enabled": True, "a": True, "b": True, "c": True, "d": True, "e": True},  # unanimous, all faults hold
         ],
         draw_random=lambda rng: {name: bool(rng.integers(0, 2)) for name in ("enabled", "a", "b", "c", "d", "e")},
         edge_values=(False, True),
@@ -352,7 +375,9 @@ SPECS = [
         inputs=("start", "char"),
         make_kernel=lambda: UartTx(parity=False).__call__,
         nominal={"start": False, "char": 0.0},
-        manual=_uart_tx_drive((0x55, 0xC3, 0x00, 0xFF)),
+        # 0x01 and 0x7F have an ODD number of set bits, so the even-parity bit is HIGH for them: the parity XOR
+        # reduction must emit a 1, not just the 0 that every even-popcount byte (0x55/0xC3/0x00/0xFF) yields.
+        manual=_uart_tx_drive((0x55, 0xC3, 0x00, 0x01, 0x7F, 0xFF)),
         draw_random=lambda rng: {"start": bool(rng.integers(0, 8) == 0), "char": float(rng.integers(0, 256))},
         # The per-input edge sweep is uniform over inputs, so it cannot mix a boolean lane (start) with a float lane
         # (char); the random draw already sweeps char across the whole 0..255 byte range, so no separate edge set.
@@ -368,6 +393,10 @@ SPECS = [
             _uart_rx_frame(0x55, False)
             + _uart_rx_frame(0xC3, False)
             + _uart_rx_frame(0x00, False)
+            + _uart_rx_frame(
+                0x01, False
+            )  # odd popcount -> true even-parity bit HIGH, so the recomputed parity must be 1
+            + _uart_rx_frame(0x7F, False)  # 7 bits set (odd) -> exercises most of the parity reduction, still no error
             + _uart_rx_frame(0x96, False, flip_parity=True)  # corrupted parity bit -> parity_error asserts
             + _uart_rx_frame(0x3C, False, drop_stop=True)  # stop bit held low -> frame_error asserts
         ),
@@ -383,8 +412,8 @@ SPECS = [
         nominal={"x": 1.0},
         manual=[{"x": v} for v in (0.5, 0.75, 1.0, 1.3, 1.7, 2.0)],  # across the [0.5, 2.0] reciprocal domain
         draw_random=_draw_scalars(("x",), 0.5, 2.0),
-        # The Newton iteration only converges on its domain; off-domain x diverges and the back-edge loop never
-        # terminates, so the edge sweep is pinned to the domain (a real loop, unlike the former fixed-count form).
+        # The Newton iteration only converges on its domain; off-domain x diverges and the data-dependent back-edge
+        # loop never terminates, so the edge sweep is pinned to the domain rather than the full format edge set.
         protected=frozenset({"x"}),
         protected_values=(0.5, 0.75, 1.0, 1.5, 2.0),
         edge_values=_WIDE_EDGES,
@@ -476,6 +505,7 @@ SPECS = [
         name="ekf1_stateful",
         inputs=("dt", "u_shunt", "di_dt"),
         make_kernel=_fresh_stateful_ekf,
+        vector_public_state=True,  # result is the carried x/P_urt vectors; excluded from the scalar reference harness
         nominal={"dt": 1e-2, "u_shunt": 0.5, "di_dt": 0.5},
         manual=[  # a short measurement sequence threaded through the carried state
             {"dt": 1e-2, "u_shunt": 0.0, "di_dt": 0.0},
