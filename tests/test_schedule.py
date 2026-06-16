@@ -408,12 +408,12 @@ def test_bool_only_block_drains_one_step_under_the_wide_boundary() -> None:
     ), "drained at the wide boundary"
 
     # A bool-only block that carries a tail install keeps the WIDE drain: the pc-gated install lands at the wide
-    # boundary, so shrinking to the bool boundary would read it one PC before it lands (a miscompile).
-    # quadrature_encoder's bool-state install blocks exercise this.
-    from quadrature_encoder import QuadratureEncoder  # noqa: PLC0415
+    # boundary, so shrinking to the bool boundary would read it one PC before it lands (a miscompile). The
+    # majority_voter's gated diagnostic arm is a bool-only block whose five sticky-fault writes are such installs.
+    from majority_voter import MajorityVoter  # noqa: PLC0415
 
-    quad = build(_run(QuadratureEncoder().__call__), "quad_bank_drain")
-    bool_install_blocks = [b for b in quad.blocks if b.bool_writes and is_bool_only(b)]
+    voter = build(_run(MajorityVoter().__call__), "voter_bank_drain")
+    bool_install_blocks = [b for b in voter.blocks if b.bool_writes and is_bool_only(b)]
     assert bool_install_blocks, "no bool-only install-bearing block to exercise the install drain exception"
     for block in bool_install_blocks:
         assert block.term_offset == boundary_step(

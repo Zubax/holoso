@@ -44,6 +44,7 @@ from ekf1_stateful import Ekf1  # noqa: E402
 from ekf1_stateless import update_x_P  # noqa: E402
 from iir1_lpf import IIR1LPF  # noqa: E402
 from latching_fault_register import LatchingFaultRegister  # noqa: E402
+from majority_voter import MajorityVoter  # noqa: E402
 from octave_index import octave_index  # noqa: E402
 from phase_frequency_detector import PhaseFrequencyDetector  # noqa: E402
 from pid import PID  # noqa: E402
@@ -66,6 +67,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "quadrature_encoder": lambda: QuadratureEncoder().__call__,
     "phase_frequency_detector": lambda: PhaseFrequencyDetector().__call__,
     "latching_fault_register": lambda: LatchingFaultRegister().__call__,
+    "majority_voter": lambda: MajorityVoter().__call__,
     "recip_newton": lambda: NewtonReciprocal().__call__,
     "remainder": lambda: remainder,
     "octave_index": lambda: octave_index,
@@ -189,15 +191,14 @@ BASELINE: dict[str, Metrics] = {
     "iir1_lpf": Metrics(False, nreg=3, bnreg=2, steering=3, copies=0, min_ii=21, last_pc=21, max_block_span=21),
     "pid": Metrics(False, nreg=9, bnreg=3, steering=10, copies=0, min_ii=40, last_pc=40, max_block_span=40),
     "schmitt_trigger": Metrics(False, nreg=1, bnreg=3, steering=2, copies=0, min_ii=7, last_pc=7, max_block_span=7),
-    "quadrature_encoder": Metrics(
-        False, nreg=1, bnreg=8, steering=14, copies=4, min_ii=12, last_pc=20, max_block_span=7
-    ),
+    "quadrature_encoder": Metrics(False, nreg=1, bnreg=9, steering=7, copies=0, min_ii=6, last_pc=6, max_block_span=6),
     "phase_frequency_detector": Metrics(
         False, nreg=1, bnreg=8, steering=6, copies=0, min_ii=6, last_pc=6, max_block_span=6
     ),
     "latching_fault_register": Metrics(
         False, nreg=1, bnreg=7, steering=4, copies=0, min_ii=6, last_pc=6, max_block_span=6
     ),
+    "majority_voter": Metrics(False, nreg=1, bnreg=21, steering=30, copies=5, min_ii=20, last_pc=26, max_block_span=14),
     "recip_newton": Metrics(False, nreg=4, bnreg=1, steering=4, copies=2, min_ii=21, last_pc=47, max_block_span=25),
     "remainder": Metrics(False, nreg=8, bnreg=4, steering=12, copies=2, min_ii=50, last_pc=71, max_block_span=22),
     "octave_index": Metrics(False, nreg=3, bnreg=1, steering=6, copies=3, min_ii=18, last_pc=56, max_block_span=27),

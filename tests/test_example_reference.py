@@ -1,0 +1,87 @@
+"""
+Behavioral validation of every compilable example against its ORIGINAL Python execution.
+
+The cosimulation suite (``test_cosim_examples.py``) checks the emitted RTL against the kernel's EMBEDDED numerical
+model -- but both descend from the same front-end lowering, so a front-end miscompile poisons the RTL and the model
+identically and the bit-for-bit check still passes. That suite proves ``RTL == compiler-model``; it cannot prove
+``compiler-model == Python semantics``. This module closes that gap: it drives each example's numerical model AND a
+fresh plain-Python instance of the same kernel over the curated input sequence and asserts they agree. Boolean lanes
+and exact (integer/Sterbenz) float lanes must match bit-for-bit; a kernel whose float outputs accumulate rounding
+(``approximate``) is compared within a format-derived tolerance. Inputs are quantized into the format first, so the
+model and the reference see the same operands and only the per-operation rounding differs.
+
+The example specs (kernel factory, declared input order, curated vector sequence, datapath format) are shared with the
+cosimulation suite via ``_examples`` so the two views stay in lockstep.
+"""
+
+import numpy as np
+import pytest
+
+import holoso
+from holoso import BoolType, FloatFormat
+from ._examples import SPECS, ExampleSpec
+from ._modelref import default_ops, default_tolerance, flatten_value, within
+
+# ``ekf1_stateful`` reports its result purely as persistent PUBLIC VECTOR state (``update`` returns nothing); that
+# aggregate-state read-back is already validated against the Python reference in ``test_verify.py``. Every other example
+# returns its outputs (optionally alongside scalar public state), which this generic harness compares directly.
+_VECTOR_STATE_EXAMPLES = frozenset({"ekf1_stateful"})
+
+# A public state attribute drives an output port named ``state_<attr>``; a return value drives ``out_<n>``. The model
+# emits the surviving return leaves as the leading ``out_`` ports (a returned public attribute is folded into its
+# ``state_`` port), so the two are matched by walking the outputs and consuming return leaves in order. This positional
+# walk assumes the surviving ``out_`` leaves form a leading prefix of the flattened return -- true for every current
+# kernel; a future kernel that returned a folded public attribute AHEAD of a computed value would need keyed mapping.
+_STATE_PREFIX = "state_"
+
+_CASES = [
+    pytest.param(spec, spec.formats[0], id=f"{spec.name}-e{spec.formats[0].wexp}m{spec.formats[0].wman}")
+    for spec in SPECS
+    if spec.name not in _VECTOR_STATE_EXAMPLES
+]
+
+
+def _quantize(value: float | bool, fmt: FloatFormat) -> float | bool:
+    """A float rounded into ``fmt`` (so the model and float64 reference get an identical operand); a bool unchanged."""
+    return value if isinstance(value, bool) else fmt.decode(fmt.encode(value))
+
+
+def _model_for(spec: ExampleSpec, fmt: FloatFormat):  # type: ignore[no-untyped-def]
+    # Built through the public facade, exactly as a user would; ``_lir.ops`` (read once below for the tolerance op
+    # count) is the only internal datum the result does not expose publicly.
+    return holoso.synthesize(spec.make_kernel(), default_ops(fmt), name=spec.name).numerical_model.elaborate()
+
+
+@pytest.mark.parametrize("spec,fmt", _CASES)
+def test_example_matches_python_reference(spec: ExampleSpec, fmt: FloatFormat) -> None:
+    model = _model_for(spec, fmt)
+    reference = spec.make_kernel()  # a fresh plain-Python instance, advanced in lockstep with the model
+    instance = getattr(reference, "__self__", None)  # the bound receiver, for reading scalar public-state live-outs
+    op_count = max(len(model._lir.ops), 1)
+    for row in spec.manual:
+        quantized = {name: _quantize(value, fmt) for name, value in row.items()}
+        got = model.run(*[quantized[port.name] for port in model.inputs])
+        leaves = [leaf for _, leaf in flatten_value(reference(*[quantized[name] for name in spec.inputs]))]
+        expected: list[float | bool] = []
+        return_index = 0
+        for port in model.outputs:
+            if port.name.startswith(_STATE_PREFIX):
+                value = getattr(instance, port.name[len(_STATE_PREFIX) :])
+                assert not isinstance(value, (list, tuple, np.ndarray)), f"{spec.name}: unexpected vector public state"
+                expected.append(value)
+            else:
+                expected.append(leaves[return_index])
+                return_index += 1
+        floats = [abs(float(v)) for v in (*quantized.values(), *expected) if not isinstance(v, bool)]
+        # Exact (0, 0) unless the kernel accumulates rounding: a discrete/Sterbenz float output must match bit-for-bit,
+        # so a stuck or off-by-one value cannot hide under a loose relative tolerance (acute in the coarse byte format).
+        rtol, atol = default_tolerance(fmt, op_count, max([1.0, *floats])) if spec.approximate else (0.0, 0.0)
+        for port, got_value, want in zip(model.outputs, got, expected):
+            if isinstance(port.scalar_type, BoolType):
+                assert bool(got_value) == bool(
+                    want
+                ), f"{spec.name} {row} {port.name}: {bool(got_value)} != {bool(want)}"
+            else:
+                assert within(
+                    float(got_value), float(want), rtol, atol
+                ), f"{spec.name} {row} {port.name}: {float(got_value)} vs {float(want)}"

@@ -253,19 +253,32 @@ class _Scope:
 
     @classmethod
     def fresh(
-        cls, fn: types.FunctionType, env: dict[str, _Value], lines: list[str], start: int, filename: str
+        cls,
+        fn: types.FunctionType,
+        env: dict[str, _Value],
+        lines: list[str],
+        start: int,
+        filename: str,
+        *,
+        context: "_Scope | None" = None,
+        self_name: str | None = None,
     ) -> "_Scope":
-        """A scope for lowering a pure function: the given parameter bindings and source, with no state context."""
+        """
+        A scope for lowering a callee: the given parameter bindings and source, with a fresh return slot and no
+        inherited loop-counter bindings. A pure function gets NO state context (``context`` is None). An instance method
+        passes the caller's scope as ``context`` to inherit its instance/snapshot/state -- so the method's
+        ``self.<attr>`` reads resolve against the same module -- with ``self_name`` bound to the method's own receiver.
+        """
         return cls(
             fn=fn,
             env=env,
-            static_ints={},  # the callee starts with no inherited loop-counter bindings
+            static_ints={},
             return_=None,
-            instance=None,
-            self_name=None,
-            snapshot={},
-            state_order=[],
-            state_env={},
+            instance=context.instance if context is not None else None,
+            self_name=self_name,
+            snapshot=context.snapshot if context is not None else {},
+            state_order=context.state_order if context is not None else [],
+            state_env=context.state_env if context is not None else {},
             lines=lines,
             start=start,
             filename=filename,
@@ -313,16 +326,12 @@ class _Lowerer:
         # Compile-time integer bindings for unrolled loop counters: a counter is a static value (it indexes constant
         # tables, sets shift exponents, bounds ranges), resolved by the static-int evaluator, not a runtime register.
         self._static_ints: dict[str, int] = {}
-        # Instance attributes assigned anywhere in the body (syntactic, ignoring reachability). A boolean attribute NOT
-        # in this set is read-only, so a branch on it has a compile-time-known condition (see ``_static_bool``).
+        # Instance attributes assigned on a reachable path (see ``_syntactically_assigned_attrs``). An attribute NOT in
+        # this set is read-only, so a branch on it has a compile-time-known condition (see ``_static_bool``).
         self._assigned_attrs: set[str] = set()
-        # True only while that read-only set is itself being built: a static fold may then not consult an attribute's
-        # read-only-ness (the set is incomplete), so attribute leaves read as opaque -- yet an absorbing connective
-        # (``self.flag or True``) still folds, since the absorbing operand alone decides it.
-        self._scanning_readonly_attrs: bool = False
-        # The reachable assignments seen so far while building ``_assigned_attrs``. Integer range bounds may consult
-        # this partial set: a write that has already been reached makes the attribute non-static from that point on,
-        # while a read-only integer attribute remains usable for zero-trip and nested static-range reachability.
+        # The previous iteration's over-approximation while the read-only fixpoint runs (None outside it). Static
+        # evaluation judges an attribute read-only against this set instead of the not-yet-final ``_assigned_attrs``;
+        # ``_attr_assigned_set`` is the single accessor.
         self._readonly_scan_assigned_attrs: set[str] | None = None
         # The names each lowered function binds (parameters and assignment targets); shadow resolution consults these.
         self._local_names: dict[types.FunctionType, set[str]] = {}
@@ -355,6 +364,7 @@ class _Lowerer:
                 )
             self._self_name = params[0].arg
             params = params[1:]
+            self._check_standard_attribute_access()
             self._assigned_attrs = self._syntactically_assigned_attrs(fndef)
             self._collect_written_attrs(fndef)
             self._check_state_slot_names()
@@ -720,17 +730,12 @@ class _Lowerer:
                 return self._static_ints[name]
             case ast.Name(id=name) if not self._is_local(name):
                 # A module-level integer constant (e.g. ITERATIONS = 12) used as a loop bound, index, or exponent.
-                global_value = self._fn.__globals__.get(name, _ABSENT)
+                global_value = self._module_global(name)
                 return global_value if type(global_value) is int else None
             case ast.Attribute() if self._is_self_attr(node):
                 assert isinstance(node, ast.Attribute)
-                attr_value = self._snapshot.get(node.attr)
-                if type(attr_value) is not int:
-                    return None
-                assigned = self._readonly_scan_assigned_attrs
-                if assigned is None:
-                    assigned = self._assigned_attrs
-                return attr_value if node.attr not in assigned else None
+                attr_value = self._readonly_snapshot_value(node.attr)
+                return attr_value if type(attr_value) is int else None
             case ast.UnaryOp(op=ast.USub(), operand=operand):
                 inner = self._static_int(operand)
                 return None if inner is None else -inner
@@ -792,6 +797,10 @@ class _Lowerer:
         """
         if isinstance(test, ast.Constant) and isinstance(test.value, bool):
             return test.value
+        if isinstance(test, ast.Name) and not self._is_local(test.id):
+            glob = self._module_global(test.id)
+            if type(glob) is bool:
+                return glob  # a module-level boolean constant, folded like a literal or a read-only attribute
         cast = self._cast_call(test)
         if cast is not None and cast[0] == "bool":
             # ``bool(<static bool>)`` is identity; ``bool(<static float>)`` is format-dependent (its argument is not a
@@ -813,11 +822,29 @@ class _Lowerer:
                 if folded == absorbing:
                     return absorbing
             return not absorbing  # every operand folded to the identity
+        if isinstance(test, ast.BinOp) and isinstance(test.op, ast.BitXor):
+            # ``^`` has no absorbing operand, so the result is static only if BOTH operands are: a single dynamic
+            # operand leaves it runtime (None), and that operand is then lowered and type-checked by ``_lower_bool``.
+            xor_left = self._static_bool(test.left)
+            xor_right = self._static_bool(test.right)
+            return None if xor_left is None or xor_right is None else (xor_left != xor_right)
         if isinstance(test, ast.IfExp):
             condition = self._static_bool(test.test)
             if condition is None:
                 return None
             return self._static_bool(test.body if condition else test.orelse)
+        if isinstance(test, ast.Compare) and all(isinstance(eq_op, (ast.Eq, ast.NotEq)) for eq_op in test.ops):
+            # A boolean ``==``/``!=`` chain (``a == b != c``) of compile-time booleans folds to the conjunction of its
+            # links; a float relation, or any runtime operand, leaves an operand unresolved and falls through to the
+            # float-relation fold below.
+            chain_vals = [self._static_bool(operand) for operand in (test.left, *test.comparators)]
+            if all(link is not None for link in chain_vals):
+                chain_result = True
+                for eq_op, link_l, link_r in zip(test.ops, chain_vals, chain_vals[1:]):
+                    chain_result = chain_result and (
+                        (link_l == link_r) if isinstance(eq_op, ast.Eq) else (link_l != link_r)
+                    )
+                return chain_result
         if isinstance(test, ast.Compare):
             # ``a OP1 b OP2 c`` is the conjunction of its consecutive pairs, short-circuiting on the first failing link.
             operands = [test.left, *test.comparators]
@@ -831,10 +858,10 @@ class _Lowerer:
                 if not holds:
                     return False
             return True
-        if self._is_self_attr(test) and not self._scanning_readonly_attrs:
+        if self._is_self_attr(test):
             assert isinstance(test, ast.Attribute)
-            value = self._snapshot.get(test.attr)
-            if isinstance(value, (bool, np.bool_)) and test.attr not in self._assigned_attrs:
+            value = self._readonly_snapshot_value(test.attr)
+            if isinstance(value, (bool, np.bool_)):
                 return bool(value)  # a read-only boolean attribute keeps its snapshot value (never assigned)
         return None
 
@@ -929,26 +956,53 @@ class _Lowerer:
             return relation.holds((left_float > right_float) - (left_float < right_float))
         return None
 
-    def _syntactically_assigned_attrs(self, fndef: ast.FunctionDef) -> set[str]:
+    def _record_self_targets(self, targets: list[ast.expr], attrs: set[str]) -> None:
+        """Add every ``self.<attr>`` leaf among assignment ``targets`` (descending nested/starred tuple targets)."""
+        for leaf in (leaf for target in targets for leaf in _leaf_targets(target)):
+            if self._is_self_attr(leaf) and isinstance(leaf, ast.Attribute):
+                attrs.add(leaf.attr)
+
+    def _all_assigned_attrs(self, stmts: list[ast.stmt]) -> set[str]:
         """
-        The instance attributes the body could assign on a reachable path; used by ``_static_bool`` to recognize a
-        read-only attribute (one never assigned, so it keeps its snapshot value). Reachability mirrors ``_lower_stmts``:
-        it stops at a ``return`` and folds a literal-constant ``if`` (and a statically-false ``while``) to its live
-        arm, so a write in statically-dead code does not mask a read-only attribute. A condition that depends on a
-        read-only attribute is not resolved here -- the set is still being built -- so an attribute leaf reads as opaque
-        and only an absorbing connective (``self.flag or True``) or an attribute-free condition folds; an unfoldable
-        attribute condition is descended conservatively (a safe over-approximation: an attribute is only ever treated as
-        written when it might not be, never the reverse).
+        Every instance attribute that is an assignment target anywhere in ``stmts``, descending all arms with no
+        reachability folding -- the maximal over-approximation seeding the read-only fixpoint. It recognizes exactly
+        the write forms ``_collect_assigned`` does (plain/annotated/augmented assignment), so the fixpoint it seeds
+        converges to that scan's precise set; an attribute it omits is provably never assigned.
         """
         attrs: set[str] = set()
-        self._scanning_readonly_attrs = True
-        self._readonly_scan_assigned_attrs = attrs
-        try:
-            self._collect_assigned(fndef.body, attrs)
-        finally:
-            self._scanning_readonly_attrs = False
-            self._readonly_scan_assigned_attrs = None
+        for top in stmts:
+            for node in ast.walk(top):
+                match node:
+                    case ast.Assign(targets=targets):
+                        self._record_self_targets(targets, attrs)
+                    case ast.AnnAssign(target=target) | ast.AugAssign(target=target):
+                        self._record_self_targets([target], attrs)
         return attrs
+
+    def _syntactically_assigned_attrs(self, fndef: ast.FunctionDef) -> set[str]:
+        """
+        The instance attributes the body assigns on a reachable path, used to recognize a read-only attribute (one
+        never assigned, so it keeps its snapshot value). Reachability mirrors ``_lower_stmts``: it stops at a ``return``
+        and folds a statically-known ``if``/``while`` to its live arm, so a write in dead code does not mask a read-only
+        attribute -- including an ``if`` whose guard tests a read-only attribute (``if self.flag == True:``).
+
+        Folding such a guard needs the attribute's read-only-ness, which is exactly what this set encodes; a fixpoint
+        resolves the circularity. Seed with the maximal over-approximation (every syntactic write target, no folding);
+        each pass judges read-only-ness against the PREVIOUS over-approximation -- an attribute absent from it is
+        provably never written, so a guard on it folds soundly -- and re-scans. A pass only prunes a genuinely dead arm,
+        so the set decreases monotonically to the precise reachable-assigned set while always over-approximating it.
+        """
+        current = self._all_assigned_attrs(fndef.body)
+        try:
+            while True:
+                self._readonly_scan_assigned_attrs = current
+                following: set[str] = set()
+                self._collect_assigned(fndef.body, following)
+                if following == current:
+                    return current
+                current = following
+        finally:
+            self._readonly_scan_assigned_attrs = None
 
     def _collect_assigned(self, stmts: list[ast.stmt], attrs: set[str]) -> bool:
         """
@@ -957,12 +1011,6 @@ class _Lowerer:
         of the enclosing list unreachable -- without propagating that, an attribute assigned after such an ``if`` would
         be wrongly counted as written and lose its read-only fold.
         """
-
-        def record(targets: list[ast.expr]) -> None:
-            for leaf in (leaf for target in targets for leaf in _leaf_targets(target)):
-                if self._is_self_attr(leaf) and isinstance(leaf, ast.Attribute):
-                    attrs.add(leaf.attr)
-
         for stmt in stmts:
             match stmt:
                 case ast.Return():
@@ -970,9 +1018,9 @@ class _Lowerer:
                 case ast.If(test=test, body=body, orelse=orelse):
                     # Fold a statically-known guard to its live arm, as lowering does, so a write in the dead arm is not
                     # counted as an assignment (which would wrongly mark a read-only attribute as written and suppress a
-                    # later fold). Attribute leaves read as opaque while this set is being built (``_scanning_readonly
-                    # _attrs``), so an absorbing connective still folds but a value-dependent attribute condition is
-                    # conservatively descended on both arms.
+                    # later fold). The fixpoint judges read-only-ness against the PREVIOUS over-approximation
+                    # (``_attr_assigned_set``): a guard on an attribute absent from it -- or an absorbing connective --
+                    # folds, while a value-dependent guard whose attribute may yet be written is descended on both arms.
                     constant = self._static_condition(test)
                     if constant is not None:
                         if self._collect_assigned(body if constant else orelse, attrs):
@@ -997,9 +1045,9 @@ class _Lowerer:
                     self._collect_assigned(body, attrs)
                     self._collect_assigned(orelse, attrs)
                 case ast.Assign(targets=targets):
-                    record(targets)
+                    self._record_self_targets(targets, attrs)
                 case ast.AnnAssign(target=target) | ast.AugAssign(target=target):
-                    record([target])
+                    self._record_self_targets([target], attrs)
         return False
 
     def _lower_if(self, test: ast.expr, body: list[ast.stmt], orelse: list[ast.stmt]) -> bool:
@@ -1248,12 +1296,21 @@ class _Lowerer:
                 raise UnsupportedConstruct(f"unsupported constant {value!r}", self._loc(node))
             case ast.Name(id=name):
                 bound = self._env.get(name)
-                if bound is None:
-                    raise UnsupportedConstruct(
-                        f"unknown name {name!r} (only parameters and locally-assigned names are in scope)",
-                        self._loc(node),
-                    )
-                return bound
+                if bound is not None:
+                    return bound
+                if not self._is_local(name):
+                    # A module-level numeric/boolean constant resolves like a literal, mirroring Python's global lookup
+                    # for a name the function never binds (a local name never falls through here: an unbound local is an
+                    # error, not a silent reach for a same-named global). bool is checked before int (it is a subclass).
+                    glob = self._module_global(name)
+                    if isinstance(glob, bool):
+                        return _Scalar(self._builder.bool_const(glob))
+                    if isinstance(glob, (int, float)):
+                        return _Scalar(self._builder.float_const(float(glob)))
+                raise UnsupportedConstruct(
+                    f"unknown name {name!r} (only parameters, locals, and module-level numeric constants are in scope)",
+                    self._loc(node),
+                )
             case ast.List(elts=elts) | ast.Tuple(elts=elts):
                 return _Aggregate(tuple(self._lower_elements(elts)))
             case ast.Subscript(value=value, slice=index):
@@ -1271,6 +1328,8 @@ class _Lowerer:
                 return self._lower_bool(node)
             case ast.BinOp(left=left, op=ast.Pow(), right=right):
                 return _Scalar(self._lower_pow(left, right))
+            case ast.BinOp(op=ast.BitXor()):
+                return self._lower_bool(node)  # boolean exclusive-or; the only bitwise operator in the subset
             case ast.BinOp(left=left, op=op, right=right):
                 return self._apply_binop(op, self._lower_expr(left), self._lower_expr(right), self._loc(node))
             case ast.Compare() | ast.BoolOp():
@@ -1339,6 +1398,8 @@ class _Lowerer:
             if node.keywords or len(node.args) != 1 or isinstance(node.args[0], ast.Starred):
                 raise UnsupportedConstruct(f"np.{numpy_fn}() takes a single array-like argument", self._loc(node))
             return self._lower_expr(node.args[0])
+        if isinstance(func, ast.Attribute) and self._is_self_name(func.value):
+            return self._lower_method_call(node, func)
         # Resolve a bare name as Python does: a locally bound name shadows any global (and is not callable); a
         # user-defined global function shadows the built-in ``abs``; ``abs`` is a bare-name builtin, so a method-style
         # call such as ``x.abs(...)`` is never mistaken for it and falls through to the unsupported-call error.
@@ -1411,6 +1472,33 @@ class _Lowerer:
                 args.append(self._lower_expr(arg))
         return args
 
+    def _lower_method_call(self, node: ast.Call, func: ast.Attribute) -> _Value:
+        """
+        Inline a call to a method on the current instance (``self.method(...)``). The method is resolved through the
+        instance's class via the MRO (so an inherited method on a shared base resolves), and lowered with the caller's
+        module context kept, so its ``self.<attr>`` reads see the same state; a recursive call is rejected. A regular
+        method binds its first parameter to the receiver; a ``@staticmethod`` takes no receiver and binds all arguments.
+        Only ``self``-receiver calls reach here -- a foreign receiver is not a synthesizable value.
+        """
+        if func.attr in self._snapshot:
+            # A method and a staticmethod are NON-data descriptors, so a same-named instance attribute shadows them in
+            # Python's lookup: ``self.<attr>(...)`` would call the STORED value, not the class method. A stored
+            # attribute is not a synthesizable callable here, so reject rather than silently inline the shadowed method.
+            raise UnsupportedConstruct(
+                f"self.{func.attr}(...) resolves to a stored instance attribute, not a method", self._loc(node)
+            )
+        descriptor = self._class_mro_attr(func.attr)  # class MRO only: a metaclass method is not callable as self.m()
+        static_fn = descriptor.__func__ if isinstance(descriptor, staticmethod) else None
+        if isinstance(static_fn, types.FunctionType):
+            method, bound_self = static_fn, False  # a staticmethod takes no receiver
+        elif isinstance(descriptor, types.FunctionType):
+            method, bound_self = descriptor, True  # a regular method: its first parameter is the receiver
+        else:
+            raise UnsupportedConstruct(f"unsupported call to {func.attr!r}", self._loc(node))
+        if node.keywords:
+            raise UnsupportedConstruct(f"method {func.attr}() takes no keyword arguments", self._loc(node))
+        return self._inline(method, self._lower_args(node), self._loc(node), bound_self=bound_self)
+
     def _inline_call(self, callee: types.FunctionType, node: ast.Call) -> _Value:
         """Inline a pure global function: bind its parameters to the arguments and lower its body in a fresh scope."""
         if node.keywords:
@@ -1419,7 +1507,9 @@ class _Lowerer:
             )
         return self._inline(callee, self._lower_args(node), self._loc(node))
 
-    def _inline(self, callee: types.FunctionType, args: list[_Value], loc: SourceLocation) -> _Value:
+    def _inline(
+        self, callee: types.FunctionType, args: list[_Value], loc: SourceLocation, *, bound_self: bool = False
+    ) -> _Value:
         if callee in self._inlining:
             raise UnsupportedConstruct(f"recursive inlining of {callee.__name__}() is not supported", loc)
         fndef, lines, start, filename = _parse_fndef(callee)
@@ -1429,19 +1519,37 @@ class _Lowerer:
                 f"cannot inline {callee.__name__}(): variadic or keyword-only parameters are not supported", loc
             )
         params = [*decl.posonlyargs, *decl.args]
+        self_param: str | None = None
+        if bound_self:
+            if not params:
+                raise UnsupportedConstruct(f"method {callee.__name__}() must take 'self' as its first parameter", loc)
+            self_param = params[0].arg
+            params = params[1:]
         if len(params) != len(args):
             raise UnsupportedConstruct(
                 f"{callee.__name__}() takes {len(params)} positional arguments but {len(args)} were given", loc
             )
-        # The callee is pure: lower it in a fresh scope with no state context (an attribute access would fail name
-        # resolution), sharing the one HirBuilder so its ops intern/CSE into the same DAG. The caller's scope is
+        # Lower the callee in a fresh scope sharing the one HirBuilder so its ops intern/CSE into the same DAG. A plain
+        # function gets NO state context (an attribute access would fail name resolution); an instance method
+        # (``bound_self``) keeps the caller's instance/snapshot/state so its ``self.<attr>`` reads resolve against the
+        # same module -- its first parameter is the receiver, the rest bind to the arguments. The caller's scope is
         # captured and reinstalled as a unit, so no field can be silently saved-but-not-restored.
         outer = self._capture()
         self._inlining.add(callee)
         bindings = {param.arg: arg for param, arg in zip(params, args)}
-        self._install(_Scope.fresh(callee, bindings, lines, start, filename))
+        # An instance method inherits the caller's scope as its state context; a pure function gets none.
+        context = outer if bound_self else None
+        self._install(_Scope.fresh(callee, bindings, lines, start, filename, context=context, self_name=self_param))
         self._local_names[callee] = self._collect_local_names(fndef)
         try:
+            if bound_self and self._all_assigned_attrs(fndef.body):
+                # A state-mutating helper would have to fold its writes into the entry method's state-slot analysis,
+                # which scans only the entry body; until that is needed, a called method is read-only over ``self``. The
+                # check is PURELY SYNTACTIC (any ``self.<attr> = ...`` anywhere): a reachability-folded check would
+                # mis-prune a write under a guard the helper sees as read-only but the entry treats as runtime state.
+                raise UnsupportedConstruct(
+                    f"method {callee.__name__}() assigns a self attribute; only the entry method may write state", loc
+                )
             self._lower_body(fndef)
             if self._return is None:
                 raise UnsupportedConstruct(f"inlined {callee.__name__}() must end in a 'return'", loc)
@@ -1514,6 +1622,11 @@ class _Lowerer:
         match node:
             case ast.Constant(value=(int() | float()) as value) if not isinstance(value, bool):
                 return float(value)
+            case ast.Name(id=name) if not self._is_local(name):
+                # A module-level numeric constant (int or float, including a numpy float); ``isinstance`` matches the
+                # value-position resolution in ``_lower_expr`` so a global folds the same way in both.
+                glob = self._module_global(name)
+                return float(glob) if isinstance(glob, (int, float)) and not isinstance(glob, bool) else None
             case ast.UnaryOp(op=ast.USub(), operand=operand):
                 inner = self._static_float(operand)
                 return None if inner is None else -inner
@@ -1533,11 +1646,11 @@ class _Lowerer:
                     case _:
                         return None
             case _:
-                if self._is_self_attr(node) and not self._scanning_readonly_attrs:
+                if self._is_self_attr(node):
                     assert isinstance(node, ast.Attribute)
-                    attr_value = self._snapshot.get(node.attr)
+                    attr_value = self._readonly_snapshot_value(node.attr)
                     if isinstance(attr_value, (int, float)) and not isinstance(attr_value, bool):
-                        return float(attr_value) if node.attr not in self._assigned_attrs else None
+                        return float(attr_value)
                 integer = self._static_int(node)
                 return None if integer is None else float(integer)
 
@@ -1578,10 +1691,20 @@ class _Lowerer:
         if relop is None:
             raise UnsupportedConstruct(f"unsupported comparison operator {type(op).__name__}", loc)
         left_id, right_id = self._scalar(left, loc), self._scalar(right, loc)
-        if isinstance(self._builder.type_of(left_id), BoolType) or isinstance(
-            self._builder.type_of(right_id), BoolType
-        ):
-            raise UnsupportedConstruct("comparison operands must be floating-point, not boolean", loc)
+        left_bool = isinstance(self._builder.type_of(left_id), BoolType)
+        right_bool = isinstance(self._builder.type_of(right_id), BoolType)
+        if left_bool and right_bool:
+            # Boolean equality maps onto the existing combinational gates: ``a != b`` is the exclusive-or, ``a == b`` is
+            # its negation (xnor). Ordering (``<``/``<=``/``>``/``>=``) on booleans is rejected as meaningless here.
+            if isinstance(op, ast.NotEq):
+                return _Scalar(self._builder.operation(BoolXor(), [left_id, right_id]))
+            if isinstance(op, ast.Eq):
+                return _Scalar(
+                    self._builder.operation(BoolNot(), [self._builder.operation(BoolXor(), [left_id, right_id])])
+                )
+            raise UnsupportedConstruct("booleans compare only with == and != (ordering is floating-point only)", loc)
+        if left_bool or right_bool:
+            raise UnsupportedConstruct("comparison operands must be both boolean or both floating-point", loc)
         return _Scalar(self._builder.operation(FloatRelational(relop), [left_id, right_id]))
 
     def _lower_bool(self, node: ast.expr) -> _Value:
@@ -1603,6 +1726,11 @@ class _Lowerer:
                 return self._lower_connective(values, BoolOr(), absorbing=True)
             case ast.UnaryOp(op=ast.Not(), operand=operand):
                 return _Scalar(self._builder.operation(BoolNot(), [self._bool_scalar(operand)]))
+            case ast.BinOp(op=ast.BitXor(), left=left, right=right):
+                # ``a ^ b`` is the only bitwise operator in the subset: a combinational boolean exclusive-or (the
+                # parity primitive). Both operands are pure booleans, always evaluated; a non-boolean operand is
+                # rejected by ``_bool_scalar``.
+                return _Scalar(self._builder.operation(BoolXor(), [self._bool_scalar(left), self._bool_scalar(right)]))
             case ast.Compare(left=left, ops=ops, comparators=comparators):
                 return self._lower_compare_chain(left, ops, comparators, self._loc(node))
             case _:
@@ -1774,6 +1902,14 @@ class _Lowerer:
         """Whether ``name`` is bound (parameter or assignment target) in the function currently being lowered."""
         return name in self._local_names[self._fn]
 
+    def _module_global(self, name: str) -> object:
+        """
+        The value ``name`` is bound to in the synthesized function's module globals, or ``_ABSENT`` if unbound. The one
+        source for module-constant lookup; callers gate on ``not _is_local(name)`` first (a local binding shadows the
+        global) and apply their own type filter (the int/bool/float positions accept different subsets).
+        """
+        return self._fn.__globals__.get(name, _ABSENT)
+
     def _collect_written_attrs(self, fndef: ast.FunctionDef) -> None:
         """
         Find the instance attributes the method assigns on any reachable path; these become persistent state, the rest
@@ -1843,6 +1979,15 @@ class _Lowerer:
                     continue
                 assert isinstance(target, ast.Attribute)
                 attr = target.attr
+                if self._is_class_data_descriptor(attr):
+                    # Python routes ``self.<name> = ...`` through a class data descriptor (e.g. a property setter) even
+                    # when ``__dict__`` holds a same-named entry (data-descriptor precedence). Treating the write as a
+                    # plain state-slot store would silently diverge; reject it (descriptor writes are unsupported).
+                    raise UnsupportedConstruct(
+                        f"self.{attr} is a class data descriptor; assignment through a descriptor is not supported "
+                        "(only direct instance attributes hold persistent state)",
+                        self._loc(target),
+                    )
                 if attr not in self._snapshot:
                     raise UnsupportedConstruct(
                         f"attribute self.{attr} is assigned but not initialized on the instance "
@@ -1884,6 +2029,87 @@ class _Lowerer:
             and node.value.id == self._self_name
         )
 
+    def _is_self_name(self, node: ast.expr) -> bool:
+        return self._self_name is not None and isinstance(node, ast.Name) and node.id == self._self_name
+
+    def _check_standard_attribute_access(self) -> None:
+        """
+        Reject an instance whose class overrides the attribute-access protocol. The state model assumes ``self.<attr>``
+        reads and writes go straight to the instance ``__dict__`` (or a supported ``@property``); a custom
+        ``__getattribute__``, ``__getattr__``, ``__setattr__``, or ``__delattr__`` routes them through arbitrary code
+        instead, which the model cannot mirror and would silently diverge from. These four ARE the whole protocol, so
+        rejecting any non-``object`` override of them closes the category rather than one instance of it.
+        """
+        for name in ("__getattribute__", "__getattr__", "__setattr__", "__delattr__"):
+            for klass in type(self._instance).__mro__:
+                if name in klass.__dict__:
+                    if klass is not object:
+                        raise UnsupportedConstruct(
+                            f"the synthesized class overrides {name}; only standard instance-attribute access is "
+                            "supported (a custom attribute-access protocol cannot be modeled as persistent state)"
+                        )
+                    break
+
+    def _class_mro_attr(self, attr: str) -> object:
+        """
+        The class variable named ``attr`` as it governs ``self.<attr>``: the first ``klass.__dict__[attr]`` along the
+        instance's class MRO, or ``_ABSENT``. This is exactly CPython's instance-attribute class-variable lookup, with
+        the metaclass excluded -- a metaclass descriptor governs ``Class.attr``, not instance access, so it must not be
+        consulted here (``inspect.getattr_static(type(instance), attr)`` would, and would mistake it for one).
+        """
+        if self._instance is not None:
+            for klass in type(self._instance).__mro__:
+                if attr in klass.__dict__:
+                    return klass.__dict__[attr]
+        return _ABSENT
+
+    def _class_property_descriptor(self, attr: str) -> property | None:
+        """
+        The class ``property`` descriptor backing ``attr`` (whose ``fget`` is its getter), or None if ``attr`` is not a
+        property. A property is the one descriptor the reader supports -- ``_read_attr`` inlines its getter, like a
+        zero-argument method -- so a read-only computed value reads as ``self.<name>``; any other data descriptor is
+        rejected (``_is_class_data_descriptor``), and a property is opaque to compile-time folding (always read via its
+        getter, never as a stored snapshot value).
+        """
+        descriptor = self._class_mro_attr(attr)
+        return descriptor if isinstance(descriptor, property) else None
+
+    def _is_class_data_descriptor(self, attr: str) -> bool:
+        """
+        Whether ``attr`` resolves to a class DATA descriptor -- one whose type defines ``__set__`` or ``__delete__`` (a
+        ``property`` is one). Python resolves such a name through the descriptor for both read and write, taking
+        precedence over any same-named instance ``__dict__`` entry, so that entry is dead state: it must never be folded
+        as a stored value (``_readonly_snapshot_value``), written as a state slot (``_scan_attr_writes``), or read as
+        one (``_read_attr``). A non-data descriptor (a method, ``staticmethod``, ``cached_property``) or a plain class-
+        attribute value is instead shadowed BY the instance entry, which therefore IS the live value and stays state.
+        """
+        descriptor_type = type(self._class_mro_attr(attr))
+        return hasattr(descriptor_type, "__set__") or hasattr(descriptor_type, "__delete__")
+
+    def _attr_assigned_set(self) -> set[str]:
+        """
+        The attribute set against which static evaluation judges read-only-ness. While the read-only fixpoint iterates
+        it is the previous iteration's over-approximation (an attribute absent from it is provably never assigned, so a
+        condition on it folds soundly); outside the scan it is the finalized assigned set. One source of truth shared by
+        ``_static_int``, ``_static_bool``, and ``_static_float`` so all three fold a read-only attribute identically.
+        """
+        return (
+            self._readonly_scan_assigned_attrs
+            if self._readonly_scan_assigned_attrs is not None
+            else self._assigned_attrs
+        )
+
+    def _readonly_snapshot_value(self, attr: str) -> object:
+        """
+        The reset-snapshot value of a self attribute eligible for compile-time folding, or ``_ABSENT`` when none is. An
+        attribute folds only if it is never assigned on a reachable path (``_attr_assigned_set``) and is not a class
+        data descriptor (read through the descriptor, never as a stored value -- ``_is_class_data_descriptor``). Shared
+        by ``_static_int``, ``_static_bool``, and ``_static_float`` so all three fold a read-only attribute the same.
+        """
+        if attr in self._attr_assigned_set() or self._is_class_data_descriptor(attr):
+            return _ABSENT
+        return self._snapshot.get(attr, _ABSENT)
+
     def _attr_of(self, target: ast.Attribute) -> str:
         if not self._is_self_attr(target):
             raise UnsupportedConstruct(
@@ -1903,6 +2129,22 @@ class _Lowerer:
             self._state_env[attr] = shape.compose(reads)
 
     def _read_attr(self, target: ast.Attribute) -> _Value:
+        if self._is_self_attr(target):
+            # A ``self.<name>`` whose name is a property (not a stored attribute) inlines the property's getter, like a
+            # zero-argument method call -- so a read-only computed value (e.g. one derived from frozen configuration)
+            # reads as ``self.<name>`` rather than a recomputed expression at every use.
+            descriptor = self._class_property_descriptor(target.attr)
+            if descriptor is not None:
+                if not isinstance(descriptor.fget, types.FunctionType):
+                    raise UnsupportedConstruct(f"self.{target.attr} has no plain-Python getter", self._loc(target))
+                return self._inline(descriptor.fget, [], self._loc(target), bound_self=True)
+            if self._is_class_data_descriptor(target.attr):
+                # Any other data descriptor (a custom ``__get__``/``__set__``) shadows the ``__dict__`` entry for reads
+                # too; its getter is arbitrary code, not a stored value, so reading it as a state slot would diverge.
+                raise UnsupportedConstruct(
+                    f"self.{target.attr} is a class data descriptor; only @property reads are supported",
+                    self._loc(target),
+                )
         attr = self._attr_of(target)
         shape = self._shape(attr)
         if attr in self._state_order:

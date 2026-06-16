@@ -9,6 +9,7 @@ from .._hir import (
     BoolSelect,
     BoolToFloat,
     BoolType as HirBoolType,
+    BoolXor,
     Branch,
     Const,
     FloatAbs,
@@ -42,6 +43,7 @@ from .._operators import (
     BoolOrOperator,
     BoolSelectOperator,
     BoolToFloatOperator,
+    BoolXorOperator,
     FloatHardwareOperator,
     FloatSignControl,
     FloatToBoolOperator,
@@ -245,6 +247,9 @@ class _LoweringContext:
                 return True
             case Operation(operator=BoolOr() as semantic, operands=(a, b)):
                 self._lower_bool_logic(old_id, _select_hardware(semantic, BoolOrOperator()), [a, b])
+                return True
+            case Operation(operator=BoolXor() as semantic, operands=(a, b)):
+                self._lower_bool_logic(old_id, _select_hardware(semantic, BoolXorOperator()), [a, b])
                 return True
             case Operation(operator=BoolSelect() as semantic, operands=(cond, a, b)):
                 # The boolean if-conversion mux: a NOT chain on the condition or either arm folds into that operand's

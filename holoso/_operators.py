@@ -516,7 +516,7 @@ class FCmpOperator(FloatHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class BoolLogicOperator(InlineHardwareOperator, ABC):
     """
-    A boolean-logic operator (AND/OR): a plain ``& |`` gate folded into its boolean register's write. Never
+    A boolean-logic operator (AND/OR/XOR): a plain ``& | ^`` gate folded into its boolean register's write. Never
     added to :class:`OpConfig` -- it has no module and no configuration.
     """
 
@@ -553,6 +553,23 @@ class BoolOrOperator(BoolLogicOperator):
     def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
         a, b = operands
         return (bool(a) or bool(b),)
+
+
+@dataclass(frozen=True, slots=True)
+class BoolXorOperator(BoolLogicOperator):
+    mnemonic: ClassVar[str] = "bxor"
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((BoolType(), BoolType()), (BoolType(),))
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        a, b = operand_nets
+        return f"{a} ^ {b}"
+
+    def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
+        a, b = operands
+        return (bool(a) != bool(b),)
 
 
 @dataclass(frozen=True, slots=True)

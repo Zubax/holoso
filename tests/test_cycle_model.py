@@ -30,6 +30,7 @@ import poly3  # noqa: E402
 from cordic_sincos import CordicSinCos  # noqa: E402
 from ekf1_stateless import update_x_P  # noqa: E402
 from iir1_lpf import IIR1LPF  # noqa: E402
+from majority_voter import MajorityVoter  # noqa: E402
 from octave_index import octave_index  # noqa: E402
 from phase_frequency_detector import PhaseFrequencyDetector  # noqa: E402
 from quadrature_encoder import QuadratureEncoder  # noqa: E402
@@ -150,12 +151,17 @@ _WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[l
     "quadrature_encoder": (
         lambda: QuadratureEncoder().__call__,
         [[_T, _F], [_T, _T], [_F, _F], [_F, _T], [_T, _T], [_F, _F]],
-        13,
+        5,
     ),
     "phase_frequency_detector": (
         lambda: PhaseFrequencyDetector().__call__,
         [[_T, _F, _F], [_F, _T, _F], [_T, _T, _F], [_F, _F, _T], [_T, _F, _F], [_F, _F, _T]],
         5,
+    ),
+    "majority_voter": (
+        lambda: MajorityVoter().__call__,
+        [[_T, _T, _T, _F, _F, _F], [_T, _T, _T, _T, _T, _T], [_T, _F, _T, _F, _T, _F], [_F, _T, _T, _T, _T, _T]],
+        20,
     ),
     "recip_newton": (lambda: NewtonReciprocal().__call__, [[0.5], [1.0], [2.0], [1.7], [2.9], [0.35]], 244),
     "remainder": (

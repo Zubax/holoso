@@ -468,21 +468,22 @@ def test_dead_assignment_after_return_does_not_suppress_fold() -> None:
     assert len(hir.blocks) == 1  # no runtime branch emitted
 
 
-def test_boolean_comparison_operand_is_rejected() -> None:
-    # Regression (Codex): comparing booleans (e.g. `self.flag == True`) must raise a clear UnsupportedConstruct, not an
-    # internal error from feeding a boolean into the float comparator.
-    class BoolCompare:
-        def __init__(self) -> None:
-            self.flag = False
-            self.y = 0.0
+def test_boolean_ordering_and_mixed_comparison_are_rejected() -> None:
+    # Booleans compare only with == and != (which lower to xnor/xor; see tests/test_language_features.py). Ordering on
+    # booleans, and a mixed boolean/float comparison, remain rejected with a clear UnsupportedConstruct.
+    class BoolOrdering:
+        def __call__(self, a: bool, b: bool) -> bool:
+            return a < b  # ordering on booleans is meaningless
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
-            if self.flag == True:  # noqa: E712 -- exercising the rejection
-                self.y = x
-            return self.y
+    with pytest.raises(UnsupportedConstruct, match="ordering"):
+        lower(BoolOrdering().__call__)
 
-    with pytest.raises(UnsupportedConstruct, match="floating-point"):
-        lower(BoolCompare().__call__)
+    class MixedComparison:
+        def __call__(self, flag: bool, x: float) -> bool:
+            return flag == x  # a boolean compared against a float
+
+    with pytest.raises(UnsupportedConstruct, match="both boolean or both floating-point"):
+        lower(MixedComparison().__call__)
 
 
 def test_public_boolean_state_attribute_is_output() -> None:

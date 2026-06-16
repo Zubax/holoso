@@ -179,10 +179,19 @@ nested and single-starred targets, into locals or `self` attributes), elementwis
 aggregate) operate on aggregates and leave only scalar leaves in HIR -- the supported source is thus executable numpy.
 
 A pure function reachable through `__globals__` is inlined -- its body lowered in a fresh scope and its return
-consumed as an aggregate -- so kernels compose (the `ekf1_stateful` example inlines the stateless `update_x_P`).
-Name resolution follows Python: a local binding (parameter or any assignment target, including unpacked ones) shadows a
-same-named global, and a global that shadows a built-in or intrinsic is honored only when it is callable -- a
-non-callable shadow (e.g. `abs = 5`) is rejected rather than silently lowered to the built-in it spells.
+consumed as an aggregate -- so kernels compose (the `ekf1_stateful` example inlines the stateless `update_x_P`). A
+method call on the synthesized instance (`self.helper(...)`) is inlined the same way but with the instance context
+kept, so the callee's own `self.<attr>` reads resolve; the method is found through the class MRO, so a helper on a
+shared base is inherited (the `uart` example factors `_parity_bit`/`_last_index` onto a base `_UartFrame`), a
+`@staticmethod` binds all its arguments with no receiver (the `majority_voter` example's `_majority`), and a
+`@property` read inlines its getter -- a property is a computed read-only value: assignment through a setter (and any
+other class data descriptor) is rejected, and the name is opaque to compile-time folding. A
+called method may read `self` but not write it -- only the entry method owns the state-slot analysis. Name resolution
+follows Python: a local binding (parameter or any assignment target, including unpacked ones) shadows a same-named
+global; a module-level
+numeric or boolean constant resolves in a value position like a literal; and a global that shadows a built-in or
+intrinsic is honored only when it is callable -- a non-callable shadow (e.g. `abs = 5`) is rejected rather than silently
+lowered to the built-in it spells.
 
 Positional and keyword-only parameters both become input ports. Parameters annotated as `bool` become 1-bit boolean
 ports; unannotated and float-annotated scalar parameters become floating-point ports. Reductions (`max`, `argmax`,
@@ -220,7 +229,7 @@ phi([(pred_block, value)])        # SSA merge
 # pure semantic operations (generic; selected into concrete hardware by a later pass)
 operation(operator, operands)      # float_add, float_mul, float_div, float_neg, float_abs, float_mul_pow2, ...
 relational(op, a, b) -> bool      # lt, le, eq, ...  (implemented; chained a<b<c desugars to band of the links)
-boolean(op, ...)     -> bool      # and/or are combinational gates; not folds into consumers; xor not yet
+boolean(op, ...)     -> bool      # and/or/xor are combinational gates (xor is `^`); `==`/`!=` on bools are xnor/xor
 cast(a, to_ty)                    # bool(x) / float(cond)  (implemented as combinational float<->bool casts)
 select(cond, a, b)                # DATA mux (not control flow), produced by diamond if-conversion; a conditional
                                   # expression first lowers to branch + typed phi and may then convert (see below)

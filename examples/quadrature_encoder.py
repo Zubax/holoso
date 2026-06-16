@@ -15,8 +15,8 @@ class QuadratureEncoder:
         self._b: bool = initial_b
 
     def __call__(self, a: bool, b: bool, /) -> tuple[bool, bool, bool]:
-        changed_a = (a and not self._a) or ((not a) and self._a)
-        changed_b = (b and not self._b) or ((not b) and self._b)
+        changed_a = a != self._a  # an input edge: the sample differs from the previous one (lowers to an exclusive-or)
+        changed_b = b != self._b
         step = False
         forward = True
         fault = False
@@ -26,7 +26,7 @@ class QuadratureEncoder:
             self._b = b
         elif changed_a or changed_b:
             step = True
-            forward = (a and self._b) or (not a and not self._b)
+            forward = a == self._b  # direction: forward iff the changed line now matches the other channel (xnor)
             self._a = a
             self._b = b
         return step, forward, fault

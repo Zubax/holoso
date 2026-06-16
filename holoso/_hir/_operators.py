@@ -248,6 +248,25 @@ class BoolOr(Operator):
 
 
 @dataclass(frozen=True, slots=True)
+class BoolXor(Operator):
+    """A boolean exclusive-or ``a ^ b`` (both operands genuine booleans); the parity primitive."""
+
+    mnemonic: ClassVar[str] = "bxor"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _bool_signature(2)
+
+    def fold_constants(self, operands: list[Const]) -> Const:
+        a, b = [_bool_const(operand) for operand in operands]
+        return BoolConst(a.value != b.value)
+
+    def identity(self) -> Const:
+        return BoolConst(False)  # x ^ False == x (there is no absorbing element: x ^ True == ~x, not a constant)
+
+
+@dataclass(frozen=True, slots=True)
 class BoolNot(Operator):
     """A boolean negation ``not a``."""
 

@@ -25,6 +25,7 @@ from ._operators import (
     BoolOr as BoolOr,
     BoolSelect as BoolSelect,
     BoolToFloat as BoolToFloat,
+    BoolXor as BoolXor,
     FloatAbs as FloatAbs,
     FloatAdd as FloatAdd,
     FloatDiv as FloatDiv,
