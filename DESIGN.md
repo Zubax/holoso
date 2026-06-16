@@ -337,12 +337,19 @@ a float comparison feeding a bool->float cast feeding a float multiply) schedule
 for physical instances through per-instance busy windows (an instance accepts a new firing every
 `initiation_interval` cycles -- 1 for today's fully pipelined operators; the comparator is ordinary in this regard);
 inline firings have no contention. The numerical model evaluates the whole block in one commit-sorted pass so a
-float op reading a cast result reads it after it is written. Timing is a property of the register bank, never of the
-individual operator: the wide bank reads through a read latch and writes through a writeback latch, while the
-boolean bank is latch-free -- a boolean result is written directly at its microcode-gated commit step and is
-readable the next step, and an inline op reads all its operands on the single step its write fires; a bool->float
-result lands in a wide register on the wide bank's ordinary landing. The bank-true dependency edges this yields (see
-Scheduler) let boolean-logic and cast chains schedule back-to-back, which directly shortens logic-dense kernels. The
+float op reading a cast result reads it after it is written. The cycle-accurate timing model (`holoso/_lir/_ir.py`)
+is built from four named primitives, never per-case constants: a global `FETCH_LAG` (the microcode fetch leads the
+datapath), a per-bank read latch and writeback latch (the wide bank has both, presenting a read address one step
+early and registering a result one step before the array write; the latch-free boolean bank has neither), and a
+read-first edge (a register read sees the value written one step earlier, so any result is readable one step after
+it is written). The operator's latency is the orthogonal pipeline depth: a pooled instance has its stage count, an
+inline combinational op has none -- latency 0, since its register cycle is the read-first edge, not a stage. Every
+landing/read/fire/writeback/boundary helper derives from this one set, so the two banks and the pooled/inline classes
+are uniform instances, not hand-coded cases. The bank-true dependency edges this yields (see Scheduler) let
+boolean-logic and cast chains schedule back-to-back, which directly shortens logic-dense kernels. An inline op also
+has no read latch, so it issues from a block's first control word (cycle 0), reclaiming the slot a pooled op must
+reserve for its early read address -- except on the entry block's `ucode[0]`, the accept-handshake slot the sequencer
+re-fires during the `in_valid` wait, where an op producing a persistent-state live-out stays off the first word. The
 comparison/connective/cast examples (`pid`, `schmitt_trigger`, `signal_window`, `remainder`) synthesize and
 cosimulate bit-exactly like `iir1_lpf`.
 
@@ -523,15 +530,27 @@ CFG backend (`if`/`else`, comparisons, unrolled `for`, and back-edge `while`).
 Blocks are laid out contiguously in reverse-postorder with the single canonical `Ret` forced last as the out_valid
 boundary (so a loop body, a DFS leaf via its back edge, stays below it); a back-edge is a jump to a lower address.
 Each block spans `term_offset + 1` fetch PCs and its terminator redirects the fetch PC at `term_offset` via a small
-`case(pc)` in `next_pc` that, for a `branch`, reads the condition's 1-bit register (`bregs`). `term_offset` is normally
-the drained boundary `boundary_step(block_makespan, wide_resident)`, which is bank-aware: a block pays the latched wide
-landing if it holds any wide value at its boundary (a float def, a float phi-arm install, or a float output/state
-live-out at `Ret`) OR carries any tail install -- a phi copy, a boolean write, or a const-branch materialization is a
-pc-gated copy that lands one step LATER than a direct bank result, at the wide boundary regardless of its register's
-bank, so the terminator must not redirect before it lands. Only an install-free, float-free boundary lands a step
-earlier on the latch-free boolean bank (a comparator branch, the all-boolean `Ret` of a fully-coalesced kernel such as
-the quadrature encoder). Cross-block software pipelining shrinks `term_offset` further below this boundary (see below)
-so a block's tail overlaps its successor. A phi (and each persistent slot's live-out) is resolved at register
+`case(pc)` in `next_pc` that, for a `branch`, reads the condition's 1-bit register (`bregs`). `term_offset` is the
+latest cycle a value still LANDS in the block's frame -- the boundary must cover every landing the block does not
+forward to a successor. A block that does in-frame BOUNDARY WORK pays the drained boundary
+`boundary_step(block_makespan, wide_resident)`; a block whose boundary values are all already RESIDENT (produced and
+landed in predecessor blocks) pays no drain at all and its terminator offset is just the latest spill-in landing it
+still receives, or 0. The `octave_index`, `recip_newton`, and `quadrature_encoder` drain-only `Ret`s are the latter
+case: the loop body (or the predecessor diamond) produces every output and persistent value, which the `Ret` reads
+combinationally at its own base PC, so `out_valid` asserts there with no phantom drain for a value that never commits in
+the frame. A block has boundary work when it issues operations, carries a tail install, reads the INPUT loads (only the
+entry block does -- inputs land in-frame at cycle 1, invisible to the operation schedule, so the entry always drains),
+or is the `Ret` of a stateful FLOAT kernel (a non-coalesced float state slot installs its live-out wide at the boundary,
+and coalescing is not yet decided at this layout phase, so every stateful float `Ret` conservatively pays the wide
+drain; always correctness-safe). The work drain is bank-aware: it pays the latched wide landing only when a wide value
+actually LANDS in its frame -- a float def, a float-arm predecessor (conservatively, whether or not the arm later
+coalesces), a float value spilling in from an overlapping predecessor, the stateful-float `Ret`, OR any tail install
+(a phi copy, a boolean write, or a const-branch
+materialization is a pc-gated copy that lands one step LATER than a direct bank result, at the wide boundary regardless
+of its register's bank, so the terminator must not redirect before it lands). An install-free, float-free work boundary
+(a comparator branch, the bool-work `Ret` of a fully-boolean kernel such as the phase-frequency detector) lands a step
+earlier on the latch-free boolean bank. Cross-block software pipelining shrinks `term_offset` further below this
+boundary (see below) so a block's tail overlaps its successor. A phi (and each persistent slot's live-out) is resolved at register
 allocation as above: coalesced onto the merged register when its live range does not overlap, else installed by a
 pc-gated copy at the predecessor's tail (a parallel copy bundle, read-first, so a swap is correct).
 `min_initiation_interval` is the shortest-path lower bound (exact when the kernel has a single forward path);
@@ -662,14 +681,18 @@ pairwise, from the producer's result-bank landing and the consumer's read mechan
 bank charges its writeback latch and read-first edge against the consumer's read latch (edge 3 for a float-arithmetic
 consumer); the latch-free boolean bank only the read-first edge, against an inline consumer's fire-step read (edge 0
 for a logic op reading a comparison -- back-to-back), clamped so an inline consumer always commits strictly after its
-producer (the commit-ordered model evaluation relies on that). Inputs are the exception: they load directly into the
-array at the accept edge and the microcode fetch lag hides that load before the first control word reaches the
-datapath, so an input-reading op waits only `INPUT_DEPENDENCY_EDGE`.
+producer (the commit-ordered model evaluation relies on that). Block-resident operands -- inputs, state reads, phis,
+and drained-in results -- load into the array before the block's first control word reaches the datapath, so a
+consumer reads them from cycle 0; an op therefore issues from that first word. Two hardware constraints raise an op's
+earliest issue to cycle 1: a pooled op presents its read address one step early (its read-address word must stay
+in-block), and an entry-block op producing a persistent-state live-out must stay off `ucode[0]`, which the sequencer
+re-fires during the `in_valid` accept wait (a cycle-0 state write would be re-driven with stale inputs).
 
 ```
-for cycle = 1, 2, ...:                          # cycle 0 accepts/loads inputs
+for cycle = 0, 1, 2, ...:                       # the block's control words, from its first (entry: ucode[0] accepts)
     ready = unscheduled ops with every operator-operand committed (commit + dependency_edge(producer, consumer) <=
-            cycle, the edge derived per bank pair); and, if the op reads an input, cycle >= INPUT_DEPENDENCY_EDGE
+            cycle, the edge per bank pair); and cycle >= 1 for a pooled op (early read address) or an entry-block
+            persistent-state-live-out producer (the accept-dwell guard)
     for op in ready by critical_path desc:
         if an instance of op's concrete hardware operator is free this cycle:
             bind op to that instance; issue_cycle[op] = cycle

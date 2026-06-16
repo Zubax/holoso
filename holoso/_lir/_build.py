@@ -57,11 +57,34 @@ def build(mir: Mir, module_name: str) -> Lir:
     if not mir.outputs:
         raise UnsupportedConstruct("Synthesized kernel must produce at least one output value")
     lir = _build_program(mir, module_name)
+    _assert_entry_dwell_safe(lir)
     names = [port.name for port in lir.ports]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise UnsupportedConstruct(f"duplicate port name(s) in the module interface: {', '.join(duplicates)}")
     return lir
+
+
+def _assert_entry_dwell_safe(lir: Lir) -> None:
+    """
+    Build-time invariant for the accept-dwell contract: no entry-block op issued on cycle 0 writes a persistent-state
+    register. The sequencer holds pc 0 while waiting for ``in_valid`` and re-fires ``ucode[0]`` each idle cycle, so a
+    cycle-0 write to a state register would be re-driven with stale inputs and corrupt the carried state. The hazard is
+    PRECLUDED structurally today -- an inline op writes a temporary (it never coalesces onto a state-slot register: only
+    instance-backed producers may, see the ``live_out in inst_of`` gate in the float-bank allocator), a pooled op is
+    floored to issue >= 1, and every state install is a pc-gated copy at the Ret (cycle >= 1) -- so it never trips. It
+    is kept as defense-in-depth because the dwell is invisible to BOTH validation paths (the cosim bench never delays
+    ``in_valid``; the model asserts it at once and keys cycle-0 ops at their read pc, never pc 0): a future change
+    that let an inline result reach a state register on cycle 0 would otherwise corrupt state silently. Raised
+    unconditionally (not via ``assert``, which ``python -O`` strips) so such a regression fails the build loudly.
+    """
+    entry = lir.blocks[lir.entry]
+    state_regs = {slot.reg for slot in lir.float_state_slots} | {slot.reg for slot in lir.bool_state_slots}
+    cycle0_writes = [w.dst for op in entry.ops if op.issue_cycle == 0 for w in op.writes]
+    cycle0_writes += [op.write.dst for op in entry.inline_ops if op.issue_cycle == 0]
+    for dst in cycle0_writes:
+        if dst in state_regs:
+            raise AssertionError(f"entry-block cycle-0 op writes persistent-state register {dst.stable_label}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,11 +240,26 @@ def _schedule_with_overlap(
         for target in targets:
             pred_count[target] += 1
     blocks_by_id = {block.id: block for block in mir.blocks}
-    # A wide value resident at a block's boundary forces the latched wide drain; a block carrying only boolean values
-    # drains one step earlier. A block holds a wide boundary value iff it defines a float value, installs a float phi
-    # arm at its tail (the copy lands wide), or is the Ret whose outputs/state live-outs include a float value.
+    # A wide value that LANDS in a block's frame forces the latched wide drain; a block whose boundary holds only
+    # boolean landings (or wide values RESIDENT from a predecessor, already landed) drains one step earlier. A block
+    # holds a wide landing iff it defines a float value, installs a float phi arm at its tail (the copy lands wide), a
+    # float value spills into it, or -- the conservative case below -- it is the Ret of a stateful float kernel. A float
+    # OUTPUT is NOT itself a wide landing: it is a combinational tap, wide-draining only when its value is produced
+    # in-frame (caught by ``block_operations``) or spills in, not when it is resident from a predecessor (the
+    # octave_index drain-only Ret), so the output does not appear here.
     float_arm_preds = {pred for phi in float_mir.phi_nodes.values() for pred, _arm, _cond in phi.arms}
-    ret_boundary_is_wide = bool(float_mir.outputs) or bool(float_mir.state_slots)
+    # ``ret_boundary_is_wide`` is a DELIBERATE conservative over-approximation, not a precise "lands in-frame" test: a
+    # NON-coalesced float state slot installs its live-out wide at the Ret boundary (read-first), but whether a slot
+    # coalesces is decided during allocation -- AFTER this layout pass -- so we cannot yet tell a coalesced (resident,
+    # no install) slot from a non-coalesced one. Charging the wide drain for every stateful float Ret is always
+    # correctness-safe (a later boundary only reads a value later, never wrong) and costs at most one cycle, only when a
+    # coalesced slot's live-out is resident at a drain-only Ret -- a case no current kernel hits.
+    ret_boundary_is_wide = bool(float_mir.state_slots)
+    # The persistent-state live-out values. A producer of one is dwell-guarded off the ENTRY block's ``ucode[0]`` as
+    # defense-in-depth: re-firing it during the accept dwell is harmless today (an inline producer writes a temporary,
+    # not the state register; see ``_assert_entry_dwell_safe``), but the guard keeps the producer off cycle 0 cheaply
+    # (cost-free on every current kernel) so the dwell, invisible to both validation paths, cannot bite a future change.
+    state_liveouts = frozenset(slot.live_out for slot in (*float_mir.state_slots, *bool_mir.state_slots))
     block_sched: dict[int, Schedule] = {}
     block_makespan: dict[int, int] = {}
     block_term_offset: dict[int, int] = {}
@@ -240,11 +278,13 @@ def _schedule_with_overlap(
             schedulable=set(float_mir.block_operations(block)) | set(bool_mir.block_operations(block)),
             entry_busy=inherited.entry_busy,
             livein_landing=livein_landing,
+            dwell_guarded=state_liveouts if bid == mir.entry else frozenset(),
         )
         block_sched[bid] = sched
         has_install = bid in has_install_blocks
         makespan = sched.makespan + (1 if has_install else 0)
         block_makespan[bid] = makespan
+        wide_cap = boundary_step(makespan, wide_resident=True)  # the latched wide landing of this block's makespan
         targets = succ[bid]
         overlaps = bool(targets) and not has_install and all(pred_count[target] == 1 for target in targets)
         if overlaps:
@@ -253,10 +293,10 @@ def _schedule_with_overlap(
             # floor is not locally known) the conservative wide drain -- NOT the bank-aware drained boundary. The
             # landings spill past it into the (single-predecessor) successors. The cap is the wide drain, which always
             # accommodates the floor (every control word commits by the makespan, so word + the error-latch slack fits
-            # within ``boundary_step(makespan, wide_resident=True)``); ``min`` is defensive. The bank-aware drain below
-            # governs only FULLY-DRAINED blocks -- a bool-only block branching on a live-in condition legitimately keeps
-            # the wide cap here, above its bool drain, so no ``term_offset <= bank-aware drain`` invariant holds.
-            cap = boundary_step(makespan, wide_resident=True)
+            # within ``wide_cap``); ``min`` is defensive. The bank-aware drain below governs only FULLY-DRAINED blocks --
+            # a bool-only block branching on a live-in condition legitimately keeps the wide cap here, above its bool
+            # drain, so no ``term_offset <= bank-aware drain`` invariant holds.
+            cap = wide_cap
             floor = 1
             for vid, issue in sched.issue_cycle.items():
                 word, _landing = _value_word_and_landing(mir, float_mir, vid, issue)
@@ -282,21 +322,37 @@ def _schedule_with_overlap(
             ), f"block {bid}: a control word sits past the wide drain"  # the cap accommodates the floor
             term_offset = min(floor, cap)
         else:
-            # A fully-drained block holds its boundary-resident values to the latched WIDE landing when ANY of them lands
-            # there: a float def or a float output/state live-out at the Ret (the wide bank's write-latch + read-first
-            # edge), OR -- regardless of bank -- ANY tail install (``has_install``: a phi copy, a boolean write, or a
-            # const-branch materialization). An install is a pc-gated copy that lands one step LATER than a direct bank
-            # result (``install_landing(copy_step_cycle(...))`` == the wide landing), so a block whose boolean condition
-            # or phi register is written by such an install must keep the wide drain or the terminator would read it one
-            # PC before it lands. Only an install-free, float-free block drains a step earlier on the latch-free boolean
-            # bank (a comparator branch, the all-boolean Ret of a fully-coalesced kernel).
-            wide_resident = (
-                has_install
-                or bool(float_mir.block_operations(block))
-                or bid in float_arm_preds
-                or (isinstance(block.terminator, MirRet) and ret_boundary_is_wide)
-            )
-            term_offset = boundary_step(makespan, wide_resident=wide_resident)
+            # A fully-drained block's terminator offset is the latest cycle a value LANDS in its frame: its own
+            # bank-aware work drain ``boundary_step(makespan, wide_resident)`` (DESIGN.md, "drained boundary", covers the
+            # wide-vs-bool bank choice) plus any spill-in it cannot forward (``max(work_drain, *livein_landing.values())``).
+            # A block with NO boundary work pays no drain -- a non-entry drain-only Ret reading already-resident outputs
+            # lands its boundary at cycle 0, not at the phantom ``boundary_step(0, ...)`` of a value that never commits.
+            #
+            # ``bid == mir.entry`` and ``ret_boundary_is_wide`` are work terms for landings INVISIBLE to the op schedule:
+            # the entry's cycle-1 input loads and a stateful-float Ret's wide state install. They cannot fold into a
+            # per-value landing ``max`` (the form the op landings take in the overlapping branch) because register
+            # allocation -- which places input lanes and state-slot installs -- runs AFTER this layout pass; they are
+            # irreducible block-granularity proxies, not avoidable special-casing.
+            ret_state_boundary = isinstance(block.terminator, MirRet) and ret_boundary_is_wide
+            if sched.issue_cycle or has_install or bid == mir.entry or ret_state_boundary:
+                wide_spills_in = any(vid in float_mir.operation_nodes for vid in livein_landing)
+                wide_resident = (
+                    has_install
+                    or bool(float_mir.block_operations(block))
+                    or bid in float_arm_preds
+                    or wide_spills_in
+                    or ret_state_boundary
+                )
+                work_drain = boundary_step(makespan, wide_resident=wide_resident)
+            else:
+                work_drain = 0
+            term_offset = max([work_drain, *livein_landing.values()])
+        # A block's drained boundary never exceeds the latched WIDE landing of its own makespan: the overlap floor is
+        # capped there (``min(floor, cap)``), and the fully-drained ``max(work_drain, spills)`` stays within it (a spill
+        # from an overlapping predecessor lands within the successor's wide cap). This invariant keeps a boundary state
+        # install -- placed at that wide drain -- a true boundary install read on the last_pc edge; a future overlap-bound
+        # change that stretched ``term_offset`` past it would silently turn that install early, sampling a stale source.
+        assert term_offset <= wide_cap, f"block {bid}: term_offset {term_offset} exceeds the wide drain {wide_cap}"
         block_term_offset[bid] = term_offset
         if overlaps:  # hand the spill residue to the (single-predecessor) successors this block uniquely reaches
             # Both the per-instance busy residue and the value landings cross the shrunk terminator into the successor
@@ -520,7 +576,7 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
         for bslot in bool_mir.state_slots
     ]
     outputs = _build_outputs(mir, float_mir, bool_mir, alloc, const_pool)
-    return Lir(
+    lir = Lir(
         module_name=module_name,
         instances=instances,
         float_consts=consts,
@@ -544,6 +600,16 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
         bool_regfile=BoolRegFileLayout(nreg=alloc.nbreg),
         bool_state_slots=bool_state_slots,
     )
+    # A non-coalesced float slot's writeback fires read-first at ``state_copy_step``, at last_pc for a boundary install or
+    # below it for an early one. A boundary that collapsed below the install would drop the writeback and freeze the
+    # persistent state; the per-block ``term_offset <= wide drain`` invariant in ``_schedule_with_overlap`` is the
+    # matching guard for the opposite slip (a boundary install degrading into an early one). Backstop, not a live failure.
+    for slot in lir.float_state_slots:
+        if slot.needs_copy:
+            assert (
+                lir.state_copy_step(slot) <= last_pc
+            ), f"state slot {slot.name!r} writeback at {lir.state_copy_step(slot)} lands past the boundary {last_pc}"
+    return lir
 
 
 def _bool_operand(bool_mir: MirBoolView, vid: ValueId, alloc: _Allocation, inversion: BoolInversion) -> BoolOperand:

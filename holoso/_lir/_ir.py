@@ -24,49 +24,91 @@ FETCH_STAGES = 3
 FETCH_LAG = FETCH_STAGES - 1
 
 
-# Executing-step (hardware) frame cycle offsets: the single source of truth shared by the LIR cycle helpers below, the
-# write timeline, the numerical model, the scheduler's dependency edges, and the register allocator, so a value's
-# landing/read/copy/boundary cycle is computed in exactly one place and the consumers cannot drift (the bug this
-# centralization prevents). Timing is a property of the REGISTER BANK and of the operation class (instance-backed vs
-# inline), never of an individual operator: the wide bank reads through a read latch and writes through a writeback
-# latch; the boolean bank is latch-free (results are written directly at their commit step and read directly).
+# The cycle-accurate timing model: one consistent physical story shared by the LIR cycle helpers below, the write
+# timeline, the numerical model, the scheduler's dependency edges, the register allocator, and the HTML report, so a
+# value's landing/read/copy/boundary cycle is computed in exactly one place and the consumers cannot drift.
+# It is built from primitives:
+#   - FETCH_LAG -- the microcode fetch leads the datapath by this many steps (a global frame offset);
+#   - a per-bank READ latch -- the wide bank presents an operand's read address one step early; the boolean bank reads
+#     latch-free on the in_valid step;
+#   - a per-bank WRITEBACK latch -- a wide result is registered one step before the array write; the boolean bank
+#     writes directly at its commit step;
+#   - READ_FIRST_EDGE -- a register read sees the value written one step earlier (write-then-read), so a result becomes
+#     readable one step after it is written, on either bank.
+# Timing is a property of the REGISTER BANK and of the operation class (instance-backed vs inline), never of an
+# individual operator; the operator's own LATENCY is the orthogonal pipeline depth (a pooled instance has L stages, an
+# inline combinational op has none).
+READ_FIRST_EDGE = 1
+
+
+@dataclass(frozen=True, slots=True)
+class BankTiming:
+    """
+    The latching of one register bank. ``read_latch`` is how many steps early a read address is presented (the wide
+    bank's read latch); ``writeback_latch`` is how many steps a result is registered before the array write (the wide
+    bank's writeback latch). The boolean bank is latch-free, so both are zero.
+    """
+
+    read_latch: int
+    writeback_latch: int
+
+
+WIDE_BANK = BankTiming(read_latch=1, writeback_latch=1)
+BOOL_BANK = BankTiming(read_latch=0, writeback_latch=0)
+
+
+def _bank(is_wide: bool) -> BankTiming:
+    return WIDE_BANK if is_wide else BOOL_BANK
+
+
+def landing_cycle(commit_cycle: int, bank: BankTiming) -> int:
+    """The cycle a result committed at ``commit_cycle`` becomes readable: writeback latch then read-first edge."""
+    return commit_cycle + FETCH_LAG + bank.writeback_latch + READ_FIRST_EDGE
+
+
+def read_cycle(issue_cycle: int, bank: BankTiming) -> int:
+    """The cycle an instance-backed operator samples a register operand on ``bank``: read latch presents it early."""
+    return issue_cycle + FETCH_LAG - bank.read_latch
+
+
 def wide_landing_cycle(commit_cycle: int) -> int:
-    """The cycle a wide result is readable in the array: its commit plus the write latch and the read-first edge."""
-    return commit_cycle + FETCH_LAG + 2
+    """The cycle a wide result is readable in the array: its commit plus the writeback latch and the read-first edge."""
+    return landing_cycle(commit_cycle, WIDE_BANK)
 
 
 def bool_landing_cycle(commit_cycle: int) -> int:
     """The cycle a boolean result becomes readable: written directly at its commit step, visible the next step."""
-    return commit_cycle + FETCH_LAG + 1
+    return landing_cycle(commit_cycle, BOOL_BANK)
 
 
 def pooled_wide_read_cycle(issue_cycle: int) -> int:
     """The cycle an instance-backed operator samples a wide operand -- the read latch presents the address early."""
-    return issue_cycle + FETCH_LAG - 1
+    return read_cycle(issue_cycle, WIDE_BANK)
 
 
 def pooled_bool_read_cycle(issue_cycle: int) -> int:
     """The cycle an instance-backed operator samples a boolean operand: latch-free, directly on its in_valid step."""
-    return issue_cycle + FETCH_LAG
+    return read_cycle(issue_cycle, BOOL_BANK)
 
 
 def inline_fire_cycle(commit_cycle: int, dst_is_wide: bool) -> int:
     """
     The cycle an inline combinational operation (boolean logic, a float<->bool cast) fires: it is one PC-gated
     statement that reads ALL its operands and writes its destination on this single step -- the commit step for a
-    boolean destination, one later for a wide one (aligned with the wide bank's write-latch write enables).
+    boolean destination, one later for a wide one (aligned with the destination bank's writeback latch).
     """
-    return commit_cycle + FETCH_LAG + (1 if dst_is_wide else 0)
+    return commit_cycle + FETCH_LAG + _bank(dst_is_wide).writeback_latch
 
 
 def pooled_writeback_word(commit_cycle: int, dst_is_wide: bool) -> int:
     """
-    The fetch step on which a pooled lane drives its write-enable/address microcode word: the wide bank one step after
-    the commit (the writeback latch), the latch-free boolean bank on the commit step itself. Shared by the emitter's
+    The FETCH-PC-frame step on which a pooled lane drives its write-enable/address microcode word: the commit step plus
+    the destination bank's writeback latch. This is the lone helper in the fetch-PC frame (no ``FETCH_LAG``) -- it
+    places the microcode word the sequencer fetches, not the step the datapath acts on it. Shared by the emitter's
     microcode (where the word is placed) and the overlap layout (which keeps every write word inside the block), so the
     two cannot drift -- the same single-source-of-truth contract as the landing/read helpers above.
     """
-    return commit_cycle + (1 if dst_is_wide else 0)
+    return commit_cycle + _bank(dst_is_wide).writeback_latch
 
 
 def operand_read_cycle(operator: HardwareOperator, issue_cycle: int) -> int:
@@ -89,8 +131,10 @@ def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: Ha
     """
     The minimum same-block scheduling distance from a producer's commit to a consumer's issue (``issue_consumer >=
     commit_producer + edge``), derived from the landing of the producer's tapped output port's bank and the
-    consumer's operand-read timing so the scheduler, the liveness views, and the model share one rule. The clamp
-    keeps an inline consumer's commit strictly after its producer's, which the model's commit-ordered evaluation
+    consumer's operand-read timing so the scheduler, the liveness views, and the model share one rule. The clamp's
+    floor ``READ_FIRST_EDGE - consumer.latency`` holds the consumer's COMMIT at least one read-first edge after the
+    producer's -- the same write-then-read edge a register read pays, expressed at commit level not read level -- so
+    an inline consumer (latency 0) commits strictly after its producer, which the model's commit-ordered evaluation
     relies on. The zero-offset evaluation below is exact because every cycle helper is affine in its cycle argument
     with unit slope, so the difference at zero is the frame-independent spacing; a helper that ever loses that
     affinity breaks this derivation. No pooled operator reads a boolean operand yet, ENFORCED here in lockstep with
@@ -99,19 +143,31 @@ def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: Ha
     both helpers at once.
     """
     producer_wide = isinstance(producer.signature.result_types[producer_port], FloatType)
-    landing = wide_landing_cycle(0) if producer_wide else bool_landing_cycle(0)
+    landing = landing_cycle(0, _bank(producer_wide))
     if isinstance(consumer, PooledHardwareOperator):
         assert producer_wide, f"{consumer.mnemonic}: pooled operators read only wide operands today"
         read = pooled_wide_read_cycle(0)
     else:
         dst_is_wide = isinstance(consumer.signature.result_types[0], FloatType)
         read = inline_fire_cycle(consumer.latency, dst_is_wide)
-    return max(landing - read, 1 - consumer.latency)
+    return max(landing - read, READ_FIRST_EDGE - consumer.latency)
 
 
 def copy_step_cycle(install_cycle: int) -> int:
-    """The step a non-coalesced slot writeback fires and samples its source."""
-    return install_cycle + FETCH_LAG + 1
+    """
+    The hardware fetch step on which a pc-gated install -- a non-coalesced slot writeback, a phi copy, or a boolean
+    write -- fires and combinationally samples its source register. ``install_cycle`` is the scheduler-frame placement
+    of the install (``makespan + 1`` at the boundary, earlier for an eagerly-installed float slot; see
+    ``FloatStateSlot.install_cycle``), not a commit or landing cycle. A copy is a latch-free reg->reg move -- it carries
+    no pooled read latch -- so it samples its source one READ_FIRST_EDGE past that placement in the executing frame,
+    beyond the FETCH_LAG shift. That edge is bank-INDEPENDENT (a register read sees the prior step's value on either
+    bank), which is why wide copies and boolean writes share this one formula; any bank-dependent writeback latch is
+    absorbed into ``install_cycle`` upstream, never charged here. The destination's own write-then-read edge is added
+    separately by ``install_landing``, giving the cosim-verified identity ``install_landing(copy_step_cycle(c)) ==
+    wide_landing_cycle(c)``: an install placed at ``c`` lands exactly where a direct wide result committed at ``c``
+    would, the coalescing equivalence the overlap layout relies on.
+    """
+    return install_cycle + FETCH_LAG + READ_FIRST_EDGE
 
 
 def install_landing(fire_step: int) -> int:
@@ -122,7 +178,7 @@ def install_landing(fire_step: int) -> int:
     through this one helper and cannot drift. A boundary slot install is the lone exception: it reads-then-writes at
     ``last_pc`` and does not pass through here.
     """
-    return fire_step + 1
+    return fire_step + READ_FIRST_EDGE
 
 
 def boundary_step(makespan: int, wide_resident: bool) -> int:
@@ -134,7 +190,7 @@ def boundary_step(makespan: int, wide_resident: bool) -> int:
     the overlap layout (the terminator offset), the liveness boundary, and the numerical model, so the per-bank drain
     cannot drift between them.
     """
-    return wide_landing_cycle(makespan) if wide_resident else bool_landing_cycle(makespan)
+    return landing_cycle(makespan, _bank(wide_resident))
 
 
 def successor_local_cycle(block_local_cycle: int, term_offset: int) -> int:

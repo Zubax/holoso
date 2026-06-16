@@ -51,6 +51,7 @@ import madd  # noqa: E402
 import poly3  # noqa: E402
 from cordic_sincos import CordicSinCos  # noqa: E402
 from iir1_lpf import IIR1LPF  # noqa: E402
+from latching_fault_register import LatchingFaultRegister  # noqa: E402
 from octave_index import octave_index  # noqa: E402
 from pid import PID  # noqa: E402
 from phase_frequency_detector import PhaseFrequencyDetector  # noqa: E402
@@ -285,6 +286,26 @@ _SPECS = [
             "ref_edge": bool(rng.integers(0, 2)),
             "fb_edge": bool(rng.integers(0, 2)),
             "clear": bool(rng.integers(0, 2)),
+        },
+        edge_values=(False, True),
+    ),
+    ExampleSpec(
+        name="latching_fault_register",
+        inputs=("overcurrent", "overvoltage", "overtemp"),
+        make_kernel=lambda: LatchingFaultRegister().__call__,
+        nominal={"overcurrent": False, "overvoltage": False, "overtemp": False},
+        manual=[
+            {"overcurrent": False, "overvoltage": False, "overtemp": False},  # idle -> nothing latched
+            {"overcurrent": True, "overvoltage": False, "overtemp": False},  # overcurrent trips -> latches
+            {"overcurrent": False, "overvoltage": False, "overtemp": False},  # transient gone, the latch holds
+            {"overcurrent": False, "overvoltage": True, "overtemp": False},  # overvoltage trips -> both latched
+            {"overcurrent": False, "overvoltage": False, "overtemp": True},  # overtemp trips -> all three latched
+            {"overcurrent": False, "overvoltage": False, "overtemp": False},  # all stay latched (cleared only by reset)
+        ],
+        draw_random=lambda rng: {
+            "overcurrent": bool(rng.integers(0, 2)),
+            "overvoltage": bool(rng.integers(0, 2)),
+            "overtemp": bool(rng.integers(0, 2)),
         },
         edge_values=(False, True),
     ),

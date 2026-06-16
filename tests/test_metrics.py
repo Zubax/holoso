@@ -43,6 +43,7 @@ from cordic_sincos import CordicSinCos  # noqa: E402
 from ekf1_stateful import Ekf1  # noqa: E402
 from ekf1_stateless import update_x_P  # noqa: E402
 from iir1_lpf import IIR1LPF  # noqa: E402
+from latching_fault_register import LatchingFaultRegister  # noqa: E402
 from octave_index import octave_index  # noqa: E402
 from phase_frequency_detector import PhaseFrequencyDetector  # noqa: E402
 from pid import PID  # noqa: E402
@@ -64,6 +65,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "schmitt_trigger": lambda: SchmittTrigger().__call__,
     "quadrature_encoder": lambda: QuadratureEncoder().__call__,
     "phase_frequency_detector": lambda: PhaseFrequencyDetector().__call__,
+    "latching_fault_register": lambda: LatchingFaultRegister().__call__,
     "recip_newton": lambda: NewtonReciprocal().__call__,
     "remainder": lambda: remainder,
     "octave_index": lambda: octave_index,
@@ -188,14 +190,17 @@ BASELINE: dict[str, Metrics] = {
     "pid": Metrics(False, nreg=9, bnreg=3, steering=10, copies=0, min_ii=40, last_pc=40, max_block_span=40),
     "schmitt_trigger": Metrics(False, nreg=1, bnreg=3, steering=2, copies=0, min_ii=7, last_pc=7, max_block_span=7),
     "quadrature_encoder": Metrics(
-        False, nreg=1, bnreg=8, steering=14, copies=4, min_ii=17, last_pc=27, max_block_span=9
+        False, nreg=1, bnreg=8, steering=14, copies=4, min_ii=12, last_pc=20, max_block_span=7
     ),
     "phase_frequency_detector": Metrics(
-        False, nreg=1, bnreg=8, steering=6, copies=0, min_ii=8, last_pc=8, max_block_span=8
+        False, nreg=1, bnreg=8, steering=6, copies=0, min_ii=6, last_pc=6, max_block_span=6
     ),
-    "recip_newton": Metrics(False, nreg=4, bnreg=1, steering=4, copies=2, min_ii=25, last_pc=51, max_block_span=25),
+    "latching_fault_register": Metrics(
+        False, nreg=1, bnreg=7, steering=4, copies=0, min_ii=6, last_pc=6, max_block_span=6
+    ),
+    "recip_newton": Metrics(False, nreg=4, bnreg=1, steering=4, copies=2, min_ii=21, last_pc=47, max_block_span=25),
     "remainder": Metrics(False, nreg=8, bnreg=4, steering=12, copies=2, min_ii=50, last_pc=71, max_block_span=22),
-    "octave_index": Metrics(False, nreg=3, bnreg=1, steering=6, copies=3, min_ii=22, last_pc=60, max_block_span=27),
+    "octave_index": Metrics(False, nreg=3, bnreg=1, steering=6, copies=3, min_ii=18, last_pc=56, max_block_span=27),
     "cordic_sincos": Metrics(
         False, nreg=9, bnreg=3, steering=54, copies=0, min_ii=150, last_pc=150, max_block_span=150
     ),

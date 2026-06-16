@@ -197,7 +197,9 @@ class InlineHardwareOperator(HardwareOperator, ABC):
 
     @property
     def latency(self) -> int:
-        return 1
+        # It reads and writes on one step; the register's write-then-read cost is the bank's READ_FIRST_EDGE in the
+        # landing helper, not a pipeline stage.
+        return 0
 
     def render(self, *operands: str) -> str:
         """Defaults to the Verilog expression with the whitespace squeezed out; override where that reads poorly."""

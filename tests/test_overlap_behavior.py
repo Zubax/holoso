@@ -336,3 +336,149 @@ def test_multi_output_mixed_io_metadata_and_values() -> None:
                 assert float(got[2]) == total, f"flag={flag} x={x} y={y}: {float(got[2])} vs {total}"
     with pytest.raises(TypeError, match="input 0 must be bool"):
         simulator.run(1.0, 2.0, 3.0)  # a float in the boolean lane is rejected by the typed input coercion
+
+
+# --------------------------------------------------------------------------------------------------------------------
+# Cycle-model refactor surface (this branch): the inline op's latency 1->0 + the scheduler issuing inline ops from a
+# block's cycle 0 + the ``dependency_edge`` clamp floored at ``READ_FIRST_EDGE - consumer.latency``. The refactor is
+# value-PRESERVING -- old and new code both produce correct outputs -- so none of the tests below discriminate the old
+# code from the new by value. What they pin (could-have-failed honestly):
+#   (a) a WRONG implementation of the new edges -- an off-by-one in the inline latency or the dependency-edge clamp
+#       would make the numerical model's commit-ordered single-pass evaluation read a producer's STALE value before it
+#       commits, diverging from a Python float64 reference. Demonstrable cheaply for the latching register (below),
+#       reasoned for the deep cross-bank chain.
+#   (b) first BLACK-BOX, public-API value coverage of kernel SHAPES previously exercised only white-box and/or in cosim
+#       (the latching-fault-register multi-channel bool entry state; the octave_index resident-output drain-only Ret).
+# These do NOT cover the entry-block accept-dwell guard: the dwell is invisible to the numerical model (it asserts
+# in_valid at once and keys cycle-0 ops at their read pc, never re-firing ucode[0]), so no model-level test can observe
+# it; it is guarded only by the build-time ``_assert_entry_dwell_safe`` invariant. See the report's uncovered section.
+# --------------------------------------------------------------------------------------------------------------------
+
+
+class _LatchingFaultRegister:
+    """
+    Three independent sticky OR-latches plus a combinational ``any_fault`` summary -- a multi-channel boolean state
+    kernel whose new-state producers (``self._x = self._x or x``) read only resident values and so are the entry
+    block's cycle-0-eligible inline ops. The summary ORs the THREE freshly-latched channels in the same block, so its
+    value depends on the commit ordering being right: a stale read of any channel would drop a just-latched fault.
+    Multi-channel bool state with a same-block summary is a shape no other black-box test exercises (``_BoolStateMachine``
+    in test_public_api_behavior is single-channel; ``_ChainedSlots`` is float).
+    """
+
+    def __init__(self) -> None:
+        self._overcurrent = False
+        self._overvoltage = False
+        self._overtemp = False
+
+    def __call__(self, overcurrent: bool, overvoltage: bool, overtemp: bool):  # type: ignore[no-untyped-def]
+        self._overcurrent = self._overcurrent or overcurrent
+        self._overvoltage = self._overvoltage or overvoltage
+        self._overtemp = self._overtemp or overtemp
+        any_fault = self._overcurrent or self._overvoltage or self._overtemp
+        return any_fault, self._overcurrent, self._overvoltage, self._overtemp
+
+
+def test_latching_fault_register_streams_and_resets() -> None:
+    # Each channel latches on its first trip and HOLDS until reset; ``any_fault`` summarizes the just-updated channels.
+    # Demonstrates the commit-ordering guard (a): on the FIRST-TRIP vector (True, False, False) the correct summary is
+    # True -- it ORs the channel just latched THIS transaction. A reorder that read the channel's stale (pre-update)
+    # value would yield False there, which the assertion below would catch. Persistent state across many transactions
+    # plus a mid-stream ``reset()`` clearing every sticky latch is the load-bearing observable.
+    simulator = holoso.synthesize(
+        _LatchingFaultRegister().__call__, _ops(), name="latching_fault"
+    ).numerical_model.elaborate()
+    reference = _LatchingFaultRegister()
+    stream = [
+        (False, False, False),  # idle: nothing latches
+        (True, False, False),  # overcurrent trips -> latches; any_fault must be True on this very transaction
+        (False, False, False),  # transient gone, the latch holds
+        (False, True, False),  # overvoltage trips -> both latched
+        (False, False, True),  # overtemp trips -> all three latched
+        (False, False, False),  # all stay latched (cleared only by reset)
+    ]
+    for vector in stream:
+        got = tuple(bool(value) for value in simulator.run(*vector))
+        want = reference(*vector)
+        assert got == want, f"vector={vector}: {got} vs {want}"
+        # The summary ORs the freshly-latched channels; on the trip cycle this differs from a stale-read OR.
+        assert got[0] == (got[1] or got[2] or got[3]), f"any_fault desync at {vector}: {got}"
+    simulator.reset()  # the synchronous reset clears every sticky latch
+    fresh = _LatchingFaultRegister()
+    for vector in [(False, False, False), (False, True, False), (False, False, False)]:
+        got = tuple(bool(value) for value in simulator.run(*vector))
+        assert got == fresh(*vector), f"post-reset {vector}: {got}"
+
+
+def _octave_index(x):  # type: ignore[no-untyped-def]
+    # The order of magnitude of x in octaves: halvings (or doublings, for |x| < 1) to bring |x| into (0.5, 1]. The
+    # division-bearing magnitude diamond stays a real branch; its merge is an empty pass-through threaded into the
+    # halving loop, whose Ret is a resident-output drain (the float ``octaves`` is produced in the loop body and read
+    # combinationally at the Ret's own base PC). A local copy of the examples/octave_index kernel (the test must not
+    # couple to examples/, and a local kernel preserves the diamond -> merge -> loop -> drain-Ret shape).
+    magnitude = abs(x)
+    if magnitude >= 1.0:
+        scaled = magnitude
+    else:
+        scaled = 1.0 / magnitude  # the lone non-speculatable op: keeps the diamond a real branch
+    octaves = 0.0
+    while scaled > 1.0:
+        scaled = scaled * 0.5
+        octaves = octaves + 1.0
+    return octaves
+
+
+def test_octave_index_resident_output_drain_only_ret_matches_reference() -> None:
+    # The resident-output drain-only Ret shape (the ``ret_boundary_is_wide = bool(state_slots)`` change, dropping
+    # ``outputs``): the loop body produces the float ``octaves``, which the exit Ret reads resident at its base PC with
+    # no boundary drain. This is value-PRESERVING -- the prior code merely paid an extra-cycle wide drain on the same
+    # Ret, so this does NOT discriminate the current change (that latency reclaim is pinned white-box by the committed
+    # test_drain_only_ret_with_a_resident_output_needs_no_boundary_drain twin, by test_metrics last_pc, and by
+    # test_cycle_model). It is the first BLACK-BOX, public-API value coverage of this shape (b), and it guards the
+    # OVER-aggressive direction: a future reclaim pushing the boundary BELOW the resident landing would sample
+    # ``octaves`` before the loop's final write lands -> an off-by-one octave count, which exact ``==`` would catch.
+    #
+    # The trip count is data-dependent, so the value is the loop's correctness. Inputs are FROZEN to a verified set:
+    # |x| >= 1 magnitudes (abs and *0.5 are exact, so the count is unambiguous) and |x| < 1 values comfortably inside
+    # an octave (their reciprocal does not round across an octave boundary), so the ZKF count equals the float64 count
+    # exactly. Do NOT broaden post-hoc: a value near a power-of-two boundary can flip the rounded count by one.
+    simulator = holoso.synthesize(_octave_index, _ops(), name="octave_drain").numerical_model.elaborate()
+    for x in (1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 3.0, 7.0, -3.0, -16.0, 1.5, 0.5, 0.25, 0.7, 0.1, 0.03):
+        got = float(simulator.run(x)[0])
+        want = _octave_index(x)
+        assert got == want, f"octave count at x={x}: {got} vs {want}"
+
+
+def _cross_bank_chain(a, b, c, d):  # type: ignore[no-untyped-def]
+    # A deep cross-bank chain on the tight same-bank edge: back-to-back inline ``band``/``bor`` over comparisons, a
+    # bool->float cast, a float op consuming the cast, and a float->bool reduction folded into a select. The inline
+    # latency dropped 1->0 and the dependency-edge clamp now floors at ``READ_FIRST_EDGE - latency``, so this chain is
+    # the most direct exercise of the new commit-ordered edges through the public API.
+    p = a > b
+    q = c > d
+    r = (p and q) or (a > d)  # back-to-back inline band then bor: the tight same-bank read-first edge
+    gate = 1.0 if r else 0.0  # bool -> float cast
+    s = gate * (a + b) + c  # a float op consuming the cast result
+    t = s > 0.0  # float -> bool reduction
+    out = (s - d) if t else (d - s)  # the select consumes ``t`` and ``s``
+    return out, r, t
+
+
+def test_cross_bank_chain_commit_ordering_matches_reference() -> None:
+    # Could-have-failed (a, reasoned): an off-by-one in the inline latency or the dependency-edge clamp would let a
+    # consumer in this chain commit at or before its producer, so the model's commit-ordered single pass would read a
+    # stale operand -- the boolean ``r``/``t`` would flip and the float ``out`` would diverge from the float64
+    # reference. The chain has no black-box twin (test_arithmetic_behavior's cross-domain test is a single cast; the
+    # deep same-bank reduction at test_schedule is white-box and float-only).
+    #
+    # Inputs are FROZEN to a verified set: ``r`` and ``t`` are comparisons of ROUNDED intermediates (``t = s > 0`` with
+    # ``s`` a rounded sum), so a value near a comparison boundary could round differently than float64. The reference
+    # bools are derived from the SAME Python expression, and the operands are kept clear of those boundaries.
+    import itertools  # noqa: PLC0415
+
+    simulator = holoso.synthesize(_cross_bank_chain, _ops(), name="cross_bank").numerical_model.elaborate()
+    for a, b, c, d in itertools.product((-2.0, 0.5, 2.0), repeat=4):
+        got = simulator.run(a, b, c, d)
+        want_out, want_r, want_t = _cross_bank_chain(a, b, c, d)
+        assert got[1] is want_r, f"r at ({a},{b},{c},{d}): {got[1]} vs {want_r}"
+        assert got[2] is want_t, f"t at ({a},{b},{c},{d}): {got[2]} vs {want_t}"
+        assert _close(float(got[0]), want_out, op_count=6), f"out at ({a},{b},{c},{d}): {float(got[0])} vs {want_out}"

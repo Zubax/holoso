@@ -379,32 +379,41 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes(config: Operator
 
 
 def test_bool_only_block_drains_one_step_under_the_wide_boundary() -> None:
-    # B1 (bank-aware drained boundary): a drained block carrying only boolean values at its boundary AND no tail install
-    # lands one fetch step earlier than a wide one -- the latch-free boolean bank has no write-latch edge. But a tail
-    # INSTALL (a pc-gated boolean write/phi copy) lands one step LATER, at the wide boundary, so an install-bearing
-    # bool-only block must KEEP the wide drain (round-5 fix). quadrature_encoder is fully boolean (bool inputs/outputs/
-    # state): its install-free Ret drains at the BOOL boundary (the win), while its bool-install blocks drain WIDE.
-    # Crash-before: the pre-bank-aware single-bank drain put the Ret one PC too late (no bool shrink); the round-5 bug
-    # put the install blocks one PC too EARLY (bool shrink despite the install landing wide).
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    from quadrature_encoder import QuadratureEncoder
-
-    lir = build(_run(QuadratureEncoder().__call__), "quad_bank_drain")
+    # B1 (bank-aware drained boundary): a drained block that does WORK carrying only boolean values at its boundary AND
+    # no tail install lands one fetch step earlier than a wide one -- the latch-free boolean bank has no write-latch
+    # edge. But a tail INSTALL (a pc-gated boolean write/phi copy) lands one step LATER, at the wide boundary, so an
+    # install-bearing bool-only block must KEEP the wide drain. Crash-before: a single-bank drain puts the bool-work
+    # block one PC too late (no bool shrink), and a bank-aware drain that also shrinks an install-bearing block puts that
+    # block one PC too EARLY (bool shrink despite the install landing wide).
 
     def is_bool_only(block: LirBlock) -> bool:  # no wide register write and no float copy at the tail
         return not block.copies and not any(
             isinstance(w.dst, RegRef) for op in (*block.ops, *block.inline_ops) for w in op.writes
         )
 
-    # The install-free, all-boolean Ret block: drains one step under the wide boundary (the bank-aware win).
-    ret = next(block for block in lir.blocks if isinstance(block.terminator, Ret))
-    assert is_bool_only(ret) and not ret.bool_writes, "quadrature_encoder Ret should be install-free and all-boolean"
-    assert ret.term_offset == boundary_step(ret.block_makespan, wide_resident=False)
-    assert ret.term_offset < boundary_step(ret.block_makespan, wide_resident=True), "Ret drained at the wide boundary"
+    # phase_frequency_detector is a single-block all-boolean kernel: its Ret does real boolean WORK (makespan > 0) and
+    # installs nothing, so it drains one step under the wide boundary -- the bank-aware win for a value that LANDS in
+    # the frame (distinct from a pure-drain Ret, whose resident output needs no boundary at all -- covered separately).
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    from phase_frequency_detector import PhaseFrequencyDetector  # noqa: PLC0415
+
+    pfd = build(_run(PhaseFrequencyDetector().__call__), "pfd_bool_drain")
+    pfd_ret = next(block for block in pfd.blocks if isinstance(block.terminator, Ret))
+    assert (
+        is_bool_only(pfd_ret) and not pfd_ret.bool_writes and pfd_ret.block_makespan > 0
+    ), "pfd Ret: bool work, no install"
+    assert pfd_ret.term_offset == boundary_step(pfd_ret.block_makespan, wide_resident=False)
+    assert pfd_ret.term_offset < boundary_step(
+        pfd_ret.block_makespan, wide_resident=True
+    ), "drained at the wide boundary"
 
     # A bool-only block that carries a tail install keeps the WIDE drain: the pc-gated install lands at the wide
-    # boundary, so shrinking to the bool boundary would read it one PC before it lands (the round-5 miscompile).
-    bool_install_blocks = [b for b in lir.blocks if b.bool_writes and is_bool_only(b)]
+    # boundary, so shrinking to the bool boundary would read it one PC before it lands (a miscompile).
+    # quadrature_encoder's bool-state install blocks exercise this.
+    from quadrature_encoder import QuadratureEncoder  # noqa: PLC0415
+
+    quad = build(_run(QuadratureEncoder().__call__), "quad_bank_drain")
+    bool_install_blocks = [b for b in quad.blocks if b.bool_writes and is_bool_only(b)]
     assert bool_install_blocks, "no bool-only install-bearing block to exercise the install drain exception"
     for block in bool_install_blocks:
         assert block.term_offset == boundary_step(
@@ -412,9 +421,50 @@ def test_bool_only_block_drains_one_step_under_the_wide_boundary() -> None:
         ), "an install-bearing bool block shrank below the wide boundary where its install lands"
 
 
+def test_entry_block_reclaims_its_first_control_word() -> None:
+    # An inline op has no read latch and is combinational (latency 0), so the entry block's first boolean operation
+    # issues on block-local cycle 0 and FIRES on executing step 0 -- reclaiming ``ucode[0]``. Crash-before: the cycle-1
+    # scheduler start and the inline latency of 1 together pushed the first op two steps late, to executing step 2.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    from quadrature_encoder import QuadratureEncoder
+
+    lir = build(_run(QuadratureEncoder().__call__), "quad_reclaim")
+    entry = next(block for block in lir.blocks if lir.block_base[block.index] == 0)
+    first = min(entry.inline_ops, key=lambda op: op.issue_cycle)
+    assert first.issue_cycle == 0, "entry block's first inline op did not reclaim ucode[0]"
+    fire_pc = operand_read_cycle(first.operator, lir.block_base[entry.index] + first.issue_cycle)
+    assert fire_pc - FETCH_LAG == 0, "the first boolean op does not fire on executing step 0"
+
+
+def test_entry_state_liveout_producer_is_dwell_guarded() -> None:
+    # The sequencer holds pc 0 during the accept wait and re-fires ``ucode[0]`` each idle cycle. As defense-in-depth
+    # against a dwell that neither cosim nor the model exercises, the scheduler floors an entry-block producer of a
+    # persistent-state live-out to cycle >= 1; a stateless twin still reclaims cycle 0. The flooring is cost-free on
+    # every real kernel and the hazard is precluded today (such a producer writes a temporary, never the state register
+    # -- see ``_assert_entry_dwell_safe``), so this pins the guard's behavior, not an active miscompile.
+    class _Stateful:
+        def __init__(self) -> None:
+            self._s = False
+
+        def __call__(self, a: bool, b: bool):  # type: ignore[no-untyped-def]
+            prev = self._s
+            self._s = a and b  # the new state is a combinational inline op in the entry block
+            return prev
+
+    def _stateless(a: bool, b: bool):  # type: ignore[no-untyped-def]
+        return a and b
+
+    stateful = build(_run(_Stateful().__call__), "dwell_stateful")
+    stateless = build(_run(_stateless), "dwell_stateless")
+    sf = min(op.issue_cycle for block in stateful.blocks for op in block.inline_ops)
+    sl = min(op.issue_cycle for block in stateless.blocks for op in block.inline_ops)
+    assert sl == 0, "a stateless entry inline op should reclaim ucode[0]"
+    assert sf >= 1, "an entry inline op producing a persistent-state live-out must stay off ucode[0] (dwell guard)"
+
+
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 def test_const_branch_install_block_keeps_the_wide_drain(config: OperatorCase) -> None:
-    # Regression (review round 5, fuzz-found B1 miscompile): a constant branch condition formed by DIVISION escapes the
+    # Regression (fuzz-found B1 miscompile): a constant branch condition formed by DIVISION escapes the
     # frontend's AST-level reachability fold (which evaluates only +,-,* of literals), so the HIR const-folder reduces
     # it to a BoolConst that if-conversion refuses -- leaving an EMPTY const-branch block (the condition install + a
     # branch, no float content). That condition install is a pc-gated copy landing at the WIDE boundary, so the
@@ -2252,3 +2302,33 @@ def test_boolean_logic_chain_reuses_registers_on_the_tight_same_bank_edge() -> N
         a, b, c, d, e, g = vals
         want = 1.0 if (a > b and c > d and e > g and a > d and b > e) else 0.0
         assert float(model.run(*vals)[0]) == want, vals
+
+
+def test_drain_only_ret_with_a_resident_output_needs_no_boundary_drain() -> None:
+    # A Ret reached by a branch that writes nothing itself, whose output was produced in a PREDECESSOR (resident,
+    # already landed with every pipeline edge -- writeback latch and read-first -- paid), needs NO boundary drain at
+    # all: out_valid asserts at the Ret block's own base PC, reading the resident output combinationally. A drained
+    # block's boundary covers only values that LAND in its frame; a pure-drain block has none, so its terminator offset
+    # is 0 (not the phantom ``boundary_step(0, ...)`` of a value that never commits there). octave_index is the
+    # canonical case -- its loop body produces the octave count and the exit block does pure drain to out_valid.
+    # Crash-before (the ``boundary_step(makespan=0, ...)`` over-charge): the drain-only Ret paid a full FETCH_LAG +
+    # read-first (+ writeback) phantom drain, so out_valid landed three cycles late on every transaction.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    from octave_index import octave_index  # noqa: PLC0415  (example kernels live under examples/)
+
+    lir = build(_run(octave_index), "octave_drain_only_ret")
+    ret = next(b for b in lir.blocks if isinstance(b.terminator, Ret))
+    # Nothing lands in the Ret's own frame -- it neither computes nor installs; the output is resident.
+    assert not (ret.ops or ret.inline_ops or ret.copies or ret.bool_writes), "the exit block must be pure drain"
+    assert ret.term_offset == 0, "a resident-output drain-only Ret needs no boundary drain"
+    ret_base = lir.block_base[ret.index]
+    assert lir.last_pc == ret_base, "out_valid asserts at the Ret block base, not after a phantom drain"
+    # The reclaim is the entire phantom boundary_step a value committing at the empty block's cycle 0 would have paid
+    # (three cycles here: FETCH_LAG + read-first on the latch-free boolean bank). Format-independent, so it holds at
+    # any FloatFormat.
+    assert boundary_step(ret.block_makespan, wide_resident=False) == 3, "the reclaimed phantom bool drain"
+    # The earlier boundary read is sound: the resident output is bit-exact against the Python reference on both ranges
+    # (magnitude >= 1 takes the no-reciprocal arm; below unity inverts first), exercising the real branch into the loop.
+    model = build_model(lir)
+    for x in (8.0, 0.1, 1.0, 32.0, 0.03, -3.0):
+        assert float(model.run(x)[0]) == octave_index(x), x
