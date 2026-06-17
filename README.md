@@ -1,4 +1,17 @@
-# Holoso -- simple high-level synthesis of Python into Verilog for numerical code
+<div align="center">
+
+<img src="docs/holoso-logo-128.png" width="60px">
+
+<h1>Holoso</h1>
+
+_Simple high-level synthesis of portable Verilog from idiomatic Python_
+
+[![Try online](https://img.shields.io/badge/try_online-holoso.digital-black?color=ff0000)](https://holoso.digital/)
+[![Forum](https://img.shields.io/discourse/https/forum.zubax.com/users.svg?logo=discourse&color=ff0000)](https://forum.zubax.com)
+
+</div>
+
+-----
 
 Holoso converts a small subset of Python functions and expressions into synthesizable and verifiable Verilog.
 It does not attempt to be a general-purpose high-level synthesizer (HLS); instead, it is focused at a very narrow set
