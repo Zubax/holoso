@@ -238,3 +238,5 @@ between) would dig up a critical defect. Hence, we repeat turns generously acros
 
 Review agents in maximum thinking mode may go silent for a long time.
 Set a generous timeout of about 1 hour or so, use your best judgement.
+Some agents expect input from stdin when launched headless and may get hung if no input is given;
+in those cases consider redirecting from `/dev/null` or something like that; read the docs to figure out usage.
