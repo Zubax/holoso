@@ -8,6 +8,9 @@ with the implementation. However, do not attempt to capture minor implementation
 
 Do not commit anything unless asked explicitly to do so.
 
+When (sub)agents fail or get stuck, e.g. due to a connection error or a transient environment error,
+retry them until success.
+
 ## Conventions
 
 ### Reset strategy

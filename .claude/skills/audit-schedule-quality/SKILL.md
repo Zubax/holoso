@@ -15,6 +15,9 @@ install, or branch placed later than the datapath physics permits, while its ope
 already available and the hardware it needs was free. Every credible finding pairs a wasted cycle with
 the reason the delay is NOT justified.
 
+THE SOURCE DIRECTORY IS READ-ONLY.
+The work tree must not be altered during this audit; use an external temporary directory for scratch files.
+
 ## Independence — the rule that makes this trustworthy
 
 Read ONLY the schedule's settled final state. Do NOT call the compiler's timing/scheduling helpers or its
@@ -45,7 +48,8 @@ number; pin every one by calibration (below). The model has this shape:
 - A result becomes readable a fixed offset after its producer commits; a consumer samples a fixed offset
   from its own issue. Their difference is the minimum producer→consumer distance — the "edge".
 - An op has an earliest-issue floor (a pooled op one cycle later than an inline op). Operands resident
-  from the block start (constants, inputs, prior-block values) impose only the floor.
+  from the block start (constants, inputs, prior-block values) impose only the floor — correct for
+  within-block slack, but it is also what blinds that pass to boundary placement (see Boundaries).
 
 ## Audit
 
@@ -92,17 +96,35 @@ case, not absolute optimality. If the model instead DISAGREES on a rigid kernel,
 physics itself is non-minimal — stop and surface it (grounding the latter needs RTL co-simulation and is
 out of scope).
 
-## Boundaries — installs, branches, block extent (needs-confirmation tier)
+## Boundaries — installs, branches, block extent (needs-confirmation tier, but MANDATORY)
 
-Late installs, late branches, empty trailing cycles, and over-long blocks are real defect classes, but
-their timing leans on the boundary-drain and cross-block-pipelining rules — the hard part. The standard
-writeback drain legitimately pushes a terminator past the last commit, so a naive "terminator past the
-last activity" test fires on nearly every block; the defect is only the EXCESS drain (a block whose
-boundary values are all boolean or already resident pays no wide drain, so a wide-sized tail is wasted).
-Treat any finding that leans on boundary/drain or cross-block residence as needs-confirmation; the
-within-block op slack above is the high-confidence tier. (The elaborated simulator is bit/cycle-exact but
-rides the same helpers, so use it only to confirm a proposed tightening doesn't change results — never as
-an optimality oracle.)
+The within-block op pass above is STRUCTURALLY BLIND here, so it is not optional to also do this: that pass
+works in block-local cycles, anchors each block's base and terminator offset as ground truth, and treats
+every operand resident at block entry (constant, input, state live-in, prior-block result) as free — so an
+op or install fed ONLY by resident operands sits at the local floor with zero local slack no matter how late
+its block sits in the whole-kernel timeline. The wasted cycles that live exactly there are easy to miss and
+are not minor. Run this pass in the ABSOLUTE frame and do not down-weight it.
+
+Two distinct defect classes:
+
+- Relocatable boundary work. The op or install whose landing DEFINES the terminator offset, but whose
+  operands were ALL resident before its block began, carries no in-block dependency justifying its boundary
+  placement. It could land a cycle earlier — riding into a single-predecessor's tail — so the terminator,
+  and with it the final landing and every downstream block base, is looser than the dataflow requires. Detect
+  it mechanically: in the absolute frame, flag any terminator-defining op/install/branch all of whose inputs
+  were available at block entry. This check is cheap and highly selective (it stays silent on straight-line
+  and dependency-bound blocks). It is the wasted cycle even when every block is locally tight; confirm
+  against the cross-block-overlap rules — overlap across a branch condition or a resident-only boundary may
+  be a documented deferral, but a deferral is still a reportable wasted cycle, not a non-finding.
+
+- Excess drain. The standard writeback drain legitimately pushes a terminator past the last commit, so a
+  naive "terminator past last activity" test fires on nearly every block; the real defect is only the EXCESS
+  drain — a block whose boundary values are all boolean or already resident paying a wider or later drain
+  than its bank warrants.
+
+Treat a finding's JUSTIFICATION (is the relocation actually legal) as needs-confirmation; treat its DETECTION
+as required. (The elaborated simulator is bit/cycle-exact but rides the same helpers, so use it only to
+confirm a proposed tightening doesn't change results — never as an optimality oracle.)
 
 ## Recipe (schematic — map to current names)
 
@@ -121,9 +143,12 @@ for each op:  efi = max(floor, max over register-operands of producer.commit + e
   one-cycle lag accumulates down the block. The instances are idle through the gap and the destination is
   free, so the delay is unjustified: move the root up and the whole tail follows.
 
-- Boundary classes (needs-confirmation). An install sitting well after its source was ready and pushing
-  the block tail; a branch taken a cycle past the last real work while its condition was long available;
-  a block whose only activity is at the very end, leaving cycles idle beyond the legitimate drain.
+- Boundary classes. Relocatable boundary work: a block whose terminator-defining op or install reads only
+  values that were already resident at block entry, so its whole tail could ride a cycle earlier into the
+  predecessor — the within-block pass sees zero slack because those operands are "free at the floor," yet
+  the terminator and the final landing are a cycle loose. Also: an install sitting well after its source was
+  ready; a branch taken a cycle past the last real work while its condition was long available; a block whose
+  only activity is at the very end, beyond the legitimate drain.
 
 ## Report
 
