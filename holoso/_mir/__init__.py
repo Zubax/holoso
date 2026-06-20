@@ -27,4 +27,8 @@ from ._ir import (
     MirStateSlot as MirStateSlot,
     MirTerminator as MirTerminator,
 )
+from ._interpret import (
+    InterpreterPort as InterpreterPort,
+    MirInterpreter as MirInterpreter,
+)
 from ._lower import lower as lower

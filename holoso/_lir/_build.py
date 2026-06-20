@@ -5,9 +5,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from .._errors import UnsupportedConstruct
-from .._hir import ValueId
 from .._mir import (
     Mir,
+    MirBlock,
     MirBoolConst,
     MirBoolInput,
     MirBoolOutput,
@@ -32,6 +32,7 @@ from .._operators import (
     PooledHardwareOperator,
     PortConditioner,
 )
+from .._util import ValueId
 from ._ir import *
 from ._liveness import BankLiveness, compute_interference
 from ._portassign import assign_commutative_ports
@@ -184,6 +185,15 @@ def _value_word_and_landing(mir: Mir, float_mir: MirFloatView, vid: ValueId, iss
     return word, landing
 
 
+def _install_inclusive_makespan(work_makespan: int, has_install: bool) -> int:
+    """
+    The block makespan inclusive of its tail install: an install-bearing block fires its pc-gated phi/slot copies one
+    cycle past its last work commit, so its effective makespan is one higher. The single owner of this ``+1`` so the
+    overlap layout's boundary derivation and the per-block LirBlock makespan cannot disagree on it.
+    """
+    return work_makespan + (1 if has_install else 0)
+
+
 @dataclass(frozen=True, slots=True)
 class _OverlapLayout:
     """
@@ -211,6 +221,101 @@ class _SpillCarry:
 
     entry_busy: dict[tuple[PooledHardwareOperator, int], int]
     livein_landing: dict[ValueId, int]
+
+
+def _issue_side_envelope(mir: Mir, float_mir: MirFloatView, sched: Schedule, block: MirBlock) -> int:
+    """
+    The issue-side floor an OVERLAPPING block's terminator may not precede: the latest control word still driven in the
+    block (a pooled write-enable or an inline fire step), padded by the error-latch slack for any err-port op, and the
+    produced branch condition's boolean landing. A live-in branch condition is NOT handled here -- its exact read floor
+    is not locally known, so ``_block_boundary`` raises the floor to the wide cap for it. The floor starts at 1.
+    """
+    floor = 1
+    for vid, issue in sched.issue_cycle.items():
+        word, _landing = _value_word_and_landing(mir, float_mir, vid, issue)
+        floor = max(floor, word)
+        operator = _mir_operation(mir, vid).operator
+        if isinstance(operator, PooledHardwareOperator) and operator.error_ports:
+            # The err_pc diagnostic latches ``pc - FETCH_LAG`` when this op's write-enable executes, which is
+            # FETCH_LAG fetch steps after its write word. If the terminator redirected by then, err_pc would
+            # capture the successor frame's PC instead of this op's step. Keep the latch inside the block: the
+            # data writeback still rides the pipeline correctly, but the diagnostic needs the live PC in-frame.
+            floor = max(floor, word + FETCH_LAG)
+    if isinstance(block.terminator, MirBranch) and block.terminator.cond in sched.issue_cycle:
+        # The produced condition keeps its boolean landing inside the block; a live-in condition is handled in
+        # ``_block_boundary`` (its read floor is not locally known, so it pins the floor to the wide cap).
+        floor = max(floor, bool_landing_cycle(sched.commit_cycle(block.terminator.cond)))
+    return floor
+
+
+@dataclass(frozen=True, slots=True)
+class _BlockBoundary:
+    """
+    A block's terminator placement: the (possibly overlap-shrunk) ``term_offset`` and the ``wide_cap`` -- the latched
+    wide landing of the block's makespan -- that bounds it. ``_block_boundary`` is the SOLE owner of both
+    ``boundary_step`` calls (the wide cap and the drained work boundary), the overlap floor clamp, and the
+    ``term_offset <= wide_cap`` invariant, so the caller need not recompute the cap for its spill carry.
+    """
+
+    term_offset: int
+    wide_cap: int
+
+
+def _block_boundary(
+    bid: int,
+    makespan: int,
+    overlaps: bool,
+    envelope: int,
+    livein_condition: bool,
+    wide_resident: bool,
+    does_boundary_work: bool,
+    spill_landings: list[int],
+) -> _BlockBoundary:
+    """
+    Derive a block's terminator offset, owning both physical regimes as explicit named branches and the invariants that
+    bound them. ``wide_cap`` -- the latched wide landing of this block's makespan -- caps an overlapping block's floor and
+    backstops every block's offset.
+
+    The two regimes are genuinely different physics and stay separate:
+      - OVERLAP: an overlapping block's terminator is the ISSUE-side envelope (the latest control word still driven, the
+        produced branch condition's boolean landing). For a live-in condition, whose exact read floor is not locally
+        known, the floor is pinned to the conservative wide drain. The landings spill past it into the (single-
+        predecessor) successors. The cap is the wide drain, which always accommodates the floor (every control word
+        commits by the makespan, so word + the error-latch slack fits within ``wide_cap``); ``min`` is defensive. The
+        bank-aware drain below governs only FULLY-DRAINED blocks -- a bool-only block branching on a live-in condition
+        legitimately keeps the wide cap here, above its bool drain, so no ``term_offset <= bank-aware drain`` holds.
+      - DRAINED: a fully-drained block's terminator offset is the latest cycle a value LANDS in its frame: its own
+        bank-aware work drain ``boundary_step(makespan, wide_resident)`` plus any spill-in it cannot forward
+        (``max(work_drain, *spill_landings)``). A block with NO boundary work pays no drain -- a non-entry drain-only Ret
+        reading already-resident outputs lands its boundary at cycle 0, not at the phantom ``boundary_step(0, ...)`` of a
+        value that never commits.
+    """
+    wide_cap = boundary_step(makespan, wide_resident=True)  # the latched wide landing of this block's makespan
+    if overlaps:
+        cap = wide_cap
+        floor = cap if livein_condition else envelope
+        assert floor <= cap, f"block {bid}: a control word sits past the wide drain"  # the cap bounds the floor
+        term_offset = min(floor, cap)
+    else:
+        # ``does_boundary_work`` covers landings INVISIBLE to the op schedule (the entry's cycle-1 input loads and a
+        # stateful-float Ret's wide state install) as well as the visible op commits; without any of those the block
+        # pays no work drain. ``wide_resident`` selects the drained boundary's bank.
+        work_drain = boundary_step(makespan, wide_resident=wide_resident) if does_boundary_work else 0
+        term_offset = max([work_drain, *spill_landings])
+    # The boundary never exceeds the block's own latched wide landing, so a boundary state install placed there stays a
+    # read-first last_pc install (a spill from an overlapping predecessor lands within the successor's wide cap).
+    assert term_offset <= wide_cap, f"block {bid}: term_offset {term_offset} exceeds the wide drain {wide_cap}"
+    return _BlockBoundary(term_offset, wide_cap)
+
+
+def _spill_local_cycle(bid: int, block_local_cycle: int, term_offset: int) -> int:
+    """
+    The successor-local cycle of a value spilling past block ``bid``'s shrunk terminator. The callers gate on
+    ``block_local_cycle > term_offset``, so a real spill is non-negative (cycle 0 at the successor base is legal).
+    """
+    local = successor_local_cycle(block_local_cycle, term_offset)
+    assert local >= 0, f"block {bid}: spilled landing PC {local} precedes the successor base"
+    return local
 
 
 def _schedule_with_overlap(
@@ -282,77 +387,39 @@ def _schedule_with_overlap(
         )
         block_sched[bid] = sched
         has_install = bid in has_install_blocks
-        makespan = sched.makespan + (1 if has_install else 0)
+        makespan = _install_inclusive_makespan(sched.makespan, has_install)
         block_makespan[bid] = makespan
-        wide_cap = boundary_step(makespan, wide_resident=True)  # the latched wide landing of this block's makespan
         targets = succ[bid]
         overlaps = bool(targets) and not has_install and all(pred_count[target] == 1 for target in targets)
-        if overlaps:
-            # An overlapping block's terminator is the ISSUE-side envelope -- the latest control word still driven in
-            # the block, the produced branch condition's boolean landing, and (for a live-in condition, whose exact read
-            # floor is not locally known) the conservative wide drain -- NOT the bank-aware drained boundary. The
-            # landings spill past it into the (single-predecessor) successors. The cap is the wide drain, which always
-            # accommodates the floor (every control word commits by the makespan, so word + the error-latch slack fits
-            # within ``wide_cap``); ``min`` is defensive. The bank-aware drain below governs only FULLY-DRAINED blocks --
-            # a bool-only block branching on a live-in condition legitimately keeps the wide cap here, above its bool
-            # drain, so no ``term_offset <= bank-aware drain`` invariant holds.
-            cap = wide_cap
-            floor = 1
-            for vid, issue in sched.issue_cycle.items():
-                word, _landing = _value_word_and_landing(mir, float_mir, vid, issue)
-                floor = max(floor, word)
-                operator = _mir_operation(mir, vid).operator
-                if isinstance(operator, PooledHardwareOperator) and operator.error_ports:
-                    # The err_pc diagnostic latches ``pc - FETCH_LAG`` when this op's write-enable executes, which is
-                    # FETCH_LAG fetch steps after its write word. If the terminator redirected by then, err_pc would
-                    # capture the successor frame's PC instead of this op's step. Keep the latch inside the block: the
-                    # data writeback still rides the pipeline correctly, but the diagnostic needs the live PC in-frame.
-                    floor = max(floor, word + FETCH_LAG)
-            if isinstance(block.terminator, MirBranch):
-                cond = block.terminator.cond
-                if cond in sched.issue_cycle:  # produced in this block: keep its boolean landing inside the block
-                    cond_commit = sched.issue_cycle[cond] + _mir_operation(mir, cond).operator.latency
-                    floor = max(floor, bool_landing_cycle(cond_commit))
-                else:
-                    # A live-in condition was written in a prior block; its exact fetch-pipeline read floor at this
-                    # block's terminator is not locally known, so keep the drained boundary (no shrink) -- conservative.
-                    floor = cap
-            assert (
-                floor <= cap
-            ), f"block {bid}: a control word sits past the wide drain"  # the cap accommodates the floor
-            term_offset = min(floor, cap)
-        else:
-            # A fully-drained block's terminator offset is the latest cycle a value LANDS in its frame: its own
-            # bank-aware work drain ``boundary_step(makespan, wide_resident)`` (DESIGN.md, "drained boundary", covers the
-            # wide-vs-bool bank choice) plus any spill-in it cannot forward (``max(work_drain, *livein_landing.values())``).
-            # A block with NO boundary work pays no drain -- a non-entry drain-only Ret reading already-resident outputs
-            # lands its boundary at cycle 0, not at the phantom ``boundary_step(0, ...)`` of a value that never commits.
-            #
-            # ``bid == mir.entry`` and ``ret_boundary_is_wide`` are work terms for landings INVISIBLE to the op schedule:
-            # the entry's cycle-1 input loads and a stateful-float Ret's wide state install. They cannot fold into a
-            # per-value landing ``max`` (the form the op landings take in the overlapping branch) because register
-            # allocation -- which places input lanes and state-slot installs -- runs AFTER this layout pass; they are
-            # irreducible block-granularity proxies, not avoidable special-casing.
-            ret_state_boundary = isinstance(block.terminator, MirRet) and ret_boundary_is_wide
-            if sched.issue_cycle or has_install or bid == mir.entry or ret_state_boundary:
-                wide_spills_in = any(vid in float_mir.operation_nodes for vid in livein_landing)
-                wide_resident = (
-                    has_install
-                    or bool(float_mir.block_operations(block))
-                    or bid in float_arm_preds
-                    or wide_spills_in
-                    or ret_state_boundary
-                )
-                work_drain = boundary_step(makespan, wide_resident=wide_resident)
-            else:
-                work_drain = 0
-            term_offset = max([work_drain, *livein_landing.values()])
-        # A block's drained boundary never exceeds the latched WIDE landing of its own makespan: the overlap floor is
-        # capped there (``min(floor, cap)``), and the fully-drained ``max(work_drain, spills)`` stays within it (a spill
-        # from an overlapping predecessor lands within the successor's wide cap). This invariant keeps a boundary state
-        # install -- placed at that wide drain -- a true boundary install read on the last_pc edge; a future overlap-bound
-        # change that stretched ``term_offset`` past it would silently turn that install early, sampling a stale source.
-        assert term_offset <= wide_cap, f"block {bid}: term_offset {term_offset} exceeds the wide drain {wide_cap}"
+        # ``ret_state_boundary`` is a DELIBERATE conservative over-approximation: a non-coalesced float state slot
+        # installs its live-out wide at the Ret boundary, but whether a slot coalesces is decided AFTER this layout
+        # pass, so charging the wide drain for every stateful float Ret is always correctness-safe (a later boundary
+        # only reads a value later, never wrong) and costs at most one cycle. ``does_boundary_work`` and ``wide_resident``
+        # are pure facts of this block's schedule and CFG shape, computed unconditionally and consumed only on the
+        # fully-drained branch inside ``_block_boundary``; ``bid == mir.entry`` and ``ret_state_boundary`` are work
+        # terms for landings INVISIBLE to the op schedule (the entry's cycle-1 input loads and a stateful-float Ret's
+        # wide state install) -- irreducible block-granularity proxies, since register allocation runs after this pass.
+        ret_state_boundary = isinstance(block.terminator, MirRet) and ret_boundary_is_wide
+        does_boundary_work = bool(sched.issue_cycle) or has_install or bid == mir.entry or ret_state_boundary
+        wide_resident = (
+            has_install
+            or bool(float_mir.block_operations(block))
+            or bid in float_arm_preds
+            or any(vid in float_mir.operation_nodes for vid in livein_landing)  # a wide value spills in
+            or ret_state_boundary
+        )
+        livein_condition = isinstance(block.terminator, MirBranch) and block.terminator.cond not in sched.issue_cycle
+        boundary = _block_boundary(
+            bid,
+            makespan,
+            overlaps=overlaps,
+            envelope=_issue_side_envelope(mir, float_mir, sched, block),
+            livein_condition=livein_condition,
+            wide_resident=wide_resident,
+            does_boundary_work=does_boundary_work,
+            spill_landings=list(livein_landing.values()),
+        )
+        term_offset = boundary.term_offset
         block_term_offset[bid] = term_offset
         if overlaps:  # hand the spill residue to the (single-predecessor) successors this block uniquely reaches
             # Both the per-instance busy residue and the value landings cross the shrunk terminator into the successor
@@ -368,10 +435,10 @@ def _schedule_with_overlap(
             for vid, issue in sched.issue_cycle.items():
                 _word, land = _value_word_and_landing(mir, float_mir, vid, issue)
                 if land > term_offset:
-                    landing[vid] = successor_local_cycle(land, term_offset)
+                    landing[vid] = _spill_local_cycle(bid, land, term_offset)
             for vid, land in livein_landing.items():  # a received spill that re-spills past this shrunk terminator
                 if land > term_offset:
-                    landing[vid] = max(landing.get(vid, 0), successor_local_cycle(land, term_offset))
+                    landing[vid] = max(landing.get(vid, 0), _spill_local_cycle(bid, land, term_offset))
             spill = _SpillCarry(busy, landing)
             for target in targets:
                 carry[target] = spill
@@ -522,7 +589,7 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
             for w in alloc.bool_writes.get(block.id, [])
         ]
         has_install = block.id in has_install_blocks
-        block_makespan = install if has_install else work_makespan
+        block_makespan = _install_inclusive_makespan(work_makespan, has_install)
         # The latch-free bool bank gives a branch condition exactly one cycle of slack: a bool result committing at the
         # makespan lands one step before the terminator's boundary read. The schedule's makespan covers every commit by
         # construction, so this is a tripwire against a future makespan-computation change only; the emitter-side
@@ -1400,7 +1467,7 @@ def _bank_liveness_facts(
         for vid in block.operations:
             if vid in op_nodes:
                 op_block[vid] = block.id
-                op_commit[vid] = sched.issue_cycle[vid] + op_nodes[vid].operator.latency
+                op_commit[vid] = sched.commit_cycle(vid)
         for vid in block.phis:
             if vid in phi_nodes:
                 phi_block[vid] = block.id

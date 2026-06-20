@@ -10,9 +10,15 @@ import numpy as np
 
 from holoso import FAddOperator, FCmpOperator, FDivOperator, FMulILog2OperatorFamily, FMulOperator, OpConfig
 from holoso._backend.numerical import NumericalSimulator, generate as generate
-from holoso._lir import Lir
+from holoso._frontend import lower as lower_frontend
+from holoso._hir import optimize
+from holoso._lir import Lir, build
+from holoso._mir import MirInterpreter, lower as lower_to_mir
 from holoso._type import FloatFormat
+from holoso._value import FloatValue
 from holoso._frontend._lower import _Path, _port_name
+
+type Vector = list[FloatValue | bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +33,42 @@ class OperatorCase:
 def build_model(lir: Lir) -> NumericalSimulator:
     """Elaborate a runnable simulator for a built LIR -- the common test path (``generate`` returns the handle)."""
     return generate(lir).elaborate()
+
+
+def build_model_and_interpreter(
+    kernel: Callable[..., object], ops: OpConfig, name: str
+) -> tuple[NumericalSimulator, MirInterpreter]:
+    """
+    Drive one kernel through the internal pipeline and return (numerical model, MIR interpreter) over the SAME MIR --
+    the single source of truth for the differential-oracle tests. The model descends through ``build`` (the
+    scheduled/allocated LIR, where the verified bug class lives); the interpreter is taken straight off the MIR
+    (upstream of ``build``), so the two share everything except the LIR layer.
+    """
+    mir = lower_to_mir(optimize(lower_frontend(kernel)), ops)
+    return build_model(build(mir, name)), MirInterpreter(mir)
+
+
+def show_value(value: FloatValue | bool) -> str:
+    """A compact human label for a model/interpreter output value (used in differential-failure messages)."""
+    return f"{float(value):.6g}" if isinstance(value, FloatValue) else str(value)
+
+
+def assert_model_equals_interpreter(
+    model: NumericalSimulator, interpreter: MirInterpreter, vectors: list[Vector], label: str
+) -> None:
+    """
+    Run an ordered vector sequence through both the numerical model and the MIR interpreter (each advancing its own
+    persistent state per transaction) and assert bit-exact agreement -- the tolerance-free oracle for the LIR layer.
+    """
+    assert [p.name for p in model.inputs] == [p.name for p in interpreter.inputs], f"{label}: input ports differ"
+    assert [p.name for p in model.outputs] == [p.name for p in interpreter.outputs], f"{label}: output ports differ"
+    for vector in vectors:
+        model_out = model.run(*vector)
+        interp_out = interpreter.run(*vector)
+        assert model_out == interp_out, (
+            f"{label}: model != interpreter for inputs {[show_value(v) for v in vector]}: "
+            f"{[show_value(v) for v in model_out]} vs {[show_value(v) for v in interp_out]}"
+        )
 
 
 def flatten_value(root: object) -> list[tuple[_Path, Any]]:
@@ -327,3 +369,81 @@ class SelectHold:
         self._h = x + 1.0
         y = old if c > 0.0 else x
         return y * 2.0 + (x * 1.5) / (x * x + 0.5)  # structurally nonzero divisor (the bench asserts err_pc == 0)
+
+
+def phi_swap_loop(x, n):  # type: ignore[no-untyped-def]
+    """
+    A while loop whose two carried values genuinely SWAP across the back edge (``a, b = b, a``), producing two
+    loop-header phis whose back-edge arms cross-reference each other (phi_a's arm is phi_b and vice versa). The header
+    must resolve its phis as a PARALLEL snapshot -- read both old values, then bind both; sequential resolution (bind
+    ``a``, then read the new ``a`` for ``b``) would collapse the swap into ``a == b`` and miscompile. A separate counter
+    ``n`` drives termination, so the swap is pure and the trip count is the integer part of ``n``. Both the numerical
+    model and the MIR interpreter resolve phis in parallel, so this kernel is checked against the float64 Python
+    reference -- which swaps correctly -- turning a sequential-phi regression in EITHER oracle into a divergence
+    (interp==model alone could not catch it, since a shared sequential bug would still agree). With integer-valued
+    inputs every output is exact in the format.
+    """
+    a = x
+    b = x + 1.0
+    i = n
+    while i > 0.0:
+        a, b = b, a
+        i = i - 1.0
+    return a * 2.0 + b
+
+
+def overlap_drained_passthrough_kernel(x, y, z):  # type: ignore[no-untyped-def]
+    """
+    A wide chain ``w`` computed in the overlapping entry block spills past the shrunk terminator into a then arm that
+    does NO work and merely passes ``w`` through as the merged value, so ``w`` is the live-out of a fully-DRAINED,
+    no-work arm. This exercises the drained-block-receiving-a-spill path and pins the ``term_offset <= wide_cap``
+    boundary invariant: the spill lands within the successor's wide cap because the predecessor's issue-side envelope
+    already tracks ``w``'s late write word, so the successor-local spill is only the fixed fetch/latch gap regardless
+    of the chain depth (a reviewer hypothesized a chain-depth-scaled spill could exceed the cap; it cannot, and this
+    kernel locks that in). The else arm's unspeculatable division keeps the diamond a real branch.
+    """
+    w = ((((x * z + y) * z + y) * z + y) * z + y) * z + y
+    if x < y:
+        r = w  # then arm: pass-through, no work; w spills in and is the live-out to the merge
+    else:
+        r = w / (z * z + 1.0)
+    return r * 2.0
+
+
+def overlap_livein_branch_arm_kernel(x, y, z):  # type: ignore[no-untyped-def]
+    """
+    The wide chain ``w`` spills from the overlapping entry into an arm that ITSELF branches on a LIVE-IN condition ``c``
+    (computed in the entry block, not the arm) -- exercising the overlap-vs-drain interaction the plain dead-arm shape
+    never reaches (a spilled-into block that branches on a live-in keeps the conservative wide drain rather than
+    shrinking). Every divisor is structurally nonzero, so each diamond stays a real branch.
+    """
+    c = z > 2.0  # a live-in boolean condition, computed in the entry block (both arms reachable over the input range)
+    w = ((((x * z + y) * z + y) * z + y) * z + y) * z + y  # wide chain, spills past the shrunk entry terminator
+    if x < y:
+        if c:  # this arm branches on the LIVE-IN c while receiving w's spill
+            r = w + 1.0
+        else:
+            r = w / (z * z + 1.0)
+    else:
+        r = w / (y * y + 1.0)
+    return r
+
+
+class SlotSwap:
+    """
+    Two persistent slots that SWAP each transaction (``self._a, self._b = self._b, self._a``), forcing the parallel,
+    read-first state writeback to exchange their two registers from old values -- the register-swap correctness the
+    forward chained-slot SHIFT never exercises. Checked against the float64 reference (Python swaps correctly), so a
+    shared sequential-writeback bug in BOTH oracles would still surface as a divergence.
+    """
+
+    def __init__(self) -> None:
+        self._a = 1.0
+        self._b = -2.0
+
+    def step(self, x):  # type: ignore[no-untyped-def]
+        old_a = self._a
+        old_b = self._b
+        self._a = old_b  # swap: a <- old b
+        self._b = old_a  # swap: b <- old a
+        return old_a * 2.0 + old_b * 4.0 + x  # exact for integer x; reads both OLD slot values to observe the swap

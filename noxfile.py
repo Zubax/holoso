@@ -42,9 +42,9 @@ def clean(session):
 
 @nox.session
 def tests(session: nox.Session) -> None:
-    """Fast unit tests; the slow cocotb cosimulation lives in the cosim_examples session."""
+    """Fast unit tests; the slow cocotb cosimulation and the differential fuzzer live in their own sessions."""
     session.install("-e", ".[test]")
-    session.run("python", "-m", "pytest", "-m", "not cosim", "tests")
+    session.run("python", "-m", "pytest", "-m", "not cosim and not fuzz", "tests")
 
 
 @nox.session
@@ -52,6 +52,13 @@ def cosim_examples(session: nox.Session) -> None:
     """Long-running end-to-end cocotb cosimulation of the bundled examples across stage configurations."""
     session.install("-e", ".[test]")
     session.run("python", "-m", "pytest", "-m", "cosim", "tests")
+
+
+@nox.session
+def fuzz(session: nox.Session) -> None:
+    """End-to-end blackbox differential fuzzing of the compiler; slow, no simulator. Scaled by HOLOSO_FUZZ_* knobs."""
+    session.install("-e", ".[test]")
+    session.run("python", "-m", "pytest", "-s", "-m", "fuzz", "tests")
 
 
 @nox.session

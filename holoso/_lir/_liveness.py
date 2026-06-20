@@ -29,7 +29,7 @@ bank or the 1-bit boolean bank) and receives the symmetric interference adjacenc
 
 from dataclasses import dataclass, field
 
-from .._hir import ValueId
+from .._util import ValueId
 from ._ir import copy_step_cycle
 
 

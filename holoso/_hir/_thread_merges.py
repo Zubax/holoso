@@ -24,15 +24,14 @@ by repeating to a fixpoint, innermost-reachable first.
 
 import logging
 
+from .._util import BlockId, ValueId
 from ._ir import (
     Block,
-    BlockId,
     Branch,
     Hir,
     Jump,
     Operation,
     Phi,
-    ValueId,
     predecessors,
     renumber,
     validate_phi_predecessors,

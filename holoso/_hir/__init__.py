@@ -3,7 +3,6 @@
 from ._const import BoolConst as BoolConst, Const as Const, FloatConst as FloatConst
 from ._copy import reverse_postorder as reverse_postorder
 from ._ir import (
-    BlockId as BlockId,
     Branch as Branch,
     Hir as Hir,
     HirBuilder as HirBuilder,
@@ -17,7 +16,6 @@ from ._ir import (
     StateRead as StateRead,
     StateSlot as StateSlot,
     Terminator as Terminator,
-    ValueId as ValueId,
 )
 from ._operators import (
     BoolAnd as BoolAnd,

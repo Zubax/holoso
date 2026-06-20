@@ -7,8 +7,8 @@ from collections.abc import Callable, Set
 from typing import assert_never
 
 from ._const import Const
+from .._util import BlockId, ValueId
 from ._ir import (
-    BlockId,
     Branch,
     Hir,
     HirBuilder,
@@ -20,7 +20,6 @@ from ._ir import (
     Ret,
     StateRead,
     Terminator,
-    ValueId,
 )
 
 # A pass supplies one of these to rebuild each value into the target builder; it returns the new value id and may fold

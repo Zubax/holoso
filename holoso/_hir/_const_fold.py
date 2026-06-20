@@ -2,7 +2,8 @@
 
 from ._const import Const
 from ._copy import copy_node, rebuild
-from ._ir import Hir, HirBuilder, Node, Operation, Phi, ValueId
+from .._util import ValueId
+from ._ir import Hir, HirBuilder, Node, Operation, Phi
 
 
 def run(hir: Hir) -> Hir:

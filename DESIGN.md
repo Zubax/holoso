@@ -539,6 +539,17 @@ simulator: each cycle ticks both with the same handshake and asserts that `out_v
 check) and that the output bits match when valid, back-pressure included. End-to-end verification of the original Python
 against the numerical model is left to the user, since it requires knowledge of the source semantics.
 
+The RTL-versus-model cosimulation is structurally blind to one miscompile class: a scheduling, instance-binding,
+register-allocation, or cross-block-overlap fault in the LIR is shared by both the RTL and the numerical model (the RTL
+is emitted from the very LIR the model replays), so a wrong-but-consistent LIR passes the cosim. A schedule-independent
+oracle closes this gap. The MIR interpreter evaluates the unscheduled MIR dataflow graph directly through the operators'
+own bit-exact `evaluate`, owning no registers, no schedule, and no overlap machinery; it deliberately imports nothing
+from the LIR. It shares the front/mid-end and the operators with the numerical model but none of the LIR, so the
+differential `interpreter == model` -- bit-exact and exception-free on both float-format sides -- isolates exactly the
+LIR layer. A blackbox differential fuzzer rides on this: it generates small kernels as real importable Python source,
+drives each through both models across operator configurations, and asserts the bit-exact primary check on every
+transaction plus a best-effort float64-reference secondary check.
+
 The HTML report is an essential tool for humans to understand and debug what the compiler did. It must provide an EXACT
 representation of the generated core behavior, not a simplified or approximated view.
 

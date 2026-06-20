@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 
-from .._hir import ValueId
 from .._operators import (
     BoolInversion,
     FloatSignControl,
@@ -13,8 +12,7 @@ from .._operators import (
 )
 from .._errors import UnsupportedConstruct
 from .._type import BoolType, FloatFormat, FloatType, ScalarType
-
-type BlockId = int
+from .._util import BlockId, ValueId
 
 
 @dataclass(frozen=True, slots=True)

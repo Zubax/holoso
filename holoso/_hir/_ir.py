@@ -3,12 +3,10 @@
 from dataclasses import dataclass
 from typing import assert_never
 
+from .._util import BlockId, ValueId
 from ._const import BoolConst, Const, FloatConst
 from ._operators import Operator
 from ._types import BoolType, FloatType, Type
-
-type ValueId = int
-type BlockId = int
 
 
 @dataclass(frozen=True, slots=True)

@@ -25,6 +25,14 @@ jobs:
       - *checkout_step
       - run: nox -s cosim_examples
 
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    container: *fpga_toolchain_container
+    steps:
+      - *checkout_step
+      - run: nox -s fuzz
+
   synth:
     name: synth
     runs-on: ubuntu-latest

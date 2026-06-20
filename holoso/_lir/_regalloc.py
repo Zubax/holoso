@@ -36,7 +36,7 @@ import os
 import numpy as np
 from scipy.optimize import dual_annealing
 
-from .._hir import ValueId
+from .._util import ValueId
 from ._ir import OperatorInstance
 
 # Read port identity (operator instance + operand position) and write-source identity: an operator instance, the input

@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from .._errors import MissingIntrinsic, SourceLocation, SourceUnavailable, UnsupportedConstruct
+from .._util import BlockId, ValueId
 from .._hir import *
 
 _Path = list[int | str]

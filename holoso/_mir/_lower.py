@@ -34,9 +34,9 @@ from .._hir import (
     StateRead,
     StateSlot,
     Terminator,
-    ValueId,
     reverse_postorder,
 )
+from .._util import ValueId
 from .._operators import (
     BoolAndOperator,
     BoolInversion,

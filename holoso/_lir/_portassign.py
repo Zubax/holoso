@@ -24,7 +24,7 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.optimize import Bounds, LinearConstraint, milp
 
-from .._hir import ValueId
+from .._util import ValueId
 from .._mir import MirNode, MirOperation
 from ._ir import OperatorInstance
 

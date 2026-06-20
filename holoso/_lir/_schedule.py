@@ -23,7 +23,7 @@ Two constraints raise an op's earliest issue to cycle 1:
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .._hir import ValueId
+from .._util import ValueId
 from .._mir import MirNode, MirOperation
 from .._operators import HardwareOperator, PooledHardwareOperator, PortConditioner
 from ._ir import OperatorInstance, dependency_edge, operand_read_cycle, pooled_wide_read_cycle, wide_landing_cycle
@@ -52,10 +52,17 @@ class Schedule:
     firings: dict[ValueId, list[ValueId]]  # pooled firing leader -> its members, sorted by output port
     instances: list[OperatorInstance]
     makespan: int  # max commit cycle (issue_cycle + latency), or 0 if there are no ops
+    # Per scheduled value, its operator latency, so the commit cycle (issue + latency) has a single owner here rather
+    # than being recomputed by every consumer of the schedule.
+    latency: dict[ValueId, int]
     # Per pooled instance slot, the first cycle it is free again (last firing's issue + initiation_interval). An
     # overlapping successor inherits this residue as its ``entry_busy`` so a firing bound to the same physical slot
     # waits out the predecessor's in-flight activation instead of double-driving it across the overlapped boundary.
     busy_until: dict[tuple[PooledHardwareOperator, int], int]
+
+    def commit_cycle(self, vid: ValueId) -> int:
+        """The cycle a scheduled value commits: its issue cycle plus its operator latency."""
+        return self.issue_cycle[vid] + self.latency[vid]
 
 
 def _op(nodes: dict[ValueId, MirNode], vid: ValueId) -> MirOperation:
@@ -165,7 +172,9 @@ def schedule_ops(
     livein_landing = livein_landing or {}
     op_ids = sorted(schedulable)
     if not op_ids:
-        return Schedule(issue_cycle={}, inst_of={}, firings={}, instances=[], makespan=0, busy_until=dict(entry_busy))
+        return Schedule(
+            issue_cycle={}, inst_of={}, firings={}, instances=[], makespan=0, latency={}, busy_until=dict(entry_busy)
+        )
     schedulable_set = set(op_ids)
 
     firings = fuse_block_firings(nodes, schedulable_set)
@@ -238,6 +247,7 @@ def schedule_ops(
 
     inst_of, instances = _bind_instances(inst_count, slot_of, firings)
     pooled_firings = {leader: members for leader, members in firings.items() if leader in slot_of}
+    latency = {vid: _op(nodes, vid).operator.latency for vid in op_ids}
     makespan = max((commit_cycle(vid) for vid in op_ids), default=0)
     return Schedule(
         issue_cycle=issue_cycle,
@@ -245,6 +255,7 @@ def schedule_ops(
         firings=pooled_firings,
         instances=instances,
         makespan=makespan,
+        latency=latency,
         busy_until=busy_until,
     )
 

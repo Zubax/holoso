@@ -4,7 +4,8 @@ import math
 
 from ._const import BoolConst, FloatConst
 from ._copy import copy_node, rebuild
-from ._ir import Hir, HirBuilder, Node, Operation, ValueId
+from .._util import ValueId
+from ._ir import Hir, HirBuilder, Node, Operation
 from ._operators import BoolAnd, BoolNot, BoolOr, BoolSelect, FloatDiv, FloatMul, FloatMulPow2, Select
 
 

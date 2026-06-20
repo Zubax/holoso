@@ -1,7 +1,8 @@
 """HIR dead-code elimination."""
 
 from ._copy import copy_node, rebuild
-from ._ir import Branch, Hir, HirBuilder, Node, Operation, Phi, ValueId
+from .._util import ValueId
+from ._ir import Branch, Hir, HirBuilder, Node, Operation, Phi
 
 
 def _seeds(hir: Hir) -> list[ValueId]:
