@@ -6,6 +6,7 @@ from ._ir import (
     MirBoolConst as MirBoolConst,
     MirBoolInput as MirBoolInput,
     MirBoolOutput as MirBoolOutput,
+    MirBoolStateRead as MirBoolStateRead,
     MirBoolView as MirBoolView,
     MirBranch as MirBranch,
     MirBuilder as MirBuilder,

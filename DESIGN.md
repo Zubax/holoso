@@ -380,10 +380,12 @@ over the same objective, and colors both banks.
 Phi-arm coalescing eliminates most install copies. Before coloring, each phi and its register-backed,
 identity-conditioner arms merge by union-find whenever the two sides do not interfere, so the arm value flows straight
 into the merged register with no copy. The merge is judged on an install-free oracle and then re-checked against the
-residual (non-coalesced) installs, re-running to a fixpoint whose worst case is the copy-everything baseline. A
-state-slot-pinned arm, a loop carry whose live-in overlaps its back-edge arm, and a sibling read under a non-identity
-conditioner keep their copies; a diamond's mutually-exclusive arms coalesce away. The pass is pure post-schedule
-register reassignment -- it changes only register and copy counts, never behavior or PC layout.
+residual (non-coalesced) installs, re-running to a fixpoint whose worst case is the copy-everything baseline. A merge
+onto a non-coalesced state-slot register (owned by its copy-back machinery), a loop carry whose live-in overlaps its
+back-edge arm, and a sibling read under a non-identity conditioner keep their copies; a diamond's mutually-exclusive
+arms coalesce away. A coalesced slot register, by contrast, is seeded by its live-out pin and absorbs its phi (see
+persistent state slots). The pass is pure post-schedule register reassignment -- it changes only register and copy
+counts, never behavior or PC layout.
 
 Commutative port assignment, after allocation, orients each commutative firing's two operands across its read ports to
 minimize total read-set size (a register read in both positions would otherwise sit in both ports' muxes). Commutation
@@ -393,12 +395,19 @@ relabelling, no hardware or latency. Minimizing read-set size over orientations 
 search cannot reliably optimize, so it is solved exactly per instance as a small MILP (HiGHS via `scipy.optimize.milp`)
 with the local search as a fallback. On a stateless EKF update this takes read-mux fan-in from 89 to the optimum 78.
 
-Persistent state slots. A live-out coalesces onto the slot register when its live range does not overlap the live-in --
-the producing operator then writes the slot directly. When they overlap (a one-sample delay, or write-then-read) the
-live-out keeps its own register and a pc-gated copy installs it as early as the old live-in is read. A coalesced slot's
-register is reusable for unrelated temporaries during its dead mid-frame gap; a non-coalesced slot stays reserved. The
-cost that matters is mux fabric, not flip-flops. State registers are the one datapath exception that reset reaches (each
-loaded with its snapshot); pure datapath state stays out of the reset cone.
+Persistent state slots. Both banks commit state in place: a live-out is written directly into its slot register,
+read-first, so a same-frame self-update (`self.x = self.x | y`, an accumulator) reads the old value and writes the new
+one with no copy. The live-out may be a pooled operator result, an inline result (a cast, or the select an if-converted
+conditional update lowers to), or a phi -- a conditional or loop update whose "unchanged" arm is the slot live-in,
+coalesced onto the slot register through the same phi-arm union-find. The decision is judged on the install-free oracle,
+which over-approximates, so it is validated against the final coloring and retried: if pinning a live-out in place forces
+two interfering values onto the slot register (the live-in still needed past the in-place write -- it feeds another phi,
+or a sibling arm computed in a dominator clobbers it), that slot is backed out to a copy. When it cannot commit in place
+(a genuine overlap, a folded sign, a chained copy `self.a = self.b`, or an entry-block dwell tenant) the live-out keeps
+its own register and a pc-gated copy installs it as early as the old live-in is read. A coalesced slot's register is
+reusable for unrelated temporaries during its dead mid-frame gap; a non-coalesced slot stays reserved. The cost that
+matters is mux fabric, not flip-flops. State registers are the one datapath exception that reset reaches (each loaded
+with its snapshot); pure datapath state stays out of the reset cone.
 
 ### Control flow
 

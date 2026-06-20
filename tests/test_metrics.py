@@ -161,6 +161,14 @@ def _measure(name: str) -> Metrics:
 #   phi-arm writes of schmitt/quadrature/pfd coalesce away, dropping copies AND registers (recip_newton 5->4 wide,
 #   quadrature 13->8 bool) AND the true write-select fan-in (remainder 10->7); recip_newton keeps its one
 #   loop-carried copy (its phi overlaps the back-edge arm), proving the oracle refuses unsound merges.
+# - in-place state commit extends slot-live-out coalescing to BOTH banks and to conditional (phi/select) updates: a
+#   slot live-out -- an operator result, an inline select from an if-converted update, or a phi whose "unchanged" arm
+#   is the slot live-in -- is written directly into its slot register read-first, eliding the boundary copy-back and the
+#   scratch register. majority_voter's five sticky-fault latches collapse to in-place ORs (copies 5->0, steering 30->20,
+#   min_ii 20->16, last_pc 26->21); latching_fault_register, schmitt, quadrature, pfd shed their bool copy-back
+#   registers; pid (nreg 9->8) and iir1_lpf (steering 3->2) commit their float state in place. A validate-and-retry loop
+#   demotes any slot whose in-place commit the colorer finds unsound (a live-in feeding another phi, a dominator-arm
+#   clobber, an entry-block dwell tenant) back to a copy-back, so the chained-copy and overlap cases stay correct.
 # - min_ii reflects the bank-true dependency edges (latch-free boolean bank), diamond if-conversion (small pure
 #   branch diamonds become muxes -- a float select or, for a boolean/mixed merge, a bool_select reduced to and/or/not:
 #   signal_window/pid/cordic and now schmitt/pfd/iir1_lpf collapse to a single block; quadrature collapses partway
@@ -188,17 +196,17 @@ BASELINE: dict[str, Metrics] = {
     "madd": Metrics(True, nreg=4, bnreg=0, steering=3, copies=0, min_ii=20, last_pc=20, max_block_span=20),
     "poly3": Metrics(True, nreg=5, bnreg=0, steering=5, copies=0, min_ii=35, last_pc=35, max_block_span=35),
     "signal_window": Metrics(False, nreg=4, bnreg=6, steering=7, copies=0, min_ii=13, last_pc=13, max_block_span=13),
-    "iir1_lpf": Metrics(False, nreg=3, bnreg=2, steering=3, copies=0, min_ii=21, last_pc=21, max_block_span=21),
-    "pid": Metrics(False, nreg=9, bnreg=3, steering=10, copies=0, min_ii=40, last_pc=40, max_block_span=40),
-    "schmitt_trigger": Metrics(False, nreg=1, bnreg=3, steering=2, copies=0, min_ii=7, last_pc=7, max_block_span=7),
-    "quadrature_encoder": Metrics(False, nreg=1, bnreg=9, steering=7, copies=0, min_ii=6, last_pc=6, max_block_span=6),
+    "iir1_lpf": Metrics(False, nreg=3, bnreg=2, steering=2, copies=0, min_ii=21, last_pc=21, max_block_span=21),
+    "pid": Metrics(False, nreg=8, bnreg=3, steering=10, copies=0, min_ii=40, last_pc=40, max_block_span=40),
+    "schmitt_trigger": Metrics(False, nreg=1, bnreg=2, steering=2, copies=0, min_ii=7, last_pc=7, max_block_span=7),
+    "quadrature_encoder": Metrics(False, nreg=1, bnreg=7, steering=7, copies=0, min_ii=6, last_pc=6, max_block_span=6),
     "phase_frequency_detector": Metrics(
-        False, nreg=1, bnreg=8, steering=6, copies=0, min_ii=6, last_pc=6, max_block_span=6
+        False, nreg=1, bnreg=7, steering=5, copies=0, min_ii=6, last_pc=6, max_block_span=6
     ),
     "latching_fault_register": Metrics(
-        False, nreg=1, bnreg=7, steering=4, copies=0, min_ii=6, last_pc=6, max_block_span=6
+        False, nreg=1, bnreg=6, steering=2, copies=0, min_ii=6, last_pc=6, max_block_span=6
     ),
-    "majority_voter": Metrics(False, nreg=1, bnreg=21, steering=30, copies=5, min_ii=20, last_pc=26, max_block_span=14),
+    "majority_voter": Metrics(False, nreg=1, bnreg=21, steering=20, copies=0, min_ii=16, last_pc=21, max_block_span=14),
     "recip_newton": Metrics(False, nreg=4, bnreg=1, steering=4, copies=2, min_ii=21, last_pc=47, max_block_span=25),
     "remainder": Metrics(False, nreg=8, bnreg=4, steering=12, copies=2, min_ii=50, last_pc=71, max_block_span=22),
     "octave_index": Metrics(False, nreg=3, bnreg=1, steering=6, copies=3, min_ii=18, last_pc=56, max_block_span=27),

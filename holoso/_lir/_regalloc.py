@@ -120,7 +120,6 @@ def color(problem: ColoringProblem) -> tuple[dict[ValueId, int], int]:
         )
         if comp_score < base_score:
             assign, nreg = comp_assign, comp_nreg
-    _assert_graph_coloring(assign, problem.interferes)
     return assign, nreg
 
 
@@ -257,17 +256,21 @@ def _color_refine(problem: ColoringProblem, seed: dict[ValueId, int], nreg: int,
     return best
 
 
-def _assert_graph_coloring(assign: dict[ValueId, int], interferes: dict[ValueId, set[ValueId]]) -> None:
-    """Backstop: two values sharing a register must not interfere."""
+def find_coloring_conflict(assign: dict[ValueId, int], interferes: dict[ValueId, set[ValueId]]) -> int | None:
+    """
+    The first register carrying two interfering values, or None if the coloring is sound. The colorer never co-locates
+    interfering MOVABLE values, so a conflict can only come from the caller's pins -- e.g. a state slot whose live-in and
+    a coalesced live-out turn out to interfere under the final, install-aware interference. The caller backs that slot
+    out of its in-place coalescing and recolors; an all-copy-back coloring has no pin conflicts, so the retry converges.
+    """
     by_reg: dict[int, list[ValueId]] = {}
     for vid, reg in assign.items():
         by_reg.setdefault(reg, []).append(vid)
     for reg, vids in by_reg.items():
         members = set(vids)
-        for vid in vids:
-            clash = interferes[vid] & members
-            if clash:
-                raise AssertionError(f"register {reg} shared by interfering values {vid} and {sorted(clash)}")
+        if any(not interferes[vid].isdisjoint(members) for vid in vids):
+            return reg
+    return None
 
 
 def _objective(

@@ -378,7 +378,7 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes(config: Operator
         ), f"reg {index}: landings {sorted(pcs)} not all model writebacks {sorted(actual.get(index, set()))}"
 
 
-def test_bool_only_block_drains_one_step_under_the_wide_boundary() -> None:
+def test_bool_only_block_drains_one_step_under_the_wide_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
     # B1 (bank-aware drained boundary): a drained block that does WORK carrying only boolean values at its boundary AND
     # no tail install lands one fetch step earlier than a wide one -- the latch-free boolean bank has no write-latch
     # edge. But a tail INSTALL (a pc-gated boolean write/phi copy) lands one step LATER, at the wide boundary, so an
@@ -408,12 +408,21 @@ def test_bool_only_block_drains_one_step_under_the_wide_boundary() -> None:
     ), "drained at the wide boundary"
 
     # A bool-only block that carries a tail install keeps the WIDE drain: the pc-gated install lands at the wide
-    # boundary, so shrinking to the bool boundary would read it one PC before it lands (a miscompile). The
-    # majority_voter's gated diagnostic arm is a bool-only block whose five sticky-fault writes are such installs.
-    from majority_voter import MajorityVoter  # noqa: PLC0415
+    # boundary, so shrinking to the bool boundary would read it one PC before it lands (a miscompile). A non-coalesced
+    # boolean phi arm is such an install: here ``r``'s entry arm is the input ``a``, which is also returned, so it stays
+    # live past the merge and cannot coalesce onto the phi register -- it installs by a pc-gated copy at the (bool-only)
+    # not-taken arm's tail. If-conversion is disabled so the diamond stays a real branch with a residual phi install
+    # rather than collapsing to a select. (In-place state commit elided the former majority_voter sticky-fault installs.)
+    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
 
-    voter = build(_run(MajorityVoter().__call__), "voter_bank_drain")
-    bool_install_blocks = [b for b in voter.blocks if b.bool_writes and is_bool_only(b)]
+    def residual_bool_install(a: bool, b: bool, c: bool):  # type: ignore[no-untyped-def]
+        r = a
+        if c:
+            r = a and b
+        return r, a  # ``a`` returned -> the c-false arm (= a) of r's phi cannot coalesce -> a residual bool install
+
+    inst = build(_run(residual_bool_install), "bool_install_drain")
+    bool_install_blocks = [b for b in inst.blocks if b.bool_writes and is_bool_only(b)]
     assert bool_install_blocks, "no bool-only install-bearing block to exercise the install drain exception"
     for block in bool_install_blocks:
         assert block.term_offset == boundary_step(
@@ -1265,28 +1274,30 @@ def test_cfg_phi_merge_register_shows_residence(monkeypatch: pytest.MonkeyPatch)
 
 def test_cfg_write_only_state_slot_is_reserved() -> None:
     # A state slot written on every arm but never read before the write has no live-in, so its dedicated register is
-    # never pinned to a value. The colorer must still reserve it (it sits below fresh_start and is installed by the
-    # boundary copy) -- a temporary considering it as a reuse candidate must skip it rather than fault on the missing
-    # pool entry.
+    # never pinned to a value. The folded sign on the live-out (``self.acc = -t``) keeps it from coalescing in place, so
+    # the register is reserved-but-empty (no live-in occupant, installed by the boundary copy). The colorer must still
+    # reserve it -- a temporary considering it as a reuse candidate must skip it rather than fault on the missing pool
+    # entry. (Without the sign fold the write-only live-out would coalesce onto the slot register; see the next test.)
     class WriteOnlyBranch:
         def __init__(self) -> None:
             self.acc = 0.0
 
         def __call__(self, x):  # type: ignore[no-untyped-def]
             if x > 0.0:
-                self.acc = x * 2.0
+                t = x * 2.0
             else:
-                self.acc = x * 3.0
+                t = x * 3.0
+            self.acc = -t  # the folded sign forces a non-coalesced (reserved, copy-installed) write-only slot
             return self.acc
 
     lir = build(_run(WriteOnlyBranch().__call__), "write_only")
     (slot,) = lir.float_state_slots
-    assert slot.name == "acc"
+    assert slot.name == "acc" and slot.needs_copy  # reserved, not coalesced (the sign fold blocks in-place commit)
     assert slot.reg.index not in {
         write.dst.index for op in lir.ops for write in op.writes
     }  # reserved: no operator result lands on it
     model = build_model(lir)
-    assert float(model.run(3.0)[0]) == 6.0 and float(model.run(-2.0)[0]) == -6.0
+    assert float(model.run(3.0)[0]) == -6.0 and float(model.run(-2.0)[0]) == 6.0
 
 
 def test_cfg_state_slot_coalesces_onto_its_register() -> None:

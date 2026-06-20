@@ -23,6 +23,7 @@ from holoso import (
 from ._modelref import build_model, generate
 from holoso._frontend import lower
 from holoso._hir import optimize
+from holoso._hir import _if_convert as if_convert_pass
 from holoso._lir import build
 from holoso._mir import lower as lower_to_mir
 from ._modelref import (
@@ -943,6 +944,245 @@ def test_model_sign_conditioned_phi_arm() -> None:
     model = build_model(build(_run(_neg_abs_phi), "negabs"))
     for x in [3.0, -2.5, 0.0, 7.25, -10.0]:
         assert float(model.run(x)[0]) == (-x if x > 0.0 else x)
+
+
+# --- In-place persistent-state commit: a state slot's live-out written directly into its slot register, no copy-back.
+# Both banks, operator and conditional (phi/select) live-outs. Each test drives the cycle model against a fresh Python
+# reference across a multi-transaction sequence (the carried state must stay correct) AND asserts the copy was actually
+# elided (``not needs_copy``) -- a correctness and a tightness guard, so a regression back to the copy-back fails here.
+
+
+def _bool_slot(lir, name):  # type: ignore[no-untyped-def]
+    return next(s for s in lir.bool_state_slots if s.name == name)
+
+
+def _float_slot(lir, name):  # type: ignore[no-untyped-def]
+    return next(s for s in lir.float_state_slots if s.name == name)
+
+
+class _BoolStickyLatch:
+    # A conditional bool sticky latch (the majority_voter shape): the live-out is a phi whose "unchanged" arm is the
+    # live-in, so it commits in place into the slot register -- no scratch register, no boundary copy-back.
+    def __init__(self) -> None:
+        self._f = False
+
+    def __call__(self, en: bool, x: bool):  # type: ignore[no-untyped-def]
+        if en:
+            self._f = self._f or x
+        return self._f
+
+
+def test_inplace_bool_conditional_sticky_latch() -> None:
+    lir = build(_run(_BoolStickyLatch().__call__), "sticky")
+    assert not _bool_slot(lir, "_f").needs_copy  # the phi live-out coalesced onto the slot register
+    model = build_model(lir)
+    reference = _BoolStickyLatch()
+    t, f = True, False
+    for en, x in [(f, t), (t, t), (f, f), (t, f), (f, t), (t, f), (t, t)]:
+        assert bool(model.run(en, x)[0]) is reference(en, x)
+
+
+class _BoolOrSelf:
+    # An unconditional bool read-first self-update (latching_fault_register): the OR reads the live-in and writes the
+    # slot register in place. The OR is the slot live-out and is cycle-0 eligible, so it exercises the entry-block dwell
+    # floor on the live-out (without the floor it would corrupt carried state during the accept dwell).
+    def __init__(self) -> None:
+        self._f = False
+
+    def __call__(self, x: bool):  # type: ignore[no-untyped-def]
+        self._f = self._f or x
+        return self._f
+
+
+def test_inplace_bool_unconditional_self_update() -> None:
+    lir = build(_run(_BoolOrSelf().__call__), "orself")
+    assert not _bool_slot(lir, "_f").needs_copy
+    model = build_model(lir)
+    reference = _BoolOrSelf()
+    for x in [False, False, True, False, False]:
+        assert bool(model.run(x)[0]) is reference(x)
+
+
+class _LoopPreheaderArmInPlace:
+    # A loop-carried bool state whose loop phi coalesces onto the slot register. The preheader update ``self._s or a``
+    # is the phi's ENTRY arm, computed in the entry block from resident values only (cycle-0 eligible), and it coalesces
+    # onto the slot register -- so it MUST be floored off cycle 0 by the arm-producer dwell extension, or re-firing it
+    # during the accept dwell corrupts carried state and ``_assert_entry_dwell_safe`` trips at build time. The bare
+    # slot-live-out floor does not cover it (the live-out is the loop-exit phi, not this entry-block arm), so this is
+    # the regression guard for the transitive phi-chain dwell walk.
+    def __init__(self) -> None:
+        self._s = False
+
+    def __call__(self, a: bool, n: float):  # type: ignore[no-untyped-def]
+        self._s = self._s or a
+        i = n
+        while i > 0.0:
+            self._s = self._s or a
+            i = i - 1.0
+        return self._s
+
+
+def test_inplace_loop_preheader_arm_is_dwell_safe() -> None:
+    lir = build(_run(_LoopPreheaderArmInPlace().__call__), "preheaderarm")  # must not trip _assert_entry_dwell_safe
+    assert not _bool_slot(lir, "_s").needs_copy  # the loop phi coalesced onto the slot register
+    model = build_model(lir)
+    reference = _LoopPreheaderArmInPlace()
+    t, f = True, False
+    for a, n in [(f, 0.0), (t, 1.0), (f, 2.0), (t, 0.0), (f, 3.0), (t, 2.0)]:
+        assert bool(model.run(a, n)[0]) is reference(a, n)
+
+
+class _WriteOnlyDwellTenant:
+    # Regression (Codex): an if-converted kernel where a temporary (``y or self._x``) lands as a gap tenant on the
+    # WRITE-ONLY ``_w`` slot's free register and is cycle-0 eligible -- a dwell hazard the live-out floor cannot see (the
+    # tenant is not a slot live-out). The validate-and-retry must demote ``_w`` to a copy-back, reserving its register so
+    # no tenant lands there; without it ``_assert_entry_dwell_safe`` trips at build time.
+    def __init__(self) -> None:
+        self._x = False
+        self._w = False
+
+    def __call__(self, cond: bool, y: bool):  # type: ignore[no-untyped-def]
+        if cond:
+            self._x = y or self._x
+            self._w = y
+        else:
+            self._w = self._x
+        return self._x, self._w
+
+
+def test_inplace_write_only_slot_dwell_tenant_is_demoted() -> None:
+    lir = build(_run(_WriteOnlyDwellTenant().__call__), "dwell_tenant")  # must not trip _assert_entry_dwell_safe
+    model = build_model(lir)
+    reference = _WriteOnlyDwellTenant()
+    t, f = True, False
+    for cond, y in [(t, t), (f, t), (t, f), (f, f), (t, t), (f, t)]:
+        assert tuple(bool(v) for v in model.run(cond, y)) == tuple(bool(v) for v in reference(cond, y))
+
+
+class _FloatCondAccum:
+    # A conditional float accumulator: the live-out is the if-converted SelectOperator (an inline op) whose "false" arm
+    # is the live-in, so it commits in place into the slot register -- no scratch register, no boundary copy.
+    def __init__(self) -> None:
+        self._acc = 0.0
+
+    def __call__(self, x: float, en: bool):  # type: ignore[no-untyped-def]
+        if en:
+            self._acc = self._acc + x
+        return self._acc
+
+
+def test_inplace_float_conditional_accumulator() -> None:
+    lir = build(_run(_FloatCondAccum().__call__), "accum")
+    assert not _float_slot(lir, "_acc").needs_copy  # the select live-out coalesced onto the slot register
+    model = build_model(lir)
+    reference = _FloatCondAccum()
+    t, f = True, False
+    for x, en in [(1.0, t), (2.0, f), (3.0, t), (5.0, t), (4.0, f), (-2.0, t)]:
+        assert float(model.run(x, en)[0]) == reference(x, en)
+
+
+class _ChainedFloatSlots:
+    # A chained copy ``self.a = self.b``: a's live-out is b's live-in, so NEITHER may coalesce in place -- writing b's
+    # update before a captures b's old value would corrupt a. Both keep their copy-back (the tapped_by_other guard).
+    def __init__(self) -> None:
+        self.a = 0.0
+        self.b = 1.0
+
+    def __call__(self, x):  # type: ignore[no-untyped-def]
+        self.a = self.b
+        self.b = self.b + x
+        return self.a
+
+
+def test_chained_float_slots_do_not_coalesce() -> None:
+    lir = build(_run(_ChainedFloatSlots().__call__), "chain")
+    assert _float_slot(lir, "a").needs_copy  # chained copy of b's live-in -- must not coalesce in place
+    assert _float_slot(lir, "b").needs_copy  # tapped by a's live-out -- must not coalesce in place
+    model = build_model(lir)
+    reference = _ChainedFloatSlots()
+    for x in [2.0, 3.0, 4.0, 1.0]:
+        assert float(model.run(x)[0]) == reference(x)
+
+
+class _MultiArmFloatPhi:
+    # A nested, multi-arm conditional update where one arm reads the live-in: exercises the residual-install fixpoint
+    # when the live-out coalesces onto the slot register.
+    def __init__(self) -> None:
+        self._s = 0.0
+
+    def __call__(self, x):  # type: ignore[no-untyped-def]
+        if x > 0.0:
+            if x > 10.0:
+                self._s = x
+            else:
+                self._s = x + 1.0
+        else:
+            self._s = self._s - 1.0
+        return self._s
+
+
+def test_inplace_multiarm_float_phi() -> None:
+    lir = build(_run(_MultiArmFloatPhi().__call__), "multiarm")
+    assert not _float_slot(lir, "_s").needs_copy  # the live-in is the else arm, so the live-out commits in place
+    model = build_model(lir)
+    reference = _MultiArmFloatPhi()
+    for x in [5.0, 15.0, -1.0, -1.0, 2.0, 30.0, -3.0]:
+        assert float(model.run(x)[0]) == reference(x)
+
+
+class _LiveInFeedsAnotherSlotPhi:
+    # Regression: slot ``x``'s live-in is the if-arm of slot ``w``'s phi. ``x``'s live-out must NOT coalesce in place --
+    # the residual install of ``w``'s arm reads x's live-in at the predecessor tail where x's in-place write would land,
+    # which the install-free oracle cannot see (it crashed the colorer with an interfering co-assignment before the fix).
+    def __init__(self) -> None:
+        self.x = 0.0
+        self.w = 0.0
+
+    def __call__(self, cond: bool, y: float):  # type: ignore[no-untyped-def]
+        old_x = self.x  # the live-in of slot x
+        if cond:
+            self.x = y + 1.0
+            self.w = old_x  # w's if-arm is x's live-in, so x's live-in is consumed by w's phi
+        else:
+            self.w = 0.0
+        return self.x, self.w
+
+
+def test_state_livein_feeding_another_slot_phi_does_not_coalesce(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # keep the diamond a real branch with phis
+    lir = build(_run(_LiveInFeedsAnotherSlotPhi().__call__), "livein_other_slot")  # must not crash the colorer
+    assert _float_slot(lir, "x").needs_copy  # x's live-in feeds w's phi -> x must stay non-coalesced (copy-back)
+    model = build_model(lir)
+    reference = _LiveInFeedsAnotherSlotPhi()
+    for cond, y in [(True, 2.0), (False, 3.0), (True, -1.0), (False, 5.0), (True, 4.0)]:
+        got = tuple(float(v) for v in model.run(cond, y))
+        exp = tuple(float(v) for v in reference(cond, y))
+        assert got == exp, (cond, y, got, exp)
+
+
+class _LiveInFeedsUnrelatedPhi:
+    # Regression: slot ``x``'s live-in is an arm of an unrelated (non-state) phi. With x's live-out coalesced and the
+    # slot register unreserved, the unrelated phi could absorb x's live-in and inherit the slot pin, colliding with x's
+    # live-out (a colorer crash before the fix). x must stay non-coalesced so its live-in register is reserved.
+    def __init__(self) -> None:
+        self.x = 0.0
+
+    def __call__(self, cond: bool):  # type: ignore[no-untyped-def]
+        new_y = self.x if cond else 0.0  # an unrelated phi taking x's live-in as an arm
+        self.x = 1.0 if cond else 2.0
+        return new_y, self.x
+
+
+def test_state_livein_feeding_unrelated_phi_does_not_coalesce(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # keep the diamonds real branches with phis
+    lir = build(_run(_LiveInFeedsUnrelatedPhi().__call__), "livein_unrelated")  # must not crash the colorer
+    assert _float_slot(lir, "x").needs_copy  # x's live-in feeds an unrelated phi -> x must stay non-coalesced
+    model = build_model(lir)
+    reference = _LiveInFeedsUnrelatedPhi()
+    for cond in [True, False, True, False, True]:
+        got = tuple(float(v) for v in model.run(cond))
+        exp = tuple(float(v) for v in reference(cond))
+        assert got == exp, (cond, got, exp)
 
 
 def _while_sum(x, n):  # type: ignore[no-untyped-def]

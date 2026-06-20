@@ -389,8 +389,9 @@ class FloatStateSlot:
 
     ``tap`` is the live-out's source tap (register/constant + folded sign), the same primitive an output wire taps; here
     the sink is the slot register rather than a port. When the tap is exactly ``reg`` with an identity sign the live-out
-    coalesced onto the slot register (its producing operator wrote it) and the backend emits no copy; otherwise the
-    backend fires a reg->reg copy for it, scheduled at ``install_cycle`` -- as early as the old live-in is last read and
+    coalesced onto the slot register (its producing operator -- or, for a conditional/loop update, the arms of its phi --
+    wrote it in place) and the backend emits no copy; otherwise the backend fires a reg->reg copy for it, scheduled at
+    ``install_cycle`` -- as early as the old live-in is last read and
     the source is available, the initiation boundary at the latest. The copy samples the tap on its fetch step
     (``copy_step_cycle(install_cycle)``) and the new live-out lands one fetch step later (``install_landing``) for an
     early install, or read-first at the boundary (``LASTPC``) for a boundary install. Installing before the boundary
@@ -661,7 +662,9 @@ class BoolStateSlot:
     A persistent boolean state register: reset to ``reset_value``, holding the slot's live-in throughout the
     transaction and installing its live-out (``live_out``, a boolean register or constant with a folded inversion)
     at the boundary, read-first
-    -- so an output or branch that still reads the live-in sees the old value, exactly like a float slot.
+    -- so an output or branch that still reads the live-in sees the old value, exactly like a float slot. When the
+    live-out already resides in the slot register uninverted it coalesced there (its producing operation, or the arms
+    of its phi for a conditional/loop update, wrote it in place) and ``needs_copy`` is False -- no boundary copy.
     """
 
     name: str
