@@ -4,20 +4,20 @@ on:
   push:
   pull_request:
 
+env:
+  COCOTB_IGNORE_PYTHON_REQUIRES: "1"
+
 jobs:
   core:
-    name: tests + typecheck + black
+    name: core
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/zubax/zubax-fpga-toolchain:latest
       options: --user root
-    env:
-      COCOTB_IGNORE_PYTHON_REQUIRES: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
-
       - name: Run nox core checks
         run: nox -s tests typecheck black
 
@@ -27,13 +27,10 @@ jobs:
     container:
       image: ghcr.io/zubax/zubax-fpga-toolchain:latest
       options: --user root
-    env:
-      COCOTB_IGNORE_PYTHON_REQUIRES: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
-
       - name: Run nox cosim_examples
         run: nox -s cosim_examples
 
@@ -43,13 +40,10 @@ jobs:
     container:
       image: ghcr.io/zubax/zubax-fpga-toolchain:latest
       options: --user root
-    env:
-      COCOTB_IGNORE_PYTHON_REQUIRES: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
-
       - name: Run nox synth
         run: nox -s synth
 
@@ -59,12 +53,9 @@ jobs:
     container:
       image: ghcr.io/zubax/zubax-fpga-toolchain:latest
       options: --user root
-    env:
-      COCOTB_IGNORE_PYTHON_REQUIRES: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
-
       - name: Run nox synth_examples
         run: nox -s synth_examples
