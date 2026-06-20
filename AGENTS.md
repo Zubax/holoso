@@ -67,7 +67,12 @@ underscore-prefixed names. Exceptions apply for importing from parent modules wi
 Accessing underscore-prefixed names from outside a class (or its descendants) is not allowed;
 all externally accessble entities must be non-underscore-prefixed.
 
-Avoid files longer than about ~3000 lines (this is a soft limit).
+For invariant checking use plain `assert` statements copiously; usually any nontrivial function should contain at
+least a few. Their disappearance under `-O` is intentional.
+The assertion description string is only useful in nonobvious cases;
+do not spell out what is clear from the asserted expression. 
+
+Avoid files longer than about ~2000 lines (this is a soft limit).
 If a file grows beyond that, consider refactoring into smaller modules.
 
 If a docstring comment doesn't fit on one line, add an initial line break like this:
@@ -221,8 +226,7 @@ MAXIMUM THINKING EFFORT to review your work:
 
 - A subagent focusing on the FUNCTIONAL CORRECTNESS and ROBUSTNESS of the implementation.
 - A subagent focusing on the ARCHITECTURAL CLEANLINESS, DESIGN PRACTICES, and CODE QUALITY.
-- Distinct tools -- Codex, Antigravity (`agy`), Claude (check what's available, exclude yourself) --
-  focusing on CORRECTNESS only.
+- Distinct tools -- Codex, Claude (check what's available, exclude yourself) -- focusing on CORRECTNESS only.
 
 It is important that we use all available distinct tools to maximize the diversity of perspectives
 and minimize blind spots. When all are done, review and consolidate their findings and act accordingly.
@@ -243,6 +247,10 @@ Every time a reviewer finds a defect-revealing kernel shape, fold it into the su
 
 When working around the low-level compiler components around regalloc, scheduler, etc, consider using the
 `audit-schedule-quality` skill in an extra subagent.
+
+Review agents are NOT ALLOWED TO MODIFY ANYTHING NOR RUN ANY MUTATING COMMANDS IN THE WORKTREE;
+in particular, all use of git in the worktree is strictly prohibited.
+If they need a mutable environment, let them copy the worktree where they see fit.
 
 Review agents in maximum thinking mode may go silent for a long time.
 Set a generous timeout of about 1 hour or so, use your best judgement.
