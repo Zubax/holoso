@@ -239,6 +239,8 @@ The requirement of multiple consecutive reviews with no significant findings is 
 We have seen in the past how a single review turn would come up blank while the next round (with zero code changes in
 between) would dig up a critical defect. Hence, we repeat turns generously across distinct agents for maximum assurance.
 
+Every time a reviewer finds a defect-revealing kernel shape, fold it into the suite so it can never regress.
+
 When working around the low-level compiler components around regalloc, scheduler, etc, consider using the
 `audit-schedule-quality` skill in an extra subagent.
 

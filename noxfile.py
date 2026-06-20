@@ -115,7 +115,11 @@ def synth_examples(session: nox.Session) -> None:
         ],
         name="TrapezoidalLeakyStreamingIntegrator",
     )
-    syn("examples/madd.py", "madd", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
+    syn(
+        "examples/madd.py",
+        "madd",
+        ["yosys-ecp5:freq=100,fmul.stage_pack=1", "diamond-ecp5:freq=100", "vivado:freq=150"],
+    )
     syn("examples/poly3.py", "poly3", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
 
     syn(
@@ -133,12 +137,17 @@ def synth_examples(session: nox.Session) -> None:
         "fmul.stage_input=1,fmul.stage_product=1,fmul.stage_pack=1,"
         "fdiv.stage_input=1,fdiv.stage_pack=1,fdiv.stage_output=1"
     )
+    op_ekf1_wide_fadd_norm2 = (
+        "fadd.stage_decode=1,fadd.stage_align=1,fadd.stage_normalize=2,fadd.stage_pack=1,"
+        "fmul.stage_input=1,fmul.stage_product=1,fmul.stage_pack=1,"
+        "fdiv.stage_input=1,fdiv.stage_pack=1,fdiv.stage_output=1"
+    )
     syn(
         "examples/ekf1_stateless.py",
         "update_x_P",
         [
             f"yosys-ecp5:freq=100,{op_ekf1_wide}",
-            f"diamond-ecp5:freq=100,{op_ekf1_wide}",
+            f"diamond-ecp5:freq=100,{op_ekf1_wide},fmul.stage_output=1",
             f"vivado:freq=150,{op_ekf1_wide}",
         ],
         wexp=8,
@@ -160,7 +169,7 @@ def synth_examples(session: nox.Session) -> None:
         "examples/ekf1_stateful.py",
         "Ekf1().update",
         [
-            f"yosys-ecp5:freq=100,{op_ekf1_wide}",
+            f"yosys-ecp5:freq=100,{op_ekf1_wide_fadd_norm2}",
             f"diamond-ecp5:freq=100,{op_ekf1_wide},fadd.stage_input=1",
             f"vivado:freq=150,{op_ekf1_wide}",
         ],
