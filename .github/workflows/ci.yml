@@ -5,7 +5,8 @@ on:
   pull_request:
 
 jobs:
-  nox:
+  core:
+    name: tests + typecheck + black
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/zubax/zubax-fpga-toolchain:latest
@@ -17,5 +18,53 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Run nox
-        run: nox
+      - name: Run nox core checks
+        run: nox -s tests typecheck black
+
+  cosim_examples:
+    name: cosim_examples
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/zubax/zubax-fpga-toolchain:latest
+      options: --user root
+    env:
+      COCOTB_IGNORE_PYTHON_REQUIRES: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run nox cosim_examples
+        run: nox -s cosim_examples
+
+  synth:
+    name: synth
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/zubax/zubax-fpga-toolchain:latest
+      options: --user root
+    env:
+      COCOTB_IGNORE_PYTHON_REQUIRES: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run nox synth
+        run: nox -s synth
+
+  synth_examples:
+    name: synth_examples
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/zubax/zubax-fpga-toolchain:latest
+      options: --user root
+    env:
+      COCOTB_IGNORE_PYTHON_REQUIRES: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run nox synth_examples
+        run: nox -s synth_examples
