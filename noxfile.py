@@ -137,6 +137,7 @@ def synth_examples(session: nox.Session) -> None:
         "fmul.stage_input=1,fmul.stage_product=1,fmul.stage_pack=1,"
         "fdiv.stage_input=1,fdiv.stage_pack=1,fdiv.stage_output=1"
     )
+    op_ekf1_wide_fmul_ilog2_decode = f"{op_ekf1_wide},fmul_ilog2.stage_decode=1"
     op_ekf1_wide_fadd_norm2 = (
         "fadd.stage_decode=1,fadd.stage_align=1,fadd.stage_normalize=2,fadd.stage_pack=1,"
         "fmul.stage_input=1,fmul.stage_product=1,fmul.stage_pack=1,"
@@ -146,7 +147,7 @@ def synth_examples(session: nox.Session) -> None:
         "examples/ekf1_stateless.py",
         "update_x_P",
         [
-            f"yosys-ecp5:freq=100,{op_ekf1_wide}",
+            f"yosys-ecp5:freq=100,{op_ekf1_wide_fmul_ilog2_decode}",
             f"diamond-ecp5:freq=100,{op_ekf1_wide},fmul.stage_output=1",
             f"vivado:freq=150,{op_ekf1_wide}",
         ],

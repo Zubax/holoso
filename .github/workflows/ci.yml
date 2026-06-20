@@ -12,41 +12,37 @@ jobs:
       image: ghcr.io/zubax/zubax-fpga-toolchain:latest
       options: --user root
     steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-      - name: Run nox core checks
-        run: nox -s tests typecheck black
+      - &checkout_step
+        uses: actions/checkout@v7
+        with: { submodules: recursive }
+      - run: nox -s tests typecheck black
 
   cosim_examples:
     name: cosim_examples
     runs-on: ubuntu-latest
     container: *fpga_toolchain_container
     steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-      - name: Run nox cosim_examples
-        run: nox -s cosim_examples
+      - *checkout_step
+      - run: nox -s cosim_examples
 
   synth:
     name: synth
     runs-on: ubuntu-latest
     container: *fpga_toolchain_container
     steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-      - name: Run nox synth
-        run: nox -s synth
+      - *checkout_step
+      - run: nox -s synth
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with: { name: synth-artifacts, path: build, if-no-files-found: ignore }
 
   synth_examples:
     name: synth_examples
     runs-on: ubuntu-latest
     container: *fpga_toolchain_container
     steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-      - name: Run nox synth_examples
-        run: nox -s synth_examples
+      - *checkout_step
+      - run: nox -s synth_examples
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with: { name: synth_examples-artifacts, path: build, if-no-files-found: ignore }
