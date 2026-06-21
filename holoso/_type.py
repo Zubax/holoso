@@ -176,6 +176,19 @@ class BoolType(ScalarType):
         return "bool"
 
 
+@dataclass(frozen=True, slots=True)
+class LogicalPort:
+    """
+    One logical I/O port of a synthesized kernel: a parameter or output name paired with its scalar type. Both oracles
+    speak this signature -- the numerical model and the MIR interpreter expose their inputs/outputs as these, so the two
+    are directly comparable. Distinct from the RTL data ports, which carry a port-name prefix and explicit direction;
+    here the name is the logical one (as written in the kernel) and direction is implicit in the inputs/outputs split.
+    """
+
+    name: str
+    scalar_type: ScalarType
+
+
 def _pow2(exp: int) -> Fraction:
     return Fraction(1 << exp, 1) if exp >= 0 else Fraction(1, 1 << -exp)
 

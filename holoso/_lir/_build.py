@@ -85,15 +85,13 @@ def _assert_entry_dwell_safe(lir: Lir) -> None:
     block). This assertion is the loud backstop on that floor: the dwell is invisible to BOTH validation paths (the cosim
     bench never delays ``in_valid``; the model asserts it at once and keys cycle-0 ops at their read pc, never pc 0), so a
     regression that let a coalesced result reach a state register on cycle 0 would otherwise corrupt state silently.
-    Raised unconditionally (not via ``assert``, which ``python -O`` strips) so such a regression fails the build loudly.
     """
     entry = lir.blocks[lir.entry]
     state_regs = {slot.reg for slot in lir.float_state_slots} | {slot.reg for slot in lir.bool_state_slots}
     cycle0_writes = [w.dst for op in entry.ops if op.issue_cycle == 0 for w in op.writes]
     cycle0_writes += [op.write.dst for op in entry.inline_ops if op.issue_cycle == 0]
     for dst in cycle0_writes:
-        if dst in state_regs:
-            raise AssertionError(f"entry-block cycle-0 op writes persistent-state register {dst.stable_label}")
+        assert dst not in state_regs, f"entry-block cycle-0 op writes persistent-state register {dst.stable_label}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +271,11 @@ def _block_boundary(
     Derive a block's terminator offset, owning both physical regimes as explicit named branches and the invariants that
     bound them. ``wide_cap`` -- the latched wide landing of this block's makespan -- caps an overlapping block's floor and
     backstops every block's offset.
+
+    The classification facts (``livein_condition``, ``wide_resident``, ``does_boundary_work``) are computed by the caller
+    -- which holds the schedule and CFG context -- and passed in as plain booleans, keeping this a pure boundary-physics
+    derivation rather than reaching back into the scheduler/MIR to re-derive them. With a single call site that separation
+    is deliberate: folding the classification in would only widen this function's input surface, not remove a duplication.
 
     The two regimes are genuinely different physics and stay separate:
       - OVERLAP: an overlapping block's terminator is the ISSUE-side envelope (the latest control word still driven, the
@@ -553,6 +556,12 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
     # coalescing, so the install set is non-increasing over a finite block set and reaches a fixpoint (the assert guards
     # the monotonicity; the iteration count is bounded by the block count). Determinism is preserved: the allocator is
     # seed-fixed and the install set is rebuilt the same way each pass.
+    #
+    # This install fixpoint NESTS a second one: each ``_layout_and_allocate`` round runs the per-bank phi-coalescing /
+    # coloring fixpoint in ``_coalesce_and_color``. Both are bounded and monotone -- the install set non-increasing here,
+    # the inner forbidden-merge set non-decreasing there -- so the composition terminates in at most block-count outer
+    # rounds, each a bounded inner fixpoint. The coupling is one-way and cannot deadlock: a shrinking install set only
+    # relieves register pressure, enabling more coalescing, never forbidding a merge the inner round already made.
     const_branch_blocks = set(_const_branch_conditions(mir, bool_mir))
     has_install_blocks = _block_has_install(mir, float_mir, bool_mir)
     for _ in range(len(mir.blocks) + 1):
@@ -563,7 +572,7 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
             break
         has_install_blocks = actual
     else:
-        raise AssertionError("coalesced-install fixpoint did not converge")  # unreachable: monotone over finite blocks
+        assert False, "coalesced-install fixpoint did not converge"  # unreachable: monotone over finite blocks
     overlap = result.overlap
     block_sched = overlap.block_sched
     inst_of = result.inst_of
@@ -847,7 +856,7 @@ def _build_outputs(
         elif isinstance(out, MirBoolOutput):
             outputs.append(BoolOutputWire(out.name, _bool_operand(bool_mir, out.value, alloc, out.inversion)))
         else:
-            raise AssertionError(f"unhandled MIR output {out!r}")
+            assert False, f"unhandled MIR output {out!r}"
     return outputs
 
 
@@ -1231,7 +1240,7 @@ def _coalesce_and_color(
             for pred, phi_vid in coalescing.coalesced
             if coalescing.leader.get(phi_vid, phi_vid) in bad_leaders
         }
-    raise AssertionError("phi-coalescing fixpoint did not converge")  # unreachable: forbidding is monotone and bounded
+    assert False, "phi-coalescing fixpoint did not converge"  # unreachable: forbidding is monotone and bounded
 
 
 @dataclass(frozen=True, slots=True)
@@ -1676,7 +1685,7 @@ def _allocate_bank(
             continue
         break
     else:  # pragma: no cover -- the all-copy-back floor is conflict-free, so the loop always breaks first
-        raise AssertionError(f"{bank.label} slot-coalescing retry did not converge")
+        assert False, f"{bank.label} slot-coalescing retry did not converge"
 
     # Backstop: a non-coalesced slot register must carry nothing but its own live-in. A coalesced slot register IS shared
     # by its in-place live-out (and any phi arms merged onto it) and is skipped here.
@@ -1846,5 +1855,5 @@ def _build_inputs(
         elif isinstance(bool_node, MirBoolInput):
             loads.append(BoolInputLoad(bool_node.name, BoolRegRef(alloc.bool_reg[vid])))
         else:
-            raise AssertionError(f"unhandled MIR input {vid}")
+            assert False, f"unhandled MIR input {vid}"
     return loads

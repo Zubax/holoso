@@ -14,12 +14,11 @@ It is a first-class verification peer of the numerical model, not a test helper,
 ``holoso._lir`` -- that independence is the whole point and a guard test enforces it.
 """
 
-from dataclasses import dataclass
 from typing import assert_never
 
 from .._operators import BoolInversion, FloatSignControl, PortConditioner
 from .._util import ValueId
-from .._type import FloatFormat, ScalarType
+from .._type import FloatFormat, LogicalPort
 from .._value import FloatValue
 from ._ir import (
     Mir,
@@ -46,14 +45,6 @@ from ._ir import (
 type InterpreterInput = FloatValue | float | bool
 type InterpreterOutput = FloatValue | bool
 type _Value = FloatValue | bool
-
-
-@dataclass(frozen=True, slots=True)
-class InterpreterPort:
-    """One logical I/O port: the kernel's parameter or output name paired with its scalar type (the model's peer)."""
-
-    name: str
-    scalar_type: ScalarType
 
 
 def _apply_conditioner(conditioner: PortConditioner, value: _Value) -> _Value:
@@ -95,14 +86,14 @@ class MirInterpreter:
         self.reset()
 
     @property
-    def inputs(self) -> list[InterpreterPort]:
+    def inputs(self) -> list[LogicalPort]:
         """The logical input ports in parameter order, each with its scalar type."""
-        return [InterpreterPort(node.name, node.scalar_type) for node in self._input_nodes()]
+        return [LogicalPort(node.name, node.scalar_type) for node in self._input_nodes()]
 
     @property
-    def outputs(self) -> list[InterpreterPort]:
+    def outputs(self) -> list[LogicalPort]:
         """The logical output ports in return order, each with its scalar type."""
-        return [InterpreterPort(out.name, self._mir.nodes[out.value].scalar_type) for out in self._mir.outputs]
+        return [LogicalPort(out.name, self._mir.nodes[out.value].scalar_type) for out in self._mir.outputs]
 
     def reset(self) -> None:
         """Reload every persistent slot with its reset snapshot, as at rst (the live-in of the next transaction)."""

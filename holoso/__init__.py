@@ -11,7 +11,13 @@ from ._lir import (
     Direction as Direction,
     Port as Port,
 )
-from ._type import BoolType as BoolType, FloatFormat as FloatFormat, FloatType as FloatType, ScalarType as ScalarType
+from ._type import (
+    BoolType as BoolType,
+    FloatFormat as FloatFormat,
+    FloatType as FloatType,
+    LogicalPort as LogicalPort,
+    ScalarType as ScalarType,
+)
 from ._value import FloatValue as FloatValue
 from ._errors import (
     HolosoError as HolosoError,
@@ -25,7 +31,6 @@ from ._backend.cocotb import CocotbOutput as CocotbOutput
 from ._backend.html import HtmlOutput as HtmlOutput
 from ._backend.numerical import (
     NumericalModel as NumericalModel,
-    NumericalModelPort as NumericalModelPort,
     NumericalSimulator as NumericalSimulator,
 )
 from ._backend.verilog import VerilogOutput as VerilogOutput

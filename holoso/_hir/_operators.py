@@ -1,13 +1,11 @@
 """Semantic HIR operators."""
 
-import enum
 import math
-import operator
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar
 
+from .._util import RelationalOp
 from ._const import BoolConst, Const, FloatConst
 from ._types import BoolType, FloatType, Signature
 
@@ -161,31 +159,6 @@ class FloatMulPow2(Operator):
         return FloatConst(math.ldexp(a.value, self.k))
 
 
-class RelationalOp(enum.Enum):
-    """A two-operand ordering/equality test on floats, producing a boolean."""
-
-    LT = "lt"
-    LE = "le"
-    GT = "gt"
-    GE = "ge"
-    EQ = "eq"
-    NE = "ne"
-
-    def holds(self, ordering: int) -> bool:
-        """Apply this relation to a three-way comparison result (-1/0/+1), the bit-exact model's comparison path."""
-        return _RELATIONAL_FN[self](ordering, 0)
-
-
-_RELATIONAL_FN: dict[RelationalOp, Callable[[float, float], bool]] = {
-    RelationalOp.LT: operator.lt,
-    RelationalOp.LE: operator.le,
-    RelationalOp.GT: operator.gt,
-    RelationalOp.GE: operator.ge,
-    RelationalOp.EQ: operator.eq,
-    RelationalOp.NE: operator.ne,
-}
-
-
 @dataclass(frozen=True, slots=True)
 class FloatRelational(Operator):
     """A float comparison ``a <op> b`` returning a boolean."""
@@ -200,7 +173,7 @@ class FloatRelational(Operator):
 
     def fold_constants(self, operands: list[Const]) -> Const:
         a, b = [_float_const(operand) for operand in operands]
-        return BoolConst(_RELATIONAL_FN[self.op](a.value, b.value))
+        return BoolConst(self.op.apply(a.value, b.value))
 
 
 @dataclass(frozen=True, slots=True)

@@ -60,8 +60,8 @@ def assert_model_equals_interpreter(
     Run an ordered vector sequence through both the numerical model and the MIR interpreter (each advancing its own
     persistent state per transaction) and assert bit-exact agreement -- the tolerance-free oracle for the LIR layer.
     """
-    assert [p.name for p in model.inputs] == [p.name for p in interpreter.inputs], f"{label}: input ports differ"
-    assert [p.name for p in model.outputs] == [p.name for p in interpreter.outputs], f"{label}: output ports differ"
+    assert model.inputs == interpreter.inputs, f"{label}: input ports differ (name or type)"
+    assert model.outputs == interpreter.outputs, f"{label}: output ports differ (name or type)"
     for vector in vectors:
         model_out = model.run(*vector)
         interp_out = interpreter.run(*vector)

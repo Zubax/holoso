@@ -41,6 +41,7 @@ from holoso._hir._const_fold import run as fold_constants
 from holoso._lir import build
 from holoso._mir import lower as lower_to_mir, Mir, MirFloatConst, MirFloatInput, MirOperation
 from holoso._operators import FMulILog2Operator, FloatSignControl
+from ._importguard import forbidden_imports
 from ._modelref import build_model
 
 FMT = FloatFormat(6, 18)
@@ -124,7 +125,7 @@ def test_hir_builder_rejects_wrong_semantic_operand_type() -> None:
     except ValueError as ex:
         assert "expects operands" in str(ex)
     else:
-        raise AssertionError("expected a semantic type mismatch")
+        assert False, "expected a semantic type mismatch"
 
 
 def test_lower_rejects_non_float_hir_input_type() -> None:
@@ -140,7 +141,7 @@ def test_lower_rejects_non_float_hir_input_type() -> None:
     except UnsupportedConstruct as ex:
         assert "no MIR lowering rule" in str(ex)
     else:
-        raise AssertionError("expected HIR-to-MIR lowering to reject non-float semantic input")
+        assert False, "expected HIR-to-MIR lowering to reject non-float semantic input"
 
 
 def test_hir_constant_folding_returns_float_const() -> None:
@@ -242,7 +243,7 @@ def test_unsupported_pow2_shift_is_rejected() -> None:
     except UnsupportedConstruct as ex:
         assert "unsupported power-of-two float scale" in str(ex)
     else:
-        raise AssertionError("expected an unsupported power-of-two shift")
+        assert False, "expected an unsupported power-of-two shift"
 
 
 def test_true_division_stays_fdiv() -> None:
@@ -615,3 +616,12 @@ def test_dead_diamond_frees_its_condition_cone() -> None:
     assert not any(
         isinstance(n, Operation) and isinstance(n.operator, HirFloatDiv) for n in hir.nodes.values()
     ), "the unused condition cone (division included) is dead code after conversion"
+
+
+def test_operator_layer_does_not_import_hir() -> None:
+    """
+    The hardware operator models are a base vocabulary layer below the IR pipeline; they must never reach back into the
+    semantic HIR -- the smell W12 removed (importing ``RelationalOp`` from ``_hir``). Locks the severed edge transitively.
+    """
+    offenders = forbidden_imports("holoso._operators", "holoso._hir")
+    assert not offenders, f"the operator layer transitively imports HIR: {offenders}"

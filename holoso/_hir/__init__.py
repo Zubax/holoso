@@ -1,5 +1,6 @@
 """Thin API for the hardware-agnostic high-level IR."""
 
+from .._util import RelationalOp as RelationalOp
 from ._const import BoolConst as BoolConst, Const as Const, FloatConst as FloatConst
 from ._copy import reverse_postorder as reverse_postorder
 from ._ir import (
@@ -33,7 +34,6 @@ from ._operators import (
     FloatRelational as FloatRelational,
     FloatToBool as FloatToBool,
     Operator as Operator,
-    RelationalOp as RelationalOp,
     Select as Select,
 )
 from ._optimize import optimize as optimize

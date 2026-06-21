@@ -8,14 +8,11 @@ already known correct -- every bundled example (validated against Python in ``te
 scheduling corner kernel (validated against RTL in the cosim suite). A disagreement here means the interpreter is wrong,
 not the compiler; only once this gate is green does an interpreter-vs-model divergence elsewhere indict the LIR layer.
 
-The independence guard asserts the interpreter module imports nothing from ``holoso._lir`` -- the layer it exists to
-verify -- so the oracle can never silently re-couple to the artifact under test.
+The independence guard asserts the interpreter's TRANSITIVE import closure excludes ``holoso._lir`` -- the layer it
+exists to verify -- so the oracle can never silently re-couple to the artifact under test, even through an intermediary.
 """
 
-import ast
-import inspect
 from collections.abc import Callable
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -27,6 +24,7 @@ from holoso._type import BoolType, FloatFormat
 from holoso._value import FloatValue
 
 from ._examples import SPECS, ExampleSpec
+from ._importguard import forbidden_imports
 from ._modelref import (
     ChainedSlots,
     SelectHold,
@@ -164,11 +162,6 @@ def test_state_slot_swap_writeback_is_parallel() -> None:
 
 
 def test_interpreter_imports_nothing_from_lir() -> None:
-    """The oracle must never re-couple to the layer it verifies; assert no ``holoso._lir`` import in its module."""
-    source = Path(inspect.getsourcefile(MirInterpreter) or "").read_text(encoding="utf-8")
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.ImportFrom):
-            assert "_lir" not in (node.module or ""), f"interpreter must not import from {node.module!r}"
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                assert "_lir" not in alias.name, f"interpreter must not import {alias.name!r}"
+    """The oracle must never re-couple to the layer it verifies: its TRANSITIVE import closure excludes ``holoso._lir``."""
+    offenders = forbidden_imports(MirInterpreter.__module__, "holoso._lir")
+    assert not offenders, f"interpreter transitively imports the LIR layer it verifies: {offenders}"

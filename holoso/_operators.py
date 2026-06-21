@@ -15,7 +15,7 @@ from ._value import (
     mul_ilog2_float_value,
 )
 from ._type import BoolType, FloatFormat, FloatType, ScalarSignature, ScalarType
-from ._hir import RelationalOp
+from ._util import RelationalOp
 
 
 def _instance_stem_text(text: str) -> str:

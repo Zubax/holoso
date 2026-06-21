@@ -1559,14 +1559,14 @@ def run_kernel(
             lir, kernel.dead_arm_chain_depth
         ), f"{name}: dead-arm kernel did not spill a depth-{kernel.dead_arm_chain_depth} chain -- hazard not armed"
 
-    assert [p.name for p in model.inputs] == [p.name for p in interpreter.inputs], f"{name}: input ports differ"
+    assert model.inputs == interpreter.inputs, f"{name}: input ports differ (name or type)"
     # The float64 reference binds by PARAMETER NAME against a vector drawn in model-port order, so a frontend bug that
     # swapped the param->port mapping and the port order together would feed model, interpreter, AND reference the same
     # wrong name->value mapping and pass vacuously. Pinning the port order to the source parameter order closes that.
     assert [p.name for p in model.inputs] == list(
         kernel.input_names
     ), f"{name}: model input ports {[p.name for p in model.inputs]} differ from params {list(kernel.input_names)}"
-    assert [p.name for p in model.outputs] == [p.name for p in interpreter.outputs], f"{name}: output ports differ"
+    assert model.outputs == interpreter.outputs, f"{name}: output ports differ (name or type)"
     # The vector sequence is keyed by (master_seed, index) so it is identical across op-configs and reproducible; drawn
     # from the just-built model's port order, so no throwaway compile is needed.
     vectors = _draw_vectors(kernel, model, fmt, _seed_rng(kernel.seed, kernel.index), n_vectors)

@@ -39,28 +39,12 @@ from .._lir import BoolRegRef, Lir
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
 from .._lir import copy_step_cycle, install_landing, operand_read_cycle, result_landing_cycle, scalar_type_of
 from .._operators import *
-from .._type import FloatFormat, ScalarType
+from .._type import FloatFormat, LogicalPort
 
 type ModelInput = FloatValue | float | bool
 type ModelOutput = FloatValue | bool
 type _Dst = RegRef | BoolRegRef
 type _Value = FloatValue | bool
-
-
-@dataclass(frozen=True, slots=True)
-class NumericalModelPort:
-    """
-    One logical I/O port of a model: the kernel's parameter or output name paired with its :class:`ScalarType`. This is
-    the logical signature the model speaks -- positional
-    :meth:`NumericalSimulator.set_inputs`/:meth:`NumericalSimulator.run` follow this order, and
-    :attr:`NumericalSimulator.output_values` are returned in it.
-    It is distinct from the RTL :class:`DataInputPort`, which carries the ``in_`` port-name prefix and an explicit
-    direction; here the name is the logical one (as written in the kernel) and the direction is implicit in the
-    ``inputs``/``outputs`` split.
-    """
-
-    name: str
-    scalar_type: ScalarType
 
 
 def _coerce_input(value: ModelInput, fmt: FloatFormat, index: int) -> FloatValue:
@@ -97,7 +81,7 @@ def _coerce_inputs(lir: Lir, inputs: tuple[ModelInput, ...]) -> tuple[list[Float
     return float_values, bool_values
 
 
-def _signature(ports: list[NumericalModelPort]) -> str:
+def _signature(ports: list[LogicalPort]) -> str:
     return ", ".join(f"{port.name}: {port.scalar_type}" for port in ports)
 
 
@@ -136,16 +120,16 @@ class _Kernel:
         return self._lir.float_format
 
     @property
-    def inputs(self) -> list[NumericalModelPort]:
+    def inputs(self) -> list[LogicalPort]:
         """The logical input ports in parameter order, each with its scalar type."""
         fmt = self._lir.float_format
-        return [NumericalModelPort(load.name, scalar_type_of(load, fmt)) for load in self._lir.inputs]
+        return [LogicalPort(load.name, scalar_type_of(load, fmt)) for load in self._lir.inputs]
 
     @property
-    def outputs(self) -> list[NumericalModelPort]:
+    def outputs(self) -> list[LogicalPort]:
         """The logical output ports in return order, each with its scalar type."""
         fmt = self._lir.float_format
-        return [NumericalModelPort(wire.name, scalar_type_of(wire, fmt)) for wire in self._lir.outputs]
+        return [LogicalPort(wire.name, scalar_type_of(wire, fmt)) for wire in self._lir.outputs]
 
     def __str__(self) -> str:
         return (
