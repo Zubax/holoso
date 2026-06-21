@@ -238,6 +238,9 @@ Iteration until no feedback has been attempted in the past but it is not practic
 issues the review agents tend to degrade to nitpicking.
 Hence, we stop iteration earlier, as soon as the feedback ceases to contain significant findings.
 
+THREE CONSECUTIVE TRIVIAL-ONLY TURNS ACROSS ALL REVIEW AGENTS ARE NON-NEGOTIABLE,
+regardless of how many iterations it takes to get there.
+
 The requirement of multiple consecutive reviews with no significant findings is intended to improve the coverage.
 We have seen in the past how a single review turn would come up blank while the next round (with zero code changes in
 between) would dig up a critical defect. Hence, we repeat turns generously across distinct agents for maximum assurance.
