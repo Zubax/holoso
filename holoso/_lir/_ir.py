@@ -7,7 +7,7 @@ which typed storage resources, with which folded sign controls.
 
 from bisect import bisect_right
 from dataclasses import dataclass
-from typing import Generic, TypeVar, assert_never
+from typing import TypeVar, assert_never
 
 from .._operators import (
     BoolInversion,
@@ -325,20 +325,6 @@ def result_landing_cycle(dst: RegRef | BoolRegRef, commit_cycle: int) -> int:
 
 
 _BankReg = TypeVar("_BankReg", RegRef, BoolRegRef)  # one register bank's reference type (wide or boolean)
-
-
-@dataclass(frozen=True, slots=True)
-class _LivenessBank(Generic[_BankReg]):
-    """
-    The bank-specific inputs to the shared register-liveness collector: the register type and the bank's fixed
-    def/use/read-first events, keyed per register. The shared collector extends these with the per-block datapath
-    events and resolves residence.
-    """
-
-    reg_type: type[_BankReg]
-    defs: dict[_BankReg, list[int]]
-    uses: dict[_BankReg, list[int]]
-    read_first: dict[_BankReg, set[int]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1035,17 +1021,14 @@ class Lir:
                     rows.setdefault(reg, set()).update(resident)
         return rows
 
-    def _bank_liveness(self, bank: _LivenessBank[_BankReg]) -> dict[_BankReg, set[int]]:
+    def _collect_op_events(
+        self, reg_type: type[_BankReg], defs: dict[_BankReg, list[int]], uses: dict[_BankReg, list[int]]
+    ) -> None:
         """
-        Collect one register bank's def/use PCs and resolve them through the shared CFG residence pass. The bank
-        descriptor supplies its register type and fixed events; this body is otherwise independent of the wide/boolean
-        bank identity.
+        Add one bank's per-block datapath op events to ``defs``/``uses``: each result LANDING (stamped via
+        ``write_landing_pcs`` at every successor-arm PC it spills into) and each operand READ. The single definition of
+        op read/write timing, shared by both banks so :attr:`reg_liveness` and :attr:`bool_liveness` cannot drift.
         """
-        defs, uses, read_first = (
-            bank.defs,
-            bank.uses,
-            bank.read_first,
-        )  # the bank's fixed events, extended in place below
         block: (
             LirBlock  # explicit binding: the loop target's type is undecidable under the constrained-TypeVar reanalysis
         )
@@ -1055,14 +1038,34 @@ class Lir:
             for op in block_ops:
                 read = operand_read_cycle(op.operator, base_pc + op.issue_cycle)
                 for write in op.writes:
-                    if isinstance(write.dst, bank.reg_type):
+                    if isinstance(write.dst, reg_type):
                         defs.setdefault(write.dst, []).extend(self.write_landing_pcs(block, write.dst, op.commit_cycle))
                 for operand in op.operands:
-                    if isinstance(operand.source, bank.reg_type):
+                    if isinstance(operand.source, reg_type):
                         uses.setdefault(operand.source, []).append(read)
-        return self._cfg_residence(defs, uses, read_first)
 
-    def _reg_liveness_bank(self) -> _LivenessBank[RegRef]:
+    @property
+    def reg_liveness(self) -> dict[RegRef, set[int]]:
+        """
+        Map each wide register to the actual clock cycles on which it holds a live value.
+
+        This is cycle-accurate to the emitted hardware, in the executing-step (hardware) frame. Timing comes from the
+        shared helpers: an input lands on cycle 1; an operator result lands on ``result_landing_cycle`` (which for the
+        last result is the initiation interval); an operand is read on ``operand_read_cycle``; an output tap on the
+        present cycle; and a non-coalesced slot's writeback fires and samples its source on ``state_copy_step`` -- the
+        present cycle for a boundary copy, earlier for an early install (the landing follows below). A slot register
+        additionally stays live through the present cycle, since its live-out must reside there for the next initiation.
+        Each row spans a value from when it lands in the array through its last read.
+
+        Diagnostic only -- consumed by the reports (e.g., HTML schedule) and the tests, never by the emitter or the
+        numerical model. Each op-result LANDING is stamped via ``write_landing_pcs`` at exactly the PC(s) the model
+        writes it -- on every successor arm under overlap, not just the fall-through. A pc-gated install (a phi copy or
+        an early non-coalesced slot writeback) fires and samples its source on the copy step but lands its destination
+        one PC later via ``install_landing`` -- the same +1 the model commits. A boundary install reads-then-writes
+        at the boundary and lands there. Residence is then resolved per basic block by ``_cfg_residence`` (CFG-aware
+        register liveness), so a value live on two mutually-exclusive arms that rejoin at a merge stays resident on BOTH
+        arms. The result is cycle-exact to the numerical model on every register and every path.
+        """
         present = self.initiation_interval  # hardware-frame present / boundary step
         defs: dict[RegRef, list[int]] = {}
         uses: dict[RegRef, list[int]] = {}
@@ -1100,9 +1103,23 @@ class Lir:
                 defs.setdefault(copy.dst, []).append(install_landing(step))
                 if isinstance(copy.source.source, RegRef):
                     uses.setdefault(copy.source.source, []).append(step)
-        return _LivenessBank(reg_type=RegRef, defs=defs, uses=uses, read_first=read_first)
+        self._collect_op_events(RegRef, defs, uses)
+        return self._cfg_residence(defs, uses, read_first)
 
-    def _bool_liveness_bank(self) -> _LivenessBank[BoolRegRef]:
+    @property
+    def bool_liveness(self) -> dict[BoolRegRef, set[int]]:
+        """
+        Map each boolean register to the cycles on which it holds a live value, the boolean-bank counterpart of
+        :attr:`reg_liveness` in the same executing-step frame. A boolean register is defined when a comparison,
+        boolean-logic op, or float->bool cast commits its result, when a boolean phi/state install lands, and -- for a
+        persistent slot -- at the live-in resident from cycle 1; it is read by a boolean-logic op or a bool->float cast
+        taking it as an operand, by a branch testing it as a condition, by a phi/state install copying it, and at the
+        boundary where a slot's live-out must persist for the next initiation. A boolean result that spills past an
+        overlap-shrunk terminator is stamped on every successor arm via ``write_landing_pcs``, exactly as the numerical
+        model re-keys it; a phi/boolean write lands its destination one PC after its fire step via ``install_landing``
+        (the model's +1), while a boolean slot always installs read-first at the boundary. Residence is resolved by the
+        same per-block ``_cfg_residence`` as :attr:`reg_liveness`, so a spilled or merged boolean is cycle-exact too.
+        """
         present = self.initiation_interval
         defs: dict[BoolRegRef, list[int]] = {}
         uses: dict[BoolRegRef, list[int]] = {}
@@ -1133,44 +1150,5 @@ class Lir:
                     uses.setdefault(bwrite.source.source, []).append(step)
             if isinstance(block.terminator, Branch):  # the next-PC case reads the condition at the block boundary PC
                 uses.setdefault(block.terminator.cond, []).append(self.term_pc(block))
-        return _LivenessBank(reg_type=BoolRegRef, defs=defs, uses=uses, read_first=read_first)
-
-    @property
-    def reg_liveness(self) -> dict[RegRef, set[int]]:
-        """
-        Map each wide register to the actual clock cycles on which it holds a live value.
-
-        This is cycle-accurate to the emitted hardware, in the executing-step (hardware) frame. Timing comes from the
-        shared helpers: an input lands on cycle 1; an operator result lands on ``result_landing_cycle`` (which for the
-        last result is the initiation interval); an operand is read on ``operand_read_cycle``; an output tap on the
-        present cycle; and a non-coalesced slot's writeback fires and samples its source on ``state_copy_step`` -- the
-        present cycle for a boundary copy, earlier for an early install (the landing follows below). A slot register
-        additionally stays live through the present cycle, since its live-out must reside there for the next initiation.
-        Each row spans a value from when it lands in the array through its last read.
-
-        Diagnostic only -- consumed by the reports (e.g., HTML schedule) and the tests, never by the emitter or the
-        numerical model. Each op-result LANDING is stamped via ``write_landing_pcs`` at exactly the PC(s) the model
-        writes it -- on every successor arm under overlap, not just the fall-through. A pc-gated install (a phi copy or
-        an early non-coalesced slot writeback) fires and samples its source on the copy step but lands its destination
-        one PC later via ``install_landing`` -- the same +1 the model commits -- while a boundary install reads-then-writes
-        at the boundary and lands there. Residence is then resolved per basic block by ``_cfg_residence`` (CFG-aware
-        register liveness), so a value live on two mutually-exclusive arms that rejoin at a merge stays resident on BOTH
-        arms. The result is cycle-exact to the numerical model on every register and every path.
-        """
-        return self._bank_liveness(self._reg_liveness_bank())
-
-    @property
-    def bool_liveness(self) -> dict[BoolRegRef, set[int]]:
-        """
-        Map each boolean register to the cycles on which it holds a live value, the boolean-bank counterpart of
-        :attr:`reg_liveness` in the same executing-step frame. A boolean register is defined when a comparison,
-        boolean-logic op, or float->bool cast commits its result, when a boolean phi/state install lands, and -- for a
-        persistent slot -- at the live-in resident from cycle 1; it is read by a boolean-logic op or a bool->float cast
-        taking it as an operand, by a branch testing it as a condition, by a phi/state install copying it, and at the
-        boundary where a slot's live-out must persist for the next initiation. A boolean result that spills past an
-        overlap-shrunk terminator is stamped on every successor arm via ``write_landing_pcs``, exactly as the numerical
-        model re-keys it; a phi/boolean write lands its destination one PC after its fire step via ``install_landing``
-        (the model's +1), while a boolean slot always installs read-first at the boundary. Residence is resolved by the
-        same per-block ``_cfg_residence`` as :attr:`reg_liveness`, so a spilled or merged boolean is cycle-exact too.
-        """
-        return self._bank_liveness(self._bool_liveness_bank())
+        self._collect_op_events(BoolRegRef, defs, uses)
+        return self._cfg_residence(defs, uses, read_first)

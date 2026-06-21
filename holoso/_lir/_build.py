@@ -13,7 +13,6 @@ from .._mir import (
     MirBoolConst,
     MirBoolInput,
     MirBoolOutput,
-    MirBoolStateRead,
     MirBoolStateSlot,
     MirBoolView,
     MirBranch,
@@ -21,7 +20,6 @@ from .._mir import (
     MirFloatInput,
     MirFloatOutput,
     MirFloatStateSlot,
-    MirFloatStateRead,
     MirOperation,
     MirFloatView,
     MirJump,
@@ -1369,10 +1367,6 @@ class _Bank(ABC, Generic[_SlotT]):
         """Whether the slot folds the identity sideband, so its live-out may commit into the slot register in place."""
 
     @abstractmethod
-    def state_read_name(self, node: MirNode) -> str | None:
-        """The slot name ``node`` reads if it is this bank's state-read, else None -- used to detect a chained copy."""
-
-    @abstractmethod
     def boundary_base(self, mir: Mir, values: set[ValueId], ret_block: int) -> dict[int, set[ValueId]]:
         """The non-slot boundary users: bank outputs, plus the per-block branch conditions for the boolean bank."""
 
@@ -1401,9 +1395,6 @@ class _WideBank(_Bank[MirFloatStateSlot]):
 
     def slot_identity(self, slot: MirFloatStateSlot) -> bool:
         return slot.sign == FloatSignControl()
-
-    def state_read_name(self, node: MirNode) -> str | None:
-        return node.name if isinstance(node, MirFloatStateRead) else None
 
     def boundary_base(self, mir: Mir, values: set[ValueId], ret_block: int) -> dict[int, set[ValueId]]:
         boundary: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
@@ -1470,9 +1461,6 @@ class _BoolBank(_Bank[MirBoolStateSlot]):
 
     def slot_identity(self, slot: MirBoolStateSlot) -> bool:
         return slot.inversion == BoolInversion()
-
-    def state_read_name(self, node: MirNode) -> str | None:
-        return node.name if isinstance(node, MirBoolStateRead) else None
 
     def boundary_base(self, mir: Mir, values: set[ValueId], ret_block: int) -> dict[int, set[ValueId]]:
         boundary: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
@@ -1562,7 +1550,8 @@ def _allocate_bank(
     livein_of = {slot.name: state_read_of.get(slot.name) for slot in slots}
     tapped_by_other: set[str] = set()
     for slot in slots:
-        read_name = bank.state_read_name(view.nodes[slot.live_out])
+        node = view.nodes[slot.live_out]  # the view holds only this bank's nodes, so a state-read here is this bank's
+        read_name = node.name if isinstance(node, MirStateRead) else None
         if read_name is not None and read_name != slot.name:
             tapped_by_other.add(read_name)
     boundary_oracle = {b: set(s) for b, s in boundary_base.items()}
@@ -1755,6 +1744,11 @@ def _allocate(
                 continue
             bool_writes.setdefault(pred, []).append(_BoolArmInstall(bool_alloc.reg[vid], value, inversion))
 
+    # A constant branch condition (e.g. a read-only boolean attribute, or a folded test) has no register of its own;
+    # materialize it into a bool register written in the branching block so the next-PC decode can read it. The constant
+    # is globally interned, so sibling branches sharing it reuse one register -- but the write must be emitted in EVERY
+    # branching block that uses it, else a path reaching the branch through a block that did not write it reads a stale
+    # register. (A later static-branch-folding pass would instead drop the dead arm; until then this keeps it correct.)
     bool_reg, nbreg = bool_alloc.reg, bool_alloc.nreg
     for block_id, cond in _const_branch_conditions(mir, bool_mir).items():
         if cond not in bool_reg:
