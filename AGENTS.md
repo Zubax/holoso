@@ -219,22 +219,21 @@ Use your best judgement as to which features do not need test coverage. For exam
 - white-box tests of implementation details rather than behaviors;
 - rejection of invalid inputs where an exception is raised.
 
-## Review team
+## Review loop
 
 After every change or milestone, or when explicitly prompted, dispatch several fresh-context review agents set to the
 MAXIMUM THINKING EFFORT to review your work:
 
-- A subagent focusing on the FUNCTIONAL CORRECTNESS and ROBUSTNESS of the implementation.
+- A subagent focusing on the OPPORTUNITIES FOR SIMPLIFICATION.
+- A subagent focusing on the FUNCTIONAL CORRECTNESS and TEST COVERAGE.
 - A subagent focusing on the ARCHITECTURAL CLEANLINESS, DESIGN PRACTICES, and CODE QUALITY.
 - Distinct tools -- Codex, Claude (check what's available, exclude yourself) -- focusing on CORRECTNESS only.
 
-It is important that we use all available distinct tools to maximize the diversity of perspectives
-and minimize blind spots. When all are done, review and consolidate their findings and act accordingly.
-If behavioral defects are found, ensure extensive regression tests are introduced.
+It is important that we use distinct tools to maximize the diversity of perspectives and minimize blind spots.
+When all reviewers are done, review and consolidate their findings and act accordingly.
+If defects are found, ensure extensive regression tests are introduced.
 
 Repeat the review/refine loop until the agents return only trivial feedback (or none) for three (sic!) consecutive turns.
-Here, "trivial feedback" means stylistic/inconsequential issues such as wording, formatting, trivial parameter
-validation, or anything else that does not materially affect the correctness or maintainability of the codebase.
 Iteration until no feedback has been attempted in the past but it is not practical because in the absence of significant
 issues the review agents tend to degrade to nitpicking.
 Hence, we stop iteration earlier, as soon as the feedback ceases to contain significant findings.
@@ -243,16 +242,9 @@ The requirement of multiple consecutive reviews with no significant findings is 
 We have seen in the past how a single review turn would come up blank while the next round (with zero code changes in
 between) would dig up a critical defect. Hence, we repeat turns generously across distinct agents for maximum assurance.
 
-Every time a reviewer finds a defect-revealing kernel shape, fold it into the suite so it can never regress.
-
-When working around the low-level compiler components around regalloc, scheduler, etc, consider using the
-`audit-schedule-quality` skill in an extra subagent.
-
-Review agents are NOT ALLOWED TO MODIFY ANYTHING NOR RUN ANY MUTATING COMMANDS IN THE WORKTREE;
-in particular, all use of git in the worktree is strictly prohibited.
+Review agents are NOT ALLOWED TO MODIFY ANYTHING NOR RUN ANY MUTATING COMMANDS IN THE WORKTREE.
 If they need a mutable environment, let them copy the worktree where they see fit.
 
-Review agents in maximum thinking mode may go silent for a long time.
-Set a generous timeout of about 1 hour or so, use your best judgement.
+Review agents in maximum thinking mode may go silent for hours, so set timeouts accordingly.
 Some agents expect input from stdin when launched headless and may get hung if no input is given;
 in those cases consider redirecting from `/dev/null` or something like that; read the docs to figure out usage.
