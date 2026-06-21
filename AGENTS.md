@@ -254,10 +254,5 @@ Review agents in maximum thinking mode may go silent for hours, so set timeouts 
 Some agents expect input from stdin when launched headless and may get hung if no input is given;
 in those cases consider redirecting from `/dev/null` or something like that; read the docs to figure out usage.
 
-A frequent, avoidable cause of a review agent going silent (a stream-idle timeout) is blocking on a long FOREGROUND
-command -- running the test suite, a build, or a slow search inline. Review/analysis agents are read-only: instruct them
-to inspect via `git diff`, `grep`, and file reads only, to background (`&`) or skip anything slow, and to deliver
-findings promptly rather than deliberate silently. Give each agent exactly ONE focus (simplification, correctness, OR
-architecture) -- a single multi-focus session both dilutes the perspective and runs long enough to idle out; never
-delegate all foci to one session. This markedly reduces timeouts, though a deep review may still occasionally idle; when
-one does, re-run that single focus as a Codex session, which does not exhibit the idle-timeout failure mode.
+A frequent, avoidable cause of Claude agents going silent (a stream-idle timeout) is blocking on a long FOREGROUND
+command. Instruct them to background long-running commands, including test execution.
