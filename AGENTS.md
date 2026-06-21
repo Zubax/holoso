@@ -231,6 +231,9 @@ MAXIMUM THINKING EFFORT to review your work:
   Do not use Antigravity/Gemini, they are weak and tend to produce more noise than signal.
   Agents often get stuck or hung; always use a timeout.
 
+Do not, under any circumstances, delegate more than one task to the same agent, because this results in dilution of
+attention and poor performance.
+
 It is important that we use distinct tools to maximize the diversity of perspectives and minimize blind spots.
 When all reviewers are done, review and consolidate their findings and act accordingly.
 If defects are found, ensure extensive regression tests are introduced.
@@ -242,6 +245,8 @@ Hence, we stop iteration earlier, as soon as the feedback ceases to contain sign
 
 THREE CONSECUTIVE TRIVIAL-ONLY TURNS ACROSS ALL REVIEW AGENTS ARE NON-NEGOTIABLE,
 regardless of how many iterations it takes to get there.
+Together with the one-task-per-agent rule this often results in
+many dozens (sometimes over a hundred) of agent sessions in total per full review job, which is expected.
 
 The requirement of multiple consecutive reviews with no significant findings is intended to improve the coverage.
 We have seen in the past how a single review turn would come up blank while the next round (with zero code changes in
