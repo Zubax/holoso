@@ -10,11 +10,14 @@ reproducer under ``tests/fuzz_regressions/`` before failing.
 """
 
 import os
+from collections.abc import Callable
 
+import numpy as np
 import pytest
 
 from holoso._type import FloatFormat
 
+from . import _fuzz as fuzz_impl
 from ._fuzz import CheckKind, Divergence, run_campaign, save_reproducer
 
 # The campaign datapath: a shallow format keeps the per-kernel build fast while still exercising rounding, branches,
@@ -95,6 +98,37 @@ def _run_and_assert(n_kernels: int, n_vectors: int, seed: int) -> None:
     from ._fuzz import Shape
 
     assert stats.shape_counts[Shape.BRANCH] > 0, "no branchy kernels generated -- the fuzzer is degenerate"
+    assert stats.shape_counts[Shape.OVERBUDGET_BRANCH] > 0, "no over-budget branch kernels generated"
+    assert stats.shape_counts[Shape.RELATION_PAIR] > 0, "no relation-pair kernels generated"
+    assert stats.shape_counts[Shape.EXACT_WIRING] >= 2, "exact wiring kernels were not both generated"
+
+
+def _surviving_forward_branches_for_probe(name: str, emit: Callable[[fuzz_impl._Emitter], fuzz_impl._Fragment]) -> int:
+    em = fuzz_impl._make_emitter(np.random.default_rng(0xC0FFEE), ["a", "b", "c"], set())
+    fragment = emit(em)
+    em.return_line = f"return {fragment.value}"
+    kernel = fuzz_impl._finish_function_kernel(
+        name,
+        0xC0FFEE,
+        0,
+        ["a", "b", "c"],
+        set(),
+        em,
+        fragment.shapes,
+        fragment.mode,
+    )
+    mir, _lir, _model, _interpreter = fuzz_impl._build_with_lir(
+        kernel.callable, fuzz_impl.OP_CONFIGS["default"](_FMT), name
+    )
+    return fuzz_impl.surviving_forward_branches(mir)
+
+
+def test_branch_claiming_inner_shapes_survive_compilation() -> None:
+    """A branch-claiming inner shape must not pass merely because an outer branch survived."""
+    assert (
+        _surviving_forward_branches_for_probe("nested_probe", lambda em: fuzz_impl._emit_diamond(em, nested=True)) >= 2
+    )
+    assert _surviving_forward_branches_for_probe("const_probe", fuzz_impl._emit_const_branch) >= 2
 
 
 @pytest.mark.fuzz

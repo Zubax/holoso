@@ -228,6 +228,8 @@ MAXIMUM THINKING EFFORT to review your work:
 - A subagent focusing on the FUNCTIONAL CORRECTNESS and TEST COVERAGE.
 - A subagent focusing on the ARCHITECTURAL CLEANLINESS, DESIGN PRACTICES, and CODE QUALITY.
 - Distinct tools -- Codex, Claude (check what's available, exclude yourself) -- focusing on CORRECTNESS only.
+  Do not use Antigravity/Gemini, they are weak and tend to produce more noise than signal.
+  Agents often get stuck or hung; always use a timeout.
 
 It is important that we use distinct tools to maximize the diversity of perspectives and minimize blind spots.
 When all reviewers are done, review and consolidate their findings and act accordingly.
