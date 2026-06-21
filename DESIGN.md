@@ -557,7 +557,9 @@ from the LIR. It shares the front/mid-end and the operators with the numerical m
 differential `interpreter == model` -- bit-exact and exception-free on both float-format sides -- isolates exactly the
 LIR layer. A blackbox differential fuzzer rides on this: it generates small kernels as real importable Python source,
 drives each through both models across operator configurations, and asserts the bit-exact primary check on every
-transaction plus a best-effort float64-reference secondary check.
+transaction plus a best-effort float64-reference secondary check. A schedule-length freeze independently pins each
+representative kernel's minimum II and last microcode PC (the out_valid boundary), so a scheduling-efficiency
+regression fails.
 
 The HTML report is an essential tool for humans to understand and debug what the compiler did. It must provide an EXACT
 representation of the generated core behavior, not a simplified or approximated view.
