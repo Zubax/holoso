@@ -99,9 +99,14 @@ def _collapse_bool_inversions(nodes: dict[ValueId, Node], vid: ValueId) -> tuple
 
 def _collapse_conditioner(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, PortConditioner]:
     """Collapse the type's own sideband chain: sign operations over a float value, NOTs over a boolean one."""
-    if isinstance(nodes[vid].type, HirBoolType):
-        return _collapse_bool_inversions(nodes, vid)
-    return _collapse_signs(nodes, vid)
+    ty = nodes[vid].type
+    match ty:
+        case HirBoolType():
+            return _collapse_bool_inversions(nodes, vid)
+        case HirFloatType():
+            return _collapse_signs(nodes, vid)
+        case _:
+            raise UnsupportedConstruct(f"no conditioner-collapse rule for HIR type {ty!r}")
 
 
 def _collapse_signs(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, FloatSignControl]:

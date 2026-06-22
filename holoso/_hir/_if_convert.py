@@ -87,7 +87,13 @@ def _splice(hir: Hir, diamond: tuple[Block, Block, Block, Block]) -> Hir:
         phi = nodes[vid]
         assert isinstance(phi, Phi)
         arm_value = dict(phi.arms)
-        op = Select() if isinstance(phi.type, FloatType) else BoolSelect()
+        match phi.type:
+            case FloatType():
+                op: Select | BoolSelect = Select()
+            case BoolType():
+                op = BoolSelect()
+            case _:
+                raise AssertionError(f"if-conversion reached an unsupported phi type: {phi.type}")
         nodes[vid] = Operation(op, (terminator.cond, arm_value[arm_t.id], arm_value[arm_f.id]))
     spliced = Block(
         id=pred.id,
