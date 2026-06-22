@@ -373,69 +373,102 @@ class _Lowerer:
         """
         The local names and instance attributes a loop body reassigns on a reachable path (its loop-carried
         candidates). Reachability mirrors lowering precisely, including constant folding: a statically-known ``if``
-        contributes only its taken arm, exactly as ``_scan_attr_writes`` and ``_lower_if`` resolve it. A non-fold-aware
-        walk would over-approximate a write whose only occurrence is in a folded-away arm, opening a header phi for an
-        attribute that is not persistent state (and never reassigned in the body) -- a self-referential, unwritten phi
-        that crashes slot lookup. The static-int context is snapshot/restored across the two arms of a dynamic ``if``
-        just as lowering does, so a counter bound in one arm does not leak into the sibling's fold decisions.
+        contributes only its taken arm, so a non-fold-aware walk would over-approximate a write whose only occurrence
+        is in a folded-away arm, opening a header phi for an attribute that is not persistent state (and never
+        reassigned in the body) -- a self-referential, unwritten phi that crashes slot lookup. The shared
+        ``_walk_reachable`` driver supplies that fold awareness; this records every (re)bound name and self-attribute.
         """
         names: set[str] = set()
         attrs: set[str] = set()
-
-        def record(targets: list[ast.expr]) -> None:
-            for leaf in (leaf for target in targets for leaf in leaf_targets(target)):
-                if isinstance(leaf, ast.Name):
-                    names.add(leaf.id)
-                    self._invalidate_static_int(leaf.id)  # mirror lowering: a reassigned name is no longer static
-                elif self._is_self_attr(leaf) and isinstance(leaf, ast.Attribute):
-                    attrs.add(leaf.attr)
-
-        def walk(body: list[ast.stmt]) -> None:
-            for stmt in body:
-                for name in statement_walrus_names(stmt):  # a walrus in this statement's test/value rebinds a name
-                    names.add(name)
-                    self._invalidate_static_int(name)  # mirror lowering: a reassigned name is no longer static
-                match stmt:
-                    case ast.Return():
-                        return
-                    case ast.If(test=test, body=b, orelse=o):
-                        constant = self._static_condition(test)
-                        if constant is not None:
-                            walk(b if constant else o)  # a folded ``if`` contributes only its taken arm
-                        else:
-                            saved = dict(self._static_ints)
-                            walk(b)
-                            then_static = dict(self._static_ints)
-                            self._static_ints = dict(saved)
-                            walk(o)
-                            self._static_ints = self._merge_static_ints(then_static, self._static_ints)
-                    case ast.For(target=ast.Name(id=counter), iter=iterable, body=b):
-                        if self._for_counter_is_bound(
-                            iterable
-                        ):  # a for that runs >=1 trip binds (and leaks) its counter
-                            names.add(counter)
-                        self._walk_loop_assigned(counter, iterable, b, walk)
-                    case ast.While(test=test, body=b):
-                        if self._static_condition(test) is not False:  # a statically-false loop reassigns nothing
-                            _, _, nested = self._loop_carried(b)  # counters the nested loop rebinds to runtime
-                            saved = dict(self._static_ints)
-                            self._static_ints = {n: v for n, v in saved.items() if n not in nested}
-                            walk(b)
-                            self._static_ints = {n: v for n, v in saved.items() if n not in nested}
-                    case ast.For(body=b, orelse=o):
-                        walk(b)
-                        walk(o)
-                    case ast.Assign(targets=targets):
-                        record(targets)
-                    case ast.AnnAssign(target=target) | ast.AugAssign(target=target):
-                        record([target])
-
         outer_static = dict(self._static_ints)  # the fold-aware walk binds counters; do not perturb lowering's context
         try:
-            walk(stmts)
+            self._walk_reachable(stmts, on_attr=lambda node: attrs.add(node.attr), on_name=names.add)
         finally:
             self._static_ints = outer_static
         return names, attrs
+
+    def _walk_reachable(
+        self,
+        stmts: list[ast.stmt],
+        *,
+        on_attr: Callable[[ast.Attribute], None],
+        on_name: Callable[[str], None] | None = None,
+    ) -> bool:
+        """
+        The precise fold-aware reachability walk shared by the persistent-state and loop-carried scans (the two
+        analyses that mirror lowering exactly). It descends ``stmts`` as ``_lower_stmts`` does -- stopping at a
+        ``return``, folding a statically-known ``if`` to its taken arm and propagating that arm's return, unrolling a
+        static ``for`` with the counter bound per trip, skipping a statically-false ``while`` -- and threading the
+        static-int context throughout (invalidating a reassigned name, snapshotting across dynamic-``if`` arms, demoting
+        loop-carried counters) so a counter-dependent inner fold resolves exactly as lowering will. It reports each
+        ``self.<attr>`` assignment target to ``on_attr`` and each (re)bound local name to ``on_name``, and returns
+        whether a ``return`` was reached so a caller stops at the statements a returning folded arm makes unreachable.
+        A loop ``else`` is NOT descended -- a reachable loop-``else`` is rejected at lowering, so its writes never reach
+        the IR. The read-only scan does not use this walk; it is a deliberately separate over-approximation that keeps
+        the bootstrap fixpoint verifiable (see ``_collect_assigned``).
+        """
+
+        def recur(body: list[ast.stmt]) -> bool:
+            return self._walk_reachable(body, on_attr=on_attr, on_name=on_name)
+
+        for stmt in stmts:
+            for name in statement_walrus_names(stmt):  # a walrus in this statement's test/value rebinds a name
+                if on_name is not None:
+                    on_name(name)
+                self._invalidate_static_int(name)  # mirror lowering: a reassigned name is no longer static
+            match stmt:
+                case ast.Return():
+                    return True  # statements after a return are unreachable, exactly as lowering stops here
+                case ast.If(test=test, body=body, orelse=orelse):
+                    constant = self._static_condition(test)
+                    if constant is not None:
+                        if recur(body if constant else orelse):  # a folded ``if`` contributes only its taken arm
+                            return True  # the taken arm returned; the rest of this list is unreachable
+                    else:
+                        saved = dict(self._static_ints)  # isolate the arms so a counter bound in one does not leak
+                        recur(body)
+                        then_static = dict(self._static_ints)
+                        self._static_ints = dict(saved)
+                        recur(orelse)
+                        self._static_ints = self._merge_static_ints(then_static, self._static_ints)
+                case ast.For(target=ast.Name(id=counter), iter=iterable, body=body):
+                    if self._for_counter_is_bound(iterable):  # a for that runs >=1 trip binds (and leaks) its counter
+                        if on_name is not None:
+                            on_name(counter)
+                    self._unroll_static_for(counter, iterable, body, recur)
+                case ast.For(body=body):  # a non-Name target (rejected at lowering); walk the body once
+                    recur(body)
+                case ast.While(test=test, body=body):
+                    if self._static_condition(test) is not False:  # a statically-false loop reassigns nothing
+                        _, _, demoted = self._loop_carried(body)  # counters the loop rebinds to a runtime value
+                        saved = self._static_ints
+                        self._static_ints = {n: v for n, v in saved.items() if n not in demoted}
+                        recur(body)
+                        self._static_ints = {n: v for n, v in saved.items() if n not in demoted}
+                case ast.Assign(targets=targets):
+                    self._record_targets([leaf for t in targets for leaf in leaf_targets(t)], on_attr, on_name)
+                case ast.AnnAssign(target=target) | ast.AugAssign(target=target):
+                    self._record_targets(list(leaf_targets(target)), on_attr, on_name)
+        return False
+
+    def _record_targets(
+        self,
+        leaves: list[ast.expr],
+        on_attr: Callable[[ast.Attribute], None],
+        on_name: Callable[[str], None] | None,
+    ) -> None:
+        """
+        Report assignment-target leaves of the precise walk: a ``self.<attr>`` to ``on_attr``, a plain name to
+        ``on_name``; a reassigned name also drops its compile-time-integer binding, mirroring lowering's ``_bind_name``.
+        """
+        for leaf in leaves:
+            if isinstance(leaf, ast.Name):
+                if on_name is not None:
+                    on_name(leaf.id)
+                self._invalidate_static_int(leaf.id)  # mirror lowering: a reassigned name is no longer static
+            elif self._is_self_attr(leaf):
+                assert isinstance(leaf, ast.Attribute)
+                on_attr(leaf)
 
     def _for_counter_is_bound(self, iterable: ast.expr) -> bool:
         """
@@ -450,24 +483,26 @@ class _Lowerer:
             return True
         return range_trip_count(trips) >= 1
 
-    def _walk_loop_assigned(
-        self, counter: str, iterable: ast.expr, body: list[ast.stmt], walk: "Callable[[list[ast.stmt]], None]"
+    def _unroll_static_for(
+        self, counter: str, iterable: ast.expr, body: list[ast.stmt], recur: Callable[[list[ast.stmt]], bool]
     ) -> None:
         """
-        Unroll a static ``for`` inside a loop body exactly as lowering does, binding the counter per trip so a
-        counter-dependent inner range is resolved consistently; a non-static / over-threshold range walks once.
+        Unroll a static ``for`` exactly as ``_lower_for`` does -- bind the counter per trip and walk the body (via
+        ``recur``, the enclosing ``_walk_reachable`` continuation) once per trip so a counter-dependent inner range
+        resolves consistently; a non-static / over-threshold range is rejected at lowering, so walk the body once
+        (unbound) so a real write is not missed before that rejection.
         """
         try:
             trips = self._static_range(iterable, self._loc(iterable))
         except UnsupportedConstruct:
-            walk(body)
+            recur(body)
             return
         if range_trip_count(trips) > UNROLL_THRESHOLD:
-            walk(body)
+            recur(body)
             return
         for index in trips:
             self._static_ints[counter] = index
-            walk(body)
+            recur(body)
 
     def _is_builtin_range(self) -> bool:
         """
@@ -741,8 +776,8 @@ class _Lowerer:
         """
         Every instance attribute that is an assignment target anywhere in ``stmts``, descending all arms with no
         reachability folding -- the maximal over-approximation seeding the read-only fixpoint. It recognizes exactly
-        the write forms ``_collect_assigned`` does (plain/annotated/augmented assignment), so the fixpoint it seeds
-        converges to that scan's precise set; an attribute it omits is provably never assigned.
+        the write forms the fold-aware read-only scan does (plain/annotated/augmented assignment), so the fixpoint it
+        seeds converges to that scan's precise set; an attribute it omits is provably never assigned.
         """
         attrs: set[str] = set()
         for top in stmts:
@@ -767,6 +802,9 @@ class _Lowerer:
         provably never written, so a guard on it folds soundly -- and re-scans. A pass only prunes a genuinely dead arm,
         so the set decreases monotonically to the precise reachable-assigned set while always over-approximating it.
         """
+        # The read-only fixpoint runs in ``_bind_parameters`` before any loop counter is bound; the over-approximation
+        # relies on that (a counter-dependent ``range(i)`` stays unresolved, so its body is conservatively counted).
+        assert not self._static_ints, "the read-only scan must run before any counter binding"
         current = self._all_assigned_attrs(fndef.body)
         try:
             while True:
@@ -782,9 +820,11 @@ class _Lowerer:
     def _collect_assigned(self, stmts: list[ast.stmt], attrs: set[str]) -> bool:
         """
         Record the instance attributes assigned on a reachable path into ``attrs``; return True if a ``return`` is
-        reached so the caller stops, exactly as lowering does. A folded ``if`` whose taken arm returns makes the rest
-        of the enclosing list unreachable -- without propagating that, an attribute assigned after such an ``if`` would
-        be wrongly counted as written and lose its read-only fold.
+        reached so the caller stops, exactly as lowering does. This is the read-only fixpoint's scan, kept DELIBERATELY
+        separate from the precise ``_walk_reachable``: it is a flat over-approximation (no counter binding, no
+        static-int threading) so the bootstrap fixpoint stays eyeball-verifiable -- a monotone shrink from the maximal
+        seed whose sole invariant is that it always over-approximates the truly-assigned set. A folded ``if`` whose
+        taken arm returns makes the rest of the enclosing list unreachable, so propagate that.
         """
         for stmt in stmts:
             match stmt:
@@ -807,12 +847,12 @@ class _Lowerer:
                     pass  # a statically-false while never runs; its body assigns nothing reachable (lowering skips it)
                 case ast.For(iter=iterable, body=body, orelse=orelse):
                     # A zero-trip static range never runs its body, so a write there is not reachable; mirror only that.
-                    # The counter is deliberately NOT bound here: folding a counter-dependent inner condition would
-                    # require this scan to replicate the full static-int discipline of ``_scan_attr_writes``
-                    # (invalidate-on-reassign, per-arm snapshot/restore), and binding without it risks a stale-counter
-                    # miscompile. So a write reachable only on a counter value no trip takes is conservatively
-                    # counted -- a safe over-approximation (at worst an unused state register for a dead for-body
-                    # write, never a wrong result). Unifying the three scans' loop traversal is tracked future work.
+                    # The counter is deliberately NOT bound: folding a counter-dependent inner condition would need the
+                    # full static-int discipline of the precise ``_walk_reachable`` (invalidate-on-reassign, per-arm
+                    # snapshot/restore), and binding without it risks a stale-counter miscompile. So a write reachable
+                    # only on a counter value no trip takes is conservatively counted -- a safe over-approximation (at
+                    # worst an unused state register for a dead for-body write, never a wrong result). A loop ``else``
+                    # runs whenever the loop completes (even a zero-trip ``for``), so its writes ARE reachable.
                     if self._for_counter_is_bound(iterable):
                         self._collect_assigned(body, attrs)
                     self._collect_assigned(orelse, attrs)
@@ -1006,8 +1046,8 @@ class _Lowerer:
 
     def _invalidate_static_int(self, name: str) -> None:
         """
-        Drop a name's compile-time-integer binding because it has been reassigned to a (runtime) value. The
-        reachability scans (``_scan_attr_writes``, ``_loop_assigned``) must apply this exactly as lowering's
+        Drop a name's compile-time-integer binding because it has been reassigned to a (runtime) value. The shared
+        reachability walk (``_walk_reachable``) must apply this exactly as lowering's
         ``_bind_name`` does: a value assignment never produces a static integer (those arise only from ``for`` counters
         and ``range`` bounds), so an assignment to a previously-static name demotes it everywhere. Keeping the scans in
         lockstep with lowering prevents a fold-reachability divergence -- e.g. the scan folding a branch on a stale
@@ -1697,105 +1737,34 @@ class _Lowerer:
         as state: it would crash slot registration or silently add a spurious state port. Stops at the first top-level
         return, like ``_lower_stmts``.
         """
-        self._scan_attr_writes(fndef.body)
+        self._walk_reachable(fndef.body, on_attr=self._register_state_attr)
         self._static_ints.clear()  # the scan binds loop counters to mirror the unroll; lowering re-binds from scratch
 
-    def _scan_attr_writes(self, stmts: list[ast.stmt]) -> bool:
+    def _register_state_attr(self, target: ast.Attribute) -> None:
         """
-        Scan one statement list for attribute writes, returning True if a ``return`` was reached (so the caller stops,
-        exactly as ``_lower_stmts`` does). Control flow and counter scoping mirror lowering precisely: a literal ``if``
-        scans only its taken arm and propagates that arm's return; a dynamic ``if`` scans both arms with the
-        compile-time counters snapshot/restored per arm and merged afterward (a counter bound in one arm must not leak
-        into the sibling -- the same hazard branch lowering guards); a ``for`` unrolls via ``_scan_loop_attr_writes``.
+        Register a reachable ``self.<attr>`` write target as a persistent state slot, in first-write order. A write
+        through a class data descriptor (e.g. a property setter) or to an attribute with no instance snapshot is
+        rejected with the same diagnostic ``_lower_stmts`` raises -- the state set must be discovered here exactly as
+        lowering will treat it.
         """
-        for stmt in stmts:
-            for name in statement_walrus_names(stmt):
-                self._invalidate_static_int(name)  # mirror lowering: a walrus-reassigned name is no longer static
-            if isinstance(stmt, ast.Return):
-                return True
-            if isinstance(stmt, ast.If):
-                constant = self._static_condition(stmt.test)
-                if constant is not None:
-                    if self._scan_attr_writes(stmt.body if constant else stmt.orelse):
-                        return True  # the taken arm returned; statements after the if are unreachable
-                else:
-                    before = dict(self._static_ints)
-                    self._scan_attr_writes(stmt.body)
-                    then_static = dict(self._static_ints)
-                    self._static_ints = dict(before)
-                    self._scan_attr_writes(stmt.orelse)
-                    self._static_ints = self._merge_static_ints(then_static, self._static_ints)
-                continue
-            if isinstance(stmt, ast.For):
-                self._scan_loop_attr_writes(stmt)
-                continue
-            if isinstance(stmt, ast.While):
-                # The body runs an unknown number of times; any attribute it writes is persistent state. A statically
-                # -false loop never runs (its writes are not state), mirroring lowering. A name the body reassigns is a
-                # runtime loop phi inside it, so demote it from the static-int map before scanning (so a folded branch
-                # there agrees with lowering). The loop does not end the enclosing scan (it may run zero times); a
-                # return inside it is rejected at lowering.
-                if self._static_condition(stmt.test) is not False:
-                    _, _, demoted = self._loop_carried(stmt.body)
-                    saved = self._static_ints
-                    self._static_ints = {n: v for n, v in saved.items() if n not in demoted}
-                    self._scan_attr_writes(stmt.body)
-                    self._static_ints = {n: v for n, v in saved.items() if n not in demoted}
-                continue
-            targets: list[ast.expr] = []
-            match stmt:
-                case ast.Assign(targets=ts):
-                    targets = [leaf for t in ts for leaf in leaf_targets(t)]
-                case ast.AnnAssign(target=t) | ast.AugAssign(target=t):
-                    targets = list(leaf_targets(t))
-            for target in targets:
-                if isinstance(target, ast.Name):
-                    self._invalidate_static_int(target.id)  # mirror lowering: a reassigned name is no longer static
-                if not self._is_self_attr(target):
-                    continue
-                assert isinstance(target, ast.Attribute)
-                attr = target.attr
-                if self._is_class_data_descriptor(attr):
-                    # Python routes ``self.<name> = ...`` through a class data descriptor (e.g. a property setter) even
-                    # when ``__dict__`` holds a same-named entry (data-descriptor precedence). Treating the write as a
-                    # plain state-slot store would silently diverge; reject it (descriptor writes are unsupported).
-                    raise UnsupportedConstruct(
-                        f"self.{attr} is a class data descriptor; assignment through a descriptor is not supported "
-                        "(only direct instance attributes hold persistent state)",
-                        self._loc(target),
-                    )
-                if attr not in self._snapshot:
-                    raise UnsupportedConstruct(
-                        f"attribute self.{attr} is assigned but not initialized on the instance "
-                        "(all persistent state must have an initial value)",
-                        self._loc(target),
-                    )
-                if attr not in self._state_order:
-                    self._state_order.append(attr)
-        return False
-
-    def _scan_loop_attr_writes(self, stmt: ast.For) -> None:
-        """
-        Scan a ``for`` loop's attribute writes exactly as ``_lower_for`` would unroll it: bind the compile-time counter
-        and scan the body once per trip (enclosing counters in scope), so the discovered state set matches precisely
-        what the unroller lowers -- a counter-dependent inner range that is empty on every trip contributes nothing. A
-        non-``Name`` target or a non-static / over-threshold range is rejected at lowering; scan its body once so a
-        real write is not missed before that rejection.
-        """
-        if not isinstance(stmt.target, ast.Name):
-            self._scan_attr_writes(stmt.body)
-            return
-        try:
-            trips = self._static_range(stmt.iter, self._loc(stmt))
-        except UnsupportedConstruct:
-            self._scan_attr_writes(stmt.body)
-            return
-        if range_trip_count(trips) > UNROLL_THRESHOLD:
-            self._scan_attr_writes(stmt.body)
-            return
-        for index in trips:
-            self._static_ints[stmt.target.id] = index
-            self._scan_attr_writes(stmt.body)
+        attr = target.attr
+        if self._is_class_data_descriptor(attr):
+            # Python routes ``self.<name> = ...`` through a class data descriptor (e.g. a property setter) even when
+            # ``__dict__`` holds a same-named entry (data-descriptor precedence). Treating the write as a plain
+            # state-slot store would silently diverge; reject it (descriptor writes are unsupported).
+            raise UnsupportedConstruct(
+                f"self.{attr} is a class data descriptor; assignment through a descriptor is not supported "
+                "(only direct instance attributes hold persistent state)",
+                self._loc(target),
+            )
+        if attr not in self._snapshot:
+            raise UnsupportedConstruct(
+                f"attribute self.{attr} is assigned but not initialized on the instance "
+                "(all persistent state must have an initial value)",
+                self._loc(target),
+            )
+        if attr not in self._state_order:
+            self._state_order.append(attr)
 
     def _is_self_attr(self, node: ast.expr) -> bool:
         return (
@@ -1858,7 +1827,7 @@ class _Lowerer:
         Whether ``attr`` resolves to a class DATA descriptor -- one whose type defines ``__set__`` or ``__delete__`` (a
         ``property`` is one). Python resolves such a name through the descriptor for both read and write, taking
         precedence over any same-named instance ``__dict__`` entry, so that entry is dead state: it must never be folded
-        as a stored value (``_readonly_snapshot_value``), written as a state slot (``_scan_attr_writes``), or read as
+        as a stored value (``_readonly_snapshot_value``), written as a state slot (``_register_state_attr``), or read as
         one (``_read_attr``). A non-data descriptor (a method, ``staticmethod``, ``cached_property``) is instead
         shadowed BY a same-named instance entry when one exists, so it does not block that entry from being read/folded
         as state; an attribute with no instance entry is simply unknown to the snapshot and rejected by the read path.

@@ -13,6 +13,9 @@ retry them until success.
 
 ## Conventions
 
+Given a trade-off between performance and simplicity, always choose simplicity.
+Clear designs are easier to verify, maintain, and refactor, and they are more likely to be correct.
+
 ### Reset strategy
 
 Use synchronous active-high reset for stream control only: validity flags, state-machine state, and other control

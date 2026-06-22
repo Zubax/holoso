@@ -258,6 +258,38 @@ def test_for_counter_reassign_keeps_scan_and_lowering_in_lockstep() -> None:
         assert float(model.run(a)[0]) == float(ref.step(a)), f"mismatch at a={a}"
 
 
+def test_walrus_counter_demotion_keeps_scan_and_lowering_in_lockstep() -> None:
+    # Regression: a walrus that rebinds a leaked ``for`` counter to a runtime value must demote it in the reachability
+    # scan exactly as lowering does -- the scan invalidates a static int on a walrus target just as on a plain
+    # reassignment. Here ``t`` (the counter, 0) is rebound by ``(t := a)`` in the ``if`` test, so the branch is dynamic
+    # and its else arm (a ``while`` writing ``self.s``) IS reachable. A scan that failed to invalidate the walrus target
+    # would fold ``0 < 1.0`` to True, drop ``self.s`` from the state set, then crash in ``_lower_while`` when lowering
+    # (which does invalidate) opens a header phi for the unregistered attribute. The state set and the phis must agree.
+    class K:
+        def __init__(self) -> None:
+            self.s = 4.0
+
+        def step(self, a):  # type: ignore[no-untyped-def]
+            for t in range(1):  # leaks t == 0 (a compile-time integer) into the enclosing scope
+                pass
+            if (t := a) < 1.0:  # the walrus rebinds t to a runtime value -> a real branch, not a stale 0<1.0 fold
+                pass
+            else:
+                c = 2.0
+                while c > 0.0:
+                    c = c - 1.0
+                    self.s = 5.0  # written only on the else path's loop; must be persistent state
+            return self.s
+
+    hir = lower(K().step)
+    assert "s" in {slot.name for slot in hir.state_slots}  # the loop-written attr must be registered as state
+
+    model = build_model(build(_run(K().step), "k"))
+    ref = K()
+    for a in (0.5, 5.0, -7.0):  # a<1 takes the empty then arm; a>=1 runs the else loop and writes s
+        assert float(model.run(a)[0]) == float(ref.step(a)), f"mismatch at a={a}"
+
+
 def test_for_counter_reassigned_inside_while_is_demoted_after_the_loop() -> None:
     # Regression (differential fuzzer): a leaked ``for`` counter reassigned to a runtime value INSIDE a ``while`` body
     # must stay demoted after the loop. ``_lower_while`` restored the preheader static-int map verbatim on exit, which
@@ -1578,7 +1610,7 @@ def test_model_bool_cast_of_underflowing_constant_is_false() -> None:
 
 def test_connective_branch_does_not_create_a_phantom_state_slot() -> None:
     # Regression (review): folding ``if u > 0.0 or True:`` to its live arm must keep the persistent-state scan
-    # (``_scan_attr_writes``) and lowering in lockstep. Before the shared ``_static_condition`` predicate the scan
+    # (``_collect_written_attrs``) and lowering in lockstep. Before the shared ``_static_condition`` predicate the scan
     # descended both arms (strict ``_static_bool`` does not fold ``X or True``) while lowering folded one, so the dead
     # else-arm's ``self.y`` became a state slot with no value and ``_register_state_slots`` crashed with KeyError.
     class K:

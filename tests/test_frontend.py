@@ -534,6 +534,55 @@ def test_while_loop_with_else_is_unsupported() -> None:
         lower(f)
 
 
+def test_loop_else_write_keeps_attribute_assigned_so_the_loop_else_is_rejected() -> None:
+    # Regression (Codex review): a ``for``/``while`` ``else`` clause runs when the loop completes, so a self-attr write
+    # there is a real assignment the read-only-attribute scan must see. If it did not, the attribute would fold to
+    # read-only, the guard gating the (lowering-unsupported) loop-else would fold it away as dead, and the program would
+    # be silently COMPILED instead of rejected -- a behavior change, not a diagnostic shift. The scan must descend the
+    # loop ``else`` so ``self.flag`` stays assigned, ``if self.flag`` stays a runtime branch, and lowering reaches and
+    # rejects the loop-else.
+    class K:
+        def __init__(self) -> None:
+            self.flag = True
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if self.flag:
+                self.y = x
+            else:
+                for _ in range(1):
+                    pass
+                else:
+                    self.flag = False  # the loop-else assigns flag; it must not be treated as a read-only constant
+            return self.y
+
+    with pytest.raises(UnsupportedConstruct, match="else"):
+        lower(K().__call__)
+
+
+def test_while_else_write_keeps_attribute_assigned_so_the_while_else_is_rejected() -> None:
+    # The ``while`` companion to the ``for`` else regression above. A ``while`` else likewise runs on a reachable path
+    # (a runtime guard keeps it from being statically dead), so the read-only scan must descend it; otherwise the same
+    # silent-compile-instead-of-reject hazard applies to the ``while`` branch of the unified driver.
+    class K:
+        def __init__(self) -> None:
+            self.flag = True
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if self.flag:
+                self.y = x
+            else:
+                while x < 0.0:
+                    x = x + 1.0
+                else:
+                    self.flag = False  # the while-else assigns flag; it must not be treated as a read-only constant
+            return self.y
+
+    with pytest.raises(UnsupportedConstruct, match="else"):
+        lower(K().__call__)
+
+
 def test_return_inside_while_is_unsupported() -> None:
     def f(a):  # type: ignore[no-untyped-def]
         x = a
@@ -2037,7 +2086,7 @@ def test_ternary_condition_with_equal_arms_folds() -> None:
     lower(f)  # must not raise (the return is reachable, not inside a branch)
 
 
-def test_collect_assigned_stops_at_a_returning_folded_arm() -> None:
+def test_readonly_scan_stops_at_a_returning_folded_arm() -> None:
     # Regression (review #1): a folded ``if`` whose taken arm returns makes the rest unreachable; the read-only scan
     # must stop there, so an attribute assigned only afterwards is not wrongly counted as written. Here ``gate`` is
     # read-only, so the first guard folds and its return is permitted -- which fails if ``gate`` is mismarked.
