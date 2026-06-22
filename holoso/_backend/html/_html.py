@@ -15,7 +15,7 @@ from datetime import datetime
 from importlib import resources
 
 from ..._lir import Lir
-from ..._operators import HardwareOperator
+from ..._operators import PooledHardwareOperator
 from ..verilog import VerilogOutput
 from ._schedule import render_schedule
 
@@ -69,19 +69,16 @@ def generate(lir: Lir, verilog_output: VerilogOutput) -> HtmlOutput:
 
 
 def _metrics(lir: Lir) -> str:
-    fmt = lir.float_regfile.fmt
+    fmt = lir.float_format
     op_counts: dict[str, int] = {}
-    for inst in lir.float_instances:
+    for inst in lir.instances:
         op_counts[inst.operator.mnemonic] = op_counts.get(inst.operator.mnemonic, 0) + 1
     rows: list[tuple[str, object]] = [
         ("ZKF format", f"e{fmt.wexp}+m{fmt.wman} = {fmt.width}-bit"),
         ("operator instances", " ".join(f"{count}×{kind}" for kind, count in op_counts.items())),
-        ("registers", lir.float_regfile.nreg),
-        ("regfile R/W ports", f"{lir.float_regfile.nrd} / {lir.float_regfile.nwr}"),
-        ("schedule makespan", lir.makespan),
-        ("operations", lir.op_count),
-        ("II (cycles)", lir.initiation_interval),
-        ("longest op chain", lir.max_chain_len),
+        ("registers", lir.regfile.nreg),
+        ("regfile R/W ports", f"{lir.regfile.nrd} / {lir.regfile.nwr}"),
+        ("II min [cycles]", lir.initiation_interval),
     ]
     body = "".join(f"<tr><th>{_esc(label)}</th><td>{_esc(str(value))}</td></tr>" for label, value in rows)
     return f"<h2>Metrics</h2><table class='metrics'>{body}</table>"
@@ -92,8 +89,8 @@ def _stage_config(lir: Lir) -> str:
         "<h2>Operator Params</h2><table class='metrics cfg'>",
         "<tr><th>operator</th><th>HDL param</th><th>value</th></tr>",
     ]
-    seen: dict[HardwareOperator, None] = {}  # distinct operators present, in instance order
-    for inst in lir.float_instances:
+    seen: dict[PooledHardwareOperator, None] = {}  # distinct operators present, in instance order
+    for inst in lir.instances:
         seen.setdefault(inst.operator, None)
     rows = 0
     for op in seen:

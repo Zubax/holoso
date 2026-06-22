@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Stateful wrapper around the pure ``ekf1_stateless.update_x_P`` kernel.
-
-This is the same extended-Kalman-filter covariance update as ``ekf1_stateless``, but packaged as a resettable filter
-module that owns its state. The persisted ``x`` and ``P_urt`` are public, so they become observable
-``state_x_*`` / ``state_P_urt_*`` ports; ``R_diag`` and ``Q_diag`` are read-only configuration folded into the design at
-construction time. ``update`` is ordinary executable numpy -- holoso lowers the very source that runs natively.
+Stateful wrapper around the pure stateless EKF demo kernel.
+This is the same extended-Kalman-filter covariance update as ``ekf1_stateless``, but packaged as a stateful resettable
+filter module. The persisted ``x`` and ``P_urt`` are public, so they become observable ports as
+``state_x_*`` and ``state_P_urt_*``; ``R_diag`` and ``Q_diag`` are read-only configuration folded into the design at
+construction time.
 """
 
 import dataclasses
@@ -28,6 +27,7 @@ class Ekf1:
 
     An aggregate field may be a Python list, whose length holoso reads from the reset value, or a numpy array whose
     shape is stated explicitly with jaxtyping; ``Q_diag`` exercises the latter and the rest the former.
+    This can be a dataclass or an ordinary class -- Holoso supports both.
     """
 
     x: list[float] = dataclasses.field(default_factory=lambda: [0.1e-3, 0.0, 0.0])  # state vector [x_R, x_g, x_i]
@@ -59,12 +59,14 @@ def main() -> None:
             holoso.FMulOperator(narrow),
             holoso.FDivOperator(narrow),
             holoso.FMulILog2OperatorFamily(narrow),
+            holoso.FCmpOperator(narrow),
         ),
         holoso.OpConfig(
             holoso.FAddOperator(wide, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
             holoso.FMulOperator(wide, stage_input=1, stage_product=1, stage_pack=1),
             holoso.FDivOperator(wide, stage_input=1, stage_pack=1, stage_output=1),
             holoso.FMulILog2OperatorFamily(wide),
+            holoso.FCmpOperator(wide),
         ),
     ]
     base = Path(__file__).resolve().parent / "build" / Path(__file__).stem

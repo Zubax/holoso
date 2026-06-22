@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 
 from holoso import FloatFormat, OpConfig
 from holoso._backend.cocotb import generate as generate_testbench
-from holoso._backend.numerical import generate as build_model
+from holoso._backend.numerical import generate
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._frontend import lower
 from holoso._hir import optimize
@@ -32,7 +32,7 @@ def run_cosim(
     """
     ops = default_ops(fmt) if ops is None else ops
     lir = build(lower_to_mir(optimize(lower(fn)), ops), name)
-    model = build_model(lir)
+    model = generate(lir)
     # Generated sources live outside the cocotb build dir, which the runner wipes on clean=True.
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"{name}_w{fmt.wexp}_{fmt.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)

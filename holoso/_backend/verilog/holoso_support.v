@@ -15,7 +15,8 @@
 // FLOATING POINT BASIC OPERATORS
 //
 // Using Zubax Kulibin float -- an IEEE 754-like format with simplifications: no NaN, no subnormals, no negative 0.
-// Refer to the Kulibin library for details.
+// Refer to the Kulibin library for details. Note that even though it technically has no negative zero, it is not an
+// error to produce it -- all operators ignore the sign bit when the magnitude is zero.
 //
 // Parameters: WEXP -- exponent bit width, WMAN -- mantissa/significand bit width (incl. hidden bit).
 // The total width is WFULL=WEXP+WMAN (the significand MSb is absent but there is also the sign bit, like IEEE 754).
@@ -181,14 +182,6 @@ module holoso_fdiv#(parameter WEXP = 6, parameter WMAN = 18,
     );
 endmodule
 
-// Combinational saturator: replaces infinity with the largest finite value of the same sign; finite pass through.
-module holoso_fsaturate#(parameter WEXP = 6, parameter WMAN = 18) (
-    input  wire [WEXP+WMAN-1:0] x,
-    output wire [WEXP+WMAN-1:0] y
-);
-    zkf_saturate#(.WEXP(WEXP), .WMAN(WMAN)) u_saturate (.x(x), .y(y));
-endmodule
-
 // Floating point min/max sorter with sign conditioning on inputs and outputs:
 //      min = sgnop(min(sgnop(a), sgnop(b)))
 //      max = sgnop(max(sgnop(a), sgnop(b)))
@@ -229,7 +222,8 @@ endmodule
 // Floating point comparator with sign conditioning on inputs only:
 //      (a_gt_b, a_eq_b, a_lt_b) = compare(sgnop(a), sgnop(b))
 // Outputs are mutually-exclusive one-hot flags.
-module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18, parameter integer LATENCY = 0) (
+module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18, parameter integer STAGE_INPUT = 0,
+                    parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
@@ -247,27 +241,7 @@ module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18, parameter integer L
     wire [WFULL-1:0] b1;
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
-    zkf_cmp#(.WEXP(WEXP), .WMAN(WMAN), .LATENCY(LATENCY)) u_cmp (.clk(clk), .rst(rst),
-                                                                 .in_valid(in_valid), .a(a1), .b(b1),
-                                                                 .out_valid(out_valid),
-                                                                 .a_gt_b(a_gt_b), .a_eq_b(a_eq_b),
-                                                                 .a_lt_b(a_lt_b));
-endmodule
-
-// Combinational predicate: y=1 iff x is finite (i.e., x is not an infinity).
-module holoso_fisfinite#(parameter WEXP = 6, parameter WMAN = 18) (input  wire [WEXP+WMAN-1:0] x, output wire y);
-    zkf_is_finite#(.WEXP(WEXP), .WMAN(WMAN)) u_is_finite (.x(x), .y(y));
-endmodule
-
-// Combinational mapping from float to boolean: a zero or a subnormal (if supported) float is false, otherwise true.
-// E.g., if IEEE 754 binary32 is used (with subnormals), values with magnitude under ~1e-38 are mapped to falsity.
-module holoso_ftobool#(parameter WEXP = 6, parameter WMAN = 18) (input wire [WEXP+WMAN-1:0] x, output wire y);
-    assign y = |x[WEXP+WMAN-2:WMAN-1];  // zero if the exponent is zero; assume no subnormals or subnormals~0
-endmodule
-
-// Combinational mapping from boolean to float: falsity is zero, truth is one.
-module holoso_ffrombool#(parameter WEXP = 6, parameter WMAN = 18) (input wire x, output wire [WEXP+WMAN-1:0] y);
-    // ZKF 1.0 is sign 0, biased exponent BIAS = 2^(WEXP-1)-1, fraction 0.
-    localparam [WEXP+WMAN-1:0] ONE = (((1 << (WEXP-1)) - 1) << (WMAN-1));
-    assign y = x ? ONE : {(WEXP+WMAN){1'b0}};
+    zkf_cmp#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT), .LATENCY(LATENCY)) u_cmp (
+        .clk(clk), .rst(rst), .in_valid(in_valid), .a(a1), .b(b1),
+        .out_valid(out_valid), .a_gt_b(a_gt_b), .a_eq_b(a_eq_b), .a_lt_b(a_lt_b));
 endmodule

@@ -5,12 +5,19 @@ From a scheduled :class:`Lir` this derives the per-step VLIW control word: the d
 every control field and its value on each step (``None`` == don't-care), and the partition into constant fields
 (driven by constant nets) versus varying fields (packed into the ROM word). It also owns the Verilog-safe naming the
 emitter wires up. It emits no Verilog text -- that is the emitter's job; this module is pure data.
+
+Write control is per OUTPUT-PORT LANE, keyed ``(instance, port)``: a wide lane's write-enable/address ride one ROM
+step after the commit (aligned with the writeback latch), while a latch-free boolean lane's ride the commit step
+itself, together with its 1-bit inversion conditioner (the boolean dual of the wide lane's issue-step ``y_sgnop``,
+applied as a fabric XOR at the register write). A lane exists only if some firing taps it; a never-tapped module
+output gets no fields and is left unconnected.
 """
 
 from dataclasses import dataclass
 from string import ascii_letters
 
-from ..._lir import FloatConstRef, Lir, FloatOperatorInstance, FloatScheduledOp
+from ..._lir import FloatConstRef, FloatOperand, Lir, OperatorInstance, PooledScheduledOp, RegRef, pooled_writeback_word
+from ..._type import is_wide_type
 
 PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
 
@@ -31,7 +38,7 @@ class Field:
     const_value: int = 0
 
 
-def base_name(inst: FloatOperatorInstance) -> str:
+def base_name(inst: OperatorInstance) -> str:
     return f"{inst.operator.instance_stem}_{inst.index}"
 
 
@@ -40,19 +47,21 @@ def code_width(count: int) -> int:
     return max(1, (count - 1).bit_length()) if count > 1 else 1
 
 
-def write_target_lists(lir: Lir) -> dict[FloatOperatorInstance, list[int]]:
+def write_target_lists(lir: Lir) -> dict[tuple[OperatorInstance, int], list[int]]:
     """
-    Per instance, the sorted distinct registers it ever writes -- the write-address field's dense codebook.
-    The write-address field carries the position in this list, not the raw register index, so its width is
-    ``code_width(M)`` over the instance's ``M`` write targets rather than the whole register file. The per-register
-    write selector compares against the same position, so the recode is transparent (no decode logic on the consumer)
-    and mirrors the read side, where the read-address field carries the dense read-set index.
+    Per output-port lane ``(instance, port)``, the sorted distinct registers it ever writes -- the lane's
+    write-address codebook (its bank is implied by the destinations' type). The write-address field carries the
+    position in this list, not the raw register index, so its width is ``code_width(M)`` over the lane's ``M``
+    targets rather than the whole register file. The per-register write selector compares against the same position,
+    so the recode is transparent (no decode logic on the consumer) and mirrors the read side, where the read-address
+    field carries the dense read-set index. Lanes never tapped by any firing are absent.
     """
-    targets: dict[FloatOperatorInstance, list[int]] = {}
-    for op in lir.float_ops:
-        regs = targets.setdefault(op.inst, [])
-        if op.dst.index not in regs:
-            regs.append(op.dst.index)
+    targets: dict[tuple[OperatorInstance, int], list[int]] = {}
+    for op in lir.ops:
+        for write in op.writes:
+            regs = targets.setdefault((op.inst, write.port), [])
+            if write.dst.index not in regs:
+                regs.append(write.dst.index)
     for regs in targets.values():
         regs.sort()
     return targets
@@ -71,8 +80,8 @@ def f_osgn(base: str, letter: str) -> str:
     return f"mc_{base}_{letter}s"
 
 
-def f_ysgn(base: str) -> str:
-    return f"mc_{base}_ys"
+def f_ysgn(base: str, port: int) -> str:
+    return f"mc_{base}_y{port}s"
 
 
 def f_selc(port: int) -> str:
@@ -83,40 +92,45 @@ def f_cidx(port: int) -> str:
     return f"mc_cidx{port}"
 
 
-def f_we(base: str) -> str:
-    return f"mc_we_{base}"
+def f_we(base: str, port: int) -> str:
+    return f"mc_we_{base}_y{port}"
 
 
-def f_wa(base: str) -> str:
-    return f"mc_wa_{base}"
+def f_wa(base: str, port: int) -> str:
+    return f"mc_wa_{base}_y{port}"
 
 
-def _op_expr(op: FloatScheduledOp) -> str:
-    return f"r{op.dst.index}={op.inst.operator.render(*[o.stable_label for o in op.operands])}"
+def f_binv(base: str, port: int) -> str:
+    return f"mc_binv_{base}_y{port}"
 
 
-def cycle_summary(issues: list[FloatScheduledOp], commits: list[FloatScheduledOp]) -> str:
+def _op_expr(op: PooledScheduledOp) -> str:
+    dsts = "/".join(write.conditioner.decorate(write.dst.stable_label) for write in op.writes)
+    return f"{dsts}={op.inst.operator.render(*[operand.stable_label for operand in op.operands])}"
+
+
+def cycle_summary(issues: list[PooledScheduledOp], commits: list[PooledScheduledOp]) -> str:
     parts: list[str] = []
     if issues:
         parts.append("issue " + ", ".join(_op_expr(op) for op in issues))
     if commits:
-        parts.append("commit " + ", ".join(f"r{op.dst.index}" for op in commits))
+        parts.append("commit " + ", ".join("/".join(write.dst.stable_label for write in op.writes) for op in commits))
     return "; ".join(parts)
 
 
-def read_ports(lir: Lir) -> dict[tuple[FloatOperatorInstance, int], int]:
+def read_ports(lir: Lir) -> dict[tuple[OperatorInstance, int], int]:
     """One dedicated read port per operator operand, numbered in instance/operand order (counts to ``nrd``)."""
-    read_port: dict[tuple[FloatOperatorInstance, int], int] = {}
-    for inst in lir.float_instances:
+    read_port: dict[tuple[OperatorInstance, int], int] = {}
+    for inst in lir.instances:
         for pos in range(inst.operator.arity):
             read_port[(inst, pos)] = len(read_port)
     return read_port
 
 
-def port_const_map(lir: Lir, read_port: dict[tuple[FloatOperatorInstance, int], int]) -> dict[int, list[int]]:
+def port_const_map(lir: Lir, read_port: dict[tuple[OperatorInstance, int], int]) -> dict[int, list[int]]:
     """Read port -> the distinct constant-pool indices it ever sources (drives the per-operand constant select)."""
     port_consts: dict[int, list[int]] = {}
-    for op in lir.float_ops:
+    for op in lir.ops:
         for pos, operand in enumerate(op.operands):
             if isinstance(operand.source, FloatConstRef):
                 port = read_port[(op.inst, pos)]
@@ -128,39 +142,52 @@ def port_const_map(lir: Lir, read_port: dict[tuple[FloatOperatorInstance, int], 
 
 def build_microcode(
     lir: Lir,
-    read_port: dict[tuple[FloatOperatorInstance, int], int],
+    read_port: dict[tuple[OperatorInstance, int], int],
     port_consts: dict[int, list[int]],
-    write_lists: dict[FloatOperatorInstance, list[int]],
+    write_lists: dict[tuple[OperatorInstance, int], list[int]],
 ) -> dict[str, Field]:
     """
     Build the per-step value table of every control field from the static schedule.
 
-    ``in_valid`` and ``write-enable`` are concrete every step (they gate operation), so they default to 0; every other
-    field is a don't-care (``None``) except on the step its operator issues or commits, which maximises the constant
-    columns that later get lifted out of the ROM.
+    ``in_valid`` and the write-enables are concrete every step (they gate operation), so they default to 0; every
+    other field is a don't-care (``None``) except on the step its firing issues or commits, which maximises the
+    constant columns that later get lifted out of the ROM.
 
-    Read and write control are placed on shifted steps to line up with the register-file latches: the read-address group
-    is presented 1 step before the operator issues (so the latched operand arrives on the issue step), and the
-    write-enable/address are presented 1 step after the operator commits (so they line up with the writeback latch).
+    Control is placed on shifted steps to line up with each bank's discipline: the read-address group is presented 1
+    step before the firing issues (so the latched wide operand arrives on the issue step); a WIDE lane's
+    write-enable/address are presented 1 step after the commit (the writeback latch), with its sign conditioner on
+    the issue step (consumed inside the wrapper); a BOOLEAN lane is latch-free, so its write-enable/address/inversion
+    are presented ON the commit step -- one step earlier than a wide lane's, which is exactly what gives a branch
+    condition its one cycle of slack at the block boundary.
     """
-    depth = lir.makespan + 3  # steps 0..present (present == makespan + WRITE_LATCH + 1)
+    depth = lir.last_pc + 1  # one control word per fetch PC: blocks are laid out across 0..last_pc with NOP gaps
     fields: dict[str, Field] = {}
+    defaults: dict[str, int | None] = {}
 
     def add(name: str, width: int, default: int | None) -> None:
         fields[name] = Field(name, width, [default] * depth)
+        defaults[name] = default
+
+    def put(name: str, step: int, value: int) -> None:
+        # Single-writer rule: a field's step slot may be set once to a non-default value (or repeatedly to the same
+        # value). Under per-block draining no two firings share a control word, so this never fires; once commit-side
+        # writebacks of in-flight results spill into successor words, it catches at build time any two spills colliding
+        # on one slot (e.g. a replica landing on a word another firing already drives) instead of silently clobbering.
+        field = fields[name]
+        current = field.values[step]
+        assert (
+            current == defaults[name] or current == value
+        ), f"microcode single-writer violation on field {name!r} step {step}: holds {current!r}, cannot write {value!r}"
+        field.values[step] = value
 
     # The read-address field selects within a port's read-set, not the whole register file: it carries the dense
     # read-set index (0..K-1), so its width is ceil(log2 K) and the emitter's read-mux case selects by it. A
     # single-reader or always-constant port keeps the constant value finalize_fields lifts out of the ROM.
     port_read_set = {read_port[key]: regs for key, regs in lir.read_set_per_port.items()}
 
-    for inst in lir.float_instances:
+    for inst in lir.instances:
         base = base_name(inst)
         add(f_iv(base), 1, 0)
-        add(f_we(base), 1, 0)
-        # The write-address field carries the dense write-target index (0..M-1), symmetric to the read-address field.
-        add(f_wa(base), code_width(len(write_lists.get(inst, []))), None)
-        add(f_ysgn(base), 2, None)
         for pos in range(inst.operator.arity):
             add(f_osgn(base, PORT_LETTERS[pos]), 2, None)
             port = read_port[(inst, pos)]
@@ -169,28 +196,48 @@ def build_microcode(
                 add(f_selc(port), 1, None)
                 if len(port_consts[port]) > 1:
                     add(f_cidx(port), code_width(len(port_consts[port])), None)
+    for (inst, port_index), targets in sorted(write_lists.items(), key=lambda kv: (base_name(kv[0][0]), kv[0][1])):
+        base = base_name(inst)
+        add(f_we(base, port_index), 1, 0)
+        # The write-address field carries the dense write-target index (0..M-1), symmetric to the read-address field.
+        add(f_wa(base, port_index), code_width(len(targets)), None)
+        if is_wide_type(inst.operator.signature.result_types[port_index]):
+            add(f_ysgn(base, port_index), 2, None)
+        else:
+            add(f_binv(base, port_index), 1, None)
 
-    for op in lir.float_ops:
+    for op in lir.ops:
         base = base_name(op.inst)
         ci = op.issue_cycle  # in_valid and sign controls, consumed inside the wrapper on the issue step
         rci = op.issue_cycle - 1  # read-address group, presented early so the read latch delivers on issue
-        wcc = op.commit_cycle + 1  # write-enable/address, delayed to line up with the writeback latch
-        assert 0 <= rci and wcc < depth, f"microcode step out of range: rci={rci}, wcc={wcc}, depth={depth}"
-        fields[f_iv(base)].values[ci] = 1
-        fields[f_ysgn(base)].values[ci] = op.result_sign.encoded
+        assert 0 <= rci, f"microcode step out of range: rci={rci}, depth={depth}"
+        put(f_iv(base), ci, 1)
         for pos, operand in enumerate(op.operands):
             port = read_port[(op.inst, pos)]
-            fields[f_osgn(base, PORT_LETTERS[pos])].values[ci] = operand.sign.encoded
+            assert isinstance(operand, FloatOperand), "pooled operators read only wide operands today (no read lane)"
+            put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.sign.encoded)
             if isinstance(operand.source, FloatConstRef):
-                fields[f_selc(port)].values[rci] = 1
+                put(f_selc(port), rci, 1)
                 if f_cidx(port) in fields:
-                    fields[f_cidx(port)].values[rci] = port_consts[port].index(operand.source.index)
-            else:
+                    put(f_cidx(port), rci, port_consts[port].index(operand.source.index))
+            elif isinstance(operand.source, RegRef):
                 if f_selc(port) in fields:
-                    fields[f_selc(port)].values[rci] = 0
-                fields[f_rd(port)].values[rci] = port_read_set[port].index(operand.source.index)
-        fields[f_we(base)].values[wcc] = 1
-        fields[f_wa(base)].values[wcc] = write_lists[op.inst].index(op.dst.index)
+                    put(f_selc(port), rci, 0)
+                put(f_rd(port), rci, port_read_set[port].index(operand.source.index))
+        for write in op.writes:
+            lane = (op.inst, write.port)
+            wide = isinstance(write.dst, RegRef)
+            # Wide lane: writeback latch alignment (one step after the commit); the latch-free boolean lane fires ON the
+            # commit step (NOT one later -- a +1 would land the result past the branch's boundary read). The same step
+            # the overlap layout uses to keep every write word inside the block (see pooled_writeback_word).
+            wcc = pooled_writeback_word(op.commit_cycle, wide)
+            assert wcc < depth, f"microcode step out of range: wcc={wcc}, depth={depth}"
+            if wide:
+                put(f_ysgn(base, write.port), ci, write.conditioner.encoded)  # sign rides the wrapper at issue
+            else:
+                put(f_binv(base, write.port), wcc, write.conditioner.encoded)  # inversion applied at the write
+            put(f_we(base, write.port), wcc, 1)
+            put(f_wa(base, write.port), wcc, write_lists[lane].index(write.dst.index))
 
     return fields
 

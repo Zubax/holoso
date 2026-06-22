@@ -41,7 +41,10 @@ include = ["holoso*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-v", "-p", "no:mypy"]
-markers = ["cosim: end-to-end cocotb cosimulation; slow, needs a simulator"]
+markers = [
+    "cosim: end-to-end cocotb cosimulation; slow, needs a simulator",
+    "fuzz: end-to-end blackbox differential fuzzing; slow, no simulator",
+]
 
 [tool.black]
 line-length = 120

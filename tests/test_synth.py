@@ -8,7 +8,15 @@ from pathlib import Path
 import pytest
 
 import holoso
-from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso import (
+    FAddOperator,
+    FCmpOperator,
+    FDivOperator,
+    FloatFormat,
+    FMulILog2OperatorFamily,
+    FMulOperator,
+    OpConfig,
+)
 
 
 def _kernel(a, b):  # type: ignore[no-untyped-def]  # module-level so inspect.getsource works
@@ -19,7 +27,9 @@ FMT32 = FloatFormat(8, 24)
 
 
 def _ops(fmt: FloatFormat = FMT32) -> OpConfig:
-    return OpConfig(FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt))
+    return OpConfig(
+        FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt), FCmpOperator(fmt)
+    )
 
 
 def _has_localparam(verilog: str, name: str, value: int) -> bool:
@@ -31,7 +41,13 @@ def _has_localparam(verilog: str, name: str, value: int) -> bool:
 
 def test_op_config_rejects_mixed_float_formats() -> None:
     fmt24 = FloatFormat(6, 18)
-    ops = OpConfig(FAddOperator(FMT32), FMulOperator(fmt24), FDivOperator(FMT32), FMulILog2OperatorFamily(FMT32))
+    ops = OpConfig(
+        FAddOperator(FMT32),
+        FMulOperator(fmt24),
+        FDivOperator(FMT32),
+        FMulILog2OperatorFamily(FMT32),
+        FCmpOperator(FMT32),
+    )
     with pytest.raises(ValueError, match="same format"):
         _ = ops.float_format
 
@@ -57,6 +73,7 @@ def test_synthesize_threads_pipeline_stages() -> None:
             FMulOperator(FMT32, stage_product=1),
             FDivOperator(FMT32),
             FMulILog2OperatorFamily(FMT32),
+            FCmpOperator(FMT32),
         ),
     )
     # Every STAGE_* is emitted explicitly (defaults as 0), so the instantiation is self-describing and threading is
@@ -82,11 +99,14 @@ def test_rejects_non_finite_constants() -> None:
 def test_write_artifacts(tmp_path: Path) -> None:
     result = holoso.synthesize(_kernel, ops=_ops())
     paths = result.write(tmp_path)
-    assert set(paths) == {"_kernel.v", "holoso_support.v", "test__kernel.py", "_kernel.html"}
+    # The support header (holoso_support.vh) ships and is included unconditionally, alongside the support modules.
+    assert set(paths) == {"_kernel.v", "holoso_support.v", "holoso_support.vh", "test__kernel.py", "_kernel.html"}
     assert (tmp_path / "_kernel.v").exists()
     assert (tmp_path / "test__kernel.py").exists()
     assert (tmp_path / "_kernel.html").exists()
     assert (tmp_path / "holoso_support.v").exists()
+    assert (tmp_path / "holoso_support.vh").exists()
+    assert '`include "holoso_support.vh"' in (tmp_path / "_kernel.v").read_text()  # always included
 
 
 def test_rejects_invalid_and_reserved_module_names() -> None:
@@ -110,7 +130,13 @@ def test_accepts_valid_module_name(tmp_path: Path) -> None:
     result = holoso.synthesize(_kernel, ops=_ops(), name="good_name")
     assert result.module_name == "good_name"
     paths = result.write(tmp_path)
-    assert set(paths) == {"good_name.v", "holoso_support.v", "test_good_name.py", "good_name.html"}
+    assert set(paths) == {
+        "good_name.v",
+        "holoso_support.v",
+        "holoso_support.vh",
+        "test_good_name.py",
+        "good_name.html",
+    }
 
 
 def test_synthesize_ekf1_stateless() -> None:

@@ -1,25 +1,40 @@
 """Thin API for the hardware-agnostic high-level IR."""
 
-from ._const import Const as Const, FloatConst as FloatConst
+from .._util import RelationalOp as RelationalOp
+from ._const import BoolConst as BoolConst, Const as Const, FloatConst as FloatConst
+from ._copy import reverse_postorder as reverse_postorder
 from ._ir import (
+    Branch as Branch,
     Hir as Hir,
     HirBuilder as HirBuilder,
     InPort as InPort,
+    Jump as Jump,
     Node as Node,
     Operation as Operation,
     OutputPort as OutputPort,
+    Phi as Phi,
+    Ret as Ret,
     StateRead as StateRead,
     StateSlot as StateSlot,
-    ValueId as ValueId,
+    Terminator as Terminator,
 )
 from ._operators import (
+    BoolAnd as BoolAnd,
+    BoolNot as BoolNot,
+    BoolOr as BoolOr,
+    BoolSelect as BoolSelect,
+    BoolToFloat as BoolToFloat,
+    BoolXor as BoolXor,
     FloatAbs as FloatAbs,
     FloatAdd as FloatAdd,
     FloatDiv as FloatDiv,
     FloatMul as FloatMul,
     FloatMulPow2 as FloatMulPow2,
     FloatNeg as FloatNeg,
+    FloatRelational as FloatRelational,
+    FloatToBool as FloatToBool,
     Operator as Operator,
+    Select as Select,
 )
 from ._optimize import optimize as optimize
-from ._types import FloatType as FloatType, Signature as Signature, Type as Type
+from ._types import BoolType as BoolType, FloatType as FloatType, Signature as Signature, Type as Type

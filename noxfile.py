@@ -42,9 +42,9 @@ def clean(session):
 
 @nox.session
 def tests(session: nox.Session) -> None:
-    """Fast unit tests; the slow cocotb cosimulation lives in the cosim_examples session."""
+    """Fast unit tests; the slow cocotb cosimulation and the differential fuzzer live in their own sessions."""
     session.install("-e", ".[test]")
-    session.run("python", "-m", "pytest", "-m", "not cosim", "tests")
+    session.run("python", "-m", "pytest", "-m", "not cosim and not fuzz", "tests")
 
 
 @nox.session
@@ -52,6 +52,13 @@ def cosim_examples(session: nox.Session) -> None:
     """Long-running end-to-end cocotb cosimulation of the bundled examples across stage configurations."""
     session.install("-e", ".[test]")
     session.run("python", "-m", "pytest", "-m", "cosim", "tests")
+
+
+@nox.session
+def fuzz(session: nox.Session) -> None:
+    """End-to-end blackbox differential fuzzing of the compiler; slow, no simulator. Scaled by HOLOSO_FUZZ_* knobs."""
+    session.install("-e", ".[test]")
+    session.run("python", "-m", "pytest", "-s", "-m", "fuzz", "tests")
 
 
 @nox.session
@@ -115,7 +122,11 @@ def synth_examples(session: nox.Session) -> None:
         ],
         name="TrapezoidalLeakyStreamingIntegrator",
     )
-    syn("examples/madd.py", "madd", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
+    syn(
+        "examples/madd.py",
+        "madd",
+        ["yosys-ecp5:freq=100,fmul.stage_pack=1", "diamond-ecp5:freq=100", "vivado:freq=150"],
+    )
     syn("examples/poly3.py", "poly3", ["yosys-ecp5:freq=100", "diamond-ecp5:freq=100", "vivado:freq=150"])
 
     syn(
@@ -133,12 +144,18 @@ def synth_examples(session: nox.Session) -> None:
         "fmul.stage_input=1,fmul.stage_product=1,fmul.stage_pack=1,"
         "fdiv.stage_input=1,fdiv.stage_pack=1,fdiv.stage_output=1"
     )
+    op_ekf1_wide_fmul_ilog2_decode = f"{op_ekf1_wide},fmul_ilog2.stage_decode=1"
+    op_ekf1_wide_fadd_norm2 = (
+        "fadd.stage_decode=1,fadd.stage_align=1,fadd.stage_normalize=2,fadd.stage_pack=1,"
+        "fmul.stage_input=1,fmul.stage_product=1,fmul.stage_pack=1,"
+        "fdiv.stage_input=1,fdiv.stage_pack=1,fdiv.stage_output=1"
+    )
     syn(
         "examples/ekf1_stateless.py",
         "update_x_P",
         [
-            f"yosys-ecp5:freq=100,{op_ekf1_wide}",
-            f"diamond-ecp5:freq=100,{op_ekf1_wide}",
+            f"yosys-ecp5:freq=100,{op_ekf1_wide_fmul_ilog2_decode}",
+            f"diamond-ecp5:freq=100,{op_ekf1_wide},fmul.stage_output=1",
             f"vivado:freq=150,{op_ekf1_wide}",
         ],
         wexp=8,
@@ -160,7 +177,7 @@ def synth_examples(session: nox.Session) -> None:
         "examples/ekf1_stateful.py",
         "Ekf1().update",
         [
-            f"yosys-ecp5:freq=100,{op_ekf1_wide}",
+            f"yosys-ecp5:freq=100,{op_ekf1_wide_fadd_norm2}",
             f"diamond-ecp5:freq=100,{op_ekf1_wide},fadd.stage_input=1",
             f"vivado:freq=150,{op_ekf1_wide}",
         ],

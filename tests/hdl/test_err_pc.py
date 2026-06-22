@@ -15,7 +15,15 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FAddOperator, FDivOperator, FloatFormat, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso import (
+    FAddOperator,
+    FCmpOperator,
+    FDivOperator,
+    FloatFormat,
+    FMulILog2OperatorFamily,
+    FMulOperator,
+    OpConfig,
+)
 from holoso._backend.verilog import generate
 from holoso._frontend import lower
 from holoso._hir import optimize
@@ -25,7 +33,7 @@ from holoso._mir import lower as lower_to_mir
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
 
 FMT = FloatFormat(6, 18)
-OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT))
+OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
 
 
 def _divide(a, b):  # type: ignore[no-untyped-def]
@@ -70,7 +78,7 @@ async def err_pc_latches_div0(dut) -> None:
 def test_err_pc(sim: str) -> None:
     lir = build(lower_to_mir(optimize(lower(_divide)), OPS), "divide")
     # The fdiv's div0 rides the writeback latch, so err_pc latches the write step: its commit cycle plus write latch.
-    err_step = next(op.commit_cycle for op in lir.float_ops if isinstance(op.inst.operator, FDivOperator)) + 1
+    err_step = next(op.commit_cycle for op in lir.ops if isinstance(op.inst.operator, FDivOperator)) + 1
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"divide_w{FMT.wexp}_{FMT.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     verilog_path = gen_dir / "divide.v"

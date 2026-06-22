@@ -1,4 +1,10 @@
-from iir1_lpf import IIR1LPF  # Ideally, the synthesizer should follow the import and inline the implementation.
+#!/usr/bin/env python3
+"""
+A single-pole high-pass IIR filter based on LF baseline subtraction.
+TODO FIXME: Currently unsupported.
+"""
+
+from iir1_lpf import IIR1LPF
 
 
 class IIR1HPF:
@@ -15,6 +21,6 @@ class IIR1HPF:
         self.lpf = IIR1LPF(ALPHA=ALPHA)
 
     def step(self, x: float) -> float:
-        x = float(x)
+        x = float(x)  # No-op in Holoso (ignored), while it may be useful in numerical Python.
         bias = self.lpf(x)
         return x - bias

@@ -7,7 +7,8 @@
     var edges = data.edges;          // [writeCellId, operandCellId, color, operationGroup]
     var columns = data.columns;      // label per grid column, indexed by (cell index - 1)
     var constants = data.constants;  // { "c0": "1.0", ... }
-    var liveness = data.liveness;    // { "<registerIndex>": [[start, end], ...] } live-row intervals
+    var liveness = data.liveness;    // { "<columnLabel>": [[start, end], ...] } live-row intervals, keyed by full label
+    var arrows = data.arrows;        // [{ from, to, lane, tip, cond }] margin control transfers
 
     var wrap = document.getElementById("schedwrap");
     if (!wrap) {
@@ -75,10 +76,121 @@
         });
     }
 
-    drawEdges();
-    window.addEventListener("resize", drawEdges);
+    // Control-transfer arrows in the right margin: the backend packs arrows into the lowest non-overlapping channels.
+    // Each routes out of the grid at its source row, right into its channel, vertically to the target row, then back
+    // left to the grid with an arrowhead. The margin is reserved as right padding on the wrapper so the grid's own
+    // scrollWidth covers the channels (and the overlay, sized to it, can paint them).
+    var CHANNEL_GAP = 9;    // clearance between the grid's right edge and the first channel, in px
+    var CHANNEL_STEP = 11;  // spacing between adjacent channels, in px
+    var HEAD = 5;           // arrowhead half-extent, in px
+    var CORNER = 5;         // bracket-corner radius, in px
+
+    function rowCentreY(cyc, origin) {
+        var cell = document.getElementById("pc_" + cyc);
+        if (!cell) {
+            return null;
+        }
+        var rect = cell.getBoundingClientRect();
+        return rect.top - origin.top + rect.height / 2;
+    }
+
+    function arrowPath(gridRight, channelX, y1, y2) {
+        var dx = channelX - gridRight;
+        var dy = y2 - y1;
+        var vdir = dy < 0 ? -1 : 1;
+        var radius = Math.min(CORNER, dx / 2, Math.abs(dy) / 2);
+        if (radius < 0.5) {
+            return "M" + gridRight + "," + y1 + " H" + channelX + " V" + y2 + " H" + gridRight;
+        }
+        return [
+            "M", gridRight, ",", y1,
+            " H", channelX - radius,
+            " Q", channelX, ",", y1, " ", channelX, ",", y1 + vdir * radius,
+            " V", y2 - vdir * radius,
+            " Q", channelX, ",", y2, " ", channelX - radius, ",", y2,
+            " H", gridRight,
+        ].join("");
+    }
+
+    function drawArrows() {
+        if (!arrows.length) {
+            return;
+        }
+        var origin = wrap.getBoundingClientRect();
+        var gridRight = grid.getBoundingClientRect().right - origin.left;
+        // Reserve the channel band as wrapper padding, then resize the overlay to the grown scrollWidth so it can paint
+        // the full band (drawEdges sized it to the pre-padding width).
+        var laneCount = arrows.reduce(function (count, arrow) {
+            return Math.max(count, arrow.lane + 1);
+        }, 0);
+        var band = CHANNEL_GAP + laneCount * CHANNEL_STEP + HEAD;
+        wrap.style.paddingRight = band + "px";
+        svg.setAttribute("width", wrap.scrollWidth);
+        svg.setAttribute("height", wrap.scrollHeight);
+        arrows.forEach(function (arrow) {
+            var y1 = rowCentreY(arrow.from, origin);
+            var y2 = rowCentreY(arrow.to, origin);
+            if (y1 === null || y2 === null) {
+                return;  // a row outside the rendered range -- skip the arrow safely
+            }
+            var channelX = gridRight + CHANNEL_GAP + arrow.lane * CHANNEL_STEP;
+            var group = document.createElementNS(SVG_NS, "g");
+            group.setAttribute("class", "jarrow " + (arrow.cond ? "jbranch" : "jjump"));
+
+            var bracket = document.createElementNS(SVG_NS, "path");
+            bracket.setAttribute("d", arrowPath(gridRight, channelX, y1, y2));
+            bracket.setAttribute("fill", "none");
+            bracket.setAttribute("class", "jbracket");
+            group.appendChild(bracket);
+
+            var head = document.createElementNS(SVG_NS, "polygon");  // arrowhead pointing left into the target row
+            head.setAttribute("points",
+                gridRight + "," + y2 + " " + (gridRight + HEAD) + "," + (y2 - HEAD) + " " +
+                (gridRight + HEAD) + "," + (y2 + HEAD));
+            group.appendChild(head);
+
+            // Rarefied dotted feed from the boolean register the branch tests (its cell at the source row) to the
+            // arrow's root, so that register's residence ends visibly at the branch rather than in nothingness. The
+            // tested cell is marked with a circle, exactly as a dataflow edge marks an operand cell.
+            if (arrow.cond) {
+                var condCell = document.getElementById(arrow.cond);
+                if (condCell) {
+                    var cr = condCell.getBoundingClientRect();
+                    var cx = cr.left - origin.left + cr.width / 2;
+                    var cy = cr.top - origin.top + cr.height / 2;
+                    var feed = document.createElementNS(SVG_NS, "line");
+                    feed.setAttribute("x1", cx);
+                    feed.setAttribute("y1", cy);
+                    feed.setAttribute("x2", gridRight);
+                    feed.setAttribute("y2", y1);
+                    feed.setAttribute("class", "jcond");
+                    group.appendChild(feed);
+                    var dot = document.createElementNS(SVG_NS, "circle");  // operand marker on the tested register cell
+                    dot.setAttribute("cx", cx);
+                    dot.setAttribute("cy", cy);
+                    dot.setAttribute("r", "1.8");
+                    dot.setAttribute("class", "jcond");
+                    group.appendChild(dot);
+                }
+            }
+
+            var title = document.createElementNS(SVG_NS, "title");
+            title.textContent = arrow.tip;
+            group.appendChild(title);
+            svg.appendChild(group);
+        });
+    }
+
+    function redraw() {
+        wrap.style.paddingRight = "0px";  // release any reserved band so the grid metrics are measured bare
+        drawEdges();
+        drawArrows();
+    }
+
+    redraw();
+    window.addEventListener("resize", redraw);
     if (document.fonts && document.fonts.ready) {
-        document.fonts.ready.then(drawEdges);
+        document.fonts.ready.then(redraw);
     }
 
     // Hovering an operation (its result column or its ops chip) makes only that one operation stand out: we toggle a
@@ -109,9 +221,10 @@
         }
     }
 
-    // Whether register `label` (e.g. "r41") holds a live value on `cycle`, from its residence intervals.
+    // Whether register `label` (e.g. "r41" or "b0") holds a live value on `cycle`, from its residence intervals. The
+    // map is keyed by the full label, so the wide and boolean banks never collide on a shared bank index.
     function isAlive(label, cycle) {
-        var intervals = liveness[label.slice(1)];
+        var intervals = liveness[label];
         if (!intervals) {
             return false;
         }

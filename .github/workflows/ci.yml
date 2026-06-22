@@ -1,21 +1,56 @@
 name: CI
-
 on:
   push:
-  pull_request:
+env:
+  COCOTB_IGNORE_PYTHON_REQUIRES: "1"
 
 jobs:
-  nox:
+  core:
+    name: core
     runs-on: ubuntu-latest
-    container:
+    container: &fpga_toolchain_container
       image: ghcr.io/zubax/zubax-fpga-toolchain:latest
       options: --user root
-    env:
-      COCOTB_IGNORE_PYTHON_REQUIRES: "1"
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - &checkout_step
+        uses: actions/checkout@v7
+        with: { submodules: recursive }
+      - run: nox -s tests typecheck black
 
-      - name: Run nox
-        run: nox
+  cosim_examples:
+    name: cosim_examples
+    runs-on: ubuntu-latest
+    container: *fpga_toolchain_container
+    steps:
+      - *checkout_step
+      - run: nox -s cosim_examples
+
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    container: *fpga_toolchain_container
+    steps:
+      - *checkout_step
+      - run: nox -s fuzz
+
+  synth:
+    name: synth
+    runs-on: ubuntu-latest
+    container: *fpga_toolchain_container
+    steps:
+      - *checkout_step
+      - run: nox -s synth
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with: { name: synth-artifacts, path: build, if-no-files-found: ignore }
+
+  synth_examples:
+    name: synth_examples
+    runs-on: ubuntu-latest
+    container: *fpga_toolchain_container
+    steps:
+      - *checkout_step
+      - run: nox -s synth_examples
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with: { name: synth_examples-artifacts, path: build, if-no-files-found: ignore }

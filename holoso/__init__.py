@@ -11,7 +11,13 @@ from ._lir import (
     Direction as Direction,
     Port as Port,
 )
-from ._type import FloatFormat as FloatFormat, FloatType as FloatType, ScalarType as ScalarType
+from ._type import (
+    BoolType as BoolType,
+    FloatFormat as FloatFormat,
+    FloatType as FloatType,
+    LogicalPort as LogicalPort,
+    ScalarType as ScalarType,
+)
 from ._value import FloatValue as FloatValue
 from ._errors import (
     HolosoError as HolosoError,
@@ -23,7 +29,10 @@ from ._errors import (
 
 from ._backend.cocotb import CocotbOutput as CocotbOutput
 from ._backend.html import HtmlOutput as HtmlOutput
-from ._backend.numerical import NumericalModel as NumericalModel
+from ._backend.numerical import (
+    NumericalModel as NumericalModel,
+    NumericalSimulator as NumericalSimulator,
+)
 from ._backend.verilog import VerilogOutput as VerilogOutput
 
 from ._operators import (
@@ -31,6 +40,7 @@ from ._operators import (
     FDivOperator as FDivOperator,
     FMulILog2OperatorFamily as FMulILog2OperatorFamily,
     FMulOperator as FMulOperator,
+    FCmpOperator as FCmpOperator,
     OpConfig as OpConfig,
 )
 

@@ -6,7 +6,15 @@ Read the `README.md`.
 Whenever introducing nontrivial changes, update `DESIGN.md` as well to keep it fully up-to-date and non-conflicting
 with the implementation. However, do not attempt to capture minor implementation minutiae there, keep it high-level.
 
+Do not commit anything unless asked explicitly to do so.
+
+When (sub)agents fail or get stuck, e.g. due to a connection error or a transient environment error,
+retry them until success.
+
 ## Conventions
+
+Given a trade-off between performance and simplicity, always choose simplicity.
+Clear designs are easier to verify, maintain, and refactor, and they are more likely to be correct.
 
 ### Reset strategy
 
@@ -61,6 +69,14 @@ Importing anything from a package or subpackage is only allowed as long as it do
 underscore-prefixed names. Exceptions apply for importing from parent modules with the dot notation, and for unit tests.
 Accessing underscore-prefixed names from outside a class (or its descendants) is not allowed;
 all externally accessble entities must be non-underscore-prefixed.
+
+For invariant checking use plain `assert` statements copiously; usually any nontrivial function should contain at
+least a few. Their disappearance under `-O` is intentional.
+The assertion description string is only useful in nonobvious cases;
+do not spell out what is clear from the asserted expression. 
+
+Avoid files longer than about ~2000 lines (this is a soft limit).
+If a file grows beyond that, consider refactoring into smaller modules.
 
 If a docstring comment doesn't fit on one line, add an initial line break like this:
 
@@ -131,9 +147,15 @@ In Markdown, it is best to avoid bold `**` and italics `*` for emphasis; prefer 
 Prefer prose over lists, and avoid excessive formatting in general.
 These are not hard rules but rather soft suggestions.
 
+Don't hesitate to use rich Unicode where appropriate; e.g., in HTML reports, prefer `×` over `*` for multiplication,
+`µs` over `us` for microseconds, `🠄` instead of `=`/`<=`/`:=` for assignment, `≤` instead of `<=` for less-or-equal,
+and so on. Sensible use of emojis is also encouraged, especially in command-line output.
+
+Use logging extensively. Ensure that every significant action/decision/condition is logged.
+
 Generated reports must be written in rich and colorful human-friendly HTML format, not Markdown.
 
-No need to add tests nor update the design docs for report-generation-related changes.
+No need to add tests nor update the design docs for report-generation-related changes (e.g., HTML backend).
 
 ## Timing closure
 
@@ -179,7 +201,28 @@ A robust closure procedure that accounts for this starts lean and adds back one 
 Entirely driven by `nox`; read the `noxfile.py` for details and follow its recommendations.
 Tests may take a long time to run; if there is no output, assume they are still running, not stuck,
 
-After every change, dispatch two review agents with fresh context to review your work:
-one will focus on the functional correctness, the other will focus on the architectural and design aspects.
-When both are done, review and consolidate their findings and act accordingly.
-Repeat in a loop until the agents return no actionable feedback.
+Treat all code as suspect and likely defective until proven otherwise through testing. A passing build, a clean type
+check, a green-looking review, or code that merely reads as correct is not evidence of correctness -- only a test that
+exercises the behavior and could have failed is. When in doubt, assume the path is untested and the behavior is wrong
+until a kernel demonstrates otherwise.
+
+Prefer API-level black-box kernel tests over intrusive tests: a specific kernel exercising the target path,
+driven through the public API (e.g., `holoso.synthesize(fn, ops).numerical_model.elaborate()` etc),
+asserting mostly on publicly observable behavior -- output values against a reference,
+persistent state across transactions, typed-port metadata, error diagnostics -- not on internal structures.
+Such black-box tests are more likely to survive a deep refactoring.
+White-box tests remain valuable only where pure black-box tests are impractical.
+
+Whenever a defect is found (whether by a review agent or reported by a user), you MUST add a regression test that
+is verified to crash with the defect in place, and pass once the fix is implemented.
+
+Use your best judgement as to which features do not need test coverage. For example, the following should be avoided:
+- parameter validation in developer-only features;
+- HTML layout correctness;
+- white-box tests of implementation details rather than behaviors;
+- rejection of invalid inputs where an exception is raised.
+
+## Review loop
+
+After every change or milestone, or when explicitly prompted, run the multi-agent review/refine loop:
+invoke the `review-loop` skill and follow it. See `.claude/skills/review-loop/SKILL.md`
