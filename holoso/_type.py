@@ -69,7 +69,7 @@ class FloatFormat:
         if magnitude == 0.0:
             return 0  # canonical positive zero
         if math.isinf(magnitude):
-            return self._pack(sign, self._exp_inf, 0)
+            return self._pack(sign, self.exp_inf, 0)
         return self.pack(Fraction(value))
 
     def pack(self, value: Fraction) -> int:
@@ -78,10 +78,10 @@ class FloatFormat:
             return 0  # canonical positive zero
         sign = 1 if value < 0 else 0
         magnitude = abs(value)
-        wfrac = self._wfrac
+        wfrac = self.wfrac
         exp = _floor_log2(magnitude)
-        min_exp = 1 - self._bias
-        max_exp = self._exp_inf - 1 - self._bias
+        min_exp = 1 - self.bias
+        max_exp = self.exp_inf - 1 - self.bias
         if exp < min_exp:  # Underflow: round against the half-MIN_NORMAL boundary (no subnormals).
             return self._pack(sign, 1, 0) if magnitude >= pow2(min_exp - 1) else 0
         scaled = magnitude / pow2(exp) * (1 << wfrac)
@@ -93,21 +93,21 @@ class FloatFormat:
             quotient >>= 1
             exp += 1
         if exp > max_exp:
-            return self._pack(sign, self._exp_inf, 0)
-        return self._pack(sign, exp + self._bias, quotient & ((1 << wfrac) - 1))
+            return self._pack(sign, self.exp_inf, 0)
+        return self._pack(sign, exp + self.bias, quotient & ((1 << wfrac) - 1))
 
     def decode(self, bits: int) -> float:
         """Exactly decode a ZKF bit pattern into the Python float it represents."""
-        wfrac = self._wfrac
+        wfrac = self.wfrac
         sign = (bits >> (self.width - 1)) & 1
-        exp = (bits >> wfrac) & self._exp_inf
+        exp = (bits >> wfrac) & self.exp_inf
         frac = bits & ((1 << wfrac) - 1)
         if exp == 0:
             return 0.0
-        if exp == self._exp_inf:
+        if exp == self.exp_inf:
             return -math.inf if sign else math.inf
         significand = (1 << wfrac) | frac
-        value = math.ldexp(float(significand), exp - self._bias - wfrac)
+        value = math.ldexp(float(significand), exp - self.bias - wfrac)
         return -value if sign else value
 
     def round(self, value: float) -> float:
@@ -120,9 +120,9 @@ class FloatFormat:
 
     def is_legal(self, bits: int) -> bool:
         """Whether ``bits`` is a legal ZKF value (rejects subnormals and negative zero)."""
-        wfrac = self._wfrac
+        wfrac = self.wfrac
         sign = (bits >> (self.width - 1)) & 1
-        exp = (bits >> wfrac) & self._exp_inf
+        exp = (bits >> wfrac) & self.exp_inf
         frac = bits & ((1 << wfrac) - 1)
         if exp == 0:
             return frac == 0 and sign == 0  # only canonical +0
@@ -130,24 +130,47 @@ class FloatFormat:
 
     def is_finite(self, bits: int) -> bool:
         """Whether ``bits`` encodes a finite value rather than an infinity."""
-        return ((bits >> self._wfrac) & self._exp_inf) != self._exp_inf
+        return ((bits >> self.wfrac) & self.exp_inf) != self.exp_inf
 
     @property
-    def _bias(self) -> int:
-        return bias(self)
+    def bias(self) -> int:
+        """The exponent bias."""
+        return (1 << (self.wexp - 1)) - 1
 
     @property
-    def _wfrac(self) -> int:
-        return wfrac(self)
+    def wfrac(self) -> int:
+        """The number of stored fraction bits (the significand width minus the hidden leading bit)."""
+        return self.wman - 1
 
     @property
-    def _exp_inf(self) -> int:
-        return exp_inf(self)
+    def exp_inf(self) -> int:
+        """The all-ones biased exponent reserved for infinity."""
+        return (1 << self.wexp) - 1
+
+    @property
+    def exp_max_finite(self) -> int:
+        """The largest finite biased exponent (one below infinity)."""
+        return self.exp_inf - 1
+
+    @property
+    def frac_mask(self) -> int:
+        """A mask selecting the stored fraction bits."""
+        return (1 << self.wfrac) - 1
+
+    @property
+    def min_exp_unbiased(self) -> int:
+        """The smallest unbiased exponent of a normal value (ZKF has no subnormals)."""
+        return 1 - self.bias
+
+    @property
+    def max_exp_unbiased(self) -> int:
+        """The largest unbiased exponent of a finite value."""
+        return self.exp_max_finite - self.bias
 
     def _pack(self, sign: int, exp: int, frac: int) -> int:
         """Simply assemble raw sign/exponent/fraction fields without rounding."""
-        wfrac = self._wfrac
-        return ((sign & 1) << (self.width - 1)) | ((exp & self._exp_inf) << wfrac) | (frac & ((1 << wfrac) - 1))
+        wfrac = self.wfrac
+        return ((sign & 1) << (self.width - 1)) | ((exp & self.exp_inf) << wfrac) | (frac & ((1 << wfrac) - 1))
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,46 +225,6 @@ class LogicalPort:
 def pow2(exp: int) -> Fraction:
     """``2**exp`` as an exact rational, for either sign of ``exp``. Shared by the codec and the value arithmetic."""
     return Fraction(1 << exp, 1) if exp >= 0 else Fraction(1, 1 << -exp)
-
-
-# ZKF field geometry -- the single source of truth, shared by ``FloatFormat`` (the codec) and ``_value`` (the
-# arithmetic), so a layout change cannot drift between them. Package-internal (``_type`` is a private module, and these
-# are not re-exported by ``holoso/__init__``), so they do not widen the public API.
-
-
-def bias(fmt: FloatFormat) -> int:
-    """The exponent bias of ``fmt``."""
-    return (1 << (fmt.wexp - 1)) - 1
-
-
-def wfrac(fmt: FloatFormat) -> int:
-    """The number of stored fraction bits (the significand width minus the hidden leading bit)."""
-    return fmt.wman - 1
-
-
-def exp_inf(fmt: FloatFormat) -> int:
-    """The all-ones biased exponent reserved for infinity."""
-    return (1 << fmt.wexp) - 1
-
-
-def exp_max_finite(fmt: FloatFormat) -> int:
-    """The largest finite biased exponent (one below infinity)."""
-    return exp_inf(fmt) - 1
-
-
-def frac_mask(fmt: FloatFormat) -> int:
-    """A mask selecting the stored fraction bits."""
-    return (1 << wfrac(fmt)) - 1
-
-
-def min_exp_unbiased(fmt: FloatFormat) -> int:
-    """The smallest unbiased exponent of a normal value (ZKF has no subnormals)."""
-    return 1 - bias(fmt)
-
-
-def max_exp_unbiased(fmt: FloatFormat) -> int:
-    """The largest unbiased exponent of a finite value."""
-    return exp_max_finite(fmt) - bias(fmt)
 
 
 def _floor_log2(value: Fraction) -> int:

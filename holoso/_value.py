@@ -4,17 +4,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from typing import Self
 
-from ._type import (
-    FloatFormat,
-    bias,
-    exp_inf,
-    exp_max_finite,
-    frac_mask,
-    max_exp_unbiased,
-    min_exp_unbiased,
-    pow2,
-    wfrac,
-)
+from ._type import FloatFormat, pow2
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -61,11 +51,11 @@ class FloatValue:
 
     @property
     def exponent(self) -> int:
-        return (self.bits >> wfrac(self.fmt)) & exp_inf(self.fmt)
+        return (self.bits >> self.fmt.wfrac) & self.fmt.exp_inf
 
     @property
     def significand(self) -> int:
-        return (1 << wfrac(self.fmt)) | (self.bits & frac_mask(self.fmt))
+        return (1 << self.fmt.wfrac) | (self.bits & self.fmt.frac_mask)
 
     def apply_sign(self, *, negate: bool, absolute: bool) -> "FloatValue":
         """Apply the bit-level sign conditioner used by ``holoso_fsgnop``."""
@@ -113,7 +103,7 @@ def mul_float_values(a: FloatValue, b: FloatValue) -> FloatValue:
 
     product = da.significand * db.significand
     product_high = (product >> ((2 * fmt.wman) - 1)) & 1
-    exp_unbiased_base = da.exp + db.exp - (bias(fmt) << 1)
+    exp_unbiased_base = da.exp + db.exp - (fmt.bias << 1)
 
     if product_high:
         exp_unbiased = exp_unbiased_base + 1
@@ -191,7 +181,7 @@ def mul_ilog2_float_value(a: FloatValue, k: int) -> FloatValue:
         return _zero(fmt)
     if new_exp == 0:
         return _normal(fmt, da.sign, 1, 0)
-    if new_exp > exp_max_finite(fmt):
+    if new_exp > fmt.exp_max_finite:
         return _canonical_inf(fmt, da.sign)
     return _normal(fmt, da.sign, new_exp, da.frac)
 
@@ -215,22 +205,22 @@ def _decode(value: FloatValue) -> _Decoded:
     fmt = value.fmt
     sign = value.sign
     exp = value.exponent
-    frac = value.bits & frac_mask(fmt)
+    frac = value.bits & fmt.frac_mask
     return _Decoded(
         bits=value.bits,
         sign=sign,
         exp=exp,
         frac=frac,
-        significand=(1 << wfrac(fmt)) | frac,
+        significand=(1 << fmt.wfrac) | frac,
         is_zero=exp == 0,
-        is_inf=exp == exp_inf(fmt),
+        is_inf=exp == fmt.exp_inf,
     )
 
 
 def _finite_fraction(fmt: FloatFormat, value: _Decoded) -> Fraction:
     if value.is_zero:
         return Fraction(0, 1)
-    result = Fraction(value.significand, 1) * pow2(value.exp - bias(fmt) - wfrac(fmt))
+    result = Fraction(value.significand, 1) * pow2(value.exp - fmt.bias - fmt.wfrac)
     return -result if value.sign else result
 
 
@@ -246,16 +236,16 @@ def _pack_reference(
     round_bit: int,
     sticky: int,
 ) -> FloatValue:
-    exp_biased = exp_unbiased + bias(fmt)
-    exp_underflow_zero = exp_unbiased < (min_exp_unbiased(fmt) - 1)
-    exp_one_below_min = exp_unbiased == (min_exp_unbiased(fmt) - 1)
-    exp_overflow = exp_unbiased > max_exp_unbiased(fmt)
+    exp_biased = exp_unbiased + fmt.bias
+    exp_underflow_zero = exp_unbiased < (fmt.min_exp_unbiased - 1)
+    exp_one_below_min = exp_unbiased == (fmt.min_exp_unbiased - 1)
+    exp_overflow = exp_unbiased > fmt.max_exp_unbiased
 
     round_increment = bool(guard and (round_bit or sticky or (significand_value & 1)))
     rounded_ext = (significand_value & _mask(fmt.wman)) + (1 if round_increment else 0)
     round_carry = (rounded_ext >> fmt.wman) & 1
     rounded_significand = (rounded_ext >> 1) if round_carry else (rounded_ext & _mask(fmt.wman))
-    exp_round_overflow = exp_biased == exp_max_finite(fmt) and bool(round_carry)
+    exp_round_overflow = exp_biased == fmt.exp_max_finite and bool(round_carry)
     infinity = bool(force_inf or exp_overflow or exp_round_overflow)
 
     result_zero = bool(force_zero or ((not force_inf) and exp_underflow_zero))
@@ -270,7 +260,7 @@ def _pack_reference(
         return _normal(fmt, sign, 1, 0)
 
     exp_rounded = (exp_biased + round_carry) & _mask(fmt.wexp)
-    return _from_parts(fmt, sign, exp_rounded, rounded_significand & frac_mask(fmt))
+    return _from_parts(fmt, sign, exp_rounded, rounded_significand & fmt.frac_mask)
 
 
 def _zero(fmt: FloatFormat) -> FloatValue:
@@ -278,7 +268,7 @@ def _zero(fmt: FloatFormat) -> FloatValue:
 
 
 def _canonical_inf(fmt: FloatFormat, sign: int) -> FloatValue:
-    return _from_parts(fmt, sign, exp_inf(fmt), 0)
+    return _from_parts(fmt, sign, fmt.exp_inf, 0)
 
 
 def _normal(fmt: FloatFormat, sign: int, exp: int, frac: int) -> FloatValue:
@@ -287,7 +277,7 @@ def _normal(fmt: FloatFormat, sign: int, exp: int, frac: int) -> FloatValue:
 
 def _from_parts(fmt: FloatFormat, sign: int, exp: int, frac: int) -> FloatValue:
     return FloatValue.from_bits(
-        fmt, ((sign & 1) << (fmt.width - 1)) | ((exp & exp_inf(fmt)) << wfrac(fmt)) | (frac & frac_mask(fmt))
+        fmt, ((sign & 1) << (fmt.width - 1)) | ((exp & fmt.exp_inf) << fmt.wfrac) | (frac & fmt.frac_mask)
     )
 
 
