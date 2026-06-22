@@ -24,9 +24,9 @@ FETCH_STAGES = 3
 FETCH_LAG = FETCH_STAGES - 1
 
 
-# The cycle-accurate timing model: one consistent physical story shared by the LIR cycle helpers below, the write
-# timeline, the numerical model, the scheduler's dependency edges, the register allocator, and the HTML report, so a
-# value's landing/read/copy/boundary cycle is computed in exactly one place and the consumers cannot drift.
+# The cycle-accurate timing model: one consistent physical story shared by the LIR cycle helpers below, the numerical
+# model, the scheduler's dependency edges, the register allocator, and the HTML report, so a value's
+# landing/read/copy/boundary cycle is computed in exactly one place and the consumers cannot drift.
 # It is built from primitives:
 #   - FETCH_LAG -- the microcode fetch leads the datapath by this many steps (a global frame offset);
 #   - a per-bank READ latch -- the wide bank presents an operand's read address one step early; the boolean bank reads
@@ -332,8 +332,8 @@ def _bank_of_ref(dst: RegRef | BoolRegRef) -> BankTiming:
 
 def result_landing_cycle(dst: RegRef | BoolRegRef, commit_cycle: int) -> int:
     """
-    The cycle a result lands per its destination bank -- the single dispatch every consumer (liveness, the write
-    timeline, the numerical model, the report) routes through, so the per-bank rule cannot drift between them.
+    The cycle a result lands per its destination bank -- the single dispatch every consumer (liveness, the numerical
+    model, the report) routes through, so the per-bank rule cannot drift between them.
     """
     return landing_cycle(commit_cycle, _bank_of_ref(dst))
 
@@ -740,7 +740,7 @@ class Lir:
     last_pc: int  # LASTPC: the fetch PC at which out_valid asserts (the single Ret block's boundary)
     min_initiation_interval: int  # shortest executable path latency; exact for branch-free kernels, else a lower bound
     bool_regfile: BoolRegFileLayout
-    bool_state_slots: list[BoolStateSlot]  # persistent boolean registers (branch conditions, boolean attributes)
+    bool_state_slots: list[BoolStateSlot]  # persistent boolean registers, ordered as the instance attributes
 
     def __post_init__(self) -> None:
         assert self.regfile.width == self.float_format.width
@@ -826,8 +826,8 @@ class Lir:
         ``dst`` -- one per execution path that can reach it. A landing at or before the block's terminator offset lands
         once, inside the block. A landing past an overlap-shrunk terminator spills into EACH successor arm's frame, at
         ``block_base[arm] + (landing - term_offset - 1)``. This is exactly the numerical model's redirect re-keying of
-        its in-flight writes, so the report and the write timeline place a spilled result where the hardware actually
-        writes it on every path -- not in the linear fall-through frame. A drained block never spills, so a drained
+        its in-flight writes, so the report places a spilled result where the hardware actually writes it on every
+        path -- not in the linear fall-through frame. A drained block never spills, so a drained
         kernel returns one PC per write.
 
         The recursion re-keys at every terminator the landing crosses, mirroring the model exactly. A spilled result can

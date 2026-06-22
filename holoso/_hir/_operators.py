@@ -258,9 +258,9 @@ class BoolNot(Operator):
 @dataclass(frozen=True, slots=True)
 class Select(Operator):
     """
-    A data mux ``a if cond else b`` over float values, produced exclusively by the if-conversion pass, which
-    refuses constant conditions -- so a constant-condition select never exists, and since selects are created after
-    the constant folder runs, ``fold_constants`` never sees one.
+    A data mux ``a if cond else b`` over float values, produced exclusively by the if-conversion pass, which refuses
+    constant conditions -- so a constant-condition select never exists and ``fold_constants`` never fires (the folder
+    re-runs after if-conversion, so it does see selects, but never one whose condition is constant).
     """
 
     mnemonic: ClassVar[str] = "select"

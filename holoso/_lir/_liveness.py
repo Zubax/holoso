@@ -10,7 +10,7 @@ phi result is defined at the head of its block, and each phi arm value is live o
 values stay live across the whole loop body.
 
 Second, within each block every live value is given a half-open residence interval in that block's executing-step
-(hardware) frame -- the same frame as :attr:`Lir.reg_liveness`, the write timeline, and the numerical model -- using the
+(hardware) frame -- the same frame as :attr:`Lir.reg_liveness` and the numerical model -- using the
 shared cycle helpers. A value resident from a predecessor (live-in, or a phi result) lands on the block's first step; a
 value defined by an in-block operator lands on its bank's landing cycle (the wide bank pays the writeback latch, the
 boolean bank only the read-first edge); a value that is live out of the block (or read by the block's boundary -- an
