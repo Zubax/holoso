@@ -224,43 +224,5 @@ Use your best judgement as to which features do not need test coverage. For exam
 
 ## Review loop
 
-After every change or milestone, or when explicitly prompted, dispatch several fresh-context review agents set to the
-MAXIMUM THINKING EFFORT to review your work:
-
-1. A subagent looking for OPPORTUNITIES FOR SIMPLIFICATION.
-2. A subagent evaluating FUNCTIONAL CORRECTNESS and ROBUSTNESS.
-3. A subagent evaluating ARCHITECTURAL CLEANLINESS, DESIGN PRACTICES, and CODE QUALITY.
-4. A subagent auditing POLICY and STYLE VIOLATIONS wrt project docs (e.g. private imports, docstrings, etc).
-5. Distinct tools -- Codex, Claude (check what's available, exclude yourself) -- focusing on CORRECTNESS only.
-   Do not use Antigravity/Gemini, they are weak and tend to produce more noise than signal.
-   Agents often get stuck or hung; always use a timeout.
-
-Do not, under any circumstances, delegate more than one task to the same agent, because this results in dilution of
-attention and poor performance. Given 5 distinct tasks, you will have 5 subagents running in parallel.
-
-It is important that we use distinct tools to maximize the diversity of perspectives and minimize blind spots.
-When all reviewers are done, review and consolidate their findings and act accordingly.
-If defects are found, ensure extensive regression tests are introduced.
-
-Repeat the review/refine loop until the agents return only trivial feedback (or none) for three (sic!) consecutive turns.
-Iteration until no feedback has been attempted in the past but it is not practical because in the absence of significant
-issues the review agents tend to degrade to nitpicking.
-Hence, we stop iteration earlier, as soon as the feedback ceases to contain significant findings.
-
-THREE CONSECUTIVE TRIVIAL-ONLY TURNS ACROSS ALL REVIEW AGENTS ARE NON-NEGOTIABLE,
-regardless of how many iterations it takes to get there. Together with the one-task-per-agent rule this often results in
-many dozens (sometimes over a hundred) of agent sessions in total per full review job, which is expected.
-
-The requirement of multiple consecutive reviews with no significant findings is intended to improve the coverage.
-We have seen in the past how a single review turn would come up blank while the next round (with zero code changes in
-between) would dig up a critical defect. Hence, we repeat turns generously across distinct agents for maximum assurance.
-
-Review agents are NOT ALLOWED TO MODIFY ANYTHING NOR RUN ANY MUTATING COMMANDS IN THE WORKTREE.
-If they need a mutable environment, let them copy the worktree where they see fit.
-
-Review agents in maximum thinking mode may go silent for hours, so set timeouts accordingly.
-Some agents expect input from stdin when launched headless and may get hung if no input is given;
-in those cases consider redirecting from `/dev/null` or something like that; read the docs to figure out usage.
-
-A frequent, avoidable cause of Claude agents going silent (a stream-idle timeout) is blocking on a long FOREGROUND
-command. Instruct them to background long-running commands, including test execution.
+After every change or milestone, or when explicitly prompted, run the multi-agent review/refine loop:
+invoke the `review-loop` skill and follow it. See `.claude/skills/review-loop/SKILL.md`
