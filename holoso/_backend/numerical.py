@@ -194,7 +194,10 @@ class NumericalSimulator(_Kernel):
             # A block whose terminator redirects earlier than its drained boundary (cross-block overlap) leaves
             # in-flight results still landing past its terminator PC; those landings belong to whichever arm the
             # redirect takes, so re-key the pending writes from the fall-through frame onto the taken successor's
-            # frame. For a fall-through arm (and for every fully-drained block) the shift is zero -- a no-op.
+            # frame. For a fall-through arm (and for every fully-drained block) the shift is zero -- a no-op. This
+            # dynamic single-arm shift is the per-path instance of the static ``successor_local_cycle`` map that
+            # ``_trace_landing`` / ``Lir.write_landing_pcs`` apply to every arm at once; that the two agree is locked by
+            # ``test_spilled_result_landings_match_the_numerical_model``.
             shift = next_pc - (self.pc + 1)
             if shift:
                 self._pending = {(pc + shift if pc > self.pc else pc): writes for pc, writes in self._pending.items()}
@@ -270,11 +273,10 @@ class NumericalSimulator(_Kernel):
         for slot in lir.float_state_slots:
             if not slot.needs_copy:
                 continue
-            fire_pc = lir.state_copy_step(slot)
-            if fire_pc < lir.last_pc:
-                self._installs.setdefault(fire_pc, []).append(_Install(slot.tap, slot.reg))
-            else:
+            if lir.float_state_install_is_boundary(slot):
                 self._boundary.append(_Install(slot.tap, slot.reg))
+            else:
+                self._installs.setdefault(lir.state_copy_step(slot), []).append(_Install(slot.tap, slot.reg))
         self._boundary += [_Install(slot.live_out, slot.reg) for slot in lir.bool_state_slots if slot.needs_copy]
 
     def _next_pc(self, in_valid: bool, out_ready: bool) -> int:

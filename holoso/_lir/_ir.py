@@ -849,6 +849,16 @@ class Lir:
         """
         return copy_step_cycle(slot.install_cycle)
 
+    def float_state_install_is_boundary(self, slot: FloatStateSlot) -> bool:
+        """
+        Whether a non-coalesced float slot installs read-first at the accepted-output boundary (its ``state_copy_step``
+        reaches LASTPC) rather than early via a pc-gated copy. The single early-vs-boundary test shared by the numerical
+        model (which routes the install to the boundary edge vs a pc-gated step), the HTML report (which lands it
+        read-first at LASTPC vs one PC later), and ``reg_liveness`` (which makes a boundary install read-first while an
+        early one resides through the boundary to carry), so the read-first seam cannot drift between them.
+        """
+        return self.state_copy_step(slot) >= self.last_pc
+
     @property
     def read_set_per_port(self) -> dict[ReadPort, list[int]]:
         """
@@ -1093,9 +1103,10 @@ class Lir:
                 # A coalesced live-out is an ordinary result already in the slot register; it must reside through the
                 # boundary to carry into the next initiation, even when nothing reads it again this frame.
                 uses.setdefault(slot.reg, []).append(present)
-            elif (step := self.state_copy_step(slot)) < self.last_pc:
+            elif not self.float_state_install_is_boundary(slot):
                 # An early pc-gated install lands its destination one PC after its fire step and must reside through the
                 # boundary to carry; installing the new value early is not the slot's death.
+                step = self.state_copy_step(slot)
                 defs.setdefault(slot.reg, []).append(install_landing(step))
                 uses.setdefault(slot.reg, []).append(present)
             else:
@@ -1103,6 +1114,7 @@ class Lir:
                 # first) before clocking in the new live-out, so the boundary read belongs to the live-in (read_first),
                 # and the live-out is resident at the boundary by its def alone -- no carry use, or a dead live-in would
                 # be over-tinted across the whole frame.
+                step = self.state_copy_step(slot)
                 defs.setdefault(slot.reg, []).append(step)
                 read_first.setdefault(slot.reg, set()).add(step)
         for wire in self.float_outputs:

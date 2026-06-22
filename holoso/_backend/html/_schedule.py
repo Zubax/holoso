@@ -214,7 +214,8 @@ def render_schedule(lir: Lir) -> str:
     for slot in lir.float_state_slots:  # a non-coalesced float slot latches its tap (early, or read-first at boundary)
         if slot.needs_copy:
             fire = lir.state_copy_step(slot)
-            install_event(slot.reg, slot.name, slot.tap, fire, install_landing(fire) if fire < lir.last_pc else fire)
+            landing = fire if lir.float_state_install_is_boundary(slot) else install_landing(fire)
+            install_event(slot.reg, slot.name, slot.tap, fire, landing)
     for bslot in lir.bool_state_slots:  # a non-coalesced boolean slot installs its live-out read-first at the boundary
         if bslot.needs_copy:
             install_event(bslot.reg, bslot.name, bslot.live_out, lir.last_pc, lir.last_pc)
