@@ -1,5 +1,7 @@
 """Selected mid-level IR (MIR): concrete hardware operators with typed scalar sidebands, arranged into a CFG."""
 
+from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .._operators import (
@@ -290,8 +292,33 @@ class Mir:
         return self.blocks[0].id
 
 
+class _MirBankView(ABC):
+    """
+    Common structure of a single-bank MIR resource view: the phi-arm subset and the per-block operation listing, both
+    derived identically from the bank's narrowed node table. Each concrete view fixes the element types of ``nodes``
+    and supplies ``operation_nodes`` -- the bank's defining membership predicate over the operations.
+    """
+
+    __slots__ = ()
+
+    # Each concrete view narrows this to its bank's node element type (e.g. ``dict[ValueId, MirFloatNode]``).
+    nodes: Mapping[ValueId, MirNode]
+
+    @property
+    @abstractmethod
+    def operation_nodes(self) -> dict[ValueId, MirOperation]: ...
+
+    @property
+    def phi_nodes(self) -> dict[ValueId, MirPhi]:
+        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirPhi)}
+
+    def block_operations(self, block: MirBlock) -> list[ValueId]:
+        """The bank's operation ids defined in ``block``, in evaluation order."""
+        return [vid for vid in block.operations if vid in self.operation_nodes]
+
+
 @dataclass(frozen=True, slots=True)
-class MirFloatView:
+class MirFloatView(_MirBankView):
     """
     WIDE data-bank resource family narrowed out of a MIR graph, carrying the shared CFG so scheduling runs per block.
     """
@@ -323,14 +350,6 @@ class MirFloatView:
             for vid, node in self.nodes.items()
             if isinstance(node, MirOperation) and is_wide_type(node.scalar_type)
         }
-
-    @property
-    def phi_nodes(self) -> dict[ValueId, MirPhi]:
-        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirPhi)}
-
-    def block_operations(self, block: MirBlock) -> list[ValueId]:
-        """The float-result operation ids defined in ``block``, in evaluation order."""
-        return [vid for vid in block.operations if vid in self.operation_nodes]
 
     @classmethod
     def from_mir(cls, mir: Mir) -> "MirFloatView":
@@ -390,7 +409,7 @@ class MirFloatView:
 
 
 @dataclass(frozen=True, slots=True)
-class MirBoolView:
+class MirBoolView(_MirBankView):
     """
     The boolean resource family narrowed out of a MIR graph: bool state reads, constants, phis, and bool-result
     operations (comparator taps, boolean logic, and float->bool casts), plus the bool state slots and the shared CFG.
@@ -416,20 +435,12 @@ class MirBoolView:
         return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirBoolConst)}
 
     @property
-    def phi_nodes(self) -> dict[ValueId, MirPhi]:
-        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirPhi)}
-
-    @property
     def operation_nodes(self) -> dict[ValueId, MirOperation]:
         return {
             vid: node
             for vid, node in self.nodes.items()
             if isinstance(node, MirOperation) and isinstance(node.scalar_type, BoolType)
         }
-
-    def block_operations(self, block: MirBlock) -> list[ValueId]:
-        """The bool-result operation ids defined in ``block``, in evaluation order."""
-        return [vid for vid in block.operations if vid in self.operation_nodes]
 
     @classmethod
     def from_mir(cls, mir: Mir) -> "MirBoolView":

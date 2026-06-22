@@ -3,37 +3,13 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .._mir import Mir, MirBlock, MirBoolView, MirBranch, MirFloatView, MirJump, MirRet
+from .._mir import Mir, MirBlock, MirBoolView, MirBranch, MirFloatView, MirRet
 from .._operators import HardwareOperator, PooledHardwareOperator
 from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule, schedule_ops
 from ._build_base import OverlapLayout
-from ._construct import mir_operation
-
-
-def mir_rpo(mir: Mir) -> list[int]:
-    """Reverse-postorder of the MIR block CFG from the entry (predecessors before successors)."""
-    successors = succ_map(mir)
-    order: list[int] = []
-    visited: set[int] = set()
-    # Iterative DFS (explicit stack) rather than recursion: a deep CFG (e.g. nested unrolled loops chaining thousands
-    # of blocks) would otherwise exceed Python's recursion limit. A node is emitted once all its successors are done.
-    stack: list[tuple[int, int]] = [(mir.entry, 0)]
-    visited.add(mir.entry)
-    while stack:
-        node, index = stack[-1]
-        succs = successors[node]
-        if index < len(succs):
-            stack[-1] = (node, index + 1)
-            successor = succs[index]
-            if successor not in visited:
-                visited.add(successor)
-                stack.append((successor, 0))
-        else:
-            order.append(node)
-            stack.pop()
-    return order[::-1]
+from ._mir_facts import mir_operation, mir_rpo, succ_map
 
 
 def _value_word_and_landing(mir: Mir, float_mir: MirFloatView, vid: ValueId, issue: int) -> tuple[int, int]:
@@ -373,17 +349,3 @@ def layout_blocks(mir: Mir, blocks: list[LirBlock]) -> _BlockLayout:
     min_ii = dist.get(ret_index, 0) + term_offset[ret_index]
     block_base = [base[i] for i in range(len(blocks))]
     return _BlockLayout(block_base, last_pc, min_ii)
-
-
-def succ_map(mir: Mir) -> dict[int, list[int]]:
-    """Successor block ids per block, read off the terminators."""
-    succ: dict[int, list[int]] = {}
-    for block in mir.blocks:
-        match block.terminator:
-            case MirJump(target=target):
-                succ[block.id] = [target]
-            case MirBranch(if_true=if_true, if_false=if_false):
-                succ[block.id] = [if_true, if_false]
-            case MirRet():
-                succ[block.id] = []
-    return succ

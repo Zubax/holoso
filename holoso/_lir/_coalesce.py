@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from .._mir import MirPhi
 from .._operators import PortConditioner
 from .._util import ValueId
-from ._regalloc import ColoringProblem, Producer, ReadPort, color, find_coloring_conflict
+from ._ir import ReadPort
+from ._regalloc import ColoringProblem, Producer, color, find_coloring_conflict
 from ._build_base import ColorObjective
 
 

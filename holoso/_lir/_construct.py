@@ -1,8 +1,4 @@
-"""
-Construct LIR operands, scheduled ops, terminators, outputs, inputs, and the constant pool from selected MIR, with
-the MIR node-accessor and CFG-shape helpers (phi-arm liveness, const-branch conditions, install-bearing blocks) the
-construction relies on.
-"""
+"""Construct LIR operands, scheduled ops, terminators, outputs, inputs, and the constant pool from selected MIR."""
 
 import math
 
@@ -29,6 +25,7 @@ from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule
 from ._build_base import Allocation, PooledConst
+from ._mir_facts import mir_operation
 
 
 def bool_operand(bool_mir: MirBoolView, vid: ValueId, alloc: Allocation, inversion: BoolInversion) -> BoolOperand:
@@ -62,12 +59,6 @@ def _value_dst(float_mir: MirFloatView, alloc: Allocation, vid: ValueId) -> RegR
     if vid in float_mir.operation_nodes:
         return RegRef(alloc.float_reg[vid])
     return BoolRegRef(alloc.bool_reg[vid])
-
-
-def mir_operation(mir: Mir, vid: ValueId) -> MirOperation:
-    node = mir.nodes[vid]
-    assert isinstance(node, MirOperation)
-    return node
 
 
 def build_inline_op(
@@ -210,50 +201,6 @@ def rebase_op(op: PooledScheduledOp, base: int) -> PooledScheduledOp:
         issue_cycle=op.issue_cycle + base,
         latency=op.latency,
     )
-
-
-def phi_arm_out(mir: Mir, phi_nodes: dict[ValueId, MirPhi], values: set[ValueId]) -> dict[int, frozenset[ValueId]]:
-    """
-    Per block, the phi-arm values live out of it (each read by the phi's install copy at the block's tail) -- a liveness
-    input for both banks. The residual installs (which phi registers a block writes) are derived separately, per chosen
-    coalescing, by :func:`_residual_installs`, so they are not precomputed here.
-    """
-    arm_out: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
-    for _vid, phi in phi_nodes.items():
-        for pred, arm, _conditioner in phi.arms:
-            if arm in values:
-                arm_out[pred].add(arm)
-    return {b: frozenset(s) for b, s in arm_out.items()}
-
-
-def const_branch_conditions(mir: Mir, bool_mir: MirBoolView) -> dict[int, ValueId]:
-    """
-    Per block, the constant branch condition it materializes at its tail. A block whose ``MirBranch`` tests a globally
-    interned boolean constant has no condition register, so the constant is written into a bool register in the
-    branching block. The single source of this CFG-shape fact, shared by ``block_has_install`` and the install fixpoint
-    seed (which must agree, or the monotonicity assert trips) and the allocator's materialization (which also needs the
-    condition value to write).
-    """
-    conditions: dict[int, ValueId] = {}
-    for block in mir.blocks:
-        term = block.terminator
-        if isinstance(term, MirBranch) and term.cond in bool_mir.const_nodes:
-            conditions[block.id] = term.cond
-    return conditions
-
-
-def block_has_install(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) -> set[int]:
-    """
-    Blocks whose drained tail carries a phi-arm install (a float copy, a bool write, or a const branch materialization),
-    which lengthens the block by one fetch step. Determinable from the CFG shape alone, before register assignment, so
-    the liveness boundary uses the same per-block makespan the layout will.
-    """
-    has: set[int] = set()
-    for phi in (*float_mir.phi_nodes.values(), *bool_mir.phi_nodes.values()):
-        for pred, _value, _conditioner in phi.arms:
-            has.add(pred)
-    has.update(const_branch_conditions(mir, bool_mir))
-    return has
 
 
 def build_const_pool(

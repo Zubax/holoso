@@ -333,9 +333,9 @@ def _deep_cfg_kernel(p0):  # type: ignore[no-untyped-def]
 def test_deep_cfg_does_not_overflow_recursion() -> None:
     # Regression: the HIR/MIR/LIR reverse-postorder traversals walked the block CFG recursively, so a deep CFG -- here
     # nested unrolled loops chaining thousands of blocks -- overflowed Python's recursion limit with a RecursionError
-    # in _copy.reverse_postorder (and the symmetric _lir._layout.mir_rpo). With recursion in place, optimize() raises;
-    # the iterative DFS compiles cleanly. Exercise the whole front-to-back pipeline (optimize, MIR lowering, LIR build)
-    # since each contains a CFG DFS, and check the bit-exact model against the plain-Python reference.
+    # in _copy.reverse_postorder (and the symmetric _lir._mir_facts.mir_rpo). With recursion in place, optimize()
+    # raises; the iterative DFS compiles cleanly. Exercise the whole front-to-back pipeline (optimize, MIR lowering,
+    # LIR build) since each contains a CFG DFS, and check the bit-exact model against the plain-Python reference.
     hir = lower(_deep_cfg_kernel)
     assert len(hir.blocks) > 1000  # the CFG is genuinely deep (otherwise the regression would not bite)
     model = build_model(build(_run(_deep_cfg_kernel), "deep"))

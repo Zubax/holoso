@@ -37,11 +37,10 @@ import numpy as np
 from scipy.optimize import dual_annealing
 
 from .._util import ValueId
-from ._ir import OperatorInstance
+from ._ir import OperatorInstance, ReadPort
 
-# Read port identity (operator instance + operand position) and write-source identity: an operator instance, the input
-# load, or a per-slot state writer -- opaque keys for grouping the read-mux and write-select fan-in objective.
-type ReadPort = tuple[OperatorInstance, int]
+# Write-source identity: an operator instance, the input load, or a per-slot state writer -- opaque keys for grouping
+# the write-select fan-in objective. The read-port identity ``ReadPort`` lives in ``_ir`` beside its enumerator.
 type Producer = OperatorInstance | str
 
 

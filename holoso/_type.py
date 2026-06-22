@@ -94,14 +94,14 @@ class FloatFormat:
             exp += 1
         if exp > max_exp:
             return self._pack(sign, self.exp_inf, 0)
-        return self._pack(sign, exp + self.bias, quotient & ((1 << wfrac) - 1))
+        return self._pack(sign, exp + self.bias, quotient & self.frac_mask)
 
     def decode(self, bits: int) -> float:
         """Exactly decode a ZKF bit pattern into the Python float it represents."""
         wfrac = self.wfrac
         sign = (bits >> (self.width - 1)) & 1
         exp = (bits >> wfrac) & self.exp_inf
-        frac = bits & ((1 << wfrac) - 1)
+        frac = bits & self.frac_mask
         if exp == 0:
             return 0.0
         if exp == self.exp_inf:
@@ -123,7 +123,7 @@ class FloatFormat:
         wfrac = self.wfrac
         sign = (bits >> (self.width - 1)) & 1
         exp = (bits >> wfrac) & self.exp_inf
-        frac = bits & ((1 << wfrac) - 1)
+        frac = bits & self.frac_mask
         if exp == 0:
             return frac == 0 and sign == 0  # only canonical +0
         return True
@@ -170,7 +170,7 @@ class FloatFormat:
     def _pack(self, sign: int, exp: int, frac: int) -> int:
         """Simply assemble raw sign/exponent/fraction fields without rounding."""
         wfrac = self.wfrac
-        return ((sign & 1) << (self.width - 1)) | ((exp & self.exp_inf) << wfrac) | (frac & ((1 << wfrac) - 1))
+        return ((sign & 1) << (self.width - 1)) | ((exp & self.exp_inf) << wfrac) | (frac & self.frac_mask)
 
 
 @dataclass(frozen=True, slots=True)

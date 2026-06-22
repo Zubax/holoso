@@ -6,18 +6,17 @@ both register banks (coalescing phi arms), constructs the per-block LIR, and ass
 from .._errors import UnsupportedConstruct
 from .._mir import Mir, MirBoolView, MirBranch, MirFloatView, MirPhi, MirRet
 from ._ir import *
+from ._mir_facts import block_has_install, const_branch_conditions
 from ._portassign import assign_commutative_ports
 from ._schedule import resolve_pool
 from ._bankalloc import actual_install_blocks, layout_and_allocate
 from ._construct import (
-    block_has_install,
     bool_operand,
     build_inline_op,
     build_inputs,
     build_outputs,
     build_pooled_op,
     build_terminator,
-    const_branch_conditions,
     operand_signed,
     rebase_op,
     tapped_wide_lanes,

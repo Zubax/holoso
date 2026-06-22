@@ -9,8 +9,9 @@ from dataclasses import dataclass
 
 from .._operators import BoolInversion, FloatSignControl
 from .._util import ValueId
+from ._ir import ReadPort
 from ._schedule import Schedule
-from ._regalloc import Producer, ReadPort
+from ._regalloc import Producer
 
 
 @dataclass(frozen=True, slots=True)

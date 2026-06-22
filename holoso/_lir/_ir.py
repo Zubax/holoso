@@ -290,6 +290,11 @@ class OperatorInstance:
         )
 
 
+# An operator READ port: the ``(instance, operand-position)`` pair keying ``read_set_per_port``. Distinct from the
+# WRITE-side ``(instance, output-port)`` lanes of ``write_set_per_register``/``_write_sets``, which are not read ports.
+type ReadPort = tuple[OperatorInstance, int]
+
+
 @dataclass(frozen=True, slots=True)
 class RegRef:
     """A read/write of wide data register ``index`` in the shared register bank."""
@@ -845,7 +850,7 @@ class Lir:
         return copy_step_cycle(slot.install_cycle)
 
     @property
-    def read_set_per_port(self) -> dict[tuple[OperatorInstance, int], list[int]]:
+    def read_set_per_port(self) -> dict[ReadPort, list[int]]:
         """
         For each operator read port -- identified by its ``(instance, operand-position)`` pair -- the sorted distinct
         register indices it ever reads across the schedule.
@@ -854,7 +859,7 @@ class Lir:
         Ports that never read a register are absent. This drives the sparse per-port read mux: a port that reads a
         single register needs no mux at all, and one that reads several needs a mux spanning only those registers.
         """
-        sets: dict[tuple[OperatorInstance, int], set[int]] = {}
+        sets: dict[ReadPort, set[int]] = {}
         for op in self.ops:
             for pos, operand in enumerate(op.operands):
                 if isinstance(operand.source, RegRef):

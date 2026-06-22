@@ -25,9 +25,10 @@ from .._mir import (
 from .._operators import BoolInversion, FloatSignControl, HardwareOperator, PooledHardwareOperator, PortConditioner
 from .._util import ValueId
 from ._ir import *
+from ._mir_facts import const_branch_conditions, mir_rpo, phi_arm_out, succ_map
 from ._liveness import BankLiveness, compute_interference
 from ._schedule import Schedule
-from ._regalloc import Producer, ReadPort
+from ._regalloc import Producer
 from ._build_base import (
     Allocation,
     BoolArmInstall,
@@ -36,9 +37,9 @@ from ._build_base import (
     OverlapLayout,
     PooledConst,
 )
-from ._construct import build_const_pool, const_branch_conditions, phi_arm_out
+from ._construct import build_const_pool
 from ._coalesce import coalescable_arms, coalesce_and_color
-from ._layout import mir_rpo, schedule_with_overlap, succ_map
+from ._layout import schedule_with_overlap
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +371,51 @@ _WIDE = _WideBank()
 _BOOL = _BoolBank()
 
 
+@dataclass(frozen=True, slots=True)
+class _InterferenceBuilder:
+    """
+    Builds a bank's interference graph: the loop-invariant liveness facts (residency, result landings, definition
+    blocks, phi-arm live-outs, in-flight defs) are fixed at construction, and the held MIR supplies the block CFG, so
+    each coalescing attempt produces a graph by passing only what varies -- the boundary users, the per-block reads,
+    and the residual installs.
+    """
+
+    mir: Mir
+    makespan: dict[int, int]
+    term_offset: dict[int, int]
+    resident: frozenset[ValueId]
+    op_landing: dict[ValueId, int]
+    op_block: dict[ValueId, int]
+    phi_block: dict[ValueId, int]
+    arm_out: dict[int, frozenset[ValueId]]
+    inflight_defs: dict[int, dict[ValueId, int]]
+
+    def build(
+        self,
+        boundary: dict[int, set[ValueId]],
+        block_reads: dict[int, list[tuple[ValueId, int]]],
+        install_facts: dict[int, frozenset[ValueId]],
+    ) -> dict[ValueId, set[ValueId]]:
+        return compute_interference(
+            BankLiveness(
+                blocks=[b.id for b in self.mir.blocks],
+                entry=self.mir.entry,
+                succ=succ_map(self.mir),
+                makespan=self.makespan,
+                term_offset=self.term_offset,
+                resident=self.resident,
+                op_landing=self.op_landing,
+                op_block=self.op_block,
+                phi_block=self.phi_block,
+                reads=block_reads,
+                boundary_users={b: frozenset(s) for b, s in boundary.items()},
+                arm_out=self.arm_out,
+                installs=install_facts,
+                inflight_defs=self.inflight_defs,
+            )
+        )
+
+
 def _allocate_bank(
     bank: _Bank[_SlotT],
     mir: Mir,
@@ -401,29 +447,17 @@ def _allocate_bank(
     arm_out = phi_arm_out(mir, phi_nodes, values)
     boundary_base = bank.boundary_base(mir, values, ret_block)
 
-    def graph(
-        boundary: dict[int, set[ValueId]],
-        block_reads: dict[int, list[tuple[ValueId, int]]],
-        install_facts: dict[int, frozenset[ValueId]],
-    ) -> dict[ValueId, set[ValueId]]:
-        return compute_interference(
-            BankLiveness(
-                blocks=[b.id for b in mir.blocks],
-                entry=mir.entry,
-                succ=succ_map(mir),
-                makespan=block_makespan,
-                term_offset=block_term_offset,
-                resident=frozenset({*view.input_ids, *state_read_nodes}),
-                op_landing={vid: bank.landing_cycle(commit) for vid, commit in op_commit.items()},
-                op_block=op_block,
-                phi_block=phi_block,
-                reads=block_reads,
-                boundary_users={b: frozenset(s) for b, s in boundary.items()},
-                arm_out=arm_out,
-                installs=install_facts,
-                inflight_defs=block_inflight,
-            )
-        )
+    interference = _InterferenceBuilder(
+        mir=mir,
+        makespan=block_makespan,
+        term_offset=block_term_offset,
+        resident=frozenset({*view.input_ids, *state_read_nodes}),
+        op_landing={vid: bank.landing_cycle(commit) for vid, commit in op_commit.items()},
+        op_block=op_block,
+        phi_block=phi_block,
+        arm_out=arm_out,
+        inflight_defs=block_inflight,
+    )
 
     # A slot whose live-in is consumed as ANOTHER slot's live-out (a chained copy, ``self.a = self.b``) must keep its
     # live-in to the boundary, so it can neither coalesce nor early-install. The coalescing oracle reads every live-out
@@ -440,7 +474,7 @@ def _allocate_bank(
     for slot in slots:
         if slot.live_out in values:
             boundary_oracle[ret_block].add(slot.live_out)
-    coalesce_graph = graph(boundary_oracle, reads, {})
+    coalesce_graph = interference.build(boundary_oracle, reads, {})
     candidate_arms = coalescable_arms(phi_nodes, values, bank.identity)
     phi_order = _movable_order(mir, list(phi_nodes), {}, phi_block, {})
     ret_present = block_makespan[ret_block] + 1
@@ -535,7 +569,7 @@ def _allocate_bank(
             candidate_arms,
             pinned,
             {slot_reg[s.name] for s in slots if s.name not in coalesced},
-            lambda residual: graph(boundary_final, reads_final, residual),
+            lambda residual: interference.build(boundary_final, reads_final, residual),
             ColorObjective(movable, obj_terms.consumer_ports, obj_terms.producer_key, fresh_start),
         )
         if conflict is not None:
