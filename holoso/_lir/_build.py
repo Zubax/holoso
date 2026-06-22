@@ -40,6 +40,7 @@ from .._operators import (
 )
 from .._util import ValueId
 from ._ir import *
+from ._ir import _terminator_arms  # an underscore helper, so not pulled in by the ``import *`` above
 from ._liveness import BankLiveness, compute_interference
 from ._portassign import assign_commutative_ports
 from ._regalloc import ColoringProblem, color, find_coloring_conflict
@@ -898,15 +899,7 @@ def _layout_blocks(mir: Mir, blocks: list[LirBlock]) -> _BlockLayout:
     terminator step; the successor frame begins at ``term_pc + 1``); the single Ret block's boundary is the out_valid PC.
     ``min_initiation_interval`` is the shortest root-to-Ret path's traversed length.
     """
-    successors: dict[int, list[int]] = {}
-    for b in blocks:
-        match b.terminator:
-            case Jump(target=t):
-                successors[b.index] = [t]
-            case Branch(if_true=t, if_false=f):
-                successors[b.index] = [t, f]
-            case Ret():
-                successors[b.index] = []
+    successors: dict[int, list[int]] = {b.index: _terminator_arms(b.terminator) for b in blocks}
     # Blocks are laid out linearly in reverse-postorder, but the single Ret block is forced last so its boundary is the
     # highest address (out_valid = pc == LASTPC). A loop body is a DFS leaf (its only edge back to the header is a back
     # edge), so RPO would otherwise place it after the exit; moving Ret last keeps every loop body below the Ret. A

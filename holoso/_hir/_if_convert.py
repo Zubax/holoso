@@ -25,7 +25,7 @@ import logging
 import os
 
 from ._const import BoolConst
-from .._util import BlockId, ValueId
+from .._util import BlockId
 from ._ir import Block, Branch, Hir, Jump, Operation, Phi, predecessors, renumber
 from ._operators import BoolSelect, Select
 from ._types import BoolType, FloatType

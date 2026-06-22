@@ -16,7 +16,7 @@ It is a first-class verification peer of the numerical model, not a test helper,
 
 from typing import assert_never
 
-from .._operators import BoolInversion, FloatSignControl, PortConditioner
+from .._operators import FloatSignControl, PortConditioner
 from .._util import ValueId
 from .._type import FloatFormat, LogicalPort
 from .._value import FloatValue

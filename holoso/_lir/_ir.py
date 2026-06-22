@@ -280,9 +280,13 @@ class OperatorInstance:
         # additionally need a post-layout re-entry-distance check, deferred until one exists.
         result_is_wide = any(isinstance(ty, FloatType) for ty in result_types)
         drain = boundary_step(0, wide_resident=result_is_wide)
-        assert self.operator.initiation_interval <= self.operator.latency + drain + 2, (
+        # The gap beyond the drain is two steps: the terminator's redirect into the successor frame and the
+        # successor's first issue step (READ_FIRST_EDGE-spaced); see the two-regime explanation above.
+        redirect_and_first_issue = READ_FIRST_EDGE + 1
+        bound = self.operator.latency + drain + redirect_and_first_issue
+        assert self.operator.initiation_interval <= bound, (
             f"{self.operator.mnemonic}: initiation_interval {self.operator.initiation_interval} needs cross-block "
-            f"busy tracking (max supported is latency + {drain + 2})"
+            f"busy tracking (max supported is latency + {drain + redirect_and_first_issue})"
         )
 
 

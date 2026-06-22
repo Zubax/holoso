@@ -929,7 +929,7 @@ class _Lowerer:
                 right_value = self._static_float(right) if right_value is None else right_value
                 if left_value is None or right_value is None or left_value != left_value or right_value != right_value:
                     return None
-                return relation.holds((left_value > right_value) - (left_value < right_value))
+                return relation.apply(left_value, right_value)
             case _:
                 cast = self._cast_call(test)
                 if cast is not None and cast[0] == "bool":
@@ -957,7 +957,7 @@ class _Lowerer:
         """
         left_int, right_int = self._static_int(left), self._static_int(right)
         if left_int is not None and right_int is not None:
-            return relation.holds((left_int > right_int) - (left_int < right_int))
+            return relation.apply(left_int, right_int)
         left_float, right_float = self._static_float(left), self._static_float(right)
         if (
             left_float is not None
@@ -965,7 +965,7 @@ class _Lowerer:
             and left_float == left_float
             and right_float == right_float
         ):
-            return relation.holds((left_float > right_float) - (left_float < right_float))
+            return relation.apply(left_float, right_float)
         return None
 
     def _record_self_targets(self, targets: list[ast.expr], attrs: set[str]) -> None:
