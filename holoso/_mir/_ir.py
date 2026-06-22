@@ -11,7 +11,7 @@ from .._operators import (
     identity_conditioner,
 )
 from .._errors import UnsupportedConstruct
-from .._type import BoolType, FloatFormat, FloatType, ScalarType
+from .._type import BoolType, FloatFormat, FloatType, ScalarType, is_wide_type
 from .._util import BlockId, ValueId
 
 
@@ -292,7 +292,12 @@ class Mir:
 
 @dataclass(frozen=True, slots=True)
 class MirFloatView:
-    """The float resource family narrowed out of a MIR graph, carrying the shared CFG so scheduling runs per block."""
+    """
+    The WIDE data-bank resource family narrowed out of a MIR graph, carrying the shared CFG so scheduling runs per
+    block. Admission of operations and phis is by storage bank (``is_wide_type``), not by float type, so a future
+    fixed-width int -- which shares the wide bank -- joins this view without restructuring. Float is the only wide
+    tenant today, so the narrowed set, and hence every schedule, is unchanged.
+    """
 
     nodes: dict[ValueId, MirFloatNode]
     blocks: list[MirBlock]
@@ -319,7 +324,7 @@ class MirFloatView:
         return {
             vid: node
             for vid, node in self.nodes.items()
-            if isinstance(node, MirOperation) and isinstance(node.scalar_type, FloatType)
+            if isinstance(node, MirOperation) and is_wide_type(node.scalar_type)
         }
 
     @property
@@ -345,12 +350,14 @@ class MirFloatView:
                 case MirFloatStateRead(scalar_type=scalar_type):
                     nodes[vid] = node
                     formats.add(scalar_type.fmt)
-                case MirOperation(scalar_type=FloatType() as scalar_type):
+                case MirOperation(scalar_type=scalar_type) if is_wide_type(scalar_type):
                     nodes[vid] = node
-                    formats.add(scalar_type.fmt)
-                case MirPhi(scalar_type=FloatType() as scalar_type):
+                    if isinstance(scalar_type, FloatType):
+                        formats.add(scalar_type.fmt)
+                case MirPhi(scalar_type=scalar_type) if is_wide_type(scalar_type):
                     nodes[vid] = node
-                    formats.add(scalar_type.fmt)
+                    if isinstance(scalar_type, FloatType):
+                        formats.add(scalar_type.fmt)
                 case MirBoolInput() | MirBoolStateRead() | MirBoolConst() | MirPhi() | MirOperation():
                     pass  # the bool resource family (bool state/const/phi and bool-result ops), handled by MirBoolView
                 case MirInput():
