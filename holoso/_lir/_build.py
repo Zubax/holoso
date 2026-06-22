@@ -40,7 +40,7 @@ from .._operators import (
 )
 from .._util import ValueId
 from ._ir import *
-from ._ir import _terminator_arms  # an underscore helper, so not pulled in by the ``import *`` above
+from ._ir import _bank, _terminator_arms  # underscore helpers, so not pulled in by the ``import *`` above
 from ._liveness import BankLiveness, compute_interference
 from ._portassign import assign_commutative_ports
 from ._regalloc import ColoringProblem, color, find_coloring_conflict
@@ -174,7 +174,7 @@ def _value_word_and_landing(mir: Mir, float_mir: MirFloatView, vid: ValueId, iss
     operator = _mir_operation(mir, vid).operator
     commit = issue + operator.latency
     wide = vid in float_mir.operation_nodes
-    landing = wide_landing_cycle(commit) if wide else bool_landing_cycle(commit)
+    landing = landing_cycle(commit, _bank(wide))
     if isinstance(operator, PooledHardwareOperator):
         word = pooled_writeback_word(commit, wide)
     else:

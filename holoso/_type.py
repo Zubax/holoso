@@ -176,6 +176,16 @@ class BoolType(ScalarType):
         return "bool"
 
 
+def is_wide_type(scalar_type: ScalarType) -> bool:
+    """
+    Whether ``scalar_type`` lives in the WIDE data register bank (as opposed to the 1-bit boolean bank): the single
+    storage-bank predicate the timing model, the scheduler, and the backends share instead of open-coding
+    ``isinstance(x, FloatType)`` at each site. Float is the only wide tenant today; a future fixed-width int joins it
+    here, so a wide value is routed correctly everywhere without revisiting every dispatch.
+    """
+    return isinstance(scalar_type, FloatType)
+
+
 @dataclass(frozen=True, slots=True)
 class LogicalPort:
     """

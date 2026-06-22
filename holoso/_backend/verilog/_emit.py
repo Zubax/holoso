@@ -29,7 +29,7 @@ from textwrap import dedent
 
 from ..._lir import *
 from ..._operators import *
-from ..._type import FloatType
+from ..._type import is_wide_type
 from ._microcode import *
 
 _SUPPORT_FILES = {
@@ -306,7 +306,7 @@ def _emit_declarations(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorIns
         sig = _sig(inst)
         w(f"wire         {sig}_iv;")
         for pos, operand_type in enumerate(inst.operator.signature.operand_types):
-            assert isinstance(operand_type, FloatType), "pooled operators read only wide operands today"
+            assert is_wide_type(operand_type), "pooled operators read only wide operands today"
             letter = PORT_LETTERS[pos]
             w(f"wire [1:0]   {sig}_{letter}s;")
             w(f"reg  [W-1:0] {sig}_{letter};")  # read-latched operand (the read mux output, registered)
@@ -315,7 +315,7 @@ def _emit_declarations(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorIns
         for q, result_type in enumerate(inst.operator.signature.result_types):
             if (inst, q) not in write_lists:
                 continue  # a never-tapped output port: no nets, the module port is left unconnected
-            if isinstance(result_type, FloatType):
+            if is_wide_type(result_type):
                 w(f"wire [1:0]   {sig}_y{q}s;")
                 w(f"wire [W-1:0] {sig}_y{q};")
                 w(f"reg  [W-1:0] {sig}_y{q}_q;")  # writeback latch between the operator output and the register write
@@ -357,7 +357,7 @@ def _emit_operators(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorInstan
         # A float output port carries a hardware sign conditioner (piped inside the wrapper); an untapped one is tied
         # to the identity. Boolean output ports have none -- their inversion conditioner is fabric-side at the write.
         for q, result_type in enumerate(operator.signature.result_types):
-            if isinstance(result_type, FloatType):
+            if is_wide_type(result_type):
                 conditioner = f"{sig}_y{q}s" if (inst, q) in write_lists else "2'd0"
                 w(f".{operator.output_hdl_ports[q]}_sgnop({conditioner}),")
         for letter in letters:
@@ -445,7 +445,7 @@ def _emit_datapath_comb(
         sig, base = _sig(inst), base_name(inst)
         w(f"assign {sig}_iv = {f_iv(base)};")
         for q, result_type in enumerate(inst.operator.signature.result_types):
-            if isinstance(result_type, FloatType) and (inst, q) in write_lists:
+            if is_wide_type(result_type) and (inst, q) in write_lists:
                 w(f"assign {sig}_y{q}s = {f_ysgn(base, q)};")
         for pos in range(inst.operator.arity):
             w(f"assign {sig}_{PORT_LETTERS[pos]}s = {f_osgn(base, PORT_LETTERS[pos])};")
@@ -460,7 +460,7 @@ def _emit_datapath_comb(
         lane_wes = [
             f_we(base_name(inst), q)
             for q, result_type in enumerate(inst.operator.signature.result_types)
-            if isinstance(result_type, FloatType) and (inst, q) in write_lists
+            if is_wide_type(result_type) and (inst, q) in write_lists
         ]
         assert lane_wes, "an error-bearing operator must have a tapped wide lane to align its sideband with"
         gate = lane_wes[0] if len(lane_wes) == 1 else "(" + " | ".join(lane_wes) + ")"
@@ -805,7 +805,7 @@ always @(posedge clk) begin
     for inst in lir.instances:
         sig = _sig(inst)
         for q, result_type in enumerate(inst.operator.signature.result_types):
-            if isinstance(result_type, FloatType) and (inst, q) in write_lists:
+            if is_wide_type(result_type) and (inst, q) in write_lists:
                 w(f"{sig}_y{q}_q <= {sig}_y{q};")
         for err_port in inst.operator.error_ports:
             w(f"{sig}_{err_port}_q <= {sig}_{err_port};")

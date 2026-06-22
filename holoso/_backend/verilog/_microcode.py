@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from string import ascii_letters
 
 from ..._lir import FloatConstRef, FloatOperand, Lir, OperatorInstance, PooledScheduledOp, RegRef, pooled_writeback_word
-from ..._type import FloatType
+from ..._type import is_wide_type
 
 PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
 
@@ -201,7 +201,7 @@ def build_microcode(
         add(f_we(base, port_index), 1, 0)
         # The write-address field carries the dense write-target index (0..M-1), symmetric to the read-address field.
         add(f_wa(base, port_index), code_width(len(targets)), None)
-        if isinstance(inst.operator.signature.result_types[port_index], FloatType):
+        if is_wide_type(inst.operator.signature.result_types[port_index]):
             add(f_ysgn(base, port_index), 2, None)
         else:
             add(f_binv(base, port_index), 1, None)

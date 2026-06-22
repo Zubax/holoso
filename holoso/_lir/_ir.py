@@ -17,7 +17,7 @@ from .._operators import (
     PooledHardwareOperator,
     PortConditioner,
 )
-from .._type import BoolType, FloatFormat, FloatType, ScalarType
+from .._type import BoolType, FloatFormat, FloatType, ScalarType, is_wide_type
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
 FETCH_STAGES = 3
@@ -121,9 +121,9 @@ def operand_read_cycle(operator: HardwareOperator, issue_cycle: int) -> int:
     ``dependency_edge``. An inline operation fires -- and reads -- on its writeback step.
     """
     if isinstance(operator, PooledHardwareOperator):
-        assert all(isinstance(ty, FloatType) for ty in operator.signature.operand_types), operator.mnemonic
+        assert all(is_wide_type(ty) for ty in operator.signature.operand_types), operator.mnemonic
         return pooled_wide_read_cycle(issue_cycle)
-    dst_is_wide = isinstance(operator.signature.result_types[0], FloatType)
+    dst_is_wide = is_wide_type(operator.signature.result_types[0])
     return inline_fire_cycle(issue_cycle + operator.latency, dst_is_wide)
 
 
@@ -142,13 +142,13 @@ def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: Ha
     operator must reconcile its presentation -- latch-free on the in_valid step, ``pooled_bool_read_cycle`` -- in
     both helpers at once.
     """
-    producer_wide = isinstance(producer.signature.result_types[producer_port], FloatType)
+    producer_wide = is_wide_type(producer.signature.result_types[producer_port])
     landing = landing_cycle(0, _bank(producer_wide))
     if isinstance(consumer, PooledHardwareOperator):
         assert producer_wide, f"{consumer.mnemonic}: pooled operators read only wide operands today"
         read = pooled_wide_read_cycle(0)
     else:
-        dst_is_wide = isinstance(consumer.signature.result_types[0], FloatType)
+        dst_is_wide = is_wide_type(consumer.signature.result_types[0])
         read = inline_fire_cycle(consumer.latency, dst_is_wide)
     return max(landing - read, READ_FIRST_EDGE - consumer.latency)
 
@@ -278,7 +278,7 @@ class OperatorInstance:
         # worst case for that operator. The makespan absorbs any entry_busy delay, since it tracks that firing's own
         # commit. This bound guards those drained edges; a deeper-throttled operator on a back-edge loop would
         # additionally need a post-layout re-entry-distance check, deferred until one exists.
-        result_is_wide = any(isinstance(ty, FloatType) for ty in result_types)
+        result_is_wide = any(is_wide_type(ty) for ty in result_types)
         drain = boundary_step(0, wide_resident=result_is_wide)
         # The gap beyond the drain is two steps: the terminator's redirect into the successor frame and the
         # successor's first issue step (READ_FIRST_EDGE-spaced); see the two-regime explanation above.
@@ -320,12 +320,17 @@ class BoolRegRef:
         return True
 
 
+def _bank_of_ref(dst: RegRef | BoolRegRef) -> BankTiming:
+    """The register bank a destination belongs to: wide for a ``RegRef``, the 1-bit boolean bank otherwise."""
+    return WIDE_BANK if isinstance(dst, RegRef) else BOOL_BANK
+
+
 def result_landing_cycle(dst: RegRef | BoolRegRef, commit_cycle: int) -> int:
     """
     The cycle a result lands per its destination bank -- the single dispatch every consumer (liveness, the write
     timeline, the numerical model, the report) routes through, so the per-bank rule cannot drift between them.
     """
-    return wide_landing_cycle(commit_cycle) if isinstance(dst, RegRef) else bool_landing_cycle(commit_cycle)
+    return landing_cycle(commit_cycle, _bank_of_ref(dst))
 
 
 _BankReg = TypeVar("_BankReg", RegRef, BoolRegRef)  # one register bank's reference type (wide or boolean)
