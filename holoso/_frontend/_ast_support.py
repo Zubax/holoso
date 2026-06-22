@@ -3,14 +3,14 @@
 import ast
 from collections.abc import Iterator
 
-_Path = list[int | str]
+Path = list[int | str]
 
 # A static ``for`` loop with at most this many trips fully unrolls; a larger count is rejected (a counted back-edge
 # loop would need a runtime integer counter, which is not implemented -- use a ``while`` for a variable trip count).
-_UNROLL_THRESHOLD = 64
+UNROLL_THRESHOLD = 64
 
 
-def _range_trip_count(trips: range) -> int:
+def range_trip_count(trips: range) -> int:
     """
     The number of iterations in a ``range`` as a Python integer. ``len(range(...))`` raises ``OverflowError`` once the
     count exceeds a C ``ssize_t`` (e.g. ``range(10**40)``); this computes it with big integers so an enormous static
@@ -20,42 +20,46 @@ def _range_trip_count(trips: range) -> int:
     return max(0, (span + abs(trips.step) - 1) // abs(trips.step))
 
 
-def _port_name(path: _Path) -> str:
+def port_name(path: Path) -> str:
     """Map a returned leaf path to its output-port name, e.g. ``[0, "x"]`` -> ``out_0_x``."""
     return "out" + "".join(f"_{key}" for key in path)
 
 
-def _state_port_name(slot: str) -> str:
+def state_port_name(slot: str) -> str:
     """Map a public state slot to its observable port name, e.g. ``"y"`` -> ``state_y``, ``"x_0"`` -> ``state_x_0``."""
     return f"state_{slot}"
 
 
-def _leaf_targets(target: ast.expr) -> Iterator[ast.expr]:
+def leaf_targets(target: ast.expr) -> Iterator[ast.expr]:
     """Yield an assignment target's leaf targets, descending through tuple/list/starred unpacking."""
     match target:
         case ast.Starred(value=value):
-            yield from _leaf_targets(value)
+            yield from leaf_targets(value)
         case ast.Tuple(elts=elts) | ast.List(elts=elts):
             for elt in elts:
-                yield from _leaf_targets(elt)
+                yield from leaf_targets(elt)
         case _:
             yield target
 
 
-def _contains_walrus(node: ast.AST) -> bool:
-    """Whether an expression subtree contains a walrus ``:=`` (the subset has no nested scope in expression position)."""
+def contains_walrus(node: ast.AST) -> bool:
+    """
+    Whether an expression subtree contains a walrus ``:=`` (the subset has no nested scope in expression position).
+    """
     return any(isinstance(sub, ast.NamedExpr) for sub in ast.walk(node))
 
 
-def _walrus_target_names(node: ast.AST) -> set[str]:
-    """The target names of every walrus ``(name := value)`` in an expression subtree (a walrus target is always a plain
-    name -- Python forbids targeting an attribute or subscript)."""
+def walrus_target_names(node: ast.AST) -> set[str]:
+    """
+    The target names of every walrus ``(name := value)`` in an expression subtree (a walrus target is always a plain
+    name -- Python forbids targeting an attribute or subscript).
+    """
     return {
         sub.target.id for sub in ast.walk(node) if isinstance(sub, ast.NamedExpr) and isinstance(sub.target, ast.Name)
     }
 
 
-def _statement_walrus_names(stmt: ast.stmt) -> set[str]:
+def statement_walrus_names(stmt: ast.stmt) -> set[str]:
     """
     The walrus target names bound when ``stmt`` is reached: those in its OWN expressions (an ``if``/``while`` test, a
     ``for`` iterable, an assignment/return value) but NOT in the bodies of a nested ``if``/``for``/``while`` (those are
@@ -64,16 +68,16 @@ def _statement_walrus_names(stmt: ast.stmt) -> set[str]:
     """
     match stmt:
         case ast.If(test=expr) | ast.While(test=expr) | ast.For(iter=expr):
-            return _walrus_target_names(expr)
+            return walrus_target_names(expr)
         case ast.Assign(value=expr) | ast.AugAssign(value=expr) | ast.Expr(value=expr):
-            return _walrus_target_names(expr)
+            return walrus_target_names(expr)
         case ast.AnnAssign(value=expr) | ast.Return(value=expr) if expr is not None:
-            return _walrus_target_names(expr)
+            return walrus_target_names(expr)
         case _:
             return set()
 
 
-def _scope_local_walrus_targets(node: ast.AST) -> set[str]:
+def scope_local_walrus_targets(node: ast.AST) -> set[str]:
     """
     Every walrus target name bound in ``node``'s OWN scope, descending into nested statements/expressions but NOT into a
     nested function/lambda/comprehension/class (a walrus there binds in that scope, not this one). Unlike the
@@ -94,9 +98,9 @@ def _scope_local_walrus_targets(node: ast.AST) -> set[str]:
             if isinstance(child, ast.ClassDef):
                 enclosing += child.bases
             for expr in enclosing:
-                names |= _walrus_target_names(expr)
+                names |= walrus_target_names(expr)
             continue
         if isinstance(child, ast.NamedExpr) and isinstance(child.target, ast.Name):
             names.add(child.target.id)
-        names |= _scope_local_walrus_targets(child)
+        names |= scope_local_walrus_targets(child)
     return names

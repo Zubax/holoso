@@ -16,7 +16,7 @@ from holoso._lir import Lir, build
 from holoso._mir import MirInterpreter, lower as lower_to_mir
 from holoso._type import FloatFormat
 from holoso._value import FloatValue
-from holoso._frontend._ast_support import _Path, _port_name
+from holoso._frontend._ast_support import Path, port_name
 
 type Vector = list[FloatValue | bool]
 
@@ -71,11 +71,11 @@ def assert_model_equals_interpreter(
         )
 
 
-def flatten_value(root: object) -> list[tuple[_Path, Any]]:
+def flatten_value(root: object) -> list[tuple[Path, Any]]:
     """Flatten a runtime return value into ``(path, leaf)`` pairs."""
-    leaves: list[tuple[_Path, Any]] = []
+    leaves: list[tuple[Path, Any]] = []
 
-    def walk(node: object, path: _Path) -> None:
+    def walk(node: object, path: Path) -> None:
         if isinstance(node, (list, tuple)) and not isinstance(node, str):
             for index, item in enumerate(node):
                 walk(item, [*path, index])
@@ -102,7 +102,7 @@ def evaluate_reference(fn: Callable[..., object], inputs: Mapping[str, float]) -
 
 def output_names(root: object) -> list[str]:
     """The ordered output-port names for a runtime return value."""
-    return [_port_name(path) for path, _ in flatten_value(root)]
+    return [port_name(path) for path, _ in flatten_value(root)]
 
 
 def unit_roundoff(fmt: FloatFormat) -> float:
@@ -259,11 +259,11 @@ def overlap_dead_arm_spill_kernel(x, y, z):  # type: ignore[no-untyped-def]
 def const_branch_kernel(x, y):  # type: ignore[no-untyped-def]
     """
     Empty const-branch block corner shared by the cosim test and its white-box twin. The inner condition ``1.0 / 5.0 >
-    0.0`` is constant-true but formed by DIVISION, which escapes the frontend's AST-level reachability fold (it evaluates
-    only +,-,* of literals), so the HIR const-folder reduces it to a BoolConst that if-conversion refuses -- leaving an
-    EMPTY const-branch block (the condition install + a branch, no float content). That const materialization is a
-    pc-gated install read AT the terminator and lands at the WIDE boundary, so the bank-aware drain must keep the wide
-    drain for it; shrinking to the boolean boundary made the branch read the condition one PC before it landed.
+    0.0`` is constant-true but formed by DIVISION, which escapes the frontend's AST-level reachability fold (it
+    evaluates only +,-,* of literals), so the HIR const-folder reduces it to a BoolConst that if-conversion refuses --
+    leaving an EMPTY const-branch block (the condition install + a branch, no float content). That const materialization
+    is a pc-gated install read AT the terminator and lands at the WIDE boundary, so the bank-aware drain must keep the
+    wide drain for it; shrinking to the boolean boundary made the branch read the condition one PC before it landed.
     """
     r = x
     if x > y:

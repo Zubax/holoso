@@ -10,11 +10,11 @@ lever; ASP-DAC 2004).
 
 The choice is made after register allocation, over the realised register assignment. Minimising the total
 distinct-register count over operand orientations is an instance of graph bipartisation (NP-hard in general); a plain
-local search gets trapped well above the optimum (on ekf1_stateless's multiplier it stalls at 50 register-arms where the optimum
-is 46). It is solved exactly as a small MILP (HiGHS via ``scipy.optimize.milp``): orientation variables ``o_i`` and
-port-reach indicators ``y_{port,reg}`` linked so ``y`` is forced on wherever an orientation places a register, with the
-objective summing ``y``. A deterministic local search seeded from the source orientation is the fallback when the MILP
-does not prove optimality in the time budget, so the result never increases read-mux fan-in.
+local search gets trapped well above the optimum (on ekf1_stateless's multiplier it stalls at 50 register-arms where the
+optimum is 46). It is solved exactly as a small MILP (HiGHS via ``scipy.optimize.milp``): orientation variables ``o_i``
+and port-reach indicators ``y_{port,reg}`` linked so ``y`` is forced on wherever an orientation places a register, with
+the objective summing ``y``. A deterministic local search seeded from the source orientation is the fallback when the
+MILP does not prove optimality in the time budget, so the result never increases read-mux fan-in.
 """
 
 from collections import defaultdict

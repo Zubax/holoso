@@ -14,19 +14,19 @@ from .._util import BlockId, ValueId
 from .._hir import *
 
 from ._ast_support import (
-    _Path,
-    _UNROLL_THRESHOLD,
-    _contains_walrus,
-    _leaf_targets,
-    _port_name,
-    _range_trip_count,
-    _scope_local_walrus_targets,
-    _state_port_name,
-    _statement_walrus_names,
-    _walrus_target_names,
+    Path,
+    UNROLL_THRESHOLD,
+    contains_walrus,
+    leaf_targets,
+    port_name,
+    range_trip_count,
+    scope_local_walrus_targets,
+    state_port_name,
+    statement_walrus_names,
+    walrus_target_names,
 )
-from ._aggregate import _Aggregate, _Scalar, _StateAttr, _Value
-from ._scope import _ArmResult, _Scope, _parse_fndef
+from ._aggregate import Aggregate, Scalar, StateAttr, Value
+from ._scope import ArmResult, Scope, parse_fndef
 
 _ABSENT = object()  # sentinel distinguishing a missing global from one explicitly bound to None during name resolution
 _NO_PARAMETER_ANNOTATION = object()
@@ -64,9 +64,9 @@ _KNOWN_INTRINSICS = frozenset(
 class _Lowerer:
     def __init__(self, fn: types.FunctionType, instance: object | None = None) -> None:
         self._fn = fn
-        self._entry_fndef, self._lines, self._start, self._filename = _parse_fndef(fn)
+        self._entry_fndef, self._lines, self._start, self._filename = parse_fndef(fn)
         self._builder = HirBuilder()
-        self._env: dict[str, _Value] = {}
+        self._env: dict[str, Value] = {}
         # Stateful-class lowering context; all empty/None for a plain stateless function. The snapshot is the instance
         # as handed to the synthesizer (whatever __init__ and any later mutation produced); its values seed reset.
         self._instance = instance
@@ -84,12 +84,12 @@ class _Lowerer:
                     "__slots__); its attributes cannot be snapshotted as reset state"
                 )
         self._snapshot: dict[str, object] = dict(vars(instance)) if instance is not None else {}
-        self._shapes: dict[str, _StateAttr] = {}  # per-attribute decompositions, derived once from the snapshot
+        self._shapes: dict[str, StateAttr] = {}  # per-attribute decompositions, derived once from the snapshot
         self._state_order: list[str] = []
-        self._state_env: dict[str, _Value] = {}
-        # The single return value, buffered as a _Value rather than emitted on sight: dropping a return that carries a
+        self._state_env: dict[str, Value] = {}
+        # The single return value, buffered as a Value rather than emitted on sight: dropping a return that carries a
         # public attribute's value needs that attribute's live-out, settled only once the body is fully lowered.
-        self._return: _Value | None = None
+        self._return: Value | None = None
         # Functions currently being inlined, to reject recursion (which cannot be unrolled to straight-line dataflow).
         self._inlining: set[types.FunctionType] = set()
         # Lexical depth of dynamic branch arms currently being lowered; a top-level return inside an arm is not yet
@@ -141,7 +141,7 @@ class _Lowerer:
             self._check_state_slot_names()
         # Positional then keyword-only parameters each become a scalar input port, in declaration order.
         for arg in [*params, *args.kwonlyargs]:
-            self._env[arg.arg] = _Scalar(self._input(arg))
+            self._env[arg.arg] = Scalar(self._input(arg))
 
     def _input(self, arg: ast.arg) -> ValueId:
         annotation = self._fn.__annotations__.get(arg.arg, _NO_PARAMETER_ANNOTATION)
@@ -237,16 +237,16 @@ class _Lowerer:
         """
         self._reject_self_rebinding(name, loc)  # ``for self in ...`` rebinds the instance parameter -- rejected
         trips = self._static_range(iterable, loc)
-        count = _range_trip_count(trips)  # big-int count: reject without materializing, even for range(10**40)
-        if count > _UNROLL_THRESHOLD:
+        count = range_trip_count(trips)  # big-int count: reject without materializing, even for range(10**40)
+        if count > UNROLL_THRESHOLD:
             raise UnsupportedConstruct(
-                f"loop trip count {count} exceeds the unroll threshold {_UNROLL_THRESHOLD}; a counted back-edge "
+                f"loop trip count {count} exceeds the unroll threshold {UNROLL_THRESHOLD}; a counted back-edge "
                 "for-loop is not supported (use a 'while' loop for a variable trip count)",
                 loc,
             )
         for index in trips:
             self._static_ints[name] = index
-            self._env[name] = _Scalar(self._builder.float_const(float(index)))
+            self._env[name] = Scalar(self._builder.float_const(float(index)))
             if self._lower_stmts(body):
                 raise UnsupportedConstruct("a 'return' inside a loop is not yet supported", loc)
         return False
@@ -262,7 +262,7 @@ class _Lowerer:
         contributes no state), mirroring a folded ``if``; a statically-true condition is lowered as a normal (infinite)
         loop, faithful to the source.
         """
-        if _contains_walrus(test):
+        if contains_walrus(test):
             # A walrus in the condition rebinds every iteration and its post-test value is what the name holds at the
             # loop exit (the loop leaves from the header after the test), which the header-phi exit value does not
             # capture. Rejected rather than miscompiled; bind it in the body instead.
@@ -301,9 +301,9 @@ class _Lowerer:
         name_phis = {name: self._open_loop_phi(preheader, preheader_env[name], loc) for name in sorted(carried_names)}
         attr_phis = {attr: self._open_loop_phi(preheader, preheader_state[attr], loc) for attr in sorted(carried_attrs)}
         for name, (phi, _) in name_phis.items():
-            self._env[name] = _Scalar(phi)
+            self._env[name] = Scalar(phi)
         for attr, (phi, _) in attr_phis.items():
-            self._state_env[attr] = _Scalar(phi)
+            self._state_env[attr] = Scalar(phi)
 
         cond = self._scalar(self._lower_bool(test), test)
         if not isinstance(self._builder.type_of(cond), BoolType):
@@ -325,13 +325,13 @@ class _Lowerer:
 
         self._builder.position_at(exit_block)
         self._env = dict(preheader_env)  # drop body-locals; the loop-carried names take their header-phi exit value
-        self._env.update((name, _Scalar(phi)) for name, (phi, _) in name_phis.items())
+        self._env.update((name, Scalar(phi)) for name, (phi, _) in name_phis.items())
         self._state_env = dict(preheader_state)
-        self._state_env.update((attr, _Scalar(phi)) for attr, (phi, _) in attr_phis.items())
+        self._state_env.update((attr, Scalar(phi)) for attr, (phi, _) in attr_phis.items())
         self._static_ints = exit_static
         return False
 
-    def _open_loop_phi(self, preheader: BlockId, init: _Value, loc: SourceLocation) -> tuple[ValueId, ValueId]:
+    def _open_loop_phi(self, preheader: BlockId, init: Value, loc: SourceLocation) -> tuple[ValueId, ValueId]:
         init_id = self._scalar(init, loc)  # a loop-carried value must be scalar (an aggregate merge is not supported)
         return self._builder.open_phi(self._builder.type_of(init_id), (preheader, init_id)), init_id
 
@@ -341,7 +341,7 @@ class _Lowerer:
         init_id: ValueId,
         preheader: BlockId,
         latch: BlockId,
-        latch_value: _Value,
+        latch_value: Value,
         loc: SourceLocation,
     ) -> None:
         latch_id = self._scalar(latch_value, loc)
@@ -383,7 +383,7 @@ class _Lowerer:
         attrs: set[str] = set()
 
         def record(targets: list[ast.expr]) -> None:
-            for leaf in (leaf for target in targets for leaf in _leaf_targets(target)):
+            for leaf in (leaf for target in targets for leaf in leaf_targets(target)):
                 if isinstance(leaf, ast.Name):
                     names.add(leaf.id)
                     self._invalidate_static_int(leaf.id)  # mirror lowering: a reassigned name is no longer static
@@ -392,7 +392,7 @@ class _Lowerer:
 
         def walk(body: list[ast.stmt]) -> None:
             for stmt in body:
-                for name in _statement_walrus_names(stmt):  # a walrus in this statement's test/value rebinds a name
+                for name in statement_walrus_names(stmt):  # a walrus in this statement's test/value rebinds a name
                     names.add(name)
                     self._invalidate_static_int(name)  # mirror lowering: a reassigned name is no longer static
                 match stmt:
@@ -438,27 +438,31 @@ class _Lowerer:
         return names, attrs
 
     def _for_counter_is_bound(self, iterable: ast.expr) -> bool:
-        """Whether a ``for <name> in <iterable>`` binds (and leaks) its counter: true when the static range runs at
+        """
+        Whether a ``for <name> in <iterable>`` binds (and leaks) its counter: true when the static range runs at
         least once. ``for i in range(0)`` runs zero times and never binds ``i`` (matching Python), so it must not be
         recorded as a loop-carried reassignment of an outer leaked counter. A non-static / over-threshold range is
-        rejected at lowering anyway, so be conservative (treat it as binding)."""
+        rejected at lowering anyway, so be conservative (treat it as binding).
+        """
         try:
             trips = self._static_range(iterable, self._loc(iterable))
         except UnsupportedConstruct:
             return True
-        return _range_trip_count(trips) >= 1
+        return range_trip_count(trips) >= 1
 
     def _walk_loop_assigned(
         self, counter: str, iterable: ast.expr, body: list[ast.stmt], walk: "Callable[[list[ast.stmt]], None]"
     ) -> None:
-        """Unroll a static ``for`` inside a loop body exactly as lowering does, binding the counter per trip so a
-        counter-dependent inner range is resolved consistently; a non-static / over-threshold range walks once."""
+        """
+        Unroll a static ``for`` inside a loop body exactly as lowering does, binding the counter per trip so a
+        counter-dependent inner range is resolved consistently; a non-static / over-threshold range walks once.
+        """
         try:
             trips = self._static_range(iterable, self._loc(iterable))
         except UnsupportedConstruct:
             walk(body)
             return
-        if _range_trip_count(trips) > _UNROLL_THRESHOLD:
+        if range_trip_count(trips) > UNROLL_THRESHOLD:
             walk(body)
             return
         for index in trips:
@@ -729,7 +733,7 @@ class _Lowerer:
 
     def _record_self_targets(self, targets: list[ast.expr], attrs: set[str]) -> None:
         """Add every ``self.<attr>`` leaf among assignment ``targets`` (descending nested/starred tuple targets)."""
-        for leaf in (leaf for target in targets for leaf in _leaf_targets(target)):
+        for leaf in (leaf for target in targets for leaf in leaf_targets(target)):
             if self._is_self_attr(leaf) and isinstance(leaf, ast.Attribute):
                 attrs.add(leaf.attr)
 
@@ -806,9 +810,9 @@ class _Lowerer:
                     # The counter is deliberately NOT bound here: folding a counter-dependent inner condition would
                     # require this scan to replicate the full static-int discipline of ``_scan_attr_writes``
                     # (invalidate-on-reassign, per-arm snapshot/restore), and binding without it risks a stale-counter
-                    # miscompile. So a write reachable only on a counter value no trip takes is conservatively counted --
-                    # a safe over-approximation (at worst an unused state register for a dead for-body write, never a
-                    # wrong result). Unifying the three scans' loop traversal is tracked future work.
+                    # miscompile. So a write reachable only on a counter value no trip takes is conservatively
+                    # counted -- a safe over-approximation (at worst an unused state register for a dead for-body
+                    # write, never a wrong result). Unifying the three scans' loop traversal is tracked future work.
                     if self._for_counter_is_bound(iterable):
                         self._collect_assigned(body, attrs)
                     self._collect_assigned(orelse, attrs)
@@ -843,7 +847,7 @@ class _Lowerer:
                 len(body) == 1
                 and isinstance(body[0], ast.If)
                 and not body[0].orelse
-                and not _contains_walrus(body[0].test)
+                and not contains_walrus(body[0].test)
             ):
                 tests.append(body[0].test)
                 body = body[0].body
@@ -877,13 +881,13 @@ class _Lowerer:
     def _lower_arm(
         self,
         block: BlockId,
-        base_env: dict[str, _Value],
-        base_state: dict[str, _Value],
+        base_env: dict[str, Value],
+        base_state: dict[str, Value],
         base_static: dict[str, int],
         stmts: list[ast.stmt],
         merge_block: BlockId,
         loc: SourceLocation,
-    ) -> "_ArmResult":
+    ) -> "ArmResult":
         """
         Lower one branch arm from a copy of the pre-branch environment, then jump to the merge; return its final
         environment, state, compile-time-integer bindings, and end block (the arm may itself open nested blocks).
@@ -897,7 +901,7 @@ class _Lowerer:
         self._in_branch -= 1
         end_block = self._builder.current_block
         self._builder.jump(merge_block)
-        return _ArmResult(self._env, self._state_env, self._static_ints, end_block)
+        return ArmResult(self._env, self._state_env, self._static_ints, end_block)
 
     def _merge_static_ints(self, then_static: dict[str, int], else_static: dict[str, int]) -> dict[str, int]:
         """
@@ -914,12 +918,12 @@ class _Lowerer:
 
     def _merge_env(
         self,
-        then_env: dict[str, _Value],
-        else_env: dict[str, _Value],
+        then_env: dict[str, Value],
+        else_env: dict[str, Value],
         pred_then: BlockId,
         pred_else: BlockId,
         loc: SourceLocation,
-    ) -> dict[str, _Value]:
+    ) -> dict[str, Value]:
         """
         Merge the two arms' locals: a name bound in both arms becomes a phi when the arms disagree. A name bound in
         only one arm is conditionally defined and drops out of scope (using it afterwards is an unknown-name error).
@@ -933,17 +937,17 @@ class _Lowerer:
 
     def _merge_state(
         self,
-        then_state: dict[str, _Value],
-        else_state: dict[str, _Value],
+        then_state: dict[str, Value],
+        else_state: dict[str, Value],
         pred_then: BlockId,
         pred_else: BlockId,
         loc: SourceLocation,
-    ) -> dict[str, _Value]:
+    ) -> dict[str, Value]:
         """
         Merge persistent state across the arms: an attribute an arm did not touch carries its live-in there, so a
         write on only one path becomes a phi against the carried-over value.
         """
-        merged: dict[str, _Value] = {}
+        merged: dict[str, Value] = {}
         for attr in self._state_order:
             a = then_state.get(attr)
             b = else_state.get(attr)
@@ -952,10 +956,10 @@ class _Lowerer:
             merged[attr] = self._merge_values(a, b, pred_then, pred_else, loc)
         return merged
 
-    def _merge_values(self, a: _Value, b: _Value, pred_a: BlockId, pred_b: BlockId, loc: SourceLocation) -> _Value:
+    def _merge_values(self, a: Value, b: Value, pred_a: BlockId, pred_b: BlockId, loc: SourceLocation) -> Value:
         """Reconcile two arm values into a phi per diverging scalar leaf (identical values need no phi)."""
         match (a, b):
-            case (_Scalar(id=ia), _Scalar(id=ib)):
+            case (Scalar(id=ia), Scalar(id=ib)):
                 if ia == ib:
                     return a
                 if self._builder.type_of(ia) != self._builder.type_of(ib):
@@ -964,25 +968,23 @@ class _Lowerer:
                         "variable's value across an if, must have the same type)",
                         loc,
                     )
-                return _Scalar(self._builder.phi(self._builder.type_of(ia), [(pred_a, ia), (pred_b, ib)]))
-            case (_Aggregate(items=items_a), _Aggregate(items=items_b)) if len(items_a) == len(items_b):
-                return _Aggregate(
-                    tuple(self._merge_values(x, y, pred_a, pred_b, loc) for x, y in zip(items_a, items_b))
-                )
+                return Scalar(self._builder.phi(self._builder.type_of(ia), [(pred_a, ia), (pred_b, ib)]))
+            case (Aggregate(items=items_a), Aggregate(items=items_b)) if len(items_a) == len(items_b):
+                return Aggregate(tuple(self._merge_values(x, y, pred_a, pred_b, loc) for x, y in zip(items_a, items_b)))
             case _:
                 raise UnsupportedConstruct("the two branches produce incompatible shapes for a merged value", loc)
 
-    def _live_in(self, attr: str) -> _Value:
+    def _live_in(self, attr: str) -> Value:
         """The slot's live-in value (state register content at initiation start), materialized from interned reads."""
         shape = self._shape(attr)
-        return shape.compose(tuple(_Scalar(self._read_slot(shape, slot)) for slot in shape.slots))
+        return shape.compose(tuple(Scalar(self._read_slot(shape, slot)) for slot in shape.slots))
 
-    def _read_slot(self, shape: "_StateAttr", slot: str) -> ValueId:
+    def _read_slot(self, shape: "StateAttr", slot: str) -> ValueId:
         if isinstance(shape.resets[0], BoolConst):  # a slot's bank follows the attribute's reset-snapshot type
             return self._builder.bool_state_read(slot)
         return self._builder.float_state_read(slot)
 
-    def _bind_name(self, name: str, value: _Value, loc: SourceLocation | None = None) -> None:
+    def _bind_name(self, name: str, value: Value, loc: SourceLocation | None = None) -> None:
         """
         Bind a local name to a (runtime) value. Crucially, this drops any compile-time-integer binding the name held:
         a ``for`` counter (or any name) reassigned to a runtime value is no longer a compile-time constant, so a later
@@ -1013,7 +1015,7 @@ class _Lowerer:
         """
         self._static_ints.pop(name, None)
 
-    def _assign_target(self, target: ast.expr, value: _Value) -> None:
+    def _assign_target(self, target: ast.expr, value: Value) -> None:
         """Bind one assignment target to ``value``, recursing into tuple/list targets to unpack an aggregate."""
         match target:
             case ast.Name(id=name):
@@ -1026,13 +1028,13 @@ class _Lowerer:
             case _:
                 raise UnsupportedConstruct(f"unsupported assignment target {type(target).__name__}", self._loc(target))
 
-    def _unpack_targets(self, elts: list[ast.expr], value: _Value, node: ast.expr) -> list[tuple[ast.expr, _Value]]:
+    def _unpack_targets(self, elts: list[ast.expr], value: Value, node: ast.expr) -> list[tuple[ast.expr, Value]]:
         """
         Pair each tuple-unpacking target with its value, mirroring Python: a single ``*rest`` target absorbs the
         surplus items as an aggregate, every other target takes one item, and the source must be an aggregate whose
         length matches the fixed (non-starred) targets.
         """
-        if not isinstance(value, _Aggregate):
+        if not isinstance(value, Aggregate):
             raise UnsupportedConstruct("cannot unpack a scalar value in a tuple assignment", self._loc(node))
         items = value.items
         stars = [index for index, elt in enumerate(elts) if isinstance(elt, ast.Starred)]
@@ -1053,17 +1055,17 @@ class _Lowerer:
                 f"cannot unpack {len(items)} values into at least {len(elts) - 1} targets", self._loc(node)
             )
         head = list(zip(elts[:star], items[:star]))
-        rest = _Aggregate(tuple(items[star : len(items) - len(after)]))  # the starred target binds the surplus
+        rest = Aggregate(tuple(items[star : len(items) - len(after)]))  # the starred target binds the surplus
         tail = list(zip(after, items[len(items) - len(after) :]))
         return [*head, (starred.value, rest), *tail]
 
-    def _lower_expr(self, node: ast.expr) -> _Value:
+    def _lower_expr(self, node: ast.expr) -> Value:
         match node:
             case ast.Constant(value=value):
                 if isinstance(value, bool):  # checked before int: bool is an int subclass
-                    return _Scalar(self._builder.bool_const(value))
+                    return Scalar(self._builder.bool_const(value))
                 if isinstance(value, (int, float)):
-                    return _Scalar(self._builder.float_const(float(value)))
+                    return Scalar(self._builder.float_const(float(value)))
                 raise UnsupportedConstruct(f"unsupported constant {value!r}", self._loc(node))
             case ast.Name(id=name):
                 bound = self._env.get(name)
@@ -1075,30 +1077,30 @@ class _Lowerer:
                     # error, not a silent reach for a same-named global). bool is checked before int (it is a subclass).
                     glob = self._module_global(name)
                     if isinstance(glob, bool):
-                        return _Scalar(self._builder.bool_const(glob))
+                        return Scalar(self._builder.bool_const(glob))
                     if isinstance(glob, (int, float)):
-                        return _Scalar(self._builder.float_const(float(glob)))
+                        return Scalar(self._builder.float_const(float(glob)))
                 raise UnsupportedConstruct(
                     f"unknown name {name!r} (only parameters, locals, and module-level numeric constants are in scope)",
                     self._loc(node),
                 )
             case ast.List(elts=elts) | ast.Tuple(elts=elts):
-                return _Aggregate(tuple(self._lower_elements(elts)))
+                return Aggregate(tuple(self._lower_elements(elts)))
             case ast.Subscript(value=value, slice=index):
                 return self._lower_subscript(self._lower_expr(value), index, self._loc(node))
             case ast.UnaryOp(op=ast.USub(), operand=ast.Constant(value=(int() | float()) as value)) if not isinstance(
                 value, bool
             ):
-                return _Scalar(self._builder.float_const(-float(value)))
+                return Scalar(self._builder.float_const(-float(value)))
             case ast.UnaryOp(op=ast.USub(), operand=operand):
-                return _Scalar(self._builder.operation(FloatNeg(), [self._scalar(self._lower_expr(operand), node)]))
+                return Scalar(self._builder.operation(FloatNeg(), [self._scalar(self._lower_expr(operand), node)]))
             case ast.UnaryOp(op=ast.UAdd(), operand=operand):
                 # Unary plus is scalar identity; like negation, it rejects an aggregate operand.
-                return _Scalar(self._scalar(self._lower_expr(operand), node))
+                return Scalar(self._scalar(self._lower_expr(operand), node))
             case ast.UnaryOp(op=ast.Not()):
                 return self._lower_bool(node)
             case ast.BinOp(left=left, op=ast.Pow(), right=right):
-                return _Scalar(self._lower_pow(left, right))
+                return Scalar(self._lower_pow(left, right))
             case ast.BinOp(op=ast.BitXor()):
                 return self._lower_bool(node)  # boolean exclusive-or; the only bitwise operator in the subset
             case ast.BinOp(left=left, op=op, right=right):
@@ -1121,7 +1123,7 @@ class _Lowerer:
             case _:
                 raise UnsupportedConstruct(f"unsupported expression {type(node).__name__}", self._loc(node))
 
-    def _lower_elements(self, elts: list[ast.expr]) -> Iterator[_Value]:
+    def _lower_elements(self, elts: list[ast.expr]) -> Iterator[Value]:
         """Lower the elements of a list/tuple literal, splicing any ``*aggregate`` element into place."""
         for elt in elts:
             if isinstance(elt, ast.Starred):
@@ -1129,19 +1131,19 @@ class _Lowerer:
             else:
                 yield self._lower_expr(elt)
 
-    def _unpack(self, value: _Value, node: ast.expr) -> tuple[_Value, ...]:
-        if not isinstance(value, _Aggregate):
+    def _unpack(self, value: Value, node: ast.expr) -> tuple[Value, ...]:
+        if not isinstance(value, Aggregate):
             raise UnsupportedConstruct("can only unpack an aggregate with '*'", self._loc(node))
         return value.items
 
-    def _lower_subscript(self, value: _Value, index: ast.expr, loc: SourceLocation) -> _Value:
-        if not isinstance(value, _Aggregate):
+    def _lower_subscript(self, value: Value, index: ast.expr, loc: SourceLocation) -> Value:
+        if not isinstance(value, Aggregate):
             raise UnsupportedConstruct("cannot index or slice a scalar value", loc)
         match index:
             case ast.Slice(lower=lower, upper=upper, step=None):
                 start = 0 if lower is None else self._const_index(lower)
                 stop = len(value.items) if upper is None else self._const_index(upper)
-                return _Aggregate(value.items[start:stop])
+                return Aggregate(value.items[start:stop])
             case ast.Slice():
                 raise UnsupportedConstruct("a slice step is not supported", loc)
             case _:
@@ -1156,12 +1158,12 @@ class _Lowerer:
             raise UnsupportedConstruct("array index/bound must be a compile-time integer", self._loc(node))
         return index
 
-    def _lower_call(self, node: ast.Call) -> _Value:
+    def _lower_call(self, node: ast.Call) -> Value:
         func = node.func
         # The only supported method call is ``.flatten()``, and only on an aggregate -- a scalar has no such method.
         if isinstance(func, ast.Attribute) and func.attr == "flatten" and not node.args and not node.keywords:
             receiver = self._lower_expr(func.value)
-            if not isinstance(receiver, _Aggregate):
+            if not isinstance(receiver, Aggregate):
                 raise UnsupportedConstruct(".flatten() is only supported on an aggregate value", self._loc(node))
             return receiver.flatten()
         numpy_fn = self._numpy_function(func)
@@ -1195,12 +1197,12 @@ class _Lowerer:
             if func.id == "abs" and not node.keywords and builtin_unshadowed:
                 operands = self._lower_args(node)
                 if len(operands) == 1:
-                    return _Scalar(self._builder.operation(FloatAbs(), [self._scalar(operands[0], node)]))
+                    return Scalar(self._builder.operation(FloatAbs(), [self._scalar(operands[0], node)]))
             if func.id in ("list", "tuple") and not node.keywords and builtin_unshadowed:
                 # list(seq)/tuple(seq) of an aggregate is identity here: it carries the element order the model holds,
                 # and the front-end already treats list and tuple aggregates co-equally (the list/tuple-literal case).
                 operands = self._lower_args(node)
-                if len(operands) == 1 and isinstance(operands[0], _Aggregate):
+                if len(operands) == 1 and isinstance(operands[0], Aggregate):
                     return operands[0]
             if func.id == "bool" and not node.keywords and builtin_unshadowed:
                 operands = self._lower_args(node)
@@ -1208,16 +1210,16 @@ class _Lowerer:
                     raise UnsupportedConstruct("bool() takes a single scalar argument", self._loc(node))
                 operand = self._scalar(operands[0], node)  # an aggregate argument is rejected here
                 if isinstance(self._builder.type_of(operand), BoolType):
-                    return _Scalar(operand)  # bool(<bool>) is identity
-                return _Scalar(self._builder.operation(FloatToBool(), [operand]))
+                    return Scalar(operand)  # bool(<bool>) is identity
+                return Scalar(self._builder.operation(FloatToBool(), [operand]))
             if func.id == "float" and not node.keywords and builtin_unshadowed:
                 operands = self._lower_args(node)
                 if len(operands) != 1:
                     raise UnsupportedConstruct("float() takes a single scalar argument", self._loc(node))
                 operand = self._scalar(operands[0], node)  # an aggregate argument is rejected here
                 if isinstance(self._builder.type_of(operand), BoolType):
-                    return _Scalar(self._builder.operation(BoolToFloat(), [operand]))
-                return _Scalar(operand)  # float(<float>) is identity
+                    return Scalar(self._builder.operation(BoolToFloat(), [operand]))
+                return Scalar(operand)  # float(<float>) is identity
         name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
         if name in _KNOWN_INTRINSICS:
             raise MissingIntrinsic(f"implement this operator: {name}", self._loc(node))
@@ -1233,9 +1235,9 @@ class _Lowerer:
                 return func.attr
         return None
 
-    def _lower_args(self, node: ast.Call) -> list[_Value]:
+    def _lower_args(self, node: ast.Call) -> list[Value]:
         """Lower a call's positional arguments left to right, splicing any ``*aggregate`` argument into place."""
-        args: list[_Value] = []
+        args: list[Value] = []
         for arg in node.args:
             if isinstance(arg, ast.Starred):
                 args.extend(self._unpack(self._lower_expr(arg.value), arg))
@@ -1243,7 +1245,7 @@ class _Lowerer:
                 args.append(self._lower_expr(arg))
         return args
 
-    def _lower_method_call(self, node: ast.Call, func: ast.Attribute) -> _Value:
+    def _lower_method_call(self, node: ast.Call, func: ast.Attribute) -> Value:
         """
         Inline a call to a method on the current instance (``self.method(...)``). The method is resolved through the
         instance's class via the MRO (so an inherited method on a shared base resolves), and lowered with the caller's
@@ -1273,7 +1275,7 @@ class _Lowerer:
             raise UnsupportedConstruct(f"method {func.attr}() takes no keyword arguments", self._loc(node))
         return self._inline(method, self._lower_args(node), self._loc(node), bound_self=bound_self)
 
-    def _inline_call(self, callee: types.FunctionType, node: ast.Call) -> _Value:
+    def _inline_call(self, callee: types.FunctionType, node: ast.Call) -> Value:
         """Inline a pure global function: bind its parameters to the arguments and lower its body in a fresh scope."""
         if node.keywords:
             raise UnsupportedConstruct(
@@ -1282,11 +1284,11 @@ class _Lowerer:
         return self._inline(callee, self._lower_args(node), self._loc(node))
 
     def _inline(
-        self, callee: types.FunctionType, args: list[_Value], loc: SourceLocation, *, bound_self: bool = False
-    ) -> _Value:
+        self, callee: types.FunctionType, args: list[Value], loc: SourceLocation, *, bound_self: bool = False
+    ) -> Value:
         if callee in self._inlining:
             raise UnsupportedConstruct(f"recursive inlining of {callee.__name__}() is not supported", loc)
-        fndef, lines, start, filename = _parse_fndef(callee)
+        fndef, lines, start, filename = parse_fndef(callee)
         decl = fndef.args
         if decl.vararg is not None or decl.kwarg is not None or decl.kwonlyargs:
             raise UnsupportedConstruct(
@@ -1313,7 +1315,7 @@ class _Lowerer:
         bindings = {param.arg: arg for param, arg in zip(params, args)}
         # An instance method inherits the caller's scope as its state context; a pure function gets none.
         context = outer if bound_self else None
-        self._install(_Scope.fresh(callee, bindings, lines, start, filename, context=context, self_name=self_param))
+        self._install(Scope.fresh(callee, bindings, lines, start, filename, context=context, self_name=self_param))
         self._local_names[callee] = self._collect_local_names(fndef)
         try:
             if bound_self and self._all_assigned_attrs(fndef.body):
@@ -1332,8 +1334,8 @@ class _Lowerer:
             self._inlining.discard(callee)
             self._install(outer)
 
-    def _capture(self) -> _Scope:
-        return _Scope(
+    def _capture(self) -> Scope:
+        return Scope(
             fn=self._fn,
             env=self._env,
             static_ints=self._static_ints,
@@ -1348,7 +1350,7 @@ class _Lowerer:
             filename=self._filename,
         )
 
-    def _install(self, scope: _Scope) -> None:
+    def _install(self, scope: Scope) -> None:
         self._fn = scope.fn
         self._env = scope.env
         self._static_ints = scope.static_ints
@@ -1428,26 +1430,26 @@ class _Lowerer:
                 integer = self._static_int(node)
                 return None if integer is None else float(integer)
 
-    def _apply_binop(self, op: ast.operator, a: _Value, b: _Value, loc: SourceLocation) -> _Value:
+    def _apply_binop(self, op: ast.operator, a: Value, b: Value, loc: SourceLocation) -> Value:
         match op:
             case ast.Mult():
                 # Scalar*scalar, or the elementwise broadcast of a scalar over an aggregate's leaves (vector*scalar).
-                if isinstance(a, _Aggregate) and isinstance(b, _Scalar):
+                if isinstance(a, Aggregate) and isinstance(b, Scalar):
                     return self._broadcast(a, b.id)
-                if isinstance(a, _Scalar) and isinstance(b, _Aggregate):
+                if isinstance(a, Scalar) and isinstance(b, Aggregate):
                     return self._broadcast(b, a.id)
-                if isinstance(a, _Aggregate) or isinstance(b, _Aggregate):
+                if isinstance(a, Aggregate) or isinstance(b, Aggregate):
                     raise UnsupportedConstruct(
                         "elementwise aggregate-by-aggregate multiplication is not supported", loc
                     )
-                return _Scalar(self._builder.operation(FloatMul(), [self._scalar(a, loc), self._scalar(b, loc)]))
+                return Scalar(self._builder.operation(FloatMul(), [self._scalar(a, loc), self._scalar(b, loc)]))
             case ast.Add():
-                return _Scalar(self._builder.operation(FloatAdd(), [self._scalar(a, loc), self._scalar(b, loc)]))
+                return Scalar(self._builder.operation(FloatAdd(), [self._scalar(a, loc), self._scalar(b, loc)]))
             case ast.Sub():
                 negated = self._builder.operation(FloatNeg(), [self._scalar(b, loc)])
-                return _Scalar(self._builder.operation(FloatAdd(), [self._scalar(a, loc), negated]))
+                return Scalar(self._builder.operation(FloatAdd(), [self._scalar(a, loc), negated]))
             case ast.Div():
-                return _Scalar(self._builder.operation(FloatDiv(), [self._scalar(a, loc), self._scalar(b, loc)]))
+                return Scalar(self._builder.operation(FloatDiv(), [self._scalar(a, loc), self._scalar(b, loc)]))
             case _:
                 raise UnsupportedConstruct(f"unsupported binary operator {type(op).__name__}", loc)
 
@@ -1460,7 +1462,7 @@ class _Lowerer:
         ast.NotEq: RelationalOp.NE,
     }
 
-    def _lower_compare(self, op: ast.cmpop, left: _Value, right: _Value, loc: SourceLocation) -> _Value:
+    def _lower_compare(self, op: ast.cmpop, left: Value, right: Value, loc: SourceLocation) -> Value:
         relop = self._RELATIONAL_OPS.get(type(op))
         if relop is None:
             raise UnsupportedConstruct(f"unsupported comparison operator {type(op).__name__}", loc)
@@ -1471,17 +1473,17 @@ class _Lowerer:
             # Boolean equality maps onto the existing combinational gates: ``a != b`` is the exclusive-or, ``a == b`` is
             # its negation (xnor). Ordering (``<``/``<=``/``>``/``>=``) on booleans is rejected as meaningless here.
             if isinstance(op, ast.NotEq):
-                return _Scalar(self._builder.operation(BoolXor(), [left_id, right_id]))
+                return Scalar(self._builder.operation(BoolXor(), [left_id, right_id]))
             if isinstance(op, ast.Eq):
-                return _Scalar(
+                return Scalar(
                     self._builder.operation(BoolNot(), [self._builder.operation(BoolXor(), [left_id, right_id])])
                 )
             raise UnsupportedConstruct("booleans compare only with == and != (ordering is floating-point only)", loc)
         if left_bool or right_bool:
             raise UnsupportedConstruct("comparison operands must be both boolean or both floating-point", loc)
-        return _Scalar(self._builder.operation(FloatRelational(relop), [left_id, right_id]))
+        return Scalar(self._builder.operation(FloatRelational(relop), [left_id, right_id]))
 
-    def _lower_bool(self, node: ast.expr) -> _Value:
+    def _lower_bool(self, node: ast.expr) -> Value:
         """
         Lower a boolean-valued expression to a bool scalar: a comparison (single or chained), a connective
         (``and``/``or``/``not``), a boolean literal/variable/read-only attribute, or (cross-bank) a cast. A connective
@@ -1492,19 +1494,19 @@ class _Lowerer:
         """
         constant = self._static_bool(node)
         if constant is not None:
-            return _Scalar(self._builder.bool_const(constant))
+            return Scalar(self._builder.bool_const(constant))
         match node:
             case ast.BoolOp(op=ast.And(), values=values):
                 return self._lower_connective(values, BoolAnd(), absorbing=False)
             case ast.BoolOp(op=ast.Or(), values=values):
                 return self._lower_connective(values, BoolOr(), absorbing=True)
             case ast.UnaryOp(op=ast.Not(), operand=operand):
-                return _Scalar(self._builder.operation(BoolNot(), [self._bool_scalar(operand)]))
+                return Scalar(self._builder.operation(BoolNot(), [self._bool_scalar(operand)]))
             case ast.BinOp(op=ast.BitXor(), left=left, right=right):
                 # ``a ^ b`` is the only bitwise operator in the subset: a combinational boolean exclusive-or (the
                 # parity primitive). Both operands are pure booleans, always evaluated; a non-boolean operand is
                 # rejected by ``_bool_scalar``.
-                return _Scalar(self._builder.operation(BoolXor(), [self._bool_scalar(left), self._bool_scalar(right)]))
+                return Scalar(self._builder.operation(BoolXor(), [self._bool_scalar(left), self._bool_scalar(right)]))
             case ast.Compare(left=left, ops=ops, comparators=comparators):
                 return self._lower_compare_chain(left, ops, comparators, self._loc(node))
             case _:
@@ -1519,7 +1521,7 @@ class _Lowerer:
             raise UnsupportedConstruct("expected a boolean value here (a comparison or a boolean)", self._loc(node))
         return scalar
 
-    def _lower_connective(self, values: list[ast.expr], op: Operator, absorbing: bool) -> _Value:
+    def _lower_connective(self, values: list[ast.expr], op: Operator, absorbing: bool) -> Value:
         # ``and`` has absorbing False / identity True; ``or`` is the dual. A statically-absorbing operand short-circuits
         # the whole connective (later operands are not evaluated, as in Python); a statically-identity operand is
         # dropped; the remaining dynamic operands are reduced left-to-right by the combinational logic operator.
@@ -1529,18 +1531,18 @@ class _Lowerer:
             if static is None:
                 dynamic.append(self._bool_scalar(value))
             elif static == absorbing:
-                return _Scalar(self._builder.bool_const(absorbing))
+                return Scalar(self._builder.bool_const(absorbing))
             # else: the identity value -- drop it and continue
         if not dynamic:
-            return _Scalar(self._builder.bool_const(not absorbing))  # every operand folded to the identity
+            return Scalar(self._builder.bool_const(not absorbing))  # every operand folded to the identity
         result = dynamic[0]
         for operand in dynamic[1:]:
             result = self._builder.operation(op, [result, operand])
-        return _Scalar(result)
+        return Scalar(result)
 
     def _lower_compare_chain(
         self, left: ast.expr, ops: list[ast.cmpop], comparators: list[ast.expr], loc: SourceLocation
-    ) -> _Value:
+    ) -> Value:
         # ``a OP1 b OP2 c`` is ``(a OP1 b) and (b OP2 c)`` with each operand evaluated exactly once (the shared middle
         # operand feeds two comparisons). The conjunction is the combinational ``BoolAnd``; a single comparison needs no
         # ``and`` at all.
@@ -1551,9 +1553,9 @@ class _Lowerer:
         result = comparisons[0]
         for comparison in comparisons[1:]:
             result = self._builder.operation(BoolAnd(), [result, comparison])
-        return _Scalar(result)
+        return Scalar(result)
 
-    def _lower_ifexp(self, test: ast.expr, body: ast.expr, orelse: ast.expr, loc: SourceLocation) -> _Value:
+    def _lower_ifexp(self, test: ast.expr, body: ast.expr, orelse: ast.expr, loc: SourceLocation) -> Value:
         """
         Lower a conditional expression ``body if test else orelse``. The test is lowered first (type-checking its
         operands and folding a connective/cast to a constant where it can, including ``x or True`` -> True); a test
@@ -1561,10 +1563,10 @@ class _Lowerer:
         otherwise a ``branch`` into fresh arm blocks lowers each arm there (only the taken arm computes at run time) and
         merges the two values in a phi.
         """
-        if _contains_walrus(body) or _contains_walrus(orelse):
-            # An arm is evaluated only when selected, but ``_branch_value`` lowers each from a shared environment it does
-            # not snapshot/merge, so a walrus binding in an arm would leak across arms. The test may carry a walrus (it
-            # always evaluates); an arm walrus is rejected rather than silently mis-scoped.
+        if contains_walrus(body) or contains_walrus(orelse):
+            # An arm is evaluated only when selected, but ``_branch_value`` lowers each from a shared environment it
+            # does not snapshot/merge, so a walrus binding in an arm would leak across arms. The test may carry a
+            # walrus (it always evaluates); an arm walrus is rejected rather than silently mis-scoped.
             raise UnsupportedConstruct("a walrus ':=' in a conditional-expression arm is not supported", loc)
         cond = self._bool_scalar(test)
         constant = self._static_condition(test)
@@ -1576,15 +1578,15 @@ class _Lowerer:
         # branch (and the arm lowering that type-checks them) for an arm like ``float(x or True) > 0.5``.
         both_bool = self._static_bool(body)
         if both_bool is not None and both_bool == self._static_bool(orelse):
-            return _Scalar(self._builder.bool_const(both_bool))
+            return Scalar(self._builder.bool_const(both_bool))
         both_float = self._static_float(body)
         if both_float is not None and both_float == self._static_float(orelse):
-            return _Scalar(self._builder.float_const(both_float))
+            return Scalar(self._builder.float_const(both_float))
         return self._branch_value(cond, lambda: self._lower_expr(body), lambda: self._lower_expr(orelse), loc)
 
     def _branch_value(
-        self, cond: ValueId, then_value: Callable[[], _Value], else_value: Callable[[], _Value], loc: SourceLocation
-    ) -> _Value:
+        self, cond: ValueId, then_value: Callable[[], Value], else_value: Callable[[], Value], loc: SourceLocation
+    ) -> Value:
         """
         Branch on ``cond`` into fresh then/else blocks, evaluate a value in each (a pure expression, so it mutates no
         environment), and merge the two results into a phi at the merge block, leaving the builder positioned there so
@@ -1604,15 +1606,15 @@ class _Lowerer:
         self._builder.position_at(merge_block)
         return self._merge_values(then, else_, then_end, else_end, loc)
 
-    def _broadcast(self, value: _Value, scalar: ValueId) -> _Value:
+    def _broadcast(self, value: Value, scalar: ValueId) -> Value:
         """Multiply every scalar leaf of ``value`` by ``scalar``, preserving shape (the one elementwise vector op)."""
-        if isinstance(value, _Aggregate):
-            return _Aggregate(tuple(self._broadcast(item, scalar) for item in value.items))
-        assert isinstance(value, _Scalar)
-        return _Scalar(self._builder.operation(FloatMul(), [value.id, scalar]))
+        if isinstance(value, Aggregate):
+            return Aggregate(tuple(self._broadcast(item, scalar) for item in value.items))
+        assert isinstance(value, Scalar)
+        return Scalar(self._builder.operation(FloatMul(), [value.id, scalar]))
 
-    def _scalar(self, value: _Value, where: ast.AST | SourceLocation) -> ValueId:
-        if isinstance(value, _Scalar):
+    def _scalar(self, value: Value, where: ast.AST | SourceLocation) -> ValueId:
+        if isinstance(value, Scalar):
             return value.id
         loc = where if isinstance(where, SourceLocation) else self._loc(where)
         raise UnsupportedConstruct(f"expected a scalar value here, got a {len(value.leaves())}-element aggregate", loc)
@@ -1632,7 +1634,7 @@ class _Lowerer:
             elif isinstance(node, ast.Compare) and len(node.ops) > 1:
                 operands = [node.left, *node.comparators]
             for operand in operands:
-                if _contains_walrus(operand):
+                if contains_walrus(operand):
                     raise UnsupportedConstruct(
                         "a walrus ':=' inside an 'and'/'or' or a chained comparison is not supported "
                         "(its operand may be short-circuited)",
@@ -1649,7 +1651,7 @@ class _Lowerer:
         """
         self._reject_shortcircuit_walrus(fndef)  # a walrus in a short-circuitable operand is rejected before any scan
         names = {arg.arg for arg in (*fndef.args.posonlyargs, *fndef.args.args, *fndef.args.kwonlyargs)}
-        names |= _scope_local_walrus_targets(fndef)  # a walrus ``(name := ...)`` binds ``name`` as a function local
+        names |= scope_local_walrus_targets(fndef)  # a walrus ``(name := ...)`` binds ``name`` as a function local
 
         def walk(body: list[ast.stmt]) -> None:
             for stmt in body:
@@ -1657,12 +1659,12 @@ class _Lowerer:
                     case ast.FunctionDef() | ast.AsyncFunctionDef() | ast.ClassDef():
                         pass  # a nested scope; its names belong to it, not to the function being lowered
                     case ast.Assign(targets=targets):
-                        leaves = (leaf for target in targets for leaf in _leaf_targets(target))
+                        leaves = (leaf for target in targets for leaf in leaf_targets(target))
                         names.update(leaf.id for leaf in leaves if isinstance(leaf, ast.Name))
                     case ast.AnnAssign(target=ast.Name(id=name)) | ast.AugAssign(target=ast.Name(id=name)):
                         names.add(name)
                     case ast.For(target=target, body=b, orelse=o):
-                        names.update(leaf.id for leaf in _leaf_targets(target) if isinstance(leaf, ast.Name))
+                        names.update(leaf.id for leaf in leaf_targets(target) if isinstance(leaf, ast.Name))
                         walk(b)
                         walk(o)
                     case ast.If(body=b, orelse=o) | ast.While(body=b, orelse=o):
@@ -1707,7 +1709,7 @@ class _Lowerer:
         into the sibling -- the same hazard branch lowering guards); a ``for`` unrolls via ``_scan_loop_attr_writes``.
         """
         for stmt in stmts:
-            for name in _statement_walrus_names(stmt):
+            for name in statement_walrus_names(stmt):
                 self._invalidate_static_int(name)  # mirror lowering: a walrus-reassigned name is no longer static
             if isinstance(stmt, ast.Return):
                 return True
@@ -1743,9 +1745,9 @@ class _Lowerer:
             targets: list[ast.expr] = []
             match stmt:
                 case ast.Assign(targets=ts):
-                    targets = [leaf for t in ts for leaf in _leaf_targets(t)]
+                    targets = [leaf for t in ts for leaf in leaf_targets(t)]
                 case ast.AnnAssign(target=t) | ast.AugAssign(target=t):
-                    targets = list(_leaf_targets(t))
+                    targets = list(leaf_targets(t))
             for target in targets:
                 if isinstance(target, ast.Name):
                     self._invalidate_static_int(target.id)  # mirror lowering: a reassigned name is no longer static
@@ -1788,7 +1790,7 @@ class _Lowerer:
         except UnsupportedConstruct:
             self._scan_attr_writes(stmt.body)
             return
-        if _range_trip_count(trips) > _UNROLL_THRESHOLD:
+        if range_trip_count(trips) > UNROLL_THRESHOLD:
             self._scan_attr_writes(stmt.body)
             return
         for index in trips:
@@ -1898,15 +1900,17 @@ class _Lowerer:
         return target.attr
 
     def _ensure_state_loaded(self, attr: str) -> None:
-        """Load a persistent attribute's live-in (its slot register content at the initiation start) into the state
+        """
+        Load a persistent attribute's live-in (its slot register content at the initiation start) into the state
         environment if it has not been read or written yet, so its first use -- including the entry arm of a loop
-        header phi for an attribute first written in the loop -- sees the value carried over from the previous call."""
+        header phi for an attribute first written in the loop -- sees the value carried over from the previous call.
+        """
         if attr in self._state_order and attr not in self._state_env:
             shape = self._shape(attr)
-            reads = tuple(_Scalar(self._read_slot(shape, slot)) for slot in shape.slots)
+            reads = tuple(Scalar(self._read_slot(shape, slot)) for slot in shape.slots)
             self._state_env[attr] = shape.compose(reads)
 
-    def _read_attr(self, target: ast.Attribute) -> _Value:
+    def _read_attr(self, target: ast.Attribute) -> Value:
         if self._is_self_attr(target):
             # A ``self.<name>`` whose name is a property (not a stored attribute) inlines the property's getter, like a
             # zero-argument method call -- so a read-only computed value (e.g. one derived from frozen configuration)
@@ -1929,10 +1933,10 @@ class _Lowerer:
             # Persistent state: first read before any write is the slot's live-in; later reads see the written value.
             self._ensure_state_loaded(attr)
             return self._state_env[attr]
-        consts = tuple(_Scalar(self._builder.const_node(reset)) for reset in shape.resets)
+        consts = tuple(Scalar(self._builder.const_node(reset)) for reset in shape.resets)
         return shape.compose(consts)
 
-    def _assign_attr(self, target: ast.Attribute, value: _Value) -> None:
+    def _assign_attr(self, target: ast.Attribute, value: Value) -> None:
         attr = self._attr_of(target)
         shape = self._shape(attr)
         if not shape.accepts(value):
@@ -1942,7 +1946,7 @@ class _Lowerer:
             )
         self._state_env[attr] = value
 
-    def _shape(self, attr: str) -> _StateAttr:
+    def _shape(self, attr: str) -> StateAttr:
         """
         The scalar-slot decomposition of an instance attribute, derived once from the reset snapshot and memoized so it
         is the single source of the attribute's shape. A list/tuple or 1-D numpy array is a vector; a real number is a
@@ -1953,16 +1957,16 @@ class _Lowerer:
             self._shapes[attr] = self._derive_shape(attr)
         return self._shapes[attr]
 
-    def _derive_shape(self, attr: str) -> _StateAttr:
+    def _derive_shape(self, attr: str) -> StateAttr:
         value = self._snapshot[attr]
         self._check_annotation(attr, value)
         if isinstance(value, (bool, np.bool_)):  # checked before the numeric paths: bool is an int subclass
-            return _StateAttr(is_vector=False, slots=[attr], resets=[BoolConst(bool(value))])
+            return StateAttr(is_vector=False, slots=[attr], resets=[BoolConst(bool(value))])
         elements = self._aggregate_elements(attr, value)
         if elements is None:
-            return _StateAttr(False, [attr], [FloatConst(self._coerce_real(attr, value))])
+            return StateAttr(False, [attr], [FloatConst(self._coerce_real(attr, value))])
         slots = [f"{attr}_{index}" for index in range(len(elements))]
-        return _StateAttr(True, slots, [FloatConst(self._coerce_real(attr, element)) for element in elements])
+        return StateAttr(True, slots, [FloatConst(self._coerce_real(attr, element)) for element in elements])
 
     def _aggregate_elements(self, attr: str, value: object) -> list[object] | None:
         """The ordered elements of a 1-D aggregate value (list, tuple, or numpy array), or None for a scalar."""
@@ -2044,11 +2048,11 @@ class _Lowerer:
         if self._return is not None:
             for path, vid in self._return.output_leaves():
                 if vid not in public_live_outs:
-                    self._builder.output(_port_name(path), vid)
+                    self._builder.output(port_name(path), vid)
         for attr in self._state_order:
             if self._is_public(attr):
                 for slot, live_out in zip(self._shape(attr).slots, self._state_env[attr].leaves()):
-                    self._builder.output(_state_port_name(slot), live_out)
+                    self._builder.output(state_port_name(slot), live_out)
 
 
 def lower(target: object) -> Hir:

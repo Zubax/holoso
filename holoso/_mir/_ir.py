@@ -293,10 +293,7 @@ class Mir:
 @dataclass(frozen=True, slots=True)
 class MirFloatView:
     """
-    The WIDE data-bank resource family narrowed out of a MIR graph, carrying the shared CFG so scheduling runs per
-    block. Admission of operations and phis is by storage bank (``is_wide_type``), not by float type, so a future
-    fixed-width int -- which shares the wide bank -- joins this view without restructuring. Float is the only wide
-    tenant today, so the narrowed set, and hence every schedule, is unchanged.
+    WIDE data-bank resource family narrowed out of a MIR graph, carrying the shared CFG so scheduling runs per block.
     """
 
     nodes: dict[ValueId, MirFloatNode]

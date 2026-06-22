@@ -27,19 +27,18 @@ from .._util import ValueId
 from ._ir import *
 from ._liveness import BankLiveness, compute_interference
 from ._schedule import Schedule
+from ._regalloc import Producer, ReadPort
 from ._build_base import (
-    _Allocation,
-    _BoolArmInstall,
-    _ColorObjective,
-    _FloatArmInstall,
-    _OverlapLayout,
-    _PooledConst,
-    _Port,
-    _Producer,
+    Allocation,
+    BoolArmInstall,
+    ColorObjective,
+    FloatArmInstall,
+    OverlapLayout,
+    PooledConst,
 )
-from ._construct import _build_const_pool, _const_branch_conditions, _phi_arm_out
-from ._coalesce import _coalescable_arms, _coalesce_and_color
-from ._layout import _mir_rpo, _schedule_with_overlap, _succ_map
+from ._construct import build_const_pool, const_branch_conditions, phi_arm_out
+from ._coalesce import coalescable_arms, coalesce_and_color
+from ._layout import mir_rpo, schedule_with_overlap, succ_map
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,18 +54,20 @@ class _BankAlloc:
 
 @dataclass(frozen=True, slots=True)
 class _LayoutAllocation:
-    """One full layout+allocation pass for a given install set: the overlap layout, pooled instances, the const pool,
-    and the register assignment of both banks. Re-run by the coalesced-install fixpoint as the install set shrinks."""
+    """
+    One full layout+allocation pass for a given install set: the overlap layout, pooled instances, the const pool,
+    and the register assignment of both banks. Re-run by the coalesced-install fixpoint as the install set shrinks.
+    """
 
-    overlap: _OverlapLayout
+    overlap: OverlapLayout
     inst_of: dict[ValueId, OperatorInstance]
     instances: list[OperatorInstance]
     consts: list[float]
-    const_pool: dict[ValueId, _PooledConst]
-    alloc: _Allocation
+    const_pool: dict[ValueId, PooledConst]
+    alloc: Allocation
 
 
-def _layout_and_allocate(
+def layout_and_allocate(
     mir: Mir,
     float_mir: MirFloatView,
     bool_mir: MirBoolView,
@@ -74,7 +75,7 @@ def _layout_and_allocate(
     has_install_blocks: set[int],
 ) -> _LayoutAllocation:
     """Lay out the blocks (cross-block overlap) and color both register banks for the given per-block install set."""
-    overlap = _schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks)
+    overlap = schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks)
     block_sched = overlap.block_sched
     inst_of: dict[ValueId, OperatorInstance] = {}
     inst_count: dict[PooledHardwareOperator, int] = {}
@@ -83,7 +84,7 @@ def _layout_and_allocate(
         for inst in sched.instances:
             inst_count[inst.operator] = max(inst_count.get(inst.operator, 0), inst.index + 1)
     instances = [OperatorInstance(operator, i) for operator in inst_count for i in range(inst_count[operator])]
-    consts, const_pool = _build_const_pool(float_mir, bool_mir.operation_nodes)
+    consts, const_pool = build_const_pool(float_mir, bool_mir.operation_nodes)
     alloc = _allocate(
         mir,
         float_mir,
@@ -97,11 +98,11 @@ def _layout_and_allocate(
     return _LayoutAllocation(overlap, inst_of, instances, consts, const_pool, alloc)
 
 
-def _actual_install_blocks(alloc: _Allocation, const_branch_blocks: set[int]) -> set[int]:
+def actual_install_blocks(alloc: Allocation, const_branch_blocks: set[int]) -> set[int]:
     """
     The blocks that actually install at their tail after coalescing: a real float copy or boolean write, or a const-
     branch materialization (which is not a copy). A CFG-shape phi-arm predecessor whose every arm coalesced installs
-    nothing, so it should pay neither the +1 install makespan nor the overlap-ineligibility that ``_block_has_install``
+    nothing, so it should pay neither the +1 install makespan nor the overlap-ineligibility that ``block_has_install``
     assigns from the CFG shape alone -- it drops out of the install set here, which the fixpoint feeds back to the next
     layout so the spurious drain is removed.
     """
@@ -174,7 +175,7 @@ def _movable_order(
     (the ``-3`` sentinel sorts a phi -- which has no commit -- ahead of the operations in its block). Value-id last
     keeps the order, and hence the coloring, seed-independent; both banks MUST use this one definition.
     """
-    rpo_pos = {bid: i for i, bid in enumerate(_mir_rpo(mir))}
+    rpo_pos = {bid: i for i, bid in enumerate(mir_rpo(mir))}
     block_of = {**op_block, **phi_block}
     return sorted(candidates, key=lambda vid: (rpo_pos[block_of[vid]], op_commit.get(vid, -3), vid))
 
@@ -200,8 +201,8 @@ class _ObjectiveContext:
 class _ObjectiveTerms:
     """The reusable part of a coloring objective: per-value read ports and write-source identity (loop-invariant)."""
 
-    consumer_ports: dict[ValueId, set[_Port]]
-    producer_key: dict[ValueId, frozenset[_Producer]]
+    consumer_ports: dict[ValueId, set[ReadPort]]
+    producer_key: dict[ValueId, frozenset[Producer]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,7 +251,9 @@ class _Bank(ABC, Generic[_SlotT]):
 
     @abstractmethod
     def objective_terms(self, ctx: _ObjectiveContext) -> _ObjectiveTerms:
-        """The loop-invariant objective terms: the wide read-mux/write-select fan-in, or the boolean's degenerate one."""
+        """
+        The loop-invariant objective terms: the wide read-mux/write-select fan-in, or the boolean's degenerate one.
+        """
 
     @abstractmethod
     def install_policy(self, ctx: _InstallContext) -> dict[str, int]:
@@ -282,7 +285,7 @@ class _WideBank(_Bank[MirFloatStateSlot]):
         return boundary
 
     def objective_terms(self, ctx: _ObjectiveContext) -> _ObjectiveTerms:
-        consumer_ports: dict[ValueId, set[_Port]] = {vid: set() for vid in ctx.values}
+        consumer_ports: dict[ValueId, set[ReadPort]] = {vid: set() for vid in ctx.values}
         for vid, inst in ctx.inst_of.items():
             use_node = ctx.mir.nodes[vid]
             if not isinstance(use_node, MirOperation):
@@ -290,7 +293,7 @@ class _WideBank(_Bank[MirFloatStateSlot]):
             for pos, operand in enumerate(use_node.operands):
                 if operand in ctx.values:
                     consumer_ports[operand].add((inst, pos))
-        producer_key: dict[ValueId, frozenset[_Producer]] = {vid: frozenset({"input"}) for vid in ctx.view.input_ids}
+        producer_key: dict[ValueId, frozenset[Producer]] = {vid: frozenset({"input"}) for vid in ctx.view.input_ids}
         producer_key.update({vid: frozenset({f"state:{node.name}"}) for vid, node in ctx.view.state_read_nodes.items()})
         producer_key.update(
             {vid: frozenset({ctx.inst_of[vid] if vid in ctx.inst_of else f"cast:{vid}"}) for vid in ctx.op_nodes}
@@ -395,7 +398,7 @@ def _allocate_bank(
     op_block, op_commit, phi_block, reads = facts.op_block, facts.op_commit, facts.phi_block, facts.reads
 
     ret_block = next(b.id for b in mir.blocks if isinstance(b.terminator, MirRet))
-    arm_out = _phi_arm_out(mir, phi_nodes, values)
+    arm_out = phi_arm_out(mir, phi_nodes, values)
     boundary_base = bank.boundary_base(mir, values, ret_block)
 
     def graph(
@@ -407,7 +410,7 @@ def _allocate_bank(
             BankLiveness(
                 blocks=[b.id for b in mir.blocks],
                 entry=mir.entry,
-                succ=_succ_map(mir),
+                succ=succ_map(mir),
                 makespan=block_makespan,
                 term_offset=block_term_offset,
                 resident=frozenset({*view.input_ids, *state_read_nodes}),
@@ -438,7 +441,7 @@ def _allocate_bank(
         if slot.live_out in values:
             boundary_oracle[ret_block].add(slot.live_out)
     coalesce_graph = graph(boundary_oracle, reads, {})
-    candidate_arms = _coalescable_arms(phi_nodes, values, bank.identity)
+    candidate_arms = coalescable_arms(phi_nodes, values, bank.identity)
     phi_order = _movable_order(mir, list(phi_nodes), {}, phi_block, {})
     ret_present = block_makespan[ret_block] + 1
     # Last operand-read cycle of each value in the Ret block, from the shared liveness facts so read-cycle semantics
@@ -486,10 +489,11 @@ def _allocate_bank(
             )
         )
 
-        # Final interference. A non-coalesced slot reserves its live-in to the boundary (the install reads it read-first,
-        # so the register holds nothing else); a coalesced slot keeps its live-in's actual range, so a gap tenant lands
-        # between the live-in's last read and the live-out's landing. A boundary-installed live-out is read at the
-        # boundary; an early-installed one is read by its copy at the install step, freeing its source for a later tenant.
+        # Final interference. A non-coalesced slot reserves its live-in to the boundary (the install reads it
+        # read-first, so the register holds nothing else); a coalesced slot keeps its live-in's actual range, so a gap
+        # tenant lands between the live-in's last read and the live-out's landing. A boundary-installed live-out is read
+        # at the boundary; an early-installed one is read by its copy at the install step, freeing its source for a
+        # later tenant.
         boundary_final = {b: set(s) for b, s in boundary_base.items()}
         early_reads: list[tuple[ValueId, int]] = []  # extra Ret-block reads from early-installed slot copies
         for slot in slots:
@@ -525,14 +529,14 @@ def _allocate_bank(
         movable = _movable_order(
             mir, [vid for vid in (*op_nodes, *phi_nodes) if vid not in pinned], op_block, phi_block, op_commit
         )
-        assign, nreg, coalescing, conflict = _coalesce_and_color(
+        assign, nreg, coalescing, conflict = coalesce_and_color(
             phi_nodes,
             phi_order,
             candidate_arms,
             pinned,
             {slot_reg[s.name] for s in slots if s.name not in coalesced},
             lambda residual: graph(boundary_final, reads_final, residual),
-            _ColorObjective(movable, obj_terms.consumer_ports, obj_terms.producer_key, fresh_start),
+            ColorObjective(movable, obj_terms.consumer_ports, obj_terms.producer_key, fresh_start),
         )
         if conflict is not None:
             demoted = slot_by_reg.get(conflict)
@@ -541,9 +545,9 @@ def _allocate_bank(
             ), f"coloring conflict on register {conflict} not resolvable by backing a slot out of coalescing"
             forced_copy.add(demoted)
             continue
-        # Dwell hazard: a coalesced slot register written by an entry-block cycle-0 op would be re-driven each idle cycle
-        # during the accept dwell, corrupting carried state. Demote the slot to a copy-back -- reserving its register so
-        # no tenant lands there -- and retry; _assert_entry_dwell_safe backstops.
+        # Dwell hazard: a coalesced slot register written by an entry-block cycle-0 op would be re-driven each idle
+        # cycle during the accept dwell, corrupting carried state. Demote the slot to a copy-back -- reserving its
+        # register so no tenant lands there -- and retry; _assert_entry_dwell_safe backstops.
         entry_cycle0 = {vid for vid, c in block_sched[mir.entry].issue_cycle.items() if c == 0}
         dwell = {
             slot.name
@@ -557,8 +561,8 @@ def _allocate_bank(
     else:  # pragma: no cover -- the all-copy-back floor is conflict-free, so the loop always breaks first
         assert False, f"{bank.label} slot-coalescing retry did not converge"
 
-    # Backstop: a non-coalesced slot register must carry nothing but its own live-in. A coalesced slot register IS shared
-    # by its in-place live-out (and any phi arms merged onto it) and is skipped here.
+    # Backstop: a non-coalesced slot register must carry nothing but its own live-in. A coalesced slot register IS
+    # shared by its in-place live-out (and any phi arms merged onto it) and is skipped here.
     for slot in slots:
         if slot.name in coalesced:
             continue
@@ -579,7 +583,7 @@ def _allocate(
     block_makespan: dict[int, int],
     block_term_offset: dict[int, int],
     block_inflight: dict[int, dict[ValueId, int]],
-) -> _Allocation:
+) -> Allocation:
     """
     Assign wide and boolean registers across the CFG. Both banks are colored by hardware-frame liveness, reusing
     registers across mutually-exclusive and non-overlapping live ranges. A phi is resolved by installing each arm's
@@ -607,21 +611,21 @@ def _allocate(
 
     # A phi arm coalesced onto the merged register needs no install copy: the arm value already resides in the phi's
     # register (they share a coloring class). Only the residual (non-coalesced) arms install by a pc-gated copy.
-    copies: dict[int, list[_FloatArmInstall]] = {}
+    copies: dict[int, list[FloatArmInstall]] = {}
     for vid, phi in float_mir.phi_nodes.items():
         for pred, value, sign in phi.arms:
             assert isinstance(sign, FloatSignControl)
             if (pred, vid) in float_alloc.coalesced:
                 continue
-            copies.setdefault(pred, []).append(_FloatArmInstall(float_alloc.reg[vid], value, sign))
+            copies.setdefault(pred, []).append(FloatArmInstall(float_alloc.reg[vid], value, sign))
 
-    bool_writes: dict[int, list[_BoolArmInstall]] = {}
+    bool_writes: dict[int, list[BoolArmInstall]] = {}
     for vid, phi in bool_mir.phi_nodes.items():
         for pred, value, inversion in phi.arms:
             assert isinstance(inversion, BoolInversion)
             if (pred, vid) in bool_alloc.coalesced:
                 continue
-            bool_writes.setdefault(pred, []).append(_BoolArmInstall(bool_alloc.reg[vid], value, inversion))
+            bool_writes.setdefault(pred, []).append(BoolArmInstall(bool_alloc.reg[vid], value, inversion))
 
     # A constant branch condition (e.g. a read-only boolean attribute, or a folded test) has no register of its own;
     # materialize it into a bool register written in the branching block so the next-PC decode can read it. The constant
@@ -629,13 +633,13 @@ def _allocate(
     # branching block that uses it, else a path reaching the branch through a block that did not write it reads a stale
     # register. (A later static-branch-folding pass would instead drop the dead arm; until then this keeps it correct.)
     bool_reg, nbreg = bool_alloc.reg, bool_alloc.nreg
-    for block_id, cond in _const_branch_conditions(mir, bool_mir).items():
+    for block_id, cond in const_branch_conditions(mir, bool_mir).items():
         if cond not in bool_reg:
             bool_reg[cond] = nbreg
             nbreg += 1
-        bool_writes.setdefault(block_id, []).append(_BoolArmInstall(bool_reg[cond], cond, BoolInversion()))
+        bool_writes.setdefault(block_id, []).append(BoolArmInstall(bool_reg[cond], cond, BoolInversion()))
 
-    return _Allocation(
+    return Allocation(
         float_reg=float_alloc.reg,
         float_slot_reg=float_alloc.slot_reg,
         float_install=float_alloc.install,

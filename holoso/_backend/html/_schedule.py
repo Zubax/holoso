@@ -278,7 +278,8 @@ def render_schedule(lir: Lir) -> str:
         out.append(f"<th class='{cls}' rowspan='2'><span>c{index}</span></th>")
     for inst in lir.instances:
         lat = inst.operator.latency
-        name = f"{inst.operator.instance_stem}_{inst.index}"  # full name, set vertically so a 1-stage operator does not widen
+        # full name, set vertically so a 1-stage operator does not widen
+        name = f"{inst.operator.instance_stem}_{inst.index}"
         seam = _border_suffix(stage_base[inst] + lat - 1, dv.stage_thin, dv.stage_thick)
         out.append(
             f"<th class='ohgrp{seam}' colspan='{lat}' style='color:{operator_colors[type(inst.operator)]}'>"
@@ -471,7 +472,9 @@ def _bookend_row(
     n_stage: int,
     dv: _Dividers,
 ) -> str:
-    """The input-load row (cycle 0). No operator is in flight yet, so the operator-stage cells and ops cell are empty."""
+    """
+    The input-load row (cycle 0). No operator is in flight yet, so the operator-stage cells and ops cell are empty.
+    """
     out = [f"<tr><td class='clk'>{label}</td>"]
     for ordinal, col in enumerate(columns):
         extra = " live" if _is_live(col, row_id, live) else ""
@@ -507,9 +510,10 @@ class _Arrow:
     One control-transfer arrow in the right margin: a non-fall-through jump from grid row ``src_cyc`` into row
     ``dst_cyc``. ``lane`` is the packed right-margin channel. ``tip`` is its hover label -- the branch arm's condition
     (the boolean register the branch evaluates), or ``jump`` if unconditional -- as raw text (rendered via the SVG
-    ``<title>``'s textContent, not HTML-escaped; json.dumps makes it JS-safe). ``cond`` is the boolean register the branch
-    reads, or ``None`` for an unconditional jump; the overlay draws a dotted feed from that register's cell at the source
-    row to the arrow's root, so the register's residence visibly ends at the branch rather than in nothingness.
+    ``<title>``'s textContent, not HTML-escaped; json.dumps makes it JS-safe). ``cond`` is the boolean register the
+    branch reads, or ``None`` for an unconditional jump; the overlay draws a dotted feed from that register's cell at
+    the source row to the arrow's root, so the register's residence visibly ends at the branch rather than in
+    nothingness.
     """
 
     src_cyc: int
@@ -683,7 +687,9 @@ def _input_chip(tip: str) -> str:
 
 
 def _state_chip(tip: str) -> str:
-    """A retained-state latch marker for the cycle-0 row: a persistent slot holding its reset snapshot (``.wr.state``)."""
+    """
+    A retained-state latch marker for the cycle-0 row: a persistent slot holding its reset snapshot (``.wr.state``).
+    """
     return f"<span class='wr state' title='{tip}'>&#9662;</span>"
 
 
@@ -692,7 +698,8 @@ def _register_names(lir: Lir) -> dict[tuple[str, int], tuple[str, str]]:
     Map each register that has a stable role to ``(label, kind)``, keyed by ``(bank, index)`` where bank is ``"r"`` for
     a wide register or ``"b"`` for a boolean one: the float input lanes to the port they latch at accept, the float
     state slots to the attribute they retain, and the boolean state slots to the boolean attribute they retain. Other
-    registers are anonymous scratch; both kinds may still be reused later, but their cycle-0 role is what the label names.
+    registers are anonymous scratch; both kinds may still be reused later, but their cycle-0 role is what the label
+    names.
     """
     names: dict[tuple[str, int], tuple[str, str]] = {}
     for fload in lir.float_inputs:

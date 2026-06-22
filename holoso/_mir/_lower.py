@@ -396,7 +396,8 @@ class _FloatLowerer:
         except ValueError as exc:
             # An out-of-range exponent is rejected rather than lowered to a constant multiply by 2**k: such a k always
             # lies outside the format's representable range, so the constant would overflow to a (rejected) infinity or
-            # underflow to zero -- the fallback multiply would be degenerate, so there is nothing useful to fall back to.
+            # underflow to zero -- the fallback multiply would be degenerate, so there is nothing useful to fall back
+            # to.
             raise UnsupportedConstruct(f"unsupported power-of-two float scale 2**{k}: {exc}") from exc
         return self.context.builder.operation(operator, [self.context.remap[base]], [sign])
 

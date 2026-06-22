@@ -182,7 +182,8 @@ def schedule_ops(
     issue_cycle: dict[ValueId, int] = {}
     inst_count: dict[PooledHardwareOperator, int] = {}
     slot_of: dict[ValueId, tuple[PooledHardwareOperator, int]] = {}  # per firing leader
-    # instance slot -> first cycle it is free again, seeded with the busy residue inherited from overlapping predecessors
+    # instance slot -> first cycle it is free again, seeded with the busy residue inherited from overlapping
+    # predecessors
     busy_until: dict[tuple[PooledHardwareOperator, int], int] = dict(entry_busy)
 
     def commit_cycle(vid: ValueId) -> int:

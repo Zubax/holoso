@@ -12,7 +12,7 @@ import pytest
 
 from holoso import MissingIntrinsic, UnsupportedConstruct
 from holoso._frontend import lower
-from holoso._frontend._ast_support import _port_name
+from holoso._frontend._ast_support import port_name
 from holoso._hir import (
     BoolAnd,
     BoolConst,
@@ -88,9 +88,9 @@ def test_bare_dataclass_uses_field_names() -> None:
 
 
 def test_port_name_paths() -> None:
-    assert _port_name([0]) == "out_0"
-    assert _port_name([0, "foo", "bar"]) == "out_0_foo_bar"
-    assert _port_name([3, 1]) == "out_3_1"
+    assert port_name([0]) == "out_0"
+    assert port_name([0, "foo", "bar"]) == "out_0_foo_bar"
+    assert port_name([3, 1]) == "out_3_1"
 
 
 def test_flatten_value_returns_leaves() -> None:
@@ -1625,8 +1625,8 @@ _DEAD_WALRUS_GLOBAL = 3  # a module global a dead-code walrus shadows below
 
 def test_walrus_in_dead_or_unsupported_statement_still_scopes_the_name_local() -> None:
     # Local-name collection is syntactic, as in Python: a walrus target is a function local throughout the body even in
-    # dead or out-of-subset code, so it shadows a same-named global. Here the earlier ``range(_DEAD_WALRUS_GLOBAL)`` must
-    # see the runtime local (rejected), NOT silently fold the module int 3 from the global.
+    # dead or out-of-subset code, so it shadows a same-named global. Here the earlier ``range(_DEAD_WALRUS_GLOBAL)``
+    # must see the runtime local (rejected), NOT silently fold the module int 3 from the global.
     def f(x):  # type: ignore[no-untyped-def]
         v = x
         for _ in range(_DEAD_WALRUS_GLOBAL):
@@ -1640,8 +1640,8 @@ def test_walrus_in_dead_or_unsupported_statement_still_scopes_the_name_local() -
 
 def test_walrus_in_a_nested_scope_default_scopes_the_name_in_the_enclosing_function() -> None:
     # A nested def/lambda is a separate scope, but its default-argument expressions execute in the ENCLOSING scope, so a
-    # walrus there binds an enclosing local (as in Python). The earlier ``range(_DEAD_WALRUS_GLOBAL)`` must therefore see
-    # the runtime local, not the module int -- even though the lambda is dead code that lowering never reaches.
+    # walrus there binds an enclosing local (as in Python). The earlier ``range(_DEAD_WALRUS_GLOBAL)`` must therefore
+    # see the runtime local, not the module int -- even though the lambda is dead code that lowering never reaches.
     def f(x):  # type: ignore[no-untyped-def]
         v = x
         for _ in range(_DEAD_WALRUS_GLOBAL):
@@ -2016,7 +2016,8 @@ def test_statically_false_while_with_a_boolean_condition_is_skipped() -> None:
 
 
 def test_reachability_folds_through_a_bool_cast_of_a_connective() -> None:
-    # ``bool(X or True)`` carries the truthiness of ``X or True`` (= True), so the guard folds and the return is allowed.
+    # ``bool(X or True)`` carries the truthiness of ``X or True`` (= True), so the guard folds and the return is
+    # allowed.
     def f(x):  # type: ignore[no-untyped-def]
         if bool(x > 0.0 or True):
             return 1.0

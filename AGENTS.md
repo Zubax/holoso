@@ -224,15 +224,16 @@ Use your best judgement as to which features do not need test coverage. For exam
 After every change or milestone, or when explicitly prompted, dispatch several fresh-context review agents set to the
 MAXIMUM THINKING EFFORT to review your work:
 
-- A subagent focusing on the OPPORTUNITIES FOR SIMPLIFICATION.
-- A subagent focusing on the FUNCTIONAL CORRECTNESS and TEST COVERAGE.
-- A subagent focusing on the ARCHITECTURAL CLEANLINESS, DESIGN PRACTICES, and CODE QUALITY.
-- Distinct tools -- Codex, Claude (check what's available, exclude yourself) -- focusing on CORRECTNESS only.
-  Do not use Antigravity/Gemini, they are weak and tend to produce more noise than signal.
-  Agents often get stuck or hung; always use a timeout.
+1. A subagent looking for OPPORTUNITIES FOR SIMPLIFICATION.
+2. A subagent evaluating FUNCTIONAL CORRECTNESS and ROBUSTNESS.
+3. A subagent evaluating ARCHITECTURAL CLEANLINESS, DESIGN PRACTICES, and CODE QUALITY.
+4. A subagent auditing POLICY and STYLE VIOLATIONS wrt project docs (e.g. private imports, docstrings, etc).
+5. Distinct tools -- Codex, Claude (check what's available, exclude yourself) -- focusing on CORRECTNESS only.
+   Do not use Antigravity/Gemini, they are weak and tend to produce more noise than signal.
+   Agents often get stuck or hung; always use a timeout.
 
 Do not, under any circumstances, delegate more than one task to the same agent, because this results in dilution of
-attention and poor performance.
+attention and poor performance. Given 5 distinct tasks, you will have 5 subagents running in parallel.
 
 It is important that we use distinct tools to maximize the diversity of perspectives and minimize blind spots.
 When all reviewers are done, review and consolidate their findings and act accordingly.
@@ -244,8 +245,7 @@ issues the review agents tend to degrade to nitpicking.
 Hence, we stop iteration earlier, as soon as the feedback ceases to contain significant findings.
 
 THREE CONSECUTIVE TRIVIAL-ONLY TURNS ACROSS ALL REVIEW AGENTS ARE NON-NEGOTIABLE,
-regardless of how many iterations it takes to get there.
-Together with the one-task-per-agent rule this often results in
+regardless of how many iterations it takes to get there. Together with the one-task-per-agent rule this often results in
 many dozens (sometimes over a hundred) of agent sessions in total per full review job, which is expected.
 
 The requirement of multiple consecutive reviews with no significant findings is intended to improve the coverage.

@@ -112,7 +112,9 @@ def test_interpreter_matches_model_on_corners(
 
 
 def test_interpreter_matches_model_on_edge_bits() -> None:
-    """A stateless corner over uniformly-random legal ZKF bit patterns (incl. extremes): exhaustive bit-pattern cross."""
+    """
+    A stateless corner over uniformly-random legal ZKF bit patterns (incl. extremes): exhaustive bit-pattern cross.
+    """
     fmt = FloatFormat(6, 18)
     model, interpreter = build_model_and_interpreter(branch_boundary_kernel, default_ops(fmt), "branch_boundary")
     rng = np.random.default_rng(0x5EED)
@@ -162,6 +164,8 @@ def test_state_slot_swap_writeback_is_parallel() -> None:
 
 
 def test_interpreter_imports_nothing_from_lir() -> None:
-    """The oracle must never re-couple to the layer it verifies: its TRANSITIVE import closure excludes ``holoso._lir``."""
+    """
+    The oracle must never re-couple to the layer it verifies: its TRANSITIVE import closure excludes ``holoso._lir``.
+    """
     offenders = forbidden_imports(MirInterpreter.__module__, "holoso._lir")
     assert not offenders, f"interpreter transitively imports the LIR layer it verifies: {offenders}"

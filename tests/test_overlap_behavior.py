@@ -361,8 +361,8 @@ class _LatchingFaultRegister:
     kernel whose new-state producers (``self._x = self._x or x``) read only resident values and so are the entry
     block's cycle-0-eligible inline ops. The summary ORs the THREE freshly-latched channels in the same block, so its
     value depends on the commit ordering being right: a stale read of any channel would drop a just-latched fault.
-    Multi-channel bool state with a same-block summary is a shape no other black-box test exercises (``_BoolStateMachine``
-    in test_public_api_behavior is single-channel; ``_ChainedSlots`` is float).
+    Multi-channel bool state with a same-block summary is a shape no other black-box test exercises
+    (``_BoolStateMachine`` in test_public_api_behavior is single-channel; ``_ChainedSlots`` is float).
     """
 
     def __init__(self) -> None:

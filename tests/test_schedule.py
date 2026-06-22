@@ -383,8 +383,8 @@ def test_bool_only_block_drains_one_step_under_the_wide_boundary(monkeypatch: py
     # no tail install lands one fetch step earlier than a wide one -- the latch-free boolean bank has no write-latch
     # edge. But a tail INSTALL (a pc-gated boolean write/phi copy) lands one step LATER, at the wide boundary, so an
     # install-bearing bool-only block must KEEP the wide drain. Crash-before: a single-bank drain puts the bool-work
-    # block one PC too late (no bool shrink), and a bank-aware drain that also shrinks an install-bearing block puts that
-    # block one PC too EARLY (bool shrink despite the install landing wide).
+    # block one PC too late (no bool shrink), and a bank-aware drain that also shrinks an install-bearing block puts
+    # that block one PC too EARLY (bool shrink despite the install landing wide).
 
     def is_bool_only(block: LirBlock) -> bool:  # no wide register write and no float copy at the tail
         return not block.copies and not any(
@@ -412,7 +412,8 @@ def test_bool_only_block_drains_one_step_under_the_wide_boundary(monkeypatch: py
     # boolean phi arm is such an install: here ``r``'s entry arm is the input ``a``, which is also returned, so it stays
     # live past the merge and cannot coalesce onto the phi register -- it installs by a pc-gated copy at the (bool-only)
     # not-taken arm's tail. If-conversion is disabled so the diamond stays a real branch with a residual phi install
-    # rather than collapsing to a select. (In-place state commit elided the former majority_voter sticky-fault installs.)
+    # rather than collapsing to a select. (In-place state commit elided the former majority_voter sticky-fault
+    # installs.)
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
 
     def residual_bool_install(a: bool, b: bool, c: bool):  # type: ignore[no-untyped-def]
@@ -1843,7 +1844,9 @@ def test_marked_commutative_operators_are_bit_exact_commutative() -> None:
             assert evaluate(a, b).bits == evaluate(b, a).bits
 
 
-def test_commutative_port_assignment_never_increases_read_mux_fan_in(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_commutative_port_assignment_never_increases_read_mux_fan_in(  # type: ignore[no-untyped-def]
+    monkeypatch,
+) -> None:
     import holoso._lir._build as build_module
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))

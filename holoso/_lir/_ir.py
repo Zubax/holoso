@@ -57,7 +57,7 @@ WIDE_BANK = BankTiming(read_latch=1, writeback_latch=1)
 BOOL_BANK = BankTiming(read_latch=0, writeback_latch=0)
 
 
-def _bank(is_wide: bool) -> BankTiming:
+def bank_timing(is_wide: bool) -> BankTiming:
     return WIDE_BANK if is_wide else BOOL_BANK
 
 
@@ -97,7 +97,7 @@ def inline_fire_cycle(commit_cycle: int, dst_is_wide: bool) -> int:
     statement that reads ALL its operands and writes its destination on this single step -- the commit step for a
     boolean destination, one later for a wide one (aligned with the destination bank's writeback latch).
     """
-    return commit_cycle + FETCH_LAG + _bank(dst_is_wide).writeback_latch
+    return commit_cycle + FETCH_LAG + bank_timing(dst_is_wide).writeback_latch
 
 
 def pooled_writeback_word(commit_cycle: int, dst_is_wide: bool) -> int:
@@ -108,7 +108,7 @@ def pooled_writeback_word(commit_cycle: int, dst_is_wide: bool) -> int:
     microcode (where the word is placed) and the overlap layout (which keeps every write word inside the block), so the
     two cannot drift -- the same single-source-of-truth contract as the landing/read helpers above.
     """
-    return commit_cycle + _bank(dst_is_wide).writeback_latch
+    return commit_cycle + bank_timing(dst_is_wide).writeback_latch
 
 
 def operand_read_cycle(operator: HardwareOperator, issue_cycle: int) -> int:
@@ -143,7 +143,7 @@ def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: Ha
     both helpers at once.
     """
     producer_wide = is_wide_type(producer.signature.result_types[producer_port])
-    landing = landing_cycle(0, _bank(producer_wide))
+    landing = landing_cycle(0, bank_timing(producer_wide))
     if isinstance(consumer, PooledHardwareOperator):
         assert producer_wide, f"{consumer.mnemonic}: pooled operators read only wide operands today"
         read = pooled_wide_read_cycle(0)
@@ -190,7 +190,7 @@ def boundary_step(makespan: int, wide_resident: bool) -> int:
     the overlap layout (the terminator offset), the liveness boundary, and the numerical model, so the per-bank drain
     cannot drift between them.
     """
-    return landing_cycle(makespan, _bank(wide_resident))
+    return landing_cycle(makespan, bank_timing(wide_resident))
 
 
 def successor_local_cycle(block_local_cycle: int, term_offset: int) -> int:
@@ -398,9 +398,9 @@ class FloatStateSlot:
 
     ``tap`` is the live-out's source tap (register/constant + folded sign), the same primitive an output wire taps; here
     the sink is the slot register rather than a port. When the tap is exactly ``reg`` with an identity sign the live-out
-    coalesced onto the slot register (its producing operator -- or, for a conditional/loop update, the arms of its phi --
-    wrote it in place) and the backend emits no copy; otherwise the backend fires a reg->reg copy for it, scheduled at
-    ``install_cycle`` -- as early as the old live-in is last read and
+    coalesced onto the slot register (its producing operator -- or, for a conditional/loop update, the arms of its phi
+    -- wrote it in place) and the backend emits no copy; otherwise the backend fires a reg->reg copy for it, scheduled
+    at ``install_cycle`` -- as early as the old live-in is last read and
     the source is available, the initiation boundary at the latest. The copy samples the tap on its fetch step
     (``copy_step_cycle(install_cycle)``) and the new live-out lands one fetch step later (``install_landing``) for an
     early install, or read-first at the boundary (``LASTPC``) for a boundary install. Installing before the boundary
@@ -613,7 +613,7 @@ class Ret:
 type Terminator = Jump | Branch | Ret
 
 
-def _terminator_arms(terminator: Terminator) -> list[int]:
+def terminator_arms(terminator: Terminator) -> list[int]:
     """The successor block indices a terminator can redirect to: a jump's target, a branch's two arms, none for Ret."""
     match terminator:
         case Jump(target=target):
@@ -661,7 +661,7 @@ def _trace_landing(
     if landing_cycle <= block.term_offset:
         return [block_base[block.index] + landing_cycle]
     spilled = successor_local_cycle(landing_cycle, block.term_offset)
-    arms = _terminator_arms(block.terminator)
+    arms = terminator_arms(block.terminator)
     return [pc for arm in arms for pc in _trace_landing(by_index, block_base, by_index[arm], spilled)]
 
 
@@ -898,8 +898,9 @@ class Lir:
         with one priority chain over exactly these drivers -- the input load, every pooled writeback lane, every inline
         (cast) write, every phi-arm copy/write, and a non-coalesced slot's install. A register's live-in carry is the
         chain's implicit hold (the unmatched-condition fall-through), not a mux input, so it is not counted. This is the
-        true steering cost the sparse register file synthesizes, counting the phi-arm copies that ``write_set_per_register``
-        (pooled lanes only) omits, so it stays meaningful as coalescing trades copies for shared writeback lanes.
+        true steering cost the sparse register file synthesizes, counting the phi-arm copies that
+        ``write_set_per_register`` (pooled lanes only) omits, so it stays meaningful as coalescing trades copies for
+        shared writeback lanes.
         """
         wide: dict[int, int] = {}
         boolc: dict[int, int] = {}
@@ -973,7 +974,7 @@ class Lir:
         order = sorted(range(len(self.blocks)), key=lambda i: self.block_base[i])
         sorted_bases = [self.block_base[i] for i in order]
         term_pc = {block.index: self.term_pc(block) for block in self.blocks}
-        succ = {block.index: _terminator_arms(block.terminator) for block in self.blocks}
+        succ = {block.index: terminator_arms(block.terminator) for block in self.blocks}
 
         def block_of(pc: int) -> int:
             return order[bisect_right(sorted_bases, pc) - 1]

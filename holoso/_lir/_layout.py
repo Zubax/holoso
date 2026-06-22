@@ -7,15 +7,14 @@ from .._mir import Mir, MirBlock, MirBoolView, MirBranch, MirFloatView, MirJump,
 from .._operators import HardwareOperator, PooledHardwareOperator
 from .._util import ValueId
 from ._ir import *
-from ._ir import _bank, _terminator_arms
 from ._schedule import Schedule, schedule_ops
-from ._build_base import _OverlapLayout
-from ._construct import _mir_operation
+from ._build_base import OverlapLayout
+from ._construct import mir_operation
 
 
-def _mir_rpo(mir: Mir) -> list[int]:
+def mir_rpo(mir: Mir) -> list[int]:
     """Reverse-postorder of the MIR block CFG from the entry (predecessors before successors)."""
-    successors = _succ_map(mir)
+    successors = succ_map(mir)
     order: list[int] = []
     visited: set[int] = set()
     # Iterative DFS (explicit stack) rather than recursion: a deep CFG (e.g. nested unrolled loops chaining thousands
@@ -45,10 +44,10 @@ def _value_word_and_landing(mir: Mir, float_mir: MirFloatView, vid: ValueId, iss
     Cross-block overlap may place ``term_offset`` between the two: the word stays in the block, the landing spills into
     the (single-predecessor) successor frame.
     """
-    operator = _mir_operation(mir, vid).operator
+    operator = mir_operation(mir, vid).operator
     commit = issue + operator.latency
     wide = vid in float_mir.operation_nodes
-    landing = landing_cycle(commit, _bank(wide))
+    landing = landing_cycle(commit, bank_timing(wide))
     if isinstance(operator, PooledHardwareOperator):
         word = pooled_writeback_word(commit, wide)
     else:
@@ -56,7 +55,7 @@ def _value_word_and_landing(mir: Mir, float_mir: MirFloatView, vid: ValueId, iss
     return word, landing
 
 
-def _install_inclusive_makespan(work_makespan: int, has_install: bool) -> int:
+def install_inclusive_makespan(work_makespan: int, has_install: bool) -> int:
     """
     The block makespan inclusive of its tail install: an install-bearing block fires its pc-gated phi/slot copies one
     cycle past its last work commit, so its effective makespan is one higher. The single owner of this ``+1`` so the
@@ -90,7 +89,7 @@ def _issue_side_envelope(mir: Mir, float_mir: MirFloatView, sched: Schedule, blo
     for vid, issue in sched.issue_cycle.items():
         word, _landing = _value_word_and_landing(mir, float_mir, vid, issue)
         floor = max(floor, word)
-        operator = _mir_operation(mir, vid).operator
+        operator = mir_operation(mir, vid).operator
         if isinstance(operator, PooledHardwareOperator) and operator.error_ports:
             # The err_pc diagnostic latches ``pc - FETCH_LAG`` when this op's write-enable executes, which is
             # FETCH_LAG fetch steps after its write word. If the terminator redirected by then, err_pc would
@@ -129,13 +128,14 @@ def _block_boundary(
 ) -> _BlockBoundary:
     """
     Derive a block's terminator offset, owning both physical regimes as explicit named branches and the invariants that
-    bound them. ``wide_cap`` -- the latched wide landing of this block's makespan -- caps an overlapping block's floor and
-    backstops every block's offset.
+    bound them. ``wide_cap`` -- the latched wide landing of this block's makespan -- caps an overlapping block's floor
+    and backstops every block's offset.
 
-    The classification facts (``livein_condition``, ``wide_resident``, ``does_boundary_work``) are computed by the caller
-    -- which holds the schedule and CFG context -- and passed in as plain booleans, keeping this a pure boundary-physics
-    derivation rather than reaching back into the scheduler/MIR to re-derive them. With a single call site that separation
-    is deliberate: folding the classification in would only widen this function's input surface, not remove a duplication.
+    The classification facts (``livein_condition``, ``wide_resident``, ``does_boundary_work``) are computed by the
+    caller -- which holds the schedule and CFG context -- and passed in as plain booleans, keeping this a pure
+    boundary-physics derivation rather than reaching back into the scheduler/MIR to re-derive them. With a single call
+    site that separation is deliberate: folding the classification in would only widen this function's input surface,
+    not remove a duplication.
 
     The two regimes are genuinely different physics and stay separate:
       - OVERLAP: an overlapping block's terminator is the ISSUE-side envelope (the latest control word still driven, the
@@ -147,9 +147,9 @@ def _block_boundary(
         legitimately keeps the wide cap here, above its bool drain, so no ``term_offset <= bank-aware drain`` holds.
       - DRAINED: a fully-drained block's terminator offset is the latest cycle a value LANDS in its frame: its own
         bank-aware work drain ``boundary_step(makespan, wide_resident)`` plus any spill-in it cannot forward
-        (``max(work_drain, *spill_landings)``). A block with NO boundary work pays no drain -- a non-entry drain-only Ret
-        reading already-resident outputs lands its boundary at cycle 0, not at the phantom ``boundary_step(0, ...)`` of a
-        value that never commits.
+        (``max(work_drain, *spill_landings)``). A block with NO boundary work pays no drain -- a non-entry drain-only
+        Ret reading already-resident outputs lands its boundary at cycle 0, not at the phantom ``boundary_step(0, ...)``
+        of a value that never commits.
     """
     wide_cap = boundary_step(makespan, wide_resident=True)  # the latched wide landing of this block's makespan
     if overlaps:
@@ -179,13 +179,13 @@ def _spill_local_cycle(bid: int, block_local_cycle: int, term_offset: int) -> in
     return local
 
 
-def _schedule_with_overlap(
+def schedule_with_overlap(
     mir: Mir,
     float_mir: MirFloatView,
     bool_mir: MirBoolView,
     pool: Mapping[type[HardwareOperator], int],
     has_install_blocks: set[int],
-) -> _OverlapLayout:
+) -> OverlapLayout:
     """
     Schedule every block in reverse-postorder and derive each block's terminator offset, threading cross-block overlap
     forward. A block whose every successor is single-predecessor (so a spill cannot reach a wrong path) and that carries
@@ -200,7 +200,7 @@ def _schedule_with_overlap(
     no fixpoint. Under draining (every block multi-pred-bound or install-bearing) every offset equals its bank-aware
     ``boundary_step(makespan, wide_resident)`` and the carries are empty -- identical to an isolated per-block schedule.
     """
-    succ = _succ_map(mir)
+    succ = succ_map(mir)
     pred_count: dict[int, int] = {block.id: 0 for block in mir.blocks}
     for targets in succ.values():
         for target in targets:
@@ -222,13 +222,13 @@ def _schedule_with_overlap(
     # coalesced slot's live-out is resident at a drain-only Ret -- a case no current kernel hits.
     ret_boundary_is_wide = bool(float_mir.state_slots)
     # The persistent-state live-out values, plus the arm producers reachable from them through phi chains (a nested
-    # conditional/loop update layers phi over phi). A producer of one is dwell-guarded off the ENTRY block's ``ucode[0]``:
-    # once a slot live-out -- or any of its (transitive) phi arms -- coalesces onto the slot register, its producer writes
-    # the persistent register directly, so re-firing it during the accept dwell would corrupt the carried state; the guard
-    # keeps such a producer off cycle 0. For a slot whose live-out does not coalesce the producer writes a temporary and
-    # the guard is merely harmless defense-in-depth (see ``_assert_entry_dwell_safe``); it is cost-free unless a guarded
-    # value would actually have issued at cycle 0. The transitive walk visits each value once, so loop-carried phi cycles
-    # terminate.
+    # conditional/loop update layers phi over phi). A producer of one is dwell-guarded off the ENTRY block's
+    # ``ucode[0]``: once a slot live-out -- or any of its (transitive) phi arms -- coalesces onto the slot register, its
+    # producer writes the persistent register directly, so re-firing it during the accept dwell would corrupt the
+    # carried state; the guard keeps such a producer off cycle 0. For a slot whose live-out does not coalesce the
+    # producer writes a temporary and the guard is merely harmless defense-in-depth (see ``_assert_entry_dwell_safe``);
+    # it is cost-free unless a guarded value would actually have issued at cycle 0. The transitive walk visits each
+    # value once, so loop-carried phi cycles terminate.
     all_phis = {**float_mir.phi_nodes, **bool_mir.phi_nodes}
     state_liveouts_set: set[ValueId] = set()
     worklist = [slot.live_out for slot in (*float_mir.state_slots, *bool_mir.state_slots)]
@@ -248,7 +248,7 @@ def _schedule_with_overlap(
     # successor block -> the spill carry its single overlapping predecessor hands it (set at most once: a carried-into
     # block is single-predecessor, so only that one predecessor overlaps into it).
     carry: dict[int, _SpillCarry] = {}
-    for bid in _mir_rpo(mir):
+    for bid in mir_rpo(mir):
         block = blocks_by_id[bid]
         inherited = carry.get(bid, _SpillCarry({}, {}))
         livein_landing = inherited.livein_landing
@@ -263,18 +263,19 @@ def _schedule_with_overlap(
         )
         block_sched[bid] = sched
         has_install = bid in has_install_blocks
-        makespan = _install_inclusive_makespan(sched.makespan, has_install)
+        makespan = install_inclusive_makespan(sched.makespan, has_install)
         block_makespan[bid] = makespan
         targets = succ[bid]
         overlaps = bool(targets) and not has_install and all(pred_count[target] == 1 for target in targets)
         # ``ret_state_boundary`` is a DELIBERATE conservative over-approximation: a non-coalesced float state slot
         # installs its live-out wide at the Ret boundary, but whether a slot coalesces is decided AFTER this layout
         # pass, so charging the wide drain for every stateful float Ret is always correctness-safe (a later boundary
-        # only reads a value later, never wrong) and costs at most one cycle. ``does_boundary_work`` and ``wide_resident``
-        # are pure facts of this block's schedule and CFG shape, computed unconditionally and consumed only on the
-        # fully-drained branch inside ``_block_boundary``; ``bid == mir.entry`` and ``ret_state_boundary`` are work
-        # terms for landings INVISIBLE to the op schedule (the entry's cycle-1 input loads and a stateful-float Ret's
-        # wide state install) -- irreducible block-granularity proxies, since register allocation runs after this pass.
+        # only reads a value later, never wrong) and costs at most one cycle. ``does_boundary_work`` and
+        # ``wide_resident`` are pure facts of this block's schedule and CFG shape, computed unconditionally and consumed
+        # only on the fully-drained branch inside ``_block_boundary``; ``bid == mir.entry`` and ``ret_state_boundary``
+        # are work terms for landings INVISIBLE to the op schedule (the entry's cycle-1 input loads and a stateful-float
+        # Ret's wide state install) -- irreducible block-granularity proxies, since register allocation runs after this
+        # pass.
         ret_state_boundary = isinstance(block.terminator, MirRet) and ret_boundary_is_wide
         does_boundary_work = bool(sched.issue_cycle) or has_install or bid == mir.entry or ret_state_boundary
         wide_resident = (
@@ -318,7 +319,7 @@ def _schedule_with_overlap(
             spill = _SpillCarry(busy, landing)
             for target in targets:
                 carry[target] = spill
-    return _OverlapLayout(block_sched, block_makespan, block_term_offset, block_inflight)
+    return OverlapLayout(block_sched, block_makespan, block_term_offset, block_inflight)
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,21 +331,22 @@ class _BlockLayout:
     min_initiation_interval: int
 
 
-def _layout_blocks(mir: Mir, blocks: list[LirBlock]) -> _BlockLayout:
+def layout_blocks(mir: Mir, blocks: list[LirBlock]) -> _BlockLayout:
     """
     Lay blocks out in the ROM in reverse-postorder, returning their per-block base PCs, the out_valid PC, and the
-    shortest-path initiation interval. Each block spans ``term_offset + 1`` fetch steps (its body up to and including the
-    terminator step; the successor frame begins at ``term_pc + 1``); the single Ret block's boundary is the out_valid PC.
+    shortest-path initiation interval. Each block spans ``term_offset + 1`` fetch steps (its body up to and including
+    the terminator step; the successor frame begins at ``term_pc + 1``); the single Ret block's boundary is the
+    out_valid PC.
     ``min_initiation_interval`` is the shortest root-to-Ret path's traversed length.
     """
-    successors: dict[int, list[int]] = {b.index: _terminator_arms(b.terminator) for b in blocks}
+    successors: dict[int, list[int]] = {b.index: terminator_arms(b.terminator) for b in blocks}
     # Blocks are laid out linearly in reverse-postorder, but the single Ret block is forced last so its boundary is the
     # highest address (out_valid = pc == LASTPC). A loop body is a DFS leaf (its only edge back to the header is a back
     # edge), so RPO would otherwise place it after the exit; moving Ret last keeps every loop body below the Ret. A
     # back-edge targets an earlier, lower-addressed block, which the next-PC sequencer redirects like any other jump, so
     # the linear layout needs no special case; the frontend emits reducible loops, so a back-edge target dominates it.
     ret_index = next(b.index for b in blocks if isinstance(b.terminator, Ret))
-    order = [bid for bid in _mir_rpo(mir) if bid != ret_index] + [ret_index]
+    order = [bid for bid in mir_rpo(mir) if bid != ret_index] + [ret_index]
     position = {bid: i for i, bid in enumerate(order)}
     term_offset = {b.index: b.term_offset for b in blocks}
     length = {index: offset + 1 for index, offset in term_offset.items()}
@@ -373,7 +375,7 @@ def _layout_blocks(mir: Mir, blocks: list[LirBlock]) -> _BlockLayout:
     return _BlockLayout(block_base, last_pc, min_ii)
 
 
-def _succ_map(mir: Mir) -> dict[int, list[int]]:
+def succ_map(mir: Mir) -> dict[int, list[int]]:
     """Successor block ids per block, read off the terminators."""
     succ: dict[int, list[int]] = {}
     for block in mir.blocks:

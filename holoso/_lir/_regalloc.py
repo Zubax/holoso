@@ -41,8 +41,8 @@ from ._ir import OperatorInstance
 
 # Read port identity (operator instance + operand position) and write-source identity: an operator instance, the input
 # load, or a per-slot state writer -- opaque keys for grouping the read-mux and write-select fan-in objective.
-type _Port = tuple[OperatorInstance, int]
-type _Producer = OperatorInstance | str
+type ReadPort = tuple[OperatorInstance, int]
+type Producer = OperatorInstance | str
 
 
 # Budget for the SciPy dual-annealing refinement. It only polishes an already-valid greedy seed (and is a no-op when
@@ -50,11 +50,11 @@ type _Producer = OperatorInstance | str
 # build time for a deeper search. The environment override is for testing only; eventually we might add an API handle.
 _REFINE_MAXITER = int(os.getenv("HOLOSO_REGALLOC_EFFORT", "5000"))
 
-# Balance of reach against register count, layered on the hardware-accurate liveness. ``_REG_REUSE_WRITE_CAP`` bounds how
-# wide a per-register write select the compaction may build (the ":1" of the select -- the number of distinct producers
-# sharing a register); reuse never widens a read mux beyond a fresh register, so the write select is the only mux a
-# compacted coloring can grow. ``_REG_PRICE`` is what one freed register is worth in mux-arm units: the allocator keeps
-# whichever coloring minimizes ``reach + _REG_PRICE * registers``. The price bounds the spectrum -- price 0 stays
+# Balance of reach against register count, layered on the hardware-accurate liveness. ``_REG_REUSE_WRITE_CAP`` bounds
+# how wide a per-register write select the compaction may build (the ":1" of the select -- the number of distinct
+# producers sharing a register); reuse never widens a read mux beyond a fresh register, so the write select is the only
+# mux a compacted coloring can grow. ``_REG_PRICE`` is what one freed register is worth in mux-arm units: the allocator
+# keeps whichever coloring minimizes ``reach + _REG_PRICE * registers``. The price bounds the spectrum -- price 0 stays
 # reach-minimal (registers only break a reach tie), price -> inf takes every register the cap can free, and a fractional
 # price compacts only when a register comes near reach-free. The default 2.0 sheds one register off each bundled small
 # kernel with f_max held and selects no wider than 2:1.
@@ -91,8 +91,8 @@ class ColoringProblem:
     movable: list[ValueId]
     pinned: dict[ValueId, int]
     interferes: dict[ValueId, set[ValueId]]
-    consumer_ports: dict[ValueId, set[_Port]]
-    producer_key: dict[ValueId, frozenset[_Producer]]
+    consumer_ports: dict[ValueId, set[ReadPort]]
+    producer_key: dict[ValueId, frozenset[Producer]]
     fresh_start: int
 
 
@@ -130,10 +130,10 @@ def _color_greedy(problem: ColoringProblem, compact: bool, cap: int) -> dict[Val
     is the fallback. With one block this reproduces the straight-line linear scan exactly.
     """
     assign: dict[ValueId, int] = {}
-    reg_ports: dict[int, set[_Port]] = {}
-    reg_writers: dict[int, set[_Producer]] = {}
+    reg_ports: dict[int, set[ReadPort]] = {}
+    reg_writers: dict[int, set[Producer]] = {}
     reg_members: dict[int, set[ValueId]] = {}
-    port_reach: Counter[_Port] = Counter()
+    port_reach: Counter[ReadPort] = Counter()
 
     def place(vid: ValueId, reg: int) -> None:
         assign[vid] = reg
@@ -146,8 +146,8 @@ def _color_greedy(problem: ColoringProblem, compact: bool, cap: int) -> dict[Val
         reg_members.setdefault(reg, set()).add(vid)
 
     def marginal_cost(vid: ValueId, reg: int) -> int:
-        ports: frozenset[_Port] | set[_Port] = reg_ports.get(reg, frozenset())
-        writers: frozenset[_Producer] | set[_Producer] = reg_writers.get(reg, frozenset())
+        ports: frozenset[ReadPort] | set[ReadPort] = reg_ports.get(reg, frozenset())
+        writers: frozenset[Producer] | set[Producer] = reg_writers.get(reg, frozenset())
         read = sum(1 for port in problem.consumer_ports[vid] if port not in ports and port_reach[port] >= 1)
         # Exact incremental write-select growth (union of the value's producers into the register's), so a coalesced
         # class's several producers are charged honestly; a singleton set reduces to the one-producer +1-or-0 step.
@@ -202,7 +202,7 @@ def _color_refine(problem: ColoringProblem, seed: dict[ValueId, int], nreg: int,
     def decode(coords: np.ndarray) -> dict[ValueId, int] | None:
         assign: dict[ValueId, int] = {}
         members: list[set[ValueId]] = [set() for _ in range(nreg)]
-        writers: list[set[_Producer]] = [set() for _ in range(nreg)]
+        writers: list[set[Producer]] = [set() for _ in range(nreg)]
         for vid, reg in pinned:
             assign[vid] = reg
             members[reg].add(vid)
@@ -259,9 +259,10 @@ def _color_refine(problem: ColoringProblem, seed: dict[ValueId, int], nreg: int,
 def find_coloring_conflict(assign: dict[ValueId, int], interferes: dict[ValueId, set[ValueId]]) -> int | None:
     """
     The first register carrying two interfering values, or None if the coloring is sound. The colorer never co-locates
-    interfering MOVABLE values, so a conflict can only come from the caller's pins -- e.g. a state slot whose live-in and
-    a coalesced live-out turn out to interfere under the final, install-aware interference. The caller backs that slot
-    out of its in-place coalescing and recolors; an all-copy-back coloring has no pin conflicts, so the retry converges.
+    interfering MOVABLE values, so a conflict can only come from the caller's pins -- e.g. a state slot whose live-in
+    and a coalesced live-out turn out to interfere under the final, install-aware interference. The caller backs that
+    slot out of its in-place coalescing and recolors; an all-copy-back coloring has no pin conflicts, so the retry
+    converges.
     """
     by_reg: dict[int, list[ValueId]] = {}
     for vid, reg in assign.items():
@@ -275,17 +276,17 @@ def find_coloring_conflict(assign: dict[ValueId, int], interferes: dict[ValueId,
 
 def _objective(
     assign: dict[ValueId, int],
-    consumer_ports: dict[ValueId, set[_Port]],
-    producer_key: dict[ValueId, frozenset[_Producer]],
+    consumer_ports: dict[ValueId, set[ReadPort]],
+    producer_key: dict[ValueId, frozenset[Producer]],
 ) -> int:
     """Total sparse-regfile mux fan-in: read-mux fan-in across ports plus write-select fan-in across registers."""
     members: dict[int, list[ValueId]] = {}
     for vid, reg in assign.items():
         members.setdefault(reg, []).append(vid)
-    port_regs: dict[_Port, set[int]] = {}
+    port_regs: dict[ReadPort, set[int]] = {}
     write = 0
     for reg, vids in members.items():
-        writers: set[_Producer] = set()
+        writers: set[Producer] = set()
         for vid in vids:
             writers |= producer_key[vid]
             for port in consumer_ports[vid]:

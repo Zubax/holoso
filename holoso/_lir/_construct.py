@@ -28,10 +28,10 @@ from .._operators import BoolInversion, FloatSignControl, InlineHardwareOperator
 from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule
-from ._build_base import _Allocation, _PooledConst
+from ._build_base import Allocation, PooledConst
 
 
-def _bool_operand(bool_mir: MirBoolView, vid: ValueId, alloc: _Allocation, inversion: BoolInversion) -> BoolOperand:
+def bool_operand(bool_mir: MirBoolView, vid: ValueId, alloc: Allocation, inversion: BoolInversion) -> BoolOperand:
     node = bool_mir.nodes[vid]
     if isinstance(node, MirBoolConst):
         return BoolOperand(BoolConstRef(node.value), inversion)  # folds to the negated immediate at construction
@@ -43,8 +43,8 @@ def _typed_operand(
     bool_mir: MirBoolView,
     vid: ValueId,
     conditioner: PortConditioner,
-    alloc: _Allocation,
-    pool: dict[ValueId, _PooledConst],
+    alloc: Allocation,
+    pool: dict[ValueId, PooledConst],
 ) -> FloatOperand | BoolOperand:
     """
     One operand resolved in its own bank: a boolean value reads the bool bank with its folded inversion, a
@@ -52,35 +52,35 @@ def _typed_operand(
     """
     if vid in bool_mir.nodes:
         assert isinstance(conditioner, BoolInversion)
-        return _bool_operand(bool_mir, vid, alloc, conditioner)
+        return bool_operand(bool_mir, vid, alloc, conditioner)
     assert isinstance(conditioner, FloatSignControl)
-    return _operand_signed(float_mir, vid, conditioner, alloc, pool)
+    return operand_signed(float_mir, vid, conditioner, alloc, pool)
 
 
-def _value_dst(float_mir: MirFloatView, alloc: _Allocation, vid: ValueId) -> RegRef | BoolRegRef:
+def _value_dst(float_mir: MirFloatView, alloc: Allocation, vid: ValueId) -> RegRef | BoolRegRef:
     """The register a value's bank allocated for it: wide for a float-typed tap, boolean otherwise."""
     if vid in float_mir.operation_nodes:
         return RegRef(alloc.float_reg[vid])
     return BoolRegRef(alloc.bool_reg[vid])
 
 
-def _mir_operation(mir: Mir, vid: ValueId) -> MirOperation:
+def mir_operation(mir: Mir, vid: ValueId) -> MirOperation:
     node = mir.nodes[vid]
     assert isinstance(node, MirOperation)
     return node
 
 
-def _build_inline_op(
+def build_inline_op(
     mir: Mir,
     float_mir: MirFloatView,
     bool_mir: MirBoolView,
     vid: ValueId,
     issue_cycle: int,
-    alloc: _Allocation,
-    pool: dict[ValueId, _PooledConst],
+    alloc: Allocation,
+    pool: dict[ValueId, PooledConst],
 ) -> InlineScheduledOp:
     """Build one inline firing: operands resolved per bank, the single result written per its tapped port's bank."""
-    node = _mir_operation(mir, vid)
+    node = mir_operation(mir, vid)
     assert isinstance(node.operator, InlineHardwareOperator)
     operands = [
         _typed_operand(float_mir, bool_mir, operand, conditioner, alloc, pool)
@@ -97,15 +97,15 @@ def _build_inline_op(
     )
 
 
-def _build_pooled_op(
+def build_pooled_op(
     mir: Mir,
     float_mir: MirFloatView,
     bool_mir: MirBoolView,
     members: list[ValueId],
     sched: Schedule,
     inst_of: dict[ValueId, OperatorInstance],
-    alloc: _Allocation,
-    pool: dict[ValueId, _PooledConst],
+    alloc: Allocation,
+    pool: dict[ValueId, PooledConst],
     swap: dict[ValueId, bool],
 ) -> PooledScheduledOp:
     """
@@ -114,7 +114,7 @@ def _build_pooled_op(
     into its own bank's register.
     """
     leader = min(members)
-    node = _mir_operation(mir, leader)
+    node = mir_operation(mir, leader)
     operands = [
         _typed_operand(float_mir, bool_mir, operand, conditioner, alloc, pool)
         for operand, conditioner in zip(node.operands, node.operand_conditioners, strict=True)
@@ -128,7 +128,7 @@ def _build_pooled_op(
     permutation = node.operator.swap_output_permutation
 
     def tap_port(member: ValueId) -> int:
-        port = _mir_operation(mir, member).output_port
+        port = mir_operation(mir, member).output_port
         if not swapped:
             return port
         assert permutation is not None
@@ -138,7 +138,7 @@ def _build_pooled_op(
         PortWrite(
             port=tap_port(member),
             dst=_value_dst(float_mir, alloc, member),
-            conditioner=_mir_operation(mir, member).output_conditioner,
+            conditioner=mir_operation(mir, member).output_conditioner,
         )
         for member in sorted(members, key=tap_port)
     ]
@@ -151,12 +151,12 @@ def _build_pooled_op(
     )
 
 
-def _operand_signed(
+def operand_signed(
     float_mir: MirFloatView,
     vid: ValueId,
     sign: FloatSignControl,
-    alloc: _Allocation,
-    pool: dict[ValueId, _PooledConst],
+    alloc: Allocation,
+    pool: dict[ValueId, PooledConst],
 ) -> FloatOperand:
     node = float_mir.nodes[vid]
     if isinstance(node, MirFloatConst):
@@ -165,12 +165,12 @@ def _operand_signed(
     return FloatOperand(RegRef(alloc.float_reg[vid]), sign)
 
 
-def _build_outputs(
+def build_outputs(
     mir: Mir,
     float_mir: MirFloatView,
     bool_mir: MirBoolView,
-    alloc: _Allocation,
-    pool: dict[ValueId, _PooledConst],
+    alloc: Allocation,
+    pool: dict[ValueId, PooledConst],
 ) -> list[FloatOutputWire | BoolOutputWire]:
     outputs: list[FloatOutputWire | BoolOutputWire] = []
     for out in mir.outputs:
@@ -184,13 +184,13 @@ def _build_outputs(
             else:
                 outputs.append(FloatOutputWire(out.name, FloatOperand(RegRef(alloc.float_reg[out.value]), out.sign)))
         elif isinstance(out, MirBoolOutput):
-            outputs.append(BoolOutputWire(out.name, _bool_operand(bool_mir, out.value, alloc, out.inversion)))
+            outputs.append(BoolOutputWire(out.name, bool_operand(bool_mir, out.value, alloc, out.inversion)))
         else:
             assert False, f"unhandled MIR output {out!r}"
     return outputs
 
 
-def _build_terminator(terminator: MirTerminator, alloc: _Allocation) -> Terminator:
+def build_terminator(terminator: MirTerminator, alloc: Allocation) -> Terminator:
     match terminator:
         case MirJump(target=target):
             return Jump(target)
@@ -200,7 +200,7 @@ def _build_terminator(terminator: MirTerminator, alloc: _Allocation) -> Terminat
             return Ret()
 
 
-def _rebase_op(op: PooledScheduledOp, base: int) -> PooledScheduledOp:
+def rebase_op(op: PooledScheduledOp, base: int) -> PooledScheduledOp:
     if base == 0:
         return op
     return PooledScheduledOp(
@@ -212,7 +212,7 @@ def _rebase_op(op: PooledScheduledOp, base: int) -> PooledScheduledOp:
     )
 
 
-def _phi_arm_out(mir: Mir, phi_nodes: dict[ValueId, MirPhi], values: set[ValueId]) -> dict[int, frozenset[ValueId]]:
+def phi_arm_out(mir: Mir, phi_nodes: dict[ValueId, MirPhi], values: set[ValueId]) -> dict[int, frozenset[ValueId]]:
     """
     Per block, the phi-arm values live out of it (each read by the phi's install copy at the block's tail) -- a liveness
     input for both banks. The residual installs (which phi registers a block writes) are derived separately, per chosen
@@ -226,11 +226,11 @@ def _phi_arm_out(mir: Mir, phi_nodes: dict[ValueId, MirPhi], values: set[ValueId
     return {b: frozenset(s) for b, s in arm_out.items()}
 
 
-def _const_branch_conditions(mir: Mir, bool_mir: MirBoolView) -> dict[int, ValueId]:
+def const_branch_conditions(mir: Mir, bool_mir: MirBoolView) -> dict[int, ValueId]:
     """
     Per block, the constant branch condition it materializes at its tail. A block whose ``MirBranch`` tests a globally
     interned boolean constant has no condition register, so the constant is written into a bool register in the
-    branching block. The single source of this CFG-shape fact, shared by ``_block_has_install`` and the install fixpoint
+    branching block. The single source of this CFG-shape fact, shared by ``block_has_install`` and the install fixpoint
     seed (which must agree, or the monotonicity assert trips) and the allocator's materialization (which also needs the
     condition value to write).
     """
@@ -242,7 +242,7 @@ def _const_branch_conditions(mir: Mir, bool_mir: MirBoolView) -> dict[int, Value
     return conditions
 
 
-def _block_has_install(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) -> set[int]:
+def block_has_install(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) -> set[int]:
     """
     Blocks whose drained tail carries a phi-arm install (a float copy, a bool write, or a const branch materialization),
     which lengthens the block by one fetch step. Determinable from the CFG shape alone, before register assignment, so
@@ -252,13 +252,13 @@ def _block_has_install(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView)
     for phi in (*float_mir.phi_nodes.values(), *bool_mir.phi_nodes.values()):
         for pred, _value, _conditioner in phi.arms:
             has.add(pred)
-    has.update(_const_branch_conditions(mir, bool_mir))
+    has.update(const_branch_conditions(mir, bool_mir))
     return has
 
 
-def _build_const_pool(
+def build_const_pool(
     mir: MirFloatView, bool_operations: dict[ValueId, MirOperation] | None = None
-) -> tuple[list[float], dict[ValueId, _PooledConst]]:
+) -> tuple[list[float], dict[ValueId, PooledConst]]:
     """
     Build the immediate/ROM pool keyed by magnitude: every constant is stored as a nonnegative value, and its sign is
     folded into the consumer's (free) sign-control sideband, so a value and its negation collapse to a single entry.
@@ -294,7 +294,7 @@ def _build_const_pool(
         note(slot.live_out)
     values: list[float] = []
     magnitude_index: dict[float, int] = {}
-    pool: dict[ValueId, _PooledConst] = {}
+    pool: dict[ValueId, PooledConst] = {}
     for vid in ids:
         value = mir.const_nodes[vid].value
         if not math.isfinite(value):
@@ -306,11 +306,11 @@ def _build_const_pool(
             magnitude_index[magnitude] = index
             values.append(magnitude)
         negate = math.copysign(1.0, value) < 0.0 and mir.fmt.encode(magnitude) != 0
-        pool[vid] = _PooledConst(index, FloatSignControl(negate=negate))
+        pool[vid] = PooledConst(index, FloatSignControl(negate=negate))
     return values, pool
 
 
-def _tapped_wide_lanes(blocks: list[LirBlock]) -> set[tuple[OperatorInstance, int]]:
+def tapped_wide_lanes(blocks: list[LirBlock]) -> set[tuple[OperatorInstance, int]]:
     """The TAPPED wide output-port lanes (one write port each); a never-tapped module output gets no lane."""
     return {
         (op.inst, write.port)
@@ -321,8 +321,8 @@ def _tapped_wide_lanes(blocks: list[LirBlock]) -> set[tuple[OperatorInstance, in
     }
 
 
-def _build_inputs(
-    mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView, alloc: _Allocation
+def build_inputs(
+    mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView, alloc: Allocation
 ) -> list[FloatInputLoad | BoolInputLoad]:
     loads: list[FloatInputLoad | BoolInputLoad] = []
     for vid in mir.input_ids:

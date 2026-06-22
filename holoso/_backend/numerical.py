@@ -264,8 +264,9 @@ class NumericalSimulator(_Kernel):
                 )
             if not isinstance(block.terminator, Ret):
                 self._terminators[lir.term_pc(block)] = block.terminator
-        # A non-coalesced wide slot installs by a pc-gated copy -- early (before the boundary, like a phi copy) or at the
-        # boundary (gated on the accepted-output edge). A boolean slot always installs at the accepted boundary edge.
+        # A non-coalesced wide slot installs by a pc-gated copy -- early (before the boundary, like a phi copy) or at
+        # the boundary (gated on the accepted-output edge). A boolean slot always installs at the accepted boundary
+        # edge.
         for slot in lir.float_state_slots:
             if not slot.needs_copy:
                 continue
@@ -293,7 +294,9 @@ class NumericalSimulator(_Kernel):
                 return self._lir.block_base[target]
 
     def _apply(self, pc: int) -> None:
-        """The datapath for the cycle now at ``pc``: commit the landings due here, then sample the reads/installs here."""
+        """
+        The datapath for the cycle now at ``pc``: commit the landings due here, then sample the reads/installs here.
+        """
         for dst, value in self._pending.pop(pc, ()):
             self._write(dst, value)
         for event in self._op_events.get(pc, ()):

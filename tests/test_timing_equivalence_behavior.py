@@ -44,8 +44,12 @@ def _pair(fn, name: str):  # type: ignore[no-untyped-def]
     return short, long
 
 
-def _assert_bits_equal(short: holoso.NumericalSimulator, long: holoso.NumericalSimulator, *inputs) -> int:  # type: ignore[no-untyped-def]
-    """Run one transaction through both simulators and assert every output leaf is bit-identical; return the leaf count."""
+def _assert_bits_equal(  # type: ignore[no-untyped-def]
+    short: holoso.NumericalSimulator, long: holoso.NumericalSimulator, *inputs
+) -> int:
+    """
+    Run one transaction through both simulators and assert every output leaf is bit-identical; return the leaf count.
+    """
     out_short = short.run(*inputs)
     out_long = long.run(*inputs)
     assert len(out_short) == len(out_long), f"output arity differs: {len(out_short)} vs {len(out_long)}"

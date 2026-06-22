@@ -149,7 +149,8 @@ def test_cosim_const_branch(sim: str, config: OperatorCase) -> None:
     # terminator, landing at the wide boundary; the drain must not shrink it to the bool boundary or the branch reads
     # the condition one PC before it lands. The model crashes (KeyError) on the first transaction, but a stale-register
     # branch misdirect is a SILENT RTL miscompile only cosim discriminates (RTL vs model from one LIR). The white-box
-    # twin (test_schedule.py test_const_branch_install_block_keeps_the_wide_drain) pins the block stays at the wide drain.
+    # twin (test_schedule.py test_const_branch_install_block_keeps_the_wide_drain) pins the block stays at the wide
+    # drain.
     fmt = FloatFormat(6, 18)
     run_cosim(sim, const_branch_kernel, fmt, f"const_branch_{config.label}", ops=config.make_ops(fmt))
 
@@ -423,7 +424,8 @@ def test_cosim_overlap_div0_errpc(sim: str, config: OperatorCase) -> None:
     # M7 regression (review round 3, Codex P1): an error-bearing division whose writeback spills past a SHRUNK
     # terminator must still latch err_pc to its OWN step, not the redirected non-fall-through successor frame. The data
     # is correct regardless (model == RTL), so only this step-exact err_pc cosim catches the regression. White-box
-    # twin: test_schedule.py::test_overlap_keeps_error_op_diagnostic_latch_in_frame. See _modelref.overlap_div_err_kernel.
+    # twin: test_schedule.py::test_overlap_keeps_error_op_diagnostic_latch_in_frame. See
+    # _modelref.overlap_div_err_kernel.
     fmt = FloatFormat(6, 18)
     name = f"overlap_div_err_{config.label}"
     lir = build(lower_to_mir(optimize(lower(overlap_div_err_kernel)), config.make_ops(fmt)), name)

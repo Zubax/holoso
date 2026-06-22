@@ -8,21 +8,21 @@ from .._mir import Mir, MirBoolView, MirBranch, MirFloatView, MirPhi, MirRet
 from ._ir import *
 from ._portassign import assign_commutative_ports
 from ._schedule import resolve_pool
-from ._bankalloc import _actual_install_blocks, _layout_and_allocate
+from ._bankalloc import actual_install_blocks, layout_and_allocate
 from ._construct import (
-    _block_has_install,
-    _bool_operand,
-    _build_inline_op,
-    _build_inputs,
-    _build_outputs,
-    _build_pooled_op,
-    _build_terminator,
-    _const_branch_conditions,
-    _operand_signed,
-    _rebase_op,
-    _tapped_wide_lanes,
+    block_has_install,
+    bool_operand,
+    build_inline_op,
+    build_inputs,
+    build_outputs,
+    build_pooled_op,
+    build_terminator,
+    const_branch_conditions,
+    operand_signed,
+    rebase_op,
+    tapped_wide_lanes,
 )
-from ._layout import _install_inclusive_makespan, _layout_blocks
+from ._layout import install_inclusive_makespan, layout_blocks
 
 
 def build(mir: Mir, module_name: str) -> Lir:
@@ -48,11 +48,12 @@ def _assert_entry_dwell_safe(lir: Lir) -> None:
     cycle-0 write to a state register would be re-driven with stale inputs and corrupt the carried state. In-place state
     commit makes a producer that coalesces onto a slot register write that register directly -- an unconditional
     ``self.x = self.x | a`` (its OR/Select live-out) or an entry-block arm of a conditional update -- so the hazard is
-    real, not merely theoretical, and is prevented by the dwell floor in ``_schedule_with_overlap`` (the ``state_liveouts``
-    set, which includes both slot live-outs and the arm producers of any phi live-out, is held off cycle 0 in the entry
-    block). This assertion is the loud backstop on that floor: the dwell is invisible to BOTH validation paths (the cosim
-    bench never delays ``in_valid``; the model asserts it at once and keys cycle-0 ops at their read pc, never pc 0), so a
-    regression that let a coalesced result reach a state register on cycle 0 would otherwise corrupt state silently.
+    real, not merely theoretical, and is prevented by the dwell floor in ``schedule_with_overlap`` (the
+    ``state_liveouts`` set, which includes both slot live-outs and the arm producers of any phi live-out, is held off
+    cycle 0 in the entry block). This assertion is the loud backstop on that floor: the dwell is invisible to BOTH
+    validation paths (the cosim bench never delays ``in_valid``; the model asserts it at once and keys cycle-0 ops at
+    their read pc, never pc 0), so a regression that let a coalesced result reach a state register on cycle 0 would
+    otherwise corrupt state silently.
     """
     entry = lir.blocks[lir.entry]
     state_regs = {slot.reg for slot in lir.float_state_slots} | {slot.reg for slot in lir.bool_state_slots}
@@ -91,7 +92,7 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
     # shrinks its terminator below the drained boundary and spills its in-flight results into the successor, which
     # inherits the busy/landing residue. The +1-install drain keeps install-bearing blocks unshrunk, matching makespan.
     #
-    # The install set is computed to a fixpoint. ``_block_has_install`` marks a block install-bearing from the CFG shape
+    # The install set is computed to a fixpoint. ``block_has_install`` marks a block install-bearing from the CFG shape
     # (any phi arm originates in it), but a block whose every arm COALESCES onto the merged register installs nothing,
     # so that +1 drain (and overlap-ineligibility) is spurious. So: lay out and allocate with the conservative CFG set,
     # recompute the install set from the ACTUAL coalesced copies, and re-run until it stops shrinking. Convergence is by
@@ -100,16 +101,16 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
     # the monotonicity; the iteration count is bounded by the block count). Determinism is preserved: the allocator is
     # seed-fixed and the install set is rebuilt the same way each pass.
     #
-    # This install fixpoint NESTS a second one: each ``_layout_and_allocate`` round runs the per-bank phi-coalescing /
-    # coloring fixpoint in ``_coalesce_and_color``. Both are bounded and monotone -- the install set non-increasing here,
+    # This install fixpoint NESTS a second one: each ``layout_and_allocate`` round runs the per-bank phi-coalescing /
+    # coloring fixpoint in ``coalesce_and_color``. Both are bounded and monotone -- the install set non-increasing here,
     # the inner forbidden-merge set non-decreasing there -- so the composition terminates in at most block-count outer
     # rounds, each a bounded inner fixpoint. The coupling is one-way and cannot deadlock: a shrinking install set only
     # relieves register pressure, enabling more coalescing, never forbidding a merge the inner round already made.
-    const_branch_blocks = set(_const_branch_conditions(mir, bool_mir))
-    has_install_blocks = _block_has_install(mir, float_mir, bool_mir)
+    const_branch_blocks = set(const_branch_conditions(mir, bool_mir))
+    has_install_blocks = block_has_install(mir, float_mir, bool_mir)
     for _ in range(len(mir.blocks) + 1):
-        result = _layout_and_allocate(mir, float_mir, bool_mir, pool, has_install_blocks)
-        actual = _actual_install_blocks(result.alloc, const_branch_blocks)
+        result = layout_and_allocate(mir, float_mir, bool_mir, pool, has_install_blocks)
+        actual = actual_install_blocks(result.alloc, const_branch_blocks)
         assert actual <= has_install_blocks, "the coalesced-install fixpoint must not grow the install set"
         if actual == has_install_blocks:
             break
@@ -133,11 +134,11 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
         # port; every inline operator (boolean logic, the float<->bool casts) becomes an InlineScheduledOp. Each
         # issues as soon as its own operands have landed, with no barrier.
         ops = [
-            _build_pooled_op(mir, float_mir, bool_mir, members, sched, inst_of, alloc, const_pool, swap)
+            build_pooled_op(mir, float_mir, bool_mir, members, sched, inst_of, alloc, const_pool, swap)
             for _, members in sorted(sched.firings.items(), key=lambda kv: (sched.issue_cycle[kv[0]], kv[0]))
         ]
         inline_ops = [
-            _build_inline_op(mir, float_mir, bool_mir, vid, sched.issue_cycle[vid], alloc, const_pool)
+            build_inline_op(mir, float_mir, bool_mir, vid, sched.issue_cycle[vid], alloc, const_pool)
             for vid in sorted(
                 (v for v in sched.issue_cycle if v not in sched.inst_of),
                 key=lambda v: (sched.issue_cycle[v], v),
@@ -146,15 +147,15 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
         work_makespan = sched.makespan
         install = work_makespan + 1
         copies = [
-            FloatCopy(RegRef(c.dst), _operand_signed(float_mir, c.source, c.sign, alloc, const_pool), install)
+            FloatCopy(RegRef(c.dst), operand_signed(float_mir, c.source, c.sign, alloc, const_pool), install)
             for c in alloc.copies.get(block.id, [])
         ]
         bool_writes = [
-            BoolWrite(BoolRegRef(w.dst), _bool_operand(bool_mir, w.source, alloc, w.inversion), install)
+            BoolWrite(BoolRegRef(w.dst), bool_operand(bool_mir, w.source, alloc, w.inversion), install)
             for w in alloc.bool_writes.get(block.id, [])
         ]
         has_install = block.id in has_install_blocks
-        block_makespan = _install_inclusive_makespan(work_makespan, has_install)
+        block_makespan = install_inclusive_makespan(work_makespan, has_install)
         # The latch-free bool bank gives a branch condition exactly one cycle of slack: a bool result committing at the
         # makespan lands one step before the terminator's boundary read. The schedule's makespan covers every commit by
         # construction, so this is a tripwire against a future makespan-computation change only; the emitter-side
@@ -172,7 +173,7 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
                 inline_ops,
                 copies,
                 bool_writes,
-                _build_terminator(block.terminator, alloc),
+                build_terminator(block.terminator, alloc),
                 block_makespan,
                 # The terminator offset from the overlap layout: the drained boundary, or shrunk to the issue-side
                 # envelope when this block's in-flight results spill into single-predecessor successors.
@@ -180,9 +181,9 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
             )
         )
 
-    layout = _layout_blocks(mir, blocks)
+    layout = layout_blocks(mir, blocks)
     block_base, last_pc, min_ii = layout.block_base, layout.last_pc, layout.min_initiation_interval
-    flat_ops = [_rebase_op(op, block_base[block.id]) for block in mir.blocks for op in blocks[block.id].ops]
+    flat_ops = [rebase_op(op, block_base[block.id]) for block in mir.blocks for op in blocks[block.id].ops]
 
     # A coalesced slot's live-out tap resolves to the slot register itself (its operator wrote it directly, no copy); a
     # non-coalesced slot taps the live-out's own register, installed at ``install_cycle`` -- absolutized here by adding
@@ -193,7 +194,7 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
             slot.name,
             RegRef(alloc.float_slot_reg[slot.name]),
             slot.reset_value,
-            _operand_signed(float_mir, slot.live_out, slot.sign, alloc, const_pool),
+            operand_signed(float_mir, slot.live_out, slot.sign, alloc, const_pool),
             block_base[ret_block] + alloc.float_install[slot.name],
         )
         for slot in float_mir.state_slots
@@ -203,11 +204,11 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
             bslot.name,
             BoolRegRef(alloc.bool_slot_reg[bslot.name]),
             bool(bslot.reset_value),
-            _bool_operand(bool_mir, bslot.live_out, alloc, bslot.inversion),
+            bool_operand(bool_mir, bslot.live_out, alloc, bslot.inversion),
         )
         for bslot in bool_mir.state_slots
     ]
-    outputs = _build_outputs(mir, float_mir, bool_mir, alloc, const_pool)
+    outputs = build_outputs(mir, float_mir, bool_mir, alloc, const_pool)
     lir = Lir(
         module_name=module_name,
         instances=instances,
@@ -217,10 +218,10 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
             width=float_mir.fmt.width,
             nreg=max(1, alloc.nreg),
             nrd=max(1, sum(inst.operator.arity for inst in instances)),
-            nwr=max(1, len(_tapped_wide_lanes(blocks))),
+            nwr=max(1, len(tapped_wide_lanes(blocks))),
             nload=len(float_mir.input_ids),
         ),
-        inputs=_build_inputs(mir, float_mir, bool_mir, alloc),
+        inputs=build_inputs(mir, float_mir, bool_mir, alloc),
         ops=flat_ops,
         outputs=outputs,
         float_state_slots=float_state_slots,
@@ -232,10 +233,11 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
         bool_regfile=BoolRegFileLayout(nreg=alloc.nbreg),
         bool_state_slots=bool_state_slots,
     )
-    # A non-coalesced float slot's writeback fires read-first at ``state_copy_step``, at last_pc for a boundary install or
-    # below it for an early one. A boundary that collapsed below the install would drop the writeback and freeze the
-    # persistent state; the per-block ``term_offset <= wide drain`` invariant in ``_schedule_with_overlap`` is the
-    # matching guard for the opposite slip (a boundary install degrading into an early one). Backstop, not a live failure.
+    # A non-coalesced float slot's writeback fires read-first at ``state_copy_step``, at last_pc for a boundary install
+    # or below it for an early one. A boundary that collapsed below the install would drop the writeback and freeze the
+    # persistent state; the per-block ``term_offset <= wide drain`` invariant in ``schedule_with_overlap`` is the
+    # matching guard for the opposite slip (a boundary install degrading into an early one). Backstop, not a live
+    # failure.
     for slot in lir.float_state_slots:
         if slot.needs_copy:
             assert (

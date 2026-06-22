@@ -1,24 +1,20 @@
 """
-Shared carrier types and aliases for the LIR builder, referenced by more than one builder stage: the constant-pool
-entry, the wide/bool phi-arm installs, the full register allocation, the cross-block overlap layout, the coloring
-objective, and the steering-objective identity aliases. They sit at the base of the builder's internal dependency
-DAG (construct/coalesce -> layout -> bankalloc all import from here) to keep those stage modules acyclic.
+Shared carrier types for the LIR builder, referenced by more than one builder stage: the constant-pool entry, the
+wide/bool phi-arm installs, the full register allocation, the cross-block overlap layout, and the coloring objective.
+They sit at the base of the builder stages' dependency DAG (construct/coalesce -> layout -> bankalloc all import from
+here) to keep those stage modules acyclic.
 """
 
 from dataclasses import dataclass
 
 from .._operators import BoolInversion, FloatSignControl
 from .._util import ValueId
-from ._ir import OperatorInstance
 from ._schedule import Schedule
-
-type _Producer = OperatorInstance | str  # write-source identity for the steering objective (see ._regalloc)
-
-type _Port = tuple[OperatorInstance, int]  # read-port identity (instance + operand position) for the steering objective
+from ._regalloc import Producer, ReadPort
 
 
 @dataclass(frozen=True, slots=True)
-class _PooledConst:
+class PooledConst:
     """A constant's place in the magnitude pool: its index, plus the sign that recovers the original signed value."""
 
     index: int
@@ -26,7 +22,7 @@ class _PooledConst:
 
 
 @dataclass(frozen=True, slots=True)
-class _FloatArmInstall:
+class FloatArmInstall:
     """A wide phi-arm install at a predecessor's tail: destination register, source value, and the arm's folded sign."""
 
     dst: int
@@ -35,7 +31,7 @@ class _FloatArmInstall:
 
 
 @dataclass(frozen=True, slots=True)
-class _BoolArmInstall:
+class BoolArmInstall:
     """A boolean phi-arm install at a predecessor's tail: destination register, source value, and folded inversion."""
 
     dst: int
@@ -44,7 +40,7 @@ class _BoolArmInstall:
 
 
 @dataclass(frozen=True, slots=True)
-class _Allocation:
+class Allocation:
     """The register assignment: float/bool registers per value and slot, plus the per-block phi-arm installs."""
 
     float_reg: dict[ValueId, int]
@@ -54,12 +50,12 @@ class _Allocation:
     bool_reg: dict[ValueId, int]
     bool_slot_reg: dict[str, int]
     nbreg: int
-    copies: dict[int, list[_FloatArmInstall]]  # block -> wide phi-arm installs at its tail
-    bool_writes: dict[int, list[_BoolArmInstall]]  # block -> boolean phi-arm installs at its tail
+    copies: dict[int, list[FloatArmInstall]]  # block -> wide phi-arm installs at its tail
+    bool_writes: dict[int, list[BoolArmInstall]]  # block -> boolean phi-arm installs at its tail
 
 
 @dataclass(frozen=True, slots=True)
-class _OverlapLayout:
+class OverlapLayout:
     """
     The per-block schedule plus the install-inclusive makespan, the (possibly overlap-shrunk) terminator offset, and
     the spills each block receives -- the predecessor values landing in it past an overlapped terminator, mapped to
@@ -74,7 +70,7 @@ class _OverlapLayout:
 
 
 @dataclass(frozen=True, slots=True)
-class _ColorObjective:
+class ColorObjective:
     """
     One bank's steering inputs to quotient coloring, beyond the interference graph and pins: the deterministic movable
     order, the per-value consumer read ports and producers (the write-select objective), and the first freely
@@ -82,6 +78,6 @@ class _ColorObjective:
     """
 
     movable: list[ValueId]
-    consumer_ports: dict[ValueId, set[tuple[OperatorInstance, int]]]
-    producer_key: dict[ValueId, frozenset[_Producer]]
+    consumer_ports: dict[ValueId, set[ReadPort]]
+    producer_key: dict[ValueId, frozenset[Producer]]
     fresh_start: int

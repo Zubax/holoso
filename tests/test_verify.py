@@ -1034,9 +1034,9 @@ def test_inplace_loop_preheader_arm_is_dwell_safe() -> None:
 
 class _WriteOnlyDwellTenant:
     # Regression (Codex): an if-converted kernel where a temporary (``y or self._x``) lands as a gap tenant on the
-    # WRITE-ONLY ``_w`` slot's free register and is cycle-0 eligible -- a dwell hazard the live-out floor cannot see (the
-    # tenant is not a slot live-out). The validate-and-retry must demote ``_w`` to a copy-back, reserving its register so
-    # no tenant lands there; without it ``_assert_entry_dwell_safe`` trips at build time.
+    # WRITE-ONLY ``_w`` slot's free register and is cycle-0 eligible -- a dwell hazard the live-out floor cannot see
+    # (the tenant is not a slot live-out). The validate-and-retry must demote ``_w`` to a copy-back, reserving its
+    # register so no tenant lands there; without it ``_assert_entry_dwell_safe`` trips at build time.
     def __init__(self) -> None:
         self._x = False
         self._w = False
@@ -1133,7 +1133,8 @@ def test_inplace_multiarm_float_phi() -> None:
 class _LiveInFeedsAnotherSlotPhi:
     # Regression: slot ``x``'s live-in is the if-arm of slot ``w``'s phi. ``x``'s live-out must NOT coalesce in place --
     # the residual install of ``w``'s arm reads x's live-in at the predecessor tail where x's in-place write would land,
-    # which the install-free oracle cannot see (it crashed the colorer with an interfering co-assignment before the fix).
+    # which the install-free oracle cannot see (it crashed the colorer with an interfering co-assignment before the
+    # fix).
     def __init__(self) -> None:
         self.x = 0.0
         self.w = 0.0

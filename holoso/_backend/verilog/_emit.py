@@ -739,10 +739,12 @@ def _bool_writer_entries(
 
 
 def _wide_state_install_entry(lir: Lir, slot: FloatStateSlot) -> list[tuple[str, str]]:
-    """The slot register's live-out install, appended under the reset-else as the lowest-priority arm of its chain. A
+    """
+    The slot register's live-out install, appended under the reset-else as the lowest-priority arm of its chain. A
     coalesced slot has no install (its producing operator already writes the slot register); a non-coalesced one is
     installed read-first on its writeback step (``state_copy_step``, the absolute install PC -- which reduces to
-    ``LASTPC`` for a boundary install), out_ready-gated so a held boundary copies exactly once."""
+    ``LASTPC`` for a boundary install), out_ready-gated so a held boundary copies exactly once.
+    """
     if not slot.needs_copy:
         return []
     pcw = max(1, lir.initiation_interval.bit_length())
@@ -863,7 +865,7 @@ always @(posedge clk) begin
 def _emit_outputs(w: _Writer, lir: Lir) -> None:
     w("""
 assign in_ready  = (pc == 0);
-assign out_valid = (pc == LASTPC);  // the result is valid in the array on PRESENT; execution lags the fetch by FETCH_LAG
+assign out_valid = (pc == LASTPC);  // result valid on PRESENT; execution lags the fetch by FETCH_LAG
 assign err_pc    = err_pc_q;
 """)
     float_index = 0

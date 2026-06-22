@@ -185,7 +185,9 @@ class MirInterpreter:
         return env
 
     def _resolve_phis(self, block: MirBlock, previous: int | None, env: dict[ValueId, _Value]) -> None:
-        """Bind every phi in ``block`` as a parallel snapshot of the arm taken from ``previous`` (loop swaps need this)."""
+        """
+        Bind every phi in ``block`` as a parallel snapshot of the arm taken from ``previous`` (loop swaps need this).
+        """
         if not block.phis:
             return
         assert previous is not None, f"block {block.id} reached with phis but no predecessor (entry phi?)"

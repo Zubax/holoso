@@ -385,9 +385,11 @@ def test_read_only_attr_equality_does_not_poison_later_folds() -> None:
 
 
 class _HelperGuardedStateWrite:
-    """A called helper whose self-write hides behind a guard the reset snapshot would fold dead -- stale once the entry
+    """
+    A called helper whose self-write hides behind a guard the reset snapshot would fold dead -- stale once the entry
     method writes that guard at runtime. A reachability-folded self-write check prunes the dead write and wrongly
-    accepts the helper (then drops the write, diverging from Python); pure-syntactic detection must reject it."""
+    accepts the helper (then drops the write, diverging from Python); pure-syntactic detection must reject it.
+    """
 
     def __init__(self) -> None:
         self._flag = False  # snapshot False -> a reachability-folded check folds the guard dead and prunes the write...
@@ -411,8 +413,10 @@ def test_guarded_helper_state_write_is_rejected() -> None:
 
 
 class _PropertyShadowsDict:
-    """A class ``property`` whose name also has an instance ``__dict__`` entry: the data descriptor shadows the dict
-    slot, so a read of ``self._mode`` must resolve through the getter (True), not the snapshot value (False)."""
+    """
+    A class ``property`` whose name also has an instance ``__dict__`` entry: the data descriptor shadows the dict
+    slot, so a read of ``self._mode`` must resolve through the getter (True), not the snapshot value (False).
+    """
 
     @property
     def _mode(self) -> bool:
@@ -439,9 +443,11 @@ def test_property_shadowing_dict_entry_resolves_via_getter() -> None:
 
 
 class _PropertySetterWrite:
-    """A property with a setter, shadowed by a same-named ``__dict__`` entry. ``self.flag = x`` invokes the setter in
+    """
+    A property with a setter, shadowed by a same-named ``__dict__`` entry. ``self.flag = x`` invokes the setter in
     Python (descriptor precedence) but would be a plain state-slot store to the dead snapshot entry in the compiler --
-    a silent divergence, since the reader inlines the getter. The write must be rejected, not miscompiled."""
+    a silent divergence, since the reader inlines the getter. The write must be rejected, not miscompiled.
+    """
 
     @property
     def flag(self) -> bool:
@@ -478,8 +484,10 @@ class _DataDescriptor:
 
 
 class _DataDescriptorWrite:
-    """A custom (non-property) data descriptor shadowed by a __dict__ entry. Like the property setter, the descriptor
-    wins for read and write in Python; treating the shadow as a state slot would diverge, so the write is rejected."""
+    """
+    A custom (non-property) data descriptor shadowed by a __dict__ entry. Like the property setter, the descriptor
+    wins for read and write in Python; treating the shadow as a state slot would diverge, so the write is rejected.
+    """
 
     _flag = _DataDescriptor()
 
@@ -493,8 +501,10 @@ class _DataDescriptorWrite:
 
 
 class _DataDescriptorRead:
-    """A custom data descriptor that is only read. The write check never fires, so the read path must reject it -- its
-    getter is arbitrary code, not a stored value, and reading the dead __dict__ shadow as a state slot would diverge."""
+    """
+    A custom data descriptor that is only read. The write check never fires, so the read path must reject it -- its
+    getter is arbitrary code, not a stored value, and reading the dead __dict__ shadow as a state slot would diverge.
+    """
 
     _flag = _DataDescriptor()
 
@@ -521,8 +531,10 @@ def test_data_descriptor_read_is_rejected() -> None:
 
 
 class _GetterOverridingProperty(property):
-    """A ``property`` subclass whose ``__get__`` ignores ``fget``: Python reads via the overridden ``__get__`` (False),
-    so inlining ``fget`` (True) would silently diverge. Inlining is faithful only when ``__get__`` is property's own."""
+    """
+    A ``property`` subclass whose ``__get__`` ignores ``fget``: Python reads via the overridden ``__get__`` (False),
+    so inlining ``fget`` (True) would silently diverge. Inlining is faithful only when ``__get__`` is property's own.
+    """
 
     def __get__(self, instance, owner=None):  # type: ignore[override]
         return False
@@ -551,9 +563,11 @@ def _spoofed_getter(self) -> bool:  # type: ignore[no-untyped-def]  # getter sig
 
 
 class _FgetSpoofingProperty(property):
-    """A ``property`` subclass that leaves ``__get__`` ALONE (so Python reads via the real getter) but overrides
+    """
+    A ``property`` subclass that leaves ``__get__`` ALONE (so Python reads via the real getter) but overrides
     ``__getattribute__`` to return a different callable for ``fget`` -- so introspecting ``fget`` would inline code that
-    diverges from what Python runs. Defeats a ``__get__``-identity guard; only the exact type is trustworthy."""
+    diverges from what Python runs. Defeats a ``__get__``-identity guard; only the exact type is trustworthy.
+    """
 
     def __getattribute__(self, name):  # type: ignore[no-untyped-def]
         if name == "fget":
@@ -579,8 +593,10 @@ def test_property_subclass_spoofing_fget_is_rejected() -> None:
 
 
 class _GetterOverridingStaticmethod(staticmethod):
-    """A ``staticmethod`` subclass whose ``__get__`` returns a different callable than ``__func__``: Python calls the
-    overridden binding, so inlining ``__func__`` would diverge. Faithful only when ``__get__`` is staticmethod's own."""
+    """
+    A ``staticmethod`` subclass whose ``__get__`` returns a different callable than ``__func__``: Python calls the
+    overridden binding, so inlining ``__func__`` would diverge. Faithful only when ``__get__`` is staticmethod's own.
+    """
 
     def __get__(self, instance, owner=None):  # type: ignore[override]
         return lambda v: v * 3.0

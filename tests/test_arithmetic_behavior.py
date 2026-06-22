@@ -68,7 +68,9 @@ def _sim(fn, name: str) -> holoso.NumericalSimulator:  # type: ignore[no-untyped
 
 
 def _val(bits: int) -> FloatValue:
-    """An exact ZKF input value from a raw bit pattern (so extremes survive even when a Python float cannot hold them)."""
+    """
+    An exact ZKF input value from a raw bit pattern (so extremes survive even when a Python float cannot hold them).
+    """
     return FloatValue.from_bits(FMT, bits)
 
 
