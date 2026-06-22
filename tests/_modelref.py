@@ -16,7 +16,7 @@ from holoso._lir import Lir, build
 from holoso._mir import MirInterpreter, lower as lower_to_mir
 from holoso._type import FloatFormat
 from holoso._value import FloatValue
-from holoso._frontend._lower import _Path, _port_name
+from holoso._frontend._ast_support import _Path, _port_name
 
 type Vector = list[FloatValue | bool]
 

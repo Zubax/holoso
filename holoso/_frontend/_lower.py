@@ -3,37 +3,33 @@
 import ast
 import builtins
 import inspect
-import textwrap
 import types
-from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
-from .._errors import MissingIntrinsic, SourceLocation, SourceUnavailable, UnsupportedConstruct
+from .._errors import MissingIntrinsic, SourceLocation, UnsupportedConstruct
 from .._util import BlockId, ValueId
 from .._hir import *
 
-_Path = list[int | str]
+from ._ast_support import (
+    _Path,
+    _UNROLL_THRESHOLD,
+    _contains_walrus,
+    _leaf_targets,
+    _port_name,
+    _range_trip_count,
+    _scope_local_walrus_targets,
+    _state_port_name,
+    _statement_walrus_names,
+    _walrus_target_names,
+)
+from ._aggregate import _Aggregate, _Scalar, _StateAttr, _Value
+from ._scope import _ArmResult, _Scope, _parse_fndef
 
 _ABSENT = object()  # sentinel distinguishing a missing global from one explicitly bound to None during name resolution
 _NO_PARAMETER_ANNOTATION = object()
-
-# A static ``for`` loop with at most this many trips fully unrolls; a larger count is rejected (a counted back-edge
-# loop would need a runtime integer counter, which is not implemented -- use a ``while`` for a variable trip count).
-_UNROLL_THRESHOLD = 64
-
-
-def _range_trip_count(trips: range) -> int:
-    """
-    The number of iterations in a ``range`` as a Python integer. ``len(range(...))`` raises ``OverflowError`` once the
-    count exceeds a C ``ssize_t`` (e.g. ``range(10**40)``); this computes it with big integers so an enormous static
-    loop is cleanly rejected against the unroll threshold rather than crashing the compiler.
-    """
-    span = (trips.stop - trips.start) if trips.step > 0 else (trips.start - trips.stop)
-    return max(0, (span + abs(trips.step) - 1) // abs(trips.step))
 
 
 # numpy array constructors that take one array-like and preserve its elements: in this compile-time model the operand is
@@ -63,243 +59,6 @@ _KNOWN_INTRINSICS = frozenset(
         "pow",
     }
 )
-
-
-def _port_name(path: _Path) -> str:
-    """Map a returned leaf path to its output-port name, e.g. ``[0, "x"]`` -> ``out_0_x``."""
-    return "out" + "".join(f"_{key}" for key in path)
-
-
-def _state_port_name(slot: str) -> str:
-    """Map a public state slot to its observable port name, e.g. ``"y"`` -> ``state_y``, ``"x_0"`` -> ``state_x_0``."""
-    return f"state_{slot}"
-
-
-def _leaf_targets(target: ast.expr) -> Iterator[ast.expr]:
-    """Yield an assignment target's leaf targets, descending through tuple/list/starred unpacking."""
-    match target:
-        case ast.Starred(value=value):
-            yield from _leaf_targets(value)
-        case ast.Tuple(elts=elts) | ast.List(elts=elts):
-            for elt in elts:
-                yield from _leaf_targets(elt)
-        case _:
-            yield target
-
-
-def _contains_walrus(node: ast.AST) -> bool:
-    """Whether an expression subtree contains a walrus ``:=`` (the subset has no nested scope in expression position)."""
-    return any(isinstance(sub, ast.NamedExpr) for sub in ast.walk(node))
-
-
-def _walrus_target_names(node: ast.AST) -> set[str]:
-    """The target names of every walrus ``(name := value)`` in an expression subtree (a walrus target is always a plain
-    name -- Python forbids targeting an attribute or subscript)."""
-    return {
-        sub.target.id for sub in ast.walk(node) if isinstance(sub, ast.NamedExpr) and isinstance(sub.target, ast.Name)
-    }
-
-
-def _statement_walrus_names(stmt: ast.stmt) -> set[str]:
-    """
-    The walrus target names bound when ``stmt`` is reached: those in its OWN expressions (an ``if``/``while`` test, a
-    ``for`` iterable, an assignment/return value) but NOT in the bodies of a nested ``if``/``for``/``while`` (those are
-    scanned at their own reachability). Lowering binds a walrus target like any assignment, so the local-name and
-    reachability scans register these to stay in lockstep with it.
-    """
-    match stmt:
-        case ast.If(test=expr) | ast.While(test=expr) | ast.For(iter=expr):
-            return _walrus_target_names(expr)
-        case ast.Assign(value=expr) | ast.AugAssign(value=expr) | ast.Expr(value=expr):
-            return _walrus_target_names(expr)
-        case ast.AnnAssign(value=expr) | ast.Return(value=expr) if expr is not None:
-            return _walrus_target_names(expr)
-        case _:
-            return set()
-
-
-def _scope_local_walrus_targets(node: ast.AST) -> set[str]:
-    """
-    Every walrus target name bound in ``node``'s OWN scope, descending into nested statements/expressions but NOT into a
-    nested function/lambda/comprehension/class (a walrus there binds in that scope, not this one). Unlike the
-    reachability scans, this is purely syntactic: a walrus target is a function local throughout the body -- as in
-    Python -- even inside a dead or out-of-subset statement, so it shadows a same-named global everywhere.
-    """
-    names: set[str] = set()
-    for child in ast.iter_child_nodes(node):
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
-            # The body is a separate scope, but a nested def/lambda/class's default-argument, decorator, and base
-            # expressions execute in THIS scope, so a walrus in one of them binds an enclosing local (comprehensions
-            # are out of subset). The body itself is not descended into.
-            enclosing: list[ast.expr] = []
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                enclosing += [d for d in (*child.args.defaults, *child.args.kw_defaults) if d is not None]
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                enclosing += child.decorator_list
-            if isinstance(child, ast.ClassDef):
-                enclosing += child.bases
-            for expr in enclosing:
-                names |= _walrus_target_names(expr)
-            continue
-        if isinstance(child, ast.NamedExpr) and isinstance(child.target, ast.Name):
-            names.add(child.target.id)
-        names |= _scope_local_walrus_targets(child)
-    return names
-
-
-class _Value(ABC):
-    """
-    A compile-time lowering value: a single scalar HIR wire or an ordered aggregate of values. Aggregates (vectors,
-    matrices, tuples) are pure frontend bookkeeping over scalar registers -- per DESIGN.md they never exist as hardware
-    aggregates -- so they never enter HIR; only their scalar leaves do.
-    """
-
-    @abstractmethod
-    def walk(self, path: _Path) -> Iterator[tuple[_Path, ValueId]]:
-        """Yield ``(path, scalar)`` leaves row-major, extending ``path`` by the aggregate index at each level."""
-
-    def leaves(self) -> list[ValueId]:
-        return [vid for _, vid in self.walk([])]
-
-    def flatten(self) -> "_Aggregate":
-        """Collapse to a flat aggregate of all scalar leaves in row-major order (the ``.flatten()`` method)."""
-        return _Aggregate(tuple(_Scalar(vid) for vid in self.leaves()))
-
-    def output_leaves(self) -> list[tuple[_Path, ValueId]]:
-        """The (path, scalar) pairs naming this returned value's output ports; an aggregate uses its indexed paths."""
-        return list(self.walk([]))
-
-
-@dataclass(frozen=True, slots=True)
-class _Scalar(_Value):
-    id: ValueId
-
-    def walk(self, path: _Path) -> Iterator[tuple[_Path, ValueId]]:
-        yield list(path), self.id
-
-    def output_leaves(self) -> list[tuple[_Path, ValueId]]:
-        # A bare scalar return is out_0 (leaf position 0), not the empty-path "out", to match the multi-output and
-        # reference orderings; walking a lone scalar would otherwise yield the empty path.
-        return [([0], self.id)]
-
-
-@dataclass(frozen=True, slots=True)
-class _Aggregate(_Value):
-    items: tuple[_Value, ...]
-
-    def walk(self, path: _Path) -> Iterator[tuple[_Path, ValueId]]:
-        for index, item in enumerate(self.items):
-            yield from item.walk([*path, index])
-
-
-@dataclass(frozen=True, slots=True)
-class _StateAttr:
-    """
-    The scalar-slot decomposition of one instance attribute, derived from the reset snapshot: a scalar occupies a single
-    bare-named slot, a vector one indexed slot per element. It is the single source of an attribute's shape -- its slot
-    names, its typed reset values, and whether an assigned value must be a scalar or a same-length flat aggregate. The
-    element type lives in the typed ``resets`` (a :class:`BoolConst` reset marks a boolean attribute, a scalar only since
-    boolean vectors are not supported), so no separate type flag is carried.
-    """
-
-    is_vector: bool
-    slots: list[str]
-    resets: list[Const]
-
-    def accepts(self, value: _Value) -> bool:
-        """
-        Whether an assigned value matches this shape: a scalar attribute accepts only a scalar, a vector only a flat
-        aggregate of the same length. Checking the full shape -- not merely the leaf count -- keeps the assigned value
-        consistent with the per-element slot layout that the next transaction reconstructs from the reset snapshot.
-        """
-        if not self.is_vector:
-            return isinstance(value, _Scalar)
-        return (
-            isinstance(value, _Aggregate)
-            and len(value.items) == len(self.slots)
-            and all(isinstance(item, _Scalar) for item in value.items)
-        )
-
-    def compose(self, scalars: tuple[_Scalar, ...]) -> _Value:
-        """A scalar attribute is its single wire; a vector attribute is the aggregate of its per-element wires."""
-        return _Aggregate(scalars) if self.is_vector else scalars[0]
-
-
-@dataclass(frozen=True, slots=True)
-class _ArmResult:
-    """One branch arm's outcome: its final locals, persistent state, compile-time-integer bindings, and end block."""
-
-    env: dict[str, _Value]
-    state: dict[str, _Value]
-    static_ints: dict[str, int]
-    end_block: int
-
-
-@dataclass(frozen=True, slots=True)
-class _Scope:
-    """The per-function lowering state, captured and restored as a unit when a callee is inlined into a fresh scope."""
-
-    fn: types.FunctionType
-    env: dict[str, _Value]
-    static_ints: dict[str, int]
-    return_: _Value | None
-    instance: object | None
-    self_name: str | None
-    snapshot: dict[str, object]
-    state_order: list[str]
-    state_env: dict[str, _Value]
-    lines: list[str]
-    start: int
-    filename: str
-
-    @classmethod
-    def fresh(
-        cls,
-        fn: types.FunctionType,
-        env: dict[str, _Value],
-        lines: list[str],
-        start: int,
-        filename: str,
-        *,
-        context: "_Scope | None" = None,
-        self_name: str | None = None,
-    ) -> "_Scope":
-        """
-        A scope for lowering a callee: the given parameter bindings and source, with a fresh return slot and no
-        inherited loop-counter bindings. A pure function gets NO state context (``context`` is None). An instance method
-        passes the caller's scope as ``context`` to inherit its instance/snapshot/state -- so the method's
-        ``self.<attr>`` reads resolve against the same module -- with ``self_name`` bound to the method's own receiver.
-        """
-        return cls(
-            fn=fn,
-            env=env,
-            static_ints={},
-            return_=None,
-            instance=context.instance if context is not None else None,
-            self_name=self_name,
-            snapshot=context.snapshot if context is not None else {},
-            state_order=context.state_order if context is not None else [],
-            state_env=context.state_env if context is not None else {},
-            lines=lines,
-            start=start,
-            filename=filename,
-        )
-
-
-def _parse_fndef(fn: types.FunctionType) -> tuple[ast.FunctionDef, list[str], int, str]:
-    """Retrieve and parse a function's ``def`` node, returning its source lines, start line, and filename."""
-    try:
-        lines, start = inspect.getsourcelines(fn)
-    except (OSError, TypeError) as exc:
-        raise SourceUnavailable(
-            f"cannot retrieve source for {getattr(fn, '__name__', '?')!r}; "
-            "define it in an importable module (not a REPL/exec/lambda)"
-        ) from exc
-    module = ast.parse(textwrap.dedent("".join(lines)))
-    for node in module.body:
-        if isinstance(node, ast.FunctionDef) and node.name == fn.__name__:
-            return node, lines, start, inspect.getsourcefile(fn) or "<unknown>"
-    raise SourceUnavailable(f"could not locate a 'def {fn.__name__}' in the retrieved source")
 
 
 class _Lowerer:

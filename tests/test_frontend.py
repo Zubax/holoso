@@ -12,7 +12,7 @@ import pytest
 
 from holoso import MissingIntrinsic, UnsupportedConstruct
 from holoso._frontend import lower
-from holoso._frontend._lower import _port_name
+from holoso._frontend._ast_support import _port_name
 from holoso._hir import (
     BoolAnd,
     BoolConst,
