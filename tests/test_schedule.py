@@ -35,12 +35,13 @@ from holoso._lir import (
 )
 from holoso._lir._ir import (
     FETCH_LAG,
+    READ_FIRST_EDGE,
     boundary_step,
     dependency_edge,
+    inline_landing_cycle,
     install_landing,
     pooled_writeback_word,
     successor_local_cycle,
-    wide_landing_cycle,
 )
 from holoso._mir import (
     lower as lower_to_mir,
@@ -208,6 +209,61 @@ def test_overlap_shrinks_branch_terminator_below_drained_boundary(config: Operat
     assert shrunk, "no branch block shrank its terminator: cross-block overlap did not engage"
 
 
+def test_entry_branch_on_resident_condition_skips_the_wide_drain() -> None:
+    # Regression (terminator read-floor): an entry block that branches on a RESIDENT live-in condition -- here a
+    # persistent boolean state, the uart_rx / majority_voter entry shape -- shrinks its terminator to the issue-side
+    # envelope. The condition is resident from the block's first cycle, so the branch needs no drain; pinning the
+    # terminator to the wide drain instead would push every downstream block's base a cycle late, which the
+    # term_offset assertion below catches.
+    class _EntryStateBranch:
+        def __init__(self) -> None:
+            self._armed = False
+
+        def step(self, a, b):  # type: ignore[no-untyped-def]
+            if self._armed:  # the entry branches on the resident boolean state (its live-in)
+                r = a / b  # a non-speculatable arm keeps this a real branch, not an if-converted select
+            else:
+                r = a + b
+            self._armed = a > b
+            return r
+
+    lir = build(_run(_EntryStateBranch().step), "entry_state_branch")
+    entry = lir.blocks[lir.entry]
+    assert isinstance(entry.terminator, Branch)
+    assert not entry.ops and not entry.inline_ops  # the entry only branches on the resident state; it does no work
+    # The op-less entry rides the issue-side envelope floor (1), strictly below the wide drain (4) a pin would charge.
+    assert entry.term_offset == 1
+    assert entry.term_offset < boundary_step(entry.block_makespan, wide_resident=True)
+
+
+def test_resident_bound_inline_select_bypasses_the_writeback_latch() -> None:
+    # Regression (inline writeback latch -- the uart_rx block-leading select defect): a select is a combinational mux
+    # written into the register array directly, carrying no pooled-operator writeback latch, so its WIDE result lands at
+    # commit + FETCH_LAG + READ_FIRST_EDGE -- a cycle before a pooled wide result. Here the condition is a resident
+    # boolean state and both arms are resident (an input and the state itself), so the select issues at its block's
+    # first cycle; charging it the wide writeback latch would land its result a cycle late.
+    class _ResidentSelect:
+        def __init__(self) -> None:
+            self._armed = False
+
+        def step(self, c, d):  # type: ignore[no-untyped-def]
+            r = c if self._armed else d  # condition (state) and both arms are resident -> the select binds nothing
+            self._armed = c > d
+            return r
+
+    lir = build(_run(_ResidentSelect().step), "resident_select")
+    selects = [
+        (block, op) for block in lir.blocks for op in block.inline_ops if isinstance(op.operator, SelectOperator)
+    ]
+    assert len(selects) == 1
+    block, op = selects[0]
+    assert op.issue_cycle == 0  # resident operands impose no edge -> the select issues at the block's first cycle
+    base = lir.block_base[block.index]
+    landing = base + inline_landing_cycle(op.commit_cycle)
+    assert landing == base + op.commit_cycle + FETCH_LAG + READ_FIRST_EDGE  # inline: no writeback latch (else +1)
+    assert landing in lir.reg_liveness[op.write.dst]  # the result is live on its true (writeback-latch-free) landing
+
+
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 def test_overlap_spilled_result_lands_in_successor_frame(config: OperatorCase) -> None:
     # The overlap_spill_kernel corner (shared with test_cosim.py test_cosim_overlap_spill): the branch condition is an
@@ -312,7 +368,7 @@ def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase)
         for block in lir.blocks:
             for op in (*block.ops, *block.inline_ops):
                 for write in op.writes:
-                    pcs = lir.write_landing_pcs(block, write.dst, op.commit_cycle)
+                    pcs = lir.write_landing_pcs(block, op, write)
                     predicted.setdefault((type(write.dst).__name__, write.dst.index), set()).update(pcs)
                     multi_arm += len(pcs) > 1
         assert multi_arm > 0, f"{name}: no result spills into multiple arms -- the regression is vacuous"
@@ -361,9 +417,7 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes(config: Operator
         for op in (*block.ops, *block.inline_ops):
             for write in op.writes:
                 if isinstance(write.dst, RegRef):
-                    predicted.setdefault(write.dst.index, set()).update(
-                        lir.write_landing_pcs(block, write.dst, op.commit_cycle)
-                    )
+                    predicted.setdefault(write.dst.index, set()).update(lir.write_landing_pcs(block, op, write))
     sim = _Recorder(lir)
     actual: dict[int, set[int]] = {}
     for seed in [0.5, 1.5, 2.5, 0.25, 1.0]:  # in-domain seeds (the Newton iteration converges for x < 3)
@@ -600,7 +654,7 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late(config: Op
                 for write in op.writes:
                     if not isinstance(write.dst, RegRef):
                         continue
-                    landing_pcs = lir.write_landing_pcs(block, write.dst, op.commit_cycle)
+                    landing_pcs = lir.write_landing_pcs(block, op, write)
                     if len(landing_pcs) <= 1:
                         continue  # not a multi-arm spill
                     spilled_any = True
@@ -1921,22 +1975,29 @@ def test_zero_regalloc_effort_bypasses_annealing(monkeypatch) -> None:  # type: 
 
 
 def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
-    # Regression: the bool->float cast result lands at wide_landing_cycle(commit) -- NOT one cycle later. An off-by-one
-    # marked it past its true landing (and, for a boundary cast, past the initiation interval, so its report cell fell
-    # off the grid) and left a consumer's read cycle outside its residence. Here a multiply consumes the cast result.
+    # Regression: a bool->float cast is an inline combinational op written into the array directly, so its WIDE result
+    # lands at inline_landing_cycle(commit) = commit + FETCH_LAG + READ_FIRST_EDGE -- a cycle BEFORE a pooled wide
+    # result (no writeback latch). Charging it the wide writeback latch marks it past its true landing (and, for a
+    # boundary cast, past the initiation interval, so its report cell falls off the grid) and leaves a consumer's read
+    # cycle outside its residence. Here a multiply consumes the cast result.
     def f(x):  # type: ignore[no-untyped-def]
         return float(x > 0.0) * x
 
     lir = build(_run(f), "cast_mul")
     interval = lir.initiation_interval
-    casts = [
-        (lir.block_base[b.index], op) for b in lir.blocks for op in b.inline_ops if isinstance(op.write.dst, RegRef)
-    ]
+    casts = [(b, op) for b in lir.blocks for op in b.inline_ops if isinstance(op.write.dst, RegRef)]
     assert casts, "expected a bool->float cast result in the wide bank"
-    for base, op in casts:
-        landing = wide_landing_cycle(base + op.commit_cycle)
+    for block, op in casts:
+        base = lir.block_base[block.index]
+        landing = base + inline_landing_cycle(op.commit_cycle)
+        assert landing == base + op.commit_cycle + FETCH_LAG + READ_FIRST_EDGE  # inline: no writeback latch
         assert 1 <= landing <= interval  # within the rendered schedule grid, not one row past the boundary
-        assert landing in lir.reg_liveness[op.write.dst]  # live from its true landing (the off-by-one would miss it)
+        # The cast write lands at its inline landing, NOT the latched wide landing (commit+4): a bool->float cast is
+        # inline, so write_landing_pcs (via op_result_landing) must place it via inline_landing_cycle. Mis-dispatching
+        # it through the wide writeback latch would return base + commit + 4 here -- this is the discriminating guard,
+        # since reg_liveness alone is a union over the register's reuse and stays satisfied even with the late landing.
+        assert lir.write_landing_pcs(block, op, op.write) == [landing]
+        assert landing in lir.reg_liveness[op.write.dst]  # and it is live there
     cast_regs = {op.write.dst for _, op in casts}
     for fop in lir.ops:  # the consuming multiply must read the cast result within its residence (no late-def gap)
         for operand in fop.operands:

@@ -37,7 +37,8 @@ from .._lir import BoolInputLoad, FloatConstRef, FloatInputLoad, FloatOperand
 from .._lir import RegRef, ScheduledOp
 from .._lir import BoolRegRef, Lir
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
-from .._lir import copy_step_cycle, install_landing, operand_read_cycle, result_landing_cycle, scalar_type_of
+from .._lir import copy_step_cycle, install_landing, op_result_landing, operand_read_cycle
+from .._lir import scalar_type_of
 from .._operators import *
 from .._type import FloatFormat, LogicalPort
 
@@ -305,7 +306,7 @@ class NumericalSimulator(_Kernel):
             results = event.op.operator.evaluate(*[self._read(operand) for operand in event.op.operands])
             for write in event.op.writes:
                 result = results[write.port]
-                landing = result_landing_cycle(write.dst, event.commit_pc)
+                landing = op_result_landing(event.op.operator, write.dst, event.commit_pc)
                 if isinstance(write.dst, RegRef):
                     assert isinstance(result, FloatValue) and isinstance(write.conditioner, FloatSignControl)
                     self._pending.setdefault(landing, []).append((write.dst, write.conditioner.apply_value(result)))

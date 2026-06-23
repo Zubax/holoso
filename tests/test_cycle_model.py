@@ -161,13 +161,13 @@ _WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[l
     "majority_voter": (
         lambda: MajorityVoter().__call__,
         [[_T, _T, _T, _F, _F, _F], [_T, _T, _T, _T, _T, _T], [_T, _F, _T, _F, _T, _F], [_F, _T, _T, _T, _T, _T]],
-        19,
+        17,
     ),
     "recip_newton": (lambda: NewtonReciprocal().__call__, [[0.5], [1.0], [2.0], [1.7], [2.9], [0.35]], 244),
     "remainder": (
         lambda: remainder,
         [[1.0, 1.0], [7.0, 3.0], [1000.0, 1.0], [123.0, 4.0], [50.0, 7.0], [2.5, 2.5]],
-        382,
+        381,
     ),
     "octave_index": (lambda: octave_index, [[8.0], [0.1], [1.0], [32.0], [0.03], [-3.0]], 135),
 }

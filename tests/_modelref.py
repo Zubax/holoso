@@ -413,9 +413,10 @@ def overlap_drained_passthrough_kernel(x, y, z):  # type: ignore[no-untyped-def]
 def overlap_livein_branch_arm_kernel(x, y, z):  # type: ignore[no-untyped-def]
     """
     The wide chain ``w`` spills from the overlapping entry into an arm that ITSELF branches on a LIVE-IN condition ``c``
-    (computed in the entry block, not the arm) -- exercising the overlap-vs-drain interaction the plain dead-arm shape
-    never reaches (a spilled-into block that branches on a live-in keeps the conservative wide drain rather than
-    shrinking). Every divisor is structurally nonzero, so each diamond stays a real branch.
+    (computed in the entry block, not the arm) -- exercising the overlap interaction the plain dead-arm shape never
+    reaches: a block that receives a spill and branches on a RESIDENT live-in condition shrinks its terminator to the
+    issue-side envelope (the resident condition adds no read floor) rather than pinning to the wide drain. Every divisor
+    is structurally nonzero, so each diamond stays a real branch.
     """
     c = z > 2.0  # a live-in boolean condition, computed in the entry block (both arms reachable over the input range)
     w = ((((x * z + y) * z + y) * z + y) * z + y) * z + y  # wide chain, spills past the shrunk entry terminator

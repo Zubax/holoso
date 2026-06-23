@@ -125,10 +125,11 @@ def _state_copy_rhs(slot: FloatStateSlot) -> str:
 
 def _inline_fire_pc(lir: Lir, block_index: int, op: InlineScheduledOp) -> int:
     """
-    The fetch PC at which an inline firing's single PC-gated statement executes: the bank-true fire step (the commit
-    step for a boolean destination, one later for a wide one, aligned with the wide bank's write-latch enables).
+    The fetch PC at which an inline firing's single PC-gated statement executes: its combinational fire step, one
+    ``FETCH_LAG`` after the commit on either bank. An inline op drives its destination's write data combinationally, so
+    -- unlike a pooled lane -- it carries no writeback latch.
     """
-    return lir.block_base[block_index] + inline_fire_cycle(op.commit_cycle, isinstance(op.write.dst, RegRef))
+    return lir.block_base[block_index] + inline_fire_cycle(op.commit_cycle)
 
 
 def _inline_sign_wire(block_index: int, op_index: int, pos: int) -> str:

@@ -18,7 +18,6 @@ from .._mir import (
     MirNode,
     MirOperation,
     MirPhi,
-    MirRet,
     MirStateRead,
     MirStateSlot,
 )
@@ -74,9 +73,10 @@ def layout_and_allocate(
     bool_mir: MirBoolView,
     pool: Mapping[type[HardwareOperator], int],
     has_install_blocks: set[int],
+    state_copy_blocks: Mapping[int, bool],
 ) -> _LayoutAllocation:
     """Lay out the blocks (cross-block overlap) and color both register banks for the given per-block install set."""
-    overlap = schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks)
+    overlap = schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks, state_copy_blocks)
     block_sched = overlap.block_sched
     inst_of: dict[ValueId, OperatorInstance] = {}
     inst_count: dict[PooledHardwareOperator, int] = {}
@@ -443,7 +443,7 @@ def _allocate_bank(
     facts = _bank_liveness_facts(mir, block_sched, op_nodes, phi_nodes, values)
     op_block, op_commit, phi_block, reads = facts.op_block, facts.op_commit, facts.phi_block, facts.reads
 
-    ret_block = next(b.id for b in mir.blocks if isinstance(b.terminator, MirRet))
+    ret_block = mir.ret_block
     arm_out = phi_arm_out(mir, phi_nodes, values)
     boundary_base = bank.boundary_base(mir, values, ret_block)
 
@@ -452,7 +452,14 @@ def _allocate_bank(
         makespan=block_makespan,
         term_offset=block_term_offset,
         resident=frozenset({*view.input_ids, *state_read_nodes}),
-        op_landing={vid: bank.landing_cycle(commit) for vid, commit in op_commit.items()},
+        op_landing={
+            vid: (
+                bank.landing_cycle(commit)  # pooled: through the bank's writeback latch
+                if isinstance(op_nodes[vid].operator, PooledHardwareOperator)
+                else inline_landing_cycle(commit)  # inline: combinational array write, no writeback latch
+            )
+            for vid, commit in op_commit.items()
+        },
         op_block=op_block,
         phi_block=phi_block,
         arm_out=arm_out,

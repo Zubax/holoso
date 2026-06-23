@@ -12,8 +12,9 @@ values stay live across the whole loop body.
 Second, within each block every live value is given a half-open residence interval in that block's executing-step
 (hardware) frame -- the same frame as :attr:`Lir.reg_liveness` and the numerical model -- using the
 shared cycle helpers. A value resident from a predecessor (live-in, or a phi result) lands on the block's first step; a
-value defined by an in-block operator lands on its bank's landing cycle (the wide bank pays the writeback latch, the
-boolean bank only the read-first edge); a value that is live out of the block (or read by the block's boundary -- an
+value defined by an in-block POOLED operator lands on its bank's landing cycle (the wide bank pays the writeback latch,
+the boolean bank only the read-first edge), an INLINE operator's result a cycle earlier (it writes the array
+combinationally, no writeback latch); a value that is live out of the block (or read by the block's boundary -- an
 output, a branch condition, a state live-out, or a phi-arm copy) stays resident through the block boundary; and a phi
 result additionally occupies its register at the tail of every arm predecessor, where its install copy physically
 writes it one step before the boundary -- deliberately also foreclosing the phi sharing a register with its own arm
@@ -59,9 +60,9 @@ class BankLiveness:
     # layout uses -- so an install's copy step is exactly ``copy_step_cycle(makespan[block])``.
     makespan: dict[int, int]
     # Per-block terminator offset (the boundary step where values live-out / consumed-at-boundary must still reside).
-    # Equals the bank-aware ``boundary_step(makespan[block], wide_resident)`` under per-block draining; a separate field
-    # so cross-block overlap can shrink it below the drain without disturbing the install copy step, which stays keyed
-    # on ``makespan``.
+    # Under per-block draining it is the latest cycle a value lands in the block's frame, taken per op (bank- and
+    # inline-aware); a separate field so cross-block overlap can shrink it below the drain without disturbing the
+    # install copy step, which stays keyed on ``makespan``.
     term_offset: dict[int, int]
     resident: frozenset[ValueId]  # inputs and state live-ins: resident from the start, defined at the entry
     op_landing: dict[ValueId, int]  # op-result value -> its bank-true landing cycle in its def block (block-local)
@@ -72,7 +73,7 @@ class BankLiveness:
     arm_out: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> phi-arm values live out of it
     installs: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> phi dests installed at its tail
     # Cross-block overlap: per block, a predecessor value whose in-flight write SPILLS past the predecessor's shrunk
-    # terminator and lands in THIS block, mapped to its block-local landing cycle. The writeback latch fires
+    # terminator and lands in THIS block, mapped to its block-local landing cycle. The spilled write fires
     # unconditionally (the predecessor drove its write-enable before the redirect), so the value's register is occupied
     # in every successor frame it spills into -- from the block's first step through its landing -- whether or not the
     # value is dataflow-live here. Modeling it as resident-from-step-1 keeps a sibling arm where the value is DEAD from

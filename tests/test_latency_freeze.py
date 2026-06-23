@@ -37,14 +37,14 @@ from ._modelref import default_ops
 # filters, branchy logic, data-dependent loops, and a large kernel.
 _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "madd": (20, 20),
-    "signal_window": (13, 13),
+    "signal_window": (12, 12),
     "poly3": (35, 35),
     "iir1_lpf": (21, 21),
     "schmitt_trigger": (7, 7),
-    "majority_voter": (16, 21),
+    "majority_voter": (14, 19),
     "recip_newton": (21, 47),
-    "remainder": (50, 71),
-    "cordic_sincos": (150, 150),
+    "remainder": (49, 70),
+    "cordic_sincos": (149, 149),
     "ekf1_stateless": (129, 129),
 }
 

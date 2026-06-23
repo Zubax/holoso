@@ -291,6 +291,11 @@ class Mir:
     def entry(self) -> BlockId:
         return self.blocks[0].id
 
+    @property
+    def ret_block(self) -> BlockId:
+        """The id of the sole function-exit block (a kernel has exactly one ``MirRet``)."""
+        return next(block.id for block in self.blocks if isinstance(block.terminator, MirRet))
+
 
 class _MirBankView(ABC):
     """

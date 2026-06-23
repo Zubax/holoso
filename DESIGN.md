@@ -335,9 +335,11 @@ cast issues as soon as its own operands have landed, so a cross-domain chain (`f
 commit-to-issue spacing a dependence requires is not one constant -- it is derived pairwise from the producer's
 result-bank landing and the consumer's read mechanism by one shared rule over the cycle-accurate timing model. That
 model is built from four named primitives, never per-case constants: a global fetch lag (the microcode fetch leads the
-datapath), a per-bank read latch and writeback latch (the wide bank has both, the latch-free boolean bank neither), and
-a read-first edge (a register read sees the value written one step earlier). The operator's pipeline depth is
-orthogonal: a pooled instance has its stage count, an inline combinational op has latency 0. Every
+datapath), a per-bank read latch, a writeback latch carried by a POOLED wide operator's result path (an inline op
+writes the register array combinationally and carries none, so an inline wide result lands a cycle before a pooled one;
+the latch-free boolean bank has neither latch), and a read-first edge (a register read sees the value written one step
+earlier). The operator's pipeline depth is orthogonal: a pooled instance has its stage count, an inline combinational
+op has latency 0. Every
 landing/read/fire/writeback/boundary helper derives from this one set, so the two banks and the pooled/inline classes
 are uniform instances rather than hand-coded cases -- which is what lets boolean-logic and cast chains schedule
 back-to-back and shortens logic-dense kernels.
@@ -417,22 +419,27 @@ out_valid boundary, so a back-edge is a jump to a lower address; each block's te
 small `case(pc)` that, for a branch, reads the condition's 1-bit register.
 
 A block's terminator offset is the latest cycle a value still lands in its frame -- the boundary must cover every
-landing the block does not forward to a successor. A block that does in-frame boundary work (operations, a tail install,
-the input loads, the stateful-float `Ret`) pays a drained boundary; one whose boundary values are all already resident
-in predecessors pays none (the drain-only `Ret`s of loop/diamond kernels, whose body produces every output the `Ret`
-reads combinationally). The drain is bank-aware -- it charges the latched wide landing only when a wide value lands, a
-step earlier on the latch-free boolean bank.
+landing the block does not forward to a successor. It is taken per landing event, so it is both bank-aware (a pooled
+wide result lands through its writeback latch, a step after a boolean or inline result) and inline-aware (an inline op
+writes the array combinationally and lands a cycle before a pooled wide one). Three landings beyond the ops are charged
+explicitly: a phi/const tail install; a NON-coalesced state slot's read-first boundary copy, on its own bank (a
+coalesced slot writes its register in place and adds nothing); and the entry block's input loads. A block whose
+boundary values are all already resident in predecessors pays none (the drain-only `Ret`s of loop/diamond kernels,
+whose body produces every output the `Ret` reads combinationally).
 
 Cross-block software pipelining then shrinks the terminator offset down to the issue-side envelope -- the latest PC at
-which the block still drives a control word -- whenever every successor is single-predecessor, so a spill cannot reach a
-wrong path. In-flight results land past the terminator in the uniquely-reached successor frame, carried there by the
-fetch pipeline with no replicated microcode; the successor inherits the predecessor's per-instance busy residue and each
-spilled value's landing cycle, so it neither double-drives a busy instance nor reads a not-yet-landed operand. A
-multi-predecessor successor (merge, loop header, `Ret`) never receives a spill, so the carry converges in one
+which the block still drives a control word, raised to the branch condition's read floor (a produced condition's
+boolean landing, a spilled-in condition's carried landing, nothing for a condition resident from the block's first
+cycle) -- whenever every successor is single-predecessor, so a spill cannot reach a wrong path. A block branching on a
+resident live-in condition therefore shrinks fully rather than paying the wide drain. In-flight results land past the
+terminator in the uniquely-reached successor frame, carried there by the fetch pipeline with no replicated microcode;
+the successor inherits the predecessor's per-instance busy residue and each spilled value's landing cycle, so it
+neither double-drives a busy instance nor reads a not-yet-landed operand. A multi-predecessor successor (merge, loop
+header, `Ret`) never receives a spill, so the carry converges in one
 reverse-postorder pass and no overlap crosses a back-edge (a loop header, though multi-predecessor, still shrinks its
-own terminator when its body and exit successors are single-predecessor). Because whether a phi/const install is real
-depends on coalescing (decided later), the install set is computed to a monotone fixpoint that sheds spurious drains as
-coalescing frees registers.
+own terminator when its body and exit successors are single-predecessor). Because whether a phi/const install -- or a
+state slot's boundary copy -- is real depends on coalescing (decided later), the install set and the per-block
+state-copy drain are computed to a monotone fixpoint that sheds spurious drains as coalescing frees registers.
 
 Compile-time-known branch conditions fold to a single arm so the other is never lowered (no spurious state from an
 unreachable write): a literal, a read-only boolean attribute, a comparison of compile-time floats, and the
@@ -451,7 +458,7 @@ Aggressive cross-block overlap: the landed pipelining shrinks a terminator only 
 write-enable words stay in-block and no microcode is replicated. Pushing further -- letting the write-enable words spill
 past the terminator -- would shave the remaining per-block tail but needs the commit-side control fields replicated into
 every successor arm (each at its own offset) policed by the single-writer microcode validator (already in place).
-Overlap also stays off across a live-in branch condition and across any multi-predecessor edge.
+Overlap also stays off across any multi-predecessor edge.
 
 Empty merge-block elimination (the HIR merge-threading pass above) leaves two cases a real branch: an empty `else`-arm
 block (its predecessor is the diamond branch, so threading would create the forbidden branch-block phi arm) and a merge

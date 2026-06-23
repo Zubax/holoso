@@ -103,7 +103,7 @@ def render_schedule(lir: Lir) -> str:
             operand_labels = [_operand_label(operand) for operand in op.operands]
             firing_tip = _esc(_op_text(op))
             for write in op.writes:
-                landing_pcs = lir.write_landing_pcs(block, write.dst, op.commit_cycle)
+                landing_pcs = lir.write_landing_pcs(block, op, write)
                 tip = _esc(
                     f"{_col_label(write.dst)} 🠄 "
                     + op.inst.operator.render_output(write.port, write.conditioner, *operand_labels)
@@ -151,7 +151,7 @@ def render_schedule(lir: Lir) -> str:
         for bop in block.inline_ops:
             color = operator_colors[type(bop.operator)]
             read_cyc = operand_read_cycle(bop.operator, base_pc + bop.issue_cycle)
-            landing_pcs = lir.write_landing_pcs(block, bop.write.dst, bop.commit_cycle)
+            landing_pcs = lir.write_landing_pcs(block, bop, bop.write)
             tip = _esc(_inline_op_text(bop))
             dcol = bop.write.dst
             dord = col_ord[dcol]
