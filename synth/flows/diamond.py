@@ -42,10 +42,10 @@ class DiamondEcp5Flow(Flow):
             return False
         return (diamond.resolve().parent / "diamond_env").is_file() or find_tool("pnmainc") is not None
 
-    def prepare(self, result: SynthesisResult, extra_rtl: list[Path]) -> SynthArtifact:
+    def prepare(self, result: SynthesisResult) -> SynthArtifact:
         wrapper = build_ooc_wrapper(result)
         top = wrapper.top
-        src = assemble(result, wrapper, extra_rtl)
+        src = assemble(result, wrapper)
         verilog_paths = [sf.path for sf in src if sf.path.suffix == ".v"]
 
         lpf = SourceFile(Path(f"{top}.lpf"), _lpf(self.target_frequency_MHz))

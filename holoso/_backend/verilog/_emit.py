@@ -23,8 +23,11 @@ fabric-XOR inversion conditioner). Inline operators (boolean logic, the float<->
 statements rendered by the operator's own ``verilog_expr``.
 """
 
+import logging
 from dataclasses import dataclass
+from functools import cache
 from importlib import resources
+from importlib.resources.abc import Traversable
 from textwrap import dedent
 
 from ..._lir import *
@@ -32,10 +35,73 @@ from ..._operators import *
 from ..._type import is_wide_type
 from ._microcode import *
 
-_SUPPORT_FILES = {
-    name: resources.files(__package__).joinpath(name).read_text(encoding="utf-8")
-    for name in ("holoso_support.v", "holoso_support.vh")
-}
+_logger = logging.getLogger(__name__)
+
+# The shared support library ships as two files: the single self-contained module library ``holoso_support.v`` and the
+# function header ``holoso_support.vh`` that generated modules ``include``. The module library is assembled in memory
+# from the hand-written wrappers (``holoso_support_template.v``) plus every primitive under ``rtl/`` -- one subdirectory
+# per vendored source (refreshed by ``tools/update_support_rtl.py``), plus any locally-maintained subdirectories. Its
+# contents are invariant to the generated module, so one file serves a whole design.
+_TEMPLATE_FILE = "holoso_support_template.v"
+_HEADER_FILE = "holoso_support.vh"
+_MEGAFILE = "holoso_support.v"
+_MEGAFILE_COMPONENT_SOURCE_DIR = "rtl"
+_MANIFEST = "README.md"
+_SEPARATOR = "// " + "=" * 117
+
+
+def _iter_rtl(node: Traversable, prefix: str = "") -> list[tuple[str, str]]:
+    """Every ``.v`` under ``node`` as (path-relative-to-rtl, content), recursing into subdirectories."""
+    out: list[tuple[str, str]] = []
+    for child in node.iterdir():
+        rel = f"{prefix}{child.name}"
+        if child.is_dir():
+            out += _iter_rtl(child, f"{rel}/")
+        elif child.name.endswith(".v"):
+            out.append((rel, child.read_text(encoding="utf-8")))
+    return out
+
+
+def _megafile_header(rtl: Traversable) -> str:
+    lines = [
+        _SEPARATOR,
+        "// HOLOSO SUPPORT LIBRARY -- AUTO-GENERATED, DO NOT EDIT.",
+        "//",
+        f"// A Holoso-synthesized design needs only this file plus {_HEADER_FILE}.",
+        "// The same set of support files serves every Holoso-generated module in a design.",
+    ]
+    for name in sorted(child.name for child in rtl.iterdir() if child.is_dir()):
+        readme = rtl.joinpath(name).joinpath(_MANIFEST)
+        if readme.is_file():
+            lines += ["//", _SEPARATOR, "//"]
+            lines += [f"// {line}".rstrip() for line in readme.read_text(encoding="utf-8").strip().splitlines()]
+    lines += ["//", _SEPARATOR]
+    return "\n".join(lines)
+
+
+def _build_megafile(pkg: Traversable) -> str:
+    rtl = pkg.joinpath(_MEGAFILE_COMPONENT_SOURCE_DIR)
+    modules = _iter_rtl(rtl)
+    assert modules, "no .v files found under rtl/"
+    modules.sort(key=lambda rc: (rc[0].rsplit("/", 1)[-1].startswith("_"), rc[0]))
+    blocks = [_megafile_header(rtl), pkg.joinpath(_TEMPLATE_FILE).read_text(encoding="utf-8").strip()]
+    for rel, content in modules:
+        blocks.append(f"{_SEPARATOR}\n// EMBEDDED FILE BEGIN: {rel}")
+        blocks.append(content.strip())
+        blocks.append(f"// EMBEDDED FILE END: {rel}")
+    return "\n\n".join(blocks) + "\n"
+
+
+@cache
+def support_files() -> dict[str, str]:
+    """The shared support library that generated modules instantiate ``{filename: content}``; invariant, so cached."""
+    pkg = resources.files(__package__)
+    files = {
+        _MEGAFILE: _build_megafile(pkg),
+        _HEADER_FILE: pkg.joinpath(_HEADER_FILE).read_text(encoding="utf-8"),
+    }
+    _logger.info("Assembled support library: %s", ", ".join(f"{n} ({len(t.encode())} B)" for n, t in files.items()))
+    return files
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,7 +272,7 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_clocked(w, lir, read_port, port_consts, read_sets, write_sets, write_lists)
     _emit_outputs(w, lir)
     w("\nendmodule\n")
-    return VerilogOutput(verilog=w.render(), support_files=_SUPPORT_FILES)
+    return VerilogOutput(verilog=w.render(), support_files=support_files())
 
 
 def _emit_header(w: _Writer, lir: Lir) -> None:

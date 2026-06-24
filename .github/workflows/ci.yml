@@ -14,7 +14,6 @@ jobs:
     steps:
       - &checkout_step
         uses: actions/checkout@v7
-        with: { submodules: recursive }
       - run: nox -s tests typecheck black
 
   cosim_examples:

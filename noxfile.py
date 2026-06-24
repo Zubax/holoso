@@ -70,7 +70,7 @@ def typecheck(session: nox.Session) -> None:
 @nox.session
 def black(session: nox.Session) -> None:
     session.install("-e", ".[format]")
-    default = ("--check", "holoso", "tests", "synth", "examples", "noxfile.py")
+    default = ("--check", "holoso", "tests", "synth", "examples", "tools", "noxfile.py")
     session.run("python", "-m", "black", *(session.posargs or default))
 
 
@@ -102,10 +102,7 @@ def synth_examples(session: nox.Session) -> None:
         prefix = "python", "-m", "synth"
         flow_args = [arg for f in flows for arg in ("--flow", f)]
         name_args = ["--name", name] if name is not None else []
-        rtl_args = ["--rtl", "lib/kulibin/float/hdl"]
-        session.run(
-            *prefix, source, target, f"--wexp={wexp}", f"--wman={wman}", *name_args, *flow_args, *rtl_args, env=env
-        )
+        session.run(*prefix, source, target, f"--wexp={wexp}", f"--wman={wman}", *name_args, *flow_args, env=env)
 
     # Wide scalars require extra stages to close timings. If closure fails, feel free to throw in more stages here.
     op_integrator_wide_ecp5 = (

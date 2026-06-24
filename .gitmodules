@@ -1,4 +1,0 @@
-[submodule "lib/kulibin"]
-	path = lib/kulibin
-	url = https://github.com/Zubax/kulibin
-	branch = dev

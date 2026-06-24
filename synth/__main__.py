@@ -2,7 +2,7 @@
 Command-line entry point for the OOC synthesis-evaluation harness.
 Usage::
 
-    python -m synth <kernel.py> <expression> --wexp W --wman M --rtl PATH... --flow FLOW:freq=MHz[,OP.KNOB=VALUE...]
+    python -m synth <kernel.py> <expression> --wexp W --wman M --flow FLOW:freq=MHz[,OP.KNOB=VALUE...]
 
 Repeat ``--flow`` to run multiple flows, each with its own target frequency.
 Each flow may override operator knobs using fields such as ``fadd.stage_decode=1``.
@@ -85,13 +85,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--wexp", type=int, default=6, help="float exponent bits")
     parser.add_argument("--wman", type=int, default=18, help="float significand bits")
-    parser.add_argument(
-        "--rtl",
-        nargs="+",
-        required=True,
-        metavar="PATH",
-        help="extra RTL the DUT needs: .v files or directories globbed for *.v",
-    )
     parser.add_argument("--name", default=None, help="generated module name (automatic by default)")
     parser.add_argument(
         "--flow",
@@ -195,14 +188,6 @@ def _instantiate_operator(operator_cls: type, fmt: FloatFormat, overrides: dict[
         raise TypeError(f"cannot construct OpConfig operator {operator_cls.__name__}: {exc}") from exc
 
 
-def _collect_rtl(specs: list[str]) -> list[Path]:
-    rtl: list[Path] = []
-    for spec in specs:
-        path = Path(spec)
-        rtl += sorted(path.glob("*.v")) if path.is_dir() else [path]
-    return rtl
-
-
 def _load_target(kernel: Path, expression: str) -> object:
     """
     Resolve the synthesis target by evaluating ``expression`` in the kernel module's namespace. A bare function name
@@ -246,13 +231,12 @@ def _run_flow(
     ops: OpConfig,
     target: Any,
     name: str,
-    rtl: list[Path],
     directory: Path,
 ) -> SynthReport | _Failure:
     try:
         result = synthesize(target, ops=ops, name=name)
         result.write(directory / "holoso_result")
-        return flow.prepare(result, rtl).synthesize(directory)
+        return flow.prepare(result).synthesize(directory)
     except Exception as exc:  # one tool's failure must not stop the others
         return _Failure(type(flow).__name__, directory, str(exc))
 
@@ -290,7 +274,6 @@ def main() -> int:
 
     fmt = FloatFormat(wexp=args.wexp, wman=args.wman)
     name = args.name or re.sub(r"\W+", "_", args.expression).strip("_")  # sanitize the expression into a module name
-    rtl = _collect_rtl(args.rtl)
     target = _load_target(Path(args.kernel), args.expression)
 
     out_dir = BUILD_ROOT / name
@@ -315,7 +298,7 @@ def main() -> int:
                 operator = getattr(ops, field.name)
                 print(f"    {_BOLD}{_CYAN}{field.name:12}{_RESET}: {operator}")
             print(flush=True)
-            futures[executor.submit(_run_flow, flow, ops, target, name, rtl, directory)] = flow
+            futures[executor.submit(_run_flow, flow, ops, target, name, directory)] = flow
 
         for future in as_completed(futures):
             outcomes.append(future.result())

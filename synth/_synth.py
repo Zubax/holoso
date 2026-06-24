@@ -19,9 +19,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 BUILD_ROOT = REPO_ROOT / "build" / "synth"
 DEFAULT_TIMEOUT_S = float(os.environ.get("HOLOSO_SYNTH_TIMEOUT_S", "3600"))
 
-# Caller-supplied RTL is bundled under this subdirectory so a tool's library search can target just those files.
-RTL_SUBDIR = Path("rtl")
-
 
 def new_build_dir(prefix: str) -> Path:
     """Create and return a fresh build directory under ``BUILD_ROOT`` for one synthesis run."""
@@ -115,16 +112,15 @@ class SynthArtifact:
         return self.runner(target)
 
 
-def assemble(result: SynthesisResult, wrapper: OocWrapper, extra_rtl: list[Path]) -> list[SourceFile]:
-    """Bundle the wrapper, the generated module, the support files, and the caller-supplied RTL into one source set.
-
-    A generated module instantiates backend-provided support files plus additional RTL primitives (the Kulibin float
-    modules) that the caller supplies -- the harness does not go looking for them. Everything is bundled as in-memory
-    :class:`SourceFile`s so a recipe directory is self-contained.
+def assemble(result: SynthesisResult, wrapper: OocWrapper) -> list[SourceFile]:
     """
-    files = [SourceFile(Path(name), content) for name, content in result.verilog_output.support_files.items()] + [
+    Bundle the wrapper, the generated module, and the self-contained support files into one source set.
+
+    A generated module instantiates only support-library modules, all of which live inside the single bundled
+    ``holoso_support.v``; nothing else is needed. Everything is bundled as in-memory :class:`SourceFile`s so a
+    recipe directory is self-contained.
+    """
+    return [SourceFile(Path(name), content) for name, content in result.verilog_output.support_files.items()] + [
         SourceFile(Path(f"{result.module_name}.v"), result.verilog_output.verilog),
         SourceFile(Path(f"{wrapper.top}.v"), wrapper.verilog),
     ]
-    files += [SourceFile(RTL_SUBDIR / path.name, path.read_text(encoding="utf-8")) for path in extra_rtl]
-    return files

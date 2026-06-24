@@ -12,6 +12,7 @@ those classes are mapped through ZKF's zero/MIN_NORMAL boundary rule and canonic
 
 import math
 import os
+import tempfile
 from collections import deque
 from pathlib import Path
 from typing import Iterable
@@ -19,6 +20,7 @@ from typing import Iterable
 import cocotb
 import holoso
 import numpy as np
+from holoso._backend.verilog._emit import support_files
 from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, RisingEdge, Timer
 
@@ -36,10 +38,9 @@ def within(actual: float, expected: float, rtol: float, atol: float) -> bool:
 
 BENCH_DIR = Path(__file__).resolve().parent  # tests/hdl -- the cocotb test_dir for the benches and cosim driver
 REPO_ROOT = BENCH_DIR.parents[1]
-HDL_DIR = Path(holoso.__file__).resolve().parent / "_backend" / "verilog"  # support .v/.vh ship as package data
-HOLOSO_HDL = HDL_DIR / "holoso_support.v"
-KULIBIN_HDL_DIR = REPO_ROOT / "lib" / "kulibin" / "float" / "hdl"
+HDL_DIR = Path(holoso.__file__).resolve().parent / "_backend" / "verilog"
 TESTS_DIR = REPO_ROOT / "tests"
+SUPPORT_BUILD_DIR = REPO_ROOT / "build" / "holoso_support"  # where the assembled support library is materialized
 
 SIMULATORS = (os.environ["SIM"],) if "SIM" in os.environ else ("icarus", "verilator")
 
@@ -54,8 +55,36 @@ VERILATOR_BUILD_ARGS = [
 
 
 def sources() -> list[Path]:
-    """All RTL sources needed to elaborate any holoso_f* wrapper."""
-    return [HOLOSO_HDL] + sorted(KULIBIN_HDL_DIR.glob("*.v"))
+    """
+    The shared support library written out for the simulator: the single self-contained module file
+    holoso_support.v, assembled in memory exactly as it ships, which suffices to elaborate any holoso_f* wrapper.
+    The holoso_support.vh function header is resolved separately from HDL_DIR via the include path.
+    """
+    SUPPORT_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    for name, content in support_files().items():
+        if not name.endswith(".v"):
+            continue
+        path = SUPPORT_BUILD_DIR / name
+        _atomic_write(path, content)
+        paths.append(path)
+    return paths
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """
+    Write ``content`` to the shared support path atomically (write-temp + replace). Every holoso_f* bench rewrites
+    this same file, and a simulator build may read it while the next bench is rewriting it; a plain truncating write
+    is observed torn (iverilog fails to find the top module in a half-written file), so the swap must be atomic.
+    """
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def build_args(sim: str) -> list[str]:
