@@ -27,6 +27,8 @@ and why none are good enough for practical use.
 Holoso is an experimental project and as such it has no burden of backward compatibility.
 Breaking changes will occur regularly without notice until v1.0 is out.
 
+<img src="docs/hero.png" width="800px">
+
 ## Design
 
 Holoso implements essentially a separate programming language whose syntax is a strict subset of Python,
