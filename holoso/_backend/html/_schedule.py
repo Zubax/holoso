@@ -125,7 +125,7 @@ def render_schedule(lir: Lir) -> str:
                     endpoints.add((dord, write_cyc))
                     cell_group[(dord, write_cyc)] = group
                     for operand in op.operands:
-                        oord = col_ord[_operand_col(operand)]  # operands are read a read-latch cycle before the issue
+                        oord = col_ord[operand.source]  # operands are read a read-latch cycle before the issue
                         endpoints.add((oord, read_cyc))
                         edges.append((f"g{dord}_{write_cyc}", f"g{oord}_{read_cyc}", color, group))
                     chips_at.setdefault(write_cyc, []).append(
@@ -163,7 +163,7 @@ def render_schedule(lir: Lir) -> str:
                 endpoints.add((dord, write_cyc))
                 cell_group[(dord, write_cyc)] = group
                 for inline_operand in bop.operands:
-                    oord = col_ord[_operand_col(inline_operand)]
+                    oord = col_ord[inline_operand.source]
                     endpoints.add((oord, read_cyc))
                     edges.append((f"g{dord}_{write_cyc}", f"g{oord}_{read_cyc}", color, group))
                 chips_at.setdefault(write_cyc, []).append(
@@ -188,7 +188,7 @@ def render_schedule(lir: Lir) -> str:
         state_cells.add((landing, dst))
         endpoints.add((dord, landing))
         cell_group[(dord, landing)] = group
-        oord = col_ord[_operand_col(source)]
+        oord = col_ord[source.source]
         endpoints.add((oord, fire_step))
         edges.append((f"g{dord}_{landing}", f"g{oord}_{fire_step}", "state", group))  # JS resolves to --c-state
         chips_at.setdefault(landing, []).append(f"<span class='opf state' data-op='{group}'>{tip}</span>")
@@ -420,15 +420,6 @@ def _gc_class(ordinal: int, dv: _Dividers) -> str:
 def _oc_class(sidx: int, dv: _Dividers) -> str:
     """Class for an operator-stage cell in stage column ``sidx`` (with its right-border divider, if any)."""
     return "oc" + _border_suffix(sidx, dv.stage_thin, dv.stage_thick)
-
-
-def _operand_col(operand: FloatOperand | BoolOperand) -> ColKey:
-    """
-    The grid column an operand reads: a register or a constant (float or boolean). Boolean constants now occupy a
-    const-pool column too (``_bool_consts``), so every operand source anchors a column -- and thus a dataflow/install
-    edge -- exactly like a float source.
-    """
-    return operand.source
 
 
 def _operand_label(operand: FloatOperand | BoolOperand) -> str:

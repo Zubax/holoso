@@ -90,31 +90,6 @@ def _issue_side_envelope(
     return floor
 
 
-def _block_boundary(
-    bid: int,
-    makespan: int,
-    overlaps: bool,
-    envelope: int,
-    work_drain: int,
-    spill_landings: list[int],
-) -> int:
-    """
-    Derive a block's terminator offset from the classification facts the caller computes (it holds the schedule/CFG
-    context): the ISSUE-side ``envelope`` when the block overlaps its single-predecessor successors, else the drained
-    boundary ``max(work_drain, *spill_landings)``. The two regimes' physics live in DESIGN.md (cross-block pipelining
-    and the drained boundary); the invariant local to here is that the offset never exceeds the block's latched wide
-    landing ``boundary_step(makespan, wide_resident=True)``, asserted below.
-    """
-    if overlaps:
-        term_offset = envelope
-    else:
-        term_offset = max([work_drain, *spill_landings])
-    # Within the latched wide landing, a boundary state install placed at the offset stays a read-first last_pc install.
-    wide_cap = boundary_step(makespan, wide_resident=True)
-    assert term_offset <= wide_cap, f"block {bid}: term_offset {term_offset} exceeds the wide drain {wide_cap}"
-    return term_offset
-
-
 def _spill_local_cycle(bid: int, block_local_cycle: int, term_offset: int) -> int:
     """
     The successor-local cycle of a value spilling past block ``bid``'s shrunk terminator. The callers gate on
@@ -224,14 +199,16 @@ def schedule_with_overlap(
             work_drain = max(work_drain, boundary_step(sched.makespan, wide_resident=state_copy_blocks[bid]))
         if bid == mir.entry:
             work_drain = max(work_drain, 1)
-        term_offset = _block_boundary(
-            bid,
-            makespan,
-            overlaps=overlaps,
-            envelope=_issue_side_envelope(mir, float_mir, sched, block, livein_landing),
-            work_drain=work_drain,
-            spill_landings=list(livein_landing.values()),
-        )
+        # The terminator offset: the issue-side envelope when this block overlaps its single-predecessor successors,
+        # else the drained boundary max(work_drain, *spill landings). It never exceeds the block's latched wide landing
+        # (a boundary state install placed at the offset stays a read-first last_pc install); the two regimes' physics
+        # are in DESIGN.md.
+        if overlaps:
+            term_offset = _issue_side_envelope(mir, float_mir, sched, block, livein_landing)
+        else:
+            term_offset = max([work_drain, *livein_landing.values()])
+        wide_cap = boundary_step(makespan, wide_resident=True)
+        assert term_offset <= wide_cap, f"block {bid}: term_offset {term_offset} exceeds the wide drain {wide_cap}"
         block_term_offset[bid] = term_offset
         if overlaps:  # hand the spill residue to the (single-predecessor) successors this block uniquely reaches
             # Both the per-instance busy residue and the value landings cross the shrunk terminator into the successor
