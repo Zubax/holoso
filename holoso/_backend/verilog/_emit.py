@@ -38,10 +38,11 @@ from ._microcode import *
 _logger = logging.getLogger(__name__)
 
 # The shared support library ships as two files: the single self-contained module library ``holoso_support.v`` and the
-# function header ``holoso_support.vh`` that generated modules ``include``. The module library is assembled in memory
-# from the hand-written wrappers (``holoso_support_template.v``) plus every primitive under ``rtl/`` -- one subdirectory
-# per vendored source (refreshed by ``tools/update_support_rtl.py``), plus any locally-maintained subdirectories. Its
-# contents are invariant to the generated module, so one file serves a whole design.
+# function header ``holoso_support.vh`` that generated modules ``include``. Both live under ``rtl/`` together with every
+# primitive they bundle: the hand-written wrappers (``holoso_support_template.v``) and the header sit at the top, while
+# each vendored source occupies its own subdirectory (refreshed by ``tools/update_support_rtl.py``), alongside any
+# locally-maintained subdirectories. The module library is assembled in memory and is invariant to the generated
+# module, so one file serves a whole design.
 _TEMPLATE_FILE = "holoso_support_template.v"
 _HEADER_FILE = "holoso_support.vh"
 _MEGAFILE = "holoso_support.v"
@@ -81,10 +82,11 @@ def _megafile_header(rtl: Traversable) -> str:
 
 def _build_megafile(pkg: Traversable) -> str:
     rtl = pkg.joinpath(_MEGAFILE_COMPONENT_SOURCE_DIR)
-    modules = _iter_rtl(rtl)
+    # The hand-written wrappers lead; exclude the template from the glob so it is not also embedded as a module.
+    modules = [(rel, text) for rel, text in _iter_rtl(rtl) if rel != _TEMPLATE_FILE]
     assert modules, "no .v files found under rtl/"
     modules.sort(key=lambda rc: (rc[0].rsplit("/", 1)[-1].startswith("_"), rc[0]))
-    blocks = [_megafile_header(rtl), pkg.joinpath(_TEMPLATE_FILE).read_text(encoding="utf-8").strip()]
+    blocks = [_megafile_header(rtl), rtl.joinpath(_TEMPLATE_FILE).read_text(encoding="utf-8").strip()]
     for rel, content in modules:
         blocks.append(f"{_SEPARATOR}\n// EMBEDDED FILE BEGIN: {rel}")
         blocks.append(content.strip())
@@ -98,7 +100,7 @@ def support_files() -> dict[str, str]:
     pkg = resources.files(__package__)
     files = {
         _MEGAFILE: _build_megafile(pkg),
-        _HEADER_FILE: pkg.joinpath(_HEADER_FILE).read_text(encoding="utf-8"),
+        _HEADER_FILE: pkg.joinpath(_MEGAFILE_COMPONENT_SOURCE_DIR).joinpath(_HEADER_FILE).read_text(encoding="utf-8"),
     }
     _logger.info("Assembled support library: %s", ", ".join(f"{n} ({len(t.encode())} B)" for n, t in files.items()))
     return files
