@@ -20,7 +20,7 @@ from typing import Iterable
 import cocotb
 import holoso
 import numpy as np
-from holoso._backend.verilog._emit import support_files
+from holoso._backend.verilog._support import support_files
 from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, RisingEdge, Timer
 
