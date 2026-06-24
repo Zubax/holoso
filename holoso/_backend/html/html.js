@@ -6,7 +6,7 @@
     var data = __DATA__;
     var edges = data.edges;          // [writeCellId, operandCellId, color, operationGroup]
     var columns = data.columns;      // label per grid column, indexed by (cell index - 1)
-    var constants = data.constants;  // { "c0": "1.0", ... }
+    var constants = data.constants;  // { "c0": "1.0", ..., "T": "True", "F": "False" } float + boolean const values
     var liveness = data.liveness;    // { "<columnLabel>": [[start, end], ...] } live-row intervals, keyed by full label
     var arrows = data.arrows;        // [{ from, to, lane, tip, cond }] margin control transfers
 
@@ -277,7 +277,7 @@
             return;
         }
         var clk = cell.parentNode.cells[0].textContent.trim();
-        if (label.charAt(0) === "c") {
+        if (constants[label] !== undefined) {  // a constant column (float cX or boolean T/F): show its value
             cell.title = label + " = " + constants[label];
         } else {
             var cycle = clk === "in" ? 0 : parseInt(clk, 10);
