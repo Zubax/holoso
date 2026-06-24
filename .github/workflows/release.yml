@@ -38,18 +38,49 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          STATUS=$(curl -sS -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/holoso/$VERSION/json")
-          case "$STATUS" in
-            200)
-              echo "PyPI already has holoso $VERSION."
-              echo "exists=true" >> "$GITHUB_OUTPUT"
-              ;;
-            404)
-              echo "PyPI does not have holoso $VERSION; publishing."
-              echo "exists=false" >> "$GITHUB_OUTPUT"
-              ;;
-            *) echo "::error::PyPI returned HTTP $STATUS"; exit 1 ;;
-          esac
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+
+          version = os.environ["VERSION"]
+          url = "https://pypi.org/simple/holoso/"
+          request = urllib.request.Request(url, headers={"Accept": "application/vnd.pypi.simple.v1+json"})
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  payload = json.load(response)
+          except urllib.error.HTTPError as ex:
+              if ex.code == 404:
+                  exists = False
+              else:
+                  print(f"::error::PyPI returned HTTP {ex.code}", file=sys.stderr)
+                  raise SystemExit(1) from ex
+          except urllib.error.URLError as ex:
+              print(f"::error::PyPI request failed: {ex.reason}", file=sys.stderr)
+              raise SystemExit(1) from ex
+          except json.JSONDecodeError as ex:
+              print(f"::error::PyPI returned invalid JSON: {ex}", file=sys.stderr)
+              raise SystemExit(1) from ex
+          else:
+              if not isinstance(payload, dict):
+                  print("::error::PyPI returned an unexpected Simple API response.", file=sys.stderr)
+                  raise SystemExit(1)
+              versions = payload.get("versions")
+              if not isinstance(versions, list) or not all(isinstance(v, str) for v in versions):
+                  print("::error::PyPI returned an unexpected Simple API response.", file=sys.stderr)
+                  raise SystemExit(1)
+              exists = version in versions
+
+          if exists:
+              print(f"PyPI already has holoso {version}.")
+          else:
+              print(f"PyPI does not have holoso {version}; publishing.")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              print(f"exists={str(exists).lower()}", file=out)
+          PY
 
       - name: Build package
         if: steps.pypi.outputs.exists == 'false'
