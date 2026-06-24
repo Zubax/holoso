@@ -16,6 +16,9 @@ retry them until success.
 Given a trade-off between performance and simplicity, always choose simplicity.
 Clear designs are easier to verify, maintain, and refactor, and they are more likely to be correct.
 
+Write only minimal comments that add rationale, high-level context, or non-obvious implications.
+Avoid comments that merely describe what the code does or restate what is already evident from the type system.
+
 ### Reset strategy
 
 Use synchronous active-high reset for stream control only: validity flags, state-machine state, and other control

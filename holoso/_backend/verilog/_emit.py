@@ -1,6 +1,6 @@
 """
-Render a scheduled :class:`Lir` into a synthesizable Verilog ZISC module, plus access to the shared ``holoso_support``
-HDL that the generated module instantiates.
+Render a scheduled :class:`Lir` into a synthesizable Verilog ZISC module that instantiates the shared support library
+(assembled by :mod:`._support`).
 
 The controller is a microcode ROM (see :mod:`._microcode`): one pre-decoded VLIW control word per step, stored in a
 (BRAM-inferable) ROM read through a 3-stage fetch (a PC latch, the array read, and the BRAM output register) so the
@@ -24,18 +24,13 @@ statements rendered by the operator's own ``verilog_expr``.
 """
 
 from dataclasses import dataclass
-from importlib import resources
 from textwrap import dedent
 
 from ..._lir import *
 from ..._operators import *
 from ..._type import is_wide_type
 from ._microcode import *
-
-_SUPPORT_FILES = {
-    name: resources.files(__package__).joinpath(name).read_text(encoding="utf-8")
-    for name in ("holoso_support.v", "holoso_support.vh")
-}
+from ._support import support_files
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,7 +201,7 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_clocked(w, lir, read_port, port_consts, read_sets, write_sets, write_lists)
     _emit_outputs(w, lir)
     w("\nendmodule\n")
-    return VerilogOutput(verilog=w.render(), support_files=_SUPPORT_FILES)
+    return VerilogOutput(verilog=w.render(), support_files=support_files())
 
 
 def _emit_header(w: _Writer, lir: Lir) -> None:

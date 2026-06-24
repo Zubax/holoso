@@ -543,8 +543,13 @@ register file or emitting constant-load micro-instructions are noted alternative
 Each operator instance carries its own parameters and float format, fixed at construction from the `OpConfig`. Every
 instantiation lists every hardware parameter explicitly (including defaults), so it is self-describing and turns a
 param-name mismatch into a loud elaboration error. The wrapper does not derive latency; it takes `LATENCY` for sideband
-alignment and forwards it to the wrapped implementation, whose source is the reference for stage counts. The
-`support_files` map is the authoritative manifest for auxiliary HDL shipped with a module.
+alignment and forwards it to the wrapped implementation, whose source is the reference for stage counts.
+
+Support library. The `support_files` map is the authoritative set of auxiliary HDL shipped with a module: a single
+self-contained `holoso_support.v` plus the `holoso_support.vh` function header that generated modules `include`. The
+`.v` is assembled in memory, invariant to the generated module, from the hand-written operator wrappers
+and every third-party module under the vendored RTL set. This enables the end application to introduce all RTL
+dependencies by adding a single large `holoso_support.v` to the synthesis input.
 
 ### Numerical model
 

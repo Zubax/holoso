@@ -32,6 +32,13 @@ Unlike most tools in this domain, Holoso is trivial to set up and get started wi
 
 Clone the repo and install: `cd holoso && pip install -e .`
 
+Synthesizing a kernel with `holoso.synthesize(...).write(out_dir)` produces a self-contained set of files: the generated
+module, a single `holoso_support.v` support library together with its `holoso_support.vh` header, a cocotb testbench,
+and an HTML schedule report. The support library bundles the upstream Zubax Kulibin float primitives, so nothing else
+has to be fetched to simulate or synthesize the result. Maintainers refresh those vendored primitives with
+`tools/update_support_rtl.py`; each source's provenance and license live in `holoso/_backend/verilog/rtl/<source>/README.md`
+(e.g. `rtl/kulibin/README.md`).
+
 Come back later.
 
 ## Verification

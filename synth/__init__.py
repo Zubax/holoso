@@ -2,11 +2,12 @@
 Out-of-context (OOC) synthesis-evaluation harness for Holoso-generated modules.
 
 The public surface is what this module re-exports below. Concrete flows are imported per tool so pulling in one
-does not require the others; the caller supplies the DUT's RTL dependencies (e.g. the Kulibin float primitives)::
+does not require the others. A generated module's only dependency is the bundled support library, so the flow
+needs nothing beyond the synthesis result::
 
     from synth.flows.yosys import YosysEcp5Flow, Ecp5Device
     result: SynthesisResult = ...  # See holoso API
-    artifact = YosysEcp5Flow(device=Ecp5Device(), target_frequency_MHz=100.0).prepare(result, extra_rtl)
+    artifact = YosysEcp5Flow(device=Ecp5Device(), target_frequency_MHz=100.0).prepare(result)
     report = artifact.synthesize()
     print(report.fmax_MHz, report.slack_ns, report.resources["DSP"].used)
 

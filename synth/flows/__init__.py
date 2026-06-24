@@ -3,7 +3,6 @@ Tool-specific synthesis flows for the OOC evaluation harness, plus the abstract 
 """
 
 from abc import ABC, abstractmethod
-from pathlib import Path
 
 from holoso import SynthesisResult
 
@@ -22,8 +21,8 @@ class Flow(ABC):
         """Whether the underlying tool(s) can be found (PATH, /opt, /usr, /home)."""
 
     @abstractmethod
-    def prepare(self, result: SynthesisResult, extra_rtl: list[Path]) -> SynthArtifact:
+    def prepare(self, result: SynthesisResult) -> SynthArtifact:
         """
-        Build the OOC wrapper and emit a self-contained recipe whose ``synthesize`` runs the flow.
-        ``extra_rtl`` are the additional Verilog files the DUT needs.
+        Build the OOC wrapper and emit a self-contained recipe whose ``synthesize`` runs the flow. The generated
+        module's only dependency is the bundled support library, so no external RTL is required.
         """

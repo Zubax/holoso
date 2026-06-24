@@ -11,7 +11,7 @@ from holoso import SynthesisResult
 
 from .._detect import find_tool, require_tool
 from .._ooc import build_ooc_wrapper
-from .._synth import RTL_SUBDIR, CommandSpec, ResourceUse, SourceFile, SynthArtifact, SynthReport, assemble, run_logged
+from .._synth import CommandSpec, ResourceUse, SourceFile, SynthArtifact, SynthReport, assemble, run_logged
 from . import Flow
 
 _SCRIPT = "synth.ys"
@@ -42,10 +42,10 @@ class YosysEcp5Flow(Flow):
     def available(self) -> bool:
         return find_tool("yosys") is not None and find_tool("nextpnr-ecp5") is not None
 
-    def prepare(self, result: SynthesisResult, extra_rtl: list[Path]) -> SynthArtifact:
+    def prepare(self, result: SynthesisResult) -> SynthArtifact:
         wrapper = build_ooc_wrapper(result)
         top = wrapper.top
-        src = assemble(result, wrapper, extra_rtl)
+        src = assemble(result, wrapper)
         script = SourceFile(Path(_SCRIPT), _yosys_script(top, result.module_name))
 
         nextpnr_args: list[str] = [
@@ -80,14 +80,13 @@ class YosysEcp5Flow(Flow):
 
 
 def _yosys_script(top: str, dut_module: str) -> str:
-    # Read only the files we generate; pull the instantiated primitives from the bundled rtl/ libdir on demand.
-    libdir = RTL_SUBDIR.as_posix()
+    # The support library is self-contained, so every instantiated module is already in scope after these reads.
     return "\n".join(
         [
             "read_verilog -I . holoso_support.v",
             f"read_verilog -I . {dut_module}.v",
             f"read_verilog -I . {top}.v",
-            f"hierarchy -check -top {top} -libdir {libdir}",
+            f"hierarchy -check -top {top}",
             # Retiming underperforms on many OOC targets today, apparently around the fmul DSP/packer boundary.
             # Revisit this if future Yosys/nextpnr versions or RTL changes make retiming consistently beneficial.
             # ABC9 also appears to be sucky at least on ECP5.

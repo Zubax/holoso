@@ -39,10 +39,10 @@ class VivadoFlow(Flow):
     def available(self) -> bool:
         return find_tool("vivado") is not None
 
-    def prepare(self, result: SynthesisResult, extra_rtl: list[Path]) -> SynthArtifact:
+    def prepare(self, result: SynthesisResult) -> SynthArtifact:
         wrapper = build_ooc_wrapper(result)
         top = wrapper.top
-        src = assemble(result, wrapper, extra_rtl)
+        src = assemble(result, wrapper)
         verilog_paths = [sf.path for sf in src if sf.path.suffix == ".v"]
 
         period_ns = 1000.0 / self.target_frequency_MHz

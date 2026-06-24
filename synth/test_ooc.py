@@ -2,8 +2,6 @@
 End-to-end checks for the OOC synthesis-evaluation harness.
 """
 
-from pathlib import Path
-
 import pytest
 
 from holoso import synthesize, SynthesisResult, FloatFormat
@@ -15,8 +13,6 @@ from synth.flows.vivado import VivadoFlow
 from synth.flows.yosys import YosysEcp5Flow
 
 FMT = FloatFormat(wexp=8, wman=24)  # 32-bit ports
-REPO_ROOT = Path(__file__).resolve().parents[1]
-KULIBIN_HDL = sorted((REPO_ROOT / "lib" / "kulibin" / "float" / "hdl").glob("*.v"))
 
 
 def kern(a: float, b: float) -> float:
@@ -75,7 +71,7 @@ def _assert_sane(report: SynthReport, flow: str) -> None:
 
 def test_yosys_ecp5_end_to_end() -> None:
     wrapper = build_ooc_wrapper(KERN)
-    report = YosysEcp5Flow(target_frequency_MHz=100.0).prepare(KERN, KULIBIN_HDL).synthesize()
+    report = YosysEcp5Flow(target_frequency_MHz=100.0).prepare(KERN).synthesize()
     _assert_sane(report, "yosys-ecp5")
     # Out of context: no IO pads, so the bounded primary IO is the only boundary.
     assert report.resources["TRELLIS_IO"].used == 0
@@ -86,14 +82,14 @@ def test_yosys_ecp5_end_to_end() -> None:
 
 def test_yosys_ecp5_wide_selectors_synthesize() -> None:
     # A kernel whose selectors are multi-bit must still elaborate and route.
-    report = YosysEcp5Flow(target_frequency_MHz=100.0).prepare(WIDE, KULIBIN_HDL).synthesize()
+    report = YosysEcp5Flow(target_frequency_MHz=100.0).prepare(WIDE).synthesize()
     _assert_sane(report, "yosys-ecp5")
     assert report.resources["TRELLIS_IO"].used == 0
 
 
 @requires_diamond
 def test_diamond_ecp5_end_to_end() -> None:
-    report = DiamondEcp5Flow(target_frequency_MHz=100.0).prepare(KERN, KULIBIN_HDL).synthesize()
+    report = DiamondEcp5Flow(target_frequency_MHz=100.0).prepare(KERN).synthesize()
     _assert_sane(report, "diamond-ecp5")
     # The muxed wrapper bounds the pin count, so Diamond's PIO usage stays small and the design fits real pins.
     pio = report.resources.get("PIO")
@@ -102,7 +98,7 @@ def test_diamond_ecp5_end_to_end() -> None:
 
 @requires_vivado
 def test_vivado_end_to_end() -> None:
-    report = VivadoFlow(target_frequency_MHz=100.0).prepare(KERN, KULIBIN_HDL).synthesize()
+    report = VivadoFlow(target_frequency_MHz=100.0).prepare(KERN).synthesize()
     _assert_sane(report, "vivado")
     assert report.resources["Slice LUTs"].used > 0
     assert report.resources["Slice Registers"].used > 0
