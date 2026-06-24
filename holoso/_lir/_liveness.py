@@ -31,7 +31,6 @@ bank or the 1-bit boolean bank) and receives the symmetric interference adjacenc
 from dataclasses import dataclass, field
 
 from .._util import ValueId
-from ._ir import copy_step_cycle
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,13 +55,10 @@ class BankLiveness:
     blocks: list[int]
     entry: int
     succ: dict[int, list[int]]
-    # Block makespan, INCLUSIVE of the +1 install step when the block carries any install -- the same value the
-    # layout uses -- so an install's copy step is exactly ``copy_step_cycle(makespan[block])``.
-    makespan: dict[int, int]
     # Per-block terminator offset (the boundary step where values live-out / consumed-at-boundary must still reside).
     # Under per-block draining it is the latest cycle a value lands in the block's frame, taken per op (bank- and
-    # inline-aware); a separate field so cross-block overlap can shrink it below the drain without disturbing the
-    # install copy step, which stays keyed on ``makespan``.
+    # inline-aware); a separate field so cross-block overlap can shrink it below the drain without disturbing an
+    # install's fire step, which the caller stamps per install in ``installs``.
     term_offset: dict[int, int]
     resident: frozenset[ValueId]  # inputs and state live-ins: resident from the start, defined at the entry
     op_landing: dict[ValueId, int]  # op-result value -> its bank-true landing cycle in its def block (block-local)
@@ -71,7 +67,10 @@ class BankLiveness:
     reads: dict[int, list[tuple[ValueId, int]]] = field(default_factory=dict)  # block -> [(value, read cycle)]
     boundary_users: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> boundary-read values
     arm_out: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> phi-arm values live out of it
-    installs: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> phi dests installed at its tail
+    # block -> {phi dest installed at its tail: the install's block-local FIRE step}. The fire step is per install, not
+    # per block: a register-source copy fires at its copy step, a sourceless const one read-first edge earlier, so its
+    # destination register is occupied from the true (earlier) write cycle and a tenant cannot be clobbered.
+    installs: dict[int, dict[ValueId, int]] = field(default_factory=dict)
     # Cross-block overlap: per block, a predecessor value whose in-flight write SPILLS past the predecessor's shrunk
     # terminator and lands in THIS block, mapped to its block-local landing cycle. The spilled write fires
     # unconditionally (the predecessor drove its write-enable before the redirect), so the value's register is occupied
@@ -147,9 +146,9 @@ def compute_interference(bank: BankLiveness) -> dict[ValueId, set[ValueId]]:
 
     for block in bank.blocks:
         boundary = bank.term_offset[block]
-        installed = bank.installs.get(block, frozenset())
+        installed = bank.installs.get(block, {})
         inflight = bank.inflight_defs.get(block, {})
-        live_set = live.live_in[block] | defs[block] | installed | inflight.keys()
+        live_set = live.live_in[block] | defs[block] | installed.keys() | inflight.keys()
         # A value's residence in this block: it lands on the block's first step when it is resident, a phi result, or a
         # live-in carried from a predecessor; on its operator's landing cycle when defined here; and on the install
         # step (one before the boundary) when its only presence is a phi install at this block's tail. It dies on its
@@ -161,9 +160,7 @@ def compute_interference(bank: BankLiveness) -> dict[ValueId, set[ValueId]]:
             if vid in bank.op_block and bank.op_block[vid] == block and vid not in live.live_in[block]:
                 w = bank.op_landing[vid]
             elif vid in installed and vid not in live.live_in[block] and vid not in defs[block]:
-                # The install fires on the copy step of the block's install-inclusive makespan, one step before the
-                # boundary (see the ``makespan`` field contract).
-                w = copy_step_cycle(bank.makespan[block])
+                w = installed[vid]  # the install's own fire step (per install: copy-class later, const-class earlier)
             else:
                 w = 1
             write_at[vid] = w

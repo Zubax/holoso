@@ -32,13 +32,15 @@ def _value_word_and_landing(mir: Mir, float_mir: MirFloatView, vid: ValueId, iss
     return word, landing
 
 
-def install_inclusive_makespan(work_makespan: int, has_install: bool) -> int:
+def install_inclusive_makespan(work_makespan: int, has_copy_install: bool) -> int:
     """
-    The block makespan inclusive of its tail install: an install-bearing block fires its pc-gated phi/slot copies one
-    cycle past its last work commit, so its effective makespan is one higher. The single owner of this ``+1`` so the
-    overlap layout's boundary derivation and the per-block LirBlock makespan cannot disagree on it.
+    The block makespan inclusive of its tail install: a block with a register-source COPY install fires that copy one
+    cycle past its last work commit (to read-first its source), so its effective makespan is one higher. A const-only
+    tail is inline-class and adds no step, so it does not raise the makespan. The single owner of this ``+1`` so the
+    overlap layout's boundary derivation and the per-block LirBlock makespan cannot disagree on it (the dual of the
+    per-install ``install_issue_cycle``).
     """
-    return work_makespan + (1 if has_install else 0)
+    return work_makespan + (1 if has_copy_install else 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,7 +130,7 @@ def schedule_with_overlap(
     float_mir: MirFloatView,
     bool_mir: MirBoolView,
     pool: Mapping[type[HardwareOperator], int],
-    has_install_blocks: set[int],
+    has_install_blocks: Mapping[int, bool],
     state_copy_blocks: Mapping[int, bool],
 ) -> OverlapLayout:
     """
@@ -193,16 +195,19 @@ def schedule_with_overlap(
         )
         block_sched[bid] = sched
         has_install = bid in has_install_blocks
-        makespan = install_inclusive_makespan(sched.makespan, has_install)
+        has_copy_install = has_install_blocks.get(bid, False)
+        makespan = install_inclusive_makespan(sched.makespan, has_copy_install)
         block_makespan[bid] = makespan
         targets = succ[bid]
         overlaps = bool(targets) and not has_install and all(pred_count[target] == 1 for target in targets)
         # The drained boundary is the latest cycle a value LANDS in this block's frame, taken per op so it is both
         # bank-aware AND inline-aware: a pooled result lands through its bank's writeback latch, an inline result writes
         # the array combinationally and lands a cycle earlier. Three landings are INVISIBLE to the op schedule and are
-        # added explicitly: (1) a phi/const tail install lands one fetch-pipeline past the work
-        # makespan (``boundary_step(makespan, wide)``, ``makespan`` install-inclusive); (2) a NON-coalesced state slot's
-        # read-first boundary copy lands at ``boundary_step(sched.makespan, bank)`` -- its source is among the op
+        # added explicitly: (1) a phi/const tail install -- a register-source COPY lands at the wide writeback boundary
+        # ``boundary_step(makespan, wide)`` (``makespan`` install-inclusive, one past the work), while a SOURCELESS
+        # const install is inline-class and lands a cycle earlier at the latch-free combinational landing
+        # ``inline_landing_cycle(work)``, paying neither the +1 step nor the writeback latch; (2) a NON-coalesced state
+        # slot's read-first boundary copy lands at ``boundary_step(sched.makespan, bank)`` -- its source is among the op
         # landings, but the copy adds its bank's fetch-pipeline; ``state_copy_blocks`` carries the Ret blocks that have
         # one (mapped to the wide-vs-bool bank), decided by the coalescing fixpoint -- a coalesced slot writes its
         # register in place and needs no copy, so it is absent; (3) the entry's input loads land on cycle 1.
@@ -210,8 +215,10 @@ def schedule_with_overlap(
             (_value_word_and_landing(mir, float_mir, vid, issue)[1] for vid, issue in sched.issue_cycle.items()),
             default=0,
         )
-        if has_install:
+        if has_copy_install:
             work_drain = max(work_drain, boundary_step(makespan, wide_resident=True))
+        elif has_install:
+            work_drain = max(work_drain, inline_landing_cycle(sched.makespan))
         if bid in state_copy_blocks:
             work_drain = max(work_drain, boundary_step(sched.makespan, wide_resident=state_copy_blocks[bid]))
         if bid == mir.entry:

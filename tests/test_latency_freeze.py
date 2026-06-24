@@ -42,10 +42,15 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "iir1_lpf": (21, 21),
     "schmitt_trigger": (7, 7),
     "majority_voter": (14, 19),
-    "recip_newton": (21, 47),
+    "recip_newton": (20, 46),
     "remainder": (49, 70),
     "cordic_sincos": (149, 149),
     "ekf1_stateless": (129, 129),
+    # Branchy kernels whose boolean/float live-outs install literal constants on the normal path -- the inline-class
+    # const-install timing (no source-sample edge, no +1 step) lands each within the work makespan rather than at the
+    # copy-pipeline boundary, shrinking every downstream block base.
+    "uart_rx": (6, 164),
+    "uart_tx": (8, 142),
 }
 
 _SPEC_BY_NAME = {spec.name: spec for spec in SPECS}

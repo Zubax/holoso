@@ -427,6 +427,18 @@ coalesced slot writes its register in place and adds nothing); and the entry blo
 boundary values are all already resident in predecessors pays none (the drain-only `Ret`s of loop/diamond kernels,
 whose body produces every output the `Ret` reads combinationally).
 
+A tail install is classified by whether it reads a register source. A register-source copy (a phi arm that is an input,
+a cross-block value, or another register) must sample its source one step past the work makespan to read it first, so it
+fires at the copy step and lands at the wide writeback boundary -- the +1 install step. A SOURCELESS install of a literal
+constant (a phi-arm const arm, or a const branch condition materialized at the tail) has nothing to sample: a wide
+constant is a combinational wire, a boolean one a literal, so it fires inline-class at the combinational step within the
+work makespan and lands one read-first edge later at the latch-free combinational landing -- two cycles earlier than the
+copy pipeline, paying neither the +1 step nor the writeback latch, on either bank. So a const-only tail block drains to
+that inline landing rather than the wider copy boundary; the recovered cycles shrink every downstream block base (the
+boolean live-out resets of a UART receiver, for instance, land within their block instead of two cycles past it). The
+register-allocator residence occupies each install's destination from its own fire step -- earlier for a const -- so a
+tenant cannot be clobbered by the earlier write.
+
 Cross-block software pipelining then shrinks the terminator offset down to the issue-side envelope -- the latest PC at
 which the block still drives a control word, raised to the branch condition's read floor (a produced condition's
 boolean landing, a spilled-in condition's carried landing, nothing for a condition resident from the block's first

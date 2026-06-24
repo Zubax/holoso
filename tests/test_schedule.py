@@ -527,17 +527,20 @@ def test_entry_state_liveout_producer_is_dwell_guarded() -> None:
 
 
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
-def test_const_branch_install_block_keeps_the_wide_drain(config: OperatorCase) -> None:
+def test_const_branch_install_block_drains_to_its_inline_landing(config: OperatorCase) -> None:
     # Regression (fuzz-found B1 miscompile): a constant branch condition formed by DIVISION escapes the
     # frontend's AST-level reachability fold (which evaluates only +,-,* of literals), so the HIR const-folder reduces
     # it to a BoolConst that if-conversion refuses -- leaving an EMPTY const-branch block (the condition install + a
-    # branch, no float content). That condition install is a pc-gated copy landing at the WIDE boundary, so the
-    # bank-aware drain must NOT shrink the block to the bool boundary, or the terminator reads the condition one PC
-    # before it lands. Crash-before: KeyError (model) / stale branch read (RTL); pass-after: bit-exact vs the reference.
+    # branch, no float content). The condition is a literal, so its tail bool write is SOURCELESS (inline-class): it
+    # fires at the combinational step and lands one read-first edge later, at the latch-free landing within the work
+    # makespan -- and the block must drain to exactly that landing, where the terminator then reads the condition the
+    # following step. The drain must neither shrink below it (terminator reads a stale condition -- the original B1 bug)
+    # nor pay the wider copy/writeback boundary. Crash-before: KeyError (model) / stale branch read (RTL); pass-after:
+    # bit-exact vs the reference.
     lir = build(_run(const_branch_kernel, config.make_ops(FMT)), f"const_branch_{config.label}")
-    # Structural teeth: the surviving const-branch block branches on a constant materialized by a tail bool write, so
-    # it must drain at the WIDE boundary (where that pc-gated install lands), not the bool boundary. Pins the drain
-    # itself, not only the output, so a future drain regression here is localized rather than silently model-correct.
+    # Structural teeth: the surviving const-branch block branches on a constant materialized by a sourceless tail bool
+    # write, so it drains to that install's inline-class landing. Pins the drain itself, not only the output, so a future
+    # drain regression here is localized rather than silently model-correct.
     const_blocks = [
         b
         for b in lir.blocks
@@ -545,9 +548,10 @@ def test_const_branch_install_block_keeps_the_wide_drain(config: OperatorCase) -
     ]
     assert const_blocks, "the const-branch block did not survive; the corner is no longer exercised"
     for block in const_blocks:
-        assert block.term_offset == boundary_step(
-            block.block_makespan, wide_resident=True
-        ), "a const-branch block shrank below the wide boundary where its condition install lands"
+        assert all(w.is_const for w in block.bool_writes), "the const-branch condition install is not a literal const"
+        assert block.term_offset == inline_landing_cycle(
+            block.block_makespan
+        ), "a const-branch block must drain to its sourceless install's inline landing"
     model = build_model(lir)
     for x, y in [(2.0, 1.0), (1.0, 2.0), (5.0, 3.0), (-1.0, -2.0)]:
         (got,) = model.run(x, y)

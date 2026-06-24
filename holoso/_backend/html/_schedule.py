@@ -206,10 +206,10 @@ def render_schedule(lir: Lir) -> str:
     for block in lir.blocks:
         base_pc = lir.block_base[block.index]
         for copy in block.copies:  # a non-coalesced wide phi-arm merge copy
-            fire = base_pc + copy_step_cycle(copy.issue_cycle)
+            fire = base_pc + copy.fire_step
             install_event(copy.dst, copy.dst.stable_label, copy.source, fire, install_landing(fire))
         for bwrite in block.bool_writes:  # a boolean phi/state install (a constant or another boolean register)
-            fire = base_pc + copy_step_cycle(bwrite.issue_cycle)
+            fire = base_pc + bwrite.fire_step
             install_event(bwrite.dst, bwrite.dst.stable_label, bwrite.source, fire, install_landing(fire))
     for slot in lir.float_state_slots:  # a non-coalesced float slot latches its tap (early, or read-first at boundary)
         if slot.needs_copy:

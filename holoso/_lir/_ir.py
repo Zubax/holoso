@@ -187,12 +187,35 @@ def copy_step_cycle(install_cycle: int) -> int:
 def install_landing(fire_step: int) -> int:
     """
     The step a pc-gated install -- a phi copy, a boolean write, or an early (non-boundary) slot writeback -- commits its
-    destination and becomes readable: one after the step it fires on and samples its source. The model writes the
-    destination into ``_pending`` one PC past the fire, so the numerical model and the liveness diagnostic route this +1
-    through this one helper and cannot drift. A boundary slot install is the lone exception: it reads-then-writes at
-    ``last_pc`` and does not pass through here.
+    destination and becomes readable: one after the step it fires on. The model writes the destination into ``_pending``
+    one PC past the fire, so the numerical model and the liveness diagnostic route this +1 through this one helper and
+    cannot drift. A boundary slot install is the lone exception: it reads-then-writes at ``last_pc`` and does not pass
+    through here.
     """
     return fire_step + READ_FIRST_EDGE
+
+
+def install_fire_step(install_cycle: int, sourceless: bool) -> int:
+    """
+    The block-local fetch step a pc-gated install fires and drives its destination's write data. A register-source copy
+    must sample its source one READ_FIRST_EDGE past its placement (``copy_step_cycle``); a SOURCELESS install -- a
+    literal constant, which is a combinational wire with nothing to sample -- fires at the inline combinational step
+    (``inline_fire_cycle``), one edge earlier, on either bank. Both land one READ_FIRST_EDGE later via ``install_landing``
+    (so a sourceless install lands at ``inline_landing_cycle(install_cycle)``, the latch-free combinational landing). The
+    single owner of this dichotomy, shared by the model, emitter, liveness, layout drain, and HTML report.
+    """
+    return inline_fire_cycle(install_cycle) if sourceless else copy_step_cycle(install_cycle)
+
+
+def install_issue_cycle(work_makespan: int, sourceless: bool) -> int:
+    """
+    The scheduler-frame placement of a block's tail install. A register-source copy is placed one step PAST the work
+    makespan so it read-firsts a source the block's work may have just produced; a sourceless literal-constant install
+    has nothing to wait for and is placed at the work makespan itself. The per-install dual of
+    ``install_inclusive_makespan`` (which carries the same +1 into the block makespan only when a copy is present), so
+    the placement and the drain agree on the +1 and an install cannot land past its block's terminator.
+    """
+    return work_makespan + (0 if sourceless else 1)
 
 
 def boundary_step(makespan: int, wide_resident: bool) -> int:
@@ -614,6 +637,19 @@ class FloatCopy:
     source: FloatOperand
     issue_cycle: int
 
+    @property
+    def is_const(self) -> bool:
+        """A literal-constant install (a combinational wire source); it fires inline-class, with no source to sample."""
+        return isinstance(self.source.source, FloatConstRef)
+
+    @property
+    def fire_step(self) -> int:
+        return install_fire_step(self.issue_cycle, self.is_const)
+
+    @property
+    def landing(self) -> int:
+        return install_landing(self.fire_step)
+
 
 @dataclass(frozen=True, slots=True)
 class BoolWrite:
@@ -625,6 +661,19 @@ class BoolWrite:
     dst: BoolRegRef
     source: BoolOperand
     issue_cycle: int
+
+    @property
+    def is_const(self) -> bool:
+        """A literal-constant install (a combinational wire source); it fires inline-class, with no source to sample."""
+        return isinstance(self.source.source, BoolConstRef)
+
+    @property
+    def fire_step(self) -> int:
+        return install_fire_step(self.issue_cycle, self.is_const)
+
+    @property
+    def landing(self) -> int:
+        return install_landing(self.fire_step)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1165,7 +1214,7 @@ class Lir:
         for block in self.blocks:
             base_pc = self.block_base[block.index]
             for copy in block.copies:  # phi copy fires here and samples its source; destination lands one PC later
-                step = base_pc + copy_step_cycle(copy.issue_cycle)
+                step = base_pc + copy.fire_step
                 defs.setdefault(copy.dst, []).append(install_landing(step))
                 if isinstance(copy.source.source, RegRef):
                     uses.setdefault(copy.source.source, []).append(step)
@@ -1210,7 +1259,7 @@ class Lir:
         for block in self.blocks:
             base_pc = self.block_base[block.index]
             for bwrite in block.bool_writes:  # bool write fires and samples here; destination lands one PC later
-                step = base_pc + copy_step_cycle(bwrite.issue_cycle)
+                step = base_pc + bwrite.fire_step
                 defs.setdefault(bwrite.dst, []).append(install_landing(step))
                 if isinstance(bwrite.source.source, BoolRegRef):
                     uses.setdefault(bwrite.source.source, []).append(step)

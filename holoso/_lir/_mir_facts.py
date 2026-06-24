@@ -83,15 +83,23 @@ def const_branch_conditions(mir: Mir, bool_mir: MirBoolView) -> dict[int, ValueI
     return conditions
 
 
-def block_has_install(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) -> set[int]:
+def block_has_install(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) -> dict[int, bool]:
     """
-    Blocks whose drained tail carries a phi-arm install (a float copy, a bool write, or a const branch materialization),
-    which lengthens the block by one fetch step. Determinable from the CFG shape alone, before register assignment, so
-    the liveness boundary uses the same per-block makespan the layout will.
+    Each install-bearing block mapped to whether it carries a COPY-class (register-source) install: a float copy or a
+    bool write of a register, which samples its source and so pays the +1 install step and the wide writeback drain. A
+    block present with value ``False`` installs only literal constants -- phi-arm const arms, or a const branch
+    condition -- which fire inline-class within the work makespan and pay neither. Determinable from the CFG/MIR shape
+    before register assignment (a const arm is a constant node), conservatively: an arm is assumed not to coalesce, so
+    a register arm marks the block copy-class even if it later coalesces away (the fixpoint then narrows it). The
+    liveness boundary and the layout share this classification so the per-block makespan and drain agree.
     """
-    has: set[int] = set()
-    for phi in (*float_mir.phi_nodes.values(), *bool_mir.phi_nodes.values()):
-        for pred, _value, _conditioner in phi.arms:
-            has.add(pred)
-    has.update(const_branch_conditions(mir, bool_mir))
-    return has
+    install: dict[int, bool] = {}
+    for phi in float_mir.phi_nodes.values():
+        for pred, value, _conditioner in phi.arms:
+            install[pred] = install.get(pred, False) or value not in float_mir.const_nodes
+    for phi in bool_mir.phi_nodes.values():
+        for pred, value, _conditioner in phi.arms:
+            install[pred] = install.get(pred, False) or value not in bool_mir.const_nodes
+    for block_id in const_branch_conditions(mir, bool_mir):
+        install.setdefault(block_id, False)  # a const branch materializes a literal: inline-class, never copy-class
+    return install

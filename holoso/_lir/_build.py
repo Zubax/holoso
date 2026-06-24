@@ -7,7 +7,7 @@ from .._errors import UnsupportedConstruct
 from .._mir import Mir, MirBoolView, MirBranch, MirFloatView, MirPhi
 from .._util import ValueId
 from ._ir import *
-from ._mir_facts import block_has_install, const_branch_conditions
+from ._mir_facts import block_has_install
 from ._portassign import assign_commutative_ports
 from ._schedule import resolve_pool
 from ._bankalloc import actual_install_blocks, layout_and_allocate
@@ -141,7 +141,6 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
     # The same fixpoint also sheds the float state slot's read-first boundary-copy drain charge once the slot
     # coalesces: ``state_copy_blocks`` starts conservative (any float-state Ret needs a copy) and shrinks as coalescing
     # removes it, monotone alongside the install set.
-    const_branch_blocks = set(const_branch_conditions(mir, bool_mir))
     has_install_blocks = block_has_install(mir, float_mir, bool_mir)
     ret_block = mir.ret_block
     # Conservative seed for the state-copy fixpoint -- the pre-allocation form of ``_state_copy_blocks``: assume every
@@ -149,17 +148,20 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
     state_copy_blocks = (
         {ret_block: bool(float_mir.state_slots)} if (float_mir.state_slots or bool_mir.state_slots) else {}
     )
-    # Iteration bound = the product measure's height + 1. The fixpoint descends two non-increasing dimensions: the
-    # install set (<= len(blocks) blocks, so <= len(blocks) removals) and the single-keyed state-copy charge (height 2:
-    # wide -> bool -> absent). They are only positively coupled, not locked to co-descend, so the worst case is their
-    # SUM of descents -- len(blocks) + 2 -- plus one round to confirm the fixpoint.
-    for _ in range(len(mir.blocks) + 3):
+    # Iteration bound = the product measure's height + 1. The fixpoint descends non-increasing dimensions: the install
+    # classification (each block can drop out, <= len(blocks) removals, and a copy-class block can narrow to const-only
+    # once as its register arm coalesces away, <= len(blocks) narrowings) and the single-keyed state-copy charge
+    # (height 2: wide -> bool -> absent). They are only positively coupled, not locked to co-descend, so the worst case
+    # is the SUM of descents -- 2*len(blocks) + 2 -- plus one round to confirm the fixpoint.
+    for _ in range(2 * len(mir.blocks) + 3):
         result = layout_and_allocate(mir, float_mir, bool_mir, pool, has_install_blocks, state_copy_blocks)
-        actual = actual_install_blocks(result.alloc, const_branch_blocks)
+        actual = actual_install_blocks(result.alloc, float_mir, bool_mir)
         actual_state = _state_copy_blocks(mir, float_mir, bool_mir, result.alloc, result.const_pool)
-        # Pin the monotonicity the bound relies on as coalescing frees registers: install keys only drop, state-copy
-        # keys only drop, and a state-copy charge only narrows wide->bool (never widens bool->wide).
-        assert actual <= has_install_blocks, "install fixpoint must not grow"
+        # Pin the monotonicity the bound relies on as coalescing frees registers: install keys only drop, an install's
+        # copy-class bit only narrows copy->const (never widens const->copy), state-copy keys only drop, and a
+        # state-copy charge only narrows wide->bool.
+        assert actual.keys() <= has_install_blocks.keys(), "install fixpoint must not grow"
+        assert all(has_install_blocks[b] or not copy for b, copy in actual.items()), "install drain must not widen"
         assert actual_state.keys() <= state_copy_blocks.keys(), "state-copy fixpoint must not grow"
         assert all(
             state_copy_blocks[b] or not wide for b, wide in actual_state.items()
@@ -197,17 +199,25 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
             )
         ]
         work_makespan = sched.makespan
-        install = work_makespan + 1
-        copies = [
-            FloatCopy(RegRef(c.dst), operand_signed(float_mir, c.source, c.sign, alloc, const_pool), install)
-            for c in alloc.copies.get(block.id, [])
-        ]
-        bool_writes = [
-            BoolWrite(BoolRegRef(w.dst), bool_operand(bool_mir, w.source, alloc, w.inversion), install)
-            for w in alloc.bool_writes.get(block.id, [])
-        ]
-        has_install = block.id in has_install_blocks
-        block_makespan = install_inclusive_makespan(work_makespan, has_install)
+        copies = []
+        for c in alloc.copies.get(block.id, []):
+            fsrc = operand_signed(float_mir, c.source, c.sign, alloc, const_pool)
+            copies.append(
+                FloatCopy(
+                    RegRef(c.dst), fsrc, install_issue_cycle(work_makespan, isinstance(fsrc.source, FloatConstRef))
+                )
+            )
+        bool_writes = []
+        for w in alloc.bool_writes.get(block.id, []):
+            bsrc = bool_operand(bool_mir, w.source, alloc, w.inversion)
+            bool_writes.append(
+                BoolWrite(
+                    BoolRegRef(w.dst), bsrc, install_issue_cycle(work_makespan, isinstance(bsrc.source, BoolConstRef))
+                )
+            )
+        # The block makespan carries the install +1 only when a register-source copy is present (a const-only tail is
+        # inline-class and adds no step); ``has_install_blocks`` maps each install-bearing block to that copy-class bit.
+        block_makespan = install_inclusive_makespan(work_makespan, has_install_blocks.get(block.id, False))
         # The latch-free bool bank gives a branch condition exactly one cycle of slack: a bool result committing at the
         # makespan lands one step before the terminator's boundary read. The schedule's makespan covers every commit by
         # construction, so this is a tripwire against a future makespan-computation change only; the emitter-side
@@ -218,6 +228,15 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
         assert all(
             commit <= block_makespan for commit in bool_commits
         ), f"block {block.id}: a boolean result commits past the block makespan {block_makespan}"
+        # Every phi-arm install must LAND within its block (at or before the terminator). An install landing past the
+        # terminator is enqueued for a PC the block never reaches: a non-Ret terminator re-keys it onto the taken arm,
+        # but a Ret wrap drops it -- a silently dead install. This is the vector-independent structural invariant that a
+        # value cosim cannot see (a dead install that does not change outputs passes every value comparison).
+        term_offset = overlap.block_term_offset[block.id]
+        install_landings = [c.landing for c in copies] + [w.landing for w in bool_writes]
+        assert all(
+            landing <= term_offset for landing in install_landings
+        ), f"block {block.id}: a phi-arm install lands at {max(install_landings)} past the terminator {term_offset}"
         blocks.append(
             LirBlock(
                 block.id,

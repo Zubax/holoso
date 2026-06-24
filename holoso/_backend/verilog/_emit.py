@@ -525,12 +525,12 @@ def _terminator_redirects(lir: Lir) -> list[tuple[int, str]]:
 
 
 def _float_copy_pc(lir: Lir, block: LirBlock, copy: FloatCopy) -> int:
-    """The fetch PC at which a phi-arm copy installs its value (its source has landed by this step)."""
-    return lir.block_base[block.index] + copy_step_cycle(copy.issue_cycle)
+    """The fetch PC at which a phi-arm copy installs its value (a const fires inline-class, a reg copy one step later)."""
+    return lir.block_base[block.index] + copy.fire_step
 
 
 def _bool_write_pc(lir: Lir, block: LirBlock, write: BoolWrite) -> int:
-    return lir.block_base[block.index] + copy_step_cycle(write.issue_cycle)
+    return lir.block_base[block.index] + write.fire_step
 
 
 def _copy_sign_wire(block_index: int, copy_index: int) -> str:
