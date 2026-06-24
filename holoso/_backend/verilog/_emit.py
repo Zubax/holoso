@@ -425,21 +425,15 @@ def _emit_field_wires(w: _Writer, fields: dict[str, Field]) -> None:
     w("")
 
 
-def _const_term_expr(port: int, consts: list[int]) -> str:
+def _const_pool_mux(selector: str, consts: list[int]) -> str:
+    """
+    A const-pool read expression: the lone ``const_N`` net, or a ``selector``-indexed ternary mux over ``consts``. Used
+    on the read side (an operand's per-port const select, ``mc_cidx``) and the write side (a register's ucode-driven
+    constant install, ``mc_ccidx``) alike.
+    """
     expr = f"const_{consts[-1]}"
     for local in range(len(consts) - 2, -1, -1):
-        expr = f"({f_cidx(port)} == {local}) ? const_{consts[local]} : {expr}"
-    return expr
-
-
-def _const_install_expr(reg: int, book: list[int]) -> str:
-    """
-    The write data for wide register ``reg``'s ucode-driven constant install: the lone ``const_N`` net, or a
-    ``mc_ccidx``-selected mux over its const codebook (the write-side analogue of :func:`_const_term_expr`).
-    """
-    expr = f"const_{book[-1]}"
-    for local in range(len(book) - 2, -1, -1):
-        expr = f"({f_ccidx(RegRef(reg))} == {local}) ? const_{book[local]} : {expr}"
+        expr = f"({selector} == {local}) ? const_{consts[local]} : {expr}"
     return expr
 
 
@@ -449,7 +443,7 @@ def _emit_datapath_comb(
     """Combinational datapath: constant terms, the input-load enable, operator control, the err flag, and next_pc."""
     for port in sorted(port_consts):
         if len(port_consts[port]) > 1:
-            w(f"wire [W-1:0] cterm{port} = {_const_term_expr(port, port_consts[port])};")
+            w(f"wire [W-1:0] cterm{port} = {_const_pool_mux(f_cidx(port), port_consts[port])};")
     w("")
 
     w("// Operator control (in_valid and sign controls are consumed inside the wrapper on the issue step).")
@@ -718,7 +712,9 @@ def _wide_writer_entries(
     # Ucode-driven constant installs: a microcode write-enable arm (like an operator lane), reusing the const-pool nets.
     const_books = const_install_codebooks(lir)
     for reg in sorted(const_books):
-        entries.setdefault(reg, []).append((f_cwe(RegRef(reg)), _const_install_expr(reg, const_books[reg])))
+        entries.setdefault(reg, []).append(
+            (f_cwe(RegRef(reg)), _const_pool_mux(f_ccidx(RegRef(reg)), const_books[reg]))
+        )
     for block in lir.blocks:
         for op_index, inline_op in enumerate(block.inline_ops):
             if isinstance(inline_op.write.dst, RegRef):

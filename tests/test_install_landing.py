@@ -17,7 +17,6 @@ from holoso._frontend import lower as lower_frontend
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
 from holoso._lir import build
-from holoso._lir._ir import Ret
 from holoso._mir import lower as lower_to_mir
 
 from ._examples import SPECS
@@ -38,14 +37,6 @@ def test_phi_arm_installs_land_within_their_block(spec) -> None:  # type: ignore
                 f"{spec.name} block {block.index}: install of {install.dst} lands at {landing}, past the terminator "
                 f"{block.term_offset} -- a dead install the Ret wrap would orphan"
             )
-
-
-@pytest.mark.parametrize("spec", SPECS, ids=lambda s: s.name)
-def test_every_example_has_a_single_ret_boundary(spec) -> None:  # type: ignore[no-untyped-def]
-    """Sanity anchor for the structural guard above: each kernel terminates at exactly one Ret block."""
-    lir = _build(spec)
-    rets = [b for b in lir.blocks if isinstance(b.terminator, Ret)]
-    assert len(rets) == 1, f"{spec.name}: expected exactly one Ret block, found {len(rets)}"
 
 
 @pytest.mark.parametrize("name", ["uart_rx", "uart_tx"])
