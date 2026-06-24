@@ -192,12 +192,30 @@ def _measure(name: str) -> Metrics:
 #   whose every arm coalesces installs nothing, so its +1 install drain is dropped (remainder last_pc 73->71 on its two
 #   fully-coalesced diamond arms). last_pc tiles every block's span, so a per-block drain regression anywhere inflates
 #   it; max_block_span localizes it to one block.
+# - the inline-op timing and terminator read-floor work refreezes a handful of entries. The drained boundary is the
+#   latest value LANDING per op: a block branching on a RESIDENT live-in condition shrinks to its issue-side envelope
+#   rather than the wide drain, and an inline op (a select, a bool->float cast) writes the array combinationally -- it
+#   carries no pooled writeback latch, so it lands a cycle before a pooled wide result and its block drains a cycle
+#   earlier (a non-coalesced state slot's read-first boundary copy still pays its bank's drain). The linear ROM layout
+#   cascades these into downstream bases: majority_voter min_ii 16->14/last_pc 21->19/max_block_span 14->12;
+#   signal_window 13->12 on all three; remainder min_ii 50->49/last_pc 71->70/max_block_span 22->21; cordic_sincos
+#   150->149 on all three. The tighter schedules shift liveness and are a DELIBERATE steering loosening on two kernels:
+#   signal_window (steering 7->8, bnreg 6->5) and pid (steering 10->11, bnreg 3->2) trade one freed boolean register for
+#   one write-select mux arm -- a small net-LUT cost. The bump is intrinsic (stable across annealer seeds and 10x
+#   refinement iterations, not seed-0 noise), refrozen rather than chased: the timing rules are global and
+#   correctness-neutral, and scoping them to spare a kernel would forfeit the cycle gains elsewhere.
+# - inline-class installs for any block-entry-RESIDENT source (a constant, an input, or a state read), not just literal
+#   constants: a phi-arm install reading such a source has nothing to read-first, so it fires at the combinational step
+#   and drops the +1 install drain, landing two cycles earlier than a computed-source copy. recip_newton min_ii 21->20/
+#   last_pc 47->46 (its constant arm); remainder min_ii 49->45/last_pc 70->66 and octave_index min_ii 18->16/last_pc
+#   56->53/max_block_span 27->26 (their |input| copies). Only the schedule-length guards move; nreg/bnreg/steering/copies
+#   are unchanged (the source's register is reserved to the boundary anyway, so reading it earlier frees nothing extra).
 BASELINE: dict[str, Metrics] = {
     "madd": Metrics(True, nreg=4, bnreg=0, steering=3, copies=0, min_ii=20, last_pc=20, max_block_span=20),
     "poly3": Metrics(True, nreg=5, bnreg=0, steering=5, copies=0, min_ii=35, last_pc=35, max_block_span=35),
-    "signal_window": Metrics(False, nreg=4, bnreg=6, steering=7, copies=0, min_ii=13, last_pc=13, max_block_span=13),
+    "signal_window": Metrics(False, nreg=4, bnreg=5, steering=8, copies=0, min_ii=12, last_pc=12, max_block_span=12),
     "iir1_lpf": Metrics(False, nreg=3, bnreg=2, steering=2, copies=0, min_ii=21, last_pc=21, max_block_span=21),
-    "pid": Metrics(False, nreg=8, bnreg=3, steering=10, copies=0, min_ii=40, last_pc=40, max_block_span=40),
+    "pid": Metrics(False, nreg=8, bnreg=2, steering=11, copies=0, min_ii=40, last_pc=40, max_block_span=40),
     "schmitt_trigger": Metrics(False, nreg=1, bnreg=2, steering=2, copies=0, min_ii=7, last_pc=7, max_block_span=7),
     "quadrature_encoder": Metrics(False, nreg=1, bnreg=7, steering=7, copies=0, min_ii=6, last_pc=6, max_block_span=6),
     "phase_frequency_detector": Metrics(
@@ -206,12 +224,12 @@ BASELINE: dict[str, Metrics] = {
     "latching_fault_register": Metrics(
         False, nreg=1, bnreg=6, steering=2, copies=0, min_ii=6, last_pc=6, max_block_span=6
     ),
-    "majority_voter": Metrics(False, nreg=1, bnreg=21, steering=20, copies=0, min_ii=16, last_pc=21, max_block_span=14),
-    "recip_newton": Metrics(False, nreg=4, bnreg=1, steering=4, copies=2, min_ii=21, last_pc=47, max_block_span=25),
-    "remainder": Metrics(False, nreg=8, bnreg=4, steering=12, copies=2, min_ii=50, last_pc=71, max_block_span=22),
-    "octave_index": Metrics(False, nreg=3, bnreg=1, steering=6, copies=3, min_ii=18, last_pc=56, max_block_span=27),
+    "majority_voter": Metrics(False, nreg=1, bnreg=21, steering=20, copies=0, min_ii=14, last_pc=19, max_block_span=12),
+    "recip_newton": Metrics(False, nreg=4, bnreg=1, steering=4, copies=2, min_ii=20, last_pc=46, max_block_span=25),
+    "remainder": Metrics(False, nreg=8, bnreg=4, steering=12, copies=2, min_ii=45, last_pc=66, max_block_span=21),
+    "octave_index": Metrics(False, nreg=3, bnreg=1, steering=6, copies=3, min_ii=16, last_pc=53, max_block_span=26),
     "cordic_sincos": Metrics(
-        False, nreg=9, bnreg=3, steering=54, copies=0, min_ii=150, last_pc=150, max_block_span=150
+        False, nreg=9, bnreg=3, steering=54, copies=0, min_ii=149, last_pc=149, max_block_span=149
     ),
     "integrator": Metrics(True, nreg=5, bnreg=0, steering=4, copies=0, min_ii=24, last_pc=24, max_block_span=24),
     "ekf1_stateless": Metrics(

@@ -91,13 +91,24 @@ def pooled_bool_read_cycle(issue_cycle: int) -> int:
     return read_cycle(issue_cycle, BOOL_BANK)
 
 
-def inline_fire_cycle(commit_cycle: int, dst_is_wide: bool) -> int:
+def inline_fire_cycle(commit_cycle: int) -> int:
     """
-    The cycle an inline combinational operation (boolean logic, a float<->bool cast) fires: it is one PC-gated
-    statement that reads ALL its operands and writes its destination on this single step -- the commit step for a
-    boolean destination, one later for a wide one (aligned with the destination bank's writeback latch).
+    The cycle an inline combinational operation (a select/mux, boolean logic, a float<->bool cast) fires: it is one
+    PC-gated statement that reads ALL its operands and drives its destination register's write data on this single
+    step. Unlike a pooled operator -- whose pipeline output is registered in a writeback latch before the array write
+    -- an inline op drives the array write combinationally, so it carries NO writeback latch on either bank: it fires
+    ``FETCH_LAG`` after its commit and its result becomes readable one ``READ_FIRST_EDGE`` later
+    (``inline_landing_cycle``).
     """
-    return commit_cycle + FETCH_LAG + bank_timing(dst_is_wide).writeback_latch
+    return commit_cycle + FETCH_LAG
+
+
+def inline_landing_cycle(commit_cycle: int) -> int:
+    """
+    The cycle an inline operation's result becomes readable: its combinational array write (``inline_fire_cycle``) plus
+    the read-first edge. Bank-independent -- an inline write never passes through a pooled operator's writeback latch.
+    """
+    return inline_fire_cycle(commit_cycle) + READ_FIRST_EDGE
 
 
 def pooled_writeback_word(commit_cycle: int, dst_is_wide: bool) -> int:
@@ -118,39 +129,42 @@ def operand_read_cycle(operator: HardwareOperator, issue_cycle: int) -> int:
     numerical model so none can drift. A pooled instance reads through the wide read latch; no pooled operator reads
     a boolean operand yet, ENFORCED here -- when one appears it is presented latch-free on the in_valid step
     (``pooled_bool_read_cycle``) and this dispatch must grow per-operand granularity, reconciled with
-    ``dependency_edge``. An inline operation fires -- and reads -- on its writeback step.
+    ``dependency_edge``. An inline op fires -- and reads -- on its combinational fire step (``inline_fire_cycle``).
     """
     if isinstance(operator, PooledHardwareOperator):
         assert all(is_wide_type(ty) for ty in operator.signature.operand_types), operator.mnemonic
         return pooled_wide_read_cycle(issue_cycle)
-    dst_is_wide = is_wide_type(operator.signature.result_types[0])
-    return inline_fire_cycle(issue_cycle + operator.latency, dst_is_wide)
+    return inline_fire_cycle(issue_cycle + operator.latency)
 
 
 def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: HardwareOperator) -> int:
     """
     The minimum same-block scheduling distance from a producer's commit to a consumer's issue (``issue_consumer >=
-    commit_producer + edge``), derived from the landing of the producer's tapped output port's bank and the
-    consumer's operand-read timing so the scheduler, the liveness views, and the model share one rule. The clamp's
-    floor ``READ_FIRST_EDGE - consumer.latency`` holds the consumer's COMMIT at least one read-first edge after the
-    producer's -- the same write-then-read edge a register read pays, expressed at commit level not read level -- so
-    an inline consumer (latency 0) commits strictly after its producer, which the model's commit-ordered evaluation
-    relies on. The zero-offset evaluation below is exact because every cycle helper is affine in its cycle argument
-    with unit slope, so the difference at zero is the frame-independent spacing; a helper that ever loses that
-    affinity breaks this derivation. No pooled operator reads a boolean operand yet, ENFORCED here in lockstep with
-    ``operand_read_cycle`` (which charges every pooled consumer the wide read latch): the first bool-reading pooled
-    operator must reconcile its presentation -- latch-free on the in_valid step, ``pooled_bool_read_cycle`` -- in
-    both helpers at once.
+    commit_producer + edge``): the producer's result landing minus the consumer's operand-read timing, so the consumer
+    reads no earlier than the producer's result becomes readable. A POOLED producer lands through its result bank's
+    writeback latch (``landing_cycle``); an INLINE producer writes the array combinationally and lands one read-first
+    edge after its fire (``inline_landing_cycle``), with no writeback latch. A POOLED consumer reads through the wide
+    read latch; an INLINE consumer reads on its combinational fire step (``inline_fire_cycle``). One shared rule for the
+    scheduler, the liveness views, and the model. There is NO floor below this spacing: the model commits every PC's
+    landings before evaluating that PC's reads (``NumericalSimulator._apply``), so a consumer whose read PC equals the
+    producer's landing PC reads the just-committed value -- write-then-read holds at the PC granularity. The zero-offset
+    evaluation below is exact because every cycle helper is affine in its cycle argument with unit slope, so the
+    difference at zero is the frame-independent spacing; a helper that ever loses that affinity breaks this derivation.
+    No pooled operator reads a boolean operand yet, ENFORCED here in lockstep with ``operand_read_cycle`` (which charges
+    every pooled consumer the wide read latch): the first bool-reading pooled operator must reconcile its presentation
+    -- latch-free on the in_valid step, ``pooled_bool_read_cycle`` -- in both helpers at once.
     """
     producer_wide = is_wide_type(producer.signature.result_types[producer_port])
-    landing = landing_cycle(0, bank_timing(producer_wide))
+    if isinstance(producer, PooledHardwareOperator):
+        landing = landing_cycle(0, bank_timing(producer_wide))
+    else:
+        landing = inline_landing_cycle(0)  # an inline producer writes the array directly: no writeback latch
     if isinstance(consumer, PooledHardwareOperator):
         assert producer_wide, f"{consumer.mnemonic}: pooled operators read only wide operands today"
         read = pooled_wide_read_cycle(0)
     else:
-        dst_is_wide = is_wide_type(consumer.signature.result_types[0])
-        read = inline_fire_cycle(consumer.latency, dst_is_wide)
-    return max(landing - read, READ_FIRST_EDGE - consumer.latency)
+        read = inline_fire_cycle(consumer.latency)
+    return landing - read
 
 
 def copy_step_cycle(install_cycle: int) -> int:
@@ -173,12 +187,36 @@ def copy_step_cycle(install_cycle: int) -> int:
 def install_landing(fire_step: int) -> int:
     """
     The step a pc-gated install -- a phi copy, a boolean write, or an early (non-boundary) slot writeback -- commits its
-    destination and becomes readable: one after the step it fires on and samples its source. The model writes the
-    destination into ``_pending`` one PC past the fire, so the numerical model and the liveness diagnostic route this +1
-    through this one helper and cannot drift. A boundary slot install is the lone exception: it reads-then-writes at
-    ``last_pc`` and does not pass through here.
+    destination and becomes readable: one after the step it fires on. The model writes the destination into ``_pending``
+    one PC past the fire, so the numerical model and the liveness diagnostic route this +1 through this one helper and
+    cannot drift. A boundary slot install is the lone exception: it reads-then-writes at ``last_pc`` and does not pass
+    through here.
     """
     return fire_step + READ_FIRST_EDGE
+
+
+def install_fire_step(install_cycle: int, resident_source: bool) -> int:
+    """
+    The block-local fetch step a pc-gated install fires and drives its destination's write data. An install whose source
+    is COMPUTED by the block's work must sample it one READ_FIRST_EDGE past its placement (``copy_step_cycle``); an
+    install whose source is RESIDENT at block entry -- a literal constant (a combinational wire), an input, or a state
+    read, all stable before the block -- has nothing to wait for and fires at the inline combinational step
+    (``inline_fire_cycle``), one edge earlier, on either bank. Both land one READ_FIRST_EDGE later via ``install_landing``
+    (so a resident-source install lands at ``inline_landing_cycle(install_cycle)``, the latch-free combinational
+    landing). The single owner of this dichotomy, shared by the model, emitter, liveness, layout drain, and HTML report.
+    """
+    return inline_fire_cycle(install_cycle) if resident_source else copy_step_cycle(install_cycle)
+
+
+def install_issue_cycle(work_makespan: int, resident_source: bool) -> int:
+    """
+    The scheduler-frame placement of a block's tail install. A computed-source copy is placed one step PAST the work
+    makespan so it read-firsts a source the block's work may have just produced; an install whose source is resident at
+    block entry has nothing to wait for and is placed at the work makespan itself. The per-install dual of
+    ``install_inclusive_makespan`` (which carries the same +1 into the block makespan only when a computed-source copy is
+    present), so the placement and the drain agree on the +1 and an install cannot land past its block's terminator.
+    """
+    return work_makespan + (0 if resident_source else 1)
 
 
 def boundary_step(makespan: int, wide_resident: bool) -> int:
@@ -332,10 +370,23 @@ def _bank_of_ref(dst: RegRef | BoolRegRef) -> BankTiming:
 
 def result_landing_cycle(dst: RegRef | BoolRegRef, commit_cycle: int) -> int:
     """
-    The cycle a result lands per its destination bank -- the single dispatch every consumer (liveness, the numerical
-    model, the report) routes through, so the per-bank rule cannot drift between them.
+    The cycle a POOLED operator's result lands per its destination bank -- through the bank's writeback latch. For a
+    landing dispatched by op kind, route through ``op_result_landing`` (which sends a pooled result here and an inline
+    one through ``inline_landing_cycle``), so the kind/bank rule lives in one place and cannot drift.
     """
     return landing_cycle(commit_cycle, _bank_of_ref(dst))
+
+
+def op_result_landing(operator: HardwareOperator, dst: RegRef | BoolRegRef, commit_cycle: int) -> int:
+    """
+    The cycle an operator's result becomes readable, dispatched by its kind: a POOLED result lands through its
+    destination bank's writeback latch (``result_landing_cycle``); an INLINE result writes the array combinationally
+    and lands a cycle earlier (``inline_landing_cycle``, no writeback latch). The single per-op dispatch the liveness
+    views, the numerical model, and the report all route through, so the kind/bank rule cannot drift between them.
+    """
+    if isinstance(operator, PooledHardwareOperator):
+        return result_landing_cycle(dst, commit_cycle)
+    return inline_landing_cycle(commit_cycle)
 
 
 _BankReg = TypeVar("_BankReg", RegRef, BoolRegRef)  # one register bank's reference type (wide or boolean)
@@ -395,6 +446,11 @@ class FloatInputLoad(InputLoad):
     dst: RegRef
 
 
+def float_liveout_coalesced(tap: FloatOperand, reg: RegRef) -> bool:
+    """A float state live-out shares its slot register (no install copy) iff its tap is exactly ``reg``, unsigned."""
+    return tap.source == reg and tap.sign == FloatSignControl()
+
+
 @dataclass(frozen=True, slots=True)
 class FloatStateSlot:
     """
@@ -421,7 +477,7 @@ class FloatStateSlot:
 
     @property
     def needs_copy(self) -> bool:
-        return not (self.tap.source == self.reg and self.tap.sign == FloatSignControl())
+        return not float_liveout_coalesced(self.tap, self.reg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,8 +567,9 @@ class PooledScheduledOp:
 @dataclass(frozen=True, slots=True)
 class InlineScheduledOp:
     """
-    One inline-operator firing: a single PC-gated statement that reads its operands and writes its one result on its
-    fire step (the commit step for a boolean destination, one later for a wide one).
+    One inline-operator firing: a single PC-gated statement that reads its operands and drives its one result's write
+    data combinationally on its fire step. Carrying no pooled writeback latch, its timing is bank-independent -- the
+    result lands one read-first edge after the fire (``inline_landing_cycle``), a cycle before a pooled wide result.
     """
 
     operator: InlineHardwareOperator
@@ -575,23 +632,55 @@ class FloatCopy:
     A register-to-register move installing a phi arm's value into the merged register at a predecessor's tail: ``dst``
     takes ``source`` on the block-relative ``issue_cycle``. Used when a phi arm is not an operator result that can be
     coalesced directly onto the merged register (e.g. an input, a constant, or a value defined in another block).
+    ``resident_source`` records whether ``source`` is available at block entry (a constant, input, or state read) rather
+    than computed by this block's work -- the timing class: a resident source fires inline-class (the builder sets it
+    from ``value_resident_at_entry``, which a ``RegRef`` operand alone cannot reveal).
     """
 
     dst: RegRef
     source: FloatOperand
     issue_cycle: int
+    resident_source: bool
+
+    @property
+    def is_const(self) -> bool:
+        """A literal-constant install (one kind of resident source); meaningful where the literal itself matters."""
+        return isinstance(self.source.source, FloatConstRef)
+
+    @property
+    def fire_step(self) -> int:
+        return install_fire_step(self.issue_cycle, self.resident_source)
+
+    @property
+    def landing(self) -> int:
+        return install_landing(self.fire_step)
 
 
 @dataclass(frozen=True, slots=True)
 class BoolWrite:
     """
     A boolean register install of a phi arm (a bool const or another bool register, with the arm's folded inversion)
-    on a block-relative cycle.
+    on a block-relative cycle. ``resident_source`` records whether ``source`` is available at block entry (a constant,
+    input, or state read) rather than computed by this block's work -- the timing class (see :class:`FloatCopy`).
     """
 
     dst: BoolRegRef
     source: BoolOperand
     issue_cycle: int
+    resident_source: bool
+
+    @property
+    def is_const(self) -> bool:
+        """A literal-constant install (one kind of resident source); meaningful where the literal itself matters."""
+        return isinstance(self.source.source, BoolConstRef)
+
+    @property
+    def fire_step(self) -> int:
+        return install_fire_step(self.issue_cycle, self.resident_source)
+
+    @property
+    def landing(self) -> int:
+        return install_landing(self.fire_step)
 
 
 @dataclass(frozen=True, slots=True)
@@ -639,11 +728,12 @@ class LirBlock:
     redirects the fetch PC at the block boundary. ``block_makespan`` is the last commit cycle inside the block (0 if
     it has none). ``term_offset`` is the block-relative fetch cycle at which the terminator redirects the PC -- the
     block's boundary step -- and is the single source of truth for the terminator PC (the successor frame begins one
-    step later, at ``term_pc + 1``). It is the full drain ``boundary_step(block_makespan, wide_resident)`` for a block
-    that drains (a multi-predecessor successor, a phi/const install, or a live-in branch condition) -- bank-aware, so a
-    block carrying only boolean values across its boundary drains one step earlier than a wide one -- but cross-block
-    software pipelining shrinks it to the issue-side envelope when the block's in-flight results may spill into single-
-    predecessor successors -- so a consumer reads it here rather than re-deriving the boundary.
+    step later, at ``term_pc + 1``). For a block that drains (a multi-predecessor successor or a phi/const install) it
+    is the latest cycle a value LANDS in the block's frame -- taken per landing event, so both bank-aware (a pooled wide
+    result lands a step after a boolean or inline one) and inline-aware (an inline op writes the array combinationally
+    and lands a step before a pooled wide one) -- but cross-block software pipelining shrinks it to the issue-side
+    envelope when the block's in-flight results may spill into single-predecessor successors -- so a consumer reads it
+    here rather than re-deriving the boundary.
     """
 
     index: int
@@ -670,6 +760,11 @@ def _trace_landing(
     return [pc for arm in arms for pc in _trace_landing(by_index, block_base, by_index[arm], spilled)]
 
 
+def bool_liveout_coalesced(live_out: BoolOperand, reg: BoolRegRef) -> bool:
+    """A bool state live-out shares its slot register (no install copy) iff it is exactly ``reg``, uninverted."""
+    return isinstance(live_out.source, BoolRegRef) and live_out.source == reg and not live_out.inversion.invert
+
+
 @dataclass(frozen=True, slots=True)
 class BoolStateSlot:
     """
@@ -692,11 +787,7 @@ class BoolStateSlot:
         False only when the live-out already resides in the slot register UNINVERTED (an unwritten slot); a live-out
         under an inversion needs the install copy to apply it, even from the slot's own register.
         """
-        return not (
-            isinstance(self.live_out.source, BoolRegRef)
-            and self.live_out.source == self.reg
-            and not self.live_out.inversion.invert
-        )
+        return not bool_liveout_coalesced(self.live_out, self.reg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -820,11 +911,13 @@ class Lir:
         """
         return self.block_base[block.index] + block.term_offset
 
-    def write_landing_pcs(self, block: LirBlock, dst: RegRef | BoolRegRef, commit_cycle: int) -> list[int]:
+    def write_landing_pcs(self, block: LirBlock, op: ScheduledOp, write: PortWrite) -> list[int]:
         """
-        Every absolute fetch PC at which a result committed at ``block``-local ``commit_cycle`` lands in register
-        ``dst`` -- one per execution path that can reach it. A landing at or before the block's terminator offset lands
-        once, inside the block. A landing past an overlap-shrunk terminator spills into EACH successor arm's frame, at
+        Every absolute fetch PC at which ``op``'s result committed in ``block`` lands in register ``write.dst`` -- one
+        per execution path that can reach it. The landing rule is dispatched by ``op``'s kind via ``op_result_landing``
+        (an inline op writes the array combinationally; a pooled op lands through its bank's writeback latch). A landing
+        at or before the block's terminator offset lands once, inside the block. A
+        landing past an overlap-shrunk terminator spills into EACH successor arm's frame, at
         ``block_base[arm] + (landing - term_offset - 1)``. This is exactly the numerical model's redirect re-keying of
         its in-flight writes, so the report places a spilled result where the hardware actually writes it on every
         path -- not in the linear fall-through frame. A drained block never spills, so a drained
@@ -836,8 +929,9 @@ class Lir:
         insurance, and terminates because spills only cross single-predecessor forward edges (a finite DAG; a back-edge
         target is multi-predecessor and never overlaps).
         """
+        local_landing = op_result_landing(op.operator, write.dst, op.commit_cycle)
         by_index = {b.index: b for b in self.blocks}
-        return _trace_landing(by_index, self.block_base, block, result_landing_cycle(dst, commit_cycle))
+        return _trace_landing(by_index, self.block_base, block, local_landing)
 
     def state_copy_step(self, slot: FloatStateSlot) -> int:
         """
@@ -1064,7 +1158,7 @@ class Lir:
                 read = operand_read_cycle(op.operator, base_pc + op.issue_cycle)
                 for write in op.writes:
                     if isinstance(write.dst, reg_type):
-                        defs.setdefault(write.dst, []).extend(self.write_landing_pcs(block, write.dst, op.commit_cycle))
+                        defs.setdefault(write.dst, []).extend(self.write_landing_pcs(block, op, write))
                 for operand in op.operands:
                     if isinstance(operand.source, reg_type):
                         uses.setdefault(operand.source, []).append(read)
@@ -1075,8 +1169,9 @@ class Lir:
         Map each wide register to the actual clock cycles on which it holds a live value.
 
         This is cycle-accurate to the emitted hardware, in the executing-step (hardware) frame. Timing comes from the
-        shared helpers: an input lands on cycle 1; an operator result lands on ``result_landing_cycle`` (which for the
-        last result is the initiation interval); an operand is read on ``operand_read_cycle``; an output tap on the
+        shared helpers: an input lands on cycle 1; a pooled operator result lands on ``result_landing_cycle`` (which for
+        the last result is the initiation interval) and an inline one a cycle earlier on ``inline_landing_cycle``
+        (selected per op by ``write_landing_pcs``); an operand is read on ``operand_read_cycle``; an output tap on the
         present cycle; and a non-coalesced slot's writeback fires and samples its source on ``state_copy_step`` -- the
         present cycle for a boundary copy, earlier for an early install (the landing follows below). A slot register
         additionally stays live through the present cycle, since its live-out must reside there for the next initiation.
@@ -1126,7 +1221,7 @@ class Lir:
         for block in self.blocks:
             base_pc = self.block_base[block.index]
             for copy in block.copies:  # phi copy fires here and samples its source; destination lands one PC later
-                step = base_pc + copy_step_cycle(copy.issue_cycle)
+                step = base_pc + copy.fire_step
                 defs.setdefault(copy.dst, []).append(install_landing(step))
                 if isinstance(copy.source.source, RegRef):
                     uses.setdefault(copy.source.source, []).append(step)
@@ -1171,7 +1266,7 @@ class Lir:
         for block in self.blocks:
             base_pc = self.block_base[block.index]
             for bwrite in block.bool_writes:  # bool write fires and samples here; destination lands one PC later
-                step = base_pc + copy_step_cycle(bwrite.issue_cycle)
+                step = base_pc + bwrite.fire_step
                 defs.setdefault(bwrite.dst, []).append(install_landing(step))
                 if isinstance(bwrite.source.source, BoolRegRef):
                     uses.setdefault(bwrite.source.source, []).append(step)

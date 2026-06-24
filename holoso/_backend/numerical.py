@@ -37,7 +37,8 @@ from .._lir import BoolInputLoad, FloatConstRef, FloatInputLoad, FloatOperand
 from .._lir import RegRef, ScheduledOp
 from .._lir import BoolRegRef, Lir
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
-from .._lir import copy_step_cycle, install_landing, operand_read_cycle, result_landing_cycle, scalar_type_of
+from .._lir import install_landing, op_result_landing, operand_read_cycle
+from .._lir import scalar_type_of
 from .._operators import *
 from .._type import FloatFormat, LogicalPort
 
@@ -202,6 +203,11 @@ class NumericalSimulator(_Kernel):
             if shift:
                 self._pending = {(pc + shift if pc > self.pc else pc): writes for pc, writes in self._pending.items()}
         if self.pc == self._lir.last_pc and out_ready:  # accepted boundary edge: advance persistent state (read-first)
+            # The Ret wrap does not re-key _pending (it is excluded from _terminators), so any write still keyed past the
+            # boundary here is orphaned -- a silently dead install. The schedule must drain every landing within last_pc.
+            assert all(
+                k <= self._lir.last_pc for k in self._pending
+            ), f"install orphaned past last_pc {self._lir.last_pc}"
             installed = [(inst.dst, self._read(inst.source)) for inst in self._boundary]
             for dst, value in installed:
                 self._write(dst, value)
@@ -258,13 +264,9 @@ class NumericalSimulator(_Kernel):
                 read_pc = operand_read_cycle(op.operator, base + op.issue_cycle)
                 self._op_events.setdefault(read_pc, []).append(_OpEvent(op, base + op.commit_cycle))
             for copy in block.copies:
-                self._installs.setdefault(base + copy_step_cycle(copy.issue_cycle), []).append(
-                    _Install(copy.source, copy.dst)
-                )
+                self._installs.setdefault(base + copy.fire_step, []).append(_Install(copy.source, copy.dst))
             for write in block.bool_writes:
-                self._installs.setdefault(base + copy_step_cycle(write.issue_cycle), []).append(
-                    _Install(write.source, write.dst)
-                )
+                self._installs.setdefault(base + write.fire_step, []).append(_Install(write.source, write.dst))
             if not isinstance(block.terminator, Ret):
                 self._terminators[lir.term_pc(block)] = block.terminator
         # A non-coalesced wide slot installs by a pc-gated copy -- early (before the boundary, like a phi copy) or at
@@ -305,7 +307,7 @@ class NumericalSimulator(_Kernel):
             results = event.op.operator.evaluate(*[self._read(operand) for operand in event.op.operands])
             for write in event.op.writes:
                 result = results[write.port]
-                landing = result_landing_cycle(write.dst, event.commit_pc)
+                landing = op_result_landing(event.op.operator, write.dst, event.commit_pc)
                 if isinstance(write.dst, RegRef):
                     assert isinstance(result, FloatValue) and isinstance(write.conditioner, FloatSignControl)
                     self._pending.setdefault(landing, []).append((write.dst, write.conditioner.apply_value(result)))

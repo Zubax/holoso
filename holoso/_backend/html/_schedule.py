@@ -29,6 +29,8 @@ _ARROW_KEY_MARKER = (
 
 def render_schedule(lir: Lir) -> str:
     nreg, nbreg, nconst = lir.regfile.nreg, lir.bool_regfile.nreg, len(lir.float_consts)
+    bool_consts = _bool_consts(lir)
+    nbbool = len(bool_consts)
     columns = _columns_of(lir)
     col_ord = {col: ordinal for ordinal, col in enumerate(columns)}
     operator_colors = _operator_colors(lir)
@@ -53,8 +55,9 @@ def render_schedule(lir: Lir) -> str:
 
     # Column seams: a 2px black seam marks every register-bank boundary (wide|bool, bool|constants) and the two block
     # boundaries (the last data column | pipeline, and pipeline | OPERATIONS); a 1px seam marks the legacy wide|const
-    # seam of a kernel without a boolean bank and the seams between operator groups.
-    data_thin, data_thick = _data_seams(nreg, nbreg, nconst)
+    # seam of a kernel without a boolean bank, the float|bool divide within the constants block, and the seams between
+    # operator groups.
+    data_thin, data_thick = _data_seams(nreg, nbreg, nconst, nbbool)
     if columns:
         data_thick.add(len(columns) - 1)  # the data block | operator-pipeline boundary
     dv = _Dividers(
@@ -103,7 +106,7 @@ def render_schedule(lir: Lir) -> str:
             operand_labels = [_operand_label(operand) for operand in op.operands]
             firing_tip = _esc(_op_text(op))
             for write in op.writes:
-                landing_pcs = lir.write_landing_pcs(block, write.dst, op.commit_cycle)
+                landing_pcs = lir.write_landing_pcs(block, op, write)
                 tip = _esc(
                     f"{_col_label(write.dst)} 🠄 "
                     + op.inst.operator.render_output(write.port, write.conditioner, *operand_labels)
@@ -122,13 +125,8 @@ def render_schedule(lir: Lir) -> str:
                     endpoints.add((dord, write_cyc))
                     cell_group[(dord, write_cyc)] = group
                     for operand in op.operands:
-                        ocol = _operand_col(operand)
-                        if ocol is None:
-                            continue  # a boolean-constant operand has no column / no source cell
-                        oord = col_ord[ocol]
-                        endpoints.add(
-                            (oord, read_cyc)
-                        )  # operands are read a read-latch cycle before the operator issues
+                        oord = col_ord[operand.source]  # operands are read a read-latch cycle before the issue
+                        endpoints.add((oord, read_cyc))
                         edges.append((f"g{dord}_{write_cyc}", f"g{oord}_{read_cyc}", color, group))
                     chips_at.setdefault(write_cyc, []).append(
                         f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
@@ -144,14 +142,14 @@ def render_schedule(lir: Lir) -> str:
 
     # Inline firings (boolean logic and the float<->bool casts): single PC-gated statements with no pooled instance,
     # so no pipeline-stage trail. Each renders a colored result cell on its bank's landing cycle, a write marker,
-    # dataflow edges from its operands (all read on the op's single fire step per operand_read_cycle; a
-    # boolean-constant operand has no source cell, hence no edge), and an ops chip, all in one hover group.
+    # dataflow edges from its operands (all read on the op's single fire step per operand_read_cycle; a constant operand
+    # -- float or boolean -- anchors its const-pool column), and an ops chip, all in one hover group.
     for block in lir.blocks:
         base_pc = lir.block_base[block.index]
         for bop in block.inline_ops:
             color = operator_colors[type(bop.operator)]
             read_cyc = operand_read_cycle(bop.operator, base_pc + bop.issue_cycle)
-            landing_pcs = lir.write_landing_pcs(block, bop.write.dst, bop.commit_cycle)
+            landing_pcs = lir.write_landing_pcs(block, bop, bop.write)
             tip = _esc(_inline_op_text(bop))
             dcol = bop.write.dst
             dord = col_ord[dcol]
@@ -165,10 +163,7 @@ def render_schedule(lir: Lir) -> str:
                 endpoints.add((dord, write_cyc))
                 cell_group[(dord, write_cyc)] = group
                 for inline_operand in bop.operands:
-                    ocol = _operand_col(inline_operand)
-                    if ocol is None:
-                        continue  # a boolean-constant operand has no column / no source cell
-                    oord = col_ord[ocol]
+                    oord = col_ord[inline_operand.source]
                     endpoints.add((oord, read_cyc))
                     edges.append((f"g{dord}_{write_cyc}", f"g{oord}_{read_cyc}", color, group))
                 chips_at.setdefault(write_cyc, []).append(
@@ -180,8 +175,9 @@ def render_schedule(lir: Lir) -> str:
     # write events the schedule must show, not invisible side effects. Each samples its source on its FIRE step and
     # latches its destination on its LANDING row; the caller passes both, computed per kind exactly as the numerical
     # model's decode does, so the marker row matches the residence tint and the model commit. Render each like a state
-    # commit -- a filled cell, a write marker, and a chip at the landing row, plus a dataflow edge to the source read
-    # on the fire row (a constant source occupies no column, hence no edge).
+    # commit -- a filled cell, a write marker, and a chip at the landing row, plus a dataflow edge from the landing to
+    # the source's const-pool/register cell on the fire row, so the one-cycle-early write span is visible (a boolean
+    # constant source now anchors a ``T``/``F`` column, exactly as a float constant does).
     def install_event(
         dst: ColKey, label: str, source: FloatOperand | BoolOperand, fire_step: int, landing: int
     ) -> None:
@@ -192,11 +188,9 @@ def render_schedule(lir: Lir) -> str:
         state_cells.add((landing, dst))
         endpoints.add((dord, landing))
         cell_group[(dord, landing)] = group
-        ocol = _operand_col(source)
-        if ocol is not None:  # a constant source occupies no column, so it anchors no edge
-            oord = col_ord[ocol]
-            endpoints.add((oord, fire_step))
-            edges.append((f"g{dord}_{landing}", f"g{oord}_{fire_step}", "state", group))  # JS resolves to --c-state
+        oord = col_ord[source.source]
+        endpoints.add((oord, fire_step))
+        edges.append((f"g{dord}_{landing}", f"g{oord}_{fire_step}", "state", group))  # JS resolves to --c-state
         chips_at.setdefault(landing, []).append(f"<span class='opf state' data-op='{group}'>{tip}</span>")
         group += 1
 
@@ -206,10 +200,10 @@ def render_schedule(lir: Lir) -> str:
     for block in lir.blocks:
         base_pc = lir.block_base[block.index]
         for copy in block.copies:  # a non-coalesced wide phi-arm merge copy
-            fire = base_pc + copy_step_cycle(copy.issue_cycle)
+            fire = base_pc + copy.fire_step
             install_event(copy.dst, copy.dst.stable_label, copy.source, fire, install_landing(fire))
         for bwrite in block.bool_writes:  # a boolean phi/state install (a constant or another boolean register)
-            fire = base_pc + copy_step_cycle(bwrite.issue_cycle)
+            fire = base_pc + bwrite.fire_step
             install_event(bwrite.dst, bwrite.dst.stable_label, bwrite.source, fire, install_landing(fire))
     for slot in lir.float_state_slots:  # a non-coalesced float slot latches its tap (early, or read-first at boundary)
         if slot.needs_copy:
@@ -247,9 +241,12 @@ def render_schedule(lir: Lir) -> str:
             f"<th class='gband{_border_suffix(nreg + nbreg - 1, dv.data_thin, dv.data_thick)}' "
             f"colspan='{nbreg}'><span title='bool registers'>bool registers</span></th>"
         )
-    if nconst:
-        const_seam = _border_suffix(nreg + nbreg + nconst - 1, dv.data_thin, dv.data_thick)
-        out.append(f"<th class='gband{const_seam}' colspan='{nconst}'><span title='constants'>constants</span></th>")
+    if nconst + nbbool:
+        const_seam = _border_suffix(nreg + nbreg + nconst + nbbool - 1, dv.data_thin, dv.data_thick)
+        out.append(
+            f"<th class='gband{const_seam}' colspan='{nconst + nbbool}'>"
+            "<span title='constants'>constants</span></th>"
+        )
     if n_stage:
         seam = _border_suffix(n_stage - 1, dv.stage_thin, dv.stage_thick)
         out.append(
@@ -277,6 +274,9 @@ def render_schedule(lir: Lir) -> str:
     for index in range(nconst):
         cls = "gh k" + _border_suffix(nreg + nbreg + index, dv.data_thin, dv.data_thick)
         out.append(f"<th class='{cls}' rowspan='2'><span>c{index}</span></th>")
+    for index, value in enumerate(bool_consts):
+        cls = "gh k" + _border_suffix(nreg + nbreg + nconst + index, dv.data_thin, dv.data_thick)
+        out.append(f"<th class='{cls}' rowspan='2'><span>{'T' if value else 'F'}</span></th>")
     for inst in lir.instances:
         lat = inst.operator.latency
         # full name, set vertically so a 1-stage operator does not widen
@@ -323,7 +323,7 @@ def render_schedule(lir: Lir) -> str:
     return "".join(out)
 
 
-type ColKey = RegRef | BoolRegRef | FloatConstRef
+type ColKey = RegRef | BoolRegRef | FloatConstRef | BoolConstRef
 
 
 def _esc(text: str) -> str:
@@ -333,9 +333,12 @@ def _esc(text: str) -> str:
 def _col_label(col: ColKey) -> str:
     """
     The report's display label for a grid column: ``rX`` for a wide register, ``bX`` for a boolean register, ``cX`` for
-    a float constant. This is the single labeling authority for the schedule: the headers, tooltips, dataflow operand
-    expressions, arrow conditions, and the JS payload all route through it.
+    a float constant, and ``T``/``F`` for a boolean constant (which carries no pool index). This is the single labeling
+    authority for the schedule: the headers, tooltips, dataflow operand expressions, arrow conditions, and the JS payload
+    all route through it.
     """
+    if isinstance(col, BoolConstRef):
+        return "T" if col.value else "F"
     return col.stable_label
 
 
@@ -367,7 +370,8 @@ class _Dividers:
     cell wins an equal-width conflict, so a left border on the right column would not show). A ``thick`` 2px seam marks
     every register-bank boundary (wide|bool, bool|constants) and the two block boundaries (the data block |
     operator-pipeline and operator-pipeline | OPERATIONS); a ``thin`` 1px seam marks the legacy wide|constants seam of a
-    boolean-free kernel and the seams between operator groups. Data and stage columns index separately.
+    boolean-free kernel, the float|bool divide within the constants block, and the seams between operator groups. Data
+    and stage columns index separately.
     """
 
     data_thin: set[int]
@@ -376,23 +380,27 @@ class _Dividers:
     stage_thick: set[int]
 
 
-def _data_seams(nreg: int, nbreg: int, nconst: int) -> tuple[set[int], set[int]]:
+def _data_seams(nreg: int, nbreg: int, nconst: int, nbbool: int) -> tuple[set[int], set[int]]:
     """
-    Right-border seams within the register/constant block, as ``(thin, thick)`` left-cell column-index sets.
+    Right-border seams within the register/constant block, as ``(thin, thick)`` left-cell column-index sets. The
+    constant block is the float constants followed by the boolean constants.
 
     A thick 2px black seam marks each register-bank boundary: wide|bool and bool|constants. With no boolean bank the
     wide bank abuts the constants directly; that legacy seam stays the lighter 1px so a float-only kernel renders
-    exactly as before. Empty banks contribute no seam. The constants|pipeline block boundary is added by the caller.
+    exactly as before. A thin 1px seam separates the float constants from the boolean constants within the constant
+    block. Empty banks contribute no seam. The constants|pipeline block boundary is added by the caller.
     """
     thin: set[int] = set()
     thick: set[int] = set()
     if nbreg:
         if nreg:
             thick.add(nreg - 1)  # wide | bool
-        if nconst:
+        if nconst or nbbool:
             thick.add(nreg + nbreg - 1)  # bool | constants
-    elif nreg and nconst:
+    elif nreg and (nconst or nbbool):
         thin.add(nreg - 1)  # legacy wide | constants (no boolean bank)
+    if nconst and nbbool:
+        thin.add(nreg + nbreg + nconst - 1)  # float constants | boolean constants
     return thin, thick
 
 
@@ -412,12 +420,6 @@ def _gc_class(ordinal: int, dv: _Dividers) -> str:
 def _oc_class(sidx: int, dv: _Dividers) -> str:
     """Class for an operator-stage cell in stage column ``sidx`` (with its right-border divider, if any)."""
     return "oc" + _border_suffix(sidx, dv.stage_thin, dv.stage_thick)
-
-
-def _operand_col(operand: FloatOperand | BoolOperand) -> ColKey | None:
-    """The grid column an operand reads, or None for a boolean constant (it occupies no column)."""
-    source = operand.source
-    return None if isinstance(source, BoolConstRef) else source
 
 
 def _operand_label(operand: FloatOperand | BoolOperand) -> str:
@@ -655,7 +657,8 @@ def _sched_script(
     data = {
         "edges": edges,
         "columns": cols,
-        "constants": {f"c{i}": repr(value) for i, value in enumerate(lir.float_consts)},
+        "constants": {f"c{i}": repr(value) for i, value in enumerate(lir.float_consts)}
+        | {_col_label(BoolConstRef(value)): repr(value) for value in _bool_consts(lir)},
         "liveness": {_col_label(col): _live_intervals(rows) for col, rows in live.items()},
         "arrows": [
             {
@@ -674,12 +677,36 @@ def _sched_script(
 def _columns_of(lir: Lir) -> list[ColKey]:
     """
     The grid columns in bank order: wide registers (``rX``), then boolean registers (``bX``), then float constants
-    (``cX``). This is exactly the order the table renders, so a column ordinal indexes straight into this list.
+    (``cX``), then the boolean constants used (``T``/``F``). This is exactly the order the table renders, so a column
+    ordinal indexes straight into this list.
     """
     cols: list[ColKey] = [RegRef(i) for i in range(lir.regfile.nreg)]
     cols += [BoolRegRef(i) for i in range(lir.bool_regfile.nreg)]
     cols += [FloatConstRef(i) for i in range(len(lir.float_consts))]
+    cols += [BoolConstRef(value) for value in _bool_consts(lir)]
     return cols
+
+
+def _bool_consts(lir: Lir) -> list[bool]:
+    """
+    The boolean constant values that appear as an operand or install source, rendered as const-pool columns (``False``
+    before ``True``). Booleans have no interned pool (only two values), so the columns are presentation-only -- their
+    purpose is to anchor an install edge from the constant into its landing, exactly as the float const pool does, so a
+    boolean constant install reads as the one-cycle-early write it is rather than appearing to land late.
+    """
+    used: set[bool] = set()
+    for block in lir.blocks:
+        for bop in block.inline_ops:
+            for operand in bop.operands:
+                if isinstance(operand.source, BoolConstRef):
+                    used.add(operand.source.value)
+        for bwrite in block.bool_writes:
+            if isinstance(bwrite.source.source, BoolConstRef):
+                used.add(bwrite.source.source.value)
+    for bslot in lir.bool_state_slots:
+        if bslot.needs_copy and isinstance(bslot.live_out.source, BoolConstRef):
+            used.add(bslot.live_out.source.value)
+    return sorted(used)
 
 
 def _input_chip(tip: str) -> str:

@@ -110,7 +110,7 @@ def test_report_draws_per_arm_edges_for_a_multi_arm_spill() -> None:
             for write in op.writes:
                 if not isinstance(write.dst, RegRef):
                     continue
-                landing_pcs = lir.write_landing_pcs(block, write.dst, op.commit_cycle)
+                landing_pcs = lir.write_landing_pcs(block, op, write)
                 if len(landing_pcs) <= 1:
                     continue  # not a multi-arm spill
                 for pc in landing_pcs:  # a wide register's column ordinal is its index (the wide bank renders first)

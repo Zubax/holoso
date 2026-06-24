@@ -254,6 +254,42 @@ def test_nested_division_branch_output_matches_reference() -> None:
             assert _close(got, want), f"x={x} y={y}: {got} vs {want}"
 
 
+def _spilled_branch_condition(a, b, c, d):  # type: ignore[no-untyped-def]
+    # A boolean comparison produced in the entry but BRANCHED ON in a single-predecessor successor. The entry overlaps
+    # into that successor, and the DEEP condition (a long product, committing late) lands past the entry's shrunk
+    # terminator -- so it spills into the successor frame rather than being resident there. The successor's branch must
+    # read the condition only AFTER its carried landing: the terminator read-floor folds the spilled-in condition's
+    # landing into the issue-side envelope. Without that fold the branch reads a stale condition and takes the wrong arm
+    # -- a silent miscompile (the build does not crash, the result is just wrong) the reference comparison catches.
+    # The inner arm divides, so both diamonds stay real branches (division is unspeculatable); divisors are structurally
+    # nonzero so every path is valid.
+    cond = (a * b * c * d) > (a + b + c + d)
+    if c > 0.0:
+        if cond:
+            r = a / (b * b + 1.0)
+        else:
+            r = a - b
+    else:
+        r = c / (d * d + 1.0)
+    return r
+
+
+def test_spilled_in_branch_condition_is_read_after_it_lands() -> None:
+    simulator = holoso.synthesize(_spilled_branch_condition, _ops(), name="spilled_cond").numerical_model.elaborate()
+    for a, b, c, d in [
+        (2.0, 3.0, 1.5, 0.5),
+        (0.5, 4.0, 2.0, 1.0),
+        (3.0, 2.0, -1.0, 2.0),
+        (1.5, 1.5, 0.25, 3.0),
+        (4.0, 0.5, 1.0, 2.0),
+        (2.0, 2.0, -2.0, 4.0),
+        (2.0, 2.0, 2.0, 2.0),  # cond True with c > 0: exercises the inner condition-true arm
+    ]:
+        got = float(simulator.run(a, b, c, d)[0])
+        want = _spilled_branch_condition(a, b, c, d)
+        assert _close(got, want), f"a={a} b={b} c={c} d={d}: {got} vs {want}"
+
+
 def _mixed_select_and_branch(x, y):  # type: ignore[no-untyped-def]
     # One kernel mixing an if-converted (select) pure diamond and a real (division-bearing) branch: the max folds to a
     # select, the division gates a real branch. Both the select polarity and the branch decision are crossed.
@@ -339,19 +375,9 @@ def test_multi_output_mixed_io_metadata_and_values() -> None:
 
 
 # --------------------------------------------------------------------------------------------------------------------
-# Cycle-model refactor surface (this branch): the inline op's latency 1->0 + the scheduler issuing inline ops from a
-# block's cycle 0 + the ``dependency_edge`` clamp floored at ``READ_FIRST_EDGE - consumer.latency``. The refactor is
-# value-PRESERVING -- old and new code both produce correct outputs -- so none of the tests below discriminate the old
-# code from the new by value. What they pin (could-have-failed honestly):
-#   (a) a WRONG implementation of the new edges -- an off-by-one in the inline latency or the dependency-edge clamp
-#       would make the numerical model's commit-ordered single-pass evaluation read a producer's STALE value before it
-#       commits, diverging from a Python float64 reference. Demonstrable cheaply for the latching register (below),
-#       reasoned for the deep cross-bank chain.
-#   (b) first BLACK-BOX, public-API value coverage of kernel SHAPES previously exercised only white-box and/or in cosim
-#       (the latching-fault-register multi-channel bool entry state; the octave_index resident-output drain-only Ret).
-# These do NOT cover the entry-block accept-dwell guard: the dwell is invisible to the numerical model (it asserts
-# in_valid at once and keys cycle-0 ops at their read pc, never re-firing ucode[0]), so no model-level test can observe
-# it; it is guarded only by the build-time ``_assert_entry_dwell_safe`` invariant. See the report's uncovered section.
+# Cross-bank cycle-model value coverage: inline ops reading across the float/bool banks, checked value-wise against a
+# Python reference. The model commits each PC's landings before evaluating that PC's reads, so a wrong inline read step
+# or dependency edge would read a stale/not-yet-landed value and diverge.
 # --------------------------------------------------------------------------------------------------------------------
 
 
@@ -380,8 +406,8 @@ class _LatchingFaultRegister:
 
 def test_latching_fault_register_streams_and_resets() -> None:
     # Each channel latches on its first trip and HOLDS until reset; ``any_fault`` summarizes the just-updated channels.
-    # Demonstrates the commit-ordering guard (a): on the FIRST-TRIP vector (True, False, False) the correct summary is
-    # True -- it ORs the channel just latched THIS transaction. A reorder that read the channel's stale (pre-update)
+    # Demonstrates the edge guard (a): on the FIRST-TRIP vector (True, False, False) the correct summary is
+    # True -- it ORs the channel just latched THIS transaction. A wrong edge that read the channel's stale (pre-update)
     # value would yield False there, which the assertion below would catch. Persistent state across many transactions
     # plus a mid-stream ``reset()`` clearing every sticky latch is the load-bearing observable.
     simulator = holoso.synthesize(
@@ -428,14 +454,10 @@ def _octave_index(x):  # type: ignore[no-untyped-def]
 
 
 def test_octave_index_resident_output_drain_only_ret_matches_reference() -> None:
-    # The resident-output drain-only Ret shape (the ``ret_boundary_is_wide = bool(state_slots)`` change, dropping
-    # ``outputs``): the loop body produces the float ``octaves``, which the exit Ret reads resident at its base PC with
-    # no boundary drain. This is value-PRESERVING -- the prior code merely paid an extra-cycle wide drain on the same
-    # Ret, so this does NOT discriminate the current change (that latency reclaim is pinned white-box by the committed
-    # test_drain_only_ret_with_a_resident_output_needs_no_boundary_drain twin, by test_metrics last_pc, and by
-    # test_cycle_model). It is the first BLACK-BOX, public-API value coverage of this shape (b), and it guards the
-    # OVER-aggressive direction: a future reclaim pushing the boundary BELOW the resident landing would sample
-    # ``octaves`` before the loop's final write lands -> an off-by-one octave count, which exact ``==`` would catch.
+    # The resident-output drain-only Ret shape: the loop body produces the float ``octaves``, which the exit Ret reads
+    # resident at its base PC with no boundary drain. Exact ``==`` guards the over-aggressive direction -- a reclaim
+    # pushing the boundary BELOW the resident landing would sample ``octaves`` before the loop's final write lands, an
+    # off-by-one octave count.
     #
     # The trip count is data-dependent, so the value is the loop's correctness. Inputs are FROZEN to a verified set:
     # |x| >= 1 magnitudes (abs and *0.5 are exact, so the count is unambiguous) and |x| < 1 values comfortably inside
@@ -450,9 +472,9 @@ def test_octave_index_resident_output_drain_only_ret_matches_reference() -> None
 
 def _cross_bank_chain(a, b, c, d):  # type: ignore[no-untyped-def]
     # A deep cross-bank chain on the tight same-bank edge: back-to-back inline ``band``/``bor`` over comparisons, a
-    # bool->float cast, a float op consuming the cast, and a float->bool reduction folded into a select. The inline
-    # latency dropped 1->0 and the dependency-edge clamp now floors at ``READ_FIRST_EDGE - latency``, so this chain is
-    # the most direct exercise of the new commit-ordered edges through the public API.
+    # bool->float cast, a float op consuming the cast, and a float->bool reduction folded into a select. Inline ops are
+    # latency 0 and the dependency edge is the unclamped landing-vs-read spacing, so this chain is the most direct
+    # exercise of those cross-bank edges through the public API.
     p = a > b
     q = c > d
     r = (p and q) or (a > d)  # back-to-back inline band then bor: the tight same-bank read-first edge
@@ -463,12 +485,12 @@ def _cross_bank_chain(a, b, c, d):  # type: ignore[no-untyped-def]
     return out, r, t
 
 
-def test_cross_bank_chain_commit_ordering_matches_reference() -> None:
-    # Could-have-failed (a, reasoned): an off-by-one in the inline latency or the dependency-edge clamp would let a
-    # consumer in this chain commit at or before its producer, so the model's commit-ordered single pass would read a
-    # stale operand -- the boolean ``r``/``t`` would flip and the float ``out`` would diverge from the float64
-    # reference. The chain has no black-box twin (test_arithmetic_behavior's cross-domain test is a single cast; the
-    # deep same-bank reduction at test_schedule is white-box and float-only).
+def test_cross_bank_chain_edges_match_reference() -> None:
+    # Could-have-failed (a, reasoned): an off-by-one in the inline read step or a dependency edge would let a consumer
+    # in this chain read before its producer's value lands, so the model (which commits each PC's landings before its
+    # reads) would sample a stale operand -- the boolean ``r``/``t`` would flip and the float ``out`` would diverge from
+    # the float64 reference. The chain has no black-box twin (test_arithmetic_behavior's cross-domain test is a single
+    # cast; the deep same-bank reduction at test_schedule is white-box and float-only).
     #
     # Inputs are FROZEN to a verified set: ``r`` and ``t`` are comparisons of ROUNDED intermediates (``t = s > 0`` with
     # ``s`` a rounded sum), so a value near a comparison boundary could round differently than float64. The reference

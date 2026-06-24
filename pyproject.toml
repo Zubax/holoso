@@ -33,8 +33,7 @@ version = {attr = "holoso.__version__"}
 include = ["holoso*"]
 
 [tool.setuptools.package-data]
-# Each backend ships its runtime assets (loaded via importlib.resources) as package data.
-"holoso._backend.verilog" = ["*.v", "*.vh"]
+"holoso._backend.verilog" = ["**/*.v", "**/*.vh", "**/*.md"]
 "holoso._backend.html" = ["*.css", "*.js"]
 "holoso" = ["py.typed"]
 

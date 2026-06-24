@@ -16,7 +16,19 @@ output gets no fields and is left unconnected.
 from dataclasses import dataclass
 from string import ascii_letters
 
-from ..._lir import FloatConstRef, FloatOperand, Lir, OperatorInstance, PooledScheduledOp, RegRef, pooled_writeback_word
+from ..._lir import (
+    BoolConstRef,
+    BoolRegRef,
+    FloatConstRef,
+    FloatCopy,
+    FloatOperand,
+    Lir,
+    OperatorInstance,
+    PooledScheduledOp,
+    RegRef,
+    pooled_writeback_word,
+)
+from ..._operators import FloatSignControl
 from ..._type import is_wide_type
 
 PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
@@ -102,6 +114,60 @@ def f_wa(base: str, port: int) -> str:
 
 def f_binv(base: str, port: int) -> str:
     return f"mc_binv_{base}_y{port}"
+
+
+# Per-REGISTER constant-install fields: a phi-arm constant install is not an operator, so it has no (instance, port)
+# write lane. Each destination register that receives a ucode-driven constant install carries a 1-bit write-enable; a
+# wide register additionally carries a const-pool index selector when it installs more than one distinct constant, and
+# a boolean register carries the 1-bit value. Names key on ``stable_label`` (``r<k>``/``b<k>``), disjoint from the
+# operator-lane fields (``mc_*_<base>_y<port>``).
+def f_cwe(dst: RegRef | BoolRegRef) -> str:
+    return f"mc_cwe_{dst.stable_label}"
+
+
+def f_ccidx(reg: RegRef) -> str:
+    return f"mc_ccidx_{reg.stable_label}"
+
+
+def f_cval(breg: BoolRegRef) -> str:
+    return f"mc_cval_{breg.stable_label}"
+
+
+def is_ucode_const_copy(copy: FloatCopy) -> bool:
+    """
+    Whether a wide phi-arm copy is a constant install the microcode can drive directly: a constant source with the
+    identity sign, so its write data is a bare ``const_N`` net needing no register read port and no sign-conditioning
+    wire. A register-source copy (needs a read port) or a signed constant install (``-CONST``, needs a sign wire in the
+    write-data mux) stays pc-gated -- the deferred harder cases.
+    """
+    return copy.is_const and copy.source.sign == FloatSignControl()
+
+
+def const_install_codebooks(lir: Lir) -> dict[int, list[int]]:
+    """
+    Wide register -> the sorted distinct const-pool indices its ucode-driven constant installs use -- the per-register
+    write-data codebook the ``mc_ccidx`` selector indexes (the write-side analogue of ``port_const_map``). A register
+    installing a single constant has a one-entry book (the selector is then a lifted-out constant, no ROM bits).
+    """
+    books: dict[int, list[int]] = {}
+    for block in lir.blocks:
+        for copy in block.copies:
+            if is_ucode_const_copy(copy):
+                assert isinstance(copy.source.source, FloatConstRef)
+                book = books.setdefault(copy.dst.index, [])
+                if copy.source.source.index not in book:
+                    book.append(copy.source.source.index)
+    for book in books.values():
+        book.sort()
+    return books
+
+
+def const_install_bool_regs(lir: Lir) -> list[int]:
+    """
+    The boolean registers that receive a ucode-driven constant install (the bool analogue of
+    :func:`const_install_codebooks`; a boolean constant carries no pool, only its 1-bit value).
+    """
+    return sorted({write.dst.index for block in lir.blocks for write in block.bool_writes if write.is_const})
 
 
 def _op_expr(op: PooledScheduledOp) -> str:
@@ -206,6 +272,18 @@ def build_microcode(
         else:
             add(f_binv(base, port_index), 1, None)
 
+    # Per-register constant-install fields. A wide register's selector is declared only when it installs more than one
+    # distinct constant; otherwise the single index is a constant column finalize lifts out of the ROM. A boolean
+    # register carries its 1-bit value. The write-enable defaults to 0 (concrete every step, so it always packs).
+    const_books = const_install_codebooks(lir)
+    for reg in sorted(const_books):
+        add(f_cwe(RegRef(reg)), 1, 0)
+        if len(const_books[reg]) > 1:
+            add(f_ccidx(RegRef(reg)), code_width(len(const_books[reg])), None)
+    for reg in const_install_bool_regs(lir):
+        add(f_cwe(BoolRegRef(reg)), 1, 0)
+        add(f_cval(BoolRegRef(reg)), 1, None)
+
     for op in lir.ops:
         base = base_name(op.inst)
         ci = op.issue_cycle  # in_valid and sign controls, consumed inside the wrapper on the issue step
@@ -238,6 +316,30 @@ def build_microcode(
                 put(f_binv(base, write.port), wcc, write.conditioner.encoded)  # inversion applied at the write
             put(f_we(base, write.port), wcc, 1)
             put(f_wa(base, write.port), wcc, write_lists[lane].index(write.dst.index))
+
+    # Constant installs ride the microcode like operator writes: the write-enable (and the wide selector / boolean
+    # value) are placed at ROM step ``block_base + issue_cycle`` == install_pc - FETCH_LAG, so the datapath write fires
+    # on the very clock the former pc-gate fired -- schedule-neutral. A register-source or signed-const install is not
+    # selected here and stays pc-gated.
+    for block in lir.blocks:
+        base_pc = lir.block_base[block.index]
+        for copy in block.copies:
+            if not is_ucode_const_copy(copy):
+                continue
+            assert isinstance(copy.source.source, FloatConstRef)
+            step = base_pc + copy.issue_cycle
+            assert 0 <= step < depth, f"const-install ROM step out of range: {step}"
+            put(f_cwe(copy.dst), step, 1)
+            if f_ccidx(copy.dst) in fields:
+                put(f_ccidx(copy.dst), step, const_books[copy.dst.index].index(copy.source.source.index))
+        for bwrite in block.bool_writes:
+            if not bwrite.is_const:
+                continue
+            assert isinstance(bwrite.source.source, BoolConstRef)
+            step = base_pc + bwrite.issue_cycle
+            assert 0 <= step < depth, f"const-install ROM step out of range: {step}"
+            put(f_cwe(bwrite.dst), step, 1)
+            put(f_cval(bwrite.dst), step, int(bwrite.source.source.value))
 
     return fields
 

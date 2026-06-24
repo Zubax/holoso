@@ -12,8 +12,9 @@ values stay live across the whole loop body.
 Second, within each block every live value is given a half-open residence interval in that block's executing-step
 (hardware) frame -- the same frame as :attr:`Lir.reg_liveness` and the numerical model -- using the
 shared cycle helpers. A value resident from a predecessor (live-in, or a phi result) lands on the block's first step; a
-value defined by an in-block operator lands on its bank's landing cycle (the wide bank pays the writeback latch, the
-boolean bank only the read-first edge); a value that is live out of the block (or read by the block's boundary -- an
+value defined by an in-block POOLED operator lands on its bank's landing cycle (the wide bank pays the writeback latch,
+the boolean bank only the read-first edge), an INLINE operator's result a cycle earlier (it writes the array
+combinationally, no writeback latch); a value that is live out of the block (or read by the block's boundary -- an
 output, a branch condition, a state live-out, or a phi-arm copy) stays resident through the block boundary; and a phi
 result additionally occupies its register at the tail of every arm predecessor, where its install copy physically
 writes it one step before the boundary -- deliberately also foreclosing the phi sharing a register with its own arm
@@ -30,7 +31,6 @@ bank or the 1-bit boolean bank) and receives the symmetric interference adjacenc
 from dataclasses import dataclass, field
 
 from .._util import ValueId
-from ._ir import copy_step_cycle
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,13 +55,10 @@ class BankLiveness:
     blocks: list[int]
     entry: int
     succ: dict[int, list[int]]
-    # Block makespan, INCLUSIVE of the +1 install step when the block carries any install -- the same value the
-    # layout uses -- so an install's copy step is exactly ``copy_step_cycle(makespan[block])``.
-    makespan: dict[int, int]
     # Per-block terminator offset (the boundary step where values live-out / consumed-at-boundary must still reside).
-    # Equals the bank-aware ``boundary_step(makespan[block], wide_resident)`` under per-block draining; a separate field
-    # so cross-block overlap can shrink it below the drain without disturbing the install copy step, which stays keyed
-    # on ``makespan``.
+    # Under per-block draining it is the latest cycle a value lands in the block's frame, taken per op (bank- and
+    # inline-aware); a separate field so cross-block overlap can shrink it below the drain without disturbing an
+    # install's fire step, which the caller stamps per install in ``installs``.
     term_offset: dict[int, int]
     resident: frozenset[ValueId]  # inputs and state live-ins: resident from the start, defined at the entry
     op_landing: dict[ValueId, int]  # op-result value -> its bank-true landing cycle in its def block (block-local)
@@ -70,9 +67,13 @@ class BankLiveness:
     reads: dict[int, list[tuple[ValueId, int]]] = field(default_factory=dict)  # block -> [(value, read cycle)]
     boundary_users: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> boundary-read values
     arm_out: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> phi-arm values live out of it
-    installs: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> phi dests installed at its tail
+    # block -> {phi dest installed at its tail: the install's block-local FIRE step}. The fire step is per install, not
+    # per block: a computed-source copy fires at its copy step, an install of a block-entry-resident source (const,
+    # input, state read) one read-first edge earlier, so its destination register is occupied from the true (earlier)
+    # write cycle and a tenant cannot be clobbered.
+    installs: dict[int, dict[ValueId, int]] = field(default_factory=dict)
     # Cross-block overlap: per block, a predecessor value whose in-flight write SPILLS past the predecessor's shrunk
-    # terminator and lands in THIS block, mapped to its block-local landing cycle. The writeback latch fires
+    # terminator and lands in THIS block, mapped to its block-local landing cycle. The spilled write fires
     # unconditionally (the predecessor drove its write-enable before the redirect), so the value's register is occupied
     # in every successor frame it spills into -- from the block's first step through its landing -- whether or not the
     # value is dataflow-live here. Modeling it as resident-from-step-1 keeps a sibling arm where the value is DEAD from
@@ -146,9 +147,9 @@ def compute_interference(bank: BankLiveness) -> dict[ValueId, set[ValueId]]:
 
     for block in bank.blocks:
         boundary = bank.term_offset[block]
-        installed = bank.installs.get(block, frozenset())
+        installed = bank.installs.get(block, {})
         inflight = bank.inflight_defs.get(block, {})
-        live_set = live.live_in[block] | defs[block] | installed | inflight.keys()
+        live_set = live.live_in[block] | defs[block] | installed.keys() | inflight.keys()
         # A value's residence in this block: it lands on the block's first step when it is resident, a phi result, or a
         # live-in carried from a predecessor; on its operator's landing cycle when defined here; and on the install
         # step (one before the boundary) when its only presence is a phi install at this block's tail. It dies on its
@@ -160,9 +161,7 @@ def compute_interference(bank: BankLiveness) -> dict[ValueId, set[ValueId]]:
             if vid in bank.op_block and bank.op_block[vid] == block and vid not in live.live_in[block]:
                 w = bank.op_landing[vid]
             elif vid in installed and vid not in live.live_in[block] and vid not in defs[block]:
-                # The install fires on the copy step of the block's install-inclusive makespan, one step before the
-                # boundary (see the ``makespan`` field contract).
-                w = copy_step_cycle(bank.makespan[block])
+                w = installed[vid]  # the install's own fire step (per install: copy-class later, const-class earlier)
             else:
                 w = 1
             write_at[vid] = w

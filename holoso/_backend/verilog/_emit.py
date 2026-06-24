@@ -1,6 +1,6 @@
 """
-Render a scheduled :class:`Lir` into a synthesizable Verilog ZISC module, plus access to the shared ``holoso_support``
-HDL that the generated module instantiates.
+Render a scheduled :class:`Lir` into a synthesizable Verilog ZISC module that instantiates the shared support library
+(assembled by :mod:`._support`).
 
 The controller is a microcode ROM (see :mod:`._microcode`): one pre-decoded VLIW control word per step, stored in a
 (BRAM-inferable) ROM read through a 3-stage fetch (a PC latch, the array read, and the BRAM output register) so the
@@ -24,18 +24,13 @@ statements rendered by the operator's own ``verilog_expr``.
 """
 
 from dataclasses import dataclass
-from importlib import resources
 from textwrap import dedent
 
 from ..._lir import *
 from ..._operators import *
 from ..._type import is_wide_type
 from ._microcode import *
-
-_SUPPORT_FILES = {
-    name: resources.files(__package__).joinpath(name).read_text(encoding="utf-8")
-    for name in ("holoso_support.v", "holoso_support.vh")
-}
+from ._support import support_files
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,10 +120,11 @@ def _state_copy_rhs(slot: FloatStateSlot) -> str:
 
 def _inline_fire_pc(lir: Lir, block_index: int, op: InlineScheduledOp) -> int:
     """
-    The fetch PC at which an inline firing's single PC-gated statement executes: the bank-true fire step (the commit
-    step for a boolean destination, one later for a wide one, aligned with the wide bank's write-latch enables).
+    The fetch PC at which an inline firing's single PC-gated statement executes: its combinational fire step, one
+    ``FETCH_LAG`` after the commit on either bank. An inline op drives its destination's write data combinationally, so
+    -- unlike a pooled lane -- it carries no writeback latch.
     """
-    return lir.block_base[block_index] + inline_fire_cycle(op.commit_cycle, isinstance(op.write.dst, RegRef))
+    return lir.block_base[block_index] + inline_fire_cycle(op.commit_cycle)
 
 
 def _inline_sign_wire(block_index: int, op_index: int, pos: int) -> str:
@@ -205,7 +201,7 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_clocked(w, lir, read_port, port_consts, read_sets, write_sets, write_lists)
     _emit_outputs(w, lir)
     w("\nendmodule\n")
-    return VerilogOutput(verilog=w.render(), support_files=_SUPPORT_FILES)
+    return VerilogOutput(verilog=w.render(), support_files=support_files())
 
 
 def _emit_header(w: _Writer, lir: Lir) -> None:
@@ -424,10 +420,15 @@ def _emit_field_wires(w: _Writer, fields: dict[str, Field]) -> None:
     w("")
 
 
-def _const_term_expr(port: int, consts: list[int]) -> str:
+def _const_pool_mux(selector: str, consts: list[int]) -> str:
+    """
+    A const-pool read expression: the lone ``const_N`` net, or a ``selector``-indexed ternary mux over ``consts``. Used
+    on the read side (an operand's per-port const select, ``mc_cidx``) and the write side (a register's ucode-driven
+    constant install, ``mc_ccidx``) alike.
+    """
     expr = f"const_{consts[-1]}"
     for local in range(len(consts) - 2, -1, -1):
-        expr = f"({f_cidx(port)} == {local}) ? const_{consts[local]} : {expr}"
+        expr = f"({selector} == {local}) ? const_{consts[local]} : {expr}"
     return expr
 
 
@@ -437,7 +438,7 @@ def _emit_datapath_comb(
     """Combinational datapath: constant terms, the input-load enable, operator control, the err flag, and next_pc."""
     for port in sorted(port_consts):
         if len(port_consts[port]) > 1:
-            w(f"wire [W-1:0] cterm{port} = {_const_term_expr(port, port_consts[port])};")
+            w(f"wire [W-1:0] cterm{port} = {_const_pool_mux(f_cidx(port), port_consts[port])};")
     w("")
 
     w("// Operator control (in_valid and sign controls are consumed inside the wrapper on the issue step).")
@@ -524,12 +525,12 @@ def _terminator_redirects(lir: Lir) -> list[tuple[int, str]]:
 
 
 def _float_copy_pc(lir: Lir, block: LirBlock, copy: FloatCopy) -> int:
-    """The fetch PC at which a phi-arm copy installs its value (its source has landed by this step)."""
-    return lir.block_base[block.index] + copy_step_cycle(copy.issue_cycle)
+    """The fetch PC at which a phi-arm copy installs its value (a const fires inline-class, a reg copy one step later)."""
+    return lir.block_base[block.index] + copy.fire_step
 
 
 def _bool_write_pc(lir: Lir, block: LirBlock, write: BoolWrite) -> int:
-    return lir.block_base[block.index] + copy_step_cycle(write.issue_cycle)
+    return lir.block_base[block.index] + write.fire_step
 
 
 def _copy_sign_wire(block_index: int, copy_index: int) -> str:
@@ -556,10 +557,16 @@ def _bool_write_rhs(write: BoolWrite) -> str:
 
 
 def _copies_grouped(lir: Lir) -> dict[int, list[tuple[int, str]]]:
-    """Destination wide register -> [(install PC, source net)], over every phi-arm copy in the program."""
+    """
+    Destination wide register -> [(install PC, source net)], over the phi-arm copies that remain pc-gated: register-
+    source copies and signed-constant installs. Identity-sign constant installs are ucode-driven (see
+    ``_wide_writer_entries``), not pc-gated.
+    """
     grouped: dict[int, list[tuple[int, str]]] = {}
     for block in lir.blocks:
         for copy_index, copy in enumerate(block.copies):
+            if is_ucode_const_copy(copy):
+                continue
             grouped.setdefault(copy.dst.index, []).append(
                 (_float_copy_pc(lir, block, copy), _float_copy_rhs(block.index, copy_index, copy))
             )
@@ -567,10 +574,15 @@ def _copies_grouped(lir: Lir) -> dict[int, list[tuple[int, str]]]:
 
 
 def _bool_writes_grouped(lir: Lir) -> dict[int, list[tuple[int, str]]]:
-    """Destination boolean register -> [(install PC, source expression)], over every boolean phi-arm write."""
+    """
+    Destination boolean register -> [(install PC, source expression)], over the boolean phi-arm writes that remain
+    pc-gated: register-source writes. Constant boolean installs are ucode-driven (see ``_bool_writer_entries``).
+    """
     grouped: dict[int, list[tuple[int, str]]] = {}
     for block in lir.blocks:
         for write in block.bool_writes:
+            if write.is_const:
+                continue
             grouped.setdefault(write.dst.index, []).append((_bool_write_pc(lir, block, write), _bool_write_rhs(write)))
     return grouped
 
@@ -692,6 +704,12 @@ def _wide_writer_entries(
             entries.setdefault(reg, []).append(
                 (_writeback_cond(inst, port, reg, write_lists), f"{_sig(inst)}_y{port}_q")
             )
+    # Ucode-driven constant installs: a microcode write-enable arm (like an operator lane), reusing the const-pool nets.
+    const_books = const_install_codebooks(lir)
+    for reg in sorted(const_books):
+        entries.setdefault(reg, []).append(
+            (f_cwe(RegRef(reg)), _const_pool_mux(f_ccidx(RegRef(reg)), const_books[reg]))
+        )
     for block in lir.blocks:
         for op_index, inline_op in enumerate(block.inline_ops):
             if isinstance(inline_op.write.dst, RegRef):
@@ -723,6 +741,10 @@ def _bool_writer_entries(
         for inst, port in bool_write_sets[reg]:
             rhs = f"{_sig(inst)}_y{port} ^ {f_binv(base_name(inst), port)}"
             entries.setdefault(reg, []).append((_writeback_cond(inst, port, reg, write_lists), rhs))
+    # Ucode-driven constant installs: a microcode write-enable arm latching the 1-bit value (latch-free, no XOR -- the
+    # inversion is already folded into the value at construction).
+    for reg in const_install_bool_regs(lir):
+        entries.setdefault(reg, []).append((f_cwe(BoolRegRef(reg)), f_cval(BoolRegRef(reg))))
     for block in lir.blocks:
         for op_index, inline_op in enumerate(block.inline_ops):
             if isinstance(inline_op.write.dst, BoolRegRef):
