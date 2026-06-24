@@ -195,27 +195,28 @@ def install_landing(fire_step: int) -> int:
     return fire_step + READ_FIRST_EDGE
 
 
-def install_fire_step(install_cycle: int, sourceless: bool) -> int:
+def install_fire_step(install_cycle: int, resident_source: bool) -> int:
     """
-    The block-local fetch step a pc-gated install fires and drives its destination's write data. A register-source copy
-    must sample its source one READ_FIRST_EDGE past its placement (``copy_step_cycle``); a SOURCELESS install -- a
-    literal constant, which is a combinational wire with nothing to sample -- fires at the inline combinational step
+    The block-local fetch step a pc-gated install fires and drives its destination's write data. An install whose source
+    is COMPUTED by the block's work must sample it one READ_FIRST_EDGE past its placement (``copy_step_cycle``); an
+    install whose source is RESIDENT at block entry -- a literal constant (a combinational wire), an input, or a state
+    read, all stable before the block -- has nothing to wait for and fires at the inline combinational step
     (``inline_fire_cycle``), one edge earlier, on either bank. Both land one READ_FIRST_EDGE later via ``install_landing``
-    (so a sourceless install lands at ``inline_landing_cycle(install_cycle)``, the latch-free combinational landing). The
-    single owner of this dichotomy, shared by the model, emitter, liveness, layout drain, and HTML report.
+    (so a resident-source install lands at ``inline_landing_cycle(install_cycle)``, the latch-free combinational
+    landing). The single owner of this dichotomy, shared by the model, emitter, liveness, layout drain, and HTML report.
     """
-    return inline_fire_cycle(install_cycle) if sourceless else copy_step_cycle(install_cycle)
+    return inline_fire_cycle(install_cycle) if resident_source else copy_step_cycle(install_cycle)
 
 
-def install_issue_cycle(work_makespan: int, sourceless: bool) -> int:
+def install_issue_cycle(work_makespan: int, resident_source: bool) -> int:
     """
-    The scheduler-frame placement of a block's tail install. A register-source copy is placed one step PAST the work
-    makespan so it read-firsts a source the block's work may have just produced; a sourceless literal-constant install
-    has nothing to wait for and is placed at the work makespan itself. The per-install dual of
-    ``install_inclusive_makespan`` (which carries the same +1 into the block makespan only when a copy is present), so
-    the placement and the drain agree on the +1 and an install cannot land past its block's terminator.
+    The scheduler-frame placement of a block's tail install. A computed-source copy is placed one step PAST the work
+    makespan so it read-firsts a source the block's work may have just produced; an install whose source is resident at
+    block entry has nothing to wait for and is placed at the work makespan itself. The per-install dual of
+    ``install_inclusive_makespan`` (which carries the same +1 into the block makespan only when a computed-source copy is
+    present), so the placement and the drain agree on the +1 and an install cannot land past its block's terminator.
     """
-    return work_makespan + (0 if sourceless else 1)
+    return work_makespan + (0 if resident_source else 1)
 
 
 def boundary_step(makespan: int, wide_resident: bool) -> int:
@@ -631,20 +632,24 @@ class FloatCopy:
     A register-to-register move installing a phi arm's value into the merged register at a predecessor's tail: ``dst``
     takes ``source`` on the block-relative ``issue_cycle``. Used when a phi arm is not an operator result that can be
     coalesced directly onto the merged register (e.g. an input, a constant, or a value defined in another block).
+    ``resident_source`` records whether ``source`` is available at block entry (a constant, input, or state read) rather
+    than computed by this block's work -- the timing class: a resident source fires inline-class (the builder sets it
+    from ``value_resident_at_entry``, which a ``RegRef`` operand alone cannot reveal).
     """
 
     dst: RegRef
     source: FloatOperand
     issue_cycle: int
+    resident_source: bool
 
     @property
     def is_const(self) -> bool:
-        """A literal-constant install (a combinational wire source); it fires inline-class, with no source to sample."""
+        """A literal-constant install (one kind of resident source); meaningful where the literal itself matters."""
         return isinstance(self.source.source, FloatConstRef)
 
     @property
     def fire_step(self) -> int:
-        return install_fire_step(self.issue_cycle, self.is_const)
+        return install_fire_step(self.issue_cycle, self.resident_source)
 
     @property
     def landing(self) -> int:
@@ -655,21 +660,23 @@ class FloatCopy:
 class BoolWrite:
     """
     A boolean register install of a phi arm (a bool const or another bool register, with the arm's folded inversion)
-    on a block-relative cycle.
+    on a block-relative cycle. ``resident_source`` records whether ``source`` is available at block entry (a constant,
+    input, or state read) rather than computed by this block's work -- the timing class (see :class:`FloatCopy`).
     """
 
     dst: BoolRegRef
     source: BoolOperand
     issue_cycle: int
+    resident_source: bool
 
     @property
     def is_const(self) -> bool:
-        """A literal-constant install (a combinational wire source); it fires inline-class, with no source to sample."""
+        """A literal-constant install (one kind of resident source); meaningful where the literal itself matters."""
         return isinstance(self.source.source, BoolConstRef)
 
     @property
     def fire_step(self) -> int:
-        return install_fire_step(self.issue_cycle, self.is_const)
+        return install_fire_step(self.issue_cycle, self.resident_source)
 
     @property
     def landing(self) -> int:

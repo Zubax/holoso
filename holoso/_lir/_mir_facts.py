@@ -5,7 +5,20 @@ depend on nothing in the LIR layer, so they sit at the base of the builder DAG -
 bank allocation without coupling those stages to one another.
 """
 
-from .._mir import Mir, MirBoolView, MirBranch, MirFloatView, MirJump, MirOperation, MirPhi, MirRet
+from .._mir import (
+    Mir,
+    MirBoolView,
+    MirBranch,
+    MirConst,
+    MirFloatView,
+    MirInput,
+    MirJump,
+    MirNode,
+    MirOperation,
+    MirPhi,
+    MirRet,
+    MirStateRead,
+)
 from .._util import ValueId
 
 
@@ -13,6 +26,20 @@ def mir_operation(mir: Mir, vid: ValueId) -> MirOperation:
     node = mir.nodes[vid]
     assert isinstance(node, MirOperation)
     return node
+
+
+def value_resident_at_entry(node: MirNode) -> bool:
+    """
+    Whether a value is resident in its register from a block's first step rather than produced by the block's own work:
+    a literal constant, an input load, or a persistent-state read. A value computed in some block (an operator result or
+    a phi) is NOT entry-resident -- it lands mid/late-block. This is the single discriminator for an install's timing: a
+    tail install reading an entry-resident source has nothing to read-first, so it fires inline-class (one fetch step
+    earlier, no +1), exactly like a literal constant; an install reading a computed source must read-first it (copy-
+    class). The lone source of this fact, shared by the install seed, the post-coalescing refinement, the builder, and
+    the allocator residence, so they cannot drift. The positive test means a future node kind defaults to non-resident --
+    the safe (copy-class) direction.
+    """
+    return isinstance(node, (MirConst, MirInput, MirStateRead))
 
 
 def succ_map(mir: Mir) -> dict[int, list[int]]:
@@ -85,21 +112,23 @@ def const_branch_conditions(mir: Mir, bool_mir: MirBoolView) -> dict[int, ValueI
 
 def block_has_install(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) -> dict[int, bool]:
     """
-    Each install-bearing block mapped to whether it carries a COPY-class (register-source) install: a float copy or a
-    bool write of a register, which samples its source and so pays the +1 install step and the wide writeback drain. A
-    block present with value ``False`` installs only literal constants -- phi-arm const arms, or a const branch
-    condition -- which fire inline-class within the work makespan and pay neither. Determinable from the CFG/MIR shape
-    before register assignment (a const arm is a constant node), conservatively: an arm is assumed not to coalesce, so
-    a register arm marks the block copy-class even if it later coalesces away (the fixpoint then narrows it). The
-    liveness boundary and the layout share this classification so the per-block makespan and drain agree.
+    Each install-bearing block mapped to whether it carries a COPY-class install: a float copy or a bool write whose
+    source is COMPUTED by the block's own work (an operator result or phi), which the install must read-first and so pays
+    the +1 install step and the wide writeback drain. A block present with value ``False`` installs only block-entry-
+    RESIDENT sources -- literal constants (phi-arm const arms or a const branch condition), inputs, or state reads --
+    which are available before the install fires, so it fires inline-class within the work makespan and pays neither.
+    Determinable from the MIR shape before register assignment (``value_resident_at_entry``), conservatively: an arm is
+    assumed not to coalesce, so a computed-source arm marks the block copy-class even if it later coalesces away (the
+    fixpoint then narrows it). The liveness boundary and the layout share this classification so the per-block makespan
+    and drain agree.
     """
     install: dict[int, bool] = {}
     for phi in float_mir.phi_nodes.values():
         for pred, value, _conditioner in phi.arms:
-            install[pred] = install.get(pred, False) or value not in float_mir.const_nodes
+            install[pred] = install.get(pred, False) or not value_resident_at_entry(float_mir.nodes[value])
     for phi in bool_mir.phi_nodes.values():
         for pred, value, _conditioner in phi.arms:
-            install[pred] = install.get(pred, False) or value not in bool_mir.const_nodes
+            install[pred] = install.get(pred, False) or not value_resident_at_entry(bool_mir.nodes[value])
     for block_id in const_branch_conditions(mir, bool_mir):
         install.setdefault(block_id, False)  # a const branch materializes a literal: inline-class, never copy-class
     return install

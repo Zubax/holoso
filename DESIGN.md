@@ -427,16 +427,19 @@ coalesced slot writes its register in place and adds nothing); and the entry blo
 boundary values are all already resident in predecessors pays none (the drain-only `Ret`s of loop/diamond kernels,
 whose body produces every output the `Ret` reads combinationally).
 
-A tail install is classified by whether it reads a register source. A register-source copy (a phi arm that is an input,
-a cross-block value, or another register) must sample its source one step past the work makespan to read it first, so it
-fires at the copy step and lands at the wide writeback boundary -- the +1 install step. A SOURCELESS install of a literal
-constant (a phi-arm const arm, or a const branch condition materialized at the tail) has nothing to sample: a wide
-constant is a combinational wire, a boolean one a literal, so it fires inline-class at the combinational step within the
-work makespan and lands one read-first edge later at the latch-free combinational landing -- two cycles earlier than the
-copy pipeline, paying neither the +1 step nor the writeback latch, on either bank. So a const-only tail block drains to
-that inline landing rather than the wider copy boundary; the recovered cycles shrink every downstream block base (the
-boolean live-out resets of a UART receiver, for instance, land within their block instead of two cycles past it). The
-register-allocator residence occupies each install's destination from its own fire step -- earlier for a const -- so a
+A tail install is classified by whether its source is COMPUTED by the block's own work or RESIDENT at block entry. A
+computed-source copy (the phi arm is an operator result or phi produced in this block) must sample its source one step
+past the work makespan to read it first, so it fires at the copy step and lands at the wide writeback boundary -- the +1
+install step. An install whose source is resident at block entry -- a literal constant (a phi-arm const arm, or a const
+branch condition; a wide constant is a combinational wire, a boolean one a literal), an input, or a persistent-state
+read -- has nothing to read-first: it fires inline-class at the combinational step within the work makespan and lands one
+read-first edge later at the latch-free combinational landing -- two cycles earlier than the copy pipeline, paying
+neither the +1 step nor the writeback latch, on either bank. So a block whose tail installs are all entry-resident drains
+to that inline landing rather than the wider copy boundary; the recovered cycles shrink every downstream block base (a
+UART receiver's boolean live-out resets, and its installs of the rx input, land within their block instead of two cycles
+past it). The classification is one per-value predicate (is the value computed, or entry-resident) shared by the install
+seed, the post-coalescing refinement, the builder, and the residence so they cannot drift; the register-allocator
+residence occupies each install's destination from its own fire step -- earlier for an entry-resident source -- so a
 tenant cannot be clobbered by the earlier write.
 
 Cross-block software pipelining then shrinks the terminator offset down to the issue-side envelope -- the latest PC at

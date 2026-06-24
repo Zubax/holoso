@@ -461,28 +461,49 @@ def test_bool_only_block_drains_one_step_under_the_wide_boundary(monkeypatch: py
         pfd_ret.block_makespan, wide_resident=True
     ), "drained at the wide boundary"
 
-    # A bool-only block that carries a tail install keeps the WIDE drain: the pc-gated install lands at the wide
-    # boundary, so shrinking to the bool boundary would read it one PC before it lands (a miscompile). A non-coalesced
-    # boolean phi arm is such an install: here ``r``'s entry arm is the input ``a``, which is also returned, so it stays
-    # live past the merge and cannot coalesce onto the phi register -- it installs by a pc-gated copy at the (bool-only)
-    # not-taken arm's tail. If-conversion is disabled so the diamond stays a real branch with a residual phi install
-    # rather than collapsing to a select. (In-place state commit elided the former majority_voter sticky-fault
-    # installs.)
+    # An install-bearing bool-only block's drain tracks its install's SOURCE. A COMPUTED-source copy (the phi arm is an
+    # operator result the block produced) lands at the wide writeback boundary, so the block must KEEP the wide drain --
+    # shrinking to the bool boundary would read it one PC before it lands (the B1 miscompile). A source RESIDENT at block
+    # entry (here an input) needs no read-first: the install fires inline-class and lands at the latch-free boundary one
+    # step under wide, so the block drains there. Both residual installs are forced by ``return r, <arm>`` keeping the
+    # c-false arm live past the merge so it cannot coalesce onto the phi register; if-conversion is disabled so each
+    # diamond stays a real branch rather than collapsing to a select. (In-place state commit elided the former
+    # majority_voter sticky-fault installs.)
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
 
-    def residual_bool_install(a: bool, b: bool, c: bool):  # type: ignore[no-untyped-def]
-        r = a
-        if c:
-            r = a and b
-        return r, a  # ``a`` returned -> the c-false arm (= a) of r's phi cannot coalesce -> a residual bool install
+    def bool_install_blocks(lir: object) -> list[LirBlock]:  # bool-only blocks carrying a tail bool install
+        return [b for b in lir.blocks if b.bool_writes and is_bool_only(b)]  # type: ignore[attr-defined]
 
-    inst = build(_run(residual_bool_install), "bool_install_drain")
-    bool_install_blocks = [b for b in inst.blocks if b.bool_writes and is_bool_only(b)]
-    assert bool_install_blocks, "no bool-only install-bearing block to exercise the install drain exception"
-    for block in bool_install_blocks:
+    def computed_source_install(a: bool, b: bool, c: bool):  # type: ignore[no-untyped-def]
+        x = a and b  # COMPUTED in-block; returned so the c-false arm (= x) cannot coalesce -> a computed-source install
+        r = x
+        if c:
+            r = a or b
+        return r, x
+
+    computed = bool_install_blocks(build(_run(computed_source_install), "computed_source_install"))
+    assert computed and all(
+        not w.resident_source for b in computed for w in b.bool_writes
+    ), "no computed-source bool install to exercise the wide-drain case"
+    for block in computed:
         assert block.term_offset == boundary_step(
             block.block_makespan, wide_resident=True
-        ), "an install-bearing bool block shrank below the wide boundary where its install lands"
+        ), "a computed-source bool install must keep the wide drain where it lands"
+
+    def resident_source_install(a: bool, b: bool, c: bool):  # type: ignore[no-untyped-def]
+        r = a  # the c-false arm is the INPUT a (resident at block entry), returned so it cannot coalesce
+        if c:
+            r = a and b
+        return r, a
+
+    resident = bool_install_blocks(build(_run(resident_source_install), "resident_source_install"))
+    assert resident and all(
+        w.resident_source for b in resident for w in b.bool_writes
+    ), "no resident-source bool install to exercise the inline-class drain"
+    for block in resident:
+        assert block.term_offset == boundary_step(
+            block.block_makespan, wide_resident=False
+        ), "a resident-source bool install fires inline-class and drains one step under the wide boundary"
 
 
 def test_entry_block_reclaims_its_first_control_word() -> None:
@@ -531,16 +552,16 @@ def test_const_branch_install_block_drains_to_its_inline_landing(config: Operato
     # Regression (fuzz-found B1 miscompile): a constant branch condition formed by DIVISION escapes the
     # frontend's AST-level reachability fold (which evaluates only +,-,* of literals), so the HIR const-folder reduces
     # it to a BoolConst that if-conversion refuses -- leaving an EMPTY const-branch block (the condition install + a
-    # branch, no float content). The condition is a literal, so its tail bool write is SOURCELESS (inline-class): it
-    # fires at the combinational step and lands one read-first edge later, at the latch-free landing within the work
-    # makespan -- and the block must drain to exactly that landing, where the terminator then reads the condition the
-    # following step. The drain must neither shrink below it (terminator reads a stale condition -- the original B1 bug)
-    # nor pay the wider copy/writeback boundary. Crash-before: KeyError (model) / stale branch read (RTL); pass-after:
-    # bit-exact vs the reference.
+    # branch, no float content). The condition is a literal -- an entry-resident source -- so its tail bool write is
+    # inline-class: it fires at the combinational step and lands one read-first edge later, at the latch-free landing
+    # within the work makespan -- and the block must drain to exactly that landing, where the terminator then reads the
+    # condition the following step. The drain must neither shrink below it (terminator reads a stale condition -- the
+    # original B1 bug) nor pay the wider copy/writeback boundary. Crash-before: KeyError (model) / stale branch read
+    # (RTL); pass-after: bit-exact vs the reference.
     lir = build(_run(const_branch_kernel, config.make_ops(FMT)), f"const_branch_{config.label}")
-    # Structural teeth: the surviving const-branch block branches on a constant materialized by a sourceless tail bool
-    # write, so it drains to that install's inline-class landing. Pins the drain itself, not only the output, so a future
-    # drain regression here is localized rather than silently model-correct.
+    # Structural teeth: the surviving const-branch block branches on a constant materialized by an entry-resident tail
+    # bool write, so it drains to that install's inline-class landing. Pins the drain itself, not only the output, so a
+    # future drain regression here is localized rather than silently model-correct.
     const_blocks = [
         b
         for b in lir.blocks
@@ -551,7 +572,7 @@ def test_const_branch_install_block_drains_to_its_inline_landing(config: Operato
         assert all(w.is_const for w in block.bool_writes), "the const-branch condition install is not a literal const"
         assert block.term_offset == inline_landing_cycle(
             block.block_makespan
-        ), "a const-branch block must drain to its sourceless install's inline landing"
+        ), "a const-branch block must drain to its entry-resident install's inline landing"
     model = build_model(lir)
     for x, y in [(2.0, 1.0), (1.0, 2.0), (5.0, 3.0), (-1.0, -2.0)]:
         (got,) = model.run(x, y)

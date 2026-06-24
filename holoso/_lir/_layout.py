@@ -34,11 +34,11 @@ def _value_word_and_landing(mir: Mir, float_mir: MirFloatView, vid: ValueId, iss
 
 def install_inclusive_makespan(work_makespan: int, has_copy_install: bool) -> int:
     """
-    The block makespan inclusive of its tail install: a block with a register-source COPY install fires that copy one
-    cycle past its last work commit (to read-first its source), so its effective makespan is one higher. A const-only
-    tail is inline-class and adds no step, so it does not raise the makespan. The single owner of this ``+1`` so the
-    overlap layout's boundary derivation and the per-block LirBlock makespan cannot disagree on it (the dual of the
-    per-install ``install_issue_cycle``).
+    The block makespan inclusive of its tail install: a block with a COMPUTED-source COPY install fires that copy one
+    cycle past its last work commit (to read-first the source its work produced), so its effective makespan is one
+    higher. A tail that installs only block-entry-resident sources (const, input, state read) is inline-class and adds no
+    step, so it does not raise the makespan. The single owner of this ``+1`` so the overlap layout's boundary derivation
+    and the per-block LirBlock makespan cannot disagree on it (the dual of the per-install ``install_issue_cycle``).
     """
     return work_makespan + (1 if has_copy_install else 0)
 
@@ -136,7 +136,7 @@ def schedule_with_overlap(
     """
     Schedule every block in reverse-postorder and derive each block's terminator offset, threading cross-block overlap
     forward. A block whose every successor is single-predecessor (so a spill cannot reach a wrong path) and that carries
-    no phi/const install shrinks its terminator offset from the drained boundary down to the issue-side envelope -- the
+    no tail install shrinks its terminator offset from the drained boundary down to the issue-side envelope -- the
     latest cycle it still drives a control word, plus the branch condition's read floor. The drained boundary is the
     latest cycle a value LANDS in the block's frame, taken per op so it is both bank-aware and inline-aware (a pooled
     result lands through its bank's writeback latch, an inline result a cycle earlier). Its in-flight results then land
@@ -203,10 +203,11 @@ def schedule_with_overlap(
         # The drained boundary is the latest cycle a value LANDS in this block's frame, taken per op so it is both
         # bank-aware AND inline-aware: a pooled result lands through its bank's writeback latch, an inline result writes
         # the array combinationally and lands a cycle earlier. Three landings are INVISIBLE to the op schedule and are
-        # added explicitly: (1) a phi/const tail install -- a register-source COPY lands at the wide writeback boundary
-        # ``boundary_step(makespan, wide)`` (``makespan`` install-inclusive, one past the work), while a SOURCELESS
-        # const install is inline-class and lands a cycle earlier at the latch-free combinational landing
-        # ``inline_landing_cycle(work)``, paying neither the +1 step nor the writeback latch; (2) a NON-coalesced state
+        # added explicitly: (1) a phi tail install -- a COMPUTED-source COPY lands at the wide writeback boundary
+        # ``boundary_step(makespan, wide)`` (``makespan`` install-inclusive, one past the work), while an install of a
+        # block-entry-resident source (const, input, state read) is inline-class and lands a cycle earlier at the
+        # latch-free combinational landing ``inline_landing_cycle(work)``, paying neither the +1 step nor the writeback
+        # latch; (2) a NON-coalesced state
         # slot's read-first boundary copy lands at ``boundary_step(sched.makespan, bank)`` -- its source is among the op
         # landings, but the copy adds its bank's fetch-pipeline; ``state_copy_blocks`` carries the Ret blocks that have
         # one (mapped to the wide-vs-bool bank), decided by the coalescing fixpoint -- a coalesced slot writes its

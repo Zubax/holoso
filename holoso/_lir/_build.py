@@ -7,7 +7,7 @@ from .._errors import UnsupportedConstruct
 from .._mir import Mir, MirBoolView, MirBranch, MirFloatView, MirPhi
 from .._util import ValueId
 from ._ir import *
-from ._mir_facts import block_has_install
+from ._mir_facts import block_has_install, value_resident_at_entry
 from ._portassign import assign_commutative_ports
 from ._schedule import resolve_pool
 from ._bankalloc import actual_install_blocks, layout_and_allocate
@@ -149,8 +149,8 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
         {ret_block: bool(float_mir.state_slots)} if (float_mir.state_slots or bool_mir.state_slots) else {}
     )
     # Iteration bound = the product measure's height + 1. The fixpoint descends non-increasing dimensions: the install
-    # classification (each block can drop out, <= len(blocks) removals, and a copy-class block can narrow to const-only
-    # once as its register arm coalesces away, <= len(blocks) narrowings) and the single-keyed state-copy charge
+    # classification (each block can drop out, <= len(blocks) removals, and a copy-class block can narrow to inline-class
+    # once its computed-source arm coalesces away, <= len(blocks) narrowings) and the single-keyed state-copy charge
     # (height 2: wide -> bool -> absent). They are only positively coupled, not locked to co-descend, so the worst case
     # is the SUM of descents -- 2*len(blocks) + 2 -- plus one round to confirm the fixpoint.
     for _ in range(2 * len(mir.blocks) + 3):
@@ -199,24 +199,22 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
             )
         ]
         work_makespan = sched.makespan
+        # An install fires inline-class iff its source is resident at block entry (a const, input, or state read) rather
+        # than computed by this block's work -- the same +1-free, source-sample-free timing as a literal constant.
         copies = []
         for c in alloc.copies.get(block.id, []):
             fsrc = operand_signed(float_mir, c.source, c.sign, alloc, const_pool)
-            copies.append(
-                FloatCopy(
-                    RegRef(c.dst), fsrc, install_issue_cycle(work_makespan, isinstance(fsrc.source, FloatConstRef))
-                )
-            )
+            resident = value_resident_at_entry(float_mir.nodes[c.source])
+            copies.append(FloatCopy(RegRef(c.dst), fsrc, install_issue_cycle(work_makespan, resident), resident))
         bool_writes = []
         for w in alloc.bool_writes.get(block.id, []):
             bsrc = bool_operand(bool_mir, w.source, alloc, w.inversion)
+            resident = value_resident_at_entry(bool_mir.nodes[w.source])
             bool_writes.append(
-                BoolWrite(
-                    BoolRegRef(w.dst), bsrc, install_issue_cycle(work_makespan, isinstance(bsrc.source, BoolConstRef))
-                )
+                BoolWrite(BoolRegRef(w.dst), bsrc, install_issue_cycle(work_makespan, resident), resident)
             )
-        # The block makespan carries the install +1 only when a register-source copy is present (a const-only tail is
-        # inline-class and adds no step); ``has_install_blocks`` maps each install-bearing block to that copy-class bit.
+        # The block makespan carries the install +1 only when a computed-source copy is present (an entry-resident-only
+        # tail is inline-class and adds no step); ``has_install_blocks`` maps each install-bearing block to that bit.
         block_makespan = install_inclusive_makespan(work_makespan, has_install_blocks.get(block.id, False))
         # The latch-free bool bank gives a branch condition exactly one cycle of slack: a bool result committing at the
         # makespan lands one step before the terminator's boundary read. The schedule's makespan covers every commit by

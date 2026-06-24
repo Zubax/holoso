@@ -24,7 +24,7 @@ from .._mir import (
 from .._operators import BoolInversion, FloatSignControl, HardwareOperator, PooledHardwareOperator, PortConditioner
 from .._util import ValueId
 from ._ir import *
-from ._mir_facts import const_branch_conditions, mir_rpo, phi_arm_out, succ_map
+from ._mir_facts import const_branch_conditions, mir_rpo, phi_arm_out, succ_map, value_resident_at_entry
 from ._liveness import BankLiveness, compute_interference
 from ._schedule import Schedule
 from ._regalloc import Producer
@@ -102,19 +102,19 @@ def layout_and_allocate(
 def actual_install_blocks(alloc: Allocation, float_mir: MirFloatView, bool_mir: MirBoolView) -> dict[int, bool]:
     """
     The post-coalescing install classification (the refinement ``block_has_install`` seeds): each block that actually
-    installs at its tail, mapped to whether it carries a COPY-class (register-source) install. A float copy or bool
-    write of a REGISTER samples its source (copy-class, ``True``); a literal-constant copy/write -- including the const
-    branch materialization, which is a bool write of a constant condition already present in ``alloc.bool_writes`` -- is
-    sourceless (inline-class, ``False``). A CFG-shape phi-arm predecessor whose every arm coalesced installs nothing and
-    drops out here, which the fixpoint feeds back to the next layout so the spurious drain is removed.
+    installs at its tail, mapped to whether it carries a COPY-class install -- one whose source is COMPUTED by the
+    block's work (an operator result or phi), so the install must read-first it (``True``). An install of a block-entry-
+    RESIDENT source -- a literal constant (including the const branch materialization already in ``alloc.bool_writes``),
+    an input, or a state read -- fires inline-class (``False``). A CFG-shape phi-arm predecessor whose every arm coalesced
+    installs nothing and drops out here, which the fixpoint feeds back to the next layout so the spurious drain is removed.
     """
     install: dict[int, bool] = {}
     for bid, copies in alloc.copies.items():
         for c in copies:
-            install[bid] = install.get(bid, False) or c.source not in float_mir.const_nodes
+            install[bid] = install.get(bid, False) or not value_resident_at_entry(float_mir.nodes[c.source])
     for bid, writes in alloc.bool_writes.items():
         for w in writes:
-            install[bid] = install.get(bid, False) or w.source not in bool_mir.const_nodes
+            install[bid] = install.get(bid, False) or not value_resident_at_entry(bool_mir.nodes[w.source])
     return install
 
 
@@ -394,12 +394,13 @@ class _InterferenceBuilder:
     phi_block: dict[ValueId, int]
     arm_out: dict[int, frozenset[ValueId]]
     inflight_defs: dict[int, dict[ValueId, int]]
-    const_install_dests: dict[int, frozenset[ValueId]]  # block -> phi dests whose arm in THIS block is a literal const
+    # block -> phi dests whose arm in THIS block has a block-entry-resident source (const, input, or state read)
+    resident_install_dests: dict[int, frozenset[ValueId]]
 
     def _install_fire(self, block: int, vid: ValueId) -> int:
         """The install's block-local fire step, via the same helpers as the LIR install so residence matches exactly."""
-        sourceless = vid in self.const_install_dests.get(block, frozenset())
-        return install_fire_step(install_issue_cycle(self.work_makespan[block], sourceless), sourceless)
+        resident = vid in self.resident_install_dests.get(block, frozenset())
+        return install_fire_step(install_issue_cycle(self.work_makespan[block], resident), resident)
 
     def build(
         self,
@@ -457,14 +458,15 @@ def _allocate_bank(
     arm_out = phi_arm_out(mir, phi_nodes, values)
     boundary_base = bank.boundary_base(mir, values, ret_block)
 
-    # Per block, the phi dests whose arm originating there is a literal constant: those installs fire inline-class, one
-    # read-first edge earlier than a register-source copy, so the residence must occupy their destination from that
-    # earlier write cycle. Keyed identically to the residual install facts (phi-result vid per predecessor block).
-    const_install_dests: dict[int, set[ValueId]] = {}
+    # Per block, the phi dests whose arm originating there has a block-entry-resident source (a const, input, or state
+    # read): those installs fire inline-class, one read-first edge earlier than a computed-source copy, so the residence
+    # must occupy their destination from that earlier write cycle. Keyed identically to the residual install facts
+    # (phi-result vid per predecessor block).
+    resident_install_dests: dict[int, set[ValueId]] = {}
     for vid, phi in phi_nodes.items():
         for pred, value, _conditioner in phi.arms:
-            if value in view.const_nodes:
-                const_install_dests.setdefault(pred, set()).add(vid)
+            if value_resident_at_entry(view.nodes[value]):
+                resident_install_dests.setdefault(pred, set()).add(vid)
 
     interference = _InterferenceBuilder(
         mir=mir,
@@ -483,7 +485,7 @@ def _allocate_bank(
         phi_block=phi_block,
         arm_out=arm_out,
         inflight_defs=block_inflight,
-        const_install_dests={b: frozenset(s) for b, s in const_install_dests.items()},
+        resident_install_dests={b: frozenset(s) for b, s in resident_install_dests.items()},
     )
 
     # A slot whose live-in is consumed as ANOTHER slot's live-out (a chained copy, ``self.a = self.b``) must keep its
