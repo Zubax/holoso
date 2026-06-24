@@ -19,15 +19,13 @@ from .._util import BlockId, ValueId
 
 @dataclass(frozen=True, slots=True)
 class MirInput:
-    """A typed module input value."""
-
     name: str
     scalar_type: ScalarType
 
 
 @dataclass(frozen=True, slots=True)
 class MirStateRead:
-    """A typed read of a persistent state slot's live-in value (the slot's register content at the initiation start)."""
+    """The slot's live-in: its register content at the initiation start."""
 
     name: str
     scalar_type: ScalarType
@@ -35,8 +33,6 @@ class MirStateRead:
 
 @dataclass(frozen=True, slots=True)
 class MirConst:
-    """A typed scalar constant value."""
-
     scalar_type: ScalarType
 
 
@@ -50,13 +46,11 @@ def _check_conditioner(conditioner: PortConditioner, port_type: ScalarType, role
 @dataclass(frozen=True, slots=True)
 class MirOperation:
     """
-    A selected hardware-operator use producing ONE value: the ``output_port``-th result of ``operator``, conditioned
-    by ``output_conditioner``. Every port carries its type's conditioner (a folded sign control on a float port, an
-    optional inversion on a boolean port). Operations sharing one block, operator, operands, and operand conditioners
-    while tapping DISTINCT output ports fuse into a single firing at LIR build -- a multi-output module computes all
-    its results at once. The operation belongs to the resource family of its tapped port's type (float or bool); the
-    views slice it by that type. Operands may reference either resource family (a comparison reads float operands and
-    produces booleans; the bool->float cast the reverse).
+    A selected hardware-operator use producing ONE value: the ``output_port``-th result, conditioned by
+    ``output_conditioner``. Operations sharing one block, operator, operands, and operand conditioners while tapping
+    DISTINCT output ports fuse into a single firing at LIR build -- a multi-output module computes all its results at
+    once. The operation belongs to the resource family of its tapped port's type; operands may reference either family
+    (a comparison reads float operands and produces booleans; the bool->float cast the reverse).
     """
 
     operator: HardwareOperator
@@ -92,15 +86,13 @@ class MirOperation:
 
 @dataclass(frozen=True, slots=True)
 class MirOutput:
-    """A named module output driven by an internal value."""
-
     name: str
     value: ValueId
 
 
 @dataclass(frozen=True, slots=True)
 class MirStateSlot:
-    """A persistent state slot: a register holding ``live_out`` at the boundary, reset to ``reset_value``."""
+    """A persistent slot register holding ``live_out`` at the transaction boundary."""
 
     name: str
     reset_value: float
@@ -109,8 +101,6 @@ class MirStateSlot:
 
 @dataclass(frozen=True, slots=True)
 class MirFloatInput(MirInput):
-    """A floating-point module input port."""
-
     scalar_type: FloatType
 
     def __post_init__(self) -> None:
@@ -120,8 +110,6 @@ class MirFloatInput(MirInput):
 
 @dataclass(frozen=True, slots=True)
 class MirBoolInput(MirInput):
-    """A boolean module input port."""
-
     scalar_type: BoolType
 
     def __post_init__(self) -> None:
@@ -131,8 +119,6 @@ class MirBoolInput(MirInput):
 
 @dataclass(frozen=True, slots=True)
 class MirFloatStateRead(MirStateRead):
-    """A floating-point read of a persistent state slot's live-in value."""
-
     scalar_type: FloatType
 
     def __post_init__(self) -> None:
@@ -142,8 +128,6 @@ class MirFloatStateRead(MirStateRead):
 
 @dataclass(frozen=True, slots=True)
 class MirFloatConst(MirConst):
-    """A floating-point constant."""
-
     scalar_type: FloatType
     value: float
 
@@ -154,8 +138,6 @@ class MirFloatConst(MirConst):
 
 @dataclass(frozen=True, slots=True)
 class MirBoolStateRead(MirStateRead):
-    """A boolean read of a persistent state slot's live-in value."""
-
     scalar_type: BoolType
 
     def __post_init__(self) -> None:
@@ -165,8 +147,6 @@ class MirBoolStateRead(MirStateRead):
 
 @dataclass(frozen=True, slots=True)
 class MirBoolConst(MirConst):
-    """A boolean constant."""
-
     scalar_type: BoolType
     value: bool
 
@@ -198,8 +178,6 @@ type MirBoolNode = MirBoolInput | MirBoolStateRead | MirBoolConst | MirPhi | Mir
 
 @dataclass(frozen=True, slots=True)
 class MirFloatOutput(MirOutput):
-    """A floating-point module output with a folded output sign control."""
-
     sign: FloatSignControl = FloatSignControl()
 
     def __post_init__(self) -> None:
@@ -209,8 +187,6 @@ class MirFloatOutput(MirOutput):
 
 @dataclass(frozen=True, slots=True)
 class MirBoolOutput(MirOutput):
-    """A boolean module output with an optional folded inversion on the driven value."""
-
     inversion: BoolInversion = BoolInversion()
 
     def __post_init__(self) -> None:
@@ -220,8 +196,6 @@ class MirBoolOutput(MirOutput):
 
 @dataclass(frozen=True, slots=True)
 class MirFloatStateSlot(MirStateSlot):
-    """A floating-point persistent state slot with a folded sign control on its live-out value."""
-
     sign: FloatSignControl = FloatSignControl()
 
     def __post_init__(self) -> None:
@@ -231,8 +205,6 @@ class MirFloatStateSlot(MirStateSlot):
 
 @dataclass(frozen=True, slots=True)
 class MirBoolStateSlot(MirStateSlot):
-    """A boolean persistent state slot with an optional folded inversion on its live-out value."""
-
     inversion: BoolInversion = BoolInversion()
 
     def __post_init__(self) -> None:
@@ -244,15 +216,11 @@ class MirBoolStateSlot(MirStateSlot):
 
 @dataclass(frozen=True, slots=True)
 class MirJump:
-    """Unconditional control transfer to ``target``."""
-
     target: BlockId
 
 
 @dataclass(frozen=True, slots=True)
 class MirBranch:
-    """Conditional control transfer on a boolean value ``cond``."""
-
     cond: ValueId
     if_true: BlockId
     if_false: BlockId
@@ -268,7 +236,7 @@ type MirTerminator = MirJump | MirBranch | MirRet
 
 @dataclass(frozen=True, slots=True)
 class MirBlock:
-    """One basic block: entry phis, straight-line operations in evaluation order, and a terminator."""
+    """``operations`` is straight-line in evaluation order; ``phis`` merge at block entry."""
 
     id: BlockId
     phis: tuple[ValueId, ...]
@@ -278,7 +246,7 @@ class MirBlock:
 
 @dataclass(frozen=True, slots=True)
 class Mir:
-    """A selected graph arranged into a CFG of basic blocks (``blocks[0]`` is the entry), ready for scheduling."""
+    """A selected graph arranged into a CFG of basic blocks; ``blocks[0]`` is the entry."""
 
     float_format: FloatFormat
     nodes: dict[ValueId, MirNode]
@@ -495,8 +463,6 @@ class MirBuilder:
         self._outputs: list[MirOutput] = []
         self._state_slots: list[MirStateSlot] = []
 
-    # -- block management ------------------------------------------------------------------------------------------
-
     def block(self) -> BlockId:
         bid = len(self._blocks)
         self._blocks.append(_MirBlockUC(phis=[], operations=[], terminator=None))
@@ -526,8 +492,6 @@ class MirBuilder:
 
     def ret(self) -> None:
         self.set_terminator(self.current_block, MirRet())
-
-    # -- value construction ----------------------------------------------------------------------------------------
 
     def _fresh(self, node: MirNode) -> ValueId:
         vid = len(self._nodes)
@@ -641,8 +605,10 @@ class MirBuilder:
         return vid
 
     def open_phi(self, scalar_type: ScalarType, entry_arm: tuple[BlockId, ValueId, PortConditioner]) -> ValueId:
-        """Create a loop-header phi with only its entry arm; the latch arm is supplied later by set_phi_arms (the back
-        edge references a body value defined after the header in the lowering order)."""
+        """
+        Create a loop-header phi with only its entry arm; the latch arm is supplied later by set_phi_arms (the back
+        edge references a body value defined after the header in the lowering order).
+        """
         return self.phi(scalar_type, [entry_arm])
 
     def set_phi_arms(self, phi: ValueId, arms: list[tuple[BlockId, ValueId, PortConditioner]]) -> None:

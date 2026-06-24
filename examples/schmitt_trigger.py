@@ -2,7 +2,8 @@
 """
 A Schmitt trigger: a comparator with hysteresis. The output latches high once the input rises above ``HIGH`` and low
 once it falls below ``LOW``; between the two thresholds it holds its previous value (the hysteresis deadband).
-The two threshold tests are data-dependent branches that leave the state untouched in the deadband.
+The two threshold tests form a constant-armed boolean state-machine merge: if-conversion plus strength reduction
+collapse them to a single straight-line block of and/or/not over the held state, with no branch and no select.
 """
 
 from pathlib import Path

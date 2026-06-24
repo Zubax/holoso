@@ -12,8 +12,6 @@ from ._aggregate import Value
 
 @dataclass(frozen=True, slots=True)
 class ArmResult:
-    """One branch arm's outcome: its final locals, persistent state, compile-time-integer bindings, and end block."""
-
     env: dict[str, Value]
     state: dict[str, Value]
     static_ints: dict[str, int]
@@ -72,7 +70,6 @@ class Scope:
 
 
 def parse_fndef(fn: types.FunctionType) -> tuple[ast.FunctionDef, list[str], int, str]:
-    """Retrieve and parse a function's ``def`` node, returning its source lines, start line, and filename."""
     try:
         lines, start = inspect.getsourcelines(fn)
     except (OSError, TypeError) as exc:

@@ -43,10 +43,6 @@ def _typed_operand(
     alloc: Allocation,
     pool: dict[ValueId, PooledConst],
 ) -> FloatOperand | BoolOperand:
-    """
-    One operand resolved in its own bank: a boolean value reads the bool bank with its folded inversion, a
-    floating-point value reads the wide bank with its folded sign control.
-    """
     if vid in bool_mir.nodes:
         assert isinstance(conditioner, BoolInversion)
         return bool_operand(bool_mir, vid, alloc, conditioner)
@@ -55,7 +51,6 @@ def _typed_operand(
 
 
 def _value_dst(float_mir: MirFloatView, alloc: Allocation, vid: ValueId) -> RegRef | BoolRegRef:
-    """The register a value's bank allocated for it: wide for a float-typed tap, boolean otherwise."""
     if vid in float_mir.operation_nodes:
         return RegRef(alloc.float_reg[vid])
     return BoolRegRef(alloc.bool_reg[vid])
@@ -70,7 +65,6 @@ def build_inline_op(
     alloc: Allocation,
     pool: dict[ValueId, PooledConst],
 ) -> InlineScheduledOp:
-    """Build one inline firing: operands resolved per bank, the single result written per its tapped port's bank."""
     node = mir_operation(mir, vid)
     assert isinstance(node.operator, InlineHardwareOperator)
     operands = [
@@ -258,7 +252,6 @@ def build_const_pool(
 
 
 def tapped_wide_lanes(blocks: list[LirBlock]) -> set[tuple[OperatorInstance, int]]:
-    """The TAPPED wide output-port lanes (one write port each); a never-tapped module output gets no lane."""
     return {
         (op.inst, write.port)
         for block in blocks

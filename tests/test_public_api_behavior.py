@@ -55,7 +55,6 @@ def _ops() -> OpConfig:
 
 
 def _sim(fn, name: str) -> holoso.NumericalSimulator:  # type: ignore[no-untyped-def]
-    """Synthesize ``fn`` through the public API and elaborate a runnable simulator."""
     return holoso.synthesize(fn, _ops(), name=name).numerical_model.elaborate()
 
 
@@ -65,22 +64,14 @@ def _close(got: float, want: float, op_count: int = 12) -> bool:
     return within(got, want, rtol, atol)
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# M2: diamond if-conversion + select. The sign chain folds into the select operand conditioner (so ``x if c else -x``
-# costs one comparison and one mux); a comparison feeding a select feeding a float op is a straight-line cross-bank
-# chain; arms may be different arithmetic; ternaries nest. A division in an arm is unspeculatable, so that diamond
-# STAYS a real branch -- and an if-convertible / real-branch PAIR of the SAME math must agree.
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def _abs_via_select(x, c):  # type: ignore[no-untyped-def]
     # x if c>0 else -x : the negation folds into the select's operand sign conditioner -- one compare, one mux.
     return x if c > 0.0 else -x
 
 
 def _neg_abs_via_select(x, c):  # type: ignore[no-untyped-def]
-    # The mirror orientation: -x if c>0 else x. The sign rides the OTHER arm, exercising the conditioner on the
-    # opposite operand. Both arms are sign chains over the same input, so the whole diamond collapses to one select.
+    # The sign rides the OTHER arm, exercising the conditioner on the opposite operand. Both arms are sign chains over
+    # the same input, so the whole diamond collapses to one select.
     return -x if c > 0.0 else x
 
 
@@ -113,7 +104,7 @@ def test_comparison_select_float_chain_stays_straight_line() -> None:
 
 def _diff_arith_select(x, y, c):  # type: ignore[no-untyped-def]
     # A select whose two arms are DIFFERENT arithmetic (product vs sum), both speculatable -> if-converts to a select
-    # over two distinct sub-DAGs. Crosses the c boundary; both arms checked.
+    # over two distinct sub-DAGs.
     return (x * y) if c > 0.0 else (x + y)
 
 
@@ -178,14 +169,10 @@ def test_ifconvertible_and_real_branch_forms_agree() -> None:
         assert a == b, f"forms disagree x={x} y={y} c={c}: ifc={a} branch={b}"
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# M3: NOT-folding. ``not`` never materializes hardware -- it folds into the consumer's sideband on the CONSUMER side.
-# Exercise every consumer position. Bools are EXACT, so assert the full truth table.
-# --------------------------------------------------------------------------------------------------------------------
+# M3: ``not`` never materializes hardware -- it folds into the consumer's sideband on the CONSUMER side.
 
 
 def _not_in_branch_condition(c: bool, x, y):  # type: ignore[no-untyped-def]
-    # ``not`` as a branch condition: folds to a branch-target swap. Both arms are exact copies/sums.
     if not c:
         r = x + y
     else:
@@ -202,7 +189,6 @@ def test_not_as_branch_condition() -> None:
 
 
 def _not_in_boolean_logic(a: bool, b: bool):  # type: ignore[no-untyped-def]
-    # ``a and not b`` : the NOT folds into the inline AND gate's operand inversion conditioner. Full truth table.
     return a and not b
 
 
@@ -216,7 +202,6 @@ def test_not_in_boolean_logic_operand() -> None:
 
 
 def _not_as_output(c: bool):  # type: ignore[no-untyped-def]
-    # ``not`` as a boolean OUTPUT: folds into the output port's inversion conditioner.
     return not c
 
 
@@ -239,7 +224,6 @@ class _BoolNotState:
 
 
 def test_not_drives_boolean_state_slot() -> None:
-    # The slot toggles every transaction: the inversion folds into the state writeback. Exact boolean sequence.
     sim = _sim(_BoolNotState().__call__, "not_state")
     reference = _BoolNotState()
     for _ in range(8):
@@ -247,8 +231,6 @@ def test_not_drives_boolean_state_slot() -> None:
 
 
 def _not_in_phi_arm(c: bool, d: bool):  # type: ignore[no-untyped-def]
-    # A boolean ternary whose selected arm is a NEGATED bool: ``(not d) if c else d``. The inversion folds into the
-    # phi arm's conditioner. Full truth table over (c, d).
     return (not d) if c else d
 
 
@@ -276,8 +258,8 @@ def _comparison_both_polarities(x, y):  # type: ignore[no-untyped-def]
     # ONE comparison consumed in BOTH polarities: ``x > y`` drives a boolean output directly, and ``not (x > y)`` (the
     # complement) gates a float select. One comparator tap must serve both -- the polarities must stay consistent.
     gt = x > y
-    sel = 10.0 if gt else 20.0  # uses gt
-    other = 1.0 if not gt else 0.0  # uses ~gt
+    sel = 10.0 if gt else 20.0
+    other = 1.0 if not gt else 0.0
     return gt, sel + other
 
 
@@ -290,12 +272,6 @@ def test_comparison_in_both_polarities() -> None:
                 want_gt, want_val = _comparison_both_polarities(*xy)
                 assert got[0] is want_gt, f"xy={xy}: bool {got[0]} vs {want_gt}"
                 assert float(got[1]) == want_val, f"xy={xy}: val {float(got[1])} vs {want_val}"
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# M5: phi-arm coalescing. Coalescing is output-NEUTRAL (a pure post-schedule register reassignment over
-# value-preserving moves), so the proof is correctness across many vectors through these coalescing-bearing shapes.
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def _pure_recurrence(x, n):  # type: ignore[no-untyped-def]
@@ -344,15 +320,8 @@ def test_coalescing_soundness_corner_matches_reference() -> None:
         assert _close(got, want, op_count=2 * max(1, int(n)) + 2), f"x={x} n={n}: {got} vs {want}"
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# M6b: typed ports + multi-output. Bool input, bool output, mixed float+bool tuple AND list returns, an UNUSED bool
-# input proven NEUTRAL by output invariance (no peeking at internal structure), with metadata read from the simulator.
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def _mixed_tuple_io(flag: bool, x, y):  # type: ignore[no-untyped-def]
-    # Mixed float+bool inputs and a TUPLE return mixing a bool and two floats. ``inside`` is a boolean output; the two
-    # float outputs are exact (sum/difference of representable inputs).
+    # The two float outputs are exact (sum/difference of representable inputs).
     inside = flag and (x > y)
     return inside, x + y, x - y
 
@@ -413,8 +382,6 @@ def _unused_bool_input(flag: bool, x, y):  # type: ignore[no-untyped-def]
 
 
 def test_unused_bool_input_is_neutral() -> None:
-    # Prove neutrality through observable behavior alone: the port exists with the right type, and the float output is
-    # IDENTICAL whether the unused flag is True or False (no peeking at internal structure).
     sim = _sim(_unused_bool_input, "unused_bool")
     assert [(p.name, p.scalar_type) for p in sim.inputs] == [
         ("flag", BoolType()),
@@ -431,13 +398,6 @@ def test_unused_bool_input_is_neutral() -> None:
             assert _close(with_true, want, op_count=2), f"x={x} y={y}: {with_true} vs {want}"
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# M6: persistent state breadth. A chained-slot kernel (``self.a = self.b; self.b = x``) and a boolean state slot,
-# each over a long multi-transaction stream with a ``reset`` partway, asserted against a Python reference of the same
-# class advanced in lockstep.
-# --------------------------------------------------------------------------------------------------------------------
-
-
 class _ChainedSlots:
     """``_a`` captures ``_b``'s OLD value while ``_b`` advances -- two chained copy slots (read-first ordering)."""
 
@@ -449,7 +409,7 @@ class _ChainedSlots:
         out = self._a
         self._a = self._b
         self._b = x
-        return out  # a delayed view of inputs: returns _a, which lagged _b by one, which lagged x by one
+        return out
 
 
 def test_chained_slots_stream_and_reset() -> None:
@@ -497,11 +457,6 @@ def test_boolean_state_slot_stream_and_reset() -> None:
         want_gated, want_armed = fresh(x)
         assert _close(float(got[0]), want_gated, op_count=2), f"post-reset gated at x={x}: {float(got[0])}"
         assert got[1] is want_armed, f"post-reset armed at x={x}: {got[1]} vs {want_armed}"
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# Commutative operator orientation + constant folding breadth.
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def _lt_kernel(x, y):  # type: ignore[no-untyped-def]

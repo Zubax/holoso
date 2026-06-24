@@ -48,20 +48,13 @@ def _ops() -> OpConfig:
 
 
 def _close(got: float, want: float, op_count: int = 12) -> bool:
-    """A reduced-precision agreement for a kernel of about ``op_count`` ZKF ops over operands of order-unity-to-ten."""
+    """Reduced-precision agreement for a kernel of about ``op_count`` ZKF ops over operands of order unity-to-ten."""
     rtol, atol = default_tolerance(FMT, op_count, magnitude=max(1.0, abs(want)))
     return within(got, want, rtol, atol)
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Cross-block software pipelining (M7) carrying PERSISTENT STATE across many transactions.
-#
-# Every existing overlap kernel (overlap_spill_kernel, overlap_dead_arm_spill_kernel, overlap_div_err_kernel) is
-# STATELESS. The net-new surface is a stateful kernel whose entry/branch block both (a) computes a wide chain that
-# spills into single-predecessor arms and (b) feeds a persistent attribute carried across transactions. The wide chain
-# ``w`` commits late and spills past the (shrunk) terminator; the unspeculatable division in the else arm keeps the
-# diamond a real branch, so the entry block's only successors are the two single-predecessor arms it can shrink into.
-# --------------------------------------------------------------------------------------------------------------------
+# M7 cross-block software pipelining: the existing overlap kernels are all STATELESS, so the net-new surface is a
+# stateful kernel that both spills a wide chain into its arms and feeds a persistent attribute across transactions.
 
 
 class _OverlapAccumulator:
@@ -87,8 +80,6 @@ class _OverlapAccumulator:
 
 
 def test_overlap_kernel_persistent_state_across_many_vectors() -> None:
-    # The accumulator threads the overlapping branch's result across a long random stream; the model must match a fresh
-    # Python reference advanced in lockstep, on BOTH branch polarities and across the decision boundary (x == y).
     simulator = holoso.synthesize(
         _OverlapAccumulator().__call__, _ops(), name="overlap_acc"
     ).numerical_model.elaborate()
@@ -103,8 +94,6 @@ def test_overlap_kernel_persistent_state_across_many_vectors() -> None:
 
 
 def test_overlap_kernel_reset_restores_initial_state() -> None:
-    # The persistent slot resets to its snapshot, so the accumulator restarts after ``reset`` -- the same first output
-    # as a fresh elaboration regardless of how far the previous run wandered.
     simulator = holoso.synthesize(
         _OverlapAccumulator().__call__, _ops(), name="overlap_acc_rst"
     ).numerical_model.elaborate()
@@ -117,10 +106,7 @@ def test_overlap_kernel_reset_restores_initial_state() -> None:
     assert float(simulator.run(1.0, 2.0, 0.5)[0]) == first  # bit-identical restart after reset
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Model-level handshake under back-pressure (the cosim exercises this against RTL; nothing drove it via ``tick`` alone
-# at the model level, where test_cycle_model only holds out_ready low BEFORE out_valid, never after).
-# --------------------------------------------------------------------------------------------------------------------
+# Model-level handshake under back-pressure: test_cycle_model only holds out_ready low BEFORE out_valid, never after.
 
 
 def _drive_with_stall(simulator: holoso.NumericalSimulator, inputs: tuple[float, ...], stall: int) -> float:
@@ -150,7 +136,7 @@ def test_backpressure_holds_output_and_advances_state_once_through_overlap() -> 
     simulator = holoso.synthesize(_OverlapAccumulator().__call__, _ops(), name="overlap_bp").numerical_model.elaborate()
     reference = _OverlapAccumulator()
     for index, vector in enumerate([(1.0, 2.0, 0.5), (3.0, 1.0, 2.0), (0.5, 4.0, 1.0), (2.0, 2.0, 1.0)]):
-        got = _drive_with_stall(simulator, vector, stall=2 * index)  # 0, 2, 4, 6 cycles of back-pressure
+        got = _drive_with_stall(simulator, vector, stall=2 * index)
         want = reference(*vector)
         assert _close(got, want), f"vector={vector} stall={2 * index}: {got} vs {want}"
 
@@ -171,12 +157,6 @@ def test_run_drains_partial_overlap_transaction_before_presenting_new_inputs() -
     want = reference(0.5, 4.0, 1.0)  # the transaction run() actually returns
     got = float(simulator.run(0.5, 4.0, 1.0)[0])
     assert _close(got, want), f"drain ordering: {got} vs {want}"
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# State slots: a two-deep shift register (two non-coalesced copy slots) over many transactions plus reset. Only the
-# RTL cosim (_ShiftRegister2 in test_cosim.py) exercised this; there was no model-path equivalent.
-# --------------------------------------------------------------------------------------------------------------------
 
 
 class _ShiftRegister2:
@@ -205,13 +185,6 @@ def test_two_deep_shift_register_delays_by_two_and_resets() -> None:
     fresh = _ShiftRegister2()
     for x in [7.0, 8.0, 9.0, 10.0]:
         assert float(simulator.run(x)[0]) == fresh(x), f"post-reset mismatch at x={x}"
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# Diamond if-conversion vs real branches checked by OUTPUT VALUE (the existing nested/if-conversion tests assert HIR
-# block counts; here we confirm the compiled semantics are correct on every path, which is what would survive a
-# refactor of the if-conversion heuristic).
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def _nested_pure(x, y):  # type: ignore[no-untyped-def]
@@ -333,10 +306,7 @@ def test_diamond_inside_loop_output_matches_reference() -> None:
         assert _close(got, want, op_count=8 * max(1, int(n))), f"x={x} n={n}: {got} vs {want}"
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Typed ports (M6b): multi-output mixed float+bool I/O, a boolean input, and the scalar-type metadata read from the
-# elaborated simulator (the existing typed-port test reads it from the handle; here it is the simulator's own view).
-# --------------------------------------------------------------------------------------------------------------------
+# Unlike the existing typed-port test (which reads metadata from the handle), this reads it from the simulator's view.
 
 
 def _multi_io(flag: bool, x, y):  # type: ignore[no-untyped-def]
@@ -374,11 +344,8 @@ def test_multi_output_mixed_io_metadata_and_values() -> None:
         simulator.run(1.0, 2.0, 3.0)  # a float in the boolean lane is rejected by the typed input coercion
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Cross-bank cycle-model value coverage: inline ops reading across the float/bool banks, checked value-wise against a
-# Python reference. The model commits each PC's landings before evaluating that PC's reads, so a wrong inline read step
-# or dependency edge would read a stale/not-yet-landed value and diverge.
-# --------------------------------------------------------------------------------------------------------------------
+# Cross-bank cycle-model coverage: the model commits each PC's landings before evaluating that PC's reads, so a wrong
+# inline read step or dependency edge would read a stale/not-yet-landed value and diverge.
 
 
 class _LatchingFaultRegister:
@@ -428,7 +395,7 @@ def test_latching_fault_register_streams_and_resets() -> None:
         assert got == want, f"vector={vector}: {got} vs {want}"
         # The summary ORs the freshly-latched channels; on the trip cycle this differs from a stale-read OR.
         assert got[0] == (got[1] or got[2] or got[3]), f"any_fault desync at {vector}: {got}"
-    simulator.reset()  # the synchronous reset clears every sticky latch
+    simulator.reset()
     fresh = _LatchingFaultRegister()
     for vector in [(False, False, False), (False, True, False), (False, False, False)]:
         got = tuple(bool(value) for value in simulator.run(*vector))

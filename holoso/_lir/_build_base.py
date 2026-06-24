@@ -42,8 +42,6 @@ class BoolArmInstall:
 
 @dataclass(frozen=True, slots=True)
 class Allocation:
-    """The register assignment: float/bool registers per value and slot, plus the per-block phi-arm installs."""
-
     float_reg: dict[ValueId, int]
     float_slot_reg: dict[str, int]
     float_install: dict[str, int]  # slot name -> Ret-block-relative scheduler-frame install cycle of its live-out

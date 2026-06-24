@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-A stateless signal-window conditioner exercising various boolean/float expression forms:
+A stateless signal-window conditioner exercising various boolean/float expression forms. Outputs (matching the
+return tuple ``(float, bool, bool, bool, float)``):
 
-- clamped: x clamped into [lo, hi] with a nested conditional (ternary) expression;
+- clamped (float): x clamped into [lo, hi] with a nested conditional (ternary) expression;
 
-- inside: whether x lies strictly inside the open window, from a chained comparison fed through a bool->float cast;
+- inside (bool): whether x lies strictly inside the open window, straight from a chained comparison ``lo < x < hi``;
 
-- outside: the boundary/outside region, from an or-connective in a conditional expression;
+- outside (bool): the boundary/outside region, an or of two boundary comparisons ``x <= lo or x >= hi``;
 
-- live: a "live" sample -- nonzero and inside -- from a float->bool cast and an and-connective, cast back to float;
+- live (bool): a "live" sample -- nonzero and inside -- a float->bool cast ``bool(x)`` and-ed with a chained comparison;
 
-- gated: the input passed through only inside the window -- a cross-domain chain
+- gated (float): the input passed through only inside the window -- a cross-domain chain
   (comparison -> bool -> float cast -> float multiply) that the bool->float result must feed on time.
 
-The conditional expressions lower to branch + phi, so the kernel is a small CFG; the comparisons, connectives, and
-casts are combinational ops within it. No branch arm drives an output directly -- every output is a phi merge or a
-combinational cast result.
+The two ternary arms of ``clamped`` if-convert to selects, leaving a single straight-line block; the comparisons,
+connectives, and casts are combinational ops within it, so the kernel has no branch and no phi.
 """
 
 from pathlib import Path

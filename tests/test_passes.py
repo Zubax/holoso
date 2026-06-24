@@ -370,8 +370,6 @@ def _hir_of(target):  # type: ignore[no-untyped-def]
 
 
 def test_if_conversion_collapses_a_pure_diamond() -> None:
-    # A small pure diamond becomes one straight-line block: the merge phi is replaced by a select over the branch
-    # condition, the branch disappears, and the arms' operations run unconditionally.
     def f(a, b):  # type: ignore[no-untyped-def]
         if a > b:
             y = a + b
@@ -550,7 +548,6 @@ def test_bool_select_reductions_are_truth_table_correct() -> None:
 
 
 def test_if_conversion_collapses_nested_chains_to_one_block() -> None:
-    # Sequential diamonds collapse one after another, recompacting block ids each time, leaving a single block.
     def f(x, y):  # type: ignore[no-untyped-def]
         if x > 0.0:
             a = x + y

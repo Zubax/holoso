@@ -1,9 +1,8 @@
 """
 Out-of-context (OOC) synthesis-evaluation harness for Holoso-generated modules.
 
-The public surface is what this module re-exports below. Concrete flows are imported per tool so pulling in one
-does not require the others. A generated module's only dependency is the bundled support library, so the flow
-needs nothing beyond the synthesis result::
+Concrete flows are imported per tool so pulling in one does not require the others. A generated module's only
+dependency is the bundled support library, so the flow needs nothing beyond the synthesis result::
 
     from synth.flows.yosys import YosysEcp5Flow, Ecp5Device
     result: SynthesisResult = ...  # See holoso API

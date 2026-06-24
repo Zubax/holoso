@@ -38,7 +38,6 @@ FMT = FloatFormat(6, 18)
 
 
 def _pair(fn, name: str):  # type: ignore[no-untyped-def]
-    """Elaborate the same kernel under the minimum-latency and the deeply-staged operator configurations."""
     short = holoso.synthesize(fn, default_ops(FMT), name=f"{name}_short").numerical_model.elaborate()
     long = holoso.synthesize(fn, staged_ops(FMT), name=f"{name}_long").numerical_model.elaborate()
     return short, long
@@ -47,9 +46,6 @@ def _pair(fn, name: str):  # type: ignore[no-untyped-def]
 def _assert_bits_equal(  # type: ignore[no-untyped-def]
     short: holoso.NumericalSimulator, long: holoso.NumericalSimulator, *inputs
 ) -> int:
-    """
-    Run one transaction through both simulators and assert every output leaf is bit-identical; return the leaf count.
-    """
     out_short = short.run(*inputs)
     out_long = long.run(*inputs)
     assert len(out_short) == len(out_long), f"output arity differs: {len(out_short)} vs {len(out_long)}"
@@ -75,7 +71,7 @@ def _assert_bits_equal(  # type: ignore[no-untyped-def]
 def _branchy_diamond(x, y, c):  # type: ignore[no-untyped-def]
     t = (x * y + c) * y  # a multiply-add-multiply chain that commits late
     if t > c:
-        r = t + x  # then-arm reads the late chain
+        r = t + x
     else:
         r = t / (y * y + 1.0)  # else-arm divides (structurally nonzero) -> the diamond stays a real branch
     return r
@@ -117,10 +113,9 @@ def test_back_edge_loop_timing_invariant() -> None:
 
 
 def _cycles_to_out_valid(simulator: holoso.NumericalSimulator, *inputs) -> int:  # type: ignore[no-untyped-def]
-    """Count clocks from accepting a transaction until ``out_valid`` -- the realized latency for this configuration."""
     simulator.set_inputs(*inputs)
     count = 1
-    simulator.tick(in_valid=True, out_ready=False)  # accept
+    simulator.tick(in_valid=True, out_ready=False)
     while not simulator.out_valid:
         simulator.tick(in_valid=False, out_ready=False)
         count += 1
@@ -148,8 +143,6 @@ def test_staged_configuration_is_genuinely_deeper() -> None:
 
 
 class _LeakyAccumulator:
-    """A persistent leaky accumulator fed by a branchy diamond -- carried across transactions (-> ``out_0``)."""
-
     def __init__(self) -> None:
         self._acc = 0.0
 
@@ -178,11 +171,10 @@ def test_stateful_stream_timing_invariant_with_reset() -> None:
 
 
 def _drain_to_output(simulator: holoso.NumericalSimulator, inputs, stall: int):  # type: ignore[no-untyped-def]
-    """Drive one transaction tick-by-tick with ``stall`` cycles of sustained back-pressure; return the held output."""
     simulator.set_inputs(*inputs)
     while not simulator.in_ready:
         simulator.tick(in_valid=False, out_ready=True)
-    simulator.tick(in_valid=True, out_ready=False)  # accept
+    simulator.tick(in_valid=True, out_ready=False)
     while not simulator.out_valid:
         simulator.tick(in_valid=False, out_ready=False)
     held = simulator.output_values[0]

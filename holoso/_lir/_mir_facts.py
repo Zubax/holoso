@@ -43,7 +43,6 @@ def value_resident_at_entry(node: MirNode) -> bool:
 
 
 def succ_map(mir: Mir) -> dict[int, list[int]]:
-    """Successor block ids per block, read off the terminators."""
     succ: dict[int, list[int]] = {}
     for block in mir.blocks:
         match block.terminator:

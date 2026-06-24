@@ -93,8 +93,9 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
 .edges circle.hl { fill: #000; }
 .grid td.gc.hl, .grid td.oc.hl { background: #111 !important; }
 .opf.hl { background: #111 !important; box-shadow: 0 0 0 2px rgba(17, 17, 17, 0.35); }
-/* Structural hazard: two operations claim one operator stage on one cycle. Impossible under the barrier schedule;
-   the red ring is the alarm for a future multiple-issue bug. */
+/* Structural hazard: two operations claim one operator stage on one cycle. Impossible under the software-pipelined
+   schedule (per-instance busy windows keep firings off a shared stage); the red ring is the alarm for a future
+   multiple-issue bug. */
 .grid td.oc.conflict { box-shadow: inset 0 0 0 2px #f00; }
 /* Control-transfer arrows in the right margin. The overlay is click-through (pointer-events: none), so re-enable
    pointing on the arrow strokes alone for the hover tooltip; the channel band is reserved as wrapper padding so the

@@ -5,8 +5,7 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
-class Type(ABC):
-    """A format-free scalar value type used by HIR."""
+class Type(ABC): ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,8 +20,6 @@ class BoolType(Type):
 
 @dataclass(frozen=True, slots=True)
 class Signature:
-    """Operand/result types for a semantic HIR operator."""
-
     operand_types: tuple[Type, ...]
     result_type: Type
 

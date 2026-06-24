@@ -91,7 +91,6 @@ def assign_commutative_ports(
 
 
 def _fan_in(uses: list[_Use], orientation: list[bool]) -> int:
-    """Total distinct registers read across the two operand ports under the given per-use orientation."""
     port_a: set[int] = set()
     port_b: set[int] = set()
     for (_, first, second), swapped in zip(uses, orientation, strict=True):

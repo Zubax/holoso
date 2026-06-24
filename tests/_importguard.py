@@ -38,10 +38,6 @@ def transitive_holoso_imports(root_module: str) -> set[str]:
 
 
 def forbidden_imports(root_module: str, forbidden_prefix: str) -> list[str]:
-    """
-    The modules in ``root_module``'s transitive import closure that fall within the ``forbidden_prefix`` package
-    subtree (the prefix itself or any submodule) -- the offending edges a layering guard asserts are absent, sorted.
-    """
     return sorted(
         module
         for module in transitive_holoso_imports(root_module)

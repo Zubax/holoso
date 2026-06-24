@@ -39,7 +39,6 @@ def _ansi(text: str, code: str) -> str:
 
 
 def _print_summary(stats: object) -> None:
-    """A compact, colorful campaign summary: totals, the shape histogram, and any divergences with their paths."""
     from ._fuzz import CampaignStats, Shape  # local import keeps the module import light
 
     assert isinstance(stats, CampaignStats)
@@ -133,7 +132,6 @@ def test_branch_claiming_inner_shapes_survive_compilation() -> None:
 
 @pytest.mark.fuzz
 def test_fuzz_campaign() -> None:
-    """The full marked campaign; the budget comes from the environment (defaults chosen for a bounded local run)."""
     n_kernels = _budget("HOLOSO_FUZZ_KERNELS", 200)
     n_vectors = _budget("HOLOSO_FUZZ_ITERS", 32)
     seed = _budget("HOLOSO_FUZZ_SEED", 0xF0007A11)

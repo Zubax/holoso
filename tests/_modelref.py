@@ -23,15 +23,12 @@ type Vector = list[FloatValue | bool]
 
 @dataclass(frozen=True, slots=True)
 class OperatorCase:
-    """A labeled operator configuration used by parametrized tests and generated module names."""
-
     label: str
     make_ops: Callable[[FloatFormat], OpConfig]
     fcmp_latency: int
 
 
 def build_model(lir: Lir) -> NumericalSimulator:
-    """Elaborate a runnable simulator for a built LIR -- the common test path (``generate`` returns the handle)."""
     return generate(lir).elaborate()
 
 
@@ -49,17 +46,12 @@ def build_model_and_interpreter(
 
 
 def show_value(value: FloatValue | bool) -> str:
-    """A compact human label for a model/interpreter output value (used in differential-failure messages)."""
     return f"{float(value):.6g}" if isinstance(value, FloatValue) else str(value)
 
 
 def assert_model_equals_interpreter(
     model: NumericalSimulator, interpreter: MirInterpreter, vectors: list[Vector], label: str
 ) -> None:
-    """
-    Run an ordered vector sequence through both the numerical model and the MIR interpreter (each advancing its own
-    persistent state per transaction) and assert bit-exact agreement -- the tolerance-free oracle for the LIR layer.
-    """
     assert model.inputs == interpreter.inputs, f"{label}: input ports differ (name or type)"
     assert model.outputs == interpreter.outputs, f"{label}: output ports differ (name or type)"
     for vector in vectors:
@@ -72,7 +64,6 @@ def assert_model_equals_interpreter(
 
 
 def flatten_value(root: object) -> list[tuple[Path, Any]]:
-    """Flatten a runtime return value into ``(path, leaf)`` pairs."""
     leaves: list[tuple[Path, Any]] = []
 
     def walk(node: object, path: Path) -> None:
@@ -95,25 +86,21 @@ def flatten_value(root: object) -> list[tuple[Path, Any]]:
 
 
 def evaluate_reference(fn: Callable[..., object], inputs: Mapping[str, float]) -> list[float]:
-    """Call ``fn`` in float64 with the named inputs and flatten the result into ordered output values."""
     result = fn(**inputs)
     return [float(value) for _, value in flatten_value(result)]
 
 
 def output_names(root: object) -> list[str]:
-    """The ordered output-port names for a runtime return value."""
     return [port_name(path) for path, _ in flatten_value(root)]
 
 
 def unit_roundoff(fmt: FloatFormat) -> float:
-    """The format's unit roundoff, ``2**-(wman-1)`` (relative spacing of representable values)."""
     return 2.0 ** -(fmt.wman - 1)
 
 
 def default_tolerance(
     fmt: FloatFormat, op_count: int, magnitude: float = 1.0, rel_factor: float = 16.0
 ) -> tuple[float, float]:
-    """A defensible (rtol, atol) for a kernel of ``op_count`` operations evaluated over operands up to ``magnitude``."""
     u = unit_roundoff(fmt)
     rtol = rel_factor * max(op_count, 1) * u
     atol = rtol * abs(magnitude)
@@ -132,7 +119,6 @@ def bounded(rng: np.random.Generator, lo: float, hi: float) -> float:
 
 
 def log_uniform_positive(rng: np.random.Generator, lo: float, hi: float) -> float:
-    """A strictly-positive value drawn log-uniformly in ``[lo, hi]`` (good for noise/scale parameters)."""
     return float(np.exp(rng.uniform(np.log(lo), np.log(hi))))
 
 
@@ -146,7 +132,6 @@ def random_legal_bits(fmt: FloatFormat, rng: np.random.Generator) -> int:
 
 
 def spd_matrix(rng: np.random.Generator, n: int, diag_lo: float = 0.5, diag_hi: float = 2.0) -> np.ndarray:
-    """A random symmetric positive-definite ``n x n`` matrix (``L @ L.T`` with a positive-diagonal lower triangle)."""
     lower = np.zeros((n, n))
     for i in range(n):
         for j in range(i + 1):
@@ -155,7 +140,6 @@ def spd_matrix(rng: np.random.Generator, n: int, diag_lo: float = 0.5, diag_hi: 
 
 
 def encode_inputs(fmt: FloatFormat, values: dict[str, float | bool]) -> dict[str, int]:
-    """Encode a name->float mapping to name->ZKF-bits (the bit pattern the DUT receives)."""
     return {name: int(value) if type(value) is bool else fmt.encode(value) for name, value in values.items()}
 
 
@@ -183,7 +167,6 @@ def format_edge_bits(fmt: FloatFormat) -> list[int]:
 
 
 def default_ops(fmt: FloatFormat) -> OpConfig:
-    """The operator configuration with no optional pipeline stages: the minimum-latency baseline."""
     return fcmp_staged_ops(fmt, 0)
 
 
@@ -199,7 +182,6 @@ def fcmp_staged_ops(fmt: FloatFormat, stage_input: int) -> OpConfig:
 
 
 def fcmp_s1_ops(fmt: FloatFormat) -> OpConfig:
-    """Default operators with only the comparator input stage enabled."""
     return fcmp_staged_ops(fmt, 1)
 
 

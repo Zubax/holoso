@@ -1,7 +1,3 @@
-"""
-Yosys + nextpnr out-of-context synthesis verification flow.
-"""
-
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,8 +20,6 @@ _NEXTPNR_LOG = "nextpnr.log"
 
 @dataclass(frozen=True, slots=True)
 class Ecp5Device:
-    """A Lattice ECP5 target as nextpnr-ecp5 wants it: a size flag plus a package and speed grade."""
-
     size: str = "25k"  # nextpnr-ecp5 --<size>
     package: str = "CABGA381"
     speed_grade: int = 6
@@ -33,8 +27,6 @@ class Ecp5Device:
 
 @dataclass(frozen=True, slots=True)
 class YosysEcp5Flow(Flow):
-    """Yosys synthesis + nextpnr-ecp5 place-and-route, out of context."""
-
     device: Ecp5Device = field(default_factory=Ecp5Device)
     target_frequency_MHz: float = 100.0
     options: dict[str, Any] = field(default_factory=dict)

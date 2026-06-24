@@ -8,16 +8,12 @@ from .._type import ScalarType
 
 
 class Direction(enum.StrEnum):
-    """Module port direction."""
-
     IN = "in"
     OUT = "out"
 
 
 @dataclass(frozen=True, slots=True)
 class Port(ABC):
-    """One I/O port on a generated module."""
-
     name: str
 
     @property

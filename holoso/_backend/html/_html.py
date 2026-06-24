@@ -22,8 +22,6 @@ from ._schedule import render_schedule
 
 @dataclass(frozen=True, slots=True)
 class HtmlOutput:
-    """One self-contained, single-page report document, with resources built-in."""
-
     html: str
 
     def __str__(self) -> str:

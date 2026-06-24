@@ -88,7 +88,6 @@ class _Live:
 
 
 def _defs(bank: BankLiveness) -> dict[int, set[ValueId]]:
-    """Values defined in each block: in-block operator results, the block's phi results, plus residents at the entry."""
     defs: dict[int, set[ValueId]] = {b: set() for b in bank.blocks}
     for vid, block in bank.op_block.items():
         defs[block].add(vid)

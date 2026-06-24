@@ -105,7 +105,7 @@ def test_small_kernel_inputs_outputs_and_ops() -> None:
     hir = lower(kernel)
     assert hir.input_names() == ["a", "b"]
     assert [o.name for o in hir.outputs] == ["out_0"]
-    assert _arith_count(hir, FloatMul) == 2  # (a-b)*0.25 and a*b
+    assert _arith_count(hir, FloatMul) == 2
     assert _arith_count(hir, FloatAdd) == 2  # subtraction (add+neg) and the final add
     assert _arith_count(hir, FloatNeg) == 1  # the negation introduced by subtraction
 
@@ -145,7 +145,7 @@ def test_pow_expands_to_multiply_chain() -> None:
         return a**3
 
     hir = lower(cube)
-    assert _arith_count(hir, FloatMul) == 2  # a*a*a
+    assert _arith_count(hir, FloatMul) == 2
 
 
 def test_abs_lowers_to_semantic_operation() -> None:
@@ -185,7 +185,7 @@ def test_static_for_loop_unrolls() -> None:
         return x
 
     hir = lower(f)
-    assert _arith_count(hir, FloatAdd) == 3  # one add per unrolled trip
+    assert _arith_count(hir, FloatAdd) == 3
 
 
 def test_for_loop_counter_is_a_compile_time_constant() -> None:
@@ -393,8 +393,8 @@ def test_static_integer_comparison_branch_folds() -> None:
             return self.x
 
     folded = lower(GuardAlwaysFalse().__call__)
-    assert [slot.name for slot in folded.state_slots] == []  # statically-dead write, no spurious state
-    assert len(folded.blocks) == 1  # every guard folded, no branch emitted
+    assert [slot.name for slot in folded.state_slots] == []
+    assert len(folded.blocks) == 1
 
     class GuardReal:
         def __init__(self) -> None:
@@ -430,8 +430,8 @@ def test_static_float_comparison_branch_folds() -> None:
             return self.y
 
     folded = lower(ConfigGate().__call__)
-    assert [slot.name for slot in folded.state_slots] == []  # both float guards fold false: no spurious state
-    assert len(folded.blocks) == 1  # no runtime branch emitted
+    assert [slot.name for slot in folded.state_slots] == []
+    assert len(folded.blocks) == 1
 
     class ConfigEnabled:
         def __init__(self) -> None:
@@ -464,8 +464,8 @@ def test_dead_assignment_after_return_does_not_suppress_fold() -> None:
             self.flag = False  # noqa -- dead code: must not count as an assignment of flag
 
     hir = lower(DeadAfterReturn().__call__)
-    assert [slot.name for slot in hir.state_slots] == []  # folded: y never written, no spurious state
-    assert len(hir.blocks) == 1  # no runtime branch emitted
+    assert [slot.name for slot in hir.state_slots] == []
+    assert len(hir.blocks) == 1
 
 
 def test_boolean_ordering_and_mixed_comparison_are_rejected() -> None:
@@ -473,21 +473,20 @@ def test_boolean_ordering_and_mixed_comparison_are_rejected() -> None:
     # booleans, and a mixed boolean/float comparison, remain rejected with a clear UnsupportedConstruct.
     class BoolOrdering:
         def __call__(self, a: bool, b: bool) -> bool:
-            return a < b  # ordering on booleans is meaningless
+            return a < b
 
     with pytest.raises(UnsupportedConstruct, match="ordering"):
         lower(BoolOrdering().__call__)
 
     class MixedComparison:
         def __call__(self, flag: bool, x: float) -> bool:
-            return flag == x  # a boolean compared against a float
+            return flag == x
 
     with pytest.raises(UnsupportedConstruct, match="both boolean or both floating-point"):
         lower(MixedComparison().__call__)
 
 
 def test_public_boolean_state_attribute_is_output() -> None:
-    # A written public boolean attribute is exposed as a 1-bit state_<attr> output, just like a float state attribute.
     class PublicBool:
         def __init__(self) -> None:
             self.flag = False
@@ -514,7 +513,7 @@ def test_while_loop_lowers_to_back_edge() -> None:
     hir = lower(f)
     assert len(hir.blocks) == 4
     header = hir.blocks[1]
-    assert len(header.phis) == 1  # x is the single loop-carried value
+    assert len(header.phis) == 1
     assert isinstance(header.terminator, Branch)
     body = hir.blocks[2]
     assert isinstance(body.terminator, Jump)
@@ -892,7 +891,6 @@ def test_attribute_written_only_in_dead_code_reads_as_constant() -> None:
 def test_stateful_readonly_attribute_is_folded_constant() -> None:
     integrator = _integrator_class()(k=2**-22)
     hir = optimize(lower(integrator.__call__))
-    # k is only read, so it is a folded constant, not a persistent slot or a state read.
     assert "k" not in {s.name for s in hir.state_slots}
     assert all(not (isinstance(n, StateRead) and n.slot == "k") for n in hir.nodes.values())
 
@@ -935,7 +933,7 @@ def test_assigning_uninitialized_attribute_is_rejected() -> None:
             self.y = 0.0
 
         def __call__(self, x: float) -> float:
-            self.scratch = x  # never initialized on the instance
+            self.scratch = x
             return self.y
 
     with pytest.raises(UnsupportedConstruct, match="not initialized"):
@@ -948,19 +946,16 @@ def test_nested_attribute_access_is_rejected() -> None:
             self.y = 0.0
 
         def __call__(self, x: float) -> float:
-            return x + self.y.real  # nested attribute access on self.y
+            return x + self.y.real
 
     with pytest.raises(UnsupportedConstruct, match="direct self"):
         lower(Bad().__call__)
 
 
-# --- Compile-time aggregates -----------------------------------------------------------------------------------------
-
-
 def test_tuple_build_and_index() -> None:
     def f(a, b):  # type: ignore[no-untyped-def]
         z = a, b
-        return [z[1], z[0]]  # swapped
+        return [z[1], z[0]]
 
     assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
 
@@ -976,7 +971,7 @@ def test_list_slice() -> None:
 def test_vector_scalar_broadcast() -> None:
     def f(a, b):  # type: ignore[no-untyped-def]
         v = [a, b]
-        return v * 0.5  # elementwise: one multiply per leaf
+        return v * 0.5
 
     hir = lower(f)
     assert _arith_count(hir, FloatMul) == 2
@@ -1016,9 +1011,6 @@ def test_star_unpacking_a_scalar_is_rejected() -> None:
         lower(f)
 
 
-# --- Tuple-unpacking assignment --------------------------------------------------------------------------------------
-
-
 def test_tuple_unpacking_routes_values() -> None:
     # The right-hand side is built once before any binding, so a swap reads both sources first (no clobber).
     def swap(a, b):  # type: ignore[no-untyped-def]
@@ -1032,8 +1024,8 @@ def test_tuple_unpacking_routes_values() -> None:
 
 def test_starred_and_nested_unpacking_route_values() -> None:
     def f(a, b, c):  # type: ignore[no-untyped-def]
-        first, *rest = [a, b, c]  # rest binds the surplus as an aggregate
-        r0, r1 = rest  # nested unpacking of that aggregate
+        first, *rest = [a, b, c]
+        r0, r1 = rest
         return [first, r0, r1]
 
     hir = lower(f)
@@ -1047,7 +1039,7 @@ def test_chained_assignment_binds_every_target() -> None:
 
     hir = lower(f)
     out = [o.value for o in hir.outputs]
-    assert out[0] == out[1]  # both targets name the same single value
+    assert out[0] == out[1]
 
 
 def test_unpacking_a_scalar_source_is_rejected() -> None:
@@ -1095,9 +1087,6 @@ def test_unpacked_name_shadows_global_callable() -> None:
         lower(f)
 
 
-# --- Importing and inlining a pure function --------------------------------------------------------------------------
-
-
 def _addmul(p, q):  # type: ignore[no-untyped-def]
     return [p + q, p * q]
 
@@ -1122,7 +1111,7 @@ def test_inlined_global_with_star_args() -> None:
 
 def test_inline_arity_mismatch_is_rejected() -> None:
     def f(a):  # type: ignore[no-untyped-def]
-        return _addmul(a)  # _addmul takes two positional arguments
+        return _addmul(a)
 
     with pytest.raises(UnsupportedConstruct, match="positional arguments"):
         lower(f)
@@ -1168,7 +1157,6 @@ def test_boolean_in_float_arithmetic_is_rejected() -> None:
 
 
 def test_abs_accepts_a_star_unpacked_argument() -> None:
-    # Call-argument unpacking applies uniformly: abs(*v) on a one-element aggregate is abs of that single element.
     def f(a):  # type: ignore[no-untyped-def]
         v = [a]
         return abs(*v)
@@ -1178,13 +1166,13 @@ def test_abs_accepts_a_star_unpacked_argument() -> None:
 
 def test_unary_plus_is_scalar_identity_and_rejects_aggregates() -> None:
     def scalar_ok(a):  # type: ignore[no-untyped-def]
-        return +a  # identity on a scalar
+        return +a
 
     assert [o.name for o in lower(scalar_ok).outputs] == ["out_0"]
 
     def aggregate_bad(a, b):  # type: ignore[no-untyped-def]
         v = [a, b]
-        return +v  # unary plus does not apply to an aggregate
+        return +v
 
     with pytest.raises(UnsupportedConstruct, match="scalar"):
         lower(aggregate_bad)
@@ -1232,11 +1220,8 @@ def test_callable_global_shadowing_abs_is_inlined_not_floatabs() -> None:
     def use_abs(a):  # type: ignore[no-untyped-def]
         return abs(a)
 
-    hir = lower(_rebind_globals(use_abs, abs=cbrt))  # cbrt is a module-level def returning x * x
+    hir = lower(_rebind_globals(use_abs, abs=cbrt))
     assert _arith_count(hir, FloatAbs) == 0 and _arith_count(hir, FloatMul) == 1
-
-
-# --- numpy-array aggregates and executable-numpy interop --------------------------------------------------------------
 
 
 def test_numpy_array_state_decomposes_like_a_list() -> None:
@@ -1290,7 +1275,7 @@ def test_numpy_asarray_is_identity_on_an_aggregate() -> None:
 def test_list_is_identity_on_an_aggregate() -> None:
     def f(a, b, c):  # type: ignore[no-untyped-def]
         v = [a, b, c]
-        return list(v[0:2])  # list() of a slice carries the same elements -- identity here
+        return list(v[0:2])
 
     assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
 
@@ -1306,7 +1291,7 @@ def test_list_of_a_scalar_is_rejected() -> None:
 def test_tuple_is_identity_on_an_aggregate() -> None:
     def f(a, b, c):  # type: ignore[no-untyped-def]
         v = [a, b, c]
-        return tuple(v[0:2])  # tuple() of a slice is identity here, co-equal with list()
+        return tuple(v[0:2])
 
     assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
 
@@ -1369,9 +1354,6 @@ def test_ekf1_stateful_structure() -> None:
     assert _arith_count(hir, FloatDiv) == 1  # the inlined kernel's single 1/x21
 
 
-# --- Vector-valued state and keyword-only inputs ---------------------------------------------------------------------
-
-
 def test_vector_state_decomposes_to_per_element_slots() -> None:
     class Vec:
         def __init__(self) -> None:
@@ -1391,7 +1373,7 @@ def test_vector_state_shape_mismatch_is_rejected() -> None:
             self.v = [0.0, 0.0]
 
         def update(self, a):  # type: ignore[no-untyped-def]
-            self.v = [a]  # the slot holds two scalars, but one is assigned
+            self.v = [a]
 
     with pytest.raises(UnsupportedConstruct, match="2-element vector"):
         lower(Vec().update)
@@ -1469,7 +1451,7 @@ def test_first_sample_branch_if_converts_to_one_block() -> None:
     assert len(hir.blocks) == 1
     assert isinstance(hir.blocks[0].terminator, Ret)
     assert not any(isinstance(b.terminator, Branch) for b in hir.blocks)
-    assert any(isinstance(n, Operation) and isinstance(n.operator, Select) for n in hir.nodes.values())  # y mux
+    assert any(isinstance(n, Operation) and isinstance(n.operator, Select) for n in hir.nodes.values())
     slots = {s.name: s for s in hir.state_slots}
     assert isinstance(slots["_first"].reset_value, BoolConst) and slots["_first"].reset_value.value is True
     assert isinstance(slots["y"].reset_value, FloatConst) and slots["y"].reset_value.value == 0.0
@@ -1490,7 +1472,7 @@ def test_nested_if_lowers_through_optimize() -> None:
             return self.y
 
     raw = lower(C().__call__)
-    assert any(isinstance(b.terminator, Branch) for b in raw.blocks)  # the lowering itself emits real nested branches
+    assert any(isinstance(b.terminator, Branch) for b in raw.blocks)
     hir = optimize(raw)
     # Both nested diamonds are small and pure, so if-conversion collapses them: no branch survives and the merges
     # became selects -- the optimized pipeline must still carry the slot through.
@@ -1513,7 +1495,7 @@ def test_attribute_written_on_one_arm_becomes_a_phi() -> None:
 
     raw = lower(Clamp().__call__)
     slots = {s.name: s for s in raw.state_slots}
-    assert isinstance(raw.nodes[slots["acc"].live_out], Phi)  # merged: written value on one path, live-in on the other
+    assert isinstance(raw.nodes[slots["acc"].live_out], Phi)
     # The empty-else diamond then if-converts: the merge becomes select(cond, written, live_in) -- a data mux.
     hir = optimize(raw)
     slots = {s.name: s for s in hir.state_slots}
@@ -1531,7 +1513,7 @@ def test_boolean_and_in_condition_lowers_to_combinational_bool_and() -> None:
 
     hir = lower(f)
     assert _op_count(hir, BoolAnd) == 1
-    assert _op_count(hir, FloatRelational) == 2  # the two comparisons feeding the AND
+    assert _op_count(hir, FloatRelational) == 2
 
 
 def test_boolean_or_lowers_to_combinational_bool_or() -> None:
@@ -1602,8 +1584,8 @@ def test_nested_if_without_else_folds_into_one_and_branch() -> None:
 
     assert _branch_count(lower(nested)) == 1  # one branch, not two
     assert _branch_count(lower(nested)) == _branch_count(lower(manual))
-    assert _op_count(lower(nested), BoolAnd) == 1  # the conjunction the fold synthesized
-    assert _branch_count(lower(triple)) == 1  # still a single branch
+    assert _op_count(lower(nested), BoolAnd) == 1
+    assert _branch_count(lower(triple)) == 1
     assert _op_count(lower(triple), BoolAnd) == 2  # A and B and C -> two binary ANDs
 
 
@@ -1634,7 +1616,7 @@ def test_nested_if_fold_is_suppressed_when_the_inner_test_has_a_walrus() -> None
                 r = t
         return r
 
-    assert _branch_count(lower(f)) == 2  # not folded into a single ``and`` branch
+    assert _branch_count(lower(f)) == 2
 
 
 def test_walrus_in_conditional_expression_arm_is_rejected() -> None:
@@ -1815,7 +1797,7 @@ def test_nested_conditional_expression_clamp_lowers() -> None:
 
     hir = lower(f)
     assert _op_count(hir, FloatRelational) == 2
-    assert sum(1 for n in hir.nodes.values() if isinstance(n, Phi)) >= 2  # one phi per ternary merge
+    assert sum(1 for n in hir.nodes.values() if isinstance(n, Phi)) >= 2
 
 
 def test_statically_true_connective_in_condition_does_not_branch() -> None:
@@ -1823,7 +1805,7 @@ def test_statically_true_connective_in_condition_does_not_branch() -> None:
         return 1.0 if (1.0 < 2.0 and 3.0 > 2.0) else 0.0
 
     hir = lower(f)
-    assert len(hir.blocks) == 1  # the whole guard folds to True: no branch, no comparison
+    assert len(hir.blocks) == 1
     assert _op_count(hir, FloatRelational) == 0
     assert _op_count(hir, BoolAnd) == 0
 
@@ -1920,7 +1902,6 @@ def test_float_cast_of_float_is_identity() -> None:
 
 
 def test_cross_domain_cast_chain_lowers() -> None:
-    # The keystone: float -> bool (comparison) -> float (cast) -> float (multiply) all in one straight-line block.
     def f(x, k):  # type: ignore[no-untyped-def]
         return float(x > 0.0) * k
 
@@ -1981,7 +1962,7 @@ def test_static_bool_sees_through_bool_cast_so_return_in_branch_folds() -> None:
         return x  # unreachable; must not force a branch nor a return-in-branch rejection
 
     hir = lower(f)
-    assert len(hir.blocks) == 1  # folded: no branch
+    assert len(hir.blocks) == 1
 
 
 def test_static_bool_cast_short_circuits_a_dead_non_boolean_operand() -> None:
@@ -1992,7 +1973,7 @@ def test_static_bool_cast_short_circuits_a_dead_non_boolean_operand() -> None:
 
     hir = lower(f)
     assert len(hir.blocks) == 1
-    assert _op_count(hir, FloatToBool) == 0  # the whole guard folds to False; no cast survives
+    assert _op_count(hir, FloatToBool) == 0
 
 
 def test_static_float_sees_through_float_cast_of_a_bool() -> None:
@@ -2001,7 +1982,7 @@ def test_static_float_sees_through_float_cast_of_a_bool() -> None:
         return x if float(True) > 0.5 else 0.0
 
     hir = lower(f)
-    assert len(hir.blocks) == 1  # the ternary's static test selects one arm with no branch
+    assert len(hir.blocks) == 1
     assert _op_count(hir, BoolToFloat) == 0
 
 
@@ -2014,7 +1995,7 @@ def test_or_true_in_a_condition_folds_and_permits_a_return() -> None:
         return x  # unreachable
 
     hir = lower(f)
-    assert len(hir.blocks) == 1  # the guard folded; no branch, so the return is not inside a branch
+    assert len(hir.blocks) == 1
     assert _op_count(optimize(hir), FloatRelational) == 0  # the dead ``x > 0.0`` is dead-code-eliminated
 
 
@@ -2039,7 +2020,7 @@ def test_chained_comparison_with_a_static_true_link_collapses_the_dead_and() -> 
 
     hir = optimize(lower(f))
     assert _op_count(hir, BoolAnd) == 0
-    assert _op_count(hir, FloatRelational) == 1  # only the dynamic ``1.0 < x`` survives
+    assert _op_count(hir, FloatRelational) == 1
 
 
 def test_statically_false_while_still_type_checks_its_condition() -> None:
@@ -2061,7 +2042,7 @@ def test_statically_false_while_with_a_boolean_condition_is_skipped() -> None:
             x = x + 1.0
         return x
 
-    assert len(lower(f).blocks) == 1  # the loop body is not lowered
+    assert len(lower(f).blocks) == 1
 
 
 def test_reachability_folds_through_a_bool_cast_of_a_connective() -> None:
@@ -2072,7 +2053,7 @@ def test_reachability_folds_through_a_bool_cast_of_a_connective() -> None:
             return 1.0
         return x
 
-    assert len(lower(f).blocks) == 1  # folded; no branch, return permitted
+    assert len(lower(f).blocks) == 1
 
 
 def test_ternary_condition_with_equal_arms_folds() -> None:
@@ -2103,7 +2084,7 @@ def test_readonly_scan_stops_at_a_returning_folded_arm() -> None:
                 return self.y
             self.gate = False  # unreachable; must not mark ``gate`` assigned
 
-    assert lower(K().__call__).state_slots == []  # gate read-only -> everything folds; no rejection, no state
+    assert lower(K().__call__).state_slots == []
 
 
 def test_float_cast_connective_comparison_condition_folds_without_spurious_state() -> None:
@@ -2122,7 +2103,7 @@ def test_float_cast_connective_comparison_condition_folds_without_spurious_state
             return self.y
 
     hir = lower(K().__call__)
-    assert [slot.name for slot in hir.state_slots] == ["y"]  # z is not spurious state
+    assert [slot.name for slot in hir.state_slots] == ["y"]
     assert len(hir.blocks) == 1
 
 
@@ -2149,7 +2130,7 @@ def test_absorbing_attribute_connective_keeps_a_dead_arm_attribute_read_only() -
             return self.y
 
     hir = lower(K().__call__)
-    assert [slot.name for slot in hir.state_slots] == ["y"]  # z is not spurious state
+    assert [slot.name for slot in hir.state_slots] == ["y"]
 
 
 def test_equal_arm_ternary_condition_leaves_no_dead_branch() -> None:
@@ -2198,7 +2179,7 @@ def test_read_only_scan_does_not_misfold_a_reassigned_for_counter() -> None:
             return self.y
 
     slots = {slot.name for slot in lower(K().__call__).state_slots}
-    assert "_flag" in slots and "z" in slots  # the guard stays dynamic; neither arm is wrongly dropped
+    assert "_flag" in slots and "z" in slots
 
 
 def test_ternary_with_mismatched_scalar_arm_types_is_cleanly_rejected() -> None:

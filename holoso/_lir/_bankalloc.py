@@ -43,8 +43,6 @@ from ._layout import schedule_with_overlap
 
 @dataclass(frozen=True, slots=True)
 class _BankAlloc:
-    """One bank's assignment: register per value, register per state slot, count, per-slot install, and coalescing."""
-
     reg: dict[ValueId, int]
     slot_reg: dict[str, int]
     nreg: int
@@ -75,7 +73,6 @@ def layout_and_allocate(
     has_install_blocks: Mapping[int, bool],
     state_copy_blocks: Mapping[int, bool],
 ) -> _LayoutAllocation:
-    """Lay out the blocks (cross-block overlap) and color both register banks for the given per-block install set."""
     overlap = schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks, state_copy_blocks)
     block_sched = overlap.block_sched
     inst_of: dict[ValueId, OperatorInstance] = {}
@@ -120,11 +117,6 @@ def actual_install_blocks(alloc: Allocation, float_mir: MirFloatView, bool_mir: 
 
 @dataclass(frozen=True, slots=True)
 class _BankLivenessFacts:
-    """
-    One bank's per-value liveness inputs: definition block and commit cycle per operation, definition block per phi,
-    and the exact per-consumer operand reads (block -> list of (value, read cycle)).
-    """
-
     op_block: dict[ValueId, int]
     op_commit: dict[ValueId, int]
     phi_block: dict[ValueId, int]

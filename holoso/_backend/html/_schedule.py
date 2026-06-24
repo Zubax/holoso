@@ -76,8 +76,8 @@ def render_schedule(lir: Lir) -> str:
     for breg, brows in lir.bool_liveness.items():
         live[breg] = brows
     edges: list[tuple[str, str, str, int]] = []  # (commit id, operand id, color, operation group) for the overlay
-    # Operator pipeline occupancy: instance ``inst`` is in stage ``k`` on cycle ``issue + k``. Keyed to the operation
-    # group so a hover lights the whole pipeline trail together with the result cell, its chip and its edges.
+    # Operator pipeline occupancy: instance ``inst`` is in stage ``k`` on cycle ``issue + k + FETCH_LAG``. Keyed to the
+    # operation group so a hover lights the whole pipeline trail together with the result cell, its chip and its edges.
     # ``conflicts`` flags any cell two operations claim at once -- the alarm for a scheduling bug (a structural hazard
     # the pipelined scheduler should never emit).
     stage_fill: dict[tuple[int, int], tuple[str, int]] = {}  # (stage column, cycle) -> (operator color, group)
@@ -295,7 +295,8 @@ def render_schedule(lir: Lir) -> str:
     out.append("</tr>")
 
     # One displayed row per clock cycle, cycle-accurate to the hardware: the accept/input-load cycle (0), then the
-    # compute, latch, and fetch-staging cycles 1..II. out_valid rises on the last row (the present cycle == II).
+    # compute, latch, and fetch-staging cycles 1..II. The row axis is the fetch PC, so out_valid (pc == LASTPC == II)
+    # rises on the last row; the executing PRESENT step shown there lags the fetch by FETCH_LAG (present == II - FETCH_LAG).
     in_cells: dict[ColKey, str] = {load.dst: _input_chip(f"in_{load.name}") for load in lir.inputs}
     for slot in lir.float_state_slots:  # at cycle 0 the persistent registers hold their reset snapshot, not an input
         in_cells[slot.reg] = _state_chip(f"{slot.name} = {slot.reset_value!r}")
@@ -355,10 +356,8 @@ def _is_live(col: ColKey, row_id: int, live: dict[ColKey, set[int]]) -> bool:
 
 def _write_label(index: int, tip: str) -> str:
     """
-    The result marker on the operator's commit cell: its instance index, white text on the filled result cell.
-
-    Operands are no longer chips; the dataflow edges (drawn by the overlay) connect this cell to its operand cells, so
-    the cell only needs to identify the operator instance. The tooltip carries the full expression with operand signs.
+    The commit-cell marker is just the operator instance index: the overlay's dataflow edges already connect this cell
+    to its operand cells, so the cell need not name them; the tooltip carries the full signed expression.
     """
     return f"<span class='wl' title='{tip}'>{index}</span>"
 
@@ -413,20 +412,14 @@ def _border_suffix(idx: int, thin: set[int], thick: set[int]) -> str:
 
 
 def _gc_class(ordinal: int, dv: _Dividers) -> str:
-    """Class for a register/constant data cell in column ``ordinal`` (with its right-border divider, if any)."""
     return "gc" + _border_suffix(ordinal, dv.data_thin, dv.data_thick)
 
 
 def _oc_class(sidx: int, dv: _Dividers) -> str:
-    """Class for an operator-stage cell in stage column ``sidx`` (with its right-border divider, if any)."""
     return "oc" + _border_suffix(sidx, dv.stage_thin, dv.stage_thick)
 
 
 def _operand_label(operand: FloatOperand | BoolOperand) -> str:
-    """
-    An operand's display label: a float operand's sign-decorated :func:`_col_label` column, a boolean register's
-    ``bX`` column label, or an inline ``True``/``False`` for a boolean constant.
-    """
     if isinstance(operand, FloatOperand):
         return operand.sign.decorate(_col_label(operand.source))
     source = operand.source
@@ -436,7 +429,6 @@ def _operand_label(operand: FloatOperand | BoolOperand) -> str:
 
 
 def _inline_op_text(op: InlineScheduledOp) -> str:
-    """The expression for an inline firing's chip/tooltip: ``<dst> 🠄 <operator>(<operands>)``."""
     body = op.operator.render_output(op.write.port, op.write.conditioner, *[_operand_label(o) for o in op.operands])
     return f"{_col_label(op.write.dst)} 🠄 {body}"
 
@@ -475,9 +467,7 @@ def _bookend_row(
     n_stage: int,
     dv: _Dividers,
 ) -> str:
-    """
-    The input-load row (cycle 0). No operator is in flight yet, so the operator-stage cells and ops cell are empty.
-    """
+    """Cycle 0: no operator is in flight yet, so the operator-stage cells and ops cell are empty."""
     out = [f"<tr><td class='clk'>{label}</td>"]
     for ordinal, col in enumerate(columns):
         extra = " live" if _is_live(col, row_id, live) else ""
@@ -742,7 +732,6 @@ def _register_names(lir: Lir) -> dict[tuple[str, int], tuple[str, str]]:
 
 
 def _named_label(bank: str, index: int, named: tuple[str, str] | None) -> str:
-    """A column header label ``<bank><index>`` (e.g. ``r3``, ``b0``), prefixed with its color-coded role name if any."""
     base = f"{bank}{index}"
     if named is None:
         return base
@@ -752,7 +741,6 @@ def _named_label(bank: str, index: int, named: tuple[str, str] | None) -> str:
 def _schedule_key(
     operator_colors: dict[type[HardwareOperator], str], has_state: bool, has_arrows: bool, has_blocks: bool
 ) -> str:
-    """A small legend above the grid: operator-kind colors plus the read/write chip shapes."""
     items = [
         f"<span class='wr' style='background:{color}'>{_esc(cls.mnemonic)}</span>"
         for cls, color in operator_colors.items()

@@ -1,7 +1,3 @@
-"""
-Core building blocks for the synthesis-evaluation harness.
-"""
-
 import os
 import shlex
 import subprocess
@@ -21,14 +17,12 @@ DEFAULT_TIMEOUT_S = float(os.environ.get("HOLOSO_SYNTH_TIMEOUT_S", "3600"))
 
 
 def new_build_dir(prefix: str) -> Path:
-    """Create and return a fresh build directory under ``BUILD_ROOT`` for one synthesis run."""
     BUILD_ROOT.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
     return Path(tempfile.mkdtemp(prefix=f"{prefix}_{stamp}_", dir=BUILD_ROOT))
 
 
 def run_logged(argv: list[str | Path], log_path: Path, *, cwd: Path, timeout_s: float = DEFAULT_TIMEOUT_S) -> None:
-    """Run ``argv`` in ``cwd``, teeing stdout+stderr to ``log_path``; raise on nonzero exit or timeout."""
     rendered = [str(item) for item in argv]
     log_path.parent.mkdir(parents=True, exist_ok=True)
     print("$ " + " ".join(shlex.quote(item) for item in rendered), flush=True)
@@ -45,15 +39,13 @@ def run_logged(argv: list[str | Path], log_path: Path, *, cwd: Path, timeout_s: 
 
 @dataclass(frozen=True, slots=True)
 class ResourceUse:
-    """One fabric-resource figure: how many were used out of how many available (when the tool reports it)."""
-
     name: str
     used: int
     available: int | None = None
 
     @property
     def fraction(self) -> float | None:
-        """Used divided by available, nominally in [0, 1]; may exceed 1.0 when the design did not fit."""
+        """May exceed 1.0 when the design did not fit."""
         if not self.available:
             return None
         return self.used / self.available
@@ -61,8 +53,6 @@ class ResourceUse:
 
 @dataclass(frozen=True, slots=True)
 class SynthReport:
-    """The parsed outcome of one synthesis + place-and-route run."""
-
     flow: str
     target_frequency_MHz: float
     fmax_MHz: float
@@ -74,23 +64,19 @@ class SynthReport:
 
 @dataclass(frozen=True, slots=True)
 class SourceFile:
-    """One file to materialize, addressed by a path relative to the artifact directory."""
-
-    path: Path
+    path: Path  # relative to the artifact directory
     content: str
 
 
 @dataclass(frozen=True, slots=True)
 class CommandSpec:
-    """One tool invocation, run with the artifact directory as the working directory (for manual reproduction)."""
+    """The recipe's tool invocations are recorded only for manual reproduction; the runner executes them itself."""
 
     argv: list[str | Path]
 
 
 @dataclass(frozen=True, slots=True)
 class SynthArtifact:
-    """A self-contained synthesis recipe plus a bound runner that executes and parses it."""
-
     flow: str
     top: str
     files: list[SourceFile]
@@ -98,7 +84,6 @@ class SynthArtifact:
     runner: Callable[[Path], SynthReport]
 
     def write(self, directory: Path) -> None:
-        """Materialize every file into ``directory`` (creating nested directories as needed)."""
         directory.mkdir(parents=True, exist_ok=True)
         for source in self.files:
             target = directory / source.path
@@ -106,7 +91,6 @@ class SynthArtifact:
             target.write_text(source.content, encoding="utf-8")
 
     def synthesize(self, directory: Path | None = None) -> SynthReport:
-        """Write the recipe (to ``directory`` or a fresh build dir) and run the flow, returning the parsed result."""
         target = directory if directory is not None else new_build_dir(self.flow)
         self.write(target)
         return self.runner(target)
@@ -114,11 +98,9 @@ class SynthArtifact:
 
 def assemble(result: SynthesisResult, wrapper: OocWrapper) -> list[SourceFile]:
     """
-    Bundle the wrapper, the generated module, and the self-contained support files into one source set.
-
     A generated module instantiates only support-library modules, all of which live inside the single bundled
-    ``holoso_support.v``; nothing else is needed. Everything is bundled as in-memory :class:`SourceFile`s so a
-    recipe directory is self-contained.
+    ``holoso_support.v``; nothing else is needed. Everything is bundled in memory so a recipe directory is
+    self-contained.
     """
     return [SourceFile(Path(name), content) for name, content in result.verilog_output.support_files.items()] + [
         SourceFile(Path(f"{result.module_name}.v"), result.verilog_output.verilog),

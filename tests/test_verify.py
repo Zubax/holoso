@@ -60,7 +60,7 @@ def _exact_int_comparison(a):  # type: ignore[no-untyped-def]
 def test_model_exact_integer_comparison_is_not_folded_via_float() -> None:
     model = build_model(build(_run(_exact_int_comparison), "eic"))
     for a in (5.0, 0.0, -2.0):
-        assert float(model.run(a)[0]) == _exact_int_comparison(a)  # a + 1.0 -- the `==` is false for distinct integers
+        assert float(model.run(a)[0]) == _exact_int_comparison(a)
 
 
 def test_codec_known_binary32_values() -> None:
@@ -109,7 +109,7 @@ def test_float_value_factories_and_fields() -> None:
 
 def test_is_legal_rejects_subnormal_and_negative_zero() -> None:
     # exp == 0 with nonzero fraction is subnormal; sign bit with zero magnitude is negative zero.
-    assert not FMT.is_legal(0b1)  # subnormal
+    assert not FMT.is_legal(0b1)
     neg_zero = 1 << (FMT.width - 1)
     assert not FMT.is_legal(neg_zero)
     assert FMT.is_legal(FMT.encode(1.0))
@@ -314,7 +314,7 @@ def test_for_counter_reassigned_inside_while_is_demoted_after_the_loop() -> None
     assert len(lower(kernel).blocks) > 1  # the comparison is a real branch, not folded away
     model = build_model(build(_run(kernel), "k"))
     for a in (-5.0, -0.5, 0.5, 7.0):
-        assert float(model.run(a)[0]) == float(kernel(a)), f"mismatch at a={a}"  # 100.0 for a<0, else 200.0
+        assert float(model.run(a)[0]) == float(kernel(a)), f"mismatch at a={a}"
 
 
 def test_for_counter_reassigned_inside_while_rejects_later_static_use() -> None:
@@ -517,8 +517,6 @@ class _Iir1Lpf:
 
 
 def test_model_executes_first_sample_branch() -> None:
-    # The model must follow the control-flow path: the first sample takes the then-arm (y = x exactly), and every
-    # later sample takes the else-arm (the IIR update), staying bit-exact to the model's own re-evaluation.
     model = build_model(build(_run(_Iir1Lpf().__call__), "iir1_lpf"))
     reference = _Iir1Lpf()
     stream = [1.0, 2.0, 3.0, 0.5, -1.0, 8.0]
@@ -531,7 +529,6 @@ def test_model_executes_first_sample_branch() -> None:
 
 
 def test_model_branch_reset_restarts_the_first_sample_arm() -> None:
-    # reset() reloads the boolean state, so the first-sample arm fires again after a reset.
     model = build_model(build(_run(_Iir1Lpf().__call__), "iir1_lpf"))
     model.run(1.0)
     second = float(model.run(5.0)[0])
@@ -570,8 +567,6 @@ class _PID:
 
 
 def test_model_pid_controller_all_arms_anti_windup_and_first_update() -> None:
-    # A float comparison drives each saturation arm; the integrator freezes while saturated (anti-windup); the boolean
-    # ``_started`` state suppresses the derivative on the first update (no prev_error yet) and enables it after.
     model = build_model(build(_run(_PID().__call__), "pid"))
     reference = _PID()
     ui = [p.name for p in model.outputs].index("out_0")
@@ -674,7 +669,6 @@ class _SchmittTrigger:
 
 
 def test_model_schmitt_trigger_hysteresis() -> None:
-    # The output latches at the thresholds and holds across the deadband (a comparison branch with a one-arm phi).
     model = build_model(build(_run(_SchmittTrigger().__call__), "schmitt"))
     reference = _SchmittTrigger()
     for x in [0.0, 0.5, 1.5, 0.5, -0.5, -1.5, -0.5, 0.5, 2.0]:
@@ -829,7 +823,6 @@ def test_compare_float_values_exact_for_wide_formats() -> None:
 
 
 def test_model_unrolled_for_loop_newton_reciprocal() -> None:
-    # A fixed-count `for` unrolls to a flat datapath; Newton-Raphson converges to 1/x on the restricted domain.
     import math
 
     def reciprocal(x):  # type: ignore[no-untyped-def]
@@ -840,7 +833,7 @@ def test_model_unrolled_for_loop_newton_reciprocal() -> None:
 
     model = build_model(build(_run(reciprocal), "newton"))
     assert len(model._lir.blocks) == 1  # fully unrolled to a single straight-line block
-    for x in [0.5, 0.75, 1.0, 1.3, 1.7, 2.0]:
+    for x in [0.5, 0.75, 1.0, 1.3, 1.7, 2.0]:  # the restricted domain where this 4-step Newton seed converges
         assert math.isclose(float(model.run(x)[0]), 1.0 / x, rel_tol=1e-5)
 
 
@@ -865,8 +858,6 @@ class _CordicSinCos:
 
 
 def test_model_unrolled_cordic_sin_cos() -> None:
-    # An unrolled loop with a compile-time `2**-i` shift, a constant arctan table indexed by the counter, and a
-    # per-iteration sign branch computes sin/cos.
     model = build_model(build(_run(_CordicSinCos().__call__), "cordic"))
     cos_index, sin_index = [p.name for p in model.outputs].index("out_0"), [p.name for p in model.outputs].index(
         "out_1"
@@ -892,8 +883,8 @@ def test_model_attribute_written_only_in_loop_is_persistent_state() -> None:
     model = build_model(build(_run(_LoopAccumulator().__call__), "accum"))
     assert [slot.name for slot in model._lir.float_state_slots] == ["acc"]
     reference = _LoopAccumulator()
-    assert float(model.run(1.0)[0]) == reference(1.0)  # 3*1
-    assert float(model.run(2.0)[0]) == reference(2.0)  # previous 3 + 3*2 = 9 (state carried)
+    assert float(model.run(1.0)[0]) == reference(1.0)
+    assert float(model.run(2.0)[0]) == reference(2.0)  # state carried across calls
 
 
 class _LiveInClobberedByLiveOut:
@@ -962,7 +953,6 @@ def test_model_signed_state_liveout_persists_with_sign() -> None:
 
 
 def _neg_abs_phi(x):  # type: ignore[no-untyped-def]
-    # A value whose sign is conditioned by the branch (-x on one arm, x on the other) merges through a phi -> -|x|.
     if x > 0.0:
         y = -x
     else:
@@ -1219,7 +1209,6 @@ def test_state_livein_feeding_unrelated_phi_does_not_coalesce(monkeypatch: pytes
 
 
 def _while_sum(x, n):  # type: ignore[no-untyped-def]
-    # A real back-edge loop: add x to an accumulator a runtime number of times (n down to 0). Loop-carried locals only.
     acc = 0.0
     i = n
     while i > 0.0:
@@ -1314,7 +1303,7 @@ def _counter_dead_arm_in_while(x):  # type: ignore[no-untyped-def]
 def test_model_counter_assigned_only_on_dead_path_stays_static() -> None:
     model = build_model(build(_run(_counter_dead_arm_in_while), "cdaiw"))
     for x in [0.0, 1.0, 3.0]:
-        assert float(model.run(x)[0]) == _counter_dead_arm_in_while(x)  # table[2] == 30.0
+        assert float(model.run(x)[0]) == _counter_dead_arm_in_while(x)
 
 
 def _zero_trip_inner_for(x):  # type: ignore[no-untyped-def]
@@ -1334,7 +1323,7 @@ def _zero_trip_inner_for(x):  # type: ignore[no-untyped-def]
 def test_model_zero_trip_inner_for_keeps_outer_counter_static() -> None:
     model = build_model(build(_run(_zero_trip_inner_for), "ztif"))
     for x in [0.0, 2.0, 5.0]:
-        assert float(model.run(x)[0]) == _zero_trip_inner_for(x)  # table[2] == 30.0
+        assert float(model.run(x)[0]) == _zero_trip_inner_for(x)
 
 
 def test_model_attr_written_under_counter_gated_branch_in_while() -> None:
@@ -1439,7 +1428,7 @@ def test_model_counter_dependent_empty_inner_loop_is_not_state() -> None:
     assert [slot.name for slot in live.float_state_slots] == ["s"]
     model, reference = build_model(live), _CounterDependentLiveInner()
     for x in [1.0, 1.0, 2.0]:
-        assert float(model.run(x)[0]) == reference(x)  # 3, 6, 12
+        assert float(model.run(x)[0]) == reference(x)
 
 
 class _ReturnInLiteralIfArm:
@@ -1459,7 +1448,7 @@ def test_model_return_in_literal_if_arm_ends_the_scan() -> None:
     # port, or a slot-registration crash when the attribute is not otherwise read).
     lir = build(_run(_ReturnInLiteralIfArm().__call__), "f7")
     assert [slot.name for slot in lir.float_state_slots] == []
-    assert float(build_model(lir).run(5.0)[0]) == 7.0  # x + y = 5 + 2
+    assert float(build_model(lir).run(5.0)[0]) == 7.0
 
 
 class _CounterLeakAcrossArms:
@@ -1549,8 +1538,6 @@ def test_model_handle_round_trips_through_pickle() -> None:
 
 
 def test_model_boolean_connectives_and_chained_and_ternary_are_exact() -> None:
-    # Connectives (and/or/not), a chained comparison, and ternaries all lower to combinational bool ops feeding
-    # branch+phi merges; the model must reproduce the Python reference exactly across every arm.
     def kernel(x, lo, hi):  # type: ignore[no-untyped-def]
         deadband = 0.0 if lo < x < hi else x  # chained comparison + ternary
         gate = 1.0 if (x > lo and x < hi) else 0.0  # and-connective in a condition
@@ -1630,7 +1617,7 @@ def test_connective_branch_does_not_create_a_phantom_state_slot() -> None:
     assert len(hir.blocks) == 1  # the connective guard folded; no branch
     model = build_model(build(_run(K().__call__), "phantom_if"))
     assert float(model.run(2.0)[0]) == 2.0
-    assert float(model.run(3.0)[0]) == 5.0  # accumulates 2 + 3, exact in this format
+    assert float(model.run(3.0)[0]) == 5.0  # the accumulation is exact in this format
 
 
 def test_connective_branch_in_a_loop_body_does_not_carry_a_phantom_attribute() -> None:
@@ -1654,4 +1641,4 @@ def test_connective_branch_in_a_loop_body_does_not_carry_a_phantom_attribute() -
     hir = lower(K().__call__)
     assert [slot.name for slot in hir.state_slots] == ["acc"]  # dead is not carried
     model = build_model(build(_run(K().__call__), "phantom_loop"))
-    assert float(model.run(1.0)[0]) == 3.0  # three trips accumulate u
+    assert float(model.run(1.0)[0]) == 3.0

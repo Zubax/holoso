@@ -79,13 +79,12 @@ async def holoso_fsort_cocotb(dut) -> None:
         await Timer(1, unit="ns")
         sb.sample()
 
-    # 1) Directed x directed with neutral sgnops.
     for a in DIRECTED_F32:
         for b in DIRECTED_F32:
             await step(a, b, 0, 0, 0, 0)
     await sb.drain()
 
-    # 2) Full sgnop sweep. Output sign controls change every cycle to verify sideband pipelining.
+    # Full sgnop sweep: output sign controls change every cycle to verify sideband pipelining.
     sample_pairs = [
         (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))], DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
         for _ in range(4)
@@ -98,7 +97,6 @@ async def holoso_fsort_cocotb(dut) -> None:
                         await step(a, b, a_op, b_op, mn_op, mx_op)
     await sb.drain()
 
-    # 3) Random bulk.
     for _ in range(get_random_count()):
         if rng.random() < 0.2:
             await step_idle()

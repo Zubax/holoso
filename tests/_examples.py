@@ -183,7 +183,7 @@ SPECS = [
         name="madd",
         inputs=("a", "b", "c"),
         make_kernel=lambda: madd.madd,
-        approximate=True,  # continuous float arithmetic -> compare within a format tolerance
+        approximate=True,
         nominal={"a": 1.0, "b": 1.0, "c": 1.0},
         manual=[
             {"a": 1.0, "b": 1.0, "c": 0.0},
@@ -208,7 +208,7 @@ SPECS = [
             {"x": -2.0, "lo": -1.0, "hi": 1.0},  # below -> clamped to lo, outside
             {"x": 1.0, "lo": -1.0, "hi": 1.0},  # on the hi boundary -> outside (x >= hi), not strictly inside
             {"x": -1.0, "lo": -1.0, "hi": 1.0},  # on the lo boundary
-            {"x": 0.25, "lo": -0.5, "hi": 0.5},  # a narrower window
+            {"x": 0.25, "lo": -0.5, "hi": 0.5},
         ],
         draw_random=lambda rng: {
             "x": bounded(rng, -3.0, 3.0),
@@ -221,7 +221,7 @@ SPECS = [
         name="poly3",
         inputs=("x", "c0", "c1", "c2", "c3"),
         make_kernel=lambda: poly3.poly3,
-        approximate=True,  # continuous float arithmetic -> compare within a format tolerance
+        approximate=True,
         nominal={"x": 1.0, "c0": 1.0, "c1": 1.0, "c2": 1.0, "c3": 1.0},
         manual=[
             {"x": 0.0, "c0": 1.0, "c1": 2.0, "c2": 3.0, "c3": 4.0},  # evaluates to c0
@@ -239,7 +239,7 @@ SPECS = [
         name="iir1_lpf",
         inputs=("x",),
         make_kernel=lambda: IIR1LPF().__call__,
-        approximate=True,  # continuous float arithmetic -> compare within a format tolerance
+        approximate=True,
         nominal={"x": 1.0},
         manual=[  # one continuous stream: the first sample latches y=x, then the IIR settles toward the input
             *({"x": v} for v in (1.0, 1.0, 1.0, 1.0)),
@@ -253,7 +253,7 @@ SPECS = [
         name="pid",
         inputs=("setpoint", "measurement"),
         make_kernel=lambda: PID().__call__,
-        approximate=True,  # continuous float arithmetic -> compare within a format tolerance
+        approximate=True,
         nominal={"setpoint": 1.0, "measurement": 0.0},
         manual=[  # first update (D suppressed), then a varying measurement (D active) driving both saturation rails
             {"setpoint": sp, "measurement": m}
@@ -417,7 +417,7 @@ SPECS = [
         name="recip_newton",
         inputs=("x",),
         make_kernel=lambda: NewtonReciprocal().__call__,
-        approximate=True,  # continuous float arithmetic -> compare within a format tolerance
+        approximate=True,
         nominal={"x": 1.0},
         manual=[{"x": v} for v in (0.5, 0.75, 1.0, 1.3, 1.7, 2.0)],  # across the [0.5, 2.0] reciprocal domain
         draw_random=_draw_scalars(("x",), 0.5, 2.0),
@@ -462,7 +462,7 @@ SPECS = [
         name="cordic_sincos",
         inputs=("theta",),
         make_kernel=lambda: CordicSinCos().__call__,
-        approximate=True,  # continuous float arithmetic -> compare within a format tolerance
+        approximate=True,
         nominal={"theta": 0.5},
         manual=[{"theta": v} for v in (0.0, 0.3, 0.7, -0.5, 1.0, -1.0)],  # angles within the convergence range
         draw_random=_draw_scalars(("theta",), -1.4, 1.4),
@@ -472,7 +472,7 @@ SPECS = [
         name="integrator",
         inputs=("x", "dt"),
         make_kernel=lambda: TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__,
-        approximate=True,  # continuous float arithmetic -> compare within a format tolerance
+        approximate=True,
         nominal={"x": 1.0, "dt": 1.0e-3},
         manual=[  # one continuous stream: settle at zero, a step, an impulse, then a ramp
             *({"x": v, "dt": 1.0e-3} for v in (0.0, 0.0, 1.0, 1.0, 1.0, 1.0)),
@@ -488,7 +488,7 @@ SPECS = [
         name="ekf1_stateless",
         inputs=_EKF_STATELESS_INPUTS,
         make_kernel=lambda: ekf1_stateless.update_x_P,
-        approximate=True,  # continuous float arithmetic -> compare within a format tolerance
+        approximate=True,
         nominal={
             "P00": 1.0, "P01": 0.0, "P02": 0.0, "P11": 1.0, "P12": 0.0, "P22": 1.0,
             "Q_R": 1e-3, "Q_g": 1e-3, "Q_i": 1e-3, "R_ct": 1e2, "R_shunt": 1e2, "dt": 1e-2,

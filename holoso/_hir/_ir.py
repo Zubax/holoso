@@ -11,16 +11,12 @@ from ._types import BoolType, FloatType, Type
 
 @dataclass(frozen=True, slots=True)
 class InPort:
-    """A module input port (a function parameter)."""
-
     name: str
     type: Type
 
 
 @dataclass(frozen=True, slots=True)
 class Operation:
-    """A semantic operation occurrence in HIR."""
-
     operator: Operator
     operands: tuple[ValueId, ...]
 
@@ -59,15 +55,11 @@ type Node = InPort | Const | Operation | StateRead | Phi
 
 @dataclass(frozen=True, slots=True)
 class Jump:
-    """Unconditional control transfer to ``target``."""
-
     target: BlockId
 
 
 @dataclass(frozen=True, slots=True)
 class Branch:
-    """Conditional control transfer: to ``if_true`` when ``cond`` (a BoolType value) is true, else ``if_false``."""
-
     cond: ValueId
     if_true: BlockId
     if_false: BlockId
@@ -82,7 +74,6 @@ type Terminator = Jump | Branch | Ret
 
 
 def predecessors(blocks: list["Block"]) -> dict[BlockId, set[BlockId]]:
-    """Per block, the set of CFG predecessor block ids (the one edge walk shared by validation and passes)."""
     preds: dict[BlockId, set[BlockId]] = {block.id: set() for block in blocks}
     for block in blocks:
         match block.terminator:
@@ -99,8 +90,8 @@ def predecessors(blocks: list["Block"]) -> dict[BlockId, set[BlockId]]:
 @dataclass(frozen=True, slots=True)
 class Block:
     """
-    One basic block: its entry phis, its straight-line operations in evaluation order, and its terminator. Inputs,
-    constants, and state reads are entry-global pure values and do not appear in any block's ``operations`` list.
+    Inputs, constants, and state reads are entry-global pure values and do not appear in any block's ``operations``
+    list; ``operations`` holds only the block's straight-line operations in evaluation order.
     """
 
     id: BlockId
@@ -232,10 +223,8 @@ class HirBuilder:
         self._outputs: list[OutputPort] = []
         self._state_slots: list[StateSlot] = []
 
-    # -- block management ------------------------------------------------------------------------------------------
-
     def block(self) -> BlockId:
-        """Create a fresh empty block and return its id; the first one created is the entry. Does not move position."""
+        """The first block created is the entry. Does not move the builder's position."""
         bid = len(self._blocks)
         self._blocks.append(_BlockUnderConstruction(phis=[], operations=[], terminator=None))
         if self._cur is None:
@@ -264,8 +253,6 @@ class HirBuilder:
 
     def ret(self) -> None:
         self.set_terminator(self.current_block, Ret())
-
-    # -- value construction ----------------------------------------------------------------------------------------
 
     def _fresh(self, node: Node) -> ValueId:
         vid = len(self._nodes)
@@ -365,7 +352,7 @@ class HirBuilder:
         return self.phi(type, [entry_arm])
 
     def set_phi_arms(self, phi: ValueId, arms: list[tuple[BlockId, ValueId]]) -> None:
-        """Replace a phi's arms (used to close a loop-header phi opened by :meth:`open_phi` once the latch is known)."""
+        """Closes a loop-header phi opened by :meth:`open_phi`, once the latch (back-edge) arm is known."""
         node = self._nodes[phi]
         if not isinstance(node, Phi):
             raise ValueError(f"value {phi} is not a phi")

@@ -158,8 +158,6 @@ async def cosim(dut):
 
 @dataclass(frozen=True, slots=True)
 class CocotbOutput:
-    """The cocotb backend's output: one self-contained, self-checking cocotb testbench module."""
-
     testbench: str
 
     def __str__(self) -> str:

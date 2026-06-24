@@ -31,7 +31,6 @@ def state_port_name(slot: str) -> str:
 
 
 def leaf_targets(target: ast.expr) -> Iterator[ast.expr]:
-    """Yield an assignment target's leaf targets, descending through tuple/list/starred unpacking."""
     match target:
         case ast.Starred(value=value):
             yield from leaf_targets(value)

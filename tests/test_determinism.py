@@ -64,7 +64,6 @@ def coalesce_conflict(x, b, cc):  # type: ignore[no-untyped-def]
 
 
 def emit_coalesce_conflict() -> None:
-    """Subprocess entry: print the full Verilog of the phi-coalescing de-coalescing kernel."""
     from holoso import FloatFormat, synthesize
 
     from ._modelref import default_ops
@@ -74,7 +73,6 @@ def emit_coalesce_conflict() -> None:
 
 
 def emit_cordic() -> None:
-    """Subprocess entry: print the full Verilog of the branch-heavy cordic example."""
     sys.path.insert(0, str(_REPO / "examples"))
     from cordic_sincos import CordicSinCos
 
@@ -87,7 +85,6 @@ def emit_cordic() -> None:
 
 
 def dump_two_carried_hir() -> None:
-    """Subprocess entry: print the canonical HIR node table of the loop-carried-state kernel."""
     from holoso._frontend import lower
 
     hir = lower(TwoCarried().step)

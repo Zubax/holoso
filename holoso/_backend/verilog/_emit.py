@@ -35,8 +35,6 @@ from ._support import support_files
 
 @dataclass(frozen=True, slots=True)
 class VerilogOutput:
-    """The Verilog backend's output: the generated module text and the shared support files it instantiates."""
-
     verilog: str
     support_files: dict[str, str]  # filename -> content
 
@@ -88,17 +86,14 @@ def _lit(width: int, value: int) -> str:
 
 
 def _cterm_expr(port: int, consts: list[int]) -> str:
-    """The constant operand value for a read port: the single immediate, or the per-port constant-index selector."""
     return f"const_{consts[0]}" if len(consts) == 1 else f"cterm{port}"
 
 
 def _source_net(source: RegRef | FloatConstRef) -> str:
-    """The net carrying a register-or-constant source value: the pooled constant immediate, or the register read."""
     return f"const_{source.index}" if isinstance(source, FloatConstRef) else f"regs[{source.index}]"
 
 
 def _fsgnop(w: _Writer, raw: str, sign: FloatSignControl, dst: str, inst: str) -> None:
-    """Emit a sign-conditioning wrapper instance applying ``sign`` to ``raw`` and driving ``dst``."""
     w(f"holoso_fsgnop #(.WFULL(W)) {inst} (.x({raw}), .op(2'd{sign.encoded}), .y({dst}));")
 
 
@@ -114,7 +109,6 @@ def _state_sign_wire(slot: FloatStateSlot) -> str | None:
 
 
 def _state_copy_rhs(slot: FloatStateSlot) -> str:
-    """The value a non-coalesced slot register's install copy latches: sign-conditioned wire, or raw tap."""
     return _state_sign_wire(slot) or _source_net(slot.tap.source)
 
 
@@ -435,7 +429,6 @@ def _const_pool_mux(selector: str, consts: list[int]) -> str:
 def _emit_datapath_comb(
     w: _Writer, lir: Lir, port_consts: dict[int, list[int]], write_lists: dict[tuple[OperatorInstance, int], list[int]]
 ) -> None:
-    """Combinational datapath: constant terms, the input-load enable, operator control, the err flag, and next_pc."""
     for port in sorted(port_consts):
         if len(port_consts[port]) > 1:
             w(f"wire [W-1:0] cterm{port} = {_const_pool_mux(f_cidx(port), port_consts[port])};")
@@ -538,7 +531,6 @@ def _copy_sign_wire(block_index: int, copy_index: int) -> str:
 
 
 def _float_copy_rhs(block_index: int, copy_index: int, copy: FloatCopy) -> str:
-    """The net a float copy installs: the raw source for an identity sign, else a per-copy sign-conditioning wire."""
     if copy.source.sign == FloatSignControl():
         return _source_net(copy.source.source)
     return _copy_sign_wire(block_index, copy_index)
@@ -588,7 +580,6 @@ def _bool_writes_grouped(lir: Lir) -> dict[int, list[tuple[int, str]]]:
 
 
 def _emit_copy_sign_wires(w: _Writer, lir: Lir) -> None:
-    """Emit a sign-conditioning wire for each float copy whose installed source carries a folded sign control."""
     emitted = False
     for block in lir.blocks:
         for copy_index, copy in enumerate(block.copies):
@@ -602,7 +593,6 @@ def _emit_copy_sign_wires(w: _Writer, lir: Lir) -> None:
 
 
 def _emit_inline_sign_wires(w: _Writer, lir: Lir) -> None:
-    """Emit a sign-conditioning wire for each inline-firing float operand carrying a non-identity folded sign."""
     emitted = False
     for block in lir.blocks:
         for op_index, op in enumerate(block.inline_ops):
@@ -617,7 +607,6 @@ def _emit_inline_sign_wires(w: _Writer, lir: Lir) -> None:
 
 
 def _emit_state_next(w: _Writer, lir: Lir) -> None:
-    """Sign-condition the persisted next value of any non-coalesced slot whose copied source carries a folded sign."""
     emitted = False
     for slot in lir.float_state_slots:
         wire = _state_sign_wire(slot)
@@ -775,7 +764,7 @@ def _wide_state_install_entry(lir: Lir, slot: FloatStateSlot) -> list[tuple[str,
 
 
 def _emit_chain(w: _Writer, lhs: str, entries: list[tuple[str, str]]) -> None:
-    """Emit one register's whole write as a single priority chain ``if (c0) lhs<=r0; else if (c1) ...`` (one driver)."""
+    """One priority chain per register, so the register has exactly one driver (the multi-assign rule)."""
     clause = "if"
     for cond, rhs in entries:
         w(f"{clause} ({cond}) {lhs} <= {rhs};")
@@ -835,8 +824,9 @@ always @(posedge clk) begin
             w(f"{sig}_{err_port}_q <= {sig}_{err_port};")
     w("")
 
-    # Non-slot registers: one reset-unconditional write chain each (so they settle to ucode[0] under reset and pack into
-    # the BRAM output register). A register with no drivers is simply omitted.
+    # Non-slot registers: one reset-unconditional write chain each driving regs[]/bregs[]. Datapath payload carries no
+    # reset, keeping the high-fanout reset net off the wide cone (only control/valid state is reset); the contents are
+    # don't-care until a valid write lands. A register with no drivers is simply omitted.
     nonslot_wide = [reg for reg in range(nreg) if reg not in float_slots and wide.get(reg)]
     nonslot_bool = [reg for reg in range(nbreg) if reg not in bool_slots and boolw.get(reg)]
     if nonslot_wide or nonslot_bool:

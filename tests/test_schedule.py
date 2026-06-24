@@ -167,7 +167,7 @@ def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator(config: O
         for op in block.ops
         if isinstance(op.inst.operator, FCmpOperator)
     ]
-    assert len(in_valid_pcs) >= 2  # the chained comparison lowers to two comparator firings feeding a BoolAnd
+    assert len(in_valid_pcs) >= 2
     assert len(set(in_valid_pcs)) == len(in_valid_pcs)  # instance contention spaces them: no comparator collision
 
 
@@ -220,7 +220,7 @@ def test_entry_branch_on_resident_condition_skips_the_wide_drain() -> None:
             self._armed = False
 
         def step(self, a, b):  # type: ignore[no-untyped-def]
-            if self._armed:  # the entry branches on the resident boolean state (its live-in)
+            if self._armed:
                 r = a / b  # a non-speculatable arm keeps this a real branch, not an if-converted select
             else:
                 r = a + b
@@ -230,7 +230,7 @@ def test_entry_branch_on_resident_condition_skips_the_wide_drain() -> None:
     lir = build(_run(_EntryStateBranch().step), "entry_state_branch")
     entry = lir.blocks[lir.entry]
     assert isinstance(entry.terminator, Branch)
-    assert not entry.ops and not entry.inline_ops  # the entry only branches on the resident state; it does no work
+    assert not entry.ops and not entry.inline_ops
     # The op-less entry rides the issue-side envelope floor (1), strictly below the wide drain (4) a pin would charge.
     assert entry.term_offset == 1
     assert entry.term_offset < boundary_step(entry.block_makespan, wide_resident=True)
@@ -1229,8 +1229,8 @@ def test_fmul_ilog2_same_k_shares_one_instance() -> None:
     il = _ilog2(mir)
     assert len(il) == 2
     sched = _schedule(mir)
-    assert sched.issue_cycle[il[0]] != sched.issue_cycle[il[1]]  # not concurrent
-    assert sched.inst_of[il[0]] == sched.inst_of[il[1]]  # ...so they share the one instance
+    assert sched.issue_cycle[il[0]] != sched.issue_cycle[il[1]]
+    assert sched.inst_of[il[0]] == sched.inst_of[il[1]]
     assert sum(1 for i in sched.instances if isinstance(i.operator, FMulILog2Operator)) == 1
 
 
@@ -1256,7 +1256,7 @@ def test_fmul_ilog2_different_k_never_shares() -> None:
     il = _ilog2(mir)
     assert len(il) == 2
     sched = _schedule(mir)
-    assert sched.inst_of[il[0]] != sched.inst_of[il[1]]  # different K -> different instances
+    assert sched.inst_of[il[0]] != sched.inst_of[il[1]]
     assert {sched.inst_of[v].operator.k for v in il} == {2, 3}
     assert {sched.inst_of[v].index for v in il} == {0}  # indices are local to each concrete operator value
 
@@ -1322,7 +1322,6 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
     # The carried live-out must survive to the boundary even though nothing reads it again this frame, so the slot
     # register stays live from its landing through the boundary -- an early install is not the value's death.
     assert set(range(landing, lir.initiation_interval + 1)) <= lir.reg_liveness[slot.reg]
-    # Output wires carry the same FloatOperand tap primitive as state slots.
     assert all(isinstance(w.tap, FloatOperand) for w in lir.float_outputs)
     # Pin the hardware-frame cycle formulas the report, model, and allocator all depend on (the write/read latch
     # offsets around FETCH_LAG); every consumer routes through the shared _ir helpers that own this arithmetic.
@@ -1367,15 +1366,13 @@ def test_cfg_write_only_state_slot_is_reserved() -> None:
                 t = x * 2.0
             else:
                 t = x * 3.0
-            self.acc = -t  # the folded sign forces a non-coalesced (reserved, copy-installed) write-only slot
+            self.acc = -t
             return self.acc
 
     lir = build(_run(WriteOnlyBranch().__call__), "write_only")
     (slot,) = lir.float_state_slots
-    assert slot.name == "acc" and slot.needs_copy  # reserved, not coalesced (the sign fold blocks in-place commit)
-    assert slot.reg.index not in {
-        write.dst.index for op in lir.ops for write in op.writes
-    }  # reserved: no operator result lands on it
+    assert slot.name == "acc" and slot.needs_copy
+    assert slot.reg.index not in {write.dst.index for op in lir.ops for write in op.writes}
     model = build_model(lir)
     assert float(model.run(3.0)[0]) == -6.0 and float(model.run(-2.0)[0]) == 6.0
 
@@ -1393,7 +1390,7 @@ def test_cfg_state_slot_coalesces_onto_its_register() -> None:
             return float(x > 0.0) * self.state
 
     lir = build(_run(Filt().__call__), "filt")
-    assert any(block.inline_ops for block in lir.blocks)  # the float(x>0) cast is an inline op
+    assert any(block.inline_ops for block in lir.blocks)
     (slot,) = lir.float_state_slots
     assert not slot.needs_copy, "the slot live-out must coalesce onto the slot register (no install copy)"
     assert slot.tap.source == slot.reg
@@ -1422,7 +1419,7 @@ def test_cfg_branch_conditions_reuse_boolean_registers(monkeypatch: pytest.Monke
     lir = build(_run(f), "branches")
     comparisons = sum(1 for b in lir.blocks for op in b.ops if isinstance(op.inst.operator, FCmpOperator))
     assert comparisons >= 3
-    assert lir.bool_regfile.nreg < comparisons  # the three conditions share boolean registers
+    assert lir.bool_regfile.nreg < comparisons
     model = build_model(lir)
     assert abs(float(model.run(1.0, -1.0, 1.0)[0]) - 6.0) < 1e-3  # a=1; +1 (x>0); skip (y<=0); +4 (z>0) = 6
 
@@ -1504,7 +1501,6 @@ def test_interfering_loop_carried_phi_keeps_its_copy() -> None:
 
 
 def _check_float_kernel(fn, name, samples):  # type: ignore[no-untyped-def]
-    """Build ``fn`` (must not crash) and check the cycle model matches the float64 reference on ``samples``."""
     lir = build(_run(fn), name)  # crash-before: the install-free oracle admitted an unsound merge -> backstop assert
     model = build_model(lir)
     for args in samples:
@@ -1640,10 +1636,9 @@ def test_state_early_copy_frees_source_register() -> None:
     lir = build(_run(TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__), "trapz")
     (xprev,) = [s for s in lir.float_state_slots if s.name == "_x_prev"]
     (in_x,) = [load for load in lir.float_inputs if load.name == "x"]
-    assert xprev.needs_copy and in_x.dst == xprev.tap.source  # the copy's source is the input register
+    assert xprev.needs_copy and in_x.dst == xprev.tap.source
     makespan = max((op.commit_cycle for op in lir.ops), default=0)
     assert xprev.install_cycle <= makespan  # installs before the boundary (present cycle == makespan + 1)
-    # The freed input register is reused: a later operation's result is assigned to it as well.
     assert any(write.dst == in_x.dst for op in lir.ops for write in op.writes)
 
 
@@ -1658,7 +1653,6 @@ def test_build_lir_ekf1_stateless() -> None:
     assert len(fdivs) == 1
     # The two K=1 power-of-two scalings are non-concurrent, so they pool onto a single shared instance.
     assert sum(1 for inst in lir.instances if isinstance(inst.operator, FMulILog2Operator)) == 1
-    # Register reuse: not every distinct value occupies its own register.
     assert lir.regfile.nreg < len(lir.ops) + len(lir.float_inputs)
     # The interference test runs in the hardware frame (a value frees its register as soon as its last read precedes the
     # next value's landing), not the scheduler-frame rule that left it several cycles too conservative and produced 42
@@ -1683,7 +1677,7 @@ def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
     lir = build(_run(f), "f")
     assert [c for c in lir.float_consts if abs(c) == 1000.0] == [1000.0]
     operands = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, FloatConstRef)]
-    assert len({opnd.source.index for opnd in operands}) == 1  # both products read one pool entry
+    assert len({opnd.source.index for opnd in operands}) == 1
     assert {opnd.sign for opnd in operands} == {FloatSignControl(), FloatSignControl(negate=True)}
 
 
@@ -1722,8 +1716,8 @@ def test_underflowing_negative_constant_is_not_sign_folded() -> None:
 
     lir = build(_run(f), "f")
     (operand,) = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, FloatConstRef)]
-    assert FMT.encode(lir.float_consts[operand.source.index]) == 0  # the pooled magnitude is a zero-encoding
-    assert operand.sign == FloatSignControl()  # identity, not negate
+    assert FMT.encode(lir.float_consts[operand.source.index]) == 0
+    assert operand.sign == FloatSignControl()
 
 
 def test_underflowing_negative_constant_output_stays_canonical_zero() -> None:
@@ -1982,9 +1976,9 @@ def test_reach_floor_seed_skips_annealing(monkeypatch) -> None:  # type: ignore[
         return a * b + c  # the product and the sum reuse registers, lifting the objective above the floor
 
     build(_run(floor_kernel), "floor")
-    assert calls == []  # early-exit: dual_annealing was never invoked
+    assert calls == []
     build(_run(sharing_kernel), "sharing")
-    assert calls  # a non-floor seed is still refined
+    assert calls
 
 
 def test_zero_regalloc_effort_bypasses_annealing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -2022,7 +2016,7 @@ def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
         # it through the wide writeback latch would return base + commit + 4 here -- this is the discriminating guard,
         # since reg_liveness alone is a union over the register's reuse and stays satisfied even with the late landing.
         assert lir.write_landing_pcs(block, op, op.write) == [landing]
-        assert landing in lir.reg_liveness[op.write.dst]  # and it is live there
+        assert landing in lir.reg_liveness[op.write.dst]
     cast_regs = {op.write.dst for _, op in casts}
     for fop in lir.ops:  # the consuming multiply must read the cast result within its residence (no late-def gap)
         for operand in fop.operands:
@@ -2063,7 +2057,7 @@ def test_same_port_taps_with_different_inversions_do_not_fuse() -> None:
     lir = build(_run(f), "split_inversions")
     firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
     assert len(firings) == 2, "same-port taps cannot share a firing"
-    assert len({op.issue_cycle for op in firings}) == 2  # the single instance serializes them
+    assert len({op.issue_cycle for op in firings}) == 2
     model = build_model(lir)
     for a, b in [(1.0, 2.0), (2.0, 1.0), (1.5, 1.5)]:
         below, not_below = (float(v) for v in model.run(a, b))
@@ -2071,8 +2065,6 @@ def test_same_port_taps_with_different_inversions_do_not_fuse() -> None:
 
 
 class _ThrottledAdd(FAddOperator):
-    """A test-only adder whose instance accepts a new firing only every 3 cycles (initiation interval 3)."""
-
     @property
     def initiation_interval(self) -> int:
         return 3
@@ -2095,7 +2087,7 @@ def test_initiation_interval_spaces_firings_on_one_instance() -> None:
     sched = schedule_ops(mir.nodes, resolve_pool(mir.nodes), {first, second})
     spacing = abs(sched.issue_cycle[second] - sched.issue_cycle[first])
     assert spacing >= 3, f"II=3 must space same-instance firings by at least 3 cycles, got {spacing}"
-    assert sched.inst_of[first] == sched.inst_of[second]  # one pooled instance serves both
+    assert sched.inst_of[first] == sched.inst_of[second]
 
 
 class _HeavilyThrottledAdd(FAddOperator):
@@ -2143,7 +2135,7 @@ def test_write_timeline_resolves_inline_wide_producers() -> None:
             if isinstance(operand.source, RegRef):
                 latest_producer_before(timeline, operand.source, read)  # must not raise for any operand
                 resolved += 1
-    assert resolved >= 2  # the multiply reads both x and the cast result
+    assert resolved >= 2
     assert any(
         isinstance(producer, InlineProducer) for events in timeline.values() for _, producer in events
     ), "the cast's wide write must appear in the timeline with its inline producer"
@@ -2307,8 +2299,6 @@ def test_value_consumed_in_both_polarities_shares_one_producer() -> None:
 
 
 class _InvertedState:
-    """A boolean state slot whose live-out is the negation of its own live-in: a self-toggling flag."""
-
     def __init__(self) -> None:
         self._flip = False
 

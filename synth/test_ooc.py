@@ -1,7 +1,3 @@
-"""
-End-to-end checks for the OOC synthesis-evaluation harness.
-"""
-
 import pytest
 
 from holoso import synthesize, SynthesisResult, FloatFormat

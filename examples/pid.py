@@ -23,7 +23,7 @@ class PID:
         error = setpoint - measurement
         candidate = self.integral + self.ki * error  # tentative integrator update
         if self._started:
-            derivative = self.kd * (error - self.prev_error)  # kd * d(error)/dt
+            derivative = self.kd * (error - self.prev_error)
         else:
             derivative = 0.0  # first update: no previous error, so emit no derivative kick
         self.prev_error = error

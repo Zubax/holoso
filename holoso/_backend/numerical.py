@@ -96,8 +96,6 @@ class _OpEvent:
 
 @dataclass(frozen=True, slots=True)
 class _Install:
-    """A register install (a phi copy, a boolean write, or a state writeback): a source operand and its destination."""
-
     source: FloatOperand | BoolOperand
     dst: _Dst
 
@@ -122,13 +120,11 @@ class _Kernel:
 
     @property
     def inputs(self) -> list[LogicalPort]:
-        """The logical input ports in parameter order, each with its scalar type."""
         fmt = self._lir.float_format
         return [LogicalPort(load.name, scalar_type_of(load, fmt)) for load in self._lir.inputs]
 
     @property
     def outputs(self) -> list[LogicalPort]:
-        """The logical output ports in return order, each with its scalar type."""
         fmt = self._lir.float_format
         return [LogicalPort(wire.name, scalar_type_of(wire, fmt)) for wire in self._lir.outputs]
 
@@ -241,12 +237,12 @@ class NumericalSimulator(_Kernel):
 
     @property
     def in_ready(self) -> bool:
-        """Whether the module will accept a transaction on the next edge (the fetch PC idles at 0)."""
+        """The fetch PC idles at 0 between transactions, so PC 0 is the accept-ready state."""
         return self.pc == 0
 
     @property
     def out_valid(self) -> bool:
-        """Whether the outputs are valid this cycle (the fetch PC has reached the Ret boundary)."""
+        """last_pc is the Ret boundary the fetch PC reaches once the outputs are presentable in the array."""
         return self.pc == self._lir.last_pc
 
     @property
@@ -255,7 +251,6 @@ class NumericalSimulator(_Kernel):
         return [self._read(wire.tap) for wire in self._lir.outputs]
 
     def _decode(self) -> None:
-        """Decode the LIR schedule once into the per-PC firing/install/terminator tables the per-clock loop replays."""
         lir = self._lir
         for block in lir.blocks:
             base = lir.block_base[block.index]
@@ -298,9 +293,7 @@ class NumericalSimulator(_Kernel):
                 return self._lir.block_base[target]
 
     def _apply(self, pc: int) -> None:
-        """
-        The datapath for the cycle now at ``pc``: commit the landings due here, then sample the reads/installs here.
-        """
+        # Commit the landings due here BEFORE sampling this PC's reads/installs (read-first within the cycle).
         for dst, value in self._pending.pop(pc, ()):
             self._write(dst, value)
         for event in self._op_events.get(pc, ()):
@@ -322,7 +315,6 @@ class NumericalSimulator(_Kernel):
             self._pending.setdefault(install_landing(pc), []).append((dst, value))
 
     def _read(self, operand: FloatOperand | BoolOperand) -> _Value:
-        """Resolve an operand against the current register files (or the constant pool), applying its conditioner."""
         if isinstance(operand, FloatOperand):
             float_source = operand.source
             base = (
@@ -337,7 +329,6 @@ class NumericalSimulator(_Kernel):
         return operand.inversion.apply(self.bregs[bool_source.index])
 
     def _write(self, dst: _Dst, value: _Value) -> None:
-        """Commit a value into its bank's register file (the destination's type selects the bank)."""
         if isinstance(dst, RegRef):
             assert isinstance(value, FloatValue)
             self.regs[dst.index] = value
@@ -357,10 +348,8 @@ class NumericalModel(_Kernel):
         self._lir = lir
 
     def elaborate(self) -> NumericalSimulator:
-        """Build a fresh, reset :class:`NumericalSimulator` for this kernel."""
         return NumericalSimulator(self._lir)
 
 
 def generate(lir: Lir) -> NumericalModel:
-    """Build the serializable numerical-model handle from a finished :class:`Lir`."""
     return NumericalModel(lir)

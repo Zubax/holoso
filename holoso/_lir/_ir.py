@@ -364,7 +364,6 @@ class BoolRegRef:
 
 
 def _bank_of_ref(dst: RegRef | BoolRegRef) -> BankTiming:
-    """The register bank a destination belongs to: wide for a ``RegRef``, the 1-bit boolean bank otherwise."""
     return WIDE_BANK if isinstance(dst, RegRef) else BOOL_BANK
 
 
@@ -394,8 +393,6 @@ _BankReg = TypeVar("_BankReg", RegRef, BoolRegRef)  # one register bank's refere
 
 @dataclass(frozen=True, slots=True)
 class ConstRef:
-    """An immediate constant, ``index`` into one typed LIR constant pool."""
-
     index: int
 
     @property
@@ -408,21 +405,16 @@ class ConstRef:
 
 
 @dataclass(frozen=True, slots=True)
-class FloatConstRef(ConstRef):
-    """An immediate floating-point constant, ``index`` into the LIR float constant pool."""
+class FloatConstRef(ConstRef): ...
 
 
 @dataclass(frozen=True, slots=True)
 class Operand:
-    """An operator input: a register read or a constant immediate."""
-
     source: RegRef | ConstRef
 
 
 @dataclass(frozen=True, slots=True)
 class FloatOperand(Operand):
-    """A float operator input: a wide-register read or float constant immediate, with folded sign control."""
-
     source: RegRef | FloatConstRef
     sign: FloatSignControl = FloatSignControl()
 
@@ -441,8 +433,6 @@ class InputLoad:
 
 @dataclass(frozen=True, slots=True)
 class FloatInputLoad(InputLoad):
-    """A float input port sampled into a wide register at in_valid."""
-
     dst: RegRef
 
 
@@ -482,8 +472,6 @@ class FloatStateSlot:
 
 @dataclass(frozen=True, slots=True)
 class BoolInputLoad(InputLoad):
-    """A boolean input port sampled into a boolean register at in_valid."""
-
     dst: BoolRegRef
 
 
@@ -597,15 +585,11 @@ class OutputWire:
 
 @dataclass(frozen=True, slots=True)
 class FloatOutputWire(OutputWire):
-    """A float output port: the named external sink for a float source tap (register/constant + folded sign)."""
-
     tap: FloatOperand
 
 
 @dataclass(frozen=True, slots=True)
 class BoolOutputWire(OutputWire):
-    """A boolean output port: the named external sink for a boolean register or immediate, with a folded inversion."""
-
     tap: BoolOperand
 
 
@@ -685,15 +669,11 @@ class BoolWrite:
 
 @dataclass(frozen=True, slots=True)
 class Jump:
-    """Unconditional control transfer to block ``target``."""
-
     target: int
 
 
 @dataclass(frozen=True, slots=True)
 class Branch:
-    """Conditional control transfer on boolean register ``cond``."""
-
     cond: BoolRegRef
     if_true: int
     if_false: int
@@ -708,7 +688,6 @@ type Terminator = Jump | Branch | Ret
 
 
 def terminator_arms(terminator: Terminator) -> list[int]:
-    """The successor block indices a terminator can redirect to: a jump's target, a branch's two arms, none for Ret."""
     match terminator:
         case Jump(target=target):
             return [target]
@@ -792,8 +771,6 @@ class BoolStateSlot:
 
 @dataclass(frozen=True, slots=True)
 class RegFileLayout:
-    """The shared wide data register file resource."""
-
     width: int
     nreg: int
     nrd: int
@@ -1039,7 +1016,6 @@ class Lir:
 
     @property
     def group_by_cycle(self) -> tuple[dict[int, list[PooledScheduledOp]], dict[int, list[PooledScheduledOp]]]:
-        """The schedule grouped into per-cycle issues and commits, each canonically ordered."""
         issues: dict[int, list[PooledScheduledOp]] = {}
         commits: dict[int, list[PooledScheduledOp]] = {}
         for op in self.ops:

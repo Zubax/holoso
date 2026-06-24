@@ -106,7 +106,7 @@ def test_write_artifacts(tmp_path: Path) -> None:
     assert (tmp_path / "_kernel.html").exists()
     assert (tmp_path / "holoso_support.v").exists()
     assert (tmp_path / "holoso_support.vh").exists()
-    assert '`include "holoso_support.vh"' in (tmp_path / "_kernel.v").read_text()  # always included
+    assert '`include "holoso_support.vh"' in (tmp_path / "_kernel.v").read_text()
 
 
 def test_rejects_invalid_and_reserved_module_names() -> None:

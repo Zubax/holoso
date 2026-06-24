@@ -26,8 +26,6 @@ _ERR_PC = "err_pc"
 
 @dataclass(frozen=True, slots=True)
 class WordSlot:
-    """One DUT data port mapped to a value of the input or output selector."""
-
     selector: int
     port_name: str  # the DUT port: "in_<name>", "out_<...>", or "err_pc"
     width: int
@@ -35,8 +33,6 @@ class WordSlot:
 
 @dataclass(frozen=True, slots=True)
 class OocWrapper:
-    """A portable, pin-bounded measurement wrapper around a Holoso-generated module."""
-
     top: str
     dut_module: str
     verilog: str
@@ -44,12 +40,12 @@ class OocWrapper:
     io_out_width: int  # W_out: max over data outputs and err_pc
     in_sel_width: int  # ceil(log2 N_inputs); 0 when there are 0 or 1 data inputs
     out_sel_width: int  # ceil(log2 N_output_slots); 0 when there is a single output slot
-    inputs: list[WordSlot]  # selector -> DUT data input
-    outputs: list[WordSlot]  # selector -> DUT data output / err_pc
+    inputs: list[WordSlot]
+    outputs: list[WordSlot]  # the last slot is err_pc
 
     @property
     def primary_io_bits(self) -> int:
-        """Bounded primary-IO bit count: the two data words, the two selectors, and the 6 control bits."""
+        """The trailing constant is the 6 un-muxed control bits (clk excluded, it is not primary IO)."""
         return self.io_in_width + self.io_out_width + self.in_sel_width + self.out_sel_width + 6
 
 
@@ -58,7 +54,6 @@ def _sel_width(count: int) -> int:
 
 
 def _decl(width: int) -> str:
-    """Vector range prefix for a declaration; empty for a 1-bit signal."""
     return f"[{width - 1}:0] " if width > 1 else ""
 
 
@@ -76,7 +71,6 @@ def _find_err_pc(result: SynthesisResult) -> Port:
 
 
 def build_ooc_wrapper(result: SynthesisResult, *, top_suffix: str = "_ooc") -> OocWrapper:
-    """Generate a mux-reduced OOC measurement wrapper for ``result``'s generated module."""
     data_inputs = result.input_ports
     data_outputs = result.output_ports
     err_pc = _find_err_pc(result)
@@ -136,7 +130,6 @@ def _render(
         f"module {top} (",
     ]
 
-    # ---- port list -------------------------------------------------------------------------------------------------
     ports = [
         "input  wire clk",
         "input  wire rst",
@@ -156,7 +149,6 @@ def _render(
     lines.append(f"    {ports[-1]}")
     lines.append(");")
 
-    # ---- declarations ----------------------------------------------------------------------------------------------
     lines += [
         "    // Control/validity boundary registers (the only reset-bearing registers in this wrapper).",
         f"    {KEEP_ATTR} reg r_in_valid;",
@@ -183,7 +175,6 @@ def _render(
         "",
     ]
 
-    # ---- DUT instance ----------------------------------------------------------------------------------------------
     conns = [
         ".clk(clk)",
         ".rst(rst)",
@@ -200,7 +191,6 @@ def _render(
     lines.append("    );")
     lines.append("")
 
-    # ---- control always block (reset-bearing) ----------------------------------------------------------------------
     lines += [
         "    always @(posedge clk) begin",
         "        if (rst) begin",
@@ -218,7 +208,6 @@ def _render(
         "",
     ]
 
-    # ---- datapath always block (reset-unconditional) --------------------------------------------------------------
     lines.append("    always @(posedge clk) begin")
     lines += _input_load_lines(in_slots, in_sel_width)
     lines += [f"        r_{s.port_name} <= dut_{s.port_name};" for s in out_slots]

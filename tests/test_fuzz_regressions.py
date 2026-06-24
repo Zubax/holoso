@@ -67,7 +67,6 @@ def _read_meta(path: Path) -> dict[str, object]:
 @pytest.mark.skipif(not _CASES, reason="no saved fuzz regressions to replay")
 @pytest.mark.parametrize("case", _CASES, ids=[p.stem for p in _CASES])
 def test_fuzz_regression(case: Path) -> None:
-    """Replay one saved case in a subprocess pinned to its saved regalloc effort; assert its check now passes."""
     meta = _read_meta(case)
     if meta["op_label"] not in OP_CONFIGS:
         pytest.skip(f"unknown op-config {meta['op_label']!r} (saved by a newer/older generator)")
