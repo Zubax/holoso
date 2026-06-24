@@ -508,6 +508,13 @@ field constant across the whole program (common for sign controls, single-reader
 destinations) is driven by a constant net and lifted out of the ROM, so synthesis prunes what it feeds; the Python ROM
 packer and the module's bit-slice offsets are produced together so they cannot drift.
 
+A constant phi-arm install rides the microcode like an operator write rather than a PC compare: a per-register
+write-enable field, set one fetch lag before the install lands, drives the register from the constant net (a boolean
+install carries its 1-bit value in the word; a wide one selects among its register's constant codebook). The enable
+field is set at the install's issue step, so the datapath write commits on the very step the former PC compare did --
+identical timing, one fewer special case. A register-source phi-arm copy (it samples a register, needing a read port)
+and a signed-constant install stay PC-gated for now.
+
 Sparse storage. A multi-reader operand's read mux is a `case` over its dense read-set index selecting `regs[...]`
 directly (the last entry as `default`, so the case is full and the unused high codes fall there as don't-cares). This
 deliberately avoids an indexed part-select into a packed gather bus (`bus[idx*W +: W]`): a variable part-select offset is

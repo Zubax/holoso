@@ -432,6 +432,17 @@ def _const_term_expr(port: int, consts: list[int]) -> str:
     return expr
 
 
+def _const_install_expr(reg: int, book: list[int]) -> str:
+    """
+    The write data for wide register ``reg``'s ucode-driven constant install: the lone ``const_N`` net, or a
+    ``mc_ccidx``-selected mux over its const codebook (the write-side analogue of :func:`_const_term_expr`).
+    """
+    expr = f"const_{book[-1]}"
+    for local in range(len(book) - 2, -1, -1):
+        expr = f"({f_ccidx(RegRef(reg))} == {local}) ? const_{book[local]} : {expr}"
+    return expr
+
+
 def _emit_datapath_comb(
     w: _Writer, lir: Lir, port_consts: dict[int, list[int]], write_lists: dict[tuple[OperatorInstance, int], list[int]]
 ) -> None:
@@ -557,10 +568,16 @@ def _bool_write_rhs(write: BoolWrite) -> str:
 
 
 def _copies_grouped(lir: Lir) -> dict[int, list[tuple[int, str]]]:
-    """Destination wide register -> [(install PC, source net)], over every phi-arm copy in the program."""
+    """
+    Destination wide register -> [(install PC, source net)], over the phi-arm copies that remain pc-gated: register-
+    source copies and signed-constant installs. Identity-sign constant installs are ucode-driven (see
+    ``_wide_writer_entries``), not pc-gated.
+    """
     grouped: dict[int, list[tuple[int, str]]] = {}
     for block in lir.blocks:
         for copy_index, copy in enumerate(block.copies):
+            if is_ucode_const_copy(copy):
+                continue
             grouped.setdefault(copy.dst.index, []).append(
                 (_float_copy_pc(lir, block, copy), _float_copy_rhs(block.index, copy_index, copy))
             )
@@ -568,10 +585,15 @@ def _copies_grouped(lir: Lir) -> dict[int, list[tuple[int, str]]]:
 
 
 def _bool_writes_grouped(lir: Lir) -> dict[int, list[tuple[int, str]]]:
-    """Destination boolean register -> [(install PC, source expression)], over every boolean phi-arm write."""
+    """
+    Destination boolean register -> [(install PC, source expression)], over the boolean phi-arm writes that remain
+    pc-gated: register-source writes. Constant boolean installs are ucode-driven (see ``_bool_writer_entries``).
+    """
     grouped: dict[int, list[tuple[int, str]]] = {}
     for block in lir.blocks:
         for write in block.bool_writes:
+            if write.is_const:
+                continue
             grouped.setdefault(write.dst.index, []).append((_bool_write_pc(lir, block, write), _bool_write_rhs(write)))
     return grouped
 
@@ -693,6 +715,10 @@ def _wide_writer_entries(
             entries.setdefault(reg, []).append(
                 (_writeback_cond(inst, port, reg, write_lists), f"{_sig(inst)}_y{port}_q")
             )
+    # Ucode-driven constant installs: a microcode write-enable arm (like an operator lane), reusing the const-pool nets.
+    const_books = const_install_codebooks(lir)
+    for reg in sorted(const_books):
+        entries.setdefault(reg, []).append((f_cwe(RegRef(reg)), _const_install_expr(reg, const_books[reg])))
     for block in lir.blocks:
         for op_index, inline_op in enumerate(block.inline_ops):
             if isinstance(inline_op.write.dst, RegRef):
@@ -724,6 +750,10 @@ def _bool_writer_entries(
         for inst, port in bool_write_sets[reg]:
             rhs = f"{_sig(inst)}_y{port} ^ {f_binv(base_name(inst), port)}"
             entries.setdefault(reg, []).append((_writeback_cond(inst, port, reg, write_lists), rhs))
+    # Ucode-driven constant installs: a microcode write-enable arm latching the 1-bit value (latch-free, no XOR -- the
+    # inversion is already folded into the value at construction).
+    for reg in const_install_bool_regs(lir):
+        entries.setdefault(reg, []).append((f_cwe(BoolRegRef(reg)), f_cval(BoolRegRef(reg))))
     for block in lir.blocks:
         for op_index, inline_op in enumerate(block.inline_ops):
             if isinstance(inline_op.write.dst, BoolRegRef):
