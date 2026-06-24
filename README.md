@@ -13,7 +13,7 @@ _Simple high-level synthesis of portable Verilog from idiomatic Python_
 
 -----
 
-Holoso converts a subset of Python into synthesizable and verifiable Verilog.
+Holoso converts a subset of idiomatic Python into synthesizable and verifiable Verilog.
 It is primarily designed for heavy numerical code which is abundant in control systems and DSP
 where manual RTL coding is inefficient and error-prone.
 
@@ -24,10 +24,12 @@ harnesses and iterate faster.
 See [PRIOR_ART.md](PRIOR_ART.md) for a detailed review of existing alternatives,
 and why none are good enough for practical use.
 
-Holoso is an experimental project and as such it has no burden of backward compatibility.
+Holoso is under active development and as such it has no burden of backward compatibility.
 Breaking changes will occur regularly without notice until v1.0 is out.
+Many critical features are missing which may limit applicability beyond applications that we are immediately involved with.
+Contributions of any kind are emphatically welcome!
 
-<img src="docs/hero.png" width="800px">
+<img src="docs/hero.png" width="900px">
 
 ## Design
 

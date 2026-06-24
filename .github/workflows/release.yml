@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Extract version
+        id: version
+        run: |
+          python -m pip install --no-deps .
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          from importlib.metadata import version
+
+          print(f"version={version('holoso')}")
+          PY
+
+      - name: Check PyPI
+        id: pypi
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          STATUS=$(curl -sS -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/holoso/$VERSION/json")
+          case "$STATUS" in
+            200)
+              echo "PyPI already has holoso $VERSION."
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "PyPI does not have holoso $VERSION; publishing."
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *) echo "::error::PyPI returned HTTP $STATUS"; exit 1 ;;
+          esac
+
+      - name: Build package
+        if: steps.pypi.outputs.exists == 'false'
+        run: |
+          python -m pip install build
+          python -m build
+
+      - name: Ensure tag
+        if: steps.pypi.outputs.exists == 'false'
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -e -o pipefail
+          TAG_SHA=$(git ls-remote --tags origin "refs/tags/$VERSION^{}" | cut -f1)
+          if [ -z "$TAG_SHA" ]; then
+            TAG_SHA=$(git ls-remote --tags origin "refs/tags/$VERSION" | cut -f1)
+          fi
+
+          if [ -z "$TAG_SHA" ]; then
+            echo "Creating tag $VERSION at $EXPECTED_SHA."
+            git push origin "HEAD:refs/tags/$VERSION"
+          elif [ "$TAG_SHA" = "$EXPECTED_SHA" ]; then
+            echo "Tag $VERSION already points to $EXPECTED_SHA."
+          else
+            echo "::error::Tag $VERSION points to $TAG_SHA, expected $EXPECTED_SHA."
+            exit 1
+          fi
+
+      - name: Publish to PyPI
+        if: steps.pypi.outputs.exists == 'false'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          attestations: false
