@@ -70,18 +70,18 @@ def test_synthesize_threads_pipeline_stages() -> None:
         _kernel,
         ops=OpConfig(
             FAddOperator(FMT32, stage_decode=1),
-            FMulOperator(FMT32, stage_product=1),
+            FMulOperator(FMT32, stage_product=2),
             FDivOperator(FMT32),
             FMulILog2OperatorFamily(FMT32),
             FCmpOperator(FMT32),
         ),
     )
-    # Every STAGE_* is emitted explicitly (defaults as 0), so the instantiation is self-describing and threading is
-    # visible in both directions: default operators show 0, configured ones show 1.
+    # Every STAGE_* is emitted explicitly (defaults as 0), so the instantiation is self-describing and configured
+    # values are visible.
     assert ".STAGE_DECODE(0)" in base.verilog_output.verilog
-    assert ".STAGE_DECODE(1)" in staged.verilog_output.verilog and ".STAGE_PRODUCT(1)" in staged.verilog_output.verilog
+    assert ".STAGE_DECODE(1)" in staged.verilog_output.verilog and ".STAGE_PRODUCT(2)" in staged.verilog_output.verilog
     assert ".LATENCY(4)" in base.verilog_output.verilog and ".LATENCY(1)" in base.verilog_output.verilog
-    assert ".LATENCY(5)" in staged.verilog_output.verilog and ".LATENCY(2)" in staged.verilog_output.verilog
+    assert ".LATENCY(5)" in staged.verilog_output.verilog and ".LATENCY(3)" in staged.verilog_output.verilog
 
 
 def test_rejects_non_finite_constants() -> None:

@@ -136,24 +136,36 @@ def synth_examples(session: nox.Session) -> None:
         ],
         name="ekf1_stateless_e6m18",
     )
-    op_ekf1_wide = (
+
+    op_ekf1_wide_stateless = (
         "fadd.stage_decode=1,fadd.stage_align=1,fadd.stage_normalize=1,fadd.stage_pack=1,"
         "fmul.stage_input=1,fmul.stage_product=1,fmul.stage_pack=1,"
         "fdiv.stage_input=1,fdiv.stage_pack=1,fdiv.stage_output=1"
     )
-    op_ekf1_wide_fmul_ilog2_decode = f"{op_ekf1_wide},fmul_ilog2.stage_decode=1"
-    op_ekf1_wide_fadd_norm2 = (
+    op_ekf1_wide_stateless_yosys = (
+        "fadd.stage_decode=1,fadd.stage_align=1,fadd.stage_normalize=1,fadd.stage_pack=1,"
+        "fmul.stage_input=1,fmul.stage_product=2,fmul.stage_pack=1,"
+        "fdiv.stage_input=1,fdiv.stage_pack=1,fdiv.stage_output=1,"
+        "fmul_ilog2.stage_decode=1"
+    )
+    op_ekf1_wide_stateful = (
         "fadd.stage_decode=1,fadd.stage_align=1,fadd.stage_normalize=2,fadd.stage_pack=1,"
         "fmul.stage_input=1,fmul.stage_product=1,fmul.stage_pack=1,"
         "fdiv.stage_input=1,fdiv.stage_pack=1,fdiv.stage_output=1"
+    )
+    op_ekf1_wide_stateful_yosys = (
+        "fadd.stage_decode=1,fadd.stage_align=1,fadd.stage_normalize=2,fadd.stage_pack=1,"
+        "fmul.stage_input=1,fmul.stage_product=2,fmul.stage_pack=1,"
+        "fdiv.stage_input=1,fdiv.stage_pack=1,fdiv.stage_output=1,"
+        "fmul_ilog2.stage_decode=1"
     )
     syn(
         "examples/ekf1_stateless.py",
         "update_x_P",
         [
-            f"yosys-ecp5:freq=100,{op_ekf1_wide_fmul_ilog2_decode}",
-            f"diamond-ecp5:freq=100,{op_ekf1_wide},fmul.stage_output=1",
-            f"vivado:freq=150,{op_ekf1_wide}",
+            f"yosys-ecp5:freq=100,{op_ekf1_wide_stateless_yosys}",
+            f"diamond-ecp5:freq=100,{op_ekf1_wide_stateless},fmul.stage_output=1",
+            f"vivado:freq=150,{op_ekf1_wide_stateless}",
         ],
         wexp=8,
         wman=36,
@@ -174,9 +186,9 @@ def synth_examples(session: nox.Session) -> None:
         "examples/ekf1_stateful.py",
         "Ekf1().update",
         [
-            f"yosys-ecp5:freq=100,{op_ekf1_wide_fadd_norm2}",
-            f"diamond-ecp5:freq=100,{op_ekf1_wide},fadd.stage_input=1",
-            f"vivado:freq=150,{op_ekf1_wide}",
+            f"yosys-ecp5:freq=100,{op_ekf1_wide_stateful_yosys}",
+            f"diamond-ecp5:freq=100,{op_ekf1_wide_stateful},fadd.stage_input=1",
+            f"vivado:freq=150,{op_ekf1_wide_stateful}",
         ],
         wexp=8,
         wman=36,

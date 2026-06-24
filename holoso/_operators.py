@@ -319,9 +319,11 @@ class FMulOperator(FloatHardwareOperator):
     stage_output: int = 0
 
     def __post_init__(self) -> None:
-        for field in ("stage_input", "stage_product", "stage_pack", "stage_output"):
+        for field in ("stage_input", "stage_pack", "stage_output"):
             if getattr(self, field) not in (0, 1):
                 raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
+        if self.stage_product not in range(5):
+            raise ValueError(f"stage_product invalid: {self.stage_product!r}")
 
     @property
     def latency(self) -> int:
