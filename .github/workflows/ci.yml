@@ -1,6 +1,9 @@
 name: CI
 on:
   push:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
 env:
   COCOTB_IGNORE_PYTHON_REQUIRES: "1"
 
