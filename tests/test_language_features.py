@@ -39,21 +39,16 @@ def _model(target: object):  # type: ignore[no-untyped-def]
     return holoso.synthesize(target, _ops()).numerical_model.elaborate()
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Boolean exclusive-or (``^``)
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def _xor2(a: bool, b: bool) -> bool:
     return a ^ b
 
 
 def _xor_chain(a: bool, b: bool, c: bool, d: bool) -> bool:
-    return a ^ b ^ c ^ d  # left-associative chain of the binary operator
+    return a ^ b ^ c ^ d
 
 
 def _float_xor(x: float, y: float) -> float:
-    return x ^ y  # nonsensical: ``^`` is boolean only
+    return x ^ y
 
 
 def test_bool_xor_truth_table() -> None:
@@ -74,14 +69,7 @@ def test_xor_on_floats_is_rejected() -> None:
         holoso.synthesize(_float_xor, _ops())
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Instance / inherited method calls
-# --------------------------------------------------------------------------------------------------------------------
-
-
 class _ParityBase:
-    """A shared base providing a parity-with-polarity helper, inherited by the synthesized subclass."""
-
     def __init__(self, odd: bool) -> None:
         self._odd = odd
 
@@ -100,7 +88,7 @@ class _StateWriter:
         self._latch = False
 
     def _absorb(self, x: bool) -> bool:
-        self._latch = x  # a method assigning self state -- must be rejected
+        self._latch = x
         return x
 
     def __call__(self, x: bool) -> bool:
@@ -122,11 +110,6 @@ def test_method_writing_self_state_is_rejected() -> None:
         holoso.synthesize(_StateWriter().__call__, _ops())
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# ``@property`` reads
-# --------------------------------------------------------------------------------------------------------------------
-
-
 class _Thresholded:
     def __init__(self, base: float) -> None:
         self._base = base
@@ -136,21 +119,17 @@ class _Thresholded:
         return self._base * 2  # a computed read-only value, derived from frozen configuration
 
     def __call__(self, x: float) -> bool:
-        return x >= self._threshold  # reads the property like an attribute
+        return x >= self._threshold
 
 
 def test_property_read_folds_from_configuration() -> None:
-    sim = _model(_Thresholded(3.0).__call__)  # threshold == 6.0
+    sim = _model(_Thresholded(3.0).__call__)
     for x in (0.0, 5.0, 6.0, 7.0, 10.0):
         assert bool(sim.run(x)[0]) == (x >= 6.0), f"x={x}"
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Module-level constant resolution (and local shadowing)
-# --------------------------------------------------------------------------------------------------------------------
-
-_GAIN = 4.0  # a module-level float constant
-_LIMIT = 10  # a module-level int constant (resolves as a float in a value position)
+_GAIN = 4.0
+_LIMIT = 10  # an int module constant resolves as a float in a value position
 
 
 def _uses_module_constants(x: float) -> tuple[float, bool]:
@@ -174,7 +153,6 @@ def test_module_constants_resolve_in_value_position() -> None:
 def test_local_name_shadows_module_constant() -> None:
     sim = _model(_local_shadows_module_constant)
     for x in (1.0, 2.0, 5.0):
-        # the LOCAL _GAIN (1.0) wins, not the module _GAIN (4.0): x * 1.0, not x * 4.0
         assert float(sim.run(x)[0]) == x * 1.0, f"shadow x={x}"
 
 
@@ -196,21 +174,16 @@ def test_module_constant_in_static_int_and_value_positions() -> None:
         assert float(sim.run(x)[0]) == x * _TRIPS + x**_TRIPS, f"x={x}"
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# ``@staticmethod`` calls
-# --------------------------------------------------------------------------------------------------------------------
-
-
 class _Scaler:
     def __init__(self, bias: float) -> None:
         self._bias = bias
 
     @staticmethod
     def _double(x: float) -> float:
-        return x * 2  # a static method: no receiver, all arguments bound
+        return x * 2
 
     def __call__(self, x: float) -> float:
-        return self._double(x) + self._bias  # a ``self.<staticmethod>(...)`` call
+        return self._double(x) + self._bias
 
 
 def test_staticmethod_call_binds_all_arguments() -> None:
@@ -240,11 +213,6 @@ def test_method_shadowed_by_instance_attribute_is_rejected() -> None:
     # rather than silently miscompiled to the shadowed method.
     with pytest.raises(UnsupportedConstruct, match="stored instance attribute"):
         holoso.synthesize(_ShadowedMethod().__call__, _ops())
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# Boolean ``==`` / ``!=`` (mapping to xnor / xor)
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def _bool_eq_ne(a: bool, b: bool) -> tuple[bool, bool]:
@@ -283,12 +251,8 @@ def test_bool_eq_as_runtime_branch_condition() -> None:
             assert float(sim.run(a, b, x)[0]) == (x * 2 if a == b else x), f"{a} {b} {x}"
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Module-level bool/float constants in compile-time-static positions (branch reachability)
-# --------------------------------------------------------------------------------------------------------------------
-
-_FEATURE_ON = True  # a module-level bool constant used as a branch condition
-_THRESHOLD = 2.0  # a module-level float constant used in a static comparison
+_FEATURE_ON = True
+_THRESHOLD = 2.0
 
 
 def _module_bool_branch(x: float) -> float:
@@ -315,7 +279,7 @@ def test_module_float_constant_folds_in_static_comparison() -> None:
         assert float(sim.run(x)[0]) == x * 2.0, f"x={x}"
 
 
-_CHAIN_A = True  # module bools for a chained static comparison
+_CHAIN_A = True
 _CHAIN_B = True
 _NP_TWO = np.float64(2.0)  # a numpy float module constant, which must resolve like a plain float
 
@@ -513,7 +477,7 @@ class _DataDescriptorRead:
         self.__dict__["_flag"] = False
 
     def __call__(self, x: float, /) -> float:
-        return x * 2.0 if self._flag else x  # reads the data descriptor
+        return x * 2.0 if self._flag else x
 
 
 def test_data_descriptor_write_is_rejected() -> None:
@@ -637,9 +601,7 @@ def test_metaclass_property_does_not_shadow_instance_attribute() -> None:
     # descriptor governs class access, not instance access -- so the instance __dict__ entry is live ordinary state.
     sim = _model(_MetaclassPropertyShadow().__call__)
     for x in (1.0, 2.0, 3.0):
-        assert (
-            float(sim.run(x)[0]) == x * 2.0
-        ), f"x={x}"  # flag is the instance True -> doubled, not the metaclass False
+        assert float(sim.run(x)[0]) == x * 2.0, f"x={x}"
 
 
 class _CustomSetattr:
@@ -699,11 +661,6 @@ def test_getattribute_override_is_rejected_before_snapshot() -> None:
         holoso.synthesize(_RaisingGetattribute().__call__, _ops())
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Runtime boolean comparison chains and a property over written state (isolated coverage of two new front-end paths)
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def _bool_eq_chain(a: bool, b: bool, c: bool) -> bool:
     return a == b == c  # a runtime 3-link chain: (a == b) and (b == c), each link an xnor
 
@@ -731,9 +688,9 @@ class _RunningHalf:
         return self._acc / 2.0  # a property over MUTABLE state -- its value changes within a call and across calls
 
     def __call__(self, x: float) -> tuple[float, float]:
-        before = self._half  # reads acc/2 before the write
+        before = self._half
         self._acc = self._acc + x
-        after = self._half  # reads the updated acc/2 -- the getter must be re-inlined, not reused
+        after = self._half  # the getter must be re-inlined, not reused, so this sees the updated state
         return before, after
 
 

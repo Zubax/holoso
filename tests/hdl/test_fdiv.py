@@ -3,8 +3,7 @@ Tests for holoso_fdiv (pipelined; y = sgnop(sgnop(a)/sgnop(b)); div0 alongside o
 
 div0 is asserted when the post-sgnop divisor has exp=0 (i.e., the divisor is zero in either sign form). When div0=1
 the y output is unspecified by the wrapper contract, so the test skips the y comparison for those cases but still
-checks that div0 itself is correct. The wrapper delays y_sgnop through the same number of stages as zkf_div, and the
-scoreboard verifies the documented latency against actual out_valid timing.
+checks that div0 itself is correct. The wrapper delays y_sgnop through the same number of stages as zkf_div.
 """
 
 import os
@@ -87,7 +86,6 @@ async def holoso_fdiv_cocotb(dut) -> None:
         await Timer(1, unit="ns")
         sb.sample()
 
-    # Directed x directed, neutral sgnops.
     for a in DIRECTED_F32:
         for b in DIRECTED_F32:
             await step(a, b, 0, 0, 0)
@@ -108,7 +106,6 @@ async def holoso_fdiv_cocotb(dut) -> None:
                     await step(a, b, a_op, b_op, y_op)
     await sb.drain()
 
-    # Random bulk.
     for _ in range(get_random_count()):
         if rng.random() < 0.2:
             await step_idle()

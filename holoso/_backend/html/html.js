@@ -1,5 +1,4 @@
-// Interactive layer for the schedule grid. _sched_script in html.py substitutes the per-module payload into the
-// placeholder on the "var data =" line below. Kept readable (the report is a tool, not a minified asset); without JS
+// Interactive layer for the schedule grid; html.py substitutes the per-module payload into __DATA__ below. Without JS
 // the grid still renders fully -- only the dataflow edges and hover behaviors are absent.
 (function () {
     "use strict";
@@ -131,7 +130,7 @@
             var y1 = rowCentreY(arrow.from, origin);
             var y2 = rowCentreY(arrow.to, origin);
             if (y1 === null || y2 === null) {
-                return;  // a row outside the rendered range -- skip the arrow safely
+                return;  // a row outside the rendered range
             }
             var channelX = gridRight + CHANNEL_GAP + arrow.lane * CHANNEL_STEP;
             var group = document.createElementNS(SVG_NS, "g");
@@ -143,15 +142,14 @@
             bracket.setAttribute("class", "jbracket");
             group.appendChild(bracket);
 
-            var head = document.createElementNS(SVG_NS, "polygon");  // arrowhead pointing left into the target row
+            var head = document.createElementNS(SVG_NS, "polygon");
             head.setAttribute("points",
                 gridRight + "," + y2 + " " + (gridRight + HEAD) + "," + (y2 - HEAD) + " " +
                 (gridRight + HEAD) + "," + (y2 + HEAD));
             group.appendChild(head);
 
-            // Rarefied dotted feed from the boolean register the branch tests (its cell at the source row) to the
-            // arrow's root, so that register's residence ends visibly at the branch rather than in nothingness. The
-            // tested cell is marked with a circle, exactly as a dataflow edge marks an operand cell.
+            // Dotted feed from the boolean register the branch tests to the arrow's root, so that register's residence
+            // ends visibly at the branch. The tested cell is marked with a circle, like a dataflow operand.
             if (arrow.cond) {
                 var condCell = document.getElementById(arrow.cond);
                 if (condCell) {
@@ -165,7 +163,7 @@
                     feed.setAttribute("y2", y1);
                     feed.setAttribute("class", "jcond");
                     group.appendChild(feed);
-                    var dot = document.createElementNS(SVG_NS, "circle");  // operand marker on the tested register cell
+                    var dot = document.createElementNS(SVG_NS, "circle");
                     dot.setAttribute("cx", cx);
                     dot.setAttribute("cy", cy);
                     dot.setAttribute("r", "1.8");
@@ -193,10 +191,9 @@
         document.fonts.ready.then(redraw);
     }
 
-    // Hovering an operation (its result column or its ops chip) makes only that one operation stand out: we toggle a
-    // class on its own handful of elements rather than restyling every other operation, so there is no per-hover
-    // sweep of the grid. The .hl class blackens its edges, result cells and chip.
-    var focused = null;  // currently focused group (a "data-op" string), or null
+    // Hovering an operation highlights only its own elements (toggle .hl on its handful of nodes) rather than
+    // restyling every other operation, so there is no per-hover sweep of the grid.
+    var focused = null;
 
     function setHighlighted(group, on) {
         [nodesByGroup[group], edgesByGroup[group]].forEach(function (list) {
@@ -264,7 +261,7 @@
     }
 
     wrap.addEventListener("mouseover", function (event) {
-        var owner = event.target.closest("[data-op]");  // a result cell or an ops chip
+        var owner = event.target.closest("[data-op]");
         focus(owner ? owner.dataset.op : null);
 
         var cell = event.target.closest("td");

@@ -25,7 +25,6 @@ _SEPARATOR = "// " + "=" * 117
 
 
 def _iter_rtl(node: Traversable, prefix: str = "") -> list[tuple[str, str]]:
-    """Every ``.v`` under ``node`` as (path-relative-to-rtl, content), recursing into subdirectories."""
     out: list[tuple[str, str]] = []
     for child in node.iterdir():
         rel = f"{prefix}{child.name}"

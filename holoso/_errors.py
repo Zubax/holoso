@@ -19,13 +19,10 @@ class SourceLocation:
         return f"{where}\n    {self.line.strip()}"
 
 
-class HolosoError(Exception):
-    """Base class for every error raised by Holoso."""
+class HolosoError(Exception): ...
 
 
 class SynthesisError(HolosoError):
-    """An error encountered while analyzing or lowering user source."""
-
     def __init__(self, message: str, location: SourceLocation | None = None) -> None:
         self.message = message
         self.location = location

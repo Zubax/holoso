@@ -32,10 +32,6 @@ def within(actual: float, expected: float, rtol: float, atol: float) -> bool:
     return abs(actual - expected) <= atol + rtol * abs(expected)
 
 
-# ---------------------------------------------------------------------------
-# Paths and build helpers
-# ---------------------------------------------------------------------------
-
 BENCH_DIR = Path(__file__).resolve().parent  # tests/hdl -- the cocotb test_dir for the benches and cosim driver
 REPO_ROOT = BENCH_DIR.parents[1]
 HDL_DIR = Path(holoso.__file__).resolve().parent / "_backend" / "verilog" / "rtl"
@@ -91,10 +87,7 @@ def build_args(sim: str) -> list[str]:
     return VERILATOR_BUILD_ARGS if sim == "verilator" else []
 
 
-# ---------------------------------------------------------------------------
-# Sign-conditioning opcodes (must match holoso_fsgnop's op encoding in holoso_support.v / FloatSignControl.encoded)
-# ---------------------------------------------------------------------------
-
+# Sign-conditioning opcodes -- must match holoso_fsgnop's op encoding in holoso_support.v / FloatSignControl.encoded.
 SGNOP_NONE = 0
 SGNOP_NEG = 1
 SGNOP_ABS = 2
@@ -112,10 +105,6 @@ def apply_sgnop(bits: int, op: int, wfull: int = 32) -> int:
     s_out = (s_in & (1 - op_abs)) ^ op_neg
     return (s_out << (wfull - 1)) | (bits & body_mask)
 
-
-# ---------------------------------------------------------------------------
-# binary32 <-> bits and classification
-# ---------------------------------------------------------------------------
 
 F32_SIGN_MASK = 0x80000000
 F32_EXP_MASK = 0x7F800000
@@ -280,22 +269,12 @@ def _flush_to_zkf(bits: int) -> int:
     return bits
 
 
-# ---------------------------------------------------------------------------
-# Test parameter knobs (env vars)
-# ---------------------------------------------------------------------------
-
-
 def get_seed(default: int = 0x9E3779B97F4A7C15) -> int:
     return int(os.environ.get("HOLOSO_TEST_SEED", hex(default)), 0)
 
 
 def get_random_count(default: int = 256) -> int:
     return int(os.environ.get("HOLOSO_TEST_RANDOM_COUNT", str(default)))
-
-
-# ---------------------------------------------------------------------------
-# Cocotb scaffolding
-# ---------------------------------------------------------------------------
 
 
 async def start_clock(dut, period_ns: int = 10) -> None:

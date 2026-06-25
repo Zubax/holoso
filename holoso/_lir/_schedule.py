@@ -61,7 +61,6 @@ class Schedule:
     busy_until: dict[tuple[PooledHardwareOperator, int], int]
 
     def commit_cycle(self, vid: ValueId) -> int:
-        """The cycle a scheduled value commits: its issue cycle plus its operator latency."""
         return self.issue_cycle[vid] + self.latency[vid]
 
 

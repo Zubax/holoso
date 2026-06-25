@@ -79,12 +79,6 @@ def _round(value: float) -> float:
     return FMT.round(value)
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Axis B: floating-point edge behavior via kernels + algebraic identities. Inputs are the canonical ZKF edge patterns
-# (zero, ±0.5, ±1, ±smallest-normal, ±largest-finite); identities are asserted EXACTLY on the output bits. The
-# reference for overflow/underflow is ``FloatFormat.round`` of the exact real, so it follows the format, not float64.
-# --------------------------------------------------------------------------------------------------------------------
-
 _EDGES = format_edge_bits(FMT)  # zero, ±0.5, ±1, ±smallest-normal, ±largest-finite (9 patterns)
 
 
@@ -97,7 +91,6 @@ def _mul(a, b):  # type: ignore[no-untyped-def]
 
 
 def _neg_self(x):  # type: ignore[no-untyped-def]
-    # x + (-x) must be exactly +0 for every finite x.
     return x + (-x)
 
 
@@ -136,7 +129,7 @@ def test_abs_via_select_clears_sign_over_edges() -> None:
     for bits in _EDGES:
         x = _val(bits)
         out = sim.run(x)[0]
-        want = x.apply_sign(negate=False, absolute=True)  # the magnitude bit pattern (sign bit cleared)
+        want = x.apply_sign(negate=False, absolute=True)
         assert out.bits == want.bits, f"abs(0x{bits:x}) bits=0x{out.bits:x} vs 0x{want.bits:x}"
 
 
@@ -207,13 +200,6 @@ def test_divide_by_zero_emits_inf_error_path() -> None:
     assert math.isinf(float(out)) and float(out) > 0.0, f"1.0/0.0 not +inf: {float(out)} (bits 0x{out.bits:x})"
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Axis C: relational + chained comparisons, full breadth. All six operators each in a bool-returning kernel, swept
-# across the exact boundary (equal, just-below, just-above); a chained ``lo < x < hi`` over the four region boundaries;
-# == / != on bit-equal vs bit-different operands.
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def _k_lt(x, y):  # type: ignore[no-untyped-def]
     return x < y
 
@@ -242,8 +228,8 @@ def test_all_six_relational_operators_exact_at_boundary() -> None:
     # A representable pivot and its exact neighbours one ULP away (so just-below / just-above straddle the boundary).
     pivot = 2.0
     pivot_bits = FMT.encode(pivot)
-    below = float(_val(pivot_bits - 1))  # one ULP below pivot
-    above = float(_val(pivot_bits + 1))  # one ULP above pivot
+    below = float(_val(pivot_bits - 1))
+    above = float(_val(pivot_bits + 1))
     pairs = [(pivot, pivot), (below, pivot), (above, pivot), (pivot, below), (pivot, above), (-pivot, pivot)]
     for fn, py, name in [
         (_k_lt, lambda a, b: a < b, "lt"),
@@ -280,18 +266,11 @@ def test_equality_bit_equal_vs_bit_different() -> None:
     sim_ne = _sim(_k_ne, "ne_bits")
     base = FMT.encode(1.5)
     same = _val(base)
-    other = _val(base + 1)  # one ULP different -> a different value
+    other = _val(base + 1)
     assert sim_eq.run(same, same)[0] is True
     assert sim_eq.run(same, other)[0] is False
     assert sim_ne.run(same, same)[0] is False
     assert sim_ne.run(same, other)[0] is True
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# Axis D: fmul_ilog2 power-of-two strength reduction. Multiplying by a power-of-two constant only shifts the exponent,
-# so the result is EXACT (no rounding) -- asserted bit-for-bit against ``FloatFormat.round`` of the exact product. A
-# non-power-of-two constant stays an ordinary fmul and is still correct. Power-of-two overflow/underflow edges too.
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def _x_times_2(x):  # type: ignore[no-untyped-def]
@@ -358,12 +337,6 @@ def test_power_of_two_overflow_and_underflow_edges() -> None:
     assert under.bits == 0, f"smallest_normal*0.125 not +0: bits=0x{under.bits:x} ({float(under)})"
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Axis E: boolean connectives + float<->bool casts. Full truth tables, De Morgan equivalence, float(cond) feeding
-# arithmetic, a compare->cast->multiply cross-domain chain, and bool(x) truthiness.
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def _k_and(a: bool, b: bool):  # type: ignore[no-untyped-def]
     return a and b
 
@@ -421,7 +394,7 @@ def test_float_of_bool_is_exactly_zero_or_one_feeding_arithmetic() -> None:
     sim = _sim(_float_of_cond, "float_cond")
     for x, y in [(3.0, 1.0), (1.0, 3.0), (2.0, 2.0)]:
         got = sim.run(FloatValue.from_float(FMT, x), FloatValue.from_float(FMT, y))[0]
-        want = FloatValue.from_float(FMT, (10.0 if x > y else 0.0) + 1.0)  # exactly 11.0 or 1.0
+        want = FloatValue.from_float(FMT, (10.0 if x > y else 0.0) + 1.0)
         assert got.bits == want.bits, f"float({x}>{y})*10+1 bits=0x{got.bits:x} vs 0x{want.bits:x}"
 
 
@@ -452,14 +425,6 @@ def test_bool_of_float_truthiness() -> None:
     # smallest-normal is the smallest nonzero magnitude -> still truthy.
     frac_bits = FMT.wman - 1
     assert sim.run(_val(1 << frac_bits))[0] is True
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# Axis F: constant folding / static evaluation. A subexpression folding to ZERO (distinct from the existing x+7 fold),
-# a compile-time-constant branch dropping a divide-by-zero dead arm, a read-only attribute folding in a condition, and
-# a bounded ``for`` loop fully unrolling a Horner polynomial -- proved bit-identical to a hand-unrolled straight-line
-# version (reference-free: same op order => same rounding => same bits).
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def _fold_to_zero(x):  # type: ignore[no-untyped-def]
@@ -548,6 +513,6 @@ def test_bounded_for_loop_polynomial_matches_reference() -> None:
     sim = _sim(_horner_loop, "horner_ref")
     for x in (-2.0, -0.5, 0.5, 1.0, 1.5, 2.0):
         got = float(sim.run(FloatValue.from_float(FMT, x))[0])
-        want = (((1.0 * x + 1.0) * x + 1.0) * x + 1.0) * x + 1.0  # the degree-4 polynomial closed form
+        want = (((1.0 * x + 1.0) * x + 1.0) * x + 1.0) * x + 1.0
         rtol, atol = default_tolerance(FMT, op_count=10, magnitude=max(1.0, abs(want)))
         assert within(got, want, rtol, atol), f"horner x={x}: {got} vs {want}"

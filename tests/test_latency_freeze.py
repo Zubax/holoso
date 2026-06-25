@@ -69,8 +69,6 @@ def test_schedule_length_is_frozen(name: str) -> None:
 
 
 class _Delay3:
-    """A 3-tap float delay line: each tap copies the previous (x2<-x1<-x0<-input), a chain of slot-to-slot copies."""
-
     def __init__(self) -> None:
         self.x0 = 0.0
         self.x1 = 0.0
@@ -85,8 +83,6 @@ class _Delay3:
 
 
 class _BoolShift3:
-    """A 3-tap boolean shift register: the boolean-bank counterpart of the chained-copy delay line."""
-
     def __init__(self) -> None:
         self.b0 = False
         self.b1 = False

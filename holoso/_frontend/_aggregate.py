@@ -18,17 +18,16 @@ class Value(ABC):
 
     @abstractmethod
     def walk(self, path: Path) -> Iterator[tuple[Path, ValueId]]:
-        """Yield ``(path, scalar)`` leaves row-major, extending ``path`` by the aggregate index at each level."""
+        """Leaves are yielded row-major, ``path`` extended by the aggregate index at each level."""
 
     def leaves(self) -> list[ValueId]:
         return [vid for _, vid in self.walk([])]
 
     def flatten(self) -> "Aggregate":
-        """Collapse to a flat aggregate of all scalar leaves in row-major order (the ``.flatten()`` method)."""
+        """The leaves flatten in row-major order."""
         return Aggregate(tuple(Scalar(vid) for vid in self.leaves()))
 
     def output_leaves(self) -> list[tuple[Path, ValueId]]:
-        """The (path, scalar) pairs naming this returned value's output ports; an aggregate uses its indexed paths."""
         return list(self.walk([]))
 
 
@@ -83,5 +82,4 @@ class StateAttr:
         )
 
     def compose(self, scalars: tuple[Scalar, ...]) -> Value:
-        """A scalar attribute is its single wire; a vector attribute is the aggregate of its per-element wires."""
         return Aggregate(scalars) if self.is_vector else scalars[0]

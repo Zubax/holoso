@@ -1,7 +1,4 @@
-"""
-Lattice Diamond / LSE out-of-context synthesis verification flow.
-"""
-
+import html
 import os
 import re
 import shlex
@@ -23,15 +20,11 @@ _CLOCK_NET = "clk_c"  # Diamond names the net driven by the `clk` input port `cl
 
 @dataclass(frozen=True, slots=True)
 class DiamondEcp5Device:
-    """A Lattice ECP5 target as Diamond wants it: a single full Lattice device string."""
-
     device: str = "LFE5U-25F-6BG381C"
 
 
 @dataclass(frozen=True, slots=True)
 class DiamondEcp5Flow(Flow):
-    """Lattice Diamond LSE synthesis + PAR, out of context."""
-
     device: DiamondEcp5Device = field(default_factory=DiamondEcp5Device)
     target_frequency_MHz: float = 100.0
     options: dict[str, Any] = field(default_factory=dict)
@@ -73,7 +66,7 @@ def _lpf(freq_MHz: float) -> str:
 
 
 def _xml_attr(text: str) -> str:
-    return text.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+    return html.escape(text, quote=True)
 
 
 def _strategy(freq_MHz: float) -> str:

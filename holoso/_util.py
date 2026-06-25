@@ -12,8 +12,6 @@ type BlockId = int
 
 
 class RelationalOp(enum.Enum):
-    """A two-operand ordering/equality test on floats, producing a boolean."""
-
     LT = "lt"
     LE = "le"
     GT = "gt"
@@ -22,7 +20,7 @@ class RelationalOp(enum.Enum):
     NE = "ne"
 
     def apply(self, left: float, right: float) -> bool:
-        """Evaluate the relation on two ordered operands -- the single definition of its truth function."""
+        """The single definition of each relation's truth function; every other comparison path routes through here."""
         match self:
             case RelationalOp.LT:
                 return left < right

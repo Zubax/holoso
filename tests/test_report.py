@@ -62,13 +62,13 @@ def _report(name: str) -> str:
 @pytest.mark.parametrize("name", list(_EXAMPLES))
 def test_report_renders_for_each_example(name: str) -> None:
     html = _report(name)
-    assert html.lstrip().startswith("<!")  # a complete HTML document
-    assert "<h2>Schedule</h2>" in html  # the schedule section is present
-    assert "class='gridkey'" in html  # the legend is present
-    assert "register holds a live value" in html  # the register-liveness tint is explained
+    assert html.lstrip().startswith("<!")
+    assert "<h2>Schedule</h2>" in html
+    assert "class='gridkey'" in html
+    assert "register holds a live value" in html
     assert "title='registers'>registers" in html
     assert "r0" in html
-    assert "class='live'" in html or "live'>" in html  # at least one register is tinted live
+    assert "class='live'" in html or "live'>" in html
 
 
 def test_report_reveals_boolean_operators_and_casts() -> None:
@@ -112,7 +112,7 @@ def test_report_draws_per_arm_edges_for_a_multi_arm_spill() -> None:
                     continue
                 landing_pcs = lir.write_landing_pcs(block, op, write)
                 if len(landing_pcs) <= 1:
-                    continue  # not a multi-arm spill
+                    continue
                 for pc in landing_pcs:  # a wide register's column ordinal is its index (the wide bank renders first)
                     cell = f"g{write.dst.index}_{pc}"
                     assert cell in edge_sources, f"no dataflow edge anchored to the arm landing cell {cell}"

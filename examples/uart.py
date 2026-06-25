@@ -18,7 +18,7 @@ import holoso
 OVERSAMPLE = 16  # ticks per bit period
 LAST_PHASE = OVERSAMPLE - 1  # the phase/data countdown runs LAST_PHASE..0 inclusive (OVERSAMPLE sub-bit ticks)
 HALF_BIT = OVERSAMPLE // 2 - 1  # countdown after start detection: places the first sample at the start bit's middle
-MSB = 128  # weight of bit 7, the bit a shift register exposes first; only needed until we have integers
+MSB = 128  # weight of bit 7, the bit a shift register exposes first; only needed until we have integer support
 
 
 class _UartFrame:

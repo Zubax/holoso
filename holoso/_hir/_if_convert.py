@@ -115,7 +115,6 @@ def _splice(hir: Hir, diamond: tuple[Block, Block, Block, Block]) -> Hir:
 
 
 def run(hir: Hir) -> Hir:
-    """Convert every eligible diamond, innermost first, until none remains; block ids are then recompacted."""
     if _IFCONV_MAX_OPS <= 0:
         return hir
     converted = 0

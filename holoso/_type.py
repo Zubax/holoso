@@ -8,12 +8,9 @@ from fractions import Fraction
 
 @dataclass(frozen=True, slots=True)
 class ScalarType(ABC):
-    """A scalar value type carried by a data port or an internal typed storage resource."""
-
     @property
     @abstractmethod
-    def width(self) -> int:
-        """The number of bits needed to represent one scalar value."""
+    def width(self) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,8 +39,7 @@ class FloatFormat:
 
     ``encode``/``decode`` are the bit-exact round-trip codec between Python floats and ZKF bit patterns. The layout is
     ``[sign | exponent(wexp) | stored-fraction(wman-1)]`` with a hidden leading significand bit: ``exp == 0`` is zero
-    (ZKF has no subnormals and no negative zero) and the all-ones exponent is infinity. Encoding rounds to nearest,
-    ties to even, using exact rational arithmetic.
+    and the all-ones exponent is infinity. Encoding rounds to nearest, ties to even, using exact rational arithmetic.
     """
 
     wexp: int
@@ -57,7 +53,7 @@ class FloatFormat:
 
     @property
     def width(self) -> int:
-        """Total bit width of one scalar (``WFULL = wexp + wman``)."""
+        """``WFULL = wexp + wman``."""
         return self.wexp + self.wman
 
     def encode(self, value: float) -> int:
@@ -97,7 +93,6 @@ class FloatFormat:
         return self._pack(sign, exp + self.bias, quotient & self.frac_mask)
 
     def decode(self, bits: int) -> float:
-        """Exactly decode a ZKF bit pattern into the Python float it represents."""
         wfrac = self.wfrac
         sign = (bits >> (self.width - 1)) & 1
         exp = (bits >> wfrac) & self.exp_inf
@@ -134,7 +129,6 @@ class FloatFormat:
 
     @property
     def bias(self) -> int:
-        """The exponent bias."""
         return (1 << (self.wexp - 1)) - 1
 
     @property
@@ -149,12 +143,10 @@ class FloatFormat:
 
     @property
     def exp_max_finite(self) -> int:
-        """The largest finite biased exponent (one below infinity)."""
         return self.exp_inf - 1
 
     @property
     def frac_mask(self) -> int:
-        """A mask selecting the stored fraction bits."""
         return (1 << self.wfrac) - 1
 
     @property
@@ -164,19 +156,16 @@ class FloatFormat:
 
     @property
     def max_exp_unbiased(self) -> int:
-        """The largest unbiased exponent of a finite value."""
         return self.exp_max_finite - self.bias
 
     def _pack(self, sign: int, exp: int, frac: int) -> int:
-        """Simply assemble raw sign/exponent/fraction fields without rounding."""
+        """Assemble raw sign/exponent/fraction fields without rounding (distinct from the rounding ``pack``)."""
         wfrac = self.wfrac
         return ((sign & 1) << (self.width - 1)) | ((exp & self.exp_inf) << wfrac) | (frac & self.frac_mask)
 
 
 @dataclass(frozen=True, slots=True)
 class FloatType(ScalarType):
-    """A ZKF floating-point scalar with the given bit-exact format."""
-
     fmt: FloatFormat
 
     @property
@@ -189,7 +178,7 @@ class FloatType(ScalarType):
 
 @dataclass(frozen=True, slots=True)
 class BoolType(ScalarType):
-    """A single-bit boolean scalar; the storage type of branch conditions and boolean state."""
+    """The storage type of branch conditions and boolean state."""
 
     @property
     def width(self) -> int:

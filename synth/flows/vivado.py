@@ -1,7 +1,3 @@
-"""
-AMD/Xilinx Vivado out-of-context synthesis verification flow.
-"""
-
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,15 +19,11 @@ _TIMING = "worst_path.rpt"
 
 @dataclass(frozen=True, slots=True)
 class XilinxPart:
-    """An AMD/Xilinx part for the Vivado flow, e.g. ``xc7a35tcsg324-1``."""
-
     name: str = "xc7a35tcsg324-1"
 
 
 @dataclass(frozen=True, slots=True)
 class VivadoFlow(Flow):
-    """Vivado synthesis + place-and-route, out of context."""
-
     part: XilinxPart = field(default_factory=XilinxPart)
     target_frequency_MHz: float = 100.0
     options: dict[str, Any] = field(default_factory=dict)

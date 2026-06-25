@@ -1,9 +1,8 @@
 """
 Tests for holoso_fmul_ilog2_const (pipelined; y = sgnop(sgnop(a) * 2^K)).
 
-K is a compile-time signed integer exponent shift. The test rebuilds the DUT for several K values to cover negative,
-zero, and positive scales, and separately sweeps STAGE_DECODE at K=0. The wrapper delays y_sgnop through the same
-number of stages as zkf_mul_ilog2_const, and the scoreboard verifies the documented latency against out_valid timing.
+K is a compile-time signed integer exponent shift. The wrapper delays y_sgnop through the same number of stages as
+zkf_mul_ilog2_const.
 """
 
 import os
@@ -70,19 +69,17 @@ async def holoso_fmul_ilog2_const_cocotb(dut) -> None:
         await Timer(1, unit="ns")
         sb.sample()
 
-    # 1) Directed, neutral sgnops.
     for a in DIRECTED_F32:
         await step(a, 0, 0)
     await sb.drain()
 
-    # 2) Sgnop sweep on directed values. Output sign control changes every cycle to verify sideband pipelining.
+    # Sgnop sweep: output sign control changes every cycle to verify sideband pipelining.
     for a_op in SGNOP_OPS:
         for a in DIRECTED_F32:
             for y_op in SGNOP_OPS:
                 await step(a, a_op, y_op)
     await sb.drain()
 
-    # 3) Random bulk.
     for _ in range(get_random_count()):
         if rng.random() < 0.2:
             await step_idle()
@@ -93,7 +90,6 @@ async def holoso_fmul_ilog2_const_cocotb(dut) -> None:
         await step(a, a_op, y_op)
     await sb.drain()
 
-    # 4) Reset.
     await drive_reset(dut)
     for _ in range(8):
         dut.in_valid.value = 0

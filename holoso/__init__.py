@@ -44,5 +44,5 @@ from ._operators import (
     OpConfig as OpConfig,
 )
 
-__version__ = "0.1.0"
-__url__ = "https://github.com/Zubax/holoso"
+__version__ = "0.1.1"
+__url__ = "https://holoso.digital"

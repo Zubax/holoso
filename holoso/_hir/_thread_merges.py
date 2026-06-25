@@ -41,7 +41,6 @@ _logger = logging.getLogger(__name__)
 
 
 def _jumps_to(block: Block, target: BlockId) -> bool:
-    """Whether ``block`` is ``Jump``-terminated straight to ``target`` (a sole, unconditional successor edge)."""
     return isinstance(block.terminator, Jump) and block.terminator.target == target
 
 
@@ -75,7 +74,6 @@ def _phis_consumed_only_as_successor_arms(
 
 
 def _find_empty_merge(hir: Hir) -> tuple[Block, BlockId] | None:
-    """The first threadable empty merge block ``M`` (in block order) and its successor ``S``, or None."""
     preds = predecessors(hir.blocks)
     blocks_by_id = {block.id: block for block in hir.blocks}
     for block in hir.blocks:
@@ -92,7 +90,6 @@ def _find_empty_merge(hir: Hir) -> tuple[Block, BlockId] | None:
 
 
 def _thread(hir: Hir, merge: Block, successor: BlockId) -> Hir:
-    """Retarget ``merge``'s predecessors onto ``successor``, compose its phi arms, and drop the block."""
     arm_preds = sorted(predecessors(hir.blocks)[merge.id])  # deterministic predecessor order
     merge_arms: dict[ValueId, dict[BlockId, ValueId]] = {}  # merge phi -> {predecessor: that arm's value}
     for phi_id in merge.phis:
@@ -131,7 +128,6 @@ def _thread(hir: Hir, merge: Block, successor: BlockId) -> Hir:
 
 
 def run(hir: Hir) -> Hir:
-    """Thread every threadable empty merge block, innermost-reachable first, until none remains; then recompact ids."""
     threaded = 0
     while (candidate := _find_empty_merge(hir)) is not None:
         merge, successor = candidate

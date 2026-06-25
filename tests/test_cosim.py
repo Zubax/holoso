@@ -89,7 +89,6 @@ def test_cosim_staged_kernel(sim: str) -> None:
     def kernel(a, b):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
-    # Exercise staged operator parameters end-to-end through synthesis and cosim.
     fmt = FloatFormat(8, 24)
     ops = OpConfig(
         FAddOperator(fmt, stage_decode=1),

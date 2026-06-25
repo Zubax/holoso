@@ -34,8 +34,6 @@ def _bool_const(const: Const) -> BoolConst:
 
 @dataclass(frozen=True, slots=True)
 class Operator(ABC):
-    """A reusable semantic operation definition referenced by HIR operation nodes."""
-
     mnemonic: ClassVar[str]
     # Whether evaluating this operation on a not-taken path is unobservable: a speculatable operation has no error
     # sideband and no effect beyond its result value, so if-conversion may execute it unconditionally. Division is
@@ -46,8 +44,7 @@ class Operator(ABC):
 
     @property
     @abstractmethod
-    def signature(self) -> Signature:
-        """Semantic operand/result types."""
+    def signature(self) -> Signature: ...
 
     @property
     def arity(self) -> int:
@@ -161,8 +158,6 @@ class FloatMulPow2(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatRelational(Operator):
-    """A float comparison ``a <op> b`` returning a boolean."""
-
     mnemonic: ClassVar[str] = "frelational"
     speculatable: ClassVar[bool] = True
     op: RelationalOp
@@ -178,8 +173,6 @@ class FloatRelational(Operator):
 
 @dataclass(frozen=True, slots=True)
 class BoolAnd(Operator):
-    """A boolean conjunction ``a and b`` (both operands genuine booleans)."""
-
     mnemonic: ClassVar[str] = "band"
     speculatable: ClassVar[bool] = True
 
@@ -200,8 +193,6 @@ class BoolAnd(Operator):
 
 @dataclass(frozen=True, slots=True)
 class BoolOr(Operator):
-    """A boolean disjunction ``a or b`` (both operands genuine booleans)."""
-
     mnemonic: ClassVar[str] = "bor"
     speculatable: ClassVar[bool] = True
 
@@ -222,8 +213,6 @@ class BoolOr(Operator):
 
 @dataclass(frozen=True, slots=True)
 class BoolXor(Operator):
-    """A boolean exclusive-or ``a ^ b`` (both operands genuine booleans); the parity primitive."""
-
     mnemonic: ClassVar[str] = "bxor"
     speculatable: ClassVar[bool] = True
 
@@ -241,8 +230,6 @@ class BoolXor(Operator):
 
 @dataclass(frozen=True, slots=True)
 class BoolNot(Operator):
-    """A boolean negation ``not a``."""
-
     mnemonic: ClassVar[str] = "bnot"
     speculatable: ClassVar[bool] = True
 
@@ -315,8 +302,6 @@ class FloatToBool(Operator):
 
 @dataclass(frozen=True, slots=True)
 class BoolToFloat(Operator):
-    """A scalar cast ``float(cond)``: ``1.0`` when the boolean is true, ``0.0`` when false."""
-
     mnemonic: ClassVar[str] = "bool_to_float"
     speculatable: ClassVar[bool] = True
 

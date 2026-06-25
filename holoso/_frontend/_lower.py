@@ -167,7 +167,7 @@ class _Lowerer:
         return False
 
     def _lower_stmt(self, stmt: ast.stmt) -> bool:
-        """Lower one statement. Returns True when a ``return`` was reached (no further statements are processed)."""
+        """Returns True when a ``return`` was reached, so no further statements are processed."""
         match stmt:
             case ast.Expr(value=ast.Constant(value=str())):
                 return False  # docstring
@@ -767,7 +767,6 @@ class _Lowerer:
         return None
 
     def _record_self_targets(self, targets: list[ast.expr], attrs: set[str]) -> None:
-        """Add every ``self.<attr>`` leaf among assignment ``targets`` (descending nested/starred tuple targets)."""
         for leaf in (leaf for target in targets for leaf in leaf_targets(target)):
             if self._is_self_attr(leaf) and isinstance(leaf, ast.Attribute):
                 attrs.add(leaf.attr)
@@ -1056,7 +1055,6 @@ class _Lowerer:
         self._static_ints.pop(name, None)
 
     def _assign_target(self, target: ast.expr, value: Value) -> None:
-        """Bind one assignment target to ``value``, recursing into tuple/list targets to unpack an aggregate."""
         match target:
             case ast.Name(id=name):
                 self._bind_name(name, value, self._loc(target))
@@ -1164,7 +1162,7 @@ class _Lowerer:
                 raise UnsupportedConstruct(f"unsupported expression {type(node).__name__}", self._loc(node))
 
     def _lower_elements(self, elts: list[ast.expr]) -> Iterator[Value]:
-        """Lower the elements of a list/tuple literal, splicing any ``*aggregate`` element into place."""
+        """A ``*aggregate`` element is spliced in place (its leaves inlined into the surrounding sequence)."""
         for elt in elts:
             if isinstance(elt, ast.Starred):
                 yield from self._unpack(self._lower_expr(elt.value), elt)
@@ -1276,7 +1274,7 @@ class _Lowerer:
         return None
 
     def _lower_args(self, node: ast.Call) -> list[Value]:
-        """Lower a call's positional arguments left to right, splicing any ``*aggregate`` argument into place."""
+        """A ``*aggregate`` argument is spliced in place (its leaves inlined into the positional list)."""
         args: list[Value] = []
         for arg in node.args:
             if isinstance(arg, ast.Starred):
@@ -1316,7 +1314,6 @@ class _Lowerer:
         return self._inline(method, self._lower_args(node), self._loc(node), bound_self=bound_self)
 
     def _inline_call(self, callee: types.FunctionType, node: ast.Call) -> Value:
-        """Inline a pure global function: bind its parameters to the arguments and lower its body in a fresh scope."""
         if node.keywords:
             raise UnsupportedConstruct(
                 f"inlined call to {callee.__name__}() takes no keyword arguments", self._loc(node)
@@ -1555,7 +1552,6 @@ class _Lowerer:
                 return self._lower_expr(node)
 
     def _bool_scalar(self, node: ast.expr) -> ValueId:
-        """Lower a boolean sub-expression to a single bool ValueId (rejecting an aggregate or a non-boolean value)."""
         scalar = self._scalar(self._lower_bool(node), node)
         if not isinstance(self._builder.type_of(scalar), BoolType):
             raise UnsupportedConstruct("expected a boolean value here (a comparison or a boolean)", self._loc(node))
@@ -1647,7 +1643,7 @@ class _Lowerer:
         return self._merge_values(then, else_, then_end, else_end, loc)
 
     def _broadcast(self, value: Value, scalar: ValueId) -> Value:
-        """Multiply every scalar leaf of ``value`` by ``scalar``, preserving shape (the one elementwise vector op)."""
+        """The one elementwise vector op: every scalar leaf is multiplied by ``scalar``, preserving shape."""
         if isinstance(value, Aggregate):
             return Aggregate(tuple(self._broadcast(item, scalar) for item in value.items))
         assert isinstance(value, Scalar)
@@ -1715,7 +1711,6 @@ class _Lowerer:
         return names
 
     def _is_local(self, name: str) -> bool:
-        """Whether ``name`` is bound (parameter or assignment target) in the function currently being lowered."""
         return name in self._local_names[self._fn]
 
     def _module_global(self, name: str) -> object:
@@ -1938,7 +1933,6 @@ class _Lowerer:
         return StateAttr(True, slots, [FloatConst(self._coerce_real(attr, element)) for element in elements])
 
     def _aggregate_elements(self, attr: str, value: object) -> list[object] | None:
-        """The ordered elements of a 1-D aggregate value (list, tuple, or numpy array), or None for a scalar."""
         if isinstance(value, np.ndarray):
             if value.ndim != 1:
                 raise UnsupportedConstruct(
@@ -1997,7 +1991,6 @@ class _Lowerer:
         return not attr.startswith("_")
 
     def _register_state_slots(self) -> None:
-        """Register each written attribute as persistent state: one scalar slot per element, reset from the snapshot."""
         for attr in self._state_order:
             shape = self._shape(attr)
             for slot, reset, live_out in zip(shape.slots, shape.resets, self._state_env[attr].leaves()):

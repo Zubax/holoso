@@ -95,7 +95,7 @@ def test_comparisons_share_one_pooled_fcmp_instance() -> None:
         return y
 
     verilog = generate(build(_run(kernel, _ops(FloatFormat(8, 24))), "two_cmp")).verilog
-    assert verilog.count("holoso_fcmp #") == 1  # one shared comparator for both comparisons, not one each
+    assert verilog.count("holoso_fcmp #") == 1
 
 
 def test_streaming_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
@@ -403,13 +403,11 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         bool_state_slots=[],
     )
     verilog = generate(lir).verilog
-    # Both wide lanes exist independently: per-port writeback latches, write-enables, and sign-conditioner fields.
     for q in (0, 1):
         assert "s_fsortlike_" in verilog and f"_y{q}_q" in verilog
         assert re.search(rf"mc_we_fsortlike_\w+_0_y{q}\b", verilog)
         assert re.search(rf"mc_fsortlike_\w+_0_y{q}s\b", verilog)
     assert ".min(" in verilog and ".max(" in verilog and ".min_sgnop(" in verilog and ".max_sgnop(" in verilog
-    # Elaborate under Icarus against a stub module with the expected port list.
     if shutil.which("iverilog") is None:
         pytest.skip("iverilog not installed")
     stub = """

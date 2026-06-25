@@ -37,13 +37,11 @@ async def holoso_fsgnop_cocotb(dut) -> None:
         assert actual == expected, f"WFULL={wfull} x=0x{x:x} op={op}: got 0x{actual:x}, want 0x{expected:x}"
 
     if wfull <= 8:
-        # Exhaustive over all input bit patterns + all opcodes.
         for x in range(1 << wfull):
             for op in SGNOP_OPS:
                 await check(x, op)
         return
 
-    # Directed battery (using the float32 corner-case set, masked to wfull).
     body_mask = (1 << wfull) - 1
     for raw in DIRECTED_F32:
         x = raw & body_mask
@@ -53,7 +51,6 @@ async def holoso_fsgnop_cocotb(dut) -> None:
             for op in SGNOP_OPS:
                 await check(x_eff, op)
 
-    # Random sweep: HOLOSO_TEST_RANDOM_COUNT cases, all opcodes per draw.
     rng = np.random.default_rng(get_seed())
     for _ in range(get_random_count()):
         x = int(rng.integers(0, 1 << wfull, dtype=np.uint64))

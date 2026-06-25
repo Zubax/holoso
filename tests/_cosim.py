@@ -25,8 +25,6 @@ def run_cosim(
     vectors: list[Mapping[str, int]] | None = None,
 ) -> None:
     """
-    Compile ``fn``, emit its Verilog and a self-checking cocotb bench, and run the bench on ``sim``.
-
     ``ops`` defaults to the minimum-latency configuration (no optional stages). ``vectors`` is an explicit input
     sequence (each maps an input-port name to its ZKF bits); when omitted the bench draws its own fixed-seed sweep.
     """

@@ -3,7 +3,6 @@
 Rotation-mode CORDIC computing cos(theta), sin(theta) with no multiplier on the rotation: each iteration is an
 add/subtract and a power-of-two scale ``2**-i`` (an exact shift), with a per-iteration sign decision driving the
 direction of micro-rotation. The fixed arctan table and the aggregate gain fold at compile time; the loop unrolls.
-The result is a flat sequence of sign-branch diamonds -- comparisons feeding branches over a small datapath.
 """
 
 import math
@@ -32,7 +31,7 @@ class CordicSinCos:
                 y_next = y - x * (2.0**-i)
                 z += self.angles[i]
             x, y = x_next, y_next
-        return x, y  # (cos theta, sin theta)
+        return x, y
 
 
 def main() -> None:

@@ -108,11 +108,6 @@ class Mode(Enum):
 
 @dataclass(frozen=True, slots=True)
 class GeneratedKernel:
-    """
-    One rendered kernel ready to drive: its module-qualified callable, its source text and file, the shapes it
-    realizes, its numerical mode, its input-port names (in order), and the seed it was drawn from (for provenance).
-    """
-
     name: str
     source: str
     filename: str
@@ -132,8 +127,6 @@ class GeneratedKernel:
 
 @dataclass(frozen=True, slots=True)
 class _Fragment:
-    """The value produced by one source fragment, plus its mode and structural coverage tags."""
-
     value: str
     mode: Mode = Mode.EXACT
     shapes: frozenset[Shape] = frozenset()
@@ -189,16 +182,10 @@ def _binary_literal(significand: float, exp: int) -> str:
     return repr(math.ldexp(significand, exp))
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Source rendering: a tiny templated emitter producing real importable .py modules.
-# --------------------------------------------------------------------------------------------------------------------
-
-
 def _render_module(name: str, source: str) -> types.ModuleType:
     """
-    Write ``source`` to a real file under :data:`FUZZ_TMP`, register it with ``linecache`` (so ``inspect.getsource``
-    works), compile it, and exec it into a fresh module. The frontend retrieves the kernel's source via
-    ``inspect.getsourcelines``, which a REPL/exec-only function cannot satisfy -- hence the real, linecache-backed file.
+    The frontend retrieves the kernel's source via ``inspect.getsourcelines``, which a REPL/exec-only function cannot
+    satisfy -- hence the real, linecache-backed file rather than a bare ``exec``.
     """
     FUZZ_TMP.mkdir(parents=True, exist_ok=True)
     path = str((FUZZ_TMP / f"{name}.py").resolve())
@@ -208,11 +195,6 @@ def _render_module(name: str, source: str) -> types.ModuleType:
     module.__file__ = path
     exec(compile(source, path, "exec"), module.__dict__)  # noqa: S102 -- generated, sandboxed, gitignored source
     return module
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# Expression builders: bounded, structurally-controlled fragments.
-# --------------------------------------------------------------------------------------------------------------------
 
 
 class _Emitter:
@@ -232,9 +214,6 @@ class _Emitter:
         self.return_line = ""  # set by the assembly step before rendering
 
     def then_value(self) -> _Fragment:
-        """
-        The value assigned in a diamond's then arm: a verbatim select, a power-of-two scale, or a continuous expression.
-        """
         if self.chance(0.4):
             return self.scaled_value()
         if self.chance(0.4) and len(self.floats) >= 2:
@@ -316,7 +295,6 @@ class _Emitter:
         return int(self._rng.choice(shifts))
 
     def exact_division_scale_exp(self) -> int:
-        """The exponent of a non-one exact power-of-two quotient for the division wiring probe."""
         return self.randint(1, min(3, _max_normal_exp(self._fmt)))
 
     def exact_division_denominator_hi_exp(self, scale_exp: int) -> int:
@@ -330,10 +308,7 @@ class _Emitter:
         """A lower bound for ``hi`` that keeps ``hi / 2.0`` normal while preserving Sterbenz exactness."""
         return _power2_literal(max(_min_normal_exp(self._fmt) + 1, 1))
 
-    # -- bounded numeric fragments ----------------------------------------------------------------------------------
-
     def small_literal(self) -> str:
-        """A small exact power-of-two-friendly literal (exact in any reasonable format)."""
         return self.choice(["1.0", "2.0", "0.5", "0.25", "4.0", "-1.0", "-2.0", "-0.5"])
 
     def nonneg_expr(self) -> str:
@@ -346,7 +321,6 @@ class _Emitter:
         return f"(({self.nonneg_expr()}) + {c})"
 
     def continuous_expr(self, depth: int) -> str:
-        """A bounded continuous-arithmetic expression of ``+`` and ``*`` over the live float pool."""
         if depth <= 0 or not self.chance(0.7):
             return self.pick_float()
         op = self.choice(["+", "*"])
@@ -410,8 +384,6 @@ class _Emitter:
         self.add_float(clamped)
         return _fragment(clamped, shapes=frozenset({Shape.SELECT}))
 
-    # -- line accumulation ------------------------------------------------------------------------------------------
-
     def emit(self, line: str, indent: int = 1) -> None:
         self._lines.append((indent, line))
 
@@ -424,11 +396,6 @@ class _Emitter:
         body indent of 1 == 4 spaces); a class method uses 1 (its body lives one level deeper, at 8 spaces).
         """
         return "\n".join("    " * (indent + base_indent) + line for indent, line in self._lines)
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# Kernel templates. Each emits body lines and returns the produced float plus the fragment's mode/shapes.
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def _body(line: str, indent: int = 0) -> tuple[int, str]:
@@ -448,7 +415,6 @@ def _if_else_body(cond: str, then_body: _Body, else_body: _Body) -> _Body:
 
 
 def _emit_if_else(em: _Emitter, cond: str, then_body: _Body, else_body: _Body, indent: int = 1) -> None:
-    """Emit the shared if/else diamond skeleton."""
     for extra, line in _if_else_body(cond, then_body, else_body):
         em.emit(line, indent + extra)
 
@@ -594,10 +560,6 @@ def _emit_const_branch(em: _Emitter) -> _Fragment:
 
 
 def _emit_bounded_loop(em: _Emitter) -> _Fragment:
-    """
-    A bounded back-edge ``while`` loop: a carried scalar strictly decreasing by a positive literal toward the exit
-    comparison, with a bounded initial value so the trip count stays small.
-    """
     r = em.fresh("loop")
     seed = em.pick_float()
     capped = em.fresh("cap")
@@ -632,7 +594,6 @@ def _emit_diamond_then_loop(em: _Emitter) -> _Fragment:
 
 
 def _emit_reduction(em: _Emitter) -> _Fragment:
-    """An unrolled ``for`` reduction over a literal range (under the unroll threshold). Continuous arithmetic."""
     n = em.randint(2, 6)
     acc = em.fresh("acc")
     em.emit(f"{acc} = {em.pick_float()}")
@@ -736,16 +697,11 @@ def _emit_forced_overbudget_branch(em: _Emitter) -> _Fragment:
 
 
 def _emit_exact_select(em: _Emitter) -> _Fragment:
-    """
-    A straight-line ternary select whose arms are operands verbatim (no arithmetic): ``r = a if c else b`` or the
-    sign-flip ``a if c else -a``. The condition is a float relation or a boolean connective.
-    """
     cond = _emit_condition(em)
     return em.exact_select_value(cond)
 
 
 def _emit_exact_clamp(em: _Emitter) -> _Fragment:
-    """A straight-line clamp into ``[-1, 1]`` via two verbatim-arm selects: exact in the format at every input."""
     return em.exact_clamp_value()
 
 
@@ -768,11 +724,6 @@ _DIRECTED_TEMPLATES: list[Callable[[_Emitter], _Fragment]] = [
     _emit_sterbenz_subtract,
     _emit_forced_overbudget_branch,
 ]
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# Top-level kernel assembly.
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def _seed_rng(master_seed: int, index: int) -> np.random.Generator:
@@ -828,10 +779,6 @@ def _finish_function_kernel(
 def generate_stateless_kernel(
     name: str, master_seed: int, index: int, fmt: FloatFormat = _DEFAULT_EXACT_FMT
 ) -> GeneratedKernel:
-    """
-    Render one stateless kernel: 2-4 float (and occasionally bool) inputs, a sequence of 1-3 danger-shape fragments, and
-    a return of a combination of the live values. The shapes and numerical mode are derived from returned fragments.
-    """
     rng = _seed_rng(master_seed, index)
     n_float = int(rng.integers(2, 5))
     use_bool = bool(rng.random() < 0.35)
@@ -847,8 +794,7 @@ def generate_stateless_kernel(
         template = rng.choice(_STATELESS_TEMPLATES)  # type: ignore[arg-type]
         produced.append(template(em))
 
-    # The return value combines the produced fragments (and possibly other live floats) into one or a small tuple of
-    # floats. Combining via ``+`` keeps every produced value LIVE so DCE cannot drop the diamonds/divisions feeding it.
+    # Combining the produced fragments keeps every one LIVE so DCE cannot drop the diamonds/divisions feeding output.
     return_mode = _emit_return(em, produced)
 
     return _finish_function_kernel(
@@ -871,7 +817,6 @@ def generate_directed_kernel(
     template: Callable[[_Emitter], _Fragment],
     fmt: FloatFormat = _DEFAULT_EXACT_FMT,
 ) -> GeneratedKernel:
-    """A directed exact kernel with an explicit return."""
     params = ["a", "b", "c"]
     em = _make_emitter(_seed_rng(master_seed, index), params, set(), fmt)
     payload = template(em)
@@ -925,8 +870,6 @@ def _emit_return(em: _Emitter, produced: list[_Fragment]) -> Mode:
         em.return_line = f"return {live[0]}"
         return Mode.EXACT
     elif em.chance(0.5):
-        # A small tuple: each lane is one produced value verbatim (kept live), so multiple output ports are exercised
-        # without introducing a rounding add -- an EXACT-mode kernel stays exact end to end.
         lanes = ", ".join(live[:3])
         em.return_line = f"return ({lanes},)"
         return Mode.EXACT
@@ -936,26 +879,18 @@ def _emit_return(em: _Emitter, produced: list[_Fragment]) -> Mode:
 
 
 def _assemble_function(name: str, params: list[str], bool_set: set[str], body: str, return_line: str) -> str:
-    """Assemble the full module source for a stateless kernel from its signature, body, and return line."""
     sig = ", ".join(f"{p}: bool" if p in bool_set else p for p in params)
     docstring = '    """A generated fuzz kernel."""'
     return f"def {name}({sig}):\n{docstring}\n{body}\n    {return_line}\n"
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# Stateful kernel assembly: a class with PRIVATE chained slots.
-# --------------------------------------------------------------------------------------------------------------------
 
 
 def generate_stateful_kernel(
     name: str, master_seed: int, index: int, fmt: FloatFormat = _DEFAULT_EXACT_FMT
 ) -> GeneratedKernel:
     """
-    Render one stateful kernel: a class with private (underscore) float slots, a ``__call__`` taking 1-2 float inputs
-    that advances the slots -- including the chained-slot pattern (``self._a = self._b; self._b = <expr>``), capturing
-    one slot's OLD value while another advances -- and returns a scalar combining the live-in slot values with the
-    inputs (a structurally-nonzero divisor keeps it well-defined). The slots are PRIVATE so no ``state_*`` output port
-    is created (a public attribute would break the float64 comparison).
+    Render one stateful kernel exercising the chained-slot pattern (capturing one slot's OLD value while another
+    advances). The slots are PRIVATE so no ``state_*`` output port is created -- a public attribute would break the
+    float64 comparison.
     """
     rng = _seed_rng(master_seed, index)
     n_inputs = int(rng.integers(1, 3))
@@ -970,7 +905,7 @@ def generate_stateful_kernel(
     for p in inputs:
         em.add_float(p)
     for s in slots:
-        em.add_float(f"self.{s}")  # the slot's CURRENT (live-in) value is a readable float
+        em.add_float(f"self.{s}")
 
     # Capture every slot's OLD value first (so updates that reference each other use the live-in, like the chained
     # pattern) -- the frontend's parallel slot semantics make this faithful, but binding locals keeps the source clear.
@@ -982,7 +917,7 @@ def generate_stateful_kernel(
     # The chained-slot pattern: slot i captures slot (i+1)'s old value; the last slot advances from an input.
     for i, s in enumerate(slots):
         if i + 1 < n_slots and em.chance(0.6):
-            em.emit(f"self.{s} = {olds[slots[i + 1]]}")  # chained: ``self._a = old of self._b``
+            em.emit(f"self.{s} = {olds[slots[i + 1]]}")
         else:
             em.emit(f"self.{s} = {em.pick_float()} + {em.small_literal()}")
 
@@ -1018,7 +953,6 @@ def generate_stateful_kernel(
 def _assemble_class(
     name: str, inputs: list[str], slots: list[str], resets: list[float], body: str, return_line: str
 ) -> str:
-    """Assemble the full module source for a stateful kernel: a class with literal-initialized private slots."""
     init_lines = "\n".join(f"        self.{slot} = {reset!r}" for slot, reset in zip(slots, resets))
     sig = ", ".join(inputs)
     return (
@@ -1033,20 +967,12 @@ def _assemble_class(
 
 
 def generate_kernel(master_seed: int, index: int, fmt: FloatFormat = _DEFAULT_EXACT_FMT) -> GeneratedKernel:
-    """
-    Render kernel ``index`` of a campaign: stateful ~30% of the time, stateless otherwise. Reproducible by ``(seed,
-    index)`` regardless of order.
-    """
+    """Reproducible by ``(seed, index)`` regardless of draw order, so any kernel replays from its provenance alone."""
     name = f"fuzz_k_{master_seed:x}_{index}"
     rng = np.random.default_rng(np.random.SeedSequence([master_seed, index, 0x5A5A]))
     if rng.random() < 0.3:
         return generate_stateful_kernel(name, master_seed, index, fmt)
     return generate_stateless_kernel(name, master_seed, index, fmt)
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# The differential runner.
-# --------------------------------------------------------------------------------------------------------------------
 
 
 class CheckKind(Enum):
@@ -1116,7 +1042,6 @@ def _build_with_lir(
 
 
 def _build_all(fn: Callable[..., object], ops: OpConfig, name: str) -> tuple[Mir, NumericalSimulator, MirInterpreter]:
-    """Build the MIR-backed numerical model and interpreter through the same lowering path."""
     mir, _, model, interpreter = _build_with_lir(fn, ops, name)
     return mir, model, interpreter
 
@@ -1266,7 +1191,6 @@ def _assert_danger_survived(kernel: GeneratedKernel, mir: Mir, op_label: str) ->
 
 
 def _port_vector(model: NumericalSimulator, fmt: FloatFormat, values: dict[str, float | bool]) -> Vector:
-    """Build a positional input vector in the model's port order from a name->value mapping."""
     vector: Vector = []
     for port in model.inputs:
         raw = values[port.name]
@@ -1278,7 +1202,6 @@ def _port_vector(model: NumericalSimulator, fmt: FloatFormat, values: dict[str, 
 
 
 def _vector_from_bits(model: NumericalSimulator, fmt: FloatFormat, bits: dict[str, int]) -> Vector:
-    """Build a positional input vector from a name->ZKF-bits mapping (the saved-reproducer encoding)."""
     vector: Vector = []
     for port in model.inputs:
         raw = bits[port.name]
@@ -1448,8 +1371,6 @@ def _secondary_ok(
 
 @dataclass(frozen=True, slots=True)
 class _SecondaryOutcome:
-    """The result of the secondary float64 check for one vector: whether it ran, and any finite EXACT-mode mismatch."""
-
     checked: bool  # True if the float64 reference was finite and the lanes were compared
     latch_off: bool  # True if a stateful kernel's float64 reference has drifted -> stop the secondary for the sequence
     exact_failure: str | None  # a finite EXACT-mode divergence detail (a real bug), else None
@@ -1487,7 +1408,6 @@ class _Differential:
         self._op_count = op_count
 
     def primary(self, vector: Vector) -> tuple[list[FloatValue | bool], str | None]:
-        """Run both engines and return the model output plus the interp-vs-model mismatch detail (None when equal)."""
         model_out = self.model.run(*vector)
         interp_out = self.interpreter.run(*vector)
         if model_out == interp_out:
@@ -1639,7 +1559,6 @@ def _run_campaign_kernel(
     *,
     expect_armed: bool = False,
 ) -> None:
-    """Record one campaign kernel and sweep it across every operator configuration."""
     stats.record_kernel(kernel)
     for op_label, make_ops in OP_CONFIGS.items():
         divergence = run_kernel(kernel, op_label, make_ops(fmt), fmt, effort, n_vectors, stats, expect_armed)
@@ -1678,10 +1597,6 @@ def run_campaign(
     return stats
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Reproducer persistence (a self-contained replayable case under tests/fuzz_regressions/).
-# --------------------------------------------------------------------------------------------------------------------
-
 REGRESSIONS_DIR = Path(__file__).resolve().parent / "fuzz_regressions"
 
 
@@ -1710,7 +1625,6 @@ class ReproMeta:
     vectors_bits: list[dict[str, int]]
 
     def to_dict(self) -> dict[str, object]:
-        """The serializable dict literal embedded in the saved reproducer (enums as names/values, the format split)."""
         return {
             "kernel_name": self.kernel_name,
             "op_label": self.op_label,
@@ -1752,9 +1666,8 @@ class ReproMeta:
 
 def save_reproducer(divergence: Divergence, fmt: FloatFormat) -> Path:
     """
-    Write a self-contained reproducer for a divergence into :data:`REGRESSIONS_DIR`: the rendered kernel source, the
-    failing input vectors as exact ZKF bits, the op-config label, the triggering effort, the format, and which check
-    failed. The replayer (``test_fuzz_regressions``) globs these and re-asserts the previously-failing check.
+    Write a self-contained reproducer into :data:`REGRESSIONS_DIR`. The replayer (``test_fuzz_regressions``) globs
+    these and re-asserts the previously-failing check.
     """
     REGRESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     kernel = divergence.kernel

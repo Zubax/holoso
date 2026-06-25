@@ -236,9 +236,11 @@ def build_microcode(
 
     def put(name: str, step: int, value: int) -> None:
         # Single-writer rule: a field's step slot may be set once to a non-default value (or repeatedly to the same
-        # value). Under per-block draining no two firings share a control word, so this never fires; once commit-side
-        # writebacks of in-flight results spill into successor words, it catches at build time any two spills colliding
-        # on one slot (e.g. a replica landing on a word another firing already drives) instead of silently clobbering.
+        # value). Every write word stays inside its block (only the result LANDING spills into a successor frame -- see
+        # pooled_writeback_word), so under per-block draining no two firings share a control word and this never fires.
+        # Under cross-block overlap a successor's base PC drops so its head words can share an absolute fetch step with
+        # the predecessor's tail words; this catches at build time any two firings' control words colliding on one slot
+        # instead of silently clobbering.
         field = fields[name]
         current = field.values[step]
         assert (

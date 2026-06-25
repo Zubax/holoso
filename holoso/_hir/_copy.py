@@ -28,10 +28,7 @@ type BuildValue = Callable[[HirBuilder, ValueId, Node, dict[ValueId, ValueId]], 
 
 
 def copy_node(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
-    """
-    Rebuild ``node`` into ``builder`` with operands/arms remapped. Block ids are preserved across a rebuild, so a phi's
-    predecessor ids need no remapping.
-    """
+    """Block ids are preserved across a rebuild, so a phi's predecessor ids need no remapping (only arm values do)."""
     match node:
         case InPort(name=name, type=type):
             return builder.input(name, type)

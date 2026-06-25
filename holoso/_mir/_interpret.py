@@ -87,16 +87,14 @@ class MirInterpreter:
 
     @property
     def inputs(self) -> list[LogicalPort]:
-        """The logical input ports in parameter order, each with its scalar type."""
         return [LogicalPort(node.name, node.scalar_type) for node in self._input_nodes()]
 
     @property
     def outputs(self) -> list[LogicalPort]:
-        """The logical output ports in return order, each with its scalar type."""
         return [LogicalPort(out.name, self._mir.nodes[out.value].scalar_type) for out in self._mir.outputs]
 
     def reset(self) -> None:
-        """Reload every persistent slot with its reset snapshot, as at rst (the live-in of the next transaction)."""
+        """Reload every slot with its reset snapshot: the live-in of the next transaction."""
         fmt = self._mir.float_format
         state: dict[str, _Value] = {}
         for slot in self._mir.state_slots:

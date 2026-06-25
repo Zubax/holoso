@@ -190,9 +190,8 @@ def _instantiate_operator(operator_cls: type, fmt: FloatFormat, overrides: dict[
 
 def _load_target(kernel: Path, expression: str) -> object:
     """
-    Resolve the synthesis target by evaluating ``expression`` in the kernel module's namespace. A bare function name
-    yields that function; an instance method -- optionally with a customized reset state -- is written out in full, e.g.
-    ``Ekf1(Q_diag=np.array([...])).update``, whose bound ``__self__`` snapshot seeds the reset values.
+    ``expression`` is evaluated in the kernel module's namespace, e.g. ``Ekf1(Q_diag=np.array([...])).update``;
+    for a bound method the ``__self__`` snapshot seeds the reset values.
     """
     sys.path.insert(0, str(kernel.resolve().parent))
     module = importlib.import_module(kernel.stem)
@@ -273,7 +272,7 @@ def main() -> int:
         return 10
 
     fmt = FloatFormat(wexp=args.wexp, wman=args.wman)
-    name = args.name or re.sub(r"\W+", "_", args.expression).strip("_")  # sanitize the expression into a module name
+    name = args.name or re.sub(r"\W+", "_", args.expression).strip("_")
     target = _load_target(Path(args.kernel), args.expression)
 
     out_dir = BUILD_ROOT / name

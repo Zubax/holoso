@@ -8,18 +8,13 @@ from ._types import BoolType, FloatType, Type
 
 @dataclass(frozen=True, slots=True)
 class Const(ABC):
-    """A typed HIR constant value."""
-
     @property
     @abstractmethod
-    def type(self) -> Type:
-        """The HIR type of this constant."""
+    def type(self) -> Type: ...
 
 
 @dataclass(frozen=True, slots=True)
 class FloatConst(Const):
-    """A floating-point constant."""
-
     value: float
 
     @property
@@ -29,8 +24,6 @@ class FloatConst(Const):
 
 @dataclass(frozen=True, slots=True)
 class BoolConst(Const):
-    """A boolean constant."""
-
     value: bool
 
     @property

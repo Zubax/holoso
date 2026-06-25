@@ -7,6 +7,37 @@ name = "holoso"
 dynamic = ["version"]
 requires-python = ">=3.14"
 description = "A simple Python-to-Verilog synthesizer for numeric kernels, control systems, and DSP."
+readme = { file = "README.md", content-type = "text/markdown" }
+authors = [{ name = "Zubax Robotics", email = "pavel.kirienko@zubax.com" }]
+keywords = [
+    "acceleration",
+    "accelerator",
+    "dsp",
+    "eda",
+    "fpga",
+    "hardware acceleration",
+    "hardware design",
+    "hdl",
+    "high level synthesis",
+    "high-level synthesis",
+    "hls",
+    "logic synthesis",
+    "python to verilog",
+    "python-to-verilog",
+    "rtl",
+    "chip design",
+    "synthesis",
+    "verilog",
+    "verilog generation",
+]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+    "Topic :: Software Development :: Code Generators",
+    "Typing :: Typed",
+]
 dependencies = [
     "numpy~=2.4",
     "scipy~=1.17",
@@ -16,7 +47,7 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "cocotb~=2.0",
-    "jaxtyping~=0.3",  # Holoso supports Jaxtyping annotations, but doesn't require Jaxtyping itself at the moment.
+    "jaxtyping~=0.3", # Holoso supports Jaxtyping annotations, but doesn't require Jaxtyping itself at the moment.
     "pytest~=9.0",
 ]
 format = [
@@ -26,8 +57,13 @@ typecheck = [
     "mypy~=2.1",
 ]
 
+[project.urls]
+Homepage = "https://holoso.digital"
+Repository = "https://github.com/Zubax/holoso"
+Forum = "https://forum.zubax.com"
+
 [tool.setuptools.dynamic]
-version = {attr = "holoso.__version__"}
+version = { attr = "holoso.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["holoso*"]

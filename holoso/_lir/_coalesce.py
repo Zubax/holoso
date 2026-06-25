@@ -13,10 +13,6 @@ from ._build_base import ColorObjective
 
 @dataclass(frozen=True, slots=True)
 class _PhiCoalescing:
-    """
-    One bank's phi-arm coalescing outcome: the class leader of every merged value and the arms that lost their copy.
-    """
-
     leader: dict[ValueId, ValueId]  # value -> class leader (a value never merged maps to itself, implicitly)
     coalesced: frozenset[tuple[int, ValueId]]  # (pred, phi) arms that share the merged register (no install copy)
 

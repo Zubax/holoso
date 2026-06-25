@@ -25,11 +25,9 @@ def _dq0_to_ac(dq0: np.ndarray, theta: float) -> np.ndarray:  # Inlined at place
     dq0 = dq0.reshape((2, 1))
     d, q = dq0[0, 0], dq0[1, 0]
     ct, st = np.cos(theta), np.sin(theta)  # Assume holoso_sincos is available.
-    # Inverse Park: dq0 -> alpha-beta-zero
-    alpha = d * ct - q * st
+    alpha = d * ct - q * st  # inverse Park
     beta = d * st + q * ct
-    # Inverse Clarke: alpha-beta-zero -> abc
-    a = alpha
+    a = alpha  # inverse Clarke
     b = -0.5 * alpha + (np.sqrt(3.0) / 2.0) * beta
     c = -0.5 * alpha - (np.sqrt(3.0) / 2.0) * beta
     return np.array([[a], [b], [c]])

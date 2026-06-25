@@ -39,7 +39,6 @@ class FloatSignControl:
     absolute: bool = False
 
     def then(self, outer: "FloatSignControl") -> "FloatSignControl":
-        """Compose two controls where ``self`` is applied first and ``outer`` after."""
         if outer.absolute:
             return FloatSignControl(negate=outer.negate, absolute=True)
         return FloatSignControl(negate=self.negate ^ outer.negate, absolute=self.absolute)
@@ -87,7 +86,6 @@ type PortConditioner = FloatSignControl | BoolInversion
 
 
 def identity_conditioner(scalar_type: ScalarType) -> PortConditioner:
-    """The identity conditioner of a port's type: a float port carries a sign control, a boolean port an inversion."""
     if isinstance(scalar_type, FloatType):
         return FloatSignControl()
     if isinstance(scalar_type, BoolType):
@@ -116,8 +114,7 @@ class HardwareOperator(ABC):
 
     @property
     @abstractmethod
-    def latency(self) -> int:
-        """Exact cycle latency of this fully specified operator instance."""
+    def latency(self) -> int: ...
 
     @property
     def initiation_interval(self) -> int:
@@ -129,12 +126,10 @@ class HardwareOperator(ABC):
         return 1
 
     @abstractmethod
-    def render(self, *operands: str) -> str:
-        """Human-friendly expression for the report and trace comments."""
+    def render(self, *operands: str) -> str: ...
 
     @property
     def is_commutative(self) -> bool:
-        """Whether operand swap (with the induced output-port permutation) preserves bit-exact semantics."""
         return self.swap_output_permutation is not None
 
     def render_output(self, port: int, conditioner: "PortConditioner", *operands: str) -> str:
@@ -148,8 +143,7 @@ class HardwareOperator(ABC):
 
     @property
     @abstractmethod
-    def signature(self) -> ScalarSignature:
-        """Concrete operand- and result-port types."""
+    def signature(self) -> ScalarSignature: ...
 
     @property
     def arity(self) -> int:
@@ -202,12 +196,10 @@ class InlineHardwareOperator(HardwareOperator, ABC):
         return 0
 
     def render(self, *operands: str) -> str:
-        """Defaults to the Verilog expression with the whitespace squeezed out; override where that reads poorly."""
         return self.verilog_expr(*operands).replace(" ", "")
 
     @abstractmethod
-    def verilog_expr(self, *operand_nets: str) -> str:
-        """The combinational RHS of this operator over the given operand net expressions."""
+    def verilog_expr(self, *operand_nets: str) -> str: ...
 
 
 class ParameterizedHardwareOperator(ABC):
@@ -222,8 +214,6 @@ class ParameterizedHardwareOperator(ABC):
 
 @dataclass(frozen=True, slots=True)
 class FloatHardwareOperator(PooledHardwareOperator, ABC):
-    """A fully specified floating-point operator bound to one ZKF format."""
-
     fmt: FloatFormat
 
     @property
@@ -251,8 +241,6 @@ class FloatHardwareOperator(PooledHardwareOperator, ABC):
 
 @dataclass(frozen=True, slots=True)
 class FloatParameterizedHardwareOperator(ParameterizedHardwareOperator, ABC):
-    """A floating-point operator family bound to one ZKF format."""
-
     fmt: FloatFormat
 
 

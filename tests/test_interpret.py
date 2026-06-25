@@ -48,7 +48,6 @@ from ._modelref import (
 
 
 def _decode_spec_vector(model: NumericalSimulator, fmt: FloatFormat, row: dict[str, int]) -> Vector:
-    """Turn one example vector (name -> ZKF bits) into positional inputs in the model's input-port order."""
     vector: Vector = []
     for port in model.inputs:
         bits = row[port.name]
@@ -112,9 +111,6 @@ def test_interpreter_matches_model_on_corners(
 
 
 def test_interpreter_matches_model_on_edge_bits() -> None:
-    """
-    A stateless corner over uniformly-random legal ZKF bit patterns (incl. extremes): exhaustive bit-pattern cross.
-    """
     fmt = FloatFormat(6, 18)
     model, interpreter = build_model_and_interpreter(branch_boundary_kernel, default_ops(fmt), "branch_boundary")
     rng = np.random.default_rng(0x5EED)

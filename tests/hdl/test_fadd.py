@@ -2,7 +2,7 @@
 Tests for holoso_fadd (pipelined; sgnop on a, b, y; y = sgnop(sgnop(a)+sgnop(b))).
 
 The wrapper delays y_sgnop through the same number of stages as zkf_add, so all sgnop controls are allowed to vary
-every input cycle. The scoreboard verifies the documented wrapper latency against actual out_valid timing.
+every input cycle.
 """
 
 import os
@@ -67,13 +67,12 @@ async def holoso_fadd_cocotb(dut) -> None:
         await Timer(1, unit="ns")
         sb.sample()
 
-    # Phase A: directed x directed, all-zero sgnops -- streams without drain.
     for a in DIRECTED_F32:
         for b in DIRECTED_F32:
             await step(a, b, 0, 0, 0)
     await sb.drain()
 
-    # Phase B: sgnop sweep. Output sign control changes every cycle to verify sideband pipelining.
+    # Sgnop sweep: output sign control changes every cycle to verify sideband pipelining.
     sample_pairs = [
         (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))], DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
         for _ in range(8)
@@ -85,7 +84,7 @@ async def holoso_fadd_cocotb(dut) -> None:
                     await step(a, b, a_op, b_op, y_op)
     await sb.drain()
 
-    # Phase C: random bulk. Inject occasional gaps to exercise the valid pipeline.
+    # Random bulk with occasional gaps to exercise the valid pipeline.
     for _ in range(get_random_count()):
         a = random_zkf_f32(rng)
         b = random_zkf_f32(rng)
@@ -98,7 +97,7 @@ async def holoso_fadd_cocotb(dut) -> None:
         await step(a, b, a_op, b_op, y_op)
     await sb.drain()
 
-    # Phase D: reset behavior. After reset, out_valid must stay deasserted while idle.
+    # After reset, out_valid must stay deasserted while idle.
     await drive_reset(dut)
     for _ in range(8):
         dut.in_valid.value = 0

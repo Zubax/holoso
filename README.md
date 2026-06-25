@@ -6,7 +6,8 @@
 
 _Simple high-level synthesis of portable Verilog from idiomatic Python_
 
-[![Try online](https://img.shields.io/badge/try_online-holoso.digital-black?color=ff0000)](https://holoso.digital/)
+[![Try online](https://img.shields.io/badge/try_online-holoso.digital-black?color=ff00ff)](https://holoso.digital/)
+[![PyPI](https://img.shields.io/pypi/v/holoso?logo=pypi&color=ffff00)](https://pypi.org/project/holoso/)
 [![Forum](https://img.shields.io/discourse/https/forum.zubax.com/users.svg?logo=discourse&color=ff0000)](https://forum.zubax.com)
 
 </div>
@@ -63,6 +64,63 @@ report that provides a human-friendly view of the processor and the microcode se
 >*They come up to me with tears in their eyes, they say sir, that schedule report, it's the most beautiful report we have ever seen.*
 
 For a detailed review of the design and trade-offs, please refer to `DESIGN.md`.
+
+### Semantics
+
+Holoso follows Python with minimal deviations where it makes sense for hardware synthesis.
+
+- Static typing only.
+- No implicit type conversions.
+- Boolean short-circuiting is not supported, all operands evaluated eagerly.
+- Floating-point precision depends on the selected floating-point format. See below for more info about floats.
+- No exceptions: division by zero, domain errors, etc. produce the closest meaningful result and assert the error flag.
+
+### Floating point
+
+The floating point engine is based on [Zubax Kulibin Float (ZKF)](https://github.com/Zubax/kulibin).
+
+Differences from IEEE 754: no NaN, no subnormals (exponent 0 always encodes +0; finite magnitudes in `(0, min_normal/2)`
+round to +0; magnitudes in `[min_normal/2, min_normal)` round to signed min_normal), no exceptions, overflow produces ±∞.
+Canonical representations do not include negative zero (it is not an error to pass negative zero though).
+
+Floating-point optimizations are fast-math style, assuming commutativity and associativity,
+allowing non-bit-exact rewrites.
+
+Infinity cases that would be NaN in IEEE 754:
+
+| Expression          | Result                         |
+|---------------------|--------------------------------|
+| +∞ + −∞             | +0                             |
+| 0⋅±∞                | +0                             |
+| 0 ÷ 0               | +0                             |
+| ±∞ ÷ ±∞             | +0                             |
+
+Non-NaN infinity cases (same intent as IEEE 754):
+
+| Expression          | Result                         |
+|---------------------|--------------------------------|
+| finite≠0 ÷ 0        | ±∞  (sign = sign of dividend)  |
+| ±∞ ÷ 0              | ±∞  (sign = sign of dividend)  |
+| finite ÷ ±∞         | +0                             |
+| ±∞⋅±∞               | ±∞  (sign = signs XOR)         |
+| finite≠0⋅±∞         | ±∞  (sign = signs XOR)         |
+
+WEXP can be chosen freely depending on the required range, while WMAN is sensitive to the chip's DSP capabilities
+and thus requires careful selection to achieve best resource utilization.
+
+| WMAN | ≈ε (interval) | Description                                                                         |
+|------|---------------|-------------------------------------------------------------------------------------|
+| 16   | 3.052e-05     | DSP tiles in Lattice iCE40 and similar                                              |
+| 18   | 7.629e-06     | Classic FPGA DSP width, very common: ECP5, PolarFire, Trion, many Intel modes, etc. |
+| 24   | 1.192e-07     | IEEE 754 binary32; also fits Versal DSP58's 27x24 asymmetric multiplier side        |
+| 27   | 1.490e-08     | Intel/Altera variable-precision DSPs                                                |
+| 32   | 4.657e-10     | 2x16                                                                                |
+| 36   | 2.910e-11     | 2x18 (very common) or native Intel/Altera 36x36-style variable-precision mode       |
+| 48   | 7.105e-15     | 2x24 or 3x16; with an 8-bit exponent amounts to 7 bytes exactly                     |
+| 53   | 2.220e-16     | IEEE 754 binary64                                                                   |
+
+Narrower WMAN is rarely practical for computation due to low precision and fast error accumulation,
+although they can still be useful for storage/exchange. One notable exception is neural networks though.
 
 ## Usage
 

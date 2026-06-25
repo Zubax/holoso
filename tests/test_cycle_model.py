@@ -49,10 +49,6 @@ def _random_inputs(lir: Lir, rng: random.Random) -> list[object]:
 
 
 def _drive(model: NumericalSimulator, inputs: list[object]) -> tuple[tuple[object, ...], int]:
-    """
-    Drive one transaction tick by tick (as a cosimulator would), returning the outputs and the in_valid->out_valid
-    latency in cycles -- the count from just after the accept edge to out_valid, exactly the cosim bench's ``waited``.
-    """
     model.set_inputs(*inputs)
     while not model.in_ready:
         model.tick(in_valid=False, out_ready=True)
@@ -121,7 +117,7 @@ def test_deep_loop_runs_in_bounded_memory() -> None:
     assert deep_cycles > shallow_cycles * 100, "the deep run must genuinely iterate thousands of times"
     # The in-flight landing buffers drain every cycle, so after the transaction they hold nothing -- the state the
     # model retains does not grow with the trip count, which is what keeps an arbitrarily deep loop bounded.
-    assert not model._pending  # noqa: SLF001  (the in-flight buffer drains every cycle)
+    assert not model._pending  # noqa: SLF001
 
 
 def _count_down(n):  # type: ignore[no-untyped-def]
