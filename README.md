@@ -107,11 +107,6 @@ Non-NaN infinity cases (same intent as IEEE 754):
 WEXP can be chosen freely depending on the required range, while WMAN is sensitive to the chip's DSP capabilities
 and thus requires careful selection to achieve best resource utilization.
 
-The floats are parameterized by the exponent width (WEXP) and mantissa width (WMAN).
-WEXP can be chosen arbitrarily depending on the required range,
-while WMAN ideally should be chosen to match the native DSP tile width of the target FPGA family, or a multiple thereof.
-A list of sensible WMAN values that are expected to work well with common target chips is provided below.
-
 | WMAN | ≈ε (interval) | Description                                                                         |
 |------|---------------|-------------------------------------------------------------------------------------|
 | 16   | 3.052e-05     | DSP tiles in Lattice iCE40 and similar                                              |
