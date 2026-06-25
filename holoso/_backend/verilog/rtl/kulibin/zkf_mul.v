@@ -14,8 +14,6 @@
 
 `default_nettype none
 
-`define ZKF_MUL_LATENCY (1 + STAGE_INPUT + STAGE_PRODUCT + STAGE_PACK + STAGE_OUTPUT)
-
 module zkf_mul #(
     parameter WEXP          = 6,    // exponent field width
     parameter WMAN          = 18,   // significand precision including the hidden bit
@@ -24,7 +22,7 @@ module zkf_mul #(
     parameter STAGE_PRODUCT = 0,    // forwarded to _zkf_pmul
     parameter STAGE_PACK    = 0,
     parameter STAGE_OUTPUT  = 0,
-    parameter LATENCY       = `ZKF_MUL_LATENCY   // must equal the register-stage count; checked below
+    parameter LATENCY       = 0
 ) (
     input wire clk,
     input wire rst,
@@ -36,6 +34,7 @@ module zkf_mul #(
     output wire                 out_valid,
     output wire [WEXP+WMAN-1:0] y
 );
+    localparam LATENCY_REF = 1 + STAGE_INPUT + STAGE_PRODUCT + STAGE_PACK + STAGE_OUTPUT;
     generate
         if ((WEXP < 2) || (WMAN < 4)) begin : g_invalid_wman
             _zkf_invalid_wexp_or_wman u_invalid();
@@ -43,7 +42,7 @@ module zkf_mul #(
         if ((STAGE_INPUT != 0) && (STAGE_INPUT != 1)) begin : g_invalid_stage_input
             _zkf_invalid_stage_input u_invalid();
         end
-        if (LATENCY != `ZKF_MUL_LATENCY) begin : g_invalid_latency
+        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
     endgenerate
@@ -152,5 +151,4 @@ module zkf_mul #(
     );
 endmodule
 
-`undef ZKF_MUL_LATENCY
 `default_nettype wire

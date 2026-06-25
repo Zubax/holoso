@@ -17,8 +17,6 @@
 
 `default_nettype none
 
-`define ZKF_RESIZE_LATENCY (STAGE_INPUT + STAGE_OUTPUT)
-
 module zkf_resize #(
     parameter WEXP_IN      = 6,
     parameter WMAN_IN      = 18,
@@ -26,7 +24,7 @@ module zkf_resize #(
     parameter WMAN_OUT     = 11,
     parameter STAGE_INPUT  = 0,
     parameter STAGE_OUTPUT = 0,
-    parameter LATENCY      = `ZKF_RESIZE_LATENCY   // must equal the register-stage count; checked below
+    parameter LATENCY      = 0
 ) (
     input wire clk,
     input wire rst,
@@ -37,6 +35,7 @@ module zkf_resize #(
     output wire                         out_valid,
     output wire [WEXP_OUT+WMAN_OUT-1:0] y
 );
+    localparam LATENCY_REF = STAGE_INPUT + STAGE_OUTPUT;
     generate
         if ((WEXP_IN < 2) || (WMAN_IN < 4) || (WEXP_OUT < 2) || (WMAN_OUT < 4)) begin : g_invalid
             _zkf_invalid_wexp_or_wman u_invalid();
@@ -47,7 +46,7 @@ module zkf_resize #(
         if ((STAGE_OUTPUT != 0) && (STAGE_OUTPUT != 1)) begin : g_invalid_stage_output
             _zkf_invalid_stage_output u_invalid();
         end
-        if (LATENCY != `ZKF_RESIZE_LATENCY) begin : g_invalid_latency
+        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
     endgenerate
@@ -191,5 +190,4 @@ module zkf_resize #(
     endgenerate
 endmodule
 
-`undef ZKF_RESIZE_LATENCY
 `default_nettype wire

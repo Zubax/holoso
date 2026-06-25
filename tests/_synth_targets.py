@@ -172,13 +172,10 @@ TARGETS: list[SynthTarget] = [
         ),
     ),
     for_example("cordic_sincos", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    # octave_index and remainder have no yosys-ecp5 target: Yosys aborts elaborating them with
-    # "_zkf_invalid_latency_mismatch ... is not part of the design" -- it instantiates the zkf_add LATENCY-guard branch
-    # though the condition is provably false (every emitted .LATENCY matches its ZKF_*_LATENCY macro, holoso_fadd
-    # forwards .LATENCY verbatim, and the sibling kernels synthesize the identical guard cleanly). The byte-identical
-    # RTL closes lean on both Diamond and Vivado, so the defect is Yosys-specific, not a Holoso latency bug (TODO.md).
+    for_example("octave_index", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("octave_index", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("octave_index", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
+    for_example("remainder", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("remainder", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("remainder", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     # The wide e8m36 EKF datapath needs extra stages, written out per row. Yosys wants a deeper multiply + an ilog2
@@ -260,8 +257,8 @@ TARGETS: list[SynthTarget] = [
 
 
 # Catalogued examples deliberately absent from the matrix, each with a reason; guarded against staleness by
-# test_synth_targets.test_every_example_has_a_synth_target. Currently empty -- every catalogued example has at least
-# one target (octave_index and remainder are Diamond/Vivado-only, see above, but still covered).
+# test_synth_targets.test_every_example_has_a_synth_target. Currently empty -- every catalogued example is covered on
+# all three tools.
 UNSYNTHESIZED: frozenset[str] = frozenset()
 
 # Every environment-variable key any target sets. The harness clears these before applying a target's own env, so an

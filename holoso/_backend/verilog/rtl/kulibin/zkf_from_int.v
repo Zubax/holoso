@@ -13,8 +13,6 @@
 
 `default_nettype none
 
-`define ZKF_FROM_INT_LATENCY (1 + STAGE_INPUT + STAGE_NORMALIZE + STAGE_PACK + STAGE_OUTPUT)
-
 module zkf_from_int #(
     parameter WEXP            = 6,
     parameter WMAN            = 18,
@@ -23,7 +21,7 @@ module zkf_from_int #(
     parameter STAGE_NORMALIZE = 0,
     parameter STAGE_PACK      = 0,
     parameter STAGE_OUTPUT    = 0,
-    parameter LATENCY         = `ZKF_FROM_INT_LATENCY   // must equal the register-stage count; checked below
+    parameter LATENCY         = 0
 ) (
     input wire clk,
     input wire rst,
@@ -34,6 +32,7 @@ module zkf_from_int #(
     output wire                  out_valid,
     output wire [WEXP+WMAN-1:0]  y
 );
+    localparam LATENCY_REF = 1 + STAGE_INPUT + STAGE_NORMALIZE + STAGE_PACK + STAGE_OUTPUT;
     generate
         if ((WEXP < 2) || (WMAN < 4) || (WINT < 2)) begin : g_invalid
             _zkf_invalid_wexp_or_wman u_invalid();
@@ -45,7 +44,7 @@ module zkf_from_int #(
         if ((STAGE_INPUT != 0) && (STAGE_INPUT != 1)) begin : g_invalid_stage_input
             _zkf_invalid_stage_input u_invalid();
         end
-        if (LATENCY != `ZKF_FROM_INT_LATENCY) begin : g_invalid_latency
+        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
     endgenerate
@@ -121,7 +120,5 @@ module zkf_from_int #(
         .sb_out(sb_out_unused)
     );
 endmodule
-
-`undef ZKF_FROM_INT_LATENCY
 
 `default_nettype wire

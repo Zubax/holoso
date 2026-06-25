@@ -28,10 +28,6 @@
 
 `default_nettype none
 
-`define ZKF_EXP2_DEGREE (((WMAN+18)/11)-1)
-`define ZKF_EXP2_LATENCY \
-    (STAGE_INPUT + STAGE_REDUCE + 4 + `ZKF_EXP2_DEGREE*(2+STAGE_PRODUCT) + STAGE_PACK + STAGE_OUTPUT)
-
 module zkf_exp2 #(
     parameter WEXP          = 6,    // exponent field width
     parameter WMAN          = 18,   // significand precision including the hidden bit
@@ -41,7 +37,7 @@ module zkf_exp2 #(
     parameter STAGE_PRODUCT = 0,    // see _zkf_pmul
     parameter STAGE_PACK    = 0,    // 0: comb pack input; 1: register pack input (+1 stage)
     parameter STAGE_OUTPUT  = 0,    // 0: combinational outputs;  1: registered outputs, +1 stage
-    parameter LATENCY       = `ZKF_EXP2_LATENCY   // must equal the register-stage count; checked below
+    parameter LATENCY       = 0
 ) (
     input wire clk,
     input wire rst,
@@ -52,6 +48,8 @@ module zkf_exp2 #(
     output wire                 out_valid,
     output wire [WEXP+WMAN-1:0] y
 );
+    localparam DEGREE = (((WMAN+18)/11)-1);
+    localparam LATENCY_REF = STAGE_INPUT + STAGE_REDUCE + 4 + DEGREE*(2+STAGE_PRODUCT) + STAGE_PACK + STAGE_OUTPUT;
     generate
         if ((WEXP < 2) || (WMAN < 4)) begin : g_invalid_wman
             _zkf_invalid_wexp_or_wman u_invalid();
@@ -67,7 +65,7 @@ module zkf_exp2 #(
         if ((STAGE_REDUCE != 0) && (STAGE_REDUCE != 1)) begin : g_invalid_stage_reduce
             _zkf_invalid_stage_reduce u_invalid();
         end
-        if (LATENCY != `ZKF_EXP2_LATENCY) begin : g_invalid_latency
+        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
     endgenerate
@@ -202,7 +200,7 @@ module zkf_exp2 #(
     // Intentional: unsupported in-range WMAN names missing _zkf_exp2_m<WMAN>, prompting table generation.
     `define ZKF_EXP2_TABLE(W) end else if (WMAN == W) begin \
         _zkf_exp2_m``W #( \
-            .D(`ZKF_EXP2_DEGREE), .WSB(SBW), \
+            .D(DEGREE), .WSB(SBW), \
             .WMULTIPLIER(WMULTIPLIER), .STAGE_PRODUCT(STAGE_PRODUCT) \
         ) u_eval ( \
             .clk(clk), .rst(rst), .in_valid(eval_in_valid), .sb_in(sb_in_e), .f(eval_f), \
@@ -300,6 +298,4 @@ module zkf_exp2 #(
     );
 endmodule
 
-`undef ZKF_EXP2_LATENCY
-`undef ZKF_EXP2_DEGREE
 `default_nettype wire
