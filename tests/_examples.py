@@ -7,8 +7,9 @@ the model vs the original Python), so the two views stay in lockstep over one so
 
 import os
 import sys
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 import numpy as np
@@ -69,6 +70,25 @@ _PID_MANUAL = [  # first update (D suppressed), then a varying measurement (D ac
 ]
 
 
+type InputVector = dict[str, float | bool]
+"""One input vector: input-name -> scalar value (a float, or a bool for a boolean-typed port)."""
+
+
+class ReferenceComparison(Enum):
+    """
+    How the Python-reference suite (``test_example_reference``) treats a kernel's scalar outputs.
+    EXACT: every float output is exact in the format (boolean logic, integer-valued counters/bytes, or exact
+    Sterbenz reductions), so it must match the float64 reference bit-for-bit. APPROXIMATE: float outputs
+    accumulate rounding (continuous arithmetic), so the comparison allows a format-derived tolerance. EXCLUDED:
+    the result is purely persistent public VECTOR state with no scalar lane to compare, so the scalar harness
+    skips it -- its aggregate-state read-back is validated against Python separately in ``test_verify``.
+    """
+
+    EXACT = "exact"
+    APPROXIMATE = "approximate"
+    EXCLUDED = "excluded"
+
+
 @dataclass(frozen=True)
 class ExampleSpec:
     """One example kernel plus the domain knowledge to drive it: a factory, a baseline, and vector generators."""
@@ -76,29 +96,30 @@ class ExampleSpec:
     name: str
     inputs: tuple[str, ...]
     make_kernel: Callable[[], Callable[..., object]]
-    nominal: dict[str, float | bool]  # baseline for the per-input edge sweep (each input perturbed in turn)
-    manual: list[dict[str, float | bool]]  # sensible vectors; an ordered sequence for stateful kernels
-    draw_random: Callable[[np.random.Generator], dict[str, float | bool]]
+    nominal: InputVector  # baseline for the per-input edge sweep (each input perturbed in turn)
+    manual: list[InputVector]  # sensible vectors; an ordered sequence for stateful kernels
+    draw_random: Callable[[np.random.Generator], InputVector]
     edge_values: tuple[float | bool, ...]
-    protected: frozenset[str] = frozenset()  # inputs swept only over positive edges to keep a divisor away from zero
-    protected_values: tuple[float, ...] = ()
+    # Per-input edge-sweep overrides: a listed input is swept over its own values instead of ``edge_values`` (e.g. a
+    # divisor pinned to positive magnitudes so it never reaches zero). Inputs absent here use ``edge_values``.
+    edge_overrides: Mapping[str, tuple[float | bool, ...]] = field(default_factory=dict)
     # The float format(s) to drive at. The matrix is e8m36 by plan; a kernel that wants a second datapath (e.g. a
     # shallow e6m18 alongside the deep e8m36, to exercise both pipeline depths) lists both here.
     formats: tuple[FloatFormat, ...] = (_FMT,)
-    # Whether the kernel's float outputs accumulate rounding (continuous arithmetic), so the Python-reference comparison
-    # must allow a format-derived tolerance. False (the default) means every float output is exact in the format --
-    # boolean logic, integer-valued counters/bytes, or exact (Sterbenz) reductions -- and must match Python bit-for-bit.
-    approximate: bool = False
-    # Whether the kernel reports its result purely as persistent PUBLIC VECTOR state (no scalar return or scalar state).
-    # The generic Python-reference harness (``test_example_reference``) compares only scalar lanes, so such a kernel is
-    # excluded there; its aggregate-state read-back is validated against Python separately in ``test_verify``.
-    vector_public_state: bool = False
+    reference: ReferenceComparison = ReferenceComparison.EXACT
+
+    def __post_init__(self) -> None:
+        inputs = set(self.inputs)
+        assert set(self.nominal) == inputs, f"{self.name}: nominal keys {set(self.nominal)} != inputs {inputs}"
+        for row in self.manual:
+            assert set(row) == inputs, f"{self.name}: manual row keys {set(row)} != inputs {inputs}"
+        assert set(self.edge_overrides) <= inputs, f"{self.name}: edge_overrides keys outside inputs {inputs}"
 
     def vectors(self, fmt: FloatFormat) -> list[dict[str, int]]:
         """The full reproducible input sequence as input-name -> ZKF-bits rows: manual, then random, then edges."""
         return [encode_inputs(fmt, row) for row in self.raw_vectors()]
 
-    def reference_vectors(self) -> list[dict[str, float | bool]]:
+    def reference_vectors(self) -> list[InputVector]:
         """
         The manual sequence then the random draw -- the inputs on which the ZKF model and the float64 Python reference
         agree to within the per-operation rounding tolerance, so the Python-reference suite drives this subset. The
@@ -109,11 +130,11 @@ class ExampleSpec:
         rng = np.random.default_rng(_SEED)
         return [*self.manual, *(self.draw_random(rng) for _ in range(_RANDOM_COUNT))]
 
-    def raw_vectors(self) -> list[dict[str, float | bool]]:
+    def raw_vectors(self) -> list[InputVector]:
         """The full reproducible input sequence as raw float/bool rows: manual, then random, then per-input edges."""
         rows = self.reference_vectors()
         for name in self.inputs:
-            values = self.protected_values if name in self.protected else self.edge_values
+            values = self.edge_overrides.get(name, self.edge_values)
             rows += [{**self.nominal, name: value} for value in values]
         return rows
 
@@ -195,7 +216,7 @@ SPECS = [
         name="madd",
         inputs=("a", "b", "c"),
         make_kernel=lambda: madd.madd,
-        approximate=True,
+        reference=ReferenceComparison.APPROXIMATE,
         nominal={"a": 1.0, "b": 1.0, "c": 1.0},
         manual=[
             {"a": 1.0, "b": 1.0, "c": 0.0},
@@ -233,7 +254,7 @@ SPECS = [
         name="poly3",
         inputs=("x", "c0", "c1", "c2", "c3"),
         make_kernel=lambda: poly3.poly3,
-        approximate=True,
+        reference=ReferenceComparison.APPROXIMATE,
         nominal={"x": 1.0, "c0": 1.0, "c1": 1.0, "c2": 1.0, "c3": 1.0},
         manual=[
             {"x": 0.0, "c0": 1.0, "c1": 2.0, "c2": 3.0, "c3": 4.0},  # evaluates to c0
@@ -251,7 +272,7 @@ SPECS = [
         name="iir1_lpf",
         inputs=("x",),
         make_kernel=lambda: IIR1LPF().__call__,
-        approximate=True,
+        reference=ReferenceComparison.APPROXIMATE,
         nominal={"x": 1.0},
         manual=[  # one continuous stream: the first sample latches y=x, then the IIR settles toward the input
             *({"x": v} for v in (1.0, 1.0, 1.0, 1.0)),
@@ -265,7 +286,7 @@ SPECS = [
         name="pid",
         inputs=_PID_INPUTS,
         make_kernel=lambda: PID().__call__,
-        approximate=True,
+        reference=ReferenceComparison.APPROXIMATE,
         nominal={"setpoint": 1.0, "measurement": 0.0, "dt": 1.0},
         manual=_PID_MANUAL,
         draw_random=lambda rng: {
@@ -273,8 +294,7 @@ SPECS = [
             "dt": log_uniform_positive(rng, 0.125, 4.0),
         },
         edge_values=_WIDE_EDGES,
-        protected=frozenset({"dt"}),
-        protected_values=_POSITIVE_DIVISOR_EDGES,
+        edge_overrides={"dt": _POSITIVE_DIVISOR_EDGES},
     ),
     ExampleSpec(
         name="schmitt_trigger",
@@ -431,14 +451,13 @@ SPECS = [
         name="recip_newton",
         inputs=("x",),
         make_kernel=lambda: NewtonReciprocal().__call__,
-        approximate=True,
+        reference=ReferenceComparison.APPROXIMATE,
         nominal={"x": 1.0},
         manual=[{"x": v} for v in (0.5, 0.75, 1.0, 1.3, 1.7, 2.0)],  # across the [0.5, 2.0] reciprocal domain
         draw_random=_draw_scalars(("x",), 0.5, 2.0),
         # The Newton iteration only converges on its domain; off-domain x diverges and the data-dependent back-edge
         # loop never terminates, so the edge sweep is pinned to the domain rather than the full format edge set.
-        protected=frozenset({"x"}),
-        protected_values=(0.5, 0.75, 1.0, 1.5, 2.0),
+        edge_overrides={"x": (0.5, 0.75, 1.0, 1.5, 2.0)},
         edge_values=_WIDE_EDGES,
     ),
     ExampleSpec(
@@ -454,8 +473,7 @@ SPECS = [
         draw_random=lambda rng: {"x": bounded(rng, -8.0, 8.0), "y": log_uniform_positive(rng, 0.25, 4.0)},
         # The divisor must stay nonzero (y == 0 makes the scaled-subtraction loop run forever), and the magnitude
         # ratio is bounded to keep the data-dependent trip count -- hence the simulation length -- small.
-        protected=frozenset({"y"}),
-        protected_values=(0.25, 0.5, 1.0, 2.0, 4.0),
+        edge_overrides={"y": (0.25, 0.5, 1.0, 2.0, 4.0)},
         edge_values=(0.0, 0.5, -0.5, 1.0, -1.0, 3.0, -3.0, 8.0),
     ),
     ExampleSpec(
@@ -467,8 +485,7 @@ SPECS = [
         # x must stay nonzero (x == 0 makes the magnitude loop run forever) and bounded in magnitude (the trip count is
         # the octave distance, hence the simulation length); abs() folds the sign in, so the random sweep is positive.
         draw_random=lambda rng: {"x": log_uniform_positive(rng, 2**-5, 2**5)},
-        protected=frozenset({"x"}),
-        protected_values=(0.25, 0.5, 1.0, 2.0, 8.0),
+        edge_overrides={"x": (0.25, 0.5, 1.0, 2.0, 8.0)},
         edge_values=(0.25, 0.5, 1.0, 2.0, 8.0),
         formats=(FloatFormat(6, 18), _FMT),  # the shallow and deep datapaths, both bit-exact against the model
     ),
@@ -476,7 +493,7 @@ SPECS = [
         name="cordic_sincos",
         inputs=("theta",),
         make_kernel=lambda: CordicSinCos().__call__,
-        approximate=True,
+        reference=ReferenceComparison.APPROXIMATE,
         nominal={"theta": 0.5},
         manual=[{"theta": v} for v in (0.0, 0.3, 0.7, -0.5, 1.0, -1.0)],  # angles within the convergence range
         draw_random=_draw_scalars(("theta",), -1.4, 1.4),
@@ -486,7 +503,7 @@ SPECS = [
         name="integrator",
         inputs=("x", "dt"),
         make_kernel=lambda: TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__,
-        approximate=True,
+        reference=ReferenceComparison.APPROXIMATE,
         nominal={"x": 1.0, "dt": 1.0e-3},
         manual=[  # one continuous stream: settle at zero, a step, an impulse, then a ramp
             *({"x": v, "dt": 1.0e-3} for v in (0.0, 0.0, 1.0, 1.0, 1.0, 1.0)),
@@ -494,15 +511,14 @@ SPECS = [
             *({"x": v, "dt": 5.0e-4} for v in (1.0, 2.0, 3.0, 4.0)),
         ],
         draw_random=lambda rng: {"x": bounded(rng, -4.0, 4.0), "dt": log_uniform_positive(rng, 1.0e-4, 1.0e-2)},
-        protected=frozenset({"dt"}),
-        protected_values=(0.0, 1.0e-4, 1.0e-3, 1.0e-2),
+        edge_overrides={"dt": (0.0, 1.0e-4, 1.0e-3, 1.0e-2)},
         edge_values=_WIDE_EDGES,
     ),
     ExampleSpec(
         name="ekf1_stateless",
         inputs=_EKF_STATELESS_INPUTS,
         make_kernel=lambda: ekf1_stateless.update_x_P,
-        approximate=True,
+        reference=ReferenceComparison.APPROXIMATE,
         nominal={
             "P00": 1.0, "P01": 0.0, "P02": 0.0, "P11": 1.0, "P12": 0.0, "P22": 1.0,
             "Q_R": 1e-3, "Q_g": 1e-3, "Q_i": 1e-3, "R_ct": 1e2, "R_shunt": 1e2, "dt": 1e-2,
@@ -521,14 +537,13 @@ SPECS = [
         ],
         draw_random=_draw_ekf_stateless,
         edge_values=_EKF_EDGES,
-        protected=frozenset({"R_ct", "R_shunt"}),
-        protected_values=_POSITIVE_DIVISOR_EDGES,
+        edge_overrides={"R_ct": _POSITIVE_DIVISOR_EDGES, "R_shunt": _POSITIVE_DIVISOR_EDGES},
     ),
     ExampleSpec(
         name="ekf1_stateful",
         inputs=("dt", "u_shunt", "di_dt"),
         make_kernel=_fresh_stateful_ekf,
-        vector_public_state=True,  # result is the carried x/P_urt vectors; excluded from the scalar reference harness
+        reference=ReferenceComparison.EXCLUDED,  # carried x/P_urt vectors only; no scalar lane for the reference harness
         nominal={"dt": 1e-2, "u_shunt": 0.5, "di_dt": 0.5},
         manual=[  # a short measurement sequence threaded through the carried state
             {"dt": 1e-2, "u_shunt": 0.0, "di_dt": 0.0},

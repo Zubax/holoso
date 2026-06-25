@@ -11,7 +11,8 @@ from holoso import SynthesisResult
 from .._detect import find_tool
 from .._ooc import build_ooc_wrapper
 from .._synth import CommandSpec, ResourceUse, SourceFile, SynthArtifact, SynthReport, assemble, run_logged
-from . import Flow
+from .._flow_id import FlowId
+from ._flow import Flow
 
 _TCL = "run_diamond.tcl"
 _LOG = "diamond.log"
@@ -52,7 +53,7 @@ class DiamondEcp5Flow(Flow):
             return _parse(self, directory)
 
         return SynthArtifact(
-            flow="diamond-ecp5", top=top, files=[*src, lpf, sty, ldf, tcl], commands=commands, runner=runner
+            flow=FlowId.DIAMOND_ECP5, top=top, files=[*src, lpf, sty, ldf, tcl], commands=commands, runner=runner
         )
 
 
@@ -214,7 +215,7 @@ def _parse(flow: DiamondEcp5Flow, directory: Path) -> SynthReport:
     }
 
     return SynthReport(
-        flow="diamond-ecp5",
+        flow=FlowId.DIAMOND_ECP5,
         target_frequency_MHz=target,
         fmax_MHz=fmax_MHz,
         slack_ns=1000.0 / target - 1000.0 / fmax_MHz,

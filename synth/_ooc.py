@@ -57,6 +57,15 @@ def _decl(width: int) -> str:
     return f"[{width - 1}:0] " if width > 1 else ""
 
 
+def _bus(width: int) -> str:
+    """
+    Declaration prefix for a primary IO word that is always bit-sliced (io_in): force a vector even at width 1, so a
+    1-bit slice ``io_in[0:0]`` is legal. A scalar ``wire`` collapsed by ``_decl`` is not indexable under strict
+    elaborators (Diamond/Vivado reject ``cannot index into non-array``), only under lenient Yosys.
+    """
+    return f"[{width - 1}:0] "
+
+
 def _zext(reg: str, width: int, target: int) -> str:
     if width >= target:
         return reg
@@ -139,7 +148,7 @@ def _render(
         "output wire out_valid",
     ]
     if has_inputs:
-        ports.append(f"input  wire {_decl(io_in_width)}io_in")
+        ports.append(f"input  wire {_bus(io_in_width)}io_in")
         if in_sel_width > 0:
             ports.append(f"input  wire {_decl(in_sel_width)}in_sel")
     ports.append(f"output wire {_decl(io_out_width)}io_out")

@@ -8,7 +8,8 @@ from holoso import SynthesisResult
 from .._detect import find_tool, require_tool
 from .._ooc import build_ooc_wrapper
 from .._synth import CommandSpec, ResourceUse, SourceFile, SynthArtifact, SynthReport, assemble, run_logged
-from . import Flow
+from .._flow_id import FlowId
+from ._flow import Flow
 
 _TCL = "run_vivado.tcl"
 _XDC = "ooc.xdc"
@@ -23,7 +24,7 @@ class XilinxPart:
 
 
 @dataclass(frozen=True, slots=True)
-class VivadoFlow(Flow):
+class VivadoArtix7Flow(Flow):
     part: XilinxPart = field(default_factory=XilinxPart)
     target_frequency_MHz: float = 100.0
     options: dict[str, Any] = field(default_factory=dict)
@@ -50,7 +51,9 @@ class VivadoFlow(Flow):
             )
             return _parse(self, directory)
 
-        return SynthArtifact(flow="vivado", top=top, files=[*src, xdc, tcl], commands=commands, runner=runner)
+        return SynthArtifact(
+            flow=FlowId.VIVADO_ARTIX7, top=top, files=[*src, xdc, tcl], commands=commands, runner=runner
+        )
 
 
 def _tcl(top: str, part: str, verilog_paths: list[Path]) -> str:
@@ -85,7 +88,7 @@ def _parse_utilization(text: str) -> dict[str, ResourceUse]:
     return resources
 
 
-def _parse(flow: VivadoFlow, directory: Path) -> SynthReport:
+def _parse(flow: VivadoArtix7Flow, directory: Path) -> SynthReport:
     timing = (directory / _TIMING).read_text(errors="replace")
     slack_match = re.search(r"Slack\s*\((?:MET|VIOLATED)\)\s*:\s*(-?[0-9.]+)\s*ns", timing)
     if not slack_match:
@@ -98,7 +101,7 @@ def _parse(flow: VivadoFlow, directory: Path) -> SynthReport:
     resources = _parse_utilization((directory / _UTIL).read_text(errors="replace"))
 
     return SynthReport(
-        flow="vivado",
+        flow=FlowId.VIVADO_ARTIX7,
         target_frequency_MHz=target,
         fmax_MHz=fmax_MHz,
         slack_ns=slack_ns,

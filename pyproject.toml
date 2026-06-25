@@ -49,6 +49,7 @@ test = [
     "cocotb~=2.0",
     "jaxtyping~=0.3", # Holoso supports Jaxtyping annotations, but doesn't require Jaxtyping itself at the moment.
     "pytest~=9.0",
+    "pytest-xdist~=3.8", # parallel workers; the synth_examples session pins -n explicitly (RAM-bound wide PAR)
 ]
 
 [project.urls]
@@ -73,6 +74,7 @@ addopts = ["-v", "-p", "no:mypy"]
 markers = [
     "cosim: end-to-end cocotb cosimulation; slow, needs a simulator",
     "fuzz: end-to-end blackbox differential fuzzing; slow, no simulator",
+    "synth: end-to-end out-of-context FPGA synthesis of the example matrix; slow, needs a synthesis tool",
 ]
 
 [tool.black]
