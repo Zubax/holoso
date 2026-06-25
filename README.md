@@ -6,7 +6,8 @@
 
 _Simple high-level synthesis of portable Verilog from idiomatic Python_
 
-[![Try online](https://img.shields.io/badge/try_online-holoso.digital-black?color=ff0000)](https://holoso.digital/)
+[![Try online](https://img.shields.io/badge/try_online-holoso.digital-black?color=ff00ff)](https://holoso.digital/)
+[![PyPI](https://img.shields.io/pypi/v/holoso?logo=pypi&color=ffff00)](https://pypi.org/project/holoso/)
 [![Forum](https://img.shields.io/discourse/https/forum.zubax.com/users.svg?logo=discourse&color=ff0000)](https://forum.zubax.com)
 
 </div>
