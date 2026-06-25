@@ -63,13 +63,13 @@ def fuzz(session: nox.Session) -> None:
 
 @nox.session
 def typecheck(session: nox.Session) -> None:
-    session.install("-e", ".[typecheck]")
+    session.install("-e", ".", "mypy~=2.1")
     session.run("mypy", *session.posargs)
 
 
 @nox.session
 def black(session: nox.Session) -> None:
-    session.install("-e", ".[format]")
+    session.install("black~=26.5")
     default = ("--check", "holoso", "tests", "synth", "examples", "tools", "noxfile.py")
     session.run("python", "-m", "black", *(session.posargs or default))
 

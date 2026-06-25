@@ -50,12 +50,6 @@ test = [
     "jaxtyping~=0.3", # Holoso supports Jaxtyping annotations, but doesn't require Jaxtyping itself at the moment.
     "pytest~=9.0",
 ]
-format = [
-    "black~=26.5",
-]
-typecheck = [
-    "mypy~=2.1",
-]
 
 [project.urls]
 Homepage = "https://holoso.digital"
