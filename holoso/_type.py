@@ -39,8 +39,7 @@ class FloatFormat:
 
     ``encode``/``decode`` are the bit-exact round-trip codec between Python floats and ZKF bit patterns. The layout is
     ``[sign | exponent(wexp) | stored-fraction(wman-1)]`` with a hidden leading significand bit: ``exp == 0`` is zero
-    (ZKF has no subnormals and no negative zero) and the all-ones exponent is infinity. Encoding rounds to nearest,
-    ties to even, using exact rational arithmetic.
+    and the all-ones exponent is infinity. Encoding rounds to nearest, ties to even, using exact rational arithmetic.
     """
 
     wexp: int
