@@ -547,11 +547,11 @@ class _PID:
         self.prev_error = 0.0
         self._started = False  # boolean state: the first update has no derivative
 
-    def __call__(self, setpoint, measurement):  # type: ignore[no-untyped-def]
+    def __call__(self, setpoint, measurement, dt):  # type: ignore[no-untyped-def]
         error = setpoint - measurement
-        candidate = self.integral + self.ki * error
+        candidate = self.integral + self.ki * error * dt
         if self._started:
-            derivative = self.kd * (error - self.prev_error)
+            derivative = self.kd * (error - self.prev_error) / dt
         else:
             derivative = 0.0
         self.prev_error = error
@@ -571,11 +571,22 @@ def test_model_pid_controller_all_arms_anti_windup_and_first_update() -> None:
     reference = _PID()
     ui = [p.name for p in model.outputs].index("out_0")
     rtol, atol = default_tolerance(FMT, len(model._lir.ops), magnitude=10.0)
-    stream = [(10.0, 0.0), (10.0, 0.5), (0.0, 1.0), (0.5, 0.5), (-10.0, 0.0), (-10.0, -0.5), (0.0, 0.0)]
-    for setpoint, measurement in stream:
-        got = float(model.run(setpoint, measurement)[ui])
-        assert within(got, reference(setpoint, measurement), rtol, atol)
-    assert abs(reference.integral) < 0.1  # the integrator stayed bounded despite the saturating commands
+    stream = [
+        (0.5, 0.0, 2.0, 0.3125),
+        (0.75, 0.0, 0.5, 0.5859375),
+        (10.0, 0.0, 1.0, 4.0),
+        (10.0, 0.5, 0.5, 4.0),
+        (0.0, 1.0, 1.0, -3.1015625),
+        (0.5, 0.5, 1.0, 0.2734375),
+        (-10.0, 0.0, 0.25, -4.0),
+        (-10.0, -0.5, 1.5, -4.0),
+        (0.0, 0.0, 1.0, 2.3984375),
+    ]
+    for setpoint, measurement, dt, want in stream:
+        args = (setpoint, measurement, dt)
+        got = float(model.run(*args)[ui])
+        assert reference(*args) == pytest.approx(want)
+        assert within(got, want, rtol, atol)
 
 
 def _remainder(x, y):  # type: ignore[no-untyped-def]

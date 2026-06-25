@@ -28,13 +28,6 @@ Functional comments are not prose: type-checker and linter directives, formatter
 pragmas, shebangs, and encoding lines. Preserve every one. Never delete a docstring that is a block's only body
 — it breaks syntax; reduce it to a terse line or a bare ellipsis instead.
 
-## Calibrate with the user first
-
-A blanket percentage target often misfits the codebase: well-documented code may be mostly rationale, so an honest
-pass removes far less than a naive estimate. Sample the real comments, and if the honest reduction is far from what
-was asked, offer a concrete choice — conservative, moderate, aggressive — with real before/after examples, and let
-the user pick. Apply ONE threshold uniformly so the same kind of comment gets the same decision everywhere.
-
 ## Prove you changed nothing but comments
 
 This safety net is what lets you cut confidently. Parse each file before and after, strip the docstrings from both,
@@ -49,6 +42,7 @@ command — it destroys a sibling's concurrent work; undo mistakes by hand-editi
 of their writable set; they only run it. Fresh subagents apply a given policy more willingly than ones asked to
 reverse an earlier, more conservative instruction.
 
-When the cutting is done, audit every deletion once more for erased rationale and restore the genuine losses. Then
-format, type-check, and run the full test suite before committing. A differential fuzzer or a simulation pass, if
-the project has one, is strong independent proof that behavior is unchanged.
+When the cutting is done, audit every deletion once more for erased rationale and restore the genuine losses.
+Run review agents to cross-check the results.
+Then format, type-check, and run the full test suite before committing. A differential fuzzer or a simulation pass,
+if the project has one, is strong independent proof that behavior is unchanged.

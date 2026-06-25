@@ -54,7 +54,19 @@ _SEED = 0x05EED
 _WIDE_EDGES = tuple(_FMT.decode(bits) for bits in format_edge_bits(_FMT))
 _MIN_NORMAL = _WIDE_EDGES[5]
 _EKF_EDGES = (*_WIDE_EDGES[:7], 1e6, -1e6)
-_EKF_POSITIVE_EDGES = (0.5, 1.0, _MIN_NORMAL, 1e6)
+_POSITIVE_DIVISOR_EDGES = (0.5, 1.0, _MIN_NORMAL, 1e6)
+_PID_INPUTS = ("setpoint", "measurement", "dt")
+_PID_MANUAL = [  # first update (D suppressed), then a varying measurement (D active) driving both saturation rails
+    {"setpoint": 0.5, "measurement": 0.0, "dt": 2.0},
+    {"setpoint": 0.75, "measurement": 0.0, "dt": 0.5},
+    {"setpoint": 10.0, "measurement": 0.0, "dt": 1.0},
+    {"setpoint": 10.0, "measurement": 0.5, "dt": 0.5},
+    {"setpoint": 0.0, "measurement": 1.0, "dt": 1.0},
+    {"setpoint": 0.5, "measurement": 0.5, "dt": 1.0},
+    {"setpoint": -10.0, "measurement": 0.0, "dt": 0.25},
+    {"setpoint": -10.0, "measurement": -0.5, "dt": 1.5},
+    {"setpoint": 0.0, "measurement": 0.0, "dt": 1.0},
+]
 
 
 @dataclass(frozen=True)
@@ -251,16 +263,18 @@ SPECS = [
     ),
     ExampleSpec(
         name="pid",
-        inputs=("setpoint", "measurement"),
+        inputs=_PID_INPUTS,
         make_kernel=lambda: PID().__call__,
         approximate=True,
-        nominal={"setpoint": 1.0, "measurement": 0.0},
-        manual=[  # first update (D suppressed), then a varying measurement (D active) driving both saturation rails
-            {"setpoint": sp, "measurement": m}
-            for sp, m in [(10.0, 0.0), (10.0, 0.5), (0.0, 1.0), (0.5, 0.5), (-10.0, 0.0), (-10.0, -0.5), (0.0, 0.0)]
-        ],
-        draw_random=_draw_scalars(("setpoint", "measurement"), -6.0, 6.0),
+        nominal={"setpoint": 1.0, "measurement": 0.0, "dt": 1.0},
+        manual=_PID_MANUAL,
+        draw_random=lambda rng: {
+            **_draw_scalars(("setpoint", "measurement"), -6.0, 6.0)(rng),
+            "dt": log_uniform_positive(rng, 0.125, 4.0),
+        },
         edge_values=_WIDE_EDGES,
+        protected=frozenset({"dt"}),
+        protected_values=_POSITIVE_DIVISOR_EDGES,
     ),
     ExampleSpec(
         name="schmitt_trigger",
@@ -508,7 +522,7 @@ SPECS = [
         draw_random=_draw_ekf_stateless,
         edge_values=_EKF_EDGES,
         protected=frozenset({"R_ct", "R_shunt"}),
-        protected_values=_EKF_POSITIVE_EDGES,
+        protected_values=_POSITIVE_DIVISOR_EDGES,
     ),
     ExampleSpec(
         name="ekf1_stateful",

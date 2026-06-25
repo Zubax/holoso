@@ -65,7 +65,7 @@ class UartTx(_UartFrame):
     def __init__(self, parity: bool | None) -> None:
         super().__init__(parity)
         self._busy = False
-        self._phase = 0
+        self._phase = 0  # sub-bit countdown LAST_PHASE..0 within the current frame bit
         self._index = 0  # which frame bit is on the wire: 0 start, 1..8 data, then parity/stop
         self._shift = 0  # the byte being shifted out, current bit in the MSB
         self._parity = False  # the polarized parity bit, computed once at latch
@@ -87,28 +87,29 @@ class UartTx(_UartFrame):
 
     def __call__(self, start: bool, char: float, /) -> tuple[bool, bool]:
         if not self._busy:
-            tx = True
+            tx = True  # idle line is high
             if start:
-                self._busy = True
+                self._busy = True  # the frame begins (start bit) on the next tick
                 self._phase = LAST_PHASE
                 self._index = 0
                 self._shift = self._reverse_byte(char)  # reversed so the MSB-first shift-out emits the byte LSB first
                 self._parity = self._parity_bit(char)
         else:
             if self._index <= 0:
-                tx = False
+                tx = False  # start bit
             elif self._index <= 8:
                 # the reversed byte's MSB is the original LSB, so the wire carries the byte LSB first
-                tx = self._shift >= MSB
+                tx = self._shift >= MSB  # data bit
             elif self._index <= 9:
                 tx = self._parity if self._parity_present else True  # parity bit (E/O) or stop bit (N)
             else:
-                tx = True
+                tx = True  # stop bit (E/O)
             if self._phase <= 0:
                 if (self._index >= 1) and (self._index <= 8):
-                    self._shift = (self._shift - MSB if self._shift >= MSB else self._shift) * 2  # expose the next bit
+                    # drop the bit just sent and expose the next in the MSB
+                    self._shift = (self._shift - MSB if self._shift >= MSB else self._shift) * 2
                 if self._index >= self._last_index:
-                    self._busy = False
+                    self._busy = False  # frame complete; the next tick is idle
                 else:
                     self._index += 1
                     self._phase = LAST_PHASE
@@ -140,9 +141,9 @@ class UartRx(_UartFrame):
         if not self._busy:
             if not rx:  # falling edge into the start bit
                 self._busy = True
-                self._count = HALF_BIT
+                self._count = HALF_BIT  # the first sample lands at the middle of the start bit
                 self._index = 0
-                self._char = 0
+                self._char = 0  # begin a fresh byte
         elif self._count <= 0:
             # Mid-bit sample of frame bit ``index``.
             if self._index <= 0:

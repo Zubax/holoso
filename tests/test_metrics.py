@@ -145,77 +145,54 @@ def _measure(name: str) -> Metrics:
     )
 
 
-# Each row is an upper bound (a build must be <= every field), frozen on the current build. What explains the
-# figures, per mechanism rather than per re-freeze:
+# Each row is an upper bound (a build must be <= every field), frozen on the current build. What the figures reflect,
+# per mechanism:
 #
 # - Registers and steering reflect the unified cross-block allocator: liveness-bounded reuse with coalesced state
-#   slots, the per-(instance, port) lane accounting of BOTH banks' write selects, the comparator's read ports
-#   counted (and steered) like any other operand muxes, and commutative orientation (the comparator swaps with its
-#   gt/lt tap exchange). steering now counts the GROUND-TRUTH write-select fan-in (the emitter's full per-register
-#   write chain incl. phi-arm copies), so the figures are larger than the former pooled-lane-only proxy but reflect
-#   real hardware. Cordic's read-mux steering sits a couple of arms above the best coloring observed in its
+#   slots, per-(instance, port) lane accounting of both banks' write selects, the comparator's read ports steered like
+#   any other operand muxes, and commutative orientation (the comparator swaps with its gt/lt tap exchange). steering
+#   counts the GROUND-TRUTH write-select fan-in (the emitter's full per-register write chain incl. phi-arm copies), not
+#   a pooled-lane-only proxy. Cordic's read-mux steering sits a couple of arms above the best coloring in its
 #   near-equal-cost band -- the disclosed price of deterministic value numbering; deeper annealing is optional.
-# - copies and the phi-dense steering/registers reflect phi-arm coalescing (M5): a phi whose register-backed,
-#   identity-conditioner arms do not interfere with it (the install-free oracle decides) shares their register, so
-#   the install copy vanishes. iir1_lpf's two slot-feeding copies, remainder's diamond copies, and the boolean
-#   phi-arm writes of schmitt/quadrature/pfd coalesce away, dropping copies AND registers (recip_newton 5->4 wide,
-#   quadrature 13->8 bool) AND the true write-select fan-in (remainder 10->7); recip_newton keeps its one
-#   loop-carried copy (its phi overlaps the back-edge arm), proving the oracle refuses unsound merges.
-# - in-place state commit extends slot-live-out coalescing to BOTH banks and to conditional (phi/select) updates: a
-#   slot live-out -- an operator result, an inline select from an if-converted update, or a phi whose "unchanged" arm
-#   is the slot live-in -- is written directly into its slot register read-first, eliding the boundary copy-back and the
-#   scratch register. majority_voter's five sticky-fault latches collapse to in-place ORs (copies 5->0, steering 30->20,
-#   min_ii 20->16, last_pc 26->21); latching_fault_register, schmitt, quadrature, pfd shed their bool copy-back
-#   registers; pid (nreg 9->8) and iir1_lpf (steering 3->2) commit their float state in place. A validate-and-retry loop
-#   demotes any slot whose in-place commit the colorer finds unsound (a live-in feeding another phi, a dominator-arm
-#   clobber, an entry-block dwell tenant) back to a copy-back, so the chained-copy and overlap cases stay correct.
-# - min_ii reflects the bank-true dependency edges (latch-free boolean bank), diamond if-conversion (small pure
-#   branch diamonds become muxes -- a float select or, for a boolean/mixed merge, a bool_select reduced to and/or/not:
-#   signal_window/pid/cordic and now schmitt/pfd/iir1_lpf collapse to a single block; quadrature collapses partway
-#   bounded by the per-arm op budget; remainder converts its float AND bool diamonds, keeping only its while-loop
-#   branches), NOT-folding (a semantic NOT is a free consumer-side inversion), and cross-block software pipelining
-#   (a branch block whose successors are all single-predecessor shrinks its terminator below the drained boundary).
-#   Bool-phi if-conversion runs both arms unconditionally, so it can RAISE min_ii (the shortest static path) while
-#   LOWERING realized per-transaction latency -- the true goal, guarded by test_cycle_model's realized-latency test:
-#   iir1_lpf's rare cheap first-iteration path disappears (min_ii 15->21) but its steady-state latency drops 30->20;
-#   schmitt 27->7, pfd 48->8, quadrature 32->21, remainder every path down. Coalescing is layout-neutral, so it does
-#   not move min_ii. The register/steering side of the same trade: both arms' values are simultaneously live, so a
-#   converted diamond can need an extra register (remainder nreg 6->8, schmitt bnreg 2->3) -- the cost of the mux.
+# - copies and the phi-dense figures reflect phi-arm coalescing: a phi whose register-backed, identity-conditioner arms
+#   do not interfere with it shares their register (the install-free oracle decides), so the install copy vanishes.
+#   recip_newton keeps its one loop-carried copy (its phi overlaps the back-edge arm), proving the oracle refuses
+#   unsound merges.
+# - in-place state commit extends slot-live-out coalescing to both banks and to conditional (phi/select) updates: a
+#   slot live-out (an operator result, an inline select from an if-converted update, or a phi whose "unchanged" arm is
+#   the slot live-in) is written directly into its slot register read-first, eliding the boundary copy-back and the
+#   scratch register. A validate-and-retry loop demotes any slot whose in-place commit the colorer finds unsound (a
+#   live-in feeding another phi, a dominator-arm clobber, an entry-block dwell tenant) back to a copy-back.
+# - min_ii reflects bank-true dependency edges (latch-free boolean bank), diamond if-conversion (small pure branch
+#   diamonds become muxes -- a float select, or a bool_select reduced to and/or/not for a boolean/mixed merge),
+#   NOT-folding (a semantic NOT is a free consumer-side inversion), and cross-block software pipelining. Bool-phi
+#   if-conversion runs both arms unconditionally, so it can RAISE min_ii (the shortest static path) while LOWERING
+#   realized per-transaction latency -- the true goal, guarded by test_cycle_model. A converted diamond keeps both
+#   arms' values simultaneously live, so it can need an extra register -- the cost of the mux. Coalescing is
+#   layout-neutral and does not move min_ii.
 # - bnreg reflects exact per-consumer boolean read steps and phi coalescing: a condition consumed mid-block frees
 #   its register for a later value in the same block, and a boolean phi merging onto its arms drops its own register.
-# - last_pc and max_block_span are the stage-count guards (the "excessive number of stages" gate). They reflect the two
-#   per-block drain tighteners: (1) the bank-aware drained boundary -- a drained block carrying only boolean values at
-#   its boundary AND no tail install drains one fetch step earlier than a wide one (a pc-gated install lands at the wide
-#   boundary regardless of bank, so an install-bearing block keeps the wide drain): quadrature last_pc 28->27 (only its
-#   install-free Ret tightens; its bool-install blocks stay wide), while schmitt min_ii 8->7 and pfd 9->8 tighten on
-#   their install-free boolean-output single blocks; and (2) the coalesced-install fixpoint -- a phi-arm predecessor
-#   whose every arm coalesces installs nothing, so its +1 install drain is dropped (remainder last_pc 73->71 on its two
-#   fully-coalesced diamond arms). last_pc tiles every block's span, so a per-block drain regression anywhere inflates
-#   it; max_block_span localizes it to one block.
-# - the inline-op timing and terminator read-floor work refreezes a handful of entries. The drained boundary is the
-#   latest value LANDING per op: a block branching on a RESIDENT live-in condition shrinks to its issue-side envelope
-#   rather than the wide drain, and an inline op (a select, a bool->float cast) writes the array combinationally -- it
-#   carries no pooled writeback latch, so it lands a cycle before a pooled wide result and its block drains a cycle
-#   earlier (a non-coalesced state slot's read-first boundary copy still pays its bank's drain). The linear ROM layout
-#   cascades these into downstream bases: majority_voter min_ii 16->14/last_pc 21->19/max_block_span 14->12;
-#   signal_window 13->12 on all three; remainder min_ii 50->49/last_pc 71->70/max_block_span 22->21; cordic_sincos
-#   150->149 on all three. The tighter schedules shift liveness and are a DELIBERATE steering loosening on two kernels:
-#   signal_window (steering 7->8, bnreg 6->5) and pid (steering 10->11, bnreg 3->2) trade one freed boolean register for
-#   one write-select mux arm -- a small net-LUT cost. The bump is intrinsic (stable across annealer seeds and 10x
-#   refinement iterations, not seed-0 noise), refrozen rather than chased: the timing rules are global and
-#   correctness-neutral, and scoping them to spare a kernel would forfeit the cycle gains elsewhere.
-# - inline-class installs for any block-entry-RESIDENT source (a constant, an input, or a state read), not just literal
-#   constants: a phi-arm install reading such a source has nothing to read-first, so it fires at the combinational step
-#   and drops the +1 install drain, landing two cycles earlier than a computed-source copy. recip_newton min_ii 21->20/
-#   last_pc 47->46 (its constant arm); remainder min_ii 49->45/last_pc 70->66 and octave_index min_ii 18->16/last_pc
-#   56->53/max_block_span 27->26 (their |input| copies). Only the schedule-length guards move; nreg/bnreg/steering/copies
-#   are unchanged (the source's register is reserved to the boundary anyway, so reading it earlier frees nothing extra).
+# - last_pc and max_block_span are the stage-count guards. They reflect two per-block drain tighteners: (1) the
+#   bank-aware drained boundary -- a drained block carrying only boolean values at its boundary AND no tail install
+#   drains one fetch step earlier than a wide one (a pc-gated install lands at the wide boundary regardless of bank);
+#   and (2) the coalesced-install fixpoint -- a phi-arm predecessor whose every arm coalesces installs nothing, so its
+#   +1 install drain is dropped. The drained boundary is the latest value LANDING per op: an inline op (a select or a
+#   bool->float cast) writes the array combinationally with no pooled writeback latch, landing and draining a cycle
+#   earlier, and an install reading a block-entry-RESIDENT source (constant, input, or state read) fires at the
+#   combinational step and drops its +1 install drain. last_pc tiles every block's span (a per-block drain regression
+#   anywhere inflates it); max_block_span localizes it to one block. These timing rules move the schedule-length
+#   guards but not nreg/bnreg/steering/copies; signal_window carries a deliberately-loosened steering arm (one freed
+#   boolean register traded for one write-select mux) -- refrozen rather than chased, since the rules are global and
+#   correctness-neutral.
+# - pid uses a variable sample interval: the derivative path contains a real divide, and the first-sample and saturation
+#   guards keep the kernel multi-block with one residual copy. The larger PID row is therefore a property of the example
+#   itself, not a scheduler regression to chase.
 BASELINE: dict[str, Metrics] = {
     "madd": Metrics(True, nreg=4, bnreg=0, steering=3, copies=0, min_ii=20, last_pc=20, max_block_span=20),
     "poly3": Metrics(True, nreg=5, bnreg=0, steering=5, copies=0, min_ii=35, last_pc=35, max_block_span=35),
     "signal_window": Metrics(False, nreg=4, bnreg=5, steering=8, copies=0, min_ii=12, last_pc=12, max_block_span=12),
     "iir1_lpf": Metrics(False, nreg=3, bnreg=2, steering=2, copies=0, min_ii=21, last_pc=21, max_block_span=21),
-    "pid": Metrics(False, nreg=8, bnreg=2, steering=11, copies=0, min_ii=40, last_pc=40, max_block_span=40),
+    "pid": Metrics(False, nreg=10, bnreg=2, steering=13, copies=1, min_ii=52, last_pc=90, max_block_span=37),
     "schmitt_trigger": Metrics(False, nreg=1, bnreg=2, steering=2, copies=0, min_ii=7, last_pc=7, max_block_span=7),
     "quadrature_encoder": Metrics(False, nreg=1, bnreg=7, steering=7, copies=0, min_ii=6, last_pc=6, max_block_span=6),
     "phase_frequency_detector": Metrics(

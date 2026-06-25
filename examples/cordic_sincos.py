@@ -3,8 +3,6 @@
 Rotation-mode CORDIC computing cos(theta), sin(theta) with no multiplier on the rotation: each iteration is an
 add/subtract and a power-of-two scale ``2**-i`` (an exact shift), with a per-iteration sign decision driving the
 direction of micro-rotation. The fixed arctan table and the aggregate gain fold at compile time; the loop unrolls.
-Each unrolled iteration is a sign-branch diamond, but with both arms speculatable these if-convert to selects: the
-whole rotation collapses to one straight-line block of comparisons feeding selects over a small datapath, no branch.
 """
 
 import math

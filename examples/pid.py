@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 A PID controller with output saturation, integral anti-windup (conditional integration), and a derivative channel.
-The controller computes ``u = kp*e + (integral + ki*e) + kd*(e - e_prev)`` and saturates it to +-limit.
-The very first update is treated specially to avoid the initial spike.
+The controller computes ``u = kp*e + (integral + ki*e*dt) + kd*(e - e_prev)/dt`` for positive ``dt`` and saturates it
+to +-limit. The very first update is treated specially to avoid the initial spike.
 """
 
 from pathlib import Path
@@ -19,11 +19,11 @@ class PID:
         self.prev_error: float = 0.0  # persistent state; previous error for the derivative term
         self._started: bool = False  # boolean persistent state; False only on the first update (no derivative yet)
 
-    def __call__(self, setpoint: float, measurement: float, /) -> float:
+    def __call__(self, setpoint: float, measurement: float, dt: float, /) -> float:
         error = setpoint - measurement
-        candidate = self.integral + self.ki * error  # tentative integrator update
+        candidate = self.integral + self.ki * error * dt  # tentative integrator update
         if self._started:
-            derivative = self.kd * (error - self.prev_error)
+            derivative = self.kd * (error - self.prev_error) / dt
         else:
             derivative = 0.0  # first update: no previous error, so emit no derivative kick
         self.prev_error = error
