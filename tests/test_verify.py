@@ -1,8 +1,6 @@
 """Unit tests for the pure-Python verification core."""
 
 import pickle
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -37,6 +35,7 @@ from ._modelref import (
     unit_roundoff,
     within,
 )
+from ._examples import CordicSinCos, IIR1LPF, PID, SchmittTrigger, ekf1_stateful, ekf1_stateless, remainder
 
 F32 = FloatFormat(8, 24)
 FMT = FloatFormat(6, 18)
@@ -47,20 +46,19 @@ def _run(target):  # type: ignore[no-untyped-def]
     return lower_to_mir(optimize(lower(target)), OPS)
 
 
-def _exact_int_comparison(a):  # type: ignore[no-untyped-def]
-    # Regression (user): two compile-time integers must be compared exactly, not via a lossy float64 fold. As float64
-    # both operands round to 9007199254740992.0 and the `==` would misfold true; as integers they are distinct.
-    if 9007199254740993 == 9007199254740992:
-        r = a
-    else:
-        r = a + 1.0
-    return r
-
-
 def test_model_exact_integer_comparison_is_not_folded_via_float() -> None:
-    model = build_model(build(_run(_exact_int_comparison), "eic"))
+    def exact_int_comparison(a):  # type: ignore[no-untyped-def]
+        # Regression (user): two compile-time integers must be compared exactly, not via a lossy float64 fold. As
+        # float64 both operands round to 9007199254740992.0 and the `==` would misfold true; as integers they differ.
+        if 9007199254740993 == 9007199254740992:
+            r = a
+        else:
+            r = a + 1.0
+        return r
+
+    model = build_model(build(_run(exact_int_comparison), "eic"))
     for a in (5.0, 0.0, -2.0):
-        assert float(model.run(a)[0]) == _exact_int_comparison(a)
+        assert float(model.run(a)[0]) == exact_int_comparison(a)
 
 
 def test_codec_known_binary32_values() -> None:
@@ -387,9 +385,6 @@ def test_model_is_bit_exact_for_wide_zkf_multiply_regression() -> None:
 
 
 def test_model_matches_reference_ekf1_stateless() -> None:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1_stateless
-
     rng = np.random.default_rng(12345)
     cov = spd_matrix(rng, 3, 0.5, 2.0)
     inputs = {
@@ -434,10 +429,6 @@ def test_model_matches_reference_aggregates() -> None:
 
 
 def test_model_matches_reference_ekf1_stateful() -> None:
-    examples = str(Path(__file__).resolve().parents[1] / "examples")
-    sys.path.insert(0, examples)
-    import ekf1_stateful
-
     rng = np.random.default_rng(54321)
     cov = spd_matrix(rng, 3, 0.5, 2.0)
     p_urt = [float(cov[i, j]) for i, j in ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))]
@@ -499,26 +490,9 @@ def test_sampling_legal_and_spd() -> None:
     assert set(encoded) == {"a", "b"} and encoded["a"] == FMT.encode(1.0)
 
 
-class _Iir1Lpf:
-    """A single-pole low-pass IIR with a boolean first-sample branch (mirrors examples/iir1_lpf.py)."""
-
-    def __init__(self) -> None:
-        self.alpha = 2**-16
-        self.y = 0.0
-        self._first = True
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        if self._first:
-            self._first = False
-            self.y = x
-        else:
-            self.y += self.alpha * (x - self.y)
-        return self.y
-
-
 def test_model_executes_first_sample_branch() -> None:
-    model = build_model(build(_run(_Iir1Lpf().__call__), "iir1_lpf"))
-    reference = _Iir1Lpf()
+    model = build_model(build(_run(IIR1LPF().__call__), "iir1_lpf"))
+    reference = IIR1LPF()
     stream = [1.0, 2.0, 3.0, 0.5, -1.0, 8.0]
     rtol, atol = default_tolerance(FMT, len(model._lir.ops), magnitude=8.0)
     for index, x in enumerate(stream):
@@ -529,7 +503,7 @@ def test_model_executes_first_sample_branch() -> None:
 
 
 def test_model_branch_reset_restarts_the_first_sample_arm() -> None:
-    model = build_model(build(_run(_Iir1Lpf().__call__), "iir1_lpf"))
+    model = build_model(build(_run(IIR1LPF().__call__), "iir1_lpf"))
     model.run(1.0)
     second = float(model.run(5.0)[0])
     assert second != 5.0  # the second sample took the IIR arm, not y = x
@@ -537,38 +511,9 @@ def test_model_branch_reset_restarts_the_first_sample_arm() -> None:
     assert float(model.run(5.0)[0]) == FMT.decode(FMT.encode(5.0))  # first-sample arm again
 
 
-class _PID:
-    def __init__(self) -> None:
-        self.kp = 0.5
-        self.ki = 0.0625
-        self.kd = 0.25
-        self.limit = 4.0
-        self.integral = 0.0
-        self.prev_error = 0.0
-        self._started = False  # boolean state: the first update has no derivative
-
-    def __call__(self, setpoint, measurement, dt):  # type: ignore[no-untyped-def]
-        error = setpoint - measurement
-        candidate = self.integral + self.ki * error * dt
-        if self._started:
-            derivative = self.kd * (error - self.prev_error) / dt
-        else:
-            derivative = 0.0
-        self.prev_error = error
-        self._started = True
-        u = self.kp * error + candidate + derivative
-        if u > self.limit:
-            u = self.limit
-        elif u < -self.limit:
-            u = -self.limit
-        else:
-            self.integral = candidate
-        return u
-
-
 def test_model_pid_controller_all_arms_anti_windup_and_first_update() -> None:
-    model = build_model(build(_run(_PID().__call__), "pid"))
-    reference = _PID()
+    model = build_model(build(_run(PID().__call__), "pid"))
+    reference = PID()
     ui = [p.name for p in model.outputs].index("out_0")
     rtol, atol = default_tolerance(FMT, len(model._lir.ops), magnitude=10.0)
     stream = [
@@ -589,61 +534,35 @@ def test_model_pid_controller_all_arms_anti_windup_and_first_update() -> None:
         assert within(got, want, rtol, atol)
 
 
-def _remainder(x, y):  # type: ignore[no-untyped-def]
-    # Mirrors examples/remainder.py: boolean quotient parity, a walrus-bound ``twice_r``, augmented assignment, and the
-    # nested unit-place tie branch (``elif twice_r == ay: if quotient_is_odd:``) that the frontend folds to one branch.
-    ax, ay = abs(x), abs(y)
-    scaled = ay
-    while scaled * 2 <= ax:
-        scaled += scaled
-    r = ax
-    quotient_is_odd = False
-    while scaled > ay:  # halve down to -- but not past -- the unit place (|y|*0.5 can clamp back in subnormal-free ZKF)
-        if r >= scaled:
-            r -= scaled
-        scaled *= 0.5
-    if r >= ay:
-        r -= ay
-        quotient_is_odd = True
-    if (twice_r := r * 2) > ay:
-        r -= ay
-    elif twice_r == ay:
-        if quotient_is_odd:
-            r -= ay
-    return -r if x < 0 else r
-
-
-def _walrus(x):  # type: ignore[no-untyped-def]
-    # ``(t := x*2)`` evaluates the subexpression once, binds ``t``, and yields it to the comparison; ``t`` then stays
-    # visible to both arms (it is bound in the test, before the branch), as in Python.
-    if (t := x * 2.0) > 4.0:
-        r = t + 1.0
-    else:
-        r = t
-    return r
-
-
 def test_model_walrus_binds_once_and_stays_visible_after_the_test() -> None:
-    model = build_model(build(_run(_walrus), "walrus"))
+    def walrus(x):  # type: ignore[no-untyped-def]
+        # ``(t := x*2)`` evaluates the subexpression once, binds ``t``, and yields it to the comparison; ``t`` then
+        # stays visible to both arms (it is bound in the test, before the branch), as in Python.
+        if (t := x * 2.0) > 4.0:
+            r = t + 1.0
+        else:
+            r = t
+        return r
+
+    model = build_model(build(_run(walrus), "walrus"))
     for x in (3.0, 1.0, 2.0, -5.0, 0.0):  # >2 takes the then arm (reads t), else reads the same bound t
-        assert float(model.run(x)[0]) == _walrus(x)
-
-
-def _walrus_loop(x):  # type: ignore[no-untyped-def]
-    # A walrus reassigning a pre-defined accumulator inside a loop body must be loop-carried (a header phi), so the
-    # accumulation persists across iterations rather than resetting to the preheader value each trip.
-    acc = 0.0
-    i = 0.0
-    while i < 4.0:
-        y = (acc := acc + x)  # noqa: F841 -- the walrus side effect (rebinding acc) is the point
-        i = i + 1.0
-    return acc
+        assert float(model.run(x)[0]) == walrus(x)
 
 
 def test_model_walrus_reassigned_loop_variable_is_loop_carried() -> None:
-    model = build_model(build(_run(_walrus_loop), "walrus_loop"))
+    def walrus_loop(x):  # type: ignore[no-untyped-def]
+        # A walrus reassigning a pre-defined accumulator inside a loop body must be loop-carried (a header phi), so the
+        # accumulation persists across iterations rather than resetting to the preheader value each trip.
+        acc = 0.0
+        i = 0.0
+        while i < 4.0:
+            y = (acc := acc + x)  # noqa: F841 -- the walrus side effect (rebinding acc) is the point
+            i = i + 1.0
+        return acc
+
+    model = build_model(build(_run(walrus_loop), "walrus_loop"))
     for x in (2.5, 1.0, -3.0):  # the defect (walrus invisible to the loop scan) returns 0.0 instead of 4*x
-        assert float(model.run(x)[0]) == _walrus_loop(x)
+        assert float(model.run(x)[0]) == walrus_loop(x)
 
 
 def test_model_remainder_iterative_reduction_is_exact_and_matches_ieee() -> None:
@@ -655,7 +574,7 @@ def test_model_remainder_iterative_reduction_is_exact_and_matches_ieee() -> None
     # forever, which the explicit unit-place handling avoids.
     import math
 
-    model = build_model(build(_run(_remainder), "remainder"))
+    model = build_model(build(_run(remainder), "remainder"))
     ui = [p.name for p in model.outputs].index("out_0")
     min_normal = 2.0 ** (1 - (2 ** (FMT.wexp - 1) - 1))
     cases = [(5.0, 3.0), (10.0, 3.0), (7.5, 2.0), (-7.5, 2.0), (13.0, 4.0), (6.0, 4.0), (2.0, 4.0), (0.0, 2.0)]
@@ -665,44 +584,31 @@ def test_model_remainder_iterative_reduction_is_exact_and_matches_ieee() -> None
         assert float(model.run(x, y)[ui]) == math.remainder(x, y)
 
 
-class _SchmittTrigger:
-    def __init__(self) -> None:
-        self.high = 1.0
-        self.low = -1.0
-        self.y = 0.0
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        if x > self.high:
-            self.y = 1.0
-        elif x < self.low:
-            self.y = 0.0
-        return self.y
-
-
 def test_model_schmitt_trigger_hysteresis() -> None:
-    model = build_model(build(_run(_SchmittTrigger().__call__), "schmitt"))
-    reference = _SchmittTrigger()
+    # A float-state hysteresis variant; the examples/schmitt_trigger kernel is bool-typed, so this exercises the float
+    # state slot instead (the bool example drives test_model_public_boolean_state_output).
+    class FloatSchmittTrigger:
+        def __init__(self) -> None:
+            self.high = 1.0
+            self.low = -1.0
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if x > self.high:
+                self.y = 1.0
+            elif x < self.low:
+                self.y = 0.0
+            return self.y
+
+    model = build_model(build(_run(FloatSchmittTrigger().__call__), "schmitt"))
+    reference = FloatSchmittTrigger()
     for x in [0.0, 0.5, 1.5, 0.5, -0.5, -1.5, -0.5, 0.5, 2.0]:
         assert float(model.run(x)[0]) == reference(x)  # 0.0/1.0 are exact in ZKF
 
 
-class _BoolSchmittTrigger:
-    def __init__(self) -> None:
-        self.high = 1.0
-        self.low = -1.0
-        self.y = False
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        if x > self.high:
-            self.y = True
-        elif x < self.low:
-            self.y = False
-        return self.y
-
-
 def test_model_public_boolean_state_output() -> None:
-    model = build_model(build(_run(_BoolSchmittTrigger().__call__), "bool_schmitt"))
-    reference = _BoolSchmittTrigger()
+    model = build_model(build(_run(SchmittTrigger().__call__), "bool_schmitt"))
+    reference = SchmittTrigger()
     assert [p.name for p in model.outputs] == ["state_y"]
     for x in [0.0, 0.5, 1.5, 0.5, -0.5, -1.5, -0.5, 0.5, 2.0]:
         got = model.run(x)[0]
@@ -710,18 +616,17 @@ def test_model_public_boolean_state_output() -> None:
         assert got is reference(x)
 
 
-class _BoolToggle:
-    def __init__(self) -> None:
-        self.flag = False
-
-    def __call__(self) -> bool:
-        self.flag = not self.flag
-        return self.flag
-
-
 def test_model_boolean_only_state_output() -> None:
-    model = build_model(build(_run(_BoolToggle().__call__), "bool_toggle"))
-    reference = _BoolToggle()
+    class BoolToggle:
+        def __init__(self) -> None:
+            self.flag = False
+
+        def __call__(self) -> bool:
+            self.flag = not self.flag
+            return self.flag
+
+    model = build_model(build(_run(BoolToggle().__call__), "bool_toggle"))
+    reference = BoolToggle()
     assert [p.name for p in model.inputs] == []
     assert [p.name for p in model.outputs] == ["state_flag"]
     for _ in range(6):
@@ -768,29 +673,19 @@ def test_model_ports_carry_scalar_types() -> None:
     assert "flag: bool" in str(handle) and "x: float24" in str(handle)
 
 
-class _UnusedBoolInputStateAccumulator:
-    def __init__(self) -> None:
-        self.y = 0.0
-
-    def __call__(self, flag: bool, x):  # type: ignore[no-untyped-def]
-        self.y = self.y + x + 1.0
-        return self.y
-
-
 def test_model_unused_boolean_input_keeps_cfg_state_timing() -> None:
-    model = build_model(build(_run(_UnusedBoolInputStateAccumulator().__call__), "unused_bool"))
+    class UnusedBoolInputStateAccumulator:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def __call__(self, flag: bool, x):  # type: ignore[no-untyped-def]
+            self.y = self.y + x + 1.0
+            return self.y
+
+    model = build_model(build(_run(UnusedBoolInputStateAccumulator().__call__), "unused_bool"))
     assert model._lir.bool_inputs  # an unused boolean input is still a port and a boolean register load
     assert float(model.run(False, 2.0)[0]) == 3.0
     assert float(model.run(True, 4.0)[0]) == 8.0
-
-
-class _StateAccumulator:
-    def __init__(self) -> None:
-        self.total = 0.0
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        self.total = self.total + x
-        return self.total
 
 
 def test_run_drains_in_flight_transaction_before_presenting_new_inputs() -> None:
@@ -798,11 +693,19 @@ def test_run_drains_in_flight_transaction_before_presenting_new_inputs() -> None
     # the new inputs. Presenting first overwrites the input lanes the still-draining transaction reads, corrupting its
     # persistent-state writeback. A stateful accumulator surfaces it: after partially driving x=1, run(2.0) must carry
     # state 0+1+2 = 3 -- the bug yields 0+2+2 = 4 because the drained x=1 transaction reads the freshly-written 2.0.
-    reference = build_model(build(_run(_StateAccumulator().__call__), "acc_ref"))
+    class StateAccumulator:
+        def __init__(self) -> None:
+            self.total = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            self.total = self.total + x
+            return self.total
+
+    reference = build_model(build(_run(StateAccumulator().__call__), "acc_ref"))
     assert float(reference.run(1.0)[0]) == 1.0
     assert float(reference.run(2.0)[0]) == 3.0  # state carries across transactions
 
-    model = build_model(build(_run(_StateAccumulator().__call__), "acc"))
+    model = build_model(build(_run(StateAccumulator().__call__), "acc"))
     model.set_inputs(1.0)
     model.tick(in_valid=True, out_ready=False)  # accept x=1; the transaction is now in flight (in_ready is False)
     assert not model.in_ready and not model._pending  # mid-flight, and the accumulate op has not yet sampled x=1
@@ -848,28 +751,8 @@ def test_model_unrolled_for_loop_newton_reciprocal() -> None:
         assert math.isclose(float(model.run(x)[0]), 1.0 / x, rel_tol=1e-5)
 
 
-class _CordicSinCos:
-    def __init__(self, iterations: int = 12) -> None:
-        self.iterations = iterations
-        gain = 1.0
-        for i in range(iterations):
-            gain *= 1.0 / np.sqrt(1.0 + 2.0 ** (-2 * i))
-        self.gain = float(gain)
-        self.angles = tuple(float(np.arctan(2.0**-i)) for i in range(iterations))
-
-    def __call__(self, theta):  # type: ignore[no-untyped-def]
-        x, y, z = self.gain, 0.0, theta
-        for i in range(self.iterations):
-            if z >= 0.0:
-                x_next, y_next, z = x - y * (2.0**-i), y + x * (2.0**-i), z - self.angles[i]
-            else:
-                x_next, y_next, z = x + y * (2.0**-i), y - x * (2.0**-i), z + self.angles[i]
-            x, y = x_next, y_next
-        return x, y
-
-
 def test_model_unrolled_cordic_sin_cos() -> None:
-    model = build_model(build(_run(_CordicSinCos().__call__), "cordic"))
+    model = build_model(build(_run(CordicSinCos().__call__), "cordic"))
     cos_index, sin_index = [p.name for p in model.outputs].index("out_0"), [p.name for p in model.outputs].index(
         "out_1"
     )
@@ -878,103 +761,98 @@ def test_model_unrolled_cordic_sin_cos() -> None:
         assert abs(float(model.run(theta)[sin_index]) - np.sin(theta)) < 1e-3
 
 
-class _LoopAccumulator:
-    def __init__(self) -> None:
-        self.acc = 0.0
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        for _ in range(3):
-            self.acc = self.acc + x
-        return self.acc
-
-
 def test_model_attribute_written_only_in_loop_is_persistent_state() -> None:
     # An attribute assigned only inside a loop body must still become persistent state (regression: the write must not
     # be dropped). It accumulates within a call and carries across calls.
-    model = build_model(build(_run(_LoopAccumulator().__call__), "accum"))
+    class LoopAccumulator:
+        def __init__(self) -> None:
+            self.acc = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            for _ in range(3):
+                self.acc = self.acc + x
+            return self.acc
+
+    model = build_model(build(_run(LoopAccumulator().__call__), "accum"))
     assert [slot.name for slot in model._lir.float_state_slots] == ["acc"]
-    reference = _LoopAccumulator()
+    reference = LoopAccumulator()
     assert float(model.run(1.0)[0]) == reference(1.0)
     assert float(model.run(2.0)[0]) == reference(2.0)  # state carried across calls
 
 
-class _LiveInClobberedByLiveOut:
-    # Regression (Codex F1): a non-phi state live-out (here an input) must not be installed into the slot register in
-    # the entry block, where the branch and arms still read the live-in.
-    def __init__(self) -> None:
-        self.y = 2.0
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        if self.y > 0.0:  # reads the live-in y
-            z = self.y
-        else:
-            z = 0.0
-        self.y = x  # live-out installed only at the boundary, not before the reads above
-        return z
-
-
 def test_model_state_liveout_does_not_clobber_live_in_branch() -> None:
-    model = build_model(build(_run(_LiveInClobberedByLiveOut().__call__), "f1"))
-    reference = _LiveInClobberedByLiveOut()
+    class LiveInClobberedByLiveOut:
+        # Regression (Codex F1): a non-phi state live-out (here an input) must not be installed into the slot register
+        # in the entry block, where the branch and arms still read the live-in.
+        def __init__(self) -> None:
+            self.y = 2.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if self.y > 0.0:  # reads the live-in y
+                z = self.y
+            else:
+                z = 0.0
+            self.y = x  # live-out installed only at the boundary, not before the reads above
+            return z
+
+    model = build_model(build(_run(LiveInClobberedByLiveOut().__call__), "f1"))
+    reference = LiveInClobberedByLiveOut()
     for x in [5.0, -1.0, 3.0]:
         assert float(model.run(x)[0]) == reference(x)
 
 
-class _LiveInReadAfterPhi:
-    # Regression (Codex F2): a state phi must not be coalesced onto the slot register when the live-in is still read
-    # afterwards (here returned), or the phi install corrupts the returned live-in.
-    def __init__(self) -> None:
-        self.y = 1.0
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        old = self.y
-        if x > 0.0:
-            self.y = x
-        else:
-            self.y = x + 10.0
-        return old
-
-
 def test_model_state_phi_does_not_clobber_returned_live_in() -> None:
-    model = build_model(build(_run(_LiveInReadAfterPhi().__call__), "f2"))
-    reference = _LiveInReadAfterPhi()
+    class LiveInReadAfterPhi:
+        # Regression (Codex F2): a state phi must not be coalesced onto the slot register when the live-in is still read
+        # afterwards (here returned), or the phi install corrupts the returned live-in.
+        def __init__(self) -> None:
+            self.y = 1.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            old = self.y
+            if x > 0.0:
+                self.y = x
+            else:
+                self.y = x + 10.0
+            return old
+
+    model = build_model(build(_run(LiveInReadAfterPhi().__call__), "f2"))
+    reference = LiveInReadAfterPhi()
     for x in [2.0, 3.0, -4.0]:
         assert float(model.run(x)[0]) == reference(x)
 
 
-class _SignedStateLiveOut:
-    # Regression (Codex F3): a sign-conditioned state live-out must persist with the sign applied.
-    def __init__(self) -> None:
-        self.y = 0.0
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        if x > 0.0:
-            t = x + 1.0
-        else:
-            t = self.y
-        self.y = -t
-        return self.y
-
-
 def test_model_signed_state_liveout_persists_with_sign() -> None:
-    model = build_model(build(_run(_SignedStateLiveOut().__call__), "f3"))
-    reference = _SignedStateLiveOut()
+    class SignedStateLiveOut:
+        # Regression (Codex F3): a sign-conditioned state live-out must persist with the sign applied.
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if x > 0.0:
+                t = x + 1.0
+            else:
+                t = self.y
+            self.y = -t
+            return self.y
+
+    model = build_model(build(_run(SignedStateLiveOut().__call__), "f3"))
+    reference = SignedStateLiveOut()
     for x in [2.0, -1.0, -1.0, 4.0]:
         assert float(model.run(x)[0]) == reference(x)
-
-
-def _neg_abs_phi(x):  # type: ignore[no-untyped-def]
-    if x > 0.0:
-        y = -x
-    else:
-        y = x
-    return y
 
 
 def test_model_sign_conditioned_phi_arm() -> None:
     # Regression (#16): the merge resolution carries a per-arm folded sign, so a sign-conditioned phi arm lowers and
     # evaluates correctly (it was previously rejected with "a sign-conditioned value merged by a phi").
-    model = build_model(build(_run(_neg_abs_phi), "negabs"))
+    def neg_abs_phi(x):  # type: ignore[no-untyped-def]
+        if x > 0.0:
+            y = -x
+        else:
+            y = x
+        return y
+
+    model = build_model(build(_run(neg_abs_phi), "negabs"))
     for x in [3.0, -2.5, 0.0, 7.25, -10.0]:
         assert float(model.run(x)[0]) == (-x if x > 0.0 else x)
 
@@ -993,411 +871,396 @@ def _float_slot(lir, name):  # type: ignore[no-untyped-def]
     return next(s for s in lir.float_state_slots if s.name == name)
 
 
-class _BoolStickyLatch:
-    # A conditional bool sticky latch (the majority_voter shape): the live-out is a phi whose "unchanged" arm is the
-    # live-in, so it commits in place into the slot register -- no scratch register, no boundary copy-back.
-    def __init__(self) -> None:
-        self._f = False
-
-    def __call__(self, en: bool, x: bool):  # type: ignore[no-untyped-def]
-        if en:
-            self._f = self._f or x
-        return self._f
-
-
 def test_inplace_bool_conditional_sticky_latch() -> None:
-    lir = build(_run(_BoolStickyLatch().__call__), "sticky")
+    class BoolStickyLatch:
+        # A conditional bool sticky latch (the majority_voter shape): the live-out is a phi whose "unchanged" arm is the
+        # live-in, so it commits in place into the slot register -- no scratch register, no boundary copy-back.
+        def __init__(self) -> None:
+            self._f = False
+
+        def __call__(self, en: bool, x: bool):  # type: ignore[no-untyped-def]
+            if en:
+                self._f = self._f or x
+            return self._f
+
+    lir = build(_run(BoolStickyLatch().__call__), "sticky")
     assert not _bool_slot(lir, "_f").needs_copy  # the phi live-out coalesced onto the slot register
     model = build_model(lir)
-    reference = _BoolStickyLatch()
+    reference = BoolStickyLatch()
     t, f = True, False
     for en, x in [(f, t), (t, t), (f, f), (t, f), (f, t), (t, f), (t, t)]:
         assert bool(model.run(en, x)[0]) is reference(en, x)
 
 
-class _BoolOrSelf:
-    # An unconditional bool read-first self-update (latching_fault_register): the OR reads the live-in and writes the
-    # slot register in place. The OR is the slot live-out and is cycle-0 eligible, so it exercises the entry-block dwell
-    # floor on the live-out (without the floor it would corrupt carried state during the accept dwell).
-    def __init__(self) -> None:
-        self._f = False
-
-    def __call__(self, x: bool):  # type: ignore[no-untyped-def]
-        self._f = self._f or x
-        return self._f
-
-
 def test_inplace_bool_unconditional_self_update() -> None:
-    lir = build(_run(_BoolOrSelf().__call__), "orself")
+    class BoolOrSelf:
+        # An unconditional bool read-first self-update (latching_fault_register): the OR reads the live-in and writes
+        # the slot register in place. The OR is the slot live-out and is cycle-0 eligible, so it exercises the
+        # entry-block dwell floor on the live-out (without the floor it would corrupt carried state during the accept
+        # dwell).
+        def __init__(self) -> None:
+            self._f = False
+
+        def __call__(self, x: bool):  # type: ignore[no-untyped-def]
+            self._f = self._f or x
+            return self._f
+
+    lir = build(_run(BoolOrSelf().__call__), "orself")
     assert not _bool_slot(lir, "_f").needs_copy
     model = build_model(lir)
-    reference = _BoolOrSelf()
+    reference = BoolOrSelf()
     for x in [False, False, True, False, False]:
         assert bool(model.run(x)[0]) is reference(x)
 
 
-class _LoopPreheaderArmInPlace:
-    # A loop-carried bool state whose loop phi coalesces onto the slot register. The preheader update ``self._s or a``
-    # is the phi's ENTRY arm, computed in the entry block from resident values only (cycle-0 eligible), and it coalesces
-    # onto the slot register -- so it MUST be floored off cycle 0 by the arm-producer dwell extension, or re-firing it
-    # during the accept dwell corrupts carried state and ``_assert_entry_dwell_safe`` trips at build time. The bare
-    # slot-live-out floor does not cover it (the live-out is the loop-exit phi, not this entry-block arm), so this is
-    # the regression guard for the transitive phi-chain dwell walk.
-    def __init__(self) -> None:
-        self._s = False
-
-    def __call__(self, a: bool, n: float):  # type: ignore[no-untyped-def]
-        self._s = self._s or a
-        i = n
-        while i > 0.0:
-            self._s = self._s or a
-            i = i - 1.0
-        return self._s
-
-
 def test_inplace_loop_preheader_arm_is_dwell_safe() -> None:
-    lir = build(_run(_LoopPreheaderArmInPlace().__call__), "preheaderarm")  # must not trip _assert_entry_dwell_safe
+    class LoopPreheaderArmInPlace:
+        # A loop-carried bool state whose loop phi coalesces onto the slot register. The preheader update ``self._s or
+        # a`` is the phi's ENTRY arm, computed in the entry block from resident values only (cycle-0 eligible), and it
+        # coalesces onto the slot register -- so it MUST be floored off cycle 0 by the arm-producer dwell extension, or
+        # re-firing it during the accept dwell corrupts carried state and ``_assert_entry_dwell_safe`` trips at build
+        # time. The bare slot-live-out floor does not cover it (the live-out is the loop-exit phi, not this entry-block
+        # arm), so this is the regression guard for the transitive phi-chain dwell walk.
+        def __init__(self) -> None:
+            self._s = False
+
+        def __call__(self, a: bool, n: float):  # type: ignore[no-untyped-def]
+            self._s = self._s or a
+            i = n
+            while i > 0.0:
+                self._s = self._s or a
+                i = i - 1.0
+            return self._s
+
+    lir = build(_run(LoopPreheaderArmInPlace().__call__), "preheaderarm")  # must not trip _assert_entry_dwell_safe
     assert not _bool_slot(lir, "_s").needs_copy  # the loop phi coalesced onto the slot register
     model = build_model(lir)
-    reference = _LoopPreheaderArmInPlace()
+    reference = LoopPreheaderArmInPlace()
     t, f = True, False
     for a, n in [(f, 0.0), (t, 1.0), (f, 2.0), (t, 0.0), (f, 3.0), (t, 2.0)]:
         assert bool(model.run(a, n)[0]) is reference(a, n)
 
 
-class _WriteOnlyDwellTenant:
-    # Regression (Codex): an if-converted kernel where a temporary (``y or self._x``) lands as a gap tenant on the
-    # WRITE-ONLY ``_w`` slot's free register and is cycle-0 eligible -- a dwell hazard the live-out floor cannot see
-    # (the tenant is not a slot live-out). The validate-and-retry must demote ``_w`` to a copy-back, reserving its
-    # register so no tenant lands there; without it ``_assert_entry_dwell_safe`` trips at build time.
-    def __init__(self) -> None:
-        self._x = False
-        self._w = False
-
-    def __call__(self, cond: bool, y: bool):  # type: ignore[no-untyped-def]
-        if cond:
-            self._x = y or self._x
-            self._w = y
-        else:
-            self._w = self._x
-        return self._x, self._w
-
-
 def test_inplace_write_only_slot_dwell_tenant_is_demoted() -> None:
-    lir = build(_run(_WriteOnlyDwellTenant().__call__), "dwell_tenant")  # must not trip _assert_entry_dwell_safe
+    class WriteOnlyDwellTenant:
+        # Regression (Codex): an if-converted kernel where a temporary (``y or self._x``) lands as a gap tenant on the
+        # WRITE-ONLY ``_w`` slot's free register and is cycle-0 eligible -- a dwell hazard the live-out floor cannot see
+        # (the tenant is not a slot live-out). The validate-and-retry must demote ``_w`` to a copy-back, reserving its
+        # register so no tenant lands there; without it ``_assert_entry_dwell_safe`` trips at build time.
+        def __init__(self) -> None:
+            self._x = False
+            self._w = False
+
+        def __call__(self, cond: bool, y: bool):  # type: ignore[no-untyped-def]
+            if cond:
+                self._x = y or self._x
+                self._w = y
+            else:
+                self._w = self._x
+            return self._x, self._w
+
+    lir = build(_run(WriteOnlyDwellTenant().__call__), "dwell_tenant")  # must not trip _assert_entry_dwell_safe
     model = build_model(lir)
-    reference = _WriteOnlyDwellTenant()
+    reference = WriteOnlyDwellTenant()
     t, f = True, False
     for cond, y in [(t, t), (f, t), (t, f), (f, f), (t, t), (f, t)]:
         assert tuple(bool(v) for v in model.run(cond, y)) == tuple(bool(v) for v in reference(cond, y))
 
 
-class _FloatCondAccum:
-    # A conditional float accumulator: the live-out is the if-converted SelectOperator (an inline op) whose "false" arm
-    # is the live-in, so it commits in place into the slot register -- no scratch register, no boundary copy.
-    def __init__(self) -> None:
-        self._acc = 0.0
-
-    def __call__(self, x: float, en: bool):  # type: ignore[no-untyped-def]
-        if en:
-            self._acc = self._acc + x
-        return self._acc
-
-
 def test_inplace_float_conditional_accumulator() -> None:
-    lir = build(_run(_FloatCondAccum().__call__), "accum")
+    class FloatCondAccum:
+        # A conditional float accumulator: the live-out is the if-converted SelectOperator (an inline op) whose "false"
+        # arm is the live-in, so it commits in place into the slot register -- no scratch register, no boundary copy.
+        def __init__(self) -> None:
+            self._acc = 0.0
+
+        def __call__(self, x: float, en: bool):  # type: ignore[no-untyped-def]
+            if en:
+                self._acc = self._acc + x
+            return self._acc
+
+    lir = build(_run(FloatCondAccum().__call__), "accum")
     assert not _float_slot(lir, "_acc").needs_copy  # the select live-out coalesced onto the slot register
     model = build_model(lir)
-    reference = _FloatCondAccum()
+    reference = FloatCondAccum()
     t, f = True, False
     for x, en in [(1.0, t), (2.0, f), (3.0, t), (5.0, t), (4.0, f), (-2.0, t)]:
         assert float(model.run(x, en)[0]) == reference(x, en)
 
 
-class _ChainedFloatSlots:
-    # A chained copy ``self.a = self.b``: a's live-out is b's live-in, so NEITHER may coalesce in place -- writing b's
-    # update before a captures b's old value would corrupt a. Both keep their copy-back (the tapped_by_other guard).
-    def __init__(self) -> None:
-        self.a = 0.0
-        self.b = 1.0
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        self.a = self.b
-        self.b = self.b + x
-        return self.a
-
-
 def test_chained_float_slots_do_not_coalesce() -> None:
-    lir = build(_run(_ChainedFloatSlots().__call__), "chain")
+    class ChainedFloatSlots:
+        # A chained copy ``self.a = self.b``: a's live-out is b's live-in, so NEITHER may coalesce in place -- writing
+        # b's update before a captures b's old value would corrupt a. Both keep their copy-back (tapped_by_other guard).
+        def __init__(self) -> None:
+            self.a = 0.0
+            self.b = 1.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            self.a = self.b
+            self.b = self.b + x
+            return self.a
+
+    lir = build(_run(ChainedFloatSlots().__call__), "chain")
     assert _float_slot(lir, "a").needs_copy  # chained copy of b's live-in -- must not coalesce in place
     assert _float_slot(lir, "b").needs_copy  # tapped by a's live-out -- must not coalesce in place
     model = build_model(lir)
-    reference = _ChainedFloatSlots()
+    reference = ChainedFloatSlots()
     for x in [2.0, 3.0, 4.0, 1.0]:
         assert float(model.run(x)[0]) == reference(x)
 
 
-class _MultiArmFloatPhi:
-    # A nested, multi-arm conditional update where one arm reads the live-in: exercises the residual-install fixpoint
-    # when the live-out coalesces onto the slot register.
-    def __init__(self) -> None:
-        self._s = 0.0
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        if x > 0.0:
-            if x > 10.0:
-                self._s = x
-            else:
-                self._s = x + 1.0
-        else:
-            self._s = self._s - 1.0
-        return self._s
-
-
 def test_inplace_multiarm_float_phi() -> None:
-    lir = build(_run(_MultiArmFloatPhi().__call__), "multiarm")
+    class MultiArmFloatPhi:
+        # A nested, multi-arm conditional update where one arm reads the live-in: exercises the residual-install
+        # fixpoint when the live-out coalesces onto the slot register.
+        def __init__(self) -> None:
+            self._s = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if x > 0.0:
+                if x > 10.0:
+                    self._s = x
+                else:
+                    self._s = x + 1.0
+            else:
+                self._s = self._s - 1.0
+            return self._s
+
+    lir = build(_run(MultiArmFloatPhi().__call__), "multiarm")
     assert not _float_slot(lir, "_s").needs_copy  # the live-in is the else arm, so the live-out commits in place
     model = build_model(lir)
-    reference = _MultiArmFloatPhi()
+    reference = MultiArmFloatPhi()
     for x in [5.0, 15.0, -1.0, -1.0, 2.0, 30.0, -3.0]:
         assert float(model.run(x)[0]) == reference(x)
 
 
-class _LiveInFeedsAnotherSlotPhi:
-    # Regression: slot ``x``'s live-in is the if-arm of slot ``w``'s phi. ``x``'s live-out must NOT coalesce in place --
-    # the residual install of ``w``'s arm reads x's live-in at the predecessor tail where x's in-place write would land,
-    # which the install-free oracle cannot see (it crashed the colorer with an interfering co-assignment before the
-    # fix).
-    def __init__(self) -> None:
-        self.x = 0.0
-        self.w = 0.0
-
-    def __call__(self, cond: bool, y: float):  # type: ignore[no-untyped-def]
-        old_x = self.x  # the live-in of slot x
-        if cond:
-            self.x = y + 1.0
-            self.w = old_x  # w's if-arm is x's live-in, so x's live-in is consumed by w's phi
-        else:
-            self.w = 0.0
-        return self.x, self.w
-
-
 def test_state_livein_feeding_another_slot_phi_does_not_coalesce(monkeypatch: pytest.MonkeyPatch) -> None:
+    class LiveInFeedsAnotherSlotPhi:
+        # Regression: slot ``x``'s live-in is the if-arm of slot ``w``'s phi. ``x``'s live-out must NOT coalesce in
+        # place -- the residual install of ``w``'s arm reads x's live-in at the predecessor tail where x's in-place
+        # write would land, which the install-free oracle cannot see (it crashed the colorer with an interfering
+        # co-assignment before the fix).
+        def __init__(self) -> None:
+            self.x = 0.0
+            self.w = 0.0
+
+        def __call__(self, cond: bool, y: float):  # type: ignore[no-untyped-def]
+            old_x = self.x  # the live-in of slot x
+            if cond:
+                self.x = y + 1.0
+                self.w = old_x  # w's if-arm is x's live-in, so x's live-in is consumed by w's phi
+            else:
+                self.w = 0.0
+            return self.x, self.w
+
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # keep the diamond a real branch with phis
-    lir = build(_run(_LiveInFeedsAnotherSlotPhi().__call__), "livein_other_slot")  # must not crash the colorer
+    lir = build(_run(LiveInFeedsAnotherSlotPhi().__call__), "livein_other_slot")  # must not crash the colorer
     assert _float_slot(lir, "x").needs_copy  # x's live-in feeds w's phi -> x must stay non-coalesced (copy-back)
     model = build_model(lir)
-    reference = _LiveInFeedsAnotherSlotPhi()
+    reference = LiveInFeedsAnotherSlotPhi()
     for cond, y in [(True, 2.0), (False, 3.0), (True, -1.0), (False, 5.0), (True, 4.0)]:
         got = tuple(float(v) for v in model.run(cond, y))
         exp = tuple(float(v) for v in reference(cond, y))
         assert got == exp, (cond, y, got, exp)
 
 
-class _LiveInFeedsUnrelatedPhi:
-    # Regression: slot ``x``'s live-in is an arm of an unrelated (non-state) phi. With x's live-out coalesced and the
-    # slot register unreserved, the unrelated phi could absorb x's live-in and inherit the slot pin, colliding with x's
-    # live-out (a colorer crash before the fix). x must stay non-coalesced so its live-in register is reserved.
-    def __init__(self) -> None:
-        self.x = 0.0
-
-    def __call__(self, cond: bool):  # type: ignore[no-untyped-def]
-        new_y = self.x if cond else 0.0  # an unrelated phi taking x's live-in as an arm
-        self.x = 1.0 if cond else 2.0
-        return new_y, self.x
-
-
 def test_state_livein_feeding_unrelated_phi_does_not_coalesce(monkeypatch: pytest.MonkeyPatch) -> None:
+    class LiveInFeedsUnrelatedPhi:
+        # Regression: slot ``x``'s live-in is an arm of an unrelated (non-state) phi. With x's live-out coalesced and
+        # the slot register unreserved, the unrelated phi could absorb x's live-in and inherit the slot pin, colliding
+        # with x's live-out (a colorer crash before the fix). x must stay non-coalesced so its live-in register is
+        # reserved.
+        def __init__(self) -> None:
+            self.x = 0.0
+
+        def __call__(self, cond: bool):  # type: ignore[no-untyped-def]
+            new_y = self.x if cond else 0.0  # an unrelated phi taking x's live-in as an arm
+            self.x = 1.0 if cond else 2.0
+            return new_y, self.x
+
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # keep the diamonds real branches with phis
-    lir = build(_run(_LiveInFeedsUnrelatedPhi().__call__), "livein_unrelated")  # must not crash the colorer
+    lir = build(_run(LiveInFeedsUnrelatedPhi().__call__), "livein_unrelated")  # must not crash the colorer
     assert _float_slot(lir, "x").needs_copy  # x's live-in feeds an unrelated phi -> x must stay non-coalesced
     model = build_model(lir)
-    reference = _LiveInFeedsUnrelatedPhi()
+    reference = LiveInFeedsUnrelatedPhi()
     for cond in [True, False, True, False, True]:
         got = tuple(float(v) for v in model.run(cond))
         exp = tuple(float(v) for v in reference(cond))
         assert got == exp, (cond, got, exp)
 
 
-def _while_sum(x, n):  # type: ignore[no-untyped-def]
-    acc = 0.0
-    i = n
-    while i > 0.0:
-        acc = acc + x
-        i = i - 1.0
-    return acc
-
-
 def test_model_while_loop_accumulates() -> None:
     # Regression (#14): a variable-count while loop follows the back-edge in the model and converges to x * n.
-    model = build_model(build(_run(_while_sum), "whilesum"))
+    def while_sum(x, n):  # type: ignore[no-untyped-def]
+        acc = 0.0
+        i = n
+        while i > 0.0:
+            acc = acc + x
+            i = i - 1.0
+        return acc
+
+    model = build_model(build(_run(while_sum), "whilesum"))
     for x, n in [(1.0, 3.0), (2.0, 0.0), (0.5, 5.0), (-1.0, 4.0)]:
         assert float(model.run(x, n)[0]) == pytest.approx(x * n)
 
 
-class _WhileIntegrator:
-    # A while loop that updates a persistent state attribute a runtime number of times: exercises the state scan's
-    # while handling (the attribute must be classified as persistent state) and a loop-carried state phi.
-    def __init__(self) -> None:
-        self._total = 0.0
-
-    def __call__(self, x, n):  # type: ignore[no-untyped-def]
-        i = n
-        while i > 0.0:
-            self._total = self._total + x
-            i = i - 1.0
-        return self._total
-
-
 def test_model_while_loop_carries_persistent_state() -> None:
-    model = build_model(build(_run(_WhileIntegrator().__call__), "whileint"))
-    reference = _WhileIntegrator()
+    class WhileIntegrator:
+        # A while loop that updates a persistent state attribute a runtime number of times: exercises the state scan's
+        # while handling (the attribute must be classified as persistent state) and a loop-carried state phi.
+        def __init__(self) -> None:
+            self._total = 0.0
+
+        def __call__(self, x, n):  # type: ignore[no-untyped-def]
+            i = n
+            while i > 0.0:
+                self._total = self._total + x
+                i = i - 1.0
+            return self._total
+
+    model = build_model(build(_run(WhileIntegrator().__call__), "whileint"))
+    reference = WhileIntegrator()
     for x, n in [(1.0, 2.0), (3.0, 1.0), (0.5, 4.0), (2.0, 0.0)]:
         assert float(model.run(x, n)[0]) == pytest.approx(reference(x, n))
 
 
-def _for_counter_inside_while(x):  # type: ignore[no-untyped-def]
-    # Regression (Codex iter5): a `for` counter bound inside a `while` body is a loop-carried local; its value at the
-    # body's end must flow through the while-header phi, not be dropped when the preheader environment is restored.
-    j = 0.0
-    i = 0.0
-    while i < x:
-        for j in range(2):
-            pass
-        i = i + 1.0
-    return j
-
-
 def test_model_for_counter_inside_while_is_loop_carried() -> None:
-    model = build_model(build(_run(_for_counter_inside_while), "fciw"))
+    def for_counter_inside_while(x):  # type: ignore[no-untyped-def]
+        # Regression (Codex iter5): a `for` counter bound inside a `while` body is a loop-carried local; its value at
+        # the body's end must flow through the while-header phi, not be dropped when the preheader env is restored.
+        j = 0.0
+        i = 0.0
+        while i < x:
+            for j in range(2):
+                pass
+            i = i + 1.0
+        return j
+
+    model = build_model(build(_run(for_counter_inside_while), "fciw"))
     for x in [0.0, 1.0, 2.0, 3.0]:
-        assert float(model.run(x)[0]) == _for_counter_inside_while(x)
-
-
-class _CounterGatedWhileState:
-    # Regression (iter5): a leaked `for` counter reassigned in a `while` must be demoted from the static-int map for the
-    # whole body, so an in-body branch on it is a real runtime branch -- both arms lowered, so the attribute written on
-    # the otherwise-"folded-away" arm is correctly registered as persistent state and updated.
-    def __init__(self) -> None:
-        self.s1 = -1.0
-        self._s2 = 2.0
-
-    def step(self, a):  # type: ignore[no-untyped-def]
-        for i in range(3):
-            pass
-        w = 2.0
-        while w > 0.0:
-            if 8.0 > i:
-                self.s1 = a
-            else:
-                self._s2 = a
-            i = a
-            w = w - 1.0
-        return self._s2
-
-
-def _counter_dead_arm_in_while(x):  # type: ignore[no-untyped-def]
-    # Regression (Codex iter7): a leaked `for` counter assigned only on a statically-dead path (`if False:`) inside a
-    # `while` is NOT actually reassigned, so it stays a compile-time int -- a later static index must still resolve,
-    # not be rejected (the demotion is fold-aware: only a counter reassigned on a reachable path is demoted).
-    table = (10.0, 20.0, 30.0)
-    for i in range(3):
-        pass
-    c = x
-    while c > 0.0:
-        if False:
-            i = x  # noqa -- dead arm: i is not actually reassigned
-        c = c - 1.0
-    return table[i]
+        assert float(model.run(x)[0]) == for_counter_inside_while(x)
 
 
 def test_model_counter_assigned_only_on_dead_path_stays_static() -> None:
-    model = build_model(build(_run(_counter_dead_arm_in_while), "cdaiw"))
-    for x in [0.0, 1.0, 3.0]:
-        assert float(model.run(x)[0]) == _counter_dead_arm_in_while(x)
-
-
-def _zero_trip_inner_for(x):  # type: ignore[no-untyped-def]
-    # Regression (Codex iter8): `for i in range(0)` runs zero times and never binds `i` (Python semantics), so it must
-    # not be recorded as a loop-carried reassignment of the outer leaked counter -- the later static index still uses
-    # the outer for's leaked value.
-    table = (10.0, 20.0, 30.0)
-    for i in range(3):
-        pass
-    while x > 0.0:
-        for i in range(0):
+    def counter_dead_arm_in_while(x):  # type: ignore[no-untyped-def]
+        # Regression (Codex iter7): a leaked `for` counter assigned only on a statically-dead path (`if False:`) inside
+        # a `while` is NOT actually reassigned, so it stays a compile-time int -- a later static index must still
+        # resolve, not be rejected (the demotion is fold-aware: only a counter reassigned on a reachable path is
+        # demoted).
+        table = (10.0, 20.0, 30.0)
+        for i in range(3):
             pass
-        x = x - 1.0
-    return table[i]
+        c = x
+        while c > 0.0:
+            if False:
+                i = x  # noqa -- dead arm: i is not actually reassigned
+            c = c - 1.0
+        return table[i]
+
+    model = build_model(build(_run(counter_dead_arm_in_while), "cdaiw"))
+    for x in [0.0, 1.0, 3.0]:
+        assert float(model.run(x)[0]) == counter_dead_arm_in_while(x)
 
 
 def test_model_zero_trip_inner_for_keeps_outer_counter_static() -> None:
-    model = build_model(build(_run(_zero_trip_inner_for), "ztif"))
+    def zero_trip_inner_for(x):  # type: ignore[no-untyped-def]
+        # Regression (Codex iter8): `for i in range(0)` runs zero times and never binds `i` (Python semantics), so it
+        # must not be recorded as a loop-carried reassignment of the outer leaked counter -- the later static index
+        # still uses the outer for's leaked value.
+        table = (10.0, 20.0, 30.0)
+        for i in range(3):
+            pass
+        while x > 0.0:
+            for i in range(0):
+                pass
+            x = x - 1.0
+        return table[i]
+
+    model = build_model(build(_run(zero_trip_inner_for), "ztif"))
     for x in [0.0, 2.0, 5.0]:
-        assert float(model.run(x)[0]) == _zero_trip_inner_for(x)
+        assert float(model.run(x)[0]) == zero_trip_inner_for(x)
 
 
 def test_model_attr_written_under_counter_gated_branch_in_while() -> None:
-    model = build_model(build(_run(_CounterGatedWhileState().step), "cgws"))
-    assert "_s2" in {slot.name for slot in build(_run(_CounterGatedWhileState().step), "cgws").float_state_slots}
-    reference = _CounterGatedWhileState()
+    class CounterGatedWhileState:
+        # Regression (iter5): a leaked `for` counter reassigned in a `while` must be demoted from the static-int map for
+        # the whole body, so an in-body branch on it is a real runtime branch -- both arms lowered, so the attribute
+        # written on the otherwise-"folded-away" arm is correctly registered as persistent state and updated.
+        def __init__(self) -> None:
+            self.s1 = -1.0
+            self._s2 = 2.0
+
+        def step(self, a):  # type: ignore[no-untyped-def]
+            for i in range(3):
+                pass
+            w = 2.0
+            while w > 0.0:
+                if 8.0 > i:
+                    self.s1 = a
+                else:
+                    self._s2 = a
+                i = a
+                w = w - 1.0
+            return self._s2
+
+    model = build_model(build(_run(CounterGatedWhileState().step), "cgws"))
+    assert "_s2" in {slot.name for slot in build(_run(CounterGatedWhileState().step), "cgws").float_state_slots}
+    reference = CounterGatedWhileState()
     for a in [10.0, 9.0, 8.0, 0.0, -3.0, 12.0]:
         assert float(model.run(a)[0]) == reference.step(a)
 
 
-class _SharedConstBranchCondition:
-    # Regression (Codex F4): a constant branch condition shared by sibling branches (the interned `self.flag`) must be
-    # materialized in every branching block that uses it, not only the first, or a path through the other reads a stale
-    # boolean register.
-    def __init__(self) -> None:
-        self.flag = True
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        if x > 0.0:
-            if self.flag:
-                y = 1.0
-            else:
-                y = 2.0
-        else:
-            if self.flag:
-                y = 3.0
-            else:
-                y = 4.0
-        return y
-
-
 def test_model_shared_constant_branch_condition() -> None:
-    model = build_model(build(_run(_SharedConstBranchCondition().__call__), "f4"))
-    reference = _SharedConstBranchCondition()
+    class SharedConstBranchCondition:
+        # Regression (Codex F4): a constant branch condition shared by sibling branches (the interned `self.flag`) must
+        # be materialized in every branching block that uses it, not only the first, or a path through the other reads a
+        # stale boolean register.
+        def __init__(self) -> None:
+            self.flag = True
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if x > 0.0:
+                if self.flag:
+                    y = 1.0
+                else:
+                    y = 2.0
+            else:
+                if self.flag:
+                    y = 3.0
+                else:
+                    y = 4.0
+            return y
+
+    model = build_model(build(_run(SharedConstBranchCondition().__call__), "f4"))
+    reference = SharedConstBranchCondition()
     for x in [1.0, -1.0, 2.0, -3.0]:
         assert float(model.run(x)[0]) == reference(x)
-
-
-class _DeadLoopWrite:
-    def __init__(self) -> None:
-        self.y = 1.25
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        for _ in range(0):  # statically empty: the body never lowers
-            self.y = x
-        return self.y
-
-
-class _DeadIfWrite:
-    def __init__(self) -> None:
-        self.y = 2.5
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        if False:  # statically never taken
-            self.y = x
-        return self.y
 
 
 def test_model_statically_dead_attribute_write_is_not_state() -> None:
     # Regression (Codex F5): a write under a never-taken static branch or an empty loop must NOT be classified as
     # persistent state -- that changed the interface (a spurious state port) and crashed slot registration when the
     # dead-written attribute was not otherwise read. The attribute stays a compile-time constant.
-    for kernel, constant in [(_DeadLoopWrite, 1.25), (_DeadIfWrite, 2.5)]:
+    class DeadLoopWrite:
+        def __init__(self) -> None:
+            self.y = 1.25
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            for _ in range(0):  # statically empty: the body never lowers
+                self.y = x
+            return self.y
+
+    class DeadIfWrite:
+        def __init__(self) -> None:
+            self.y = 2.5
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if False:  # statically never taken
+                self.y = x
+            return self.y
+
+    for kernel, constant in [(DeadLoopWrite, 1.25), (DeadIfWrite, 2.5)]:
         lir = build(_run(kernel().__call__), "dead")
         assert [slot.name for slot in lir.float_state_slots] == []  # no state slot; no crash building it
         model = build_model(lir)
@@ -1405,106 +1268,101 @@ def test_model_statically_dead_attribute_write_is_not_state() -> None:
         assert float(model.run(-3.0)[0]) == constant
 
 
-class _CounterDependentEmptyInner:
-    def __init__(self) -> None:
-        self.y = 1.25
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        for i in range(1):  # the only outer trip has i == 0
-            for _ in range(i):  # range(0) on that trip: the body never lowers
-                self.y = x
-        return self.y
-
-
-class _CounterDependentLiveInner:
-    def __init__(self) -> None:
-        self.s = 0.0
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        for i in range(3):  # inner runs 0 + 1 + 2 = 3 times per call
-            for _ in range(i):
-                self.s = self.s + x
-        return self.s
-
-
 def test_model_counter_dependent_empty_inner_loop_is_not_state() -> None:
     # Regression (Codex F6): the attribute-write scan must mirror the unroll counter-by-counter, so a counter-dependent
     # inner range that is empty on every outer trip contributes no state (the scan ran before counter binding before
     # and over-approximated, crashing slot registration / adding a spurious port). A live nested loop still is state.
-    dead = build(_run(_CounterDependentEmptyInner().__call__), "f6dead")
+    class CounterDependentEmptyInner:
+        def __init__(self) -> None:
+            self.y = 1.25
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            for i in range(1):  # the only outer trip has i == 0
+                for _ in range(i):  # range(0) on that trip: the body never lowers
+                    self.y = x
+            return self.y
+
+    class CounterDependentLiveInner:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            for i in range(3):  # inner runs 0 + 1 + 2 = 3 times per call
+                for _ in range(i):
+                    self.s = self.s + x
+            return self.s
+
+    dead = build(_run(CounterDependentEmptyInner().__call__), "f6dead")
     assert [slot.name for slot in dead.float_state_slots] == []
     assert float(build_model(dead).run(9.0)[0]) == 1.25  # builds without KeyError; y stays constant
 
-    live = build(_run(_CounterDependentLiveInner().__call__), "f6live")
+    live = build(_run(CounterDependentLiveInner().__call__), "f6live")
     assert [slot.name for slot in live.float_state_slots] == ["s"]
-    model, reference = build_model(live), _CounterDependentLiveInner()
+    model, reference = build_model(live), CounterDependentLiveInner()
     for x in [1.0, 1.0, 2.0]:
         assert float(model.run(x)[0]) == reference(x)
-
-
-class _ReturnInLiteralIfArm:
-    def __init__(self) -> None:
-        self.y = 2.0
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        if True:
-            return x + self.y  # the only live path; reads y as a constant
-        self.y = x  # unreachable: lowering stops at the return above
-        return self.y
 
 
 def test_model_return_in_literal_if_arm_ends_the_scan() -> None:
     # Regression (Codex/reviewer F7): the attribute-write scan must propagate a return reached in a taken literal-if
     # arm and stop, exactly as lowering does -- otherwise the dead post-if write is misclassified as state (spurious
     # port, or a slot-registration crash when the attribute is not otherwise read).
-    lir = build(_run(_ReturnInLiteralIfArm().__call__), "f7")
+    class ReturnInLiteralIfArm:
+        def __init__(self) -> None:
+            self.y = 2.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            if True:
+                return x + self.y  # the only live path; reads y as a constant
+            self.y = x  # unreachable: lowering stops at the return above
+            return self.y
+
+    lir = build(_run(ReturnInLiteralIfArm().__call__), "f7")
     assert [slot.name for slot in lir.float_state_slots] == []
     assert float(build_model(lir).run(5.0)[0]) == 7.0
-
-
-class _CounterLeakAcrossArms:
-    def __init__(self) -> None:
-        self.y = 1.0
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        for i in range(1):  # leaves i == 0 before the branch
-            pass
-        if x > 0.0:
-            for i in range(3):  # i == 2 here, but must NOT leak into the sibling arm
-                pass
-        else:
-            for _ in range(i):  # i == 0 on this path: empty, so self.y is never written
-                self.y = x
-        return self.y
 
 
 def test_model_loop_counter_does_not_leak_across_branch_arms_in_scan() -> None:
     # Regression (Codex F8): the attribute-write scan binds loop counters to mirror the unroll, so it must snapshot and
     # restore them per branch arm (and merge afterward) -- else the then-arm's counter leaks into the else-arm and a
     # statically-empty inner range there is mistaken for a live write.
-    lir = build(_run(_CounterLeakAcrossArms().__call__), "f8")
+    class CounterLeakAcrossArms:
+        def __init__(self) -> None:
+            self.y = 1.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            for i in range(1):  # leaves i == 0 before the branch
+                pass
+            if x > 0.0:
+                for i in range(3):  # i == 2 here, but must NOT leak into the sibling arm
+                    pass
+            else:
+                for _ in range(i):  # i == 0 on this path: empty, so self.y is never written
+                    self.y = x
+            return self.y
+
+    lir = build(_run(CounterLeakAcrossArms().__call__), "f8")
     assert [slot.name for slot in lir.float_state_slots] == []
     assert float(build_model(lir).run(1.0)[0]) == 1.0  # y stays the reset constant
-
-
-class _DelayLine:
-    def __init__(self) -> None:
-        self._prev = 0.0
-        self.c = 1.0
-
-    def __call__(self, x):  # type: ignore[no-untyped-def]
-        out = self._prev
-        self._prev = self.c  # chained copy of c's live-in; c also self-accumulates below
-        self.c = self.c + x
-        return out
 
 
 def test_model_chained_state_copy_delay_line() -> None:
     # Regression (Codex F9): a unit-delay idiom -- one slot copying another slot's live-in while that slot
     # self-accumulates -- must build (the single-block allocator must not coalesce the accumulator's live-out onto its
     # register, which would clobber the live-in before the chained copy reads it) and reproduce the delayed stream.
-    model = build_model(build(_run(_DelayLine().__call__), "delay"))
-    reference = _DelayLine()
+    class DelayLine:
+        def __init__(self) -> None:
+            self._prev = 0.0
+            self.c = 1.0
+
+        def __call__(self, x):  # type: ignore[no-untyped-def]
+            out = self._prev
+            self._prev = self.c  # chained copy of c's live-in; c also self-accumulates below
+            self.c = self.c + x
+            return out
+
+    model = build_model(build(_run(DelayLine().__call__), "delay"))
+    reference = DelayLine()
     for x in [1.0, 1.0, 2.0, 3.0, -1.0]:
         assert float(model.run(x)[0]) == reference(x)  # out[n] == c[n-1]
 
@@ -1541,7 +1399,7 @@ def test_model_handle_round_trips_through_pickle() -> None:
     # generated testbench embeds it as a pickle blob). After a round trip it must elaborate to a simulator that runs
     # identically to one elaborated from the original handle -- both start from reset and advance their persistent
     # (stateful IIR) registers in step over the same input sequence.
-    handle = generate(build(_run(_Iir1Lpf().__call__), "iir1_lpf"))
+    handle = generate(build(_run(IIR1LPF().__call__), "iir1_lpf"))
     restored = pickle.loads(pickle.dumps(handle)).elaborate()
     fresh = handle.elaborate()
     for v in (1.0, 2.0, 3.0, 4.0, 5.0):
