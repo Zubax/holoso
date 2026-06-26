@@ -7,6 +7,7 @@ This speeds up iteration significantly, at the cost of poorer register allocatio
 """
 
 from pathlib import Path
+import os
 import shutil
 import nox
 
@@ -62,6 +63,29 @@ def fuzz(session: nox.Session) -> None:
 
 
 @nox.session
+def synth_examples(session: nox.Session) -> None:
+    """
+    Out-of-context FPGA synthesis (f_max/fabric) of the bundled example matrix across the available tools.
+    This one takes a long time.
+
+    Targets are independent and embarrassingly parallel, but the wide e8m36 datapaths are RAM-bound under
+    place-and-route, so the worker count is half the host core count (at least 2) rather than the full count --
+    leaving memory headroom while still scaling with the machine. pytest-enabler, which would otherwise force
+    ``-n auto`` (the full core count), is disabled here so this holds.
+    """
+    session.install("-e", ".[test]")
+    workers = max(2, (os.cpu_count() or 4) // 2)
+    session.run("python", "-m", "pytest", "-p", "no:enabler", "-s", "-m", "synth", "-n", str(workers), "tests")
+
+
+@nox.session
+def synth(session: nox.Session) -> None:
+    """Run external FPGA synthesis/place-and-route checks."""
+    session.install("-e", ".[test]")
+    session.run("python", "-m", "pytest", "-s", "synth")
+
+
+@nox.session
 def typecheck(session: nox.Session) -> None:
     session.install("-e", ".", "mypy~=2.1")
     session.run("mypy", *session.posargs)
@@ -72,27 +96,3 @@ def black(session: nox.Session) -> None:
     session.install("black~=26.5")
     default = ("--check", "holoso", "tests", "synth", "examples", "tools", "noxfile.py")
     session.run("python", "-m", "black", *(session.posargs or default))
-
-
-@nox.session
-def synth_examples(session: nox.Session) -> None:
-    """
-    Out-of-context FPGA synthesis (f_max/fabric) of the bundled example matrix across the available tools.
-    This one takes a long time.
-
-    The worker count is pinned to 2 rather than auto-scaled: the wide e8m36 datapaths are RAM-bound under
-    place-and-route, so matching the host core count would exhaust memory before saturating it (pytest-enabler,
-    which would otherwise force ``-n auto``, is disabled here so the cap holds). Override on a high-memory host,
-    e.g. ``nox -s synth_examples -- -n 4 tests``.
-    """
-    session.install("-e", ".[test]")
-    session.run(
-        "python", "-m", "pytest", "-p", "no:enabler", "-s", "-m", "synth", *(session.posargs or ("-n", "2", "tests"))
-    )
-
-
-@nox.session
-def synth(session: nox.Session) -> None:
-    """Run external FPGA synthesis/place-and-route checks."""
-    session.install("-e", ".[test]")
-    session.run("python", "-m", "pytest", "-s", *(session.posargs or ("synth",)))
