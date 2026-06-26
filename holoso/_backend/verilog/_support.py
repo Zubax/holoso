@@ -13,6 +13,7 @@ import logging
 from functools import cache
 from importlib import resources
 from importlib.resources.abc import Traversable
+from ..._legal import output_header
 
 _logger = logging.getLogger(__name__)
 
@@ -35,20 +36,12 @@ def _iter_rtl(node: Traversable, prefix: str = "") -> list[tuple[str, str]]:
     return out
 
 
-def _megafile_header(rtl: Traversable) -> str:
-    lines = [
-        _SEPARATOR,
-        "// HOLOSO SUPPORT LIBRARY -- AUTO-GENERATED, DO NOT EDIT.",
+def _megafile_header() -> str:
+    lines = output_header("// ").splitlines() + [
         "//",
         f"// A Holoso-synthesized design needs only this file plus {_HEADER_FILE}.",
         "// The same set of support files serves every Holoso-generated module in a design.",
     ]
-    for name in sorted(child.name for child in rtl.iterdir() if child.is_dir()):
-        readme = rtl.joinpath(name).joinpath(_MANIFEST)
-        if readme.is_file():
-            lines += ["//", _SEPARATOR, "//"]
-            lines += [f"// {line}".rstrip() for line in readme.read_text(encoding="utf-8").strip().splitlines()]
-    lines += ["//", _SEPARATOR]
     return "\n".join(lines)
 
 
@@ -58,7 +51,7 @@ def _build_megafile(pkg: Traversable) -> str:
     modules = [(rel, text) for rel, text in _iter_rtl(rtl) if rel != _TEMPLATE_FILE]
     assert modules, "no .v files found under rtl/"
     modules.sort(key=lambda rc: (rc[0].rsplit("/", 1)[-1].startswith("_"), rc[0]))
-    blocks = [_megafile_header(rtl), rtl.joinpath(_TEMPLATE_FILE).read_text(encoding="utf-8").strip()]
+    blocks = [_megafile_header(), rtl.joinpath(_TEMPLATE_FILE).read_text(encoding="utf-8").strip()]
     for rel, content in modules:
         blocks.append(f"{_SEPARATOR}\n// EMBEDDED FILE BEGIN: {rel}")
         blocks.append(content.strip())

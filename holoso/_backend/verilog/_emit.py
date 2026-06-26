@@ -29,6 +29,7 @@ from textwrap import dedent
 from ..._lir import *
 from ..._operators import *
 from ..._type import is_wide_type
+from ..._legal import output_header
 from ._microcode import *
 from ._support import support_files
 
@@ -199,12 +200,10 @@ def generate(lir: Lir) -> VerilogOutput:
 
 
 def _emit_header(w: _Writer, lir: Lir) -> None:
-    from holoso import __url__, __version__
-
     # Generation time is not included for reproducibility.
     fmt = lir.float_format
     w(f"""
-// Constructed by Holoso v{__version__} <{__url__}>. Do not edit.
+{output_header("// ")}
 
 `timescale 1ns/1ps
 

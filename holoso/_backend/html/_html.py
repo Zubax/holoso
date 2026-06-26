@@ -16,6 +16,7 @@ from importlib import resources
 
 from ..._lir import Lir
 from ..._operators import PooledHardwareOperator
+from ..._legal import output_header
 from ..verilog import VerilogOutput
 from ._schedule import render_schedule
 
@@ -40,15 +41,13 @@ def _esc(text: str) -> str:
 
 
 def generate(lir: Lir, verilog_output: VerilogOutput) -> HtmlOutput:
-    from holoso import __url__, __version__
-
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     out: list[str] = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'>",
         f"<title>Module {_esc(lir.module_name)} - Holoso</title><style>{_CSS}</style></head><body>",
         f"<header><h1>Module {_esc(lir.module_name)}</h1>"
-        f"<div class='sub'>Synthesized by <a href='{__url__}'>Holoso</a> v{__version__} at"
-        f" {generated}</div></header><main>",
+        f"<div class='sub'>{generated} {_esc(output_header())}</div>"
+        f"</header><main>",
     ]
     # The compact summary sections share one wrapping row (metrics, then the narrow constants and interface) so they
     # do not waste page height; the wide register-grid schedule follows below.

@@ -167,7 +167,6 @@ container useful as it comes with all of the required tools out of the box.
 ## License
 
 Holoso is licensed under the [Apache License 2.0](LICENSE).
-
 What you produce with it is yours: the Verilog this tool generates, together with the bundled support RTL it stitches
-into every design (the vendored ZKF/Kulibin primitives), is unencumbered and carries no license obligations. Use it in
-open-source or proprietary designs freely.
+into every design, is unencumbered and carries no license obligations.
+Use it in open-source or proprietary designs freely.
