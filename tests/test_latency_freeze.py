@@ -36,22 +36,22 @@ from ._modelref import default_ops
 # kernels. A representative cross-section of shapes: straight-line and deep arithmetic, clamp/select, stateful
 # filters, branchy logic, data-dependent loops, and a large kernel.
 _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
-    "madd": (20, 20),
-    "signal_window": (12, 12),
-    "poly3": (35, 35),
-    "iir1_lpf": (21, 21),
+    "madd": (17, 17),
+    "signal_window": (11, 11),
+    "poly3": (29, 29),
+    "iir1_lpf": (18, 18),
     "schmitt_trigger": (7, 7),
     "majority_voter": (14, 19),
-    "recip_newton": (20, 46),
-    "remainder": (45, 66),
-    "cordic_sincos": (149, 149),
-    "ekf1_stateless": (129, 129),
+    "recip_newton": (18, 40),
+    "remainder": (42, 61),
+    "cordic_sincos": (127, 127),
+    "ekf1_stateless": (126, 126),
     # Branchy kernels whose phi-arm installs source block-entry-resident values (boolean/float live-out constants, or an
     # input/state read) on the normal path -- the inline-class timing (no source-sample edge, no +1 step) lands each
     # within the work makespan rather than at the copy-pipeline boundary, shrinking every downstream block base.
-    "uart_rx": (6, 161),
-    "uart_tx": (8, 142),
-    "octave_index": (16, 44),
+    "uart_rx": (6, 143),
+    "uart_tx": (8, 124),
+    "octave_index": (16, 42),
 }
 
 _SPEC_BY_NAME = {spec.name: spec for spec in SPECS}
@@ -100,7 +100,7 @@ class _BoolShift3:
 # _BoolShift3 the boolean bank's. _FMT is the wide e8m36 datapath the example matrix uses.
 _FMT = FloatFormat(8, 36)
 _CHAINED_COPY: list[tuple[str, object, tuple[int, int]]] = [
-    ("delay3", _Delay3, (4, 4)),
+    ("delay3", _Delay3, (3, 3)),
     ("bool_shift3", _BoolShift3, (3, 3)),
 ]
 

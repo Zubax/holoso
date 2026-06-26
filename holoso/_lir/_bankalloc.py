@@ -71,7 +71,7 @@ def layout_and_allocate(
     bool_mir: MirBoolView,
     pool: Mapping[type[HardwareOperator], int],
     has_install_blocks: Mapping[int, bool],
-    state_copy_blocks: Mapping[int, bool],
+    state_copy_blocks: frozenset[int],
 ) -> _LayoutAllocation:
     overlap = schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks, state_copy_blocks)
     block_sched = overlap.block_sched
@@ -224,16 +224,12 @@ class _InstallContext:
 class _Bank(ABC, Generic[_SlotT]):
     """
     The policy surface for one physical register bank. The liveness/coalescing/coloring skeleton in
-    :func:`_allocate_bank` is shared; each subclass supplies the wide/boolean specifics -- landing cycle, identity
+    :func:`_allocate_bank` is shared; each subclass supplies the wide/boolean specifics -- identity
     conditioner, slot/boundary/objective extraction, and the install policy.
     """
 
     label: ClassVar[str]
     identity: ClassVar[PortConditioner]  # the no-op conditioner whose absence lets a live-out commit into its slot
-
-    @abstractmethod
-    def landing_cycle(self, commit_cycle: int) -> int:
-        """The hardware-frame cycle on which a result committed at ``commit_cycle`` lands in its register."""
 
     @abstractmethod
     def state_slots(self, view: _BankView) -> list[_SlotT]:
@@ -264,9 +260,6 @@ class _Bank(ABC, Generic[_SlotT]):
 class _WideBank(_Bank[MirFloatStateSlot]):
     label = "wide"
     identity = FloatSignControl()
-
-    def landing_cycle(self, commit_cycle: int) -> int:
-        return wide_landing_cycle(commit_cycle)
 
     def state_slots(self, view: _BankView) -> list[MirFloatStateSlot]:
         assert isinstance(view, MirFloatView)
@@ -320,7 +313,7 @@ class _WideBank(_Bank[MirFloatStateSlot]):
             if early:
                 cycle = (ctx.op_commit[live_out] if live_out in ctx.op_nodes else 0) + 1  # read-first: an older commit
                 if r_in is not None:
-                    cycle = max(cycle, ctx.last_read_ret.get(r_in, 0) - copy_step_cycle(0))
+                    cycle = max(cycle, ctx.last_read_ret.get(r_in, 0) - inline_fire_cycle(0))
                 install[name] = min(cycle, ctx.ret_present)
             else:
                 install[name] = ctx.ret_present
@@ -330,9 +323,6 @@ class _WideBank(_Bank[MirFloatStateSlot]):
 class _BoolBank(_Bank[MirBoolStateSlot]):
     label = "bool"
     identity = BoolInversion()
-
-    def landing_cycle(self, commit_cycle: int) -> int:
-        return bool_landing_cycle(commit_cycle)
 
     def state_slots(self, view: _BankView) -> list[MirBoolStateSlot]:
         assert isinstance(view, MirBoolView)
@@ -392,7 +382,7 @@ class _InterferenceBuilder:
     def _install_fire(self, block: int, vid: ValueId) -> int:
         """The install's block-local fire step, via the same helpers as the LIR install so residence matches exactly."""
         resident = vid in self.resident_install_dests.get(block, frozenset())
-        return install_fire_step(install_issue_cycle(self.work_makespan[block], resident), resident)
+        return install_fire_step(install_issue_cycle(self.work_makespan[block], resident))
 
     def build(
         self,
@@ -430,7 +420,7 @@ def _allocate_bank(
     block_inflight: dict[int, dict[ValueId, int]],
 ) -> _BankAlloc:
     """
-    Color one physical register bank across the CFG. The bank descriptor supplies the landing-cycle, conditioner,
+    Color one physical register bank across the CFG. The bank descriptor supplies the conditioner,
     boundary, objective, and install policies; the liveness/coalescing/coloring skeleton is shared.
     """
     nload = len(view.input_ids)
@@ -465,14 +455,8 @@ def _allocate_bank(
         work_makespan={bid: sched.makespan for bid, sched in block_sched.items()},
         term_offset=block_term_offset,
         resident=frozenset({*view.input_ids, *state_read_nodes}),
-        op_landing={
-            vid: (
-                bank.landing_cycle(commit)  # pooled: through the bank's writeback latch
-                if isinstance(op_nodes[vid].operator, PooledHardwareOperator)
-                else inline_landing_cycle(commit)  # inline: combinational array write, no writeback latch
-            )
-            for vid, commit in op_commit.items()
-        },
+        # Every result -- pooled or inline, wide or boolean -- lands at the one bank-independent landing.
+        op_landing={vid: landing_cycle(commit) for vid, commit in op_commit.items()},
         op_block=op_block,
         phi_block=phi_block,
         arm_out=arm_out,
@@ -562,7 +546,7 @@ def _allocate_bank(
             if live_out not in values:
                 continue
             if install[name] < ret_present:
-                early_reads.append((live_out, copy_step_cycle(install[name])))
+                early_reads.append((live_out, inline_fire_cycle(install[name])))
             else:
                 boundary_final[ret_block].add(live_out)
         # Only an early install adds a Ret-block read; with none (always so for the boolean bank) the shared facts'

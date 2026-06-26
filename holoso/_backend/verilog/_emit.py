@@ -10,17 +10,17 @@ FETCH_LAG, which the sequencer accounts for: the PC counts up to LASTPC and out_
 Storage is a sparse, schedule-specific register file emitted inline instead of a general-purpose multiport file.
 The register array is a plain ``reg`` bank. Each operator operand has a dedicated read port whose mux spans only the
 registers that operand ever reads across the schedule (a single-register operand needs no mux), followed by a read
-latch. Each operator result passes through a writeback latch into a per-register write select that spans only the
-instances that ever write that register (a single-writer register needs no address compare).
+latch. Each operator result drives a per-register write select directly, spanning only the instances that ever write
+that register (a single-writer register needs no address compare).
 
-All sequential logic -- the fetch pipeline, the read/write register-file latches, the register writes, and the
+All sequential logic -- the fetch pipeline, the operand read latches, the register writes, and the
 reset-gated control state -- is emitted as a single ``always @(posedge clk)`` block; the only combinational
 ``always @*`` block is the next-PC sequencer. Control fields that are constant across the whole program are driven
 by constant nets and omitted from the ROM, so synthesis prunes them. Pooled instances -- the comparator included --
 are driven uniformly through microcode lanes: read-address/latch lanes per operand, a write lane per tapped output
-port (wide lanes through the writeback latch, latch-free boolean lanes written directly at their commit step with a
-fabric-XOR inversion conditioner). Inline operators (boolean logic, the float<->bool casts) are single PC-gated
-statements rendered by the operator's own ``verilog_expr``.
+port (both wide and boolean lanes write the array directly at their commit step from the operator's combinational
+output; boolean lanes carry a fabric-XOR inversion conditioner). Inline operators (boolean logic, the float<->bool
+casts) are single PC-gated statements rendered by the operator's own ``verilog_expr``.
 """
 
 from dataclasses import dataclass
@@ -116,8 +116,7 @@ def _state_copy_rhs(slot: FloatStateSlot) -> str:
 def _inline_fire_pc(lir: Lir, block_index: int, op: InlineScheduledOp) -> int:
     """
     The fetch PC at which an inline firing's single PC-gated statement executes: its combinational fire step, one
-    ``FETCH_LAG`` after the commit on either bank. An inline op drives its destination's write data combinationally, so
-    -- unlike a pooled lane -- it carries no writeback latch.
+    ``FETCH_LAG`` after the commit. An inline op drives its destination's write data combinationally on this step.
     """
     return lir.block_base[block_index] + inline_fire_cycle(op.commit_cycle)
 
@@ -170,14 +169,8 @@ def generate(lir: Lir) -> VerilogOutput:
     ucw = finalize_fields(fields)
 
     issues_by_cycle, commits_by_cycle = lir.group_by_cycle
-    # Commit annotations land on each firing's write step (the same step the microcode places its write-enable): a
-    # bool-only firing writes ON the commit step (latch-free bank), one with a wide lane one step later (writeback
-    # latch). A pooled firing's taps are single-bank, so the firing's write step is pooled_writeback_word of that bank.
-    commits_by_step: dict[int, list[PooledScheduledOp]] = {}
-    for commit_cycle, ops in commits_by_cycle.items():
-        for op in ops:
-            wide = any(isinstance(write.dst, RegRef) for write in op.writes)
-            commits_by_step.setdefault(pooled_writeback_word(commit_cycle, wide), []).append(op)
+    # Commit annotations land on each firing's write step -- the commit step itself, the same step the microcode places
+    # its write-enable word (every bank writes combinationally, so a pooled lane's write word sits at the commit step).
 
     depth = lir.last_pc + 1  # one microcode word per fetch PC (0..last_pc); inter-block drains and the tail pack to NOP
 
@@ -187,7 +180,7 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_declarations(w, lir, write_lists)
     _emit_consts(w, lir)
     _emit_operators(w, lir, write_lists)
-    _emit_microcode_rom(w, fields, ucw, depth, issues_by_cycle, commits_by_step)
+    _emit_microcode_rom(w, fields, ucw, depth, issues_by_cycle, commits_by_cycle)
     _emit_field_wires(w, fields)
     _emit_datapath_comb(w, lir, port_consts, write_lists)
     _emit_state_next(w, lir)
@@ -299,20 +292,19 @@ def _emit_declarations(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorIns
             letter = PORT_LETTERS[pos]
             w(f"wire [1:0]   {sig}_{letter}s;")
             w(f"reg  [W-1:0] {sig}_{letter};")  # read-latched operand (the read mux output, registered)
-        # One lane per TAPPED output port: a wide lane gets its conditioner wire and a writeback latch; a latch-free
-        # boolean lane is the raw 1-bit module output, written into bregs directly at its commit step.
+        # One lane per TAPPED output port: a wide lane gets its conditioner wire and the raw operator output, a boolean
+        # lane the raw 1-bit module output. Every lane drives its register write directly from the operator's
+        # combinational output.
         for q, result_type in enumerate(inst.operator.signature.result_types):
             if (inst, q) not in write_lists:
                 continue  # a never-tapped output port: no nets, the module port is left unconnected
             if is_wide_type(result_type):
                 w(f"wire [1:0]   {sig}_y{q}s;")
                 w(f"wire [W-1:0] {sig}_y{q};")
-                w(f"reg  [W-1:0] {sig}_y{q}_q;")  # writeback latch between the operator output and the register write
             else:
                 w(f"wire         {sig}_y{q};")
         for port in inst.operator.error_ports:
             w(f"wire         {sig}_{port};")
-            w(f"reg          {sig}_{port}_q;")  # error sideband rides the same writeback latch as the result
     w("")
 
 
@@ -372,7 +364,7 @@ def _emit_microcode_rom(
     ucw: int,
     depth: int,
     issues_by_cycle: dict[int, list[PooledScheduledOp]],
-    commits_by_step: dict[int, list[PooledScheduledOp]],
+    commits_by_cycle: dict[int, list[PooledScheduledOp]],
 ) -> None:
     digits = (ucw + 3) // 4
     w("""
@@ -385,7 +377,7 @@ initial begin
     """)
     w.push()
     for step in range(depth):  # depth == LASTPC + 1: one word per fetch PC, NOP where no operator issues or commits
-        summary = cycle_summary(issues_by_cycle.get(step, []), commits_by_step.get(step, []))
+        summary = cycle_summary(issues_by_cycle.get(step, []), commits_by_cycle.get(step, []))
         comment = f"  // {summary}" if summary else ""
         w(f"ucode[{step: 5}] = {ucw}'h{pack(fields, step):0{digits}x};{comment}")
     w.pop()
@@ -444,21 +436,22 @@ def _emit_datapath_comb(
             w(f"assign {sig}_{PORT_LETTERS[pos]}s = {f_osgn(base, PORT_LETTERS[pos])};")
     w("")
 
-    # An error matters only on the step its operator commits, which is exactly its wide lanes' write-enable window;
-    # both the write-enables and the error sideband are aligned to the writeback latch (commit + write latch).
+    # An error matters only on the step its operator commits, which is exactly its tapped lanes' write-enable window;
+    # both the write-enables and the operator's combinational error output fire on the commit step, so the error flag is
+    # sampled directly when its result drives the register write.
     err_terms: list[str] = []
     for inst in lir.instances:
         if not inst.operator.error_ports:
             continue
         lane_wes = [
             f_we(base_name(inst), q)
-            for q, result_type in enumerate(inst.operator.signature.result_types)
-            if is_wide_type(result_type) and (inst, q) in write_lists
+            for q in range(len(inst.operator.signature.result_types))
+            if (inst, q) in write_lists
         ]
-        assert lane_wes, "an error-bearing operator must have a tapped wide lane to align its sideband with"
+        assert lane_wes, "an error-bearing operator must have a tapped lane to align its sideband with"
         gate = lane_wes[0] if len(lane_wes) == 1 else "(" + " | ".join(lane_wes) + ")"
         for err_port in inst.operator.error_ports:
-            err_terms.append(f"({gate} & {_sig(inst)}_{err_port}_q)")
+            err_terms.append(f"({gate} & {_sig(inst)}_{err_port})")
     err_rhs = " | ".join(err_terms) if err_terms else "1'b0"
     w(f"assign err = {err_rhs};", "")
 
@@ -689,9 +682,7 @@ def _wide_writer_entries(
         entries.setdefault(fload.dst.index, []).append(("in_ready && in_valid", f"in_{fload.name}"))
     for reg in sorted(write_sets):
         for inst, port in write_sets[reg]:
-            entries.setdefault(reg, []).append(
-                (_writeback_cond(inst, port, reg, write_lists), f"{_sig(inst)}_y{port}_q")
-            )
+            entries.setdefault(reg, []).append((_writeback_cond(inst, port, reg, write_lists), f"{_sig(inst)}_y{port}"))
     # Ucode-driven constant installs: a microcode write-enable arm (like an operator lane), reusing the const-pool nets.
     const_books = const_install_codebooks(lir)
     for reg in sorted(const_books):
@@ -718,7 +709,7 @@ def _bool_writer_entries(
 ) -> dict[int, list[tuple[str, str]]]:
     """
     Per boolean register, the ordered ``(condition, rhs)`` of every driver other than its state-slot install: the
-    input load, each pooled boolean lane (microcode-gated, latch-free, with its fabric-XOR inversion conditioner),
+    input load, each pooled boolean lane (microcode-gated, with its fabric-XOR inversion conditioner),
     each pc-gated bool-result inline firing, and each pc-gated phi-arm write.
     """
     entries: dict[int, list[tuple[str, str]]] = {}
@@ -729,7 +720,7 @@ def _bool_writer_entries(
         for inst, port in bool_write_sets[reg]:
             rhs = f"{_sig(inst)}_y{port} ^ {f_binv(base_name(inst), port)}"
             entries.setdefault(reg, []).append((_writeback_cond(inst, port, reg, write_lists), rhs))
-    # Ucode-driven constant installs: a microcode write-enable arm latching the 1-bit value (latch-free, no XOR -- the
+    # Ucode-driven constant installs: a microcode write-enable arm carrying the 1-bit value (no XOR -- the
     # inversion is already folded into the value at construction).
     for reg in const_install_bool_regs(lir):
         entries.setdefault(reg, []).append((f_cwe(BoolRegRef(reg)), f_cval(BoolRegRef(reg))))
@@ -810,17 +801,6 @@ always @(posedge clk) begin
         for pos in range(inst.operator.arity):
             port = read_port[(inst, pos)]
             _read_latch_stmts(w, f"{sig}_{PORT_LETTERS[pos]}", port, read_sets.get((inst, pos), []), port_consts)
-    w("")
-
-    w("// Writeback latches: each WIDE lane's result (and any error sideband) registered before the register")
-    w("// write; a boolean lane is latch-free and written directly at its commit step.")
-    for inst in lir.instances:
-        sig = _sig(inst)
-        for q, result_type in enumerate(inst.operator.signature.result_types):
-            if is_wide_type(result_type) and (inst, q) in write_lists:
-                w(f"{sig}_y{q}_q <= {sig}_y{q};")
-        for err_port in inst.operator.error_ports:
-            w(f"{sig}_{err_port}_q <= {sig}_{err_port};")
     w("")
 
     # Non-slot registers: one reset-unconditional write chain each driving regs[]/bregs[]. Datapath payload carries no

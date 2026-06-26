@@ -26,17 +26,17 @@ from dataclasses import dataclass
 from .._util import ValueId
 from .._mir import MirNode, MirOperation
 from .._operators import HardwareOperator, PooledHardwareOperator, PortConditioner
-from ._ir import OperatorInstance, dependency_edge, operand_read_cycle, pooled_wide_read_cycle, wide_landing_cycle
+from ._ir import OperatorInstance, dependency_edge, landing_cycle, operand_read_cycle, pooled_wide_read_cycle
 
 # A pooled firing's fusion identity: the operator, its operand values, and their conditioners -- everything the
 # module activation consumes. Output ports and output conditioners are deliberately excluded (members differ there).
 type _FiringKey = tuple[PooledHardwareOperator, tuple[ValueId, ...], tuple[PortConditioner, ...]]
 
-# The largest commit-to-issue dependency edge any (producer, consumer) pair can require: the wide bank's landing
-# (write latch + read-first edge) against the pooled read latch, derived from the same helpers as dependency_edge.
-# Exact only while wide->pooled remains the maximal pair; it merely pads a generously-slack progress cap, so a
-# future larger pair costs nothing worse than a later no-progress diagnosis.
-_MAX_DEPENDENCY_EDGE = wide_landing_cycle(0) - pooled_wide_read_cycle(0)
+# The largest commit-to-issue dependency edge any (producer, consumer) pair can require: the result landing (fetch lag +
+# read-first edge) against the pooled read latch, derived from the same helpers as dependency_edge. Exact only while
+# producer->pooled remains the maximal pair; it merely pads a generously-slack progress cap, so a future larger pair
+# costs nothing worse than a later no-progress diagnosis.
+_MAX_DEPENDENCY_EDGE = landing_cycle(0) - pooled_wide_read_cycle(0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +190,7 @@ def schedule_ops(
 
     def is_ready(leader: ValueId, cycle: int) -> bool:
         # A consumer may issue only ``dependency_edge`` cycles after a same-block operator producer commits -- the
-        # edge derives from the producer's result-bank landing and the consumer's read mechanism (see _ir). Every
+        # edge derives from the producer's result landing and the consumer's read mechanism (see _ir). Every
         # other operand -- a state read, an input, a phi, or a result drained in from a prior block -- is resident at
         # the block start (constants are immediates with no read constraint), so the per-firing cycle-1 floor below is
         # all that delays it. Members of one firing share operands and conditioners, so the leader's readiness is the

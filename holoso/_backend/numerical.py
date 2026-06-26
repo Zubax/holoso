@@ -16,10 +16,10 @@ slot registers simply live in ``regs``/``bregs`` and carry across transactions; 
 reloads the reset snapshot.
 
 The timing is read off the shared LIR cycle helpers, which are in the fetch-PC frame: ``operand_read_cycle(S)`` and
-``*_landing_cycle(commit)`` are the literal ``pc`` values at which an operand is sampled and a result becomes readable
-in the array. So the simulator needs no separate clock frame and no growing timeline. The only mutable state beyond the
-register files is ``_pending``: the in-flight operator results -- the compact stand-in for the RTL operator pipeline and
-writeback latch. A result is computed when its operands are sampled (at its read PC) but only becomes readable at its
+``landing_cycle(commit)`` are the literal ``pc`` values at which an operand is sampled and a result becomes readable in
+the array. So the simulator needs no separate clock frame and no growing timeline. The only mutable state beyond the
+register files is ``_pending``: the in-flight operator results -- the compact stand-in for the RTL operator pipeline. A
+result is computed when its operands are sampled (at its read PC) but only becomes readable at its
 landing PC; like the hardware, the register file is written at the landing, not at read time. Inputs, by contrast,
 carry no latency, so :meth:`set_inputs` writes the input lanes directly. A loop re-fires the same PCs on every revisit,
 and ``_pending`` only ever holds the handful of results in flight, so an arbitrarily deep loop runs in bounded memory.
@@ -37,7 +37,7 @@ from .._lir import BoolInputLoad, FloatConstRef, FloatInputLoad, FloatOperand
 from .._lir import RegRef, ScheduledOp
 from .._lir import BoolRegRef, Lir
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
-from .._lir import install_landing, op_result_landing, operand_read_cycle
+from .._lir import install_landing, landing_cycle, operand_read_cycle
 from .._lir import scalar_type_of
 from .._operators import *
 from .._type import FloatFormat, LogicalPort
@@ -298,9 +298,11 @@ class NumericalSimulator(_Kernel):
             self._write(dst, value)
         for event in self._op_events.get(pc, ()):
             results = event.op.operator.evaluate(*[self._read(operand) for operand in event.op.operands])
+            landing = landing_cycle(
+                event.commit_pc
+            )  # every result of this firing lands at the one bank-independent cycle
             for write in event.op.writes:
                 result = results[write.port]
-                landing = op_result_landing(event.op.operator, write.dst, event.commit_pc)
                 if isinstance(write.dst, RegRef):
                     assert isinstance(result, FloatValue) and isinstance(write.conditioner, FloatSignControl)
                     self._pending.setdefault(landing, []).append((write.dst, write.conditioner.apply_value(result)))

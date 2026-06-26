@@ -271,8 +271,12 @@ parameter, and any Python/RTL drift fails at elaboration. An inaccurate latency 
 Each op issues on the earliest cycle its operands are ready and a free instance exists, with no barrier, so a
 cross-domain chain (`float(x>0)*k`) schedules tightly. The commit-to-issue spacing a dependence requires is not one
 constant but is derived pairwise from a single cycle-accurate timing model built from a few named primitives (a global
-fetch lag, a per-bank read latch, a pooled-result writeback latch, a read-first edge), never per-case constants. Because
-the two banks and the pooled/inline classes are uniform instances of that one model rather than hand-coded cases,
+fetch lag, a per-bank read latch, a read-first edge), never per-case constants. Every result -- pooled or inline, on
+either bank -- writes the register array combinationally and becomes readable a fixed fetch-lag-plus-read-first edge
+after its commit. (An earlier design registered pooled wide results in a writeback latch but dropped it as
+inconsistent -- it latched only float operators while installs, control flow, and inline writes go direct -- and
+needlessly delayed short installs.) Because the two banks and the pooled/inline classes are uniform instances of that
+one model rather than hand-coded cases,
 boolean-logic and cast chains schedule back-to-back, which shortens logic-dense kernels. Block-resident operands
 (inputs, state reads, phis) are available from the block's first control word, so an op can issue from there.
 
@@ -364,8 +368,8 @@ scheduling only adds to the makespan/II; the depth is currently fixed but may be
 The schedule replays step by step: at PC 0 the machine accepts and parallel-loads inputs into the low registers of each
 bank in one cycle (gated by `in_valid`); the PC advances every clock; at the last PC it asserts `out_valid` while
 outputs drive combinationally from their registers by fixed index. To line the latched datapath up with the schedule,
-each operand's read-address control is presented one step early and the write-enable/address one step late. The PC holds
-only at the two I/O boundaries; bubble steps carry an explicit NOP.
+each operand's read-address control is presented one step early and the write-enable/address on its commit step.
+The PC holds only at the two I/O boundaries; bubble steps carry an explicit NOP.
 
 The control word stores selectors and addresses, never data. An inline firing (boolean logic, a cast) is a single
 PC-gated statement rendered by the operator's own expression rather than a microcode lane, because it fires once at a
@@ -420,8 +424,8 @@ stays honest as scalar types are added.
 
 A tick advances exactly one `posedge clk` with the same sequencer the Verilog emits (reset, out_valid, in_ready,
 terminator redirect, back-pressure). The only mutable state beyond the register files is a small in-flight buffer -- the
-stand-in for the operator pipeline and writeback latch: a result is computed when its operands are sampled but written
-to the register file only at its landing PC, exactly as the hardware does. It therefore stays correct when blocks
+stand-in for the operator pipeline: a result is computed when its operands are sampled but written to the register file
+only at its landing PC, exactly as the hardware does. It therefore stays correct when blocks
 overlap and runs an arbitrarily deep loop in bounded memory. The persistent state is just the slot registers, carried
 across transactions.
 

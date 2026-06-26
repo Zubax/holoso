@@ -1,10 +1,11 @@
 """
-Directed cosim: a divide-by-zero latches ``err_pc`` to the fdiv's writeback step, and it resets each run.
+Directed cosim: a divide-by-zero latches ``err_pc`` to the fdiv's write step, and it resets each run.
 
 Builds the tiny module ``a / b``, then drives three back-to-back invocations: a normal one (err_pc stays 0), a
-zero-divisor one (err_pc latches the executing step on which the fdiv result is written back -- its commit cycle
-plus the write latch -- which is nonzero), and a normal one again (the per-initiation reset must have cleared the
-prior error).
+zero-divisor one (err_pc latches the executing step on which the fdiv result is written back -- the commit step
+itself -- which is nonzero), and a normal one again (the per-initiation reset
+must have cleared the prior error). Parametrized over the fdiv output stage so the err flag and the result are shown
+to latch/land together whether or not an output register stage delays the commit.
 """
 
 import json
@@ -27,13 +28,22 @@ from holoso import (
 from holoso._backend.verilog import generate
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lir import build
+from holoso._lir import build, pooled_write_word
 from holoso._mir import lower as lower_to_mir
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
 
 FMT = FloatFormat(6, 18)
-OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
+
+
+def _ops(stage_output: int) -> OpConfig:
+    return OpConfig(
+        FAddOperator(FMT),
+        FMulOperator(FMT),
+        FDivOperator(FMT, stage_output=stage_output),
+        FMulILog2OperatorFamily(FMT),
+        FCmpOperator(FMT),
+    )
 
 
 def _divide(a, b):  # type: ignore[no-untyped-def]
@@ -69,21 +79,25 @@ async def err_pc_latches_div0(dut) -> None:
         return latched
 
     assert await invoke(2.0) == 0, "no-error run must leave err_pc clear"
-    # Divide by zero: the fdiv asserts div0 at its commit; the writeback latch carries it to the write step.
-    assert await invoke(0.0) == err_step, "div0 must latch err_pc to the fdiv writeback step"
+    # Divide by zero: the fdiv asserts div0 at its commit; the write step is the commit step itself.
+    assert await invoke(0.0) == err_step, "div0 must latch err_pc to the fdiv write step"
     assert await invoke(2.0) == 0, "the per-initiation reset must clear the previous run's error"
 
 
+@pytest.mark.parametrize("stage_output", [0, 1])
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_err_pc(sim: str) -> None:
-    lir = build(lower_to_mir(optimize(lower(_divide)), OPS), "divide")
-    # The fdiv's div0 rides the writeback latch, so err_pc latches the write step: its commit cycle plus write latch.
-    err_step = next(op.commit_cycle for op in lir.ops if isinstance(op.inst.operator, FDivOperator)) + 1
-    gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"divide_w{FMT.wexp}_{FMT.wman}"
+def test_err_pc(sim: str, stage_output: int) -> None:
+    lir = build(lower_to_mir(optimize(lower(_divide)), _ops(stage_output)), "divide")
+    # The fdiv asserts div0 at its commit; err_pc latches the write word -- the
+    # commit step itself (pooled_write_word). An fdiv output stage pushes the commit later, and the err flag and the
+    # result still latch/land together: err_step is recomputed from this build's actual fdiv commit.
+    commit_cycle = next(op.commit_cycle for op in lir.ops if isinstance(op.inst.operator, FDivOperator))
+    err_step = pooled_write_word(commit_cycle)
+    gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"divide_w{FMT.wexp}_{FMT.wman}_s{stage_output}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     verilog_path = gen_dir / "divide.v"
     verilog_path.write_text(generate(lir).verilog)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"errcyc_divide_w{FMT.wexp}_{FMT.wman}"
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"errcyc_divide_w{FMT.wexp}_{FMT.wman}_s{stage_output}"
 
     runner = get_runner(sim)
     runner.build(

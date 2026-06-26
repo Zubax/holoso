@@ -52,6 +52,19 @@ def op_config(
     )
 
 
+def op_config_staged_output(fmt: FloatFormat) -> OpConfig:
+    """
+    op_config(fmt) with an output register stage on the wide arithmetic operators (fadd/fmul/fdiv), enabled locally on
+    just the rows whose timing closure needs it. fmul_ilog2 and fcmp have no output stage and stay lean.
+    """
+    return op_config(
+        fmt,
+        fadd=FAddOperator(fmt, stage_output=1),
+        fmul=FMulOperator(fmt, stage_output=1),
+        fdiv=FDivOperator(fmt, stage_output=1),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SynthTarget:
     """One synthesis closure target: a kernel synthesized for one flow under one OpConfig, asserted to meet f_max."""
@@ -123,7 +136,7 @@ TARGETS: list[SynthTarget] = [
     for_example("iir1_lpf", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("iir1_lpf", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("iir1_lpf", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("pid", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
+    for_example("pid", FlowId.YOSYS_ECP5, 100, op_config_staged_output(F_e6m18)),
     for_example("pid", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("pid", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("schmitt_trigger", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
@@ -145,7 +158,7 @@ TARGETS: list[SynthTarget] = [
     for_example("recip_newton", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("recip_newton", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("integrator", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("integrator", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
+    for_example("integrator", FlowId.DIAMOND_ECP5, 100, op_config_staged_output(F_e6m18)),
     for_example("integrator", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("uart_tx", FlowId.YOSYS_ECP5, 100, op_config(F_e4m8)),
     for_example("uart_tx", FlowId.DIAMOND_ECP5, 100, op_config(F_e4m8)),
@@ -153,10 +166,12 @@ TARGETS: list[SynthTarget] = [
     for_example("uart_rx", FlowId.YOSYS_ECP5, 100, op_config(F_e4m8)),
     for_example("uart_rx", FlowId.DIAMOND_ECP5, 100, op_config(F_e4m8)),
     for_example("uart_rx", FlowId.VIVADO_ARTIX7, 150, op_config(F_e4m8)),
-    for_example("ekf1_stateless", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("ekf1_stateless", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
+    for_example("ekf1_stateless", FlowId.YOSYS_ECP5, 100, op_config_staged_output(F_e6m18)),
+    for_example("ekf1_stateless", FlowId.DIAMOND_ECP5, 100, op_config_staged_output(F_e6m18)),
     for_example("ekf1_stateless", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("ekf1_stateful", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18), kernel=_ekf1_stateful_kernel),
+    for_example(
+        "ekf1_stateful", FlowId.YOSYS_ECP5, 100, op_config_staged_output(F_e6m18), kernel=_ekf1_stateful_kernel
+    ),
     for_example("ekf1_stateful", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18), kernel=_ekf1_stateful_kernel),
     for_example("ekf1_stateful", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18), kernel=_ekf1_stateful_kernel),
     # cordic: lean on Yosys/Vivado; Diamond needs the deep-fadd recipe (~111 MHz, verified minimal).
@@ -173,7 +188,7 @@ TARGETS: list[SynthTarget] = [
     ),
     for_example("cordic_sincos", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("octave_index", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("octave_index", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
+    for_example("octave_index", FlowId.DIAMOND_ECP5, 100, op_config_staged_output(F_e6m18)),
     for_example("octave_index", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("remainder", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("remainder", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
@@ -186,8 +201,8 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
-            fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=2, stage_pack=1),
+            fadd=FAddOperator(F_e8m36, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1),
+            fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=2, stage_pack=1, stage_output=1),
             fdiv=FDivOperator(F_e8m36, stage_input=1, stage_pack=1, stage_output=1),
             fmul_ilog2=FMulILog2OperatorFamily(F_e8m36, stage_decode=1),
         ),
@@ -198,7 +213,7 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
+            fadd=FAddOperator(F_e8m36, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1),
             fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
             fdiv=FDivOperator(F_e8m36, stage_input=1, stage_pack=1, stage_output=1),
         ),
@@ -221,8 +236,8 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_decode=1, stage_align=1, stage_normalize=2, stage_pack=1),
-            fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=2, stage_pack=1),
+            fadd=FAddOperator(F_e8m36, stage_decode=1, stage_align=1, stage_normalize=2, stage_pack=1, stage_output=1),
+            fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=2, stage_pack=1, stage_output=1),
             fdiv=FDivOperator(F_e8m36, stage_input=1, stage_pack=1, stage_output=1),
             fmul_ilog2=FMulILog2OperatorFamily(F_e8m36, stage_decode=1),
         ),

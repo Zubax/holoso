@@ -6,11 +6,10 @@ every control field and its value on each step (``None`` == don't-care), and the
 (driven by constant nets) versus varying fields (packed into the ROM word). It also owns the Verilog-safe naming the
 emitter wires up. It emits no Verilog text -- that is the emitter's job; this module is pure data.
 
-Write control is per OUTPUT-PORT LANE, keyed ``(instance, port)``: a wide lane's write-enable/address ride one ROM
-step after the commit (aligned with the writeback latch), while a latch-free boolean lane's ride the commit step
-itself, together with its 1-bit inversion conditioner (the boolean dual of the wide lane's issue-step ``y_sgnop``,
-applied as a fabric XOR at the register write). A lane exists only if some firing taps it; a never-tapped module
-output gets no fields and is left unconnected.
+Write control is per OUTPUT-PORT LANE, keyed ``(instance, port)``: a lane's write-enable/address ride the commit step
+itself (both banks write combinationally). A wide lane carries its issue-step sign conditioner ``y_sgnop``; a boolean
+lane carries a 1-bit inversion conditioner on the commit step (the boolean dual, applied as a fabric XOR at the register
+write). A lane exists only if some firing taps it; a never-tapped module output gets no fields and is left unconnected.
 """
 
 from dataclasses import dataclass
@@ -26,7 +25,7 @@ from ..._lir import (
     OperatorInstance,
     PooledScheduledOp,
     RegRef,
-    pooled_writeback_word,
+    pooled_write_word,
 )
 from ..._operators import FloatSignControl
 from ..._type import is_wide_type
@@ -219,12 +218,12 @@ def build_microcode(
     other field is a don't-care (``None``) except on the step its firing issues or commits, which maximises the
     constant columns that later get lifted out of the ROM.
 
-    Control is placed on shifted steps to line up with each bank's discipline: the read-address group is presented 1
-    step before the firing issues (so the latched wide operand arrives on the issue step); a WIDE lane's
-    write-enable/address are presented 1 step after the commit (the writeback latch), with its sign conditioner on
-    the issue step (consumed inside the wrapper); a BOOLEAN lane is latch-free, so its write-enable/address/inversion
-    are presented ON the commit step -- one step earlier than a wide lane's, which is exactly what gives a branch
-    condition its one cycle of slack at the block boundary.
+    Control is placed on the step each bank's discipline requires: the read-address group is presented 1 step before
+    the firing issues (so the latched wide operand arrives on the issue step); a lane's write-enable and write-address
+    are presented ON the commit step (both banks write combinationally). A WIDE lane's sign conditioner rides the issue
+    step (consumed inside the wrapper); a BOOLEAN lane's inversion rides the commit step with its write-enable. Placing
+    the write word on the commit step -- not one later -- is exactly what gives a branch condition its one cycle of slack
+    at the block boundary.
     """
     depth = lir.last_pc + 1  # one control word per fetch PC: blocks are laid out across 0..last_pc with NOP gaps
     fields: dict[str, Field] = {}
@@ -237,7 +236,7 @@ def build_microcode(
     def put(name: str, step: int, value: int) -> None:
         # Single-writer rule: a field's step slot may be set once to a non-default value (or repeatedly to the same
         # value). Every write word stays inside its block (only the result LANDING spills into a successor frame -- see
-        # pooled_writeback_word), so under per-block draining no two firings share a control word and this never fires.
+        # pooled_write_word), so under per-block draining no two firings share a control word and this never fires.
         # Under cross-block overlap a successor's base PC drops so its head words can share an absolute fetch step with
         # the predecessor's tail words; this catches at build time any two firings' control words colliding on one slot
         # instead of silently clobbering.
@@ -307,10 +306,10 @@ def build_microcode(
         for write in op.writes:
             lane = (op.inst, write.port)
             wide = isinstance(write.dst, RegRef)
-            # Wide lane: writeback latch alignment (one step after the commit); the latch-free boolean lane fires ON the
-            # commit step (NOT one later -- a +1 would land the result past the branch's boundary read). The same step
-            # the overlap layout uses to keep every write word inside the block (see pooled_writeback_word).
-            wcc = pooled_writeback_word(op.commit_cycle, wide)
+            # Both banks write combinationally, so the write-enable/address ride the commit step (NOT one later -- a +1
+            # would land the result past a branch's boundary read). The same step the overlap layout uses to keep every
+            # write word inside the block (see pooled_write_word).
+            wcc = pooled_write_word(op.commit_cycle)
             assert wcc < depth, f"microcode step out of range: wcc={wcc}, depth={depth}"
             if wide:
                 put(f_ysgn(base, write.port), ci, write.conditioner.encoded)  # sign rides the wrapper at issue

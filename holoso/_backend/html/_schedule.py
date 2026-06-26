@@ -35,7 +35,7 @@ def render_schedule(lir: Lir) -> str:
     col_ord = {col: ordinal for ordinal, col in enumerate(columns)}
     operator_colors = _operator_colors(lir)
     # The microcode PC timeline, cycles 1..span (cycle 0 is the accept/input-load bookend row): the grid reflects what
-    # the register array holds at each PC, including the read/write-latch and microcode-fetch staging. For a control-
+    # the register array holds at each PC, including the read latch and microcode-fetch staging. For a control-
     # flow kernel this lays out every block's PC range; one transaction follows a single path through it, so the grid
     # is the static program, not one transaction's cycle-accurate trace.
     compute_cycles = list(range(1, lir.initiation_interval + 1))
@@ -113,7 +113,7 @@ def render_schedule(lir: Lir) -> str:
                 )
                 dcol: ColKey = write.dst
                 dord = col_ord[dcol]
-                # One commit cell PER successor arm the writeback latch reaches, each with its OWN dataflow edges and
+                # One commit cell PER successor arm the writeback reaches, each with its OWN dataflow edges and
                 # ops chip on its landing row -- the report is path-exact, so a spilled result reads the same on every
                 # arm it lands in, not just the first. A single-landing (drained) write draws exactly one cell, edge
                 # set, and chip, identical to a non-overlapping schedule.

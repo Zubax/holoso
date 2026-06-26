@@ -19,7 +19,7 @@ from holoso import (
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lir import build, pooled_writeback_word
+from holoso._lir import build, pooled_write_word
 from holoso._mir import lower as lower_to_mir
 
 from ._cosim import run_cosim
@@ -144,12 +144,12 @@ def test_cosim_overlap_spill(sim: str, config: OperatorCase) -> None:
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_const_branch(sim: str, config: OperatorCase) -> None:
-    # Bank-aware drain (round-5 fix): an empty const-branch block's condition is a pc-gated install read AT the
-    # terminator, landing at the wide boundary; the drain must not shrink it to the bool boundary or the branch reads
+    # Drained-boundary (round-5 fix): an empty const-branch block's condition is a pc-gated install read AT the
+    # terminator, landing at the drained boundary; the drain must not shrink below it or the branch reads
     # the condition one PC before it lands. The model crashes (KeyError) on the first transaction, but a stale-register
     # branch misdirect is a SILENT RTL miscompile only cosim discriminates (RTL vs model from one LIR). The white-box
-    # twin (test_schedule.py test_const_branch_install_block_keeps_the_wide_drain) pins the block stays at the wide
-    # drain.
+    # twin (test_schedule.py test_const_branch_install_block_drains_to_its_inline_landing) pins the block stays at the
+    # drained boundary.
     fmt = FloatFormat(6, 18)
     run_cosim(sim, const_branch_kernel, fmt, f"const_branch_{config.label}", ops=config.make_ops(fmt))
 
@@ -409,7 +409,7 @@ async def overlap_div0_errpc(dut):
     await FallingEdge(dut.clk)
     dut.out_ready.value = 1
 
-    # x<z takes the NON-fall-through (true) arm; y==0 errs the entry-block division, whose writeback spills past the
+    # x<z takes the NON-fall-through (true) arm; y==0 errs the entry-block division, whose result spills past the
     # shrunk terminator. err_pc must still latch the division's own step (@@ERRPC@@), not the redirected successor PC.
     assert await _transact(dut, 1.0, 2.0, 3.0) == 0, "clean divide on the overlapped arm spuriously flagged err_pc"
     assert await _transact(dut, 0.0, 0.0, 1.0) == @@ERRPC@@, "div0 latched the wrong err_pc step across the redirect"
@@ -420,7 +420,7 @@ async def overlap_div0_errpc(dut):
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_overlap_div0_errpc(sim: str, config: OperatorCase) -> None:
-    # M7 regression (review round 3, Codex P1): an error-bearing division whose writeback spills past a SHRUNK
+    # M7 regression (review round 3, Codex P1): an error-bearing division whose result spills past a SHRUNK
     # terminator must still latch err_pc to its OWN step, not the redirected non-fall-through successor frame. The data
     # is correct regardless (model == RTL), so only this step-exact err_pc cosim catches the regression. White-box
     # twin: test_schedule.py::test_overlap_keeps_error_op_diagnostic_latch_in_frame. See
@@ -430,7 +430,7 @@ def test_cosim_overlap_div0_errpc(sim: str, config: OperatorCase) -> None:
     lir = build(lower_to_mir(optimize(lower(overlap_div_err_kernel)), config.make_ops(fmt)), name)
     entry = next(block for block in lir.blocks if block.index == lir.entry)
     (fdiv,) = [op for op in entry.ops if op.inst.operator.error_ports]
-    err_pc = lir.block_base[entry.index] + pooled_writeback_word(fdiv.commit_cycle, True)
+    err_pc = lir.block_base[entry.index] + pooled_write_word(fdiv.commit_cycle)
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / sim / f"{name}_errpc_w{fmt.wexp}_{fmt.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"errpc_{name}_w{fmt.wexp}_{fmt.wman}"

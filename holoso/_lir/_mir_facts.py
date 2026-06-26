@@ -113,7 +113,7 @@ def block_has_install(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) 
     """
     Each install-bearing block mapped to whether it carries a COPY-class install: a float copy or a bool write whose
     source is COMPUTED by the block's own work (an operator result or phi), which the install must read-first and so pays
-    the +1 install step and the wide writeback drain. A block present with value ``False`` installs only block-entry-
+    the +1 install step and lands at the drained boundary. A block present with value ``False`` installs only block-entry-
     RESIDENT sources -- literal constants (phi-arm const arms or a const branch condition), inputs, or state reads --
     which are available before the install fires, so it fires inline-class within the work makespan and pays neither.
     Determinable from the MIR shape before register assignment (``value_resident_at_entry``), conservatively: an arm is

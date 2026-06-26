@@ -134,8 +134,8 @@ def test_model_matches_reference_small_kernels() -> None:
 
 def test_model_matches_reference_dense_boolean_chain() -> None:
     # A boolean-dense chain at the tightest legal scheduling distance: comparisons -> logic (not/and) -> bool->float
-    # cast -> float arithmetic -> float->bool cast. The latch-free boolean bank lets a logic op issue ON its
-    # producer's commit cycle and the wide-result cast one later, so this pins the model's per-bank read/landing
+    # cast -> float arithmetic -> float->bool cast. The boolean bank's latch-free read lets a logic op issue one cycle
+    # after its producer's commit, and the wide-result cast one later, so this pins the model's per-bank read/landing
     # frames against the exact Python reference at exactly that spacing. All values are chosen exactly representable,
     # so every comparison, cast, and product is exact and the outputs must match the reference bit-for-bit.
     def f(a, b, c, d, k):  # type: ignore[no-untyped-def]
