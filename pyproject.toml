@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "holoso"
 dynamic = ["version"]
-requires-python = ">=3.14"
+requires-python = ">=3.12"  # Verification targets Python 3.14+; earlier versions supported on a best-effort basis.
 description = "A simple Python-to-Verilog synthesizer for numeric kernels, control systems, and DSP."
 readme = { file = "README.md", content-type = "text/markdown" }
 license = "Apache-2.0"
@@ -80,7 +80,7 @@ markers = [
 
 [tool.black]
 line-length = 120
-target-version = ["py314"]
+target-version = ["py312"]
 
 [tool.mypy]
 python_version = "3.14"

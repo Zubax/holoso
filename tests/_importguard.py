@@ -49,7 +49,7 @@ def _source_and_anchor(module: str) -> tuple[Path | None, str]:
     """The module's source path and the package to resolve its relative imports against (itself if it is a package)."""
     try:
         spec = importlib.util.find_spec(module)
-    except ImportError, ValueError:
+    except (ImportError, ValueError):
         return None, module
     if spec is None or spec.origin is None or not spec.origin.endswith(".py"):
         return None, module
