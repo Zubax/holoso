@@ -1282,7 +1282,7 @@ def _reference_outputs(
             kwargs[name] = float(value)
     try:
         result = fn(**kwargs)
-    except ZeroDivisionError, OverflowError, ValueError:
+    except (ZeroDivisionError, OverflowError, ValueError):
         return None
     return [value for _, value in flatten_value(result)]
 
