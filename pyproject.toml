@@ -43,7 +43,6 @@ classifiers = [
 dependencies = [
     "numpy~=2.4",
     "scipy~=1.17",
-    "sympy~=1.14",
 ]
 
 [project.optional-dependencies]
@@ -89,5 +88,5 @@ strict = true
 files = ["holoso"]
 
 [[tool.mypy.overrides]]
-module = ["sympy.*", "scipy.*"]
+module = ["scipy.*"]
 ignore_missing_imports = true
