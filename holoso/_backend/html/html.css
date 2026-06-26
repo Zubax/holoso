@@ -4,7 +4,7 @@
 body { font-family: "Ubuntu Mono", ui-monospace, monospace; margin: 0; background: #ffffff; color: #111827; font-size: 14px; }
 header { padding: 16px 28px; background: #111827; color: #f9fafb; }
 header h1 { margin: 0; font-size: 22px; }
-header .sub { color: #cbd5e1; font-size: 13px; margin-top: 3px; }
+header .sub { color: #aaa; font-size: 13px; margin-top: 3px; }
 header .sub a { color: #93c5fd; text-decoration: underline; }
 main { padding: 14px 28px 70px; }
 .toprow { display: flex; flex-wrap: wrap; gap: 0 40px; align-items: flex-start; }

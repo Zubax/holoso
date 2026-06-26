@@ -51,16 +51,6 @@
 
 `default_nettype none
 
-`define ZKF_SINCOS_K (((WMAN+1)/2) + 1)
-`define ZKF_SINCOS_XYCYC ((`ZKF_SINCOS_K * 100 + UNROLL100 - 1) / UNROLL100)
-`define ZKF_SINCOS_ZGAP  (`ZKF_SINCOS_XYCYC - `ZKF_SINCOS_K)
-`define ZKF_SINCOS_PMUL_L (1 + STAGE_PRODUCT)
-`define ZKF_SINCOS_SAVED \
-    ((PARALLEL == 0) ? 0 : ((`ZKF_SINCOS_ZGAP < `ZKF_SINCOS_PMUL_L) ? `ZKF_SINCOS_ZGAP : `ZKF_SINCOS_PMUL_L))
-`define ZKF_SINCOS_LATENCY \
-    (11 + (2 * STAGE_PRODUCT) + `ZKF_SINCOS_XYCYC - `ZKF_SINCOS_SAVED \
-        + STAGE_INPUT + STAGE_NORMALIZE + STAGE_PACK + STAGE_OUTPUT)
-
 module zkf_sincos #(
     parameter WEXP            = 6,      // exponent field width
     parameter WMAN            = 18,     // significand precision including the hidden bit
@@ -72,7 +62,7 @@ module zkf_sincos #(
     parameter STAGE_PACK      = 0,
     parameter STAGE_OUTPUT    = 0,
     parameter PARALLEL        = (UNROLL100 < 100) ? 1 : 0,  // Testing-only knob, DO NOT override.
-    parameter LATENCY         = `ZKF_SINCOS_LATENCY  // accept-to-out_valid cycles; checked below
+    parameter LATENCY         = 0
 ) (
     input  wire                 clk,
     input  wire                 rst,
@@ -87,6 +77,13 @@ module zkf_sincos #(
     output wire [WEXP+WMAN-1:0] cos,
     output wire [1:0]           quadrant
 );
+    localparam integer K      = ((WMAN + 1) / 2) + 1;          // CORDIC iterations
+    localparam integer XYCYC  = (K * 100 + UNROLL100 - 1) / UNROLL100;
+    localparam integer ZGAP   = XYCYC - K;
+    localparam integer PMUL_L = 1 + STAGE_PRODUCT;
+    localparam integer SAVED  = (PARALLEL == 0) ? 0 : ((ZGAP < PMUL_L) ? ZGAP : PMUL_L);
+    localparam LATENCY_REF =
+        11 + (2 * STAGE_PRODUCT) + XYCYC - SAVED + STAGE_INPUT + STAGE_NORMALIZE + STAGE_PACK + STAGE_OUTPUT;
     generate
         if ((WEXP < 2) || (WMAN < 4) || (WEXP >= 31)) begin : g_invalid_wexp_or_wman
             _zkf_invalid_wexp_or_wman u_invalid();
@@ -97,7 +94,7 @@ module zkf_sincos #(
         if ((STAGE_OUTPUT != 0) && (STAGE_OUTPUT != 1)) begin : g_invalid_stage_output
             _zkf_invalid_stage_output u_invalid();
         end
-        if (LATENCY != `ZKF_SINCOS_LATENCY) begin : g_invalid_latency
+        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
     endgenerate
@@ -110,7 +107,6 @@ module zkf_sincos #(
     localparam integer GUARD_Z    = 3;
     localparam integer FF   = WMAN + GUARD_FF;          // reduced-fraction width: frac(x) at scale 2**-FF
     localparam integer WT   = FF - 2;                   // quadrant-local coordinate width (top 2 bits = quadrant)
-    localparam integer K    = `ZKF_SINCOS_K;               // CORDIC iterations
     localparam integer XF   = ((3 * WMAN + 1) / 2) + GUARD_XY;  // x/y fractional scale
     localparam integer WX   = XF + 2;                   // signed x/y width
     // Native scale of the pre-narrowed const2pi from the per-WMAN _zkf_cordic_m table (MUST match its CONST2PI_S):
@@ -664,10 +660,4 @@ module zkf_sincos #(
     wire _unused = ^{cd_zn, b2_sin, b2_cos};
 endmodule
 
-`undef ZKF_SINCOS_LATENCY
-`undef ZKF_SINCOS_SAVED
-`undef ZKF_SINCOS_PMUL_L
-`undef ZKF_SINCOS_ZGAP
-`undef ZKF_SINCOS_XYCYC
-`undef ZKF_SINCOS_K
 `default_nettype wire

@@ -45,16 +45,6 @@
 
 `default_nettype none
 
-`define ZKF_ATAN2_N         (((WMAN+1)/2)+1)
-`define ZKF_ATAN2_XF        (((3*WMAN+1)/2)+6)
-`define ZKF_ATAN2_XYCYC     ((`ZKF_ATAN2_N*100 + UNROLL100 - 1)/UNROLL100)
-`define ZKF_ATAN2_STEPS     ((`ZKF_ATAN2_XF + 1)/2)
-`define ZKF_ATAN2_DIVCYC    (`ZKF_ATAN2_STEPS + 1)
-`define ZKF_ATAN2_BASE      8
-`define ZKF_ATAN2_LATENCY \
-    (`ZKF_ATAN2_BASE + STAGE_INPUT + `ZKF_ATAN2_XYCYC + `ZKF_ATAN2_DIVCYC + STAGE_PRODUCT \
-        + STAGE_NORMALIZE + STAGE_PACK + STAGE_OUTPUT)
-
 module zkf_atan2 #(
     parameter WEXP            = 6,      // exponent field width
     parameter WMAN            = 18,     // significand precision including the hidden bit
@@ -65,7 +55,7 @@ module zkf_atan2 #(
     parameter STAGE_NORMALIZE = 0,
     parameter STAGE_PACK      = 0,
     parameter STAGE_OUTPUT    = 0,
-    parameter LATENCY         = `ZKF_ATAN2_LATENCY  // accept-to-out_valid cycles; checked below
+    parameter LATENCY         = 0
 ) (
     input  wire                 clk,
     input  wire                 rst,
@@ -93,8 +83,8 @@ module zkf_atan2 #(
     localparam integer GUARD_DIV  = 8;                  // residual/bypass quotient guard (mirrors zkf_trig GUARD_DIV)
     localparam integer FF   = WMAN + GUARD_FF;
     localparam integer WT   = FF - 2;
-    localparam integer N    = `ZKF_ATAN2_N;
-    localparam integer XF   = `ZKF_ATAN2_XF;            // x/y fractional scale
+    localparam integer N    = ((WMAN+1)/2)+1;
+    localparam integer XF   = ((3*WMAN+1)/2)+6;         // x/y fractional scale
     localparam integer WX   = XF + 2;                   // signed x/y width (engine)
     localparam integer ZF   = WT + 2 + GUARD_ZF;        // angle (turns) fractional scale
     localparam integer WZ   = ZF + GUARD_Z;             // signed angle width (engine)
@@ -113,7 +103,7 @@ module zkf_atan2 #(
     // Folded radix-4 divider geometry: STEPS cycles (2 quotient bits each) producing Q = floor(num*2**F/den), where
     // the F = 2*STEPS >= XF fractional bits give the residual its ~wman+(N-1) significant quotient bits. WDIV is the
     // operand/remainder width (residual divisor x_K < 2**(XF+1); the bypass divisor sig_x zero-extends in).
-    localparam integer STEPS = `ZKF_ATAN2_STEPS;
+    localparam integer STEPS = (XF + 1)/2;
     localparam integer F     = 2 * STEPS;               // quotient fractional bits
     localparam integer WDIV  = WX;                      // divider operand / remainder width
     // The residual quotient (|y_K| < x_K) is < 1 so its integer bit is structurally 0, but the BYPASS divides
@@ -133,7 +123,7 @@ module zkf_atan2 #(
     localparam integer WMAG_TH  = WZ + 2;
     localparam integer WMAG_AB  = (WMAG_MAG > WMAG_QT) ? WMAG_MAG : WMAG_QT;
     localparam integer WMAG     = (WMAG_AB > WMAG_TH) ? WMAG_AB : WMAG_TH;
-    localparam integer WEU   = WEXP + $clog2(WMAG + 1) + 3;
+    localparam integer WEU      = WEXP + $clog2(WMAG + 1) + 3;
 
     // The CORDIC sideband is only a dummy bit. Input-derived metadata is captured into hd_* for the whole single
     // in-flight transaction (busy blocks the next accept until output retirement), so the back-end can read it directly
@@ -144,6 +134,11 @@ module zkf_atan2 #(
     localparam signed [WZ+1:0] QUARTER = {{(WZ+2-(ZF-1)){1'b0}}, 1'b1, {(ZF-2){1'b0}}}; // 1/4 turn
     localparam signed [WZ+1:0] HALF    = {{(WZ+2-ZF){1'b0}}, 1'b1, {(ZF-1){1'b0}}};     // 1/2 turn
 
+    localparam integer XYCYC  = (N*100 + UNROLL100 - 1)/UNROLL100;
+    localparam integer DIVCYC = STEPS + 1;
+    localparam integer BASE   = 8;
+    localparam LATENCY_REF =
+        BASE + STAGE_INPUT + XYCYC + DIVCYC + STAGE_PRODUCT + STAGE_NORMALIZE + STAGE_PACK + STAGE_OUTPUT;
     generate
         if ((WEXP < 2) || (WMAN < 4) || (WEXP >= 31)) begin : g_invalid_wexp_or_wman
             _zkf_invalid_wexp_or_wman u_invalid();
@@ -154,7 +149,7 @@ module zkf_atan2 #(
         if ((STAGE_OUTPUT != 0) && (STAGE_OUTPUT != 1)) begin : g_invalid_stage_output
             _zkf_invalid_stage_output u_invalid();
         end
-        if (LATENCY != `ZKF_ATAN2_LATENCY) begin : g_invalid_latency
+        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
     endgenerate
@@ -685,7 +680,7 @@ module zkf_atan2 #(
     //       registered dv_*) -- plus the bypass jam and every dv_*-derived back-end input, pre-forming texp/mexp.
     //   B2 (next stage): performs the ONE remaining signed add un_tmag = un_base +/- res_delta and assembles the packer
     //       inputs. So the P2->B2 cone is exactly one add; the pmul_p->P2 cone is the shift wires. +1 latency cycle
-    //       (folded into `ZKF_ATAN2_BASE / atan2_latency()).
+    //       (folded into BASE / atan2_latency()).
     // The special-case descriptor {special, sp_sign, spk, sp_mag} is NOT re-registered through P2/B2:
     // it is read DIRECTLY from the held dv_* regs at the output (latched at cd_done, held for the whole single
     // in-flight transaction -- earlier and longer-lived than any p2_*/b2_* copy), so only the numeric theta payload
@@ -888,10 +883,4 @@ module zkf_atan2 #(
 
 endmodule
 
-`undef ZKF_ATAN2_LATENCY
-`undef ZKF_ATAN2_BASE
-`undef ZKF_ATAN2_STEPS
-`undef ZKF_ATAN2_XYCYC
-`undef ZKF_ATAN2_XF
-`undef ZKF_ATAN2_N
 `default_nettype wire

@@ -17,15 +17,13 @@
 
 `default_nettype none
 
-`define ZKF_MUL_ILOG2_CONST_LATENCY (1 + STAGE_INPUT + STAGE_DECODE)
-
 module zkf_mul_ilog2_const #(
     parameter         WEXP         = 6,     // exponent field width
     parameter         WMAN         = 18,    // significand precision including the hidden bit
     parameter integer K            = 0,     // signed integer exponent shift: y = a * 2^K
     parameter         STAGE_INPUT  = 0,     // 0 = combinational input; 1 = latch input before logic (+1 cycle)
     parameter         STAGE_DECODE = 0,     // 0 = single-cycle; 1 = register decoded signals (+1 cycle)
-    parameter         LATENCY      = `ZKF_MUL_ILOG2_CONST_LATENCY   // must equal register-stage count; checked below
+    parameter         LATENCY      = 0
 ) (
     input wire clk,
     input wire rst,
@@ -56,6 +54,7 @@ module zkf_mul_ilog2_const #(
     localparam integer K_LIMIT_OVERFLOW  =   (1 << WEXP) - 2;
     localparam integer K_LIMIT_UNDERFLOW = -((1 << WEXP) - 2);
 
+    localparam LATENCY_REF = 1 + STAGE_INPUT + STAGE_DECODE;
     generate
         if ((WEXP < 2) || (WMAN < 4)) begin : g_invalid_wm
             _zkf_invalid_wexp_or_wman u_invalid();
@@ -78,7 +77,7 @@ module zkf_mul_ilog2_const #(
         if (K < K_LIMIT_UNDERFLOW) begin : g_invalid_k_always_underflow
             _zkf_invalid_mul_ilog2_const_k_always_underflow u_invalid();
         end
-        if (LATENCY != `ZKF_MUL_ILOG2_CONST_LATENCY) begin : g_invalid_latency
+        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
     endgenerate
@@ -199,5 +198,4 @@ module zkf_mul_ilog2_const #(
     endgenerate
 endmodule
 
-`undef ZKF_MUL_ILOG2_CONST_LATENCY
 `default_nettype wire

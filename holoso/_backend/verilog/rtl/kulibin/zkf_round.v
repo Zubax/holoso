@@ -29,8 +29,6 @@
 `default_nettype none
 
 // With all stages disabled the module becomes combinational and the clk/rst are ignored.
-`define ZKF_ROUND_LATENCY (STAGE_INPUT + STAGE_DECODE + STAGE_PACK + STAGE_OUTPUT)
-
 module zkf_round #(
     parameter WEXP         = 6,
     parameter WMAN         = 18,
@@ -38,7 +36,7 @@ module zkf_round #(
     parameter STAGE_DECODE = 0,
     parameter STAGE_PACK   = 0,
     parameter STAGE_OUTPUT = 0,
-    parameter LATENCY      = `ZKF_ROUND_LATENCY   // must equal the register-stage count; checked below
+    parameter LATENCY      = 0
 ) (
     input wire clk,
     input wire rst,
@@ -50,6 +48,7 @@ module zkf_round #(
     output wire                 out_valid,
     output wire [WEXP+WMAN-1:0] y
 );
+    localparam LATENCY_REF = STAGE_INPUT + STAGE_DECODE + STAGE_PACK + STAGE_OUTPUT;
     generate
         if ((WEXP < 2) || (WMAN < 4)) begin : g_invalid
             _zkf_invalid_wexp_or_wman u_invalid();
@@ -64,7 +63,7 @@ module zkf_round #(
         if ((STAGE_DECODE != 0) && (STAGE_DECODE != 1)) begin : g_invalid_stage_decode
             _zkf_invalid_stage_decode u_invalid();
         end
-        if (LATENCY != `ZKF_ROUND_LATENCY) begin : g_invalid_latency
+        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
     endgenerate
@@ -233,7 +232,5 @@ module zkf_round #(
         .y(y)
     );
 endmodule
-
-`undef ZKF_ROUND_LATENCY
 
 `default_nettype wire

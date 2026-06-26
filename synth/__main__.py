@@ -24,10 +24,7 @@ from pathlib import Path
 from holoso import synthesize, FloatFormat, OpConfig
 
 from ._synth import BUILD_ROOT, SynthReport
-from .flows import Flow
-from .flows.diamond import DiamondEcp5Flow
-from .flows.vivado import VivadoFlow
-from .flows.yosys import YosysEcp5Flow
+from .flows import Flow, FlowId, make_flow
 
 _RESET = "\033[0m"
 _BOLD = "\033[1m"
@@ -55,7 +52,7 @@ class _OperatorKnob:
 
 @dataclass(frozen=True, slots=True)
 class _FlowRequest:
-    flow_id: str
+    flow_id: FlowId
     target_frequency_MHz: float
     op_knobs: list[_OperatorKnob]
 
@@ -64,13 +61,6 @@ class _FlowRequest:
 class _SelectedFlow:
     request: _FlowRequest
     flow: Flow
-
-
-_FLOWS = {
-    "yosys-ecp5": lambda request: YosysEcp5Flow(target_frequency_MHz=request.target_frequency_MHz),
-    "diamond-ecp5": lambda request: DiamondEcp5Flow(target_frequency_MHz=request.target_frequency_MHz),
-    "vivado": lambda request: VivadoFlow(target_frequency_MHz=request.target_frequency_MHz),
-}
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -93,7 +83,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
         metavar="FLOW:freq=MHz[,OP.KNOB=VALUE...]",
         help=(
-            f"synthesis flow to run; repeatable; supported flows: {', '.join(_FLOWS.keys())}; "
+            f"synthesis flow to run; repeatable; supported flows: {', '.join(FlowId)}; "
             "optional operator knob fields are OP.KNOB, where OP is an OpConfig operator field"
         ),
     )
@@ -104,11 +94,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def _parse_flow_requests(parser: argparse.ArgumentParser, specs: list[str]) -> list[_FlowRequest]:
     requests: list[_FlowRequest] = []
-    seen: set[str] = set()
+    seen: set[FlowId] = set()
     for spec in specs:
         request = _parse_flow_spec(parser, spec)
         if request.flow_id in seen:
-            parser.error(f"flow {request.flow_id!r} was requested more than once")
+            parser.error(f"flow {request.flow_id.value!r} was requested more than once")
         seen.add(request.flow_id)
         requests.append(request)
     return requests
@@ -118,8 +108,8 @@ def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest
     if ":" not in spec:
         parser.error(f"flow spec {spec!r} must be written as FLOW:freq=MHz[,OP.KNOB=VALUE...]")
     flow_id, raw_fields = (part.strip() for part in spec.split(":", 1))
-    if flow_id not in _FLOWS.keys():
-        parser.error(f"unknown flow {flow_id!r}; supported flows: {', '.join(_FLOWS.keys())}")
+    if flow_id not in FlowId:
+        parser.error(f"unknown flow {flow_id!r}; supported flows: {', '.join(FlowId)}")
     if not raw_fields:
         parser.error(f"flow spec {spec!r} has no fields; expected freq=MHz")
 
@@ -151,7 +141,7 @@ def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest
         parser.error(f"flow spec {spec!r} has invalid frequency {raw_frequency!r}")
     if not math.isfinite(target_frequency_MHz) or target_frequency_MHz <= 0.0:
         parser.error(f"flow spec {spec!r} has invalid frequency {raw_frequency!r}")
-    return _FlowRequest(flow_id=flow_id, target_frequency_MHz=target_frequency_MHz, op_knobs=op_knobs)
+    return _FlowRequest(flow_id=FlowId(flow_id), target_frequency_MHz=target_frequency_MHz, op_knobs=op_knobs)
 
 
 def _parse_op_knob(parser: argparse.ArgumentParser, spec: str, key: str, raw_value: str) -> _OperatorKnob | None:
@@ -210,14 +200,11 @@ def _op_config(fmt: FloatFormat, op_knobs: list[_OperatorKnob]) -> OpConfig:
     )
 
 
-def _select_flows(requests: list[_FlowRequest]) -> tuple[list[_SelectedFlow], list[str]]:
+def _select_flows(requests: list[_FlowRequest]) -> tuple[list[_SelectedFlow], list[FlowId]]:
     flows: list[_SelectedFlow] = []
-    skipped: list[str] = []
+    skipped: list[FlowId] = []
     for request in requests:
-        try:
-            flow: Flow = _FLOWS[request.flow_id](request)  # type: ignore
-        except LookupError:
-            raise AssertionError(f"unknown flow ID {request.flow_id!r}")
+        flow: Flow = make_flow(request.flow_id, request.target_frequency_MHz)
         if flow.available():
             flows.append(_SelectedFlow(request, flow))
         else:

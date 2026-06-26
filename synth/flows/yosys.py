@@ -8,7 +8,8 @@ from holoso import SynthesisResult
 from .._detect import find_tool, require_tool
 from .._ooc import build_ooc_wrapper
 from .._synth import CommandSpec, ResourceUse, SourceFile, SynthArtifact, SynthReport, assemble, run_logged
-from . import Flow
+from .._flow_id import FlowId
+from ._flow import Flow
 
 _SCRIPT = "synth.ys"
 _NETLIST = "ooc.json"
@@ -68,7 +69,7 @@ class YosysEcp5Flow(Flow):
             run_logged([require_tool("nextpnr-ecp5"), *nextpnr_args], directory / _NEXTPNR_LOG, cwd=directory)
             return _parse(self, directory)
 
-        return SynthArtifact(flow="yosys-ecp5", top=top, files=[*src, script], commands=commands, runner=runner)
+        return SynthArtifact(flow=FlowId.YOSYS_ECP5, top=top, files=[*src, script], commands=commands, runner=runner)
 
 
 def _yosys_script(top: str, dut_module: str) -> str:
@@ -117,7 +118,7 @@ def _parse(flow: YosysEcp5Flow, directory: Path) -> SynthReport:
                 resources[name] = ResourceUse(name, item["used"], available if isinstance(available, int) else None)
 
     return SynthReport(
-        flow="yosys-ecp5",
+        flow=FlowId.YOSYS_ECP5,
         target_frequency_MHz=target,
         fmax_MHz=fmax_MHz,
         slack_ns=1000.0 / target - 1000.0 / fmax_MHz,

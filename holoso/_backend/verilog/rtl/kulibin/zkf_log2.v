@@ -46,11 +46,6 @@
 
 `default_nettype none
 
-`define ZKF_LOG2_DEGREE (((WMAN+18)/11)-1)
-`define ZKF_LOG2_LATENCY \
-    (STAGE_INPUT + STAGE_DECODE + 5 + STAGE_PRODUCT_FINAL + STAGE_NORMALIZE + STAGE_NORMALIZE_OUTPUT \
-     + STAGE_PACK + `ZKF_LOG2_DEGREE*(2+STAGE_PRODUCT) + STAGE_OUTPUT)
-
 module zkf_log2 #(
     parameter WEXP                  = 6,    // exponent field width
     parameter WMAN                  = 18,   // significand precision including the hidden bit
@@ -63,7 +58,7 @@ module zkf_log2 #(
     parameter STAGE_NORMALIZE_OUTPUT = 0,   // 0/1 register normshift outputs (direct -> _zkf_normshift.STAGE_OUTPUT)
     parameter STAGE_PACK            = 0,    // 0: comb pack input; 1: register pack input (insulates rounder)
     parameter STAGE_OUTPUT          = 0,    // 0: combinational outputs;     1: registered outputs, +1 stage
-    parameter LATENCY               = `ZKF_LOG2_LATENCY   // must equal the register-stage count; checked below
+    parameter LATENCY               = 0
 ) (
     input wire clk,
     input wire rst,
@@ -76,6 +71,9 @@ module zkf_log2 #(
     output wire                 domain_error,
     output wire                 pole
 );
+    localparam DEGREE = (((WMAN+18)/11)-1);
+    localparam LATENCY_REF = STAGE_INPUT + STAGE_DECODE + 5 + STAGE_PRODUCT_FINAL + STAGE_NORMALIZE
+                           + STAGE_NORMALIZE_OUTPUT + STAGE_PACK + DEGREE*(2+STAGE_PRODUCT) + STAGE_OUTPUT;
     generate
         // BIAS below uses an unsized integer shift on WEXP; WEXP >= 31 would overflow 32-bit integer constants.
         if ((WEXP < 2) || (WMAN < 4) || (WEXP >= 31)) begin : g_invalid_wman
@@ -87,7 +85,7 @@ module zkf_log2 #(
         if ((STAGE_DECODE != 0) && (STAGE_DECODE != 1)) begin : g_invalid_stage_decode
             _zkf_invalid_stage_decode u_invalid();
         end
-        if (LATENCY != `ZKF_LOG2_LATENCY) begin : g_invalid_latency
+        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
     endgenerate
@@ -285,7 +283,7 @@ module zkf_log2 #(
     // Intentional: unsupported in-range WMAN names missing _zkf_log2_m<WMAN>, prompting table generation.
     `define ZKF_LOG2_TABLE(W) end else if (WMAN == W) begin \
         _zkf_log2_m``W #( \
-            .D(`ZKF_LOG2_DEGREE), .WSB(SBW), \
+            .D(DEGREE), .WSB(SBW), \
             .WMULTIPLIER(WMULTIPLIER), \
             .STAGE_PRODUCT(STAGE_PRODUCT), .STAGE_PRODUCT_FINAL(STAGE_PRODUCT_FINAL) \
         ) u_eval ( \
@@ -433,6 +431,4 @@ module zkf_log2 #(
     assign domain_error = sb_out_flags[0];
 endmodule
 
-`undef ZKF_LOG2_LATENCY
-`undef ZKF_LOG2_DEGREE
 `default_nettype wire

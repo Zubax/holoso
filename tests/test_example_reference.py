@@ -7,8 +7,9 @@ identically and the bit-for-bit check still passes. That suite proves ``RTL == c
 ``compiler-model == Python semantics``. This module closes that gap: it drives each example's numerical model AND a
 fresh plain-Python instance of the same kernel over ``reference_vectors()`` (the manual sequence then the random draw)
 and asserts they agree. Boolean lanes and exact (integer/Sterbenz) float lanes must match bit-for-bit; a kernel whose
-float outputs accumulate rounding (``approximate``) is compared within a format-derived tolerance. Inputs are quantized
-into the format first, so the model and the reference see the same operands and only the per-operation rounding differs.
+float outputs accumulate rounding (``ReferenceComparison.APPROXIMATE``) is compared within a format-derived tolerance.
+Inputs are quantized into the format first, so the model and the reference see the same operands and only the
+per-operation rounding differs.
 The per-input format-edge sweep is excluded here -- the model legitimately diverges from float64 at the format extremes
 (an operation overflowing to the format's infinity stays finite in float64), which the cosim suite covers instead.
 
@@ -21,10 +22,10 @@ import pytest
 
 import holoso
 from holoso import BoolType, FloatFormat
-from ._examples import SPECS, ExampleSpec
+from ._examples import SPECS, ExampleSpec, ReferenceComparison
 from ._modelref import default_ops, default_tolerance, flatten_value, within
 
-# A kernel whose result is purely persistent PUBLIC VECTOR state (``spec.vector_public_state`` -- ``ekf1_stateful``,
+# A kernel whose result is purely persistent PUBLIC VECTOR state (``ReferenceComparison.EXCLUDED`` -- ``ekf1_stateful``,
 # whose ``update`` returns nothing) is excluded: this generic harness compares scalar lanes only, and that kernel's
 # aggregate-state read-back is already validated against the Python reference in ``test_verify.py``. Every other example
 # returns its outputs (optionally alongside scalar public state), which this harness compares directly.
@@ -39,7 +40,7 @@ _STATE_PREFIX = "state_"
 _CASES = [
     pytest.param(spec, spec.formats[0], id=f"{spec.name}-e{spec.formats[0].wexp}m{spec.formats[0].wman}")
     for spec in SPECS
-    if not spec.vector_public_state
+    if spec.reference is not ReferenceComparison.EXCLUDED
 ]
 
 
@@ -77,7 +78,8 @@ def test_example_matches_python_reference(spec: ExampleSpec, fmt: FloatFormat) -
         floats = [abs(float(v)) for v in (*quantized.values(), *expected) if not isinstance(v, bool)]
         # Exact (0, 0) unless the kernel accumulates rounding: a discrete/Sterbenz float output must match bit-for-bit,
         # so a stuck or off-by-one value cannot hide under a loose relative tolerance (acute in the coarse byte format).
-        rtol, atol = default_tolerance(fmt, op_count, max([1.0, *floats])) if spec.approximate else (0.0, 0.0)
+        approximate = spec.reference is ReferenceComparison.APPROXIMATE
+        rtol, atol = default_tolerance(fmt, op_count, max([1.0, *floats])) if approximate else (0.0, 0.0)
         for port, got_value, want in zip(model.outputs, got, expected):
             if isinstance(port.scalar_type, BoolType):
                 assert bool(got_value) == bool(

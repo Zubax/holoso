@@ -9,6 +9,7 @@ from pathlib import Path
 
 from holoso import SynthesisResult
 
+from ._flow_id import FlowId
 from ._ooc import OocWrapper
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -53,7 +54,7 @@ class ResourceUse:
 
 @dataclass(frozen=True, slots=True)
 class SynthReport:
-    flow: str
+    flow: FlowId
     target_frequency_MHz: float
     fmax_MHz: float
     slack_ns: float
@@ -77,7 +78,7 @@ class CommandSpec:
 
 @dataclass(frozen=True, slots=True)
 class SynthArtifact:
-    flow: str
+    flow: FlowId
     top: str
     files: list[SourceFile]
     commands: list[CommandSpec]

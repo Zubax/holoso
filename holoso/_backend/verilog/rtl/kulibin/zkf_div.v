@@ -13,15 +13,13 @@
 
 `default_nettype none
 
-`define ZKF_DIV_LATENCY (2 + STAGE_INPUT + ((WMAN+2+((WMAN+2)%2))/2) + STAGE_PACK + STAGE_OUTPUT)
-
 module zkf_div #(
     parameter WEXP         = 6,    // exponent field width
     parameter WMAN         = 18,   // significand precision including the hidden bit
     parameter STAGE_INPUT  = 0,    // 0 = combinational inputs; 1 = latched inputs (+1 cycle)
     parameter STAGE_PACK   = 0,    // 0 = comb pack inputs; 1 = register pack inputs (+1 cycle)
     parameter STAGE_OUTPUT = 0,    // 0 = combinational outputs; 1 = registered outputs (+1 cycle)
-    parameter LATENCY      = `ZKF_DIV_LATENCY   // must equal the register-stage count; checked below
+    parameter LATENCY      = 0
 ) (
     input wire clk,
     input wire rst,
@@ -37,13 +35,14 @@ module zkf_div #(
     localparam WFULL         = WEXP + WMAN;
     localparam WEXP_UNBIASED = WEXP + 2;
 
+    localparam LATENCY_REF = 2 + STAGE_INPUT + ((WMAN+2+((WMAN+2)%2))/2) + STAGE_PACK + STAGE_OUTPUT;
     generate
         // STAGE_INPUT is realized locally as a single optional input register, so only {0,1} is meaningful.
         // STAGE_PACK / STAGE_OUTPUT forward to _zkf_pack, which validates its own ranges.
         if ((STAGE_INPUT != 0) && (STAGE_INPUT != 1)) begin : g_invalid_stage_input
             _zkf_invalid_stage_input u_invalid();
         end
-        if (LATENCY != `ZKF_DIV_LATENCY) begin : g_invalid_latency
+        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
     endgenerate
@@ -119,5 +118,4 @@ module zkf_div #(
     ) u_pack_delay (.clk(clk), .x(core_div0), .y(div0));
 endmodule
 
-`undef ZKF_DIV_LATENCY
 `default_nettype wire

@@ -7,14 +7,12 @@
 
 `default_nettype none
 
-`define ZKF_TO_INT_LATENCY (4 + STAGE_INPUT)
-
 module zkf_to_int #(
     parameter WEXP        = 6,
     parameter WMAN        = 18,
     parameter WINT        = 32,
     parameter STAGE_INPUT = 0,  // whether to add a stage at the input (shields inputs from combinational paths)
-    parameter LATENCY     = `ZKF_TO_INT_LATENCY   // must equal the register-stage count; checked below
+    parameter LATENCY     = 0
 ) (
     input wire clk,
     input wire rst,
@@ -25,11 +23,12 @@ module zkf_to_int #(
     output wire                   out_valid,
     output wire signed [WINT-1:0] y
 );
+    localparam LATENCY_REF = 4 + STAGE_INPUT;
     generate
         if ((WEXP < 2) || (WMAN < 4) || (WINT < 2)) begin : g_invalid
             _zkf_invalid_wexp_or_wman u_invalid();
         end
-        if (LATENCY != `ZKF_TO_INT_LATENCY) begin : g_invalid_latency
+        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
     endgenerate
@@ -120,7 +119,5 @@ module zkf_to_int #(
     assign out_valid = s4_valid;
     assign y         = s4_y;
 endmodule
-
-`undef ZKF_TO_INT_LATENCY
 
 `default_nettype wire

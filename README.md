@@ -163,3 +163,10 @@ Just say `nox`. Read the `noxfile.py` and `DESIGN.md` for details.
 
 You may find the [zubax-fpga-toolchain](https://github.com/Zubax/fpga-toolchain-docker/pkgs/container/zubax-fpga-toolchain)
 container useful as it comes with all of the required tools out of the box.
+
+## License
+
+Holoso is licensed under the [Apache License 2.0](LICENSE).
+What you produce with it is yours: the Verilog this tool generates, together with the bundled support RTL it stitches
+into every design, is unencumbered and carries no license obligations.
+Use it in open-source or proprietary designs freely.

@@ -5,7 +5,7 @@ Maintenance utility: vendor third-party HDL into the backend's rtl/ tree.
 Holoso ships a single self-contained support library assembled from the hand-written wrappers plus the upstream HDL
 primitives they instantiate. Rather than carrying upstream HDL as git submodules, we vendor a verbatim copy; this
 script refreshes it. Each origin lands in its own destination subdirectory, so ownership is the subdirectory:
-refreshing replaces exactly that subtree. A README.md beside the files records provenance and the upstream license;
+refreshing replaces exactly that subtree. A README.md beside the files records provenance;
 the support-library builder globs all RTL files and stitches them all together.
 """
 
@@ -42,14 +42,7 @@ def _git(args: list[str], cwd: Path) -> str:
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
-def _license(clone: Path) -> str:
-    for candidate in ("LICENSE", "LICENSE.txt", "LICENSE.md", "COPYING"):
-        if (clone / candidate).is_file():
-            return (clone / candidate).read_text(encoding="utf-8", errors="replace").strip()
-    return ""
-
-
-def _readme(origin: Origin, commit: str, commit_date: str, license_text: str) -> str:
+def _readme(origin: Origin, commit: str, commit_date: str) -> str:
     lines = [
         f"# {origin.destination.name}",
         "",
@@ -61,8 +54,6 @@ def _readme(origin: Origin, commit: str, commit_date: str, license_text: str) ->
         f"- Source: `{origin.source}`",
         "",
     ]
-    if license_text:
-        lines += ["## License", "", license_text, ""]
     return "\n".join(lines)
 
 
@@ -73,7 +64,6 @@ def update(origin: Origin) -> None:
         subprocess.run(["git", "clone", "--depth", "1", "--branch", origin.ref, origin.remote, str(clone)], check=True)
         commit = _git(["rev-parse", "HEAD"], clone)
         commit_date = _git(["log", "-1", "--format=%cI"], clone)
-        license_text = _license(clone)
         root = clone / origin.source
         files = sorted(root.rglob("*.v"))
         assert files, f"no .v files under {origin.source!r} in {origin.remote}"
@@ -85,9 +75,7 @@ def update(origin: Origin) -> None:
             target = origin.destination / path.relative_to(root)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, target)
-        (origin.destination / "README.md").write_text(
-            _readme(origin, commit, commit_date, license_text), encoding="utf-8"
-        )
+        (origin.destination / "README.md").write_text(_readme(origin, commit, commit_date), encoding="utf-8")
     print(f"Vendored {len(files)} files into {origin.destination.relative_to(REPO_ROOT)} (commit {commit[:12]})")
 
 

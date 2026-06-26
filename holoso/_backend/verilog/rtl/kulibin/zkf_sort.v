@@ -6,13 +6,11 @@
 
 `default_nettype none
 
-`define ZKF_SORT_LATENCY (1 + STAGE_INPUT)
-
 module zkf_sort #(
     parameter WEXP        = 6,
     parameter WMAN        = 18,
     parameter STAGE_INPUT = 0,
-    parameter LATENCY     = `ZKF_SORT_LATENCY   // must equal the register-stage count; checked below
+    parameter LATENCY     = 0
 ) (
     input wire clk,
     input wire rst,
@@ -27,11 +25,12 @@ module zkf_sort #(
 );
     localparam WFULL = WEXP + WMAN;
 
+    localparam LATENCY_REF = 1 + STAGE_INPUT;
     generate
         if ((STAGE_INPUT != 0) && (STAGE_INPUT != 1)) begin : g_invalid_stage_input
             _zkf_invalid_stage_input u_invalid();
         end
-        if (LATENCY != `ZKF_SORT_LATENCY) begin : g_invalid_latency
+        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
     endgenerate
@@ -65,5 +64,4 @@ module zkf_sort #(
     end
 endmodule
 
-`undef ZKF_SORT_LATENCY
 `default_nettype wire

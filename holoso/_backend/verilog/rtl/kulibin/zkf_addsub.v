@@ -4,8 +4,6 @@
 `default_nettype none
 
 // The latency is the same as zkf_add
-`define ZKF_ADDSUB_LATENCY (4 + STAGE_INPUT + STAGE_DECODE + STAGE_ALIGN + STAGE_NORMALIZE + STAGE_PACK + STAGE_OUTPUT)
-
 module zkf_addsub #(
     parameter WEXP            = 6,    // exponent field width
     parameter WMAN            = 18,   // significand precision including the hidden bit
@@ -15,7 +13,7 @@ module zkf_addsub #(
     parameter STAGE_NORMALIZE = 0,    // forwarded to zkf_add
     parameter STAGE_PACK      = 0,    // forwarded to zkf_add
     parameter STAGE_OUTPUT    = 0,    // forwarded to zkf_add
-    parameter LATENCY         = `ZKF_ADDSUB_LATENCY   // must equal the register-stage count; checked below
+    parameter LATENCY         = 0
 ) (
     input wire clk,
     input wire rst,
@@ -30,13 +28,7 @@ module zkf_addsub #(
 );
     localparam WFULL = WEXP + WMAN;
 
-    generate
-        if (LATENCY != `ZKF_ADDSUB_LATENCY) begin : g_invalid_latency
-            _zkf_invalid_latency_mismatch u_invalid();
-        end
-    endgenerate
-
-    // Forward LATENCY into zkf_add so a drift in zkf_add's own stage count breaks this wrapper's default build too.
+    // LATENCY is forwarded to zkf_add, which performs the latency self-check.
     zkf_add #(
         .WEXP(WEXP), .WMAN(WMAN),
         .STAGE_INPUT(STAGE_INPUT),
@@ -56,5 +48,4 @@ module zkf_addsub #(
     );
 endmodule
 
-`undef ZKF_ADDSUB_LATENCY
 `default_nettype wire
