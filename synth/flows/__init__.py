@@ -15,5 +15,4 @@ assert _CONSTRUCTORS.keys() == set(FlowId), "every FlowId needs a constructor"
 
 
 def make_flow(flow_id: FlowId, target_frequency_MHz: float) -> Flow:
-    """Construct the flow for ``flow_id`` at the given target frequency."""
     return _CONSTRUCTORS[flow_id](target_frequency_MHz)
