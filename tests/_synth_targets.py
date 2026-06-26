@@ -256,11 +256,6 @@ TARGETS: list[SynthTarget] = [
 ]
 
 
-# Catalogued examples deliberately absent from the matrix, each with a reason; guarded against staleness by
-# test_synth_targets.test_every_example_has_a_synth_target. Currently empty -- every catalogued example is covered on
-# all three tools.
-UNSYNTHESIZED: frozenset[str] = frozenset()
-
 # Every environment-variable key any target sets. The harness clears these before applying a target's own env, so an
 # ambient value (e.g. a shell HOLOSO_DIAMOND_HARD=1) cannot leak into a lean row and mask a closure regression by
 # silently running the hard strategy.
