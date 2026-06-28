@@ -34,7 +34,7 @@ module _zkf_to_fixpoint #(
     parameter WMAN                      = 18,   // significand precision including the hidden bit
     parameter WI                        = 8,    // signed integer-part bits of the result; mag fits in WI+FF when oor=0
     parameter FF                        = 0,    // fractional bits kept; binary point at bit FF of mag
-    parameter STAGE_INPUT               = 0,    // 0 = expose combinational inputs; 1 = latch inputs (+1 cycle)
+    parameter STAGE_INPUT               = 0,    // number of input register stages (>=0); +STAGE_INPUT cycles
     parameter integer OOR_EXP_THRESHOLD = (1 << WEXP)   // default disables the extrinsic predicate at elaboration
 ) (
     input  wire clk,
@@ -57,9 +57,6 @@ module _zkf_to_fixpoint #(
     generate
         if ((WEXP < 2) || (WMAN < 4) || (WI < 2)) begin : g_invalid_widths
             _zkf_invalid_wexp_or_wman u_invalid();
-        end
-        if ((STAGE_INPUT != 0) && (STAGE_INPUT != 1)) begin : g_invalid_stage_input
-            _zkf_invalid_stage_input u_invalid();
         end
         // Shift by WEXP >= 31 overflows Verilog's 32-bit integer constant arithmetic and yields tool-dependent values.
         if (WEXP >= 31) begin : g_invalid_wexp_too_wide
@@ -120,7 +117,7 @@ module _zkf_to_fixpoint #(
     // Optional input register stage.
     wire             in_valid_q;
     wire [WFULL-1:0] a_q;
-    zkf_pipe #(.W(WFULL), .N(STAGE_INPUT ? 1 : 0)) u_input_pipe (
+    zkf_pipe #(.W(WFULL), .N(STAGE_INPUT)) u_input_pipe (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .in(a),
         .out_valid(in_valid_q), .out(a_q)

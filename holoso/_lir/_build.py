@@ -54,7 +54,11 @@ def _assert_entry_dwell_safe(lir: Lir) -> None:
     cycle 0 in the entry block). This assertion is the loud backstop on that floor: the dwell is invisible to BOTH
     validation paths (the cosim bench never delays ``in_valid``; the model asserts it at once and keys cycle-0 ops at
     their read pc, never pc 0), so a regression that let a coalesced result reach a state register on cycle 0 would
-    otherwise corrupt state silently.
+    otherwise corrupt state silently. The assert checks only computed writes (entry.ops/inline_ops): a ucode
+    const-install to a slot re-fires the same constant (idempotent) and a register-source install lands read-first at
+    the boundary, not entry, so the phi-arm installs are dwell-safe by construction and need no check. Even the
+    computed-write word itself sits at pc>=1 (commit / inline-fire), not pc==0, so this half too may be redundant -- it
+    is kept as defense-in-depth because the dwell is invisible to cosim and the model.
     """
     entry = lir.blocks[lir.entry]
     state_regs = {slot.reg for slot in lir.float_state_slots} | {slot.reg for slot in lir.bool_state_slots}
@@ -62,20 +66,24 @@ def _assert_entry_dwell_safe(lir: Lir) -> None:
     cycle0_writes += [op.write.dst for op in entry.inline_ops if op.issue_cycle == 0]
     for dst in cycle0_writes:
         assert dst not in state_regs, f"entry-block cycle-0 op writes persistent-state register {dst.stable_label}"
+    # The pooled-firing half of the same dwell guard: a re-fired ``ucode[0]`` would multiply-issue a pooled op. The
+    # cycle-1 floor is scoped to the entry block (non-entry words never hold -- the sequencer holds only pc 0 and
+    # LASTPC), so this backstops that the entry floor still keeps every pooled firing off cycle 0.
+    assert all(op.issue_cycle >= 1 for op in entry.ops), "entry-block pooled firing on cycle 0 (dwell floor bypassed)"
 
 
-def _state_copy_blocks(
-    mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView, alloc: Allocation, const_pool: dict[ValueId, PooledConst]
-) -> frozenset[int]:
+def _has_state_copy(
+    float_mir: MirFloatView, bool_mir: MirBoolView, alloc: Allocation, const_pool: dict[ValueId, PooledConst]
+) -> bool:
     """
-    The Ret block(s) whose state live-out does NOT coalesce onto its slot register. A non-coalesced slot installs by a
-    read-first boundary copy that lands a fetch-pipeline past the live-out, so the block's drain must reach it
-    (``boundary_step(makespan)``, bank-independent). A coalesced slot writes its register in place and needs no copy
-    (no charge). The Ret is present iff any slot, float or boolean, is non-coalesced. Recomputed from the allocation each
+    Whether the single Ret block's state live-out does NOT coalesce onto its slot register. A non-coalesced slot
+    installs by a read-first boundary copy that lands a fetch-pipeline past the live-out, so the Ret block's drain must
+    reach it (``boundary_step(makespan)``, bank-independent). A coalesced slot writes its register in place and needs no
+    copy (no charge). True iff any slot, float or boolean, is non-coalesced. Recomputed from the allocation each
     coalescing-fixpoint round through the same ``*_liveout_coalesced`` predicates ``build`` applies when it emits the
     install, so the drain charge and the emitted install cannot drift.
     """
-    non_coalesced = any(
+    return any(
         not float_liveout_coalesced(
             operand_signed(float_mir, slot.live_out, slot.sign, alloc, const_pool),
             RegRef(alloc.float_slot_reg[slot.name]),
@@ -87,7 +95,6 @@ def _state_copy_blocks(
         )
         for bslot in bool_mir.state_slots
     )
-    return frozenset({mir.ret_block}) if non_coalesced else frozenset()
 
 
 def _build_program(mir: Mir, module_name: str) -> Lir:
@@ -136,30 +143,31 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
     # inner round already made.
     #
     # The same fixpoint also sheds the state slot's read-first boundary-copy drain charge once the slot coalesces:
-    # ``state_copy_blocks`` starts conservative (any state Ret needs a copy) and shrinks as coalescing removes it,
-    # monotone alongside the install set.
+    # ``has_state_copy`` starts conservative (a state slot needs a copy) and clears as coalescing removes it, monotone
+    # alongside the install set. It is a single bool: the MIR has one Ret, so the charge is op-wide on that block.
     has_install_blocks = block_has_install(mir, float_mir, bool_mir)
     ret_block = mir.ret_block
-    # Conservative seed for the state-copy fixpoint -- the pre-allocation form of ``_state_copy_blocks``: assume every
+    # Conservative seed for the state-copy fixpoint -- the pre-allocation form of ``_has_state_copy``: assume every
     # state slot needs a boundary copy.
-    state_copy_blocks = frozenset({ret_block}) if (float_mir.state_slots or bool_mir.state_slots) else frozenset()
+    has_state_copy = bool(float_mir.state_slots or bool_mir.state_slots)
     # Iteration bound = the product measure's height + 1. The fixpoint descends non-increasing dimensions: the install
-    # classification (each block can drop out, <= len(blocks) removals, and a copy-class block can narrow to inline-class
-    # once its computed-source arm coalesces away, <= len(blocks) narrowings) and the single-keyed state-copy charge
-    # (height 1: present -> absent). They are only positively coupled, not locked to co-descend, so the worst case is the
-    # SUM of descents -- 2*len(blocks) + 1 -- plus a confirming round; the loop bound below leaves a safe margin.
+    # classification (each block can drop out, <= len(blocks) removals, and a copy-class block can narrow to
+    # inline-class once its computed-source arm coalesces away, <= len(blocks) narrowings) and the single-keyed
+    # state-copy charge (height 1: present -> absent). They are only positively coupled, not locked to co-descend,
+    # so the worst case is the SUM of descents -- 2*len(blocks) + 1 -- plus a confirming round;
+    # the loop bound below leaves a safe margin.
     for _ in range(2 * len(mir.blocks) + 3):
-        result = layout_and_allocate(mir, float_mir, bool_mir, pool, has_install_blocks, state_copy_blocks)
+        result = layout_and_allocate(mir, float_mir, bool_mir, pool, has_install_blocks, has_state_copy)
         actual = actual_install_blocks(result.alloc, float_mir, bool_mir)
-        actual_state = _state_copy_blocks(mir, float_mir, bool_mir, result.alloc, result.const_pool)
+        actual_state = _has_state_copy(float_mir, bool_mir, result.alloc, result.const_pool)
         # Pin the monotonicity the bound relies on as coalescing frees registers: install keys only drop, an install's
-        # copy-class bit only narrows copy->const (never widens const->copy), and state-copy keys only drop.
+        # copy-class bit only narrows copy->const (never widens const->copy), and the state-copy charge only clears.
         assert actual.keys() <= has_install_blocks.keys(), "install fixpoint must not grow"
         assert all(has_install_blocks[b] or not copy for b, copy in actual.items()), "install drain must not widen"
-        assert actual_state <= state_copy_blocks, "state-copy fixpoint must not grow"
-        if actual == has_install_blocks and actual_state == state_copy_blocks:
+        assert actual_state <= has_state_copy, "state-copy fixpoint must not grow"
+        if actual == has_install_blocks and actual_state == has_state_copy:
             break
-        has_install_blocks, state_copy_blocks = actual, actual_state
+        has_install_blocks, has_state_copy = actual, actual_state
     else:
         assert False, "coalesced-install fixpoint did not converge"  # unreachable: monotone over finite blocks
     overlap = result.overlap

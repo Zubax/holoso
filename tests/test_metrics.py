@@ -7,7 +7,7 @@ frontend cannot yet lower) is built to LIR and measured on the metrics that boun
 single-block without being straight-line in this sense): the wide and
 boolean register counts, the per-port read-mux fan-in and per-register write-select fan-in (the steering cost that
 dominates the LUTs), and the statically-known latency lower bound. The baseline below was re-frozen on the converged
-build with the per-bank timing model, at the default register-allocation effort. Value numbering is
+build with the bank-independent read/landing model, at the default register-allocation effort. Value numbering is
 seed-independent (``tests/test_determinism.py`` proves byte-identical Verilog across ``PYTHONHASHSEED`` values), so
 these figures hold in any process without pinning the hash seed.
 
@@ -163,7 +163,7 @@ def _measure(name: str) -> Metrics:
 #   the slot live-in) is written directly into its slot register read-first, eliding the boundary copy-back and the
 #   scratch register. A validate-and-retry loop demotes any slot whose in-place commit the colorer finds unsound (a
 #   live-in feeding another phi, a dominator-arm clobber, an entry-block dwell tenant) back to a copy-back.
-# - min_ii reflects bank-true dependency edges (latch-free boolean bank), diamond if-conversion (small pure branch
+# - min_ii reflects uniform dependency edges (both banks read latch-free), diamond if-conversion (small pure branch
 #   diamonds become muxes -- a float select, or a bool_select reduced to and/or/not for a boolean/mixed merge),
 #   NOT-folding (a semantic NOT is a free consumer-side inversion), and cross-block software pipelining. Bool-phi
 #   if-conversion runs both arms unconditionally, so it can RAISE min_ii (the shortest static path) while LOWERING
@@ -186,11 +186,11 @@ def _measure(name: str) -> Metrics:
 #   guards keep the kernel multi-block with one residual copy. The larger PID row is therefore a property of the example
 #   itself, not a scheduler regression to chase.
 BASELINE: dict[str, Metrics] = {
-    "madd": Metrics(True, nreg=4, bnreg=0, steering=3, copies=0, min_ii=17, last_pc=17, max_block_span=17),
-    "poly3": Metrics(True, nreg=5, bnreg=0, steering=5, copies=0, min_ii=29, last_pc=29, max_block_span=29),
-    "signal_window": Metrics(False, nreg=4, bnreg=5, steering=8, copies=0, min_ii=11, last_pc=11, max_block_span=11),
-    "iir1_lpf": Metrics(False, nreg=3, bnreg=2, steering=2, copies=0, min_ii=18, last_pc=18, max_block_span=18),
-    "pid": Metrics(False, nreg=10, bnreg=2, steering=13, copies=1, min_ii=44, last_pc=79, max_block_span=34),
+    "madd": Metrics(True, nreg=4, bnreg=0, steering=3, copies=0, min_ii=15, last_pc=15, max_block_span=15),
+    "poly3": Metrics(True, nreg=5, bnreg=0, steering=5, copies=0, min_ii=24, last_pc=24, max_block_span=24),
+    "signal_window": Metrics(False, nreg=4, bnreg=5, steering=8, copies=0, min_ii=10, last_pc=10, max_block_span=10),
+    "iir1_lpf": Metrics(False, nreg=3, bnreg=2, steering=2, copies=0, min_ii=16, last_pc=16, max_block_span=16),
+    "pid": Metrics(False, nreg=10, bnreg=2, steering=13, copies=1, min_ii=38, last_pc=71, max_block_span=32),
     "schmitt_trigger": Metrics(False, nreg=1, bnreg=2, steering=2, copies=0, min_ii=7, last_pc=7, max_block_span=7),
     "quadrature_encoder": Metrics(False, nreg=1, bnreg=7, steering=7, copies=0, min_ii=6, last_pc=6, max_block_span=6),
     "phase_frequency_detector": Metrics(
@@ -200,22 +200,22 @@ BASELINE: dict[str, Metrics] = {
         False, nreg=1, bnreg=6, steering=2, copies=0, min_ii=6, last_pc=6, max_block_span=6
     ),
     "majority_voter": Metrics(False, nreg=1, bnreg=21, steering=20, copies=0, min_ii=14, last_pc=19, max_block_span=12),
-    "recip_newton": Metrics(False, nreg=4, bnreg=1, steering=4, copies=2, min_ii=18, last_pc=40, max_block_span=21),
-    "remainder": Metrics(False, nreg=8, bnreg=4, steering=12, copies=2, min_ii=42, last_pc=61, max_block_span=19),
+    "recip_newton": Metrics(False, nreg=4, bnreg=1, steering=4, copies=2, min_ii=17, last_pc=36, max_block_span=18),
+    "remainder": Metrics(False, nreg=8, bnreg=4, steering=12, copies=2, min_ii=39, last_pc=58, max_block_span=17),
     "octave_index": Metrics(False, nreg=3, bnreg=1, steering=6, copies=3, min_ii=16, last_pc=51, max_block_span=25),
     "cordic_sincos": Metrics(
-        False, nreg=9, bnreg=1, steering=54, copies=0, min_ii=127, last_pc=127, max_block_span=127
+        False, nreg=7, bnreg=1, steering=53, copies=0, min_ii=105, last_pc=105, max_block_span=105
     ),
-    "integrator": Metrics(True, nreg=5, bnreg=0, steering=4, copies=0, min_ii=20, last_pc=20, max_block_span=20),
+    "integrator": Metrics(True, nreg=5, bnreg=0, steering=4, copies=0, min_ii=17, last_pc=17, max_block_span=17),
     # The two largest kernels carry slightly higher register pressure as a deliberate latency-for-area point: the
     # uniform landing keeps min_ii/last_pc tight, so a result resides a cycle longer, raising register
     # pressure (nreg, and ekf1_stateless's steering with it). The baselines are non-regression ceilings (``<=``) pinned
     # tight to the converged build, so a later improvement may sit below its bound until the next re-freeze.
     "ekf1_stateless": Metrics(
-        True, nreg=41, bnreg=0, steering=96, copies=0, min_ii=126, last_pc=126, max_block_span=126
+        True, nreg=41, bnreg=0, steering=100, copies=0, min_ii=126, last_pc=126, max_block_span=126
     ),
     "ekf1_stateful": Metrics(
-        True, nreg=40, bnreg=0, steering=85, copies=0, min_ii=128, last_pc=128, max_block_span=128
+        True, nreg=40, bnreg=0, steering=89, copies=0, min_ii=128, last_pc=128, max_block_span=128
     ),
 }
 

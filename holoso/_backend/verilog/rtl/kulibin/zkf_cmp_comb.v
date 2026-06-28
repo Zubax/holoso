@@ -14,9 +14,9 @@ module zkf_cmp_comb #(parameter WEXP = 6, parameter WMAN = 18) (
     input  wire [WEXP+WMAN-1:0] a,
     input  wire [WEXP+WMAN-1:0] b,
 
-    output wire a_gt_b, // a > b
-    output wire a_eq_b, // a = b
-    output wire a_lt_b  // a < b
+    output wire a_gt_b,
+    output wire a_eq_b,
+    output wire a_lt_b
 );
     localparam WFRAC = WMAN - 1;
     localparam WFULL = WEXP + WMAN;

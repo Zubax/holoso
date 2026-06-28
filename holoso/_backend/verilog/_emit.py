@@ -8,19 +8,10 @@ critical control cones are short register-to-register paths. The executing step 
 FETCH_LAG, which the sequencer accounts for: the PC counts up to LASTPC and out_valid is asserted there.
 
 Storage is a sparse, schedule-specific register file emitted inline instead of a general-purpose multiport file.
-The register array is a plain ``reg`` bank. Each operator operand has a dedicated read port whose mux spans only the
-registers that operand ever reads across the schedule (a single-register operand needs no mux), followed by a read
-latch. Each operator result drives a per-register write select directly, spanning only the instances that ever write
-that register (a single-writer register needs no address compare).
-
-All sequential logic -- the fetch pipeline, the operand read latches, the register writes, and the
-reset-gated control state -- is emitted as a single ``always @(posedge clk)`` block; the only combinational
-``always @*`` block is the next-PC sequencer. Control fields that are constant across the whole program are driven
-by constant nets and omitted from the ROM, so synthesis prunes them. Pooled instances -- the comparator included --
-are driven uniformly through microcode lanes: read-address/latch lanes per operand, a write lane per tapped output
-port (both wide and boolean lanes write the array directly at their commit step from the operator's combinational
-output; boolean lanes carry a fabric-XOR inversion conditioner). Inline operators (boolean logic, the float<->bool
-casts) are single PC-gated statements rendered by the operator's own ``verilog_expr``.
+The register array is a plain ``reg`` bank. Each operator operand has a dedicated read port whose combinational mux
+spans only the registers that operand ever reads across the schedule (a single-register operand needs no mux). Each
+operator result drives a per-register write select directly, spanning only the instances that ever write that register
+(a single-writer register needs no address compare).
 """
 
 from dataclasses import dataclass
@@ -186,7 +177,8 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_state_next(w, lir)
     _emit_copy_sign_wires(w, lir)
     _emit_inline_sign_wires(w, lir)
-    _emit_clocked(w, lir, read_port, port_consts, read_sets, write_sets, write_lists)
+    _emit_read_muxes(w, lir, read_port, port_consts, read_sets)
+    _emit_clocked(w, lir, write_sets, write_lists)
     _emit_outputs(w, lir)
     w("\nendmodule\n")
     return VerilogOutput(verilog=w.render(), support_files=support_files())
@@ -291,7 +283,7 @@ def _emit_declarations(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorIns
             assert is_wide_type(operand_type), "pooled operators read only wide operands today"
             letter = PORT_LETTERS[pos]
             w(f"wire [1:0]   {sig}_{letter}s;")
-            w(f"reg  [W-1:0] {sig}_{letter};")  # read-latched operand (the read mux output, registered)
+            w(f"reg  [W-1:0] {sig}_{letter};")  # combinational read-mux output (driven in the read-mux always @*)
         # One lane per TAPPED output port: a wide lane gets its conditioner wire and the raw operator output, a boolean
         # lane the raw 1-bit module output. Every lane drives its register write directly from the operator's
         # combinational output.
@@ -510,7 +502,9 @@ def _terminator_redirects(lir: Lir) -> list[tuple[int, str]]:
 
 
 def _float_copy_pc(lir: Lir, block: LirBlock, copy: FloatCopy) -> int:
-    """The fetch PC at which a phi-arm copy installs its value (a const fires inline-class, a reg copy one step later)."""
+    """
+    The fetch PC at which a phi-arm copy installs its value (a const fires inline-class, a reg copy one step later).
+    """
     return lir.block_base[block.index] + copy.fire_step
 
 
@@ -611,38 +605,36 @@ def _emit_state_next(w: _Writer, lir: Lir) -> None:
         w("")
 
 
-def _read_latch_stmts(
-    w: _Writer, target: str, port: int, read_set: list[int], port_consts: dict[int, list[int]]
-) -> None:
+def _read_mux_stmts(w: _Writer, target: str, port: int, read_set: list[int], port_consts: dict[int, list[int]]) -> None:
     """
-    Emit the read-mux + read-latch update for one operand, inside the clocked block.
+    Emit the combinational read-mux for one operand, driven in the read-mux ``always @*`` block.
 
     The mux spans only ``read_set`` (the registers this port ever reads): just the immediate when the operand is
     always a constant, a direct register read for a single register, and otherwise a ``case`` over the dense read-set
     index (the read-address field) selecting ``regs[...]`` directly. A const-select picks the immediate when the
-    operand is sometimes a constant. On idle steps the latch captures a don't-care value the operator ignores (its
+    operand is sometimes a constant. On idle steps the mux drives a don't-care value the operator ignores (its
     in_valid is low). The read mux carries no indexed part-select, so there is no offset multiply for synthesis to
     (mis)infer as a DSP -- which is why the read-set index addresses a case rather than a packed gather bus.
     """
     consts = port_consts.get(port)
     cterm = _cterm_expr(port, consts) if consts else None
     if not read_set:  # the operand is always a constant immediate
-        w(f"{target} <= {cterm};")
+        w(f"{target} = {cterm};")
         return
     if len(read_set) == 1:
         reg_expr = f"regs[{read_set[0]}]"
-        w(f"{target} <= {f_selc(port)} ? {cterm} : {reg_expr};" if cterm else f"{target} <= {reg_expr};")
+        w(f"{target} = {f_selc(port)} ? {cterm} : {reg_expr};" if cterm else f"{target} = {reg_expr};")
         return
     # Multi-register operand: a case over the dense read-set index. The last entry is the default arm so the case is
     # full (no inferred latch); the unused high codes fall there too and are don't-cares on idle steps.
     if cterm:
-        w(f"if ({f_selc(port)}) {target} <= {cterm};", "else begin")
+        w(f"if ({f_selc(port)}) {target} = {cterm};", "else begin")
         w.push()
     w(f"case ({f_rd(port)})")
     w.push()
     for index, reg in enumerate(read_set):
         label = "default" if index == len(read_set) - 1 else _lit(code_width(len(read_set)), index)
-        w(f"{label}: {target} <= regs[{reg}];")
+        w(f"{label}: {target} = regs[{reg}];")
     w.pop()
     w("endcase")
     if cterm:
@@ -650,7 +642,7 @@ def _read_latch_stmts(
         w("end")
 
 
-def _writeback_cond(
+def _write_cond(
     inst: OperatorInstance, port: int, reg: int, write_lists: dict[tuple[OperatorInstance, int], list[int]]
 ) -> str:
     """
@@ -671,7 +663,7 @@ def _wide_writer_entries(
 ) -> dict[int, list[tuple[str, str]]]:
     """
     Per wide register, the ordered ``(condition, rhs)`` of every driver other than its state-slot install: the
-    accept-step input load (highest priority), each pooled lane's writeback, each pc-gated wide-result inline firing
+    accept-step input load (highest priority), each pooled lane's write, each pc-gated wide-result inline firing
     (the bool->float cast), and each pc-gated phi-arm copy. The conditions are pairwise mutually exclusive (the load
     step, the per-lane write-enable steps, and the distinct inline/copy PCs never coincide for one register -- the
     schedule and the allocator's interference guarantee it), so the emitter folds them into one priority chain and a
@@ -682,7 +674,7 @@ def _wide_writer_entries(
         entries.setdefault(fload.dst.index, []).append(("in_ready && in_valid", f"in_{fload.name}"))
     for reg in sorted(write_sets):
         for inst, port in write_sets[reg]:
-            entries.setdefault(reg, []).append((_writeback_cond(inst, port, reg, write_lists), f"{_sig(inst)}_y{port}"))
+            entries.setdefault(reg, []).append((_write_cond(inst, port, reg, write_lists), f"{_sig(inst)}_y{port}"))
     # Ucode-driven constant installs: a microcode write-enable arm (like an operator lane), reusing the const-pool nets.
     const_books = const_install_codebooks(lir)
     for reg in sorted(const_books):
@@ -719,7 +711,7 @@ def _bool_writer_entries(
     for reg in sorted(bool_write_sets):
         for inst, port in bool_write_sets[reg]:
             rhs = f"{_sig(inst)}_y{port} ^ {f_binv(base_name(inst), port)}"
-            entries.setdefault(reg, []).append((_writeback_cond(inst, port, reg, write_lists), rhs))
+            entries.setdefault(reg, []).append((_write_cond(inst, port, reg, write_lists), rhs))
     # Ucode-driven constant installs: a microcode write-enable arm carrying the 1-bit value (no XOR -- the
     # inversion is already folded into the value at construction).
     for reg in const_install_bool_regs(lir):
@@ -761,27 +753,55 @@ def _emit_chain(w: _Writer, lhs: str, entries: list[tuple[str, str]]) -> None:
         clause = "else if"
 
 
-def _emit_clocked(
+def _emit_read_muxes(
     w: _Writer,
     lir: Lir,
     read_port: dict[tuple[OperatorInstance, int], int],
     port_consts: dict[int, list[int]],
     read_sets: dict[tuple[OperatorInstance, int], list[int]],
+) -> None:
+    """
+    Emit the combinational operand read muxes: a sparse mux over each operand's read-set drives the wrapper directly, so
+    regfile-read -> operator is combinational and the operand is sampled FETCH_LAG after its read-address word. A
+    pure-inline kernel has no pooled instances, so this would be empty -- skip it rather than emit a bare
+    ``always @* begin end``.
+    """
+    if lir.instances:
+        w(
+            "// Operand read muxes: a sparse combinational mux over each operand's "
+            "read-set, driving the wrapper directly."
+        )
+        w("always @* begin")
+        w.push()
+        for inst in lir.instances:
+            sig = _sig(inst)
+            for pos in range(inst.operator.arity):
+                port = read_port[(inst, pos)]
+                _read_mux_stmts(w, f"{sig}_{PORT_LETTERS[pos]}", port, read_sets.get((inst, pos), []), port_consts)
+        w.pop()
+        w("end")
+        w("")
+
+
+def _emit_clocked(
+    w: _Writer,
+    lir: Lir,
     write_sets: dict[int, list[tuple[OperatorInstance, int]]],
     write_lists: dict[tuple[OperatorInstance, int], list[int]],
 ) -> None:
-    """Emit every sequential element in one always @(posedge clk): fetch, latches, writes, and control state."""
+    """Emit every sequential element in one always @(posedge clk): fetch, writes, and control state."""
     # We MUST ensure that we DO NOT MULTI-ASSIGN any register in the same step; this is ensured by always placing each
     # assignment to the same register into different branches of the same condition.
     nreg = max(1, lir.regfile.nreg)
     nbreg = max(1, lir.bool_regfile.nreg)
     float_slots = {slot.reg.index: slot for slot in lir.float_state_slots}
     bool_slots = {slot.reg.index: slot for slot in lir.bool_state_slots}
-    # Each register's whole write is one priority chain over all its drivers (input load, operator writebacks, casts,
+    # Each register's whole write is one priority chain over all its drivers (input load, operator writes, casts,
     # phi copies, comparator/logic results, and -- for a slot -- its boundary install), so a register is never assigned
     # by two separate statements. The conditions within a chain are pairwise mutually exclusive by construction.
     wide = _wide_writer_entries(lir, write_sets, write_lists)
     boolw = _bool_writer_entries(lir, write_lists)
+
     w("""
 // All sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q) and the persistent
 // state registers; every other register is reset-unconditional. Each register is driven by exactly one write chain.
@@ -793,14 +813,6 @@ always @(posedge clk) begin
     w("ucode_addr_q <= next_pc;")
     w("ucode_q      <= ucode[ucode_addr_q];")
     w("ucode_word   <= ucode_q;")
-    w("")
-
-    w("// Operand read latches: a sparse mux over each operand's read-set, registered before the wrapper.")
-    for inst in lir.instances:
-        sig = _sig(inst)
-        for pos in range(inst.operator.arity):
-            port = read_port[(inst, pos)]
-            _read_latch_stmts(w, f"{sig}_{PORT_LETTERS[pos]}", port, read_sets.get((inst, pos), []), port_consts)
     w("")
 
     # Non-slot registers: one reset-unconditional write chain each driving regs[]/bregs[]. Datapath payload carries no
@@ -817,7 +829,7 @@ always @(posedge clk) begin
         w("")
 
     # Control and persistent state are the reset-gated registers: the slot snapshot (under rst) and the slot's update
-    # chain (its coalesced operator writebacks and/or its boundary install, under the else) are the two arms of one rst
+    # chain (its coalesced operator writes and/or its boundary install, under the else) are the two arms of one rst
     # condition, segregating those assignments for the synthesizer.
     fmt = lir.float_format
     digits = (fmt.width + 3) // 4
@@ -835,8 +847,8 @@ always @(posedge clk) begin
     w("end else begin")
     w.push()
     w("pc <= next_pc;")
-    w("if (in_ready && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted")
-    w("if (err) err_pc_q <= pc - FETCH_LAG;      // execution lags the fetch PC by FETCH_LAG, so the step is pc-lag")
+    w("if (err) err_pc_q <= pc - FETCH_LAG;  // err wins; execution lags the fetch PC by FETCH_LAG, so step is pc-lag")
+    w("else if (in_ready && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted")
     for reg, slot in sorted(float_slots.items()):
         chain = wide.get(reg, []) + _wide_state_install_entry(lir, slot)
         if chain:

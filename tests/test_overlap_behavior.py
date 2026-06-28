@@ -259,6 +259,40 @@ def test_spilled_in_branch_condition_is_read_after_it_lands() -> None:
         assert _close(got, want), f"a={a} b={b} c={c} d={d}: {got} vs {want}"
 
 
+def test_spilled_wide_mul_operand_is_read_after_it_lands() -> None:
+    # The fmul-producer generalization of test_spilled_in_branch_condition: a LATE latency-1 wide product spills past
+    # the overlapped entry terminator into the inner arm, where a pooled fadd reads it. Under the latch-free read EVERY
+    # latency-1 wide pooled op (fmul / fmul_ilog2 / fcmp -- all latency 1 by default) samples at issue+2, one PC past
+    # its
+    # control word; without the _issue_side_envelope operand_read_cycle floor the producer fires past the shrunk
+    # terminator and is ORPHANED (the model KeyErrors on its register; a wrong arm in general). This guards the WHOLE
+    # latency-1-pooled-op spill surface, not only the single fcmp shape -- and the defect is invisible to the
+    # interpreter<->model differential, so only a behavioral spill-then-read kernel catches it.
+    def spilled_wide_mul(a, b, c, d):  # type: ignore[no-untyped-def]
+        x = a * b * c * d
+        if c > 0.0:
+            if d > a:
+                r = x + b
+            else:
+                r = a - b
+        else:
+            r = c / (d * d + 1.0)
+        return r
+
+    simulator = holoso.synthesize(spilled_wide_mul, _ops(), name="spilled_wide_mul").numerical_model.elaborate()
+    for a, b, c, d in [
+        (2.0, 3.0, 1.5, 0.5),
+        (0.5, 4.0, 2.0, 1.0),
+        (3.0, 2.0, -1.0, 2.0),
+        (1.5, 1.5, 0.25, 3.0),
+        (4.0, 0.5, 1.0, 2.0),
+        (2.0, 2.0, 2.0, 2.0),
+    ]:
+        got = float(simulator.run(a, b, c, d)[0])
+        want = spilled_wide_mul(a, b, c, d)
+        assert _close(got, want), f"a={a} b={b} c={c} d={d}: {got} vs {want}"
+
+
 def test_mixed_select_and_real_branch_output_matches_reference() -> None:
     def mixed_select_and_branch(x, y):  # type: ignore[no-untyped-def]
         # One kernel mixing an if-converted (select) pure diamond and a real (division-bearing) branch: the max folds

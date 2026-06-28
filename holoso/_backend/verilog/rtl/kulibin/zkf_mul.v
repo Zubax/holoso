@@ -2,6 +2,7 @@
 ///
 /// STAGE_INPUT=0: operands feed the multiplier combinationally (default).
 /// STAGE_INPUT=1: latch the inputs before any combinational logic, isolating them from upstream paths (+1 cycle).
+/// STAGE_INPUT>1: add extra dummy stages; helps in routing-congested designs (+STAGE_INPUT cycles).
 ///
 /// STAGE_PRODUCT sets the pipeline depth of _zkf_pmul multiplier (1+STAGE_PRODUCT cycles). Refer to _zkf_pmul.
 /// WMULTIPLIER is an optional hint of the native DSP tile argument width; forwaded to _zkf_pmul, refer there.
@@ -15,7 +16,7 @@
 `default_nettype none
 
 module zkf_mul #(
-    parameter WEXP          = 6,    // exponent field width
+    parameter WEXP          = 6,
     parameter WMAN          = 18,   // significand precision including the hidden bit
     parameter WMULTIPLIER   = 0,    // forwarded to _zkf_pmul
     parameter STAGE_INPUT   = 0,
@@ -39,9 +40,6 @@ module zkf_mul #(
         if ((WEXP < 2) || (WMAN < 4)) begin : g_invalid_wman
             _zkf_invalid_wexp_or_wman u_invalid();
         end
-        if ((STAGE_INPUT != 0) && (STAGE_INPUT != 1)) begin : g_invalid_stage_input
-            _zkf_invalid_stage_input u_invalid();
-        end
         if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
@@ -58,11 +56,11 @@ module zkf_mul #(
     localparam signed [WEXP_UNBIASED-1:0] ZERO_EXT = {WEXP_UNBIASED{1'b0}};
     localparam signed [WEXP_UNBIASED-1:0] ONE_EXT  = {{(WEXP_UNBIASED-1){1'b0}}, 1'b1};
 
-    // Optional input register stage: latch the operands before any combinational logic (+1 cycle when STAGE_INPUT=1).
+    // Optional input register stage(s): latch the operands before any combinational logic (+STAGE_INPUT cycles).
     wire             in_valid_q;
     wire [WFULL-1:0] a_q;
     wire [WFULL-1:0] b_q;
-    zkf_pipe #(.W(2*WFULL), .N(STAGE_INPUT ? 1 : 0)) u_input_pipe (
+    zkf_pipe #(.W(2*WFULL), .N(STAGE_INPUT)) u_input_pipe (
         .clk(clk), .rst(rst), .in_valid(in_valid), .in({b, a}),
         .out_valid(in_valid_q), .out({b_q, a_q})
     );
@@ -87,24 +85,27 @@ module zkf_mul #(
     wire signed [WEXP_UNBIASED-1:0] a_exp_ext       = {{(WEXP_UNBIASED-WEXP){1'b0}}, a_exp};
     wire signed [WEXP_UNBIASED-1:0] b_exp_ext       = {{(WEXP_UNBIASED-WEXP){1'b0}}, b_exp};
     wire signed [WEXP_UNBIASED-1:0] bias_ext        = {{(WEXP_UNBIASED-WEXP){1'b0}}, EXP_BIAS};
-    wire signed [WEXP_UNBIASED-1:0] exp_unbiased_in = a_exp_ext + b_exp_ext - (bias_ext <<< 1);
+    // Subtract a single bias so the base is already BIASED: _zkf_pack then runs EXP_IS_BIASED=1 and skips its own bias
+    // add, keeping that carry chain off the packer's exponent-overflow cone. Mirrors zkf_add/zkf_fma, which likewise
+    // pre-bias their exponent to avoid a -BIAS/+BIAS round trip across the pack boundary.
+    wire signed [WEXP_UNBIASED-1:0] exp_biased_in = a_exp_ext + b_exp_ext - bias_ext;
 
     wire pre_sign       = a_sign ^ b_sign;
     wire pre_force_zero = result_zero;
     wire pre_force_inf  = result_inf;
 
     // Shared multiplier: the significand product rides through _zkf_pmul (both operands unsigned), while the sign,
-    // the unbiased exponent base, and the force-zero/force-inf controls travel in its sideband so they land registered
+    // the biased exponent base, and the force-zero/force-inf controls travel in its sideband so they land registered
     // in lockstep with the product. The full product is kept (no sticky-tail trim): trimming moves the tail
     // OR-reduction onto the multiplier output and measurably hurts fmax by weakening retiming.
     localparam WSB_MUL = WEXP_UNBIASED + 3;
-    wire [WSB_MUL-1:0] mul_sb_in = {pre_sign, exp_unbiased_in, pre_force_zero, pre_force_inf};
+    wire [WSB_MUL-1:0] mul_sb_in = {pre_sign, exp_biased_in, pre_force_zero, pre_force_inf};
     wire [WSB_MUL-1:0] mul_sb_out;
 
     wire                            s1_valid;
     wire                 [WMAG-1:0] s1_mag;
     wire                            s1_sign              = mul_sb_out[WSB_MUL-1];
-    wire signed [WEXP_UNBIASED-1:0] s1_exp_unbiased_base = $signed(mul_sb_out[WSB_MUL-2 -: WEXP_UNBIASED]);
+    wire signed [WEXP_UNBIASED-1:0] s1_exp_biased_base   = $signed(mul_sb_out[WSB_MUL-2 -: WEXP_UNBIASED]);
     wire                            s1_force_zero        = mul_sb_out[1];
     wire                            s1_force_inf         = mul_sb_out[0];
 
@@ -121,7 +122,7 @@ module zkf_mul #(
     // Keep the two overlapping sticky reductions separate: sharing s1_sticky_lo saved no resources and hurt fmax.
     wire                            s1_product_high   = s1_mag[WMAG-1];
     wire signed [WEXP_UNBIASED-1:0] s1_exp_adjust     = s1_product_high ? ONE_EXT : ZERO_EXT;
-    wire signed [WEXP_UNBIASED-1:0] s1_exp_unbiased   = s1_exp_unbiased_base + s1_exp_adjust;
+    wire signed [WEXP_UNBIASED-1:0] s1_exp_biased     = s1_exp_biased_base + s1_exp_adjust;
     wire                 [WMAN-1:0] s1_significand_hi = s1_mag[WMAG-1 -: WMAN];
     wire                 [WMAN-1:0] s1_significand_lo = s1_mag[WMAG-2 -: WMAN];
     wire                            s1_guard_hi       = s1_mag[WMAN-1];
@@ -132,7 +133,7 @@ module zkf_mul #(
     wire                            s1_sticky_lo      = |s1_mag[WMAN-4:0];
 
     _zkf_pack #(
-        .WEXP(WEXP), .WMAN(WMAN),
+        .WEXP(WEXP), .WMAN(WMAN), .EXP_IS_BIASED(1),
         .STAGE_INPUT(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT)
     ) u_pack (
         .clk(clk),
@@ -141,7 +142,7 @@ module zkf_mul #(
         .sign(s1_sign),
         .force_zero(s1_force_zero),
         .force_inf(s1_force_inf),
-        .exp_unbiased(s1_exp_unbiased),
+        .exp_unbiased(s1_exp_biased),
         .significand(s1_product_high ? s1_significand_hi : s1_significand_lo),
         .guard(s1_product_high ? s1_guard_hi : s1_guard_lo),
         .round(s1_product_high ? s1_round_hi : s1_round_lo),

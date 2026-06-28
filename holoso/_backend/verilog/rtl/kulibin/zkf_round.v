@@ -18,6 +18,7 @@
 ///   - a rounded integer that does not fit the format overflows to signed inf.
 ///
 /// STAGE_INPUT=1: Latch {a, round_mode} at the input (+1 cycle), shielding the rounder from upstream.
+/// STAGE_INPUT>1: add extra dummy stages; helps in routing-congested designs (+STAGE_INPUT cycles).
 ///
 /// STAGE_DECODE=1: Register the decode + boundary-mask cone, splitting the rounder's variable-position mask generation
 ///                 from the guard/sticky reduction and increment adder (+1 cycle).
@@ -57,9 +58,6 @@ module zkf_round #(
         if (WEXP >= 32) begin : g_invalid_wexp_too_wide
             _zkf_invalid_round_wexp_too_wide_unportable u_invalid();
         end
-        if ((STAGE_INPUT != 0) && (STAGE_INPUT != 1)) begin : g_invalid_stage_input
-            _zkf_invalid_stage_input u_invalid();
-        end
         if ((STAGE_DECODE != 0) && (STAGE_DECODE != 1)) begin : g_invalid_stage_decode
             _zkf_invalid_stage_decode u_invalid();
         end
@@ -95,7 +93,7 @@ module zkf_round #(
     localparam IN_W = WFULL + 2;
     wire            in_valid_q;
     wire [IN_W-1:0] in_q;
-    zkf_pipe #(.W(IN_W), .N(STAGE_INPUT ? 1 : 0)) u_input_pipe (
+    zkf_pipe #(.W(IN_W), .N(STAGE_INPUT)) u_input_pipe (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .in({round_mode, a}),
         .out_valid(in_valid_q), .out(in_q)

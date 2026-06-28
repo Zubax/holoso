@@ -248,7 +248,7 @@ class FloatParameterizedHardwareOperator(ParameterizedHardwareOperator, ABC):
 class FAddOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fadd"
     swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)  # signed sum: a+b == b+a bit-for-bit
-    stage_input: int = 0
+    stage_input: int = 0  # takes any count of input register stages (extra stages relieve routing congestion)
     stage_decode: int = 0
     stage_align: int = 0
     stage_normalize: int = 0  # close-cancellation normshift barriers, 0..2 (forwarded to _zkf_normshift.STAGE_SPLIT)
@@ -256,7 +256,9 @@ class FAddOperator(FloatHardwareOperator):
     stage_output: int = 0
 
     def __post_init__(self) -> None:
-        for field in ("stage_input", "stage_decode", "stage_align", "stage_pack", "stage_output"):
+        if self.stage_input < 0:
+            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
+        for field in ("stage_decode", "stage_align", "stage_pack", "stage_output"):
             if getattr(self, field) not in (0, 1):
                 raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
         if self.stage_normalize not in (0, 1, 2):
@@ -307,7 +309,9 @@ class FMulOperator(FloatHardwareOperator):
     stage_output: int = 0
 
     def __post_init__(self) -> None:
-        for field in ("stage_input", "stage_pack", "stage_output"):
+        if self.stage_input < 0:
+            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
+        for field in ("stage_pack", "stage_output"):
             if getattr(self, field) not in (0, 1):
                 raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
         if self.stage_product not in range(5):
@@ -347,7 +351,9 @@ class FDivOperator(FloatHardwareOperator):
     stage_output: int = 0
 
     def __post_init__(self) -> None:
-        for field in ("stage_input", "stage_pack", "stage_output"):
+        if self.stage_input < 0:
+            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
+        for field in ("stage_pack", "stage_output"):
             if getattr(self, field) not in (0, 1):
                 raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
 
@@ -385,9 +391,10 @@ class FMulILog2Operator(FloatHardwareOperator):
         limit = (1 << self.fmt.wexp) - 2
         if self.k < -limit or self.k >= limit:
             raise ValueError(f"k must satisfy {-limit} <= k < {limit} for {self.fmt}; got {self.k!r}")
-        for field in ("stage_input", "stage_decode"):
-            if getattr(self, field) not in (0, 1):
-                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
+        if self.stage_input < 0:
+            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
+        if self.stage_decode not in (0, 1):
+            raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
 
     @property
     def latency(self) -> int:
@@ -417,9 +424,10 @@ class FMulILog2OperatorFamily(FloatParameterizedHardwareOperator):
     stage_decode: int = 0
 
     def __post_init__(self) -> None:
-        for field in ("stage_input", "stage_decode"):
-            if getattr(self, field) not in (0, 1):
-                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
+        if self.stage_input < 0:
+            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
+        if self.stage_decode not in (0, 1):
+            raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
 
     def instantiate(self, *params: int) -> FMulILog2Operator:
         (k,) = params
@@ -467,8 +475,8 @@ class FCmpOperator(FloatHardwareOperator):
     stage_input: int = 0
 
     def __post_init__(self) -> None:
-        if self.stage_input not in (0, 1):
-            raise ValueError(f"stage_input must be 0 or 1; got {self.stage_input!r}")
+        if self.stage_input < 0:
+            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
 
     @property
     def latency(self) -> int:

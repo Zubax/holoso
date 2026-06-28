@@ -69,12 +69,12 @@ def build_write_timeline(lir: Lir) -> dict[RegRef, list[tuple[int, Producer]]]:
         for op in block.ops:
             for write in op.writes:
                 if isinstance(write.dst, RegRef):
-                    for pc in lir.write_landing_pcs(block, op, write):
+                    for pc in lir.write_landing_pcs(block, op):
                         writes.setdefault(write.dst, []).append((pc, OperationProducer(op_index)))
             op_index += 1
         for k, inline_op in enumerate(block.inline_ops):
             if isinstance(inline_op.write.dst, RegRef):
-                for pc in lir.write_landing_pcs(block, inline_op, inline_op.write):
+                for pc in lir.write_landing_pcs(block, inline_op):
                     writes.setdefault(inline_op.write.dst, []).append((pc, InlineProducer(block.index, k)))
     for events in writes.values():
         events.sort(key=lambda event: event[0])

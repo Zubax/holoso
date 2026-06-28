@@ -11,7 +11,7 @@
 `default_nettype none
 
 module _zkf_div_core #(
-    parameter WEXP          = 6,      // exponent field width
+    parameter WEXP          = 6,
     parameter WMAN          = 18,     // significand precision including the hidden bit
     parameter QFRAC_BASE    = WMAN + 2,
     parameter QFRAC         = QFRAC_BASE + (QFRAC_BASE % 2),
@@ -28,7 +28,7 @@ module _zkf_div_core #(
     output reg                            sign,
     output reg                            force_zero,
     output reg                            force_inf,
-    output reg signed [WEXP_UNBIASED-1:0] exp_unbiased,
+    output reg signed [WEXP_UNBIASED-1:0] exp_biased,
     output reg                 [WMAN-1:0] significand,
     output reg                            guard,
     output reg                            round,
@@ -57,6 +57,7 @@ module _zkf_div_core #(
 
     // QRAW contains one integer quotient bit followed by QFRAC fractional bits.
     localparam          [WEXP-1:0] EXP_INF         = {WEXP{1'b1}};
+    localparam          [WEXP-1:0] EXP_BIAS        = {1'b0, {WEXP-1{1'b1}}};
     localparam signed [WEXP_UNBIASED-1:0] ZERO_EXT = {WEXP_UNBIASED{1'b0}};
     localparam signed [WEXP_UNBIASED-1:0] ONE_EXT  = {{(WEXP_UNBIASED-1){1'b0}}, 1'b1};
 
@@ -89,6 +90,8 @@ module _zkf_div_core #(
     wire signed [WEXP_UNBIASED-1:0] a_exp_ext = {{(WEXP_UNBIASED-WEXP){1'b0}}, a_exp};
     wire signed [WEXP_UNBIASED-1:0] b_exp_ext = {{(WEXP_UNBIASED-WEXP){1'b0}}, b_exp};
     wire signed [WEXP_UNBIASED-1:0] decoded_exp_unbiased = a_exp_ext - b_exp_ext;
+    // Compile-time-constant bias, widened with constant padding, folded into the exponent at the output stage below.
+    wire signed [WEXP_UNBIASED-1:0] bias_ext = {{(WEXP_UNBIASED-WEXP){1'b0}}, EXP_BIAS};
 
     // Stage zero keeps input decode/classification and the first radix-4 digit off the same path. It also
     // precomputes 3*den once; later stages only form cheap 1*den and 2*den wires locally.
@@ -215,7 +218,11 @@ module _zkf_div_core #(
         sign         <= r_sign[QSTAGES];
         force_zero   <= r_force_zero[QSTAGES];
         force_inf    <= r_force_inf[QSTAGES];
-        exp_unbiased <= r_exp_unbiased[QSTAGES] - final_exp_adjust;
+        // Fold +BIAS here so the packed exponent is already biased (the divider drives _zkf_pack with EXP_IS_BIASED=1).
+        // This keeps the bias add off the packer's exponent-overflow cone, mirroring zkf_mul/zkf_add; the constant add
+        // rides this output register, far from the divider's radix-4 critical path.
+        // (The pipeline regs and the exp_diff byproduct intentionally stay unbiased.)
+        exp_biased <= r_exp_unbiased[QSTAGES] - final_exp_adjust + bias_ext;
         significand  <= final_high ? final_significand_hi : final_significand_lo;
         guard        <= final_high ? final_guard_hi : final_guard_lo;
         round        <= final_high ? final_round_hi : final_round_lo;

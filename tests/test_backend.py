@@ -83,7 +83,7 @@ def test_operator_instance_names_include_hardware_identity() -> None:
 @requires_iverilog
 def test_comparisons_share_one_pooled_fcmp_instance() -> None:
     # Comparisons live in mutually-exclusive blocks and execute sequentially, so they share a single holoso_fcmp
-    # (the one-instance-per-operator pooling convention), its operands riding the ordinary microcode read-latch
+    # (the one-instance-per-operator pooling convention), its operands riding the ordinary microcode read-mux
     # lanes -- not one instance per comparison.
     def kernel(x):  # type: ignore[no-untyped-def]
         if x > 1.0:
@@ -289,7 +289,8 @@ def test_ekf1_stateful_elaborates(tmp_path: Path) -> None:
 
 def test_both_bank_lane_write_enables_ride_the_commit_step() -> None:
     # A pooled lane's write-enable -- boolean OR wide -- sits at ROM step
-    # ``pooled_write_word(commit)``, which is the commit step itself (the flag is valid on that executing step; one later
+    # ``pooled_write_word(commit)``, which is the commit step itself (the flag is valid on that executing step; one
+    # later
     # would land a wide result past the branch's boundary read, which has exactly one cycle of slack). Checked white-box
     # against the microcode tables of a kernel with both lane kinds.
     from holoso._backend.verilog._microcode import (

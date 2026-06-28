@@ -46,7 +46,7 @@ def test_targets_still_exercise_constant_installs(name: str) -> None:
     parity/frame error) and other arms install literal constants with no source to sample, so they fire inline-class and
     land one cycle earlier than a computed-source copy. Pin that these kernels still emit constant phi-arm installs, so
     a kernel-shape change cannot quietly make the recovered-cycle freezes meaningless. The inline-class timing itself is
-    pinned end-to-end -- by those frozen lengths (uart_rx 143, uart_tx 124 in test_latency_freeze), by the
+    pinned end-to-end -- by those frozen lengths (uart_rx 127, uart_tx 108 in test_latency_freeze), by the
     landing <= terminator structural invariant above, and by RTL cosim -- not by re-deriving the install's own helpers.
     """
     spec = next(s for s in SPECS if s.name == name)
@@ -62,7 +62,7 @@ def test_resident_register_source_install_is_inline_class() -> None:
     (``resident_source``) and fires one cycle earlier than a computed-source copy -- exactly like a constant. Pin that
     such a non-const resident-source install is present and so classified; a build that reverted inputs (or any entry-
     resident value) to copy-class would leave this empty. The recovered cycles are pinned end-to-end by the uart_rx
-    freeze (143); here we pin that the input path is what is being exercised.
+    freeze (127); here we pin that the input path is what is being exercised.
     """
     lir = _build(next(s for s in SPECS if s.name == "uart_rx"))
     resident_non_const = [

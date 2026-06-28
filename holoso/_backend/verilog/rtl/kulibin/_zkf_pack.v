@@ -34,10 +34,10 @@
 `default_nettype none
 
 module _zkf_pack #(
-    parameter WEXP          = 6,          // exponent field width
+    parameter WEXP          = 6,
     parameter WMAN          = 18,         // significand precision including the hidden bit
     parameter WEXP_UNBIASED = WEXP + 2,   // signed unbiased exponent width
-    parameter EXP_IS_BIASED = 0,          // see above
+    parameter EXP_IS_BIASED = 0,
     parameter ASSUME_NO_OVERFLOW = 0,     // 0 = normal behavior; 1 = caller guarantees no overflow, checks removed
     parameter STAGE_INPUT   = 0,          // 0 = combinational inputs (default); 1 = one register stage at the input
     parameter STAGE_OUTPUT  = 0           // 0 = combinational output (default); 1 = registered output (one stage)

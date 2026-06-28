@@ -10,14 +10,16 @@ instance accepts a new firing every ``initiation_interval`` cycles); inline oper
 
 An operation issues from cycle 0, reclaiming a block's first control word (inputs and other block-resident operands
 load into the register array before that word reaches the datapath, so a consumer reads them from the first cycle).
-Two constraints raise an op's earliest issue to cycle 1:
-  - a POOLED (instance-backed) op presents its read address one step early (``rci = issue - 1`` in the emitter), so
-    issuing at cycle 0 would place the read-address word before the block -- a hard hardware constraint;
-  - an ENTRY-block op producing a persistent-state live-out is dwell-guarded off the first control word as defense-in-
-    depth: the sequencer holds pc 0 during the accept wait and re-fires ``ucode[0]`` each idle cycle, and re-firing a
-    cycle-0 STATE write would corrupt the carried state. That write cannot occur today (an inline producer writes a
-    temporary, never the state register; see ``_assert_entry_dwell_safe``), so this floor is cost-free on every
-    current kernel, but it keeps the producer off cycle 0 cheaply since the dwell is invisible to cosim and the model.
+A cycle-1 floor keeps two kinds of ENTRY-block firing off that first control word: a POOLED (instance-backed) firing,
+and a firing producing a persistent-state live-out (dwell-guarded explicitly). The sequencer holds pc 0 during the
+accept wait and re-fetches ``ucode[0]`` each idle cycle, so an operator activation left there -- a pooled firing's
+in_valid, or a COMPUTED STATE write -- would re-fire every idle cycle, multiply-issuing the firing or corrupting the
+carried state with stale inputs; keeping them off cycle 0 makes the re-fetched ``ucode[0]`` a NOP. Only the computed
+kind is a hazard: a ucode const-install to a state slot re-fires the same constant (idempotent), and a register-source
+install lands read-first at the boundary, not entry. ``_assert_entry_dwell_safe`` is the loud backstop on the floor.
+The floor is scoped to the entry block: non-entry blocks never hold their PC (the sequencer holds only pc 0 and
+pc==LASTPC), so non-entry pooled firings issue at cycle 0 freely. The entry dwell is invisible to BOTH cosim and the
+model, so the floor and its ``_assert_entry_dwell_safe`` backstop -- not any test -- carry that safety.
 """
 
 from collections.abc import Mapping
@@ -26,17 +28,17 @@ from dataclasses import dataclass
 from .._util import ValueId
 from .._mir import MirNode, MirOperation
 from .._operators import HardwareOperator, PooledHardwareOperator, PortConditioner
-from ._ir import OperatorInstance, dependency_edge, landing_cycle, operand_read_cycle, pooled_wide_read_cycle
+from ._ir import OperatorInstance, dependency_edge, landing_cycle, operand_read_cycle, read_cycle
 
 # A pooled firing's fusion identity: the operator, its operand values, and their conditioners -- everything the
 # module activation consumes. Output ports and output conditioners are deliberately excluded (members differ there).
 type _FiringKey = tuple[PooledHardwareOperator, tuple[ValueId, ...], tuple[PortConditioner, ...]]
 
 # The largest commit-to-issue dependency edge any (producer, consumer) pair can require: the result landing (fetch lag +
-# read-first edge) against the pooled read latch, derived from the same helpers as dependency_edge. Exact only while
-# producer->pooled remains the maximal pair; it merely pads a generously-slack progress cap, so a future larger pair
-# costs nothing worse than a later no-progress diagnosis.
-_MAX_DEPENDENCY_EDGE = landing_cycle(0) - pooled_wide_read_cycle(0)
+# read-first edge) against the latch-free pooled read, derived from the same helpers as dependency_edge. Exact only
+# while producer->pooled remains the maximal pair; it merely pads a generously-slack progress cap, so a future larger
+# pair costs nothing worse than a later no-progress diagnosis.
+_MAX_DEPENDENCY_EDGE = landing_cycle(0) - read_cycle(0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +155,7 @@ def schedule_ops(
     entry_busy: Mapping[tuple[PooledHardwareOperator, int], int] | None = None,
     livein_landing: Mapping[ValueId, int] | None = None,
     dwell_guarded: frozenset[ValueId] = frozenset(),
+    is_entry: bool = False,
 ) -> Schedule:
     """
     Place every firing of ``schedulable`` (one block's operations, across both register banks) on the earliest cycle
@@ -197,7 +200,8 @@ def schedule_ops(
         # firing's, and any member being state-live-out dwell-guards the whole firing.
         consumer = _op(nodes, leader).operator
         if cycle < 1 and (
-            isinstance(consumer, PooledHardwareOperator) or any(member in dwell_guarded for member in firings[leader])
+            (is_entry and isinstance(consumer, PooledHardwareOperator))
+            or any(member in dwell_guarded for member in firings[leader])
         ):
             return False
         for operand in _op(nodes, leader).operands:

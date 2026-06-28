@@ -12,6 +12,19 @@ Aggressive cross-block overlap (DEFERRED in DESIGN): cleanly separable — loose
 replicate commit-side control per mutually-exclusive successor arm in the emitter, exercise the single-writer
 validator (`_microcode.py`). Promote write-control to a first-class edge/path event.
 
+Loop-carried install pin is conservative: `install_issue_cycle` pins a computed-source phi-arm copy to
+`work_makespan + 1`, but when the source is not the block's last work the install lands a terminator-cycle late
+(recip_newton blk2: the `y_next → y` copy lands block-rel 17, could be 12 — read-first against the old `y` still holds —
+costing +1 cycle per loop iteration). Pin the install to its actual source's landing instead of the block makespan;
+re-freeze `test_latency_freeze`/`test_metrics`, and keep it correctness-sensitive (the read-first must hold). Surfaced
+by the schedule-quality audit.
+
+`_issue_side_envelope`'s hardcoded terminator `floor = 1` makes an empty overlapping branch block with a resident-only
+condition pay 1 cycle vs the resident-only minimum of 0 (uart_tx blk1). Probably structural — every branch block has
+term_offset ≥ 1 (the conditional PC-redirect settling through the fetch pipeline) while jump/`Ret` blocks reach 0 — so
+confirm `floor = 1` is a genuine branch minimum before shedding; if sheddable, recover the cycle. Surfaced by the
+schedule-quality audit (lower confidence than the install-pin item).
+
 ## Integer support adjacent
 
 Front-end `_apply_binop` (`_lower.py`) dispatches arithmetic by AST syntax, not operand type; make it

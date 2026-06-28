@@ -35,9 +35,9 @@ def render_schedule(lir: Lir) -> str:
     col_ord = {col: ordinal for ordinal, col in enumerate(columns)}
     operator_colors = _operator_colors(lir)
     # The microcode PC timeline, cycles 1..span (cycle 0 is the accept/input-load bookend row): the grid reflects what
-    # the register array holds at each PC, including the read latch and microcode-fetch staging. For a control-
-    # flow kernel this lays out every block's PC range; one transaction follows a single path through it, so the grid
-    # is the static program, not one transaction's cycle-accurate trace.
+    # the register array holds at each PC, including the microcode-fetch staging.
+    # For a control-flow kernel this lays out every block's PC range; one transaction follows a single path through it,
+    # so the grid is the static program, not one transaction's cycle-accurate trace.
     compute_cycles = list(range(1, lir.initiation_interval + 1))
     # Block boundaries: the grid row axis is the model fetch PC, and blocks tile it contiguously in layout order, so a
     # non-Ret block ends at its terminator PC and the next block begins on the following row. A thick horizontal seam
@@ -105,8 +105,8 @@ def render_schedule(lir: Lir) -> str:
             read_cyc = operand_read_cycle(op.inst.operator, issue_pc)
             operand_labels = [_operand_label(operand) for operand in op.operands]
             firing_tip = _esc(_op_text(op))
+            landing_pcs = lir.write_landing_pcs(block, op)  # op-wide (not per-write); hoisted out of the lane loop
             for write in op.writes:
-                landing_pcs = lir.write_landing_pcs(block, op, write)
                 tip = _esc(
                     f"{_col_label(write.dst)} 🠄 "
                     + op.inst.operator.render_output(write.port, write.conditioner, *operand_labels)
@@ -125,7 +125,7 @@ def render_schedule(lir: Lir) -> str:
                     endpoints.add((dord, write_cyc))
                     cell_group[(dord, write_cyc)] = group
                     for operand in op.operands:
-                        oord = col_ord[operand.source]  # operands are read a read-latch cycle before the issue
+                        oord = col_ord[operand.source]  # the operand's source column; read combinationally at read_cyc
                         endpoints.add((oord, read_cyc))
                         edges.append((f"g{dord}_{write_cyc}", f"g{oord}_{read_cyc}", color, group))
                     chips_at.setdefault(write_cyc, []).append(
@@ -149,7 +149,7 @@ def render_schedule(lir: Lir) -> str:
         for bop in block.inline_ops:
             color = operator_colors[type(bop.operator)]
             read_cyc = operand_read_cycle(bop.operator, base_pc + bop.issue_cycle)
-            landing_pcs = lir.write_landing_pcs(block, bop, bop.write)
+            landing_pcs = lir.write_landing_pcs(block, bop)
             tip = _esc(_inline_op_text(bop))
             dcol = bop.write.dst
             dord = col_ord[dcol]
@@ -296,7 +296,7 @@ def render_schedule(lir: Lir) -> str:
 
     # One displayed row per clock cycle, cycle-accurate to the hardware: the accept/input-load cycle (0), then the
     # compute, latch, and fetch-staging cycles 1..II. The row axis is the fetch PC, so out_valid (pc == LASTPC == II)
-    # rises on the last row; the executing PRESENT step shown there lags the fetch by FETCH_LAG (present == II - FETCH_LAG).
+    # rises on the last row; the executing PRESENT step shown there lags the fetch by FETCH_LAG (present==II-FETCH_LAG).
     in_cells: dict[ColKey, str] = {load.dst: _input_chip(f"in_{load.name}") for load in lir.inputs}
     for slot in lir.float_state_slots:  # at cycle 0 the persistent registers hold their reset snapshot, not an input
         in_cells[slot.reg] = _state_chip(f"{slot.name} = {slot.reset_value!r}")
@@ -335,8 +335,8 @@ def _col_label(col: ColKey) -> str:
     """
     The report's display label for a grid column: ``rX`` for a wide register, ``bX`` for a boolean register, ``cX`` for
     a float constant, and ``T``/``F`` for a boolean constant (which carries no pool index). This is the single labeling
-    authority for the schedule: the headers, tooltips, dataflow operand expressions, arrow conditions, and the JS payload
-    all route through it.
+    authority for the schedule: the headers, tooltips, dataflow operand expressions, arrow conditions, and the JS
+    payload all route through it.
     """
     if isinstance(col, BoolConstRef):
         return "T" if col.value else "F"

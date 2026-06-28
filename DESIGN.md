@@ -57,6 +57,46 @@ Backends -- Verilog, testbench, HTML report, numerical model, and possibly other
 (see Backend) gives bit-exact, cycle-exact emulation of the emitted HDL, so the synthesis logic can be stabilized down
 to LIR before the slow HDL-emission/simulation iteration begins.
 
+## Glossary
+
+- Issue / commit / landing -- the three cycles of a result. An op issues when its operands are sampled, commits its
+  result `issue + latency` later, and that result lands (first becomes readable) a further fixed latency later.
+  A consumer reads at the landing, not the commit.
+
+- Pooled operator -- a latency-bearing arithmetic operator (fadd, fdiv, etc.) time-multiplexed across all its uses.
+
+- Inline operator -- a combinational, simple zero-latency op (boolean logic, select, type cast, etc.)
+  emitted as a single HDL expression rather than a pooled operator instance.
+
+- Spill -- NOT a register spill to memory. A value whose landing extends past its block's terminator
+  into a single-predecessor successor: the cross-block software-pipelining overlap.
+
+- Install -- a copy that writes a value into a persistent-state slot or a merged-phi register at a block boundary,
+  used when coalescing could not make the write free.
+
+- Coalesce -- merging a phi and its identity-arm predecessors onto one register (union-find) so the install becomes a
+  no-op; a diamond's mutually-exclusive arms always coalesce away.
+
+- Slot (state slot) -- a register holding persistent state across transactions (e.g. `self.x`), committed in place
+  so a same-frame self-update needs no copy.
+
+- Drain -- the cycles a block's terminator waits past its last commit for in-frame writebacks to land.
+
+- Fetch lag -- the fixed depth (`FETCH_LAG`) by which the control-fetch pipeline lags the executing step; every operand
+  is sampled at `issue + fetch lag` through a combinational read mux.
+
+- Read-first -- within a cycle a register read returns the OLD value, before any same-cycle write; this is the origin of
+  the +1 dependency edge between producer and consumer. Aka "read-before-write", "write-after-read" (WAR).
+
+- Dwell -- the PC stalling at one of its limit hold points: pc 0 (accept, awaiting `in_valid`) or LASTPC (present,
+  awaiting the result being taken before restarting).
+
+- Makespan / II -- a block's schedule length in cycles; the initiation interval (II) is the whole executed path's exact
+  cycle count. We do not target a near-1 II like a streaming pipeline.
+
+- ZISC -- zero-instruction-set computer: the VLIW microcode-driven sequential FSM that time-multiplexes the shared
+  operators over the register banks. The artifact Holoso synthesizes.
+
 ## Python API
 
 `synthesize` is the main entry point; it returns an in-memory result and touches the filesystem only on an explicit
@@ -252,7 +292,7 @@ fully-specified pooled hardware operator), the float format, the storage banks (
 1-bit boolean bank), a pool of nonnegative float constants (the sign rides the consumer's sideband), and the typed input
 loads and output wires. Each scheduled firing -- pooled or inline -- carries its operands and conditioners, its register
 writes, and an issue cycle; the makespan is the last commit cycle, and the observable input-to-output latency follows
-from it and the fetch/latch timing of the datapath. LIR exposes a minimal API plus shared analysis helpers (per-cycle
+from it and the fetch timing of the datapath. LIR exposes a minimal API plus shared analysis helpers (per-cycle
 grouping, liveness, read/writer sets) so backends do not each re-derive them.
 
 Storage is a sparse register file synthesized per kernel: each operand's read mux spans only the registers it reads,
@@ -266,17 +306,20 @@ fully static and data-independent (most throughput-1, zero-bubble), so the whole
 each op gets an issue cycle and a bound instance, and the backend just replays it with a cycle counter -- no scoreboard.
 This makes the latency model load-bearing rather than advisory: the backend commits each result at `issue + latency`
 without watching `out_valid`, the generated RTL passes that latency into each operator wrapper's mandatory `LATENCY`
-parameter, and any Python/RTL drift fails at elaboration. An inaccurate latency is a correctness bug, not a bad estimate.
+parameter, and any Python/RTL drift fails at elaboration. An inaccurate latency is a correctness bug, not a bad
+estimate.
 
 Each op issues on the earliest cycle its operands are ready and a free instance exists, with no barrier, so a
 cross-domain chain (`float(x>0)*k`) schedules tightly. The commit-to-issue spacing a dependence requires is not one
 constant but is derived pairwise from a single cycle-accurate timing model built from a few named primitives (a global
-fetch lag, a per-bank read latch, a read-first edge), never per-case constants. Every result -- pooled or inline, on
+fetch lag and a read-first edge), never per-case constants. Both register banks sample an operand at
+issue + fetch lag through a combinational read mux. Every result -- pooled or inline, on
 either bank -- writes the register array combinationally and becomes readable a fixed fetch-lag-plus-read-first edge
 after its commit. (An earlier design registered pooled wide results in a writeback latch but dropped it as
 inconsistent -- it latched only float operators while installs, control flow, and inline writes go direct -- and
-needlessly delayed short installs.) Because the two banks and the pooled/inline classes are uniform instances of that
-one model rather than hand-coded cases,
+needlessly delayed short installs; it likewise presented the wide bank's read address a step early in a read latch,
+since removed so both banks read alike.) Because the two banks and the pooled/inline classes are uniform instances of
+that one model rather than hand-coded cases,
 boolean-logic and cast chains schedule back-to-back, which shortens logic-dense kernels. Block-resident operands
 (inputs, state reads, phis) are available from the block's first control word, so an op can issue from there.
 
@@ -324,11 +367,11 @@ costs (each path's count exact). Blocks lay out in reverse-postorder with the ca
 out_valid boundary, so a back-edge is a jump to a lower address; each block's terminator redirects the fetch PC via a
 small `case(pc)` that, for a branch, reads the condition's 1-bit register.
 
-A block's terminator offset is the latest cycle a value still lands in its frame -- it must cover every landing the block
-does not forward to a successor. A block whose boundary values are all already resident in predecessors pays none (the
-drain-only `Ret`s of loop/diamond kernels, whose body produces every output the `Ret` reads combinationally). Where a
-tail install's source is already resident at block entry rather than computed by the block's own work, it lands earlier,
-recovering cycles in every downstream block.
+A block's terminator offset is the latest cycle a value still lands in its frame -- it must cover every landing the
+block does not forward to a successor. A block whose boundary values are all already resident in predecessors pays none
+(the drain-only `Ret`s of loop/diamond kernels, whose body produces every output the `Ret` reads combinationally).
+Where a tail install's source is already resident at block entry rather than computed by the block's own work,
+it lands earlier, recovering cycles in every downstream block.
 
 Cross-block software pipelining then shrinks the terminator offset down to the issue-side envelope -- the latest PC at
 which the block still drives a control word -- whenever every successor is single-predecessor, so a spill cannot reach a
@@ -367,9 +410,9 @@ scheduling only adds to the makespan/II; the depth is currently fixed but may be
 
 The schedule replays step by step: at PC 0 the machine accepts and parallel-loads inputs into the low registers of each
 bank in one cycle (gated by `in_valid`); the PC advances every clock; at the last PC it asserts `out_valid` while
-outputs drive combinationally from their registers by fixed index. To line the latched datapath up with the schedule,
-each operand's read-address control is presented one step early and the write-enable/address on its commit step.
-The PC holds only at the two I/O boundaries; bubble steps carry an explicit NOP.
+outputs drive combinationally from their registers by fixed index. Both banks read combinationally, so each operand's
+read-address control rides its issue step (a combinational read mux samples the operand a fetch lag later) and the
+write-enable/address its commit step. The PC holds only at the two I/O boundaries; bubble steps carry an explicit NOP.
 
 The control word stores selectors and addresses, never data. An inline firing (boolean logic, a cast) is a single
 PC-gated statement rendered by the operator's own expression rather than a microcode lane, because it fires once at a
@@ -388,8 +431,9 @@ Errors are non-fatal and informative: each error-bearing operator's flag (`div0`
 global `err` gated by that instance's write-enable, and an `err_pc` latch records the executing step of the last error
 (reset at every accept).
 
-Reset covers the control registers and the persistent state registers (each loaded with its snapshot, emitted after the
-writeback so the snapshot wins on the reset edge); the fetch registers and the rest of the datapath are
+Reset covers the control registers and the persistent state registers: the reset arm loads each state register with its
+snapshot while the non-reset arm applies that register's update chain (its coalesced writebacks and boundary install),
+the two segregated as the arms of one `rst` condition. The fetch registers and the rest of the datapath are
 reset-unconditional (so they pack into the BRAM output register) and settle to the first word under reset. The control
 word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
 

@@ -71,9 +71,9 @@ def layout_and_allocate(
     bool_mir: MirBoolView,
     pool: Mapping[type[HardwareOperator], int],
     has_install_blocks: Mapping[int, bool],
-    state_copy_blocks: frozenset[int],
+    has_state_copy: bool,
 ) -> _LayoutAllocation:
-    overlap = schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks, state_copy_blocks)
+    overlap = schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks, has_state_copy)
     block_sched = overlap.block_sched
     inst_of: dict[ValueId, OperatorInstance] = {}
     inst_count: dict[PooledHardwareOperator, int] = {}
@@ -102,8 +102,9 @@ def actual_install_blocks(alloc: Allocation, float_mir: MirFloatView, bool_mir: 
     installs at its tail, mapped to whether it carries a COPY-class install -- one whose source is COMPUTED by the
     block's work (an operator result or phi), so the install must read-first it (``True``). An install of a block-entry-
     RESIDENT source -- a literal constant (including the const branch materialization already in ``alloc.bool_writes``),
-    an input, or a state read -- fires inline-class (``False``). A CFG-shape phi-arm predecessor whose every arm coalesced
-    installs nothing and drops out here, which the fixpoint feeds back to the next layout so the spurious drain is removed.
+    an input, or a state read -- fires inline-class (``False``). A CFG-shape phi-arm predecessor whose every arm
+    coalesced installs nothing and drops out here, which the fixpoint feeds back to the next layout so the
+    spurious drain is removed.
     """
     install: dict[int, bool] = {}
     for bid, copies in alloc.copies.items():
@@ -382,7 +383,7 @@ class _InterferenceBuilder:
     def _install_fire(self, block: int, vid: ValueId) -> int:
         """The install's block-local fire step, via the same helpers as the LIR install so residence matches exactly."""
         resident = vid in self.resident_install_dests.get(block, frozenset())
-        return install_fire_step(install_issue_cycle(self.work_makespan[block], resident))
+        return inline_fire_cycle(install_issue_cycle(self.work_makespan[block], resident))
 
     def build(
         self,

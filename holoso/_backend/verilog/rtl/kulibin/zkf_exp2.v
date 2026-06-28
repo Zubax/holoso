@@ -29,10 +29,10 @@
 `default_nettype none
 
 module zkf_exp2 #(
-    parameter WEXP          = 6,    // exponent field width
+    parameter WEXP          = 6,
     parameter WMAN          = 18,   // significand precision including the hidden bit
     parameter WMULTIPLIER   = 0,    // see _zkf_pmul
-    parameter STAGE_INPUT   = 0,    // 0: combinational inputs;   1: latch inputs before any logic, +1 stage
+    parameter STAGE_INPUT   = 0,    // number of input register stages (>=0); +STAGE_INPUT cycles
     parameter STAGE_REDUCE  = 0,    // 0: direct fixed->ROM input; 1: register reduced i/f/flags, +1 stage
     parameter STAGE_PRODUCT = 0,    // see _zkf_pmul
     parameter STAGE_PACK    = 0,    // 0: comb pack input; 1: register pack input (+1 stage)
@@ -58,9 +58,6 @@ module zkf_exp2 #(
         // Verilog's 32-bit integer constant arithmetic.
         if (WEXP >= 31) begin : g_invalid_wexp_too_wide
             _zkf_invalid_exp2_wexp_too_wide_unportable u_invalid();
-        end
-        if ((STAGE_INPUT != 0) && (STAGE_INPUT != 1)) begin : g_invalid_stage_input
-            _zkf_invalid_stage_input u_invalid();
         end
         if ((STAGE_REDUCE != 0) && (STAGE_REDUCE != 1)) begin : g_invalid_stage_reduce
             _zkf_invalid_stage_reduce u_invalid();

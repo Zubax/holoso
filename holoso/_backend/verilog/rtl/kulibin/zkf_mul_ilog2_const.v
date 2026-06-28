@@ -9,6 +9,7 @@
 ///
 /// STAGE_INPUT=0: operand feeds the decode combinationally (default).
 /// STAGE_INPUT=1: latch the input before any combinational logic, isolating it from upstream paths (+1 cycle).
+/// STAGE_INPUT>1: add extra dummy stages; helps in routing-congested designs (+STAGE_INPUT cycles).
 ///
 /// STAGE_DECODE=0: single-cycle combinational decode + output mux (no intermediate register).
 /// STAGE_DECODE=1: registers the decoded sign / new_exp / frac / classification predicates before the output mux.
@@ -18,10 +19,10 @@
 `default_nettype none
 
 module zkf_mul_ilog2_const #(
-    parameter         WEXP         = 6,     // exponent field width
+    parameter         WEXP         = 6,
     parameter         WMAN         = 18,    // significand precision including the hidden bit
     parameter integer K            = 0,     // signed integer exponent shift: y = a * 2^K
-    parameter         STAGE_INPUT  = 0,     // 0 = combinational input; 1 = latch input before logic (+1 cycle)
+    parameter         STAGE_INPUT  = 0,     // number of input register stages (>=0); +STAGE_INPUT cycles
     parameter         STAGE_DECODE = 0,     // 0 = single-cycle; 1 = register decoded signals (+1 cycle)
     parameter         LATENCY      = 0
 ) (
@@ -41,7 +42,7 @@ module zkf_mul_ilog2_const #(
     // -- Optional input register stage: latch the operand before any combinational logic.
     wire             in_valid_q;
     wire [WFULL-1:0] a_q;
-    zkf_pipe #(.W(WFULL), .N(STAGE_INPUT ? 1 : 0)) u_input_pipe (
+    zkf_pipe #(.W(WFULL), .N(STAGE_INPUT)) u_input_pipe (
         .clk(clk), .rst(rst), .in_valid(in_valid), .in(a),
         .out_valid(in_valid_q), .out(a_q)
     );
@@ -58,9 +59,6 @@ module zkf_mul_ilog2_const #(
     generate
         if ((WEXP < 2) || (WMAN < 4)) begin : g_invalid_wm
             _zkf_invalid_wexp_or_wman u_invalid();
-        end
-        if ((STAGE_INPUT != 0) && (STAGE_INPUT != 1)) begin : g_invalid_stage_input
-            _zkf_invalid_stage_input u_invalid();
         end
         if ((STAGE_DECODE != 0) && (STAGE_DECODE != 1)) begin : g_invalid_stage_decode
             _zkf_invalid_stage_decode u_invalid();

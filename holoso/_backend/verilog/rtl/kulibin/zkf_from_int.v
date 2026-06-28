@@ -2,6 +2,7 @@
 ///
 /// STAGE_INPUT=0: input combinational paths are exposed.
 /// STAGE_INPUT=1: inputs are latched, the external module sees registers at the input (+1 cycle).
+/// STAGE_INPUT>1: add extra dummy stages; helps in routing-congested designs (+STAGE_INPUT cycles).
 ///
 /// STAGE_NORMALIZE=0/1/2: number of internal register stages inside normshift (forward to _zkf_normshift.STAGE_SPLIT).
 ///
@@ -41,9 +42,6 @@ module zkf_from_int #(
         if (WEXP >= 32) begin : g_invalid_wexp_too_wide
             _zkf_invalid_from_int_wexp_too_wide_unportable u_invalid();
         end
-        if ((STAGE_INPUT != 0) && (STAGE_INPUT != 1)) begin : g_invalid_stage_input
-            _zkf_invalid_stage_input u_invalid();
-        end
         if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
@@ -64,7 +62,7 @@ module zkf_from_int #(
     // Optional input register stage.
     wire             in_valid_q;
     wire [WINT-1:0]  a_q;
-    zkf_pipe #(.W(WINT), .N(STAGE_INPUT ? 1 : 0)) u_input_pipe (
+    zkf_pipe #(.W(WINT), .N(STAGE_INPUT)) u_input_pipe (
         .clk(clk), .rst(rst), .in_valid(in_valid), .in(a), .out_valid(in_valid_q), .out(a_q)
     );
 
@@ -78,7 +76,6 @@ module zkf_from_int #(
     // Stage 1: register sign and magnitude. Reset only validity; payload free-runs.
     reg            s1_valid;
     reg            s1_sign;
-    // WX-wide magnitude reg.
     reg [WX-1:0]   s1_mag_ext;
 
     always @(posedge clk) begin

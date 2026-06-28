@@ -12,7 +12,7 @@ from ._build_base import OverlapLayout
 from ._mir_facts import mir_operation, mir_rpo, succ_map
 
 
-def _value_word_and_landing(mir: Mir, vid: ValueId, issue: int) -> tuple[int, int]:
+def _value_word_and_landing(mir: Mir, vid: ValueId, issue: int) -> tuple[int, int, HardwareOperator]:
     """
     For a scheduled value, the (last in-block control WORD, result LANDING) in its block-local frame. The word is the
     latest fetch step the op still drives -- a pooled lane's write-enable on its commit step or an inline op's
@@ -26,14 +26,15 @@ def _value_word_and_landing(mir: Mir, vid: ValueId, issue: int) -> tuple[int, in
     # commit step, an inline op fires its combinational statement one FETCH_LAG later. The result LANDING is uniform.
     word = pooled_write_word(commit) if isinstance(operator, PooledHardwareOperator) else inline_fire_cycle(commit)
     landing = landing_cycle(commit)
-    return word, landing
+    return word, landing, operator
 
 
 def install_inclusive_makespan(work_makespan: int, has_copy_install: bool) -> int:
     """
     The block makespan inclusive of its tail install: a block with a COMPUTED-source COPY install fires that copy one
     cycle past its last work commit (to read-first the source its work produced), so its effective makespan is one
-    higher. A tail that installs only block-entry-resident sources (const, input, state read) is inline-class and adds no
+    higher. A tail that installs only block-entry-resident sources (const, input, state read) is inline-class and adds
+    no
     step, so it does not raise the makespan. The single owner of this ``+1`` so the overlap layout's boundary derivation
     and the per-block LirBlock makespan cannot disagree on it (the dual of the per-install ``install_issue_cycle``).
     """
@@ -57,18 +58,21 @@ class _SpillCarry:
 def _issue_side_envelope(mir: Mir, sched: Schedule, block: MirBlock, livein_landing: Mapping[ValueId, int]) -> int:
     """
     The issue-side floor an OVERLAPPING block's terminator may not precede: the latest control word still driven in the
-    block (a pooled write-enable or an inline fire step), padded by the error-latch slack for any err-port op, and the
-    branch condition's read floor. The branch condition is the SINGLE owner of that read floor here, derived from where
-    the condition becomes readable: a PRODUCED condition lands inside the block at its landing; a SPILLED-IN
+    block (a pooled write-enable or an inline fire step), the operand-read cycle of any firing (a latch-free wide read
+    samples one step past a latency-1 pooled op's control word), padded by the error-latch slack for any err-port op,
+    and the branch condition's read floor. The branch condition is the SINGLE owner of that read floor here, derived
+    from where the condition becomes readable: a PRODUCED condition lands inside the block at its landing; a SPILLED-IN
     live-in condition (carried past an overlapped predecessor's shrunk terminator) lands at its carried landing cycle
     (``livein_landing``); a RESIDENT live-in condition (an input, persistent state, or a fully-drained prior-block
     result) is available from the block's first cycle and adds nothing. The floor starts at 1.
     """
     floor = 1
     for vid, issue in sched.issue_cycle.items():
-        word, _landing = _value_word_and_landing(mir, vid, issue)
-        floor = max(floor, word)
-        operator = mir_operation(mir, vid).operator
+        word, _landing, operator = _value_word_and_landing(mir, vid, issue)
+        # The block may not end before an op reads its operands: it fires (and samples) at ``operand_read_cycle``. A
+        # latch-free wide read samples one step past a latency-1 pooled op's control word, so the read can exceed the
+        # word -- without this floor the op would fire past the shrunk terminator and never execute.
+        floor = max(floor, word, operand_read_cycle(operator, issue))
         if isinstance(operator, PooledHardwareOperator) and operator.error_ports:
             # The err_pc diagnostic latches ``pc - FETCH_LAG`` when this op's write-enable executes, which is
             # FETCH_LAG fetch steps after its write word. If the terminator redirected by then, err_pc would
@@ -101,7 +105,7 @@ def schedule_with_overlap(
     bool_mir: MirBoolView,
     pool: Mapping[type[HardwareOperator], int],
     has_install_blocks: Mapping[int, bool],
-    state_copy_blocks: frozenset[int],
+    has_state_copy: bool,
 ) -> OverlapLayout:
     """
     Schedule every block in reverse-postorder and derive each block's terminator offset, threading cross-block overlap
@@ -162,6 +166,7 @@ def schedule_with_overlap(
             entry_busy=inherited.entry_busy,
             livein_landing=livein_landing,
             dwell_guarded=state_liveouts if bid == mir.entry else frozenset(),
+            is_entry=bid == mir.entry,
         )
         block_sched[bid] = sched
         has_install = bid in has_install_blocks
@@ -172,15 +177,15 @@ def schedule_with_overlap(
         overlaps = bool(targets) and not has_install and all(pred_count[target] == 1 for target in targets)
         # The drained boundary is the latest cycle a value LANDS in this block's frame, taken per op -- a pooled result
         # and an inline result both write the array combinationally and land at the same bank-independent cycle. Three
-        # landings are INVISIBLE to the op schedule and are added explicitly: (1) a phi tail install -- a COMPUTED-source
-        # COPY lands at the drain boundary ``boundary_step(makespan)`` (``makespan`` install-inclusive, one past the
-        # work), while an install of a block-entry-resident source (const, input, state read) is inline-class and lands a
-        # cycle earlier at the combinational landing ``landing_cycle(work)``, paying neither the +1 install step nor the
-        # consequent later drain; (2) a NON-coalesced state slot's read-first boundary copy lands at
-        # ``boundary_step(sched.makespan)`` -- its source is among the op landings, but the copy adds the fetch-pipeline;
-        # ``state_copy_blocks`` carries the Ret blocks that have one, decided by the coalescing fixpoint -- a coalesced
-        # slot writes its register in place and needs no copy, so it is absent; (3) the entry's input loads land on
-        # cycle 1.
+        # landings are INVISIBLE to the op schedule and are added explicitly: (1) a phi tail install -- a
+        # COMPUTED-source COPY lands at the drain boundary ``boundary_step(makespan)`` (``makespan`` install-inclusive,
+        # one past the work), while an install of a block-entry-resident source (const, input, state read) is
+        # inline-class and lands a cycle earlier at the combinational landing ``landing_cycle(work)``, paying neither
+        # the +1 install step nor the consequent later drain; (2) a NON-coalesced state slot's read-first boundary copy
+        # lands at ``boundary_step(sched.makespan)`` -- its source is among the op landings, but the copy adds the
+        # fetch-pipeline; ``has_state_copy`` flags whether the lone Ret block has one, decided by the coalescing
+        # fixpoint -- a coalesced slot writes its register in place and needs no copy, so the charge clears; (3) the
+        # entry's input loads land on cycle 1.
         work_drain = max(
             (_value_word_and_landing(mir, vid, issue)[1] for vid, issue in sched.issue_cycle.items()),
             default=0,
@@ -189,7 +194,7 @@ def schedule_with_overlap(
             work_drain = max(work_drain, boundary_step(makespan))
         elif has_install:
             work_drain = max(work_drain, landing_cycle(sched.makespan))
-        if bid in state_copy_blocks:
+        if bid == mir.ret_block and has_state_copy:
             work_drain = max(work_drain, boundary_step(sched.makespan))
         if bid == mir.entry:
             work_drain = max(work_drain, 1)
@@ -216,7 +221,7 @@ def schedule_with_overlap(
             }
             landing: dict[ValueId, int] = {}
             for vid, issue in sched.issue_cycle.items():
-                _word, land = _value_word_and_landing(mir, vid, issue)
+                _word, land, _op = _value_word_and_landing(mir, vid, issue)
                 if land > term_offset:
                     landing[vid] = _spill_local_cycle(bid, land, term_offset)
             for vid, land in livein_landing.items():  # a received spill that re-spills past this shrunk terminator

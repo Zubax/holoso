@@ -11,7 +11,7 @@ module zkf_to_int #(
     parameter WEXP        = 6,
     parameter WMAN        = 18,
     parameter WINT        = 32,
-    parameter STAGE_INPUT = 0,  // whether to add a stage at the input (shields inputs from combinational paths)
+    parameter STAGE_INPUT = 0,  // number of input register stages (>=0); +STAGE_INPUT cycles
     parameter LATENCY     = 0
 ) (
     input wire clk,

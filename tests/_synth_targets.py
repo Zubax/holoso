@@ -213,9 +213,15 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1),
+            # Read-latch-free closure on Diamond/LFE5U-25F: full STAGE_INPUT compensates the now-combinational regfile
+            # read, and a second fadd input register (stage_input=2) splits the long input->decode route that otherwise
+            # binds just under 100. (LFE5U-45F measured lower; 25F retained.)
+            fadd=FAddOperator(
+                F_e8m36, stage_input=2, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
+            ),
             fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
             fdiv=FDivOperator(F_e8m36, stage_input=1, stage_pack=1, stage_output=1),
+            fmul_ilog2=FMulILog2OperatorFamily(F_e8m36, stage_decode=1),
         ),
         env={"HOLOSO_DIAMOND_HARD": "1"},
     ),

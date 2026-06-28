@@ -35,6 +35,7 @@ from holoso._lir import (
 )
 from holoso._lir._ir import (
     FETCH_LAG,
+    OperatorInstance,
     READ_FIRST_EDGE,
     boundary_step,
     dependency_edge,
@@ -106,7 +107,7 @@ def _view(mir: Mir) -> MirFloatView:
 
 def _schedule(mir: Mir):
     view = _view(mir)
-    return schedule_ops(mir.nodes, resolve_pool(mir.nodes), set(view.operation_nodes))
+    return schedule_ops(mir.nodes, resolve_pool(mir.nodes), set(view.operation_nodes), is_entry=True)
 
 
 def _muls(mir: Mir) -> list[int]:
@@ -193,10 +194,10 @@ def test_branch_comparison_commits_at_block_makespan(config: OperatorCase) -> No
 def test_overlap_shrinks_branch_terminator_below_drained_boundary(config: OperatorCase) -> None:
     # Cross-block software pipelining (M7): a branch block whose every successor is single-predecessor shrinks its
     # terminator offset below the conservative drain boundary_step(makespan), so its in-flight results spill into the
-    # successor frame instead of fully draining. Pins that the overlap actually engages. The overlap_spill_kernel carries
-    # this shrink: a condition committing early gates a much later wide chain, so the block shrinks to that chain's write
-    # word while the result lands in the single-pred arm frames. (recip_newton's loop header does not shrink -- its
-    # drained boundary is naturally tight, landing exactly at the boundary;
+    # successor frame instead of fully draining. Pins that the overlap actually engages. The overlap_spill_kernel
+    # carries this shrink: a condition committing early gates a much later wide chain, so the block shrinks to
+    # that chain's write word while the result lands in the single-pred arm frames. (recip_newton's loop header
+    # does not shrink -- its drained boundary is naturally tight, landing exactly at the boundary;
     # test_overlapping_loop_kernel_landings_are_real_model_writes pins that tight drain.)
     lir = build(_run(overlap_spill_kernel, config.make_ops(FMT)), f"overlap_shrink_{config.label}")
     shrunk = [
@@ -311,8 +312,8 @@ def test_overlap_keeps_error_op_diagnostic_latch_in_frame(config: OperatorCase) 
     # terminator latches err_pc as pc-FETCH_LAG when its write-enable EXECUTES -- FETCH_LAG fetch steps after its write
     # word. If the terminator redirected to the non-fall-through arm by then, err_pc captures the wrong (successor)
     # frame. The data write is unaffected (it still lands correctly), so only a step-accurate err_pc check sees it; the
-    # shrink floor must keep the err_pc latch in-block: term_offset >= the write word + FETCH_LAG for an error-bearing op.
-    # Crash-before: term_offset was the bare write word (one FETCH_LAG short), so err_pc latched a redirected pc.
+    # shrink floor must keep the err_pc latch in-block: term_offset >= the write word + FETCH_LAG for an error-bearing
+    # op. Crash-before: term_offset was the bare write word (one FETCH_LAG short), so err_pc latched a redirected pc.
     lir = build(_run(overlap_div_err_kernel, config.make_ops(FMT)), f"overlap_div_err_{config.label}")
     checked = False
     for block in lir.blocks:
@@ -363,7 +364,7 @@ def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase)
         for block in lir.blocks:
             for op in (*block.ops, *block.inline_ops):
                 for write in op.writes:
-                    pcs = lir.write_landing_pcs(block, op, write)
+                    pcs = lir.write_landing_pcs(block, op)
                     predicted.setdefault((type(write.dst).__name__, write.dst.index), set()).update(pcs)
                     multi_arm += len(pcs) > 1
         assert multi_arm > 0, f"{name}: no result spills into multiple arms -- the regression is vacuous"
@@ -383,10 +384,10 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes(config: Operator
     # recip_newton is a real LOOP kernel: its header branch drains exactly AT the drained boundary -- a naturally tight
     # boundary -- so the loop does not software-pipeline its terminator (the synthetic overlap_spill_kernel above
     # carries the shrunk-terminator SPILLS). The diagnostics still run through
-    # write_landing_pcs on this real, non-synthetic layout where every op result lands in-block. With loop-carried copies
-    # the model also writes registers via installs, so strict equality does not apply -- but every op-result landing
-    # write_landing_pcs predicts must be a real register write the model performs on some path. A subset tie to the cosim
-    # oracle, guarding against a regression that mis-frames the in-block landing.
+    # write_landing_pcs on this real, non-synthetic layout where every op result lands in-block. With loop-carried
+    # copies the model also writes registers via installs, so strict equality does not apply -- but every op-result
+    # landing write_landing_pcs predicts must be a real register write the model performs on some path.
+    # A subset tie to the cosim oracle, guarding against a regression that mis-frames the in-block landing.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     from recip_newton import NewtonReciprocal
     from holoso._backend.numerical import NumericalSimulator
@@ -411,7 +412,7 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes(config: Operator
         for op in (*block.ops, *block.inline_ops):
             for write in op.writes:
                 if isinstance(write.dst, RegRef):
-                    predicted.setdefault(write.dst.index, set()).update(lir.write_landing_pcs(block, op, write))
+                    predicted.setdefault(write.dst.index, set()).update(lir.write_landing_pcs(block, op))
     sim = _Recorder(lir)
     actual: dict[int, set[int]] = {}
     for seed in [0.5, 1.5, 2.5, 0.25, 1.0]:  # in-domain seeds (the Newton iteration converges for x < 3)
@@ -440,8 +441,8 @@ def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyP
         )
 
     # phase_frequency_detector is a single-block all-boolean kernel: its Ret does real boolean WORK (makespan > 0) and
-    # installs nothing, so it drains at the work boundary (distinct from a pure-drain Ret, whose resident output needs no
-    # boundary at all -- covered separately).
+    # installs nothing, so it drains at the work boundary (distinct from a pure-drain Ret, whose resident output needs
+    # no boundary at all -- covered separately).
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     from phase_frequency_detector import PhaseFrequencyDetector  # noqa: PLC0415
 
@@ -492,13 +493,14 @@ def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyP
         w.resident_source for b in resident for w in b.bool_writes
     ), "no resident-source bool install to exercise the inline-class drain"
     for block in resident:
-        assert block.term_offset == boundary_step(
-            block.block_makespan
-        ), "a resident-source bool install fires inline-class at the work makespan, one step under a computed-source one"
+        assert block.term_offset == boundary_step(block.block_makespan), (
+            "a resident-source bool install fires inline-class at the work makespan, one step under "
+            "a computed-source one"
+        )
 
 
 def test_entry_block_reclaims_its_first_control_word() -> None:
-    # An inline op has no read latch and is combinational (latency 0), so the entry block's first boolean operation
+    # An inline op reads combinationally (latency 0), so the entry block's first boolean operation
     # issues on block-local cycle 0 and FIRES on executing step 0 -- reclaiming ``ucode[0]``. Crash-before: the cycle-1
     # scheduler start and the inline latency of 1 together pushed the first op two steps late, to executing step 2.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
@@ -653,9 +655,11 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late(config: Op
     # place a spilled result at the SAME absolute PC the numerical model writes it -- both Lir.write_landing_pcs and
     # _trace_landing map a block-local landing to block_base[arm] + (landing - term_offset - 1). The scheduler used its
     # own land - term_offset frame, one PC later, so reservation and read-gating ran on a second coordinate contract.
-    # An arm whose ONLY constraint on its consumer is the spilled operand must read it at EXACTLY that landing PC.
-    # Crash-before: under the +1 frame the read-gated consumer issued one PC late (every read strictly after the model
-    # landing -- no equality), inflating the initiation interval by a cycle; pass-after: it reads at the landing.
+    # An arm whose ONLY constraint on its consumer is the spilled operand reads it as early as the latch-free wide read
+    # allows: read == landing when the spill lands late enough, or landing+1 when it lands so early that the FETCH_LAG
+    # read offset (issue + FETCH_LAG, issue >= 0) caps how early the consumer can read it (the consumer still issues
+    # optimally, so no II is lost). So tightness here is read_pc in {landing, landing+1}; a real coordinate-frame
+    # regression (the historical land - term_offset +1 bug) would push every read to landing+2.
     for kernel, name in [(overlap_spill_kernel, "overlap_spill"), (overlap_dead_arm_spill_kernel, "dead_arm_spill")]:
         lir = build(_run(kernel, config.make_ops(FMT)), f"{name}_{config.label}")
         by_index = {block.index: block for block in lir.blocks}
@@ -668,7 +672,7 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late(config: Op
                 for write in op.writes:
                     if not isinstance(write.dst, RegRef):
                         continue
-                    landing_pcs = lir.write_landing_pcs(block, op, write)
+                    landing_pcs = lir.write_landing_pcs(block, op)
                     if len(landing_pcs) <= 1:
                         continue  # not a multi-arm spill
                     spilled_any = True
@@ -693,11 +697,13 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late(config: Op
                                 assert (
                                     read_pc >= arm_landing
                                 ), f"{name}: reg{write.dst.index} read {read_pc} < landing {arm_landing}"
-                                tight += read_pc == arm_landing
+                                tight += arm_landing <= read_pc <= arm_landing + 1
         assert spilled_any, f"{name}: no multi-arm spill -- the overlap corner is not exercised"
-        # TIGHTNESS: the read-gated arm reads the spill at exactly its model landing PC (one coordinate contract). The
-        # +1 frame pushes every such read one PC past the landing, so no equality would hold.
-        assert tight > 0, f"{name}: no consumer reads a spilled value at its model landing PC (scheduler off by one)"
+        # TIGHTNESS: the read-gated arm reads the spill within one PC of its model landing (latch-free: landing or
+        # landing+1, one coordinate contract). A land - term_offset frame regression would push every read to landing+2.
+        assert (
+            tight > 0
+        ), f"{name}: no consumer reads a spilled value within one PC of its model landing (frame off by one)"
 
 
 def test_entry_busy_gates_a_successor_firing_at_its_inherited_instance_free_cycle() -> None:
@@ -717,9 +723,9 @@ def test_entry_busy_gates_a_successor_firing_at_its_inherited_instance_free_cycl
     operator = mir.nodes[mul].operator
     schedulable = set(view.operation_nodes)
 
-    # With no residue the firing issues on the first cycle (operands resident at block start) -- so any later issue is
-    # attributable to the residue alone, not a dependency or a livein_landing.
-    assert schedule_ops(mir.nodes, pool, schedulable).issue_cycle[mul] == 1
+    # With no residue the firing issues on cycle 0 (operands resident at block start; this models a NON-entry block,
+    # which carries no accept-dwell floor) -- so any later issue is attributable to the residue alone, not a dependency.
+    assert schedule_ops(mir.nodes, pool, schedulable).issue_cycle[mul] == 0
 
     # The predecessor freed this instance at block-local ``free``; a successor whose terminator shrank to
     # ``term_offset`` inherits that as ``successor_local_cycle(free, term_offset)`` -- exactly the map the busy branch
@@ -747,7 +753,8 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
     # branch arms (or, for the loop kernel, the executed trace) of the model's per-path residence, computed with an
     # INDEPENDENT write-then-read liveness that does not share residence_rows' rule. Crash-before: false-arm mid-rows
     # missing, pre-landing rows spuriously present, and -- for the install skew -- recip_newton's wide phi copies tinted
-    # at their fire PC instead of their landing PC and bw's boolean write tinted at its fire step instead of its landing.
+    # at their fire PC instead of their landing PC and bw's boolean write tinted at its fire step instead of its
+    # landing.
     from holoso._lir._ir import FloatOperand
     from holoso._backend.numerical import NumericalSimulator
 
@@ -1312,12 +1319,13 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
     # register stays live from its landing through the boundary -- an early install is not the value's death.
     assert set(range(landing, lir.initiation_interval + 1)) <= lir.reg_liveness[slot.reg]
     assert all(isinstance(w.tap, FloatOperand) for w in lir.float_outputs)
-    # Pin the hardware-frame cycle formulas the report, model, and allocator all depend on (the read latch and the
-    # read-first edge around FETCH_LAG); every consumer routes through the shared _ir helpers that own this arithmetic.
-    # The literals here are a deliberate independent cross-check of those helpers, not a tautological restatement of them.
+    # Pin the hardware-frame cycle formulas the report, model, and allocator all depend on (the latch-free wide read
+    # and the read-first edge around FETCH_LAG); every consumer routes through the shared _ir helpers that own this
+    # arithmetic. The literals here are a deliberate independent cross-check of those helpers, not a tautological
+    # restatement of them.
     op = lir.ops[0]
     assert landing_cycle(op.commit_cycle) == op.commit_cycle + FETCH_LAG + READ_FIRST_EDGE
-    assert operand_read_cycle(op.inst.operator, op.issue_cycle) == op.issue_cycle + FETCH_LAG - 1
+    assert operand_read_cycle(op.inst.operator, op.issue_cycle) == op.issue_cycle + FETCH_LAG
 
 
 def test_cfg_phi_merge_register_shows_residence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1646,9 +1654,10 @@ def test_build_lir_ekf1_stateless() -> None:
     assert lir.regfile.nreg < len(lir.ops) + len(lir.float_inputs)
     # The interference test runs in the hardware frame (a value frees its register as soon as its last read precedes the
     # next value's landing), not the scheduler-frame rule that left it several cycles too conservative and produced 42
-    # registers here. The bound is well below 42 to flag a regression of the hardware-accurate liveness without pinning
-    # the exact minimum (currently 38); cosim (test_cosim_ekf1_stateless) proves the relaxed sharing is correct.
-    assert lir.regfile.nreg <= 40
+    # registers here. The bound flags a regression of the hardware-accurate liveness without pinning the exact minimum
+    # (currently 41: the wide read samples a cycle later, holding each operand a cycle longer and raising
+    # pressure); cosim (test_cosim_ekf1_stateless) proves the relaxed sharing is correct.
+    assert lir.regfile.nreg <= 41
     # Inputs preload through the regfile's load port (registers 0..nload-1), so nload spans the input block.
     assert lir.regfile.nload == 17
     # Dedicated ports: one read port per operator operand (sum of arities = 2+2+1+2), one write port per tapped wide
@@ -2004,7 +2013,7 @@ def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
         # The cast write lands at its combinational landing: write_landing_pcs places every result via landing_cycle.
         # Landing it one cycle later would return base + commit + 4 here -- this is the discriminating guard, since
         # reg_liveness alone is a union over the register's reuse and stays satisfied even with the late landing.
-        assert lir.write_landing_pcs(block, op, op.write) == [landing]
+        assert lir.write_landing_pcs(block, op) == [landing]
         assert landing in lir.reg_liveness[op.write.dst]
     cast_regs = {op.write.dst for _, op in casts}
     for fop in lir.ops:  # the consuming multiply must read the cast result within its residence (no late-def gap)
@@ -2087,7 +2096,7 @@ class _HeavilyThrottledAdd(FAddOperator):
 
     @property
     def initiation_interval(self) -> int:
-        return 9  # latency 4 + the maximum cross-block-safe excess of 5 (the OperatorInstance.__post_init__ bound)
+        return 8  # latency 4 + the maximum cross-block-safe excess of 4 (the OperatorInstance.__post_init__ bound)
 
 
 def test_progress_cap_accommodates_long_initiation_intervals() -> None:
@@ -2105,7 +2114,23 @@ def test_progress_cap_accommodates_long_initiation_intervals() -> None:
     sched = schedule_ops(nodes, {type(slow): 1}, set(range(2, 2 + count)))
     issues = sorted(sched.issue_cycle.values())
     assert len(issues) == count
-    assert all(later - earlier >= 9 for earlier, later in zip(issues, issues[1:]))
+    assert all(later - earlier >= 8 for earlier, later in zip(issues, issues[1:]))
+
+
+def test_cross_block_reuse_bound_pins_the_drained_edge_boundary() -> None:
+    # Regression: with the cycle-1 pooled floor scoped to the entry block, a DRAINED-edge successor's first pooled
+    # issue is block-local cycle 0 (was cycle 1), so the safe cross-block-reuse initiation interval tightened by one to
+    # latency + boundary_step(0) + 1 == 8. No built-in operator exceeds II=1, so the OperatorInstance assert is the ONLY
+    # guard and cosim can never reach it -- pin both sides of the boundary directly here.
+    OperatorInstance(_HeavilyThrottledAdd(FMT), 0)  # II == 8 == bound: constructs clean
+
+    class _OverBoundAdd(_HeavilyThrottledAdd):
+        @property
+        def initiation_interval(self) -> int:
+            return 9  # one past the bound: a drained-edge successor issuing at cycle 0 could double-issue this instance
+
+    with pytest.raises(AssertionError, match="cross-block busy tracking"):
+        OperatorInstance(_OverBoundAdd(FMT), 0)
 
 
 def test_write_timeline_resolves_inline_wide_producers() -> None:
@@ -2390,7 +2415,8 @@ def test_drain_only_ret_with_a_resident_output_needs_no_boundary_drain() -> None
     # boundary covers only values that LAND in its frame; a pure-drain block has none, so its terminator offset is 0
     # (not the phantom ``boundary_step(0)`` of a value that never commits there). octave_index is the canonical case --
     # its loop body produces the octave count and the exit block does pure drain to out_valid. Crash-before (the
-    # ``boundary_step(makespan=0)`` over-charge): the drain-only Ret paid a full FETCH_LAG + read-first phantom drain, so
+    # ``boundary_step(makespan=0)`` over-charge): the drain-only Ret paid a full FETCH_LAG + read-first phantom drain,
+    # so
     # out_valid landed three cycles late on every transaction.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     from octave_index import octave_index  # noqa: PLC0415  (example kernels live under examples/)
