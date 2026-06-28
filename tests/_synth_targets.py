@@ -9,7 +9,7 @@ registry (_examples.SPECS) so each kernel is constructed once; test_synth_target
 appears. Off-catalogue regression cores may be added as SynthTarget records with example=None.
 
 The bar (all at minimum speed grade): yosys-ecp5 and diamond-ecp5 at 100 MHz, vivado-artix7 at 150 MHz. Almost every
-kernel closes lean; stage knobs appear only where a tool genuinely needs them (the wide e8m36 EKF, cordic on Diamond).
+kernel closes lean; stage knobs are row-local and appear only where measured closure needs them.
 """
 
 from collections.abc import Callable, Mapping
@@ -166,16 +166,60 @@ TARGETS: list[SynthTarget] = [
     for_example("uart_rx", FlowId.YOSYS_ECP5, 100, op_config(F_e4m8)),
     for_example("uart_rx", FlowId.DIAMOND_ECP5, 100, op_config(F_e4m8)),
     for_example("uart_rx", FlowId.VIVADO_ARTIX7, 150, op_config(F_e4m8)),
-    for_example("ekf1_stateless", FlowId.YOSYS_ECP5, 100, op_config_staged_output(F_e6m18)),
-    for_example("ekf1_stateless", FlowId.DIAMOND_ECP5, 100, op_config_staged_output(F_e6m18)),
-    for_example("ekf1_stateless", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example(
-        "ekf1_stateful", FlowId.YOSYS_ECP5, 100, op_config_staged_output(F_e6m18), kernel=_ekf1_stateful_kernel
+        "ekf1_stateless",
+        FlowId.YOSYS_ECP5,
+        100,
+        op_config(
+            F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_input=1, stage_decode=1, stage_output=1),
+            fmul=FMulOperator(F_e6m18, stage_input=1),
+        ),
     ),
-    for_example("ekf1_stateful", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18), kernel=_ekf1_stateful_kernel),
-    for_example("ekf1_stateful", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18), kernel=_ekf1_stateful_kernel),
-    # cordic: lean on Yosys/Vivado; Diamond needs the deep-fadd recipe (~111 MHz, verified minimal).
-    for_example("cordic_sincos", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
+    for_example(
+        "ekf1_stateless",
+        FlowId.DIAMOND_ECP5,
+        100,
+        op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_input=1)),
+    ),
+    for_example(
+        "ekf1_stateless",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        op_config(F_e6m18, fmul=FMulOperator(F_e6m18, stage_product=1)),
+    ),
+    for_example(
+        "ekf1_stateful",
+        FlowId.YOSYS_ECP5,
+        100,
+        op_config(
+            F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_input=1, stage_decode=1, stage_output=1),
+            fmul=FMulOperator(F_e6m18, stage_input=1),
+        ),
+        kernel=_ekf1_stateful_kernel,
+    ),
+    for_example(
+        "ekf1_stateful",
+        FlowId.DIAMOND_ECP5,
+        100,
+        op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_input=1, stage_decode=1, stage_normalize=1)),
+        env={"HOLOSO_DIAMOND_HARD": "1"},
+        kernel=_ekf1_stateful_kernel,
+    ),
+    for_example(
+        "ekf1_stateful",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        op_config(F_e6m18, fmul=FMulOperator(F_e6m18, stage_product=1)),
+        kernel=_ekf1_stateful_kernel,
+    ),
+    for_example(
+        "cordic_sincos",
+        FlowId.YOSYS_ECP5,
+        100,
+        op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_decode=1)),
+    ),
     for_example(
         "cordic_sincos",
         FlowId.DIAMOND_ECP5,
@@ -193,18 +237,14 @@ TARGETS: list[SynthTarget] = [
     for_example("remainder", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("remainder", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("remainder", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    # The wide e8m36 EKF datapath needs extra stages, written out per row. Yosys wants a deeper multiply + an ilog2
-    # decode the vendor tools do not; Diamond runs the hard strategy via env.
     for_example(
         "ekf1_stateless",
         FlowId.YOSYS_ECP5,
         100,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1),
+            fadd=FAddOperator(F_e8m36, stage_input=1, stage_decode=1, stage_normalize=1, stage_pack=1),
             fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=2, stage_pack=1, stage_output=1),
-            fdiv=FDivOperator(F_e8m36, stage_input=1, stage_pack=1, stage_output=1),
-            fmul_ilog2=FMulILog2OperatorFamily(F_e8m36, stage_decode=1),
         ),
     ),
     for_example(
@@ -213,9 +253,6 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e8m36,
-            # Read-latch-free closure on Diamond/LFE5U-25F: full STAGE_INPUT compensates the now-combinational regfile
-            # read, and a second fadd input register (stage_input=2) splits the long input->decode route that otherwise
-            # binds just under 100. (LFE5U-45F measured lower; 25F retained.)
             fadd=FAddOperator(
                 F_e8m36, stage_input=2, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
             ),
@@ -242,10 +279,8 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_decode=1, stage_align=1, stage_normalize=2, stage_pack=1, stage_output=1),
-            fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=2, stage_pack=1, stage_output=1),
-            fdiv=FDivOperator(F_e8m36, stage_input=1, stage_pack=1, stage_output=1),
-            fmul_ilog2=FMulILog2OperatorFamily(F_e8m36, stage_decode=1),
+            fadd=FAddOperator(F_e8m36, stage_input=1, stage_decode=1, stage_normalize=1, stage_pack=1),
+            fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=2, stage_output=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
@@ -255,11 +290,10 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_input=1, stage_decode=1, stage_align=1, stage_normalize=2, stage_pack=1),
+            fadd=FAddOperator(F_e8m36, stage_input=2, stage_decode=1, stage_align=1, stage_normalize=2, stage_pack=1),
             fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=1, stage_pack=1),
-            fdiv=FDivOperator(F_e8m36, stage_input=1, stage_pack=1, stage_output=1),
+            fdiv=FDivOperator(F_e8m36, stage_input=3, stage_pack=1, stage_output=1),
         ),
-        env={"HOLOSO_DIAMOND_HARD": "1"},
         kernel=_ekf1_stateful_kernel,
     ),
     for_example(
