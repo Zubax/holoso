@@ -133,7 +133,7 @@ TARGETS: list[SynthTarget] = [
     for_example("signal_window", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("signal_window", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("signal_window", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("iir1_lpf", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
+    for_example("iir1_lpf", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_output=1))),
     for_example("iir1_lpf", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("iir1_lpf", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example(
@@ -147,7 +147,7 @@ TARGETS: list[SynthTarget] = [
             fdiv=FDivOperator(F_e6m18, stage_output=1),
         ),
     ),
-    for_example("pid", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
+    for_example("pid", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_output=1))),
     for_example("pid", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("schmitt_trigger", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("schmitt_trigger", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
@@ -183,7 +183,7 @@ TARGETS: list[SynthTarget] = [
         op_config(
             F_e6m18,
             fadd=FAddOperator(F_e6m18, stage_input=1, stage_decode=1, stage_output=1),
-            fmul=FMulOperator(F_e6m18, stage_input=1),
+            fmul=FMulOperator(F_e6m18, stage_input=1, stage_output=1),
         ),
     ),
     for_example(
@@ -210,7 +210,7 @@ TARGETS: list[SynthTarget] = [
         op_config(
             F_e6m18,
             fadd=FAddOperator(F_e6m18, stage_input=1, stage_decode=1, stage_output=1),
-            fmul=FMulOperator(F_e6m18, stage_input=1),
+            fmul=FMulOperator(F_e6m18, stage_input=1, stage_output=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
@@ -307,7 +307,9 @@ TARGETS: list[SynthTarget] = [
             F_e8m36,
             fadd=FAddOperator(F_e8m36, stage_input=1, stage_decode=1, stage_normalize=1, stage_pack=1),
             fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=2, stage_output=1),
+            fmul_ilog2=FMulILog2OperatorFamily(F_e8m36, stage_input=1, stage_decode=1),
         ),
+        env={"HOLOSO_YOSYS_HARD": "1"},
         kernel=_ekf1_stateful_kernel,
     ),
     for_example(

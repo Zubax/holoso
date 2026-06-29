@@ -268,9 +268,9 @@ def _emit_declarations(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorIns
     reg  [CYCW-1:0] err_pc_q;
     wire            err;           // an operator error is detected on the current step
 
-    wire                advancing   = (next_pc != pc);  // sequencer advances the fetch (not holding at a boundary)
-    reg [FETCH_LAG-1:0] transacting_q;                  // `advancing` delayed FETCH_LAG steps, onto the executing word
-    wire                transacting = transacting_q[FETCH_LAG-1];  // a transaction's ucode word executes now
+    reg                 transacting_in;                           // per-branch tag: this pc's word is a live step
+    reg [FETCH_LAG-1:0] transacting_q;                            // delays the tag FETCH_LAG onto executing word
+    wire                transacting = transacting_q[FETCH_LAG-1]; // gates the executing word's effects
 
     reg  [W-1:0] regs  [0:NREG-1];   // the sparse register array (read-first: a write is visible the next step)
     reg          bregs [0:NBREG-1];  // 1-bit boolean register bank: branch conditions and boolean state
@@ -440,18 +440,32 @@ def _emit_datapath_comb(
     w("""
 // Next-PC sequencer (combinational). The PC holds at the accept (pc==0) and present (pc==LASTPC) boundaries; bubble
 // steps carry a NOP word and the PC keeps advancing. The executing step lags the fetch PC by FETCH_LAG. A block's
-// terminator redirects the fetch PC at the block's boundary step (a branch reads its boolean register).
+// terminator redirects the fetch PC at the block's boundary step (a branch reads its boolean register). Each branch
+// also sets transacting_in -- 1 for a live accept/body word, 0 at the boundaries -- so each branch tags its own word.
 always @* begin
 """)
     w.push()
-    w("if (rst)            next_pc = 0;")
-    w("else if (out_valid) next_pc = out_ready ? 0 : LASTPC;  // present: hold until the result is taken")
-    w("else if (in_ready)  next_pc = in_valid ? 1 : 0;        // accept: hold until a transaction arrives")
+    w("if (rst) begin")
+    w.push()
+    w("next_pc        = 0;")
+    w("transacting_in = 1'b0;")
+    w.pop()
+    w("end else if (out_valid) begin  // present: hold until the result is taken")
+    w.push()
+    w("next_pc        = out_ready ? 0 : LASTPC;")
+    w("transacting_in = 1'b0;")
+    w.pop()
+    w("end else if (in_ready) begin   // accept: hold until a transaction arrives")
+    w.push()
+    w("next_pc        = in_valid ? 1 : 0;")
+    w("transacting_in = in_valid;")
+    w.pop()
+    w("end else begin                 // advance the fetch: the body of a live transaction")
+    w.push()
+    w("transacting_in = 1'b1;")
     if not redirects:
-        w("else                next_pc = pc + 1'b1;            // advance the fetch")
+        w("next_pc        = pc + 1'b1;")
     else:
-        w("else begin")
-        w.push()
         w("case (pc)")
         w.push()
         for term_pc, expr in redirects:
@@ -459,8 +473,8 @@ always @* begin
         w("default: next_pc = pc + 1'b1;")
         w.pop()
         w("endcase")
-        w.pop()
-        w("end")
+    w.pop()
+    w("end")
     w.pop()
     w("end", "")
 
@@ -839,7 +853,7 @@ always @(posedge clk) begin
     w("end else begin")
     w.push()
     w("pc <= next_pc;")
-    w("transacting_q <= (transacting_q << 1) | advancing;  // delay `advancing` FETCH_LAG steps onto the issue word")
+    w("transacting_q <= (transacting_q << 1) | transacting_in;")
     w("if (err) err_pc_q <= pc - FETCH_LAG;  // err wins; execution lags the fetch PC by FETCH_LAG, so step is pc-lag")
     w("else if (in_ready && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted")
     for reg, slot in sorted(float_slots.items()):
