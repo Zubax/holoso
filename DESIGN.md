@@ -450,10 +450,9 @@ instantiation lists every hardware parameter explicitly, so it is self-describin
 loud elaboration error. The wrapper does not derive latency; it takes `LATENCY` for sideband alignment and forwards it
 to the wrapped implementation, whose source is the reference for stage counts.
 
-Support library. The auxiliary HDL shipped with a module is a single self-contained `holoso_support.v` plus a
-`holoso_support.vh` function header that generated modules `include`. The `.v` is assembled in memory from the
-hand-written operator wrappers and every third-party module under the vendored RTL set, so the end application
-introduces all RTL dependencies by adding one large file to the synthesis input.
+Support library. The auxiliary HDL shipped with a module is a single self-contained `holoso_support.v`, assembled in
+memory from the hand-written operator wrappers and every third-party module under the vendored RTL set, so the end
+application introduces all RTL dependencies by adding one large file to the synthesis input.
 
 ### Numerical model
 

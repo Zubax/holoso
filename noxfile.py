@@ -94,5 +94,5 @@ def typecheck(session: nox.Session) -> None:
 @nox.session
 def black(session: nox.Session) -> None:
     session.install("black~=26.5")
-    default = ("--check", "holoso", "tests", "synth", "examples", "tools", "noxfile.py")
+    default = ("--check", "holoso", "tests", "synth", "examples", "tools", "conftest.py", "noxfile.py")
     session.run("python", "-m", "black", *(session.posargs or default))

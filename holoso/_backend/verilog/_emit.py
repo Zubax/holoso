@@ -22,7 +22,7 @@ from ..._operators import *
 from ..._type import is_wide_type
 from ..._legal import output_header
 from ._microcode import *
-from ._support import support_files
+from ._support import inline_support, support_files
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +140,6 @@ def _inline_rhs(block_index: int, op_index: int, op: InlineScheduledOp) -> str:
 
 
 def generate(lir: Lir) -> VerilogOutput:
-    # This emitter implements the mandatory v1 staging; the scheduler and microcode placement budget for exactly these.
     assert FETCH_STAGES == 3, "the Verilog emitter implements the 3-stage microcode fetch (may be configurable later)"
     w = _Writer()
     cycw = lir.cyc_width
@@ -167,7 +166,7 @@ def generate(lir: Lir) -> VerilogOutput:
 
     _emit_header(w, lir)
     _emit_localparams(w, lir, cycw, pcw, ucw)
-    _emit_support_header(w, lir)
+    _emit_inline_support(w)
     _emit_declarations(w, lir, write_lists)
     _emit_consts(w, lir)
     _emit_operators(w, lir, write_lists)
@@ -234,17 +233,17 @@ def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int) -> No
     fmt = lir.float_format
     nreg = max(1, lir.regfile.nreg)
     w(f"""
-localparam           WEXP      ={fmt.wexp:3};  // Float exponent bits fixed by the static schedule
-localparam           WMAN      ={fmt.wman:3};  // Float mantissa bits fixed by the static schedule
+localparam           WEXP      ={fmt.wexp:4};  // Float exponent bits fixed by the static schedule
+localparam           WMAN      ={fmt.wman:4};  // Float mantissa bits fixed by the static schedule
 localparam           W         = WEXP + WMAN;
-localparam           NREG      ={nreg:3};  // >= 1; the wide bank is unused when no value needs a register
-localparam           CYCW      ={cycw:3};  // err_pc width: enough for any executing step (0..present)
-localparam           PCW       ={pcw:3};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
-localparam           FETCH_LAG ={FETCH_LAG:3};  // executing step = pc - FETCH_LAG ({FETCH_STAGES}-stage control fetch)
-localparam [PCW-1:0] PRESENT   ={lir.present_step:3};  // executing step on which the outputs are valid in the array
-localparam [PCW-1:0] LASTPC    ={lir.initiation_interval:3};  // = PRESENT + FETCH_LAG; out_valid asserts here
-localparam           UCW       ={ucw:3};  // microcode word width after lifting out constant control fields
-localparam           NBREG     ={max(1, lir.bool_regfile.nreg):3};  // 1-bit boolean register bank (branch conditions)
+localparam           NREG      ={nreg:4};  // >= 1; the wide bank is unused when no value needs a register
+localparam           CYCW      ={cycw:4};  // err_pc width: enough for any executing step (0..present)
+localparam           PCW       ={pcw:4};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
+localparam           FETCH_LAG ={FETCH_LAG:4};  // executing step = pc - FETCH_LAG ({FETCH_STAGES}-stage control fetch)
+localparam [PCW-1:0] PRESENT   ={lir.present_step:4};  // executing step on which the outputs are valid in the array
+localparam [PCW-1:0] LASTPC    ={lir.initiation_interval:4};  // = PRESENT + FETCH_LAG; out_valid asserts here
+localparam           UCW       ={ucw:4};  // microcode word width after lifting out constant control fields
+localparam           NBREG     ={max(1, lir.bool_regfile.nreg):4};  // 1-bit boolean register bank (branch conditions)
 // pc: 0 = idle/accept, present at executing step PRESENT; out_valid at pc==LASTPC (fetch leads execution).
 """)
     # Cross-check the ZKF +1.0 formula against the codec at build time. This is the contract holoso_ffrombool's
@@ -254,33 +253,26 @@ localparam           NBREG     ={max(1, lir.bool_regfile.nreg):3};  // 1-bit boo
     w("")
 
 
-def _emit_support_header(w: _Writer, lir: Lir) -> None:
-    """
-    Include the shared support header unconditionally. Its functions (the float<->bool casts and the finiteness /
-    saturation helpers) are the single place that assumes the ZKF bit layout; they reference the WEXP / WMAN / W
-    localparams declared above, so the generated module's datapath invokes them by name and never open-codes the
-    layout. Defining a function the kernel does not call is free, so the header always ships and is always included.
-    """
-    w('\n`include "holoso_support.vh"\n')
+def _emit_inline_support(w: _Writer) -> None:
+    w(inline_support())
+    w("")
 
 
 def _emit_declarations(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorInstance, int], list[int]]) -> None:
-    assert (
-        FETCH_LAG >= 1
-    ), "transacting_q is [FETCH_LAG-1:0]; FETCH_LAG == 0 needs an explicit leading NOP, not this gate"
+    assert FETCH_LAG >= 1, "transacting_q is [FETCH_LAG-1:0]; FETCH_LAG==0 needs an explicit leading NOP"
     w("""
-        reg  [PCW-1:0]  pc;            // fetch program counter; the executing step lags it by FETCH_LAG
-        reg  [PCW-1:0]  next_pc;       // combinational next-state presented to the ROM each cycle
-        reg  [PCW-1:0]  ucode_addr_q;  // PC latch: splits pc -> next_pc -> ROM address from the array read
-        reg  [CYCW-1:0] err_pc_q;
-        wire            err;           // an operator error is detected on the current step
+    reg  [PCW-1:0]  pc;            // fetch program counter; the executing step lags it by FETCH_LAG
+    reg  [PCW-1:0]  next_pc;       // combinational next-state presented to the ROM each cycle
+    reg  [PCW-1:0]  ucode_addr_q;  // PC latch: splits pc -> next_pc -> ROM address from the array read
+    reg  [CYCW-1:0] err_pc_q;
+    wire            err;           // an operator error is detected on the current step
 
-        wire            advancing   = (next_pc != pc);  // sequencer advances the fetch (not holding at a boundary)
-        reg  [FETCH_LAG-1:0] transacting_q;  // `advancing` delayed FETCH_LAG steps, onto the executing word
-        wire            transacting = transacting_q[FETCH_LAG-1];  // a transaction's word executes now; gates issue
+    wire                advancing   = (next_pc != pc);  // sequencer advances the fetch (not holding at a boundary)
+    reg [FETCH_LAG-1:0] transacting_q;                  // `advancing` delayed FETCH_LAG steps, onto the executing word
+    wire                transacting = transacting_q[FETCH_LAG-1];  // a transaction's ucode word executes now
 
-        reg  [W-1:0] regs  [0:NREG-1];   // the sparse register array (read-first: a write is visible the next step)
-        reg          bregs [0:NBREG-1];  // 1-bit boolean register bank: branch conditions and boolean state
+    reg  [W-1:0] regs  [0:NREG-1];   // the sparse register array (read-first: a write is visible the next step)
+    reg          bregs [0:NBREG-1];  // 1-bit boolean register bank: branch conditions and boolean state
 
         """)
     for inst in lir.instances:
@@ -395,10 +387,11 @@ def _emit_field_wires(w: _Writer, fields: dict[str, Field]) -> None:
 // (so synthesis prunes the logic it feeds); a varying field is a slice of the instruction word.
 """)
     for f in fields.values():
-        # The pooled write-enable rides the executing word, so gate it by ``transacting`` -- a held ``ucode[0]`` (accept
-        # dwell) or a stale pre-reset commit word that survives a sub-FETCH_LAG reset must commit nothing. This single
-        # decode point covers both the register write chains and the ``err`` path that consume ``mc_we``; ``iv`` and the
-        # const-install ``cwe`` are gated at their own use sites.
+        # ``transacting`` qualifies every ucode-word-driven effect, so a held ``ucode[0]`` dwell, a fill bubble, or a
+        # stale pre-reset word commits nothing. ``mc_we`` is gated HERE at the decode because two sinks read it -- the
+        # write chains and the ``err`` term -- so one gate serves both. ``iv``/``cwe`` have one sink each and gate at
+        # their use sites, which keeps the gate UNCONDITIONAL: the constant branch below skips ``gate``, and an ungated
+        # dwell issue (if ``iv`` ever const-folds) is the silent miscompile this feature exists to prevent.
         gate = "transacting & " if f.name.startswith("mc_we_") else ""
         if f.offset < 0:
             w(f"wire {_decl_range(f.width)}{f.name} = {_lit(f.width, f.const_value)};")

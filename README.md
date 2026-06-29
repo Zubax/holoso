@@ -146,7 +146,7 @@ pid = PID(kp=0.5, ki=0.0625, kd=0.25, limit=4.0)
 
 # Run Holoso -- construct the machine and schedule the microcode.
 # The results are returned in-memory; you can write them to disk where you want.
-# They include the generated Verilog module, the fixed holoso_support.v/.vh, testbench, and the reports.
+# They include the generated Verilog module, the fixed holoso_support.v, testbench, and the reports.
 result = holoso.synthesize(pid.update, operators)
 
 # Write the files -- this is usually what you want.

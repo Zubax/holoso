@@ -15,8 +15,9 @@ validator (`_microcode.py`). Promote write-control to a first-class edge/path ev
 
 Loop-carried install pin is conservative: `install_issue_cycle` pins a computed-source phi-arm copy to
 `work_makespan + 1`, but when the source is not the block's last work the install lands a terminator-cycle late
-(recip_newton blk2: the `y_next → y` copy lands block-rel 17, could be 12 — read-first against the old `y` still holds —
-costing +1 cycle per loop iteration). Pin the install to its actual source's landing instead of the block makespan;
+(recip_newton blk2: the `y_next → y` copy lands in last clk of the block 2, delaying it by 1 clk,
+could land much earlier — read-first against the old `y` still holds — costing +1 cycle per loop iteration).
+Pin the install to its actual source's landing instead of the block makespan;
 re-freeze `test_latency_freeze`/`test_metrics`, and keep it correctness-sensitive (the read-first must hold). Surfaced
 by the schedule-quality audit.
 
