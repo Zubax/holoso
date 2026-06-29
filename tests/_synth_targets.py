@@ -267,8 +267,10 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_input=1, stage_decode=1, stage_normalize=1, stage_pack=1),
+            fadd=FAddOperator(F_e8m36, stage_input=1, stage_decode=1, stage_normalize=1, stage_pack=1, stage_output=1),
             fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=2, stage_pack=1, stage_output=1),
+            fdiv=FDivOperator(F_e8m36, stage_input=1, stage_output=1),
+            fmul_ilog2=FMulILog2OperatorFamily(F_e8m36, stage_input=1, stage_decode=1),
         ),
     ),
     for_example(
