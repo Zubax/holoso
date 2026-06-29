@@ -895,9 +895,9 @@ def test_inplace_bool_conditional_sticky_latch() -> None:
 def test_inplace_bool_unconditional_self_update() -> None:
     class BoolOrSelf:
         # An unconditional bool read-first self-update (latching_fault_register): the OR reads the live-in and writes
-        # the slot register in place. The OR is the slot live-out and is cycle-0 eligible, so it exercises the
-        # entry-block dwell floor on the live-out (without the floor it would corrupt carried state during the accept
-        # dwell).
+        # the slot register in place. The OR is the slot live-out and issues on cycle 0; its in-place commit lands at
+        # pc >= FETCH_LAG, never the held pc 0, so it is dwell-safe without any floor (the gated `transacting` makes the
+        # idle re-fetch a NOP).
         def __init__(self) -> None:
             self._f = False
 
@@ -916,11 +916,10 @@ def test_inplace_bool_unconditional_self_update() -> None:
 def test_inplace_loop_preheader_arm_is_dwell_safe() -> None:
     class LoopPreheaderArmInPlace:
         # A loop-carried bool state whose loop phi coalesces onto the slot register. The preheader update ``self._s or
-        # a`` is the phi's ENTRY arm, computed in the entry block from resident values only (cycle-0 eligible), and it
-        # coalesces onto the slot register -- so it MUST be floored off cycle 0 by the arm-producer dwell extension, or
-        # re-firing it during the accept dwell corrupts carried state and ``_assert_entry_dwell_safe`` trips at build
-        # time. The bare slot-live-out floor does not cover it (the live-out is the loop-exit phi, not this entry-block
-        # arm), so this is the regression guard for the transitive phi-chain dwell walk.
+        # a`` is the phi's ENTRY arm, computed in the entry block from resident values only, and it coalesces onto the
+        # slot register and issues on cycle 0. Its in-place commit lands at pc >= FETCH_LAG, never the held pc 0, so it
+        # is dwell-safe with no floor; this guards that the transitive phi-chain coalescing keeps carried state correct
+        # across the loop.
         def __init__(self) -> None:
             self._s = False
 
@@ -932,7 +931,7 @@ def test_inplace_loop_preheader_arm_is_dwell_safe() -> None:
                 i = i - 1.0
             return self._s
 
-    lir = build(_run(LoopPreheaderArmInPlace().__call__), "preheaderarm")  # must not trip _assert_entry_dwell_safe
+    lir = build(_run(LoopPreheaderArmInPlace().__call__), "preheaderarm")
     assert not _bool_slot(lir, "_s").needs_copy  # the loop phi coalesced onto the slot register
     model = build_model(lir)
     reference = LoopPreheaderArmInPlace()
@@ -941,12 +940,12 @@ def test_inplace_loop_preheader_arm_is_dwell_safe() -> None:
         assert bool(model.run(a, n)[0]) is reference(a, n)
 
 
-def test_inplace_write_only_slot_dwell_tenant_is_demoted() -> None:
+def test_inplace_write_only_slot_gap_tenant_is_dwell_safe() -> None:
     class WriteOnlyDwellTenant:
         # Regression (Codex): an if-converted kernel where a temporary (``y or self._x``) lands as a gap tenant on the
-        # WRITE-ONLY ``_w`` slot's free register and is cycle-0 eligible -- a dwell hazard the live-out floor cannot see
-        # (the tenant is not a slot live-out). The validate-and-retry must demote ``_w`` to a copy-back, reserving its
-        # register so no tenant lands there; without it ``_assert_entry_dwell_safe`` trips at build time.
+        # WRITE-ONLY ``_w`` slot's free register and issues on cycle 0. The tenant is dwell-safe by construction: the
+        # gated ``transacting`` makes the idle re-fetch a NOP and the commit lands at pc >= FETCH_LAG, so a gap
+        # tenant on a coalesced slot register cannot corrupt the carried state.
         def __init__(self) -> None:
             self._x = False
             self._w = False
@@ -959,7 +958,9 @@ def test_inplace_write_only_slot_dwell_tenant_is_demoted() -> None:
                 self._w = self._x
             return self._x, self._w
 
-    lir = build(_run(WriteOnlyDwellTenant().__call__), "dwell_tenant")  # must not trip _assert_entry_dwell_safe
+    lir = build(_run(WriteOnlyDwellTenant().__call__), "dwell_tenant")
+    assert not _bool_slot(lir, "_w").needs_copy, "_w must coalesce for a gap tenant to share its slot register"
+    assert any(op.issue_cycle == 0 for op in lir.blocks[lir.entry].inline_ops), "a cycle-0 entry gap tenant must arise"
     model = build_model(lir)
     reference = WriteOnlyDwellTenant()
     t, f = True, False

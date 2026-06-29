@@ -215,6 +215,9 @@ class OperatorInstance:
     index: int  # 0-based within this concrete operator value
 
     def __post_init__(self) -> None:
+        # A pooled result commits at issue + latency, so latency >= 1 keeps its write-enable off the held ``ucode[0]``
+        # (the accept-dwell word) -- a latency-0 pooled operator would re-commit every idle cycle (see ``transacting``).
+        assert self.operator.latency >= 1, f"{self.operator.mnemonic}: pooled operator latency must be >= 1"
         # Every pooled operator passes through here, so its three hand-synchronized per-port declarations are
         # validated once at the source: HDL port names align with the result types, and the commutation permutation
         # (when declared) is a type-preserving bijection -- a bad future declaration fails here, not in emission.
@@ -236,9 +239,9 @@ class OperatorInstance:
         # deeper-throttled operator on a back-edge loop would additionally need a post-layout re-entry-distance check,
         # deferred until one exists.
         drain = boundary_step(0)
-        # The gap beyond the drain is one step: the terminator's redirect into the successor frame. The drained
-        # successor's first pooled issue is block-local cycle 0 (the cycle-1 dwell floor is entry-scoped, so non-entry
-        # successors carry none), so it adds nothing past the redirect -- the worst-case gap is ``drain + 1``.
+        # The gap beyond the drain is one step: the terminator's redirect into the successor frame. Every block's first
+        # pooled issue is block-local cycle 0 (no scheduling floor delays it), so it adds nothing past the redirect --
+        # the worst-case gap is ``drain + 1``.
         redirect_and_first_issue = 1
         bound = self.operator.latency + drain + redirect_and_first_issue
         assert self.operator.initiation_interval <= bound, (

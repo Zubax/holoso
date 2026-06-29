@@ -36,22 +36,22 @@ from ._modelref import default_ops
 # kernels. A representative cross-section of shapes: straight-line and deep arithmetic, clamp/select, stateful
 # filters, branchy logic, data-dependent loops, and a large kernel.
 _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
-    "madd": (15, 15),
-    "signal_window": (10, 10),
-    "poly3": (24, 24),
-    "iir1_lpf": (16, 16),
-    "schmitt_trigger": (7, 7),
+    "madd": (14, 14),
+    "signal_window": (9, 9),
+    "poly3": (23, 23),
+    "iir1_lpf": (15, 15),
+    "schmitt_trigger": (6, 6),
     "majority_voter": (14, 19),
-    "recip_newton": (16, 34),
+    "recip_newton": (15, 33),
     "remainder": (36, 53),
-    "cordic_sincos": (105, 105),
-    "ekf1_stateless": (126, 126),
+    "cordic_sincos": (104, 104),
+    "ekf1_stateless": (125, 125),
     # Branchy kernels whose phi-arm installs source block-entry-resident values (boolean/float live-out constants, or an
     # input/state read) on the normal path -- the inline-class timing (no source-sample edge, no +1 step) lands each
     # within the work makespan rather than at the copy-pipeline boundary, shrinking every downstream block base.
     "uart_rx": (6, 120),
     "uart_tx": (8, 104),
-    "octave_index": (15, 39),
+    "octave_index": (14, 38),
 }
 
 _SPEC_BY_NAME = {spec.name: spec for spec in SPECS}

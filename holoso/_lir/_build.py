@@ -34,42 +34,11 @@ def build(mir: Mir, module_name: str) -> Lir:
     if not mir.outputs:
         raise UnsupportedConstruct("Synthesized kernel must produce at least one output value")
     lir = _build_program(mir, module_name)
-    _assert_entry_dwell_safe(lir)
     names = [port.name for port in lir.ports]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise UnsupportedConstruct(f"duplicate port name(s) in the module interface: {', '.join(duplicates)}")
     return lir
-
-
-def _assert_entry_dwell_safe(lir: Lir) -> None:
-    """
-    Build-time invariant for the accept-dwell contract: no entry-block op issued on cycle 0 writes a persistent-state
-    register. The sequencer holds pc 0 while waiting for ``in_valid`` and re-fires ``ucode[0]`` each idle cycle, so a
-    cycle-0 write to a state register would be re-driven with stale inputs and corrupt the carried state. In-place state
-    commit makes a producer that coalesces onto a slot register write that register directly -- an unconditional
-    ``self.x = self.x | a`` (its OR/Select live-out) or an entry-block arm of a conditional update -- so the hazard is
-    real, not merely theoretical, and is prevented by the dwell floor in ``schedule_with_overlap`` (the
-    ``state_liveouts`` set, which includes both slot live-outs and the arm producers of any phi live-out, is held off
-    cycle 0 in the entry block). This assertion is the loud backstop on that floor: the dwell is invisible to BOTH
-    validation paths (the cosim bench never delays ``in_valid``; the model asserts it at once and keys cycle-0 ops at
-    their read pc, never pc 0), so a regression that let a coalesced result reach a state register on cycle 0 would
-    otherwise corrupt state silently. The assert checks only computed writes (entry.ops/inline_ops): a ucode
-    const-install to a slot re-fires the same constant (idempotent) and a register-source install lands read-first at
-    the boundary, not entry, so the phi-arm installs are dwell-safe by construction and need no check. Even the
-    computed-write word itself sits at pc>=1 (commit / inline-fire), not pc==0, so this half too may be redundant -- it
-    is kept as defense-in-depth because the dwell is invisible to cosim and the model.
-    """
-    entry = lir.blocks[lir.entry]
-    state_regs = {slot.reg for slot in lir.float_state_slots} | {slot.reg for slot in lir.bool_state_slots}
-    cycle0_writes = [w.dst for op in entry.ops if op.issue_cycle == 0 for w in op.writes]
-    cycle0_writes += [op.write.dst for op in entry.inline_ops if op.issue_cycle == 0]
-    for dst in cycle0_writes:
-        assert dst not in state_regs, f"entry-block cycle-0 op writes persistent-state register {dst.stable_label}"
-    # The pooled-firing half of the same dwell guard: a re-fired ``ucode[0]`` would multiply-issue a pooled op. The
-    # cycle-1 floor is scoped to the entry block (non-entry words never hold -- the sequencer holds only pc 0 and
-    # LASTPC), so this backstops that the entry floor still keeps every pooled firing off cycle 0.
-    assert all(op.issue_cycle >= 1 for op in entry.ops), "entry-block pooled firing on cycle 0 (dwell floor bypassed)"
 
 
 def _has_state_copy(

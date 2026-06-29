@@ -265,12 +265,19 @@ def _emit_support_header(w: _Writer, lir: Lir) -> None:
 
 
 def _emit_declarations(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorInstance, int], list[int]]) -> None:
+    assert (
+        FETCH_LAG >= 1
+    ), "transacting_q is [FETCH_LAG-1:0]; FETCH_LAG == 0 needs an explicit leading NOP, not this gate"
     w("""
         reg  [PCW-1:0]  pc;            // fetch program counter; the executing step lags it by FETCH_LAG
         reg  [PCW-1:0]  next_pc;       // combinational next-state presented to the ROM each cycle
         reg  [PCW-1:0]  ucode_addr_q;  // PC latch: splits pc -> next_pc -> ROM address from the array read
         reg  [CYCW-1:0] err_pc_q;
         wire            err;           // an operator error is detected on the current step
+
+        wire            advancing   = (next_pc != pc);  // sequencer advances the fetch (not holding at a boundary)
+        reg  [FETCH_LAG-1:0] transacting_q;  // `advancing` delayed FETCH_LAG steps, onto the executing word
+        wire            transacting = transacting_q[FETCH_LAG-1];  // a transaction's word executes now; gates issue
 
         reg  [W-1:0] regs  [0:NREG-1];   // the sparse register array (read-first: a write is visible the next step)
         reg          bregs [0:NBREG-1];  // 1-bit boolean register bank: branch conditions and boolean state
@@ -388,12 +395,17 @@ def _emit_field_wires(w: _Writer, fields: dict[str, Field]) -> None:
 // (so synthesis prunes the logic it feeds); a varying field is a slice of the instruction word.
 """)
     for f in fields.values():
+        # The pooled write-enable rides the executing word, so gate it by ``transacting`` -- a held ``ucode[0]`` (accept
+        # dwell) or a stale pre-reset commit word that survives a sub-FETCH_LAG reset must commit nothing. This single
+        # decode point covers both the register write chains and the ``err`` path that consume ``mc_we``; ``iv`` and the
+        # const-install ``cwe`` are gated at their own use sites.
+        gate = "transacting & " if f.name.startswith("mc_we_") else ""
         if f.offset < 0:
             w(f"wire {_decl_range(f.width)}{f.name} = {_lit(f.width, f.const_value)};")
         elif f.width == 1:
-            w(f"wire        {f.name} = ucode_word[{f.offset}];")
+            w(f"wire        {f.name} = {gate}ucode_word[{f.offset}];")
         else:
-            w(f"wire {_decl_range(f.width)}{f.name} = ucode_word[{f.offset} +: {f.width}];")
+            w(f"wire {_decl_range(f.width)}{f.name} = {gate}ucode_word[{f.offset} +: {f.width}];")
     w("")
 
 
@@ -417,10 +429,11 @@ def _emit_datapath_comb(
             w(f"wire [W-1:0] cterm{port} = {_const_pool_mux(f_cidx(port), port_consts[port])};")
     w("")
 
-    w("// Operator control (in_valid and sign controls are consumed inside the wrapper on the issue step).")
+    w("// Operator control: in_valid is gated by `transacting`, so an idle dwell/present-hold re-fetch fires no issue;")
+    w("// the sign controls are consumed inside the wrapper on the issue step.")
     for inst in lir.instances:
         sig, base = _sig(inst), base_name(inst)
-        w(f"assign {sig}_iv = {f_iv(base)};")
+        w(f"assign {sig}_iv = transacting & {f_iv(base)};")
         for q, result_type in enumerate(inst.operator.signature.result_types):
             if is_wide_type(result_type) and (inst, q) in write_lists:
                 w(f"assign {sig}_y{q}s = {f_ysgn(base, q)};")
@@ -675,11 +688,13 @@ def _wide_writer_entries(
     for reg in sorted(write_sets):
         for inst, port in write_sets[reg]:
             entries.setdefault(reg, []).append((_write_cond(inst, port, reg, write_lists), f"{_sig(inst)}_y{port}"))
-    # Ucode-driven constant installs: a microcode write-enable arm (like an operator lane), reusing the const-pool nets.
+    # Ucode-driven constant installs: a transacting-gated write-enable arm (like an operator lane), reusing the
+    # const-pool nets. The gate keeps a cycle-0 install inert on the held ``ucode[0]`` during the idle accept dwell --
+    # unlike the pooled-lane write-enables above, which commit at issue + latency >= 1 and so never ride the held word.
     const_books = const_install_codebooks(lir)
     for reg in sorted(const_books):
         entries.setdefault(reg, []).append(
-            (f_cwe(RegRef(reg)), _const_pool_mux(f_ccidx(RegRef(reg)), const_books[reg]))
+            (f"transacting && {f_cwe(RegRef(reg))}", _const_pool_mux(f_ccidx(RegRef(reg)), const_books[reg]))
         )
     for block in lir.blocks:
         for op_index, inline_op in enumerate(block.inline_ops):
@@ -712,10 +727,10 @@ def _bool_writer_entries(
         for inst, port in bool_write_sets[reg]:
             rhs = f"{_sig(inst)}_y{port} ^ {f_binv(base_name(inst), port)}"
             entries.setdefault(reg, []).append((_write_cond(inst, port, reg, write_lists), rhs))
-    # Ucode-driven constant installs: a microcode write-enable arm carrying the 1-bit value (no XOR -- the
-    # inversion is already folded into the value at construction).
+    # Ucode-driven constant installs: a transacting-gated write-enable arm carrying the 1-bit value (no XOR -- the
+    # inversion is already folded into the value at construction). The gate keeps a cycle-0 install inert during dwell.
     for reg in const_install_bool_regs(lir):
-        entries.setdefault(reg, []).append((f_cwe(BoolRegRef(reg)), f_cval(BoolRegRef(reg))))
+        entries.setdefault(reg, []).append((f"transacting && {f_cwe(BoolRegRef(reg))}", f_cval(BoolRegRef(reg))))
     for block in lir.blocks:
         for op_index, inline_op in enumerate(block.inline_ops):
             if isinstance(inline_op.write.dst, BoolRegRef):
@@ -803,8 +818,8 @@ def _emit_clocked(
     boolw = _bool_writer_entries(lir, write_lists)
 
     w("""
-// All sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q) and the persistent
-// state registers; every other register is reset-unconditional. Each register is driven by exactly one write chain.
+// All sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q, transacting_q) and the
+// persistent state registers; every other register is reset-unconditional. Each is driven by exactly one write chain.
 always @(posedge clk) begin
 """)
     w.push()
@@ -836,8 +851,9 @@ always @(posedge clk) begin
     w("// Control and persistent state: the reset-gated registers.")
     w("if (rst) begin")
     w.push()
-    w("pc       <= 0;")
-    w("err_pc_q <= 0;")
+    w("pc            <= 0;")
+    w("err_pc_q      <= 0;")
+    w("transacting_q <= 0;")
     for slot in lir.float_state_slots:
         bits = f"{fmt.width}'h{fmt.encode(slot.reset_value):0{digits}x}"
         w(f"regs[{slot.reg.index}] <= {bits};  // {slot.name} reset snapshot")
@@ -847,6 +863,7 @@ always @(posedge clk) begin
     w("end else begin")
     w.push()
     w("pc <= next_pc;")
+    w("transacting_q <= (transacting_q << 1) | advancing;  // delay `advancing` FETCH_LAG steps onto the issue word")
     w("if (err) err_pc_q <= pc - FETCH_LAG;  // err wins; execution lags the fetch PC by FETCH_LAG, so step is pc-lag")
     w("else if (in_ready && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted")
     for reg, slot in sorted(float_slots.items()):

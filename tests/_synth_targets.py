@@ -136,7 +136,17 @@ TARGETS: list[SynthTarget] = [
     for_example("iir1_lpf", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("iir1_lpf", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("iir1_lpf", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("pid", FlowId.YOSYS_ECP5, 100, op_config_staged_output(F_e6m18)),
+    for_example(
+        "pid",
+        FlowId.YOSYS_ECP5,
+        100,
+        op_config(
+            F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_input=1, stage_output=1),
+            fmul=FMulOperator(F_e6m18, stage_output=1),
+            fdiv=FDivOperator(F_e6m18, stage_output=1),
+        ),
+    ),
     for_example("pid", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("pid", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("schmitt_trigger", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
@@ -180,7 +190,12 @@ TARGETS: list[SynthTarget] = [
         "ekf1_stateless",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_input=1)),
+        op_config(
+            F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_input=1),
+            fdiv=FDivOperator(F_e6m18, stage_input=1, stage_output=1),
+        ),
+        env={"HOLOSO_DIAMOND_HARD": "1"},
     ),
     for_example(
         "ekf1_stateless",
@@ -203,7 +218,11 @@ TARGETS: list[SynthTarget] = [
         "ekf1_stateful",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_input=1, stage_decode=1, stage_normalize=1)),
+        op_config(
+            F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_input=1, stage_decode=1, stage_normalize=1, stage_output=1),
+            fdiv=FDivOperator(F_e6m18, stage_input=1, stage_output=1),
+        ),
         env={"HOLOSO_DIAMOND_HARD": "1"},
         kernel=_ekf1_stateful_kernel,
     ),
@@ -235,7 +254,12 @@ TARGETS: list[SynthTarget] = [
     for_example("octave_index", FlowId.DIAMOND_ECP5, 100, op_config_staged_output(F_e6m18)),
     for_example("octave_index", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("remainder", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("remainder", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
+    for_example(
+        "remainder",
+        FlowId.DIAMOND_ECP5,
+        100,
+        op_config(F_e6m18, fdiv=FDivOperator(F_e6m18, stage_input=1, stage_output=1)),
+    ),
     for_example("remainder", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example(
         "ekf1_stateless",
@@ -294,6 +318,7 @@ TARGETS: list[SynthTarget] = [
             fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=1, stage_pack=1),
             fdiv=FDivOperator(F_e8m36, stage_input=3, stage_pack=1, stage_output=1),
         ),
+        env={"HOLOSO_DIAMOND_HARD": "1"},
         kernel=_ekf1_stateful_kernel,
     ),
     for_example(

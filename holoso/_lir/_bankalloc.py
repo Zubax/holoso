@@ -585,18 +585,6 @@ def _allocate_bank(
             ), f"coloring conflict on register {conflict} not resolvable by backing a slot out of coalescing"
             forced_copy.add(demoted)
             continue
-        # Dwell hazard: a coalesced slot register written by an entry-block cycle-0 op would be re-driven each idle
-        # cycle during the accept dwell, corrupting carried state. Demote the slot to a copy-back -- reserving its
-        # register so no tenant lands there -- and retry; _assert_entry_dwell_safe backstops.
-        entry_cycle0 = {vid for vid, c in block_sched[mir.entry].issue_cycle.items() if c == 0}
-        dwell = {
-            slot.name
-            for slot in slots
-            if slot.name in coalesced and slot_reg[slot.name] in {assign[v] for v in entry_cycle0 if v in assign}
-        } - forced_copy
-        if dwell:
-            forced_copy |= dwell
-            continue
         break
     else:  # pragma: no cover -- the all-copy-back floor is conflict-free, so the loop always breaks first
         assert False, f"{bank.label} slot-coalescing retry did not converge"

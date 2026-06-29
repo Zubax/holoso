@@ -107,7 +107,7 @@ def _view(mir: Mir) -> MirFloatView:
 
 def _schedule(mir: Mir):
     view = _view(mir)
-    return schedule_ops(mir.nodes, resolve_pool(mir.nodes), set(view.operation_nodes), is_entry=True)
+    return schedule_ops(mir.nodes, resolve_pool(mir.nodes), set(view.operation_nodes))
 
 
 def _muls(mir: Mir) -> list[int]:
@@ -123,7 +123,6 @@ def test_schedule_respects_dependencies() -> None:
     for vid, cycle in sched.issue_cycle.items():
         op = mir.nodes[vid]
         assert isinstance(op, MirOperation)
-        assert cycle >= 1  # nothing issues on the accept cycle
         for operand in op.operands:
             node = mir.nodes[operand]
             if isinstance(node, MirOperation):
@@ -514,12 +513,12 @@ def test_entry_block_reclaims_its_first_control_word() -> None:
     assert fire_pc - FETCH_LAG == 0, "the first boolean op does not fire on executing step 0"
 
 
-def test_entry_state_liveout_producer_is_dwell_guarded() -> None:
-    # The sequencer holds pc 0 during the accept wait and re-fires ``ucode[0]`` each idle cycle. As defense-in-depth
-    # against a dwell that neither cosim nor the model exercises, the scheduler floors an entry-block producer of a
-    # persistent-state live-out to cycle >= 1; a stateless twin still reclaims cycle 0. The flooring is cost-free on
-    # every real kernel and the hazard is precluded today (such a producer writes a temporary, never the state register
-    # -- see ``_assert_entry_dwell_safe``), so this pins the guard's behavior, not an active miscompile.
+def test_entry_state_liveout_producer_reclaims_cycle_0() -> None:
+    # An entry-block inline op producing a persistent-state live-out issues on cycle 0 like any other, reclaiming
+    # ``ucode[0]``. It is safe because the backend gates every operator's ``in_valid`` with ``transacting`` (the idle
+    # re-fetch commits nothing) and the state write lands at pc >= FETCH_LAG, never the held pc 0 -- the
+    # ``latching_fault_register`` example is the end-to-end check. This pins that the state-bearing producer issues on
+    # cycle 0, the same as its stateless twin.
     class _Stateful:
         def __init__(self) -> None:
             self._s = False
@@ -537,7 +536,7 @@ def test_entry_state_liveout_producer_is_dwell_guarded() -> None:
     sf = min(op.issue_cycle for block in stateful.blocks for op in block.inline_ops)
     sl = min(op.issue_cycle for block in stateless.blocks for op in block.inline_ops)
     assert sl == 0, "a stateless entry inline op should reclaim ucode[0]"
-    assert sf >= 1, "an entry inline op producing a persistent-state live-out must stay off ucode[0] (dwell guard)"
+    assert sf == 0, "an entry inline op producing a persistent-state live-out issues on cycle 0, reclaiming ucode[0]"
 
 
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
@@ -723,8 +722,8 @@ def test_entry_busy_gates_a_successor_firing_at_its_inherited_instance_free_cycl
     operator = mir.nodes[mul].operator
     schedulable = set(view.operation_nodes)
 
-    # With no residue the firing issues on cycle 0 (operands resident at block start; this models a NON-entry block,
-    # which carries no accept-dwell floor) -- so any later issue is attributable to the residue alone, not a dependency.
+    # With no residue the firing issues on cycle 0 (operands resident at block start) -- so any later issue is
+    # attributable to the inherited busy residue alone, not a dependency.
     assert schedule_ops(mir.nodes, pool, schedulable).issue_cycle[mul] == 0
 
     # The predecessor freed this instance at block-local ``free``; a successor whose terminator shrank to
@@ -2118,10 +2117,10 @@ def test_progress_cap_accommodates_long_initiation_intervals() -> None:
 
 
 def test_cross_block_reuse_bound_pins_the_drained_edge_boundary() -> None:
-    # Regression: with the cycle-1 pooled floor scoped to the entry block, a DRAINED-edge successor's first pooled
-    # issue is block-local cycle 0 (was cycle 1), so the safe cross-block-reuse initiation interval tightened by one to
-    # latency + boundary_step(0) + 1 == 8. No built-in operator exceeds II=1, so the OperatorInstance assert is the ONLY
-    # guard and cosim can never reach it -- pin both sides of the boundary directly here.
+    # Regression: a DRAINED-edge successor's first pooled issue is block-local cycle 0, so the safe cross-block-reuse
+    # initiation interval is latency + boundary_step(0) + 1 == 8. No built-in operator exceeds II=1, so the
+    # OperatorInstance assert is the ONLY guard and cosim can never reach it -- pin both sides of the boundary directly
+    # here.
     OperatorInstance(_HeavilyThrottledAdd(FMT), 0)  # II == 8 == bound: constructs clean
 
     class _OverBoundAdd(_HeavilyThrottledAdd):

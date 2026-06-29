@@ -8,18 +8,11 @@ single firing (a multi-output module computes all its results at once), so each 
 cycle and bound instance. Pooled operators contend for physical instances through per-instance busy windows (an
 instance accepts a new firing every ``initiation_interval`` cycles); inline operators are independent gates.
 
-An operation issues from cycle 0, reclaiming a block's first control word (inputs and other block-resident operands
-load into the register array before that word reaches the datapath, so a consumer reads them from the first cycle).
-A cycle-1 floor keeps two kinds of ENTRY-block firing off that first control word: a POOLED (instance-backed) firing,
-and a firing producing a persistent-state live-out (dwell-guarded explicitly). The sequencer holds pc 0 during the
-accept wait and re-fetches ``ucode[0]`` each idle cycle, so an operator activation left there -- a pooled firing's
-in_valid, or a COMPUTED STATE write -- would re-fire every idle cycle, multiply-issuing the firing or corrupting the
-carried state with stale inputs; keeping them off cycle 0 makes the re-fetched ``ucode[0]`` a NOP. Only the computed
-kind is a hazard: a ucode const-install to a state slot re-fires the same constant (idempotent), and a register-source
-install lands read-first at the boundary, not entry. ``_assert_entry_dwell_safe`` is the loud backstop on the floor.
-The floor is scoped to the entry block: non-entry blocks never hold their PC (the sequencer holds only pc 0 and
-pc==LASTPC), so non-entry pooled firings issue at cycle 0 freely. The entry dwell is invisible to BOTH cosim and the
-model, so the floor and its ``_assert_entry_dwell_safe`` backstop -- not any test -- carry that safety.
+Every firing issues from cycle 0, reclaiming each block's first control word: inputs and other block-resident operands
+load into the register array before that word reaches the datapath, so a consumer reads them from the first cycle.
+The entry block is no different -- the sequencer dwells at pc 0 while awaiting ``in_valid`` and re-fetches ``ucode[0]``
+each idle cycle, but the backend gates every operator's ``in_valid`` with ``transacting`` (see ``_emit``), so that
+re-fetched word commits nothing and a cycle-0 issue is safe regardless of operator kind.
 """
 
 from collections.abc import Mapping
@@ -154,8 +147,6 @@ def schedule_ops(
     schedulable: set[ValueId],
     entry_busy: Mapping[tuple[PooledHardwareOperator, int], int] | None = None,
     livein_landing: Mapping[ValueId, int] | None = None,
-    dwell_guarded: frozenset[ValueId] = frozenset(),
-    is_entry: bool = False,
 ) -> Schedule:
     """
     Place every firing of ``schedulable`` (one block's operations, across both register banks) on the earliest cycle
@@ -195,15 +186,9 @@ def schedule_ops(
         # A consumer may issue only ``dependency_edge`` cycles after a same-block operator producer commits -- the
         # edge derives from the producer's result landing and the consumer's read mechanism (see _ir). Every
         # other operand -- a state read, an input, a phi, or a result drained in from a prior block -- is resident at
-        # the block start (constants are immediates with no read constraint), so the per-firing cycle-1 floor below is
-        # all that delays it. Members of one firing share operands and conditioners, so the leader's readiness is the
-        # firing's, and any member being state-live-out dwell-guards the whole firing.
+        # the block start (constants are immediates with no read constraint), so nothing else delays the firing.
+        # Members of one firing share operands and conditioners, so the leader's readiness is the whole firing's.
         consumer = _op(nodes, leader).operator
-        if cycle < 1 and (
-            (is_entry and isinstance(consumer, PooledHardwareOperator))
-            or any(member in dwell_guarded for member in firings[leader])
-        ):
-            return False
         for operand in _op(nodes, leader).operands:
             if operand in schedulable_set:
                 if operand not in issue_cycle:

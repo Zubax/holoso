@@ -127,26 +127,6 @@ def schedule_with_overlap(
         for target in targets:
             pred_count[target] += 1
     blocks_by_id = {block.id: block for block in mir.blocks}
-    # The persistent-state live-out values, plus the arm producers reachable from them through phi chains (a nested
-    # conditional/loop update layers phi over phi). A producer of one is dwell-guarded off the ENTRY block's
-    # ``ucode[0]``: once a slot live-out -- or any of its (transitive) phi arms -- coalesces onto the slot register, its
-    # producer writes the persistent register directly, so re-firing it during the accept dwell would corrupt the
-    # carried state; the guard keeps such a producer off cycle 0. For a slot whose live-out does not coalesce the
-    # producer writes a temporary and the guard is merely harmless defense-in-depth (see ``_assert_entry_dwell_safe``);
-    # it is cost-free unless a guarded value would actually have issued at cycle 0. The transitive walk visits each
-    # value once, so loop-carried phi cycles terminate.
-    all_phis = {**float_mir.phi_nodes, **bool_mir.phi_nodes}
-    state_liveouts_set: set[ValueId] = set()
-    worklist = [slot.live_out for slot in (*float_mir.state_slots, *bool_mir.state_slots)]
-    while worklist:
-        vid = worklist.pop()
-        if vid in state_liveouts_set:
-            continue
-        state_liveouts_set.add(vid)
-        phi = all_phis.get(vid)
-        if phi is not None:
-            worklist.extend(arm for _pred, arm, _conditioner in phi.arms)
-    state_liveouts = frozenset(state_liveouts_set)
     block_sched: dict[int, Schedule] = {}
     block_makespan: dict[int, int] = {}
     block_term_offset: dict[int, int] = {}
@@ -165,8 +145,6 @@ def schedule_with_overlap(
             schedulable=set(float_mir.block_operations(block)) | set(bool_mir.block_operations(block)),
             entry_busy=inherited.entry_busy,
             livein_landing=livein_landing,
-            dwell_guarded=state_liveouts if bid == mir.entry else frozenset(),
-            is_entry=bid == mir.entry,
         )
         block_sched[bid] = sched
         has_install = bid in has_install_blocks

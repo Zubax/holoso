@@ -162,7 +162,7 @@ def _measure(name: str) -> Metrics:
 #   slot live-out (an operator result, an inline select from an if-converted update, or a phi whose "unchanged" arm is
 #   the slot live-in) is written directly into its slot register read-first, eliding the boundary copy-back and the
 #   scratch register. A validate-and-retry loop demotes any slot whose in-place commit the colorer finds unsound (a
-#   live-in feeding another phi, a dominator-arm clobber, an entry-block dwell tenant) back to a copy-back.
+#   live-in feeding another phi, or a dominator-arm clobber) back to a copy-back.
 # - min_ii reflects uniform dependency edges (both banks read latch-free), diamond if-conversion (small pure branch
 #   diamonds become muxes -- a float select, or a bool_select reduced to and/or/not for a boolean/mixed merge),
 #   NOT-folding (a semantic NOT is a free consumer-side inversion), and cross-block software pipelining. Bool-phi

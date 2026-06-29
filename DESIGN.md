@@ -323,7 +323,7 @@ that one model rather than hand-coded cases,
 boolean-logic and cast chains schedule back-to-back, which shortens logic-dense kernels. Block-resident operands
 (inputs, state reads, phis) are available from the block's first control word, so an op can issue from there.
 
-Each cycle, the ready ops (every operand committed, plus any earliest-issue floor met) are issued in critical-path order
+Each cycle, the ready ops (every operand committed) are issued in critical-path order
 onto free instances. Instances are pooled by the fully specified hardware operator itself (equal-by-value): all
 `fadd`/`fmul`/`fdiv` of a config share instances; constant-shift operators of different exponent are distinct modules. A
 configurable per-class budget (default 1) caps instances per distinct operator value, serializing co-issues beyond the
@@ -413,6 +413,9 @@ bank in one cycle (gated by `in_valid`); the PC advances every clock; at the las
 outputs drive combinationally from their registers by fixed index. Both banks read combinationally, so each operand's
 read-address control rides its issue step (a combinational read mux samples the operand a fetch lag later) and the
 write-enable/address its commit step. The PC holds only at the two I/O boundaries; bubble steps carry an explicit NOP.
+While the PC dwells it re-fetches that word each cycle, but `transacting` (high only while a transaction is in flight)
+gates every operator's `in_valid` and the register write-enables, so the idle re-fetch commits nothing and the entry
+word can carry real work.
 
 The control word stores selectors and addresses, never data. An inline firing (boolean logic, a cast) is a single
 PC-gated statement rendered by the operator's own expression rather than a microcode lane, because it fires once at a
