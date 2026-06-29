@@ -296,7 +296,7 @@ def test_both_bank_lane_write_enables_ride_the_commit_step() -> None:
     from holoso._backend.verilog._microcode import (
         base_name,
         build_microcode,
-        f_we,
+        f_wen,
         port_const_map,
         read_ports,
         write_target_lists,
@@ -312,7 +312,7 @@ def test_both_bank_lane_write_enables_ride_the_commit_step() -> None:
     checked_bool = checked_wide = 0
     for op in lir.ops:
         for write in op.writes:
-            field = fields[f_we(base_name(op.inst), write.port)]
+            field = fields[f_wen(base_name(op.inst), write.port)]
             is_wide = not isinstance(write.dst, LirBoolRegRef)
             assert (
                 field.values[pooled_write_word(op.commit_cycle)] == 1
@@ -414,8 +414,8 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         assert re.search(
             rf"regs\[\d+\] <= s_fsortlike_\w+_0_y{q}\b", verilog
         ), "the wide write must read the combinational output wire directly"
-        assert re.search(rf"mc_we_fsortlike_\w+_0_y{q}\b", verilog)
-        assert re.search(rf"mc_fsortlike_\w+_0_y{q}s\b", verilog)
+        assert re.search(rf"uc_wen_fsortlike_\w+_0_y{q}\b", verilog)
+        assert re.search(rf"uc_fsortlike_\w+_0_y{q}sgn\b", verilog)
     assert ".min(" in verilog and ".max(" in verilog and ".min_sgnop(" in verilog and ".max_sgnop(" in verilog
     if shutil.which("iverilog") is None:
         pytest.skip("iverilog not installed")

@@ -69,12 +69,13 @@ def _sig(inst: OperatorInstance) -> str:
     return f"s_{base_name(inst)}"
 
 
-def _decl_range(width: int) -> str:
-    return "" if width == 1 else f"[{width - 1:2}:0] "
-
-
 def _lit(width: int, value: int) -> str:
     return f"{width}'d{value}"
+
+
+def _wire(width: int) -> str:
+    """Aligned ``wire`` declaration prefix so field names line up regardless of bus width."""
+    return f"wire [{width - 1:2}:0] " if width > 1 else "wire        "
 
 
 def _cterm_expr(port: int, consts: list[int]) -> str:
@@ -169,9 +170,9 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_inline_support(w)
     _emit_declarations(w, lir, write_lists)
     _emit_consts(w, lir)
-    _emit_operators(w, lir, write_lists)
     _emit_microcode_rom(w, fields, ucw, depth, issues_by_cycle, commits_by_cycle)
     _emit_field_wires(w, fields)
+    _emit_operators(w, lir, write_lists)
     _emit_datapath_comb(w, lir, port_consts, write_lists)
     _emit_state_next(w, lir)
     _emit_copy_sign_wires(w, lir)
@@ -277,20 +278,16 @@ def _emit_declarations(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorIns
         """)
     for inst in lir.instances:
         sig = _sig(inst)
-        w(f"wire         {sig}_iv;")
         for pos, operand_type in enumerate(inst.operator.signature.operand_types):
             assert is_wide_type(operand_type), "pooled operators read only wide operands today"
             letter = PORT_LETTERS[pos]
-            w(f"wire [1:0]   {sig}_{letter}s;")
             w(f"reg  [W-1:0] {sig}_{letter};")  # combinational read-mux output (driven in the read-mux always @*)
-        # One lane per TAPPED output port: a wide lane gets its conditioner wire and the raw operator output, a boolean
-        # lane the raw 1-bit module output. Every lane drives its register write directly from the operator's
-        # combinational output.
+        # One net per TAPPED output port -- the raw operator output (wide W-bit or boolean 1-bit). The in_valid and
+        # sign-control ports bind directly to the decoded uc_* fields, so no s_* control net is declared for them.
         for q, result_type in enumerate(inst.operator.signature.result_types):
             if (inst, q) not in write_lists:
                 continue  # a never-tapped output port: no nets, the module port is left unconnected
             if is_wide_type(result_type):
-                w(f"wire [1:0]   {sig}_y{q}s;")
                 w(f"wire [W-1:0] {sig}_y{q};")
             else:
                 w(f"wire         {sig}_y{q};")
@@ -311,7 +308,7 @@ def _emit_consts(w: _Writer, lir: Lir) -> None:
 
 def _emit_operators(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorInstance, int], list[int]]) -> None:
     for inst in lir.instances:
-        sig = _sig(inst)
+        sig, base = _sig(inst), base_name(inst)
         operator = inst.operator
         letters = PORT_LETTERS[: operator.arity]
         # WEXP/WMAN frame the float format; hdl_params() lists K (ilog2) and every STAGE_* explicitly. LATENCY is
@@ -321,16 +318,16 @@ def _emit_operators(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorInstan
         ]
         parts.append(f".LATENCY({operator.latency})")
         params = ", ".join(parts)
-        w(f"{operator.module_name} #(", f"    {params}", f") u_{base_name(inst)} (")
+        w(f"{operator.module_name} #(", f"    {params}", f") u_{base} (")
         w.push()
-        w(f".clk(clk), .rst(rst), .in_valid({sig}_iv),")
+        w(f".clk(clk), .rst(rst), .in_valid({f_issue(base)}),")
         for letter in letters:
-            w(f".{letter}_sgnop({sig}_{letter}s),")
+            w(f".{letter}_sgnop({f_osgn(base, letter)}),")
         # A float output port carries a hardware sign conditioner (piped inside the wrapper); an untapped one is tied
         # to the identity. Boolean output ports have none -- their inversion conditioner is fabric-side at the write.
         for q, result_type in enumerate(operator.signature.result_types):
             if is_wide_type(result_type):
-                conditioner = f"{sig}_y{q}s" if (inst, q) in write_lists else "2'd0"
+                conditioner = f_ysgn(base, q) if (inst, q) in write_lists else "2'd0"
                 w(f".{operator.output_hdl_ports[q]}_sgnop({conditioner}),")
         for letter in letters:
             w(f".{letter}({sig}_{letter}),")
@@ -383,30 +380,28 @@ reg [UCW-1:0] ucode_word;  // 3rd fetch stage: packs into the BRAM output regist
 
 def _emit_field_wires(w: _Writer, fields: dict[str, Field]) -> None:
     w("""
-// Decoded control fields. A field that is constant across the whole program is driven by a constant net
-// (so synthesis prunes the logic it feeds); a varying field is a slice of the instruction word.
+// Decoded control fields. A field constant across the whole program is driven by a constant net (so synthesis prunes
+// the logic it feeds); a varying field is a slice of the instruction word. The effect-trigger fields -- the ones
+// flagged ``is_strobe`` (operator issue, pooled write-enable, const-install write-enable) -- are ANDed with
+// `transacting` HERE, so a held ucode[0] dwell, a fill bubble, or a stale pre-reset word triggers no issue, commit,
+// or install; their use sites then read the gated field. The AND wraps the constant branch too, so the gate stays
+// unconditional even if a trigger ever folds to a constant.
 """)
     for f in fields.values():
-        # ``transacting`` qualifies every ucode-word-driven effect, so a held ``ucode[0]`` dwell, a fill bubble, or a
-        # stale pre-reset word commits nothing. ``mc_we`` is gated HERE at the decode because two sinks read it -- the
-        # write chains and the ``err`` term -- so one gate serves both. ``iv``/``cwe`` have one sink each and gate at
-        # their use sites, which keeps the gate UNCONDITIONAL: the constant branch below skips ``gate``, and an ungated
-        # dwell issue (if ``iv`` ever const-folds) is the silent miscompile this feature exists to prevent.
-        gate = "transacting & " if f.name.startswith("mc_we_") else ""
+        gate = "transacting & " if f.is_strobe else ""
         if f.offset < 0:
-            w(f"wire {_decl_range(f.width)}{f.name} = {_lit(f.width, f.const_value)};")
-        elif f.width == 1:
-            w(f"wire        {f.name} = {gate}ucode_word[{f.offset}];")
+            rhs = _lit(f.width, f.const_value)
         else:
-            w(f"wire {_decl_range(f.width)}{f.name} = {gate}ucode_word[{f.offset} +: {f.width}];")
+            rhs = f"ucode_word[{f.offset} +: {f.width}]"
+        w(f"{_wire(f.width)}{f.name} = {gate}{rhs};")
     w("")
 
 
 def _const_pool_mux(selector: str, consts: list[int]) -> str:
     """
     A const-pool read expression: the lone ``const_N`` net, or a ``selector``-indexed ternary mux over ``consts``. Used
-    on the read side (an operand's per-port const select, ``mc_cidx``) and the write side (a register's ucode-driven
-    constant install, ``mc_ccidx``) alike.
+    on the read side (an operand's per-port const select, ``uc_cidx``) and the write side (a register's ucode-driven
+    constant install, ``uc_ccidx``) alike.
     """
     expr = f"const_{consts[-1]}"
     for local in range(len(consts) - 2, -1, -1):
@@ -422,18 +417,6 @@ def _emit_datapath_comb(
             w(f"wire [W-1:0] cterm{port} = {_const_pool_mux(f_cidx(port), port_consts[port])};")
     w("")
 
-    w("// Operator control: in_valid is gated by `transacting`, so an idle dwell/present-hold re-fetch fires no issue;")
-    w("// the sign controls are consumed inside the wrapper on the issue step.")
-    for inst in lir.instances:
-        sig, base = _sig(inst), base_name(inst)
-        w(f"assign {sig}_iv = transacting & {f_iv(base)};")
-        for q, result_type in enumerate(inst.operator.signature.result_types):
-            if is_wide_type(result_type) and (inst, q) in write_lists:
-                w(f"assign {sig}_y{q}s = {f_ysgn(base, q)};")
-        for pos in range(inst.operator.arity):
-            w(f"assign {sig}_{PORT_LETTERS[pos]}s = {f_osgn(base, PORT_LETTERS[pos])};")
-    w("")
-
     # An error matters only on the step its operator commits, which is exactly its tapped lanes' write-enable window;
     # both the write-enables and the operator's combinational error output fire on the commit step, so the error flag is
     # sampled directly when its result drives the register write.
@@ -442,7 +425,7 @@ def _emit_datapath_comb(
         if not inst.operator.error_ports:
             continue
         lane_wes = [
-            f_we(base_name(inst), q)
+            f_wen(base_name(inst), q)
             for q in range(len(inst.operator.signature.result_types))
             if (inst, q) in write_lists
         ]
@@ -629,14 +612,14 @@ def _read_mux_stmts(w: _Writer, target: str, port: int, read_set: list[int], por
         return
     if len(read_set) == 1:
         reg_expr = f"regs[{read_set[0]}]"
-        w(f"{target} = {f_selc(port)} ? {cterm} : {reg_expr};" if cterm else f"{target} = {reg_expr};")
+        w(f"{target} = {f_csel(port)} ? {cterm} : {reg_expr};" if cterm else f"{target} = {reg_expr};")
         return
     # Multi-register operand: a case over the dense read-set index. The last entry is the default arm so the case is
     # full (no inferred latch); the unused high codes fall there too and are don't-cares on idle steps.
     if cterm:
-        w(f"if ({f_selc(port)}) {target} = {cterm};", "else begin")
+        w(f"if ({f_csel(port)}) {target} = {cterm};", "else begin")
         w.push()
-    w(f"case ({f_rd(port)})")
+    w(f"case ({f_raddr(port)})")
     w.push()
     for index, reg in enumerate(read_set):
         label = "default" if index == len(read_set) - 1 else _lit(code_width(len(read_set)), index)
@@ -658,8 +641,8 @@ def _write_cond(
     base = base_name(inst)
     targets = write_lists[(inst, port)]
     if len(targets) == 1:
-        return f_we(base, port)
-    return f"{f_we(base, port)} && ({f_wa(base, port)} == {_lit(code_width(len(targets)), targets.index(reg))})"
+        return f_wen(base, port)
+    return f"{f_wen(base, port)} && ({f_waddr(base, port)} == {_lit(code_width(len(targets)), targets.index(reg))})"
 
 
 def _wide_writer_entries(
@@ -681,13 +664,13 @@ def _wide_writer_entries(
     for reg in sorted(write_sets):
         for inst, port in write_sets[reg]:
             entries.setdefault(reg, []).append((_write_cond(inst, port, reg, write_lists), f"{_sig(inst)}_y{port}"))
-    # Ucode-driven constant installs: a transacting-gated write-enable arm (like an operator lane), reusing the
-    # const-pool nets. The gate keeps a cycle-0 install inert on the held ``ucode[0]`` during the idle accept dwell --
-    # unlike the pooled-lane write-enables above, which commit at issue + latency >= 1 and so never ride the held word.
+    # Ucode-driven constant installs: the decode-gated const write-enable arm (like an operator lane), reusing the
+    # const-pool nets. Unlike the pooled lanes above (which commit at issue + latency >= 1), a cycle-0 install can ride
+    # the held ucode[0], so its write-enable is one of the gated strobes.
     const_books = const_install_codebooks(lir)
     for reg in sorted(const_books):
         entries.setdefault(reg, []).append(
-            (f"transacting && {f_cwe(RegRef(reg))}", _const_pool_mux(f_ccidx(RegRef(reg)), const_books[reg]))
+            (f_cwen(RegRef(reg)), _const_pool_mux(f_ccidx(RegRef(reg)), const_books[reg]))
         )
     for block in lir.blocks:
         for op_index, inline_op in enumerate(block.inline_ops):
@@ -720,10 +703,10 @@ def _bool_writer_entries(
         for inst, port in bool_write_sets[reg]:
             rhs = f"{_sig(inst)}_y{port} ^ {f_binv(base_name(inst), port)}"
             entries.setdefault(reg, []).append((_write_cond(inst, port, reg, write_lists), rhs))
-    # Ucode-driven constant installs: a transacting-gated write-enable arm carrying the 1-bit value (no XOR -- the
-    # inversion is already folded into the value at construction). The gate keeps a cycle-0 install inert during dwell.
+    # Ucode-driven constant installs: the decode-gated const write-enable arm carrying the 1-bit value (no XOR -- the
+    # inversion is folded into the value at construction).
     for reg in const_install_bool_regs(lir):
-        entries.setdefault(reg, []).append((f"transacting && {f_cwe(BoolRegRef(reg))}", f_cval(BoolRegRef(reg))))
+        entries.setdefault(reg, []).append((f_cwen(BoolRegRef(reg)), f_cval(BoolRegRef(reg))))
     for block in lir.blocks:
         for op_index, inline_op in enumerate(block.inline_ops):
             if isinstance(inline_op.write.dst, BoolRegRef):

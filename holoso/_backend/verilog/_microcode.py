@@ -38,6 +38,11 @@ class Field:
     """
     One scalar control field of the microcode word, with its value on every step (``None`` == don't-care).
 
+    ``is_strobe`` marks an effect trigger (operator issue, or a register write-enable): it is concrete every step
+    (inert 0 when idle) and ``transacting``-gated at the decode, so a held ``ucode[0]`` dwell commits nothing. Every
+    other field is qualifying data, a don't-care while its strobe is inactive, never gated. The gate keys on this
+    explicit flag, not on a resting value of 0, so a future concrete-zero non-strobe field is not silently gated.
+
     After :func:`finalize_fields`, a field is either constant across the program (``offset < 0``; driven by the
     constant net ``const_value``) or varying (stored at bit ``offset`` of the ROM word).
     """
@@ -45,8 +50,18 @@ class Field:
     name: str
     width: int
     values: list[int | None]
+    is_strobe: bool = False
     offset: int = -1
     const_value: int = 0
+
+    def __post_init__(self) -> None:
+        # A strobe is ANDed with the 1-bit ``transacting`` at the decode, so it must itself be 1-bit.
+        assert not self.is_strobe or self.width == 1, f"strobe field {self.name!r} must be 1-bit"
+
+    @property
+    def default(self) -> int | None:
+        """Resting value on a don't-care step: a strobe is inert (0); a non-strobe is an unconstrained don't-care."""
+        return 0 if self.is_strobe else None
 
 
 def base_name(inst: OperatorInstance) -> str:
@@ -78,58 +93,58 @@ def write_target_lists(lir: Lir) -> dict[tuple[OperatorInstance, int], list[int]
     return targets
 
 
-# Microcode field names. Signal names (``s_<base>_*``) and field names (``mc_*_<base>``) live in disjoint namespaces.
-def f_rd(port: int) -> str:
-    return f"mc_rd{port}"
+# Microcode field names. Signal names (``s_<base>_*``) and field names (``uc_*_<base>``) live in disjoint namespaces.
+def f_raddr(port: int) -> str:
+    return f"uc_raddr{port}"
 
 
-def f_iv(base: str) -> str:
-    return f"mc_iv_{base}"
+def f_issue(base: str) -> str:
+    return f"uc_issue_{base}"
 
 
 def f_osgn(base: str, letter: str) -> str:
-    return f"mc_{base}_{letter}s"
+    return f"uc_{base}_{letter}sgn"
 
 
 def f_ysgn(base: str, port: int) -> str:
-    return f"mc_{base}_y{port}s"
+    return f"uc_{base}_y{port}sgn"
 
 
-def f_selc(port: int) -> str:
-    return f"mc_selc{port}"
+def f_csel(port: int) -> str:
+    return f"uc_csel{port}"
 
 
 def f_cidx(port: int) -> str:
-    return f"mc_cidx{port}"
+    return f"uc_cidx{port}"
 
 
-def f_we(base: str, port: int) -> str:
-    return f"mc_we_{base}_y{port}"
+def f_wen(base: str, port: int) -> str:
+    return f"uc_wen_{base}_y{port}"
 
 
-def f_wa(base: str, port: int) -> str:
-    return f"mc_wa_{base}_y{port}"
+def f_waddr(base: str, port: int) -> str:
+    return f"uc_waddr_{base}_y{port}"
 
 
 def f_binv(base: str, port: int) -> str:
-    return f"mc_binv_{base}_y{port}"
+    return f"uc_binv_{base}_y{port}"
 
 
 # Per-REGISTER constant-install fields: a phi-arm constant install is not an operator, so it has no (instance, port)
 # write lane. Each destination register that receives a ucode-driven constant install carries a 1-bit write-enable; a
 # wide register additionally carries a const-pool index selector when it installs more than one distinct constant, and
 # a boolean register carries the 1-bit value. Names key on ``stable_label`` (``r<k>``/``b<k>``), disjoint from the
-# operator-lane fields (``mc_*_<base>_y<port>``).
-def f_cwe(dst: RegRef | BoolRegRef) -> str:
-    return f"mc_cwe_{dst.stable_label}"
+# operator-lane fields (``uc_*_<base>_y<port>``).
+def f_cwen(dst: RegRef | BoolRegRef) -> str:
+    return f"uc_cwen_{dst.stable_label}"
 
 
 def f_ccidx(reg: RegRef) -> str:
-    return f"mc_ccidx_{reg.stable_label}"
+    return f"uc_ccidx_{reg.stable_label}"
 
 
 def f_cval(breg: BoolRegRef) -> str:
-    return f"mc_cval_{breg.stable_label}"
+    return f"uc_cval_{breg.stable_label}"
 
 
 def is_ucode_const_copy(copy: FloatCopy) -> bool:
@@ -145,7 +160,7 @@ def is_ucode_const_copy(copy: FloatCopy) -> bool:
 def const_install_codebooks(lir: Lir) -> dict[int, list[int]]:
     """
     Wide register -> the sorted distinct const-pool indices its ucode-driven constant installs use -- the per-register
-    write-data codebook the ``mc_ccidx`` selector indexes (the write-side analogue of ``port_const_map``). A register
+    write-data codebook the ``uc_ccidx`` selector indexes (the write-side analogue of ``port_const_map``). A register
     installing a single constant has a one-entry book (the selector is then a lifted-out constant, no ROM bits).
     """
     books: dict[int, list[int]] = {}
@@ -227,11 +242,9 @@ def build_microcode(
     """
     depth = lir.last_pc + 1  # one control word per fetch PC: blocks are laid out across 0..last_pc with NOP gaps
     fields: dict[str, Field] = {}
-    defaults: dict[str, int | None] = {}
 
-    def add(name: str, width: int, default: int | None) -> None:
-        fields[name] = Field(name, width, [default] * depth)
-        defaults[name] = default
+    def add(name: str, width: int, is_strobe: bool = False) -> None:
+        fields[name] = Field(name, width, [0 if is_strobe else None] * depth, is_strobe=is_strobe)
 
     def put(name: str, step: int, value: int) -> None:
         # Single-writer rule: a field's step slot may be set once to a non-default value (or repeatedly to the same
@@ -243,7 +256,7 @@ def build_microcode(
         field = fields[name]
         current = field.values[step]
         assert (
-            current == defaults[name] or current == value
+            current == field.default or current == value
         ), f"microcode single-writer violation on field {name!r} step {step}: holds {current!r}, cannot write {value!r}"
         field.values[step] = value
 
@@ -254,36 +267,36 @@ def build_microcode(
 
     for inst in lir.instances:
         base = base_name(inst)
-        add(f_iv(base), 1, 0)
+        add(f_issue(base), 1, is_strobe=True)
         for pos in range(inst.operator.arity):
-            add(f_osgn(base, PORT_LETTERS[pos]), 2, None)
+            add(f_osgn(base, PORT_LETTERS[pos]), 2)
             port = read_port[(inst, pos)]
-            add(f_rd(port), code_width(len(port_read_set.get(port, []))), None)
+            add(f_raddr(port), code_width(len(port_read_set.get(port, []))))
             if port in port_consts:
-                add(f_selc(port), 1, None)
+                add(f_csel(port), 1)
                 if len(port_consts[port]) > 1:
-                    add(f_cidx(port), code_width(len(port_consts[port])), None)
+                    add(f_cidx(port), code_width(len(port_consts[port])))
     for (inst, port_index), targets in sorted(write_lists.items(), key=lambda kv: (base_name(kv[0][0]), kv[0][1])):
         base = base_name(inst)
-        add(f_we(base, port_index), 1, 0)
+        add(f_wen(base, port_index), 1, is_strobe=True)
         # The write-address field carries the dense write-target index (0..M-1), symmetric to the read-address field.
-        add(f_wa(base, port_index), code_width(len(targets)), None)
+        add(f_waddr(base, port_index), code_width(len(targets)))
         if is_wide_type(inst.operator.signature.result_types[port_index]):
-            add(f_ysgn(base, port_index), 2, None)
+            add(f_ysgn(base, port_index), 2)
         else:
-            add(f_binv(base, port_index), 1, None)
+            add(f_binv(base, port_index), 1)
 
     # Per-register constant-install fields. A wide register's selector is declared only when it installs more than one
     # distinct constant; otherwise the single index is a constant column finalize lifts out of the ROM. A boolean
     # register carries its 1-bit value. The write-enable defaults to 0 (concrete every step, so it always packs).
     const_books = const_install_codebooks(lir)
     for reg in sorted(const_books):
-        add(f_cwe(RegRef(reg)), 1, 0)
+        add(f_cwen(RegRef(reg)), 1, is_strobe=True)
         if len(const_books[reg]) > 1:
-            add(f_ccidx(RegRef(reg)), code_width(len(const_books[reg])), None)
+            add(f_ccidx(RegRef(reg)), code_width(len(const_books[reg])))
     for reg in const_install_bool_regs(lir):
-        add(f_cwe(BoolRegRef(reg)), 1, 0)
-        add(f_cval(BoolRegRef(reg)), 1, None)
+        add(f_cwen(BoolRegRef(reg)), 1, is_strobe=True)
+        add(f_cval(BoolRegRef(reg)), 1)
 
     for op in lir.ops:
         base = base_name(op.inst)
@@ -291,19 +304,19 @@ def build_microcode(
         # latch-free -- the read-address group; the datapath samples the operand FETCH_LAG later.
         ci = op.issue_cycle
         assert 0 <= ci < depth, f"microcode read/issue step out of range: ci={ci}, depth={depth}"
-        put(f_iv(base), ci, 1)
+        put(f_issue(base), ci, 1)
         for pos, operand in enumerate(op.operands):
             port = read_port[(op.inst, pos)]
             assert isinstance(operand, FloatOperand), "pooled operators read only wide operands today (no read lane)"
             put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.sign.encoded)
             if isinstance(operand.source, FloatConstRef):
-                put(f_selc(port), ci, 1)
+                put(f_csel(port), ci, 1)
                 if f_cidx(port) in fields:
                     put(f_cidx(port), ci, port_consts[port].index(operand.source.index))
             elif isinstance(operand.source, RegRef):
-                if f_selc(port) in fields:
-                    put(f_selc(port), ci, 0)
-                put(f_rd(port), ci, port_read_set[port].index(operand.source.index))
+                if f_csel(port) in fields:
+                    put(f_csel(port), ci, 0)
+                put(f_raddr(port), ci, port_read_set[port].index(operand.source.index))
         for write in op.writes:
             lane = (op.inst, write.port)
             wide = isinstance(write.dst, RegRef)
@@ -316,8 +329,8 @@ def build_microcode(
                 put(f_ysgn(base, write.port), ci, write.conditioner.encoded)  # sign rides the wrapper at issue
             else:
                 put(f_binv(base, write.port), wcc, write.conditioner.encoded)  # inversion applied at the write
-            put(f_we(base, write.port), wcc, 1)
-            put(f_wa(base, write.port), wcc, write_lists[lane].index(write.dst.index))
+            put(f_wen(base, write.port), wcc, 1)
+            put(f_waddr(base, write.port), wcc, write_lists[lane].index(write.dst.index))
 
     # Constant installs ride the microcode like operator writes: the write-enable (and the wide selector / boolean
     # value) are placed at ROM step ``block_base + issue_cycle`` == install_pc - FETCH_LAG, so the datapath write fires
@@ -331,7 +344,7 @@ def build_microcode(
             assert isinstance(copy.source.source, FloatConstRef)
             step = base_pc + copy.issue_cycle
             assert 0 <= step < depth, f"const-install ROM step out of range: {step}"
-            put(f_cwe(copy.dst), step, 1)
+            put(f_cwen(copy.dst), step, 1)
             if f_ccidx(copy.dst) in fields:
                 put(f_ccidx(copy.dst), step, const_books[copy.dst.index].index(copy.source.source.index))
         for bwrite in block.bool_writes:
@@ -340,7 +353,7 @@ def build_microcode(
             assert isinstance(bwrite.source.source, BoolConstRef)
             step = base_pc + bwrite.issue_cycle
             assert 0 <= step < depth, f"const-install ROM step out of range: {step}"
-            put(f_cwe(bwrite.dst), step, 1)
+            put(f_cwen(bwrite.dst), step, 1)
             put(f_cval(bwrite.dst), step, int(bwrite.source.source.value))
 
     return fields

@@ -56,38 +56,34 @@ def _verilog(fn: Callable[..., object], name: str) -> str:
     return generate_verilog(build(lower_to_mir(optimize(lower(fn)), default_ops(_FMT)), name)).verilog
 
 
-def test_every_operator_iv_is_gated_by_transacting() -> None:
-    arms = [line.strip() for line in _verilog(_cycle0_kernel, "gate_iv").splitlines() if "_iv =" in line]
-    arms = [line for line in arms if line.startswith("assign")]
-    assert arms, "kernel produced no pooled-operator iv assigns to check"
+def _assert_effect_trigger_gated(fn: Callable[..., object], name: str, prefix: str) -> None:
+    # Every decode wire for an effect-trigger field (named by ``prefix``) must AND ``transacting``, so a held ucode[0]
+    # dwell, a fill bubble, or a stale pre-reset word triggers nothing.
+    arms = [
+        line.strip() for line in _verilog(fn, name).splitlines() if line.lstrip().startswith("wire") and prefix in line
+    ]
+    assert arms, f"kernel produced no {prefix} wires to check"
     for line in arms:
-        assert "transacting &" in line, f"operator iv assign is not gated by transacting: {line}"
+        assert "transacting &" in line, f"{prefix} decode is not gated by transacting: {line}"
+
+
+def test_every_operator_iv_is_gated_by_transacting() -> None:
+    # Operator issue can ride ucode[0] on a cycle-0-leading kernel, so the decoded uc_issue field must AND transacting
+    # to stay inert during the idle dwell; the operator's in_valid port then reads the gated field directly.
+    _assert_effect_trigger_gated(_cycle0_kernel, "gate_iv", "uc_issue_")
 
 
 def test_const_install_is_gated_by_transacting() -> None:
-    # A cycle-0 const-install sits on ucode[0]; every emitted const-install write-enable must AND transacting. The bool
-    # install arm in _bool_writer_entries is changed identically, so this float-slot kernel covers the mechanism.
-    arms = [
-        line.strip() for line in _verilog(_ConstInstallState().__call__, "gate_cwe").splitlines() if "mc_cwe" in line
-    ]
-    arms = [line for line in arms if "<=" in line]
-    assert arms, "kernel produced no const-install arms to check"
-    for line in arms:
-        assert "transacting &&" in line, f"const-install write-enable is not gated by transacting: {line}"
+    # A cycle-0 const-install sits on ucode[0]; the decoded const-install write-enable must AND transacting. The bool
+    # install arm decodes identically, so this float-slot kernel covers the mechanism.
+    _assert_effect_trigger_gated(_ConstInstallState().__call__, "gate_cwe", "uc_cwen")
 
 
 def test_pooled_write_enable_is_gated_by_transacting() -> None:
     # A pooled commit write-enable rides the executing word, so a held ucode[0] (accept dwell) or a stale pre-reset
-    # commit word that survives a sub-FETCH_LAG reset must commit nothing. Every mc_we wire must AND transacting; the
-    # single decode-point gate covers both the register write chains and the err path that consume mc_we.
-    arms = [
-        line.strip()
-        for line in _verilog(_cycle0_kernel, "gate_we").splitlines()
-        if line.lstrip().startswith("wire") and "mc_we_" in line
-    ]
-    assert arms, "kernel produced no pooled write-enable wires to check"
-    for line in arms:
-        assert "transacting &" in line, f"pooled write-enable is not gated by transacting: {line}"
+    # commit word must commit nothing. Every uc_wen wire ANDs transacting; the single decode-point gate covers both the
+    # register write chains and the err path that consume uc_wen.
+    _assert_effect_trigger_gated(_cycle0_kernel, "gate_we", "uc_wen_")
 
 
 def _run_bench(name: str, lir: Lir, testcase: str, env: dict[str, int], monkeypatch: pytest.MonkeyPatch) -> None:

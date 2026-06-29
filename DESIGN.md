@@ -421,7 +421,8 @@ The control word stores selectors and addresses, never data. An inline firing (b
 PC-gated statement rendered by the operator's own expression rather than a microcode lane, because it fires once at a
 statically known step. A control field constant across the whole program (common for sign controls, single-reader read
 addresses, single-writer destinations) is driven by a constant net and lifted out of the ROM, so synthesis prunes what
-it feeds; the Python ROM packer and the module's bit-slice offsets are produced together so they cannot drift.
+it feeds; the Python ROM packer and the module's bit-slice offsets are produced together so they cannot drift. A strobe
+field (operator issue, the write-enables) instead ANDs `transacting` into its decode, so a dwelling re-fetch is inert.
 
 Sparse storage. A multi-reader operand's read mux is a `case` over its dense read-set index selecting a register
 directly. This deliberately avoids an indexed part-select into a packed gather bus, whose variable offset is a multiply
