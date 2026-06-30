@@ -25,7 +25,9 @@ from holoso._hir import _if_convert as if_convert_pass
 from holoso._lir import build
 from holoso._mir import lower as lower_to_mir
 from ._modelref import (
+    assert_model_equals_interpreter,
     bounded,
+    build_model_and_interpreter,
     default_tolerance,
     encode_inputs,
     evaluate_reference,
@@ -35,7 +37,16 @@ from ._modelref import (
     unit_roundoff,
     within,
 )
-from ._examples import CordicSinCos, IIR1LPF, PID, SchmittTrigger, ekf1_stateful, ekf1_stateless, remainder
+from ._examples import (
+    CordicSinCos,
+    IIR1LPF,
+    PID,
+    PhaseFrequencyDetector,
+    SchmittTrigger,
+    ekf1_stateful,
+    ekf1_stateless,
+    remainder,
+)
 
 F32 = FloatFormat(8, 24)
 FMT = FloatFormat(6, 18)
@@ -1518,3 +1529,67 @@ def test_connective_branch_in_a_loop_body_does_not_carry_a_phantom_attribute() -
     assert [slot.name for slot in hir.state_slots] == ["acc"]  # dead is not carried
     model = build_model(build(_run(K().__call__), "phantom_loop", fetch_stages=3))
     assert float(model.run(1.0)[0]) == 3.0
+
+
+def test_merged_state_slots_preserve_behaviour() -> None:
+    # The slot drop must not change behaviour: drive PFD across many transactions and confirm the model still agrees
+    # with the schedule-independent MIR interpreter (blind to LIR faults), so the merged state persists correctly.
+    model, interpreter = build_model_and_interpreter(PhaseFrequencyDetector().__call__, OPS, "pfd_merge")
+    vectors: list[list[FloatValue | bool]] = [
+        [True, False, False],  # reference leads -> up
+        [False, False, False],  # hold up
+        [False, True, False],  # feedback arrives -> reset
+        [False, True, False],  # feedback leads -> down
+        [True, False, False],  # reference arrives -> reset
+        [True, True, False],  # simultaneous edges cancel
+        [False, False, True],  # asynchronous clear
+        [True, False, False],
+    ]
+    assert_model_equals_interpreter(model, interpreter, vectors, "pfd_merge")
+
+
+def test_aliased_slot_with_phi_live_in_builds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression (review): aliased state slots whose shared live-out is a SURVIVING phi (real branch, if-conversion
+    # disabled) must compile. The drop is gated off phi live-outs: an earlier register-pinning merge tripped a
+    # coloring/backstop assert on these shapes, and an ungated drop tripped a phi-install-past-terminator assert. Both
+    # attribute orders and a phi-of-inputs shape are exercised; the un-merged builds must still match the interpreter.
+    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # keep the phi so the aliased live-in is read at a merge
+
+    class Forward:
+        def __init__(self) -> None:
+            self.x = 0.0
+            self._alias = 0.0
+
+        def __call__(self, cond: bool):  # type: ignore[no-untyped-def]
+            y = self.x if cond else 0.0
+            self.x = 1.0 if cond else 2.0
+            self._alias = self.x
+            return y, self.x
+
+    class Reversed:
+        def __init__(self) -> None:
+            self._alias = 0.0
+            self.x = 0.0
+
+        def __call__(self, cond: bool):  # type: ignore[no-untyped-def]
+            y = self.x if cond else 0.0
+            self.x = 1.0 if cond else 2.0
+            self._alias = self.x
+            return y, self.x
+
+    class InputPhi:  # new state is a phi of INPUTS, old state read separately (Codex round 2)
+        def __init__(self) -> None:
+            self.x = 0.0
+            self._alias = 0.0
+
+        def __call__(self, cond: bool, a, b):  # type: ignore[no-untyped-def]
+            old = self.x if cond else 0.0
+            self.x = a if cond else b
+            self._alias = self.x
+            return old, self.x
+
+    vectors: list[list[FloatValue | bool]] = [[True], [False], [True], [True], [False], [False], [True]]
+    for cls in (Forward, Reversed):
+        model, interpreter = build_model_and_interpreter(cls().__call__, OPS, cls.__name__)
+        assert_model_equals_interpreter(model, interpreter, vectors, cls.__name__)
+    build(_run(InputPhi().__call__), "input_phi_alias", fetch_stages=3)  # phi-of-inputs shape must compile

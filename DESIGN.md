@@ -355,8 +355,10 @@ read-first, so a same-frame self-update (`self.x = self.x | y`, an accumulator) 
 one with no copy. A conditional or loop update whose "unchanged" arm is the slot live-in coalesces onto the slot
 register through the same phi-arm union-find. When it cannot commit in place (a genuine overlap, a folded sign, or a
 chained copy `self.a = self.b`) the live-out keeps its own register and a pc-gated copy installs it as early as the old
-live-in is read. State registers are the one datapath exception that reset reaches (each loaded with its snapshot); pure
-datapath state stays out of the reset cone.
+live-in is read. Two slots that always hold the same value collapse onto one register (a public attribute and its
+private alias), dropping the duplicate register and its install copy. State
+registers are the one datapath exception that reset reaches (each loaded with its snapshot); pure datapath state stays
+out of the reset cone.
 
 ### Control flow
 
@@ -400,8 +402,9 @@ unproven against the emitter, not worth the niche benefit).
 ## Backend (VLIW/ZISC)
 
 The Verilog backend is mechanical from LIR: an inline flop bank plus the 1-bit boolean bank, one module per pooled
-operator instance, and one continuous assignment per pooled constant. There is no general multiport register-file
-module; storage is the sparse, schedule-specific fabric below. The controller is a microcode ROM -- one pre-decoded VLIW
+operator instance, and one continuous assignment per pooled constant. Either bank is emitted only when used (a
+purely-boolean kernel carries no wide register file). There is no general multiport register-file module; storage is
+the sparse, schedule-specific fabric below. The controller is a microcode ROM -- one pre-decoded VLIW
 control word per step, stored in a BRAM-inferable ROM read through a short multi-stage fetch (a PC latch, the array
 read, and the BRAM output register) so the controller is short register-to-register paths rather than a wide
 combinational `case(cyc)` cone, for a fast clock-to-out. The fetch leads the executing step, which under static
