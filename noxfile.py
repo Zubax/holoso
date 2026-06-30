@@ -79,6 +79,14 @@ def synth_examples(session: nox.Session) -> None:
 
 
 @nox.session
+def run_examples(session: nox.Session) -> None:
+    """Run every top-level example script sequentially."""
+    session.install(".[test]")
+    for example in sorted(Path("examples").glob("*.py")):
+        session.run("python", str(example))
+
+
+@nox.session
 def synth(session: nox.Session) -> None:
     """Run external FPGA synthesis/place-and-route checks."""
     session.install("-e", ".[test]")
