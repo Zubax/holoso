@@ -189,12 +189,37 @@ def _op_expr(op: PooledScheduledOp) -> str:
     return f"{dsts}={op.inst.operator.render(*[operand.stable_label for operand in op.operands])}"
 
 
-def cycle_summary(issues: list[PooledScheduledOp], commits: list[PooledScheduledOp]) -> str:
+def const_installs_by_step(lir: Lir) -> dict[int, list[str]]:
+    """
+    Per ROM step, the constant installs whose write-enable that microcode word carries (the ``uc_cwen_*`` strobes
+    :func:`build_microcode` sets), each rendered ``dst=source`` in the issue/commit summary's vocabulary. Mirrors that
+    function's predicate (``is_ucode_const_copy`` / ``BoolWrite.is_const``) and step (``block_base + issue_cycle``); a
+    register-source or signed-const install stays pc-gated -- not a word bit -- so it is excluded here.
+    """
+    installs: dict[int, list[str]] = {}
+    for block in lir.blocks:
+        base_pc = lir.block_base[block.index]
+        for copy in block.copies:
+            if is_ucode_const_copy(copy):
+                installs.setdefault(base_pc + copy.issue_cycle, []).append(
+                    f"{copy.dst.stable_label}={copy.source.stable_label}"
+                )
+        for bwrite in block.bool_writes:
+            if bwrite.is_const:
+                installs.setdefault(base_pc + bwrite.issue_cycle, []).append(
+                    f"{bwrite.dst.stable_label}={bwrite.source.stable_label}"
+                )
+    return installs
+
+
+def cycle_summary(issues: list[PooledScheduledOp], commits: list[PooledScheduledOp], installs: list[str]) -> str:
     parts: list[str] = []
     if issues:
         parts.append("issue " + ", ".join(_op_expr(op) for op in issues))
     if commits:
         parts.append("commit " + ", ".join("/".join(write.dst.stable_label for write in op.writes) for op in commits))
+    if installs:
+        parts.append("install " + ", ".join(installs))
     return "; ".join(parts)
 
 

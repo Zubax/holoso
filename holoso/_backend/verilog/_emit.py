@@ -160,8 +160,10 @@ def generate(lir: Lir) -> VerilogOutput:
     ucw = finalize_fields(fields)
 
     issues_by_cycle, commits_by_cycle = lir.group_by_cycle
+    installs_by_step = const_installs_by_step(lir)
     # Commit annotations land on each firing's write step -- the commit step itself, the same step the microcode places
     # its write-enable word (every bank writes combinationally, so a pooled lane's write word sits at the commit step).
+    # A const install rides the same word via its cwen strobe (block_base + issue_cycle), so it shares the annotation.
 
     depth = lir.last_pc + 1  # one microcode word per fetch PC (0..last_pc); inter-block drains and the tail pack to NOP
 
@@ -170,7 +172,7 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_inline_support(w)
     _emit_declarations(w, lir, write_lists)
     _emit_consts(w, lir)
-    _emit_microcode_rom(w, fields, ucw, depth, issues_by_cycle, commits_by_cycle)
+    _emit_microcode_rom(w, fields, ucw, depth, issues_by_cycle, commits_by_cycle, installs_by_step)
     _emit_field_wires(w, fields)
     _emit_operators(w, lir, write_lists)
     _emit_datapath_comb(w, lir, port_consts, write_lists)
@@ -353,6 +355,7 @@ def _emit_microcode_rom(
     depth: int,
     issues_by_cycle: dict[int, list[PooledScheduledOp]],
     commits_by_cycle: dict[int, list[PooledScheduledOp]],
+    installs_by_step: dict[int, list[str]],
 ) -> None:
     digits = (ucw + 3) // 4
     w("""
@@ -365,7 +368,9 @@ initial begin
     """)
     w.push()
     for step in range(depth):  # depth == LASTPC + 1: one word per fetch PC, NOP where no operator issues or commits
-        summary = cycle_summary(issues_by_cycle.get(step, []), commits_by_cycle.get(step, []))
+        summary = cycle_summary(
+            issues_by_cycle.get(step, []), commits_by_cycle.get(step, []), installs_by_step.get(step, [])
+        )
         comment = f"  // {summary}" if summary else ""
         w(f"ucode[{step: 5}] = {ucw}'h{pack(fields, step):0{digits}x};{comment}")
     w.pop()
@@ -506,7 +511,9 @@ def _terminator_redirects(lir: Lir) -> list[tuple[int, str]]:
 
 def _float_copy_pc(lir: Lir, block: LirBlock, copy: FloatCopy) -> int:
     """
-    The fetch PC at which a phi-arm copy installs its value (a const fires inline-class, a reg copy one step later).
+    The fetch PC at which a pc-gated phi-arm copy installs its value: its block base plus the copy's fire step (a fetch
+    lag after the ``issue_cycle`` that ``install_issue_cycle`` placed at the work makespan, or one past for a last-work
+    source).
     """
     return lir.block_base[block.index] + copy.fire_step
 
@@ -663,7 +670,7 @@ def _wide_writer_entries(
     lir: Lir,
     write_sets: dict[int, list[tuple[OperatorInstance, int]]],
     write_lists: dict[tuple[OperatorInstance, int], list[int]],
-) -> dict[int, list[tuple[str, str]]]:
+) -> dict[int, list[tuple[str, str, str]]]:
     """
     Per wide register, the ordered ``(condition, rhs)`` of every driver other than its state-slot install: the
     accept-step input load (highest priority), each pooled lane's write, each pc-gated wide-result inline firing
@@ -672,19 +679,19 @@ def _wide_writer_entries(
     schedule and the allocator's interference guarantee it), so the emitter folds them into one priority chain and a
     register is driven by exactly one statement, however many sources reuse or coalesce onto it.
     """
-    entries: dict[int, list[tuple[str, str]]] = {}
+    entries: dict[int, list[tuple[str, str, str]]] = {}
     for fload in sorted(lir.float_inputs, key=lambda load: load.dst.index):
-        entries.setdefault(fload.dst.index, []).append(("in_ready && in_valid", f"in_{fload.name}"))
+        entries.setdefault(fload.dst.index, []).append(("in_ready && in_valid", f"in_{fload.name}", ""))
     for reg in sorted(write_sets):
         for inst, port in write_sets[reg]:
-            entries.setdefault(reg, []).append((_write_cond(inst, port, reg, write_lists), f"{_sig(inst)}_y{port}"))
+            entries.setdefault(reg, []).append((_write_cond(inst, port, reg, write_lists), f"{_sig(inst)}_y{port}", ""))
     # Ucode-driven constant installs: the decode-gated const write-enable arm (like an operator lane), reusing the
     # const-pool nets. Unlike the pooled lanes above (which commit at issue + latency >= 1), a cycle-0 install can ride
     # the held ucode[0], so its write-enable is one of the gated strobes.
     const_books = const_install_codebooks(lir)
     for reg in sorted(const_books):
         entries.setdefault(reg, []).append(
-            (f_cwen(RegRef(reg)), _const_pool_mux(f_ccidx(RegRef(reg)), const_books[reg]))
+            (f_cwen(RegRef(reg)), _const_pool_mux(f_ccidx(RegRef(reg)), const_books[reg]), "")
         )
     for block in lir.blocks:
         for op_index, inline_op in enumerate(block.inline_ops):
@@ -693,34 +700,35 @@ def _wide_writer_entries(
                     (
                         f"pc == {_inline_fire_pc(lir, block.index, inline_op)}",
                         _inline_rhs(block.index, op_index, inline_op),
+                        "inline fire",
                     )
                 )
     for reg, items in _copies_grouped(lir).items():
         for install_pc, rhs in sorted(items):
-            entries.setdefault(reg, []).append((f"pc == {install_pc}", rhs))
+            entries.setdefault(reg, []).append((f"pc == {install_pc}", rhs, "phi-arm install"))
     return entries
 
 
 def _bool_writer_entries(
     lir: Lir, write_lists: dict[tuple[OperatorInstance, int], list[int]]
-) -> dict[int, list[tuple[str, str]]]:
+) -> dict[int, list[tuple[str, str, str]]]:
     """
     Per boolean register, the ordered ``(condition, rhs)`` of every driver other than its state-slot install: the
     input load, each pooled boolean lane (microcode-gated, with its fabric-XOR inversion conditioner),
     each pc-gated bool-result inline firing, and each pc-gated phi-arm write.
     """
-    entries: dict[int, list[tuple[str, str]]] = {}
+    entries: dict[int, list[tuple[str, str, str]]] = {}
     for bload in sorted(lir.bool_inputs, key=lambda load: load.dst.index):
-        entries.setdefault(bload.dst.index, []).append(("in_ready && in_valid", f"in_{bload.name}"))
+        entries.setdefault(bload.dst.index, []).append(("in_ready && in_valid", f"in_{bload.name}", ""))
     bool_write_sets = lir.bool_write_set_per_register
     for reg in sorted(bool_write_sets):
         for inst, port in bool_write_sets[reg]:
             rhs = f"{_sig(inst)}_y{port} ^ {f_binv(base_name(inst), port)}"
-            entries.setdefault(reg, []).append((_write_cond(inst, port, reg, write_lists), rhs))
+            entries.setdefault(reg, []).append((_write_cond(inst, port, reg, write_lists), rhs, ""))
     # Ucode-driven constant installs: the decode-gated const write-enable arm carrying the 1-bit value (no XOR -- the
     # inversion is folded into the value at construction).
     for reg in const_install_bool_regs(lir):
-        entries.setdefault(reg, []).append((f_cwen(BoolRegRef(reg)), f_cval(BoolRegRef(reg))))
+        entries.setdefault(reg, []).append((f_cwen(BoolRegRef(reg)), f_cval(BoolRegRef(reg)), ""))
     for block in lir.blocks:
         for op_index, inline_op in enumerate(block.inline_ops):
             if isinstance(inline_op.write.dst, BoolRegRef):
@@ -728,15 +736,16 @@ def _bool_writer_entries(
                     (
                         f"pc == {_inline_fire_pc(lir, block.index, inline_op)}",
                         _inline_rhs(block.index, op_index, inline_op),
+                        "inline fire",
                     )
                 )
     for reg, items in _bool_writes_grouped(lir).items():
         for install_pc, rhs in sorted(items):
-            entries.setdefault(reg, []).append((f"pc == {install_pc}", rhs))
+            entries.setdefault(reg, []).append((f"pc == {install_pc}", rhs, "phi-arm install"))
     return entries
 
 
-def _wide_state_install_entry(lir: Lir, slot: FloatStateSlot) -> list[tuple[str, str]]:
+def _wide_state_install_entry(lir: Lir, slot: FloatStateSlot) -> list[tuple[str, str, str]]:
     """
     The slot register's live-out install, appended under the reset-else as the lowest-priority arm of its chain. A
     coalesced slot has no install (its producing operator already writes the slot register); a non-coalesced one is
@@ -747,14 +756,16 @@ def _wide_state_install_entry(lir: Lir, slot: FloatStateSlot) -> list[tuple[str,
         return []
     pcw = max(1, lir.initiation_interval.bit_length())
     cond = f"pc == {_lit(pcw, lir.state_copy_step(slot))} && (pc != LASTPC || out_ready)"
-    return [(cond, _state_copy_rhs(slot))]
+    return [(cond, _state_copy_rhs(slot), "state install")]
 
 
-def _emit_chain(w: _Writer, lhs: str, entries: list[tuple[str, str]]) -> None:
-    """One priority chain per register, so the register has exactly one driver (the multi-assign rule)."""
+def _emit_chain(w: _Writer, lhs: str, entries: list[tuple[str, str, str]]) -> None:
+    """One priority chain per register, so the register has exactly one driver (the multi-assign rule). The optional
+    third element labels an arm whose kind is not evident from its guard -- the two ``pc == N`` arms (an inline firing
+    and a phi-arm install) read alike otherwise."""
     clause = "if"
-    for cond, rhs in entries:
-        w(f"{clause} ({cond}) {lhs} <= {rhs};")
+    for cond, rhs, note in entries:
+        w(f"{clause} ({cond}) {lhs} <= {rhs};" + (f"  // {note}" if note else ""))
         clause = "else if"
 
 
@@ -861,7 +872,11 @@ always @(posedge clk) begin
         if chain:
             _emit_chain(w, f"regs[{reg}]", chain)
     for reg, bslot in sorted(bool_slots.items()):
-        install = [("pc == LASTPC && out_ready", _bool_operand_rhs(bslot.live_out))] if bslot.needs_copy else []
+        install = (
+            [("pc == LASTPC && out_ready", _bool_operand_rhs(bslot.live_out), "state install")]
+            if bslot.needs_copy
+            else []
+        )
         chain = boolw.get(reg, []) + install
         if chain:
             _emit_chain(w, f"bregs[{reg}]", chain)
