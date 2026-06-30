@@ -54,13 +54,12 @@ def sources() -> list[Path]:
     """
     The shared support library written out for the simulator: the single self-contained module file
     holoso_support.v, assembled in memory exactly as it ships, which suffices to elaborate any holoso_f* wrapper.
-    The holoso_support.vh function header is resolved separately from HDL_DIR via the include path.
+    The holoso_support_inline.vh helper functions are resolved separately from HDL_DIR via the include path (only the
+    holoso_support_fn_tb harness includes them; generated DUTs splice them inline).
     """
     SUPPORT_BUILD_DIR.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for name, content in support_files().items():
-        if not name.endswith(".v"):
-            continue
         path = SUPPORT_BUILD_DIR / name
         _atomic_write(path, content)
         paths.append(path)

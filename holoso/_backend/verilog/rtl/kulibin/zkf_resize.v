@@ -3,6 +3,7 @@
 ///
 /// STAGE_INPUT=0: input combinational paths are exposed.
 /// STAGE_INPUT=1: inputs are latched, the external module sees registers at the input (one extra cycle).
+/// STAGE_INPUT>1: add extra dummy stages; helps in routing-congested designs (+STAGE_INPUT cycles).
 ///
 /// STAGE_OUTPUT=0: outputs are combinational (default)
 /// STAGE_OUTPUT=1: registered (one extra cycle).
@@ -40,9 +41,6 @@ module zkf_resize #(
         if ((WEXP_IN < 2) || (WMAN_IN < 4) || (WEXP_OUT < 2) || (WMAN_OUT < 4)) begin : g_invalid
             _zkf_invalid_wexp_or_wman u_invalid();
         end
-        if ((STAGE_INPUT != 0) && (STAGE_INPUT != 1)) begin : g_invalid_stage_input
-            _zkf_invalid_stage_input u_invalid();
-        end
         if ((STAGE_OUTPUT != 0) && (STAGE_OUTPUT != 1)) begin : g_invalid_stage_output
             _zkf_invalid_stage_output u_invalid();
         end
@@ -59,7 +57,7 @@ module zkf_resize #(
     // Optional input register stage.
     wire                in_valid_q;
     wire [WFULL_IN-1:0] a_q;
-    zkf_pipe #(.W(WFULL_IN), .N(STAGE_INPUT ? 1 : 0)) u_input_pipe (
+    zkf_pipe #(.W(WFULL_IN), .N(STAGE_INPUT)) u_input_pipe (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .in(a),
         .out_valid(in_valid_q), .out(a_q)

@@ -2,6 +2,7 @@
 ///
 /// STAGE_INPUT=0: operands feed the datapath combinationally (default).
 /// STAGE_INPUT=1: latch the inputs before any combinational logic, isolating them from upstream paths (+1 cycle).
+/// STAGE_INPUT>1: add extra dummy stages; helps in routing-congested designs (+STAGE_INPUT cycles).
 ///
 /// STAGE_OUTPUT=0: the result is combinational, zero cycle latency at the output (default).
 /// STAGE_OUTPUT=1: one register stage at the output (+1 cycle).
@@ -23,7 +24,7 @@
 module zkf_add #(
     parameter WEXP            = 6,    // exponent field width
     parameter WMAN            = 18,   // significand precision including the hidden bit
-    parameter STAGE_INPUT     = 0,    // 0 = combinational inputs; 1 = latch inputs before any logic (+1 cycle)
+    parameter STAGE_INPUT     = 0,    // number of input register stages (>=0); +STAGE_INPUT cycles
     parameter STAGE_DECODE    = 0,    // 0 = decode feeds s0 combinationally; 1 = registered decoded bundle (+1 cycle)
     parameter STAGE_ALIGN     = 0,    // 0 = single-cycle alignment; 1 = split alignment shifter (+1 cycle)
     parameter STAGE_NORMALIZE = 0,    // {0,1,2} internal close-cancel normshift barriers
@@ -45,12 +46,6 @@ module zkf_add #(
     generate
         if ((WEXP < 2) || (WMAN < 4)) begin : g_invalid_wman
             _zkf_invalid_wexp_or_wman u_invalid();
-        end
-        // STAGE_INPUT and STAGE_DECODE are realized locally as a single optional register each, so only {0,1} is
-        // meaningful. STAGE_ALIGN / STAGE_NORMALIZE / STAGE_PACK / STAGE_OUTPUT forward to their owners
-        // (_zkf_rshift_sticky / _zkf_normshift / _zkf_pack), which validate their own ranges.
-        if ((STAGE_INPUT != 0) && (STAGE_INPUT != 1)) begin : g_invalid_stage_input
-            _zkf_invalid_stage_input u_invalid();
         end
         if ((STAGE_DECODE != 0) && (STAGE_DECODE != 1)) begin : g_invalid_stage_decode
             _zkf_invalid_stage_decode u_invalid();
@@ -75,11 +70,11 @@ module zkf_add #(
 
     localparam [WINDEX-1:0] NORM_TOP = WMAN + 2;
 
-    // -- Optional input register stage: latch the operands before any combinational logic.
+    // Optional input register stage(s): latch the operands before any combinational logic (+STAGE_INPUT cycles).
     wire             in_valid_q;
     wire [WFULL-1:0] a_q;
     wire [WFULL-1:0] b_q;
-    zkf_pipe #(.W(2*WFULL), .N(STAGE_INPUT ? 1 : 0)) u_input_pipe (
+    zkf_pipe #(.W(2*WFULL), .N(STAGE_INPUT)) u_input_pipe (
         .clk(clk), .rst(rst), .in_valid(in_valid), .in({b, a}),
         .out_valid(in_valid_q), .out({b_q, a_q})
     );

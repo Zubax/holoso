@@ -52,7 +52,7 @@
 `default_nettype none
 
 module zkf_sincos #(
-    parameter WEXP            = 6,      // exponent field width
+    parameter WEXP            = 6,
     parameter WMAN            = 18,     // significand precision including the hidden bit
     parameter WMULTIPLIER     = 0,
     parameter UNROLL100       = 100,    // choose maximum value that closes timings

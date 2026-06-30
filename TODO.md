@@ -5,8 +5,9 @@
 Multi-instance pooling: `resolve_pool` (`_schedule.py:91`) is hardcoded to budget 1. Downstream is already
 N>1-ready (verified firsthand: budget 2 binds two `fmul` instances, II 21→20, model==interpreter on 300 vectors).
 Needs (a) a demand/feedback signal — `resolve_pool(nodes, prior_schedule)` reading `busy_until` saturation — and
-(b) a scored evaluation surface over `_layout_and_allocate` (II / mux fan-in / reg count). Revisit the `+2` II-bound
-in `OperatorInstance.__post_init__`.
+(b) a scored evaluation surface over `_layout_and_allocate` (II / mux fan-in / reg count). Revisit the reuse bound
+in `OperatorInstance.__post_init__` (now `latency + boundary_step(0) + 1` since the read-latch removal); its deferred
+re-entry-distance check is exactly what an II>1 instance on a back-edge loop would need.
 
 Aggressive cross-block overlap (DEFERRED in DESIGN): cleanly separable — loosen `_issue_side_envelope`'s floor,
 replicate commit-side control per mutually-exclusive successor arm in the emitter, exercise the single-writer

@@ -8,16 +8,11 @@ single firing (a multi-output module computes all its results at once), so each 
 cycle and bound instance. Pooled operators contend for physical instances through per-instance busy windows (an
 instance accepts a new firing every ``initiation_interval`` cycles); inline operators are independent gates.
 
-An operation issues from cycle 0, reclaiming a block's first control word (inputs and other block-resident operands
-load into the register array before that word reaches the datapath, so a consumer reads them from the first cycle).
-Two constraints raise an op's earliest issue to cycle 1:
-  - a POOLED (instance-backed) op presents its read address one step early (``rci = issue - 1`` in the emitter), so
-    issuing at cycle 0 would place the read-address word before the block -- a hard hardware constraint;
-  - an ENTRY-block op producing a persistent-state live-out is dwell-guarded off the first control word as defense-in-
-    depth: the sequencer holds pc 0 during the accept wait and re-fires ``ucode[0]`` each idle cycle, and re-firing a
-    cycle-0 STATE write would corrupt the carried state. That write cannot occur today (an inline producer writes a
-    temporary, never the state register; see ``_assert_entry_dwell_safe``), so this floor is cost-free on every
-    current kernel, but it keeps the producer off cycle 0 cheaply since the dwell is invisible to cosim and the model.
+Every firing issues from cycle 0, reclaiming each block's first control word: inputs and other block-resident operands
+load into the register array before that word reaches the datapath, so a consumer reads them from the first cycle.
+The entry block is no different -- the sequencer dwells at pc 0 while awaiting ``in_valid`` and re-fetches ``ucode[0]``
+each idle cycle, but the backend gates every operator's ``in_valid`` with ``transacting`` (see ``_emit``), so that
+re-fetched word commits nothing and a cycle-0 issue is safe regardless of operator kind.
 """
 
 from collections.abc import Mapping
@@ -26,17 +21,17 @@ from dataclasses import dataclass
 from .._util import ValueId
 from .._mir import MirNode, MirOperation
 from .._operators import HardwareOperator, PooledHardwareOperator, PortConditioner
-from ._ir import OperatorInstance, dependency_edge, operand_read_cycle, pooled_wide_read_cycle, wide_landing_cycle
+from ._ir import OperatorInstance, dependency_edge, landing_cycle, operand_read_cycle, read_cycle
 
 # A pooled firing's fusion identity: the operator, its operand values, and their conditioners -- everything the
 # module activation consumes. Output ports and output conditioners are deliberately excluded (members differ there).
 type _FiringKey = tuple[PooledHardwareOperator, tuple[ValueId, ...], tuple[PortConditioner, ...]]
 
-# The largest commit-to-issue dependency edge any (producer, consumer) pair can require: the wide bank's landing
-# (write latch + read-first edge) against the pooled read latch, derived from the same helpers as dependency_edge.
-# Exact only while wide->pooled remains the maximal pair; it merely pads a generously-slack progress cap, so a
-# future larger pair costs nothing worse than a later no-progress diagnosis.
-_MAX_DEPENDENCY_EDGE = wide_landing_cycle(0) - pooled_wide_read_cycle(0)
+# The largest commit-to-issue dependency edge any (producer, consumer) pair can require: the result landing (fetch lag +
+# read-first edge) against the latch-free pooled read, derived from the same helpers as dependency_edge. Exact only
+# while producer->pooled remains the maximal pair; it merely pads a generously-slack progress cap, so a future larger
+# pair costs nothing worse than a later no-progress diagnosis.
+_MAX_DEPENDENCY_EDGE = landing_cycle(0) - read_cycle(0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +57,17 @@ class Schedule:
 
     def commit_cycle(self, vid: ValueId) -> int:
         return self.issue_cycle[vid] + self.latency[vid]
+
+    def commit_or_makespan(self, vid: ValueId) -> int:
+        """
+        A tail install's source commit as seen from the install's own (predecessor) block: ``vid``'s commit if it is
+        scheduled here, else this block's makespan. A source with no local commit -- a block-entry-resident value, a
+        phi, or a value computed in another block -- falls back to the makespan; a resident install then stays at the
+        makespan while a computed one (coincident with the makespan) is pushed one step past it. The single rule the
+        LIR copy, the interference residence, and the makespan classification share, so the install's placement cannot
+        drift onto a foreign block's coordinate frame.
+        """
+        return self.commit_cycle(vid) if vid in self.issue_cycle else self.makespan
 
 
 def _op(nodes: dict[ValueId, MirNode], vid: ValueId) -> MirOperation:
@@ -152,7 +158,6 @@ def schedule_ops(
     schedulable: set[ValueId],
     entry_busy: Mapping[tuple[PooledHardwareOperator, int], int] | None = None,
     livein_landing: Mapping[ValueId, int] | None = None,
-    dwell_guarded: frozenset[ValueId] = frozenset(),
 ) -> Schedule:
     """
     Place every firing of ``schedulable`` (one block's operations, across both register banks) on the earliest cycle
@@ -190,16 +195,11 @@ def schedule_ops(
 
     def is_ready(leader: ValueId, cycle: int) -> bool:
         # A consumer may issue only ``dependency_edge`` cycles after a same-block operator producer commits -- the
-        # edge derives from the producer's result-bank landing and the consumer's read mechanism (see _ir). Every
+        # edge derives from the producer's result landing and the consumer's read mechanism (see _ir). Every
         # other operand -- a state read, an input, a phi, or a result drained in from a prior block -- is resident at
-        # the block start (constants are immediates with no read constraint), so the per-firing cycle-1 floor below is
-        # all that delays it. Members of one firing share operands and conditioners, so the leader's readiness is the
-        # firing's, and any member being state-live-out dwell-guards the whole firing.
+        # the block start (constants are immediates with no read constraint), so nothing else delays the firing.
+        # Members of one firing share operands and conditioners, so the leader's readiness is the whole firing's.
         consumer = _op(nodes, leader).operator
-        if cycle < 1 and (
-            isinstance(consumer, PooledHardwareOperator) or any(member in dwell_guarded for member in firings[leader])
-        ):
-            return False
         for operand in _op(nodes, leader).operands:
             if operand in schedulable_set:
                 if operand not in issue_cycle:

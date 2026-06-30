@@ -36,22 +36,26 @@ from ._modelref import default_ops
 # kernels. A representative cross-section of shapes: straight-line and deep arithmetic, clamp/select, stateful
 # filters, branchy logic, data-dependent loops, and a large kernel.
 _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
-    "madd": (20, 20),
-    "signal_window": (12, 12),
-    "poly3": (35, 35),
-    "iir1_lpf": (21, 21),
-    "schmitt_trigger": (7, 7),
+    "madd": (14, 14),
+    "signal_window": (9, 9),
+    "poly3": (23, 23),
+    "iir1_lpf": (15, 15),
+    "schmitt_trigger": (6, 6),
     "majority_voter": (14, 19),
-    "recip_newton": (20, 46),
-    "remainder": (45, 66),
-    "cordic_sincos": (149, 149),
-    "ekf1_stateless": (129, 129),
+    # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
+    # is), so the install fits at the work makespan instead of one past it -- shaving a cycle off every iteration.
+    "recip_newton": (15, 32),
+    "remainder": (36, 53),
+    "cordic_sincos": (104, 104),
+    "ekf1_stateless": (125, 125),
     # Branchy kernels whose phi-arm installs source block-entry-resident values (boolean/float live-out constants, or an
     # input/state read) on the normal path -- the inline-class timing (no source-sample edge, no +1 step) lands each
     # within the work makespan rather than at the copy-pipeline boundary, shrinking every downstream block base.
-    "uart_rx": (6, 161),
-    "uart_tx": (8, 142),
-    "octave_index": (16, 44),
+    "uart_rx": (6, 120),
+    # uart_tx additionally has an empty overlapping branch block (the idle "not busy" arm) whose only act is to test a
+    # resident input condition; a non-entry branch may redirect at its own base PC, so its terminator drains nothing.
+    "uart_tx": (7, 103),
+    "octave_index": (14, 38),
 }
 
 _SPEC_BY_NAME = {spec.name: spec for spec in SPECS}
@@ -100,7 +104,7 @@ class _BoolShift3:
 # _BoolShift3 the boolean bank's. _FMT is the wide e8m36 datapath the example matrix uses.
 _FMT = FloatFormat(8, 36)
 _CHAINED_COPY: list[tuple[str, object, tuple[int, int]]] = [
-    ("delay3", _Delay3, (4, 4)),
+    ("delay3", _Delay3, (3, 3)),
     ("bool_shift3", _BoolShift3, (3, 3)),
 ]
 

@@ -12,35 +12,33 @@ from ._build_base import OverlapLayout
 from ._mir_facts import mir_operation, mir_rpo, succ_map
 
 
-def _value_word_and_landing(mir: Mir, float_mir: MirFloatView, vid: ValueId, issue: int) -> tuple[int, int]:
+def _value_word_and_landing(mir: Mir, vid: ValueId, issue: int) -> tuple[int, int, HardwareOperator]:
     """
     For a scheduled value, the (last in-block control WORD, result LANDING) in its block-local frame. The word is the
-    latest fetch step the op still drives -- a pooled lane's write-enable (the wide bank one step after commit, the
-    boolean bank on it) or an inline op's combinational fire step; the result lands later, after the bank's pipeline.
-    Cross-block overlap may place ``term_offset`` between the two: the word stays in the block, the landing spills into
-    the (single-predecessor) successor frame.
+    latest fetch step the op still drives -- a pooled lane's write-enable on its commit step or an inline op's
+    combinational fire step; the result lands later, after the fetch pipeline. Cross-block overlap may place
+    ``term_offset`` between the two: the word stays in the block, the landing spills into the (single-predecessor)
+    successor frame.
     """
     operator = mir_operation(mir, vid).operator
     commit = issue + operator.latency
-    wide = vid in float_mir.operation_nodes
-    if isinstance(operator, PooledHardwareOperator):
-        word = pooled_writeback_word(commit, wide)
-        landing = landing_cycle(commit, bank_timing(wide))
-    else:  # an inline op drives the array write combinationally -- no writeback latch on either bank
-        word = inline_fire_cycle(commit)
-        landing = inline_landing_cycle(commit)
-    return word, landing
+    # The control WORD placement still distinguishes the op class: a pooled lane drives its write-enable word on the
+    # commit step, an inline op fires its combinational statement one FETCH_LAG later. The result LANDING is uniform.
+    word = pooled_write_word(commit) if isinstance(operator, PooledHardwareOperator) else inline_fire_cycle(commit)
+    landing = landing_cycle(commit)
+    return word, landing, operator
 
 
-def install_inclusive_makespan(work_makespan: int, has_copy_install: bool) -> int:
+def install_inclusive_makespan(work_makespan: int, install_pushes_makespan: bool) -> int:
     """
-    The block makespan inclusive of its tail install: a block with a COMPUTED-source COPY install fires that copy one
-    cycle past its last work commit (to read-first the source its work produced), so its effective makespan is one
-    higher. A tail that installs only block-entry-resident sources (const, input, state read) is inline-class and adds no
-    step, so it does not raise the makespan. The single owner of this ``+1`` so the overlap layout's boundary derivation
-    and the per-block LirBlock makespan cannot disagree on it (the dual of the per-install ``install_issue_cycle``).
+    The block makespan inclusive of its tail install: a block whose install lands PAST the work makespan is one higher.
+    That happens only for a computed source that is the block's own last-committing work, which the install must fire
+    one step after to read-first it. A tail whose every install fits at the makespan -- a block-entry-resident source,
+    or a computed source committing before the last work -- adds no step. The single owner of this ``+1`` so the overlap
+    layout's boundary derivation and the per-block LirBlock makespan cannot disagree on it (the dual of the per-install
+    ``install_issue_cycle``).
     """
-    return work_makespan + (1 if has_copy_install else 0)
+    return work_makespan + (1 if install_pushes_makespan else 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,33 +55,37 @@ class _SpillCarry:
     livein_landing: dict[ValueId, int]
 
 
-def _issue_side_envelope(
-    mir: Mir, float_mir: MirFloatView, sched: Schedule, block: MirBlock, livein_landing: Mapping[ValueId, int]
-) -> int:
+def _issue_side_envelope(mir: Mir, sched: Schedule, block: MirBlock, livein_landing: Mapping[ValueId, int]) -> int:
     """
     The issue-side floor an OVERLAPPING block's terminator may not precede: the latest control word still driven in the
-    block (a pooled write-enable or an inline fire step), padded by the error-latch slack for any err-port op, and the
-    branch condition's read floor. The branch condition is the SINGLE owner of that read floor here, derived from where
-    the condition becomes readable: a PRODUCED condition lands inside the block at its boolean landing; a SPILLED-IN
+    block (a pooled write-enable or an inline fire step), the operand-read cycle of any firing (a latch-free wide read
+    samples one step past a latency-1 pooled op's control word), padded by the error-latch slack for any err-port op,
+    and the branch condition's read floor. The branch condition is the SINGLE owner of that read floor here, derived
+    from where the condition becomes readable: a PRODUCED condition lands inside the block at its landing; a SPILLED-IN
     live-in condition (carried past an overlapped predecessor's shrunk terminator) lands at its carried landing cycle
     (``livein_landing``); a RESIDENT live-in condition (an input, persistent state, or a fully-drained prior-block
-    result) is available from the block's first cycle and adds nothing. The floor starts at 1.
+    result) is available from the block's first cycle and adds nothing. The floor starts at 1 for the ENTRY block only:
+    its terminator cannot redirect at PC 0, because the sequencer's accept hold (``pc==0``) precedes the branch
+    redirect, so an entry branch must settle at PC>=1. Every other block may redirect at its own base PC, so its floor
+    starts at 0 -- an empty resident-condition branch then drains nothing, exactly like a jump.
     """
-    floor = 1
+    floor = 1 if block.id == mir.entry else 0
     for vid, issue in sched.issue_cycle.items():
-        word, _landing = _value_word_and_landing(mir, float_mir, vid, issue)
-        floor = max(floor, word)
-        operator = mir_operation(mir, vid).operator
+        word, _landing, operator = _value_word_and_landing(mir, vid, issue)
+        # The block may not end before an op reads its operands: it fires (and samples) at ``operand_read_cycle``. A
+        # latch-free wide read samples one step past a latency-1 pooled op's control word, so the read can exceed the
+        # word -- without this floor the op would fire past the shrunk terminator and never execute.
+        floor = max(floor, word, operand_read_cycle(operator, issue))
         if isinstance(operator, PooledHardwareOperator) and operator.error_ports:
             # The err_pc diagnostic latches ``pc - FETCH_LAG`` when this op's write-enable executes, which is
             # FETCH_LAG fetch steps after its write word. If the terminator redirected by then, err_pc would
             # capture the successor frame's PC instead of this op's step. Keep the latch inside the block: the
-            # data writeback still rides the pipeline correctly, but the diagnostic needs the live PC in-frame.
+            # data write still lands correctly, but the diagnostic needs the live PC in-frame.
             floor = max(floor, word + FETCH_LAG)
     if isinstance(block.terminator, MirBranch):
         cond = block.terminator.cond
-        if cond in sched.issue_cycle:  # produced in-block: readable at its boolean landing
-            floor = max(floor, bool_landing_cycle(sched.commit_cycle(cond)))
+        if cond in sched.issue_cycle:  # produced in-block: readable at its landing
+            floor = max(floor, landing_cycle(sched.commit_cycle(cond)))
         elif cond in livein_landing:  # spilled in past an overlapped predecessor: readable at its carried landing
             floor = max(floor, livein_landing[cond])
         # else: a resident live-in condition is available from the block's first cycle and imposes no floor
@@ -106,15 +108,15 @@ def schedule_with_overlap(
     bool_mir: MirBoolView,
     pool: Mapping[type[HardwareOperator], int],
     has_install_blocks: Mapping[int, bool],
-    state_copy_blocks: Mapping[int, bool],
+    has_state_copy: bool,
 ) -> OverlapLayout:
     """
     Schedule every block in reverse-postorder and derive each block's terminator offset, threading cross-block overlap
     forward. A block whose every successor is single-predecessor (so a spill cannot reach a wrong path) and that carries
     no tail install shrinks its terminator offset from the drained boundary down to the issue-side envelope -- the
     latest cycle it still drives a control word, plus the branch condition's read floor. The drained boundary is the
-    latest cycle a value LANDS in the block's frame, taken per op so it is both bank-aware and inline-aware (a pooled
-    result lands through its bank's writeback latch, an inline result a cycle earlier). Its in-flight results then land
+    latest cycle a value LANDS in the block's frame, taken per op (a pooled result and an inline result land at the same
+    bank-independent cycle, the combinational landing). Its in-flight results then land
     past the terminator, in the uniquely-reached successor frame; the successor inherits that as ``entry_busy`` (the
     predecessor's per-instance busy residue) and ``livein_landing`` (the cycle each spilled value lands), so its
     schedule neither reads a still-in-flight operand nor double-drives a busy instance. Back-edge targets and merge
@@ -128,26 +130,6 @@ def schedule_with_overlap(
         for target in targets:
             pred_count[target] += 1
     blocks_by_id = {block.id: block for block in mir.blocks}
-    # The persistent-state live-out values, plus the arm producers reachable from them through phi chains (a nested
-    # conditional/loop update layers phi over phi). A producer of one is dwell-guarded off the ENTRY block's
-    # ``ucode[0]``: once a slot live-out -- or any of its (transitive) phi arms -- coalesces onto the slot register, its
-    # producer writes the persistent register directly, so re-firing it during the accept dwell would corrupt the
-    # carried state; the guard keeps such a producer off cycle 0. For a slot whose live-out does not coalesce the
-    # producer writes a temporary and the guard is merely harmless defense-in-depth (see ``_assert_entry_dwell_safe``);
-    # it is cost-free unless a guarded value would actually have issued at cycle 0. The transitive walk visits each
-    # value once, so loop-carried phi cycles terminate.
-    all_phis = {**float_mir.phi_nodes, **bool_mir.phi_nodes}
-    state_liveouts_set: set[ValueId] = set()
-    worklist = [slot.live_out for slot in (*float_mir.state_slots, *bool_mir.state_slots)]
-    while worklist:
-        vid = worklist.pop()
-        if vid in state_liveouts_set:
-            continue
-        state_liveouts_set.add(vid)
-        phi = all_phis.get(vid)
-        if phi is not None:
-            worklist.extend(arm for _pred, arm, _conditioner in phi.arms)
-    state_liveouts = frozenset(state_liveouts_set)
     block_sched: dict[int, Schedule] = {}
     block_makespan: dict[int, int] = {}
     block_term_offset: dict[int, int] = {}
@@ -166,49 +148,47 @@ def schedule_with_overlap(
             schedulable=set(float_mir.block_operations(block)) | set(bool_mir.block_operations(block)),
             entry_busy=inherited.entry_busy,
             livein_landing=livein_landing,
-            dwell_guarded=state_liveouts if bid == mir.entry else frozenset(),
         )
         block_sched[bid] = sched
         has_install = bid in has_install_blocks
-        has_copy_install = has_install_blocks.get(bid, False)
-        makespan = install_inclusive_makespan(sched.makespan, has_copy_install)
+        install_pushes_makespan = has_install_blocks.get(bid, False)
+        makespan = install_inclusive_makespan(sched.makespan, install_pushes_makespan)
         block_makespan[bid] = makespan
         targets = succ[bid]
         overlaps = bool(targets) and not has_install and all(pred_count[target] == 1 for target in targets)
-        # The drained boundary is the latest cycle a value LANDS in this block's frame, taken per op so it is both
-        # bank-aware AND inline-aware: a pooled result lands through its bank's writeback latch, an inline result writes
-        # the array combinationally and lands a cycle earlier. Three landings are INVISIBLE to the op schedule and are
-        # added explicitly: (1) a phi tail install -- a COMPUTED-source COPY lands at the wide writeback boundary
-        # ``boundary_step(makespan, wide)`` (``makespan`` install-inclusive, one past the work), while an install of a
-        # block-entry-resident source (const, input, state read) is inline-class and lands a cycle earlier at the
-        # latch-free combinational landing ``inline_landing_cycle(work)``, paying neither the +1 step nor the writeback
-        # latch; (2) a NON-coalesced state
-        # slot's read-first boundary copy lands at ``boundary_step(sched.makespan, bank)`` -- its source is among the op
-        # landings, but the copy adds its bank's fetch-pipeline; ``state_copy_blocks`` carries the Ret blocks that have
-        # one (mapped to the wide-vs-bool bank), decided by the coalescing fixpoint -- a coalesced slot writes its
-        # register in place and needs no copy, so it is absent; (3) the entry's input loads land on cycle 1.
+        # The drained boundary is the latest cycle a value LANDS in this block's frame, taken per op -- a pooled result
+        # and an inline result both write the array combinationally and land at the same bank-independent cycle. Three
+        # landings are INVISIBLE to the op schedule and are added explicitly: (1) a phi tail install -- one whose source
+        # is the block's own LAST work lands a step past it at the drain boundary ``boundary_step(makespan)`` (the
+        # makespan install-inclusive), while an install fitting at the makespan (a resident source, or a computed
+        # source committing before the last work) lands at ``landing_cycle(sched.makespan)`` within the work
+        # boundary, paying neither the +1 step nor the later drain; (2) a NON-coalesced state slot's read-first boundary
+        # copy lands at ``boundary_step(sched.makespan)`` -- its source is among the op landings, but the copy adds the
+        # fetch-pipeline; ``has_state_copy`` flags whether the lone Ret block has one, decided by the coalescing
+        # fixpoint -- a coalesced slot writes its register in place and needs no copy, so the charge clears; (3) the
+        # entry's input loads land on cycle 1.
         work_drain = max(
-            (_value_word_and_landing(mir, float_mir, vid, issue)[1] for vid, issue in sched.issue_cycle.items()),
+            (_value_word_and_landing(mir, vid, issue)[1] for vid, issue in sched.issue_cycle.items()),
             default=0,
         )
-        if has_copy_install:
-            work_drain = max(work_drain, boundary_step(makespan, wide_resident=True))
+        if install_pushes_makespan:
+            work_drain = max(work_drain, boundary_step(makespan))
         elif has_install:
-            work_drain = max(work_drain, inline_landing_cycle(sched.makespan))
-        if bid in state_copy_blocks:
-            work_drain = max(work_drain, boundary_step(sched.makespan, wide_resident=state_copy_blocks[bid]))
+            work_drain = max(work_drain, landing_cycle(sched.makespan))
+        if bid == mir.ret_block and has_state_copy:
+            work_drain = max(work_drain, boundary_step(sched.makespan))
         if bid == mir.entry:
             work_drain = max(work_drain, 1)
         # The terminator offset: the issue-side envelope when this block overlaps its single-predecessor successors,
-        # else the drained boundary max(work_drain, *spill landings). It never exceeds the block's latched wide landing
+        # else the drained boundary max(work_drain, *spill landings). It never exceeds the block's drained landing
         # (a boundary state install placed at the offset stays a read-first last_pc install); the two regimes' physics
         # are in DESIGN.md.
         if overlaps:
-            term_offset = _issue_side_envelope(mir, float_mir, sched, block, livein_landing)
+            term_offset = _issue_side_envelope(mir, sched, block, livein_landing)
         else:
             term_offset = max([work_drain, *livein_landing.values()])
-        wide_cap = boundary_step(makespan, wide_resident=True)
-        assert term_offset <= wide_cap, f"block {bid}: term_offset {term_offset} exceeds the wide drain {wide_cap}"
+        drain_cap = boundary_step(makespan)
+        assert term_offset <= drain_cap, f"block {bid}: term_offset {term_offset} exceeds the drain {drain_cap}"
         block_term_offset[bid] = term_offset
         if overlaps:  # hand the spill residue to the (single-predecessor) successors this block uniquely reaches
             # Both the per-instance busy residue and the value landings cross the shrunk terminator into the successor
@@ -222,7 +202,7 @@ def schedule_with_overlap(
             }
             landing: dict[ValueId, int] = {}
             for vid, issue in sched.issue_cycle.items():
-                _word, land = _value_word_and_landing(mir, float_mir, vid, issue)
+                _word, land, _op = _value_word_and_landing(mir, vid, issue)
                 if land > term_offset:
                     landing[vid] = _spill_local_cycle(bid, land, term_offset)
             for vid, land in livein_landing.items():  # a received spill that re-spills past this shrunk terminator

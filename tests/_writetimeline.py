@@ -69,12 +69,12 @@ def build_write_timeline(lir: Lir) -> dict[RegRef, list[tuple[int, Producer]]]:
         for op in block.ops:
             for write in op.writes:
                 if isinstance(write.dst, RegRef):
-                    for pc in lir.write_landing_pcs(block, op, write):
+                    for pc in lir.write_landing_pcs(block, op):
                         writes.setdefault(write.dst, []).append((pc, OperationProducer(op_index)))
             op_index += 1
         for k, inline_op in enumerate(block.inline_ops):
             if isinstance(inline_op.write.dst, RegRef):
-                for pc in lir.write_landing_pcs(block, inline_op, inline_op.write):
+                for pc in lir.write_landing_pcs(block, inline_op):
                     writes.setdefault(inline_op.write.dst, []).append((pc, InlineProducer(block.index, k)))
     for events in writes.values():
         events.sort(key=lambda event: event[0])
@@ -88,7 +88,7 @@ def latest_producer_before(
     Return the producer of the value a register holds when read at hardware-frame ``read_cycle``.
 
     The timeline is keyed by each value's landing cycle -- the cycle it becomes readable in the array, which already
-    folds in the write latch and the read-first edge -- so a read on a value's landing cycle returns that value.
+    folds in the fetch lag and the read-first edge -- so a read on a value's landing cycle returns that value.
     """
     chosen: Producer | None = None
     for landing_cycle, producer in writes[source]:

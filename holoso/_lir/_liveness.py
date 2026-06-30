@@ -12,9 +12,9 @@ values stay live across the whole loop body.
 Second, within each block every live value is given a half-open residence interval in that block's executing-step
 (hardware) frame -- the same frame as :attr:`Lir.reg_liveness` and the numerical model -- using the
 shared cycle helpers. A value resident from a predecessor (live-in, or a phi result) lands on the block's first step; a
-value defined by an in-block POOLED operator lands on its bank's landing cycle (the wide bank pays the writeback latch,
-the boolean bank only the read-first edge), an INLINE operator's result a cycle earlier (it writes the array
-combinationally, no writeback latch); a value that is live out of the block (or read by the block's boundary -- an
+value defined by an in-block operator -- pooled or inline, on either bank -- lands on the one bank- and
+class-independent landing cycle (FETCH_LAG plus the read-first edge after its commit); a value that is live out of the
+block (or read by the block's boundary -- an
 output, a branch condition, a state live-out, or a phi-arm copy) stays resident through the block boundary; and a phi
 result additionally occupies its register at the tail of every arm predecessor, where its install copy physically
 writes it one step before the boundary -- deliberately also foreclosing the phi sharing a register with its own arm
@@ -41,8 +41,8 @@ class BankLiveness:
     result may instead spill past its (shrunk) terminator and land inside this block, which ``inflight_defs`` records.
 
     All cycles are block-local in the executing-step frame (block start is step 1). ``op_landing`` is each in-block
-    definition's bank-true landing cycle (the caller computes it with the shared ``_ir`` cycle helper of its bank:
-    the latched wide bank pays the writeback latch, the latch-free boolean bank only the read-first edge). ``reads``
+    definition's landing cycle (the caller computes it with the shared ``_ir`` ``landing_cycle`` helper -- bank- and
+    class-independent now that every result writes the array combinationally). ``reads``
     carries every in-block operand read with its hardware read cycle; ``boundary_users`` carries values consumed at a
     block's boundary that are not otherwise live out (outputs and state live-outs at the Ret block, a branch
     condition); ``arm_out`` carries, per block, the phi-arm values a successor's phi takes from that block (each is
@@ -56,12 +56,12 @@ class BankLiveness:
     entry: int
     succ: dict[int, list[int]]
     # Per-block terminator offset (the boundary step where values live-out / consumed-at-boundary must still reside).
-    # Under per-block draining it is the latest cycle a value lands in the block's frame, taken per op (bank- and
-    # inline-aware); a separate field so cross-block overlap can shrink it below the drain without disturbing an
-    # install's fire step, which the caller stamps per install in ``installs``.
+    # Under per-block draining it is the latest cycle a value lands in the block's frame, taken per op; a separate
+    # field so cross-block overlap can shrink it below the drain without disturbing an install's fire step, which the
+    # caller stamps per install in ``installs``.
     term_offset: dict[int, int]
     resident: frozenset[ValueId]  # inputs and state live-ins: resident from the start, defined at the entry
-    op_landing: dict[ValueId, int]  # op-result value -> its bank-true landing cycle in its def block (block-local)
+    op_landing: dict[ValueId, int]  # op-result value -> its landing cycle in its def block (block-local)
     op_block: dict[ValueId, int]  # op-result value -> its def block
     phi_block: dict[ValueId, int]  # phi-result value -> the block whose head defines it
     reads: dict[int, list[tuple[ValueId, int]]] = field(default_factory=dict)  # block -> [(value, read cycle)]
@@ -160,7 +160,7 @@ def compute_interference(bank: BankLiveness) -> dict[ValueId, set[ValueId]]:
             if vid in bank.op_block and bank.op_block[vid] == block and vid not in live.live_in[block]:
                 w = bank.op_landing[vid]
             elif vid in installed and vid not in live.live_in[block] and vid not in defs[block]:
-                w = installed[vid]  # the install's own fire step (per install: copy-class later, const-class earlier)
+                w = installed[vid]  # the install's own fire step (its placement: makespan, or one step past)
             else:
                 w = 1
             write_at[vid] = w

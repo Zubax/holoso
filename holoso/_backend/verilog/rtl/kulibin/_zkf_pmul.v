@@ -36,7 +36,7 @@
 
 module _zkf_pmul #(
     parameter WA            = 16,  // operand a width  (illustrative default; the module works for any width)
-    parameter WB            = 16,  // operand b width
+    parameter WB            = 16,
     parameter A_SIGNED      = 1,   // 1 = a is signed (top slice sign-extended); 0 = unsigned
     parameter B_SIGNED      = 1,   // 1 = b is signed; 0 = unsigned
     parameter WSB           = 1,   // sideband carried alongside the pipeline

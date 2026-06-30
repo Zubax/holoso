@@ -47,9 +47,9 @@ number; pin every one by calibration (below). The model has this shape:
 - An op issued at T commits at T + latency (read latency from the operator; an inline op's latency is 0).
 - A result becomes readable a fixed offset after its producer commits; a consumer samples a fixed offset
   from its own issue. Their difference is the minimum producer→consumer distance — the "edge".
-- An op has an earliest-issue floor (a pooled op one cycle later than an inline op). Operands resident
-  from the block start (constants, inputs, prior-block values) impose only the floor — correct for
-  within-block slack, but it is also what blinds that pass to boundary placement (see Boundaries).
+- Every firing may issue from its block's first local cycle.
+  Operands resident from the block start (constants, inputs, prior-block values) impose only this floor —
+  correct for within-block slack, but it is also what blinds that pass to boundary placement (see Boundaries).
 
 ## Audit
 

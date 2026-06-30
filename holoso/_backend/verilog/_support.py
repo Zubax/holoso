@@ -1,12 +1,5 @@
 """
 Assemble the shared support library that every Holoso-generated module instantiates.
-
-It ships as two files: the single self-contained module library ``holoso_support.v`` and the function header
-``holoso_support.vh`` that generated modules ``include``. Both live under ``rtl/`` together with every primitive they
-bundle: the hand-written wrappers (``holoso_support_template.v``) and the header sit at the top, while each vendored
-source occupies its own subdirectory (refreshed by ``tools/update_support_rtl.py``), alongside any locally-maintained
-subdirectories. The module library is assembled in memory and is invariant to the generated module, so one file serves
-a whole design.
 """
 
 import logging
@@ -18,7 +11,7 @@ from ..._legal import output_header
 _logger = logging.getLogger(__name__)
 
 _TEMPLATE_FILE = "holoso_support_template.v"
-_HEADER_FILE = "holoso_support.vh"
+_INLINE_FILE = "holoso_support_inline.vh"
 _MEGAFILE = "holoso_support.v"
 _MEGAFILE_COMPONENT_SOURCE_DIR = "rtl"
 _MANIFEST = "README.md"
@@ -39,8 +32,7 @@ def _iter_rtl(node: Traversable, prefix: str = "") -> list[tuple[str, str]]:
 def _megafile_header() -> str:
     lines = output_header("// ").splitlines() + [
         "//",
-        f"// A Holoso-synthesized design needs only this file plus {_HEADER_FILE}.",
-        "// The same set of support files serves every Holoso-generated module in a design.",
+        "// A Holoso-synthesized design needs only this file. It serves every Holoso-generated module in a design.",
     ]
     return "\n".join(lines)
 
@@ -60,12 +52,15 @@ def _build_megafile(pkg: Traversable) -> str:
 
 
 @cache
-def support_files() -> dict[str, str]:
-    """The shared support library that generated modules instantiate ``{filename: content}``; invariant, so cached."""
+def inline_support() -> str:
+    """The helper functions for the emitter to splice into each generated module."""
     pkg = resources.files(__package__)
-    files = {
-        _MEGAFILE: _build_megafile(pkg),
-        _HEADER_FILE: pkg.joinpath(_MEGAFILE_COMPONENT_SOURCE_DIR).joinpath(_HEADER_FILE).read_text(encoding="utf-8"),
-    }
+    return pkg.joinpath(_MEGAFILE_COMPONENT_SOURCE_DIR).joinpath(_INLINE_FILE).read_text(encoding="utf-8").strip()
+
+
+@cache
+def support_files() -> dict[str, str]:
+    """The shipped support library ``{filename: content}`` -- just the module library."""
+    files = {_MEGAFILE: _build_megafile(resources.files(__package__))}
     _logger.info("Assembled support library: %s", ", ".join(f"{n} ({len(t.encode())} B)" for n, t in files.items()))
     return files

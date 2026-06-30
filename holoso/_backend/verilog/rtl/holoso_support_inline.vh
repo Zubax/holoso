@@ -1,4 +1,4 @@
-// The header to go along holoso_support.v; refer there for details. It is included in the generated Verilog files.
+// BEGIN holoso_support_inline.vh: the file is spliced into each generated module.
 
 // Combinational mapping from float to boolean: a zero or a subnormal (if supported) float is false, otherwise true.
 // E.g., if IEEE 754 binary32 is used (with subnormals), values with magnitude under ~1e-38 are mapped to falsity.
@@ -24,3 +24,5 @@ function [W-1:0] holoso_fsaturate;
     input [W-1:0] x;
     holoso_fsaturate = (&x[W-2:WMAN-1]) ? {x[W-1], {(WEXP - 1) {1'b1}}, 1'b0, {(WMAN - 1) {1'b1}}} : x;
 endfunction
+
+// END of holoso_support_inline.vh

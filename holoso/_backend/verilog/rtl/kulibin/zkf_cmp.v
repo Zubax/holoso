@@ -2,6 +2,7 @@
 ///
 /// STAGE_INPUT=0: operands feed the compare combinationally (default).
 /// STAGE_INPUT=1: latch the inputs before any combinational logic, isolating them from upstream paths (+1 cycle).
+/// STAGE_INPUT>1: add extra dummy stages; helps in routing-congested designs (+STAGE_INPUT cycles).
 
 `default_nettype none
 
@@ -19,17 +20,14 @@ module zkf_cmp #(
     input wire [WEXP+WMAN-1:0] b,
 
     output reg out_valid,
-    output reg a_gt_b,      // a > b
-    output reg a_eq_b,      // a = b
-    output reg a_lt_b       // a < b
+    output reg a_gt_b,
+    output reg a_eq_b,
+    output reg a_lt_b
 );
     localparam WFULL = WEXP + WMAN;
 
     localparam LATENCY_REF = 1 + STAGE_INPUT;
     generate
-        if ((STAGE_INPUT != 0) && (STAGE_INPUT != 1)) begin : g_invalid_stage_input
-            _zkf_invalid_stage_input u_invalid();
-        end
         if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _zkf_invalid_latency_mismatch u_invalid();
         end
@@ -39,7 +37,7 @@ module zkf_cmp #(
     wire             in_valid_q;
     wire [WFULL-1:0] a_q;
     wire [WFULL-1:0] b_q;
-    zkf_pipe #(.W(2*WFULL), .N(STAGE_INPUT ? 1 : 0)) u_input_pipe (
+    zkf_pipe #(.W(2*WFULL), .N(STAGE_INPUT)) u_input_pipe (
         .clk(clk), .rst(rst), .in_valid(in_valid), .in({b, a}),
         .out_valid(in_valid_q), .out({b_q, a_q})
     );

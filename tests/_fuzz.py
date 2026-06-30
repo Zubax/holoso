@@ -43,8 +43,8 @@ from holoso._backend.numerical import NumericalSimulator, generate
 from holoso._frontend import lower as lower_frontend
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
-from holoso._lir import Branch, InlineScheduledOp, Lir, RegRef, ScheduledOp, build, inline_landing_cycle
-from holoso._lir import operand_read_cycle, result_landing_cycle
+from holoso._lir import Branch, Lir, RegRef, ScheduledOp, build, landing_cycle
+from holoso._lir import operand_read_cycle
 from holoso._mir import Mir, MirBranch, MirInterpreter, MirJump, MirTerminator
 from holoso._mir import lower as lower_to_mir
 from holoso._operators import OpConfig
@@ -1096,11 +1096,7 @@ def _overlap_spill_depth(lir: Lir) -> int | None:
             for write in op.writes:
                 if not isinstance(write.dst, RegRef):
                     continue
-                landing = (
-                    inline_landing_cycle(op.commit_cycle)
-                    if isinstance(op, InlineScheduledOp)
-                    else result_landing_cycle(write.dst, op.commit_cycle)
-                )
+                landing = landing_cycle(op.commit_cycle)  # every result lands at the one bank-independent cycle
                 reg_depth.setdefault(write.dst, []).append((landing, op_depth))
                 if landing > block.term_offset:
                     best = op_depth if best is None else max(best, op_depth)

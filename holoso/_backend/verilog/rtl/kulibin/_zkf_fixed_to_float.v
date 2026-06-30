@@ -25,7 +25,7 @@
 `default_nettype none
 
 module _zkf_fixed_to_float #(
-    parameter WEXP                   = 6,   // exponent field width
+    parameter WEXP                   = 6,
     parameter WMAN                   = 18,  // significand precision including the hidden bit
     parameter WMAG                   = 64,  // width of the unsigned magnitude fed to the normalizer
     parameter WEU                    = 8,   // internal signed exponent width, also passed to _zkf_pack as WEXP_UNBIASED

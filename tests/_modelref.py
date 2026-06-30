@@ -222,7 +222,7 @@ def overlap_dead_arm_spill_kernel(x, y, z):  # type: ignore[no-untyped-def]
     """
     Cross-block overlap SOUNDNESS corner: a value live ONLY in one arm shares no register hazard with a value the
     sibling arm spills onto it. ``v`` is computed in the entry block and used only in the else arm; the wide chain
-    ``w`` commits late and spills past the shrunk terminator into BOTH arms (its writeback latch fires unconditionally
+    ``w`` commits late and spills past the shrunk terminator into BOTH arms (its write-enable fires unconditionally
     before the redirect). In the else arm ``w`` is DEAD -- if the allocator reuses ``w``'s register for ``v`` there,
     the unconditional spill of ``w`` clobbers ``v`` before the arm reads it (a silent miscompile the cosim cannot
     catch, since the numerical model shares the same register file). The else arm's value must therefore be checked
@@ -244,8 +244,8 @@ def const_branch_kernel(x, y):  # type: ignore[no-untyped-def]
     0.0`` is constant-true but formed by DIVISION, which escapes the frontend's AST-level reachability fold (it
     evaluates only +,-,* of literals), so the HIR const-folder reduces it to a BoolConst that if-conversion refuses --
     leaving an EMPTY const-branch block (the condition install + a branch, no float content). That const materialization
-    is a pc-gated install read AT the terminator and lands at the WIDE boundary, so the bank-aware drain must keep the
-    wide drain for it; shrinking to the boolean boundary made the branch read the condition one PC before it landed.
+    is a pc-gated install read AT the terminator and lands at the drained boundary, so the drain must keep that
+    boundary for it; shrinking below it made the branch read the condition one PC before it landed.
     """
     r = x
     if x > y:
@@ -277,8 +277,8 @@ def diamond_then_loop_kernel(x, y):  # type: ignore[no-untyped-def]
 def overlap_div_err_kernel(x, y, z):  # type: ignore[no-untyped-def]
     """
     Cross-block overlap err_pc corner (shared by the white-box twin and the directed err_pc cosim). A division -- the
-    one error-bearing op -- commits late, so its writeback spills past the shrunk terminator. The data writeback rides
-    the pipeline into the taken arm correctly, but the err_pc diagnostic latches ``pc - FETCH_LAG`` when the write-
+    one error-bearing op -- commits late, so its result spills past the shrunk terminator. The data write lands in the
+    taken arm correctly, but the err_pc diagnostic latches ``pc - FETCH_LAG`` when the write-
     enable executes, FETCH_LAG steps after its write word; if the terminator redirected to the NON-fall-through arm by
     then, err_pc would capture the successor frame instead of the division's step. The shrink floor must keep that
     latch in-block. ``x < z`` selects the non-fall-through (true) arm, the only arm with a PC discontinuity; ``y == 0``
@@ -378,11 +378,12 @@ def overlap_drained_passthrough_kernel(x, y, z):  # type: ignore[no-untyped-def]
     """
     A wide chain ``w`` computed in the overlapping entry block spills past the shrunk terminator into a then arm that
     does NO work and merely passes ``w`` through as the merged value, so ``w`` is the live-out of a fully-DRAINED,
-    no-work arm. This exercises the drained-block-receiving-a-spill path and pins the ``term_offset <= wide_cap``
-    boundary invariant: the spill lands within the successor's wide cap because the predecessor's issue-side envelope
-    already tracks ``w``'s late write word, so the successor-local spill is only the fixed fetch/latch gap regardless
-    of the chain depth (a reviewer hypothesized a chain-depth-scaled spill could exceed the cap; it cannot, and this
-    kernel locks that in). The else arm's unspeculatable division keeps the diamond a real branch.
+    no-work arm. This exercises the drained-block-receiving-a-spill path and pins the ``term_offset <= drained
+    boundary`` invariant: the spill lands within the successor's drained-boundary cap because the predecessor's
+    issue-side envelope already tracks ``w``'s late write word, so the successor-local spill is only the fixed
+    fetch/latch gap regardless of the chain depth (a reviewer hypothesized a chain-depth-scaled spill could exceed the
+    cap; it cannot, and this kernel locks that in). The else arm's unspeculatable division keeps the diamond a real
+    branch.
     """
     w = ((((x * z + y) * z + y) * z + y) * z + y) * z + y
     if x < y:
@@ -397,8 +398,8 @@ def overlap_livein_branch_arm_kernel(x, y, z):  # type: ignore[no-untyped-def]
     The wide chain ``w`` spills from the overlapping entry into an arm that ITSELF branches on a LIVE-IN condition ``c``
     (computed in the entry block, not the arm) -- exercising the overlap interaction the plain dead-arm shape never
     reaches: a block that receives a spill and branches on a RESIDENT live-in condition shrinks its terminator to the
-    issue-side envelope (the resident condition adds no read floor) rather than pinning to the wide drain. Every divisor
-    is structurally nonzero, so each diamond stays a real branch.
+    issue-side envelope (the resident condition adds no read floor) rather than pinning to the drained boundary. Every
+    divisor is structurally nonzero, so each diamond stays a real branch.
     """
     c = z > 2.0  # a live-in boolean condition, computed in the entry block (both arms reachable over the input range)
     w = ((((x * z + y) * z + y) * z + y) * z + y) * z + y  # wide chain, spills past the shrunk entry terminator

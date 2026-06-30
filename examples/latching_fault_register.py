@@ -18,12 +18,6 @@ class LatchingFaultRegister:
         self._overtemp: bool = False
 
     def __call__(self, overcurrent: bool, overvoltage: bool, overtemp: bool, /) -> tuple[bool, bool, bool, bool]:
-        # Each latch is one `or` of its own prior state and its input, so the new-state producer reads only resident
-        # values (carried state and fresh input) and is eligible for the entry block's very first microcode word.
-        # That is precisely what the scheduler's accept-dwell guard holds off cycle 0: while the sequencer waits for
-        # `in_valid` it re-fires `ucode[0]` every idle cycle, so a state-bearing write there would be re-driven with
-        # stale inputs. This kernel is the exemplar of that guard -- its three latches are floored to cycle 1,
-        # one step later than an unguarded combinational write would land.
         self._overcurrent = self._overcurrent or overcurrent
         self._overvoltage = self._overvoltage or overvoltage
         self._overtemp = self._overtemp or overtemp

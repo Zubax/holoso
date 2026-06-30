@@ -31,6 +31,7 @@
 ///     register, and the _zkf_pack output stage. Results are always representable for finite x, so no overflow path.
 ///
 /// STAGE_INPUT=1 registers the raw input before decode.
+/// STAGE_INPUT>1: add extra dummy stages; helps in routing-congested designs (+STAGE_INPUT cycles).
 /// STAGE_DECODE=1 splits classification/re-center across two registers; STAGE_DECODE=0 keeps one register.
 /// The generated evaluator uses a registered ROM read followed by a mandatory fabric register before Horner;
 /// non-arithmetic sideband payloads are aligned by plain delay pipes.
@@ -47,10 +48,10 @@
 `default_nettype none
 
 module zkf_log2 #(
-    parameter WEXP                  = 6,    // exponent field width
+    parameter WEXP                  = 6,
     parameter WMAN                  = 18,   // significand precision including the hidden bit
     parameter WMULTIPLIER           = 0,    // forwarded to _zkf_pmul
-    parameter STAGE_INPUT           = 0,    // 0: combinational inputs;   1: latch inputs before any logic (+1 stage)
+    parameter STAGE_INPUT           = 0,    // number of input register stages (>=0); +STAGE_INPUT cycles
     parameter STAGE_DECODE          = 0,    // 0: one decode/re-center register; 1: split across two registers
     parameter STAGE_PRODUCT         = 0,    // forwarded to the Horner _zkf_pmul instances
     parameter STAGE_PRODUCT_FINAL   = STAGE_PRODUCT,  // forwarded to the final f*C(f) _zkf_pmul only
@@ -78,9 +79,6 @@ module zkf_log2 #(
         // BIAS below uses an unsized integer shift on WEXP; WEXP >= 31 would overflow 32-bit integer constants.
         if ((WEXP < 2) || (WMAN < 4) || (WEXP >= 31)) begin : g_invalid_wman
             _zkf_invalid_wexp_or_wman u_invalid();
-        end
-        if ((STAGE_INPUT != 0) && (STAGE_INPUT != 1)) begin : g_invalid_stage_input
-            _zkf_invalid_stage_input u_invalid();
         end
         if ((STAGE_DECODE != 0) && (STAGE_DECODE != 1)) begin : g_invalid_stage_decode
             _zkf_invalid_stage_decode u_invalid();
@@ -144,7 +142,7 @@ module zkf_log2 #(
     // -- Optional raw input register stage: with STAGE_INPUT=1, no decode/re-center logic sits on the input side.
     wire             in_valid_q;
     wire [WFULL-1:0] x_q;
-    zkf_pipe #(.W(WFULL), .N(STAGE_INPUT ? 1 : 0)) u_input_pipe (
+    zkf_pipe #(.W(WFULL), .N(STAGE_INPUT)) u_input_pipe (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .in(x),
         .out_valid(in_valid_q), .out(x_q)

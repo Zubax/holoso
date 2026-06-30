@@ -128,8 +128,8 @@ def _count_down(n):  # type: ignore[no-untyped-def]
     return n
 
 
-# The realized worst-case in_valid->out_valid latency over a FIXED adversarial input sequence per kernel, frozen on the
-# B1+B2 build. This is the regression guard for the project's true goal -- realized per-transaction latency in multi-
+# The realized worst-case in_valid->out_valid latency over a FIXED adversarial input sequence per kernel, frozen.
+# This is the regression guard for the project's true goal -- realized per-transaction latency in multi-
 # block kernels -- which the static last_pc gate alone cannot express: a per-iteration drain regression is amplified by
 # the loop trip count (recip_newton, remainder), and a branchy kernel's worst arm may not be its longest static path.
 # Each tuple is (factory, input vectors, frozen worst-case waited). The vectors are chosen to hit the draining/long
@@ -159,7 +159,7 @@ _WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[l
         [[_T, _T, _T, _F, _F, _F], [_T, _T, _T, _T, _T, _T], [_T, _F, _T, _F, _T, _F], [_F, _T, _T, _T, _T, _T]],
         17,
     ),
-    "recip_newton": (lambda: NewtonReciprocal().__call__, [[0.5], [1.0], [2.0], [1.7], [2.9], [0.35]], 244),
+    "recip_newton": (lambda: NewtonReciprocal().__call__, [[0.5], [1.0], [2.0], [1.7], [2.9], [0.35]], 168),
     "remainder": (
         lambda: remainder,
         [[1.0, 1.0], [7.0, 3.0], [1000.0, 1.0], [123.0, 4.0], [50.0, 7.0], [2.5, 2.5]],

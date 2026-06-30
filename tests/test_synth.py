@@ -99,14 +99,11 @@ def test_rejects_non_finite_constants() -> None:
 def test_write_artifacts(tmp_path: Path) -> None:
     result = holoso.synthesize(_kernel, ops=_ops())
     paths = result.write(tmp_path)
-    # The support header (holoso_support.vh) ships and is included unconditionally, alongside the support modules.
-    assert set(paths) == {"_kernel.v", "holoso_support.v", "holoso_support.vh", "test__kernel.py", "_kernel.html"}
+    assert set(paths) == {"_kernel.v", "holoso_support.v", "test__kernel.py", "_kernel.html"}
     assert (tmp_path / "_kernel.v").exists()
     assert (tmp_path / "test__kernel.py").exists()
     assert (tmp_path / "_kernel.html").exists()
     assert (tmp_path / "holoso_support.v").exists()
-    assert (tmp_path / "holoso_support.vh").exists()
-    assert '`include "holoso_support.vh"' in (tmp_path / "_kernel.v").read_text()
 
 
 def test_rejects_invalid_and_reserved_module_names() -> None:
@@ -133,7 +130,6 @@ def test_accepts_valid_module_name(tmp_path: Path) -> None:
     assert set(paths) == {
         "good_name.v",
         "holoso_support.v",
-        "holoso_support.vh",
         "test_good_name.py",
         "good_name.html",
     }

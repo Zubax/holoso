@@ -23,7 +23,7 @@ from holoso import (
 from holoso._backend.verilog import generate
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lir import BoolRegRef, RegRef, build
+from holoso._lir import BoolRegRef, RegRef, build, pooled_write_word
 from holoso._mir import lower as lower_to_mir
 
 from .hdl.hdl_float_oracle import HDL_DIR, sources
@@ -83,7 +83,7 @@ def test_operator_instance_names_include_hardware_identity() -> None:
 @requires_iverilog
 def test_comparisons_share_one_pooled_fcmp_instance() -> None:
     # Comparisons live in mutually-exclusive blocks and execute sequentially, so they share a single holoso_fcmp
-    # (the one-instance-per-operator pooling convention), its operands riding the ordinary microcode read-latch
+    # (the one-instance-per-operator pooling convention), its operands riding the ordinary microcode read-mux
     # lanes -- not one instance per comparison.
     def kernel(x):  # type: ignore[no-untyped-def]
         if x > 1.0:
@@ -287,15 +287,15 @@ def test_ekf1_stateful_elaborates(tmp_path: Path) -> None:
     _elaborate("ekf1_stateful", generate(lir).verilog, tmp_path)
 
 
-def test_bool_lane_write_enable_rides_the_commit_step_and_wide_one_later() -> None:
-    # The sharpest trap of the per-bank discipline: a latch-free BOOLEAN lane's write-enable must sit at ROM step
-    # ``commit`` (the flag is valid on that executing step; one later would land the result past the branch's
-    # boundary read, which has exactly one cycle of slack), while a WIDE lane's sits at ``commit + 1`` to ride the
-    # writeback latch. Checked white-box against the microcode tables of a kernel with both lane kinds.
+def test_both_bank_lane_write_enables_ride_the_commit_step() -> None:
+    # A pooled lane's write-enable -- boolean OR wide -- sits at ROM step
+    # ``pooled_write_word(commit)``, which is the commit step itself (the flag is valid on that executing step;
+    # one later would land a wide result past the branch's boundary read, which has exactly one cycle of slack).
+    # Checked white-box against the microcode tables of a kernel with both lane kinds.
     from holoso._backend.verilog._microcode import (
         base_name,
         build_microcode,
-        f_we,
+        f_wen,
         port_const_map,
         read_ports,
         write_target_lists,
@@ -311,20 +311,23 @@ def test_bool_lane_write_enable_rides_the_commit_step_and_wide_one_later() -> No
     checked_bool = checked_wide = 0
     for op in lir.ops:
         for write in op.writes:
-            field = fields[f_we(base_name(op.inst), write.port)]
-            if isinstance(write.dst, LirBoolRegRef):
-                assert field.values[op.commit_cycle] == 1, "boolean lane write-enable must ride the commit step"
-                checked_bool += 1
-            else:
-                assert field.values[op.commit_cycle + 1] == 1, "wide lane write-enable must ride the writeback latch"
+            field = fields[f_wen(base_name(op.inst), write.port)]
+            is_wide = not isinstance(write.dst, LirBoolRegRef)
+            assert (
+                field.values[pooled_write_word(op.commit_cycle)] == 1
+            ), "a pooled lane's write-enable must ride the commit step on both banks"
+            if is_wide:
                 checked_wide += 1
+            else:
+                checked_bool += 1
     assert checked_bool >= 1 and checked_wide >= 2  # the kernel has a comparison and several float results
 
 
 def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Path) -> None:
-    # No shipped operator has several WIDE outputs yet (fsort will), so the per-port wide lane machinery -- separate
-    # writeback latches, write-enable/address fields, and sign-conditioner fields per output -- is exercised with a
-    # synthetic two-output operator on a hand-built Lir, down to Icarus elaboration against a matching stub module.
+    # No shipped operator has several WIDE outputs yet (fsort will), so the per-port wide lane machinery -- per-output
+    # write-enable/address and sign-conditioner fields, each result driven combinationally from the operator into its
+    # register write -- is exercised with a synthetic two-output operator on a hand-built
+    # Lir, down to Icarus elaboration against a matching stub module.
     from dataclasses import dataclass
     from typing import ClassVar
 
@@ -332,7 +335,6 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         FloatInputLoad,
         FloatOperand,
         FloatOutputWire,
-        Jump,
         Lir,
         LirBlock,
         OperatorInstance,
@@ -392,21 +394,27 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         ops=[op],
         outputs=[FloatOutputWire("out_0", FloatOperand(RegRef(2))), FloatOutputWire("out_1", FloatOperand(RegRef(3)))],
         float_state_slots=[],
-        blocks=[
-            LirBlock(0, [op], [], [], [], Ret(), op.commit_cycle, boundary_step(op.commit_cycle, wide_resident=True))
-        ],
+        blocks=[LirBlock(0, [op], [], [], [], Ret(), op.commit_cycle, boundary_step(op.commit_cycle))],
         block_base=[0],
         entry=0,
-        last_pc=op.commit_cycle + 4,
-        min_initiation_interval=op.commit_cycle + 4,
+        last_pc=boundary_step(op.commit_cycle),
+        min_initiation_interval=boundary_step(op.commit_cycle),
         bool_regfile=BoolRegFileLayout(nreg=0),
         bool_state_slots=[],
     )
     verilog = generate(lir).verilog
     for q in (0, 1):
-        assert "s_fsortlike_" in verilog and f"_y{q}_q" in verilog
-        assert re.search(rf"mc_we_fsortlike_\w+_0_y{q}\b", verilog)
-        assert re.search(rf"mc_fsortlike_\w+_0_y{q}s\b", verilog)
+        # Each per-port result is a combinational output wire (s_..._y{q}, no _q register) that drives the register
+        # write directly.
+        assert f"_y{q}_q" not in verilog, "the per-port result register must not be emitted"
+        assert re.search(
+            rf"wire\s+\[W-1:0\]\s+s_fsortlike_\w+_0_y{q}\s*;", verilog
+        ), "per-port combinational result wire"
+        assert re.search(
+            rf"regs\[\d+\] <= s_fsortlike_\w+_0_y{q}\b", verilog
+        ), "the wide write must read the combinational output wire directly"
+        assert re.search(rf"uc_wen_fsortlike_\w+_0_y{q}\b", verilog)
+        assert re.search(rf"uc_fsortlike_\w+_0_y{q}sgn\b", verilog)
     assert ".min(" in verilog and ".max(" in verilog and ".min_sgnop(" in verilog and ".max_sgnop(" in verilog
     if shutil.which("iverilog") is None:
         pytest.skip("iverilog not installed")

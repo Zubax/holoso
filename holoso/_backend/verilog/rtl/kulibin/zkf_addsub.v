@@ -5,7 +5,7 @@
 
 // The latency is the same as zkf_add
 module zkf_addsub #(
-    parameter WEXP            = 6,    // exponent field width
+    parameter WEXP            = 6,
     parameter WMAN            = 18,   // significand precision including the hidden bit
     parameter STAGE_INPUT     = 0,    // forwarded to zkf_add
     parameter STAGE_DECODE    = 0,    // forwarded to zkf_add
