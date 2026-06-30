@@ -2452,8 +2452,7 @@ def test_drain_only_ret_with_a_resident_output_needs_no_boundary_drain() -> None
     # (not the phantom ``boundary_step(0)`` of a value that never commits there). octave_index is the canonical case --
     # its loop body produces the octave count and the exit block does pure drain to out_valid. Crash-before (the
     # ``boundary_step(makespan=0)`` over-charge): the drain-only Ret paid a full FETCH_LAG + read-first phantom drain,
-    # so
-    # out_valid landed three cycles late on every transaction.
+    # so out_valid landed three cycles late on every transaction.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     from octave_index import octave_index  # noqa: PLC0415  (example kernels live under examples/)
 

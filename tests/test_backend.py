@@ -289,10 +289,9 @@ def test_ekf1_stateful_elaborates(tmp_path: Path) -> None:
 
 def test_both_bank_lane_write_enables_ride_the_commit_step() -> None:
     # A pooled lane's write-enable -- boolean OR wide -- sits at ROM step
-    # ``pooled_write_word(commit)``, which is the commit step itself (the flag is valid on that executing step; one
-    # later
-    # would land a wide result past the branch's boundary read, which has exactly one cycle of slack). Checked white-box
-    # against the microcode tables of a kernel with both lane kinds.
+    # ``pooled_write_word(commit)``, which is the commit step itself (the flag is valid on that executing step;
+    # one later would land a wide result past the branch's boundary read, which has exactly one cycle of slack).
+    # Checked white-box against the microcode tables of a kernel with both lane kinds.
     from holoso._backend.verilog._microcode import (
         base_name,
         build_microcode,

@@ -75,10 +75,9 @@ to LIR before the slow HDL-emission/simulation iteration begins.
   used when coalescing could not make the write free.
 
 - Coalesce -- merging a phi and its identity-arm predecessors onto one register (union-find) so the install becomes a
-  no-op; a diamond's mutually-exclusive arms always coalesce away.
+  no-op.
 
-- Slot (state slot) -- a register holding persistent state across transactions (e.g. `self.x`), committed in place
-  so a same-frame self-update needs no copy.
+- Slot (state slot) -- a register holding persistent state across transactions (e.g. `self.x`), committed in place.
 
 - Drain -- the cycles a block's terminator waits past its last commit for in-frame writebacks to land.
 
@@ -92,10 +91,9 @@ to LIR before the slow HDL-emission/simulation iteration begins.
   awaiting the result being taken before restarting).
 
 - Makespan / II -- a block's schedule length in cycles; the initiation interval (II) is the whole executed path's exact
-  cycle count. We do not target a near-1 II like a streaming pipeline.
+  cycle count.
 
-- ZISC -- zero-instruction-set computer: the VLIW microcode-driven sequential FSM that time-multiplexes the shared
-  operators over the register banks. The artifact Holoso synthesizes.
+- ZISC -- zero-instruction-set computer: the VLIW microcode-driven sequential FSM that Holoso synthesizes.
 
 ## Python API
 
@@ -253,8 +251,8 @@ merge feeds a following control structure -- by retargeting each predecessor's j
 composing the phi arms. A merge phi reached any other way (e.g. a loop-invariant value the header carries on its
 back-edge arm) keeps its real branch -- deferred (see LIR DEFERRED).
 
-It is understood that FP math is non-associative, so some of these optimizations may produce non-bit-exact results. This
-is accepted, analogous to fast-math in C/C++ compilers.
+FP math is non-associative, so some of these optimizations may produce non-bit-exact results -- accepted, analogous to
+fast-math in C/C++ compilers.
 
 ### DEFERRED
 
@@ -315,11 +313,11 @@ constant but is derived pairwise from a single cycle-accurate timing model built
 fetch lag and a read-first edge), never per-case constants. Both register banks sample an operand at
 issue + fetch lag through a combinational read mux. Every result -- pooled or inline, on
 either bank -- writes the register array combinationally and becomes readable a fixed fetch-lag-plus-read-first edge
-after its commit. (An earlier design registered pooled wide results in a writeback latch but dropped it as
-inconsistent -- it latched only float operators while installs, control flow, and inline writes go direct -- and
-needlessly delayed short installs; it likewise presented the wide bank's read address a step early in a read latch,
-since removed so both banks read alike.) Because the two banks and the pooled/inline classes are uniform instances of
-that one model rather than hand-coded cases,
+after its commit. (Earlier designs latched pooled wide results in a writeback latch and presented the wide bank's read
+address a step early in a read latch; both were dropped as inconsistent -- the writeback latch caught only float
+operators while installs, control flow, and inline writes went direct, and it needlessly delayed short installs --
+so every result now writes direct and both banks read alike.) Because the two banks and the pooled/inline classes
+are uniform instances of that one model rather than hand-coded cases,
 boolean-logic and cast chains schedule back-to-back, which shortens logic-dense kernels. Block-resident operands
 (inputs, state reads, phis) are available from the block's first control word, so an op can issue from there.
 
@@ -490,8 +488,8 @@ own bit-exact `evaluate`, owning no registers, no schedule, and no overlap machi
 from the LIR. Since it shares the front/mid-end and the operators with the numerical model but none of the LIR, the
 differential `interpreter == model` isolates exactly the LIR layer.
 
-The HTML report is an essential tool for humans to understand and debug what the compiler did. It must provide an EXACT
-representation of the generated core behavior, not a simplified or approximated view.
+The HTML report must give humans an EXACT representation of the generated core behavior -- the tool for understanding
+and debugging what the compiler did -- not a simplified or approximated view.
 
 ## Fabric-area exploration
 
@@ -504,7 +502,7 @@ so the dead ends are not re-explored.
 Adopted (lossless, f_max-neutral):
 
 - Read mux as a `case` over the dense read-set index rather than an indexed part-select into a packed gather bus:
-  smallest and fastest of the encodings tried, free of the DSP-inference trap. Nested-ternary muxes are catastrophic.
+  smallest and fastest of the encodings tried. Nested-ternary muxes are catastrophic.
 - Commutative operand port assignment, solved exactly as a MILP: a few percent LUT on the EKF across all three tools, at
   zero hardware or latency cost. Based on Chen & Cong.
 - Dense write-target index and a grouped input load: read/write symmetry at neutral area. The per-register write select

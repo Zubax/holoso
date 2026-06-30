@@ -378,11 +378,12 @@ def overlap_drained_passthrough_kernel(x, y, z):  # type: ignore[no-untyped-def]
     """
     A wide chain ``w`` computed in the overlapping entry block spills past the shrunk terminator into a then arm that
     does NO work and merely passes ``w`` through as the merged value, so ``w`` is the live-out of a fully-DRAINED,
-    no-work arm. This exercises the drained-block-receiving-a-spill path and pins the ``term_offset <= drained boundary``
-    boundary invariant: the spill lands within the successor's drained-boundary cap because the predecessor's issue-side envelope
-    already tracks ``w``'s late write word, so the successor-local spill is only the fixed fetch/latch gap regardless
-    of the chain depth (a reviewer hypothesized a chain-depth-scaled spill could exceed the cap; it cannot, and this
-    kernel locks that in). The else arm's unspeculatable division keeps the diamond a real branch.
+    no-work arm. This exercises the drained-block-receiving-a-spill path and pins the ``term_offset <= drained
+    boundary`` invariant: the spill lands within the successor's drained-boundary cap because the predecessor's
+    issue-side envelope already tracks ``w``'s late write word, so the successor-local spill is only the fixed
+    fetch/latch gap regardless of the chain depth (a reviewer hypothesized a chain-depth-scaled spill could exceed the
+    cap; it cannot, and this kernel locks that in). The else arm's unspeculatable division keeps the diamond a real
+    branch.
     """
     w = ((((x * z + y) * z + y) * z + y) * z + y) * z + y
     if x < y:
@@ -397,8 +398,8 @@ def overlap_livein_branch_arm_kernel(x, y, z):  # type: ignore[no-untyped-def]
     The wide chain ``w`` spills from the overlapping entry into an arm that ITSELF branches on a LIVE-IN condition ``c``
     (computed in the entry block, not the arm) -- exercising the overlap interaction the plain dead-arm shape never
     reaches: a block that receives a spill and branches on a RESIDENT live-in condition shrinks its terminator to the
-    issue-side envelope (the resident condition adds no read floor) rather than pinning to the drained boundary. Every divisor
-    is structurally nonzero, so each diamond stays a real branch.
+    issue-side envelope (the resident condition adds no read floor) rather than pinning to the drained boundary. Every
+    divisor is structurally nonzero, so each diamond stays a real branch.
     """
     c = z > 2.0  # a live-in boolean condition, computed in the entry block (both arms reachable over the input range)
     w = ((((x * z + y) * z + y) * z + y) * z + y) * z + y  # wide chain, spills past the shrunk entry terminator

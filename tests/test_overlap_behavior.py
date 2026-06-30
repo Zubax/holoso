@@ -263,8 +263,7 @@ def test_spilled_wide_mul_operand_is_read_after_it_lands() -> None:
     # The fmul-producer generalization of test_spilled_in_branch_condition: a LATE latency-1 wide product spills past
     # the overlapped entry terminator into the inner arm, where a pooled fadd reads it. Under the latch-free read EVERY
     # latency-1 wide pooled op (fmul / fmul_ilog2 / fcmp -- all latency 1 by default) samples at issue+2, one PC past
-    # its
-    # control word; without the _issue_side_envelope operand_read_cycle floor the producer fires past the shrunk
+    # its control word; without the _issue_side_envelope operand_read_cycle floor the producer fires past the shrunk
     # terminator and is ORPHANED (the model KeyErrors on its register; a wrong arm in general). This guards the WHOLE
     # latency-1-pooled-op spill surface, not only the single fcmp shape -- and the defect is invisible to the
     # interpreter<->model differential, so only a behavioral spill-then-read kernel catches it.

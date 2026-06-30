@@ -429,8 +429,8 @@ class PortWrite:
 @dataclass(frozen=True, slots=True)
 class PooledScheduledOp:
     """
-    One pooled-instance firing in the software-pipelined schedule: ``inst`` asserts ``in_valid`` on ``issue_cycle``
-    (its operands sampled per the bank read discipline), and on ``commit_cycle == issue_cycle + latency`` every
+    One pooled-instance firing in the software-pipelined schedule: ``inst`` asserts ``in_valid`` on ``issue_cycle``,
+    and on ``commit_cycle == issue_cycle + latency`` every
     tapped output port lands in its destination register. The writes are sorted by port and pairwise distinct in
     both port and destination -- members of one firing land simultaneously, so the allocator always gives them
     distinct registers.

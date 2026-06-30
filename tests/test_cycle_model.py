@@ -128,8 +128,8 @@ def _count_down(n):  # type: ignore[no-untyped-def]
     return n
 
 
-# The realized worst-case in_valid->out_valid latency over a FIXED adversarial input sequence per kernel, frozen on the
-# B1+B2 build. This is the regression guard for the project's true goal -- realized per-transaction latency in multi-
+# The realized worst-case in_valid->out_valid latency over a FIXED adversarial input sequence per kernel, frozen.
+# This is the regression guard for the project's true goal -- realized per-transaction latency in multi-
 # block kernels -- which the static last_pc gate alone cannot express: a per-iteration drain regression is amplified by
 # the loop trip count (recip_newton, remainder), and a branchy kernel's worst arm may not be its longest static path.
 # Each tuple is (factory, input vectors, frozen worst-case waited). The vectors are chosen to hit the draining/long
