@@ -106,11 +106,6 @@ class HardwareOperator(ABC):
     # The permutation must preserve each port's type, so a swapped firing's taps stay in their banks.
     swap_output_permutation: ClassVar[tuple[int, ...] | None] = None
 
-    # Whether ``evaluate`` reproduces the RTL's output bit-for-bit. True for every correctly-rounded operator; an
-    # operator that only faithfully rounds (whose reference is the correctly-rounded ideal rather than the exact bits)
-    # overrides this to False. Consumers read it to choose exact vs tolerant output comparison.
-    bit_exact: ClassVar[bool] = True
-
     @property
     @abstractmethod
     def latency(self) -> int: ...
