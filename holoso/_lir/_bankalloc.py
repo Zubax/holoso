@@ -96,23 +96,40 @@ def layout_and_allocate(
     return _LayoutAllocation(overlap, inst_of, instances, consts, const_pool, alloc)
 
 
-def actual_install_blocks(alloc: Allocation, float_mir: MirFloatView, bool_mir: MirBoolView) -> dict[int, bool]:
+def _install_pushes_makespan(sched: Schedule, source_node: MirNode, source: ValueId) -> bool:
+    """
+    Whether a tail install of ``source`` lands PAST the work makespan -- the per-install +1 drain. True only for a
+    COMPUTED source that is the block's own last-committing work (the install fires one step after to read-first it);
+    an earlier-committing or block-entry-resident source fits at the makespan. Decided through the one
+    ``install_issue_cycle`` so this classification, the LIR placement, and the interference residence cannot drift.
+    """
+    resident = value_resident_at_entry(source_node)
+    return install_issue_cycle(sched.makespan, resident, sched.commit_or_makespan(source)) > sched.makespan
+
+
+def actual_install_blocks(
+    alloc: Allocation, float_mir: MirFloatView, bool_mir: MirBoolView, block_sched: Mapping[int, Schedule]
+) -> dict[int, bool]:
     """
     The post-coalescing install classification (the refinement ``block_has_install`` seeds): each block that actually
-    installs at its tail, mapped to whether it carries a COPY-class install -- one whose source is COMPUTED by the
-    block's work (an operator result or phi), so the install must read-first it (``True``). An install of a block-entry-
-    RESIDENT source -- a literal constant (including the const branch materialization already in ``alloc.bool_writes``),
-    an input, or a state read -- fires inline-class (``False``). A CFG-shape phi-arm predecessor whose every arm
-    coalesced installs nothing and drops out here, which the fixpoint feeds back to the next layout so the
-    spurious drain is removed.
+    installs at its tail, mapped to whether any of its installs lands past the work makespan -- a computed source that
+    is the block's own last work, so the install must read-first it and the block pays the +1 drain (``True``). An
+    install whose source commits earlier, or is block-entry resident (a literal constant -- including the const branch
+    materialization already in ``alloc.bool_writes`` -- an input, or a state read), fits at the makespan (``False``), so
+    its +1 drain is unnecessary and drops here, which the fixpoint feeds back to the next layout. A CFG-shape phi-arm
+    predecessor whose every arm coalesced installs nothing and drops out entirely.
     """
     install: dict[int, bool] = {}
     for bid, copies in alloc.copies.items():
+        sched = block_sched[bid]
         for c in copies:
-            install[bid] = install.get(bid, False) or not value_resident_at_entry(float_mir.nodes[c.source])
+            pushes = _install_pushes_makespan(sched, float_mir.nodes[c.source], c.source)
+            install[bid] = install.get(bid, False) or pushes
     for bid, writes in alloc.bool_writes.items():
+        sched = block_sched[bid]
         for w in writes:
-            install[bid] = install.get(bid, False) or not value_resident_at_entry(bool_mir.nodes[w.source])
+            pushes = _install_pushes_makespan(sched, bool_mir.nodes[w.source], w.source)
+            install[bid] = install.get(bid, False) or pushes
     return install
 
 
@@ -360,6 +377,18 @@ _BOOL = _BoolBank()
 
 
 @dataclass(frozen=True, slots=True)
+class _ArmSource:
+    """
+    A phi arm's install source in the install's (predecessor) block frame: whether it is block-entry resident (a const,
+    input, or state read -- needs no read-first sampling, so it never pushes the install past the makespan) and its
+    commit cycle there (the block makespan when it has no local commit -- a phi or a value computed in another block).
+    """
+
+    resident: bool
+    source_commit: int
+
+
+@dataclass(frozen=True, slots=True)
 class _InterferenceBuilder:
     """
     Builds a bank's interference graph: the loop-invariant liveness facts (residency, result landings, definition
@@ -377,13 +406,21 @@ class _InterferenceBuilder:
     phi_block: dict[ValueId, int]
     arm_out: dict[int, frozenset[ValueId]]
     inflight_defs: dict[int, dict[ValueId, int]]
-    # block -> phi dests whose arm in THIS block has a block-entry-resident source (const, input, or state read)
-    resident_install_dests: dict[int, frozenset[ValueId]]
+    # block -> phi dest -> its arm source in THIS block's frame (resident flag + commit), so the interference residence
+    # matches the LIR copy's placement and cannot drift onto a foreign block's frame.
+    install_source: dict[int, dict[ValueId, _ArmSource]]
 
     def _install_fire(self, block: int, vid: ValueId) -> int:
         """The install's block-local fire step, via the same helpers as the LIR install so residence matches exactly."""
-        resident = vid in self.resident_install_dests.get(block, frozenset())
-        return inline_fire_cycle(install_issue_cycle(self.work_makespan[block], resident))
+        src = self.install_source[block][vid]
+        fire = inline_fire_cycle(install_issue_cycle(self.work_makespan[block], src.resident, src.source_commit))
+        # The interference residence must land within the block, exactly like the emitted copy (build asserts the same):
+        # a fire past the terminator would mean the source commit was read in a foreign block's coordinate frame.
+        assert install_landing(fire) <= self.term_offset[block], (
+            f"block {block}: install of {vid} lands at {install_landing(fire)} past the terminator "
+            f"{self.term_offset[block]} -- interference residence off the predecessor frame"
+        )
+        return fire
 
     def build(
         self,
@@ -441,15 +478,15 @@ def _allocate_bank(
     arm_out = phi_arm_out(mir, phi_nodes, values)
     boundary_base = bank.boundary_base(mir, values, ret_block)
 
-    # Per block, the phi dests whose arm originating there has a block-entry-resident source (a const, input, or state
-    # read): those installs fire inline-class, one read-first edge earlier than a computed-source copy, so the residence
-    # must occupy their destination from that earlier write cycle. Keyed identically to the residual install facts
-    # (phi-result vid per predecessor block).
-    resident_install_dests: dict[int, set[ValueId]] = {}
+    # Per block, each phi dest whose arm originates there -> its source in the PREDECESSOR's own frame (where the
+    # install fires, not the source's home block): the resident flag (a resident source needs no read-first sampling)
+    # and the source commit. The same rule build and actual_install_blocks apply, so the interference residence cannot
+    # drift onto a foreign block's frame.
+    install_source: dict[int, dict[ValueId, _ArmSource]] = {}
     for vid, phi in phi_nodes.items():
         for pred, value, _conditioner in phi.arms:
-            if value_resident_at_entry(view.nodes[value]):
-                resident_install_dests.setdefault(pred, set()).add(vid)
+            resident = value_resident_at_entry(view.nodes[value])
+            install_source.setdefault(pred, {})[vid] = _ArmSource(resident, block_sched[pred].commit_or_makespan(value))
 
     interference = _InterferenceBuilder(
         mir=mir,
@@ -462,7 +499,7 @@ def _allocate_bank(
         phi_block=phi_block,
         arm_out=arm_out,
         inflight_defs=block_inflight,
-        resident_install_dests={b: frozenset(s) for b, s in resident_install_dests.items()},
+        install_source={b: dict(m) for b, m in install_source.items()},
     )
 
     # A slot whose live-in is consumed as ANOTHER slot's live-out (a chained copy, ``self.a = self.b``) must keep its

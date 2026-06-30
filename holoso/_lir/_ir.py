@@ -65,8 +65,8 @@ def inline_fire_cycle(commit_cycle: int) -> int:
     after its scheduler-frame placement. Its result becomes readable one ``READ_FIRST_EDGE`` later (``landing_cycle``).
     For a pc-gated install this is the coalescing equivalence the overlap layout relies on -- ``install_landing`` of
     this fire step equals ``landing_cycle(commit_cycle)``, so a phi arm coalesced onto a direct operator write lands
-    exactly where its copy would have. The resident-vs-computed-source distinction lives in the install's PLACEMENT
-    (``install_issue_cycle``'s +1), not in this fire step.
+    exactly where its copy would have. Whether the install sits at the work makespan or one step past lives in its
+    PLACEMENT (``install_issue_cycle``), not in this fire step.
     """
     return commit_cycle + FETCH_LAG
 
@@ -131,15 +131,23 @@ def install_landing(fire_step: int) -> int:
     return fire_step + READ_FIRST_EDGE
 
 
-def install_issue_cycle(work_makespan: int, resident_source: bool) -> int:
+def install_issue_cycle(work_makespan: int, resident_source: bool, source_commit: int) -> int:
     """
-    The scheduler-frame placement of a block's tail install. A computed-source copy is placed one step PAST the work
-    makespan so it read-firsts a source the block's work may have just produced; an install whose source is resident at
-    block entry has nothing to wait for and is placed at the work makespan itself. The per-install dual of
-    ``install_inclusive_makespan`` (which carries the same +1 into the block makespan only when a computed-source copy
-    is present), so the placement and the drain agree on the +1 and an install cannot land past its block's terminator.
+    The scheduler-frame placement of a block's tail install. The install sits at the work makespan -- landing read-first
+    at the boundary, after every in-block read, the latest placement (minimal destination residence). It is pushed one
+    step past only when a COMPUTED source commits AT the makespan, which the install must fire after to read-first
+    (``source_commit + READ_FIRST_EDGE`` then exceeds the makespan): either the block's own last-committing op, or --
+    conservatively -- a source not scheduled in this block (a phi or a value computed elsewhere), which the callers pass
+    ``source_commit == work_makespan`` so the placement never reads off a foreign frame. A loop-carried copy sourcing an
+    EARLIER in-block op, and a resident source (constant, input, state read), stay at the makespan and pay no terminator
+    cycle. The per-install dual of ``install_inclusive_makespan`` (which carries the +1 into the block makespan exactly
+    when an install lands past the makespan), so the placement and the drain agree and an install cannot land past its
+    block's terminator.
     """
-    return work_makespan + (0 if resident_source else 1)
+    if resident_source:
+        return work_makespan
+    assert source_commit <= work_makespan, "install source_commit lies outside the install's own block frame"
+    return max(work_makespan, source_commit + READ_FIRST_EDGE)
 
 
 def boundary_step(makespan: int) -> int:
@@ -514,9 +522,9 @@ class FloatCopy:
     takes ``source`` on the block-relative ``issue_cycle``. Used when a phi arm is not an operator result that can be
     coalesced directly onto the merged register (e.g. an input, a constant, or a value defined in another block).
     ``resident_source`` records whether ``source`` is available at block entry (a constant, input, or state read) rather
-    than computed by this block's work -- placement only: a computed source is placed one step later (via
-    ``install_issue_cycle``), but both fire inline-class. The builder sets it from ``value_resident_at_entry``, which a
-    ``RegRef`` operand alone cannot reveal.
+    than computed by this block's work -- informational; the placement (``issue_cycle``, via ``install_issue_cycle``)
+    sits at the work makespan unless a computed source is the block's last work. The builder sets it from
+    ``value_resident_at_entry``, which a ``RegRef`` operand alone cannot reveal.
     """
 
     dst: RegRef
@@ -543,8 +551,8 @@ class BoolWrite:
     """
     A boolean register install of a phi arm (a bool const or another bool register, with the arm's folded inversion)
     on a block-relative cycle. ``resident_source`` records whether ``source`` is available at block entry (a constant,
-    input, or state read) rather than computed by this block's work -- placement only, both fire inline-class
-    (see :class:`FloatCopy`).
+    input, or state read) rather than computed by this block's work -- informational; the placement sits at the work
+    makespan unless a computed source is the block's last work (see :class:`FloatCopy`).
     """
 
     dst: BoolRegRef

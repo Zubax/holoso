@@ -160,7 +160,7 @@ def compute_interference(bank: BankLiveness) -> dict[ValueId, set[ValueId]]:
             if vid in bank.op_block and bank.op_block[vid] == block and vid not in live.live_in[block]:
                 w = bank.op_landing[vid]
             elif vid in installed and vid not in live.live_in[block] and vid not in defs[block]:
-                w = installed[vid]  # the install's own fire step (per install: copy-class later, const-class earlier)
+                w = installed[vid]  # the install's own fire step (its placement: makespan, or one step past)
             else:
                 w = 1
             write_at[vid] = w

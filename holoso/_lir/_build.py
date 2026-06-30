@@ -119,18 +119,21 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
     # Conservative seed for the state-copy fixpoint -- the pre-allocation form of ``_has_state_copy``: assume every
     # state slot needs a boundary copy.
     has_state_copy = bool(float_mir.state_slots or bool_mir.state_slots)
-    # Iteration bound = the product measure's height + 1. The fixpoint descends non-increasing dimensions: the install
-    # classification (each block can drop out, <= len(blocks) removals, and a copy-class block can narrow to
-    # inline-class once its computed-source arm coalesces away, <= len(blocks) narrowings) and the single-keyed
-    # state-copy charge (height 1: present -> absent). They are only positively coupled, not locked to co-descend,
-    # so the worst case is the SUM of descents -- 2*len(blocks) + 1 -- plus a confirming round;
-    # the loop bound below leaves a safe margin.
+    # Iteration bound. All three descending quantities only drop (monotonicity argument at the asserts below): the
+    # install set (<= len(blocks) removals as coalescing frees registers), the per-block push bit (<= len(blocks)
+    # narrowings), and the single-keyed state-copy charge (height 1). Worst case is their SUM plus a confirming round;
+    # the 2*len(blocks)+3 loop bound below leaves a safe margin, with the asserts and the else-clause as loud backstops.
     for _ in range(2 * len(mir.blocks) + 3):
         result = layout_and_allocate(mir, float_mir, bool_mir, pool, has_install_blocks, has_state_copy)
-        actual = actual_install_blocks(result.alloc, float_mir, bool_mir)
+        actual = actual_install_blocks(result.alloc, float_mir, bool_mir, result.overlap.block_sched)
         actual_state = _has_state_copy(float_mir, bool_mir, result.alloc, result.const_pool)
-        # Pin the monotonicity the bound relies on as coalescing frees registers: install keys only drop, an install's
-        # copy-class bit only narrows copy->const (never widens const->copy), and the state-copy charge only clears.
+        # The descent is monotone and the fixed point is sound. MONOTONE: a block leaves the install set only by
+        # coalescing away its phi-arm install, but a phi arm makes its merge successor multi-predecessor, so such a
+        # block can never satisfy ``overlaps`` and never spills -- before or after it leaves -- so no block becomes
+        # overlap-eligible across rounds, every schedule is round-invariant, and the push bit and install set only drop.
+        # SOUND: a converged classification (actual == has_install_blocks) is self-consistent, and ``landing <=
+        # term_offset`` then holds by the drain math (not the asserts), so the layout is correct even under -O. The
+        # asserts below pin the narrowing; a never-converging run -- unreachable -- falls to the ``else``, which RAISES.
         assert actual.keys() <= has_install_blocks.keys(), "install fixpoint must not grow"
         assert all(has_install_blocks[b] or not copy for b, copy in actual.items()), "install drain must not widen"
         assert actual_state <= has_state_copy, "state-copy fixpoint must not grow"
@@ -138,7 +141,7 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
             break
         has_install_blocks, has_state_copy = actual, actual_state
     else:
-        assert False, "coalesced-install fixpoint did not converge"  # unreachable: monotone over finite blocks
+        raise AssertionError("coalesced-install fixpoint did not converge")  # survives -O (unlike a bare assert)
     overlap = result.overlap
     block_sched = overlap.block_sched
     inst_of = result.inst_of
@@ -167,22 +170,23 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
             )
         ]
         work_makespan = sched.makespan
-        # An install fires inline-class iff its source is resident at block entry (a const, input, or state read) rather
-        # than computed by this block's work -- the same +1-free, source-sample-free timing as a literal constant.
+        # ``resident`` records whether the source is available at block entry (a const, input, or state read) -- it
+        # needs no read-first sampling. The placement (``install_issue_cycle``) charges the +1 only when a COMPUTED
+        # source is the block's own last work; a resident or earlier-committing computed source pays none.
         copies = []
         for c in alloc.copies.get(block.id, []):
             fsrc = operand_signed(float_mir, c.source, c.sign, alloc, const_pool)
             resident = value_resident_at_entry(float_mir.nodes[c.source])
-            copies.append(FloatCopy(RegRef(c.dst), fsrc, install_issue_cycle(work_makespan, resident), resident))
+            iss = install_issue_cycle(work_makespan, resident, sched.commit_or_makespan(c.source))
+            copies.append(FloatCopy(RegRef(c.dst), fsrc, iss, resident))
         bool_writes = []
         for w in alloc.bool_writes.get(block.id, []):
             bsrc = bool_operand(bool_mir, w.source, alloc, w.inversion)
             resident = value_resident_at_entry(bool_mir.nodes[w.source])
-            bool_writes.append(
-                BoolWrite(BoolRegRef(w.dst), bsrc, install_issue_cycle(work_makespan, resident), resident)
-            )
-        # The block makespan carries the install +1 only when a computed-source copy is present (an entry-resident-only
-        # tail is inline-class and adds no step); ``has_install_blocks`` maps each install-bearing block to that bit.
+            iss = install_issue_cycle(work_makespan, resident, sched.commit_or_makespan(w.source))
+            bool_writes.append(BoolWrite(BoolRegRef(w.dst), bsrc, iss, resident))
+        # The block makespan carries the install +1 only when some install lands past the work makespan (a computed
+        # source that is the block's own last work); ``has_install_blocks`` maps each install-bearing block to that bit.
         block_makespan = install_inclusive_makespan(work_makespan, has_install_blocks.get(block.id, False))
         # A branch condition gets exactly one cycle of slack: a bool result committing at the
         # makespan lands one step before the terminator's boundary read. The schedule's makespan covers every commit by

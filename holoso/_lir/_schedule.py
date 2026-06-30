@@ -58,6 +58,17 @@ class Schedule:
     def commit_cycle(self, vid: ValueId) -> int:
         return self.issue_cycle[vid] + self.latency[vid]
 
+    def commit_or_makespan(self, vid: ValueId) -> int:
+        """
+        A tail install's source commit as seen from the install's own (predecessor) block: ``vid``'s commit if it is
+        scheduled here, else this block's makespan. A source with no local commit -- a block-entry-resident value, a
+        phi, or a value computed in another block -- falls back to the makespan; a resident install then stays at the
+        makespan while a computed one (coincident with the makespan) is pushed one step past it. The single rule the
+        LIR copy, the interference residence, and the makespan classification share, so the install's placement cannot
+        drift onto a foreign block's coordinate frame.
+        """
+        return self.commit_cycle(vid) if vid in self.issue_cycle else self.makespan
+
 
 def _op(nodes: dict[ValueId, MirNode], vid: ValueId) -> MirOperation:
     node = nodes[vid]

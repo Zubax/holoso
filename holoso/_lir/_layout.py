@@ -29,16 +29,16 @@ def _value_word_and_landing(mir: Mir, vid: ValueId, issue: int) -> tuple[int, in
     return word, landing, operator
 
 
-def install_inclusive_makespan(work_makespan: int, has_copy_install: bool) -> int:
+def install_inclusive_makespan(work_makespan: int, install_pushes_makespan: bool) -> int:
     """
-    The block makespan inclusive of its tail install: a block with a COMPUTED-source COPY install fires that copy one
-    cycle past its last work commit (to read-first the source its work produced), so its effective makespan is one
-    higher. A tail that installs only block-entry-resident sources (const, input, state read) is inline-class and adds
-    no
-    step, so it does not raise the makespan. The single owner of this ``+1`` so the overlap layout's boundary derivation
-    and the per-block LirBlock makespan cannot disagree on it (the dual of the per-install ``install_issue_cycle``).
+    The block makespan inclusive of its tail install: a block whose install lands PAST the work makespan is one higher.
+    That happens only for a computed source that is the block's own last-committing work, which the install must fire
+    one step after to read-first it. A tail whose every install fits at the makespan -- a block-entry-resident source,
+    or a computed source committing before the last work -- adds no step. The single owner of this ``+1`` so the overlap
+    layout's boundary derivation and the per-block LirBlock makespan cannot disagree on it (the dual of the per-install
+    ``install_issue_cycle``).
     """
-    return work_makespan + (1 if has_copy_install else 0)
+    return work_makespan + (1 if install_pushes_makespan else 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,9 +64,12 @@ def _issue_side_envelope(mir: Mir, sched: Schedule, block: MirBlock, livein_land
     from where the condition becomes readable: a PRODUCED condition lands inside the block at its landing; a SPILLED-IN
     live-in condition (carried past an overlapped predecessor's shrunk terminator) lands at its carried landing cycle
     (``livein_landing``); a RESIDENT live-in condition (an input, persistent state, or a fully-drained prior-block
-    result) is available from the block's first cycle and adds nothing. The floor starts at 1.
+    result) is available from the block's first cycle and adds nothing. The floor starts at 1 for the ENTRY block only:
+    its terminator cannot redirect at PC 0, because the sequencer's accept hold (``pc==0``) precedes the branch
+    redirect, so an entry branch must settle at PC>=1. Every other block may redirect at its own base PC, so its floor
+    starts at 0 -- an empty resident-condition branch then drains nothing, exactly like a jump.
     """
-    floor = 1
+    floor = 1 if block.id == mir.entry else 0
     for vid, issue in sched.issue_cycle.items():
         word, _landing, operator = _value_word_and_landing(mir, vid, issue)
         # The block may not end before an op reads its operands: it fires (and samples) at ``operand_read_cycle``. A
@@ -148,19 +151,19 @@ def schedule_with_overlap(
         )
         block_sched[bid] = sched
         has_install = bid in has_install_blocks
-        has_copy_install = has_install_blocks.get(bid, False)
-        makespan = install_inclusive_makespan(sched.makespan, has_copy_install)
+        install_pushes_makespan = has_install_blocks.get(bid, False)
+        makespan = install_inclusive_makespan(sched.makespan, install_pushes_makespan)
         block_makespan[bid] = makespan
         targets = succ[bid]
         overlaps = bool(targets) and not has_install and all(pred_count[target] == 1 for target in targets)
         # The drained boundary is the latest cycle a value LANDS in this block's frame, taken per op -- a pooled result
         # and an inline result both write the array combinationally and land at the same bank-independent cycle. Three
-        # landings are INVISIBLE to the op schedule and are added explicitly: (1) a phi tail install -- a
-        # COMPUTED-source COPY lands at the drain boundary ``boundary_step(makespan)`` (``makespan`` install-inclusive,
-        # one past the work), while an install of a block-entry-resident source (const, input, state read) is
-        # inline-class and lands a cycle earlier at the combinational landing ``landing_cycle(work)``, paying neither
-        # the +1 install step nor the consequent later drain; (2) a NON-coalesced state slot's read-first boundary copy
-        # lands at ``boundary_step(sched.makespan)`` -- its source is among the op landings, but the copy adds the
+        # landings are INVISIBLE to the op schedule and are added explicitly: (1) a phi tail install -- one whose source
+        # is the block's own LAST work lands a step past it at the drain boundary ``boundary_step(makespan)`` (the
+        # makespan install-inclusive), while an install fitting at the makespan (a resident source, or a computed
+        # source committing before the last work) lands at ``landing_cycle(sched.makespan)`` within the work
+        # boundary, paying neither the +1 step nor the later drain; (2) a NON-coalesced state slot's read-first boundary
+        # copy lands at ``boundary_step(sched.makespan)`` -- its source is among the op landings, but the copy adds the
         # fetch-pipeline; ``has_state_copy`` flags whether the lone Ret block has one, decided by the coalescing
         # fixpoint -- a coalesced slot writes its register in place and needs no copy, so the charge clears; (3) the
         # entry's input loads land on cycle 1.
@@ -168,7 +171,7 @@ def schedule_with_overlap(
             (_value_word_and_landing(mir, vid, issue)[1] for vid, issue in sched.issue_cycle.items()),
             default=0,
         )
-        if has_copy_install:
+        if install_pushes_makespan:
             work_drain = max(work_drain, boundary_step(makespan))
         elif has_install:
             work_drain = max(work_drain, landing_cycle(sched.makespan))

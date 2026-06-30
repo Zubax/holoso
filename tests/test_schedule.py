@@ -229,9 +229,46 @@ def test_entry_branch_on_resident_condition_skips_the_drained_boundary() -> None
     entry = lir.blocks[lir.entry]
     assert isinstance(entry.terminator, Branch)
     assert not entry.ops and not entry.inline_ops
-    # The op-less entry rides the issue-side envelope floor (1), strictly below the drain (4) a pin would charge.
+    # The op-less entry rides the issue-side envelope floor (1), strictly below the drain (4) a pin would charge. Only
+    # the ENTRY needs that floor: the sequencer's accept hold (pc==0) precedes the branch redirect, so an entry branch
+    # cannot settle at PC 0 (the non-entry dual is the next test).
     assert entry.term_offset == 1
     assert entry.term_offset < boundary_step(entry.block_makespan)
+
+
+def test_non_entry_branch_on_resident_condition_redirects_at_its_base() -> None:
+    # The dual of the entry test: a NON-entry block that branches on a resident condition may redirect at its OWN base
+    # PC (only the entry is barred, by the accept hold), so an op-less such block drains nothing (term_offset 0),
+    # recovering a cycle the hardcoded envelope floor=1 would otherwise charge (uart_tx's idle not-busy arm block).
+    # Crash-before: the floor pinned every overlapping branch, entry or not, to >= 1.
+    class _NestedResidentBranch:
+        def __init__(self) -> None:
+            self._armed = False
+
+        def step(self, p: bool, q: bool, a, b):  # type: ignore[no-untyped-def]
+            if self._armed:  # entry branch on the resident boolean state
+                if q:  # non-entry branch on the resident input q; division arms keep it a real branch, not a select
+                    r = a / b
+                else:
+                    r = b / a
+            else:
+                r = a + b
+            self._armed = p
+            return r
+
+    lir = build(_run(_NestedResidentBranch().step), "nested_resident_branch")
+    entry = lir.blocks[lir.entry]
+    assert isinstance(entry.terminator, Branch) and entry.term_offset == 1  # the entry still cannot redirect at PC 0
+    non_entry_empty_branches = [
+        b
+        for b in lir.blocks
+        if isinstance(b.terminator, Branch)
+        and b.index != lir.entry
+        and not (b.ops or b.inline_ops or b.copies or b.bool_writes)
+    ]
+    assert non_entry_empty_branches, "the kernel shape no longer exercises a non-entry empty branch block"
+    for b in non_entry_empty_branches:
+        assert b.term_offset == 0, f"block {b.index}: a non-entry empty resident-condition branch did not reach 0"
 
 
 def test_resident_bound_inline_select_lands_combinationally() -> None:

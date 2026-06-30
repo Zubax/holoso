@@ -370,8 +370,9 @@ small `case(pc)` that, for a branch, reads the condition's 1-bit register.
 A block's terminator offset is the latest cycle a value still lands in its frame -- it must cover every landing the
 block does not forward to a successor. A block whose boundary values are all already resident in predecessors pays none
 (the drain-only `Ret`s of loop/diamond kernels, whose body produces every output the `Ret` reads combinationally).
-Where a tail install's source is already resident at block entry rather than computed by the block's own work,
-it lands earlier, recovering cycles in every downstream block.
+A tail install lands at the block's work makespan, read-first at the boundary, and costs an extra terminator cycle only
+when its source is the block's own last-committing work; a source resident at block entry, or computed earlier than that
+last work, lands at the makespan and recovers cycles in every downstream block.
 
 Cross-block software pipelining then shrinks the terminator offset down to the issue-side envelope -- the latest PC at
 which the block still drives a control word -- whenever every successor is single-predecessor, so a spill cannot reach a

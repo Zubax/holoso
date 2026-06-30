@@ -146,7 +146,9 @@ def _color_quotient(
     q_pinned: dict[ValueId, int] = {}
     for vid, reg in pinned.items():
         head = lead(vid)
-        assert q_pinned.setdefault(head, reg) == reg, f"coalescing class {head} spans two pinned registers"
+        # ``setdefault`` runs outside the assert (which ``-O`` strips) so the pinned map is populated under ``-O`` too.
+        pinned_reg = q_pinned.setdefault(head, reg)
+        assert pinned_reg == reg, f"coalescing class {head} spans two pinned registers"
     q_interferes: dict[ValueId, set[ValueId]] = {head: set() for head in leaders}
     q_ports: dict[ValueId, set[ReadPort]] = {head: set() for head in leaders}
     q_producers: dict[ValueId, set[Producer]] = {head: set() for head in leaders}

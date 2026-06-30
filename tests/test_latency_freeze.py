@@ -42,7 +42,9 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "iir1_lpf": (15, 15),
     "schmitt_trigger": (6, 6),
     "majority_voter": (14, 19),
-    "recip_newton": (15, 33),
+    # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
+    # is), so the install fits at the work makespan instead of one past it -- shaving a cycle off every iteration.
+    "recip_newton": (15, 32),
     "remainder": (36, 53),
     "cordic_sincos": (104, 104),
     "ekf1_stateless": (125, 125),
@@ -50,7 +52,9 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # input/state read) on the normal path -- the inline-class timing (no source-sample edge, no +1 step) lands each
     # within the work makespan rather than at the copy-pipeline boundary, shrinking every downstream block base.
     "uart_rx": (6, 120),
-    "uart_tx": (8, 104),
+    # uart_tx additionally has an empty overlapping branch block (the idle "not busy" arm) whose only act is to test a
+    # resident input condition; a non-entry branch may redirect at its own base PC, so its terminator drains nothing.
+    "uart_tx": (7, 103),
     "octave_index": (14, 38),
 }
 

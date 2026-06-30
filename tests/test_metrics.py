@@ -200,7 +200,7 @@ BASELINE: dict[str, Metrics] = {
         False, nreg=1, bnreg=6, steering=2, copies=0, min_ii=6, last_pc=6, max_block_span=6
     ),
     "majority_voter": Metrics(False, nreg=1, bnreg=21, steering=20, copies=0, min_ii=14, last_pc=19, max_block_span=12),
-    "recip_newton": Metrics(False, nreg=4, bnreg=1, steering=4, copies=2, min_ii=17, last_pc=36, max_block_span=18),
+    "recip_newton": Metrics(False, nreg=4, bnreg=1, steering=4, copies=2, min_ii=15, last_pc=32, max_block_span=16),
     "remainder": Metrics(False, nreg=8, bnreg=4, steering=12, copies=2, min_ii=39, last_pc=58, max_block_span=17),
     "octave_index": Metrics(False, nreg=3, bnreg=1, steering=6, copies=3, min_ii=16, last_pc=51, max_block_span=25),
     "cordic_sincos": Metrics(
