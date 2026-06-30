@@ -176,6 +176,9 @@ Special things to look out for:
   binary. It is possible that introduction of some stages may cause f_max to tentatively regress, which is a non-issue.
   Keep chasing the critical path regardless! The numeric details are only for locating the next P&R path in the report,
   not for ranking partial progress.
+- DO NOT GUESS WHERE THE CRITICAL PATH IS. The process is 100% FEEDBACK-DRIVEN.
+  DO NOT PREDEFINE STAGE CONFIGURATIONS TO ITERATE THROUGH THEM BLINDLY, THIS WON'T WORK.
+  The process CANNOT SUCCEED UNLESS you read the critical path report after every iteration.
 - DSP tiles must begin and end with a register stage. If retiming has moved a register away from a DSP tile,
   it means that the adjacent hop is starving and needs a new register there, even if it's not on the critical path.
 - Splitting multiplication into parallel halves (e.g., `STAGE_PRODUCT=1`) is almost never a good idea unless the
