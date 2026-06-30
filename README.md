@@ -7,6 +7,7 @@
 _Simple high-level synthesis of portable Verilog from idiomatic Python_
 
 [![Try online](https://img.shields.io/badge/try_online-holoso.digital-black?color=ff00ff)](https://holoso.digital/)
+[![GitHub](https://img.shields.io/badge/GitHub-Zubax/holoso-black?logo=github)](https://github.com/Zubax/holoso)
 [![PyPI](https://img.shields.io/pypi/v/holoso?logo=pypi&color=ffff00)](https://pypi.org/project/holoso/)
 [![Forum](https://img.shields.io/discourse/https/forum.zubax.com/users.svg?logo=discourse&color=ff0000)](https://forum.zubax.com)
 
@@ -25,7 +26,7 @@ harnesses and iterate faster.
 See [PRIOR_ART.md](PRIOR_ART.md) for a detailed review of existing alternatives,
 and why none are good enough for practical use.
 
-Holoso is under active development and many of the features we aspire to deliver are currently missing.
+⚠️ Holoso is under active development and many of the features we aspire to deliver are currently missing.
 Holoso is not yet stable; breaking changes will occur regularly without notice until v1.0 is out.
 Contributions of any kind are emphatically welcome!
 
@@ -43,7 +44,7 @@ Also have your low-level synthesis/simulation tools available.
 
 ### Define your kernel
 
-The *kernel* is a Python function or method that implements a given computation,
+The *kernel* is a Python function or method that implements some computation,
 which is translated into a Verilog module.
 
 Crucially, the kernel is just an *ordinary Python entity* that doesn't require (nontrivial) adaptation for hardware
@@ -82,7 +83,6 @@ class PID:
 ```
 
 Gee this looks exceptionally ordinary!
-No sophisticated scaffolding is required to simulate and verify this!
 The kernel can also be a standalone function (see examples).
 
 ### Configure the hardware
@@ -93,22 +93,20 @@ Some tools provide fully automatic pipelining where the user specifies some targ
 attempts to automatically cut circuits into pipeline stages relying on combinational path delay heuristics
 (e.g., see [Google XLS docs](https://google.github.io/xls/scheduling/)).
 Holoso does not do that; instead, it provides explicit tuning knobs that enable insertion of predefined optional stages.
-This makes pipeline tuning a somewhat more manual process but it also appears to deliver better results across various
-target chips and flows.
 
 Holoso constructs a specialized zero instruction set computer (ZISC) tightly optimized for the given kernel
 with fully statically scheduled microcode. That ZISC machine has a simple static controller at its core
-and a number of numerical and logical operators taking the place of ALU found in a conventional computer.
+and a number of numerical and logical operators taking the place of ALUs found in a conventional computer.
 Most of the chip fabric is spent on the operators while the controller is typically comparatively simple;
 most of the pipeline tuning is therefore also happening inside the operators.
 
 The user specifies which optional operator stages to enable by specifying them before Holoso synthesis is invoked.
 This is also where the *operand width* is selected: Holoso supports arbitrary-precision floating-point numbers
-with configurable exponent and mantissa width; its floating point format is based on IEEE-754 with a number of
+with configurable exponent and mantissa width; its floating point format is based on IEEE-754 with a few
 intentional deviations (no NaN, no subnormals).
 Custom floating point is a very important feature for FPGA targets because their DSP tiles have specific operand
-widths which are usually very different from the standard IEEE 754 binary16/32/64/etc,
-meaning that those standard representations are rarely the optimal choice for an FPGA target.
+widths which usually map poorly onto the standard IEEE 754 binary16/32/64/etc,
+meaning that those standard formats are rarely the optimal choice for an FPGA target.
 
 The full configuration might look as follows:
 
@@ -129,15 +127,25 @@ operators = holoso.OpConfig(
 )
 ```
 
+How does one actually obtain the optimal staging configuration? Empirically.
+Start with the default configuration (all stages disabled) and see if it achieves timing closure at the target frequency.
+If not, inspect the synthesis logs to see where the critical path is --
+it's going to be inside one of the arithmetic operators like fadd/fdiv/etc. --
+and enable the operator stage that splits that path. Repeat until timings close.
+
+Pro tip: even small (local) LLMs can execute this loop very efficiently, no need to waste human time on this.
+With AI automation this approach is superior to automatic target-frequency-based pipelining (e.g., XLS, FloPoCo, etc)
+because it does not rely on heuristics, but instead utilizes feedback from final PnR, thus being truly closed-loop.
+
 ### Construct the RTL
 
-Having set up the kernel and the hardware options, we can launch synthesis.
+Having set up the kernel and the hardware options, we can run synthesis.
 
 If the kernel is a function, it is simply passed to Holoso as-is.
 Classes are different because they are stateful: to synthesize a class method,
 we instantiate the class as we normally do, then we can optionally tweak the object's state as needed,
 and then we pass its bound method to Holoso.
-Holoso will inspect the current state of the class and use it as the module's reset state.
+Holoso will inspect the current state of the instance and use it as the module's reset state.
 The passed bound method will be converted into the stateful RTL module.
 
 ```python
@@ -161,7 +169,7 @@ for filename, path in out.items():
 
 The main backend is the one that emits Verilog RTL (unlike most other tools, this RTL is pretty human-readable), but
 Holoso also generates human-friendly HTML reports that reveal the operation of the generated machine in great detail,
-including the register liveness, operator pipeline occupancy, etc.
+including the register liveness, operator pipeline occupancy/utilization, latencies, etc.
 
 ## ⚙️ Design
 
@@ -169,7 +177,7 @@ Holoso implements essentially a separate programming language whose syntax is a 
 and whose semantics is largely equivalent to Python with minor deviations that make sense in chip design context.
 Save for the minor differences in semantics, Holoso ensures that one can execute the original Python code
 and run the generated circuit (RTL) side by side, and obtain equivalent results (bit-exact unless floating points
-are used, in which case small errors may creep up inherent to floats).
+are used, in which case small errors inherent to floats may creep up).
 
 Holoso designs a narrowly specialized computing core (a zero-instruction-set computer, ZISC)
 with custom statically scheduled microcode that implements the behavior of the original Python kernel.
@@ -190,8 +198,7 @@ register stage into the offending path; then re-synthesize and repeat until timi
 Along with the synthesized Verilog, Holoso produces a Cocotb co-simulation testbench and a detailed and beautiful HTML
 report that provides a human-friendly view of the processor and the microcode sequence constructed by the synthesizer.
 
->*You can SEE the pipeline — every cycle, every landing, every spill. It's gorgeous. People love it.*
->*They come up to me with tears in their eyes, they say sir, that schedule report, it's the most beautiful report we have ever seen.*
+>*People come up to me with tears in their eyes, they say sir, that schedule report, it's the most beautiful report we have ever seen.*
 
 For a detailed technical review of the design and trade-offs, please refer to `DESIGN.md`.
 
