@@ -6,14 +6,7 @@ from dataclasses import dataclass
 from hashlib import blake2s
 from typing import ClassVar
 
-from ._value import (
-    FloatValue,
-    add_float_values,
-    compare_float_values,
-    div_float_values,
-    mul_float_values,
-    mul_ilog2_float_value,
-)
+from ._value import FloatValue
 from ._type import BoolType, FloatFormat, FloatType, ScalarSignature, ScalarType
 from ._util import RelationalOp
 
@@ -106,11 +99,17 @@ class HardwareOperator(ABC):
     """
 
     mnemonic: ClassVar[str]
+
     # Commutation symmetry: swapping the two operands permutes the output ports through this map (``new_port =
     # swap_output_permutation[old_port]``); ``None`` means non-commutative. Single-output commutative operators use
     # the identity ``(0,)``; the comparator's order flags transpose (``gt`` and ``lt`` exchange, ``eq`` is fixed).
     # The permutation must preserve each port's type, so a swapped firing's taps stay in their banks.
     swap_output_permutation: ClassVar[tuple[int, ...] | None] = None
+
+    # Whether ``evaluate`` reproduces the RTL's output bit-for-bit. True for every correctly-rounded operator; an
+    # operator that only faithfully rounds (whose reference is the correctly-rounded ideal rather than the exact bits)
+    # overrides this to False. Consumers read it to choose exact vs tolerant output comparison.
+    bit_exact: ClassVar[bool] = True
 
     @property
     @abstractmethod
@@ -282,7 +281,7 @@ class FAddOperator(FloatHardwareOperator):
 
     def evaluate(self, *operands: FloatValue | bool) -> tuple[FloatValue, ...]:
         a, b = self._validated_operands(operands, 2)
-        return (add_float_values(a, b),)
+        return (a + b,)
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -327,7 +326,7 @@ class FMulOperator(FloatHardwareOperator):
 
     def evaluate(self, *operands: FloatValue | bool) -> tuple[FloatValue, ...]:
         a, b = self._validated_operands(operands, 2)
-        return (mul_float_values(a, b),)
+        return (a * b,)
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -368,7 +367,7 @@ class FDivOperator(FloatHardwareOperator):
 
     def evaluate(self, *operands: FloatValue | bool) -> tuple[FloatValue, ...]:
         a, b = self._validated_operands(operands, 2)
-        return (div_float_values(a, b),)
+        return (a / b,)
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -406,7 +405,7 @@ class FMulILog2Operator(FloatHardwareOperator):
 
     def evaluate(self, *operands: FloatValue | bool) -> tuple[FloatValue, ...]:
         (a,) = self._validated_operands(operands, 1)
-        return (mul_ilog2_float_value(a, self.k),)
+        return (a.scale_pow2(self.k),)
 
     def render(self, *operands: str) -> str:
         (a,) = operands
@@ -507,7 +506,7 @@ class FCmpOperator(FloatHardwareOperator):
 
     def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
         a, b = self._validated_operands(operands, 2)
-        ordering = compare_float_values(a, b)
+        ordering = a.compare(b)
         return ordering > 0, ordering == 0, ordering < 0
 
 

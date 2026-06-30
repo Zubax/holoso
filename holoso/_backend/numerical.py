@@ -128,6 +128,14 @@ class _Kernel:
         fmt = self._lir.float_format
         return [LogicalPort(wire.name, scalar_type_of(wire, fmt)) for wire in self._lir.outputs]
 
+    @property
+    def bit_exact(self) -> bool:
+        """
+        Whether this kernel's model matches the emitted RTL bit-for-bit (false iff it selects a faithfully-rounded
+        operator). A driver comparing the model against the hardware uses it to pick exact vs tolerant comparison.
+        """
+        return self._lir.bit_exact
+
     def __str__(self) -> str:
         return (
             f"{type(self).__name__}({self.module_name!r}: "

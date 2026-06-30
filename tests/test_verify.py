@@ -726,16 +726,14 @@ def test_run_drains_in_flight_transaction_before_presenting_new_inputs() -> None
 def test_compare_float_values_exact_for_wide_formats() -> None:
     # The model's comparison must be exact, not via a lossy float64 decode: two values differing only in the lowest
     # mantissa bit of a >53-bit mantissa must compare unequal (decode would collapse them).
-    from holoso._value import compare_float_values
-
     fmt = FloatFormat(wexp=8, wman=60)
     bias = (1 << (fmt.wexp - 1)) - 1
     one = FloatValue.from_bits(fmt, bias << fmt.wman)
     one_plus_ulp = FloatValue.from_bits(fmt, (bias << fmt.wman) | 1)
     assert fmt.decode(one.bits) == fmt.decode(one_plus_ulp.bits)  # lossy: float64 cannot tell them apart
-    assert compare_float_values(one, one_plus_ulp) == -1
-    assert compare_float_values(one_plus_ulp, one) == 1
-    assert compare_float_values(one, one) == 0
+    assert one.compare(one_plus_ulp) == -1
+    assert one_plus_ulp.compare(one) == 1
+    assert one.compare(one) == 0
     # Signs, zero, and infinities form a total order (ZKF has no NaN).
     neg_one = one.apply_sign(negate=True, absolute=False)
     zero = FloatValue.from_float(fmt, 0.0)
@@ -743,8 +741,8 @@ def test_compare_float_values_exact_for_wide_formats() -> None:
     neg_inf = FloatValue.from_float(fmt, float("-inf"))
     ascending = [neg_inf, neg_one, zero, one, pos_inf]
     for lower_value, higher_value in zip(ascending, ascending[1:]):
-        assert compare_float_values(lower_value, higher_value) == -1
-        assert compare_float_values(higher_value, lower_value) == 1
+        assert lower_value.compare(higher_value) == -1
+        assert higher_value.compare(lower_value) == 1
 
 
 def test_model_unrolled_for_loop_newton_reciprocal() -> None:

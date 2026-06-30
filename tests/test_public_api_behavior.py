@@ -64,6 +64,19 @@ def _close(got: float, want: float, op_count: int = 12) -> bool:
     return within(got, want, rtol, atol)
 
 
+def test_bit_exact_marker_true_for_correctly_rounded_kernel() -> None:
+    # Every operator a basic kernel selects is correctly rounded, so the model is bit-exact and the marker is True on
+    # both the result and the model. The False case arrives with the faithfully-rounded transcendentals.
+    result = holoso.synthesize(_bit_exact_kernel, _ops(), name="bit_exact_basic")
+    assert result.bit_exact is True
+    assert result.numerical_model.bit_exact is True
+
+
+def _bit_exact_kernel(x, y):  # type: ignore[no-untyped-def]
+    z = x * y + x
+    return z if z > 0.0 else z / y
+
+
 def _abs_via_select(x, c):  # type: ignore[no-untyped-def]
     # x if c>0 else -x : the negation folds into the select's operand sign conditioner -- one compare, one mux.
     return x if c > 0.0 else -x

@@ -49,6 +49,16 @@ class SynthesisResult:
     cocotb_output: CocotbOutput
     html_output: HtmlOutput
 
+    @property
+    def bit_exact(self) -> bool:
+        """
+        Whether the numerical model reproduces the emitted RTL bit-for-bit. False iff the kernel selects a
+        faithfully-rounded operator (e.g., a transcendental), whose reference is the correctly-rounded ideal rather
+        than the hardware's exact bits; consumers comparing the model against the RTL use this to choose exact vs
+        tolerant comparison.
+        """
+        return self.numerical_model.bit_exact
+
     def write(self, out_dir: Path | str) -> dict[str, Path]:
         """
         Write every artifact to ``out_dir`` and return the written paths keyed by filename.

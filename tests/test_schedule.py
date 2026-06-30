@@ -1966,14 +1966,15 @@ def _read_mux_fan_in(lir) -> int:  # type: ignore[no-untyped-def]
 def test_marked_commutative_operators_are_bit_exact_commutative() -> None:
     # The port-assignment pass swaps a commutative operator's operands, which is only sound if the operator is
     # exactly symmetric. Guard the FAddOperator/FMulOperator markings against a future non-commutative slip-up.
+    import operator
     import random
 
-    from holoso._value import FloatValue, add_float_values, mul_float_values
+    from holoso._value import FloatValue
 
     rng = random.Random(0)
     assert FAddOperator(FMT).is_commutative and FMulOperator(FMT).is_commutative
     assert not FDivOperator(FMT).is_commutative
-    for evaluate in (add_float_values, mul_float_values):
+    for evaluate in (operator.add, operator.mul):
         for _ in range(5000):
             a = FloatValue.from_float(FMT, rng.uniform(-2.0, 2.0) * 2.0 ** rng.randint(-22, 22))
             b = FloatValue.from_float(FMT, rng.uniform(-2.0, 2.0) * 2.0 ** rng.randint(-22, 22))

@@ -9,7 +9,11 @@ from ._type import FloatFormat, pow2
 
 @dataclass(frozen=True, slots=True, init=False)
 class FloatValue:
-    """A concrete ZKF value: a format plus the exact bits carried by hardware."""
+    """
+    A concrete ZKF value: a format plus the exact bits carried by hardware.
+    ``__eq__`` stays the dataclass's structural ``(fmt, bits)`` equality (used for hashing/interning);
+    numeric ordering goes through :meth:`compare`.
+    """
 
     fmt: FloatFormat
     bits: int
@@ -64,6 +68,114 @@ class FloatValue:
         out_sign = (self.sign & (0 if absolute else 1)) ^ (1 if negate else 0)
         return FloatValue.from_bits(self.fmt, (out_sign << sign_shift) | body)
 
+    def __add__(self, other: "FloatValue") -> "FloatValue":
+        """Exact ZKF add matching ``zkf_add``."""
+        fmt = _matching_format(self, other)
+        da = _decode(self)
+        db = _decode(other)
+
+        if da.is_inf and db.is_inf:
+            return _canonical_inf(fmt, da.sign) if da.sign == db.sign else _zero(fmt)
+        if da.is_inf:
+            return _canonical_inf(fmt, da.sign)
+        if db.is_inf:
+            return _canonical_inf(fmt, db.sign)
+
+        result = _finite_fraction(fmt, da) + _finite_fraction(fmt, db)
+        return FloatValue.from_bits(fmt, fmt.pack(result))
+
+    def __mul__(self, other: "FloatValue") -> "FloatValue":
+        """Exact ZKF multiply matching ``zkf_mul``."""
+        fmt = _matching_format(self, other)
+        da = _decode(self)
+        db = _decode(other)
+        result_zero = da.is_zero or db.is_zero
+        result_inf = (not result_zero) and (da.is_inf or db.is_inf)
+
+        product = da.significand * db.significand
+        product_high = (product >> ((2 * fmt.wman) - 1)) & 1
+        exp_unbiased_base = da.exp + db.exp - (fmt.bias << 1)
+
+        if product_high:
+            exp_unbiased = exp_unbiased_base + 1
+            significand = (product >> fmt.wman) & _mask(fmt.wman)
+            guard = (product >> (fmt.wman - 1)) & 1
+            round_bit = (product >> (fmt.wman - 2)) & 1
+            sticky = _sticky_below(product, fmt.wman - 3)
+        else:
+            exp_unbiased = exp_unbiased_base
+            significand = (product >> (fmt.wman - 1)) & _mask(fmt.wman)
+            guard = (product >> (fmt.wman - 2)) & 1
+            round_bit = (product >> (fmt.wman - 3)) & 1
+            sticky = _sticky_below(product, fmt.wman - 4)
+
+        return _pack_reference(
+            fmt,
+            da.sign ^ db.sign,
+            force_zero=result_zero,
+            force_inf=result_inf,
+            exp_unbiased=exp_unbiased,
+            significand_value=significand,
+            guard=guard,
+            round_bit=round_bit,
+            sticky=sticky,
+        )
+
+    def __truediv__(self, other: "FloatValue") -> "FloatValue":
+        """Exact ZKF divide quotient matching ``zkf_div``; error sidebands are intentionally ignored."""
+        fmt = _matching_format(self, other)
+        da = _decode(self)
+        db = _decode(other)
+
+        if da.is_zero or db.is_inf:
+            return _zero(fmt)
+
+        result_sign = da.sign if db.is_zero else (da.sign ^ db.sign)
+        if db.is_zero or da.is_inf:
+            return _canonical_inf(fmt, result_sign)
+
+        value = Fraction(da.significand, db.significand) * pow2(da.exp - db.exp)
+        return FloatValue.from_bits(fmt, fmt.pack(-value if result_sign else value))
+
+    def compare(self, other: "FloatValue") -> int:
+        """
+        Exact total-order comparison matching ``zkf_cmp``: -1 if ``self < other``, 0 if equal, +1 if ``self > other``.
+        ZKF has no NaN (the order is total) and no negative zero. Comparison is on exact values, not on a lossy float
+        decode, so it stays bit-exact always. A method rather than overloaded ordering operators: ``__eq__`` is the
+        frozen-dataclass structural (bit) equality used for hashing, and numeric ordering would be inconsistent with it
+        where equal values differ in bits, so the relations could not form a coherent order with ``==``; one three-way
+        result also mirrors the single-firing hardware comparator.
+        """
+        fmt = _matching_format(self, other)
+
+        def key(value: FloatValue) -> tuple[int, Fraction]:
+            decoded = _decode(value)
+            if decoded.is_inf:  # -inf sorts below every finite value, +inf above; the fraction tier is unused
+                return -1 if decoded.sign else 1, Fraction(0, 1)
+            return 0, _finite_fraction(fmt, decoded)
+
+        ka, kb = key(self), key(other)
+        return (ka > kb) - (ka < kb)
+
+    def scale_pow2(self, k: int) -> "FloatValue":
+        """Exact ZKF scaling by ``2**k`` matching ``zkf_mul_ilog2_const``."""
+        if isinstance(k, bool) or not isinstance(k, int):
+            raise TypeError(f"k must be int, got {type(k).__name__}")
+        fmt = self.fmt
+        da = _decode(self)
+        if da.is_zero:
+            return _zero(fmt)
+        if da.is_inf:
+            return _canonical_inf(fmt, da.sign)
+        new_exp = da.exp + k
+        if new_exp < 0:
+            return _zero(fmt)
+        if new_exp == 0:
+            return _normal(fmt, da.sign, 1, 0)
+        if new_exp > fmt.exp_max_finite:
+            return _canonical_inf(fmt, da.sign)
+        return _normal(fmt, da.sign, new_exp, da.frac)
+
 
 @dataclass(frozen=True, slots=True)
 class _Decoded:
@@ -74,116 +186,6 @@ class _Decoded:
     significand: int
     is_zero: bool
     is_inf: bool
-
-
-def add_float_values(a: FloatValue, b: FloatValue) -> FloatValue:
-    """Exact ZKF add matching ``zkf_add``."""
-    fmt = _matching_format(a, b)
-    da = _decode(a)
-    db = _decode(b)
-
-    if da.is_inf and db.is_inf:
-        return _canonical_inf(fmt, da.sign) if da.sign == db.sign else _zero(fmt)
-    if da.is_inf:
-        return _canonical_inf(fmt, da.sign)
-    if db.is_inf:
-        return _canonical_inf(fmt, db.sign)
-
-    result = _finite_fraction(fmt, da) + _finite_fraction(fmt, db)
-    return FloatValue.from_bits(fmt, fmt.pack(result))
-
-
-def mul_float_values(a: FloatValue, b: FloatValue) -> FloatValue:
-    """Exact ZKF multiply matching ``zkf_mul``."""
-    fmt = _matching_format(a, b)
-    da = _decode(a)
-    db = _decode(b)
-    result_zero = da.is_zero or db.is_zero
-    result_inf = (not result_zero) and (da.is_inf or db.is_inf)
-
-    product = da.significand * db.significand
-    product_high = (product >> ((2 * fmt.wman) - 1)) & 1
-    exp_unbiased_base = da.exp + db.exp - (fmt.bias << 1)
-
-    if product_high:
-        exp_unbiased = exp_unbiased_base + 1
-        significand = (product >> fmt.wman) & _mask(fmt.wman)
-        guard = (product >> (fmt.wman - 1)) & 1
-        round_bit = (product >> (fmt.wman - 2)) & 1
-        sticky = _sticky_below(product, fmt.wman - 3)
-    else:
-        exp_unbiased = exp_unbiased_base
-        significand = (product >> (fmt.wman - 1)) & _mask(fmt.wman)
-        guard = (product >> (fmt.wman - 2)) & 1
-        round_bit = (product >> (fmt.wman - 3)) & 1
-        sticky = _sticky_below(product, fmt.wman - 4)
-
-    return _pack_reference(
-        fmt,
-        da.sign ^ db.sign,
-        force_zero=result_zero,
-        force_inf=result_inf,
-        exp_unbiased=exp_unbiased,
-        significand_value=significand,
-        guard=guard,
-        round_bit=round_bit,
-        sticky=sticky,
-    )
-
-
-def div_float_values(a: FloatValue, b: FloatValue) -> FloatValue:
-    """Exact ZKF divide quotient matching ``zkf_div``; error sidebands are intentionally ignored."""
-    fmt = _matching_format(a, b)
-    da = _decode(a)
-    db = _decode(b)
-
-    if da.is_zero or db.is_inf:
-        return _zero(fmt)
-
-    result_sign = da.sign if db.is_zero else (da.sign ^ db.sign)
-    if db.is_zero or da.is_inf:
-        return _canonical_inf(fmt, result_sign)
-
-    value = Fraction(da.significand, db.significand) * pow2(da.exp - db.exp)
-    return FloatValue.from_bits(fmt, fmt.pack(-value if result_sign else value))
-
-
-def compare_float_values(a: FloatValue, b: FloatValue) -> int:
-    """
-    Exact total-order comparison of two values matching ``zkf_cmp``: -1 if ``a < b``, 0 if equal, +1 if ``a > b``.
-    ZKF has no NaN (the order is total) and no negative zero. Comparison is on exact values, not on a lossy float
-    decode, so it stays bit-exact always.
-    """
-    fmt = _matching_format(a, b)
-
-    def key(value: FloatValue) -> tuple[int, Fraction]:
-        decoded = _decode(value)
-        if decoded.is_inf:  # -inf sorts below every finite value, +inf above; the fraction tier is unused
-            return -1 if decoded.sign else 1, Fraction(0, 1)
-        return 0, _finite_fraction(fmt, decoded)
-
-    ka, kb = key(a), key(b)
-    return (ka > kb) - (ka < kb)
-
-
-def mul_ilog2_float_value(a: FloatValue, k: int) -> FloatValue:
-    """Exact ZKF scaling by ``2**k`` matching ``zkf_mul_ilog2_const``."""
-    if isinstance(k, bool) or not isinstance(k, int):
-        raise TypeError(f"k must be int, got {type(k).__name__}")
-    fmt = a.fmt
-    da = _decode(a)
-    if da.is_zero:
-        return _zero(fmt)
-    if da.is_inf:
-        return _canonical_inf(fmt, da.sign)
-    new_exp = da.exp + k
-    if new_exp < 0:
-        return _zero(fmt)
-    if new_exp == 0:
-        return _normal(fmt, da.sign, 1, 0)
-    if new_exp > fmt.exp_max_finite:
-        return _canonical_inf(fmt, da.sign)
-    return _normal(fmt, da.sign, new_exp, da.frac)
 
 
 def _check_format(fmt: FloatFormat) -> None:

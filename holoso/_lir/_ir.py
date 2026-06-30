@@ -780,6 +780,17 @@ class Lir:
         """
         return self.last_pc
 
+    @property
+    def bit_exact(self) -> bool:
+        """
+        Whether the numerical model reproduces the emitted RTL bit-for-bit: true unless a selected operator only
+        faithfully rounds (whose ``evaluate`` is the correctly-rounded ideal, not the hardware's exact bits).
+        The generated testbench and diagnostics read it to choose exact vs tolerant output comparison.
+        """
+        pooled = all(inst.operator.bit_exact for inst in self.instances)
+        inline = all(op.operator.bit_exact for block in self.blocks for op in block.inline_ops)
+        return pooled and inline
+
     def term_pc(self, block: LirBlock) -> int:
         """
         The absolute fetch PC at which ``block``'s terminator redirects the PC: its base plus its ``term_offset``. The
