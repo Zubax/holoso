@@ -124,7 +124,7 @@ def _pinned_regalloc_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _measure(name: str) -> Metrics:
-    lir: Lir = build(lower_to_mir(optimize(lower(_EXAMPLES[name]())), default_ops(_FMT)), name)
+    lir: Lir = build(lower_to_mir(optimize(lower(_EXAMPLES[name]())), default_ops(_FMT)), name, fetch_stages=3)
     straight = (
         len(lir.blocks) == 1
         and not lir.bool_state_slots

@@ -42,7 +42,7 @@ def build_model_and_interpreter(
     (upstream of ``build``), so the two share everything except the LIR layer.
     """
     mir = lower_to_mir(optimize(lower_frontend(kernel)), ops)
-    return build_model(build(mir, name)), MirInterpreter(mir)
+    return build_model(build(mir, name, fetch_stages=3)), MirInterpreter(mir)
 
 
 def show_value(value: FloatValue | bool) -> str:
@@ -278,8 +278,8 @@ def overlap_div_err_kernel(x, y, z):  # type: ignore[no-untyped-def]
     """
     Cross-block overlap err_pc corner (shared by the white-box twin and the directed err_pc cosim). A division -- the
     one error-bearing op -- commits late, so its result spills past the shrunk terminator. The data write lands in the
-    taken arm correctly, but the err_pc diagnostic latches ``pc - FETCH_LAG`` when the write-
-    enable executes, FETCH_LAG steps after its write word; if the terminator redirected to the NON-fall-through arm by
+    taken arm correctly, but the err_pc diagnostic latches ``pc - fetch_lag`` when the write-
+    enable executes, fetch_lag steps after its write word; if the terminator redirected to the NON-fall-through arm by
     then, err_pc would capture the successor frame instead of the division's step. The shrink floor must keep that
     latch in-block. ``x < z`` selects the non-fall-through (true) arm, the only arm with a PC discontinuity; ``y == 0``
     makes the division error. The else arm's division keeps this a real branch under default if-conversion.

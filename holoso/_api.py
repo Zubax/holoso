@@ -90,7 +90,7 @@ def synthesize(target: Target, /, ops: OpConfig, *, name: str | None = None) -> 
 
     mir = lower_to_mir(hir, ops)
 
-    lir = build(mir, module_name)
+    lir = build(mir, module_name, fetch_stages=3)  # fetch_stages will be made configurable soon
     _logger.info("LIR ports:\n\t%s", "\n\t".join(f"{port}" for port in lir.ports))
 
     verilog_output = generate_verilog(lir)

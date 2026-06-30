@@ -24,7 +24,6 @@ from holoso._backend.verilog import generate as generate_verilog
 from holoso._frontend import lower
 from holoso._hir import optimize
 from holoso._lir import Lir, build
-from holoso._lir._ir import FETCH_LAG
 from holoso._mir import lower as lower_to_mir
 
 from ._modelref import default_ops
@@ -53,7 +52,7 @@ class _ConstInstallState:
 
 
 def _verilog(fn: Callable[..., object], name: str) -> str:
-    return generate_verilog(build(lower_to_mir(optimize(lower(fn)), default_ops(_FMT)), name)).verilog
+    return generate_verilog(build(lower_to_mir(optimize(lower(fn)), default_ops(_FMT)), name, fetch_stages=3)).verilog
 
 
 def _assert_effect_trigger_gated(fn: Callable[..., object], name: str, prefix: str) -> None:
@@ -105,7 +104,7 @@ def _run_bench(name: str, lir: Lir, testcase: str, env: dict[str, int], monkeypa
         clean=True,
         timescale=("1ns", "1ps"),
     )
-    monkeypatch.setenv("HOLOSO_FETCH_LAG", str(FETCH_LAG))
+    monkeypatch.setenv("HOLOSO_FETCH_LAG", str(lir.fetch_lag))
     for key, value in env.items():
         monkeypatch.setenv(key, str(value))
     runner.test(
@@ -122,7 +121,7 @@ def _run_bench(name: str, lir: Lir, testcase: str, env: dict[str, int], monkeypa
 @pytest.mark.parametrize("k", [0, 1, 2, 3, 5])
 def test_transacting_edge_pins_at_accept_plus_fetch_lag(k: int, monkeypatch: pytest.MonkeyPatch) -> None:
     name = f"gate_edge_k{k}"
-    lir = build(lower_to_mir(optimize(lower(_cycle0_kernel)), default_ops(_FMT)), name)
+    lir = build(lower_to_mir(optimize(lower(_cycle0_kernel)), default_ops(_FMT)), name, fetch_stages=3)
     assert any(op.issue_cycle == 0 for op in lir.blocks[lir.entry].ops), "kernel must issue a pooled op on cycle 0"
     _run_bench(name, lir, "transacting_edge", {"HOLOSO_DWELL_K": k}, monkeypatch)
 
@@ -131,7 +130,7 @@ def test_transacting_edge_pins_at_accept_plus_fetch_lag(k: int, monkeypatch: pyt
 @pytest.mark.parametrize("k", [1, 2, 3, 5])
 def test_state_slot_inert_during_dwell(k: int, monkeypatch: pytest.MonkeyPatch) -> None:
     name = f"gate_state_k{k}"
-    lir = build(lower_to_mir(optimize(lower(_ConstInstallState().__call__)), default_ops(_FMT)), name)
+    lir = build(lower_to_mir(optimize(lower(_ConstInstallState().__call__)), default_ops(_FMT)), name, fetch_stages=3)
     slots = lir.float_state_slots
     assert slots, "kernel must have a float state slot with a cycle-0 const install"
     slot = slots[0]

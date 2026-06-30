@@ -55,7 +55,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
 
 
 def _report(name: str) -> str:
-    lir = build(lower_to_mir(optimize(lower(_EXAMPLES[name]())), default_ops(_FMT)), name)
+    lir = build(lower_to_mir(optimize(lower(_EXAMPLES[name]())), default_ops(_FMT)), name, fetch_stages=3)
     return generate_report(lir, generate_verilog(lir)).html
 
 
@@ -98,7 +98,7 @@ def test_report_draws_per_arm_edges_for_a_multi_arm_spill() -> None:
 
     from holoso._backend.html._schedule import render_schedule
 
-    lir = build(lower_to_mir(optimize(lower(overlap_spill_kernel)), default_ops(_FMT)), "overlap_spill")
+    lir = build(lower_to_mir(optimize(lower(overlap_spill_kernel)), default_ops(_FMT)), "overlap_spill", fetch_stages=3)
     html = render_schedule(lir)
     marker = "var data = "
     payload, _ = json.JSONDecoder().raw_decode(html, html.index(marker) + len(marker))

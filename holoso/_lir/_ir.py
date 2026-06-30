@@ -20,61 +20,58 @@ from .._operators import (
 from .._type import BoolType, FloatFormat, FloatType, ScalarType, is_wide_type
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
-FETCH_STAGES = 3
-FETCH_LAG = FETCH_STAGES - 1
-
-
 # The cycle-accurate timing model: one consistent physical story shared by the LIR cycle helpers below, the numerical
 # model, the scheduler's dependency edges, the register allocator, and the HTML report, so a value's
 # landing/read/copy/boundary cycle is computed in exactly one place and the consumers cannot drift.
 # It is built from primitives:
-#   - FETCH_LAG -- the microcode fetch leads the datapath by this many steps (a global frame offset);
+#   - fetch_lag -- the microcode fetch leads the datapath by this many steps (a global frame offset), threaded from
+#     the build entry and recorded on the Lir, so the schedule and every consumer share one value;
 #   - READ_FIRST_EDGE -- a register read sees the value written one step earlier (write-then-read), so a result becomes
 #     readable one step after it is written.
 # Both register banks read combinationally and alike: an instance-backed operator's read-address word rides its
-# issue step and the datapath samples the operand FETCH_LAG later, so every operand read lands at issue + FETCH_LAG
+# issue step and the datapath samples the operand fetch_lag later, so every operand read lands at issue + fetch_lag
 # independent of bank -- the read-side mirror of the uniform landing below. Every result -- pooled or inline, wide
 # or boolean -- drives its register write combinationally from its producer's output at its commit step, so a
-# result committed at C becomes readable at C + FETCH_LAG + READ_FIRST_EDGE, bank- and class-independent.
+# result committed at C becomes readable at C + fetch_lag + READ_FIRST_EDGE, bank- and class-independent.
 # The operator's own LATENCY is the orthogonal pipeline depth (a pooled instance has L stages, an inline op has none).
 READ_FIRST_EDGE = 1
 
 
-def landing_cycle(commit_cycle: int) -> int:
+def landing_cycle(commit_cycle: int, fetch_lag: int) -> int:
     """
     The cycle a result committed at ``commit_cycle`` becomes readable in its register: the fetch lag plus the
     write-then-read edge. Bank- and class-independent -- every result drives its array write combinationally at its
     commit step, so a pooled or inline result on either bank lands alike.
     """
-    return commit_cycle + FETCH_LAG + READ_FIRST_EDGE
+    return commit_cycle + fetch_lag + READ_FIRST_EDGE
 
 
-def read_cycle(issue_cycle: int) -> int:
+def read_cycle(issue_cycle: int, fetch_lag: int) -> int:
     """
-    The cycle an instance-backed operator samples its register operands: latch-free on both banks, FETCH_LAG after the
+    The cycle an instance-backed operator samples its register operands: latch-free on both banks, fetch_lag after the
     read-address word rides the issue step.
     """
-    return issue_cycle + FETCH_LAG
+    return issue_cycle + fetch_lag
 
 
-def inline_fire_cycle(commit_cycle: int) -> int:
+def inline_fire_cycle(commit_cycle: int, fetch_lag: int) -> int:
     """
     The cycle a PC-gated combinational statement fires: an inline operation (a select/mux, boolean logic, a float<->bool
     cast), or a pc-gated install/copy (a phi-arm copy, a non-coalesced slot writeback, a boolean write). It reads ALL
-    its operands (or its source) and drives its destination register's write data on this single step, ``FETCH_LAG``
+    its operands (or its source) and drives its destination register's write data on this single step, ``fetch_lag``
     after its scheduler-frame placement. Its result becomes readable one ``READ_FIRST_EDGE`` later (``landing_cycle``).
     For a pc-gated install this is the coalescing equivalence the overlap layout relies on -- ``install_landing`` of
     this fire step equals ``landing_cycle(commit_cycle)``, so a phi arm coalesced onto a direct operator write lands
     exactly where its copy would have. Whether the install sits at the work makespan or one step past lives in its
     PLACEMENT (``install_issue_cycle``), not in this fire step.
     """
-    return commit_cycle + FETCH_LAG
+    return commit_cycle + fetch_lag
 
 
 def pooled_write_word(commit_cycle: int) -> int:
     """
     The fetch-PC-frame step on which a pooled lane drives its write-enable/address microcode word: the commit step
-    itself. This is the lone helper in the fetch-PC frame (no ``FETCH_LAG``) -- it places the microcode word the
+    itself. This is the lone helper in the fetch-PC frame (no ``fetch_lag``) -- it places the microcode word the
     sequencer fetches, not the step the datapath acts on it. Shared by the emitter's microcode (where the word is
     placed) and the overlap layout (which keeps every write word inside the block), so the two cannot drift -- the same
     single-source-of-truth contract as the landing/read helpers above.
@@ -82,7 +79,7 @@ def pooled_write_word(commit_cycle: int) -> int:
     return commit_cycle
 
 
-def operand_read_cycle(operator: HardwareOperator, issue_cycle: int) -> int:
+def operand_read_cycle(operator: HardwareOperator, issue_cycle: int, fetch_lag: int) -> int:
     """
     The hardware-frame cycle on which an operation samples its register operands (an operation reads all its operands
     on one cycle), the single definition shared by the register allocator's interference, the liveness views, and the
@@ -91,11 +88,11 @@ def operand_read_cycle(operator: HardwareOperator, issue_cycle: int) -> int:
     """
     if isinstance(operator, PooledHardwareOperator):
         assert all(is_wide_type(ty) for ty in operator.signature.operand_types), operator.mnemonic
-        return read_cycle(issue_cycle)
-    return inline_fire_cycle(issue_cycle + operator.latency)
+        return read_cycle(issue_cycle, fetch_lag)
+    return inline_fire_cycle(issue_cycle + operator.latency, fetch_lag)
 
 
-def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: HardwareOperator) -> int:
+def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: HardwareOperator, fetch_lag: int) -> int:
     """
     The minimum same-block scheduling distance from a producer's commit to a consumer's issue (``issue_consumer >=
     commit_producer + edge``): the producer's result landing minus the consumer's operand-read timing, so the consumer
@@ -109,14 +106,14 @@ def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: Ha
     with unit slope, so the difference at zero is the frame-independent spacing; a helper that ever loses that affinity
     breaks this derivation.
     """
-    landing = landing_cycle(0)
+    landing = landing_cycle(0, fetch_lag)
     if isinstance(consumer, PooledHardwareOperator):
         assert is_wide_type(
             producer.signature.result_types[producer_port]
         ), f"{consumer.mnemonic}: pooled operators read only wide operands today"
-        read = read_cycle(0)
+        read = read_cycle(0, fetch_lag)
     else:
-        read = inline_fire_cycle(consumer.latency)
+        read = inline_fire_cycle(consumer.latency, fetch_lag)
     return landing - read
 
 
@@ -150,14 +147,14 @@ def install_issue_cycle(work_makespan: int, resident_source: bool, source_commit
     return max(work_makespan, source_commit + READ_FIRST_EDGE)
 
 
-def boundary_step(makespan: int) -> int:
+def boundary_step(makespan: int, fetch_lag: int) -> int:
     """
     The drained boundary / initiation-interval step: the cycle the block's latest boundary-resident result lands, where
     its live-outs and consumed-at-boundary values are resident. Bank-independent -- every result lands at the one
     ``landing_cycle``. The single source of truth shared by the overlap layout (the terminator offset), the liveness
     boundary, and the numerical model, so the drain cannot drift between them.
     """
-    return landing_cycle(makespan)
+    return landing_cycle(makespan, fetch_lag)
 
 
 def successor_local_cycle(block_local_cycle: int, term_offset: int) -> int:
@@ -235,27 +232,6 @@ class OperatorInstance:
         if permutation is not None:
             assert sorted(permutation) == list(range(len(result_types))), self.operator.mnemonic
             assert all(result_types[permutation[p]] == result_types[p] for p in range(len(permutation)))
-        # Cross-block instance reuse has two regimes. A single-predecessor successor inherits the predecessor's per-
-        # instance busy residue explicitly (``entry_busy``, the cross-block software-pipelining carry), so overlap onto
-        # it is sound for ANY initiation interval. A DRAINED edge -- onto a multi-predecessor successor (a merge, a loop
-        # header, the Ret), which carries no residue -- instead needs the instance provably idle by the time that
-        # successor first issues on it: the worst case is a firing committing at its block's makespan (issue =
-        # makespan - latency), and the redirect-plus-fetch gap to the successor's first issue is at least
-        # ``latency + boundary_step(0) + 1``. The drain is bank-independent -- every result lands at the one landing --
-        # so the worst-case gap is the same for every operator regardless of its result bank. The makespan absorbs any
-        # entry_busy delay, since it tracks that firing's own commit. This bound guards those drained edges; a
-        # deeper-throttled operator on a back-edge loop would additionally need a post-layout re-entry-distance check,
-        # deferred until one exists.
-        drain = boundary_step(0)
-        # The gap beyond the drain is one step: the terminator's redirect into the successor frame. Every block's first
-        # pooled issue is block-local cycle 0 (no scheduling floor delays it), so it adds nothing past the redirect --
-        # the worst-case gap is ``drain + 1``.
-        redirect_and_first_issue = 1
-        bound = self.operator.latency + drain + redirect_and_first_issue
-        assert self.operator.initiation_interval <= bound, (
-            f"{self.operator.mnemonic}: initiation_interval {self.operator.initiation_interval} needs cross-block "
-            f"busy tracking (max supported is latency + {drain + redirect_and_first_issue})"
-        )
 
 
 # An operator READ port: the ``(instance, operand-position)`` pair keying ``read_set_per_port``. Distinct from the
@@ -537,13 +513,11 @@ class FloatCopy:
         """A literal-constant install (one kind of resident source); meaningful where the literal itself matters."""
         return isinstance(self.source.source, FloatConstRef)
 
-    @property
-    def fire_step(self) -> int:
-        return inline_fire_cycle(self.issue_cycle)
+    def fire_step(self, fetch_lag: int) -> int:
+        return inline_fire_cycle(self.issue_cycle, fetch_lag)
 
-    @property
-    def landing(self) -> int:
-        return install_landing(self.fire_step)
+    def landing(self, fetch_lag: int) -> int:
+        return install_landing(self.fire_step(fetch_lag))
 
 
 @dataclass(frozen=True, slots=True)
@@ -565,13 +539,11 @@ class BoolWrite:
         """A literal-constant install (one kind of resident source); meaningful where the literal itself matters."""
         return isinstance(self.source.source, BoolConstRef)
 
-    @property
-    def fire_step(self) -> int:
-        return inline_fire_cycle(self.issue_cycle)
+    def fire_step(self, fetch_lag: int) -> int:
+        return inline_fire_cycle(self.issue_cycle, fetch_lag)
 
-    @property
-    def landing(self) -> int:
-        return install_landing(self.fire_step)
+    def landing(self, fetch_lag: int) -> int:
+        return install_landing(self.fire_step(fetch_lag))
 
 
 @dataclass(frozen=True, slots=True)
@@ -716,9 +688,30 @@ class Lir:
     min_initiation_interval: int  # shortest executable path latency; exact for branch-free kernels, else a lower bound
     bool_regfile: BoolRegFileLayout
     bool_state_slots: list[BoolStateSlot]  # persistent boolean registers, ordered as the instance attributes
+    fetch_lag: int  # steps the control fetch leads the datapath; threaded from build(), one less than its fetch_stages
 
     def __post_init__(self) -> None:
         assert self.regfile.width == self.float_format.width
+        assert self.fetch_lag in (1, 2), self.fetch_lag
+        # Cross-block instance reuse on a DRAINED edge -- onto a multi-predecessor successor (a merge, a loop
+        # header, the Ret), which carries no per-instance busy residue -- needs the instance provably idle by the
+        # time that successor first issues on it: the worst case is a firing committing at its block's makespan
+        # (issue = makespan - latency), and the redirect-plus-fetch gap to the successor's first issue is at least
+        # ``latency + drain + 1`` (the ``drain`` below). The drain is bank-independent -- every result lands at the
+        # one landing -- so the worst-case gap is the same for every operator regardless of result bank. (A
+        # single-predecessor successor inherits the residue explicitly via ``entry_busy`` and is sound for any
+        # initiation interval.) The gap beyond the drain is the one-step terminator redirect into the successor
+        # frame; every block's first pooled issue is block-local cycle 0, so it adds nothing past the redirect.
+        # This bound guards those drained edges; a deeper-throttled operator on a back-edge loop would additionally
+        # need a post-layout re-entry-distance check, deferred until one exists. Checked here, where the fetch lag
+        # is known, over every pooled instance.
+        drain = boundary_step(0, self.fetch_lag)
+        for inst in self.instances:
+            bound = inst.operator.latency + drain + 1
+            assert inst.operator.initiation_interval <= bound, (
+                f"{inst.operator.mnemonic}: initiation_interval {inst.operator.initiation_interval} needs cross-block "
+                f"busy tracking (max supported is latency + {drain + 1})"
+            )
 
     @property
     def ports(self) -> list[Port]:
@@ -768,10 +761,10 @@ class Lir:
     def present_step(self) -> int:
         """
         The hardware executing step on which the outputs are valid in the register array: the fetch PC reaches
-        ``last_pc`` (the Ret boundary) and the executing step lags it by FETCH_LAG. For a straight-line kernel this is
-        ``makespan + 1`` (the last commit plus the read-first edge); for a CFG it is the Ret block's resident step.
+        ``last_pc`` (the Ret boundary) and the executing step lags it by the fetch lag. For a straight-line kernel this
+        is ``makespan + 1`` (the last commit plus the read-first edge); for a CFG it is the Ret block's resident step.
         """
-        return self.last_pc - FETCH_LAG
+        return self.last_pc - self.fetch_lag
 
     @property
     def cyc_width(self) -> int:
@@ -813,7 +806,7 @@ class Lir:
         insurance, and terminates because spills only cross single-predecessor forward edges (a finite DAG; a back-edge
         target is multi-predecessor and never overlaps).
         """
-        local_landing = landing_cycle(op.commit_cycle)
+        local_landing = landing_cycle(op.commit_cycle, self.fetch_lag)
         by_index = {b.index: b for b in self.blocks}
         return _trace_landing(by_index, self.block_base, block, local_landing)
 
@@ -825,7 +818,7 @@ class Lir:
         An early pc-gated install instead lands its destination one PC later, via ``install_landing`` -- the same +1 the
         model commits. Shared by liveness and the emitter so the two cannot drift.
         """
-        return inline_fire_cycle(slot.install_cycle)
+        return inline_fire_cycle(slot.install_cycle, self.fetch_lag)
 
     def float_state_install_is_boundary(self, slot: FloatStateSlot) -> bool:
         """
@@ -1038,7 +1031,7 @@ class Lir:
             base_pc = self.block_base[block.index]
             block_ops: list[ScheduledOp] = [*block.ops, *block.inline_ops]
             for op in block_ops:
-                read = operand_read_cycle(op.operator, base_pc + op.issue_cycle)
+                read = operand_read_cycle(op.operator, base_pc + op.issue_cycle, self.fetch_lag)
                 for write in op.writes:
                     if isinstance(write.dst, reg_type):
                         defs.setdefault(write.dst, []).extend(self.write_landing_pcs(block, op))
@@ -1104,7 +1097,7 @@ class Lir:
         for block in self.blocks:
             base_pc = self.block_base[block.index]
             for copy in block.copies:  # phi copy fires here and samples its source; destination lands one PC later
-                step = base_pc + copy.fire_step
+                step = base_pc + copy.fire_step(self.fetch_lag)
                 defs.setdefault(copy.dst, []).append(install_landing(step))
                 if isinstance(copy.source.source, RegRef):
                     uses.setdefault(copy.source.source, []).append(step)
@@ -1149,7 +1142,7 @@ class Lir:
         for block in self.blocks:
             base_pc = self.block_base[block.index]
             for bwrite in block.bool_writes:  # bool write fires and samples here; destination lands one PC later
-                step = base_pc + bwrite.fire_step
+                step = base_pc + bwrite.fire_step(self.fetch_lag)
                 defs.setdefault(bwrite.dst, []).append(install_landing(step))
                 if isinstance(bwrite.source.source, BoolRegRef):
                     uses.setdefault(bwrite.source.source, []).append(step)

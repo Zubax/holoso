@@ -22,8 +22,6 @@ from ._ir import (
     PortWrite as PortWrite,
     RegRef as RegRef,
     ScheduledOp as ScheduledOp,
-    FETCH_LAG as FETCH_LAG,
-    FETCH_STAGES as FETCH_STAGES,
     boundary_step as boundary_step,
     inline_fire_cycle as inline_fire_cycle,
     install_landing as install_landing,

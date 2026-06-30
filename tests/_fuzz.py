@@ -1035,7 +1035,7 @@ def _build_with_lir(
     identical build path.
     """
     mir = lower_to_mir(optimize(lower_frontend(fn)), ops)
-    lir = build(mir, name)
+    lir = build(mir, name, fetch_stages=3)
     model = generate(lir).elaborate()
     interpreter = MirInterpreter(mir)
     return mir, lir, model, interpreter
@@ -1086,7 +1086,7 @@ def _overlap_spill_depth(lir: Lir) -> int | None:
             [*block.ops, *block.inline_ops], key=lambda op: (op.issue_cycle, op.commit_cycle)
         )
         for op in block_ops:
-            read_cycle = operand_read_cycle(op.operator, op.issue_cycle)
+            read_cycle = operand_read_cycle(op.operator, op.issue_cycle, lir.fetch_lag)
             operands = [
                 _depth_at(reg_depth.get(operand.source, []), read_cycle)
                 for operand in op.operands
@@ -1096,7 +1096,7 @@ def _overlap_spill_depth(lir: Lir) -> int | None:
             for write in op.writes:
                 if not isinstance(write.dst, RegRef):
                     continue
-                landing = landing_cycle(op.commit_cycle)  # every result lands at the one bank-independent cycle
+                landing = landing_cycle(op.commit_cycle, lir.fetch_lag)
                 reg_depth.setdefault(write.dst, []).append((landing, op_depth))
                 if landing > block.term_offset:
                     best = op_depth if best is None else max(best, op_depth)

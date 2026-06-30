@@ -256,12 +256,16 @@ class NumericalSimulator(_Kernel):
             base = lir.block_base[block.index]
             block_ops: list[ScheduledOp] = [*block.ops, *block.inline_ops]
             for op in block_ops:
-                read_pc = operand_read_cycle(op.operator, base + op.issue_cycle)
+                read_pc = operand_read_cycle(op.operator, base + op.issue_cycle, lir.fetch_lag)
                 self._op_events.setdefault(read_pc, []).append(_OpEvent(op, base + op.commit_cycle))
             for copy in block.copies:
-                self._installs.setdefault(base + copy.fire_step, []).append(_Install(copy.source, copy.dst))
+                self._installs.setdefault(base + copy.fire_step(lir.fetch_lag), []).append(
+                    _Install(copy.source, copy.dst)
+                )
             for write in block.bool_writes:
-                self._installs.setdefault(base + write.fire_step, []).append(_Install(write.source, write.dst))
+                self._installs.setdefault(base + write.fire_step(lir.fetch_lag), []).append(
+                    _Install(write.source, write.dst)
+                )
             if not isinstance(block.terminator, Ret):
                 self._terminators[lir.term_pc(block)] = block.terminator
         # A non-coalesced wide slot installs by a pc-gated copy -- early (before the boundary, like a phi copy) or at
@@ -298,9 +302,8 @@ class NumericalSimulator(_Kernel):
             self._write(dst, value)
         for event in self._op_events.get(pc, ()):
             results = event.op.operator.evaluate(*[self._read(operand) for operand in event.op.operands])
-            landing = landing_cycle(
-                event.commit_pc
-            )  # every result of this firing lands at the one bank-independent cycle
+            # every result of this firing lands at the one bank-independent cycle
+            landing = landing_cycle(event.commit_pc, self._lir.fetch_lag)
             for write in event.op.writes:
                 result = results[write.port]
                 if isinstance(write.dst, RegRef):

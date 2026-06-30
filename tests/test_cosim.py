@@ -337,7 +337,7 @@ def test_cosim_div0_error(sim: str, config: OperatorCase) -> None:
 
     fmt = FloatFormat(6, 18)
     name = f"kdiv_{config.label}"
-    lir = build(lower_to_mir(optimize(lower(kdiv)), config.make_ops(fmt)), name)
+    lir = build(lower_to_mir(optimize(lower(kdiv)), config.make_ops(fmt)), name, fetch_stages=3)
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / sim / f"{name}_err_w{fmt.wexp}_{fmt.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"err_{name}_w{fmt.wexp}_{fmt.wman}"
@@ -427,7 +427,7 @@ def test_cosim_overlap_div0_errpc(sim: str, config: OperatorCase) -> None:
     # _modelref.overlap_div_err_kernel.
     fmt = FloatFormat(6, 18)
     name = f"overlap_div_err_{config.label}"
-    lir = build(lower_to_mir(optimize(lower(overlap_div_err_kernel)), config.make_ops(fmt)), name)
+    lir = build(lower_to_mir(optimize(lower(overlap_div_err_kernel)), config.make_ops(fmt)), name, fetch_stages=3)
     entry = next(block for block in lir.blocks if block.index == lir.entry)
     (fdiv,) = [op for op in entry.ops if op.inst.operator.error_ports]
     err_pc = lir.block_base[entry.index] + pooled_write_word(fdiv.commit_cycle)

@@ -108,9 +108,9 @@ def _state_copy_rhs(slot: FloatStateSlot) -> str:
 def _inline_fire_pc(lir: Lir, block_index: int, op: InlineScheduledOp) -> int:
     """
     The fetch PC at which an inline firing's single PC-gated statement executes: its combinational fire step, one
-    ``FETCH_LAG`` after the commit. An inline op drives its destination's write data combinationally on this step.
+    fetch lag after the commit. An inline op drives its destination's write data combinationally on this step.
     """
-    return lir.block_base[block_index] + inline_fire_cycle(op.commit_cycle)
+    return lir.block_base[block_index] + inline_fire_cycle(op.commit_cycle, lir.fetch_lag)
 
 
 def _inline_sign_wire(block_index: int, op_index: int, pos: int) -> str:
@@ -141,7 +141,7 @@ def _inline_rhs(block_index: int, op_index: int, op: InlineScheduledOp) -> str:
 
 
 def generate(lir: Lir) -> VerilogOutput:
-    assert FETCH_STAGES == 3, "the Verilog emitter implements the 3-stage microcode fetch (may be configurable later)"
+    assert lir.fetch_lag == 2, "only the 2-lag (3-stage) fetch RTL is implemented; 1-lag awaits the latch-removal mode"
     w = _Writer()
     cycw = lir.cyc_width
     pcw = max(1, lir.initiation_interval.bit_length())
@@ -235,6 +235,8 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
 def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int) -> None:
     fmt = lir.float_format
     nreg = max(1, lir.regfile.nreg)
+    fetch_lag = lir.fetch_lag
+    fetch_stages = fetch_lag + 1  # the control-fetch pipeline depth, shown in the localparam comment
     w(f"""
 localparam           WEXP      ={fmt.wexp:4};  // Float exponent bits fixed by the static schedule
 localparam           WMAN      ={fmt.wman:4};  // Float mantissa bits fixed by the static schedule
@@ -242,7 +244,7 @@ localparam           W         = WEXP + WMAN;
 localparam           NREG      ={nreg:4};  // >= 1; the wide bank is unused when no value needs a register
 localparam           CYCW      ={cycw:4};  // err_pc width: enough for any executing step (0..present)
 localparam           PCW       ={pcw:4};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
-localparam           FETCH_LAG ={FETCH_LAG:4};  // executing step = pc - FETCH_LAG ({FETCH_STAGES}-stage control fetch)
+localparam           FETCH_LAG ={fetch_lag:4};  // executing step = pc - FETCH_LAG ({fetch_stages}-stage control fetch)
 localparam [PCW-1:0] PRESENT   ={lir.present_step:4};  // executing step on which the outputs are valid in the array
 localparam [PCW-1:0] LASTPC    ={lir.initiation_interval:4};  // = PRESENT + FETCH_LAG; out_valid asserts here
 localparam           UCW       ={ucw:4};  // microcode word width after lifting out constant control fields
@@ -262,7 +264,7 @@ def _emit_inline_support(w: _Writer) -> None:
 
 
 def _emit_declarations(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorInstance, int], list[int]]) -> None:
-    assert FETCH_LAG >= 1, "transacting_q is [FETCH_LAG-1:0]; FETCH_LAG==0 needs an explicit leading NOP"
+    assert lir.fetch_lag >= 1, "transacting_q is [FETCH_LAG-1:0]; FETCH_LAG==0 needs an explicit leading NOP"
     w("""
     reg  [PCW-1:0]  pc;            // fetch program counter; the executing step lags it by FETCH_LAG
     reg  [PCW-1:0]  next_pc;       // combinational next-state presented to the ROM each cycle
@@ -515,11 +517,11 @@ def _float_copy_pc(lir: Lir, block: LirBlock, copy: FloatCopy) -> int:
     lag after the ``issue_cycle`` that ``install_issue_cycle`` placed at the work makespan, or one past for a last-work
     source).
     """
-    return lir.block_base[block.index] + copy.fire_step
+    return lir.block_base[block.index] + copy.fire_step(lir.fetch_lag)
 
 
 def _bool_write_pc(lir: Lir, block: LirBlock, write: BoolWrite) -> int:
-    return lir.block_base[block.index] + write.fire_step
+    return lir.block_base[block.index] + write.fire_step(lir.fetch_lag)
 
 
 def _copy_sign_wire(block_index: int, copy_index: int) -> str:

@@ -34,7 +34,7 @@ def _multi_const_install(x: float) -> float:
 
 def test_multi_distinct_const_install_emits_selector() -> None:
     """The kernel must emit a const-pool selector field; otherwise the cosim below would not exercise the mux at all."""
-    lir = build(lower_to_mir(optimize(lower(_multi_const_install)), default_ops(_FMT)), "multi_const")
+    lir = build(lower_to_mir(optimize(lower(_multi_const_install)), default_ops(_FMT)), "multi_const", fetch_stages=3)
     assert "uc_ccidx_" in generate_verilog(lir).verilog
 
 

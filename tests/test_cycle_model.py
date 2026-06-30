@@ -66,7 +66,7 @@ def _drive(model: NumericalSimulator, inputs: list[object]) -> tuple[tuple[objec
 def test_tick_and_call_agree(name: str, factory: Callable[[], Callable[..., object]]) -> None:
     # The hand-driven tick loop and the run() convenience must produce the same outputs: run() is just a tick
     # driver, and the cycle count it would observe is the loop count below.
-    lir = build(lower_to_mir(optimize(lower(factory())), default_ops(_FMT)), name)
+    lir = build(lower_to_mir(optimize(lower(factory())), default_ops(_FMT)), name, fetch_stages=3)
     by_tick = NumericalSimulator(lir)
     by_call = NumericalSimulator(lir)
     rng = random.Random(1)
@@ -87,7 +87,7 @@ def test_single_path_latency_is_the_static_initiation_interval(name: str) -> Non
         "cordic_sincos": lambda: CordicSinCos().__call__,
         "ekf1_stateless": lambda: update_x_P,
     }[name]
-    lir = build(lower_to_mir(optimize(lower(factory())), default_ops(_FMT)), name)
+    lir = build(lower_to_mir(optimize(lower(factory())), default_ops(_FMT)), name, fetch_stages=3)
     model = NumericalSimulator(lir)
     rng = random.Random(7)
     for _ in range(8):
@@ -98,7 +98,7 @@ def test_single_path_latency_is_the_static_initiation_interval(name: str) -> Non
 def test_loop_latency_grows_with_the_trip_count() -> None:
     # Newton's reciprocal iterates until convergence, so a harder input runs more loop trips and a strictly longer
     # transaction -- the data-dependent latency a fixed ``initiation_interval`` cannot express.
-    lir = build(lower_to_mir(optimize(lower(NewtonReciprocal().__call__)), default_ops(_FMT)), "recip")
+    lir = build(lower_to_mir(optimize(lower(NewtonReciprocal().__call__)), default_ops(_FMT)), "recip", fetch_stages=3)
     model = NumericalSimulator(lir)
     latencies = {_drive(model, [x])[1] for x in (0.5, 0.9, 1.3, 1.7, 2.5, 3.5, 6.0, 12.0)}
     assert len(latencies) >= 3, f"loop latency should vary with the trip count, saw {sorted(latencies)}"
@@ -109,7 +109,7 @@ def test_deep_loop_runs_in_bounded_memory() -> None:
     # The per-clock model holds only the register files and a small in-flight buffer, so a loop with a very high trip
     # count executes without unbounded growth. ``count_down`` runs ``n`` iterations; at n=20000 that is hundreds of
     # thousands of ticks completing in bounded memory and time -- a global-timeline design would be O(trips^2).
-    lir = build(lower_to_mir(optimize(lower(_count_down)), default_ops(_FMT)), "count_down")
+    lir = build(lower_to_mir(optimize(lower(_count_down)), default_ops(_FMT)), "count_down", fetch_stages=3)
     shallow_cycles = _drive(NumericalSimulator(lir), [10.0])[1]
     model = NumericalSimulator(lir)
     out, deep_cycles = _drive(model, [20000.0])
@@ -176,7 +176,7 @@ def test_realized_worst_case_latency_does_not_regress(name: str) -> None:
     # re-inflates the count, amplified across loop trips. Freezing the post-optimization figure makes the gate fail on
     # any future change that lengthens a transaction, while still allowing a genuine improvement (the bound is ``<=``).
     factory, vectors, worst = _WORST_CASE_LATENCY[name]
-    lir = build(lower_to_mir(optimize(lower(factory())), default_ops(_FMT)), name)
+    lir = build(lower_to_mir(optimize(lower(factory())), default_ops(_FMT)), name, fetch_stages=3)
     model = NumericalSimulator(lir)
     waited = [_drive(model, inputs)[1] for inputs in vectors]
     assert max(waited) <= worst, f"{name}: realized worst-case latency regressed {worst} -> {max(waited)} ({waited})"

@@ -26,14 +26,15 @@ from ._construct import (
 from ._layout import install_inclusive_makespan, layout_blocks
 
 
-def build(mir: Mir, module_name: str) -> Lir:
+def build(mir: Mir, module_name: str, fetch_stages: int) -> Lir:
     """
     Schedule, bind, and register-allocate selected MIR into a pipelined microprogram. A straight-line kernel is the
-    degenerate single-``Ret``-block control-flow graph, so there is one build path for every kernel.
+    degenerate single-``Ret``-block control-flow graph, so there is one build path for every kernel. ``fetch_stages``
+    is the control-fetch pipeline depth; the datapath lags the fetch by one less than it, the lag threaded throughout.
     """
     if not mir.outputs:
         raise UnsupportedConstruct("Synthesized kernel must produce at least one output value")
-    lir = _build_program(mir, module_name)
+    lir = _build_program(mir, module_name, fetch_stages - 1)
     names = [port.name for port in lir.ports]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
@@ -66,7 +67,7 @@ def _has_state_copy(
     )
 
 
-def _build_program(mir: Mir, module_name: str) -> Lir:
+def _build_program(mir: Mir, module_name: str, fetch_lag: int) -> Lir:
     """
     Build the microprogram for any kernel (a straight-line kernel is the degenerate single-``Ret``-block graph):
     schedule each block independently, pool operator instances across the mutually-exclusive blocks, color both register
@@ -124,7 +125,7 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
     # narrowings), and the single-keyed state-copy charge (height 1). Worst case is their SUM plus a confirming round;
     # the 2*len(blocks)+3 loop bound below leaves a safe margin, with the asserts and the else-clause as loud backstops.
     for _ in range(2 * len(mir.blocks) + 3):
-        result = layout_and_allocate(mir, float_mir, bool_mir, pool, has_install_blocks, has_state_copy)
+        result = layout_and_allocate(mir, float_mir, bool_mir, pool, has_install_blocks, has_state_copy, fetch_lag)
         actual = actual_install_blocks(result.alloc, float_mir, bool_mir, result.overlap.block_sched)
         actual_state = _has_state_copy(float_mir, bool_mir, result.alloc, result.const_pool)
         # The descent is monotone and the fixed point is sound. MONOTONE: a block leaves the install set only by
@@ -203,7 +204,7 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
         # but a Ret wrap drops it -- a silently dead install. This is the vector-independent structural invariant that a
         # value cosim cannot see (a dead install that does not change outputs passes every value comparison).
         term_offset = overlap.block_term_offset[block.id]
-        install_landings = [c.landing for c in copies] + [w.landing for w in bool_writes]
+        install_landings = [c.landing(fetch_lag) for c in copies] + [w.landing(fetch_lag) for w in bool_writes]
         assert all(
             landing <= term_offset for landing in install_landings
         ), f"block {block.id}: a phi-arm install lands at {max(install_landings)} past the terminator {term_offset}"
@@ -272,6 +273,7 @@ def _build_program(mir: Mir, module_name: str) -> Lir:
         min_initiation_interval=min_ii,
         bool_regfile=BoolRegFileLayout(nreg=alloc.nbreg),
         bool_state_slots=bool_state_slots,
+        fetch_lag=fetch_lag,
     )
     # A non-coalesced float slot's writeback fires read-first at ``state_copy_step``, at last_pc for a boundary install
     # or below it for an early one. A boundary that collapsed below the install would drop the writeback and freeze the

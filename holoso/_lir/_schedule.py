@@ -27,12 +27,6 @@ from ._ir import OperatorInstance, dependency_edge, landing_cycle, operand_read_
 # module activation consumes. Output ports and output conditioners are deliberately excluded (members differ there).
 type _FiringKey = tuple[PooledHardwareOperator, tuple[ValueId, ...], tuple[PortConditioner, ...]]
 
-# The largest commit-to-issue dependency edge any (producer, consumer) pair can require: the result landing (fetch lag +
-# read-first edge) against the latch-free pooled read, derived from the same helpers as dependency_edge. Exact only
-# while producer->pooled remains the maximal pair; it merely pads a generously-slack progress cap, so a future larger
-# pair costs nothing worse than a later no-progress diagnosis.
-_MAX_DEPENDENCY_EDGE = landing_cycle(0) - read_cycle(0)
-
 
 @dataclass(frozen=True, slots=True)
 class Schedule:
@@ -132,7 +126,7 @@ def fuse_block_firings(nodes: dict[ValueId, MirNode], schedulable: set[ValueId])
 
 
 def _critical_path(
-    nodes: dict[ValueId, MirNode], op_ids: list[ValueId], schedulable: set[ValueId]
+    nodes: dict[ValueId, MirNode], op_ids: list[ValueId], schedulable: set[ValueId], fetch_lag: int
 ) -> dict[ValueId, int]:
     """Priority height: longest latency-weighted path to a sink, counting the per-pair dependency edge per edge."""
     consumers: dict[ValueId, list[ValueId]] = {vid: [] for vid in op_ids}
@@ -144,7 +138,7 @@ def _critical_path(
         node = _op(nodes, vid)
         height[vid] = node.operator.latency + max(
             (
-                dependency_edge(node.operator, node.output_port, _op(nodes, c).operator) + height[c]
+                dependency_edge(node.operator, node.output_port, _op(nodes, c).operator, fetch_lag) + height[c]
                 for c in consumers[vid]
             ),
             default=0,
@@ -156,6 +150,7 @@ def schedule_ops(
     nodes: dict[ValueId, MirNode],
     pool: Mapping[type[HardwareOperator], int],
     schedulable: set[ValueId],
+    fetch_lag: int,
     entry_busy: Mapping[tuple[PooledHardwareOperator, int], int] | None = None,
     livein_landing: Mapping[ValueId, int] | None = None,
 ) -> Schedule:
@@ -169,7 +164,7 @@ def schedule_ops(
     landing cycle, and a consumer's operand read must not precede it. A pooled instance accepts a new firing every
     ``initiation_interval`` cycles; ``entry_busy`` seeds each instance's busy window with the residue inherited from an
     overlapping predecessor (empty under draining, where an instance is necessarily idle by the boundary for every
-    operator whose initiation interval stays within ``OperatorInstance.__post_init__``'s bound). Both carries are empty
+    operator whose initiation interval stays within ``Lir.__post_init__``'s bound). Both carries are empty
     for a fully-drained block, leaving the schedule identical to an isolated per-block pass.
     """
     entry_busy = entry_busy or {}
@@ -182,7 +177,7 @@ def schedule_ops(
     schedulable_set = set(op_ids)
 
     firings = fuse_block_firings(nodes, schedulable_set)
-    height = _critical_path(nodes, op_ids, schedulable_set)
+    height = _critical_path(nodes, op_ids, schedulable_set, fetch_lag)
     issue_cycle: dict[ValueId, int] = {}
     inst_count: dict[PooledHardwareOperator, int] = {}
     slot_of: dict[ValueId, tuple[PooledHardwareOperator, int]] = {}  # per firing leader
@@ -205,21 +200,27 @@ def schedule_ops(
                 if operand not in issue_cycle:
                     return False
                 producer = _op(nodes, operand)
-                if cycle < commit_cycle(operand) + dependency_edge(producer.operator, producer.output_port, consumer):
+                edge = dependency_edge(producer.operator, producer.output_port, consumer, fetch_lag)
+                if cycle < commit_cycle(operand) + edge:
                     return False
             elif operand in livein_landing:
                 # A predecessor result spilled past an overlapped boundary lands mid-block; the consumer's operand read
                 # must not precede its block-local landing cycle (the read mechanism dispatches per consumer class).
-                if operand_read_cycle(consumer, cycle) < livein_landing[operand]:
+                if operand_read_cycle(consumer, cycle, fetch_lag) < livein_landing[operand]:
                     return False
         return True
 
     unscheduled = set(firings)
+    # The largest commit-to-issue dependency edge any (producer, consumer) pair can require: the result landing (fetch
+    # lag + read-first edge) against the latch-free pooled read, derived from the same helpers as dependency_edge. Exact
+    # only while producer->pooled remains the maximal pair; it merely pads a generously-slack progress cap, so a future
+    # larger pair costs nothing worse than a later no-progress diagnosis.
+    max_dependency_edge = landing_cycle(0, fetch_lag) - read_cycle(0, fetch_lag)
     # The progress cap charges each firing the larger of its latency and its busy window: N firings contending for
     # one instance at initiation interval K legitimately need ~N*K cycles before the last one issues.
     cap = (
         sum(max(_op(nodes, vid).operator.latency, _op(nodes, vid).operator.initiation_interval) for vid in op_ids)
-        + _MAX_DEPENDENCY_EDGE * len(op_ids)
+        + max_dependency_edge * len(op_ids)
         + 64
     )
     cycle = 0

@@ -69,7 +69,7 @@ def test_operator_instance_names_include_hardware_identity() -> None:
         return a * 4.0 + b * 8.0
 
     fmt = FloatFormat(6, 18)
-    lir = build(_run(scale, _ops(fmt)), "scale")
+    lir = build(_run(scale, _ops(fmt)), "scale", fetch_stages=3)
     names = re.findall(
         r"\bholoso_fmul_ilog2_const\s+#\([^;]+?\)\s+u_([A-Za-z_][A-Za-z0-9_]*)\s+\(", generate(lir).verilog
     )
@@ -94,7 +94,7 @@ def test_comparisons_share_one_pooled_fcmp_instance() -> None:
             y = x
         return y
 
-    verilog = generate(build(_run(kernel, _ops(FloatFormat(8, 24))), "two_cmp")).verilog
+    verilog = generate(build(_run(kernel, _ops(FloatFormat(8, 24))), "two_cmp", fetch_stages=3)).verilog
     assert verilog.count("holoso_fcmp #") == 1
 
 
@@ -131,7 +131,7 @@ def test_small_kernel_elaborates(tmp_path: Path) -> None:
         return (a - b) * 0.25 + a * b
 
     fmt = FloatFormat(8, 24)
-    lir = build(_run(kernel, _ops(fmt)), "kernel")
+    lir = build(_run(kernel, _ops(fmt)), "kernel", fetch_stages=3)
     _elaborate("kernel", generate(lir).verilog, tmp_path)
 
 
@@ -141,7 +141,7 @@ def test_kernel_with_division_elaborates(tmp_path: Path) -> None:
         return a / b + c * 2.0
 
     fmt = FloatFormat(6, 18)
-    lir = build(_run(blend, _ops(fmt)), "blend")
+    lir = build(_run(blend, _ops(fmt)), "blend", fetch_stages=3)
     _elaborate("blend", generate(lir).verilog, tmp_path)
 
 
@@ -153,7 +153,7 @@ def test_constant_only_module_elaborates(tmp_path: Path) -> None:
         return 3.5
 
     fmt = FloatFormat(8, 24)
-    lir = build(_run(const_only, _ops(fmt)), "const_only")
+    lir = build(_run(const_only, _ops(fmt)), "const_only", fetch_stages=3)
     _elaborate("const_only", generate(lir).verilog, tmp_path)
 
 
@@ -172,7 +172,7 @@ def test_boolean_output_port_is_one_bit_and_assigned() -> None:
             return self.y
 
     fmt = FloatFormat(8, 24)
-    lir = build(_run(Trigger().__call__, _ops(fmt)), "bool_trigger")
+    lir = build(_run(Trigger().__call__, _ops(fmt)), "bool_trigger", fetch_stages=3)
     (port,) = [port for port in lir.output_ports if port.name == "state_y"]
     assert isinstance(port.scalar_type, BoolType)
     assert port.width == 1
@@ -186,7 +186,7 @@ def test_boolean_input_port_is_one_bit_and_loaded() -> None:
         return flag
 
     fmt = FloatFormat(8, 24)
-    lir = build(_run(passthrough, _ops(fmt)), "bool_input")
+    lir = build(_run(passthrough, _ops(fmt)), "bool_input", fetch_stages=3)
     assert [load.name for load in lir.inputs] == ["flag"]
     assert isinstance(lir.bool_inputs[0].dst, BoolRegRef)
     assert not isinstance(lir.bool_inputs[0].dst, RegRef)
@@ -211,7 +211,7 @@ def test_boolean_only_stateful_module_elaborates(tmp_path: Path) -> None:
             return self.flag
 
     fmt = FloatFormat(8, 24)
-    lir = build(_run(Toggle().__call__, _ops(fmt)), "bool_toggle")
+    lir = build(_run(Toggle().__call__, _ops(fmt)), "bool_toggle", fetch_stages=3)
     assert lir.input_ports == []
     (port,) = lir.output_ports
     assert port.name == "state_flag"
@@ -230,7 +230,7 @@ def test_parameter_name_colliding_with_control_port_is_rejected() -> None:
 
     fmt = FloatFormat(6, 18)
     with pytest.raises(UnsupportedConstruct, match="duplicate port"):
-        build(_run(collide, _ops(fmt)), "collide")
+        build(_run(collide, _ops(fmt)), "collide", fetch_stages=3)
 
 
 def test_kernel_without_outputs_is_rejected() -> None:
@@ -239,7 +239,7 @@ def test_kernel_without_outputs_is_rejected() -> None:
 
     fmt = FloatFormat(6, 18)
     with pytest.raises(UnsupportedConstruct, match="at least one output"):
-        build(_run(empty, _ops(fmt)), "empty")
+        build(_run(empty, _ops(fmt)), "empty", fetch_stages=3)
 
 
 @requires_iverilog
@@ -260,7 +260,7 @@ def test_state_port_name_does_not_collide_with_internal_sign_wire(tmp_path: Path
             return self.y
 
     fmt = FloatFormat(8, 24)
-    lir = build(_run(Collide().__call__, _ops(fmt)), "collide_state")
+    lir = build(_run(Collide().__call__, _ops(fmt)), "collide_state", fetch_stages=3)
     _elaborate("collide_state", generate(lir).verilog, tmp_path)
 
 
@@ -270,7 +270,7 @@ def test_ekf1_stateless_elaborates(tmp_path: Path) -> None:
     import ekf1_stateless
 
     fmt = FloatFormat(6, 18)
-    lir = build(_run(ekf1_stateless.update_x_P, _ops(fmt)), "update_x_P")
+    lir = build(_run(ekf1_stateless.update_x_P, _ops(fmt)), "update_x_P", fetch_stages=3)
     _elaborate("update_x_P", generate(lir).verilog, tmp_path)
 
 
@@ -283,7 +283,7 @@ def test_ekf1_stateful_elaborates(tmp_path: Path) -> None:
     filt = ekf1_stateful.Ekf1(
         x=[0.0, 0.0, 0.0], P_urt=[1.0, 0.0, 0.0, 1.0, 0.0, 1.0], R_diag=[1.0, 1.0], Q_diag=np.array([1.0, 1.0, 1.0])
     )
-    lir = build(_run(filt.update, _ops(fmt)), "ekf1_stateful")
+    lir = build(_run(filt.update, _ops(fmt)), "ekf1_stateful", fetch_stages=3)
     _elaborate("ekf1_stateful", generate(lir).verilog, tmp_path)
 
 
@@ -304,7 +304,7 @@ def test_both_bank_lane_write_enables_ride_the_commit_step() -> None:
     from ._modelref import branch_boundary_kernel, fcmp_staged_ops
 
     fmt = FloatFormat(6, 18)
-    lir = build(_run(branch_boundary_kernel, fcmp_staged_ops(fmt, 1)), "lane_steps")
+    lir = build(_run(branch_boundary_kernel, fcmp_staged_ops(fmt, 1)), "lane_steps", fetch_stages=3)
     read_port = read_ports(lir)
     write_lists = write_target_lists(lir)
     fields = build_microcode(lir, read_port, port_const_map(lir, read_port), write_lists)
@@ -348,6 +348,8 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
     from holoso._operators import FloatHardwareOperator, FloatSignControl
     from holoso._type import ScalarSignature, FloatType as ScalarFloatType
 
+    _FETCH_LAG = 2  # datapath lag matching the 3-stage control fetch: one less than fetch_stages
+
     @dataclass(frozen=True, slots=True)
     class _SortLike(FloatHardwareOperator):
         mnemonic: ClassVar[str] = "fsortlike"
@@ -389,16 +391,17 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         instances=[inst],
         float_consts=[],
         float_format=fmt,
+        fetch_lag=_FETCH_LAG,
         regfile=RegFileLayout(width=fmt.width, nreg=4, nrd=2, nwr=2, nload=2),
         inputs=[FloatInputLoad("a", RegRef(0)), FloatInputLoad("b", RegRef(1))],
         ops=[op],
         outputs=[FloatOutputWire("out_0", FloatOperand(RegRef(2))), FloatOutputWire("out_1", FloatOperand(RegRef(3)))],
         float_state_slots=[],
-        blocks=[LirBlock(0, [op], [], [], [], Ret(), op.commit_cycle, boundary_step(op.commit_cycle))],
+        blocks=[LirBlock(0, [op], [], [], [], Ret(), op.commit_cycle, boundary_step(op.commit_cycle, _FETCH_LAG))],
         block_base=[0],
         entry=0,
-        last_pc=boundary_step(op.commit_cycle),
-        min_initiation_interval=boundary_step(op.commit_cycle),
+        last_pc=boundary_step(op.commit_cycle, _FETCH_LAG),
+        min_initiation_interval=boundary_step(op.commit_cycle, _FETCH_LAG),
         bool_regfile=BoolRegFileLayout(nreg=0),
         bool_state_slots=[],
     )

@@ -24,7 +24,11 @@ from ._modelref import assert_model_equals_interpreter, build_model_and_interpre
 
 
 def _build(spec):  # type: ignore[no-untyped-def]
-    return build(lower_to_mir(optimize(lower_frontend(spec.make_kernel())), default_ops(spec.formats[0])), spec.name)
+    return build(
+        lower_to_mir(optimize(lower_frontend(spec.make_kernel())), default_ops(spec.formats[0])),
+        spec.name,
+        fetch_stages=3,
+    )
 
 
 @pytest.mark.parametrize("spec", SPECS, ids=lambda s: s.name)
@@ -32,7 +36,7 @@ def test_phi_arm_installs_land_within_their_block(spec) -> None:  # type: ignore
     lir = _build(spec)
     for block in lir.blocks:
         for install in (*block.copies, *block.bool_writes):
-            landing = install.landing  # block-local; the same fire + read-first edge the model and emitter commit
+            landing = install.landing(lir.fetch_lag)  # block-local; same fire+read-first edge the model/emitter commit
             assert landing <= block.term_offset, (
                 f"{spec.name} block {block.index}: install of {install.dst} lands at {landing}, past the terminator "
                 f"{block.term_offset} -- a dead install the Ret wrap would orphan"
@@ -90,7 +94,7 @@ def test_computed_copy_not_last_work_fits_at_work_makespan() -> None:
             f"recip_newton block {b.index}: a computed copy still pushes the makespan ({b.block_makespan} > work "
             f"{work}) -- the loop-carried install pin regressed to the conservative +1"
         )
-        assert all(c.landing <= b.term_offset for c in b.copies)
+        assert all(c.landing(lir.fetch_lag) <= b.term_offset for c in b.copies)
 
 
 class _HoldOrUpdateBool:
@@ -122,7 +126,9 @@ def test_state_read_sourced_install_is_inline_class(monkeypatch: pytest.MonkeyPa
     """
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
     ops = default_ops(FloatFormat(6, 18))
-    lir = build(lower_to_mir(optimize(lower_frontend(_HoldOrUpdateBool().__call__)), ops), "hold_or_update_bool")
+    lir = build(
+        lower_to_mir(optimize(lower_frontend(_HoldOrUpdateBool().__call__)), ops), "hold_or_update_bool", fetch_stages=3
+    )
     resident_non_const = [x for b in lir.blocks for x in b.bool_writes if x.resident_source and not x.is_const]
     assert resident_non_const, "the state-read phi arm did not install as a resident-source bool write"
 
@@ -165,12 +171,12 @@ def test_cross_block_source_install_residence_stays_in_predecessor_frame() -> No
     ops = default_ops(FloatFormat(8, 36))
     kernel = _LiveThroughArm().__call__
     lir = build(
-        lower_to_mir(optimize(lower_frontend(kernel)), ops), "live_through_arm"
+        lower_to_mir(optimize(lower_frontend(kernel)), ops), "live_through_arm", fetch_stages=3
     )  # raises on the off-frame drift
     cross = [c for blk in lir.blocks for c in blk.copies if not c.resident_source]
     assert cross, "the kernel no longer exercises a non-coalesced cross-block-source install; the shape changed"
     for blk in lir.blocks:
-        assert all(c.landing <= blk.term_offset for c in blk.copies)
+        assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.copies)
 
     fmt = FloatFormat(8, 36)
     model, interpreter = build_model_and_interpreter(kernel, ops, "live_through_arm")
@@ -213,7 +219,7 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
     """
     ops = default_ops(FloatFormat(8, 36))
     kernel = _LastWorkArmSource().__call__
-    lir = build(lower_to_mir(optimize(lower_frontend(kernel)), ops), "last_work_arm")
+    lir = build(lower_to_mir(optimize(lower_frontend(kernel)), ops), "last_work_arm", fetch_stages=3)
     pushed = [
         blk
         for blk in lir.blocks
@@ -222,7 +228,7 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
     ]
     assert pushed, "no block takes the in-block +1 for a last-work copy source; the kernel shape changed"
     for blk in lir.blocks:
-        assert all(c.landing <= blk.term_offset for c in blk.copies)
+        assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.copies)
 
     fmt = FloatFormat(8, 36)
     model, interpreter = build_model_and_interpreter(kernel, ops, "last_work_arm")

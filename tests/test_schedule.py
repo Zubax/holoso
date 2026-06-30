@@ -34,8 +34,6 @@ from holoso._lir import (
     operand_read_cycle,
 )
 from holoso._lir._ir import (
-    FETCH_LAG,
-    OperatorInstance,
     READ_FIRST_EDGE,
     boundary_step,
     dependency_edge,
@@ -83,6 +81,7 @@ from ._writetimeline import InlineProducer, build_write_timeline, latest_produce
 
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
+_FETCH_LAG = 2  # the datapath lag the tests schedule against: one less than the 3-stage control fetch they build
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +106,7 @@ def _view(mir: Mir) -> MirFloatView:
 
 def _schedule(mir: Mir):
     view = _view(mir)
-    return schedule_ops(mir.nodes, resolve_pool(mir.nodes), set(view.operation_nodes))
+    return schedule_ops(mir.nodes, resolve_pool(mir.nodes), set(view.operation_nodes), _FETCH_LAG)
 
 
 def _muls(mir: Mir) -> list[int]:
@@ -128,7 +127,7 @@ def test_schedule_respects_dependencies() -> None:
             if isinstance(node, MirOperation):
                 # A consumer issues no earlier than the producer's commit plus the pair's dependency edge (derived
                 # from the producer's result landing and the consumer's operand-read mechanism).
-                edge = dependency_edge(node.operator, node.output_port, op.operator)
+                edge = dependency_edge(node.operator, node.output_port, op.operator, _FETCH_LAG)
                 assert cycle >= sched.issue_cycle[operand] + node.operator.latency + edge
 
 
@@ -160,7 +159,7 @@ def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator(config: O
     def f(x, lo, hi):  # type: ignore[no-untyped-def]
         return 0.0 if lo < x < hi else x
 
-    lir = build(_run(f, config.make_ops(FMT)), f"deadband_{config.label}")
+    lir = build(_run(f, config.make_ops(FMT)), f"deadband_{config.label}", fetch_stages=3)
     in_valid_pcs = [
         lir.block_base[block.index] + op.issue_cycle
         for block in lir.blocks
@@ -178,7 +177,7 @@ def test_branch_comparison_commits_at_block_makespan(config: OperatorCase) -> No
     # in its block and feeds the branch -- at comparator-only and full-pipeline latency points. If a schedule change
     # ever moves the comparison off the makespan, this fails before the cosim silently de-targets.
     ops = config.make_ops(FMT)
-    lir = build(_run(branch_boundary_kernel, ops), f"cmp_at_boundary_{config.label}")
+    lir = build(_run(branch_boundary_kernel, ops), f"cmp_at_boundary_{config.label}", fetch_stages=3)
     branch_blocks = [block for block in lir.blocks if isinstance(block.terminator, Branch)]
     assert len(branch_blocks) == 1
     (block,) = branch_blocks
@@ -198,11 +197,12 @@ def test_overlap_shrinks_branch_terminator_below_drained_boundary(config: Operat
     # that chain's write word while the result lands in the single-pred arm frames. (recip_newton's loop header
     # does not shrink -- its drained boundary is naturally tight, landing exactly at the boundary;
     # test_overlapping_loop_kernel_landings_are_real_model_writes pins that tight drain.)
-    lir = build(_run(overlap_spill_kernel, config.make_ops(FMT)), f"overlap_shrink_{config.label}")
+    lir = build(_run(overlap_spill_kernel, config.make_ops(FMT)), f"overlap_shrink_{config.label}", fetch_stages=3)
     shrunk = [
         block
         for block in lir.blocks
-        if isinstance(block.terminator, Branch) and block.term_offset < boundary_step(block.block_makespan)
+        if isinstance(block.terminator, Branch)
+        and block.term_offset < boundary_step(block.block_makespan, lir.fetch_lag)
     ]
     assert shrunk, "no branch block shrank its terminator: cross-block overlap did not engage"
 
@@ -225,7 +225,7 @@ def test_entry_branch_on_resident_condition_skips_the_drained_boundary() -> None
             self._armed = a > b
             return r
 
-    lir = build(_run(_EntryStateBranch().step), "entry_state_branch")
+    lir = build(_run(_EntryStateBranch().step), "entry_state_branch", fetch_stages=3)
     entry = lir.blocks[lir.entry]
     assert isinstance(entry.terminator, Branch)
     assert not entry.ops and not entry.inline_ops
@@ -233,7 +233,7 @@ def test_entry_branch_on_resident_condition_skips_the_drained_boundary() -> None
     # the ENTRY needs that floor: the sequencer's accept hold (pc==0) precedes the branch redirect, so an entry branch
     # cannot settle at PC 0 (the non-entry dual is the next test).
     assert entry.term_offset == 1
-    assert entry.term_offset < boundary_step(entry.block_makespan)
+    assert entry.term_offset < boundary_step(entry.block_makespan, lir.fetch_lag)
 
 
 def test_non_entry_branch_on_resident_condition_redirects_at_its_base() -> None:
@@ -256,7 +256,7 @@ def test_non_entry_branch_on_resident_condition_redirects_at_its_base() -> None:
             self._armed = p
             return r
 
-    lir = build(_run(_NestedResidentBranch().step), "nested_resident_branch")
+    lir = build(_run(_NestedResidentBranch().step), "nested_resident_branch", fetch_stages=3)
     entry = lir.blocks[lir.entry]
     assert isinstance(entry.terminator, Branch) and entry.term_offset == 1  # the entry still cannot redirect at PC 0
     non_entry_empty_branches = [
@@ -273,7 +273,7 @@ def test_non_entry_branch_on_resident_condition_redirects_at_its_base() -> None:
 
 def test_resident_bound_inline_select_lands_combinationally() -> None:
     # Regression (the uart_rx block-leading select defect): a select is a combinational mux written into the register
-    # array directly, so its WIDE result lands at commit + FETCH_LAG + READ_FIRST_EDGE -- the same combinational landing
+    # array directly, so its WIDE result lands at commit + fetch_lag + READ_FIRST_EDGE -- the same combinational landing
     # as any result. Here the condition is a resident boolean state and both arms are resident (an input and the state
     # itself), so the select issues at its block's first cycle; landing it any later would push its result a cycle late.
     class _ResidentSelect:
@@ -285,7 +285,7 @@ def test_resident_bound_inline_select_lands_combinationally() -> None:
             self._armed = c > d
             return r
 
-    lir = build(_run(_ResidentSelect().step), "resident_select")
+    lir = build(_run(_ResidentSelect().step), "resident_select", fetch_stages=3)
     selects = [
         (block, op) for block in lir.blocks for op in block.inline_ops if isinstance(op.operator, SelectOperator)
     ]
@@ -293,8 +293,8 @@ def test_resident_bound_inline_select_lands_combinationally() -> None:
     block, op = selects[0]
     assert op.issue_cycle == 0  # resident operands impose no edge -> the select issues at the block's first cycle
     base = lir.block_base[block.index]
-    landing = base + landing_cycle(op.commit_cycle)
-    assert landing == base + op.commit_cycle + FETCH_LAG + READ_FIRST_EDGE  # the combinational landing
+    landing = base + landing_cycle(op.commit_cycle, lir.fetch_lag)
+    assert landing == base + op.commit_cycle + lir.fetch_lag + READ_FIRST_EDGE  # the combinational landing
     assert landing in lir.reg_liveness[op.write.dst]  # the result is live on its true landing
 
 
@@ -305,14 +305,15 @@ def test_overlap_spilled_result_lands_in_successor_frame(config: OperatorCase) -
     # to the chain's WRITE WORD and the chain result lands PAST the terminator -- in the single-predecessor arm frames.
     # Pins that a wide result genuinely spills (landing_cycle beyond term_offset, while its write word stays in the
     # block); the cosim twin proves the arm read waits for the in-flight landing rather than reading stale data.
-    lir = build(_run(overlap_spill_kernel, config.make_ops(FMT)), f"overlap_spill_{config.label}")
+    lir = build(_run(overlap_spill_kernel, config.make_ops(FMT)), f"overlap_spill_{config.label}", fetch_stages=3)
     spilled = [
         (block, op, write)
         for block in lir.blocks
-        if isinstance(block.terminator, Branch) and block.term_offset < boundary_step(block.block_makespan)
+        if isinstance(block.terminator, Branch)
+        and block.term_offset < boundary_step(block.block_makespan, lir.fetch_lag)
         for op in block.ops
         for write in op.writes
-        if isinstance(write.dst, RegRef) and landing_cycle(op.commit_cycle) > block.term_offset
+        if isinstance(write.dst, RegRef) and landing_cycle(op.commit_cycle, lir.fetch_lag) > block.term_offset
     ]
     assert spilled, "no wide result spilled past a shrunk terminator: the overlap corner did not trigger"
     # The spilling write's control WORD stays in the block (only the read-first landing tail crosses the terminator) --
@@ -332,7 +333,9 @@ def test_overlap_dead_arm_spill_does_not_clobber_a_sibling_live_value(config: Op
     # shared kernel's else arm reads `v` while `w` is dead and spills; crash-before, w (=15 for x=3,y=1,z=2) overwrote
     # v's register and the else result was grossly wrong (~3.4 instead of 1.2).
     model = build_model(
-        build(_run(overlap_dead_arm_spill_kernel, config.make_ops(FMT)), f"dead_arm_spill_{config.label}")
+        build(
+            _run(overlap_dead_arm_spill_kernel, config.make_ops(FMT)), f"dead_arm_spill_{config.label}", fetch_stages=3
+        )
     )
     for x, y, z in [(3.0, 1.0, 2.0), (4.0, 2.0, 0.5), (2.5, 0.5, 1.5)]:  # x > y selects the else arm, where w is dead
         want = (x + y + z) / (z * z + 1.0)
@@ -345,12 +348,12 @@ def test_overlap_dead_arm_spill_does_not_clobber_a_sibling_live_value(config: Op
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 def test_overlap_keeps_error_op_diagnostic_latch_in_frame(config: OperatorCase) -> None:
     # Regression (review round 3, Codex P1): a division (the error-bearing op) whose result spills past a SHRUNK
-    # terminator latches err_pc as pc-FETCH_LAG when its write-enable EXECUTES -- FETCH_LAG fetch steps after its write
+    # terminator latches err_pc as pc-fetch_lag when its write-enable EXECUTES -- fetch_lag fetch steps after its write
     # word. If the terminator redirected to the non-fall-through arm by then, err_pc captures the wrong (successor)
     # frame. The data write is unaffected (it still lands correctly), so only a step-accurate err_pc check sees it; the
-    # shrink floor must keep the err_pc latch in-block: term_offset >= the write word + FETCH_LAG for an error-bearing
-    # op. Crash-before: term_offset was the bare write word (one FETCH_LAG short), so err_pc latched a redirected pc.
-    lir = build(_run(overlap_div_err_kernel, config.make_ops(FMT)), f"overlap_div_err_{config.label}")
+    # shrink floor must keep the err_pc latch in-block: term_offset >= the write word + fetch_lag for an error-bearing
+    # op. Crash-before: term_offset was the bare write word (one fetch_lag short), so err_pc latched a redirected pc.
+    lir = build(_run(overlap_div_err_kernel, config.make_ops(FMT)), f"overlap_div_err_{config.label}", fetch_stages=3)
     checked = False
     for block in lir.blocks:
         if not isinstance(block.terminator, Branch):
@@ -358,8 +361,8 @@ def test_overlap_keeps_error_op_diagnostic_latch_in_frame(config: OperatorCase) 
         for op in block.ops:
             operator = op.inst.operator
             if operator.error_ports:  # the division: its err diagnostic latch must not cross the terminator
-                assert block.term_offset < boundary_step(block.block_makespan)  # the corner: this block shrinks
-                assert block.term_offset >= pooled_write_word(op.commit_cycle) + FETCH_LAG
+                assert block.term_offset < boundary_step(block.block_makespan, lir.fetch_lag)  # corner: block shrinks
+                assert block.term_offset >= pooled_write_word(op.commit_cycle) + lir.fetch_lag
                 checked = True
     assert checked, "the error-bearing division did not land in a shrinkable branch block: corner not exercised"
 
@@ -390,7 +393,7 @@ def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase)
         (overlap_dead_arm_spill_kernel, "dead_arm_spill"),
         (overlap_div_err_kernel, "overlap_div_err"),
     ]:
-        lir = build(_run(kernel, config.make_ops(FMT)), f"{name}_{config.label}")
+        lir = build(_run(kernel, config.make_ops(FMT)), f"{name}_{config.label}", fetch_stages=3)
         # These kernels write every register through an operation (no copies/installs/state), so the model's writeback
         # set is exactly the op-result landings -- the cleanest tie to write_landing_pcs.
         assert not any(block.copies or block.bool_writes for block in lir.blocks)
@@ -438,9 +441,9 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes(config: Operator
                 self.writes.setdefault(dst.index, set()).add(self.pc)
             super()._write(dst, value)  # type: ignore[arg-type]
 
-    lir = build(_run(NewtonReciprocal().__call__, config.make_ops(FMT)), f"recip_newton_{config.label}")
+    lir = build(_run(NewtonReciprocal().__call__, config.make_ops(FMT)), f"recip_newton_{config.label}", fetch_stages=3)
     assert any(
-        isinstance(block.terminator, Branch) and block.term_offset == boundary_step(block.block_makespan)
+        isinstance(block.terminator, Branch) and block.term_offset == boundary_step(block.block_makespan, lir.fetch_lag)
         for block in lir.blocks
     ), "recip_newton's header branch did not drain at the tight boundary: the real-kernel layout changed"
     predicted: dict[int, set[int]] = {}
@@ -482,12 +485,12 @@ def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyP
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     from phase_frequency_detector import PhaseFrequencyDetector  # noqa: PLC0415
 
-    pfd = build(_run(PhaseFrequencyDetector().__call__), "pfd_bool_drain")
+    pfd = build(_run(PhaseFrequencyDetector().__call__), "pfd_bool_drain", fetch_stages=3)
     pfd_ret = next(block for block in pfd.blocks if isinstance(block.terminator, Ret))
     assert (
         is_bool_only(pfd_ret) and not pfd_ret.bool_writes and pfd_ret.block_makespan > 0
     ), "pfd Ret: bool work, no install"
-    assert pfd_ret.term_offset == boundary_step(pfd_ret.block_makespan)
+    assert pfd_ret.term_offset == boundary_step(pfd_ret.block_makespan, pfd.fetch_lag)
 
     # An install-bearing bool-only block's drain tracks its install's SOURCE. A COMPUTED-source copy (the phi arm is an
     # operator result the block produced) reads-first one step past the work makespan, so its block_makespan absorbs the
@@ -509,13 +512,13 @@ def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyP
             r = a or b
         return r, x
 
-    computed = bool_install_blocks(build(_run(computed_source_install), "computed_source_install"))
+    computed = bool_install_blocks(build(_run(computed_source_install), "computed_source_install", fetch_stages=3))
     assert computed and all(
         not w.resident_source for b in computed for w in b.bool_writes
     ), "no computed-source bool install to exercise the later-draining case"
     for block in computed:
         assert block.term_offset == boundary_step(
-            block.block_makespan
+            block.block_makespan, _FETCH_LAG
         ), "a computed-source bool install reads-first past the work makespan, draining where its block_makespan lands"
 
     def resident_source_install(a: bool, b: bool, c: bool):  # type: ignore[no-untyped-def]
@@ -524,12 +527,12 @@ def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyP
             r = a and b
         return r, a
 
-    resident = bool_install_blocks(build(_run(resident_source_install), "resident_source_install"))
+    resident = bool_install_blocks(build(_run(resident_source_install), "resident_source_install", fetch_stages=3))
     assert resident and all(
         w.resident_source for b in resident for w in b.bool_writes
     ), "no resident-source bool install to exercise the inline-class drain"
     for block in resident:
-        assert block.term_offset == boundary_step(block.block_makespan), (
+        assert block.term_offset == boundary_step(block.block_makespan, _FETCH_LAG), (
             "a resident-source bool install fires inline-class at the work makespan, one step under "
             "a computed-source one"
         )
@@ -542,18 +545,18 @@ def test_entry_block_reclaims_its_first_control_word() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     from quadrature_encoder import QuadratureEncoder
 
-    lir = build(_run(QuadratureEncoder().__call__), "quad_reclaim")
+    lir = build(_run(QuadratureEncoder().__call__), "quad_reclaim", fetch_stages=3)
     entry = next(block for block in lir.blocks if lir.block_base[block.index] == 0)
     first = min(entry.inline_ops, key=lambda op: op.issue_cycle)
     assert first.issue_cycle == 0, "entry block's first inline op did not reclaim ucode[0]"
-    fire_pc = operand_read_cycle(first.operator, lir.block_base[entry.index] + first.issue_cycle)
-    assert fire_pc - FETCH_LAG == 0, "the first boolean op does not fire on executing step 0"
+    fire_pc = operand_read_cycle(first.operator, lir.block_base[entry.index] + first.issue_cycle, lir.fetch_lag)
+    assert fire_pc - lir.fetch_lag == 0, "the first boolean op does not fire on executing step 0"
 
 
 def test_entry_state_liveout_producer_reclaims_cycle_0() -> None:
     # An entry-block inline op producing a persistent-state live-out issues on cycle 0 like any other, reclaiming
     # ``ucode[0]``. It is safe because the backend gates every operator's ``in_valid`` with ``transacting`` (the idle
-    # re-fetch commits nothing) and the state write lands at pc >= FETCH_LAG, never the held pc 0 -- the
+    # re-fetch commits nothing) and the state write lands at pc >= fetch_lag, never the held pc 0 -- the
     # ``latching_fault_register`` example is the end-to-end check. This pins that the state-bearing producer issues on
     # cycle 0, the same as its stateless twin.
     class _Stateful:
@@ -568,8 +571,8 @@ def test_entry_state_liveout_producer_reclaims_cycle_0() -> None:
     def _stateless(a: bool, b: bool):  # type: ignore[no-untyped-def]
         return a and b
 
-    stateful = build(_run(_Stateful().__call__), "dwell_stateful")
-    stateless = build(_run(_stateless), "dwell_stateless")
+    stateful = build(_run(_Stateful().__call__), "dwell_stateful", fetch_stages=3)
+    stateless = build(_run(_stateless), "dwell_stateless", fetch_stages=3)
     sf = min(op.issue_cycle for block in stateful.blocks for op in block.inline_ops)
     sl = min(op.issue_cycle for block in stateless.blocks for op in block.inline_ops)
     assert sl == 0, "a stateless entry inline op should reclaim ucode[0]"
@@ -587,7 +590,7 @@ def test_const_branch_install_block_drains_to_its_inline_landing(config: Operato
     # condition the following step. The drain must neither shrink below it (terminator reads a stale condition -- the
     # original B1 bug) nor pay the wider computed-source-copy boundary. Crash-before: KeyError (model) / stale branch
     # read (RTL); pass-after: bit-exact vs the reference.
-    lir = build(_run(const_branch_kernel, config.make_ops(FMT)), f"const_branch_{config.label}")
+    lir = build(_run(const_branch_kernel, config.make_ops(FMT)), f"const_branch_{config.label}", fetch_stages=3)
     # Structural teeth: the surviving const-branch block branches on a constant materialized by an entry-resident tail
     # bool write, so it drains to that install's inline-class landing. Pins the drain itself, not only the output, so a
     # future drain regression here is localized rather than silently model-correct.
@@ -600,7 +603,7 @@ def test_const_branch_install_block_drains_to_its_inline_landing(config: Operato
     for block in const_blocks:
         assert all(w.is_const for w in block.bool_writes), "the const-branch condition install is not a literal const"
         assert block.term_offset == landing_cycle(
-            block.block_makespan
+            block.block_makespan, lir.fetch_lag
         ), "a const-branch block must drain to its entry-resident install's combinational landing"
     model = build_model(lir)
     for x, y in [(2.0, 1.0), (1.0, 2.0), (5.0, 3.0), (-1.0, -2.0)]:
@@ -621,7 +624,7 @@ def test_coalesced_install_block_pays_no_spurious_install_drain() -> None:
             r = y / x
         return r
 
-    lir = build(_run(div_diamond), "div_diamond")
+    lir = build(_run(div_diamond), "div_diamond", fetch_stages=3)
     arms = [b for b in lir.blocks if b.ops and not b.copies and not b.bool_writes and isinstance(b.terminator, Jump)]
     assert len(arms) == 2, "the division diamond's two coalesced arm blocks are the B2 target"
     for block in arms:
@@ -636,7 +639,9 @@ def test_empty_merge_block_is_threaded_into_its_successor(config: OperatorCase) 
     # terminated diamond arms. Merge threading eliminates it, composing the diamond's phi arms into the loop header's
     # init arm. Crash-before (no merge threading): that empty Jump merge survives. The bit-exact RTL check of the
     # resulting three-arm loop-header phi is the cosim twin (test_cosim.py test_cosim_diamond_then_loop).
-    lir = build(_run(diamond_then_loop_kernel, config.make_ops(FMT)), f"diamond_then_loop_{config.label}")
+    lir = build(
+        _run(diamond_then_loop_kernel, config.make_ops(FMT)), f"diamond_then_loop_{config.label}", fetch_stages=3
+    )
     by_index = {block.index: block for block in lir.blocks}
     preds: dict[int, list[int]] = {block.index: [] for block in lir.blocks}
     for block in lir.blocks:
@@ -679,7 +684,7 @@ def test_merge_threading_refuses_a_back_edge_carried_merge_phi() -> None:
             z = x
         return z
 
-    model = build_model(build(_run(loop_invariant_merge), "loop_invariant_merge"))
+    model = build_model(build(_run(loop_invariant_merge), "loop_invariant_merge", fetch_stages=3))
     for a, den, c in [(2.0, 2.0, 3.0), (-1.0, 4.0, 5.0), (3.0, 1.0, 0.0)]:  # x >= 1 so the latch loop terminates
         (got,) = model.run(a, den, c)
         assert math.isclose(float(got), loop_invariant_merge(a, den, c), rel_tol=1e-6)
@@ -692,17 +697,19 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late(config: Op
     # _trace_landing map a block-local landing to block_base[arm] + (landing - term_offset - 1). The scheduler used its
     # own land - term_offset frame, one PC later, so reservation and read-gating ran on a second coordinate contract.
     # An arm whose ONLY constraint on its consumer is the spilled operand reads it as early as the latch-free wide read
-    # allows: read == landing when the spill lands late enough, or landing+1 when it lands so early that the FETCH_LAG
-    # read offset (issue + FETCH_LAG, issue >= 0) caps how early the consumer can read it (the consumer still issues
+    # allows: read == landing when the spill lands late enough, or landing+1 when it lands so early that the fetch_lag
+    # read offset (issue + fetch_lag, issue >= 0) caps how early the consumer can read it (the consumer still issues
     # optimally, so no II is lost). So tightness here is read_pc in {landing, landing+1}; a real coordinate-frame
     # regression (the historical land - term_offset +1 bug) would push every read to landing+2.
     for kernel, name in [(overlap_spill_kernel, "overlap_spill"), (overlap_dead_arm_spill_kernel, "dead_arm_spill")]:
-        lir = build(_run(kernel, config.make_ops(FMT)), f"{name}_{config.label}")
+        lir = build(_run(kernel, config.make_ops(FMT)), f"{name}_{config.label}", fetch_stages=3)
         by_index = {block.index: block for block in lir.blocks}
         spilled_any = False
         tight = 0
         for block in lir.blocks:
-            if not isinstance(block.terminator, Branch) or block.term_offset >= boundary_step(block.block_makespan):
+            if not isinstance(block.terminator, Branch) or block.term_offset >= boundary_step(
+                block.block_makespan, lir.fetch_lag
+            ):
                 continue
             for op in block.ops:
                 for write in op.writes:
@@ -727,7 +734,9 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late(config: Op
                             for operand in consumer.operands:
                                 if not (isinstance(operand.source, RegRef) and operand.source.index == write.dst.index):
                                     continue
-                                read_pc = base + operand_read_cycle(consumer.inst.operator, consumer.issue_cycle)
+                                read_pc = base + operand_read_cycle(
+                                    consumer.inst.operator, consumer.issue_cycle, lir.fetch_lag
+                                )
                                 # SAFETY: never read the in-flight value before it physically lands -- an under-
                                 # reservation reads stale data, a miscompile the model shares (cosim cannot catch it).
                                 assert (
@@ -761,7 +770,7 @@ def test_entry_busy_gates_a_successor_firing_at_its_inherited_instance_free_cycl
 
     # With no residue the firing issues on cycle 0 (operands resident at block start) -- so any later issue is
     # attributable to the inherited busy residue alone, not a dependency.
-    assert schedule_ops(mir.nodes, pool, schedulable).issue_cycle[mul] == 0
+    assert schedule_ops(mir.nodes, pool, schedulable, _FETCH_LAG).issue_cycle[mul] == 0
 
     # The predecessor freed this instance at block-local ``free``; a successor whose terminator shrank to
     # ``term_offset`` inherits that as ``successor_local_cycle(free, term_offset)`` -- exactly the map the busy branch
@@ -770,7 +779,7 @@ def test_entry_busy_gates_a_successor_firing_at_its_inherited_instance_free_cycl
     free, term_offset = 12, 4
     inherited = successor_local_cycle(free, term_offset)  # 12 - 4 - 1 = 7
     assert inherited > 1  # the residue is the genuinely binding constraint
-    sched = schedule_ops(mir.nodes, pool, schedulable, entry_busy={(operator, 0): inherited})
+    sched = schedule_ops(mir.nodes, pool, schedulable, _FETCH_LAG, entry_busy={(operator, 0): inherited})
     assert sched.issue_cycle[mul] == inherited
     assert sched.busy_until[(operator, 0)] == inherited + operator.initiation_interval
 
@@ -906,12 +915,20 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
         return wide, boolean
 
     cases: list[tuple[str, object, list[tuple[float, ...]]]] = [
-        ("join_spill", build(_run(join_spill), "join_spill"), [(0.5, 2.0, 1.5), (2.0, 0.5, 1.5)]),
-        ("phi_merge", build(_run(phi_merge), "phi_merge"), [(0.5, 2.0), (2.0, 0.5)]),
-        ("bool_write_merge", build(_run(bool_write_merge), "bool_write_merge"), [(0.5, 2.0), (2.0, 0.5)]),
+        ("join_spill", build(_run(join_spill), "join_spill", fetch_stages=3), [(0.5, 2.0, 1.5), (2.0, 0.5, 1.5)]),
+        ("phi_merge", build(_run(phi_merge), "phi_merge", fetch_stages=3), [(0.5, 2.0), (2.0, 0.5)]),
+        (
+            "bool_write_merge",
+            build(_run(bool_write_merge), "bool_write_merge", fetch_stages=3),
+            [(0.5, 2.0), (2.0, 0.5)],
+        ),
         # recip_newton is a real overlapping LOOP kernel with two non-coalesced wide phi copies (the install skew site);
         # its internal iteration covers the loop body, and the seed converges for a < 3.
-        ("recip_newton", build(_run(NewtonReciprocal().__call__), "recip_newton"), [(0.5,), (1.5,), (2.5,)]),
+        (
+            "recip_newton",
+            build(_run(NewtonReciprocal().__call__), "recip_newton", fetch_stages=3),
+            [(0.5,), (1.5,), (2.5,)],
+        ),
     ]
     for name, lir, vectors in cases:
         last = lir.initiation_interval
@@ -1118,11 +1135,19 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         return wide, boolean
 
     cases: list[tuple[str, object, list[tuple[float, ...]]]] = [
-        ("Delay", build(_run(Delay().__call__), "Delay"), [(0.5,), (-0.5,), (1.5,), (2.0,)]),
-        ("MBWide", build(_run(MBWide().__call__), "MBWide"), [(1.0, 2.0), (-1.0, 2.0), (1.5, 3.0), (-2.0, 4.0)]),
-        ("BoolHold", build(_run(BoolHold().__call__), "BoolHold"), [(1.0,), (-2.0,), (-0.5,), (2.0,)]),
-        ("BoolToggle", build(_run(BoolToggle().__call__), "BoolToggle"), [(0.5,), (1.5,), (-0.5,), (2.0,)]),
-        ("BoolSpin", build(_run(BoolSpin().__call__), "BoolSpin"), [(0.5,), (1.5,), (-0.5,), (2.0,)]),
+        ("Delay", build(_run(Delay().__call__), "Delay", fetch_stages=3), [(0.5,), (-0.5,), (1.5,), (2.0,)]),
+        (
+            "MBWide",
+            build(_run(MBWide().__call__), "MBWide", fetch_stages=3),
+            [(1.0, 2.0), (-1.0, 2.0), (1.5, 3.0), (-2.0, 4.0)],
+        ),
+        ("BoolHold", build(_run(BoolHold().__call__), "BoolHold", fetch_stages=3), [(1.0,), (-2.0,), (-0.5,), (2.0,)]),
+        (
+            "BoolToggle",
+            build(_run(BoolToggle().__call__), "BoolToggle", fetch_stages=3),
+            [(0.5,), (1.5,), (-0.5,), (2.0,)],
+        ),
+        ("BoolSpin", build(_run(BoolSpin().__call__), "BoolSpin", fetch_stages=3), [(0.5,), (1.5,), (-0.5,), (2.0,)]),
     ]
     compared = 0
     for name, lir, vectors in cases:
@@ -1151,7 +1176,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
 def test_write_landing_recursion_handles_multi_hop_spill() -> None:
     # Coverage for the multi-hop arm of the landing recursion. A result can spill past one overlap-shrunk terminator and
     # RE-spill past a second (a near-empty overlapping intermediate block whose own offset is below the inherited
-    # landing). Frontends do not emit that shape -- a single hop lands at most FETCH_LAG cycles into a successor,
+    # landing). Frontends do not emit that shape -- a single hop lands at most fetch_lag cycles into a successor,
     # below the offset of any successor carrying an op -- so the recursion is exercised here on a hand-built layout,
     # pinning that it re-keys per terminator exactly as write_landing_pcs documents and terminates.
     from holoso._lir._ir import LirBlock, Jump, Branch, Ret, BoolRegRef, _trace_landing
@@ -1171,11 +1196,11 @@ def test_write_landing_recursion_handles_multi_hop_spill() -> None:
 def test_control_arrows_anchor_at_the_terminator_pc() -> None:
     # Regression (HTML report exactness): the grid row axis is the model fetch PC, so a control-transfer arrow must root
     # at the terminator PC (where the redirect mux reads the condition register and that register's residence ends) and
-    # point at the destination block's base PC -- no FETCH_LAG offset. Crash-before: the arrow rooted FETCH_LAG rows
+    # point at the destination block's base PC -- no fetch_lag offset. Crash-before: the arrow rooted fetch_lag rows
     # below the terminator, where the condition register is already dead, so its dotted feed pointed at a blank cell.
     from holoso._backend.html._schedule import _control_arrows
 
-    lir = build(_run(overlap_spill_kernel), "overlap_spill")
+    lir = build(_run(overlap_spill_kernel), "overlap_spill", fetch_stages=3)
     arrows = _control_arrows(lir)
     assert arrows, "the branchy kernel must emit at least one control-transfer arrow"
     term_pcs = {lir.term_pc(block) for block in lir.blocks}
@@ -1213,7 +1238,7 @@ def test_phi_install_does_not_clobber_the_branch_condition() -> None:
     merged = builder.phi(BoolType(), [(entry, other, BoolInversion()), (then, inverted, BoolInversion())])
     builder.bool_output("out", merged)
     builder.ret()
-    model = build_model(build(builder.finish(), "phi_cond_clobber"))
+    model = build_model(build(builder.finish(), "phi_cond_clobber", fetch_stages=3))
     for flag_value in (False, True):
         for other_value in (False, True):
             want = (not other_value) if flag_value else other_value
@@ -1243,7 +1268,7 @@ def test_branch_on_phi_installed_in_the_branching_block_is_rejected() -> None:
     builder.bool_output("out", looping)
     builder.ret()
     with pytest.raises(UnsupportedConstruct, match="arm from the same block"):
-        build(builder.finish(), "self_loop_cond")
+        build(builder.finish(), "self_loop_cond", fetch_stages=3)
 
 
 def _ilog2(mir: Mir) -> list[int]:
@@ -1297,7 +1322,7 @@ def test_build_lir_small_kernel() -> None:
     def f(a, b):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
-    lir = build(_run(f), "kernel")
+    lir = build(_run(f), "kernel", fetch_stages=3)
     assert lir.module_name == "kernel"
     assert lir.float_format == FMT
     assert lir.regfile.width == lir.float_format.width
@@ -1325,8 +1350,6 @@ def test_build_lir_small_kernel() -> None:
 
 
 def test_state_writeback_installs_early_and_is_first_class() -> None:
-    from holoso._lir import FETCH_LAG
-
     class LeakyDelay:
         def __init__(self) -> None:
             self._p = 0.0
@@ -1336,7 +1359,7 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
             self._p = x  # a non-coalesced writeback whose source (the input x) is an ordinary register
             return out
 
-    lir = build(_run(LeakyDelay().__call__), "leaky_delay")
+    lir = build(_run(LeakyDelay().__call__), "leaky_delay", fetch_stages=3)
     (slot,) = lir.float_state_slots
     assert (
         bool(lir.float_state_slots or lir.bool_state_slots) and slot.needs_copy and isinstance(slot.tap, FloatOperand)
@@ -1347,7 +1370,7 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
     # previously absent, which is why the report could not render it).
     landing = install_landing(lir.state_copy_step(slot))
     assert landing in lir.reg_liveness[slot.reg]
-    assert lir.state_copy_step(slot) == inline_fire_cycle(slot.install_cycle)
+    assert lir.state_copy_step(slot) == inline_fire_cycle(slot.install_cycle, lir.fetch_lag)
     # Nothing reads _p's register after the old live-in and its source is an ordinary register, so the copy installs
     # before the boundary -- freeing the source register for the rest of the initiation rather than pinning it there.
     assert lir.state_copy_step(slot) < lir.initiation_interval
@@ -1356,12 +1379,12 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
     assert set(range(landing, lir.initiation_interval + 1)) <= lir.reg_liveness[slot.reg]
     assert all(isinstance(w.tap, FloatOperand) for w in lir.float_outputs)
     # Pin the hardware-frame cycle formulas the report, model, and allocator all depend on (the latch-free wide read
-    # and the read-first edge around FETCH_LAG); every consumer routes through the shared _ir helpers that own this
+    # and the read-first edge around fetch_lag); every consumer routes through the shared _ir helpers that own this
     # arithmetic. The literals here are a deliberate independent cross-check of those helpers, not a tautological
     # restatement of them.
     op = lir.ops[0]
-    assert landing_cycle(op.commit_cycle) == op.commit_cycle + FETCH_LAG + READ_FIRST_EDGE
-    assert operand_read_cycle(op.inst.operator, op.issue_cycle) == op.issue_cycle + FETCH_LAG
+    assert landing_cycle(op.commit_cycle, _FETCH_LAG) == op.commit_cycle + _FETCH_LAG + READ_FIRST_EDGE
+    assert operand_read_cycle(op.inst.operator, op.issue_cycle, _FETCH_LAG) == op.issue_cycle + _FETCH_LAG
 
 
 def test_cfg_phi_merge_register_shows_residence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1378,7 +1401,7 @@ def test_cfg_phi_merge_register_shows_residence(monkeypatch: pytest.MonkeyPatch)
             z = 2.0
         return z
 
-    lir = build(_run(f), "diamond")
+    lir = build(_run(f), "diamond", fetch_stages=3)
     assert any(block.copies for block in lir.blocks), "the merge must be resolved by phi-arm copies"
     (out,) = lir.float_outputs
     assert isinstance(out.tap.source, RegRef)
@@ -1403,7 +1426,7 @@ def test_cfg_write_only_state_slot_is_reserved() -> None:
             self.acc = -t
             return self.acc
 
-    lir = build(_run(WriteOnlyBranch().__call__), "write_only")
+    lir = build(_run(WriteOnlyBranch().__call__), "write_only", fetch_stages=3)
     (slot,) = lir.float_state_slots
     assert slot.name == "acc" and slot.needs_copy
     assert slot.reg.index not in {write.dst.index for op in lir.ops for write in op.writes}
@@ -1423,7 +1446,7 @@ def test_cfg_state_slot_coalesces_onto_its_register() -> None:
             self.state = self.state * 0.9 + x
             return float(x > 0.0) * self.state
 
-    lir = build(_run(Filt().__call__), "filt")
+    lir = build(_run(Filt().__call__), "filt", fetch_stages=3)
     assert any(block.inline_ops for block in lir.blocks)
     (slot,) = lir.float_state_slots
     assert not slot.needs_copy, "the slot live-out must coalesce onto the slot register (no install copy)"
@@ -1450,7 +1473,7 @@ def test_cfg_branch_conditions_reuse_boolean_registers(monkeypatch: pytest.Monke
             a = a + 4.0
         return a
 
-    lir = build(_run(f), "branches")
+    lir = build(_run(f), "branches", fetch_stages=3)
     comparisons = sum(1 for b in lir.blocks for op in b.ops if isinstance(op.inst.operator, FCmpOperator))
     assert comparisons >= 3
     assert lir.bool_regfile.nreg < comparisons
@@ -1483,7 +1506,7 @@ def test_diamond_op_result_arms_coalesce(monkeypatch: pytest.MonkeyPatch) -> Non
             z = x * y
         return z * x  # an operator use of the merged value, not only the boundary output
 
-    lir = build(_run(f), "phicoal")
+    lir = build(_run(f), "phicoal", fetch_stages=3)
     assert sum(len(b.copies) for b in lir.blocks) == 0, "the diamond's op-result arms must coalesce away their copies"
     assert _coalescing_self_copies(lir) == 0
     model = build_model(lir)
@@ -1505,7 +1528,7 @@ def test_loop_carried_phi_coalesces_when_non_interfering() -> None:
             i = i + 1.0
         return acc
 
-    lir = build(_run(f), "accum")
+    lir = build(_run(f), "accum", fetch_stages=3)
     register_source_copies = [
         copy for block in lir.blocks for copy in block.copies if isinstance(copy.source.source, RegRef)
     ]
@@ -1523,7 +1546,7 @@ def test_interfering_loop_carried_phi_keeps_its_copy() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     from recip_newton import NewtonReciprocal  # noqa: PLC0415  (example kernels live under examples/)
 
-    lir = build(_run(NewtonReciprocal().__call__), "recip")
+    lir = build(_run(NewtonReciprocal().__call__), "recip", fetch_stages=3)
     back_edge_op_copies = [
         copy
         for block in lir.blocks
@@ -1535,7 +1558,9 @@ def test_interfering_loop_carried_phi_keeps_its_copy() -> None:
 
 
 def _check_float_kernel(fn, name, samples):  # type: ignore[no-untyped-def]
-    lir = build(_run(fn), name)  # crash-before: the install-free oracle admitted an unsound merge -> backstop assert
+    lir = build(
+        _run(fn), name, fetch_stages=3
+    )  # crash-before: the install-free oracle admitted an unsound merge -> backstop assert
     model = build_model(lir)
     for args in samples:
         got = [float(v) for v in model.run(*args)]
@@ -1619,7 +1644,9 @@ def test_bool_phi_coalescing_residual_install_conflict_is_resolved() -> None:
             d = q and r
         return a, z, d
 
-    lir = build(_run(k), "coal_bool")  # crash-before: the bool oracle admitted the unsound merge -> backstop assert
+    lir = build(
+        _run(k), "coal_bool", fetch_stages=3
+    )  # crash-before: the bool oracle admitted the unsound merge -> backstop assert
     model = build_model(lir)
     for p, q, r in itertools.product([False, True], repeat=3):
         got = [bool(int(v)) for v in model.run(p, q, r)]
@@ -1639,7 +1666,7 @@ def test_state_war_backstop_allows_noop_writeback() -> None:
             self.s = self.s
             return out
 
-    lir = build(_run(Hold().__call__), "hold")  # must not raise AssertionError
+    lir = build(_run(Hold().__call__), "hold", fetch_stages=3)  # must not raise AssertionError
     assert {s.name for s in lir.float_state_slots} == {"s"}
 
 
@@ -1655,7 +1682,7 @@ def test_copy_slot_residence_unbroken_when_tapped_at_boundary() -> None:
             self._d = x
             return prev
 
-    lir = build(_run(Delay().__call__), "delay")
+    lir = build(_run(Delay().__call__), "delay", fetch_stages=3)
     (slot,) = lir.float_state_slots
     assert sorted(lir.reg_liveness[slot.reg]) == list(range(1, lir.initiation_interval + 1))
 
@@ -1667,7 +1694,7 @@ def test_state_early_copy_frees_source_register() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator
 
-    lir = build(_run(TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__), "trapz")
+    lir = build(_run(TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__), "trapz", fetch_stages=3)
     (xprev,) = [s for s in lir.float_state_slots if s.name == "_x_prev"]
     (in_x,) = [load for load in lir.float_inputs if load.name == "x"]
     assert xprev.needs_copy and in_x.dst == xprev.tap.source
@@ -1680,7 +1707,7 @@ def test_build_lir_ekf1_stateless() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateless
 
-    lir = build(_run(ekf1_stateless.update_x_P), "update_x_P")
+    lir = build(_run(ekf1_stateless.update_x_P), "update_x_P", fetch_stages=3)
     assert len(lir.float_inputs) == 17
     assert len(lir.float_outputs) == 9
     fdivs = [inst for inst in lir.instances if isinstance(inst.operator, FDivOperator)]
@@ -1709,7 +1736,7 @@ def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
     def f(a):  # type: ignore[no-untyped-def]
         return a * 1000.0 + a * (-1000.0)
 
-    lir = build(_run(f), "f")
+    lir = build(_run(f), "f", fetch_stages=3)
     assert [c for c in lir.float_consts if abs(c) == 1000.0] == [1000.0]
     operands = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, FloatConstRef)]
     assert len({opnd.source.index for opnd in operands}) == 1
@@ -1720,7 +1747,7 @@ def test_negative_constant_operand_is_stored_as_magnitude_with_negate() -> None:
     def f(a):  # type: ignore[no-untyped-def]
         return a + (-1000.0)
 
-    lir = build(_run(f), "f")
+    lir = build(_run(f), "f", fetch_stages=3)
     assert all(c >= 0.0 for c in lir.float_consts)
     (operand,) = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, FloatConstRef)]
     assert lir.float_consts[operand.source.index] == 1000.0
@@ -1738,7 +1765,7 @@ def test_constant_pool_is_canonically_nonnegative() -> None:
         R_diag=[1e3, 1e-6],
         Q_diag=np.array([1e-3, 1e9, 1e-9]),
     )
-    lir = build(_run(filt.update), "ekf1_stateful")
+    lir = build(_run(filt.update), "ekf1_stateful", fetch_stages=3)
     assert all(c >= 0.0 for c in lir.float_consts)
     assert len(lir.float_consts) == 6  # the +1000.0 / -1000.0 pair collapsed (was 7)
 
@@ -1749,7 +1776,7 @@ def test_underflowing_negative_constant_is_not_sign_folded() -> None:
     def f(a):  # type: ignore[no-untyped-def]
         return a + (-1e-12)  # -1e-12 underflows to +0 in FloatFormat(6, 18)
 
-    lir = build(_run(f), "f")
+    lir = build(_run(f), "f", fetch_stages=3)
     (operand,) = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, FloatConstRef)]
     assert FMT.encode(lir.float_consts[operand.source.index]) == 0
     assert operand.sign == FloatSignControl()
@@ -1759,7 +1786,7 @@ def test_underflowing_negative_constant_output_stays_canonical_zero() -> None:
     def f(a):  # type: ignore[no-untyped-def]
         return a + a, -1e-12  # the -1e-12 output underflows to +0; it must stay canonical, not fold to illegal -0
 
-    lir = build(_run(f), "f")
+    lir = build(_run(f), "f", fetch_stages=3)
     (wire,) = [w for w in lir.float_outputs if isinstance(w.tap.source, FloatConstRef)]
     assert FMT.encode(lir.float_consts[wire.tap.source.index]) == 0
     assert wire.tap.sign == FloatSignControl()
@@ -1778,7 +1805,7 @@ def test_stateful_slot_register_gaps_are_reused() -> None:
         R_diag=[1e3, 1e-6],
         Q_diag=np.array([1e-3, 1e9, 1e-9]),
     )
-    lir = build(_run(filt.update), "ekf1_stateful")
+    lir = build(_run(filt.update), "ekf1_stateful", fetch_stages=3)
     assert lir.regfile.nreg <= 40  # gap-reuse sheds ~6; a regression to the fully-reserved 45 trips this
 
 
@@ -1790,7 +1817,7 @@ def test_register_sharing_is_hardware_disjoint() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateless
 
-    lir = build(_run(ekf1_stateless.update_x_P), "update_x_P")
+    lir = build(_run(ekf1_stateless.update_x_P), "update_x_P", fetch_stages=3)
     timeline = build_write_timeline(lir)
     last_read: dict[tuple[int, str, int], int] = {}
 
@@ -1802,7 +1829,7 @@ def test_register_sharing_is_hardware_disjoint() -> None:
 
     for op in lir.ops:
         for operand in op.operands:
-            note(operand.source, operand_read_cycle(op.inst.operator, op.issue_cycle))
+            note(operand.source, operand_read_cycle(op.inst.operator, op.issue_cycle, lir.fetch_lag))
     for wire in lir.float_outputs:
         note(wire.tap.source, lir.initiation_interval)
     for slot in lir.float_state_slots:
@@ -1839,7 +1866,7 @@ def test_build_rejects_mir_with_mixed_float_formats() -> None:
         state_slots=[],
     )
     with pytest.raises(ValueError, match="configured format"):
-        build(mir, "mixed")
+        build(mir, "mixed", fetch_stages=3)
 
 
 def test_mir_builder_rejects_mixed_float_operand_formats() -> None:
@@ -1968,9 +1995,9 @@ def test_commutative_port_assignment_never_increases_read_mux_fan_in(  # type: i
         FCmpOperator(FMT),
     )
     monkeypatch.setattr(build_module, "assign_commutative_ports", lambda *args, **kwargs: {})
-    baseline = build(_run(ekf1_stateless.update_x_P, cfg), "ekf1_stateless")
+    baseline = build(_run(ekf1_stateless.update_x_P, cfg), "ekf1_stateless", fetch_stages=3)
     monkeypatch.undo()
-    optimized = build(_run(ekf1_stateless.update_x_P, cfg), "ekf1_stateless")
+    optimized = build(_run(ekf1_stateless.update_x_P, cfg), "ekf1_stateless", fetch_stages=3)
 
     assert _read_mux_fan_in(optimized) <= _read_mux_fan_in(baseline)
     assert _read_mux_fan_in(optimized) < _read_mux_fan_in(baseline)  # ekf1_stateless has commutative reach to reclaim
@@ -1983,7 +2010,7 @@ def test_optional_stages_raise_latency_without_changing_numerics() -> None:
 
     fmt = FloatFormat(8, 36)
     configs = {"default": default_ops(fmt), "staged": staged_ops(fmt)}
-    lirs = {name: build(_run(kernel, ops), f"stages_{name}") for name, ops in configs.items()}
+    lirs = {name: build(_run(kernel, ops), f"stages_{name}", fetch_stages=3) for name, ops in configs.items()}
     assert lirs["default"].initiation_interval < lirs["staged"].initiation_interval
 
     # Optional stages only insert pipeline registers, so the numerical result is bit-identical across every config.
@@ -2010,9 +2037,9 @@ def test_reach_floor_seed_skips_annealing(monkeypatch) -> None:  # type: ignore[
     def sharing_kernel(a, b, c):  # type: ignore[no-untyped-def]
         return a * b + c  # the product and the sum reuse registers, lifting the objective above the floor
 
-    build(_run(floor_kernel), "floor")
+    build(_run(floor_kernel), "floor", fetch_stages=3)
     assert calls == []
-    build(_run(sharing_kernel), "sharing")
+    build(_run(sharing_kernel), "sharing", fetch_stages=3)
     assert calls
 
 
@@ -2025,26 +2052,26 @@ def test_zero_regalloc_effort_bypasses_annealing(monkeypatch) -> None:  # type: 
     def sharing_kernel(a, b, c):  # type: ignore[no-untyped-def]
         return a * b + c
 
-    build(_run(sharing_kernel), "sharing")
+    build(_run(sharing_kernel), "sharing", fetch_stages=3)
 
 
 def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
     # Regression: a bool->float cast is an inline combinational op written into the array directly, so its WIDE result
-    # lands at landing_cycle(commit) = commit + FETCH_LAG + READ_FIRST_EDGE -- the combinational landing. Landing it any
+    # lands at landing_cycle(commit) = commit + fetch_lag + READ_FIRST_EDGE -- the combinational landing. Landing it any
     # later marks it past its true landing (and, for a boundary cast, past the initiation interval, so its report cell
     # falls off the grid) and leaves a consumer's read cycle outside its residence. Here a multiply consumes the cast
     # result.
     def f(x):  # type: ignore[no-untyped-def]
         return float(x > 0.0) * x
 
-    lir = build(_run(f), "cast_mul")
+    lir = build(_run(f), "cast_mul", fetch_stages=3)
     interval = lir.initiation_interval
     casts = [(b, op) for b in lir.blocks for op in b.inline_ops if isinstance(op.write.dst, RegRef)]
     assert casts, "expected a bool->float cast result in the wide bank"
     for block, op in casts:
         base = lir.block_base[block.index]
-        landing = base + landing_cycle(op.commit_cycle)
-        assert landing == base + op.commit_cycle + FETCH_LAG + READ_FIRST_EDGE  # the combinational landing
+        landing = base + landing_cycle(op.commit_cycle, lir.fetch_lag)
+        assert landing == base + op.commit_cycle + lir.fetch_lag + READ_FIRST_EDGE  # the combinational landing
         assert 1 <= landing <= interval  # within the rendered schedule grid, not one row past the boundary
         # The cast write lands at its combinational landing: write_landing_pcs places every result via landing_cycle.
         # Landing it one cycle later would return base + commit + 4 here -- this is the discriminating guard, since
@@ -2055,7 +2082,8 @@ def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
     for fop in lir.ops:  # the consuming multiply must read the cast result within its residence (no late-def gap)
         for operand in fop.operands:
             if operand.source in cast_regs:
-                assert operand_read_cycle(fop.inst.operator, fop.issue_cycle) in lir.reg_liveness[operand.source]
+                read = operand_read_cycle(fop.inst.operator, fop.issue_cycle, lir.fetch_lag)
+                assert read in lir.reg_liveness[operand.source]
 
 
 def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
@@ -2067,7 +2095,7 @@ def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
         same = a == b
         return [float(below), float(same)]
 
-    lir = build(_run(f), "fused_relations")
+    lir = build(_run(f), "fused_relations", fetch_stages=3)
     firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
     assert len(firings) == 1, "lt and eq taps of one operand pair must fuse into one comparator firing"
     (firing,) = firings
@@ -2088,7 +2116,7 @@ def test_same_port_taps_with_different_inversions_do_not_fuse() -> None:
         not_below = a >= b
         return [float(below), float(not_below)]
 
-    lir = build(_run(f), "split_inversions")
+    lir = build(_run(f), "split_inversions", fetch_stages=3)
     firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
     assert len(firings) == 2, "same-port taps cannot share a firing"
     assert len({op.issue_cycle for op in firings}) == 2
@@ -2118,7 +2146,7 @@ def test_initiation_interval_spaces_firings_on_one_instance() -> None:
     builder.float_output("out_1", second)
     builder.ret()
     mir = builder.finish()
-    sched = schedule_ops(mir.nodes, resolve_pool(mir.nodes), {first, second})
+    sched = schedule_ops(mir.nodes, resolve_pool(mir.nodes), {first, second}, _FETCH_LAG)
     spacing = abs(sched.issue_cycle[second] - sched.issue_cycle[first])
     assert spacing >= 3, f"II=3 must space same-instance firings by at least 3 cycles, got {spacing}"
     assert sched.inst_of[first] == sched.inst_of[second]
@@ -2127,12 +2155,12 @@ def test_initiation_interval_spaces_firings_on_one_instance() -> None:
 class _HeavilyThrottledAdd(FAddOperator):
     """
     A test-only adder throttled to the deepest initiation interval the per-block busy windows support
-    (latency + the inter-block drain gap; validated in ``OperatorInstance.__post_init__``).
+    (latency + the inter-block drain gap; validated in ``Lir.__post_init__``).
     """
 
     @property
     def initiation_interval(self) -> int:
-        return 8  # latency 4 + the maximum cross-block-safe excess of 4 (the OperatorInstance.__post_init__ bound)
+        return 8  # latency 4 + the maximum cross-block-safe excess of 4 (the Lir.__post_init__ bound)
 
 
 def test_progress_cap_accommodates_long_initiation_intervals() -> None:
@@ -2147,7 +2175,7 @@ def test_progress_cap_accommodates_long_initiation_intervals() -> None:
     count = 40
     for i in range(count):
         nodes[2 + i] = MirOperation(slow, [0, 1], [FloatSignControl(), FloatSignControl()], 0, FloatSignControl())
-    sched = schedule_ops(nodes, {type(slow): 1}, set(range(2, 2 + count)))
+    sched = schedule_ops(nodes, {type(slow): 1}, set(range(2, 2 + count)), _FETCH_LAG)
     issues = sorted(sched.issue_cycle.values())
     assert len(issues) == count
     assert all(later - earlier >= 8 for earlier, later in zip(issues, issues[1:]))
@@ -2155,10 +2183,17 @@ def test_progress_cap_accommodates_long_initiation_intervals() -> None:
 
 def test_cross_block_reuse_bound_pins_the_drained_edge_boundary() -> None:
     # Regression: a DRAINED-edge successor's first pooled issue is block-local cycle 0, so the safe cross-block-reuse
-    # initiation interval is latency + boundary_step(0) + 1 == 8. No built-in operator exceeds II=1, so the
-    # OperatorInstance assert is the ONLY guard and cosim can never reach it -- pin both sides of the boundary directly
-    # here.
-    OperatorInstance(_HeavilyThrottledAdd(FMT), 0)  # II == 8 == bound: constructs clean
+    # initiation interval is latency + boundary_step(0, fetch_lag) + 1 == 8. No built-in operator exceeds II=1, so this
+    # bound is the ONLY guard and cosim can never reach it. The check needs the fetch lag, which OperatorInstance does
+    # not have, so it lives in Lir.__post_init__ over every pooled instance -- pin both sides of the boundary by
+    # building a program whose adder sits at, then one past, the bound.
+    def _add(a: float, b: float) -> float:
+        return a + b
+
+    def _ops(fadd: FAddOperator) -> OpConfig:
+        return OpConfig(fadd, FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
+
+    build(_run(_add, _ops(_HeavilyThrottledAdd(FMT))), "at_bound", fetch_stages=3)  # II == 8 == bound: builds clean
 
     class _OverBoundAdd(_HeavilyThrottledAdd):
         @property
@@ -2166,7 +2201,7 @@ def test_cross_block_reuse_bound_pins_the_drained_edge_boundary() -> None:
             return 9  # one past the bound: a drained-edge successor issuing at cycle 0 could double-issue this instance
 
     with pytest.raises(AssertionError, match="cross-block busy tracking"):
-        OperatorInstance(_OverBoundAdd(FMT), 0)
+        build(_run(_add, _ops(_OverBoundAdd(FMT))), "over_bound", fetch_stages=3)
 
 
 def test_write_timeline_resolves_inline_wide_producers() -> None:
@@ -2176,11 +2211,11 @@ def test_write_timeline_resolves_inline_wide_producers() -> None:
     def f(x):  # type: ignore[no-untyped-def]
         return float(x > 0.0) * x
 
-    lir = build(_run(f), "cast_timeline")
+    lir = build(_run(f), "cast_timeline", fetch_stages=3)
     timeline = build_write_timeline(lir)
     resolved = 0
     for op in lir.ops:
-        read = operand_read_cycle(op.inst.operator, op.issue_cycle)
+        read = operand_read_cycle(op.inst.operator, op.issue_cycle, lir.fetch_lag)
         for operand in op.operands:
             if isinstance(operand.source, RegRef):
                 latest_producer_before(timeline, operand.source, read)  # must not raise for any operand
@@ -2202,7 +2237,7 @@ def test_commutative_comparator_swap_permutes_output_taps(config: OperatorCase) 
         above = b < a
         return [float(below), float(above)]
 
-    lir = build(_run(f, config.make_ops(FMT)), f"mirrored_{config.label}")
+    lir = build(_run(f, config.make_ops(FMT)), f"mirrored_{config.label}", fetch_stages=3)
     firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
     assert len(firings) == 2
     sources = [tuple(operand.source for operand in op.operands) for op in firings]
@@ -2223,7 +2258,7 @@ def test_chained_slot_live_in_blocks_early_install(config: OperatorCase) -> None
     # early-install decision did not, so "_b"'s new value landed before "_a"'s boundary copy captured the old one.
     # The RTL then returned the NEW "_b" through "_a" while the model kept the old one (cosim diverged on the second
     # transaction). The tapped slot must now install at the boundary, and the model must match plain Python.
-    lir = build(_run(ChainedSlots().__call__, config.make_ops(FMT)), f"chained_slots_{config.label}")
+    lir = build(_run(ChainedSlots().__call__, config.make_ops(FMT)), f"chained_slots_{config.label}", fetch_stages=3)
     slots = {slot.name: slot for slot in lir.float_state_slots}
     assert lir.state_copy_step(slots["_b"]) == lir.initiation_interval, "the tapped slot must not install early"
     reference = ChainedSlots()
@@ -2241,7 +2276,7 @@ def test_select_folds_arm_signs_into_operand_conditioners() -> None:
         y = x if c > 0.0 else -x
         return y
 
-    lir = build(_run(f), "signed_select")
+    lir = build(_run(f), "signed_select", fetch_stages=3)
     assert len(lir.blocks) == 1, "the diamond must fully if-convert"
     selects = [op for block in lir.blocks for op in block.inline_ops if isinstance(op.operator, SelectOperator)]
     assert len(selects) == 1
@@ -2259,17 +2294,19 @@ def test_select_folds_arm_signs_into_operand_conditioners() -> None:
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 def test_state_early_install_respects_a_select_reader(config: OperatorCase) -> None:
     # Pins the read-step frame of the state early-install bound: an inline select reads its operands at its fire
-    # step (issue + latency + FETCH_LAG + 1), one cycle past where an issue-frame bound would have allowed the
+    # step (issue + latency + fetch_lag + 1), one cycle past where an issue-frame bound would have allowed the
     # slot's install copy to fire -- an early install bounded by issue cycles would overwrite the live-in before
     # the select reads it (RTL would take the NEW value through ``old`` while the model keeps the old one).
-    lir = build(_run(SelectHold().step, config.make_ops(FMT)), f"select_hold_{config.label}")
+    lir = build(_run(SelectHold().step, config.make_ops(FMT)), f"select_hold_{config.label}", fetch_stages=3)
     selects = [
         (block, op) for block in lir.blocks for op in block.inline_ops if isinstance(op.operator, SelectOperator)
     ]
     assert len(selects) == 1
     ((block, select),) = selects
     (slot,) = lir.float_state_slots
-    select_read_pc = lir.block_base[block.index] + operand_read_cycle(select.operator, select.issue_cycle)
+    select_read_pc = lir.block_base[block.index] + operand_read_cycle(
+        select.operator, select.issue_cycle, lir.fetch_lag
+    )
     assert lir.state_copy_step(slot) >= select_read_pc, "the install must not precede the select's operand read"
     reference = SelectHold()
     model = build_model(lir)
@@ -2288,7 +2325,7 @@ def test_not_folds_into_every_sink_position() -> None:
         out_logic = flag and (c > 0.0)
         return [float(flag), float(out_logic)]
 
-    lir = build(_run(f), "not_sinks")
+    lir = build(_run(f), "not_sinks", fetch_stages=3)
     inline_mnemonics = sorted(op.operator.mnemonic for block in lir.blocks for op in block.inline_ops)
     assert inline_mnemonics == ["band", "ffrombool", "ffrombool"], inline_mnemonics
     band = next(op for block in lir.blocks for op in block.inline_ops if op.operator.mnemonic == "band")
@@ -2311,7 +2348,7 @@ def test_not_on_a_branch_condition_swaps_the_targets() -> None:
             y = b / (a * a + 1.0)
         return y
 
-    lir = build(_run(f), "not_branch")
+    lir = build(_run(f), "not_branch", fetch_stages=3)
     assert not any(block.inline_ops for block in lir.blocks), "the NOT must not materialize any gate"
     model = build_model(lir)
     for a, b in [(1.0, 2.0), (2.0, 1.0)]:
@@ -2325,7 +2362,7 @@ def test_double_negation_cancels() -> None:
         flag = not (not (a > b))
         return float(flag)
 
-    lir = build(_run(f), "double_not")
+    lir = build(_run(f), "double_not", fetch_stages=3)
     casts = [op for block in lir.blocks for op in block.inline_ops if op.operator.mnemonic == "ffrombool"]
     (cast,) = casts
     (operand,) = cast.operands
@@ -2340,7 +2377,7 @@ def test_value_consumed_in_both_polarities_shares_one_producer() -> None:
         flag = a > b
         return [float(flag), float(not flag)]
 
-    lir = build(_run(f), "both_polarities")
+    lir = build(_run(f), "both_polarities", fetch_stages=3)
     comparisons = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
     assert len(comparisons) == 1 and len(comparisons[0].writes) == 1, "one tap serves both polarities"
     model = build_model(lir)
@@ -2361,7 +2398,7 @@ class _InvertedState:
 def test_bool_state_slot_carries_a_live_out_inversion() -> None:
     # The toggle's live-out is its own live-in inverted: the inversion rides the slot's install (needs_copy must be
     # True even though the source register IS the slot register), and the model must toggle across transactions.
-    lir = build(_run(_InvertedState().step), "toggle")
+    lir = build(_run(_InvertedState().step), "toggle", fetch_stages=3)
     (slot,) = lir.bool_state_slots
     assert slot.needs_copy, "an inverted live-out needs its install copy even from the slot's own register"
     reference = _InvertedState()
@@ -2385,7 +2422,7 @@ def test_inverted_bool_phi_arm_installs_with_opposite_polarities(config: Operato
             d = b
         return [float(flag), d]
 
-    lir = build(_run(f, config.make_ops(FMT)), f"inverted_arm_{config.label}")
+    lir = build(_run(f, config.make_ops(FMT)), f"inverted_arm_{config.label}", fetch_stages=3)
     sources = [(write.source.source, write.source.inversion) for block in lir.blocks for write in block.bool_writes]
     flag_sources = [(src, inv) for src, inv in sources if isinstance(src, BoolRegRef)]
     assert len(flag_sources) == 2, flag_sources
@@ -2409,7 +2446,7 @@ def test_boolean_registers_are_reused_within_a_block() -> None:
             x = (x - 1.0) if x > 1.0 else (x + 1.0)
         return x
 
-    lir = build(_run(f), "breg_reuse")
+    lir = build(_run(f), "breg_reuse", fetch_stages=3)
     conditions = sum(1 for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator))
     assert conditions == 6, "the unrolled chain carries six comparisons"
     assert lir.bool_regfile.nreg <= 2, f"disjoint condition lifetimes must share registers, got {lir.bool_regfile.nreg}"
@@ -2430,7 +2467,7 @@ def test_boolean_logic_chain_reuses_registers_on_the_tight_same_bank_edge() -> N
     def f(a, b, c, d, e, g):  # type: ignore[no-untyped-def]
         return 1.0 if (a > b and c > d and e > g and a > d and b > e) else 0.0
 
-    lir = build(_run(f), "bool_chain")
+    lir = build(_run(f), "bool_chain", fetch_stages=3)
     comparisons = sum(1 for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator))
     ands = sum(1 for block in lir.blocks for op in block.inline_ops if op.operator.mnemonic == "band")
     assert comparisons == 5 and ands >= 4, (comparisons, ands)
@@ -2451,12 +2488,12 @@ def test_drain_only_ret_with_a_resident_output_needs_no_boundary_drain() -> None
     # boundary covers only values that LAND in its frame; a pure-drain block has none, so its terminator offset is 0
     # (not the phantom ``boundary_step(0)`` of a value that never commits there). octave_index is the canonical case --
     # its loop body produces the octave count and the exit block does pure drain to out_valid. Crash-before (the
-    # ``boundary_step(makespan=0)`` over-charge): the drain-only Ret paid a full FETCH_LAG + read-first phantom drain,
+    # ``boundary_step(makespan=0)`` over-charge): the drain-only Ret paid a full fetch_lag + read-first phantom drain,
     # so out_valid landed three cycles late on every transaction.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     from octave_index import octave_index  # noqa: PLC0415  (example kernels live under examples/)
 
-    lir = build(_run(octave_index), "octave_drain_only_ret")
+    lir = build(_run(octave_index), "octave_drain_only_ret", fetch_stages=3)
     ret = next(b for b in lir.blocks if isinstance(b.terminator, Ret))
     # Nothing lands in the Ret's own frame -- it neither computes nor installs; the output is resident.
     assert not (ret.ops or ret.inline_ops or ret.copies or ret.bool_writes), "the exit block must be pure drain"
@@ -2464,8 +2501,8 @@ def test_drain_only_ret_with_a_resident_output_needs_no_boundary_drain() -> None
     ret_base = lir.block_base[ret.index]
     assert lir.last_pc == ret_base, "out_valid asserts at the Ret block base, not after a phantom drain"
     # The reclaim is the entire phantom boundary_step a value committing at the empty block's cycle 0 would have paid
-    # (three cycles here: FETCH_LAG + read-first). Format-independent, so it holds at any FloatFormat.
-    assert boundary_step(ret.block_makespan) == 3, "the reclaimed phantom drain"
+    # (three cycles here: fetch_lag + read-first). Format-independent, so it holds at any FloatFormat.
+    assert boundary_step(ret.block_makespan, lir.fetch_lag) == 3, "the reclaimed phantom drain"
     # The earlier boundary read is sound: the resident output is bit-exact against the Python reference on both ranges
     # (magnitude >= 1 takes the no-reciprocal arm; below unity inverts first), exercising the real branch into the loop.
     model = build_model(lir)

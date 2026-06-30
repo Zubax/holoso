@@ -259,7 +259,7 @@ def build_microcode(
     constant columns that later get lifted out of the ROM.
 
     Control is placed on the step each operation requires: the read-address group rides the issue step (the read is
-    latch-free, so the datapath samples the operand FETCH_LAG later); a lane's write-enable and write-address are
+    latch-free, so the datapath samples the operand a fetch lag later); a lane's write-enable and write-address are
     presented ON the commit step (both banks write combinationally). A WIDE lane's sign conditioner rides the issue
     step (consumed inside the wrapper); a BOOLEAN lane's inversion rides the commit step with its write-enable. Placing
     the write word on the commit step -- not one later -- is exactly what gives a branch condition its one cycle of
@@ -326,7 +326,7 @@ def build_microcode(
     for op in lir.ops:
         base = base_name(op.inst)
         # The issue step carries in_valid, the sign controls (consumed inside the wrapper), and -- the read being
-        # latch-free -- the read-address group; the datapath samples the operand FETCH_LAG later.
+        # latch-free -- the read-address group; the datapath samples the operand a fetch lag later.
         ci = op.issue_cycle
         assert 0 <= ci < depth, f"microcode read/issue step out of range: ci={ci}, depth={depth}"
         put(f_issue(base), ci, 1)
@@ -358,7 +358,7 @@ def build_microcode(
             put(f_waddr(base, write.port), wcc, write_lists[lane].index(write.dst.index))
 
     # Constant installs ride the microcode like operator writes: the write-enable (and the wide selector / boolean
-    # value) are placed at ROM step ``block_base + issue_cycle`` == install_pc - FETCH_LAG, so the datapath write fires
+    # value) are placed at ROM step ``block_base + issue_cycle`` == install_pc - fetch_lag, so the datapath write fires
     # on the very clock the former pc-gate fired -- schedule-neutral. A register-source or signed-const install is not
     # selected here and stays pc-gated.
     for block in lir.blocks:

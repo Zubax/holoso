@@ -338,7 +338,7 @@ def test_deep_cfg_does_not_overflow_recursion() -> None:
     # LIR build) since each contains a CFG DFS, and check the bit-exact model against the plain-Python reference.
     hir = lower(_deep_cfg_kernel)
     assert len(hir.blocks) > 1000  # the CFG is genuinely deep (otherwise the regression would not bite)
-    model = build_model(build(_run(_deep_cfg_kernel), "deep"))
+    model = build_model(build(_run(_deep_cfg_kernel), "deep", fetch_stages=3))
     for x in (0.5, 2.0, 8.0):  # acc stays positive -> +900 every time; 0.5/2.0/8.0 are exact in ZKF
         assert float(model.run(x)[0]) == _deep_cfg_kernel(x)
 
@@ -541,7 +541,7 @@ def test_bool_select_reductions_are_truth_table_correct() -> None:
         assert (
             has_select == keeps_select
         ), f"{fn.__name__}: bool_select presence {has_select} != expected {keeps_select}"
-        model = build_model(build(lower_to_mir(hir, OPS), fn.__name__))
+        model = build_model(build(lower_to_mir(hir, OPS), fn.__name__, fetch_stages=3))
         for combo in itertools.product([False, True], repeat=arity):
             got = bool(model.run(*combo)[0])
             assert got == bool(ref(*combo)), f"{fn.__name__}{combo}: got {got}, want {ref(*combo)}"

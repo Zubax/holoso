@@ -81,13 +81,13 @@ to LIR before the slow HDL-emission/simulation iteration begins.
 
 - Drain -- the cycles a block's terminator waits past its last commit for in-frame writebacks to land.
 
-- Fetch lag -- the fixed depth (`FETCH_LAG`) by which the control-fetch pipeline lags the executing step; every operand
-  is sampled at `issue + fetch lag` through a combinational read mux.
+- Fetch lag -- the depth by which the control-fetch pipeline leads the executing step;
+  every operand is sampled at `issue + fetch lag`.
 
 - Read-first -- within a cycle a register read returns the OLD value, before any same-cycle write; this is the origin of
   the +1 dependency edge between producer and consumer. Aka "read-before-write", "write-after-read" (WAR).
 
-- Dwell -- the PC stalling at one of its limit hold points: pc 0 (accept, awaiting `in_valid`) or LASTPC (present,
+- Dwell -- the PC stalling at one of its hold points: pc 0 (accept, awaiting `in_valid`) or LASTPC (present,
   awaiting the result being taken before restarting).
 
 - Makespan / II -- a block's schedule length in cycles; the initiation interval (II) is the whole executed path's exact
@@ -404,7 +404,7 @@ operator instance, and one continuous assignment per pooled constant. There is n
 module; storage is the sparse, schedule-specific fabric below. The controller is a microcode ROM -- one pre-decoded VLIW
 control word per step, stored in a BRAM-inferable ROM read through a short multi-stage fetch (a PC latch, the array
 read, and the BRAM output register) so the controller is short register-to-register paths rather than a wide
-combinational `case(cyc)` cone, for a fast clock-to-out. The fetch lags the executing step, which under static
+combinational `case(cyc)` cone, for a fast clock-to-out. The fetch leads the executing step, which under static
 scheduling only adds to the makespan/II; the depth is currently fixed but may be made disableable for faster chips.
 
 The schedule replays step by step: at PC 0 the machine accepts and parallel-loads inputs into the low registers of each

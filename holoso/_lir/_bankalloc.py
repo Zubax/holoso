@@ -72,8 +72,9 @@ def layout_and_allocate(
     pool: Mapping[type[HardwareOperator], int],
     has_install_blocks: Mapping[int, bool],
     has_state_copy: bool,
+    fetch_lag: int,
 ) -> _LayoutAllocation:
-    overlap = schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks, has_state_copy)
+    overlap = schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks, has_state_copy, fetch_lag)
     block_sched = overlap.block_sched
     inst_of: dict[ValueId, OperatorInstance] = {}
     inst_count: dict[PooledHardwareOperator, int] = {}
@@ -92,6 +93,7 @@ def layout_and_allocate(
         overlap.block_makespan,
         overlap.block_term_offset,
         overlap.block_inflight,
+        fetch_lag,
     )
     return _LayoutAllocation(overlap, inst_of, instances, consts, const_pool, alloc)
 
@@ -147,6 +149,7 @@ def _bank_liveness_facts(
     op_nodes: Mapping[ValueId, MirOperation],
     phi_nodes: Mapping[ValueId, MirPhi],
     values: set[ValueId],
+    fetch_lag: int,
 ) -> _BankLivenessFacts:
     """
     One bank's per-value liveness facts, identical for both banks so their read-cycle semantics cannot drift:
@@ -172,7 +175,7 @@ def _bank_liveness_facts(
             node = mir.nodes.get(vid)
             if not isinstance(node, MirOperation):
                 continue
-            rc = operand_read_cycle(node.operator, issue)
+            rc = operand_read_cycle(node.operator, issue, fetch_lag)
             for operand in node.operands:
                 if operand in values:
                     reads[block.id].append((operand, rc))
@@ -237,6 +240,7 @@ class _InstallContext:
     last_read_ret: Mapping[ValueId, int]  # last operand-read cycle of each value in the Ret block
     ret_block: int
     ret_present: int
+    fetch_lag: int
 
 
 class _Bank(ABC, Generic[_SlotT]):
@@ -331,7 +335,7 @@ class _WideBank(_Bank[MirFloatStateSlot]):
             if early:
                 cycle = (ctx.op_commit[live_out] if live_out in ctx.op_nodes else 0) + 1  # read-first: an older commit
                 if r_in is not None:
-                    cycle = max(cycle, ctx.last_read_ret.get(r_in, 0) - inline_fire_cycle(0))
+                    cycle = max(cycle, ctx.last_read_ret.get(r_in, 0) - inline_fire_cycle(0, ctx.fetch_lag))
                 install[name] = min(cycle, ctx.ret_present)
             else:
                 install[name] = ctx.ret_present
@@ -409,11 +413,13 @@ class _InterferenceBuilder:
     # block -> phi dest -> its arm source in THIS block's frame (resident flag + commit), so the interference residence
     # matches the LIR copy's placement and cannot drift onto a foreign block's frame.
     install_source: dict[int, dict[ValueId, _ArmSource]]
+    fetch_lag: int
 
     def _install_fire(self, block: int, vid: ValueId) -> int:
         """The install's block-local fire step, via the same helpers as the LIR install so residence matches exactly."""
         src = self.install_source[block][vid]
-        fire = inline_fire_cycle(install_issue_cycle(self.work_makespan[block], src.resident, src.source_commit))
+        issue = install_issue_cycle(self.work_makespan[block], src.resident, src.source_commit)
+        fire = inline_fire_cycle(issue, self.fetch_lag)
         # The interference residence must land within the block, exactly like the emitted copy (build asserts the same):
         # a fire past the terminator would mean the source commit was read in a foreign block's coordinate frame.
         assert install_landing(fire) <= self.term_offset[block], (
@@ -456,6 +462,7 @@ def _allocate_bank(
     block_makespan: dict[int, int],
     block_term_offset: dict[int, int],
     block_inflight: dict[int, dict[ValueId, int]],
+    fetch_lag: int,
 ) -> _BankAlloc:
     """
     Color one physical register bank across the CFG. The bank descriptor supplies the conditioner,
@@ -471,7 +478,7 @@ def _allocate_bank(
     state_read_nodes: Mapping[ValueId, MirStateRead] = view.state_read_nodes
     state_read_of = {node.name: vid for vid, node in state_read_nodes.items()}
     values = {*view.input_ids, *state_read_nodes, *op_nodes, *phi_nodes}
-    facts = _bank_liveness_facts(mir, block_sched, op_nodes, phi_nodes, values)
+    facts = _bank_liveness_facts(mir, block_sched, op_nodes, phi_nodes, values, fetch_lag)
     op_block, op_commit, phi_block, reads = facts.op_block, facts.op_commit, facts.phi_block, facts.reads
 
     ret_block = mir.ret_block
@@ -494,12 +501,13 @@ def _allocate_bank(
         term_offset=block_term_offset,
         resident=frozenset({*view.input_ids, *state_read_nodes}),
         # Every result -- pooled or inline, wide or boolean -- lands at the one bank-independent landing.
-        op_landing={vid: landing_cycle(commit) for vid, commit in op_commit.items()},
+        op_landing={vid: landing_cycle(commit, fetch_lag) for vid, commit in op_commit.items()},
         op_block=op_block,
         phi_block=phi_block,
         arm_out=arm_out,
         inflight_defs=block_inflight,
         install_source={b: dict(m) for b, m in install_source.items()},
+        fetch_lag=fetch_lag,
     )
 
     # A slot whose live-in is consumed as ANOTHER slot's live-out (a chained copy, ``self.a = self.b``) must keep its
@@ -563,6 +571,7 @@ def _allocate_bank(
                 last_read_in_ret,
                 ret_block,
                 ret_present,
+                fetch_lag,
             )
         )
 
@@ -584,7 +593,7 @@ def _allocate_bank(
             if live_out not in values:
                 continue
             if install[name] < ret_present:
-                early_reads.append((live_out, inline_fire_cycle(install[name])))
+                early_reads.append((live_out, inline_fire_cycle(install[name], fetch_lag)))
             else:
                 boundary_final[ret_block].add(live_out)
         # Only an early install adds a Ret-block read; with none (always so for the boolean bank) the shared facts'
@@ -648,6 +657,7 @@ def _allocate(
     block_makespan: dict[int, int],
     block_term_offset: dict[int, int],
     block_inflight: dict[int, dict[ValueId, int]],
+    fetch_lag: int,
 ) -> Allocation:
     """
     Assign wide and boolean registers across the CFG. Both banks are colored by hardware-frame liveness, reusing
@@ -668,10 +678,10 @@ def _allocate(
         for bid, spills in block_inflight.items()
     }
     float_alloc = _allocate_bank(
-        _WIDE, mir, float_mir, block_sched, inst_of, block_makespan, block_term_offset, float_inflight
+        _WIDE, mir, float_mir, block_sched, inst_of, block_makespan, block_term_offset, float_inflight, fetch_lag
     )
     bool_alloc = _allocate_bank(
-        _BOOL, mir, bool_mir, block_sched, inst_of, block_makespan, block_term_offset, bool_inflight
+        _BOOL, mir, bool_mir, block_sched, inst_of, block_makespan, block_term_offset, bool_inflight, fetch_lag
     )
 
     # A phi arm coalesced onto the merged register needs no install copy: the arm value already resides in the phi's

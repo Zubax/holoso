@@ -76,7 +76,7 @@ def render_schedule(lir: Lir) -> str:
     for breg, brows in lir.bool_liveness.items():
         live[breg] = brows
     edges: list[tuple[str, str, str, int]] = []  # (commit id, operand id, color, operation group) for the overlay
-    # Operator pipeline occupancy: instance ``inst`` is in stage ``k`` on cycle ``issue + k + FETCH_LAG``. Keyed to the
+    # Operator pipeline occupancy: instance ``inst`` is in stage ``k`` on cycle ``issue + k + fetch_lag``. Keyed to the
     # operation group so a hover lights the whole pipeline trail together with the result cell, its chip and its edges.
     # ``conflicts`` flags any cell two operations claim at once -- the alarm for a scheduling bug (a structural hazard
     # the pipelined scheduler should never emit).
@@ -102,7 +102,7 @@ def render_schedule(lir: Lir) -> str:
             # firing renders one cell per tapped output port (all in one hover group) on EACH arm its writeback reaches,
             # edges from its shared operands, and one pipeline trail. Block-local cycles are rebased to absolute here.
             issue_pc = base_pc + op.issue_cycle
-            read_cyc = operand_read_cycle(op.inst.operator, issue_pc)
+            read_cyc = operand_read_cycle(op.inst.operator, issue_pc, lir.fetch_lag)
             operand_labels = [_operand_label(operand) for operand in op.operands]
             firing_tip = _esc(_op_text(op))
             landing_pcs = lir.write_landing_pcs(block, op)  # op-wide (not per-write); hoisted out of the lane loop
@@ -133,7 +133,7 @@ def render_schedule(lir: Lir) -> str:
                     )
             base = stage_base[op.inst]
             for k in range(op.latency):  # stamp the pipeline trail: stage k of this operator is busy on issue + k + lag
-                key = (base + k, issue_pc + k + FETCH_LAG)
+                key = (base + k, issue_pc + k + lir.fetch_lag)
                 if key in stage_fill and stage_fill[key][1] != group:
                     conflicts.add(key)
                 stage_fill[key] = (color, group)
@@ -148,7 +148,7 @@ def render_schedule(lir: Lir) -> str:
         base_pc = lir.block_base[block.index]
         for bop in block.inline_ops:
             color = operator_colors[type(bop.operator)]
-            read_cyc = operand_read_cycle(bop.operator, base_pc + bop.issue_cycle)
+            read_cyc = operand_read_cycle(bop.operator, base_pc + bop.issue_cycle, lir.fetch_lag)
             landing_pcs = lir.write_landing_pcs(block, bop)
             tip = _esc(_inline_op_text(bop))
             dcol = bop.write.dst
@@ -200,10 +200,10 @@ def render_schedule(lir: Lir) -> str:
     for block in lir.blocks:
         base_pc = lir.block_base[block.index]
         for copy in block.copies:  # a non-coalesced wide phi-arm merge copy
-            fire = base_pc + copy.fire_step
+            fire = base_pc + copy.fire_step(lir.fetch_lag)
             install_event(copy.dst, copy.dst.stable_label, copy.source, fire, install_landing(fire))
         for bwrite in block.bool_writes:  # a boolean phi/state install (a constant or another boolean register)
-            fire = base_pc + bwrite.fire_step
+            fire = base_pc + bwrite.fire_step(lir.fetch_lag)
             install_event(bwrite.dst, bwrite.dst.stable_label, bwrite.source, fire, install_landing(fire))
     for slot in lir.float_state_slots:  # a non-coalesced float slot latches its tap (early, or read-first at boundary)
         if slot.needs_copy:
@@ -224,7 +224,11 @@ def render_schedule(lir: Lir) -> str:
 
     out = [
         _schedule_key(
-            operator_colors, bool(lir.float_state_slots or lir.bool_state_slots), bool(arrows), bool(boundary_rows)
+            operator_colors,
+            bool(lir.float_state_slots or lir.bool_state_slots),
+            bool(arrows),
+            bool(boundary_rows),
+            lir.fetch_lag,
         ),
         "<div id='schedwrap'><table class='grid'>",
     ]
@@ -296,13 +300,13 @@ def render_schedule(lir: Lir) -> str:
 
     # One displayed row per clock cycle, cycle-accurate to the hardware: the accept/input-load cycle (0), then the
     # compute, latch, and fetch-staging cycles 1..II. The row axis is the fetch PC, so out_valid (pc == LASTPC == II)
-    # rises on the last row; the executing PRESENT step shown there lags the fetch by FETCH_LAG (present==II-FETCH_LAG).
+    # rises on the last row; the executing PRESENT step shown there lags the fetch by the fetch lag (present==II-lag).
     in_cells: dict[ColKey, str] = {load.dst: _input_chip(f"in_{load.name}") for load in lir.inputs}
     for slot in lir.float_state_slots:  # at cycle 0 the persistent registers hold their reset snapshot, not an input
         in_cells[slot.reg] = _state_chip(f"{slot.name} = {slot.reset_value!r}")
     for bslot in lir.bool_state_slots:  # boolean persistent slots likewise show their reset snapshot in their bX column
         in_cells[bslot.reg] = _state_chip(f"{bslot.name} = {bslot.reset_value!r}")
-    out.append(_bookend_row("in", in_cells, columns, live, 0, n_stage, dv))
+    out.append(_bookend_row("in", in_cells, columns, live, 0, n_stage, dv, lir.fetch_lag))
 
     for cyc in compute_cycles:  # one row per compute cycle; idle cycles show only pipeline advance
         out.append("<tr class='bbk'>" if cyc in boundary_rows else "<tr>")  # thick seam below a block's last row
@@ -317,7 +321,7 @@ def render_schedule(lir: Lir) -> str:
         for sidx in range(n_stage):
             out.append(_stage_cell(sidx, cyc, dv, stage_fill, stage_tip, conflicts))
         out.append(f"<td class='opcell'>{''.join(chips_at.get(cyc, []))}</td>")
-        out.append(_pc_cell(cyc))
+        out.append(_pc_cell(cyc, lir.fetch_lag))
         out.append("</tr>")
     out.append("</table><svg class='edges'></svg></div>")
     out.append(_sched_script(lir, edges, live, arrows, col_ord))
@@ -448,13 +452,13 @@ def _stage_columns(lir: Lir) -> list[tuple[OperatorInstance, int]]:
     return cols
 
 
-def _pc_cell(cyc: int) -> str:
+def _pc_cell(cyc: int, fetch_lag: int) -> str:
     """
-    The executing microcode step for grid row ``cyc`` (``clk - FETCH_LAG``): the ROM address whose control word drives
+    The executing microcode step for grid row ``cyc`` (``clk - fetch_lag``): the ROM address whose control word drives
     this cycle's datapath, and exactly what ``err_pc`` latches. Blank during the fetch warmup, where it is negative. The
     ``pc_<cyc>`` id lets the overlay measure this row's y-centre to route the control-transfer arrows in the margin.
     """
-    step = cyc - FETCH_LAG
+    step = cyc - fetch_lag
     return f"<td class='pc' id='pc_{cyc}'>{step if step >= 0 else ''}</td>"
 
 
@@ -466,6 +470,7 @@ def _bookend_row(
     row_id: int,
     n_stage: int,
     dv: _Dividers,
+    fetch_lag: int,
 ) -> str:
     """Cycle 0: no operator is in flight yet, so the operator-stage cells and ops cell are empty."""
     out = [f"<tr><td class='clk'>{label}</td>"]
@@ -475,7 +480,7 @@ def _bookend_row(
     for sidx in range(n_stage):
         out.append(f"<td class='{_oc_class(sidx, dv)}'></td>")
     out.append("<td class='opcell'></td>")
-    out.append(_pc_cell(row_id))
+    out.append(_pc_cell(row_id, fetch_lag))
     out.append("</tr>")
     return "".join(out)
 
@@ -739,7 +744,11 @@ def _named_label(bank: str, index: int, named: tuple[str, str] | None) -> str:
 
 
 def _schedule_key(
-    operator_colors: dict[type[HardwareOperator], str], has_state: bool, has_arrows: bool, has_blocks: bool
+    operator_colors: dict[type[HardwareOperator], str],
+    has_state: bool,
+    has_arrows: bool,
+    has_blocks: bool,
+    fetch_lag: int,
 ) -> str:
     items = [
         f"<span class='wr' style='background:{color}'>{_esc(cls.mnemonic)}</span>"
@@ -782,7 +791,7 @@ def _schedule_key(
         )
     if has_blocks:
         items.append(_key_item("<span class='sw bbkey'></span>", "basic-block boundary (terminator row)"))
-    items.append(f"<span>pc = microcode step executing this cycle (clk&minus;{FETCH_LAG} fetch lag)</span>")
+    items.append(f"<span>pc = microcode step executing this cycle (clk&minus;{fetch_lag} fetch lag)</span>")
     return "<h2>Schedule</h2><div class='gridkey'>" + " ".join(items) + "</div>"
 
 

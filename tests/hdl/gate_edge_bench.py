@@ -2,11 +2,11 @@
 Custom cocotb bench for ``test_gate_edge.py``: pin the rising edge of the ``transacting`` issue-gate qualifier.
 
 The DUT is a cycle-0-leading kernel. ``transacting`` (the qualifier AND-ed into every operator's ``in_valid``) must be
-LOW while the PC dwells idle at pc 0, stay LOW through the FETCH_LAG fetch-fill bubbles after the accept (the in-flight
-``ucode[0]`` re-fetches ahead of the genuine step-0), and rise on EXACTLY the FETCH_LAG-th cycle after the accept -- the
+LOW while the PC dwells idle at pc 0, stay LOW through the fetch_lag fetch-fill bubbles after the accept (the in-flight
+``ucode[0]`` re-fetches ahead of the genuine step-0), and rise on EXACTLY the fetch_lag-th cycle after the accept -- the
 cycle the genuine step-0 executes. A late rise drops step-0; an early rise fires a spurious issue in the fill window,
-the cosim-invisible hazard the gate exists to stop once iterative operators land. The idle length k and FETCH_LAG come
-from the environment so the test can sweep k and stay valid if FETCH_LAG becomes configurable.
+the cosim-invisible hazard the gate exists to stop once iterative operators land. The idle length k and fetch_lag come
+from the environment so the test can sweep k and stay valid as fetch_lag is configurable.
 """
 
 import os
@@ -38,8 +38,8 @@ async def transacting_edge(dut) -> None:  # type: ignore[no-untyped-def]
         await FallingEdge(dut.clk)
     assert int(dut.transacting.value) == 0, f"transacting high on the accept cycle, before any issue (k={k})"
 
-    # Accept: pulse in_valid for exactly one cycle, then run. transacting must stay low through the FETCH_LAG fill
-    # bubbles and rise on exactly the FETCH_LAG-th cycle after the accept edge.
+    # Accept: pulse in_valid for exactly one cycle, then run. transacting must stay low through the fetch_lag fill
+    # bubbles and rise on exactly the fetch_lag-th cycle after the accept edge.
     dut.in_valid.value = 1
     await RisingEdge(dut.clk)
     dut.in_valid.value = 0

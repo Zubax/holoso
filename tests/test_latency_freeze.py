@@ -64,7 +64,9 @@ _SPEC_BY_NAME = {spec.name: spec for spec in SPECS}
 @pytest.mark.parametrize("name", sorted(_FROZEN_SCHEDULE))
 def test_schedule_length_is_frozen(name: str) -> None:
     spec = _SPEC_BY_NAME[name]
-    lir = build(lower_to_mir(optimize(lower_frontend(spec.make_kernel())), default_ops(spec.formats[0])), name)
+    lir = build(
+        lower_to_mir(optimize(lower_frontend(spec.make_kernel())), default_ops(spec.formats[0])), name, fetch_stages=3
+    )
     got = (lir.min_initiation_interval, lir.last_pc)
     assert got == _FROZEN_SCHEDULE[name], (
         f"{name}: scheduling efficiency changed -- (min II, last PC) {got} differs from the frozen "
@@ -111,7 +113,7 @@ _CHAINED_COPY: list[tuple[str, object, tuple[int, int]]] = [
 
 @pytest.mark.parametrize("name,kernel_cls,frozen", _CHAINED_COPY)
 def test_chained_copy_schedule_is_frozen(name: str, kernel_cls: object, frozen: tuple[int, int]) -> None:
-    lir = build(lower_to_mir(optimize(lower_frontend(kernel_cls().__call__)), default_ops(_FMT)), name)
+    lir = build(lower_to_mir(optimize(lower_frontend(kernel_cls().__call__)), default_ops(_FMT)), name, fetch_stages=3)
     assert all(
         slot.needs_copy for slot in (*lir.float_state_slots, *lir.bool_state_slots)
     ), f"{name}: a chained-copy slot unexpectedly coalesced; the tapped_by_other path is no longer exercised"
