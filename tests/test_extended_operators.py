@@ -20,6 +20,7 @@ from holoso import (
     FMulILog2OperatorFamily,
     FMulOperator,
     FRoundOperator,
+    FSortOperator,
     OpConfig,
     UnsupportedConstruct,
 )
@@ -34,7 +35,7 @@ from math import fma as aliased_fma
 FMT = FloatFormat(8, 24)  # binary32: a float64 decode of any in-format value is exact, so math/round is an exact oracle
 
 
-def _ops(*, with_round: bool = True, with_fma: bool = True) -> OpConfig:
+def _ops(*, with_round: bool = True, with_fma: bool = True, with_sort: bool = True) -> OpConfig:
     return OpConfig(
         FAddOperator(FMT),
         FMulOperator(FMT),
@@ -43,6 +44,7 @@ def _ops(*, with_round: bool = True, with_fma: bool = True) -> OpConfig:
         FCmpOperator(FMT),
         fround=FRoundOperator(FMT) if with_round else None,
         ffma=FFmaOperator(FMT) if with_fma else None,
+        fsort=FSortOperator(FMT) if with_sort else None,
     )
 
 
@@ -306,3 +308,131 @@ def test_implicit_fma_distributes_product_sign() -> None:
         for _ in range(2000):
             a, b, c = (float(np.float32(rng.standard_normal() * 9)) for _ in range(3))
             assert sim.run(a, b, c)[0].bits == reference(a, b, c), f"{kernel.__name__} a={a} b={b} c={c}"
+
+
+# Pairs spanning equal values, both infinities, sign-crossing, zero, and ordinary magnitudes.
+_MINMAX_VECTORS = [
+    (2.0, 3.0),
+    (3.0, 2.0),
+    (-1.5, 4.0),
+    (4.0, -1.5),
+    (5.0, 5.0),
+    (0.0, 0.0),
+    (-2.0, 2.0),
+    (float("inf"), 2.0),
+    (2.0, float("inf")),
+    (float("-inf"), -3.0),
+    (float("inf"), float("-inf")),
+    (100.7, -100.7),
+    (1e-30, 1e30),
+]
+
+
+def test_min_max_match_reference() -> None:
+    # min(a,b) and max(a,b) over the same pair fuse into one sorter firing that writes two wide registers at once;
+    # both outputs are checked against the bit-preserving reference (FloatValue.sort), which the HDL bench anchors to
+    # the RTL. The equal and infinity pairs pin the tie direction and the total-order handling of the extrema.
+    def kernel(a: float, b: float) -> float:
+        return (min(a, b), max(a, b))
+
+    sim = _sim(kernel, "min_max_pair")
+    for a, b in _MINMAX_VECTORS:
+        lo, hi = FloatValue.sort(_v(a), _v(b))
+        out = sim.run(a, b)
+        assert out[0].bits == lo.bits, f"min a={a} b={b}"
+        assert out[1].bits == hi.bits, f"max a={a} b={b}"
+    rng = np.random.default_rng(0x504)
+    for _ in range(4000):
+        a, b = (float(np.float32(rng.standard_normal() * 12)) for _ in range(2))
+        lo, hi = FloatValue.sort(_v(a), _v(b))
+        out = sim.run(a, b)
+        assert out[0].bits == lo.bits and out[1].bits == hi.bits, f"a={a} b={b}"
+
+
+def test_min_max_sign_folds_into_operands() -> None:
+    # Each operand's sign chain folds onto its sorter operand and is applied BEFORE the sort: min(-a, |b|) is the
+    # sorter fed (-a, |b|). This drives the operand conditioners on a commutative multi-output operator.
+    def kernel(a: float, b: float) -> float:
+        return (min(-a, abs(b)), max(abs(a), -b))
+
+    sim = _sim(kernel, "min_max_signs")
+    rng = np.random.default_rng(0x510)
+    for _ in range(3000):
+        a, b = (float(np.float32(rng.standard_normal() * 12)) for _ in range(2))
+        lo, _ignore = FloatValue.sort(_v(-a), _v(abs(b)))
+        _ignore2, hi = FloatValue.sort(_v(abs(a)), _v(-b))
+        out = sim.run(a, b)
+        assert out[0].bits == lo.bits, f"min(-a,|b|) a={a} b={b}"
+        assert out[1].bits == hi.bits, f"max(|a|,-b) a={a} b={b}"
+
+
+def test_min_max_dispatch_numpy() -> None:
+    # numpy.minimum/maximum are the binary elementwise forms and must dispatch by callee identity to the sorter.
+    def kernel(a: float, b: float) -> float:
+        return (np.minimum(a, b), np.maximum(a, b))
+
+    sim = _sim(kernel, "min_max_numpy")
+    for a, b in _MINMAX_VECTORS:
+        lo, hi = FloatValue.sort(_v(a), _v(b))
+        out = sim.run(a, b)
+        assert out[0].bits == lo.bits and out[1].bits == hi.bits, f"a={a} b={b}"
+
+
+def test_min_max_wrong_arity_is_rejected() -> None:
+    def kernel(a: float, b: float, c: float) -> float:
+        return max(a, b, c)  # only the binary form is supported
+
+    with pytest.raises(UnsupportedConstruct):
+        holoso.synthesize(kernel, _ops(), name="min_max_arity")
+
+
+def test_min_max_unconfigured_is_rejected() -> None:
+    def kernel(a: float, b: float) -> float:
+        return min(a, b)
+
+    with pytest.raises(UnsupportedConstruct):
+        holoso.synthesize(kernel, _ops(with_sort=False), name="min_max_unconfigured")
+
+
+def test_min_max_is_not_bit_commutative() -> None:
+    # min/max preserve the selected operand's exact bits and break ties toward the second operand, so they are NOT
+    # bit-commutative: swapping operands can flip the sign of a zero. Two mirrored mins over the same pair must each
+    # keep their source operand order (the operator must not be marked commutative), or out_0's zero sign diverges
+    # from the reference. At x=0, sign conditioning makes -0, exposing the tie.
+    def kernel(x: float, y: float) -> float:
+        return (min(-x, y), min(y, -x))
+
+    sim = _sim(kernel, "min_max_mirror")
+    for x, y in [(0.0, 0.0), (5.0, 5.0), (-3.0, -3.0), (2.0, 7.0), (-4.0, 1.5)]:
+        neg_x = _v(x).apply_sign(negate=True, absolute=False)
+        ref0 = FloatValue.sort(neg_x, _v(y))[0]
+        ref1 = FloatValue.sort(_v(y), neg_x)[0]
+        out = sim.run(x, y)
+        assert out[0].bits == ref0.bits, f"min(-x,y) x={x} y={y}"
+        assert out[1].bits == ref1.bits, f"min(y,-x) x={x} y={y}"
+
+
+def test_min_max_of_constants_fold() -> None:
+    # min/max of two constants fold in the format-agnostic HIR, so a kernel using only constant min/max needs no
+    # fsort hardware; synthesizing with fsort unconfigured proves the fold (an unfolded min/max would be rejected).
+    def kernel(x: float) -> float:
+        return x + min(2.5, 1.5) + max(2.5, 1.5)
+
+    sim = holoso.synthesize(kernel, _ops(with_sort=False), name="min_max_fold").numerical_model.elaborate()
+    for x in [0.0, 3.0, -1.5, 100.25]:
+        ref = (_v(x) + _v(1.5)) + _v(2.5)
+        assert sim.run(x)[0].bits == ref.bits, f"x={x}"
+
+
+def test_min_max_nonfinite_constant_is_rejected() -> None:
+    # A non-finite constant operand must not be hidden by the fold's selection: even when the finite side would be
+    # selected, the non-finite constant must reach the validator and be rejected, as a bare non-finite literal is.
+    def min_selects_finite(x: float) -> float:
+        return x + min(1e400, 2.0)  # 1e400 overflows to +inf; the fold would select 2.0 but must not drop the inf
+
+    def max_selects_finite(x: float) -> float:
+        return x + max(2.0, 1e400 - 1e400)  # 1e400 - 1e400 is NaN; must be rejected, not selected away
+
+    for fn in (min_selects_finite, max_selects_finite):
+        with pytest.raises(UnsupportedConstruct):
+            holoso.synthesize(fn, _ops(), name=fn.__name__)

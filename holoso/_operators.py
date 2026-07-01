@@ -662,6 +662,52 @@ class FFmaOperator(FloatHardwareOperator):
 
 
 @dataclass(frozen=True, slots=True)
+class FSortOperator(FloatHardwareOperator):
+    """
+    A 2-element float sorter emitting the ascending ``(min, max)`` of its operands, with input and per-output sign
+    conditioning. ``min(a,b)`` taps port 0 and ``max(a,b)`` port 1; one instance serves both, and a min and a max over
+    one operand pair fuse into a single firing (as the comparator's relations do).
+    NOT commutative: min/max preserve the selected operand's exact bits, and the sorter breaks a tie toward the second
+    operand, so swapping operands can flip the sign of a zero result (a -0 conditioned from a zero magnitude).
+    """
+
+    mnemonic: ClassVar[str] = "fsort"
+    output_hdl_ports: ClassVar[list[str]] = ["min", "max"]
+    stage_input: int = 0
+
+    def __post_init__(self) -> None:
+        if self.stage_input < 0:
+            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
+
+    @property
+    def latency(self) -> int:
+        return 1 + self.stage_input
+
+    @property
+    def signature(self) -> ScalarSignature:
+        ty = FloatType(self.fmt)
+        return ScalarSignature((ty, ty), (ty, ty))
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
+        a, b = self._validated_operands(operands, 2)
+        return FloatValue.sort(a, b)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        a, b = operands
+        return f"{self.mnemonic}({a},{b})"
+
+    def render_output(
+        self, port: int, conditioner: "PortConditioner", *operands: str, immediates: tuple[int, ...] = ()
+    ) -> str:
+        assert isinstance(conditioner, FloatSignControl)
+        a, b = operands
+        return conditioner.decorate(f"{self.output_hdl_ports[port]}({a}, {b})")
+
+    def hdl_params(self) -> dict[str, int]:
+        return {"STAGE_INPUT": self.stage_input}
+
+
+@dataclass(frozen=True, slots=True)
 class BoolLogicOperator(InlineHardwareOperator, ABC):
     """
     A boolean-logic operator (AND/OR/XOR): a plain ``& | ^`` gate folded into its boolean register's write. Never
@@ -854,11 +900,12 @@ class OpConfig:
     fcmp: FCmpOperator
     fround: FRoundOperator | None = None
     ffma: FFmaOperator | None = None
+    fsort: FSortOperator | None = None
 
     @property
     def float_format(self) -> FloatFormat:
         formats = {self.fadd.fmt, self.fmul.fmt, self.fdiv.fmt, self.fmul_ilog2.fmt, self.fcmp.fmt}
-        formats.update(op.fmt for op in (self.fround, self.ffma) if op is not None)
+        formats.update(op.fmt for op in (self.fround, self.ffma, self.fsort) if op is not None)
         if len(formats) != 1:
             ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
             raise ValueError(f"all floating-point operators must use the same format; got {ordered}")

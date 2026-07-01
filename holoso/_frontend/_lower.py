@@ -44,6 +44,8 @@ _FLOAT_INTRINSICS: dict[str, Callable[[], Operator]] = {
     "ceil": FloatCeil,
     "trunc": FloatTrunc,
     "fma": FloatFma,
+    "minimum": FloatMin,  # numpy.minimum/maximum are the binary elementwise forms; np.min/np.max are reductions
+    "maximum": FloatMax,
 }
 
 
@@ -1271,6 +1273,15 @@ class _Lowerer:
                         "round() takes a single argument; round(x, ndigits) is not supported", self._loc(node)
                     )
                 return Scalar(self._builder.operation(FloatRound(), [self._scalar(operands[0], node)]))
+            if func.id in ("min", "max") and not node.keywords and builtin_unshadowed:
+                # Binary min(a, b)/max(a, b) only; the variadic and iterable forms (and key=/default=) are not lowered.
+                operands = self._lower_args(node)
+                if len(operands) != 2:
+                    raise UnsupportedConstruct(
+                        f"{func.id}() is supported only with two scalar arguments", self._loc(node)
+                    )
+                operator = FloatMin() if func.id == "min" else FloatMax()
+                return Scalar(self._builder.operation(operator, [self._scalar(operand, node) for operand in operands]))
             if func.id in ("list", "tuple") and not node.keywords and builtin_unshadowed:
                 # list(seq)/tuple(seq) of an aggregate is identity here: it carries the element order the model holds,
                 # and the front-end already treats list and tuple aggregates co-equally (the list/tuple-literal case).
@@ -1299,7 +1310,7 @@ class _Lowerer:
         raise UnsupportedConstruct(f"unsupported call to {name or '<expr>'!r}", self._loc(node))
 
     def _intrinsic_call(self, node: ast.Call) -> Value | None:
-        """Lower a ``math``/``numpy`` float intrinsic (floor/ceil/trunc/fma) to its HIR operator, or None otherwise."""
+        """Lower a ``math``/``numpy`` float intrinsic to its HIR operator, or None otherwise."""
         name = self._intrinsic_name(node.func)
         if name is None:
             return None

@@ -249,7 +249,8 @@ endmodule
 //      min = sgnop(min(sgnop(a), sgnop(b)))
 //      max = sgnop(max(sgnop(a), sgnop(b)))
 // Useful for e.g. sort-by-absolute-value or producing sign-flipped extrema.
-module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18, parameter integer LATENCY = 0) (
+module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18, parameter integer STAGE_INPUT = 0,
+                     parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
@@ -277,9 +278,11 @@ module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18, parameter integer 
                                                     .in({max_sgnop, min_sgnop}), .out_valid(), .out(out_sgnop_q));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_min (.x(min1), .op(min_sgnop_q), .y(min));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_max (.x(max1), .op(max_sgnop_q), .y(max));
-    zkf_sort#(.WEXP(WEXP), .WMAN(WMAN), .LATENCY(LATENCY)) u_sort (.clk(clk), .rst(rst),
-                                                                   .in_valid(in_valid), .a(a1), .b(b1),
-                                                                   .out_valid(out_valid), .min(min1), .max(max1));
+    zkf_sort#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT), .LATENCY(LATENCY)) u_sort (
+        .clk(clk), .rst(rst),
+        .in_valid(in_valid), .a(a1), .b(b1),
+        .out_valid(out_valid), .min(min1), .max(max1)
+    );
 endmodule
 
 // Floating point comparator with sign conditioning on inputs only:

@@ -162,13 +162,10 @@ class FloatMulPow2(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class FloatRoundToIntegral(Operator):
-    """
-    Round a float to an integral-valued float. The four modes (nearest-even, floor, ceil, trunc) are distinct HIR
-    operators that all lower to one shared ``fround`` distinguished by a per-firing immediate. Never constant-folded:
-    the format-agnostic HIR cannot reproduce the in-format result, so the hardware evaluates it (like ``FloatToBool``).
-    """
+class FloatRound(Operator):
+    """Round a float to the nearest integral-valued float, ties to even."""
 
+    mnemonic: ClassVar[str] = "round"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -177,33 +174,47 @@ class FloatRoundToIntegral(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class FloatRound(FloatRoundToIntegral):
-    mnemonic: ClassVar[str] = "round"
+class FloatFloor(Operator):
+    """Round a float toward negative infinity to an integral-valued float."""
 
-
-@dataclass(frozen=True, slots=True)
-class FloatFloor(FloatRoundToIntegral):
     mnemonic: ClassVar[str] = "floor"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
 
 
 @dataclass(frozen=True, slots=True)
-class FloatCeil(FloatRoundToIntegral):
+class FloatCeil(Operator):
+    """Round a float toward positive infinity to an integral-valued float."""
+
     mnemonic: ClassVar[str] = "ceil"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
 
 
 @dataclass(frozen=True, slots=True)
-class FloatTrunc(FloatRoundToIntegral):
+class FloatTrunc(Operator):
+    """Round a float toward zero to an integral-valued float."""
+
     mnemonic: ClassVar[str] = "trunc"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
 
 
 @dataclass(frozen=True, slots=True)
 class FloatFma(Operator):
     """
-    Fused multiply-add ``a*b + c`` from an explicit ``math.fma`` call: always single-rounds (unlike an implicit
-    ``a*b + c``, which double-rounds when the product is shared).
-    Never constant-folded (as ``FloatToBool`` defers) -- a fold in the format-agnostic HIR could only use float64,
-    which double-rounds relative to the hardware's single round at the ZKF format --
-    exactly the double-rounding fma exists to avoid.
+    Fused multiply-add ``a*b + c`` from an explicit ``math.fma`` call: always single-rounds.
+    Never constant-folded -- a fold in the format-agnostic HIR could only use float64, which double-rounds relative
+    to the hardware's single round -- exactly the double-rounding FMA exists to avoid.
     """
 
     mnemonic: ClassVar[str] = "fma"
@@ -212,6 +223,42 @@ class FloatFma(Operator):
     @property
     def signature(self) -> Signature:
         return _float_signature(3)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatMin(Operator):
+    """Binary minimum of two floats."""
+
+    mnemonic: ClassVar[str] = "min"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(2)
+
+    def fold_constants(self, operands: list[Const]) -> Const | None:
+        a, b = [_float_const(operand) for operand in operands]
+        if not (math.isfinite(a.value) and math.isfinite(b.value)):
+            return None  # do not let selection silently discard a non-finite operand
+        return a if a.value < b.value else b
+
+
+@dataclass(frozen=True, slots=True)
+class FloatMax(Operator):
+    """Binary maximum of two floats."""
+
+    mnemonic: ClassVar[str] = "max"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(2)
+
+    def fold_constants(self, operands: list[Const]) -> Const | None:
+        a, b = [_float_const(operand) for operand in operands]
+        if not (math.isfinite(a.value) and math.isfinite(b.value)):
+            return None  # do not let selection silently discard a non-finite operand
+        return b if a.value < b.value else a
 
 
 @dataclass(frozen=True, slots=True)

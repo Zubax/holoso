@@ -200,6 +200,15 @@ class FloatValue:
         product = Fraction(0, 1) if product_zero else _finite_fraction(fmt, da) * _finite_fraction(fmt, db)
         return FloatValue.from_bits(fmt, fmt.pack(product + _finite_fraction(fmt, dc)))
 
+    @staticmethod
+    def sort(a: "FloatValue", b: "FloatValue") -> tuple["FloatValue", "FloatValue"]:
+        """
+        The operands sorted ascending as ``(min, max)``, matching ``zkf_sort``: a bit-preserving selection by the
+        total order of :meth:`compare` (ZKF has no NaN). Equal values are bit-identical, so the tie direction is
+        unobservable.
+        """
+        return (a, b) if a.compare(b) < 0 else (b, a)
+
     def round(self) -> "FloatValue":
         """Round to the nearest integral-valued float, ties to even."""
         return self._round_to_integral(round)

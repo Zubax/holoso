@@ -195,13 +195,17 @@ are never interned (each parameter is a distinct ordered port). CSE'ing an opera
 point: an identical expression in two sibling `if` arms must stay two distinct values, because a globally interned DAG
 would illegally share a value across non-dominating arms. Merges emit one phi per diverging scalar leaf.
 
-Operators split structurally into POOLED -- a physical streaming module the scheduler contends for, the float arithmetic
-and the comparator -- and INLINE -- a pure expression folded into a register write, the boolean logic and the casts.
-This split is load-bearing for scheduling and emission. A comparison taps one of the comparator's order flags with an
-optional inversion, so one physical comparator serves every relation (the ZKF ordering is total: lt/gt/eq directly,
-le/ge/ne by inversion) and several relations over one operand pair share a firing. Boolean `and`/`or` are inline gates
-that always evaluate both operands (they are pure booleans); a chained comparison `a < b < c` desugars to `band(a<b,
-b<c)`. `not` never materializes hardware: NOT chains fold into the consumer's sideband (an operand/output/state/phi-arm
+Operators split structurally into POOLED -- a physical streaming module the scheduler contends for --
+and INLINE -- a pure expression folded into a register write, like boolean logic.
+This split is load-bearing for scheduling and emission.
+A comparison taps one of the comparator's order flags with an optional inversion,
+so one physical comparator serves every relation (the ZKF ordering is total: lt/gt/eq directly, le/ge/ne by inversion)
+and several relations over one operand pair share a firing.
+The sorter is the wide-output analogue: it emits the smaller and larger operand on two ports,
+so a `min` and a `max` over one pair share a firing.
+Boolean `and`/`or` are inline gates that always evaluate both operands (they are pure booleans);
+a chained comparison `a < b < c` desugars to `band(a<b,b<c)`.
+`not` never materializes hardware: NOT chains fold into the consumer's sideband (an operand/output/state/phi-arm
 inversion, or a branch-target swap), so one comparator tap and one register serve both polarities. The casts
 (`bool(x)` = `x != 0.0`, `float(cond)` = `1.0`/`0.0`) are inline writebacks that confine the ZKF bit layout to a single
 shared header, cross-checked against the bit-exact model at build time.
@@ -259,11 +263,7 @@ fast-math in C/C++ compilers.
 
 ### DEFERRED
 
-Intrinsics. `round`/`floor`/`ceil`/`trunc` and `math.fma` lower to operator modules; the front-end dispatches a name to
-an intrinsic only when the callee genuinely resolves to the `math`/`numpy` function (never by spelling alone).
-
-Reductions and matrix multiply (`max`, `argmax`, `mean`, `@`): rejected today; each will lower to a compare/select tree
-or a multiply chain.
+Composite intrinsics that have no directly matching low-level operator module.
 
 Variable-trip `for` loops: a `for` above the unroll threshold is rejected, not lowered to a counted back-edge loop (that
 needs a runtime integer counter).
@@ -280,7 +280,8 @@ hardware operator and collapses semantic negation/absolute-value chains into MIR
 results, or output wires. Multiply-by-power-of-two selects the constant-shift operator when the float format supports
 that exponent; an out-of-range exponent is rejected, since the equivalent constant would overflow or underflow the
 format anyway. The four rounding operators map to one shared `fround` distinguished by its `round_mode` immediate.
-Lowering rejects semantic domains that have no selected MIR representation.
+Binary `min`/`max` map to the low and high output ports of one shared `fsort` sorter, so a `min` and a `max` over one
+operand pair fuse into a single firing. Lowering rejects semantic domains that have no selected MIR representation.
 
 When `ffma` is configured, lowering contracts a single-use `a*b + c` into one fused multiply-add -- a faithful
 contraction that single-rounds instead of double-rounding, in the spirit of the HIR fast-math folding. It fires only

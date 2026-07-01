@@ -43,6 +43,7 @@ from ._operators import (
     FCmpOperator as FCmpOperator,
     FFmaOperator as FFmaOperator,
     FRoundOperator as FRoundOperator,
+    FSortOperator as FSortOperator,
     OpConfig as OpConfig,
 )
 

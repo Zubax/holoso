@@ -14,6 +14,7 @@ from holoso import (
     FloatFormat,
     FMulILog2OperatorFamily,
     FMulOperator,
+    FSortOperator,
     OpConfig,
 )
 from holoso._backend.verilog import generate as generate_verilog
@@ -183,6 +184,26 @@ def test_cosim_overlap_dead_arm_spill(sim: str, config: OperatorCase) -> None:
         f"overlap_dead_arm_spill_{config.label}",
         ops=config.make_ops(fmt),
     )
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_min_max(sim: str) -> None:
+    # Binary min/max lower to holoso_fsort. Taking BOTH min and max of one pair fuses to a SINGLE firing that writes
+    # two wide registers at once -- the first operator to do so -- so this proves the generated RTL lands both results
+    # bit-exactly against the model. The |a|,|b| sort in a second firing exercises the operand sign conditioners.
+    def kernel(a, b):  # type: ignore[no-untyped-def]
+        return [min(a, b), max(a, b), min(abs(a), abs(b))]
+
+    fmt = FloatFormat(8, 24)
+    ops = OpConfig(
+        FAddOperator(fmt),
+        FMulOperator(fmt),
+        FDivOperator(fmt),
+        FMulILog2OperatorFamily(fmt),
+        FCmpOperator(fmt),
+        fsort=FSortOperator(fmt),
+    )
+    run_cosim(sim, kernel, fmt, "min_max", ops=ops)
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)

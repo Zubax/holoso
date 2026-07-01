@@ -21,12 +21,13 @@ from .._hir import (
     FloatDiv,
     FloatFloor,
     FloatFma,
+    FloatMax,
+    FloatMin,
     FloatMul,
     FloatMulPow2,
     FloatNeg,
     FloatRelational,
     FloatRound,
-    FloatRoundToIntegral,
     FloatToBool,
     FloatTrunc,
     FloatType as HirFloatType,
@@ -452,8 +453,12 @@ class _FloatLowerer:
                 return self._lower_binary_float(semantic, self.context.ops.fdiv, a, b)
             case Operation(operator=FloatMulPow2(k=k) as semantic, operands=(a,)):
                 return self._lower_float_mul_pow2(semantic, a, k)
-            case Operation(operator=FloatRoundToIntegral() as semantic, operands=(a,)):
+            case Operation(
+                operator=(FloatRound() | FloatFloor() | FloatCeil() | FloatTrunc()) as semantic, operands=(a,)
+            ):
                 return self._lower_round(semantic, a)
+            case Operation(operator=(FloatMin() | FloatMax()) as semantic, operands=(a, b)):
+                return self._lower_minmax(semantic, a, b)
             case Operation(operator=FloatFma() as semantic, operands=(a, b, c)):
                 return self._emit_ffma(semantic, a, b, c, FloatSignControl())
             case Operation(operator=BoolToFloat() as semantic, operands=(a,)):
@@ -515,7 +520,7 @@ class _FloatLowerer:
             [cond_a, cond_b, sign_c],
         )
 
-    def _lower_round(self, semantic: FloatRoundToIntegral, a: ValueId) -> ValueId:
+    def _lower_round(self, semantic: FloatRound | FloatFloor | FloatCeil | FloatTrunc, a: ValueId) -> ValueId:
         # The input sign chain folds onto the operand sign conditioner, applied before the round: ``floor(-x)`` is the
         # rounder fed ``-x`` (correct -- floor of the conditioned input), not a negation of ``floor(x)``.
         operator = self.context.ops.fround
@@ -535,6 +540,23 @@ class _FloatLowerer:
             [self.context.remap[base]],
             [sign],
             immediates=(int(mode),),
+        )
+
+    def _lower_minmax(self, semantic: FloatMin | FloatMax, a: ValueId, b: ValueId) -> ValueId:
+        # Each input sign chain folds onto its operand conditioner, applied before the sort: min(-a, b) is the sorter
+        # fed (-a, b). min taps the low output port, max the high one; a min and a max over one pair fuse at LIR build.
+        operator = self.context.ops.fsort
+        if operator is None:
+            raise UnsupportedConstruct(
+                f"the kernel uses {semantic.mnemonic!r} but no 'fsort' operator is configured; add it to OpConfig"
+            )
+        base_a, sign_a = _collapse_signs(self.context.hir.nodes, a)
+        base_b, sign_b = _collapse_signs(self.context.hir.nodes, b)
+        return self.context.builder.operation(
+            _select_hardware(semantic, operator),
+            [self.context.remap[base_a], self.context.remap[base_b]],
+            [sign_a, sign_b],
+            output_port=0 if isinstance(semantic, FloatMin) else 1,
         )
 
     def _lower_float_mul_pow2(self, semantic: Operator, a: ValueId, k: int) -> ValueId:
