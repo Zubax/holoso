@@ -2,7 +2,9 @@
 
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
+from enum import IntEnum
 from hashlib import blake2s
 from typing import ClassVar
 
@@ -78,6 +80,17 @@ class BoolInversion:
 type PortConditioner = FloatSignControl | BoolInversion
 
 
+@dataclass(frozen=True, slots=True)
+class ImmediateField:
+    """
+    A per-firing immediate input port: a small microcode-driven constant on a named wrapper port, the data-carrying
+    dual of the sign sidebands. Lets one shared instance serve several per-firing modes, not one instance per mode.
+    """
+
+    name: str  # wrapper port name
+    width: int  # bit width
+
+
 def identity_conditioner(scalar_type: ScalarType) -> PortConditioner:
     if isinstance(scalar_type, FloatType):
         return FloatSignControl()
@@ -100,6 +113,10 @@ class HardwareOperator(ABC):
 
     mnemonic: ClassVar[str]
 
+    # Per-firing immediate input ports (empty for most operators; ``fround`` declares its 2-bit ``round_mode``). The
+    # value rides the MIR operation, not the operator identity, so one shared instance serves every mode.
+    immediate_ports: ClassVar[list[ImmediateField]] = []
+
     # Commutation symmetry: swapping the two operands permutes the output ports through this map (``new_port =
     # swap_output_permutation[old_port]``); ``None`` means non-commutative. Single-output commutative operators use
     # the identity ``(0,)``; the comparator's order flags transpose (``gt`` and ``lt`` exchange, ``eq`` is fixed).
@@ -120,20 +137,22 @@ class HardwareOperator(ABC):
         return 1
 
     @abstractmethod
-    def render(self, *operands: str) -> str: ...
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str: ...
 
     @property
     def is_commutative(self) -> bool:
         return self.swap_output_permutation is not None
 
-    def render_output(self, port: int, conditioner: "PortConditioner", *operands: str) -> str:
+    def render_output(
+        self, port: int, conditioner: "PortConditioner", *operands: str, immediates: tuple[int, ...] = ()
+    ) -> str:
         """
         Human-friendly form of one tapped output port. The default covers single-output operators only; a
         multi-output operator must override it (silently rendering every tap as the whole-operator expression would
-        mislabel the report).
+        mislabel the report). ``immediates`` is forwarded so a mode-bearing operator renders the firing's actual mode.
         """
         assert len(self.signature.result_types) == 1 and port == 0, f"{self.mnemonic} must override render_output"
-        return conditioner.decorate(self.render(*operands))
+        return conditioner.decorate(self.render(*operands, immediates=immediates))
 
     @property
     @abstractmethod
@@ -144,8 +163,13 @@ class HardwareOperator(ABC):
         return self.signature.arity
 
     @abstractmethod
-    def evaluate(self, *operands: "FloatValue | bool") -> tuple["FloatValue | bool", ...]:
-        """Bit-exact reference semantics: one value per output port, aligned with ``signature.result_types``."""
+    def evaluate(
+        self, *operands: "FloatValue | bool", immediates: tuple[int, ...] = ()
+    ) -> tuple["FloatValue | bool", ...]:
+        """
+        Bit-exact reference semantics: one value per output port, aligned with ``signature.result_types``.
+        ``immediates`` carries the per-firing immediate values (empty for most operators).
+        """
 
 
 @dataclass(frozen=True)
@@ -189,7 +213,7 @@ class InlineHardwareOperator(HardwareOperator, ABC):
         # landing helper, not a pipeline stage.
         return 0
 
-    def render(self, *operands: str) -> str:
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         return self.verilog_expr(*operands).replace(" ", "")
 
     @abstractmethod
@@ -274,11 +298,11 @@ class FAddOperator(FloatHardwareOperator):
     def signature(self) -> ScalarSignature:
         return self.float_signature(2)
 
-    def evaluate(self, *operands: FloatValue | bool) -> tuple[FloatValue, ...]:
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
         a, b = self._validated_operands(operands, 2)
         return (a + b,)
 
-    def render(self, *operands: str) -> str:
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         a, b = operands
         return f"{a}+{b}"
 
@@ -319,11 +343,11 @@ class FMulOperator(FloatHardwareOperator):
     def signature(self) -> ScalarSignature:
         return self.float_signature(2)
 
-    def evaluate(self, *operands: FloatValue | bool) -> tuple[FloatValue, ...]:
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
         a, b = self._validated_operands(operands, 2)
         return (a * b,)
 
-    def render(self, *operands: str) -> str:
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         a, b = operands
         return f"{a}×{b}"
 
@@ -360,11 +384,11 @@ class FDivOperator(FloatHardwareOperator):
     def signature(self) -> ScalarSignature:
         return self.float_signature(2)
 
-    def evaluate(self, *operands: FloatValue | bool) -> tuple[FloatValue, ...]:
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
         a, b = self._validated_operands(operands, 2)
         return (a / b,)
 
-    def render(self, *operands: str) -> str:
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         a, b = operands
         return f"{a}/{b}"
 
@@ -398,11 +422,11 @@ class FMulILog2Operator(FloatHardwareOperator):
     def signature(self) -> ScalarSignature:
         return self.float_signature(1)
 
-    def evaluate(self, *operands: FloatValue | bool) -> tuple[FloatValue, ...]:
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
         (a,) = self._validated_operands(operands, 1)
         return (a.scale_pow2(self.k),)
 
-    def render(self, *operands: str) -> str:
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         (a,) = operands
         return f"{a}×2^{self.k}"
 
@@ -481,7 +505,7 @@ class FCmpOperator(FloatHardwareOperator):
         ty = FloatType(self.fmt)
         return ScalarSignature((ty, ty), (BoolType(), BoolType(), BoolType()))
 
-    def render(self, *operands: str) -> str:
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         a, b = operands
         return f"cmp({a},{b})"
 
@@ -490,7 +514,9 @@ class FCmpOperator(FloatHardwareOperator):
         """The (output port, inversion) pair implementing a relation; every relation is one flag or its complement."""
         return cls._TAP_OF_RELATION[relation]
 
-    def render_output(self, port: int, conditioner: "PortConditioner", *operands: str) -> str:
+    def render_output(
+        self, port: int, conditioner: "PortConditioner", *operands: str, immediates: tuple[int, ...] = ()
+    ) -> str:
         """Human-friendly form of one tapped flag, recovered as the relation it implements (e.g. ``a≥b``)."""
         assert isinstance(conditioner, BoolInversion)
         a, b = operands
@@ -499,10 +525,140 @@ class FCmpOperator(FloatHardwareOperator):
     def hdl_params(self) -> dict[str, int]:
         return {"STAGE_INPUT": self.stage_input}
 
-    def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
         a, b = self._validated_operands(operands, 2)
         ordering = a.compare(b)
         return ordering > 0, ordering == 0, ordering < 0
+
+
+@dataclass(frozen=True, slots=True)
+class FRoundOperator(FloatHardwareOperator):
+    """
+    Round a float to an integral-valued float. One pooled instance serves all four modes (nearest-even, floor, ceil,
+    trunc) via the 2-bit ``round_mode`` immediate, as one comparator serves every relation. The zkf core is
+    combinational, so a register stage (``stage_output`` defaults to 1) keeps the pooled latency at least one cycle.
+    """
+
+    mnemonic: ClassVar[str] = "fround"
+    immediate_ports: ClassVar[list[ImmediateField]] = [ImmediateField("round_mode", 2)]
+    stage_input: int = 0
+    stage_decode: int = 0
+    stage_pack: int = 0
+    stage_output: int = 1
+
+    class Mode(IntEnum):
+        """Matches the mode encoding in holoso_fround"""
+
+        ROUND = 0
+        FLOOR = 1
+        CEIL = 2
+        TRUNC = 3
+
+    _EVAL: ClassVar[dict[Mode, Callable[[FloatValue], FloatValue]]] = {
+        Mode.ROUND: FloatValue.round,
+        Mode.FLOOR: FloatValue.floor,
+        Mode.CEIL: FloatValue.ceil,
+        Mode.TRUNC: FloatValue.trunc,
+    }
+
+    def __post_init__(self) -> None:
+        if self.stage_input < 0:
+            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
+        for field in ("stage_decode", "stage_pack", "stage_output"):
+            if getattr(self, field) not in (0, 1):
+                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
+        if self.latency < 1:
+            raise ValueError("fround needs at least one register stage (a pooled operator must have latency >= 1)")
+
+    @property
+    def latency(self) -> int:
+        return self.stage_input + self.stage_decode + self.stage_pack + self.stage_output
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return self.float_signature(1)
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
+        (a,) = self._validated_operands(operands, 1)
+        (mode,) = immediates
+        return (self._EVAL[self.Mode(mode)](a),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        (mode,) = immediates
+        return f"{self.Mode(mode).name.lower()}({a})"
+
+    def hdl_params(self) -> dict[str, int]:
+        return {
+            "STAGE_INPUT": self.stage_input,
+            "STAGE_DECODE": self.stage_decode,
+            "STAGE_PACK": self.stage_pack,
+            "STAGE_OUTPUT": self.stage_output,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FFmaOperator(FloatHardwareOperator):
+    """
+    Fused multiply-add ``a*b + c``, single-rounded (full-width product rounded once with ``c``). Arity 3; serves the
+    explicit ``math.fma`` and the implicit ``a*b+c`` fusion. Not commutative under operand reversal (gives ``c*b+a``).
+    """
+
+    mnemonic: ClassVar[str] = "ffma"
+    stage_input: int = 0
+    stage_product: int = 0
+    stage_decode: int = 0
+    stage_align: int = 0
+    stage_normalize: int = 0
+    stage_pack: int = 0
+    stage_output: int = 0
+
+    def __post_init__(self) -> None:
+        if self.stage_input < 0:
+            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
+        for field in ("stage_decode", "stage_align", "stage_pack", "stage_output"):
+            if getattr(self, field) not in (0, 1):
+                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
+        if self.stage_normalize not in (0, 1, 2):
+            raise ValueError(f"stage_normalize must be 0, 1, or 2; got {self.stage_normalize!r}")
+        if self.stage_product not in range(5):
+            raise ValueError(f"stage_product invalid: {self.stage_product!r}")
+
+    @property
+    def latency(self) -> int:
+        return (
+            5
+            + self.stage_input
+            + self.stage_product
+            + self.stage_decode
+            + self.stage_align
+            + self.stage_normalize
+            + self.stage_pack
+            + self.stage_output
+        )
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return self.float_signature(3)
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
+        a, b, c = self._validated_operands(operands, 3)
+        return (FloatValue.fma(a, b, c),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        a, b, c = operands
+        return f"{a}×{b}+{c}"
+
+    def hdl_params(self) -> dict[str, int]:
+        return {
+            "STAGE_INPUT": self.stage_input,
+            "STAGE_PRODUCT": self.stage_product,
+            "STAGE_DECODE": self.stage_decode,
+            "STAGE_ALIGN": self.stage_align,
+            "STAGE_NORMALIZE": self.stage_normalize,
+            "STAGE_PACK": self.stage_pack,
+            "STAGE_OUTPUT": self.stage_output,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,7 +681,7 @@ class BoolAndOperator(BoolLogicOperator):
         a, b = operand_nets
         return f"{a} & {b}"
 
-    def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
         a, b = operands
         return (bool(a) and bool(b),)
 
@@ -542,7 +698,7 @@ class BoolOrOperator(BoolLogicOperator):
         a, b = operand_nets
         return f"{a} | {b}"
 
-    def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
         a, b = operands
         return (bool(a) or bool(b),)
 
@@ -559,7 +715,7 @@ class BoolXorOperator(BoolLogicOperator):
         a, b = operand_nets
         return f"{a} ^ {b}"
 
-    def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
         a, b = operands
         return (bool(a) != bool(b),)
 
@@ -579,7 +735,7 @@ class FloatToBoolOperator(InlineHardwareOperator):
     def signature(self) -> ScalarSignature:
         return ScalarSignature((FloatType(self.fmt),), (BoolType(),))
 
-    def render(self, *operands: str) -> str:
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         (a,) = operands
         return f"bool({a})"
 
@@ -587,7 +743,7 @@ class FloatToBoolOperator(InlineHardwareOperator):
         (a,) = operand_nets
         return f"holoso_ftobool({a})"
 
-    def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
         (a,) = operands
         assert isinstance(a, FloatValue)
         return (a.exponent != 0,)
@@ -610,7 +766,7 @@ class SelectOperator(InlineHardwareOperator):
         ty = FloatType(self.fmt)
         return ScalarSignature((BoolType(), ty, ty), (ty,))
 
-    def render(self, *operands: str) -> str:
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         cond, a, b = operands
         return f"{cond}?{a}:{b}"
 
@@ -618,7 +774,7 @@ class SelectOperator(InlineHardwareOperator):
         cond, a, b = operand_nets
         return f"({cond} ? {a} : {b})"
 
-    def evaluate(self, *operands: "FloatValue | bool") -> tuple[FloatValue]:
+    def evaluate(self, *operands: "FloatValue | bool", immediates: tuple[int, ...] = ()) -> tuple[FloatValue]:
         cond, a, b = operands
         assert isinstance(cond, bool) and isinstance(a, FloatValue) and isinstance(b, FloatValue)
         return (a if cond else b,)
@@ -639,7 +795,7 @@ class BoolSelectOperator(InlineHardwareOperator):
         ty = BoolType()
         return ScalarSignature((ty, ty, ty), (ty,))
 
-    def render(self, *operands: str) -> str:
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         cond, a, b = operands
         return f"{cond}?{a}:{b}"
 
@@ -647,7 +803,7 @@ class BoolSelectOperator(InlineHardwareOperator):
         cond, a, b = operand_nets
         return f"({cond} ? {a} : {b})"
 
-    def evaluate(self, *operands: FloatValue | bool) -> tuple[bool, ...]:
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
         cond, a, b = operands
         return (bool(a) if bool(cond) else bool(b),)
 
@@ -668,7 +824,7 @@ class BoolToFloatOperator(InlineHardwareOperator):
     def signature(self) -> ScalarSignature:
         return ScalarSignature((BoolType(),), (FloatType(self.fmt),))
 
-    def render(self, *operands: str) -> str:
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         (a,) = operands
         return f"float({a})"
 
@@ -676,7 +832,7 @@ class BoolToFloatOperator(InlineHardwareOperator):
         (a,) = operand_nets
         return f"holoso_ffrombool({a})"
 
-    def evaluate(self, *operands: FloatValue | bool) -> tuple[FloatValue, ...]:
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
         (a,) = operands
         return (FloatValue.from_float(self.fmt, 1.0 if a else 0.0),)
 
@@ -686,6 +842,9 @@ class OpConfig:
     """
     The hardware operator configuration threaded into synthesis. Constructed by the user before synthesis.
     Each field fixes one operator's format and parameters.
+
+    Some operators are optional, configured only by a kernel that uses them.
+    Selecting an unconfigured one is a clear error at MIR lowering.
     """
 
     fadd: FAddOperator
@@ -693,10 +852,13 @@ class OpConfig:
     fdiv: FDivOperator
     fmul_ilog2: FMulILog2OperatorFamily
     fcmp: FCmpOperator
+    fround: FRoundOperator | None = None
+    ffma: FFmaOperator | None = None
 
     @property
     def float_format(self) -> FloatFormat:
         formats = {self.fadd.fmt, self.fmul.fmt, self.fdiv.fmt, self.fmul_ilog2.fmt, self.fcmp.fmt}
+        formats.update(op.fmt for op in (self.fround, self.ffma) if op is not None)
         if len(formats) != 1:
             ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
             raise ValueError(f"all floating-point operators must use the same format; got {ordered}")

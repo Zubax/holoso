@@ -3,6 +3,7 @@
 import ast
 import builtins
 import inspect
+import math
 import types
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -36,6 +37,30 @@ _NO_PARAMETER_ANNOTATION = object()
 # already an aggregate, so they lower to identity. Recognizing them lets a kernel be ordinary executable numpy code.
 _NUMPY_IDENTITY = frozenset({"array", "asarray", "asanyarray"})
 
+# Float->float math/numpy intrinsics implemented as HIR operators: canonical name -> HIR operator factory (arity comes
+# from the operator's signature). Dispatched only when the callee genuinely resolves to the math/numpy function.
+_FLOAT_INTRINSICS: dict[str, Callable[[], Operator]] = {
+    "floor": FloatFloor,
+    "ceil": FloatCeil,
+    "trunc": FloatTrunc,
+    "fma": FloatFma,
+}
+
+
+def _intrinsic_of(obj: object) -> str | None:
+    """
+    The canonical intrinsic name whose actual ``math``/``numpy`` function object is ``obj``, by identity and
+    independent of the bound spelling -- so an alias (``from math import floor as f``) resolves while a shadow
+    (``ceil = abs``), a non-callable (``fma = None``), or a name a module lacks (``np.fma``) yields None.
+    """
+    if obj is None:
+        return None
+    for name in _FLOAT_INTRINSICS:
+        if obj is getattr(math, name, None) or obj is getattr(np, name, None):
+            return name
+    return None
+
+
 # Standard numeric operators that are recognized but not yet implemented; calling them fails with a clear message.
 _KNOWN_INTRINSICS = frozenset(
     {
@@ -54,8 +79,6 @@ _KNOWN_INTRINSICS = frozenset(
         "log2",
         "log10",
         "hypot",
-        "floor",
-        "ceil",
         "pow",
     }
 )
@@ -1211,6 +1234,9 @@ class _Lowerer:
             return self._lower_expr(node.args[0])
         if isinstance(func, ast.Attribute) and self._is_self_name(func.value):
             return self._lower_method_call(node, func)
+        intrinsic = self._intrinsic_call(node)
+        if intrinsic is not None:
+            return intrinsic
         # Resolve a bare name as Python does: a locally bound name shadows any global (and is not callable); a
         # user-defined global function shadows the built-in ``abs``; ``abs`` is a bare-name builtin, so a method-style
         # call such as ``x.abs(...)`` is never mistaken for it and falls through to the unsupported-call error.
@@ -1236,6 +1262,15 @@ class _Lowerer:
                 operands = self._lower_args(node)
                 if len(operands) == 1:
                     return Scalar(self._builder.operation(FloatAbs(), [self._scalar(operands[0], node)]))
+            if func.id == "round" and not node.keywords and builtin_unshadowed:
+                # ``round(x)`` rounds to a whole-number float (ties to even); the format-aware hardware does the work.
+                # ``round(x, ndigits)`` (decimal rounding) is rejected rather than silently dropping the digit count.
+                operands = self._lower_args(node)
+                if len(operands) != 1:
+                    raise UnsupportedConstruct(
+                        "round() takes a single argument; round(x, ndigits) is not supported", self._loc(node)
+                    )
+                return Scalar(self._builder.operation(FloatRound(), [self._scalar(operands[0], node)]))
             if func.id in ("list", "tuple") and not node.keywords and builtin_unshadowed:
                 # list(seq)/tuple(seq) of an aggregate is identity here: it carries the element order the model holds,
                 # and the front-end already treats list and tuple aggregates co-equally (the list/tuple-literal case).
@@ -1262,6 +1297,33 @@ class _Lowerer:
         if name in _KNOWN_INTRINSICS:
             raise MissingIntrinsic(f"implement this operator: {name}", self._loc(node))
         raise UnsupportedConstruct(f"unsupported call to {name or '<expr>'!r}", self._loc(node))
+
+    def _intrinsic_call(self, node: ast.Call) -> Value | None:
+        """Lower a ``math``/``numpy`` float intrinsic (floor/ceil/trunc/fma) to its HIR operator, or None otherwise."""
+        name = self._intrinsic_name(node.func)
+        if name is None:
+            return None
+        operator = _FLOAT_INTRINSICS[name]()
+        arity = operator.signature.arity  # the operator's own signature is the single source of truth for arity
+        if node.keywords:
+            raise UnsupportedConstruct(f"{name}() takes no keyword arguments", self._loc(node))
+        operands = self._lower_args(node)
+        if len(operands) != arity:
+            raise UnsupportedConstruct(f"{name}() takes {arity} argument(s), got {len(operands)}", self._loc(node))
+        return Scalar(self._builder.operation(operator, [self._scalar(operand, node) for operand in operands]))
+
+    def _intrinsic_name(self, func: ast.expr) -> str | None:
+        """
+        The canonical intrinsic name if ``func`` targets a supported ``math``/``numpy`` function -- a
+        ``<module>.<name>`` attribute access or a bare name bound to the function. Both resolve the callee object and
+        defer the identity/shadow decision to ``_intrinsic_of``; spelling alone never dispatches.
+        """
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and not self._is_local(func.value.id):
+            module = self._fn.__globals__.get(func.value.id)
+            return _intrinsic_of(getattr(module, func.attr, None)) if module is math or module is np else None
+        if isinstance(func, ast.Name) and not self._is_local(func.id):
+            return _intrinsic_of(self._fn.__globals__.get(func.id))
+        return None
 
     def _numpy_function(self, func: ast.expr) -> str | None:
         """

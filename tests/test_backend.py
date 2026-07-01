@@ -364,13 +364,13 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
             ty = ScalarFloatType(self.fmt)
             return ScalarSignature((ty, ty), (ty, ty))
 
-        def render(self, *operands: str) -> str:
+        def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
             return f"sortlike({operands[0]},{operands[1]})"
 
         def hdl_params(self) -> dict[str, int]:
             return {}
 
-        def evaluate(self, *operands):  # type: ignore[no-untyped-def]
+        def evaluate(self, *operands, immediates=()):  # type: ignore[no-untyped-def]
             a, b = self._validated_operands(operands, 2)
             return (a, b)  # semantics are irrelevant here; only the lane structure is under test
 
@@ -385,6 +385,7 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         ],
         issue_cycle=1,
         latency=1,
+        immediates=(),
     )
     lir = Lir(
         module_name="sortlike_probe",

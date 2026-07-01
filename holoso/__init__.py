@@ -41,6 +41,8 @@ from ._operators import (
     FMulILog2OperatorFamily as FMulILog2OperatorFamily,
     FMulOperator as FMulOperator,
     FCmpOperator as FCmpOperator,
+    FFmaOperator as FFmaOperator,
+    FRoundOperator as FRoundOperator,
     OpConfig as OpConfig,
 )
 

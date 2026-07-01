@@ -139,6 +139,9 @@ multiply-by-constant-power-of-two differs by exponent).
 Operators are chosen by a single `OpConfig`, constructed explicitly by the user and passed into `synthesize`; there is
 no implicit default. Its float format is verified consistent across the configured operators and drives HIR-to-MIR
 lowering; thereafter the format is derived from selected MIR. Latency-tuning knobs are named after the HDL parameters.
+Some operators are optional (default `None`).
+
+An operator may declare per-firing small microcode-driven immediate inputs.
 
 ## Front-end
 
@@ -256,8 +259,8 @@ fast-math in C/C++ compilers.
 
 ### DEFERRED
 
-Intrinsics. `sqrt`/`sincos`/`exp` and the like are recognized but always hard-error today -- no intrinsic operator
-exists yet. Each will map to an operator module.
+Intrinsics. `round`/`floor`/`ceil`/`trunc` and `math.fma` lower to operator modules; the front-end dispatches a name to
+an intrinsic only when the callee genuinely resolves to the `math`/`numpy` function (never by spelling alone).
 
 Reductions and matrix multiply (`max`, `argmax`, `mean`, `@`): rejected today; each will lower to a compare/select tree
 or a multiply chain.
@@ -276,7 +279,15 @@ HIR-to-MIR lowering selects concrete hardware. The float lowerer maps each seman
 hardware operator and collapses semantic negation/absolute-value chains into MIR sign-control sidebands on operands,
 results, or output wires. Multiply-by-power-of-two selects the constant-shift operator when the float format supports
 that exponent; an out-of-range exponent is rejected, since the equivalent constant would overflow or underflow the
-format anyway. Lowering rejects semantic domains that have no selected MIR representation.
+format anyway. The four rounding operators map to one shared `fround` distinguished by its `round_mode` immediate.
+Lowering rejects semantic domains that have no selected MIR representation.
+
+When `ffma` is configured, lowering contracts a single-use `a*b + c` into one fused multiply-add -- a faithful
+contraction that single-rounds instead of double-rounding, in the spirit of the HIR fast-math folding. It fires only
+when the product (and every sign node on its chain) is used nowhere else; a shared product is observed elsewhere as a
+rounded value, so its add keeps the separate multiply-then-add. The product's folded sign distributes onto the
+multiplier operands (negation onto one, absolute onto both).
+The use-count shares one enumerator with the dead-code seeds so the two cannot drift.
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float format explicitly so float-less modules still elaborate with a known scalar width. The CFG is carried
@@ -518,7 +529,9 @@ Explored and rejected for register-pressure-bound kernels:
 - Register-file size cap via pressure-limited scheduling: `nreg` floors at peak liveness, so it trades large latency and
   f_max for a couple percent.
 - Operator replication and FMA fusion: both raise read-operand traffic (more, or wider, read ports), enlarging total mux
-  area despite fewer ops or a shorter makespan.
+  area despite fewer ops or a shorter makespan. This is why the FMA contraction is opt-in (only when `ffma` is
+  configured): it is a numerical feature (single- vs double-rounding), not an area lever, so a pressure-bound kernel
+  should leave `ffma` unconfigured.
 - Operand collectors (copy/move ops off the worst-reach ports): a copy relocates fan-in rather than removing it -- a net
   gain needs a value moved onto a co-reachable but not co-live target, which the interference floor denies, and copies
   on the shared operator also cost cycles.

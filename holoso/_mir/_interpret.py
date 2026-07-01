@@ -126,7 +126,7 @@ class MirInterpreter:
                     _apply_conditioner(conditioner, env[operand])
                     for operand, conditioner in zip(operation.operands, operation.operand_conditioners, strict=True)
                 ]
-                results = operation.operator.evaluate(*operands)
+                results = operation.operator.evaluate(*operands, immediates=operation.immediates)
                 env[op_id] = _apply_conditioner(operation.output_conditioner, results[operation.output_port])
             terminator = block.terminator
             match terminator:

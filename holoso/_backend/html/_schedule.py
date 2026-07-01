@@ -109,7 +109,9 @@ def render_schedule(lir: Lir) -> str:
             for write in op.writes:
                 tip = _esc(
                     f"{_col_label(write.dst)} 🠄 "
-                    + op.inst.operator.render_output(write.port, write.conditioner, *operand_labels)
+                    + op.inst.operator.render_output(
+                        write.port, write.conditioner, *operand_labels, immediates=op.immediates
+                    )
                 )
                 dcol: ColKey = write.dst
                 dord = col_ord[dcol]
@@ -348,7 +350,7 @@ def _col_label(col: ColKey) -> str:
 
 
 def _op_text(op: PooledScheduledOp) -> str:
-    body = op.inst.operator.render(*[_operand_label(o) for o in op.operands])
+    body = op.inst.operator.render(*[_operand_label(o) for o in op.operands], immediates=op.immediates)
     dsts = "/".join(write.conditioner.decorate(_col_label(write.dst)) for write in op.writes)
     return f"{dsts}={body}"
 
@@ -433,7 +435,8 @@ def _operand_label(operand: FloatOperand | BoolOperand) -> str:
 
 
 def _inline_op_text(op: InlineScheduledOp) -> str:
-    body = op.operator.render_output(op.write.port, op.write.conditioner, *[_operand_label(o) for o in op.operands])
+    operands = [_operand_label(o) for o in op.operands]
+    body = op.operator.render_output(op.write.port, op.write.conditioner, *operands, immediates=op.immediates)
     return f"{_col_label(op.write.dst)} 🠄 {body}"
 
 

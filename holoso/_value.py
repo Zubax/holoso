@@ -1,5 +1,7 @@
 """Runtime values and exact arithmetic for Zubax Kulibin float."""
 
+import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Self
@@ -175,6 +177,57 @@ class FloatValue:
         if new_exp > fmt.exp_max_finite:
             return _canonical_inf(fmt, da.sign)
         return _normal(fmt, da.sign, new_exp, da.frac)
+
+    @staticmethod
+    def fma(a: "FloatValue", b: "FloatValue", c: "FloatValue") -> "FloatValue":
+        """
+        Exact fused multiply-add ``a*b + c``, rounded once (ties to even), matching ``zkf_fma``. Specials mirror the
+        core: an infinite product or ``c`` forces infinity, except opposite-sign ``inf + inf``, which cancels to +0.
+        """
+        fmt = _matching_format(a, b)
+        if not isinstance(c, FloatValue):
+            raise TypeError(f"fma addend must be FloatValue, got {type(c).__name__}")
+        if c.fmt != fmt:
+            raise ValueError(f"operand format mismatch: {c.fmt} != {fmt}")
+        da, db, dc = _decode(a), _decode(b), _decode(c)
+        product_zero = da.is_zero or db.is_zero
+        product_inf = (not product_zero) and (da.is_inf or db.is_inf)
+        product_sign = da.sign ^ db.sign
+        if product_inf and dc.is_inf and product_sign != dc.sign:
+            return _zero(fmt)
+        if product_inf or dc.is_inf:
+            return _canonical_inf(fmt, product_sign if product_inf else dc.sign)
+        product = Fraction(0, 1) if product_zero else _finite_fraction(fmt, da) * _finite_fraction(fmt, db)
+        return FloatValue.from_bits(fmt, fmt.pack(product + _finite_fraction(fmt, dc)))
+
+    def round(self) -> "FloatValue":
+        """Round to the nearest integral-valued float, ties to even."""
+        return self._round_to_integral(round)
+
+    def floor(self) -> "FloatValue":
+        return self._round_to_integral(math.floor)
+
+    def ceil(self) -> "FloatValue":
+        return self._round_to_integral(math.ceil)
+
+    def trunc(self) -> "FloatValue":
+        return self._round_to_integral(math.trunc)
+
+    def _round_to_integral(self, to_integer: Callable[[Fraction], int]) -> "FloatValue":
+        """
+        Apply ``to_integer`` to the exact value. Infinity passes through; zero and any zero-magnitude result
+        canonicalize to +0 (so ``(-0.3).ceil()`` is +0); an overflowing integer becomes signed inf.
+        """
+        fmt = self.fmt
+        da = _decode(self)
+        if da.is_inf:
+            return _canonical_inf(fmt, da.sign)
+        if da.is_zero:
+            return _zero(fmt)
+        integer = to_integer(_finite_fraction(fmt, da))
+        if integer == 0:
+            return _zero(fmt)
+        return FloatValue.from_bits(fmt, fmt.pack(Fraction(integer)))
 
 
 @dataclass(frozen=True, slots=True)
