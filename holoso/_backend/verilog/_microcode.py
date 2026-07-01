@@ -106,6 +106,10 @@ def f_osgn(base: str, letter: str) -> str:
     return f"uc_{base}_{letter}sgn"
 
 
+def f_imm(base: str, name: str) -> str:
+    return f"uc_{base}_imm_{name}"
+
+
 def f_ysgn(base: str, port: int) -> str:
     return f"uc_{base}_y{port}sgn"
 
@@ -186,7 +190,8 @@ def const_install_bool_regs(lir: Lir) -> list[int]:
 
 def _op_expr(op: PooledScheduledOp) -> str:
     dsts = "/".join(write.conditioner.decorate(write.dst.stable_label) for write in op.writes)
-    return f"{dsts}={op.inst.operator.render(*[operand.stable_label for operand in op.operands])}"
+    operands = [operand.stable_label for operand in op.operands]
+    return f"{dsts}={op.inst.operator.render(*operands, immediates=op.immediates)}"
 
 
 def const_installs_by_step(lir: Lir) -> dict[int, list[str]]:
@@ -293,6 +298,8 @@ def build_microcode(
     for inst in lir.instances:
         base = base_name(inst)
         add(f_issue(base), 1, is_strobe=True)
+        for imm in inst.operator.immediate_ports:
+            add(f_imm(base, imm.name), imm.width)
         for pos in range(inst.operator.arity):
             add(f_osgn(base, PORT_LETTERS[pos]), 2)
             port = read_port[(inst, pos)]
@@ -330,6 +337,8 @@ def build_microcode(
         ci = op.issue_cycle
         assert 0 <= ci < depth, f"microcode read/issue step out of range: ci={ci}, depth={depth}"
         put(f_issue(base), ci, 1)
+        for value, imm in zip(op.immediates, op.operator.immediate_ports, strict=True):
+            put(f_imm(base, imm.name), ci, value)  # per-firing immediate rides the issue step, like the sign controls
         for pos, operand in enumerate(op.operands):
             port = read_port[(op.inst, pos)]
             assert isinstance(operand, FloatOperand), "pooled operators read only wide operands today (no read lane)"

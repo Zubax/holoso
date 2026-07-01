@@ -225,6 +225,21 @@ def div_oracle_bits(a_bits: int, b_bits: int) -> int | None:
     return _flush_to_zkf(yb)
 
 
+_ZKF_F32 = holoso.FloatFormat(8, 24)
+
+
+def fma_oracle_bits(a_bits: int, b_bits: int, c_bits: int) -> int:
+    """
+    Reference fused multiply-add a*b + c (single rounding) for ZKF-legal float32 inputs, via the exact
+    ``FloatValue.fma``. The vendored zkf_fma RTL is the independent hardware anchor; this bench proves the two agree
+    bit-for-bit. No None case: ZKF has no NaN, so fma of legal inputs is always a legal value.
+    """
+    a = holoso.FloatValue.from_bits(_ZKF_F32, a_bits)
+    b = holoso.FloatValue.from_bits(_ZKF_F32, b_bits)
+    c = holoso.FloatValue.from_bits(_ZKF_F32, c_bits)
+    return holoso.FloatValue.fma(a, b, c).bits
+
+
 def sort_oracle_bits(a_bits: int, b_bits: int) -> tuple[int, int]:
     """Return (min_bits, max_bits) for the float32 min/max of two ZKF-legal inputs."""
     a = bits_to_f32(a_bits)
@@ -246,6 +261,35 @@ def mul_ilog2_oracle_bits(a_bits: int, k: int) -> int | None:
     a = bits_to_f32(a_bits)
     y = np.float32(np.ldexp(float(a), k))
     yb = f32_to_bits(y)
+    if is_nan_f32(yb):
+        return None
+    return _flush_to_zkf(yb)
+
+
+# Round-mode opcodes -- must match zkf_round's round_mode encoding and FRoundOperator's immediate values.
+ROUND_NEAREST_EVEN = 0
+ROUND_FLOOR = 1
+ROUND_CEIL = 2
+ROUND_TRUNC = 3
+ROUND_MODES: tuple[int, ...] = (ROUND_NEAREST_EVEN, ROUND_FLOOR, ROUND_CEIL, ROUND_TRUNC)
+
+
+def round_oracle_bits(a_bits: int, mode: int) -> int | None:
+    """
+    Round a ZKF-legal float32 to an integral float per the zkf_round mode, using numpy as an INDEPENDENT reference
+    (rint is round-half-to-even). Integral float32 results are exact; ``_flush_to_zkf`` canonicalizes a -0 result
+    (e.g. ceil(-0.3)) to +0. Returns None on NaN (an inf input rounds to itself, never NaN, so None never occurs here).
+    """
+    a = bits_to_f32(a_bits)
+    if mode == ROUND_NEAREST_EVEN:
+        y = np.rint(a)
+    elif mode == ROUND_FLOOR:
+        y = np.floor(a)
+    elif mode == ROUND_CEIL:
+        y = np.ceil(a)
+    else:
+        y = np.trunc(a)
+    yb = f32_to_bits(np.float32(y))
     if is_nan_f32(yb):
         return None
     return _flush_to_zkf(yb)

@@ -1859,6 +1859,7 @@ def test_build_rejects_mir_with_mixed_float_formats() -> None:
                 [FloatSignControl(), FloatSignControl()],
                 0,
                 FloatSignControl(),
+                (),
             ),
         },
         blocks=[MirBlock(0, (), (1,), MirRet())],
@@ -1889,9 +1890,9 @@ def test_mir_operation_validates_invariants() -> None:
     with pytest.raises(TypeError, match="scalar_type"):
         MirFloatConst(OtherScalarType(), 1.0)
     with pytest.raises(ValueError, match="operand"):
-        MirOperation(FAddOperator(FMT), [0], [FloatSignControl(), FloatSignControl()], 0, FloatSignControl())
+        MirOperation(FAddOperator(FMT), [0], [FloatSignControl(), FloatSignControl()], 0, FloatSignControl(), ())
     with pytest.raises(ValueError, match="conditioner"):
-        MirOperation(FAddOperator(FMT), [0, 0], [FloatSignControl()], 0, FloatSignControl())
+        MirOperation(FAddOperator(FMT), [0, 0], [FloatSignControl()], 0, FloatSignControl(), ())
     # A boolean output port carries an inversion, never a sign control: booleans have no sign.
     with pytest.raises(TypeError, match="output conditioner"):
         MirOperation(
@@ -1900,12 +1901,13 @@ def test_mir_operation_validates_invariants() -> None:
             [FloatSignControl(), FloatSignControl()],
             2,
             FloatSignControl(negate=True),
+            (),
         )
     # A boolean operand carries an inversion too; a sign control on it is a type error.
     with pytest.raises(TypeError, match="operand conditioner"):
-        MirOperation(BoolAndOperator(), [0, 0], [FloatSignControl(), BoolInversion()], 0, BoolInversion())
+        MirOperation(BoolAndOperator(), [0, 0], [FloatSignControl(), BoolInversion()], 0, BoolInversion(), ())
     with pytest.raises(ValueError, match="does not exist"):
-        MirOperation(FAddOperator(FMT), [0, 0], [FloatSignControl(), FloatSignControl()], 1, FloatSignControl())
+        MirOperation(FAddOperator(FMT), [0, 0], [FloatSignControl(), FloatSignControl()], 1, FloatSignControl(), ())
     with pytest.raises(TypeError, match="sign"):
         MirFloatOutput("out_0", 0, object())
 
@@ -1966,14 +1968,15 @@ def _read_mux_fan_in(lir) -> int:  # type: ignore[no-untyped-def]
 def test_marked_commutative_operators_are_bit_exact_commutative() -> None:
     # The port-assignment pass swaps a commutative operator's operands, which is only sound if the operator is
     # exactly symmetric. Guard the FAddOperator/FMulOperator markings against a future non-commutative slip-up.
+    import operator
     import random
 
-    from holoso._value import FloatValue, add_float_values, mul_float_values
+    from holoso._value import FloatValue
 
     rng = random.Random(0)
     assert FAddOperator(FMT).is_commutative and FMulOperator(FMT).is_commutative
     assert not FDivOperator(FMT).is_commutative
-    for evaluate in (add_float_values, mul_float_values):
+    for evaluate in (operator.add, operator.mul):
         for _ in range(5000):
             a = FloatValue.from_float(FMT, rng.uniform(-2.0, 2.0) * 2.0 ** rng.randint(-22, 22))
             b = FloatValue.from_float(FMT, rng.uniform(-2.0, 2.0) * 2.0 ** rng.randint(-22, 22))
@@ -2175,7 +2178,7 @@ def test_progress_cap_accommodates_long_initiation_intervals() -> None:
     nodes = {0: MirFloatInput("a", FloatType(FMT)), 1: MirFloatInput("b", FloatType(FMT))}
     count = 40
     for i in range(count):
-        nodes[2 + i] = MirOperation(slow, [0, 1], [FloatSignControl(), FloatSignControl()], 0, FloatSignControl())
+        nodes[2 + i] = MirOperation(slow, [0, 1], [FloatSignControl(), FloatSignControl()], 0, FloatSignControl(), ())
     sched = schedule_ops(nodes, {type(slow): 1}, set(range(2, 2 + count)), _FETCH_LAG)
     issues = sorted(sched.issue_cycle.values())
     assert len(issues) == count

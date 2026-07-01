@@ -41,8 +41,11 @@ from ._operators import (
     FMulILog2OperatorFamily as FMulILog2OperatorFamily,
     FMulOperator as FMulOperator,
     FCmpOperator as FCmpOperator,
+    FFmaOperator as FFmaOperator,
+    FRoundOperator as FRoundOperator,
+    FSortOperator as FSortOperator,
     OpConfig as OpConfig,
 )
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 __url__ = "https://holoso.digital"

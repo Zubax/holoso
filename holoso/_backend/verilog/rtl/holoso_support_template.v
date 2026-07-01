@@ -102,6 +102,47 @@ module holoso_fmul#(parameter WEXP = 6, parameter WMAN = 18, parameter STAGE_INP
     );
 endmodule
 
+// Floating point fused multiply-add with sign conditioning:  y = sgnop(sgnop(a)*sgnop(b) + sgnop(c))
+// The product is kept full-width and rounded once together with c (a single rounding, unlike a multiply then add).
+// The inputs are sampled once at in_valid and are not required to remain stable during operation.
+module holoso_ffma#(parameter WEXP = 6, parameter WMAN = 18,
+                    parameter STAGE_INPUT = 0, parameter STAGE_PRODUCT = 0, parameter STAGE_DECODE = 0,
+                    parameter STAGE_ALIGN = 0, parameter STAGE_NORMALIZE = 0, parameter STAGE_PACK = 0,
+                    parameter STAGE_OUTPUT = 0, parameter integer LATENCY = 0) (
+    input  wire clk,
+    input  wire rst,
+    input  wire                 in_valid,
+    input  wire           [1:0] a_sgnop,
+    input  wire           [1:0] b_sgnop,
+    input  wire           [1:0] c_sgnop,
+    input  wire           [1:0] y_sgnop,
+    input  wire [WEXP+WMAN-1:0] a,
+    input  wire [WEXP+WMAN-1:0] b,
+    input  wire [WEXP+WMAN-1:0] c,
+    output wire                 out_valid,
+    output wire [WEXP+WMAN-1:0] y
+);
+    localparam WFULL = WEXP + WMAN;
+    wire [WFULL-1:0] a1;
+    wire [WFULL-1:0] b1;
+    wire [WFULL-1:0] c1;
+    wire [WFULL-1:0] y1;
+    wire       [1:0] y_sgnop_q;
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_c (.x(c), .op(c_sgnop), .y(c1));
+    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
+                                                  .out_valid(), .out(y_sgnop_q));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
+    zkf_fma#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT), .STAGE_PRODUCT(STAGE_PRODUCT),
+             .STAGE_DECODE(STAGE_DECODE), .STAGE_ALIGN(STAGE_ALIGN), .STAGE_NORMALIZE(STAGE_NORMALIZE),
+             .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT), .LATENCY(LATENCY)) u_fma (
+        .clk(clk), .rst(rst),
+        .in_valid(in_valid), .a(a1), .b(b1), .c(c1),
+        .out_valid(out_valid), .y(y1)
+    );
+endmodule
+
 // Constant-power-of-two scaler with sign conditioning:  y = sgnop(sgnop(a) * 2^K)
 // K is a signed integer exponent shift; -2^(WEXP-1) < K < 2^(WEXP-1). The scaling is exact.
 // The inputs are sampled once at in_valid and are not required to remain stable during operation.
@@ -129,6 +170,39 @@ module holoso_fmul_ilog2_const#(parameter WEXP = 6, parameter WMAN = 18, paramet
                          .STAGE_INPUT(STAGE_INPUT), .STAGE_DECODE(STAGE_DECODE), .LATENCY(LATENCY)) u_mul_ilog2_const (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .a(a1),
+        .out_valid(out_valid), .y(y1)
+    );
+endmodule
+
+// Floating point round-to-integer with sign conditioning:  y = sgnop(round(sgnop(a), round_mode))
+// round_mode selects the mode per transaction: 0 nearest-even, 1 floor, 2 ceil, 3 trunc (the zkf_round encoding).
+// The input is sampled once at in_valid and is not required to remain stable during operation.
+module holoso_fround#(parameter WEXP = 6, parameter WMAN = 18,
+                      parameter STAGE_INPUT = 0, parameter STAGE_DECODE = 0,
+                      parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
+                      parameter integer LATENCY = 0) (
+    input  wire clk,
+    input  wire rst,
+    input  wire                 in_valid,
+    input  wire           [1:0] a_sgnop,
+    input  wire           [1:0] round_mode,
+    input  wire           [1:0] y_sgnop,
+    input  wire [WEXP+WMAN-1:0] a,
+    output wire                 out_valid,
+    output wire [WEXP+WMAN-1:0] y
+);
+    localparam WFULL = WEXP + WMAN;
+    wire [WFULL-1:0] a1;
+    wire [WFULL-1:0] y1;
+    wire       [1:0] y_sgnop_q;
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
+    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
+                                                  .out_valid(), .out(y_sgnop_q));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
+    zkf_round#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT), .STAGE_DECODE(STAGE_DECODE),
+               .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT), .LATENCY(LATENCY)) u_round (
+        .clk(clk), .rst(rst),
+        .in_valid(in_valid), .a(a1), .round_mode(round_mode),
         .out_valid(out_valid), .y(y1)
     );
 endmodule
@@ -175,7 +249,8 @@ endmodule
 //      min = sgnop(min(sgnop(a), sgnop(b)))
 //      max = sgnop(max(sgnop(a), sgnop(b)))
 // Useful for e.g. sort-by-absolute-value or producing sign-flipped extrema.
-module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18, parameter integer LATENCY = 0) (
+module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18, parameter integer STAGE_INPUT = 0,
+                     parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
@@ -203,9 +278,11 @@ module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18, parameter integer 
                                                     .in({max_sgnop, min_sgnop}), .out_valid(), .out(out_sgnop_q));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_min (.x(min1), .op(min_sgnop_q), .y(min));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_max (.x(max1), .op(max_sgnop_q), .y(max));
-    zkf_sort#(.WEXP(WEXP), .WMAN(WMAN), .LATENCY(LATENCY)) u_sort (.clk(clk), .rst(rst),
-                                                                   .in_valid(in_valid), .a(a1), .b(b1),
-                                                                   .out_valid(out_valid), .min(min1), .max(max1));
+    zkf_sort#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT), .LATENCY(LATENCY)) u_sort (
+        .clk(clk), .rst(rst),
+        .in_valid(in_valid), .a(a1), .b(b1),
+        .out_valid(out_valid), .min(min1), .max(max1)
+    );
 endmodule
 
 // Floating point comparator with sign conditioning on inputs only:

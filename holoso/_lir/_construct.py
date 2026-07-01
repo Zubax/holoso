@@ -133,6 +133,7 @@ def build_pooled_op(
         writes=writes,
         issue_cycle=sched.issue_cycle[leader],
         latency=node.operator.latency,
+        immediates=node.immediates,
     )
 
 
@@ -194,6 +195,7 @@ def rebase_op(op: PooledScheduledOp, base: int) -> PooledScheduledOp:
         writes=op.writes,
         issue_cycle=op.issue_cycle + base,
         latency=op.latency,
+        immediates=op.immediates,
     )
 
 

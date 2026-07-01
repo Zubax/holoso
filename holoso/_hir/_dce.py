@@ -2,16 +2,7 @@
 
 from ._copy import copy_node, rebuild
 from .._util import ValueId
-from ._ir import Branch, Hir, HirBuilder, Node, Operation, Phi
-
-
-def _seeds(hir: Hir) -> list[ValueId]:
-    """Live roots: every output, every persistent state live-out, and every branch condition."""
-    seeds = [out.value for out in hir.outputs] + [slot.live_out for slot in hir.state_slots]
-    for block in hir.blocks:
-        if isinstance(block.terminator, Branch):
-            seeds.append(block.terminator.cond)
-    return seeds
+from ._ir import Hir, HirBuilder, Node, Operation, Phi
 
 
 def run(hir: Hir) -> Hir:
@@ -20,7 +11,7 @@ def run(hir: Hir) -> Hir:
     signature. Block structure is preserved (a structured CFG has no dead blocks at this stage).
     """
     reachable: set[ValueId] = set()
-    stack = _seeds(hir)
+    stack = hir.external_value_references()
     while stack:
         vid = stack.pop()
         if vid in reachable:

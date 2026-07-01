@@ -50,9 +50,14 @@ class Operator(ABC):
     def arity(self) -> int:
         return self.signature.arity
 
-    @abstractmethod
     def fold_constants(self, operands: list[Const]) -> Const | None:
-        """Return the folded constant node, or ``None`` if this operation should not be constant-folded."""
+        """
+        The folded constant node, or None to leave the operation unfolded (the default; like ``absorbing``/``identity``,
+        a foldable operator opts in by overriding). The HIR folder is format-agnostic (float64), so folding is faithful
+        only where that float64 result is an accepted fast-math approximation of the hardware; a format-critical
+        operator stays unfolded and is evaluated by the hardware operator, where the format is known.
+        """
+        return None
 
     def absorbing(self) -> Const | None:
         """
@@ -157,6 +162,106 @@ class FloatMulPow2(Operator):
 
 
 @dataclass(frozen=True, slots=True)
+class FloatRound(Operator):
+    """Round a float to the nearest integral-valued float, ties to even."""
+
+    mnemonic: ClassVar[str] = "round"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatFloor(Operator):
+    """Round a float toward negative infinity to an integral-valued float."""
+
+    mnemonic: ClassVar[str] = "floor"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatCeil(Operator):
+    """Round a float toward positive infinity to an integral-valued float."""
+
+    mnemonic: ClassVar[str] = "ceil"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatTrunc(Operator):
+    """Round a float toward zero to an integral-valued float."""
+
+    mnemonic: ClassVar[str] = "trunc"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatFma(Operator):
+    """
+    Fused multiply-add ``a*b + c`` from an explicit ``math.fma`` call: always single-rounds.
+    Never constant-folded -- a fold in the format-agnostic HIR could only use float64, which double-rounds relative
+    to the hardware's single round -- exactly the double-rounding FMA exists to avoid.
+    """
+
+    mnemonic: ClassVar[str] = "fma"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(3)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatMin(Operator):
+    """Binary minimum of two floats."""
+
+    mnemonic: ClassVar[str] = "min"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(2)
+
+    def fold_constants(self, operands: list[Const]) -> Const | None:
+        a, b = [_float_const(operand) for operand in operands]
+        if not (math.isfinite(a.value) and math.isfinite(b.value)):
+            return None  # do not let selection silently discard a non-finite operand
+        return a if a.value < b.value else b
+
+
+@dataclass(frozen=True, slots=True)
+class FloatMax(Operator):
+    """Binary maximum of two floats."""
+
+    mnemonic: ClassVar[str] = "max"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(2)
+
+    def fold_constants(self, operands: list[Const]) -> Const | None:
+        a, b = [_float_const(operand) for operand in operands]
+        if not (math.isfinite(a.value) and math.isfinite(b.value)):
+            return None  # do not let selection silently discard a non-finite operand
+        return b if a.value < b.value else a
+
+
+@dataclass(frozen=True, slots=True)
 class FloatRelational(Operator):
     mnemonic: ClassVar[str] = "frelational"
     speculatable: ClassVar[bool] = True
@@ -257,9 +362,6 @@ class Select(Operator):
     def signature(self) -> Signature:
         return Signature((BoolType(), FloatType(), FloatType()), FloatType())
 
-    def fold_constants(self, operands: list[Const]) -> None:
-        return None
-
 
 @dataclass(frozen=True, slots=True)
 class BoolSelect(Operator):
@@ -277,13 +379,14 @@ class BoolSelect(Operator):
     def signature(self) -> Signature:
         return Signature((BoolType(), BoolType(), BoolType()), BoolType())
 
-    def fold_constants(self, operands: list[Const]) -> None:
-        return None
-
 
 @dataclass(frozen=True, slots=True)
 class FloatToBool(Operator):
-    """A scalar cast ``bool(x)``: a float is truthy iff it is nonzero (the ZKF exponent-nonzero test)."""
+    """
+    A scalar cast ``bool(x)``: a float is truthy iff it is nonzero (the ZKF exponent-nonzero test). Never
+    constant-folded: the test is on the constant *encoded into the configured format*, so a magnitude too small to
+    represent (encoding to zero) is False -- which a format-agnostic float64 ``c != 0.0`` would get wrong.
+    """
 
     mnemonic: ClassVar[str] = "float_to_bool"
     speculatable: ClassVar[bool] = True
@@ -291,13 +394,6 @@ class FloatToBool(Operator):
     @property
     def signature(self) -> Signature:
         return Signature((FloatType(),), BoolType())
-
-    def fold_constants(self, operands: list[Const]) -> None:
-        # Deliberately NOT folded at the (format-agnostic) HIR level: ``bool(c)`` is the ZKF exponent-nonzero test on
-        # the constant *encoded into the configured float format*, so a magnitude too small to represent (which encodes
-        # to zero) is False. A raw float64 ``c != 0.0`` here would disagree; the cast is evaluated by the hardware
-        # operator instead, where the format is known.
-        return None
 
 
 @dataclass(frozen=True, slots=True)

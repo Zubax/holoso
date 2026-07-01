@@ -1,5 +1,7 @@
 """Lower optimized HIR to selected MIR."""
 
+from dataclasses import dataclass
+
 from .._errors import UnsupportedConstruct
 from .._hir import (
     BoolAnd,
@@ -14,13 +16,20 @@ from .._hir import (
     Const,
     FloatAbs,
     FloatAdd,
+    FloatCeil,
     FloatConst,
     FloatDiv,
+    FloatFloor,
+    FloatFma,
+    FloatMax,
+    FloatMin,
     FloatMul,
     FloatMulPow2,
     FloatNeg,
     FloatRelational,
+    FloatRound,
     FloatToBool,
+    FloatTrunc,
     FloatType as HirFloatType,
     Hir,
     InPort,
@@ -47,6 +56,7 @@ from .._operators import (
     FloatHardwareOperator,
     FloatSignControl,
     FloatToBoolOperator,
+    FRoundOperator,
     HardwareOperator,
     OpConfig,
     PortConditioner,
@@ -123,12 +133,91 @@ def _collapse_signs(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, 
     return vid, control
 
 
+@dataclass(frozen=True, slots=True)
+class _FmaPlan:
+    """
+    A planned contraction of ``a*b + c`` into one ``ffma``. ``mul`` is the FloatMul whose standalone MIR op is
+    suppressed, ``ma``/``mb`` its operands, ``c`` the addend, ``product_sign`` the sign peeled off the product operand.
+    """
+
+    mul: ValueId
+    ma: ValueId
+    mb: ValueId
+    c: ValueId
+    product_sign: FloatSignControl
+
+
+def _compute_use_counts(hir: Hir) -> dict[ValueId, int]:
+    """Total reference count per value across every use site: operation operands, phi arms, and external references."""
+    counts: dict[ValueId, int] = {vid: 0 for vid in hir.nodes}
+    for node in hir.nodes.values():
+        if isinstance(node, Operation):
+            for operand in node.operands:
+                counts[operand] += 1
+        elif isinstance(node, Phi):
+            for _, value in node.arms:
+                counts[value] += 1
+    for vid in hir.external_value_references():
+        counts[vid] += 1
+    return counts
+
+
+def _exclusive_mul(hir: Hir, use_counts: dict[ValueId, int], vid: ValueId) -> tuple[ValueId, FloatSignControl] | None:
+    """
+    If ``vid`` is a single-use ``a*b`` reached through single-use sign ops, return the FloatMul and its combined sign;
+    else None. Every node on the path must have use-count 1, so the rounded product is observed nowhere else -- only
+    then is contracting to a single rounding faithful. A FloatMulPow2 (``a*2**k``) is not a FloatMul, so never matches.
+    """
+    signs: list[FloatSignControl] = []
+    node = hir.nodes[vid]
+    while isinstance(node, Operation) and (sign := _sign_of(node)) is not None:
+        if use_counts[vid] != 1:
+            return None
+        signs.append(sign)
+        (vid,) = node.operands
+        node = hir.nodes[vid]
+    if not (isinstance(node, Operation) and isinstance(node.operator, FloatMul)) or use_counts[vid] != 1:
+        return None
+    product_sign = FloatSignControl()
+    for sign in reversed(signs):
+        product_sign = product_sign.then(sign)
+    return vid, product_sign
+
+
+def _plan_fma_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, _FmaPlan]:
+    """
+    Map each FloatAdd that will contract into an ``ffma`` to its plan (only when ``ffma`` is configured; else no
+    contraction, and the whole-DAG use-count is skipped). When both addends are exclusive products only the first
+    contracts -- one fma carries one product.
+    """
+    if ops.ffma is None:
+        return {}
+    use_counts = _compute_use_counts(hir)
+    plans: dict[ValueId, _FmaPlan] = {}
+    for vid, node in hir.nodes.items():
+        if not (isinstance(node, Operation) and isinstance(node.operator, FloatAdd)):
+            continue
+        op0, op1 = node.operands
+        for product_operand, addend in ((op0, op1), (op1, op0)):
+            found = _exclusive_mul(hir, use_counts, product_operand)
+            if found is not None:
+                mul_vid, product_sign = found
+                mul_node = hir.nodes[mul_vid]
+                assert isinstance(mul_node, Operation)
+                ma, mb = mul_node.operands
+                plans[vid] = _FmaPlan(mul=mul_vid, ma=ma, mb=mb, c=addend, product_sign=product_sign)
+                break
+    return plans
+
+
 class _LoweringContext:
     def __init__(self, hir: Hir, ops: OpConfig) -> None:
         self.hir = hir
         self.ops = ops
         self.builder = MirBuilder(ops.float_format)
         self.remap: dict[ValueId, ValueId] = {}
+        self.fma_plans = _plan_fma_fusions(hir, ops)
+        self.fused_muls = {plan.mul for plan in self.fma_plans.values()}
         self.float_lowerer = _FloatLowerer(self)
 
     def run(self) -> Mir:
@@ -334,6 +423,15 @@ class _FloatLowerer:
             case Operation() if _sign_of(node) is not None:
                 return True
             case Operation() as operation:
+                if old_id in self.context.fused_muls:
+                    return True  # this product is contracted into an adjacent fma; it has no standalone MIR op
+                plan = self.context.fma_plans.get(old_id)
+                if plan is not None:
+                    assert isinstance(operation.operator, FloatAdd)
+                    self.context.remap[old_id] = self._emit_ffma(
+                        operation.operator, plan.ma, plan.mb, plan.c, plan.product_sign
+                    )
+                    return True
                 lowered = self._lower_operation(operation)
                 if lowered is None:
                     return False
@@ -355,6 +453,14 @@ class _FloatLowerer:
                 return self._lower_binary_float(semantic, self.context.ops.fdiv, a, b)
             case Operation(operator=FloatMulPow2(k=k) as semantic, operands=(a,)):
                 return self._lower_float_mul_pow2(semantic, a, k)
+            case Operation(
+                operator=(FloatRound() | FloatFloor() | FloatCeil() | FloatTrunc()) as semantic, operands=(a,)
+            ):
+                return self._lower_round(semantic, a)
+            case Operation(operator=(FloatMin() | FloatMax()) as semantic, operands=(a, b)):
+                return self._lower_minmax(semantic, a, b)
+            case Operation(operator=FloatFma() as semantic, operands=(a, b, c)):
+                return self._emit_ffma(semantic, a, b, c, FloatSignControl())
             case Operation(operator=BoolToFloat() as semantic, operands=(a,)):
                 # ``float(cond)`` crosses from the boolean bank into the wide bank; a NOT chain folds into the
                 # operand conditioner.
@@ -387,6 +493,70 @@ class _FloatLowerer:
             _select_hardware(semantic, hardware),
             [self.context.remap[base_a], self.context.remap[base_b]],
             [sign_a, sign_b],
+        )
+
+    def _emit_ffma(
+        self, semantic: Operator, a: ValueId, b: ValueId, c: ValueId, product_sign: FloatSignControl
+    ) -> ValueId:
+        """
+        y = product_sign(a*b) + c as one ffma (explicit math.fma passes an identity product_sign).
+        The product sign distributes onto the multiplier operands -- negation onto a only (-(a*b) = (-a)*b),
+        absolute onto both (|a*b| = |a||b|) -- composed with each operand's own folded chain; c keeps its own.
+        The raise fires only for explicit math.fma, since a contraction plan exists only when ffma is configured.
+        """
+        operator = self.context.ops.ffma
+        if operator is None:
+            raise UnsupportedConstruct(
+                "the kernel uses math.fma but no 'ffma' operator is configured; add it to OpConfig"
+            )
+        base_a, sign_a = _collapse_signs(self.context.hir.nodes, a)
+        base_b, sign_b = _collapse_signs(self.context.hir.nodes, b)
+        base_c, sign_c = _collapse_signs(self.context.hir.nodes, c)
+        cond_a = sign_a.then(product_sign)
+        cond_b = sign_b.then(FloatSignControl(absolute=product_sign.absolute))
+        return self.context.builder.operation(
+            _select_hardware(semantic, operator),
+            [self.context.remap[base_a], self.context.remap[base_b], self.context.remap[base_c]],
+            [cond_a, cond_b, sign_c],
+        )
+
+    def _lower_round(self, semantic: FloatRound | FloatFloor | FloatCeil | FloatTrunc, a: ValueId) -> ValueId:
+        # The input sign chain folds onto the operand sign conditioner, applied before the round: ``floor(-x)`` is the
+        # rounder fed ``-x`` (correct -- floor of the conditioned input), not a negation of ``floor(x)``.
+        operator = self.context.ops.fround
+        if operator is None:
+            raise UnsupportedConstruct(
+                f"the kernel uses {semantic.mnemonic!r} but no 'fround' operator is configured; add it to OpConfig"
+            )
+        base, sign = _collapse_signs(self.context.hir.nodes, a)
+        mode = {
+            FloatRound: FRoundOperator.Mode.ROUND,
+            FloatFloor: FRoundOperator.Mode.FLOOR,
+            FloatCeil: FRoundOperator.Mode.CEIL,
+            FloatTrunc: FRoundOperator.Mode.TRUNC,
+        }[type(semantic)]
+        return self.context.builder.operation(
+            _select_hardware(semantic, operator),
+            [self.context.remap[base]],
+            [sign],
+            immediates=(int(mode),),
+        )
+
+    def _lower_minmax(self, semantic: FloatMin | FloatMax, a: ValueId, b: ValueId) -> ValueId:
+        # Each input sign chain folds onto its operand conditioner, applied before the sort: min(-a, b) is the sorter
+        # fed (-a, b). min taps the low output port, max the high one; a min and a max over one pair fuse at LIR build.
+        operator = self.context.ops.fsort
+        if operator is None:
+            raise UnsupportedConstruct(
+                f"the kernel uses {semantic.mnemonic!r} but no 'fsort' operator is configured; add it to OpConfig"
+            )
+        base_a, sign_a = _collapse_signs(self.context.hir.nodes, a)
+        base_b, sign_b = _collapse_signs(self.context.hir.nodes, b)
+        return self.context.builder.operation(
+            _select_hardware(semantic, operator),
+            [self.context.remap[base_a], self.context.remap[base_b]],
+            [sign_a, sign_b],
+            output_port=0 if isinstance(semantic, FloatMin) else 1,
         )
 
     def _lower_float_mul_pow2(self, semantic: Operator, a: ValueId, k: int) -> ValueId:

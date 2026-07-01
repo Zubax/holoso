@@ -58,11 +58,20 @@ class MirOperation:
     operand_conditioners: list[PortConditioner]
     output_port: int
     output_conditioner: PortConditioner
+    immediates: tuple[int, ...]  # per-firing immediate values, aligned with operator.immediate_ports
 
     def __post_init__(self) -> None:
         signature = self.operator.signature
         if isinstance(self.operator, InlineHardwareOperator) and len(signature.result_types) != 1:
             raise TypeError(f"inline operator {self.operator.mnemonic} must have exactly one result port")
+        ports = self.operator.immediate_ports
+        if len(self.immediates) != len(ports):
+            raise ValueError(f"{self.operator.mnemonic} expects {len(ports)} immediate(s), got {len(self.immediates)}")
+        for value, port in zip(self.immediates, ports, strict=True):
+            if not 0 <= value < (1 << port.width):
+                raise ValueError(
+                    f"{self.operator.mnemonic} immediate {port.name}={value} does not fit {port.width} bits"
+                )
         if len(self.operands) != signature.arity:
             raise ValueError(f"{self.operator.mnemonic} expects {signature.arity} operand(s), got {len(self.operands)}")
         if len(self.operand_conditioners) != signature.arity:
@@ -553,13 +562,15 @@ class MirBuilder:
         operand_conditioners: list[PortConditioner],
         output_port: int = 0,
         output_conditioner: PortConditioner | None = None,
+        immediates: tuple[int, ...] = (),
     ) -> ValueId:
         """
         Append a hardware-operator use producing the ``output_port``-th result, interned within the current block.
         The value's resource family follows the tapped port's type; operands are type-checked against the operator
         signature and may reference either resource family. ``output_conditioner`` defaults to the tapped port's
-        identity conditioner. The intern key includes the tapped port and both conditioner sides, so two relations
-        over one comparator firing stay distinct values while identical taps collapse.
+        identity conditioner. ``immediates`` carries the per-firing immediate values (e.g. a rounding mode). The intern
+        key includes the tapped port, both conditioner sides, and the immediates, so two relations over one comparator
+        firing -- or two rounding modes over one operand -- stay distinct values while identical taps collapse.
         """
         signature = operator.signature
         if len(operands) != signature.arity:
@@ -583,6 +594,7 @@ class MirBuilder:
             tuple(operand_conditioners),
             output_port,
             output_conditioner,
+            immediates,
         )
         vid = self._block_intern.get(key)
         if vid is None:
@@ -593,6 +605,7 @@ class MirBuilder:
                     operand_conditioners=list(operand_conditioners),
                     output_port=output_port,
                     output_conditioner=output_conditioner,
+                    immediates=immediates,
                 )
             )
             self._block_intern[key] = vid

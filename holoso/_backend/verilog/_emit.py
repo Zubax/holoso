@@ -328,6 +328,8 @@ def _emit_operators(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorInstan
         w(f"{operator.module_name} #(", f"    {params}", f") u_{base} (")
         w.push()
         w(f".clk(clk), .rst(rst), .in_valid({f_issue(base)}),")
+        for imm in operator.immediate_ports:
+            w(f".{imm.name}({f_imm(base, imm.name)}),")
         for letter in letters:
             w(f".{letter}_sgnop({f_osgn(base, letter)}),")
         # A float output port carries a hardware sign conditioner (piped inside the wrapper); an untapped one is tied

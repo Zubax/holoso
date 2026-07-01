@@ -15,6 +15,8 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
+from holoso import FloatFormat, FSortOperator
+
 from .hdl_float_oracle import (
     DIRECTED_F32,
     PipelineScoreboard,
@@ -118,15 +120,17 @@ async def holoso_fsort_cocotb(dut) -> None:
         assert int(dut.out_valid.value) == 0
 
 
+@pytest.mark.parametrize("stage_input", (0, 1, 2), ids=lambda s: f"i{s}")
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_holoso_fsort(sim: str) -> None:
+def test_holoso_fsort(sim: str, stage_input: int) -> None:
+    latency = FSortOperator(FloatFormat(8, 24), stage_input=stage_input).latency
     runner = get_runner(sim)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / "fsort"
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fsort_i{stage_input}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_fsort",
-        parameters={"WEXP": 8, "WMAN": 24, "LATENCY": 1},
+        parameters={"WEXP": 8, "WMAN": 24, "STAGE_INPUT": stage_input, "LATENCY": latency},
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
@@ -137,6 +141,6 @@ def test_holoso_fsort(sim: str) -> None:
         test_module="tests.hdl.test_fsort",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": "1"},
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(latency)},
         results_xml=str(build_dir / "results.xml"),
     )

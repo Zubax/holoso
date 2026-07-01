@@ -417,6 +417,7 @@ class PooledScheduledOp:
     writes: list[PortWrite]
     issue_cycle: int
     latency: int
+    immediates: tuple[int, ...]  # per-firing immediate values, aligned with the operator's immediate_ports
 
     @property
     def operator(self) -> PooledHardwareOperator:
@@ -450,6 +451,10 @@ class InlineScheduledOp:
     @property
     def writes(self) -> list[PortWrite]:
         return [self.write]
+
+    @property
+    def immediates(self) -> tuple[int, ...]:
+        return ()  # an inline operator is a pure combinational expression; it declares no immediate ports
 
     @property
     def commit_cycle(self) -> int:

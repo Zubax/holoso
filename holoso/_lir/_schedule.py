@@ -23,9 +23,10 @@ from .._mir import MirNode, MirOperation
 from .._operators import HardwareOperator, PooledHardwareOperator, PortConditioner
 from ._ir import OperatorInstance, dependency_edge, landing_cycle, operand_read_cycle, read_cycle
 
-# A pooled firing's fusion identity: the operator, its operand values, and their conditioners -- everything the
-# module activation consumes. Output ports and output conditioners are deliberately excluded (members differ there).
-type _FiringKey = tuple[PooledHardwareOperator, tuple[ValueId, ...], tuple[PortConditioner, ...]]
+# A pooled firing's fusion identity: the operator, operand values, their conditioners, and per-firing immediates --
+# everything the module activation consumes. Output ports/conditioners are excluded (members differ there); so two
+# firings with different immediates (e.g. two rounding modes) never fuse.
+type _FiringKey = tuple[PooledHardwareOperator, tuple[ValueId, ...], tuple[PortConditioner, ...], tuple[int, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +108,7 @@ def fuse_block_firings(nodes: dict[ValueId, MirNode], schedulable: set[ValueId])
         if not isinstance(node.operator, PooledHardwareOperator):
             firings[vid] = [vid]
             continue
-        key: _FiringKey = (node.operator, tuple(node.operands), tuple(node.operand_conditioners))
+        key: _FiringKey = (node.operator, tuple(node.operands), tuple(node.operand_conditioners), node.immediates)
         by_key.setdefault(key, []).append(vid)
     for members in by_key.values():
         open_groups: list[tuple[set[int], list[ValueId]]] = []  # (ports taken, members) per firing being assembled

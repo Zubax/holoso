@@ -301,7 +301,9 @@ class NumericalSimulator(_Kernel):
         for dst, value in self._pending.pop(pc, ()):
             self._write(dst, value)
         for event in self._op_events.get(pc, ()):
-            results = event.op.operator.evaluate(*[self._read(operand) for operand in event.op.operands])
+            results = event.op.operator.evaluate(
+                *[self._read(operand) for operand in event.op.operands], immediates=event.op.immediates
+            )
             # every result of this firing lands at the one bank-independent cycle
             landing = landing_cycle(event.commit_pc, self._lir.fetch_lag)
             for write in event.op.writes:
