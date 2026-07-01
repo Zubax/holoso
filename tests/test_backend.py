@@ -243,10 +243,9 @@ def test_kernel_without_outputs_is_rejected() -> None:
 
 
 @requires_iverilog
-def test_state_port_name_does_not_collide_with_internal_sign_wire(tmp_path: Path) -> None:
+def test_state_slot_folded_sign_coexists_with_sibling_port(tmp_path: Path) -> None:
     # A public attribute `y_d` becomes the port state_y_d; a sibling slot `y` whose boundary copy carries a folded sign
-    # used to emit an internal wire also named state_y_d, producing a duplicate (multiply-driven) identifier. The
-    # internal sign wire must live outside the state_<attr> port namespace, so the module elaborates cleanly.
+    # is emitted as an inline holoso_fsgnop() call in the state install. Both must elaborate cleanly together.
     class Collide:
         def __init__(self) -> None:
             self.y = 0.0
@@ -255,7 +254,7 @@ def test_state_port_name_does_not_collide_with_internal_sign_wire(tmp_path: Path
 
         def __call__(self, x):  # type: ignore[no-untyped-def]
             self.y_d = self._p
-            self.y = -self._p  # sign-flipped boundary copy -> internal sign-conditioning wire for slot y
+            self.y = -self._p  # sign-flipped state boundary copy -> inline holoso_fsgnop() in the state install
             self._p = x
             return self.y
 

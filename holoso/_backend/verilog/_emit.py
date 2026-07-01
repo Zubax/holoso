@@ -86,23 +86,14 @@ def _source_net(source: RegRef | FloatConstRef) -> str:
     return f"const_{source.index}" if isinstance(source, FloatConstRef) else f"regs[{source.index}]"
 
 
-def _fsgnop(w: _Writer, raw: str, sign: FloatSignControl, dst: str, inst: str) -> None:
-    w(f"holoso_fsgnop #(.WFULL(W)) {inst} (.x({raw}), .op(2'd{sign.encoded}), .y({dst}));")
-
-
-def _state_sign_wire(slot: FloatStateSlot) -> str | None:
-    """
-    The sign-conditioning wire name for a slot's writeback copy, or None when the copied tap needs no sign op. The stem
-    is deliberately not ``state_*``: a public attribute is exposed as a ``state_<attr>`` port, so a ``state_<name>_d``
-    net would collide with the port of an attribute literally named ``<name>_d``.
-    """
-    if slot.needs_copy and slot.tap.sign != FloatSignControl():
-        return f"statesgn_{slot.name}"
-    return None
+def _signed_source_net(source: RegRef | FloatConstRef, sign: FloatSignControl) -> str:
+    """A source net with its folded sign applied inline via ``holoso_fsgnop``, or bare when the sign is identity."""
+    raw = _source_net(source)
+    return raw if sign == FloatSignControl() else f"holoso_fsgnop({raw}, 2'd{sign.encoded})"
 
 
 def _state_copy_rhs(slot: FloatStateSlot) -> str:
-    return _state_sign_wire(slot) or _source_net(slot.tap.source)
+    return _signed_source_net(slot.tap.source, slot.tap.sign)
 
 
 def _inline_fire_pc(lir: Lir, block_index: int, op: InlineScheduledOp) -> int:
@@ -113,23 +104,16 @@ def _inline_fire_pc(lir: Lir, block_index: int, op: InlineScheduledOp) -> int:
     return lir.block_base[block_index] + inline_fire_cycle(op.commit_cycle, lir.fetch_lag)
 
 
-def _inline_sign_wire(block_index: int, op_index: int, pos: int) -> str:
-    return f"inlsgn_{block_index}_{op_index}_{pos}"
-
-
-def _inline_rhs(block_index: int, op_index: int, op: InlineScheduledOp) -> str:
+def _inline_rhs(op: InlineScheduledOp) -> str:
     """
-    The RHS of one inline firing: the operator's own combinational expression over its operand nets (a float operand
-    routes through its sign-conditioning wire when its folded sign is non-identity), with the result conditioner
-    applied -- an inversion folds into the expression; sign-conditioned wide inline results have no producer yet.
+    The RHS of one inline firing: the operator's own combinational expression over its operand nets (a float operand's
+    folded sign applies inline via ``holoso_fsgnop``), with the result conditioner applied -- an inversion folds into
+    the expression; sign-conditioned wide inline results have no producer yet.
     """
     nets: list[str] = []
-    for pos, operand in enumerate(op.operands):
+    for operand in op.operands:
         if isinstance(operand, FloatOperand):
-            if operand.sign != FloatSignControl():
-                nets.append(_inline_sign_wire(block_index, op_index, pos))
-            else:
-                nets.append(_source_net(operand.source))
+            nets.append(_signed_source_net(operand.source, operand.sign))
         else:
             nets.append(_bool_operand_rhs(operand))
     expr = op.operator.verilog_expr(*nets)
@@ -176,9 +160,6 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_field_wires(w, fields)
     _emit_operators(w, lir, write_lists)
     _emit_datapath_comb(w, lir, port_consts, write_lists)
-    _emit_state_next(w, lir)
-    _emit_copy_sign_wires(w, lir)
-    _emit_inline_sign_wires(w, lir)
     _emit_read_muxes(w, lir, read_port, port_consts, read_sets)
     _emit_clocked(w, lir, write_sets, write_lists)
     _emit_outputs(w, lir)
@@ -529,14 +510,8 @@ def _bool_write_pc(lir: Lir, block: LirBlock, write: BoolWrite) -> int:
     return lir.block_base[block.index] + write.fire_step(lir.fetch_lag)
 
 
-def _copy_sign_wire(block_index: int, copy_index: int) -> str:
-    return f"copysgn_{block_index}_{copy_index}"
-
-
-def _float_copy_rhs(block_index: int, copy_index: int, copy: FloatCopy) -> str:
-    if copy.source.sign == FloatSignControl():
-        return _source_net(copy.source.source)
-    return _copy_sign_wire(block_index, copy_index)
+def _float_copy_rhs(copy: FloatCopy) -> str:
+    return _signed_source_net(copy.source.source, copy.source.sign)
 
 
 def _bool_operand_rhs(operand: BoolOperand) -> str:
@@ -559,12 +534,10 @@ def _copies_grouped(lir: Lir) -> dict[int, list[tuple[int, str]]]:
     """
     grouped: dict[int, list[tuple[int, str]]] = {}
     for block in lir.blocks:
-        for copy_index, copy in enumerate(block.copies):
+        for copy in block.copies:
             if is_ucode_const_copy(copy):
                 continue
-            grouped.setdefault(copy.dst.index, []).append(
-                (_float_copy_pc(lir, block, copy), _float_copy_rhs(block.index, copy_index, copy))
-            )
+            grouped.setdefault(copy.dst.index, []).append((_float_copy_pc(lir, block, copy), _float_copy_rhs(copy)))
     return grouped
 
 
@@ -580,46 +553,6 @@ def _bool_writes_grouped(lir: Lir) -> dict[int, list[tuple[int, str]]]:
                 continue
             grouped.setdefault(write.dst.index, []).append((_bool_write_pc(lir, block, write), _bool_write_rhs(write)))
     return grouped
-
-
-def _emit_copy_sign_wires(w: _Writer, lir: Lir) -> None:
-    emitted = False
-    for block in lir.blocks:
-        for copy_index, copy in enumerate(block.copies):
-            if copy.source.sign != FloatSignControl():
-                wire = _copy_sign_wire(block.index, copy_index)
-                w(f"wire [W-1:0] {wire};")
-                _fsgnop(w, _source_net(copy.source.source), copy.source.sign, wire, f"u_{wire}")
-                emitted = True
-    if emitted:
-        w("")
-
-
-def _emit_inline_sign_wires(w: _Writer, lir: Lir) -> None:
-    emitted = False
-    for block in lir.blocks:
-        for op_index, op in enumerate(block.inline_ops):
-            for pos, operand in enumerate(op.operands):
-                if isinstance(operand, FloatOperand) and operand.sign != FloatSignControl():
-                    wire = _inline_sign_wire(block.index, op_index, pos)
-                    w(f"wire [W-1:0] {wire};")
-                    _fsgnop(w, _source_net(operand.source), operand.sign, wire, f"u_{wire}")
-                    emitted = True
-    if emitted:
-        w("")
-
-
-def _emit_state_next(w: _Writer, lir: Lir) -> None:
-    emitted = False
-    for slot in lir.float_state_slots:
-        wire = _state_sign_wire(slot)
-        if wire is None:
-            continue
-        w(f"wire [W-1:0] {wire};")
-        _fsgnop(w, _source_net(slot.tap.source), slot.tap.sign, wire, f"u_statesgn_{slot.name}")
-        emitted = True
-    if emitted:
-        w("")
 
 
 def _read_mux_stmts(w: _Writer, target: str, port: int, read_set: list[int], port_consts: dict[int, list[int]]) -> None:
@@ -701,12 +634,12 @@ def _wide_writer_entries(
             (f_cwen(RegRef(reg)), _const_pool_mux(f_ccidx(RegRef(reg)), const_books[reg]), "")
         )
     for block in lir.blocks:
-        for op_index, inline_op in enumerate(block.inline_ops):
+        for inline_op in block.inline_ops:
             if isinstance(inline_op.write.dst, RegRef):
                 entries.setdefault(inline_op.write.dst.index, []).append(
                     (
                         f"pc == {_inline_fire_pc(lir, block.index, inline_op)}",
-                        _inline_rhs(block.index, op_index, inline_op),
+                        _inline_rhs(inline_op),
                         "inline fire",
                     )
                 )
@@ -737,12 +670,12 @@ def _bool_writer_entries(
     for reg in const_install_bool_regs(lir):
         entries.setdefault(reg, []).append((f_cwen(BoolRegRef(reg)), f_cval(BoolRegRef(reg)), ""))
     for block in lir.blocks:
-        for op_index, inline_op in enumerate(block.inline_ops):
+        for inline_op in block.inline_ops:
             if isinstance(inline_op.write.dst, BoolRegRef):
                 entries.setdefault(inline_op.write.dst.index, []).append(
                     (
                         f"pc == {_inline_fire_pc(lir, block.index, inline_op)}",
-                        _inline_rhs(block.index, op_index, inline_op),
+                        _inline_rhs(inline_op),
                         "inline fire",
                     )
                 )
@@ -900,16 +833,10 @@ assign in_ready  = (pc == 0);
 assign out_valid = (pc == LASTPC);  // result valid on PRESENT; execution lags the fetch by FETCH_LAG
 assign err_pc    = err_pc_q;
 """)
-    float_index = 0
     for wire in lir.outputs:
         match wire:
             case BoolOutputWire():
                 w(f"assign {wire.name} = {_bool_operand_rhs(wire.tap)};")
             case FloatOutputWire():
-                raw = _source_net(wire.tap.source)
-                if wire.tap.sign == FloatSignControl():
-                    w(f"assign {wire.name} = {raw};")
-                else:
-                    _fsgnop(w, raw, wire.tap.sign, wire.name, f"u_outsgn_{float_index}")
-                float_index += 1
+                w(f"assign {wire.name} = {_signed_source_net(wire.tap.source, wire.tap.sign)};")
     w("")

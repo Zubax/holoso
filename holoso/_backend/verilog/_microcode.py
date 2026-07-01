@@ -154,9 +154,9 @@ def f_cval(breg: BoolRegRef) -> str:
 def is_ucode_const_copy(copy: FloatCopy) -> bool:
     """
     Whether a wide phi-arm copy is a constant install the microcode can drive directly: a constant source with the
-    identity sign, so its write data is a bare ``const_N`` net needing no register read port and no sign-conditioning
-    wire. A register-source copy (needs a read port) or a signed constant install (``-CONST``, needs a sign wire in the
-    write-data mux) stays pc-gated -- the deferred harder cases.
+    identity sign, so its write data is a bare ``const_N`` net needing no register read port and no sign conditioning.
+    A register-source copy (needs a read port) or a signed constant install (``-CONST``, whose write data is an inline
+    ``holoso_fsgnop`` expression rather than a bare net) stays pc-gated -- the deferred harder cases.
     """
     return copy.is_const and copy.source.sign == FloatSignControl()
 

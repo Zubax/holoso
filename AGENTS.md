@@ -1,7 +1,7 @@
 # Holoso -- simple high-level synthesis of Python into Verilog for numerical code
 
 Holoso converts a small subset of Python functions and expressions into synthesizable and verifiable Verilog.
-Read the `README.md`.
+Read the `README.md` and `DESIGN.md`.
 
 Whenever introducing nontrivial changes, update `DESIGN.md` as well to keep it fully up-to-date and non-conflicting
 with the implementation. However, do not attempt to capture minor implementation minutiae there, keep it high-level.
