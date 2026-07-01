@@ -234,21 +234,22 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
 
 def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int) -> None:
     fmt = lir.float_format
-    nreg = max(1, lir.regfile.nreg)
+    nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
     fetch_lag = lir.fetch_lag
     fetch_stages = fetch_lag + 1  # the control-fetch pipeline depth, shown in the localparam comment
+    # An unused bank emits no localparam and no register array (a zero-length reg array is illegal Verilog).
+    nreg_line = f"\nlocalparam           NREG      ={nreg:4};" if nreg else ""
+    nbreg_line = f"\nlocalparam           NBREG     ={nbreg:4};" if nbreg else ""
     w(f"""
 localparam           WEXP      ={fmt.wexp:4};  // Float exponent bits fixed by the static schedule
 localparam           WMAN      ={fmt.wman:4};  // Float mantissa bits fixed by the static schedule
-localparam           W         = WEXP + WMAN;
-localparam           NREG      ={nreg:4};  // >= 1; the wide bank is unused when no value needs a register
+localparam           W         = WEXP + WMAN;{nreg_line}
 localparam           CYCW      ={cycw:4};  // err_pc width: enough for any executing step (0..present)
 localparam           PCW       ={pcw:4};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
 localparam           FETCH_LAG ={fetch_lag:4};  // executing step = pc - FETCH_LAG ({fetch_stages}-stage control fetch)
 localparam [PCW-1:0] PRESENT   ={lir.present_step:4};  // executing step on which the outputs are valid in the array
 localparam [PCW-1:0] LASTPC    ={lir.initiation_interval:4};  // = PRESENT + FETCH_LAG; out_valid asserts here
-localparam           UCW       ={ucw:4};  // microcode word width after lifting out constant control fields
-localparam           NBREG     ={max(1, lir.bool_regfile.nreg):4};  // 1-bit boolean register bank (branch conditions)
+localparam           UCW       ={ucw:4};  // microcode word width after lifting out constant control fields{nbreg_line}
 // pc: 0 = idle/accept, present at executing step PRESENT; out_valid at pc==LASTPC (fetch leads execution).
 """)
     # Cross-check the ZKF +1.0 formula against the codec at build time. This is the contract holoso_ffrombool's
@@ -275,11 +276,13 @@ def _emit_declarations(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorIns
     reg                 transacting_in;                           // per-branch tag: this pc's word is a live step
     reg [FETCH_LAG-1:0] transacting_q;                            // delays the tag FETCH_LAG onto executing word
     wire                transacting = transacting_q[FETCH_LAG-1]; // gates the executing word's effects
-
-    reg  [W-1:0] regs  [0:NREG-1];   // the sparse register array (read-first: a write is visible the next step)
-    reg          bregs [0:NBREG-1];  // 1-bit boolean register bank: branch conditions and boolean state
-
-        """)
+""")
+    w("")
+    if lir.regfile.nreg:
+        w("reg  [W-1:0] regs  [0:NREG-1];   // read-first: a write is visible next step")
+    if lir.bool_regfile.nreg:
+        w("reg          bregs [0:NBREG-1];")
+    w("")
     for inst in lir.instances:
         sig = _sig(inst)
         for pos, operand_type in enumerate(inst.operator.signature.operand_types):
@@ -810,8 +813,8 @@ def _emit_clocked(
     """Emit every sequential element in one always @(posedge clk): fetch, writes, and control state."""
     # We MUST ensure that we DO NOT MULTI-ASSIGN any register in the same step; this is ensured by always placing each
     # assignment to the same register into different branches of the same condition.
-    nreg = max(1, lir.regfile.nreg)
-    nbreg = max(1, lir.bool_regfile.nreg)
+    nreg = lir.regfile.nreg  # 0 for an unused bank; range(0) then yields no non-slot writes (the bank is omitted)
+    nbreg = lir.bool_regfile.nreg
     float_slots = {slot.reg.index: slot for slot in lir.float_state_slots}
     bool_slots = {slot.reg.index: slot for slot in lir.bool_state_slots}
     # Each register's whole write is one priority chain over all its drivers (input load, operator writes, casts,

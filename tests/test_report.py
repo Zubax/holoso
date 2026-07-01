@@ -61,13 +61,20 @@ def _report(name: str) -> str:
 
 @pytest.mark.parametrize("name", list(_EXAMPLES))
 def test_report_renders_for_each_example(name: str) -> None:
-    html = _report(name)
+    lir = build(lower_to_mir(optimize(lower(_EXAMPLES[name]())), default_ops(_FMT)), name, fetch_stages=3)
+    html = generate_report(lir, generate_verilog(lir)).html
     assert html.lstrip().startswith("<!")
     assert "<h2>Schedule</h2>" in html
     assert "class='gridkey'" in html
     assert "register holds a live value" in html
-    assert "title='registers'>registers" in html
-    assert "r0" in html
+    # The wide-register column appears only when the kernel uses the wide bank; a purely-boolean kernel (no wide
+    # registers) shows the boolean bank instead.
+    if lir.regfile.nreg:
+        assert "title='registers'>registers" in html
+        assert "r0" in html
+    else:
+        assert "title='bool registers'>bool registers" in html
+        assert "b0" in html
     assert "class='live'" in html or "live'>" in html
 
 

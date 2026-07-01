@@ -78,6 +78,7 @@ from ._modelref import (
     staged_ops,
 )
 from ._writetimeline import InlineProducer, build_write_timeline, latest_producer_before
+from ._examples import PhaseFrequencyDetector
 
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
@@ -2508,3 +2509,31 @@ def test_drain_only_ret_with_a_resident_output_needs_no_boundary_drain() -> None
     model = build_model(lir)
     for x in (8.0, 0.1, 1.0, 32.0, 0.03, -3.0):
         assert float(model.run(x)[0]) == octave_index(x), x
+
+
+class _AliasedFloatState:
+    """Two float attributes assigned one CSE'd value each transaction: a public output and its write-only alias."""
+
+    def __init__(self) -> None:
+        self.pub = 0.0
+        self._alias = 0.0
+
+    def step(self, a, b):  # type: ignore[no-untyped-def]
+        self.pub = a + b
+        self._alias = a + b
+        return self.pub
+
+
+def test_aliased_state_slots_merge_onto_one_register() -> None:
+    # Regression (user): two state slots that always hold the same value share one register, so neither needs an
+    # install copy. PFD's up/_ref_pending and down/_fb_pending collapse 7 bool registers to 5 with no copies; the
+    # float path (a public attribute and its write-only alias) is exercised too.
+    pfd = build(_run(PhaseFrequencyDetector().__call__), "pfd_merge", fetch_stages=3)
+    assert pfd.bool_regfile.nreg == 5
+    assert pfd.regfile.nreg == 0  # purely boolean: the wide bank is unused
+    assert len(pfd.bool_state_slots) == 2  # the four attributes collapse onto two registers
+    assert all(not slot.needs_copy for slot in pfd.bool_state_slots)
+
+    flt = build(_run(_AliasedFloatState().step), "aliased_float", fetch_stages=3)
+    assert len(flt.float_state_slots) == 1  # pub and _alias share one register
+    assert all(not slot.needs_copy for slot in flt.float_state_slots)

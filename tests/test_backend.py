@@ -446,3 +446,28 @@ endmodule
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def _and_gate(a: bool, b: bool, /):  # type: ignore[no-untyped-def]
+    return a and b
+
+
+def _madd_only(a, b, c):  # type: ignore[no-untyped-def]
+    return a * b + c
+
+
+@requires_iverilog
+def test_unused_register_bank_is_omitted(tmp_path: Path) -> None:
+    # A purely-boolean kernel uses no wide bank, and an arithmetic kernel with no booleans uses no boolean bank; the
+    # unused bank must be omitted entirely rather than declared as a zero-length reg array (illegal Verilog).
+    bool_lir = build(_run(_and_gate, _ops(FloatFormat(8, 24))), "and_gate", fetch_stages=3)
+    assert bool_lir.regfile.nreg == 0
+    bool_v = generate(bool_lir).verilog
+    assert "reg  [W-1:0] regs" not in bool_v and "NREG" not in bool_v and "[0:-1]" not in bool_v
+    _elaborate("and_gate", bool_v, tmp_path)
+
+    float_lir = build(_run(_madd_only, _ops(FloatFormat(8, 24))), "madd_only", fetch_stages=3)
+    assert float_lir.bool_regfile.nreg == 0
+    float_v = generate(float_lir).verilog
+    assert "bregs" not in float_v and "NBREG" not in float_v and "[0:-1]" not in float_v
+    _elaborate("madd_only", float_v, tmp_path)

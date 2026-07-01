@@ -3,8 +3,21 @@ Build a finished :class:`Lir` from MIR: the top-level orchestration that schedul
 both register banks (coalescing phi arms), constructs the per-block LIR, and assembles the final program.
 """
 
+from dataclasses import replace
+
 from .._errors import UnsupportedConstruct
-from .._mir import Mir, MirBoolView, MirBranch, MirFloatView, MirPhi
+from .._mir import (
+    Mir,
+    MirBoolStateSlot,
+    MirBoolView,
+    MirBranch,
+    MirFloatStateSlot,
+    MirFloatView,
+    MirPhi,
+    MirStateRead,
+    MirStateSlot,
+)
+from .._operators import PortConditioner
 from .._util import ValueId
 from ._ir import *
 from ._mir_facts import block_has_install, value_resident_at_entry
@@ -42,6 +55,45 @@ def build(mir: Mir, module_name: str, fetch_stages: int) -> Lir:
     return lir
 
 
+def _drop_redundant_state_slots(mir: Mir) -> Mir:
+    """
+    Drop a state slot that is a redundant alias of another: same reset, live-out value id, and conditioner, so by
+    induction always equal. The kept representative commits the value; each dropped attribute is write-only as state and
+    its ``state_<attr>`` port already taps the shared value, so the duplicate register and its install copy vanish (e.g.
+    a phase/frequency detector's public ``up`` aliasing its internal pending latch). A class is left intact when its
+    live-out is a phi (a drop would perturb the phi-install placement) or when two members are read at entry (their
+    distinct live-ins would need substitution).
+    """
+    read_names = {node.name for node in mir.nodes.values() if isinstance(node, MirStateRead)}
+
+    def conditioner(slot: MirStateSlot) -> PortConditioner:
+        if isinstance(slot, MirFloatStateSlot):
+            return slot.sign
+        assert isinstance(slot, MirBoolStateSlot)
+        return slot.inversion
+
+    classes: dict[tuple[float | bool, ValueId, PortConditioner], list[MirStateSlot]] = {}
+    for slot in mir.state_slots:
+        classes.setdefault((slot.reset_value, slot.live_out, conditioner(slot)), []).append(slot)
+
+    dropped: set[str] = set()
+    for members in classes.values():
+        if len(members) < 2:
+            continue
+        if isinstance(mir.nodes[members[0].live_out], MirPhi):
+            continue  # a phi live-out: dropping perturbs its install placement (if-conversion usually elides the phi)
+        read_members = [m for m in members if m.name in read_names]
+        if len(read_members) >= 2:
+            continue  # two read aliases: distinct live-ins, leave intact
+        rep = read_members[0] if read_members else members[0]
+        assert all(m.name not in read_names for m in members if m is not rep), "a dropped alias must be write-only"
+        dropped.update(m.name for m in members if m is not rep)
+
+    if not dropped:
+        return mir
+    return replace(mir, state_slots=[slot for slot in mir.state_slots if slot.name not in dropped])
+
+
 def _has_state_copy(
     float_mir: MirFloatView, bool_mir: MirBoolView, alloc: Allocation, const_pool: dict[ValueId, PooledConst]
 ) -> bool:
@@ -74,6 +126,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int) -> Lir:
     banks by hardware-frame liveness (reusing registers, coalescing state live-outs), install non-coalesced phi and slot
     live-outs by pc-gated copy, and lay the blocks out in the ROM with the single ``Ret`` as the out_valid boundary.
     """
+    mir = _drop_redundant_state_slots(mir)
     float_mir = MirFloatView.from_mir(mir)
     bool_mir = MirBoolView.from_mir(mir)
     # A branch whose condition is a phi with an arm FROM THE BRANCHING BLOCK cannot be sequenced: the arm's install
@@ -257,9 +310,9 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int) -> Lir:
         float_format=float_mir.fmt,
         regfile=RegFileLayout(
             width=float_mir.fmt.width,
-            nreg=max(1, alloc.nreg),
-            nrd=max(1, sum(inst.operator.arity for inst in instances)),
-            nwr=max(1, len(tapped_wide_lanes(blocks))),
+            nreg=alloc.nreg,
+            nrd=sum(inst.operator.arity for inst in instances),
+            nwr=len(tapped_wide_lanes(blocks)),
             nload=len(float_mir.input_ids),
         ),
         inputs=build_inputs(mir, float_mir, bool_mir, alloc),

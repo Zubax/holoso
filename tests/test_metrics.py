@@ -194,7 +194,7 @@ BASELINE: dict[str, Metrics] = {
     "schmitt_trigger": Metrics(False, nreg=1, bnreg=2, steering=2, copies=0, min_ii=7, last_pc=7, max_block_span=7),
     "quadrature_encoder": Metrics(False, nreg=1, bnreg=7, steering=7, copies=0, min_ii=6, last_pc=6, max_block_span=6),
     "phase_frequency_detector": Metrics(
-        False, nreg=1, bnreg=7, steering=5, copies=0, min_ii=6, last_pc=6, max_block_span=6
+        False, nreg=0, bnreg=5, steering=5, copies=0, min_ii=6, last_pc=6, max_block_span=6
     ),
     "latching_fault_register": Metrics(
         False, nreg=1, bnreg=6, steering=2, copies=0, min_ii=6, last_pc=6, max_block_span=6
