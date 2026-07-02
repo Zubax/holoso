@@ -116,7 +116,6 @@ In complex modules, it is best to avoid a large number of named nets that are on
 Leave unused module outputs unconnected, like `.out_foo()`, instead of creating unused wires.
 
 It is best to keep at most one `always @(posedge clk)` per module, unless there are strong reasons to do otherwise.
-This rule should be followed, in particular, in Verilog emitted by the compiler.
 
 The same register can be assigned multiple times only as long as the assignments reside in different branches that
 cannot be active at the same time and are explicitly segregated with a single condition that is explicit to the

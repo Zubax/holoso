@@ -2,10 +2,10 @@
 Render a scheduled :class:`Lir` into a synthesizable Verilog ZISC module that instantiates the shared support library
 (assembled by :mod:`._support`).
 
-The controller is a microcode ROM (see :mod:`._microcode`): one pre-decoded VLIW control word per step, stored in a
-(BRAM-inferable) ROM read through a 3-stage fetch (a PC latch, the array read, and the BRAM output register) so the
-critical control cones are short register-to-register paths. The executing step therefore lags the fetch PC by
-FETCH_LAG, which the sequencer accounts for: the PC counts up to LASTPC and out_valid is asserted there.
+The controller is a microcode ROM (see :mod:`._microcode`): one pre-decoded VLIW control word per step, written as a
+synchronous ``case`` over the fetch PC (the inferable-ROM form every backend recognizes) and read through a 3-stage
+fetch (PC latch, ROM read register, routing register). The executing step lags the fetch PC by FETCH_LAG,
+which the sequencer accounts for: the PC counts up to LASTPC and out_valid is asserted there.
 
 Storage is a sparse, schedule-specific register file emitted inline instead of a general-purpose multiport file. Value
 routing is uniform: each operand port's read mux is a ``case`` over that port's read codebook (its registers and the
@@ -260,7 +260,7 @@ def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance,
     w("""
     reg  [PCW-1:0]  pc;            // fetch program counter; the executing step lags it by FETCH_LAG
     reg  [PCW-1:0]  next_pc;       // combinational next-state presented to the ROM each cycle
-    reg  [PCW-1:0]  ucode_addr_q;  // PC latch: splits pc -> next_pc -> ROM address from the array read
+    reg  [PCW-1:0]  ucode_addr_q;  // PC latch: splits pc -> next_pc -> ROM address for the case read
     reg  [CYCW-1:0] err_pc_q;
     wire            err;           // an operator error is detected on the current step
 
@@ -357,26 +357,31 @@ def _emit_microcode_rom(
 ) -> None:
     digits = (ucw + 3) // 4
     w("""
-// Microcode VLIW ROM: one pre-decoded control word per fetch PC (0..LASTPC), registered on read (clocked block below).
-// Steps with no scheduled event -- inter-block drains and the present/boundary tail -- pack to a NOP word; constant
-// control fields are lifted out (below) and not stored here, enabling synthesis-time folding.
-(* rom_style = "block", ram_style = "block", syn_romstyle = "EBR" *)
-reg [UCW-1:0] ucode [0:LASTPC];
-initial begin
-    """)
+// Microcode VLIW ROM.
+reg [UCW-1:0] ucode_q;     // 2nd fetch stage
+reg [UCW-1:0] ucode_word;  // 3rd fetch stage""")
+    packed = sorted((f for f in fields.values() if f.offset >= 0), key=lambda f: f.offset)
+    if packed:
+        bit_strs = [f"[{f.offset + f.width - 1}:{f.offset}]" if f.width > 1 else f"[{f.offset}]" for f in packed]
+        wbit = max(len(b) for b in bit_strs)
+        w("// Microcode word field map:")
+        for f, bits in zip(packed, bit_strs):
+            w(f"//   {bits:<{wbit}}  {f.name}")
+    w("""
+(* rom_style = "block", syn_romstyle = "EBR" *)
+always @(posedge clk)
+    case (ucode_addr_q)""")
     w.push()
-    for step in range(depth):  # depth == LASTPC + 1: one word per fetch PC, NOP where nothing issues, commits, or lands
+    w.push()
+    for step in range(depth):  # one arm per fetch PC, NOP where nothing issues, commits, or lands
         summary = cycle_summary(issues_by_cycle.get(step, []), commits_by_cycle.get(step, []), landings.get(step, []))
         comment = f"  // {summary}" if summary else ""
-        w(f"ucode[{step: 5}] = {ucw}'h{pack(fields, step):0{digits}x};{comment}")
+        w(f"{step}: ucode_q <= {ucw}'h{pack(fields, step):0{digits}x};{comment}")
+    w(f"default: ucode_q <= {ucw}'h0;  // unreached (PC bounded to LASTPC); NOP fill")
     w.pop()
-    w("""
-end
-
-reg [UCW-1:0] ucode_q;     // 2nd fetch stage: control-store array-read register
-reg [UCW-1:0] ucode_word;  // 3rd fetch stage: packs into the BRAM output register; drives this step
-
-""")
+    w("endcase")
+    w.pop()
+    w("")
 
 
 def _emit_field_wires(w: _Writer, fields: dict[str, Field]) -> None:
@@ -585,9 +590,8 @@ always @(posedge clk) begin
 """)
     w.push()
 
-    w("// Microcode fetch: PC latch -> control-store array read -> BRAM output register.")
+    w("// Microcode fetch: PC latch; ucode_word pipelines ucode_q.")
     w("ucode_addr_q <= next_pc;")
-    w("ucode_q      <= ucode[ucode_addr_q];")
     w("ucode_word   <= ucode_q;")
     w("")
 

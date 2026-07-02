@@ -417,10 +417,15 @@ The Verilog backend is mechanical from LIR: an inline flop bank plus the 1-bit b
 operator instance, and one continuous assignment per pooled constant. Either bank is emitted only when used (a
 purely-boolean kernel carries no wide register file). There is no general multiport register-file module; storage is
 the sparse, schedule-specific fabric below. The controller is a microcode ROM -- one pre-decoded VLIW
-control word per step, stored in a BRAM-inferable ROM read through a short multi-stage fetch (a PC latch, the array
-read, and the BRAM output register) so the controller is short register-to-register paths rather than a wide
-combinational `case(cyc)` cone, for a fast clock-to-out. The fetch leads the executing step, which under static
-scheduling only adds to the makespan/II; the depth is currently fixed but may be made disableable for faster chips.
+control word per step, written as a synchronous `case` over the fetch PC. That `case`-over-address is the inferable-ROM
+form every backend recognizes, so each maps it to an appropriate ROM (LUT logic or block RAM), rather than the
+array-plus-`initial` form, which some backends do not recognize as a ROM at all (flattening it to logic) and others
+force into a slow block RAM even when tiny. It is read through a short multi-stage fetch (a PC
+latch, the ROM read register, and a routing register) so the controller is short register-to-register paths rather than
+a wide combinational `case(cyc)` cone, for a fast clock-to-out. The ROM `case` occupies its own clocked block -- the
+sole sanctioned second `always @(posedge clk)` -- since that dedicated form is what triggers the memory inference. The
+fetch leads the executing step, which under static scheduling only adds to the makespan/II; the depth is currently fixed
+but may be made disableable for faster chips.
 
 The schedule replays step by step: at PC 0 the machine accepts and parallel-loads inputs into the low registers of each
 bank in one cycle (gated by `in_valid`); the PC advances every clock; at the last PC it asserts `out_valid` while
