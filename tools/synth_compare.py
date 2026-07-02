@@ -2,11 +2,13 @@
 """
 Before/after synthesis comparison for the bundled example matrix.
 
-``capture`` synthesizes every TARGET on the current checkout and writes a JSON of per-target cycle latency (min II and
-last PC), f_max, slack, fabric area, and pass/fail. ``render`` reads a BEFORE and an AFTER JSON and emits a side-by-side
-HTML report with deltas, pass/fail badges, headline totals, and a flag on every target whose operator stage knobs were
-retuned (its f_max delta then reflects change+retune, not an isolated knob-fixed comparison; retuning is detected by a
-changed ops repr). Report-only tooling -- not part of the compiler, no tests, no design-doc coupling.
+``capture`` synthesizes every TARGET on the current checkout and writes a JSON of per-target cycle latency, f_max,
+slack, fabric area, and pass/fail.
+
+``render`` reads a BEFORE and an AFTER JSON and emits a side-by-side HTML report with deltas and a flag on every
+target whose operator stage knobs were retuned.
+
+Report-only tooling -- not part of the compiler, no tests, no design-doc coupling.
 
 Usage:
     python tools/synth_compare.py capture --out before.json
@@ -253,7 +255,7 @@ def render(before_path: str, after_path: str, out_path: str) -> None:
     print(f"Wrote {out_path}")
 
 
-_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Holoso synthesis: before vs after</title>
+_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Holoso synthesis delta report</title>
 <style>
  body{{font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;margin:2rem;color:#1a1a2e;background:#fafaff}}
  h1{{font-size:1.4rem;margin:0 0 .3rem}}
@@ -277,7 +279,7 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Holoso synthe
  .cphdr{{font-size:.76rem;color:#667;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.25rem}}
  .cp pre{{background:#0d1117;color:#c9d1d9;padding:.6rem .8rem;border-radius:6px;font-size:.73rem;overflow-x:auto;white-space:pre;line-height:1.35}}
 </style></head><body>
-<h1>Holoso synthesis — before vs after the <code>ucode[0]</code> NOP reclaim</h1>
+<h1>Holoso synthesis deltas</h1>
 <div class="sub">before <code>{before_commit}</code> ({before_ts}) &nbsp;→&nbsp; after <code>{after_commit}</code> ({after_ts})</div>
 <div class="headline">{headline}</div>
 <table><thead><tr>
