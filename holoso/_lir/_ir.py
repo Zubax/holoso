@@ -235,7 +235,7 @@ class OperatorInstance:
 
 
 # An operator READ port: the ``(instance, operand-position)`` pair keying ``read_set_per_port``. Distinct from the
-# WRITE-side ``(instance, output-port)`` lanes of ``write_set_per_register``/``_write_sets``, which are not read ports.
+# WRITE-side ``(instance, output-port)`` lanes of ``_write_sets``, which are not read ports.
 type ReadPort = tuple[OperatorInstance, int]
 
 
@@ -852,23 +852,8 @@ class Lir:
                     sets.setdefault((op.inst, pos), set()).add(operand.source.index)
         return {port: sorted(regs) for port, regs in sets.items()}
 
-    @property
-    def write_set_per_register(self) -> dict[int, list[tuple[OperatorInstance, int]]]:
-        """
-        For each WIDE register index, the ``(instance, output port)`` lanes that ever write it, in a canonical order.
-
-        A cost proxy for the register allocator (via ``write_select_fanin``); the emitter itself routes writes through
-        the per-register write codebook, not this set. The input-load writers of registers ``0..nload-1`` are tracked
-        separately via ``lir.float_inputs`` (a distinct write source, folded into the same per-register opcode).
-        """
-        return self._write_sets(RegRef)
-
-    @property
-    def bool_write_set_per_register(self) -> dict[int, list[tuple[OperatorInstance, int]]]:
-        """The boolean-bank counterpart of :attr:`write_set_per_register`, in the same canonical lane order."""
-        return self._write_sets(BoolRegRef)
-
     def _write_sets(self, bank: type[RegRef] | type[BoolRegRef]) -> dict[int, list[tuple[OperatorInstance, int]]]:
+        # Cost proxy for write_select_fanin only (writers in canonical order); the emitter routes writes via the opcode.
         sets: dict[int, list[tuple[OperatorInstance, int]]] = {}
         for op in self.ops:
             for write in op.writes:
@@ -888,7 +873,7 @@ class Lir:
         writing it beyond the first (``max(0, drivers - 1)``) -- the input load, every pooled writeback lane, every
         inline (cast) write, every phi-arm copy/write, and a non-coalesced slot's install. The register allocator
         minimizes this steering proxy; a register's live-in carry is the write opcode's implicit NOP hold, not a driver,
-        so it is not counted. It counts the phi-arm copies that ``write_set_per_register`` (pooled lanes only) omits, so
+        so it is not counted. It counts the phi-arm copies that ``_write_sets`` (pooled lanes only) omits, so
         it stays meaningful as coalescing trades copies for shared writeback lanes. The emitted per-register opcode
         ``case`` may fold value-equal drivers below this count, so this is an upper bound on the realized mux fan-in.
         """
@@ -898,9 +883,9 @@ class Lir:
             wide[fload.dst.index] = wide.get(fload.dst.index, 0) + 1
         for bload in self.bool_inputs:
             boolc[bload.dst.index] = boolc.get(bload.dst.index, 0) + 1
-        for reg, lanes in self.write_set_per_register.items():
+        for reg, lanes in self._write_sets(RegRef).items():
             wide[reg] = wide.get(reg, 0) + len(lanes)
-        for reg, lanes in self.bool_write_set_per_register.items():
+        for reg, lanes in self._write_sets(BoolRegRef).items():
             boolc[reg] = boolc.get(reg, 0) + len(lanes)
         for block in self.blocks:
             for inline_op in block.inline_ops:

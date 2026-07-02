@@ -440,7 +440,7 @@ The control word stores selectors and value routing is uniform across two dual e
 selects that port's source, and a per-register WRITE opcode selects that register's next value (code 0 == NOP hold).
 An operator output, an inline expression (boolean logic, a cast, a select), and a phi-arm/constant/state
 move are all just sources one write opcode picks, so PC gates no datapath read or write -- it is left to control flow
-alone. A control field constant across the whole program (sign controls, single-source ports and registers) is driven
+alone. A control field constant across the whole program -- a sign control the program never varies, say -- is driven
 by a constant net and lifted out of the ROM, so synthesis prunes what it feeds; the Python ROM packer and the module's
 bit-slice offsets are produced together so they cannot drift. A gated field (an operator issue strobe or a write
 opcode) ANDs `transacting` into its decode -- a width-generic mask to the NOP code -- so a dwelling re-fetch is inert.

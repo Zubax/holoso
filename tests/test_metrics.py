@@ -83,7 +83,7 @@ class Metrics:
     """
     The non-regression figures sampled off a built :class:`Lir`.
 
-    ``steering`` is the total sparse-regfile mux fan-in -- read-mux fan-in plus the GROUND-TRUTH write-select fan-in
+    ``steering`` is the total sparse-regfile mux fan-in -- read-mux fan-in plus the upper-bound write-select fan-in
     (:attr:`Lir.write_select_fanin`, which counts every write-chain driver the backend synthesizes: pooled lanes,
     inline casts, phi-arm copies, and slot installs). Counting the copies matters here: phi-arm coalescing trades
     pc-gated copies for shared pooled writeback lanes, so a copy-blind proxy would mis-report a coalescing win as a
@@ -151,7 +151,7 @@ def _measure(name: str) -> Metrics:
 # - Registers and steering reflect the unified cross-block allocator: liveness-bounded reuse with coalesced state
 #   slots, per-(instance, port) lane accounting of both banks' write selects, the comparator's read ports steered like
 #   any other operand muxes, and commutative orientation (the comparator swaps with its gt/lt tap exchange). steering
-#   counts the GROUND-TRUTH write-select fan-in (the emitter's full per-register write chain incl. phi-arm copies), not
+#   counts the upper-bound write-select fan-in (the emitter's full per-register write chain incl. phi-arm copies), not
 #   a pooled-lane-only proxy. Cordic's read-mux steering sits a couple of arms above the best coloring in its
 #   near-equal-cost band -- the disclosed price of deterministic value numbering; deeper annealing is optional.
 # - copies and the phi-dense figures reflect phi-arm coalescing: a phi whose register-backed, identity-conditioner arms

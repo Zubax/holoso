@@ -46,5 +46,5 @@ def test_multi_distinct_const_install_selects_among_constants() -> None:
 @pytest.mark.cosim
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_multi_distinct_const_install_cosim(sim: str) -> None:
-    """RTL == model for a register installing two distinct constants: the ``uc_ccidx`` selector picks the right one."""
+    """RTL == model for a register installing two distinct constants: one write-opcode case arm per const."""
     run_cosim(sim, _multi_const_install, _FMT, "multi_const")

@@ -97,6 +97,16 @@ def _bool_operand_rhs(operand: BoolOperand) -> str:
     return f"~{net}" if operand.inversion.invert else net
 
 
+def _operand_rhs(operand: FloatOperand | BoolOperand) -> str:
+    match operand:
+        case FloatOperand():
+            return _signed_source_net(operand.source, operand.sign)
+        case BoolOperand():
+            return _bool_operand_rhs(operand)
+        case _:
+            assert_never(operand)
+
+
 def _render_inline(
     operator: InlineHardwareOperator, operands: tuple[FloatOperand | BoolOperand, ...], conditioner: PortConditioner
 ) -> str:
@@ -105,21 +115,12 @@ def _render_inline(
     sign applies inline via ``holoso_fsgnop``), with the result conditioner applied -- an inversion folds into the
     expression; sign-conditioned wide inline results have no producer yet.
     """
-    nets: list[str] = []
-    for operand in operands:
-        if isinstance(operand, FloatOperand):
-            nets.append(_signed_source_net(operand.source, operand.sign))
-        else:
-            nets.append(_bool_operand_rhs(operand))
+    nets = [_operand_rhs(operand) for operand in operands]
     expr = operator.verilog_expr(*nets)
     if isinstance(conditioner, BoolInversion):
         return conditioner.decorate(f"({expr})") if conditioner.invert else expr
     assert conditioner == FloatSignControl(), "no pass produces sign-conditioned wide inline results yet"
     return expr
-
-
-def _state_copy_rhs(slot: FloatStateSlot) -> str:
-    return _signed_source_net(slot.tap.source, slot.tap.sign)
 
 
 def _write_source_rhs(source: WriteSource) -> str:
@@ -130,10 +131,8 @@ def _write_source_rhs(source: WriteSource) -> str:
             return f"~{net}" if invert else net
         case InlineWriteSource(operator=operator, operands=operands, conditioner=conditioner):
             return _render_inline(operator, operands, conditioner)
-        case FloatMoveWriteSource(operand=operand):
-            return _signed_source_net(operand.source, operand.sign)
-        case BoolMoveWriteSource(operand=operand):
-            return _bool_operand_rhs(operand)
+        case MoveWriteSource(operand=operand):
+            return _operand_rhs(operand)
         case _:
             assert_never(source)
 
@@ -147,13 +146,12 @@ def generate(lir: Lir) -> VerilogOutput:
     # The two dual codebooks, built once and threaded to both the microcode packer and the emitters so the
     # code<->source mapping cannot drift: per operand port (read) and per register (write). The write side derives from
     # a single ``write_events`` traversal, shared by the codebook, the packer, and the ROM-comment landings.
-    read_port = read_ports(lir)
-    read_books = read_codebook(lir, read_port)
+    read_books = read_codebook(lir)
     events = write_events(lir)
     write_books = write_codebook(events)
     tapped = tapped_lanes(lir)
 
-    fields = build_microcode(lir, read_port, read_books, write_books, events, tapped)
+    fields = build_microcode(lir, read_books, write_books, events, tapped)
     ucw = finalize_fields(fields)
 
     issues_by_cycle, commits_by_cycle = lir.group_by_cycle
@@ -170,7 +168,7 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_field_wires(w, fields)
     _emit_operators(w, lir, tapped)
     _emit_datapath_comb(w, lir, write_books)
-    _emit_read_muxes(w, lir, read_port, read_books)
+    _emit_read_muxes(w, lir, read_books)
     _emit_clocked(w, lir, write_books)
     _emit_outputs(w, lir)
     w("\nendmodule\n")
@@ -491,7 +489,7 @@ def _terminator_redirects(lir: Lir) -> list[tuple[int, str]]:
     return redirects
 
 
-def _emit_read_case(w: _Writer, target: str, port: int, book: ReadCodebook) -> None:
+def _emit_read_case(w: _Writer, target: str, field: str, book: ReadCodebook) -> None:
     """
     Emit one operand's combinational read mux: a direct assign for a single source, else a ``case`` over the port's
     read opcode selecting a register or a constant directly. The last entry is the ``default`` arm so the case is full
@@ -503,7 +501,7 @@ def _emit_read_case(w: _Writer, target: str, port: int, book: ReadCodebook) -> N
         w(f"{target} = {_source_net(book.sources[0])};")
         return
     arms = book.arms()
-    w(f"case ({f_rd(port)})")
+    w(f"case ({field})")
     w.push()
     for index, (code, source) in enumerate(arms):
         label = "default" if index == len(arms) - 1 else _lit(book.opcode_width, code)
@@ -515,8 +513,7 @@ def _emit_read_case(w: _Writer, target: str, port: int, book: ReadCodebook) -> N
 def _emit_read_muxes(
     w: _Writer,
     lir: Lir,
-    read_port: dict[tuple[OperatorInstance, int], int],
-    read_books: dict[int, ReadCodebook],
+    read_books: dict[tuple[OperatorInstance, int], ReadCodebook],
 ) -> None:
     """
     Emit the combinational operand read muxes driving each wrapper directly, so regfile-read -> operator is
@@ -530,9 +527,9 @@ def _emit_read_muxes(
     w.push()
     for inst in lir.instances:
         sig = _sig(inst)
+        base = base_name(inst)
         for pos in range(inst.operator.arity):
-            port = read_port[(inst, pos)]
-            _emit_read_case(w, f"{sig}_{PORT_LETTERS[pos]}", port, read_books[port])
+            _emit_read_case(w, f"{sig}_{PORT_LETTERS[pos]}", f_rd(base, PORT_LETTERS[pos]), read_books[(inst, pos)])
     w.pop()
     w("end")
     w("")
@@ -647,13 +644,13 @@ always @(posedge clk) begin
             # write. It never can: a non-coalesced boundary slot holds its live-in until the read-first boundary read,
             # so the allocator lands no intermediate write on it -- pinned here so a future scheduler cannot regress it.
             assert RegRef(reg) not in write_books, "a boundary-install slot must carry no opcode write sources"
-            arms.append(("out_valid && out_ready", _state_copy_rhs(slot)))
+            arms.append(("out_valid && out_ready", _operand_rhs(slot.tap)))
         _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), arms)
     for reg, bslot in sorted(bool_slots.items()):
         arms = load_arm(bool_loads, reg)
         if bslot.needs_copy:
             assert BoolRegRef(reg) not in write_books, "a boundary-install bool slot must carry no opcode write sources"
-            arms.append(("out_valid && out_ready", _bool_operand_rhs(bslot.live_out)))
+            arms.append(("out_valid && out_ready", _operand_rhs(bslot.live_out)))
         _emit_reg_write(w, f"bregs[{reg}]", BoolRegRef(reg), write_books.get(BoolRegRef(reg)), arms)
     w.pop()
     w("end")
@@ -669,9 +666,5 @@ assign out_valid = (pc == LASTPC);  // result valid on PRESENT; execution lags t
 assign err_pc    = err_pc_q;
 """)
     for wire in lir.outputs:
-        match wire:
-            case BoolOutputWire():
-                w(f"assign {wire.name} = {_bool_operand_rhs(wire.tap)};")
-            case FloatOutputWire():
-                w(f"assign {wire.name} = {_signed_source_net(wire.tap.source, wire.tap.sign)};")
+        w(f"assign {wire.name} = {_operand_rhs(wire.tap)};")
     w("")

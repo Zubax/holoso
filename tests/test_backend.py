@@ -296,7 +296,6 @@ def test_both_bank_lane_write_commit_rides_the_commit_step() -> None:
         build_microcode,
         f_op,
         read_codebook,
-        read_ports,
         tapped_lanes,
         write_codebook,
         write_events,
@@ -305,10 +304,9 @@ def test_both_bank_lane_write_commit_rides_the_commit_step() -> None:
 
     fmt = FloatFormat(6, 18)
     lir = build(_run(branch_boundary_kernel, fcmp_staged_ops(fmt, 1)), "lane_steps", fetch_stages=3)
-    read_port = read_ports(lir)
     events = write_events(lir)
     write_books = write_codebook(events)
-    fields = build_microcode(lir, read_port, read_codebook(lir, read_port), write_books, events, tapped_lanes(lir))
+    fields = build_microcode(lir, read_codebook(lir), write_books, events, tapped_lanes(lir))
     checked_bool = checked_wide = 0
     for op in lir.ops:
         for write in op.writes:
@@ -340,8 +338,8 @@ def test_error_gate_ors_over_multiple_landing_registers() -> None:
 
 def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Path) -> None:
     # No shipped operator has several WIDE outputs yet (fsort will), so the per-port wide lane machinery -- per-output
-    # write-enable/address and sign-conditioner fields, each result driven combinationally from the operator into its
-    # register write -- is exercised with a synthetic two-output operator on a hand-built
+    # sign-conditioner fields plus the per-register write opcodes, each result driven combinationally from the operator
+    # into its register write -- is exercised with a synthetic two-output operator on a hand-built
     # Lir, down to Icarus elaboration against a matching stub module.
     from dataclasses import dataclass
     from typing import ClassVar
