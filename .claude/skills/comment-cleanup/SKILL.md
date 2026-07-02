@@ -1,26 +1,26 @@
 ---
 name: comment-cleanup
 description: >-
-  Prune low-value comments and docstrings across a codebase while preserving genuine rationale and
-  enforcing consistency. Use when asked to remove verbose or redundant comments, tighten documentation,
-  or make comment style uniform. Aggressive downsizing, but never erase valuable information.
+  Prune nonessential comments and docstrings across a codebase.
+  Use when asked to remove verbose or redundant comments, tighten documentation, or make comment style uniform.
+  Aggressive downsizing, but retain high-value information.
 ---
 
 # Comment cleanup
 
-Remove comments and docstrings that restate what the code or the type system already says; keep the ones
-carrying information a competent reader could not reconstruct from names, signatures, and code in a few seconds.
+Trim ALL comments/docstrings EXCEPT those that carry information a competent reader could not reconstruct from names,
+signatures, and code in a few seconds.
 
 ## Keep vs. remove
 
-REMOVE: name-echo describers (a docstring that just expands the identifier), narration of obvious control flow,
-section-divider banners, value-trace and "what the next line does" comments, type-obvious prose.
+REMOVE: name-echo describers, control flow / type / structure narration, section-divider banners,
+value-trace and "what the next line does" comments, type-obvious prose.
 
 KEEP: design rationale (the WHY), gotchas and edge-cases, contracts and invariants, cross-references,
 standards or paper citations, hardware and timing facts, and the provenance of a regression test.
 
-When uncertain whether something is rationale or restatement, keep it. The expensive mistake is erasing valuable
-information, not leaving one extra obvious line. This guardrail outranks any size target.
+When uncertain whether something is rationale or restatement, keep it.
+The expensive mistake is erasing valuable information, not leaving one extra obvious line.
 
 ## Never touch
 

@@ -70,9 +70,9 @@ def inline_fire_cycle(commit_cycle: int, fetch_lag: int) -> int:
 
 def pooled_write_word(commit_cycle: int) -> int:
     """
-    The fetch-PC-frame step on which a pooled lane drives its write-enable/address microcode word: the commit step
-    itself. This is the lone helper in the fetch-PC frame (no ``fetch_lag``) -- it places the microcode word the
-    sequencer fetches, not the step the datapath acts on it. Shared by the emitter's microcode (where the word is
+    The fetch-PC-frame step on which a pooled lane's write commits -- its destination register's write opcode: the
+    commit step itself. This is the lone helper in the fetch-PC frame (no ``fetch_lag``) -- it places the microcode word
+    the sequencer fetches, not the step the datapath acts on it. Shared by the emitter's microcode (where the word is
     placed) and the overlap layout (which keeps every write word inside the block), so the two cannot drift -- the same
     single-source-of-truth contract as the landing/read helpers above.
     """
@@ -220,7 +220,7 @@ class OperatorInstance:
     index: int  # 0-based within this concrete operator value
 
     def __post_init__(self) -> None:
-        # A pooled result commits at issue + latency, so latency >= 1 keeps its write-enable off the held ``ucode[0]``
+        # A pooled result commits at issue + latency, so latency >= 1 keeps its write opcode off the held ``ucode[0]``
         # (the accept-dwell word) -- a latency-0 pooled operator would re-commit every idle cycle (see ``transacting``).
         assert self.operator.latency >= 1, f"{self.operator.mnemonic}: pooled operator latency must be >= 1"
         # Every pooled operator passes through here, so its three hand-synchronized per-port declarations are
@@ -857,9 +857,9 @@ class Lir:
         """
         For each WIDE register index, the ``(instance, output port)`` lanes that ever write it, in a canonical order.
 
-        This drives the sparse per-register write select: a register written by a single lane needs no write-port
-        mux. The input-load writers of registers ``0..nload-1`` are tracked separately via ``lir.float_inputs``
-        (they are a distinct, address-free write source folded into the same select).
+        A cost proxy for the register allocator (via ``write_select_fanin``); the emitter itself routes writes through
+        the per-register write codebook, not this set. The input-load writers of registers ``0..nload-1`` are tracked
+        separately via ``lir.float_inputs`` (a distinct write source, folded into the same per-register opcode).
         """
         return self._write_sets(RegRef)
 
@@ -884,14 +884,13 @@ class Lir:
     @property
     def write_select_fanin(self) -> int:
         """
-        The ground-truth per-register write-select fan-in summed over both banks: for every register, the number of
-        distinct drivers in its write chain beyond the first (``max(0, drivers - 1)``). The backend drives each register
-        with one priority chain over exactly these drivers -- the input load, every pooled writeback lane, every inline
-        (cast) write, every phi-arm copy/write, and a non-coalesced slot's install. A register's live-in carry is the
-        chain's implicit hold (the unmatched-condition fall-through), not a mux input, so it is not counted. This is the
-        true steering cost the sparse register file synthesizes, counting the phi-arm copies that
-        ``write_set_per_register`` (pooled lanes only) omits, so it stays meaningful as coalescing trades copies for
-        shared writeback lanes.
+        The per-register writer fan-in summed over both banks: for every register, the number of distinct drivers
+        writing it beyond the first (``max(0, drivers - 1)``) -- the input load, every pooled writeback lane, every
+        inline (cast) write, every phi-arm copy/write, and a non-coalesced slot's install. The register allocator
+        minimizes this steering proxy; a register's live-in carry is the write opcode's implicit NOP hold, not a driver,
+        so it is not counted. It counts the phi-arm copies that ``write_set_per_register`` (pooled lanes only) omits, so
+        it stays meaningful as coalescing trades copies for shared writeback lanes. The emitted per-register opcode
+        ``case`` may fold value-equal drivers below this count, so this is an upper bound on the realized mux fan-in.
         """
         wide: dict[int, int] = {}
         boolc: dict[int, int] = {}

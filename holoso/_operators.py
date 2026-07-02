@@ -177,7 +177,7 @@ class PooledHardwareOperator(HardwareOperator, ABC):
     """
     An operator backed by a physical streaming module instance (in_valid/out_valid, per-float-port sign conditioners).
     The scheduler pools and contends equal operators over shared instances; every port is microcode-driven in the
-    generated RTL (read-address lanes for operands, write-enable lanes per output port).
+    generated RTL (a per-operand read opcode selects each operand, a per-register write opcode installs each result).
     """
 
     error_ports: ClassVar[list[str]] = []

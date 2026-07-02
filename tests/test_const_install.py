@@ -1,10 +1,12 @@
 """
 Coverage for the multi-distinct-constant install path. A register that receives two or more DISTINCT constant phi-arm
-installs is driven by a microcode const-pool selector (``uc_ccidx``) muxing among its constants, rather than the bare
-``const_N`` net a single-constant register uses. No bundled example exercises this -- each installs at most one distinct
-constant per register -- so this kernel pins it: a comparison-gated branch (a division per arm blocks if-conversion, so
-the merge stays a real phi) assigns two distinct constants to one merged variable.
+installs selects among them through its per-register write opcode, one ``case`` arm per constant ``const_N`` net. No
+bundled example exercises this -- each installs at most one distinct constant per register -- so this kernel pins it: a
+comparison-gated branch (a division per arm blocks if-conversion, so the merge stays a real phi) assigns two distinct
+constants to one merged variable.
 """
+
+import re
 
 import pytest
 
@@ -32,10 +34,13 @@ def _multi_const_install(x: float) -> float:
     return a + w
 
 
-def test_multi_distinct_const_install_emits_selector() -> None:
-    """The kernel must emit a const-pool selector field; otherwise the cosim below would not exercise the mux at all."""
+def test_multi_distinct_const_install_selects_among_constants() -> None:
+    """A register must select among >=2 distinct constants; otherwise the cosim below would not exercise that mux."""
     lir = build(lower_to_mir(optimize(lower(_multi_const_install)), default_ops(_FMT)), "multi_const", fetch_stages=3)
-    assert "uc_ccidx_" in generate_verilog(lir).verilog
+    per_reg: dict[str, set[str]] = {}
+    for reg, const in re.findall(r"regs\[(\d+)\] <= const_(\d+);", generate_verilog(lir).verilog):
+        per_reg.setdefault(reg, set()).add(const)
+    assert any(len(consts) >= 2 for consts in per_reg.values()), "no register selects among >=2 distinct constants"
 
 
 @pytest.mark.cosim

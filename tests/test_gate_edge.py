@@ -63,7 +63,8 @@ def _assert_effect_trigger_gated(fn: Callable[..., object], name: str, prefix: s
     ]
     assert arms, f"kernel produced no {prefix} wires to check"
     for line in arms:
-        assert "transacting &" in line, f"{prefix} decode is not gated by transacting: {line}"
+        # A 1-bit trigger masks as ``transacting & ...``; a wider write opcode as ``{W{transacting}} & ...``.
+        assert "transacting" in line and " & " in line, f"{prefix} decode is not gated by transacting: {line}"
 
 
 def test_every_operator_iv_is_gated_by_transacting() -> None:
@@ -73,16 +74,16 @@ def test_every_operator_iv_is_gated_by_transacting() -> None:
 
 
 def test_const_install_is_gated_by_transacting() -> None:
-    # A cycle-0 const-install sits on ucode[0]; the decoded const-install write-enable must AND transacting. The bool
-    # install arm decodes identically, so this float-slot kernel covers the mechanism.
-    _assert_effect_trigger_gated(_ConstInstallState().__call__, "gate_cwe", "uc_cwen")
+    # A cycle-0 const-install sits on ucode[0]; its per-register write opcode must AND transacting so the held dwell
+    # decodes to the NOP code (0) and installs nothing. This float-slot kernel covers the mechanism.
+    _assert_effect_trigger_gated(_ConstInstallState().__call__, "gate_cwe", "uc_op_")
 
 
 def test_pooled_write_enable_is_gated_by_transacting() -> None:
-    # A pooled commit write-enable rides the executing word, so a held ucode[0] (accept dwell) or a stale pre-reset
-    # commit word must commit nothing. Every uc_wen wire ANDs transacting; the single decode-point gate covers both the
-    # register write chains and the err path that consume uc_wen.
-    _assert_effect_trigger_gated(_cycle0_kernel, "gate_we", "uc_wen_")
+    # A pooled commit rides the executing word, so a held ucode[0] (accept dwell) or a stale pre-reset commit word must
+    # commit nothing. Every write opcode ANDs transacting; the single decode-point gate covers both the register write
+    # cases and the err path that reads those opcodes.
+    _assert_effect_trigger_gated(_cycle0_kernel, "gate_we", "uc_op_")
 
 
 def _run_bench(name: str, lir: Lir, testcase: str, env: dict[str, int], monkeypatch: pytest.MonkeyPatch) -> None:

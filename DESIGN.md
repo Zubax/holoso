@@ -305,8 +305,8 @@ writes, and an issue cycle; the makespan is the last commit cycle, and the obser
 from it and the fetch timing of the datapath. LIR exposes a minimal API plus shared analysis helpers (per-cycle
 grouping, liveness, read/writer sets) so backends do not each re-derive them.
 
-Storage is a sparse register file synthesized per kernel: each operand's read mux spans only the registers it reads,
-each register's write select only its actual writers (see Backend for the encoding). A CPU-conventional full-reach
+Storage is a sparse register file synthesized per kernel: each operand's read mux spans only the sources it reads,
+each register's write mux only the sources it takes (see Backend for the encoding). A CPU-conventional full-reach
 crossbar was tried first and abandoned -- its read/write port multiplexors imposed untenable timing.
 
 ### Scheduling
@@ -366,9 +366,9 @@ Persistent state slots. Both banks commit state in place: a live-out is written 
 read-first, so a same-frame self-update (`self.x = self.x | y`, an accumulator) reads the old value and writes the new
 one with no copy. A conditional or loop update whose "unchanged" arm is the slot live-in coalesces onto the slot
 register through the same phi-arm union-find. When it cannot commit in place (a genuine overlap, a folded sign, or a
-chained copy `self.a = self.b`) the live-out keeps its own register and a pc-gated copy installs it as early as the old
-live-in is read. Two slots that always hold the same value collapse onto one register (a public attribute and its
-private alias), dropping the duplicate register and its install copy. State
+chained copy `self.a = self.b`) the live-out keeps its own register and a microcode-driven copy installs it as early as
+the old live-in is read. Two slots that always hold the same value collapse onto one register (a public attribute and
+its private alias), dropping the duplicate register and its install copy. State
 registers are the one datapath exception that reset reaches (each loaded with its snapshot); pure datapath state stays
 out of the reset cone.
 
@@ -401,7 +401,7 @@ never a miscompile. Unifying the two is tracked future work.
 ### DEFERRED
 
 Aggressive cross-block overlap: the landed pipelining shrinks a terminator only to its issue-side envelope, so
-write-enable words stay in-block and no microcode is replicated. Pushing further -- letting the write-enable words spill
+write-opcode words stay in-block and no microcode is replicated. Pushing further -- letting the write-opcode words spill
 past the terminator -- would shave the remaining per-block tail but needs the commit-side control fields replicated into
 every successor arm, policed by the single-writer microcode validator (already in place). Overlap also stays off across
 any multi-predecessor edge.
@@ -425,40 +425,46 @@ scheduling only adds to the makespan/II; the depth is currently fixed but may be
 The schedule replays step by step: at PC 0 the machine accepts and parallel-loads inputs into the low registers of each
 bank in one cycle (gated by `in_valid`); the PC advances every clock; at the last PC it asserts `out_valid` while
 outputs drive combinationally from their registers by fixed index. Both banks read combinationally, so each operand's
-read-address control rides its issue step (a combinational read mux samples the operand a fetch lag later) and the
-write-enable/address its commit step. The PC holds only at the two I/O boundaries; bubble steps carry an explicit NOP.
-While the PC dwells it re-fetches that word each cycle, but `transacting` (high only while a transaction is in flight)
-gates every operator's `in_valid` and the register write-enables, so the idle re-fetch commits nothing and the entry
-word can carry real work.
+read opcode rides its issue step (a combinational read mux samples the operand a fetch lag later) and each register's
+write opcode its source's executing step. The PC holds only at the two I/O boundaries; bubble steps carry an explicit
+NOP. While the PC dwells it re-fetches that word each cycle, but `transacting` (high only while a transaction is in
+flight) forces every operator's `in_valid` and every register's write opcode to the inert NOP code, so the idle
+re-fetch commits nothing and the entry word can carry real work.
 
-The control word stores selectors and addresses, never data. An inline firing (boolean logic, a cast) is a single
-PC-gated statement rendered by the operator's own expression rather than a microcode lane, because it fires once at a
-statically known step. A control field constant across the whole program (common for sign controls, single-reader read
-addresses, single-writer destinations) is driven by a constant net and lifted out of the ROM, so synthesis prunes what
-it feeds; the Python ROM packer and the module's bit-slice offsets are produced together so they cannot drift. A strobe
-field (operator issue, the write-enables) instead ANDs `transacting` into its decode, so a dwelling re-fetch is inert.
+The control word stores selectors and value routing is uniform across two dual endpoints: a per-operand READ opcode
+selects that port's source, and a per-register WRITE opcode selects that register's next value (code 0 == NOP hold).
+An operator output, an inline expression (boolean logic, a cast, a select), and a phi-arm/constant/state
+move are all just sources one write opcode picks, so PC gates no datapath read or write -- it is left to control flow
+alone. A control field constant across the whole program (sign controls, single-source ports and registers) is driven
+by a constant net and lifted out of the ROM, so synthesis prunes what it feeds; the Python ROM packer and the module's
+bit-slice offsets are produced together so they cannot drift. A gated field (an operator issue strobe or a write
+opcode) ANDs `transacting` into its decode -- a width-generic mask to the NOP code -- so a dwelling re-fetch is inert.
 
-Sparse storage. A multi-reader operand's read mux is a `case` over its dense read-set index selecting a register
-directly. This deliberately avoids an indexed part-select into a packed gather bus, whose variable offset is a multiply
-that, at a non-power-of-two word width, makes Lattice Diamond's LSE infer a DSP per operand on the read path; a `case`
-has no offset arithmetic at all and measures smaller and faster on every flow. Each register's write select is a one-hot
-over only its writers. Both sides carry a set-local index sized to the set, never the file-wide register index, so the
-ROM word stays narrow.
+Sparse storage. Each operand's read mux is a `case` over its read codebook -- the registers it reads plus each distinct
+constant it reads (a constant's magnitude, its sign riding the operand-sign field into the wrapper) -- and each
+register's write is a `case` over its write codebook, both indexed by the endpoint's dense opcode. The `case` form
+deliberately avoids an indexed part-select into a packed gather bus, whose variable offset is a multiply that, at a
+non-power-of-two word width, makes Lattice Diamond's LSE infer a DSP per operand; a `case` has no offset arithmetic and
+measures smaller and faster on every flow. A single-source read port drives its lone source directly and needs no
+opcode field (a single-source register still carries a 1-bit write opcode -- its folded write-enable/NOP); every opcode
+is sized to its own codebook, never the file-wide index, so the ROM word stays narrow.
 
 Errors are non-fatal and informative: each error-bearing operator's flag (`div0`, `domain_error`, etc.) ORs into a
-global `err` gated by that instance's write-enable, and an `err_pc` latch records the executing step of the last error
-(reset at every accept).
+global `err` gated by whether some destination register's write opcode selects that instance's output this step (its
+commit window), and an `err_pc` latch records the executing step of the last error (reset at every accept).
 
 Reset covers the control registers and the persistent state registers: the reset arm loads each state register with its
-snapshot while the non-reset arm applies that register's update chain (its coalesced writebacks and boundary install),
-the two segregated as the arms of one `rst` condition. The fetch registers and the rest of the datapath are
-reset-unconditional (so they pack into the BRAM output register) and settle to the first word under reset. The control
-word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
+snapshot while the non-reset arm applies that register's opcode-selected update and its boundary install (a
+handshake-gated arm at `out_valid && out_ready`), the two segregated as the arms of one `rst` condition. The fetch
+registers and the rest of the datapath are reset-unconditional (so they pack into the BRAM output register) and settle
+to the first word under reset. The control word and datapath skeleton are the only ZISC-specific part --
+LIR itself is controller-agnostic.
 
 Why read-first plus a +1 dependency cycle, not write-through forwarding? Write-through would erase the +1 but its
 forwarding muxes cost `O(NRD*NWR)`, and we need many ports -- unsustainable. Read-first plus the +1, hidden under
-pipelined overlap, is the better trade. Constant operands are kept as immediates on the input mux; folding them into the
-register file or emitting constant-load micro-instructions are noted alternatives for when this becomes a constraint.
+pipelined overlap, is the better trade. Constant operands are kept as immediate `const_N` nets the read opcode selects,
+never stored in the ROM word; folding them into the register file or emitting constant-load micro-instructions are noted
+alternatives for when this becomes a constraint.
 
 Each operator instance carries its own parameters and float format, fixed at construction from the `OpConfig`. Every
 instantiation lists every hardware parameter explicitly, so it is self-describing and turns a param-name mismatch into a
@@ -516,12 +522,16 @@ so the dead ends are not re-explored.
 
 Adopted (lossless, f_max-neutral):
 
-- Read mux as a `case` over the dense read-set index rather than an indexed part-select into a packed gather bus:
-  smallest and fastest of the encodings tried. Nested-ternary muxes are catastrophic.
+- Read and write muxes as a `case` over the endpoint's dense opcode (the read codebook folds in the constants a port
+  reads; the write codebook, the sources a register takes) rather than an indexed part-select into a packed gather bus,
+  or the nested-ternary const-pool selector it replaced: smallest and fastest of the encodings tried. Nested-ternary
+  muxes are catastrophic.
 - Commutative operand port assignment, solved exactly as a MILP: a few percent LUT on the EKF across all three tools, at
   zero hardware or latency cost. Based on Chen & Cong.
-- Dense write-target index and a grouped input load: read/write symmetry at neutral area. The per-register write select
-  beats a per-instance write demux.
+- A per-register write opcode and a grouped input load: read/write symmetry (read selects a source per port, write
+  selects a source per register) that folds every write-enable, write-address, const-pool selector, and boolean
+  inversion into one tiny opcode, at modest ROM cost. A signed-constant install folds its sign into a compile-time
+  constant; a register-source sign stays a runtime `holoso_fsgnop`.
 
 Explored and rejected for register-pressure-bound kernels:
 

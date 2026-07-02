@@ -16,8 +16,9 @@ retry them until success.
 Given a trade-off between performance and simplicity, always choose simplicity.
 Clear designs are easier to verify, maintain, and refactor, and they are more likely to be correct.
 
-Write only minimal comments that add rationale, high-level context, or non-obvious implications.
-Avoid comments that merely describe what the code does or restate what is already evident from the type system.
+Do not write any comments or docs unless they add something that is impossible to infer from the source code,
+such as design rationale, high-level context, non-obvious implications, etc.
+Comments that describe what the code does or restate what is inferrable from the type system are strictly prohibited.
 
 ### Reset strategy
 

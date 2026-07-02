@@ -1,25 +1,25 @@
 """
 The microcode model for the Verilog ZISC backend.
 
-From a scheduled :class:`Lir` this derives the per-step VLIW control word: the dedicated read/write port assignment,
-every control field and its value on each step (``None`` == don't-care), and the partition into constant fields
-(driven by constant nets) versus varying fields (packed into the ROM word). It also owns the Verilog-safe naming the
-emitter wires up. It emits no Verilog text -- that is the emitter's job; this module is pure data.
+From a scheduled :class:`Lir` this derives the per-step VLIW control word. Datapath value routing is expressed as
+dense per-endpoint opcodes parsed by ``case`` statements -- the two endpoints are duals:
 
-Write control is per OUTPUT-PORT LANE, keyed ``(instance, port)``: a lane's write-enable/address ride the commit step
-itself (both banks write combinationally). A wide lane carries its issue-step sign conditioner ``y_sgnop``; a boolean
-lane carries a 1-bit inversion conditioner on the commit step (the boolean dual, applied as a fabric XOR at the register
-write). A lane exists only if some firing taps it; a never-tapped module output gets no fields and is left unconnected.
+- a READ endpoint is an operator operand port; its opcode selects one source from that port's read codebook;
+- a WRITE endpoint is a register; its opcode selects one source from that register's write codebook,
+  with code 0 reserved for NOP (hold).
+
+Everything a register can take on a cycle is thus one tiny opcode, carrying its write-enable, destination select,
+const-pool select, and boolean inversion together; PC is left to control flow alone. This module is pure data -- the
+emitter owns the Verilog text and renders each source key.
 """
 
 from dataclasses import dataclass
 from string import ascii_letters
 
 from ..._lir import (
-    BoolConstRef,
+    BoolOperand,
     BoolRegRef,
     FloatConstRef,
-    FloatCopy,
     FloatOperand,
     Lir,
     OperatorInstance,
@@ -27,7 +27,7 @@ from ..._lir import (
     RegRef,
     pooled_write_word,
 )
-from ..._operators import FloatSignControl
+from ..._operators import BoolInversion, InlineHardwareOperator, PortConditioner
 from ..._type import is_wide_type
 
 PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
@@ -38,10 +38,11 @@ class Field:
     """
     One scalar control field of the microcode word, with its value on every step (``None`` == don't-care).
 
-    ``is_strobe`` marks an effect trigger (operator issue, or a register write-enable): it is concrete every step
-    (inert 0 when idle) and ``transacting``-gated at the decode, so a held ``ucode[0]`` dwell commits nothing. Every
-    other field is qualifying data, a don't-care while its strobe is inactive, never gated. The gate keys on this
-    explicit flag, not on a resting value of 0, so a future concrete-zero non-strobe field is not silently gated.
+    ``gated`` marks an effect trigger (an operator issue strobe, or a per-register write opcode): it is concrete every
+    step (inert 0 when idle) and ANDed with ``transacting`` at the decode -- ``& {width{transacting}}`` -- so a held
+    ``ucode[0]`` dwell, a fill bubble, or a stale pre-reset word decodes to 0 (NOP) and commits nothing. A write opcode
+    reserves code 0 for NOP, so the mask is exactly a NOP. Every other field is qualifying data, a don't-care while its
+    trigger is inactive, never masked.
 
     After :func:`finalize_fields`, a field is either constant across the program (``offset < 0``; driven by the
     constant net ``const_value``) or varying (stored at bit ``offset`` of the ROM word).
@@ -50,18 +51,14 @@ class Field:
     name: str
     width: int
     values: list[int | None]
-    is_strobe: bool = False
+    gated: bool = False
     offset: int = -1
     const_value: int = 0
 
-    def __post_init__(self) -> None:
-        # A strobe is ANDed with the 1-bit ``transacting`` at the decode, so it must itself be 1-bit.
-        assert not self.is_strobe or self.width == 1, f"strobe field {self.name!r} must be 1-bit"
-
     @property
     def default(self) -> int | None:
-        """Resting value on a don't-care step: a strobe is inert (0); a non-strobe is an unconstrained don't-care."""
-        return 0 if self.is_strobe else None
+        """Resting value on a don't-care step: a gated field is inert (0); a plain field is unconstrained (None)."""
+        return 0 if self.gated else None
 
 
 def base_name(inst: OperatorInstance) -> str:
@@ -73,163 +70,126 @@ def code_width(count: int) -> int:
     return max(1, (count - 1).bit_length()) if count > 1 else 1
 
 
-def write_target_lists(lir: Lir) -> dict[tuple[OperatorInstance, int], list[int]]:
+# Source descriptors: value-equal keys the codebooks dedup on, and which the emitter renders to an RHS net/expression.
+# A read source reuses the LIR refs directly (``regs[i]`` / ``const_i``); the write sources below discriminate the four
+# ways a register takes a value.
+type ReadSource = RegRef | FloatConstRef
+
+
+@dataclass(frozen=True, slots=True)
+class OpWriteSource:
     """
-    Per output-port lane ``(instance, port)``, the sorted distinct registers it ever writes -- the lane's
-    write-address codebook (its bank is implied by the destinations' type). The write-address field carries the
-    position in this list, not the raw register index, so its width is ``code_width(M)`` over the lane's ``M``
-    targets rather than the whole register file. The per-register write selector compares against the same position,
-    so the recode is transparent (no decode logic on the consumer) and mirrors the read side, where the read-address
-    field carries the dense read-set index. Lanes never tapped by any firing are absent.
+    A pooled operator output lane. A boolean lane folds its fabric inversion into ``invert``; a wide lane's sign rides
+    the wrapper (the ``y*sgn`` field), so its ``invert`` is always False and equal signs never split the opcode.
     """
-    targets: dict[tuple[OperatorInstance, int], list[int]] = {}
-    for op in lir.ops:
-        for write in op.writes:
-            regs = targets.setdefault((op.inst, write.port), [])
-            if write.dst.index not in regs:
-                regs.append(write.dst.index)
-    for regs in targets.values():
-        regs.sort()
-    return targets
+
+    inst: OperatorInstance
+    port: int
+    invert: bool
 
 
-# Microcode field names. Signal names (``s_<base>_*``) and field names (``uc_*_<base>``) live in disjoint namespaces.
-def f_raddr(port: int) -> str:
-    return f"uc_raddr{port}"
+@dataclass(frozen=True, slots=True)
+class InlineWriteSource:
+    """An inline-operator combinational result; structurally identical results dedup to one opcode (loop bodies)."""
+
+    operator: InlineHardwareOperator
+    operands: tuple[FloatOperand | BoolOperand, ...]
+    conditioner: PortConditioner
 
 
+@dataclass(frozen=True, slots=True)
+class FloatMoveWriteSource:
+    """A wide phi-arm copy, a constant install (any folded sign), or an early state writeback -- a move of one tap."""
+
+    operand: FloatOperand
+
+
+@dataclass(frozen=True, slots=True)
+class BoolMoveWriteSource:
+    """A boolean phi-arm write or constant install -- a move of one boolean tap (its inversion folded)."""
+
+    operand: BoolOperand
+
+
+type WriteSource = OpWriteSource | InlineWriteSource | FloatMoveWriteSource | BoolMoveWriteSource
+
+
+@dataclass(frozen=True, slots=True)
+class WriteEvent:
+    """One microcode-driven register write: which register takes which ``source`` on which ROM (executing) ``step``."""
+
+    dst: RegRef | BoolRegRef
+    source: WriteSource
+    step: int
+
+
+@dataclass(frozen=True, slots=True)
+class ReadCodebook:
+    """
+    An operand port's ordered read sources and the dense opcode that selects among them: code ``i`` picks
+    ``sources[i]`` over ``opcode_width`` bits. A single-source port drives its source directly and carries no field.
+    """
+
+    sources: tuple[ReadSource, ...]
+
+    @property
+    def opcode_width(self) -> int:
+        return code_width(len(self.sources))
+
+    def code(self, source: ReadSource) -> int:
+        return self.sources.index(source)
+
+    def arms(self) -> list[tuple[int, ReadSource]]:
+        return list(enumerate(self.sources))
+
+
+@dataclass(frozen=True, slots=True)
+class WriteCodebook:
+    """
+    A register's ordered write sources and the dense opcode that selects among them, code 0 reserved for the NOP hold:
+    code ``i+1`` picks ``sources[i]`` over ``opcode_width`` bits. A register with no sources carries no write opcode.
+    """
+
+    sources: tuple[WriteSource, ...]
+
+    @property
+    def opcode_width(self) -> int:
+        return code_width(len(self.sources) + 1)  # +1: code 0 is the NOP hold
+
+    def code(self, source: WriteSource) -> int:
+        return self.sources.index(source) + 1
+
+    def arms(self) -> list[tuple[int, WriteSource]]:
+        return [(index + 1, source) for index, source in enumerate(self.sources)]
+
+
+# Microcode field names. Signal names (``s_<base>_*``) and field names (``uc_*``) live in disjoint namespaces.
 def f_issue(base: str) -> str:
     return f"uc_issue_{base}"
-
-
-def f_osgn(base: str, letter: str) -> str:
-    return f"uc_{base}_{letter}sgn"
 
 
 def f_imm(base: str, name: str) -> str:
     return f"uc_{base}_imm_{name}"
 
 
+def f_osgn(base: str, letter: str) -> str:
+    return f"uc_{base}_{letter}sgn"
+
+
 def f_ysgn(base: str, port: int) -> str:
     return f"uc_{base}_y{port}sgn"
 
 
-def f_csel(port: int) -> str:
-    return f"uc_csel{port}"
+def f_rd(port: int) -> str:
+    return f"uc_rd{port}"
 
 
-def f_cidx(port: int) -> str:
-    return f"uc_cidx{port}"
-
-
-def f_wen(base: str, port: int) -> str:
-    return f"uc_wen_{base}_y{port}"
-
-
-def f_waddr(base: str, port: int) -> str:
-    return f"uc_waddr_{base}_y{port}"
-
-
-def f_binv(base: str, port: int) -> str:
-    return f"uc_binv_{base}_y{port}"
-
-
-# Per-REGISTER constant-install fields: a phi-arm constant install is not an operator, so it has no (instance, port)
-# write lane. Each destination register that receives a ucode-driven constant install carries a 1-bit write-enable; a
-# wide register additionally carries a const-pool index selector when it installs more than one distinct constant, and
-# a boolean register carries the 1-bit value. Names key on ``stable_label`` (``r<k>``/``b<k>``), disjoint from the
-# operator-lane fields (``uc_*_<base>_y<port>``).
-def f_cwen(dst: RegRef | BoolRegRef) -> str:
-    return f"uc_cwen_{dst.stable_label}"
-
-
-def f_ccidx(reg: RegRef) -> str:
-    return f"uc_ccidx_{reg.stable_label}"
-
-
-def f_cval(breg: BoolRegRef) -> str:
-    return f"uc_cval_{breg.stable_label}"
-
-
-def is_ucode_const_copy(copy: FloatCopy) -> bool:
-    """
-    Whether a wide phi-arm copy is a constant install the microcode can drive directly: a constant source with the
-    identity sign, so its write data is a bare ``const_N`` net needing no register read port and no sign conditioning.
-    A register-source copy (needs a read port) or a signed constant install (``-CONST``, whose write data is an inline
-    ``holoso_fsgnop`` expression rather than a bare net) stays pc-gated -- the deferred harder cases.
-    """
-    return copy.is_const and copy.source.sign == FloatSignControl()
-
-
-def const_install_codebooks(lir: Lir) -> dict[int, list[int]]:
-    """
-    Wide register -> the sorted distinct const-pool indices its ucode-driven constant installs use -- the per-register
-    write-data codebook the ``uc_ccidx`` selector indexes (the write-side analogue of ``port_const_map``). A register
-    installing a single constant has a one-entry book (the selector is then a lifted-out constant, no ROM bits).
-    """
-    books: dict[int, list[int]] = {}
-    for block in lir.blocks:
-        for copy in block.copies:
-            if is_ucode_const_copy(copy):
-                assert isinstance(copy.source.source, FloatConstRef)
-                book = books.setdefault(copy.dst.index, [])
-                if copy.source.source.index not in book:
-                    book.append(copy.source.source.index)
-    for book in books.values():
-        book.sort()
-    return books
-
-
-def const_install_bool_regs(lir: Lir) -> list[int]:
-    """
-    The boolean registers that receive a ucode-driven constant install (the bool analogue of
-    :func:`const_install_codebooks`; a boolean constant carries no pool, only its 1-bit value).
-    """
-    return sorted({write.dst.index for block in lir.blocks for write in block.bool_writes if write.is_const})
-
-
-def _op_expr(op: PooledScheduledOp) -> str:
-    dsts = "/".join(write.conditioner.decorate(write.dst.stable_label) for write in op.writes)
-    operands = [operand.stable_label for operand in op.operands]
-    return f"{dsts}={op.inst.operator.render(*operands, immediates=op.immediates)}"
-
-
-def const_installs_by_step(lir: Lir) -> dict[int, list[str]]:
-    """
-    Per ROM step, the constant installs whose write-enable that microcode word carries (the ``uc_cwen_*`` strobes
-    :func:`build_microcode` sets), each rendered ``dst=source`` in the issue/commit summary's vocabulary. Mirrors that
-    function's predicate (``is_ucode_const_copy`` / ``BoolWrite.is_const``) and step (``block_base + issue_cycle``); a
-    register-source or signed-const install stays pc-gated -- not a word bit -- so it is excluded here.
-    """
-    installs: dict[int, list[str]] = {}
-    for block in lir.blocks:
-        base_pc = lir.block_base[block.index]
-        for copy in block.copies:
-            if is_ucode_const_copy(copy):
-                installs.setdefault(base_pc + copy.issue_cycle, []).append(
-                    f"{copy.dst.stable_label}={copy.source.stable_label}"
-                )
-        for bwrite in block.bool_writes:
-            if bwrite.is_const:
-                installs.setdefault(base_pc + bwrite.issue_cycle, []).append(
-                    f"{bwrite.dst.stable_label}={bwrite.source.stable_label}"
-                )
-    return installs
-
-
-def cycle_summary(issues: list[PooledScheduledOp], commits: list[PooledScheduledOp], installs: list[str]) -> str:
-    parts: list[str] = []
-    if issues:
-        parts.append("issue " + ", ".join(_op_expr(op) for op in issues))
-    if commits:
-        parts.append("commit " + ", ".join("/".join(write.dst.stable_label for write in op.writes) for op in commits))
-    if installs:
-        parts.append("install " + ", ".join(installs))
-    return "; ".join(parts)
+def f_op(dst: RegRef | BoolRegRef) -> str:
+    return f"uc_op_{dst.stable_label}"
 
 
 def read_ports(lir: Lir) -> dict[tuple[OperatorInstance, int], int]:
-    """One dedicated read port per operator operand, numbered in instance/operand order (counts to ``nrd``)."""
+    """One dedicated read port per operator operand, numbered in instance/operand order."""
     read_port: dict[tuple[OperatorInstance, int], int] = {}
     for inst in lir.instances:
         for pos in range(inst.operator.arity):
@@ -237,52 +197,113 @@ def read_ports(lir: Lir) -> dict[tuple[OperatorInstance, int], int]:
     return read_port
 
 
-def port_const_map(lir: Lir, read_port: dict[tuple[OperatorInstance, int], int]) -> dict[int, list[int]]:
-    """Read port -> the distinct constant-pool indices it ever sources (drives the per-operand constant select)."""
-    port_consts: dict[int, list[int]] = {}
+def tapped_lanes(lir: Lir) -> set[tuple[OperatorInstance, int]]:
+    """The operator output ports some firing writes -- an untapped port gets no nets and is left unconnected."""
+    return {(op.inst, write.port) for op in lir.ops for write in op.writes}
+
+
+def _read_ref(operand: FloatOperand) -> ReadSource:
+    """
+    The read-codebook key of a float operand: its register, or its constant magnitude (the sign rides ``uc_*sgn``).
+    """
+    return operand.source  # a RegRef, or a nonnegative-pool FloatConstRef (its magnitude); the sign is separate
+
+
+def read_codebook(lir: Lir, read_port: dict[tuple[OperatorInstance, int], int]) -> dict[int, ReadCodebook]:
+    """
+    Per operand port, the ordered distinct read sources: the registers it reads (read-set order) then each distinct
+    constant magnitude it reads (first-appearance over the schedule). The read opcode carries the position, so its
+    width is ``code_width`` over this book; a single-source port keeps its lone source and needs no opcode field.
+    """
+    sources: dict[int, list[ReadSource]] = {port: [] for port in read_port.values()}
+    for key, regs in lir.read_set_per_port.items():
+        sources[read_port[key]] = [RegRef(reg) for reg in regs]
     for op in lir.ops:
         for pos, operand in enumerate(op.operands):
-            if isinstance(operand.source, FloatConstRef):
-                port = read_port[(op.inst, pos)]
-                port_consts.setdefault(port, [])
-                if operand.source.index not in port_consts[port]:
-                    port_consts[port].append(operand.source.index)
-    return port_consts
+            if isinstance(operand, FloatOperand) and isinstance(operand.source, FloatConstRef):
+                book = sources[read_port[(op.inst, pos)]]
+                ref = _read_ref(operand)
+                if ref not in book:
+                    book.append(ref)
+    return {port: ReadCodebook(tuple(srcs)) for port, srcs in sources.items()}
+
+
+def write_events(lir: Lir) -> list[WriteEvent]:
+    """
+    Every microcode-driven register write as ``(dst, source, ROM step)``, in one deterministic traversal shared by the
+    codebook builder and the packer so the code<->source mapping cannot drift. The ROM step is the source's executing
+    step (the fetch PC it fires on, minus the fetch lag): a pooled write rides its commit cycle, an inline/copy/write
+    rides ``block_base + issue/commit``, an early state install rides ``state_copy_step - fetch_lag``. Boundary state
+    installs (and all boolean state installs, which are boundary-only) are handshake-gated special arms, not opcode
+    sources, so they are excluded here.
+    """
+    events: list[WriteEvent] = []
+    for op in lir.ops:
+        for write in op.writes:
+            if isinstance(write.dst, RegRef):
+                invert = False  # a wide lane's sign rides the wrapper, not the opcode
+            else:
+                assert isinstance(write.conditioner, BoolInversion)
+                invert = write.conditioner.invert
+            events.append(
+                WriteEvent(write.dst, OpWriteSource(op.inst, write.port, invert), pooled_write_word(op.commit_cycle))
+            )
+    for block in lir.blocks:
+        base = lir.block_base[block.index]
+        for inline_op in block.inline_ops:
+            source = InlineWriteSource(inline_op.operator, tuple(inline_op.operands), inline_op.write.conditioner)
+            events.append(WriteEvent(inline_op.write.dst, source, base + inline_op.commit_cycle))
+        for copy in block.copies:
+            events.append(WriteEvent(copy.dst, FloatMoveWriteSource(copy.source), base + copy.issue_cycle))
+        for bwrite in block.bool_writes:
+            events.append(WriteEvent(bwrite.dst, BoolMoveWriteSource(bwrite.source), base + bwrite.issue_cycle))
+    for slot in lir.float_state_slots:
+        if slot.needs_copy and not lir.float_state_install_is_boundary(slot):
+            events.append(
+                WriteEvent(slot.reg, FloatMoveWriteSource(slot.tap), lir.state_copy_step(slot) - lir.fetch_lag)
+            )
+    return events
+
+
+def write_codebook(
+    events: list[WriteEvent],
+) -> dict[RegRef | BoolRegRef, WriteCodebook]:
+    """Per register, the ordered distinct write sources (first-appearance dedup over :func:`write_events`)."""
+    sources: dict[RegRef | BoolRegRef, list[WriteSource]] = {}
+    for event in events:
+        book = sources.setdefault(event.dst, [])
+        if event.source not in book:
+            book.append(event.source)
+    return {dst: WriteCodebook(tuple(srcs)) for dst, srcs in sources.items()}
 
 
 def build_microcode(
     lir: Lir,
     read_port: dict[tuple[OperatorInstance, int], int],
-    port_consts: dict[int, list[int]],
-    write_lists: dict[tuple[OperatorInstance, int], list[int]],
+    read_books: dict[int, ReadCodebook],
+    write_books: dict[RegRef | BoolRegRef, WriteCodebook],
+    events: list[WriteEvent],
+    tapped: set[tuple[OperatorInstance, int]],
 ) -> dict[str, Field]:
     """
     Build the per-step value table of every control field from the static schedule.
 
-    ``in_valid`` and the write-enables are concrete every step (they gate operation), so they default to 0; every
-    other field is a don't-care (``None``) except on the step its firing issues or commits, which maximises the
-    constant columns that later get lifted out of the ROM.
-
-    Control is placed on the step each operation requires: the read-address group rides the issue step (the read is
-    latch-free, so the datapath samples the operand a fetch lag later); a lane's write-enable and write-address are
-    presented ON the commit step (both banks write combinationally). A WIDE lane's sign conditioner rides the issue
-    step (consumed inside the wrapper); a BOOLEAN lane's inversion rides the commit step with its write-enable. Placing
-    the write word on the commit step -- not one later -- is exactly what gives a branch condition its one cycle of
-    slack at the block boundary.
+    Control is placed on the step each operation requires: the issue strobe, the operand signs, the read opcodes, and a
+    wide result's sign ride the ISSUE step (the read is latch-free, so the datapath samples an operand a fetch lag
+    later); each register's WRITE opcode rides the source's executing step (see :func:`write_events`). A write opcode
+    carries ``code_width(N+1)`` bits over its ``N`` sources with code 0 reserved for the NOP hold; the read opcode
+    carries ``code_width(K)`` over its ``K`` sources with no NOP (a don't-care idle read is harmless).
     """
     depth = lir.last_pc + 1  # one control word per fetch PC: blocks are laid out across 0..last_pc with NOP gaps
     fields: dict[str, Field] = {}
 
-    def add(name: str, width: int, is_strobe: bool = False) -> None:
-        fields[name] = Field(name, width, [0 if is_strobe else None] * depth, is_strobe=is_strobe)
+    def add(name: str, width: int, gated: bool = False) -> None:
+        fields[name] = Field(name, width, [0 if gated else None] * depth, gated=gated)
 
     def put(name: str, step: int, value: int) -> None:
         # Single-writer rule: a field's step slot may be set once to a non-default value (or repeatedly to the same
-        # value). Every write word stays inside its block (only the result LANDING spills into a successor frame -- see
-        # pooled_write_word), so under per-block draining no two firings share a control word and this never fires.
-        # Under cross-block overlap a successor's base PC drops so its head words can share an absolute fetch step with
-        # the predecessor's tail words; this catches at build time any two firings' control words colliding on one slot
-        # instead of silently clobbering.
+        # value). For a write opcode this is exactly "<=1 landing per register per step" -- distinct sources take
+        # distinct codes, so a genuine double-landing on one register trips this rather than silently clobbering.
         field = fields[name]
         current = field.values[step]
         assert (
@@ -290,105 +311,42 @@ def build_microcode(
         ), f"microcode single-writer violation on field {name!r} step {step}: holds {current!r}, cannot write {value!r}"
         field.values[step] = value
 
-    # The read-address field selects within a port's read-set, not the whole register file: it carries the dense
-    # read-set index (0..K-1), so its width is ceil(log2 K) and the emitter's read-mux case selects by it. A
-    # single-reader or always-constant port keeps the constant value finalize_fields lifts out of the ROM.
-    port_read_set = {read_port[key]: regs for key, regs in lir.read_set_per_port.items()}
-
     for inst in lir.instances:
         base = base_name(inst)
-        add(f_issue(base), 1, is_strobe=True)
+        add(f_issue(base), 1, gated=True)
         for imm in inst.operator.immediate_ports:
             add(f_imm(base, imm.name), imm.width)
         for pos in range(inst.operator.arity):
             add(f_osgn(base, PORT_LETTERS[pos]), 2)
             port = read_port[(inst, pos)]
-            add(f_raddr(port), code_width(len(port_read_set.get(port, []))))
-            if port in port_consts:
-                add(f_csel(port), 1)
-                if len(port_consts[port]) > 1:
-                    add(f_cidx(port), code_width(len(port_consts[port])))
-    for (inst, port_index), targets in sorted(write_lists.items(), key=lambda kv: (base_name(kv[0][0]), kv[0][1])):
-        base = base_name(inst)
-        add(f_wen(base, port_index), 1, is_strobe=True)
-        # The write-address field carries the dense write-target index (0..M-1), symmetric to the read-address field.
-        add(f_waddr(base, port_index), code_width(len(targets)))
-        if is_wide_type(inst.operator.signature.result_types[port_index]):
-            add(f_ysgn(base, port_index), 2)
-        else:
-            add(f_binv(base, port_index), 1)
-
-    # Per-register constant-install fields. A wide register's selector is declared only when it installs more than one
-    # distinct constant; otherwise the single index is a constant column finalize lifts out of the ROM. A boolean
-    # register carries its 1-bit value. The write-enable defaults to 0 (concrete every step, so it always packs).
-    const_books = const_install_codebooks(lir)
-    for reg in sorted(const_books):
-        add(f_cwen(RegRef(reg)), 1, is_strobe=True)
-        if len(const_books[reg]) > 1:
-            add(f_ccidx(RegRef(reg)), code_width(len(const_books[reg])))
-    for reg in const_install_bool_regs(lir):
-        add(f_cwen(BoolRegRef(reg)), 1, is_strobe=True)
-        add(f_cval(BoolRegRef(reg)), 1)
+            if len(read_books[port].sources) > 1:
+                add(f_rd(port), read_books[port].opcode_width)
+        for q, result_type in enumerate(inst.operator.signature.result_types):
+            if is_wide_type(result_type) and (inst, q) in tapped:
+                add(f_ysgn(base, q), 2)
+    for dst, book in write_books.items():
+        add(f_op(dst), book.opcode_width, gated=True)
 
     for op in lir.ops:
         base = base_name(op.inst)
-        # The issue step carries in_valid, the sign controls (consumed inside the wrapper), and -- the read being
-        # latch-free -- the read-address group; the datapath samples the operand a fetch lag later.
         ci = op.issue_cycle
         assert 0 <= ci < depth, f"microcode read/issue step out of range: ci={ci}, depth={depth}"
         put(f_issue(base), ci, 1)
         for value, imm in zip(op.immediates, op.operator.immediate_ports, strict=True):
-            put(f_imm(base, imm.name), ci, value)  # per-firing immediate rides the issue step, like the sign controls
+            put(f_imm(base, imm.name), ci, value)
         for pos, operand in enumerate(op.operands):
-            port = read_port[(op.inst, pos)]
             assert isinstance(operand, FloatOperand), "pooled operators read only wide operands today (no read lane)"
             put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.sign.encoded)
-            if isinstance(operand.source, FloatConstRef):
-                put(f_csel(port), ci, 1)
-                if f_cidx(port) in fields:
-                    put(f_cidx(port), ci, port_consts[port].index(operand.source.index))
-            elif isinstance(operand.source, RegRef):
-                if f_csel(port) in fields:
-                    put(f_csel(port), ci, 0)
-                put(f_raddr(port), ci, port_read_set[port].index(operand.source.index))
+            port = read_port[(op.inst, pos)]
+            if f_rd(port) in fields:
+                put(f_rd(port), ci, read_books[port].code(_read_ref(operand)))
         for write in op.writes:
-            lane = (op.inst, write.port)
-            wide = isinstance(write.dst, RegRef)
-            # Both banks write combinationally, so the write-enable/address ride the commit step (NOT one later -- a +1
-            # would land the result past a branch's boundary read). The same step the overlap layout uses to keep every
-            # write word inside the block (see pooled_write_word).
-            wcc = pooled_write_word(op.commit_cycle)
-            assert wcc < depth, f"microcode step out of range: wcc={wcc}, depth={depth}"
-            if wide:
-                put(f_ysgn(base, write.port), ci, write.conditioner.encoded)  # sign rides the wrapper at issue
-            else:
-                put(f_binv(base, write.port), wcc, write.conditioner.encoded)  # inversion applied at the write
-            put(f_wen(base, write.port), wcc, 1)
-            put(f_waddr(base, write.port), wcc, write_lists[lane].index(write.dst.index))
+            if isinstance(write.dst, RegRef):
+                put(f_ysgn(base, write.port), ci, write.conditioner.encoded)  # wide result sign rides the wrapper
 
-    # Constant installs ride the microcode like operator writes: the write-enable (and the wide selector / boolean
-    # value) are placed at ROM step ``block_base + issue_cycle`` == install_pc - fetch_lag, so the datapath write fires
-    # on the very clock the former pc-gate fired -- schedule-neutral. A register-source or signed-const install is not
-    # selected here and stays pc-gated.
-    for block in lir.blocks:
-        base_pc = lir.block_base[block.index]
-        for copy in block.copies:
-            if not is_ucode_const_copy(copy):
-                continue
-            assert isinstance(copy.source.source, FloatConstRef)
-            step = base_pc + copy.issue_cycle
-            assert 0 <= step < depth, f"const-install ROM step out of range: {step}"
-            put(f_cwen(copy.dst), step, 1)
-            if f_ccidx(copy.dst) in fields:
-                put(f_ccidx(copy.dst), step, const_books[copy.dst.index].index(copy.source.source.index))
-        for bwrite in block.bool_writes:
-            if not bwrite.is_const:
-                continue
-            assert isinstance(bwrite.source.source, BoolConstRef)
-            step = base_pc + bwrite.issue_cycle
-            assert 0 <= step < depth, f"const-install ROM step out of range: {step}"
-            put(f_cwen(bwrite.dst), step, 1)
-            put(f_cval(bwrite.dst), step, int(bwrite.source.source.value))
+    for event in events:
+        assert 0 <= event.step < depth, f"microcode write step out of range: step={event.step}, depth={depth}"
+        put(f_op(event.dst), event.step, write_books[event.dst].code(event.source))
 
     return fields
 
@@ -415,3 +373,47 @@ def pack(fields: dict[str, Field], step: int) -> int:
         v = f.values[step]
         word |= ((0 if v is None else v) & ((1 << f.width) - 1)) << f.offset
     return word
+
+
+# ---- ROM-step annotations (human-readable summary shared with the HTML report's schedule view) ----
+def _op_expr(op: PooledScheduledOp) -> str:
+    dsts = "/".join(write.conditioner.decorate(write.dst.stable_label) for write in op.writes)
+    operands = [operand.stable_label for operand in op.operands]
+    return f"{dsts}={op.inst.operator.render(*operands, immediates=op.immediates)}"
+
+
+def _landing_label(dst: RegRef | BoolRegRef, source: WriteSource) -> str:
+    """A non-pooled write rendered ``dst=source`` for the ROM-step comment -- the dual of ``_write_source_rhs``."""
+    match source:
+        case InlineWriteSource(operator=operator, operands=operands, conditioner=conditioner):
+            rendered = operator.render(*[operand.stable_label for operand in operands])
+            return f"{conditioner.decorate(dst.stable_label)}={rendered}"
+        case FloatMoveWriteSource(operand=operand) | BoolMoveWriteSource(operand=operand):
+            return f"{dst.stable_label}={operand.stable_label}"
+        case OpWriteSource():
+            assert False, "pooled commits are named by cycle_summary's commit list, not as landings"
+
+
+def landings_by_step(events: list[WriteEvent]) -> dict[int, list[str]]:
+    """
+    Per ROM step, the non-pooled writes that land there rendered ``dst=source`` -- inline firings, phi-arm copies,
+    boolean writes, and early state installs. Derived from :func:`write_events` (pooled commits are excluded, being
+    named by ``cycle_summary``'s commit list), so the ROM word comment names every value the opcode installs and the
+    emitted RTL stays mappable onto the HTML schedule report.
+    """
+    landings: dict[int, list[str]] = {}
+    for event in events:
+        if not isinstance(event.source, OpWriteSource):
+            landings.setdefault(event.step, []).append(_landing_label(event.dst, event.source))
+    return landings
+
+
+def cycle_summary(issues: list[PooledScheduledOp], commits: list[PooledScheduledOp], landings: list[str]) -> str:
+    parts: list[str] = []
+    if issues:
+        parts.append("issue " + ", ".join(_op_expr(op) for op in issues))
+    if commits:
+        parts.append("commit " + ", ".join("/".join(write.dst.stable_label for write in op.writes) for op in commits))
+    if landings:
+        parts.append("land " + ", ".join(landings))
+    return "; ".join(parts)

@@ -147,7 +147,9 @@ TARGETS: list[SynthTarget] = [
             fdiv=FDivOperator(F_e6m18, stage_output=1),
         ),
     ),
-    for_example("pid", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_output=1))),
+    for_example(
+        "pid", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_input=1, stage_output=1))
+    ),
     for_example("pid", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("schmitt_trigger", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("schmitt_trigger", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
@@ -193,6 +195,7 @@ TARGETS: list[SynthTarget] = [
         op_config(
             F_e6m18,
             fadd=FAddOperator(F_e6m18, stage_input=1),
+            fmul=FMulOperator(F_e6m18, stage_output=1),
             fdiv=FDivOperator(F_e6m18, stage_input=1, stage_output=1),
         ),
         env={"HOLOSO_DIAMOND_HARD": "1"},
@@ -201,7 +204,7 @@ TARGETS: list[SynthTarget] = [
         "ekf1_stateless",
         FlowId.VIVADO_ARTIX7,
         150,
-        op_config(F_e6m18, fmul=FMulOperator(F_e6m18, stage_product=1)),
+        op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_input=1), fmul=FMulOperator(F_e6m18, stage_product=1)),
     ),
     for_example(
         "ekf1_stateful",
@@ -251,7 +254,17 @@ TARGETS: list[SynthTarget] = [
     ),
     for_example("cordic_sincos", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("octave_index", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("octave_index", FlowId.DIAMOND_ECP5, 100, op_config_staged_output(F_e6m18)),
+    for_example(
+        "octave_index",
+        FlowId.DIAMOND_ECP5,
+        100,
+        op_config(
+            F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_input=1, stage_output=1),
+            fmul=FMulOperator(F_e6m18, stage_output=1),
+            fdiv=FDivOperator(F_e6m18, stage_output=1),
+        ),
+    ),
     for_example("octave_index", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("remainder", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example(

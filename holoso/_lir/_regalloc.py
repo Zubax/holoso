@@ -76,8 +76,9 @@ class ColoringProblem:
     ``movable`` are the values to place (in a stable order); ``pinned`` fixes inputs and state live-ins to their
     registers; ``interferes`` is the symmetric adjacency; ``consumer_ports`` and ``producer_key`` drive the mux-fan-in
     objective; ``fresh_start`` is the first register index above the pinned block. There is no write-path restriction:
-    the emitter drives every register with a single priority chain over all its writers, so any two non-interfering
-    values may share a register regardless of whether they are produced by an operator, a phi-arm copy, or a cast.
+    the emitter drives every register with a single write opcode selecting among all its writers, so any two
+    non-interfering values may share a register regardless of whether they are produced by an operator, a phi-arm copy,
+    or a cast.
 
     ``producer_key`` is a SET of producers per value, not a single one: a coalesced phi class is one ``movable`` entry
     backed by every arm operator that writes its register, so the write-select fan-in counts the union of those
