@@ -5,15 +5,15 @@ operator configuration). This is the single source of truth for what the example
 
 Deliberately a dumb-simple data table -- literal frequencies, one explicit row per (example, flow), and a full typed
 OpConfig per row; duplication is preferred over indirection here. Catalogued example targets reuse the shared example
-registry (_examples.SPECS) so each kernel is constructed once; test_synth_targets checks that every catalogued example
-appears. Off-catalogue regression cores may be added as SynthTarget records with example=None.
+registry (_examples.SPECS) so each kernel is constructed once. Off-catalogue regression cores may be added as
+SynthTarget records with example=None.
 
 The bar (all at minimum speed grade): yosys-ecp5 and diamond-ecp5 at 100 MHz, vivado-artix7 at 150 MHz. Almost every
 kernel closes lean; stage knobs are row-local and appear only where measured closure needs them.
 """
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from holoso import (
     FAddOperator,
@@ -73,8 +73,7 @@ class SynthTarget:
     flow: FlowId
     target_frequency_MHz: float
     ops: OpConfig
-    name: str  # descriptive module/report label; unique per flow (guarded by test_synth_targets)
-    env: Mapping[str, str] = field(default_factory=dict)
+    name: str  # descriptive module/report label; unique per flow
     example: str | None = None  # the SPECS name this exercises; None for an off-catalogue regression core
 
     @property
@@ -93,7 +92,6 @@ def for_example(
     *,
     kernel: Callable[[], Callable[..., object]] | None = None,
     name: str | None = None,
-    env: Mapping[str, str] | None = None,
 ) -> SynthTarget:
     """
     A target whose kernel is the catalogued example `example`. The kernel defaults to the SPEC factory, but a kernel
@@ -109,7 +107,6 @@ def for_example(
         target_frequency_MHz=target_frequency_MHz,
         ops=ops,
         name=name or f"{example}_e{fmt.wexp}m{fmt.wman}",
-        env=env or {},
         example=example,
     )
 
@@ -129,7 +126,7 @@ TARGETS: list[SynthTarget] = [
     for_example("madd", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("poly3", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("poly3", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
-    for_example("poly3", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
+    for_example("poly3", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_normalize=1))),
     for_example("signal_window", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("signal_window", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("signal_window", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
@@ -147,7 +144,9 @@ TARGETS: list[SynthTarget] = [
             fdiv=FDivOperator(F_e6m18, stage_output=1),
         ),
     ),
-    for_example("pid", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_output=1))),
+    for_example(
+        "pid", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_input=1, stage_output=1))
+    ),
     for_example("pid", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("schmitt_trigger", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("schmitt_trigger", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
@@ -169,7 +168,9 @@ TARGETS: list[SynthTarget] = [
     for_example("recip_newton", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("integrator", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("integrator", FlowId.DIAMOND_ECP5, 100, op_config_staged_output(F_e6m18)),
-    for_example("integrator", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
+    for_example(
+        "integrator", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_normalize=1))
+    ),
     for_example("uart_tx", FlowId.YOSYS_ECP5, 100, op_config(F_e4m8)),
     for_example("uart_tx", FlowId.DIAMOND_ECP5, 100, op_config(F_e4m8)),
     for_example("uart_tx", FlowId.VIVADO_ARTIX7, 150, op_config(F_e4m8)),
@@ -192,16 +193,20 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_input=1),
+            fadd=FAddOperator(F_e6m18, stage_input=1, stage_normalize=1, stage_output=1),
+            fmul=FMulOperator(F_e6m18, stage_input=1, stage_output=1),
             fdiv=FDivOperator(F_e6m18, stage_input=1, stage_output=1),
         ),
-        env={"HOLOSO_DIAMOND_HARD": "1"},
     ),
     for_example(
         "ekf1_stateless",
         FlowId.VIVADO_ARTIX7,
         150,
-        op_config(F_e6m18, fmul=FMulOperator(F_e6m18, stage_product=1)),
+        op_config(
+            F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_input=1, stage_normalize=1, stage_output=1),
+            fmul=FMulOperator(F_e6m18, stage_product=1),
+        ),
     ),
     for_example(
         "ekf1_stateful",
@@ -221,16 +226,20 @@ TARGETS: list[SynthTarget] = [
         op_config(
             F_e6m18,
             fadd=FAddOperator(F_e6m18, stage_input=1, stage_decode=1, stage_normalize=1, stage_output=1),
+            fmul=FMulOperator(F_e6m18, stage_pack=1),
             fdiv=FDivOperator(F_e6m18, stage_input=1, stage_output=1),
         ),
-        env={"HOLOSO_DIAMOND_HARD": "1"},
         kernel=_ekf1_stateful_kernel,
     ),
     for_example(
         "ekf1_stateful",
         FlowId.VIVADO_ARTIX7,
         150,
-        op_config(F_e6m18, fmul=FMulOperator(F_e6m18, stage_product=1)),
+        op_config(
+            F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_input=1, stage_normalize=1),
+            fmul=FMulOperator(F_e6m18, stage_product=1),
+        ),
         kernel=_ekf1_stateful_kernel,
     ),
     for_example(
@@ -249,9 +258,21 @@ TARGETS: list[SynthTarget] = [
             fmul_ilog2=FMulILog2OperatorFamily(F_e6m18, stage_decode=1),
         ),
     ),
-    for_example("cordic_sincos", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
+    for_example(
+        "cordic_sincos", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_normalize=1))
+    ),
     for_example("octave_index", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("octave_index", FlowId.DIAMOND_ECP5, 100, op_config_staged_output(F_e6m18)),
+    for_example(
+        "octave_index",
+        FlowId.DIAMOND_ECP5,
+        100,
+        op_config(
+            F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_input=1, stage_normalize=1, stage_output=1),
+            fmul=FMulOperator(F_e6m18, stage_output=1),
+            fdiv=FDivOperator(F_e6m18, stage_output=1),
+        ),
+    ),
     for_example("octave_index", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("remainder", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example(
@@ -260,14 +281,16 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(F_e6m18, fdiv=FDivOperator(F_e6m18, stage_input=1, stage_output=1)),
     ),
-    for_example("remainder", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
+    for_example(
+        "remainder", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_normalize=1))
+    ),
     for_example(
         "ekf1_stateless",
         FlowId.YOSYS_ECP5,
         100,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_input=1, stage_decode=1, stage_normalize=1, stage_pack=1, stage_output=1),
+            fadd=FAddOperator(F_e8m36, stage_input=1, stage_decode=1, stage_normalize=2, stage_pack=1, stage_output=1),
             fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=2, stage_pack=1, stage_output=1),
             fdiv=FDivOperator(F_e8m36, stage_input=1, stage_output=1),
             fmul_ilog2=FMulILog2OperatorFamily(F_e8m36, stage_input=1, stage_decode=1),
@@ -286,7 +309,6 @@ TARGETS: list[SynthTarget] = [
             fdiv=FDivOperator(F_e8m36, stage_input=1, stage_pack=1, stage_output=1),
             fmul_ilog2=FMulILog2OperatorFamily(F_e8m36, stage_decode=1),
         ),
-        env={"HOLOSO_DIAMOND_HARD": "1"},
     ),
     for_example(
         "ekf1_stateless",
@@ -305,11 +327,10 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_input=1, stage_decode=1, stage_normalize=1, stage_pack=1),
+            fadd=FAddOperator(F_e8m36, stage_input=1, stage_decode=1, stage_normalize=2, stage_pack=1),
             fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=2, stage_output=1),
             fmul_ilog2=FMulILog2OperatorFamily(F_e8m36, stage_input=1, stage_decode=1),
         ),
-        env={"HOLOSO_YOSYS_HARD": "1"},
         kernel=_ekf1_stateful_kernel,
     ),
     for_example(
@@ -322,7 +343,6 @@ TARGETS: list[SynthTarget] = [
             fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=1, stage_pack=1),
             fdiv=FDivOperator(F_e8m36, stage_input=3, stage_pack=1, stage_output=1),
         ),
-        env={"HOLOSO_DIAMOND_HARD": "1"},
         kernel=_ekf1_stateful_kernel,
     ),
     for_example(
@@ -339,8 +359,4 @@ TARGETS: list[SynthTarget] = [
     ),
 ]
 
-
-# Every environment-variable key any target sets. The harness clears these before applying a target's own env, so an
-# ambient value (e.g. a shell HOLOSO_DIAMOND_HARD=1) cannot leak into a lean row and mask a closure regression by
-# silently running the hard strategy.
-TARGET_ENV_KEYS: frozenset[str] = frozenset(key for target in TARGETS for key in target.env)
+assert len({t.label for t in TARGETS}) == len(TARGETS)  # labels key build dirs and pytest ids

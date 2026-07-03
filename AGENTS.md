@@ -1,7 +1,7 @@
 # Holoso -- simple high-level synthesis of Python into Verilog for numerical code
 
 Holoso converts a small subset of Python functions and expressions into synthesizable and verifiable Verilog.
-Read the `README.md`.
+Read the `README.md` and `DESIGN.md`.
 
 Whenever introducing nontrivial changes, update `DESIGN.md` as well to keep it fully up-to-date and non-conflicting
 with the implementation. However, do not attempt to capture minor implementation minutiae there, keep it high-level.
@@ -16,8 +16,9 @@ retry them until success.
 Given a trade-off between performance and simplicity, always choose simplicity.
 Clear designs are easier to verify, maintain, and refactor, and they are more likely to be correct.
 
-Write only minimal comments that add rationale, high-level context, or non-obvious implications.
-Avoid comments that merely describe what the code does or restate what is already evident from the type system.
+Do not write any comments or docs unless they add something that is impossible to infer from the source code,
+such as design rationale, high-level context, non-obvious implications, etc.
+Comments that describe what the code does or restate what is inferrable from the type system are strictly prohibited.
 
 ### Reset strategy
 
@@ -115,7 +116,6 @@ In complex modules, it is best to avoid a large number of named nets that are on
 Leave unused module outputs unconnected, like `.out_foo()`, instead of creating unused wires.
 
 It is best to keep at most one `always @(posedge clk)` per module, unless there are strong reasons to do otherwise.
-This rule should be followed, in particular, in Verilog emitted by the compiler.
 
 The same register can be assigned multiple times only as long as the assignments reside in different branches that
 cannot be active at the same time and are explicitly segregated with a single condition that is explicit to the
@@ -185,6 +185,8 @@ Special things to look out for:
   multiplicand bitwidth exceeds the DSP slice input width.
 - Retiming is sneaky: a moved stage may cause a different path to become critical, so with retiming enabled one needs
   to evaluate the adjacent stages as well.
+- Route-dominated is not automatically unstageable: a register roughly halves routing distributed across a path's logic
+  levels (one shared `fadd` normalize stage can lift a cluster of rows), but cannot shorten a single high-fanout net.
 
 More pipeline stages do not necessarily improve f_max, and can cost both timing and area. Every optional stage spreads
 that operator's flip-flops across more slices; on a wide, register-pressure-heavy datapath this adds routing congestion,

@@ -2,11 +2,13 @@
 """
 Before/after synthesis comparison for the bundled example matrix.
 
-``capture`` synthesizes every TARGET on the current checkout and writes a JSON of per-target cycle latency (min II and
-last PC), f_max, slack, fabric area, and pass/fail. ``render`` reads a BEFORE and an AFTER JSON and emits a side-by-side
-HTML report with deltas, pass/fail badges, headline totals, and a flag on every target whose operator stage knobs were
-retuned (its f_max delta then reflects change+retune, not an isolated knob-fixed comparison; retuning is detected by a
-changed ops repr). Report-only tooling -- not part of the compiler, no tests, no design-doc coupling.
+``capture`` synthesizes every TARGET on the current checkout and writes a JSON of per-target cycle latency, f_max,
+slack, fabric area, and pass/fail.
+
+``render`` reads a BEFORE and an AFTER JSON and emits a side-by-side HTML report with deltas and a flag on every
+target whose operator stage knobs were retuned.
+
+Report-only tooling -- not part of the compiler, no tests, no design-doc coupling.
 
 Usage:
     python tools/synth_compare.py capture --out before.json
@@ -16,7 +18,6 @@ Usage:
 import argparse
 import html
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -32,7 +33,7 @@ from holoso._hir import optimize  # noqa: E402
 from holoso._lir import build  # noqa: E402
 from holoso._mir import lower as lower_to_mir  # noqa: E402
 from synth.flows import make_flow  # noqa: E402
-from tests._synth_targets import TARGETS, TARGET_ENV_KEYS  # noqa: E402
+from tests._synth_targets import TARGETS  # noqa: E402
 
 # Per-flow resource-primitive names for the LUT/FF/DSP/BRAM report columns; each tool names them differently.
 _RES_KEYS = {
@@ -42,13 +43,6 @@ _RES_KEYS = {
 }
 
 
-def _apply_env(env: dict) -> None:
-    for key in TARGET_ENV_KEYS:
-        os.environ.pop(key, None)
-    for key, value in env.items():
-        os.environ[key] = value
-
-
 def capture(out_path: str) -> None:
     commit = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"], cwd=REPO, capture_output=True, text=True
@@ -56,7 +50,6 @@ def capture(out_path: str) -> None:
     dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=REPO, capture_output=True, text=True).stdout)
     rows = []
     for target in TARGETS:
-        _apply_env(target.env)
         row = {
             "label": target.label,
             "name": target.name,
@@ -64,10 +57,9 @@ def capture(out_path: str) -> None:
             "flow": target.flow.value,
             "target_MHz": target.target_frequency_MHz,
             "ops": repr(target.ops),
-            "env": dict(target.env),
         }
         try:
-            lir = build(lower_to_mir(optimize(lower(target.kernel())), target.ops), target.name)
+            lir = build(lower_to_mir(optimize(lower(target.kernel())), target.ops), target.name, fetch_stages=3)
             row["min_ii"] = lir.min_initiation_interval
             row["last_pc"] = lir.last_pc
             flow = make_flow(target.flow, target.target_frequency_MHz)
@@ -172,9 +164,7 @@ def render(before_path: str, after_path: str, out_path: str) -> None:
     for label in labels:
         a = after[label]
         b = before.get(label, {})
-        retuned = (b.get("ops") is not None and b.get("ops") != a.get("ops")) or (
-            b.get("env") is not None and b.get("env") != a.get("env")
-        )
+        retuned = b.get("ops") is not None and b.get("ops") != a.get("ops")
         ii_b, ii_a = b.get("min_ii"), a.get("min_ii")
         if ii_b is not None and ii_a is not None:
             cycles_saved += ii_b - ii_a
@@ -253,7 +243,7 @@ def render(before_path: str, after_path: str, out_path: str) -> None:
     print(f"Wrote {out_path}")
 
 
-_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Holoso synthesis: before vs after</title>
+_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Holoso synthesis delta report</title>
 <style>
  body{{font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;margin:2rem;color:#1a1a2e;background:#fafaff}}
  h1{{font-size:1.4rem;margin:0 0 .3rem}}
@@ -277,7 +267,7 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Holoso synthe
  .cphdr{{font-size:.76rem;color:#667;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.25rem}}
  .cp pre{{background:#0d1117;color:#c9d1d9;padding:.6rem .8rem;border-radius:6px;font-size:.73rem;overflow-x:auto;white-space:pre;line-height:1.35}}
 </style></head><body>
-<h1>Holoso synthesis — before vs after the <code>ucode[0]</code> NOP reclaim</h1>
+<h1>Holoso synthesis deltas</h1>
 <div class="sub">before <code>{before_commit}</code> ({before_ts}) &nbsp;→&nbsp; after <code>{after_commit}</code> ({after_ts})</div>
 <div class="headline">{headline}</div>
 <table><thead><tr>

@@ -64,10 +64,9 @@ def _tcl(top: str, part: str, verilog_paths: list[Path]) -> str:
             f"read_xdc {_XDC}",
             f"synth_design -top {top} -part {part} -mode out_of_context "
             "-directive PerformanceOptimized -global_retiming on -resource_sharing off",
-            "opt_design -directive Explore",
-            "place_design -directive ExtraTimingOpt",
-            "phys_opt_design -directive AddRetime",
-            "route_design -directive AggressiveExplore -tns_cleanup",
+            "opt_design -directive Default",
+            "place_design -directive Default",
+            "route_design -directive Default -tns_cleanup",
             f"report_utilization -file {_UTIL}",
             f"report_timing -delay_type max -max_paths 1 -nworst 1 -file {_TIMING}",
             "",

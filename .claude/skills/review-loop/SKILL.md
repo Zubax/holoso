@@ -12,6 +12,10 @@ After a change or milestone, or when prompted, dispatch a fan-out of fresh-conte
 MAXIMUM THINKING EFFORT, then consolidate, fix, and repeat.
 The goal is broad coverage from adversarial, diverse, independent perspectives.
 
+The prompts given to the agents shall be extremely terse, at most a couple of sentences.
+Giving excessive detail may constrain their thinking causing the tunnel vision syndrome.
+They must be given the opportunity to look at the work without bias or prejudice.
+
 ## Fan out — one focus per agent
 
 Spawn one agent per concern and run them in parallel. Never give an agent multiple jobs: it dilutes attention

@@ -298,7 +298,10 @@ class NumericalSimulator(_Kernel):
 
     def _apply(self, pc: int) -> None:
         # Commit the landings due here BEFORE sampling this PC's reads/installs (read-first within the cycle).
-        for dst, value in self._pending.pop(pc, ()):
+        # At most one landing per register per PC (interference graph + single per-register write opcode).
+        landings = self._pending.pop(pc, ())
+        assert len({dst for dst, _ in landings}) == len(landings), f"reg landing conflict @ pc {pc}: {landings}"
+        for dst, value in landings:
             self._write(dst, value)
         for event in self._op_events.get(pc, ()):
             results = event.op.operator.evaluate(

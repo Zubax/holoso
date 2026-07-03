@@ -15,14 +15,14 @@ from ._mir_facts import mir_operation, mir_rpo, succ_map
 def _value_word_and_landing(mir: Mir, vid: ValueId, issue: int, fetch_lag: int) -> tuple[int, int, HardwareOperator]:
     """
     For a scheduled value, the (last in-block control WORD, result LANDING) in its block-local frame. The word is the
-    latest fetch step the op still drives -- a pooled lane's write-enable on its commit step or an inline op's
+    latest fetch step the op still drives -- a pooled lane's write opcode on its commit step or an inline op's
     combinational fire step; the result lands later, after the fetch pipeline. Cross-block overlap may place
     ``term_offset`` between the two: the word stays in the block, the landing spills into the (single-predecessor)
     successor frame.
     """
     operator = mir_operation(mir, vid).operator
     commit = issue + operator.latency
-    # The control WORD placement still distinguishes the op class: a pooled lane drives its write-enable word on the
+    # The control WORD placement still distinguishes the op class: a pooled lane drives its write-opcode word on the
     # commit step, an inline op fires its combinational statement one fetch_lag later. The result LANDING is uniform.
     word = (
         pooled_write_word(commit)

@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
+
 from holoso import SynthesisResult
+
 from .._synth import SynthArtifact
 
 

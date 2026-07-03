@@ -243,10 +243,9 @@ def test_kernel_without_outputs_is_rejected() -> None:
 
 
 @requires_iverilog
-def test_state_port_name_does_not_collide_with_internal_sign_wire(tmp_path: Path) -> None:
+def test_state_slot_folded_sign_coexists_with_sibling_port(tmp_path: Path) -> None:
     # A public attribute `y_d` becomes the port state_y_d; a sibling slot `y` whose boundary copy carries a folded sign
-    # used to emit an internal wire also named state_y_d, producing a duplicate (multiply-driven) identifier. The
-    # internal sign wire must live outside the state_<attr> port namespace, so the module elaborates cleanly.
+    # is emitted as an inline holoso_fsgnop() call in the state install. Both must elaborate cleanly together.
     class Collide:
         def __init__(self) -> None:
             self.y = 0.0
@@ -255,7 +254,7 @@ def test_state_port_name_does_not_collide_with_internal_sign_wire(tmp_path: Path
 
         def __call__(self, x):  # type: ignore[no-untyped-def]
             self.y_d = self._p
-            self.y = -self._p  # sign-flipped boundary copy -> internal sign-conditioning wire for slot y
+            self.y = -self._p  # sign-flipped state boundary copy -> inline holoso_fsgnop() in the state install
             self._p = x
             return self.y
 
@@ -287,35 +286,36 @@ def test_ekf1_stateful_elaborates(tmp_path: Path) -> None:
     _elaborate("ekf1_stateful", generate(lir).verilog, tmp_path)
 
 
-def test_both_bank_lane_write_enables_ride_the_commit_step() -> None:
-    # A pooled lane's write-enable -- boolean OR wide -- sits at ROM step
-    # ``pooled_write_word(commit)``, which is the commit step itself (the flag is valid on that executing step;
-    # one later would land a wide result past the branch's boundary read, which has exactly one cycle of slack).
-    # Checked white-box against the microcode tables of a kernel with both lane kinds.
+def test_both_bank_lane_write_commit_rides_the_commit_step() -> None:
+    # A pooled lane commits on its commit step: the destination register's write opcode holds that lane's source code
+    # at ROM step ``pooled_write_word(commit)`` == the commit step itself (valid on that executing step; one later would
+    # land a wide result past the branch's boundary read, which has exactly one cycle of slack). Checked white-box
+    # against the microcode tables of a kernel with both lane kinds.
     from holoso._backend.verilog._microcode import (
-        base_name,
+        OpWriteSource,
         build_microcode,
-        f_wen,
-        port_const_map,
-        read_ports,
-        write_target_lists,
+        f_op,
+        read_codebook,
+        tapped_lanes,
+        write_codebook,
+        write_events,
     )
-    from holoso._lir import BoolRegRef as LirBoolRegRef
     from ._modelref import branch_boundary_kernel, fcmp_staged_ops
 
     fmt = FloatFormat(6, 18)
     lir = build(_run(branch_boundary_kernel, fcmp_staged_ops(fmt, 1)), "lane_steps", fetch_stages=3)
-    read_port = read_ports(lir)
-    write_lists = write_target_lists(lir)
-    fields = build_microcode(lir, read_port, port_const_map(lir, read_port), write_lists)
+    events = write_events(lir)
+    write_books = write_codebook(events)
+    fields = build_microcode(lir, read_codebook(lir), write_books, events, tapped_lanes(lir))
     checked_bool = checked_wide = 0
     for op in lir.ops:
         for write in op.writes:
-            field = fields[f_wen(base_name(op.inst), write.port)]
-            is_wide = not isinstance(write.dst, LirBoolRegRef)
+            is_wide = not isinstance(write.dst, BoolRegRef)
+            source = OpWriteSource(op.inst, write.port, False if is_wide else write.conditioner.invert)
+            code = write_books[write.dst].code(source)
             assert (
-                field.values[pooled_write_word(op.commit_cycle)] == 1
-            ), "a pooled lane's write-enable must ride the commit step on both banks"
+                fields[f_op(write.dst)].values[pooled_write_word(op.commit_cycle)] == code
+            ), "a pooled lane's write opcode must ride the commit step on both banks"
             if is_wide:
                 checked_wide += 1
             else:
@@ -323,10 +323,23 @@ def test_both_bank_lane_write_enables_ride_the_commit_step() -> None:
     assert checked_bool >= 1 and checked_wide >= 2  # the kernel has a comparison and several float results
 
 
+def _two_division_kernel(a: float, b: float, c: float, d: float) -> float:
+    return a / b + c / d  # two divisions share one fdiv instance and land in two distinct registers
+
+
+def test_error_gate_ors_over_multiple_landing_registers() -> None:
+    # An error-bearing operator (fdiv) whose result lands in >=2 distinct registers reconstructs its commit window as
+    # the OR, over those registers, of ``uc_op_<reg> == <its source code>``. No bundled example produces a multi-term
+    # err gate, and the numerical model does not simulate ``err``, so cosim cannot reach it -- pin the reconstruction.
+    verilog = generate(build(_run(_two_division_kernel, _ops(FloatFormat(6, 18))), "two_div", fetch_stages=3)).verilog
+    err = next(line.strip() for line in verilog.splitlines() if line.strip().startswith("assign err ="))
+    assert err.count("uc_op_") >= 2 and " | " in err and "div0" in err, err
+
+
 def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Path) -> None:
     # No shipped operator has several WIDE outputs yet (fsort will), so the per-port wide lane machinery -- per-output
-    # write-enable/address and sign-conditioner fields, each result driven combinationally from the operator into its
-    # register write -- is exercised with a synthetic two-output operator on a hand-built
+    # sign-conditioner fields plus the per-register write opcodes, each result driven combinationally from the operator
+    # into its register write -- is exercised with a synthetic two-output operator on a hand-built
     # Lir, down to Icarus elaboration against a matching stub module.
     from dataclasses import dataclass
     from typing import ClassVar
@@ -417,7 +430,6 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         assert re.search(
             rf"regs\[\d+\] <= s_fsortlike_\w+_0_y{q}\b", verilog
         ), "the wide write must read the combinational output wire directly"
-        assert re.search(rf"uc_wen_fsortlike_\w+_0_y{q}\b", verilog)
         assert re.search(rf"uc_fsortlike_\w+_0_y{q}sgn\b", verilog)
     assert ".min(" in verilog and ".max(" in verilog and ".min_sgnop(" in verilog and ".max_sgnop(" in verilog
     if shutil.which("iverilog") is None:

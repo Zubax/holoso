@@ -18,21 +18,9 @@ import holoso
 from synth._synth import BUILD_ROOT
 from synth.flows import make_flow
 
-from ._synth_targets import TARGET_ENV_KEYS, TARGETS, SynthTarget
+from ._synth_targets import TARGETS, SynthTarget
 
 pytestmark = pytest.mark.synth
-
-
-def _apply_env(monkeypatch: pytest.MonkeyPatch, target: SynthTarget) -> None:
-    """
-    Set exactly this target's env, normalized: every key any target uses is cleared first so an ambient value (e.g. a
-    shell ``HOLOSO_DIAMOND_HARD=1``) cannot leak into a lean row and run the hard strategy, masking a closure
-    regression. The values are read inside ``flow.prepare()`` (``HOLOSO_DIAMOND_HARD`` in diamond ``_strategy``).
-    """
-    for key in TARGET_ENV_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    for key, value in target.env.items():
-        monkeypatch.setenv(key, value)
 
 
 def test_some_target_flow_is_available() -> None:
@@ -45,12 +33,15 @@ def test_some_target_flow_is_available() -> None:
     ), "no synthesis tool available; the matrix would pass while verifying nothing"
 
 
-@pytest.mark.parametrize("target", TARGETS, ids=lambda t: t.label)
-def test_target_closes_timing(target: SynthTarget, monkeypatch: pytest.MonkeyPatch) -> None:
+# Heaviest-first so xdist starts the long wide-datapath rows immediately instead of scheduling them last and tailing.
+_BY_COST = sorted(TARGETS, key=lambda t: t.ops.float_format.wman, reverse=True)
+
+
+@pytest.mark.parametrize("target", _BY_COST, ids=lambda t: t.label)
+def test_target_closes_timing(target: SynthTarget) -> None:
     flow = make_flow(target.flow, target.target_frequency_MHz)
     if not flow.available():
         pytest.skip(f"{target.flow.value} tool not available")
-    _apply_env(monkeypatch, target)
 
     result = holoso.synthesize(target.kernel(), target.ops, name=target.name)
     directory = BUILD_ROOT / "examples" / target.label

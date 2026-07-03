@@ -364,7 +364,7 @@ class _BoolBank(_Bank[MirBoolStateSlot]):
         return boundary
 
     def objective_terms(self, ctx: _ObjectiveContext) -> _ObjectiveTerms:
-        # The boolean bank has no read multiplexer and a one-hot pc-gated write chain, so it carries no read ports and a
+        # The boolean bank has no read multiplexer and a per-register write opcode, so it carries no read ports and a
         # single uniform producer -- the objective degenerates to register count.
         return _ObjectiveTerms(
             {vid: set() for vid in ctx.values},

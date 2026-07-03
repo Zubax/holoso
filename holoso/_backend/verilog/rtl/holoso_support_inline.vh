@@ -25,4 +25,12 @@ function [W-1:0] holoso_fsaturate;
     holoso_fsaturate = (&x[W-2:WMAN-1]) ? {x[W-1], {(WEXP - 1) {1'b1}}, 1'b0, {(WMAN - 1) {1'b1}}} : x;
 endfunction
 
+// Combinational floating-point sign conditioner (absolute first, then optional negate): op[0]=negate, op[1]=absolute.
+//      op=0: +x        op=1: -x        op=2: +|x|      op=3: -|x|
+function [W-1:0] holoso_fsgnop;
+    input [W-1:0] x;
+    input [1:0]   op;
+    holoso_fsgnop = {(x[W-1] & ~op[1]) ^ op[0], x[W-2:0]};
+endfunction
+
 // END of holoso_support_inline.vh

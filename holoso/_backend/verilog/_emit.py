@@ -2,20 +2,21 @@
 Render a scheduled :class:`Lir` into a synthesizable Verilog ZISC module that instantiates the shared support library
 (assembled by :mod:`._support`).
 
-The controller is a microcode ROM (see :mod:`._microcode`): one pre-decoded VLIW control word per step, stored in a
-(BRAM-inferable) ROM read through a 3-stage fetch (a PC latch, the array read, and the BRAM output register) so the
-critical control cones are short register-to-register paths. The executing step therefore lags the fetch PC by
-FETCH_LAG, which the sequencer accounts for: the PC counts up to LASTPC and out_valid is asserted there.
+The controller is a microcode ROM (see :mod:`._microcode`): one pre-decoded VLIW control word per step, written as a
+synchronous ``case`` over the fetch PC (the inferable-ROM form every backend recognizes) and read through a 3-stage
+fetch (PC latch, ROM read register, routing register). The executing step lags the fetch PC by FETCH_LAG,
+which the sequencer accounts for: the PC counts up to LASTPC and out_valid is asserted there.
 
-Storage is a sparse, schedule-specific register file emitted inline instead of a general-purpose multiport file.
-The register array is a plain ``reg`` bank. Each operator operand has a dedicated read port whose combinational mux
-spans only the registers that operand ever reads across the schedule (a single-register operand needs no mux). Each
-operator result drives a per-register write select directly, spanning only the instances that ever write that register
-(a single-writer register needs no address compare).
+Storage is a sparse, schedule-specific register file emitted inline instead of a general-purpose multiport file. Value
+routing is uniform: each operand port's read mux is a ``case`` over that port's read codebook (its registers and the
+constants it reads), and each register's write is a ``case`` over that register's write codebook selected by a tiny
+per-register opcode (code 0 == NOP hold). PC drives only the sequencer; it never gates a datapath read or write.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from textwrap import dedent
+from typing import assert_never
 
 from ..._lir import *
 from ..._operators import *
@@ -78,66 +79,62 @@ def _wire(width: int) -> str:
     return f"wire [{width - 1:2}:0] " if width > 1 else "wire        "
 
 
-def _cterm_expr(port: int, consts: list[int]) -> str:
-    return f"const_{consts[0]}" if len(consts) == 1 else f"cterm{port}"
-
-
 def _source_net(source: RegRef | FloatConstRef) -> str:
     return f"const_{source.index}" if isinstance(source, FloatConstRef) else f"regs[{source.index}]"
 
 
-def _fsgnop(w: _Writer, raw: str, sign: FloatSignControl, dst: str, inst: str) -> None:
-    w(f"holoso_fsgnop #(.WFULL(W)) {inst} (.x({raw}), .op(2'd{sign.encoded}), .y({dst}));")
+def _signed_source_net(source: RegRef | FloatConstRef, sign: FloatSignControl) -> str:
+    """A source net with its folded sign applied inline via ``holoso_fsgnop``, or bare when the sign is identity."""
+    raw = _source_net(source)
+    return raw if sign == FloatSignControl() else f"holoso_fsgnop({raw}, 2'd{sign.encoded})"
 
 
-def _state_sign_wire(slot: FloatStateSlot) -> str | None:
+def _bool_operand_rhs(operand: BoolOperand) -> str:
+    source = operand.source
+    if isinstance(source, BoolConstRef):
+        return "1'b1" if source.value else "1'b0"  # an inverted immediate folded at construction
+    net = f"bregs[{source.index}]"
+    return f"~{net}" if operand.inversion.invert else net
+
+
+def _operand_rhs(operand: FloatOperand | BoolOperand) -> str:
+    match operand:
+        case FloatOperand():
+            return _signed_source_net(operand.source, operand.sign)
+        case BoolOperand():
+            return _bool_operand_rhs(operand)
+        case _:
+            assert_never(operand)
+
+
+def _render_inline(
+    operator: InlineHardwareOperator, operands: tuple[FloatOperand | BoolOperand, ...], conditioner: PortConditioner
+) -> str:
     """
-    The sign-conditioning wire name for a slot's writeback copy, or None when the copied tap needs no sign op. The stem
-    is deliberately not ``state_*``: a public attribute is exposed as a ``state_<attr>`` port, so a ``state_<name>_d``
-    net would collide with the port of an attribute literally named ``<name>_d``.
+    An inline firing's combinational RHS: the operator's own expression over its operand nets (a float operand's folded
+    sign applies inline via ``holoso_fsgnop``), with the result conditioner applied -- an inversion folds into the
+    expression; sign-conditioned wide inline results have no producer yet.
     """
-    if slot.needs_copy and slot.tap.sign != FloatSignControl():
-        return f"statesgn_{slot.name}"
-    return None
-
-
-def _state_copy_rhs(slot: FloatStateSlot) -> str:
-    return _state_sign_wire(slot) or _source_net(slot.tap.source)
-
-
-def _inline_fire_pc(lir: Lir, block_index: int, op: InlineScheduledOp) -> int:
-    """
-    The fetch PC at which an inline firing's single PC-gated statement executes: its combinational fire step, one
-    fetch lag after the commit. An inline op drives its destination's write data combinationally on this step.
-    """
-    return lir.block_base[block_index] + inline_fire_cycle(op.commit_cycle, lir.fetch_lag)
-
-
-def _inline_sign_wire(block_index: int, op_index: int, pos: int) -> str:
-    return f"inlsgn_{block_index}_{op_index}_{pos}"
-
-
-def _inline_rhs(block_index: int, op_index: int, op: InlineScheduledOp) -> str:
-    """
-    The RHS of one inline firing: the operator's own combinational expression over its operand nets (a float operand
-    routes through its sign-conditioning wire when its folded sign is non-identity), with the result conditioner
-    applied -- an inversion folds into the expression; sign-conditioned wide inline results have no producer yet.
-    """
-    nets: list[str] = []
-    for pos, operand in enumerate(op.operands):
-        if isinstance(operand, FloatOperand):
-            if operand.sign != FloatSignControl():
-                nets.append(_inline_sign_wire(block_index, op_index, pos))
-            else:
-                nets.append(_source_net(operand.source))
-        else:
-            nets.append(_bool_operand_rhs(operand))
-    expr = op.operator.verilog_expr(*nets)
-    conditioner = op.write.conditioner
+    nets = [_operand_rhs(operand) for operand in operands]
+    expr = operator.verilog_expr(*nets)
     if isinstance(conditioner, BoolInversion):
         return conditioner.decorate(f"({expr})") if conditioner.invert else expr
     assert conditioner == FloatSignControl(), "no pass produces sign-conditioned wide inline results yet"
     return expr
+
+
+def _write_source_rhs(source: WriteSource) -> str:
+    """Render one write-codebook source to its Verilog RHS -- the dual of the microcode's structured source key."""
+    match source:
+        case OpWriteSource(inst=inst, port=port, invert=invert):
+            net = f"{_sig(inst)}_y{port}"  # wide: sign rode the wrapper; bool: fabric inversion folds here
+            return f"~{net}" if invert else net
+        case InlineWriteSource(operator=operator, operands=operands, conditioner=conditioner):
+            return _render_inline(operator, operands, conditioner)
+        case MoveWriteSource(operand=operand):
+            return _operand_rhs(operand)
+        case _:
+            assert_never(source)
 
 
 def generate(lir: Lir) -> VerilogOutput:
@@ -146,41 +143,33 @@ def generate(lir: Lir) -> VerilogOutput:
     cycw = lir.cyc_width
     pcw = max(1, lir.initiation_interval.bit_length())
 
-    # One dedicated read port per operator operand; the per-port read mux spans only the registers it actually reads.
-    read_port = read_ports(lir)
-    port_consts = port_const_map(lir, read_port)
-    read_sets = lir.read_set_per_port
-    write_sets = lir.write_set_per_register
-    # Symmetric to the read-set index on the read side: the write-address field and the per-register write comparators
-    # carry the dense write-target index (ceil(log2 M) over each instance's M write targets, not the whole file). The
-    # codebook is shared between the microcode and the comparators so they cannot drift.
-    write_lists = write_target_lists(lir)
+    # The two dual codebooks, built once and threaded to both the microcode packer and the emitters so the
+    # code<->source mapping cannot drift: per operand port (read) and per register (write). The write side derives from
+    # a single ``write_events`` traversal, shared by the codebook, the packer, and the ROM-comment landings.
+    read_books = read_codebook(lir)
+    events = write_events(lir)
+    write_books = write_codebook(events)
+    tapped = tapped_lanes(lir)
 
-    fields = build_microcode(lir, read_port, port_consts, write_lists)
+    fields = build_microcode(lir, read_books, write_books, events, tapped)
     ucw = finalize_fields(fields)
 
     issues_by_cycle, commits_by_cycle = lir.group_by_cycle
-    installs_by_step = const_installs_by_step(lir)
-    # Commit annotations land on each firing's write step -- the commit step itself, the same step the microcode places
-    # its write-enable word (every bank writes combinationally, so a pooled lane's write word sits at the commit step).
-    # A const install rides the same word via its cwen strobe (block_base + issue_cycle), so it shares the annotation.
+    landings = landings_by_step(events)
 
     depth = lir.last_pc + 1  # one microcode word per fetch PC (0..last_pc); inter-block drains and the tail pack to NOP
 
     _emit_header(w, lir)
     _emit_localparams(w, lir, cycw, pcw, ucw)
     _emit_inline_support(w)
-    _emit_declarations(w, lir, write_lists)
+    _emit_declarations(w, lir, tapped)
     _emit_consts(w, lir)
-    _emit_microcode_rom(w, fields, ucw, depth, issues_by_cycle, commits_by_cycle, installs_by_step)
+    _emit_microcode_rom(w, fields, ucw, depth, issues_by_cycle, commits_by_cycle, landings)
     _emit_field_wires(w, fields)
-    _emit_operators(w, lir, write_lists)
-    _emit_datapath_comb(w, lir, port_consts, write_lists)
-    _emit_state_next(w, lir)
-    _emit_copy_sign_wires(w, lir)
-    _emit_inline_sign_wires(w, lir)
-    _emit_read_muxes(w, lir, read_port, port_consts, read_sets)
-    _emit_clocked(w, lir, write_sets, write_lists)
+    _emit_operators(w, lir, tapped)
+    _emit_datapath_comb(w, lir, write_books)
+    _emit_read_muxes(w, lir, read_books)
+    _emit_clocked(w, lir, write_books)
     _emit_outputs(w, lir)
     w("\nendmodule\n")
     return VerilogOutput(verilog=w.render(), support_files=support_files())
@@ -264,12 +253,12 @@ def _emit_inline_support(w: _Writer) -> None:
     w("")
 
 
-def _emit_declarations(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorInstance, int], list[int]]) -> None:
+def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, int]]) -> None:
     assert lir.fetch_lag >= 1, "transacting_q is [FETCH_LAG-1:0]; FETCH_LAG==0 needs an explicit leading NOP"
     w("""
     reg  [PCW-1:0]  pc;            // fetch program counter; the executing step lags it by FETCH_LAG
     reg  [PCW-1:0]  next_pc;       // combinational next-state presented to the ROM each cycle
-    reg  [PCW-1:0]  ucode_addr_q;  // PC latch: splits pc -> next_pc -> ROM address from the array read
+    reg  [PCW-1:0]  ucode_addr_q;  // PC latch: splits pc -> next_pc -> ROM address for the case read
     reg  [CYCW-1:0] err_pc_q;
     wire            err;           // an operator error is detected on the current step
 
@@ -292,7 +281,7 @@ def _emit_declarations(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorIns
         # One net per TAPPED output port -- the raw operator output (wide W-bit or boolean 1-bit). The in_valid and
         # sign-control ports bind directly to the decoded uc_* fields, so no s_* control net is declared for them.
         for q, result_type in enumerate(inst.operator.signature.result_types):
-            if (inst, q) not in write_lists:
+            if (inst, q) not in tapped:
                 continue  # a never-tapped output port: no nets, the module port is left unconnected
             if is_wide_type(result_type):
                 w(f"wire [W-1:0] {sig}_y{q};")
@@ -313,7 +302,7 @@ def _emit_consts(w: _Writer, lir: Lir) -> None:
         w("")
 
 
-def _emit_operators(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorInstance, int], list[int]]) -> None:
+def _emit_operators(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, int]]) -> None:
     for inst in lir.instances:
         sig, base = _sig(inst), base_name(inst)
         operator = inst.operator
@@ -336,14 +325,14 @@ def _emit_operators(w: _Writer, lir: Lir, write_lists: dict[tuple[OperatorInstan
         # to the identity. Boolean output ports have none -- their inversion conditioner is fabric-side at the write.
         for q, result_type in enumerate(operator.signature.result_types):
             if is_wide_type(result_type):
-                conditioner = f_ysgn(base, q) if (inst, q) in write_lists else "2'd0"
+                conditioner = f_ysgn(base, q) if (inst, q) in tapped else "2'd0"
                 w(f".{operator.output_hdl_ports[q]}_sgnop({conditioner}),")
         for letter in letters:
             w(f".{letter}({sig}_{letter}),")
         # out_valid is left unconnected: the static schedule already knows when each result is ready.
         w(".out_valid(),")
         outputs = [
-            f".{operator.output_hdl_ports[q]}({f'{sig}_y{q}' if (inst, q) in write_lists else ''})"
+            f".{operator.output_hdl_ports[q]}({f'{sig}_y{q}' if (inst, q) in tapped else ''})"
             for q in range(len(operator.signature.result_types))
         ]
         for line_index, line in enumerate(outputs):
@@ -362,87 +351,71 @@ def _emit_microcode_rom(
     depth: int,
     issues_by_cycle: dict[int, list[PooledScheduledOp]],
     commits_by_cycle: dict[int, list[PooledScheduledOp]],
-    installs_by_step: dict[int, list[str]],
+    landings: dict[int, list[str]],
 ) -> None:
     digits = (ucw + 3) // 4
     w("""
-// Microcode VLIW ROM: one pre-decoded control word per fetch PC (0..LASTPC), registered on read (clocked block below).
-// Steps with no scheduled event -- inter-block drains and the present/boundary tail -- pack to a NOP word; constant
-// control fields are lifted out (below) and not stored here, enabling synthesis-time folding.
-(* rom_style = "block", ram_style = "block", syn_romstyle = "EBR" *)
-reg [UCW-1:0] ucode [0:LASTPC];
-initial begin
-    """)
-    w.push()
-    for step in range(depth):  # depth == LASTPC + 1: one word per fetch PC, NOP where no operator issues or commits
-        summary = cycle_summary(
-            issues_by_cycle.get(step, []), commits_by_cycle.get(step, []), installs_by_step.get(step, [])
-        )
-        comment = f"  // {summary}" if summary else ""
-        w(f"ucode[{step: 5}] = {ucw}'h{pack(fields, step):0{digits}x};{comment}")
-    w.pop()
+// Microcode VLIW ROM.
+reg [UCW-1:0] ucode_q;     // 2nd fetch stage
+reg [UCW-1:0] ucode_word;  // 3rd fetch stage""")
+    packed = sorted((f for f in fields.values() if f.offset >= 0), key=lambda f: f.offset)
+    if packed:
+        bit_strs = [f"[{f.offset + f.width - 1}:{f.offset}]" if f.width > 1 else f"[{f.offset}]" for f in packed]
+        wbit = max(len(b) for b in bit_strs)
+        w("// Microcode word field map:")
+        for f, bits in zip(packed, bit_strs):
+            w(f"//   {bits:<{wbit}}  {f.name}")
     w("""
-end
-
-reg [UCW-1:0] ucode_q;     // 2nd fetch stage: control-store array-read register
-reg [UCW-1:0] ucode_word;  // 3rd fetch stage: packs into the BRAM output register; drives this step
-
-""")
+(* rom_style = "block", syn_romstyle = "EBR" *)
+always @(posedge clk)
+    case (ucode_addr_q)""")
+    w.push()
+    w.push()
+    for step in range(depth):  # one arm per fetch PC, NOP where nothing issues, commits, or lands
+        summary = cycle_summary(issues_by_cycle.get(step, []), commits_by_cycle.get(step, []), landings.get(step, []))
+        comment = f"  // {summary}" if summary else ""
+        w(f"{step}: ucode_q <= {ucw}'h{pack(fields, step):0{digits}x};{comment}")
+    w(f"default: ucode_q <= {ucw}'h0;  // unreached (PC bounded to LASTPC); NOP fill")
+    w.pop()
+    w("endcase")
+    w.pop()
+    w("")
 
 
 def _emit_field_wires(w: _Writer, fields: dict[str, Field]) -> None:
     w("""
 // Decoded control fields. A field constant across the whole program is driven by a constant net (so synthesis prunes
-// the logic it feeds); a varying field is a slice of the instruction word. The effect-trigger fields -- the ones
-// flagged ``is_strobe`` (operator issue, pooled write-enable, const-install write-enable) -- are ANDed with
-// `transacting` HERE, so a held ucode[0] dwell, a fill bubble, or a stale pre-reset word triggers no issue, commit,
-// or install; their use sites then read the gated field. The AND wraps the constant branch too, so the gate stays
-// unconditional even if a trigger ever folds to a constant.
+// the logic it feeds); a varying field is a slice of the instruction word. The effect-trigger fields -- the ``gated``
+// ones (operator issue strobes and per-register write opcodes) -- are ANDed with `transacting` HERE, so a held
+// ucode[0] dwell, a fill bubble, or a stale pre-reset word decodes to 0 (NOP): no issue and every register holds.
+// The AND wraps the constant branch too, so the gate stays unconditional even if a trigger ever folds to a constant.
 """)
     for f in fields.values():
-        gate = "transacting & " if f.is_strobe else ""
-        if f.offset < 0:
-            rhs = _lit(f.width, f.const_value)
-        else:
-            rhs = f"ucode_word[{f.offset} +: {f.width}]"
-        w(f"{_wire(f.width)}{f.name} = {gate}{rhs};")
+        rhs = _lit(f.width, f.const_value) if f.offset < 0 else f"ucode_word[{f.offset} +: {f.width}]"
+        if f.gated:
+            mask = "transacting" if f.width == 1 else f"{{{f.width}{{transacting}}}}"
+            rhs = f"{mask} & {rhs}"
+        w(f"{_wire(f.width)}{f.name} = {rhs};")
     w("")
 
 
-def _const_pool_mux(selector: str, consts: list[int]) -> str:
-    """
-    A const-pool read expression: the lone ``const_N`` net, or a ``selector``-indexed ternary mux over ``consts``. Used
-    on the read side (an operand's per-port const select, ``uc_cidx``) and the write side (a register's ucode-driven
-    constant install, ``uc_ccidx``) alike.
-    """
-    expr = f"const_{consts[-1]}"
-    for local in range(len(consts) - 2, -1, -1):
-        expr = f"({selector} == {local}) ? const_{consts[local]} : {expr}"
-    return expr
-
-
-def _emit_datapath_comb(
-    w: _Writer, lir: Lir, port_consts: dict[int, list[int]], write_lists: dict[tuple[OperatorInstance, int], list[int]]
-) -> None:
-    for port in sorted(port_consts):
-        if len(port_consts[port]) > 1:
-            w(f"wire [W-1:0] cterm{port} = {_const_pool_mux(f_cidx(port), port_consts[port])};")
-    w("")
-
-    # An error matters only on the step its operator commits, which is exactly its tapped lanes' write-enable window;
-    # both the write-enables and the operator's combinational error output fire on the commit step, so the error flag is
-    # sampled directly when its result drives the register write.
+def _emit_datapath_comb(w: _Writer, lir: Lir, write_books: dict[RegRef | BoolRegRef, WriteCodebook]) -> None:
+    # An error matters only on the step its operator commits -- the step some destination register's write opcode
+    # selects this operator's output lane. So the error output is gated by the OR, over the op's write-codebook entries,
+    # of (uc_op_<reg> == that entry's code); the opcode is transacting-masked, so the gate is live exactly on that
+    # commit step.
+    op_gates: dict[OperatorInstance, list[str]] = {}
+    for dst, book in write_books.items():
+        for code, source in book.arms():
+            if isinstance(source, OpWriteSource):
+                op_gates.setdefault(source.inst, []).append(f"({f_op(dst)} == {_lit(book.opcode_width, code)})")
     err_terms: list[str] = []
     for inst in lir.instances:
         if not inst.operator.error_ports:
             continue
-        lane_wes = [
-            f_wen(base_name(inst), q)
-            for q in range(len(inst.operator.signature.result_types))
-            if (inst, q) in write_lists
-        ]
-        assert lane_wes, "an error-bearing operator must have a tapped lane to align its sideband with"
-        gate = lane_wes[0] if len(lane_wes) == 1 else "(" + " | ".join(lane_wes) + ")"
+        gates = op_gates.get(inst, [])
+        assert gates, "an error-bearing operator must have a tapped lane to align its sideband with"
+        gate = gates[0] if len(gates) == 1 else "(" + " | ".join(gates) + ")"
         for err_port in inst.operator.error_ports:
             err_terms.append(f"({gate} & {_sig(inst)}_{err_port})")
     err_rhs = " | ".join(err_terms) if err_terms else "1'b0"
@@ -516,343 +489,130 @@ def _terminator_redirects(lir: Lir) -> list[tuple[int, str]]:
     return redirects
 
 
-def _float_copy_pc(lir: Lir, block: LirBlock, copy: FloatCopy) -> int:
+def _emit_read_case(w: _Writer, target: str, field: str, book: ReadCodebook) -> None:
     """
-    The fetch PC at which a pc-gated phi-arm copy installs its value: its block base plus the copy's fire step (a fetch
-    lag after the ``issue_cycle`` that ``install_issue_cycle`` placed at the work makespan, or one past for a last-work
-    source).
+    Emit one operand's combinational read mux: a direct assign for a single source, else a ``case`` over the port's
+    read opcode selecting a register or a constant directly. The last entry is the ``default`` arm so the case is full
+    (no inferred latch on this combinational path); unused high codes fall there too and are don't-cares on idle steps.
+    The mux carries no indexed part-select, so there is no offset multiply for synthesis to (mis)infer as a DSP.
     """
-    return lir.block_base[block.index] + copy.fire_step(lir.fetch_lag)
-
-
-def _bool_write_pc(lir: Lir, block: LirBlock, write: BoolWrite) -> int:
-    return lir.block_base[block.index] + write.fire_step(lir.fetch_lag)
-
-
-def _copy_sign_wire(block_index: int, copy_index: int) -> str:
-    return f"copysgn_{block_index}_{copy_index}"
-
-
-def _float_copy_rhs(block_index: int, copy_index: int, copy: FloatCopy) -> str:
-    if copy.source.sign == FloatSignControl():
-        return _source_net(copy.source.source)
-    return _copy_sign_wire(block_index, copy_index)
-
-
-def _bool_operand_rhs(operand: BoolOperand) -> str:
-    source = operand.source
-    if isinstance(source, BoolConstRef):
-        return "1'b1" if source.value else "1'b0"  # an inverted immediate folded at construction
-    net = f"bregs[{source.index}]"
-    return f"~{net}" if operand.inversion.invert else net
-
-
-def _bool_write_rhs(write: BoolWrite) -> str:
-    return _bool_operand_rhs(write.source)
-
-
-def _copies_grouped(lir: Lir) -> dict[int, list[tuple[int, str]]]:
-    """
-    Destination wide register -> [(install PC, source net)], over the phi-arm copies that remain pc-gated: register-
-    source copies and signed-constant installs. Identity-sign constant installs are ucode-driven (see
-    ``_wide_writer_entries``), not pc-gated.
-    """
-    grouped: dict[int, list[tuple[int, str]]] = {}
-    for block in lir.blocks:
-        for copy_index, copy in enumerate(block.copies):
-            if is_ucode_const_copy(copy):
-                continue
-            grouped.setdefault(copy.dst.index, []).append(
-                (_float_copy_pc(lir, block, copy), _float_copy_rhs(block.index, copy_index, copy))
-            )
-    return grouped
-
-
-def _bool_writes_grouped(lir: Lir) -> dict[int, list[tuple[int, str]]]:
-    """
-    Destination boolean register -> [(install PC, source expression)], over the boolean phi-arm writes that remain
-    pc-gated: register-source writes. Constant boolean installs are ucode-driven (see ``_bool_writer_entries``).
-    """
-    grouped: dict[int, list[tuple[int, str]]] = {}
-    for block in lir.blocks:
-        for write in block.bool_writes:
-            if write.is_const:
-                continue
-            grouped.setdefault(write.dst.index, []).append((_bool_write_pc(lir, block, write), _bool_write_rhs(write)))
-    return grouped
-
-
-def _emit_copy_sign_wires(w: _Writer, lir: Lir) -> None:
-    emitted = False
-    for block in lir.blocks:
-        for copy_index, copy in enumerate(block.copies):
-            if copy.source.sign != FloatSignControl():
-                wire = _copy_sign_wire(block.index, copy_index)
-                w(f"wire [W-1:0] {wire};")
-                _fsgnop(w, _source_net(copy.source.source), copy.source.sign, wire, f"u_{wire}")
-                emitted = True
-    if emitted:
-        w("")
-
-
-def _emit_inline_sign_wires(w: _Writer, lir: Lir) -> None:
-    emitted = False
-    for block in lir.blocks:
-        for op_index, op in enumerate(block.inline_ops):
-            for pos, operand in enumerate(op.operands):
-                if isinstance(operand, FloatOperand) and operand.sign != FloatSignControl():
-                    wire = _inline_sign_wire(block.index, op_index, pos)
-                    w(f"wire [W-1:0] {wire};")
-                    _fsgnop(w, _source_net(operand.source), operand.sign, wire, f"u_{wire}")
-                    emitted = True
-    if emitted:
-        w("")
-
-
-def _emit_state_next(w: _Writer, lir: Lir) -> None:
-    emitted = False
-    for slot in lir.float_state_slots:
-        wire = _state_sign_wire(slot)
-        if wire is None:
-            continue
-        w(f"wire [W-1:0] {wire};")
-        _fsgnop(w, _source_net(slot.tap.source), slot.tap.sign, wire, f"u_statesgn_{slot.name}")
-        emitted = True
-    if emitted:
-        w("")
-
-
-def _read_mux_stmts(w: _Writer, target: str, port: int, read_set: list[int], port_consts: dict[int, list[int]]) -> None:
-    """
-    Emit the combinational read-mux for one operand, driven in the read-mux ``always @*`` block.
-
-    The mux spans only ``read_set`` (the registers this port ever reads): just the immediate when the operand is
-    always a constant, a direct register read for a single register, and otherwise a ``case`` over the dense read-set
-    index (the read-address field) selecting ``regs[...]`` directly. A const-select picks the immediate when the
-    operand is sometimes a constant. On idle steps the mux drives a don't-care value the operator ignores (its
-    in_valid is low). The read mux carries no indexed part-select, so there is no offset multiply for synthesis to
-    (mis)infer as a DSP -- which is why the read-set index addresses a case rather than a packed gather bus.
-    """
-    consts = port_consts.get(port)
-    cterm = _cterm_expr(port, consts) if consts else None
-    if not read_set:  # the operand is always a constant immediate
-        w(f"{target} = {cterm};")
+    assert book.sources, "an operand port always reads at least one source"
+    if len(book.sources) == 1:
+        w(f"{target} = {_source_net(book.sources[0])};")
         return
-    if len(read_set) == 1:
-        reg_expr = f"regs[{read_set[0]}]"
-        w(f"{target} = {f_csel(port)} ? {cterm} : {reg_expr};" if cterm else f"{target} = {reg_expr};")
-        return
-    # Multi-register operand: a case over the dense read-set index. The last entry is the default arm so the case is
-    # full (no inferred latch); the unused high codes fall there too and are don't-cares on idle steps.
-    if cterm:
-        w(f"if ({f_csel(port)}) {target} = {cterm};", "else begin")
-        w.push()
-    w(f"case ({f_raddr(port)})")
+    arms = book.arms()
+    w(f"case ({field})")
     w.push()
-    for index, reg in enumerate(read_set):
-        label = "default" if index == len(read_set) - 1 else _lit(code_width(len(read_set)), index)
-        w(f"{label}: {target} = regs[{reg}];")
+    for index, (code, source) in enumerate(arms):
+        label = "default" if index == len(arms) - 1 else _lit(book.opcode_width, code)
+        w(f"{label}: {target} = {_source_net(source)};")
     w.pop()
     w("endcase")
-    if cterm:
-        w.pop()
-        w("end")
-
-
-def _write_cond(
-    inst: OperatorInstance, port: int, reg: int, write_lists: dict[tuple[OperatorInstance, int], list[int]]
-) -> str:
-    """
-    The guard under which lane ``(inst, port)`` writes ``reg``: its write-enable, plus a write-address compare when
-    the lane targets more than one register (the dense write-target index this register occupies in its codebook).
-    """
-    base = base_name(inst)
-    targets = write_lists[(inst, port)]
-    if len(targets) == 1:
-        return f_wen(base, port)
-    return f"{f_wen(base, port)} && ({f_waddr(base, port)} == {_lit(code_width(len(targets)), targets.index(reg))})"
-
-
-def _wide_writer_entries(
-    lir: Lir,
-    write_sets: dict[int, list[tuple[OperatorInstance, int]]],
-    write_lists: dict[tuple[OperatorInstance, int], list[int]],
-) -> dict[int, list[tuple[str, str, str]]]:
-    """
-    Per wide register, the ordered ``(condition, rhs)`` of every driver other than its state-slot install: the
-    accept-step input load (highest priority), each pooled lane's write, each pc-gated wide-result inline firing
-    (the bool->float cast), and each pc-gated phi-arm copy. The conditions are pairwise mutually exclusive (the load
-    step, the per-lane write-enable steps, and the distinct inline/copy PCs never coincide for one register -- the
-    schedule and the allocator's interference guarantee it), so the emitter folds them into one priority chain and a
-    register is driven by exactly one statement, however many sources reuse or coalesce onto it.
-    """
-    entries: dict[int, list[tuple[str, str, str]]] = {}
-    for fload in sorted(lir.float_inputs, key=lambda load: load.dst.index):
-        entries.setdefault(fload.dst.index, []).append(("in_ready && in_valid", f"in_{fload.name}", ""))
-    for reg in sorted(write_sets):
-        for inst, port in write_sets[reg]:
-            entries.setdefault(reg, []).append((_write_cond(inst, port, reg, write_lists), f"{_sig(inst)}_y{port}", ""))
-    # Ucode-driven constant installs: the decode-gated const write-enable arm (like an operator lane), reusing the
-    # const-pool nets. Unlike the pooled lanes above (which commit at issue + latency >= 1), a cycle-0 install can ride
-    # the held ucode[0], so its write-enable is one of the gated strobes.
-    const_books = const_install_codebooks(lir)
-    for reg in sorted(const_books):
-        entries.setdefault(reg, []).append(
-            (f_cwen(RegRef(reg)), _const_pool_mux(f_ccidx(RegRef(reg)), const_books[reg]), "")
-        )
-    for block in lir.blocks:
-        for op_index, inline_op in enumerate(block.inline_ops):
-            if isinstance(inline_op.write.dst, RegRef):
-                entries.setdefault(inline_op.write.dst.index, []).append(
-                    (
-                        f"pc == {_inline_fire_pc(lir, block.index, inline_op)}",
-                        _inline_rhs(block.index, op_index, inline_op),
-                        "inline fire",
-                    )
-                )
-    for reg, items in _copies_grouped(lir).items():
-        for install_pc, rhs in sorted(items):
-            entries.setdefault(reg, []).append((f"pc == {install_pc}", rhs, "phi-arm install"))
-    return entries
-
-
-def _bool_writer_entries(
-    lir: Lir, write_lists: dict[tuple[OperatorInstance, int], list[int]]
-) -> dict[int, list[tuple[str, str, str]]]:
-    """
-    Per boolean register, the ordered ``(condition, rhs)`` of every driver other than its state-slot install: the
-    input load, each pooled boolean lane (microcode-gated, with its fabric-XOR inversion conditioner),
-    each pc-gated bool-result inline firing, and each pc-gated phi-arm write.
-    """
-    entries: dict[int, list[tuple[str, str, str]]] = {}
-    for bload in sorted(lir.bool_inputs, key=lambda load: load.dst.index):
-        entries.setdefault(bload.dst.index, []).append(("in_ready && in_valid", f"in_{bload.name}", ""))
-    bool_write_sets = lir.bool_write_set_per_register
-    for reg in sorted(bool_write_sets):
-        for inst, port in bool_write_sets[reg]:
-            rhs = f"{_sig(inst)}_y{port} ^ {f_binv(base_name(inst), port)}"
-            entries.setdefault(reg, []).append((_write_cond(inst, port, reg, write_lists), rhs, ""))
-    # Ucode-driven constant installs: the decode-gated const write-enable arm carrying the 1-bit value (no XOR -- the
-    # inversion is folded into the value at construction).
-    for reg in const_install_bool_regs(lir):
-        entries.setdefault(reg, []).append((f_cwen(BoolRegRef(reg)), f_cval(BoolRegRef(reg)), ""))
-    for block in lir.blocks:
-        for op_index, inline_op in enumerate(block.inline_ops):
-            if isinstance(inline_op.write.dst, BoolRegRef):
-                entries.setdefault(inline_op.write.dst.index, []).append(
-                    (
-                        f"pc == {_inline_fire_pc(lir, block.index, inline_op)}",
-                        _inline_rhs(block.index, op_index, inline_op),
-                        "inline fire",
-                    )
-                )
-    for reg, items in _bool_writes_grouped(lir).items():
-        for install_pc, rhs in sorted(items):
-            entries.setdefault(reg, []).append((f"pc == {install_pc}", rhs, "phi-arm install"))
-    return entries
-
-
-def _wide_state_install_entry(lir: Lir, slot: FloatStateSlot) -> list[tuple[str, str, str]]:
-    """
-    The slot register's live-out install, appended under the reset-else as the lowest-priority arm of its chain. A
-    coalesced slot has no install (its producing operator already writes the slot register); a non-coalesced one is
-    installed read-first on its writeback step (``state_copy_step``, the absolute install PC -- which reduces to
-    ``LASTPC`` for a boundary install), out_ready-gated so a held boundary copies exactly once.
-    """
-    if not slot.needs_copy:
-        return []
-    pcw = max(1, lir.initiation_interval.bit_length())
-    cond = f"pc == {_lit(pcw, lir.state_copy_step(slot))} && (pc != LASTPC || out_ready)"
-    return [(cond, _state_copy_rhs(slot), "state install")]
-
-
-def _emit_chain(w: _Writer, lhs: str, entries: list[tuple[str, str, str]]) -> None:
-    """One priority chain per register, so the register has exactly one driver (the multi-assign rule). The optional
-    third element labels an arm whose kind is not evident from its guard -- the two ``pc == N`` arms (an inline firing
-    and a phi-arm install) read alike otherwise."""
-    clause = "if"
-    for cond, rhs, note in entries:
-        w(f"{clause} ({cond}) {lhs} <= {rhs};" + (f"  // {note}" if note else ""))
-        clause = "else if"
 
 
 def _emit_read_muxes(
     w: _Writer,
     lir: Lir,
-    read_port: dict[tuple[OperatorInstance, int], int],
-    port_consts: dict[int, list[int]],
-    read_sets: dict[tuple[OperatorInstance, int], list[int]],
+    read_books: dict[tuple[OperatorInstance, int], ReadCodebook],
 ) -> None:
     """
-    Emit the combinational operand read muxes: a sparse mux over each operand's read-set drives the wrapper directly, so
-    regfile-read -> operator is combinational and the operand is sampled FETCH_LAG after its read-address word. A
-    pure-inline kernel has no pooled instances, so this would be empty -- skip it rather than emit a bare
-    ``always @* begin end``.
+    Emit the combinational operand read muxes driving each wrapper directly, so regfile-read -> operator is
+    combinational and the operand is sampled FETCH_LAG after its read-opcode word. A pure-inline kernel has no pooled
+    instances, so this would be empty -- skip it rather than emit a bare ``always @* begin end``.
     """
-    if lir.instances:
-        w(
-            "// Operand read muxes: a sparse combinational mux over each operand's "
-            "read-set, driving the wrapper directly."
-        )
-        w("always @* begin")
-        w.push()
-        for inst in lir.instances:
-            sig = _sig(inst)
-            for pos in range(inst.operator.arity):
-                port = read_port[(inst, pos)]
-                _read_mux_stmts(w, f"{sig}_{PORT_LETTERS[pos]}", port, read_sets.get((inst, pos), []), port_consts)
-        w.pop()
-        w("end")
-        w("")
+    if not lir.instances:
+        return
+    w("// Operand read muxes: a per-port case over the read codebook (registers and constants), driving the wrapper.")
+    w("always @* begin")
+    w.push()
+    for inst in lir.instances:
+        sig = _sig(inst)
+        base = base_name(inst)
+        for pos in range(inst.operator.arity):
+            _emit_read_case(w, f"{sig}_{PORT_LETTERS[pos]}", f_rd(base, PORT_LETTERS[pos]), read_books[(inst, pos)])
+    w.pop()
+    w("end")
+    w("")
 
 
-def _emit_clocked(
+def _emit_reg_write(
     w: _Writer,
-    lir: Lir,
-    write_sets: dict[int, list[tuple[OperatorInstance, int]]],
-    write_lists: dict[tuple[OperatorInstance, int], list[int]],
+    lhs: str,
+    dst: RegRef | BoolRegRef,
+    book: WriteCodebook | None,
+    special_arms: list[tuple[str, str]],
 ) -> None:
-    """Emit every sequential element in one always @(posedge clk): fetch, writes, and control state."""
-    # We MUST ensure that we DO NOT MULTI-ASSIGN any register in the same step; this is ensured by always placing each
-    # assignment to the same register into different branches of the same condition.
-    nreg = lir.regfile.nreg  # 0 for an unused bank; range(0) then yields no non-slot writes (the bank is omitted)
-    nbreg = lir.bool_regfile.nreg
+    """
+    One segregated write statement per register (the multi-assign rule): the handshake-gated special arms first (an
+    input load, a boundary state install), then the opcode ``case`` over the register's write codebook as the final
+    ``else``. Code 0 is the NOP hold -- an unlisted code in this clocked ``case`` retains the flop -- so the
+    write-enable is folded into the opcode with no extra logic level. A single-source register degenerates to
+    ``if (opcode)``.
+    """
+    clause = "if"
+    for cond, rhs in special_arms:
+        w(f"{clause} ({cond}) {lhs} <= {rhs};")
+        clause = "else if"
+    if book is None or not book.sources:
+        return
+    prefix = "else " if special_arms else ""
+    opcode = f_op(dst)
+    if len(book.sources) == 1:
+        w(f"{prefix}if ({opcode}) {lhs} <= {_write_source_rhs(book.sources[0])};")
+        return
+    w(f"{prefix}case ({opcode})")
+    w.push()
+    for code, source in book.arms():
+        w(f"{_lit(book.opcode_width, code)}: {lhs} <= {_write_source_rhs(source)};")
+    w.pop()
+    w("endcase")
+
+
+def _emit_clocked(w: _Writer, lir: Lir, write_books: dict[RegRef | BoolRegRef, WriteCodebook]) -> None:
+    """Emit every sequential element in one always @(posedge clk): fetch, register writes, and control state."""
+    nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
     float_slots = {slot.reg.index: slot for slot in lir.float_state_slots}
     bool_slots = {slot.reg.index: slot for slot in lir.bool_state_slots}
-    # Each register's whole write is one priority chain over all its drivers (input load, operator writes, casts,
-    # phi copies, comparator/logic results, and -- for a slot -- its boundary install), so a register is never assigned
-    # by two separate statements. The conditions within a chain are pairwise mutually exclusive by construction.
-    wide = _wide_writer_entries(lir, write_sets, write_lists)
-    boolw = _bool_writer_entries(lir, write_lists)
+    float_loads = {load.dst.index: load for load in lir.float_inputs}
+    bool_loads = {load.dst.index: load for load in lir.bool_inputs}
+
+    def load_arm(loads: Mapping[int, FloatInputLoad | BoolInputLoad], reg: int) -> list[tuple[str, str]]:
+        load = loads.get(reg)
+        return [("in_ready && in_valid", f"in_{load.name}")] if load else []
 
     w("""
 // All sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q, transacting_q) and the
-// persistent state registers; every other register is reset-unconditional. Each is driven by exactly one write chain.
+// persistent state registers; every other register is reset-unconditional. Each is driven by exactly one statement.
 always @(posedge clk) begin
 """)
     w.push()
 
-    w("// Microcode fetch: PC latch -> control-store array read -> BRAM output register.")
+    w("// Microcode fetch: PC latch; ucode_word pipelines ucode_q.")
     w("ucode_addr_q <= next_pc;")
-    w("ucode_q      <= ucode[ucode_addr_q];")
     w("ucode_word   <= ucode_q;")
     w("")
 
-    # Non-slot registers: one reset-unconditional write chain each driving regs[]/bregs[]. Datapath payload carries no
-    # reset, keeping the high-fanout reset net off the wide cone (only control/valid state is reset); the contents are
-    # don't-care until a valid write lands. A register with no drivers is simply omitted.
-    nonslot_wide = [reg for reg in range(nreg) if reg not in float_slots and wide.get(reg)]
-    nonslot_bool = [reg for reg in range(nbreg) if reg not in bool_slots and boolw.get(reg)]
+    # Non-slot registers: one reset-unconditional statement each. Datapath payload carries no reset, keeping the
+    # high-fanout reset net off the wide cone (only control/valid state is reset); contents are don't-care until a
+    # valid write lands. A register with neither an input load nor any opcode source is simply omitted.
+    nonslot_wide = [
+        reg for reg in range(nreg) if reg not in float_slots and (RegRef(reg) in write_books or reg in float_loads)
+    ]
+    nonslot_bool = [
+        reg for reg in range(nbreg) if reg not in bool_slots and (BoolRegRef(reg) in write_books or reg in bool_loads)
+    ]
     if nonslot_wide or nonslot_bool:
-        w("// Register write chains (reset-unconditional): one priority chain per register over all its drivers.")
+        w("// Register writes (reset-unconditional): one opcode-selected statement per register.")
         for reg in nonslot_wide:
-            _emit_chain(w, f"regs[{reg}]", wide[reg])
+            _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), load_arm(float_loads, reg))
         for reg in nonslot_bool:
-            _emit_chain(w, f"bregs[{reg}]", boolw[reg])
+            _emit_reg_write(
+                w, f"bregs[{reg}]", BoolRegRef(reg), write_books.get(BoolRegRef(reg)), load_arm(bool_loads, reg)
+            )
         w("")
 
     # Control and persistent state are the reset-gated registers: the slot snapshot (under rst) and the slot's update
-    # chain (its coalesced operator writes and/or its boundary install, under the else) are the two arms of one rst
+    # statement (its opcode-selected writes plus a boundary install arm, under the else) are the two arms of one rst
     # condition, segregating those assignments for the synthesizer.
     fmt = lir.float_format
     digits = (fmt.width + 3) // 4
@@ -874,19 +634,24 @@ always @(posedge clk) begin
     w("transacting_q <= (transacting_q << 1) | transacting_in;")
     w("if (err) err_pc_q <= pc - FETCH_LAG;  // err wins; execution lags the fetch PC by FETCH_LAG, so step is pc-lag")
     w("else if (in_ready && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted")
+    # A non-coalesced slot installs its live-out read-first at the accepted-output boundary (out_valid && out_ready, so
+    # a held boundary copies exactly once), a lower-priority arm of the same statement; an early install is an ordinary
+    # opcode source (see write_events). Boolean state installs are boundary-only.
     for reg, slot in sorted(float_slots.items()):
-        chain = wide.get(reg, []) + _wide_state_install_entry(lir, slot)
-        if chain:
-            _emit_chain(w, f"regs[{reg}]", chain)
+        arms = load_arm(float_loads, reg)
+        if slot.needs_copy and lir.float_state_install_is_boundary(slot):
+            # The boundary install is a higher-priority arm than the opcode case, so it must not shadow any opcode
+            # write. It never can: a non-coalesced boundary slot holds its live-in until the read-first boundary read,
+            # so the allocator lands no intermediate write on it -- pinned here so a future scheduler cannot regress it.
+            assert RegRef(reg) not in write_books, "a boundary-install slot must carry no opcode write sources"
+            arms.append(("out_valid && out_ready", _operand_rhs(slot.tap)))
+        _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), arms)
     for reg, bslot in sorted(bool_slots.items()):
-        install = (
-            [("pc == LASTPC && out_ready", _bool_operand_rhs(bslot.live_out), "state install")]
-            if bslot.needs_copy
-            else []
-        )
-        chain = boolw.get(reg, []) + install
-        if chain:
-            _emit_chain(w, f"bregs[{reg}]", chain)
+        arms = load_arm(bool_loads, reg)
+        if bslot.needs_copy:
+            assert BoolRegRef(reg) not in write_books, "a boundary-install bool slot must carry no opcode write sources"
+            arms.append(("out_valid && out_ready", _operand_rhs(bslot.live_out)))
+        _emit_reg_write(w, f"bregs[{reg}]", BoolRegRef(reg), write_books.get(BoolRegRef(reg)), arms)
     w.pop()
     w("end")
 
@@ -900,16 +665,6 @@ assign in_ready  = (pc == 0);
 assign out_valid = (pc == LASTPC);  // result valid on PRESENT; execution lags the fetch by FETCH_LAG
 assign err_pc    = err_pc_q;
 """)
-    float_index = 0
     for wire in lir.outputs:
-        match wire:
-            case BoolOutputWire():
-                w(f"assign {wire.name} = {_bool_operand_rhs(wire.tap)};")
-            case FloatOutputWire():
-                raw = _source_net(wire.tap.source)
-                if wire.tap.sign == FloatSignControl():
-                    w(f"assign {wire.name} = {raw};")
-                else:
-                    _fsgnop(w, raw, wire.tap.sign, wire.name, f"u_outsgn_{float_index}")
-                float_index += 1
+        w(f"assign {wire.name} = {_operand_rhs(wire.tap)};")
     w("")
