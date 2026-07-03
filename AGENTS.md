@@ -185,6 +185,8 @@ Special things to look out for:
   multiplicand bitwidth exceeds the DSP slice input width.
 - Retiming is sneaky: a moved stage may cause a different path to become critical, so with retiming enabled one needs
   to evaluate the adjacent stages as well.
+- Route-dominated is not automatically unstageable: a register roughly halves routing distributed across a path's logic
+  levels (one shared `fadd` normalize stage can lift a cluster of rows), but cannot shorten a single high-fanout net.
 
 More pipeline stages do not necessarily improve f_max, and can cost both timing and area. Every optional stage spreads
 that operator's flip-flops across more slices; on a wide, register-pressure-heavy datapath this adds routing congestion,

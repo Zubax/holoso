@@ -1,5 +1,4 @@
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -60,10 +59,6 @@ class YosysEcp5Flow(Flow):
             _REPORT,
             *(str(a) for a in self.options.get("nextpnr_extra", ())),
         ]
-        # A few wide kernels sit at the very edge on nextpnr; HOLOSO_YOSYS_HARD raises the heap placer's timing weight
-        # (default 10) so placement chases the critical routes harder -- the yosys analogue of HOLOSO_DIAMOND_HARD.
-        if int(os.getenv("HOLOSO_YOSYS_HARD", "0").strip() or "0") != 0:
-            nextpnr_args += ["--placer-heap-timingweight", "25"]
         commands = [
             CommandSpec(["yosys", "-s", _SCRIPT]),
             CommandSpec(["nextpnr-ecp5", *nextpnr_args]),

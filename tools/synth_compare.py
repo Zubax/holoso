@@ -18,7 +18,6 @@ Usage:
 import argparse
 import html
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -34,7 +33,7 @@ from holoso._hir import optimize  # noqa: E402
 from holoso._lir import build  # noqa: E402
 from holoso._mir import lower as lower_to_mir  # noqa: E402
 from synth.flows import make_flow  # noqa: E402
-from tests._synth_targets import TARGETS, TARGET_ENV_KEYS  # noqa: E402
+from tests._synth_targets import TARGETS  # noqa: E402
 
 # Per-flow resource-primitive names for the LUT/FF/DSP/BRAM report columns; each tool names them differently.
 _RES_KEYS = {
@@ -44,13 +43,6 @@ _RES_KEYS = {
 }
 
 
-def _apply_env(env: dict) -> None:
-    for key in TARGET_ENV_KEYS:
-        os.environ.pop(key, None)
-    for key, value in env.items():
-        os.environ[key] = value
-
-
 def capture(out_path: str) -> None:
     commit = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"], cwd=REPO, capture_output=True, text=True
@@ -58,7 +50,6 @@ def capture(out_path: str) -> None:
     dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=REPO, capture_output=True, text=True).stdout)
     rows = []
     for target in TARGETS:
-        _apply_env(target.env)
         row = {
             "label": target.label,
             "name": target.name,
@@ -66,7 +57,6 @@ def capture(out_path: str) -> None:
             "flow": target.flow.value,
             "target_MHz": target.target_frequency_MHz,
             "ops": repr(target.ops),
-            "env": dict(target.env),
         }
         try:
             lir = build(lower_to_mir(optimize(lower(target.kernel())), target.ops), target.name, fetch_stages=3)
@@ -174,9 +164,7 @@ def render(before_path: str, after_path: str, out_path: str) -> None:
     for label in labels:
         a = after[label]
         b = before.get(label, {})
-        retuned = (b.get("ops") is not None and b.get("ops") != a.get("ops")) or (
-            b.get("env") is not None and b.get("env") != a.get("env")
-        )
+        retuned = b.get("ops") is not None and b.get("ops") != a.get("ops")
         ii_b, ii_a = b.get("min_ii"), a.get("min_ii")
         if ii_b is not None and ii_a is not None:
             cycles_saved += ii_b - ii_a

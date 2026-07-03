@@ -68,13 +68,11 @@ def synth_examples(session: nox.Session) -> None:
     Out-of-context FPGA synthesis (f_max/fabric) of the bundled example matrix across the available tools.
     This one takes a long time.
 
-    Targets are independent and embarrassingly parallel, but the wide e8m36 datapaths are RAM-bound under
-    place-and-route, so the worker count is half the host core count (at least 2) rather than the full count --
-    leaving memory headroom while still scaling with the machine. pytest-enabler, which would otherwise force
-    ``-n auto`` (the full core count), is disabled here so this holds.
+    Each run is itself multithreaded, so the worker count (two-thirds of the cores) balances core utilization against
+    peak P&R memory on the wide e8m36 rows. pytest-enabler is disabled so it cannot force ``-n auto`` (the full count).
     """
     session.install("-e", ".[test]")
-    workers = max(2, (os.cpu_count() or 4) // 2)
+    workers = max(2, int((os.cpu_count() or 4) * 2 / 3))
     session.run("python", "-m", "pytest", "-p", "no:enabler", "-s", "-m", "synth", "-n", str(workers), "tests")
 
 
