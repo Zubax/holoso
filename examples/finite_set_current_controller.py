@@ -5,6 +5,7 @@ TODO FIXME: Currently unsupported.
 """
 
 from dataclasses import dataclass
+from typing import cast
 import numpy as np
 
 
@@ -100,7 +101,11 @@ class FiniteSetCurrentController:
         norm_squares = np.array([float(vector @ vector) for vector in vectors])
         if not np.allclose(norm_squares, norm_squares[0], rtol=0.0, atol=1e-12):
             raise ValueError(f"Active vectors must have equal norms: {norm_squares}")
-        return tuple(candidates), tuple(vectors), 4.0 * self._BALANCE_WEIGHT * float(norm_squares[0])
+        return (
+            cast(tuple[tuple[bool, bool, bool], ...], tuple(candidates)),
+            tuple(vectors),
+            4.0 * self._BALANCE_WEIGHT * float(norm_squares[0]),
+        )
 
     def _balance_step(self, switch_ac: tuple[bool, bool, bool], /) -> np.ndarray:
         return 2.0 * self._zero_mean(np.array(switch_ac, dtype=float))

@@ -63,7 +63,7 @@ def test_model_exact_integer_comparison_is_not_folded_via_float() -> None:
     def exact_int_comparison(a: float) -> float:
         # Regression (user): two compile-time integers must be compared exactly, not via a lossy float64 fold. As
         # float64 both operands round to 9007199254740992.0 and the `==` would misfold true; as integers they differ.
-        if 9007199254740993 == 9007199254740992:
+        if 9007199254740993 == 9007199254740992:  # type: ignore[comparison-overlap]  # deliberately-distinct literals
             r = a
         else:
             r = a + 1.0
@@ -189,7 +189,7 @@ def test_for_counter_reassigned_to_runtime_clears_static_binding() -> None:
     # ``1.0 >= 0`` (the counter), silently taking the wrong arm and miscompiling the output for any ``i`` above 1.
     def f(a: float) -> float:
         for i in range(1):
-            i = a  # reassign the loop variable to a runtime value inside the (single-trip) body
+            i = a  # type: ignore[assignment]  # reassign the loop variable to a runtime value (single-trip body)
         if 1.0 >= i:
             r = 100.0
         else:
@@ -209,7 +209,7 @@ def test_for_counter_reassigned_after_loop_clears_static_binding() -> None:
         acc = 0.0
         for i in range(3):
             acc = acc + 1.0
-        i = a
+        i = a  # type: ignore[assignment]
         if 1.0 >= i:
             acc = acc + 50.0
         return acc
@@ -227,7 +227,7 @@ def test_runtime_reassigned_for_counter_is_not_a_static_index() -> None:
     def f(a: float, b: float, c: float) -> float:
         vec = [a, b, c]
         for i in range(1):
-            i = a  # i is now a runtime value, not a compile-time index
+            i = a  # type: ignore[assignment]  # i is now a runtime value, not a compile-time index
         return vec[i]
 
     with pytest.raises(UnsupportedConstruct):
@@ -247,7 +247,7 @@ def test_for_counter_reassign_keeps_scan_and_lowering_in_lockstep() -> None:
 
         def step(self, a: float) -> float:
             for t in range(1):
-                t = a  # reassign the counter to a runtime value -> the following branch is dynamic
+                t = a  # type: ignore[assignment]  # reassign the counter to a runtime value -> a dynamic branch
             # Both sides are otherwise compile-time (the counter and a literal), so if the scan failed to demote the
             # reassigned counter it would fold ``0 < 1.0`` to True and never scan the else arm. With the counter
             # correctly demoted, this is a real runtime branch and the else arm's ``self.s`` write is reachable.
@@ -283,7 +283,7 @@ def test_walrus_counter_demotion_keeps_scan_and_lowering_in_lockstep() -> None:
         def step(self, a: float) -> float:
             for t in range(1):  # leaks t == 0 (a compile-time integer) into the enclosing scope
                 pass
-            if (t := a) < 1.0:  # the walrus rebinds t to a runtime value -> a real branch, not a stale 0<1.0 fold
+            if (t := a) < 1.0:  # type: ignore[assignment]  # the walrus rebinds t to a runtime value, not a fold
                 pass
             else:
                 c = 2.0
@@ -312,7 +312,7 @@ def test_for_counter_reassigned_inside_while_is_demoted_after_the_loop() -> None
             pass
         w = 0.0
         while w < 1.0:
-            i = a  # demote the counter to a runtime value INSIDE the while body
+            i = a  # type: ignore[assignment]  # demote the counter to a runtime value INSIDE the while body
             w = w + 1.0
         r = 0.0
         if i < 0.0:  # must be a real runtime branch on the reassigned value, not a fold on the stale counter (0)
@@ -336,7 +336,8 @@ def test_for_counter_reassigned_inside_while_rejects_later_static_use() -> None:
             pass
         w = 0.0
         while w < 1.0:
-            i = a  # runtime reassignment inside the loop -> i is no longer a compile-time integer afterwards
+            # runtime reassignment inside the loop -> i is no longer a compile-time integer afterwards
+            i = a  # type: ignore[assignment]
             w = w + 1.0
         return a * 2.0**i  # a runtime exponent must be rejected, never folded against the stale counter
 
@@ -394,6 +395,7 @@ def test_model_is_bit_exact_for_wide_zkf_multiply_regression() -> None:
         FloatValue.from_bits(fmt, 0x42BF30E6505),
         FloatValue.from_bits(fmt, 0xBD734F60F3A),
     )
+    assert isinstance(got[0], FloatValue)
     assert got[0].bits == 0xC0B5B6B31D9
 
 
@@ -1216,7 +1218,7 @@ def test_model_attr_written_under_counter_gated_branch_in_while() -> None:
                     self.s1 = a
                 else:
                     self._s2 = a
-                i = a
+                i = a  # type: ignore[assignment]
                 w = w - 1.0
             return self._s2
 
@@ -1278,7 +1280,8 @@ def test_model_statically_dead_attribute_write_is_not_state() -> None:
                 self.y = x
             return self.y
 
-    for kernel, constant in [(DeadLoopWrite, 1.25), (DeadIfWrite, 2.5)]:
+    kernels: list[tuple[type[DeadLoopWrite] | type[DeadIfWrite], float]] = [(DeadLoopWrite, 1.25), (DeadIfWrite, 2.5)]
+    for kernel, constant in kernels:
         lir = build(_run(kernel().__call__), "dead", fetch_stages=3)
         assert [slot.name for slot in lir.float_state_slots] == []  # no state slot; no crash building it
         model = build_model(lir)

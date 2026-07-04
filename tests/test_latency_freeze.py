@@ -25,7 +25,8 @@ import holoso
 from holoso import FloatFormat
 from holoso._frontend import lower as lower_frontend
 from holoso._hir import optimize
-from holoso._lir import build
+from holoso._lir import FloatStateSlot, build
+from holoso._lir._ir import BoolStateSlot
 from holoso._mir import lower as lower_to_mir
 
 from ._examples import SPECS
@@ -105,17 +106,20 @@ class _BoolShift3:
 # Chained-copy kernels and their frozen (min II, last PC). _Delay3 exercises the wide bank's tapped_by_other path,
 # _BoolShift3 the boolean bank's. _FMT is the wide e8m36 datapath the example matrix uses.
 _FMT = FloatFormat(8, 36)
-_CHAINED_COPY: list[tuple[str, object, tuple[int, int]]] = [
+_CHAINED_COPY: list[tuple[str, type[_Delay3] | type[_BoolShift3], tuple[int, int]]] = [
     ("delay3", _Delay3, (3, 3)),
     ("bool_shift3", _BoolShift3, (3, 3)),
 ]
 
 
 @pytest.mark.parametrize("name,kernel_cls,frozen", _CHAINED_COPY)
-def test_chained_copy_schedule_is_frozen(name: str, kernel_cls: object, frozen: tuple[int, int]) -> None:
+def test_chained_copy_schedule_is_frozen(
+    name: str, kernel_cls: type[_Delay3] | type[_BoolShift3], frozen: tuple[int, int]
+) -> None:
     lir = build(lower_to_mir(optimize(lower_frontend(kernel_cls().__call__)), default_ops(_FMT)), name, fetch_stages=3)
+    slots: list[FloatStateSlot | BoolStateSlot] = [*lir.float_state_slots, *lir.bool_state_slots]
     assert all(
-        slot.needs_copy for slot in (*lir.float_state_slots, *lir.bool_state_slots)
+        slot.needs_copy for slot in slots
     ), f"{name}: a chained-copy slot unexpectedly coalesced; the tapped_by_other path is no longer exercised"
     got = (lir.min_initiation_interval, lir.last_pc)
     assert got == frozen, (

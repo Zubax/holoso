@@ -10,6 +10,8 @@ analysis -- both behavioral, not mere input validation.
 """
 
 import itertools
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pytest
@@ -35,7 +37,7 @@ def _ops() -> OpConfig:
     )
 
 
-def _model(target: object) -> holoso.NumericalSimulator:
+def _model(target: Callable[..., object]) -> holoso.NumericalSimulator:
     return holoso.synthesize(target, _ops()).numerical_model.elaborate()
 
 
@@ -48,7 +50,7 @@ def _xor_chain(a: bool, b: bool, c: bool, d: bool) -> bool:
 
 
 def _float_xor(x: float, y: float) -> float:
-    return x ^ y
+    return x ^ y  # type: ignore[operator, no-any-return]  # deliberately ill-typed: exercises rejection of float ^
 
 
 def test_bool_xor_truth_table() -> None:
@@ -198,9 +200,9 @@ def _instance_shadow(x: float) -> float:
 
 class _ShadowedMethod:
     def __init__(self) -> None:
-        self._mix = _instance_shadow  # an instance attribute that shadows the same-named method
+        self._mix = _instance_shadow  # type: ignore[method-assign]  # shadows the same-named method below
 
-    def _mix(self, x: float) -> float:  # type: ignore[no-redef]  # shadowed at runtime by the __init__ binding
+    def _mix(self, x: float) -> float:  # shadowed at runtime by the __init__ binding
         return x * 2
 
     def __call__(self, x: float) -> float:
@@ -556,7 +558,7 @@ def test_property_subclass_spoofing_fget_is_rejected() -> None:
         holoso.synthesize(_PropertyFgetSpoof().__call__, _ops())
 
 
-class _GetterOverridingStaticmethod(staticmethod):
+class _GetterOverridingStaticmethod(staticmethod[..., Any]):
     """
     A ``staticmethod`` subclass whose ``__get__`` returns a different callable than ``__func__``: Python calls the
     overridden binding, so inlining ``__func__`` would diverge. Faithful only when ``__get__`` is staticmethod's own.
@@ -572,7 +574,7 @@ class _StaticmethodSubclassCall:
         return v * 2.0  # __func__: what reading descriptor.__func__ would inline -- but __get__ binds x*3 instead
 
     def __call__(self, x: float, /) -> float:
-        return self._scale(x)  # Python calls __get__'s binding (x*3); inlining __func__ would compute x*2
+        return self._scale(x)  # type: ignore[no-any-return, operator]  # __get__ binds x*3; __func__ would give x*2
 
 
 def test_staticmethod_subclass_overriding_get_is_rejected() -> None:
@@ -589,6 +591,8 @@ class _Meta(type):
 
 
 class _MetaclassPropertyShadow(metaclass=_Meta):
+    flag: bool  # declared only for typing; set via __dict__ below, never through this class's own namespace
+
     def __init__(self) -> None:
         self.__dict__["flag"] = True  # a LIVE instance attribute: the metaclass property does not govern instances
 

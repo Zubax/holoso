@@ -7,6 +7,7 @@ the wrapper delays y_sgnop through the same number of stages as zkf_round.
 """
 
 import os
+from typing import Any
 
 import cocotb
 import numpy as np
@@ -49,7 +50,7 @@ DIRECTED_ROUND: tuple[int, ...] = DIRECTED_F32 + tuple(
 
 
 @cocotb.test()
-async def holoso_fround_cocotb(dut) -> None:
+async def holoso_fround_cocotb(dut: Any) -> None:
     await start_clock(dut)
     await drive_reset(dut)
 

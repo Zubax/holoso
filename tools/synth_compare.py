@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any, cast
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -50,7 +51,7 @@ def capture(out_path: str) -> None:
     dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=REPO, capture_output=True, text=True).stdout)
     rows = []
     for target in TARGETS:
-        row = {
+        row: dict[str, Any] = {
             "label": target.label,
             "name": target.name,
             "example": target.example,
@@ -86,7 +87,9 @@ def capture(out_path: str) -> None:
     print(f"\nWrote {out_path}: {len(rows)} targets @ {commit}{'+dirty' if dirty else ''}")
 
 
-def _delta_cell(before, after, *, lower_is_better: bool, unit: str = "", fmt: str = "{:.2f}") -> str:
+def _delta_cell(
+    before: float | int | None, after: float | int | None, *, lower_is_better: bool, unit: str = "", fmt: str = "{:.2f}"
+) -> str:
     if before is None or after is None:
         b = fmt.format(before) if before is not None else "—"
         a = fmt.format(after) if after is not None else "—"
@@ -101,10 +104,10 @@ def _delta_cell(before, after, *, lower_is_better: bool, unit: str = "", fmt: st
     )
 
 
-def _resource_total(row, key):
+def _resource_total(row: dict[str, Any], key: str) -> int | None:
     res = row.get("resources") or {}
     item = res.get(key)
-    return item["used"] if item else None
+    return cast(int, item["used"]) if item else None
 
 
 def _critical_path(directory: Path, flow: str) -> str | None:
@@ -129,12 +132,12 @@ def _critical_path(directory: Path, flow: str) -> str | None:
             lines = log.read_text(errors="ignore").splitlines()
             for i, ln in enumerate(lines):
                 if "Critical path report" in ln:
-                    out: list[str] = []
+                    out2: list[str] = []
                     for sub in lines[i:]:
-                        out.append(sub.replace("Info: ", "").rstrip())
+                        out2.append(sub.replace("Info: ", "").rstrip())
                         if "ns logic" in sub and "ns rout" in sub:  # the path's terminating summary line
-                            return "\n".join(out)
-                    return "\n".join(out[:80])
+                            return "\n".join(out2)
+                    return "\n".join(out2[:80])
         elif "vivado" in flow:
             rpt = directory / "worst_path.rpt"
             if not rpt.exists():

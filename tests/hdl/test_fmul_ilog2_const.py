@@ -6,6 +6,7 @@ zkf_mul_ilog2_const.
 """
 
 import os
+from typing import Any
 
 import cocotb
 import numpy as np
@@ -38,7 +39,7 @@ K_VALUES = (-5, -1, 0, 1, 5)
 
 
 @cocotb.test()
-async def holoso_fmul_ilog2_const_cocotb(dut) -> None:
+async def holoso_fmul_ilog2_const_cocotb(dut: Any) -> None:
     k_param = int(os.environ["HOLOSO_TEST_K"])
 
     await start_clock(dut)

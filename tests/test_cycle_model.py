@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from holoso import FloatFormat
-from holoso._backend.numerical import NumericalSimulator
+from holoso._backend.numerical import ModelInput, ModelOutput, NumericalSimulator
 from holoso._frontend import lower
 from holoso._hir import optimize
 from holoso._lir import Lir, build
@@ -41,14 +41,14 @@ from schmitt_trigger import SchmittTrigger  # noqa: E402
 _FMT = FloatFormat(8, 36)
 
 
-def _random_inputs(lir: Lir, rng: random.Random) -> list[object]:
+def _random_inputs(lir: Lir, rng: random.Random) -> list[ModelInput]:
     return [
         bool(rng.randint(0, 1)) if type(load).__name__ == "BoolInputLoad" else rng.uniform(-3.0, 3.0)
         for load in lir.inputs
     ]
 
 
-def _drive(model: NumericalSimulator, inputs: list[object]) -> tuple[tuple[object, ...], int]:
+def _drive(model: NumericalSimulator, inputs: list[ModelInput]) -> tuple[list[ModelOutput], int]:
     model.set_inputs(*inputs)
     while not model.in_ready:
         model.tick(in_valid=False, out_ready=True)
@@ -81,12 +81,13 @@ def test_tick_and_call_agree(name: str, factory: Callable[[], Callable[..., obje
 def test_single_path_latency_is_the_static_initiation_interval(name: str) -> None:
     # A kernel with one forward path takes exactly ``initiation_interval - 1`` cycles from the accept edge (pc==1) to
     # out_valid (pc==LASTPC) -- the cycle count a caller recovers by counting ticks, here the static lower bound.
-    factory = {
+    factories: dict[str, Callable[[], Callable[..., object]]] = {
         "madd": lambda: madd.madd,
         "poly3": lambda: poly3.poly3,
         "cordic_sincos": lambda: CordicSinCos().__call__,
         "ekf1_stateless": lambda: update_x_P,
-    }[name]
+    }
+    factory = factories[name]
     lir = build(lower_to_mir(optimize(lower(factory())), default_ops(_FMT)), name, fetch_stages=3)
     model = NumericalSimulator(lir)
     rng = random.Random(7)
@@ -113,7 +114,7 @@ def test_deep_loop_runs_in_bounded_memory() -> None:
     shallow_cycles = _drive(NumericalSimulator(lir), [10.0])[1]
     model = NumericalSimulator(lir)
     out, deep_cycles = _drive(model, [20000.0])
-    assert abs(float(out[0])) <= 1e-3  # type: ignore[arg-type]
+    assert abs(float(out[0])) <= 1e-3
     assert deep_cycles > shallow_cycles * 100, "the deep run must genuinely iterate thousands of times"
     # The in-flight landing buffers drain every cycle, so after the transaction they hold nothing -- the state the
     # model retains does not grow with the trip count, which is what keeps an arbitrarily deep loop bounded.
@@ -141,7 +142,7 @@ def _count_down(n: float) -> float:
 # path is unified away, yet every realized transaction is the steady-state 20 cycles, which only this guard pins -- the
 # static metrics gate sees only the raised min_ii).
 _T, _F = True, False
-_WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[list[object]], int]] = {
+_WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[list[ModelInput]], int]] = {
     "schmitt_trigger": (lambda: SchmittTrigger().__call__, [[2.0], [-2.0], [0.0], [0.5], [-0.5], [3.0]], 6),
     "iir1_lpf": (lambda: IIR1LPF().__call__, [[1.0], [-2.0], [0.5], [3.0], [-1.5], [0.0]], 20),
     "quadrature_encoder": (

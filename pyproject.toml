@@ -89,8 +89,8 @@ target-version = ["py312"]
 [tool.mypy]
 python_version = "3.14"
 strict = true
-files = ["holoso"]
+files = ["holoso", "tests", "examples", "synth", "tools"]
 
 [[tool.mypy.overrides]]
-module = ["scipy.*"]
+module = ["scipy.*", "cocotb.*", "cocotb_tools.*"]
 ignore_missing_imports = true

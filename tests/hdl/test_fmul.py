@@ -6,6 +6,7 @@ every input cycle.
 """
 
 import os
+from typing import Any
 
 import cocotb
 import numpy as np
@@ -38,7 +39,7 @@ STAGE_COMBOS = ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1))
 
 
 @cocotb.test()
-async def holoso_fmul_cocotb(dut) -> None:
+async def holoso_fmul_cocotb(dut: Any) -> None:
     await start_clock(dut)
     await drive_reset(dut)
 

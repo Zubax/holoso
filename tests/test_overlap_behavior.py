@@ -86,7 +86,9 @@ def test_overlap_kernel_persistent_state_across_many_vectors() -> None:
     reference = _OverlapAccumulator()
     rng = np.random.default_rng(0xA11CE)
     samples = [(0.5, 0.5, 1.0), (2.0, 2.0, 1.0)]  # the x == y decision boundary on both sides
-    samples += [tuple(float(rng.uniform(-3.0, 3.0)) for _ in range(3)) for _ in range(60)]
+    samples += [
+        (float(rng.uniform(-3.0, 3.0)), float(rng.uniform(-3.0, 3.0)), float(rng.uniform(-3.0, 3.0))) for _ in range(60)
+    ]
     for x, y, z in samples:
         got = float(simulator.run(x, y, z)[0])
         want = reference(x, y, z)

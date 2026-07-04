@@ -8,6 +8,7 @@ multiply-then-add would double-round differently).
 """
 
 import os
+from typing import Any
 
 import cocotb
 import numpy as np
@@ -56,7 +57,7 @@ _CANCELLATION = (
 
 
 @cocotb.test()
-async def holoso_ffma_cocotb(dut) -> None:
+async def holoso_ffma_cocotb(dut: Any) -> None:
     await start_clock(dut)
     await drive_reset(dut)
 

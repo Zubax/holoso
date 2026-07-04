@@ -10,6 +10,7 @@ to latch/land together whether or not an output register stage delays the commit
 
 import json
 import os
+from typing import Any
 
 import cocotb
 import pytest
@@ -50,13 +51,13 @@ def _divide(a: float, b: float) -> float:
     return a / b
 
 
-async def _settle(dut: object) -> None:
+async def _settle(dut: Any) -> None:
     await RisingEdge(dut.clk)
     await Timer(1, unit="ns")
 
 
 @cocotb.test()
-async def err_pc_latches_div0(dut: object) -> None:
+async def err_pc_latches_div0(dut: Any) -> None:
     err_step = int(json.loads(os.environ["HOLOSO_ERRCYC"])["err_step"])
     a_bits = FMT.encode(1.0)
 

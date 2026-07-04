@@ -7,6 +7,7 @@ checks that div0 itself is correct. The wrapper delays y_sgnop through the same 
 """
 
 import os
+from typing import Any
 
 import cocotb
 import numpy as np
@@ -44,7 +45,7 @@ def _exp_is_zero(bits: int) -> bool:
 
 
 @cocotb.test()
-async def holoso_fdiv_cocotb(dut) -> None:
+async def holoso_fdiv_cocotb(dut: Any) -> None:
     await start_clock(dut)
     await drive_reset(dut)
 
@@ -62,7 +63,7 @@ async def holoso_fdiv_cocotb(dut) -> None:
         b_eff = apply_sgnop(b, b_op)
         b_eff_is_zero = _exp_is_zero(b_eff)
 
-        expected: dict = {"_desc": f"a=0x{a:08x} b=0x{b:08x} ops={a_op}{b_op}{y_op}"}
+        expected: dict[str, Any] = {"_desc": f"a=0x{a:08x} b=0x{b:08x} ops={a_op}{b_op}{y_op}"}
         if b_eff_is_zero:
             # div0 asserts; y is unspecified -- only check div0.
             expected["div0"] = 1

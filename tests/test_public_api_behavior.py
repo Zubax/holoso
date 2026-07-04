@@ -161,7 +161,9 @@ def test_ifconvertible_and_real_branch_forms_agree() -> None:
     sim_br = _sim(_real_branch_division_form, "br_div")
     rng = np.random.default_rng(0xC0FFEE)
     samples = [(2.0, 3.0, 1.0), (2.0, 3.0, -1.0), (2.0, 3.0, 0.0), (-1.0, 2.0, 0.5)]
-    samples += [tuple(float(rng.uniform(-3.0, 3.0)) for _ in range(3)) for _ in range(40)]
+    samples += [
+        (float(rng.uniform(-3.0, 3.0)), float(rng.uniform(-3.0, 3.0)), float(rng.uniform(-3.0, 3.0))) for _ in range(40)
+    ]
     for x, y, c in samples:
         a = float(sim_ifc.run(x, y, c)[0])
         b = float(sim_br.run(x, y, c)[0])

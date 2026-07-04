@@ -41,7 +41,7 @@ from holoso._hir import BoolSelect, FloatDiv as HirFloatDiv, Phi, Select
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir._const_fold import run as fold_constants
 from holoso._lir import build
-from holoso._mir import lower as lower_to_mir, Mir, MirFloatConst, MirFloatInput, MirOperation
+from holoso._mir import lower as lower_to_mir, Mir, MirFloatConst, MirFloatInput, MirFloatOutput, MirOperation
 from holoso._operators import FMulILog2Operator, FloatSignControl
 from ._importguard import forbidden_imports
 from ._modelref import build_model
@@ -228,7 +228,7 @@ def test_wide_supported_pow2_uses_ilog2_operator() -> None:
     mir = _run(f, ops)
     selected = _ops(mir)
     assert [type(o.operator) for o in selected] == [FMulILog2Operator]
-    assert selected[0].operator.k == 4
+    assert isinstance(selected[0].operator, FMulILog2Operator) and selected[0].operator.k == 4
     assert _consts(mir) == []
 
 
@@ -279,6 +279,7 @@ def test_pure_sign_output_adds_no_operation() -> None:
 
     mir = _run(f)
     assert _ops(mir) == []
+    assert isinstance(mir.outputs[0], MirFloatOutput)
     assert mir.outputs[0].sign == FloatSignControl(absolute=True).then(FloatSignControl(negate=True))
 
 
@@ -525,7 +526,7 @@ def test_bool_select_reductions_are_truth_table_correct() -> None:
             y = not f
         return y
 
-    cases = [
+    cases: list[tuple[Callable[..., bool], Callable[..., bool], int, bool]] = [
         (s_tf, lambda c: c, 1, False),
         (s_ft, lambda c: not c, 1, False),
         (s_t_dyn, lambda c, f: c or f, 2, False),

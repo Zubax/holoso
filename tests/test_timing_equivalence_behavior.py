@@ -32,7 +32,7 @@ from collections.abc import Callable
 import numpy as np
 
 import holoso
-from holoso import FloatFormat
+from holoso import FloatFormat, FloatValue
 
 from ._modelref import default_ops, overlap_spill_kernel, staged_ops
 
@@ -82,7 +82,9 @@ def test_branchy_diamond_timing_invariant() -> None:
     rng = np.random.default_rng(0xB47C)
     # Both branch polarities and the exact decision boundary (t == c) on hand-picked vectors plus a random sweep.
     samples = [(1.0, 2.0, 0.0), (0.5, 0.5, 1.0), (-1.0, 3.0, -2.0), (2.0, 1.0, 5.0), (0.0, 4.0, 0.0)]
-    samples += [tuple(float(rng.uniform(-3.0, 3.0)) for _ in range(3)) for _ in range(60)]
+    samples += [
+        (float(rng.uniform(-3.0, 3.0)), float(rng.uniform(-3.0, 3.0)), float(rng.uniform(-3.0, 3.0))) for _ in range(60)
+    ]
     for x, y, c in samples:
         _assert_bits_equal(short, long, x, y, c)
 
@@ -160,7 +162,7 @@ def test_stateful_stream_timing_invariant_with_reset() -> None:
     short, long = _pair(_LeakyAccumulator().__call__, "leaky_acc")
     rng = np.random.default_rng(0x5EED)
     sequence = [(1.0, 2.0), (2.0, 1.0), (0.5, 0.5)]  # both polarities and the x == y boundary
-    sequence += [tuple(float(rng.uniform(-3.0, 3.0)) for _ in range(2)) for _ in range(40)]
+    sequence += [(float(rng.uniform(-3.0, 3.0)), float(rng.uniform(-3.0, 3.0))) for _ in range(40)]
     for x, y in sequence:
         _assert_bits_equal(short, long, x, y)
     # A reset partway must restore both pipelines to the same snapshot; they must continue bit-identical afterwards.
@@ -195,6 +197,7 @@ def test_stateful_backpressure_timing_invariant() -> None:
     for index, vector in enumerate([(1.0, 2.0), (3.0, 1.0), (0.5, 4.0), (2.0, 2.0), (-1.0, 0.5)]):
         held_short = _drain_to_output(short, vector, stall=2 * index)
         held_long = _drain_to_output(long, vector, stall=2 * index)
+        assert isinstance(held_short, FloatValue) and isinstance(held_long, FloatValue)
         assert held_short.bits == held_long.bits, (
             f"vector={vector} stall={2 * index}: short=0x{held_short.bits:x} ({float(held_short)}) "
             f"long=0x{held_long.bits:x} ({float(held_long)})"
@@ -213,6 +216,8 @@ def test_overlap_spill_timing_invariant() -> None:
     short, long = _pair(overlap_spill_kernel, "overlap_spill")
     rng = np.random.default_rng(0x09E2)
     samples = [(1.0, 2.0, 0.5), (2.0, 1.0, 0.5), (0.5, 0.5, 1.0), (-1.0, 3.0, 2.0), (3.0, -1.0, -2.0)]
-    samples += [tuple(float(rng.uniform(-3.0, 3.0)) for _ in range(3)) for _ in range(60)]
+    samples += [
+        (float(rng.uniform(-3.0, 3.0)), float(rng.uniform(-3.0, 3.0)), float(rng.uniform(-3.0, 3.0))) for _ in range(60)
+    ]
     for x, y, z in samples:
         _assert_bits_equal(short, long, x, y, z)

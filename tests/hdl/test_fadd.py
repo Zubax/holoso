@@ -6,6 +6,7 @@ every input cycle.
 """
 
 import os
+from typing import Any
 
 import cocotb
 import numpy as np
@@ -35,7 +36,7 @@ from .hdl_float_oracle import (
 
 
 @cocotb.test()
-async def holoso_fadd_cocotb(dut) -> None:
+async def holoso_fadd_cocotb(dut: Any) -> None:
     await start_clock(dut)
     await drive_reset(dut)
 

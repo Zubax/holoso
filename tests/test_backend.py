@@ -15,6 +15,7 @@ from holoso import (
     FCmpOperator,
     FDivOperator,
     FloatFormat,
+    FloatValue,
     FMulILog2OperatorFamily,
     FMulOperator,
     OpConfig,
@@ -300,6 +301,7 @@ def test_both_bank_lane_write_commit_rides_the_commit_step() -> None:
         write_codebook,
         write_events,
     )
+    from holoso._operators import BoolInversion
     from ._modelref import branch_boundary_kernel, fcmp_staged_ops
 
     fmt = FloatFormat(6, 18)
@@ -311,7 +313,12 @@ def test_both_bank_lane_write_commit_rides_the_commit_step() -> None:
     for op in lir.ops:
         for write in op.writes:
             is_wide = not isinstance(write.dst, BoolRegRef)
-            source = OpWriteSource(op.inst, write.port, False if is_wide else write.conditioner.invert)
+            if is_wide:
+                invert = False
+            else:
+                assert isinstance(write.conditioner, BoolInversion)
+                invert = write.conditioner.invert
+            source = OpWriteSource(op.inst, write.port, invert)
             code = write_books[write.dst].code(source)
             assert (
                 fields[f_op(write.dst)].values[pooled_write_word(op.commit_cycle)] == code
@@ -358,7 +365,7 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         boundary_step,
     )
     from holoso._lir._ir import BoolRegFileLayout
-    from holoso._operators import FloatHardwareOperator, FloatSignControl, FloatValue
+    from holoso._operators import FloatHardwareOperator, FloatSignControl
     from holoso._type import ScalarSignature, FloatType as ScalarFloatType
 
     _FETCH_LAG = 2  # datapath lag matching the 3-stage control fetch: one less than fetch_stages

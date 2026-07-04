@@ -6,7 +6,9 @@ import math
 import sys
 import textwrap
 import types
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -355,7 +357,7 @@ def test_nested_function_scope_does_not_shadow_global() -> None:
     # function treat that name as local, which would shadow the numpy alias (or a builtin) at an earlier use.
     def kernel(x: float) -> float:
         y = np.asarray([x])
-        return y[0]
+        return y[0]  # type: ignore[no-any-return]
 
         def helper() -> int:  # noqa -- dead nested scope; its ``np`` is not the outer's
             np = 1
@@ -821,7 +823,7 @@ def test_loop_carried_attr_written_only_in_live_folded_arm() -> None:
 
 def test_unknown_global_is_unsupported() -> None:
     def f(a: float) -> float:
-        return a + UNDEFINED_GLOBAL  # type: ignore[name-defined]  # noqa: F821
+        return a + UNDEFINED_GLOBAL  # type: ignore[name-defined, no-any-return]  # noqa: F821
 
     with pytest.raises(UnsupportedConstruct):
         lower(f)
@@ -851,7 +853,10 @@ def test_stateful_method_state_slots_and_dedup() -> None:
     assert [o.name for o in hir.outputs] == ["state_y"]
     slots = {s.name: s for s in hir.state_slots}
     assert set(slots) == {"y", "_x_prev"}
-    assert slots["y"].reset_value.value == 0.0 and slots["_x_prev"].reset_value.value == 0.0
+    assert (
+        cast(FloatConst, slots["y"].reset_value).value == 0.0
+        and cast(FloatConst, slots["_x_prev"].reset_value).value == 0.0
+    )
     assert {n.slot for n in hir.nodes.values() if isinstance(n, StateRead)} == {"y", "_x_prev"}
 
 
@@ -945,9 +950,9 @@ def test_stateful_readonly_attribute_is_folded_constant() -> None:
 def test_stateful_reset_state_is_the_instance_snapshot() -> None:
     # The reset value is whatever the instance holds at synthesis time, including post-construction mutation.
     integrator = _integrator_class()(k=2**-22)
-    integrator.y = 1.5  # type: ignore[attr-defined]
+    integrator.y = 1.5
     slots = {s.name: s for s in lower(integrator.__call__).state_slots}
-    assert slots["y"].reset_value.value == 1.5
+    assert cast(FloatConst, slots["y"].reset_value).value == 1.5
 
 
 def test_init_method_target_is_rejected() -> None:
@@ -1018,7 +1023,7 @@ def test_list_slice() -> None:
 def test_vector_scalar_broadcast() -> None:
     def f(a: float, b: float) -> list[float]:
         v = [a, b]
-        return v * 0.5
+        return v * 0.5  # type: ignore[no-any-return, operator]
 
     hir = lower(f)
     assert _arith_count(hir, FloatMul) == 2
@@ -1028,7 +1033,7 @@ def test_vector_scalar_broadcast() -> None:
 def test_flatten_collapses_nesting() -> None:
     def f(a: float, b: float) -> list[float]:
         m = [[a], [b]]
-        return m.flatten()
+        return m.flatten()  # type: ignore[no-any-return, attr-defined]
 
     assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
 
@@ -1044,7 +1049,7 @@ def test_index_out_of_range_is_rejected() -> None:
 
 def test_indexing_a_scalar_is_rejected() -> None:
     def f(a: float) -> float:
-        return a[0]
+        return a[0]  # type: ignore[no-any-return, index]
 
     with pytest.raises(UnsupportedConstruct, match="index or slice a scalar"):
         lower(f)
@@ -1052,7 +1057,7 @@ def test_indexing_a_scalar_is_rejected() -> None:
 
 def test_star_unpacking_a_scalar_is_rejected() -> None:
     def f(a: float) -> float:
-        return [*a]
+        return [*a]  # type: ignore[misc, return-value]
 
     with pytest.raises(UnsupportedConstruct, match="unpack"):
         lower(f)
@@ -1091,8 +1096,8 @@ def test_chained_assignment_binds_every_target() -> None:
 
 def test_unpacking_a_scalar_source_is_rejected() -> None:
     def f(a: float) -> float:
-        x, y = a
-        return x + y
+        x, y = a  # type: ignore[misc]
+        return x + y  # type: ignore[no-any-return, has-type]
 
     with pytest.raises(UnsupportedConstruct, match="unpack a scalar"):
         lower(f)
@@ -1100,8 +1105,8 @@ def test_unpacking_a_scalar_source_is_rejected() -> None:
 
 def test_unpacking_arity_mismatch_is_rejected() -> None:
     def f(a: float, b: float, c: float) -> float:
-        x, y = [a, b, c]
-        return x + y
+        x, y = [a, b, c]  # type: ignore[misc]
+        return x + y  # type: ignore[no-any-return, has-type]
 
     with pytest.raises(UnsupportedConstruct, match="unpack 3 values into 2"):
         lower(f)
@@ -1128,7 +1133,7 @@ def test_unpacked_name_shadows_global_callable() -> None:
     # this exercises _collect_local_names descending into unpacking targets.
     def f(a: float) -> float:
         _addmul, b = a, a  # _addmul is now a local value (Python would raise 'float not callable' when called)
-        return _addmul(b)
+        return _addmul(b)  # type: ignore[no-any-return, operator]
 
     with pytest.raises(UnsupportedConstruct, match="not a callable"):
         lower(f)
@@ -1158,7 +1163,7 @@ def test_inlined_global_with_star_args() -> None:
 
 def test_inline_arity_mismatch_is_rejected() -> None:
     def f(a: float) -> float:
-        return _addmul(a)
+        return _addmul(a)  # type: ignore[call-arg, return-value]
 
     with pytest.raises(UnsupportedConstruct, match="positional arguments"):
         lower(f)
@@ -1179,7 +1184,7 @@ def test_user_global_function_shadows_intrinsic_name() -> None:
 def test_local_name_shadows_global_callable() -> None:
     # A parameter named like a global function refers to the parameter (a value), which is not callable.
     def f(_addmul: float, a: float) -> float:
-        return _addmul(a)
+        return _addmul(a)  # type: ignore[no-any-return, operator]
 
     with pytest.raises(UnsupportedConstruct, match="not a callable"):
         lower(f)
@@ -1187,7 +1192,7 @@ def test_local_name_shadows_global_callable() -> None:
 
 def test_flatten_on_a_scalar_is_rejected() -> None:
     def f(a: float) -> float:
-        return a.flatten()
+        return a.flatten()  # type: ignore[no-any-return, attr-defined]
 
     with pytest.raises(UnsupportedConstruct, match="aggregate"):
         lower(f)
@@ -1219,7 +1224,7 @@ def test_unary_plus_is_scalar_identity_and_rejects_aggregates() -> None:
 
     def aggregate_bad(a: float, b: float) -> list[float]:
         v = [a, b]
-        return +v
+        return +v  # type: ignore[no-any-return, operator]
 
     with pytest.raises(UnsupportedConstruct, match="scalar"):
         lower(aggregate_bad)
@@ -1229,14 +1234,15 @@ def test_method_style_abs_call_is_rejected() -> None:
     # Only a bare-name abs(...) is the builtin; a method-style a.abs(b) must not be silently treated as it (which would
     # drop the receiver) -- there is no supported scalar method, so it is an unsupported call.
     def f(a: float, b: float) -> float:
-        return a.abs(b)
+        return a.abs(b)  # type: ignore[no-any-return, attr-defined]
 
     with pytest.raises(UnsupportedConstruct, match="abs"):
         lower(f)
 
 
-def _rebind_globals(fn: types.FunctionType, **overrides: object) -> types.FunctionType:
+def _rebind_globals(fn: Callable[..., object], **overrides: object) -> Callable[..., object]:
     """A copy of ``fn`` whose module globals carry ``overrides`` (its source stays retrievable via the shared code)."""
+    assert isinstance(fn, types.FunctionType)
     copy = types.FunctionType(
         fn.__code__, {**fn.__globals__, **overrides}, fn.__name__, fn.__defaults__, fn.__closure__
     )
@@ -1251,10 +1257,10 @@ def test_noncallable_global_shadowing_builtin_is_rejected() -> None:
         return abs(a)
 
     def use_list(a: float) -> float:
-        return list((a, a))
+        return list((a, a))  # type: ignore[return-value]
 
     def use_tuple(a: float) -> float:
-        return tuple((a, a))
+        return tuple((a, a))  # type: ignore[return-value]
 
     # ``None`` shadows too -- it is present-but-non-callable, distinct from an absent global (the _ABSENT sentinel).
     shadows = ((use_abs, {"abs": 5}), (use_abs, {"abs": None}), (use_list, {"list": 5}), (use_tuple, {"tuple": 5}))
@@ -1306,7 +1312,7 @@ def test_jaxtyping_array_field_lowers_and_is_validated() -> None:
 def test_numpy_integer_array_values_coerce_to_real() -> None:
     @dataclasses.dataclass
     class Filt:
-        v: np.ndarray  # type: ignore[type-arg]
+        v: np.ndarray
 
         def step(self, a: float) -> None:
             self.v = self.v * a
@@ -1316,7 +1322,7 @@ def test_numpy_integer_array_values_coerce_to_real() -> None:
 
 def test_numpy_asarray_is_identity_on_an_aggregate() -> None:
     def f(a: float, b: float) -> list[float]:
-        return np.asarray([a, b]).flatten()  # asarray of an array-like is identity in this compile-time model
+        return np.asarray([a, b]).flatten()  # type: ignore[return-value]  # identity in this compile-time model
 
     assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
 
@@ -1331,7 +1337,7 @@ def test_list_is_identity_on_an_aggregate() -> None:
 
 def test_list_of_a_scalar_is_rejected() -> None:
     def f(a: float) -> float:
-        return list(a)  # Python: list(scalar) is a TypeError -- a scalar is not iterable
+        return list(a)  # type: ignore[no-any-return, call-overload]  # list(scalar) is a Python TypeError
 
     with pytest.raises(UnsupportedConstruct, match="list"):
         lower(f)
@@ -1340,7 +1346,7 @@ def test_list_of_a_scalar_is_rejected() -> None:
 def test_tuple_is_identity_on_an_aggregate() -> None:
     def f(a: float, b: float, c: float) -> list[float]:
         v = [a, b, c]
-        return tuple(v[0:2])
+        return tuple(v[0:2])  # type: ignore[return-value]
 
     assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
 
@@ -1349,7 +1355,7 @@ def test_numpy_alias_shadowed_by_a_local_is_not_numpy() -> None:
     # ``np`` is rebound to a local value, so ``np.asarray`` is a method call on that value, not the numpy function.
     def f(a: float) -> float:
         np = [a]
-        return np.asarray([a])
+        return np.asarray([a])  # type: ignore[no-any-return, attr-defined]
 
     with pytest.raises(UnsupportedConstruct, match="asarray"):
         lower(f)
@@ -1359,15 +1365,15 @@ def test_name_assigned_later_is_local_before_its_assignment() -> None:
     # A name assigned anywhere in a function is local throughout (Python's rule); using it as a global/builtin/numpy
     # before that assignment is invalid Python (UnboundLocalError), so holoso rejects it rather than seeing the global.
     def shadows_numpy(a: float) -> float:
-        y = np.asarray([a])
+        y = np.asarray([a])  # type: ignore[used-before-def]
         np = [a]  # noqa: F841  # makes np local for the whole body
-        return y
+        return y  # type: ignore[return-value]
 
     with pytest.raises(UnsupportedConstruct):
         lower(shadows_numpy)
 
     def shadows_builtin(a: float) -> float:
-        y = abs(a)
+        y = abs(a)  # type: ignore[used-before-def]
         abs = [a]  # noqa: F841  # makes abs local for the whole body
         return y
 
@@ -1378,7 +1384,7 @@ def test_name_assigned_later_is_local_before_its_assignment() -> None:
 def test_multidimensional_array_state_is_rejected() -> None:
     @dataclasses.dataclass
     class Filt:
-        m: np.ndarray  # type: ignore[type-arg]
+        m: np.ndarray
 
         def step(self, a: float) -> None:
             self.m = self.m * a
@@ -1412,7 +1418,11 @@ def test_vector_state_decomposes_to_per_element_slots() -> None:
             self.v = [self.v[0] + a, self.v[1], self.v[2]]
 
     hir = lower(Vec().update)
-    assert {s.name: s.reset_value.value for s in hir.state_slots} == {"v_0": 1.0, "v_1": 2.0, "v_2": 3.0}
+    assert {s.name: cast(FloatConst, s.reset_value).value for s in hir.state_slots} == {
+        "v_0": 1.0,
+        "v_1": 2.0,
+        "v_2": 3.0,
+    }
     assert [o.name for o in hir.outputs] == ["state_v_0", "state_v_1", "state_v_2"]
 
 
@@ -1436,7 +1446,7 @@ def test_vector_state_nested_shape_is_rejected() -> None:
             self.v = [0.0, 0.0]
 
         def update(self, a: float, b: float) -> None:
-            self.v = [[a, b]]
+            self.v = [[a, b]]  # type: ignore[list-item]
 
     with pytest.raises(UnsupportedConstruct, match="incompatible shape"):
         lower(Vec().update)
@@ -1709,7 +1719,7 @@ def test_walrus_in_dead_or_unsupported_statement_still_scopes_the_name_local() -
     # must see the runtime local (rejected), NOT silently fold the module int 3 from the global.
     def f(x: float) -> float:
         v = x
-        for _ in range(_DEAD_WALRUS_GLOBAL):
+        for _ in range(_DEAD_WALRUS_GLOBAL):  # type: ignore[used-before-def]
             v = v + 1.0
         return v
         assert (_DEAD_WALRUS_GLOBAL := 2)  # noqa -- unreachable, but makes the name a local for the whole function
@@ -1754,7 +1764,7 @@ def test_walrus_target_shadowing_a_global_int_is_a_runtime_local() -> None:
     def f(x: float) -> float:
         v = x
         if (_WALRUS_SHADOWED_INT := x) > 0.0:
-            for _ in range(_WALRUS_SHADOWED_INT):  # the local float, not the module int 3
+            for _ in range(_WALRUS_SHADOWED_INT):  # type: ignore[call-overload]  # local float, not module int 3
                 v = v + 1.0
         return v
 
@@ -1770,7 +1780,7 @@ def test_reassigning_the_instance_parameter_self_is_rejected() -> None:
             self.a = 1.0
 
         def __call__(self, x: float) -> float:
-            self = x
+            self = x  # type: ignore[assignment]
             return self.a
 
     class _Walrus:
@@ -1778,7 +1788,7 @@ def test_reassigning_the_instance_parameter_self_is_rejected() -> None:
             self.a = 1.0
 
         def __call__(self, x: float) -> float:
-            y = (self := x)
+            y = (self := x)  # type: ignore[assignment]
             return self.a + y
 
     class _Augmented:
@@ -1786,7 +1796,7 @@ def test_reassigning_the_instance_parameter_self_is_rejected() -> None:
             self.a = 1.0
 
         def __call__(self, x: float) -> float:
-            self += x
+            self += x  # type: ignore[operator, assignment]
             return self.a
 
     class _ForCounter:
@@ -1794,7 +1804,7 @@ def test_reassigning_the_instance_parameter_self_is_rejected() -> None:
             self.a = 1.0
 
         def __call__(self, x: float) -> float:
-            for self in range(2):
+            for self in range(2):  # type: ignore[assignment]
                 pass
             return self.a
 
@@ -1803,7 +1813,7 @@ def test_reassigning_the_instance_parameter_self_is_rejected() -> None:
             self.a = 1.0
 
         def __call__(self, x: float) -> float:
-            self, y = x, x
+            self, y = x, x  # type: ignore[assignment]
             return self.a + y
 
     for ctor in (_PlainAssign, _Walrus, _Augmented, _ForCounter, _Unpack):
@@ -1926,7 +1936,7 @@ def test_bool_cast_rejects_aggregate_argument() -> None:
 
 def test_bool_cast_rejects_multiple_arguments() -> None:
     def f(x: float, y: float) -> float:
-        return 1.0 if bool(x, y) else 0.0  # type: ignore[call-arg, arg-type]
+        return 1.0 if bool(x, y) else 0.0  # type: ignore[call-arg]
 
     with pytest.raises(UnsupportedConstruct, match="single scalar"):
         lower(f)
@@ -1962,7 +1972,7 @@ def test_cross_domain_cast_chain_lowers() -> None:
 
 def test_float_cast_rejects_aggregate_argument() -> None:
     def f(x: float, y: float) -> float:
-        return float((x, y))[0]  # type: ignore[index]
+        return float((x, y))[0]  # type: ignore[no-any-return, index, arg-type]
 
     with pytest.raises(UnsupportedConstruct, match="scalar"):
         lower(f)
@@ -2220,7 +2230,7 @@ def test_read_only_scan_does_not_misfold_a_reassigned_for_counter() -> None:
 
         def __call__(self, u: float) -> float:
             for i in range(1):
-                i = u  # the loop counter is reassigned to a runtime value
+                i = u  # type: ignore[assignment]  # the loop counter is reassigned to a runtime value
                 if i > 0.0:
                     self._flag = True
             if self._flag:
@@ -2253,7 +2263,7 @@ def test_missing_return_annotation_is_rejected() -> None:
 
 def test_return_annotation_scalar_type_mismatch_is_rejected() -> None:
     def f(a: float) -> bool:
-        return a + 1.0
+        return a + 1.0  # type: ignore[return-value]
 
     with pytest.raises(UnsupportedConstruct, match="return type mismatch"):
         lower(f)
@@ -2269,7 +2279,7 @@ def test_return_annotation_bool_declared_float_inferred_is_rejected() -> None:
 
 def test_unsupported_return_annotation_is_rejected() -> None:
     def f(a: float) -> int:
-        return a
+        return a  # type: ignore[return-value]
 
     with pytest.raises(UnsupportedConstruct, match="unsupported return annotation"):
         lower(f)
@@ -2277,7 +2287,7 @@ def test_unsupported_return_annotation_is_rejected() -> None:
 
 def test_scalar_declared_but_tuple_returned_is_rejected() -> None:
     def f(a: float) -> float:
-        return a, a
+        return a, a  # type: ignore[return-value]
 
     with pytest.raises(UnsupportedConstruct, match="values are returned"):
         lower(f)
@@ -2285,7 +2295,7 @@ def test_scalar_declared_but_tuple_returned_is_rejected() -> None:
 
 def test_return_tuple_arity_mismatch_is_rejected() -> None:
     def f(a: float) -> tuple[float, float, float]:
-        return a, a
+        return a, a  # type: ignore[return-value]
 
     with pytest.raises(UnsupportedConstruct, match="arity mismatch"):
         lower(f)
@@ -2293,7 +2303,7 @@ def test_return_tuple_arity_mismatch_is_rejected() -> None:
 
 def test_return_none_declared_but_value_returned_is_rejected() -> None:
     def f(a: float) -> None:
-        return a
+        return a  # type: ignore[return-value]
 
     with pytest.raises(UnsupportedConstruct, match="a value is returned"):
         lower(f)
@@ -2304,7 +2314,7 @@ def test_return_value_declared_but_method_returns_nothing_is_rejected() -> None:
         def __init__(self) -> None:
             self._acc = 0.0
 
-        def update(self, x: float) -> float:
+        def update(self, x: float) -> float:  # type: ignore[return]
             self._acc = self._acc + x
 
     with pytest.raises(UnsupportedConstruct, match="returns no value"):
@@ -2345,7 +2355,7 @@ def test_none_return_annotation_accepted_for_stateful_method() -> None:
 
 def test_scalar_returned_but_tuple_declared_is_rejected() -> None:
     def f(a: float) -> tuple[float, float]:
-        return a
+        return a  # type: ignore[return-value]
 
     with pytest.raises(UnsupportedConstruct, match="a single value is returned"):
         lower(f)
@@ -2368,7 +2378,7 @@ def test_nested_tuple_return_annotation_accepted() -> None:
 
 def test_nested_tuple_return_shape_mismatch_is_rejected() -> None:
     def f(a: float, b: float) -> tuple[tuple[float, float], float]:
-        return a, a + b
+        return a, a + b  # type: ignore[return-value]
 
     with pytest.raises(UnsupportedConstruct, match="a single value is returned"):
         lower(f)

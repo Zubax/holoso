@@ -1,6 +1,8 @@
 """Tests for holoso_fisfinite (combinational; y=1 iff exponent != all-ones)."""
 
 from pathlib import Path
+from typing import Any
+
 import cocotb
 import numpy as np
 import pytest
@@ -22,7 +24,7 @@ from .hdl_float_oracle import (
 
 
 @cocotb.test()
-async def holoso_fisfinite_cocotb(dut) -> None:
+async def holoso_fisfinite_cocotb(dut: Any) -> None:
     async def check(x_bits: int) -> None:
         dut.x.value = x_bits
         await Timer(1, unit="ns")

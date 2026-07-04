@@ -53,6 +53,11 @@ def _sim(fn: Callable[..., object], name: str) -> holoso.NumericalSimulator:
     return holoso.synthesize(fn, _ops(), name=name).numerical_model.elaborate()
 
 
+def _bits(value: FloatValue | bool) -> int:
+    assert isinstance(value, FloatValue)
+    return value.bits
+
+
 def _round_ref(value: float, mode: int) -> int:
     """Independent reference: round the in-format value with Python's math/round, then re-encode. Exact at binary32."""
     fv = FloatValue.from_float(FMT, value)
@@ -109,7 +114,7 @@ def test_round_modes_match_reference() -> None:
     for value in _ROUND_VECTORS:
         out = sim.run(value)
         for index, mode in enumerate(modes_by_output):
-            assert out[index].bits == _round_ref(value, mode), f"value={value} output={index} mode={mode}"
+            assert _bits(out[index]) == _round_ref(value, mode), f"value={value} output={index} mode={mode}"
 
 
 def test_round_dispatch_numpy_and_bare_name() -> None:
@@ -121,7 +126,7 @@ def test_round_dispatch_numpy_and_bare_name() -> None:
     for value in _ROUND_VECTORS:
         out = sim.run(value)
         for index, mode in enumerate((1, 2, 3, 1, 2, 3)):
-            assert out[index].bits == _round_ref(value, mode), f"value={value} output={index}"
+            assert _bits(out[index]) == _round_ref(value, mode), f"value={value} output={index}"
 
 
 def test_round_sign_folds_into_operand() -> None:
@@ -133,9 +138,9 @@ def test_round_sign_folds_into_operand() -> None:
     sim = _sim(kernel, "round_sign_fold")
     for value in _ROUND_VECTORS:
         out = sim.run(value)
-        assert out[0].bits == _round_ref(-value, 1), f"floor(-x) value={value}"
-        assert out[1].bits == _round_ref(abs(value), 2), f"ceil(|x|) value={value}"
-        assert out[2].bits == _round_ref(-value, 3), f"trunc(-x) value={value}"
+        assert _bits(out[0]) == _round_ref(-value, 1), f"floor(-x) value={value}"
+        assert _bits(out[1]) == _round_ref(abs(value), 2), f"ceil(|x|) value={value}"
+        assert _bits(out[2]) == _round_ref(-value, 3), f"trunc(-x) value={value}"
 
 
 def test_round_ndigits_is_rejected() -> None:
@@ -169,7 +174,7 @@ def test_fma_matches_single_rounded_reference() -> None:
         ref = FloatValue.fma(
             FloatValue.from_float(FMT, a), FloatValue.from_float(FMT, b), FloatValue.from_float(FMT, c)
         )
-        assert sim.run(a, b, c)[0].bits == ref.bits, f"a={a} b={b} c={c}"
+        assert _bits(sim.run(a, b, c)[0]) == ref.bits, f"a={a} b={b} c={c}"
 
 
 def test_fma_sign_folds_per_operand() -> None:
@@ -184,7 +189,7 @@ def test_fma_sign_folds_per_operand() -> None:
         ref = FloatValue.fma(
             FloatValue.from_float(FMT, -a), FloatValue.from_float(FMT, abs(b)), FloatValue.from_float(FMT, -c)
         )
-        assert sim.run(a, b, c)[0].bits == ref.bits, f"a={a} b={b} c={c}"
+        assert _bits(sim.run(a, b, c)[0]) == ref.bits, f"a={a} b={b} c={c}"
 
 
 def test_fma_unconfigured_is_rejected() -> None:
@@ -204,8 +209,8 @@ def test_intrinsic_dispatch_resolves_aliased_imports() -> None:
     sim = _sim(kernel, "aliased_intrinsics")
     for a, b, c in [(2.7, 3.0, 1.0), (-1.5, 2.0, -0.5), (0.3, -4.0, 2.0), (-100.7, 1.5, 3.5)]:
         out = sim.run(a, b, c)
-        assert out[0].bits == _round_ref(a, 1), f"floor alias a={a}"
-        assert out[1].bits == FloatValue.fma(_v(a), _v(b), _v(c)).bits, f"fma alias a={a} b={b} c={c}"
+        assert _bits(out[0]) == _round_ref(a, 1), f"floor alias a={a}"
+        assert _bits(out[1]) == FloatValue.fma(_v(a), _v(b), _v(c)).bits, f"fma alias a={a} b={b} c={c}"
 
 
 @pytest.mark.skipif(hasattr(np, "fma"), reason="np.fma exists on this numpy and correctly dispatches to ffma")
@@ -213,7 +218,7 @@ def test_numpy_fma_is_rejected() -> None:
     # ``np.fma`` does not exist on this numpy, so it does not resolve to a real function and must not dispatch to ffma
     # by spelling alone (it would not run as plain Python either); the skip guards the numpy versions that do define it.
     def kernel(a: float, b: float, c: float) -> float:
-        return np.fma(a, b, c)  # type: ignore[attr-defined]
+        return np.fma(a, b, c)  # type: ignore[attr-defined, no-any-return]
 
     with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(kernel, _ops(), name="numpy_fma")
@@ -238,8 +243,8 @@ def test_implicit_mul_add_contracts_to_fma_only_with_ffma() -> None:
         a, b, c = (float(np.float32(rng.standard_normal() * 9)) for _ in range(3))
         single = FloatValue.fma(_v(a), _v(b), _v(c)).bits
         double = ((_v(a) * _v(b)) + _v(c)).bits
-        assert fused.run(a, b, c)[0].bits == single, f"fused a={a} b={b} c={c}"
-        assert separate.run(a, b, c)[0].bits == double, f"separate a={a} b={b} c={c}"
+        assert _bits(fused.run(a, b, c)[0]) == single, f"fused a={a} b={b} c={c}"
+        assert _bits(separate.run(a, b, c)[0]) == double, f"separate a={a} b={b} c={c}"
         diverged += single != double
     assert diverged > 0, "expected single- and double-rounded results to differ on some inputs"
 
@@ -256,8 +261,8 @@ def test_implicit_fma_not_contracted_when_product_is_shared() -> None:
     for _ in range(5000):
         a, b, c = (float(np.float32(rng.standard_normal() * 9)) for _ in range(3))
         product = _v(a) * _v(b)
-        assert sim.run(a, b, c)[0].bits == (product + _v(c)).bits, f"add a={a} b={b} c={c}"
-        assert sim.run(a, b, c)[1].bits == product.bits, f"product a={a} b={b} c={c}"
+        assert _bits(sim.run(a, b, c)[0]) == (product + _v(c)).bits, f"add a={a} b={b} c={c}"
+        assert _bits(sim.run(a, b, c)[1]) == product.bits, f"product a={a} b={b} c={c}"
 
 
 def test_implicit_fma_contracts_across_blocks() -> None:
@@ -278,7 +283,7 @@ def test_implicit_fma_contracts_across_blocks() -> None:
     for _ in range(4000):
         a, b, c = (float(np.float32(rng.standard_normal() * 9 + 1e-3)) for _ in range(3))
         single = FloatValue.fma(_v(a), _v(b), _v(c)).bits
-        assert sim.run(a, b, c, True)[0].bits == single, f"taken-arm a={a} b={b} c={c}"
+        assert _bits(sim.run(a, b, c, True)[0]) == single, f"taken-arm a={a} b={b} c={c}"
         diverged += single != ((_v(a) * _v(b)) + _v(c)).bits
     assert (
         diverged > 0
@@ -298,7 +303,7 @@ def test_implicit_fma_distributes_product_sign() -> None:
     def k_neg_abs(a: float, b: float, c: float) -> float:
         return -abs(a * b) + c
 
-    cases = [
+    cases: list[tuple[Callable[[float, float, float], float], Callable[[float, float, float], int]]] = [
         (k_neg, lambda a, b, c: FloatValue.fma(_v(-a), _v(b), _v(c)).bits),
         (k_abs, lambda a, b, c: FloatValue.fma(_v(abs(a)), _v(abs(b)), _v(c)).bits),
         (k_neg_abs, lambda a, b, c: FloatValue.fma(_v(-abs(a)), _v(abs(b)), _v(c)).bits),
@@ -308,7 +313,7 @@ def test_implicit_fma_distributes_product_sign() -> None:
         sim = holoso.synthesize(kernel, _ops(with_fma=True), name=kernel.__name__).numerical_model.elaborate()
         for _ in range(2000):
             a, b, c = (float(np.float32(rng.standard_normal() * 9)) for _ in range(3))
-            assert sim.run(a, b, c)[0].bits == reference(a, b, c), f"{kernel.__name__} a={a} b={b} c={c}"
+            assert _bits(sim.run(a, b, c)[0]) == reference(a, b, c), f"{kernel.__name__} a={a} b={b} c={c}"
 
 
 # Pairs spanning equal values, both infinities, sign-crossing, zero, and ordinary magnitudes.
@@ -340,14 +345,14 @@ def test_min_max_match_reference() -> None:
     for a, b in _MINMAX_VECTORS:
         lo, hi = FloatValue.sort(_v(a), _v(b))
         out = sim.run(a, b)
-        assert out[0].bits == lo.bits, f"min a={a} b={b}"
-        assert out[1].bits == hi.bits, f"max a={a} b={b}"
+        assert _bits(out[0]) == lo.bits, f"min a={a} b={b}"
+        assert _bits(out[1]) == hi.bits, f"max a={a} b={b}"
     rng = np.random.default_rng(0x504)
     for _ in range(4000):
         a, b = (float(np.float32(rng.standard_normal() * 12)) for _ in range(2))
         lo, hi = FloatValue.sort(_v(a), _v(b))
         out = sim.run(a, b)
-        assert out[0].bits == lo.bits and out[1].bits == hi.bits, f"a={a} b={b}"
+        assert _bits(out[0]) == lo.bits and _bits(out[1]) == hi.bits, f"a={a} b={b}"
 
 
 def test_min_max_sign_folds_into_operands() -> None:
@@ -363,8 +368,8 @@ def test_min_max_sign_folds_into_operands() -> None:
         lo, _ignore = FloatValue.sort(_v(-a), _v(abs(b)))
         _ignore2, hi = FloatValue.sort(_v(abs(a)), _v(-b))
         out = sim.run(a, b)
-        assert out[0].bits == lo.bits, f"min(-a,|b|) a={a} b={b}"
-        assert out[1].bits == hi.bits, f"max(|a|,-b) a={a} b={b}"
+        assert _bits(out[0]) == lo.bits, f"min(-a,|b|) a={a} b={b}"
+        assert _bits(out[1]) == hi.bits, f"max(|a|,-b) a={a} b={b}"
 
 
 def test_min_max_dispatch_numpy() -> None:
@@ -376,7 +381,7 @@ def test_min_max_dispatch_numpy() -> None:
     for a, b in _MINMAX_VECTORS:
         lo, hi = FloatValue.sort(_v(a), _v(b))
         out = sim.run(a, b)
-        assert out[0].bits == lo.bits and out[1].bits == hi.bits, f"a={a} b={b}"
+        assert _bits(out[0]) == lo.bits and _bits(out[1]) == hi.bits, f"a={a} b={b}"
 
 
 def test_min_max_wrong_arity_is_rejected() -> None:
@@ -409,8 +414,8 @@ def test_min_max_is_not_bit_commutative() -> None:
         ref0 = FloatValue.sort(neg_x, _v(y))[0]
         ref1 = FloatValue.sort(_v(y), neg_x)[0]
         out = sim.run(x, y)
-        assert out[0].bits == ref0.bits, f"min(-x,y) x={x} y={y}"
-        assert out[1].bits == ref1.bits, f"min(y,-x) x={x} y={y}"
+        assert _bits(out[0]) == ref0.bits, f"min(-x,y) x={x} y={y}"
+        assert _bits(out[1]) == ref1.bits, f"min(y,-x) x={x} y={y}"
 
 
 def test_min_max_of_constants_fold() -> None:
@@ -422,7 +427,7 @@ def test_min_max_of_constants_fold() -> None:
     sim = holoso.synthesize(kernel, _ops(with_sort=False), name="min_max_fold").numerical_model.elaborate()
     for x in [0.0, 3.0, -1.5, 100.25]:
         ref = (_v(x) + _v(1.5)) + _v(2.5)
-        assert sim.run(x)[0].bits == ref.bits, f"x={x}"
+        assert _bits(sim.run(x)[0]) == ref.bits, f"x={x}"
 
 
 def test_min_max_nonfinite_constant_is_rejected() -> None:

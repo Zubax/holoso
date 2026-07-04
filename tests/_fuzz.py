@@ -35,7 +35,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -792,7 +792,7 @@ def generate_stateless_kernel(
     produced: list[_Fragment] = []
     n_fragments = int(rng.integers(1, 4))
     for _ in range(n_fragments):
-        template = rng.choice(_STATELESS_TEMPLATES)  # type: ignore[arg-type]
+        template = cast(Callable[[_Emitter], _Fragment], rng.choice(_STATELESS_TEMPLATES))  # type: ignore[arg-type]
         produced.append(template(em))
 
     # Combining the produced fragments keeps every one LIVE so DCE cannot drop the diamonds/divisions feeding output.
