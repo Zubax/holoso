@@ -3,6 +3,7 @@
 import ast
 import builtins
 import inspect
+import logging
 import math
 import types
 from collections.abc import Callable, Iterator
@@ -28,6 +29,8 @@ from ._ast_support import (
 )
 from ._aggregate import Aggregate, Scalar, StateAttr, Value
 from ._scope import ArmResult, Scope, parse_fndef
+
+_logger = logging.getLogger(__name__)
 
 _ABSENT = object()  # sentinel distinguishing a missing global from one explicitly bound to None during name resolution
 _NO_PARAMETER_ANNOTATION = object()
@@ -197,6 +200,14 @@ class _Lowerer:
             case ast.Expr(value=ast.Constant(value=str())):
                 return False  # docstring
             case ast.Pass():
+                return False
+            case ast.Assert():
+                # An assert is ignored wholesale: its test is never lowered. Any side effect it would have had is
+                # dropped, as under -O; that is the author's responsibility.
+                loc = self._loc(stmt)
+                _logger.info(
+                    "Assert statement at %s:%d has no effect in Holoso and is ignored", loc.filename, loc.lineno
+                )
                 return False
             case ast.Assign(targets=targets, value=value):
                 # Lower the right-hand side once and bind it to every target; this covers single, chained, and
@@ -1728,27 +1739,32 @@ class _Lowerer:
         loc = where if isinstance(where, SourceLocation) else self._loc(where)
         raise UnsupportedConstruct(f"expected a scalar value here, got a {len(value.leaves())}-element aggregate", loc)
 
-    def _reject_shortcircuit_walrus(self, fndef: ast.FunctionDef) -> None:
+    def _reject_shortcircuit_walrus(self, node: ast.AST) -> None:
         """
         Reject a walrus inside an ``and``/``or`` operand or a chained comparison. Such an operand may be short-circuited
         -- statically dropped by the connective fold, or unevaluated in Python -- so whether its binding happens cannot
         be reconciled between the reachability scans (which see the syntactic walrus) and lowering (which may never
         evaluate it). A walrus is supported only where it is evaluated unconditionally: a single comparison or bare
-        test, an assignment/return value, an ``and``/``or``-free ``if``/``while`` test.
+        test, an assignment/return value, an ``and``/``or``-free ``if``/``while`` test. An ``assert`` is skipped -- it
+        is ignored (its test never lowered), so a short-circuited walrus within it is irrelevant here; its target still
+        counts as a function local (see ``scope_local_walrus_targets``), so a later use is a clean unbound-local error.
         """
-        for node in ast.walk(fndef):
-            operands: list[ast.expr] = []
-            if isinstance(node, ast.BoolOp):
-                operands = node.values
-            elif isinstance(node, ast.Compare) and len(node.ops) > 1:
-                operands = [node.left, *node.comparators]
-            for operand in operands:
-                if contains_walrus(operand):
-                    raise UnsupportedConstruct(
-                        "a walrus ':=' inside an 'and'/'or' or a chained comparison is not supported "
-                        "(its operand may be short-circuited)",
-                        self._loc(operand),
-                    )
+        if isinstance(node, ast.Assert):
+            return
+        operands: list[ast.expr] = []
+        if isinstance(node, ast.BoolOp):
+            operands = node.values
+        elif isinstance(node, ast.Compare) and len(node.ops) > 1:
+            operands = [node.left, *node.comparators]
+        for operand in operands:
+            if contains_walrus(operand):
+                raise UnsupportedConstruct(
+                    "a walrus ':=' inside an 'and'/'or' or a chained comparison is not supported "
+                    "(its operand may be short-circuited)",
+                    self._loc(operand),
+                )
+        for child in ast.iter_child_nodes(node):
+            self._reject_shortcircuit_walrus(child)
 
     def _collect_local_names(self, fndef: ast.FunctionDef) -> set[str]:
         """

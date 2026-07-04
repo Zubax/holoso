@@ -1,6 +1,7 @@
 """Unit tests for the Python-to-HIR frontend."""
 
 import dataclasses
+import logging
 import math
 import sys
 import textwrap
@@ -138,6 +139,42 @@ def test_unsupported_scalar_parameter_annotation_is_rejected() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="parameter annotation"):
         lower(passthrough)
+
+
+def test_assert_is_ignored_with_info_message(caplog: pytest.LogCaptureFixture) -> None:
+    # The whole test subtree -- the comparison and its nested call -- is dropped, so neither op reaches HIR.
+    def with_assert(x: float):  # type: ignore[no-untyped-def]
+        assert abs(x) > 0.0
+        return x + 1.0
+
+    with caplog.at_level(logging.INFO, logger="holoso._frontend._lower"):
+        hir = lower(with_assert)
+    assert [o.name for o in hir.outputs] == ["out_0"]
+    assert _arith_count(hir, FloatRelational) == 0 and _arith_count(hir, FloatAbs) == 0
+    assert "has no effect in Holoso" in caplog.text
+
+
+def test_walrus_in_assert_is_ignored_not_rejected() -> None:
+    # A walrus even inside an and/or in an assert is ignored, not caught by the short-circuit-walrus pre-pass: the
+    # assert is dropped and the unused binding simply vanishes, as under -O.
+    def unused_walrus(x: float):  # type: ignore[no-untyped-def]
+        assert (ok := x > 0.0) and True
+        return x + 1.0
+
+    assert [o.name for o in lower(unused_walrus).outputs] == ["out_0"]
+
+
+def test_dropped_assert_walrus_used_later_is_unknown_name() -> None:
+    # The dropped assert never binds its walrus, yet the target stays a function local (a walrus is scoped
+    # syntactically), so a later use is a clean unknown-name error that shadows the same-named global rather than
+    # silently reading it -- mirroring Python -O, which keeps the local and raises UnboundLocalError. The injected
+    # ``y`` global is what makes this discriminating: were the target NOT kept local, the read would resolve to it.
+    def used_later(x: float):  # type: ignore[no-untyped-def]
+        assert (y := x * 2.0) > 0.0
+        return y
+
+    with pytest.raises(UnsupportedConstruct, match="unknown name"):
+        lower(_rebind_globals(used_later, y=5.0))
 
 
 def test_pow_expands_to_multiply_chain() -> None:

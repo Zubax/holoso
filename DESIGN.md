@@ -229,6 +229,10 @@ test selects one arm with no branch). A walrus `(name := expr)` is supported onl
 rejected where the binding could be short-circuited (inside `and`/`or`, a chained comparison, a conditional-expression
 arm, or a `while` condition).
 
+An `assert` statement is accepted and ignored wholesale: its test is never lowered, mirroring Python under `-O`, so an
+assertion has no hardware effect (each reached assert is logged). Any effect the test would have had when executed is
+dropped along with it; as under `-O`, an assert must be side-effect-free.
+
 A nested `if` with no `else` on either level folds to a single combined-`and` branch (`if A: if B: S` becomes
 `if A and B: S`), emitting one branch instead of two. This is exact because a boolean test here is a pure combinational
 value; the fold is disabled the moment the outer `if` carries an `else` (then the `and` would mis-route the `else`).
