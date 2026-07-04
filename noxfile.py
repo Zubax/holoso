@@ -88,7 +88,8 @@ def run_examples(session: nox.Session) -> None:
 def synth(session: nox.Session) -> None:
     """Run external FPGA synthesis/place-and-route checks."""
     session.install("-e", ".[test]")
-    session.run("python", "-m", "pytest", "-s", "synth")
+    workers = max(2, int((os.cpu_count() or 4) * 2 / 3))
+    session.run("python", "-m", "pytest", "-p", "no:enabler", "-s", "-n", str(workers), "synth")
 
 
 @nox.session
