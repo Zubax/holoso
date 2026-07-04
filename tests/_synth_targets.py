@@ -246,7 +246,11 @@ TARGETS: list[SynthTarget] = [
         "cordic_sincos",
         FlowId.YOSYS_ECP5,
         100,
-        op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_decode=1)),
+        op_config(
+            F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_decode=1),
+            fmul_ilog2=FMulILog2OperatorFamily(F_e6m18, stage_decode=1),
+        ),
     ),
     for_example(
         "cordic_sincos",

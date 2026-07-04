@@ -17,6 +17,12 @@ jobs:
     steps:
       - &checkout_step
         uses: actions/checkout@v7
+      - &python_cache_step
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: pip-${{ runner.os }}-
       - run: nox -s tests typecheck black
 
   cosim_examples:
@@ -25,6 +31,7 @@ jobs:
     container: *fpga_toolchain_container
     steps:
       - *checkout_step
+      - *python_cache_step
       - run: nox -s cosim_examples
 
   fuzz:
@@ -33,14 +40,18 @@ jobs:
     container: *fpga_toolchain_container
     steps:
       - *checkout_step
+      - *python_cache_step
       - run: nox -s fuzz
 
   synth:
     name: synth
-    runs-on: ubuntu-latest
-    container: *fpga_toolchain_container
+    runs-on: [self-hosted, ci-runner]
+    container: &mega_toolchain_container
+      image: containers.zubax.com/zubax-fpga-toolchain-mega:latest
+      options: --user root --cap-add NET_ADMIN --shm-size 8g --volume /run/udev:/run/udev:ro
     steps:
       - *checkout_step
+      - *python_cache_step
       - run: nox -s synth
       - if: always()
         uses: actions/upload-artifact@v7
@@ -48,10 +59,11 @@ jobs:
 
   synth_examples:
     name: synth_examples
-    runs-on: ubuntu-latest
-    container: *fpga_toolchain_container
+    runs-on: [self-hosted, ci-runner]
+    container: *mega_toolchain_container
     steps:
       - *checkout_step
+      - *python_cache_step
       - run: nox -s synth_examples
       - if: always()
         uses: actions/upload-artifact@v7
