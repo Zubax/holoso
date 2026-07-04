@@ -5,6 +5,7 @@ and asserts on observable output values against an INDEPENDENT reference.
 """
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -48,7 +49,7 @@ def _ops(*, with_round: bool = True, with_fma: bool = True, with_sort: bool = Tr
     )
 
 
-def _sim(fn, name: str):  # type: ignore[no-untyped-def]
+def _sim(fn: Callable[..., object], name: str) -> holoso.NumericalSimulator:
     return holoso.synthesize(fn, _ops(), name=name).numerical_model.elaborate()
 
 
@@ -100,7 +101,7 @@ _ROUND_VECTORS = [
 
 
 def test_round_modes_match_reference() -> None:
-    def kernel(x: float) -> float:
+    def kernel(x: float) -> tuple[float, float, float, float]:
         return (math.floor(x), math.ceil(x), math.trunc(x), round(x))
 
     sim = _sim(kernel, "round_all_modes")
@@ -113,7 +114,7 @@ def test_round_modes_match_reference() -> None:
 
 def test_round_dispatch_numpy_and_bare_name() -> None:
     # numpy.<name> under an alias, and bare names imported via ``from math import ...`` must both dispatch.
-    def kernel(x: float) -> float:
+    def kernel(x: float) -> tuple[float, float, float, float, float, float]:
         return (np.floor(x), np.ceil(x), np.trunc(x), floor(x), ceil(x), trunc(x))
 
     sim = _sim(kernel, "round_dispatch")
@@ -126,7 +127,7 @@ def test_round_dispatch_numpy_and_bare_name() -> None:
 def test_round_sign_folds_into_operand() -> None:
     # The input sign chain folds onto the rounder operand and is applied BEFORE rounding: floor(-x) is the rounder fed
     # -x, NOT a negation of floor(x). Asserts the directional modes against the directly-negated reference.
-    def kernel(x: float) -> float:
+    def kernel(x: float) -> tuple[float, float, float]:
         return (math.floor(-x), math.ceil(abs(x)), math.trunc(-x))
 
     sim = _sim(kernel, "round_sign_fold")
@@ -197,7 +198,7 @@ def test_fma_unconfigured_is_rejected() -> None:
 def test_intrinsic_dispatch_resolves_aliased_imports() -> None:
     # An aliased import binds a non-canonical local name to the real function object; dispatch resolves by callee
     # identity, so ``aliased_floor`` (= math.floor) lowers as floor and ``aliased_fma`` (= math.fma) as fma.
-    def kernel(a: float, b: float, c: float) -> float:
+    def kernel(a: float, b: float, c: float) -> tuple[float, float]:
         return (aliased_floor(a), aliased_fma(a, b, c))
 
     sim = _sim(kernel, "aliased_intrinsics")
@@ -246,7 +247,7 @@ def test_implicit_mul_add_contracts_to_fma_only_with_ffma() -> None:
 def test_implicit_fma_not_contracted_when_product_is_shared() -> None:
     # A product used by more than the add (here also returned) must NOT contract -- the rounded product is observed
     # elsewhere, so the add keeps double-rounding semantics even with ffma configured.
-    def kernel(a: float, b: float, c: float) -> float:
+    def kernel(a: float, b: float, c: float) -> tuple[float, float]:
         p = a * b
         return p + c, p
 
@@ -332,7 +333,7 @@ def test_min_max_match_reference() -> None:
     # min(a,b) and max(a,b) over the same pair fuse into one sorter firing that writes two wide registers at once;
     # both outputs are checked against the bit-preserving reference (FloatValue.sort), which the HDL bench anchors to
     # the RTL. The equal and infinity pairs pin the tie direction and the total-order handling of the extrema.
-    def kernel(a: float, b: float) -> float:
+    def kernel(a: float, b: float) -> tuple[float, float]:
         return (min(a, b), max(a, b))
 
     sim = _sim(kernel, "min_max_pair")
@@ -352,7 +353,7 @@ def test_min_max_match_reference() -> None:
 def test_min_max_sign_folds_into_operands() -> None:
     # Each operand's sign chain folds onto its sorter operand and is applied BEFORE the sort: min(-a, |b|) is the
     # sorter fed (-a, |b|). This drives the operand conditioners on a commutative multi-output operator.
-    def kernel(a: float, b: float) -> float:
+    def kernel(a: float, b: float) -> tuple[float, float]:
         return (min(-a, abs(b)), max(abs(a), -b))
 
     sim = _sim(kernel, "min_max_signs")
@@ -368,7 +369,7 @@ def test_min_max_sign_folds_into_operands() -> None:
 
 def test_min_max_dispatch_numpy() -> None:
     # numpy.minimum/maximum are the binary elementwise forms and must dispatch by callee identity to the sorter.
-    def kernel(a: float, b: float) -> float:
+    def kernel(a: float, b: float) -> tuple[float, float]:
         return (np.minimum(a, b), np.maximum(a, b))
 
     sim = _sim(kernel, "min_max_numpy")
@@ -399,7 +400,7 @@ def test_min_max_is_not_bit_commutative() -> None:
     # bit-commutative: swapping operands can flip the sign of a zero. Two mirrored mins over the same pair must each
     # keep their source operand order (the operator must not be marked commutative), or out_0's zero sign diverges
     # from the reference. At x=0, sign conditioning makes -0, exposing the tie.
-    def kernel(x: float, y: float) -> float:
+    def kernel(x: float, y: float) -> tuple[float, float]:
         return (min(-x, y), min(y, -x))
 
     sim = _sim(kernel, "min_max_mirror")

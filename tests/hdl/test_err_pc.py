@@ -46,17 +46,17 @@ def _ops(stage_output: int) -> OpConfig:
     )
 
 
-def _divide(a: float, b: float):  # type: ignore[no-untyped-def]
+def _divide(a: float, b: float) -> float:
     return a / b
 
 
-async def _settle(dut) -> None:  # type: ignore[no-untyped-def]
+async def _settle(dut: object) -> None:
     await RisingEdge(dut.clk)
     await Timer(1, unit="ns")
 
 
 @cocotb.test()
-async def err_pc_latches_div0(dut) -> None:
+async def err_pc_latches_div0(dut: object) -> None:
     err_step = int(json.loads(os.environ["HOLOSO_ERRCYC"])["err_step"])
     a_bits = FMT.encode(1.0)
 

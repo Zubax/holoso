@@ -35,7 +35,7 @@ def _ops() -> OpConfig:
     )
 
 
-def _model(target: object):  # type: ignore[no-untyped-def]
+def _model(target: object) -> holoso.NumericalSimulator:
     return holoso.synthesize(target, _ops()).numerical_model.elaborate()
 
 
@@ -500,7 +500,7 @@ class _GetterOverridingProperty(property):
     so inlining ``fget`` (True) would silently diverge. Inlining is faithful only when ``__get__`` is property's own.
     """
 
-    def __get__(self, instance, owner=None):  # type: ignore[override]
+    def __get__(self, instance: object, owner: type | None = None) -> bool:  # type: ignore[override]
         return False
 
 
@@ -522,7 +522,7 @@ def test_property_subclass_overriding_get_is_rejected() -> None:
         holoso.synthesize(_PropertySubclassRead().__call__, _ops())
 
 
-def _spoofed_getter(self) -> bool:  # type: ignore[no-untyped-def]  # getter signature so a naive inline succeeds
+def _spoofed_getter(self: object) -> bool:  # getter signature so a naive inline succeeds
     return False  # the callable a hostile fget spoof hands the compiler -- the opposite of the real getter below
 
 
@@ -533,7 +533,7 @@ class _FgetSpoofingProperty(property):
     diverges from what Python runs. Defeats a ``__get__``-identity guard; only the exact type is trustworthy.
     """
 
-    def __getattribute__(self, name):  # type: ignore[no-untyped-def]
+    def __getattribute__(self, name: str) -> object:
         if name == "fget":
             return _spoofed_getter
         return super().__getattribute__(name)
@@ -562,7 +562,7 @@ class _GetterOverridingStaticmethod(staticmethod):
     overridden binding, so inlining ``__func__`` would diverge. Faithful only when ``__get__`` is staticmethod's own.
     """
 
-    def __get__(self, instance, owner=None):  # type: ignore[override]
+    def __get__(self, instance: object, owner: type | None = None) -> object:  # type: ignore[override]
         return lambda v: v * 3.0
 
 

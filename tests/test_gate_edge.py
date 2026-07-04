@@ -33,7 +33,7 @@ _HDL_DIR = Path(__file__).resolve().parent / "hdl"
 _FMT = FloatFormat(8, 24)
 
 
-def _cycle0_kernel(a: float, b: float):  # type: ignore[no-untyped-def]
+def _cycle0_kernel(a: float, b: float) -> float:
     # Leads with a pooled fadd (a - b) and fmul (a * b) on cycle 0, so the iv gate is exercised on a real cycle-0 issue.
     return (a - b) * 0.25 + a * b
 
@@ -44,7 +44,7 @@ class _ConstInstallState:
     def __init__(self) -> None:
         self._s = 5.0
 
-    def __call__(self, n: float):  # type: ignore[no-untyped-def]
+    def __call__(self, n: float) -> float:
         self._s = 0.0
         while self._s < n:
             self._s = self._s + 1.0

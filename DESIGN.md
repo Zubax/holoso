@@ -177,6 +177,10 @@ Parameters. Positional and keyword-only parameters become input ports and requir
 scalar is rejected. An aggregate attribute's shape is read from its reset value, optionally validated against an
 explicit jaxtyping annotation; interior shapes are inferred.
 
+Return type. The return annotation is likewise mandatory and validated against the inferred output leaves: `float`,
+`bool`, an arbitrarily nested `tuple[...]`/`tuple[X, ...]`/`list[X]` of them, or `None` for a method that returns
+nothing. A missing annotation or any shape, arity, or scalar-type divergence rejects the kernel.
+
 ## HIR
 
 HIR is a real CFG of basic blocks -- entry first, a single `Ret` exit -- carrying an SSA value DAG. Values are input

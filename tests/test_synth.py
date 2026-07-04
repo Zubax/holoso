@@ -19,7 +19,7 @@ from holoso import (
 )
 
 
-def _kernel(a: float, b: float):  # type: ignore[no-untyped-def]  # module-level so inspect.getsource works
+def _kernel(a: float, b: float) -> float:  # module-level so inspect.getsource works
     return (a - b) * 0.25 + a * b
 
 
@@ -53,7 +53,7 @@ def test_op_config_rejects_mixed_float_formats() -> None:
 
 
 def test_constant_only_module_keeps_operator_configured_format() -> None:
-    def const_only():  # type: ignore[no-untyped-def]
+    def const_only() -> float:
         return 3.5
 
     fmt = FloatFormat(6, 18)
@@ -85,10 +85,10 @@ def test_synthesize_threads_pipeline_stages() -> None:
 
 
 def test_rejects_non_finite_constants() -> None:
-    def overflow(a: float):  # type: ignore[no-untyped-def]
+    def overflow(a: float) -> float:
         return a + 1e400  # overflows to +inf, not representable in the ZKF format
 
-    def folds_to_nan(a: float):  # type: ignore[no-untyped-def]
+    def folds_to_nan(a: float) -> float:
         return a + (1e400 - 1e400)  # inf - inf const-folds to NaN
 
     for fn in (overflow, folds_to_nan):
@@ -148,7 +148,7 @@ def test_synthesize_ekf1_stateless() -> None:
 
 def test_class_target_is_unsupported() -> None:
     class Stateful:
-        def __call__(self, x: float):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             return x
 
     with pytest.raises(holoso.UnsupportedConstruct):

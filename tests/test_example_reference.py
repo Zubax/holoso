@@ -49,7 +49,7 @@ def _quantize(value: float | bool, fmt: FloatFormat) -> float | bool:
     return value if isinstance(value, bool) else fmt.decode(fmt.encode(value))
 
 
-def _model_for(spec: ExampleSpec, fmt: FloatFormat):  # type: ignore[no-untyped-def]
+def _model_for(spec: ExampleSpec, fmt: FloatFormat) -> holoso.NumericalSimulator:
     # Built through the public facade, exactly as a user would; ``_lir.ops`` (read once below for the tolerance op
     # count) is the only internal datum the result does not expose publicly.
     return holoso.synthesize(spec.make_kernel(), default_ops(fmt), name=spec.name).numerical_model.elaborate()

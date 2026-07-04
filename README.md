@@ -206,7 +206,9 @@ For a detailed technical review of the design and trade-offs, please refer to `D
 
 Holoso follows Python with minimal deviations where it makes sense for hardware synthesis.
 
-- Static typing only.
+- Static typing only. Parameters must be annotated `float` or `bool`; the return type must be annotated too — a
+  scalar, a `tuple`/`list` of scalars (arbitrarily nested), or `None` for a method that returns nothing — and is
+  validated against the kernel's actual outputs.
 - No implicit type conversions.
 - Boolean short-circuiting is not supported, all operands evaluated eagerly.
 - Floating-point precision depends on the selected floating-point format. See below for more info about floats.

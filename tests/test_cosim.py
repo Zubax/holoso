@@ -1,6 +1,7 @@
 """Functional cosimulation: drive generated modules and check their outputs bit-for-bit against the model backend."""
 
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -44,7 +45,7 @@ pytestmark = pytest.mark.cosim
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_small_kernel(sim: str) -> None:
-    def kernel(a: float, b: float):  # type: ignore[no-untyped-def]
+    def kernel(a: float, b: float) -> float:
         return (a - b) * 0.25 + a * b
 
     run_cosim(sim, kernel, FloatFormat(8, 24), "kernel")
@@ -52,7 +53,7 @@ def test_cosim_small_kernel(sim: str) -> None:
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_division(sim: str) -> None:
-    def blend(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
+    def blend(a: float, b: float, c: float) -> float:
         return a / b + c * 2.0
 
     run_cosim(sim, blend, FloatFormat(6, 18), "blend")
@@ -87,7 +88,7 @@ def test_cosim_ekf1_stateful(sim: str) -> None:
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_staged_kernel(sim: str) -> None:
-    def kernel(a: float, b: float):  # type: ignore[no-untyped-def]
+    def kernel(a: float, b: float) -> float:
         return (a - b) * 0.25 + a * b
 
     fmt = FloatFormat(8, 24)
@@ -103,7 +104,7 @@ def test_cosim_staged_kernel(sim: str) -> None:
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_staged_division(sim: str) -> None:
-    def blend(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
+    def blend(a: float, b: float, c: float) -> float:
         return a / b + (a - c)
 
     # Exercise the STAGE_ALIGN (fadd) and STAGE_INPUT (fdiv) knobs end-to-end -- the combos the staged-kernel misses.
@@ -191,7 +192,7 @@ def test_cosim_min_max(sim: str) -> None:
     # Binary min/max lower to holoso_fsort. Taking BOTH min and max of one pair fuses to a SINGLE firing that writes
     # two wide registers at once -- the first operator to do so -- so this proves the generated RTL lands both results
     # bit-exactly against the model. The |a|,|b| sort in a second firing exercises the operand sign conditioners.
-    def kernel(a: float, b: float):  # type: ignore[no-untyped-def]
+    def kernel(a: float, b: float) -> list[float]:
         return [min(a, b), max(a, b), min(abs(a), abs(b))]
 
     fmt = FloatFormat(8, 24)
@@ -250,7 +251,7 @@ class _UnusedBoolInputAccumulator:
     def __init__(self) -> None:
         self.y = 0.0
 
-    def __call__(self, flag: bool, x: float):  # type: ignore[no-untyped-def]
+    def __call__(self, flag: bool, x: float) -> float:
         self.y = self.y + x + 1.0
         return self.y
 
@@ -269,7 +270,7 @@ def test_cosim_shift_register_backpressure(sim: str, config: OperatorCase) -> No
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_unused_bool_input_keeps_cfg_state_timing(sim: str, config: OperatorCase) -> None:
     fmt = FloatFormat(6, 18)
-    vectors = [
+    vectors: list[Mapping[str, int]] = [
         {"flag": 0, "x": fmt.encode(2.0)},
         {"flag": 1, "x": fmt.encode(4.0)},
     ]
@@ -285,7 +286,7 @@ def test_cosim_unused_bool_input_keeps_cfg_state_timing(sim: str, config: Operat
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_new_operator_stages(sim: str) -> None:
-    def kernel(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
+    def kernel(a: float, b: float, c: float) -> float:
         return (a - b) / c + a * b * 0.25  # fadd, fdiv, fmul, and fmul_ilog2 (the 2^-2 scale) all in one kernel
 
     # Exercise the newly-shipped ZKF knobs end-to-end: fadd STAGE_INPUT/STAGE_NORMALIZE/STAGE_PACK, fmul STAGE_PACK,
@@ -353,7 +354,7 @@ async def div0_errpc(dut):
 @pytest.mark.parametrize("config", PIPELINE_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_div0_error(sim: str, config: OperatorCase) -> None:
-    def kdiv(a: float, b: float):  # type: ignore[no-untyped-def]
+    def kdiv(a: float, b: float) -> float:
         return a / b
 
     fmt = FloatFormat(6, 18)
@@ -487,7 +488,7 @@ def test_cosim_mirrored_comparisons_swap_orientation(sim: str, config: OperatorC
     # RTL twin of test_schedule.test_commutative_comparator_swap_permutes_output_taps: mirrored comparisons over one
     # operand pair make the port assignment orient one comparator firing swapped (its lt tap moving to gt), so the
     # emitted module must still produce both relations bit-exactly through the permuted lane.
-    def kernel(a: float, b: float):  # type: ignore[no-untyped-def]
+    def kernel(a: float, b: float) -> list[float]:
         below = a < b
         above = b < a
         return [float(below), float(above)]
@@ -510,7 +511,7 @@ def test_cosim_chained_slots_keep_the_old_value_across_the_install(sim: str, con
 def test_cosim_select_kernels(sim: str, config: OperatorCase) -> None:
     # If-converted selects in RTL: both polarities of a max kernel, an arm-sign select (the negation rides the
     # operand conditioner), and a comparison -> select -> arithmetic cross-bank chain, in one kernel.
-    def kernel(a: float, b: float):  # type: ignore[no-untyped-def]
+    def kernel(a: float, b: float) -> float:
         m = a if a > b else b
         s = a if b > 0.0 else -a
         return m * 2.0 + s
@@ -537,7 +538,7 @@ def test_cosim_not_folding_sinks(sim: str, config: OperatorCase) -> None:
         def __init__(self) -> None:
             self._flip = False
 
-        def step(self, a: float, b: float):  # type: ignore[no-untyped-def]
+        def step(self, a: float, b: float) -> float:
             old = self._flip
             self._flip = not self._flip
             gate = not (a > b)
@@ -553,7 +554,7 @@ def test_cosim_not_folding_sinks(sim: str, config: OperatorCase) -> None:
 def test_cosim_inverted_bool_phi_arm(sim: str, config: OperatorCase) -> None:
     # RTL twin of test_schedule.test_inverted_bool_phi_arm_installs_with_opposite_polarities: the conditional flag
     # negation rides the phi-arm install's inversion.
-    def kernel(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
+    def kernel(a: float, b: float, c: float) -> list[float]:
         flag = a > b
         if c > 0.0:
             flag = not flag
@@ -574,7 +575,7 @@ def test_cosim_phi_coalescing_residual_install_conflict(sim: str, config: Operat
     # residual sign-folded else-arm install writes that register, so the soundness fixpoint de-coalesces ``a``. This
     # proves the de-coalesced residual install is bit-exact in RTL, not only against the Python cycle model. The
     # division keeps the diamond a real branch (un-if-converted), which is what creates the phi merge.
-    def kernel(x: float, b: float, cc: float):  # type: ignore[no-untyped-def]
+    def kernel(x: float, b: float, cc: float) -> list[float]:
         if b < cc:
             a = x
             z = 1.0
@@ -599,7 +600,7 @@ def test_cosim_not_over_loop_phi_and_inverted_public_state(sim: str, config: Ope
         def __init__(self) -> None:
             self.armed = False
 
-        def step(self, x: float):  # type: ignore[no-untyped-def]
+        def step(self, x: float) -> float:
             flag = x > 0.0
             w = x
             while w > 1.0:

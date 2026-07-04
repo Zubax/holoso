@@ -16,14 +16,14 @@ from holoso import FloatFormat
 from holoso._frontend import lower as lower_frontend
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
-from holoso._lir import build
+from holoso._lir import Lir, build
 from holoso._mir import lower as lower_to_mir
 
-from ._examples import SPECS
+from ._examples import SPECS, ExampleSpec
 from ._modelref import assert_model_equals_interpreter, build_model_and_interpreter, default_ops
 
 
-def _build(spec):  # type: ignore[no-untyped-def]
+def _build(spec: ExampleSpec) -> Lir:
     return build(
         lower_to_mir(optimize(lower_frontend(spec.make_kernel())), default_ops(spec.formats[0])),
         spec.name,
@@ -32,7 +32,7 @@ def _build(spec):  # type: ignore[no-untyped-def]
 
 
 @pytest.mark.parametrize("spec", SPECS, ids=lambda s: s.name)
-def test_phi_arm_installs_land_within_their_block(spec) -> None:  # type: ignore[no-untyped-def]
+def test_phi_arm_installs_land_within_their_block(spec: ExampleSpec) -> None:
     lir = _build(spec)
     for block in lir.blocks:
         for install in (*block.copies, *block.bool_writes):

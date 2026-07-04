@@ -24,7 +24,7 @@ from holoso._backend.verilog import generate
 from holoso._frontend import lower
 from holoso._hir import optimize
 from holoso._lir import BoolRegRef, RegRef, build, pooled_write_word
-from holoso._mir import lower as lower_to_mir
+from holoso._mir import Mir, lower as lower_to_mir
 
 from .hdl.hdl_float_oracle import HDL_DIR, sources
 
@@ -37,7 +37,7 @@ def _ops(fmt: FloatFormat) -> OpConfig:
     )
 
 
-def _run(target, ops: OpConfig):  # type: ignore[no-untyped-def]
+def _run(target: object, ops: OpConfig) -> Mir:
     return lower_to_mir(optimize(lower(target)), ops)
 
 
@@ -65,7 +65,7 @@ def _elaborate(name: str, verilog: str, tmp_path: Path) -> None:
 
 
 def test_operator_instance_names_include_hardware_identity() -> None:
-    def scale(a: float, b: float):  # type: ignore[no-untyped-def]
+    def scale(a: float, b: float) -> float:
         return a * 4.0 + b * 8.0
 
     fmt = FloatFormat(6, 18)
@@ -85,7 +85,7 @@ def test_comparisons_share_one_pooled_fcmp_instance() -> None:
     # Comparisons live in mutually-exclusive blocks and execute sequentially, so they share a single holoso_fcmp
     # (the one-instance-per-operator pooling convention), its operands riding the ordinary microcode read-mux
     # lanes -- not one instance per comparison.
-    def kernel(x: float):  # type: ignore[no-untyped-def]
+    def kernel(x: float) -> float:
         if x > 1.0:
             y = x + 1.0
         elif x < -1.0:
@@ -127,7 +127,7 @@ endmodule
 
 @requires_iverilog
 def test_small_kernel_elaborates(tmp_path: Path) -> None:
-    def kernel(a: float, b: float):  # type: ignore[no-untyped-def]
+    def kernel(a: float, b: float) -> float:
         return (a - b) * 0.25 + a * b
 
     fmt = FloatFormat(8, 24)
@@ -137,7 +137,7 @@ def test_small_kernel_elaborates(tmp_path: Path) -> None:
 
 @requires_iverilog
 def test_kernel_with_division_elaborates(tmp_path: Path) -> None:
-    def blend(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
+    def blend(a: float, b: float, c: float) -> float:
         return a / b + c * 2.0
 
     fmt = FloatFormat(6, 18)
@@ -149,7 +149,7 @@ def test_kernel_with_division_elaborates(tmp_path: Path) -> None:
 def test_constant_only_module_elaborates(tmp_path: Path) -> None:
     # No inputs and an all-constant output => zero registers; NREG must floor to >=1 so the regfile parameter
     # guard does not instantiate its error stub (BUG1 regression).
-    def const_only():  # type: ignore[no-untyped-def]
+    def const_only() -> float:
         return 3.5
 
     fmt = FloatFormat(8, 24)
@@ -164,7 +164,7 @@ def test_boolean_output_port_is_one_bit_and_assigned() -> None:
             self.low = -1.0
             self.y = False
 
-        def __call__(self, x: float):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> bool:
             if x > self.high:
                 self.y = True
             elif x < self.low:
@@ -182,7 +182,7 @@ def test_boolean_output_port_is_one_bit_and_assigned() -> None:
 
 
 def test_boolean_input_port_is_one_bit_and_loaded() -> None:
-    def passthrough(flag: bool):  # type: ignore[no-untyped-def]
+    def passthrough(flag: bool) -> bool:
         return flag
 
     fmt = FloatFormat(8, 24)
@@ -225,7 +225,7 @@ def test_boolean_only_stateful_module_elaborates(tmp_path: Path) -> None:
 def test_parameter_name_colliding_with_control_port_is_rejected() -> None:
     # A parameter named 'valid'/'ready' becomes data port in_valid/in_ready, colliding with the control ports and
     # producing un-elaboratable Verilog; LIR construction must reject it instead of emitting duplicate ports.
-    def collide(valid: float, ready: float):  # type: ignore[no-untyped-def]
+    def collide(valid: float, ready: float) -> float:
         return valid + ready
 
     fmt = FloatFormat(6, 18)
@@ -234,7 +234,7 @@ def test_parameter_name_colliding_with_control_port_is_rejected() -> None:
 
 
 def test_kernel_without_outputs_is_rejected() -> None:
-    def empty(x: float):  # type: ignore[no-untyped-def]
+    def empty(x: float) -> tuple[()]:
         return ()
 
     fmt = FloatFormat(6, 18)
@@ -252,7 +252,7 @@ def test_state_slot_folded_sign_coexists_with_sibling_port(tmp_path: Path) -> No
             self.y_d = 0.0
             self._p = 0.0
 
-        def __call__(self, x: float):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             self.y_d = self._p
             self.y = -self._p  # sign-flipped state boundary copy -> inline holoso_fsgnop() in the state install
             self._p = x
@@ -358,7 +358,7 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         boundary_step,
     )
     from holoso._lir._ir import BoolRegFileLayout
-    from holoso._operators import FloatHardwareOperator, FloatSignControl
+    from holoso._operators import FloatHardwareOperator, FloatSignControl, FloatValue
     from holoso._type import ScalarSignature, FloatType as ScalarFloatType
 
     _FETCH_LAG = 2  # datapath lag matching the 3-stage control fetch: one less than fetch_stages
@@ -383,7 +383,9 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         def hdl_params(self) -> dict[str, int]:
             return {}
 
-        def evaluate(self, *operands, immediates=()):  # type: ignore[no-untyped-def]
+        def evaluate(
+            self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()
+        ) -> tuple[FloatValue | bool, ...]:
             a, b = self._validated_operands(operands, 2)
             return (a, b)  # semantics are irrelevant here; only the lane structure is under test
 
@@ -461,11 +463,11 @@ endmodule
     assert result.returncode == 0, result.stderr
 
 
-def _and_gate(a: bool, b: bool, /):  # type: ignore[no-untyped-def]
+def _and_gate(a: bool, b: bool, /) -> bool:
     return a and b
 
 
-def _madd_only(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
+def _madd_only(a: float, b: float, c: float) -> float:
     return a * b + c
 
 

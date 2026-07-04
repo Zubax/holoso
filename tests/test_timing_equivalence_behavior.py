@@ -27,6 +27,8 @@ handshake (out stays frozen, no new input accepted, state advances exactly once 
 invariant. A divergence under back-pressure would indicate the longer pipeline mis-drains an in-flight transaction.
 """
 
+from collections.abc import Callable
+
 import numpy as np
 
 import holoso
@@ -37,15 +39,13 @@ from ._modelref import default_ops, overlap_spill_kernel, staged_ops
 FMT = FloatFormat(6, 18)
 
 
-def _pair(fn, name: str):  # type: ignore[no-untyped-def]
+def _pair(fn: Callable[..., object], name: str) -> tuple[holoso.NumericalSimulator, holoso.NumericalSimulator]:
     short = holoso.synthesize(fn, default_ops(FMT), name=f"{name}_short").numerical_model.elaborate()
     long = holoso.synthesize(fn, staged_ops(FMT), name=f"{name}_long").numerical_model.elaborate()
     return short, long
 
 
-def _assert_bits_equal(  # type: ignore[no-untyped-def]
-    short: holoso.NumericalSimulator, long: holoso.NumericalSimulator, *inputs
-) -> int:
+def _assert_bits_equal(short: holoso.NumericalSimulator, long: holoso.NumericalSimulator, *inputs: float) -> int:
     out_short = short.run(*inputs)
     out_long = long.run(*inputs)
     assert len(out_short) == len(out_long), f"output arity differs: {len(out_short)} vs {len(out_long)}"
@@ -68,7 +68,7 @@ def _assert_bits_equal(  # type: ignore[no-untyped-def]
 # --------------------------------------------------------------------------------------------------------------------
 
 
-def _branchy_diamond(x: float, y: float, c: float):  # type: ignore[no-untyped-def]
+def _branchy_diamond(x: float, y: float, c: float) -> float:
     t = (x * y + c) * y  # a multiply-add-multiply chain that commits late
     if t > c:
         r = t + x
@@ -94,7 +94,7 @@ def test_branchy_diamond_timing_invariant() -> None:
 # --------------------------------------------------------------------------------------------------------------------
 
 
-def _newton_reciprocal(a: float, n: float):  # type: ignore[no-untyped-def]
+def _newton_reciprocal(a: float, n: float) -> float:
     # y_{k+1} = y_k * (2 - a*y_k) converges to 1/a; the loop carries y across a data-dependent number of iterations.
     y = 0.5
     i = n
@@ -112,7 +112,7 @@ def test_back_edge_loop_timing_invariant() -> None:
             _assert_bits_equal(short, long, a, n)
 
 
-def _cycles_to_out_valid(simulator: holoso.NumericalSimulator, *inputs) -> int:  # type: ignore[no-untyped-def]
+def _cycles_to_out_valid(simulator: holoso.NumericalSimulator, *inputs: float) -> int:
     simulator.set_inputs(*inputs)
     count = 1
     simulator.tick(in_valid=True, out_ready=False)
@@ -146,7 +146,7 @@ class _LeakyAccumulator:
     def __init__(self) -> None:
         self._acc = 0.0
 
-    def __call__(self, x: float, y: float):  # type: ignore[no-untyped-def]
+    def __call__(self, x: float, y: float) -> float:
         d = x * y + x
         if x > y:
             r = d + 1.0
@@ -170,7 +170,9 @@ def test_stateful_stream_timing_invariant_with_reset() -> None:
         _assert_bits_equal(short, long, x, y)
 
 
-def _drain_to_output(simulator: holoso.NumericalSimulator, inputs, stall: int):  # type: ignore[no-untyped-def]
+def _drain_to_output(
+    simulator: holoso.NumericalSimulator, inputs: tuple[float, ...], stall: int
+) -> holoso.FloatValue | bool:
     simulator.set_inputs(*inputs)
     while not simulator.in_ready:
         simulator.tick(in_valid=False, out_ready=True)

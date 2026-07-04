@@ -39,6 +39,7 @@ Python float, and outputs are compared on ``.bits`` so the assertions cannot sil
 """
 
 import math
+from collections.abc import Callable
 
 import holoso
 from holoso import (
@@ -63,7 +64,7 @@ def _ops() -> OpConfig:
     )
 
 
-def _sim(fn, name: str) -> holoso.NumericalSimulator:  # type: ignore[no-untyped-def]
+def _sim(fn: Callable[..., object], name: str) -> holoso.NumericalSimulator:
     return holoso.synthesize(fn, _ops(), name=name).numerical_model.elaborate()
 
 
@@ -82,15 +83,15 @@ def _round(value: float) -> float:
 _EDGES = format_edge_bits(FMT)  # zero, ±0.5, ±1, ±smallest-normal, ±largest-finite (9 patterns)
 
 
-def _add(a: float, b: float):  # type: ignore[no-untyped-def]
+def _add(a: float, b: float) -> float:
     return a + b
 
 
-def _mul(a: float, b: float):  # type: ignore[no-untyped-def]
+def _mul(a: float, b: float) -> float:
     return a * b
 
 
-def _neg_self(x: float):  # type: ignore[no-untyped-def]
+def _neg_self(x: float) -> float:
     return x + (-x)
 
 
@@ -119,7 +120,7 @@ def test_mul_by_zero_is_positive_zero_over_edges() -> None:
         assert out.bits == 0 and out.sign == 0, f"x*0.0 not +0: bits=0x{out.bits:x} sign={out.sign}"
 
 
-def _abs_via_select(x: float):  # type: ignore[no-untyped-def]
+def _abs_via_select(x: float) -> float:
     # abs via a sign-select: -x if x < 0 else x. The magnitude must equal |x| exactly (a pure sign-bit clear in ZKF).
     return -x if x < 0.0 else x
 
@@ -133,7 +134,7 @@ def test_abs_via_select_clears_sign_over_edges() -> None:
         assert out.bits == want.bits, f"abs(0x{bits:x}) bits=0x{out.bits:x} vs 0x{want.bits:x}"
 
 
-def _double_neg(x: float):  # type: ignore[no-untyped-def]
+def _double_neg(x: float) -> float:
     return -(-x)
 
 
@@ -173,7 +174,7 @@ def _largest_finite() -> FloatValue:
     return _val((max_exp << frac_bits) | ((1 << frac_bits) - 1))
 
 
-def _overflow_then_mul(x: float, y: float):  # type: ignore[no-untyped-def]
+def _overflow_then_mul(x: float, y: float) -> float:
     # (x + x) overflows to +inf at the extreme; multiplying by y must keep it inf (inf * finite-positive == inf).
     return (x + x) * y
 
@@ -189,7 +190,7 @@ def test_overflow_to_inf_and_stays_inf() -> None:
     assert math.isinf(float(out)) and float(out) > 0.0, f"overflow chain not +inf: {float(out)} (bits 0x{out.bits:x})"
 
 
-def _div(a: float, b: float):  # type: ignore[no-untyped-def]
+def _div(a: float, b: float) -> float:
     return a / b
 
 
@@ -200,27 +201,27 @@ def test_divide_by_zero_emits_inf_error_path() -> None:
     assert math.isinf(float(out)) and float(out) > 0.0, f"1.0/0.0 not +inf: {float(out)} (bits 0x{out.bits:x})"
 
 
-def _k_lt(x: float, y: float):  # type: ignore[no-untyped-def]
+def _k_lt(x: float, y: float) -> bool:
     return x < y
 
 
-def _k_le(x: float, y: float):  # type: ignore[no-untyped-def]
+def _k_le(x: float, y: float) -> bool:
     return x <= y
 
 
-def _k_gt(x: float, y: float):  # type: ignore[no-untyped-def]
+def _k_gt(x: float, y: float) -> bool:
     return x > y
 
 
-def _k_ge(x: float, y: float):  # type: ignore[no-untyped-def]
+def _k_ge(x: float, y: float) -> bool:
     return x >= y
 
 
-def _k_eq(x: float, y: float):  # type: ignore[no-untyped-def]
+def _k_eq(x: float, y: float) -> bool:
     return x == y
 
 
-def _k_ne(x: float, y: float):  # type: ignore[no-untyped-def]
+def _k_ne(x: float, y: float) -> bool:
     return x != y
 
 
@@ -246,7 +247,7 @@ def test_all_six_relational_operators_exact_at_boundary() -> None:
             assert got is want, f"{name}({x}, {y}) = {got}, want {want}"
 
 
-def _chained(lo: float, x: float, hi: float):  # type: ignore[no-untyped-def]
+def _chained(lo: float, x: float, hi: float) -> bool:
     # lo < x < hi lowers to two comparators AND-fused; must match Python's chained-comparison semantics exactly.
     return lo < x < hi
 
@@ -273,23 +274,23 @@ def test_equality_bit_equal_vs_bit_different() -> None:
     assert sim_ne.run(same, other)[0] is True
 
 
-def _x_times_2(x: float):  # type: ignore[no-untyped-def]
+def _x_times_2(x: float) -> float:
     return x * 2.0
 
 
-def _x_times_half(x: float):  # type: ignore[no-untyped-def]
+def _x_times_half(x: float) -> float:
     return x * 0.5
 
 
-def _x_times_8(x: float):  # type: ignore[no-untyped-def]
+def _x_times_8(x: float) -> float:
     return x * 8.0
 
 
-def _x_times_eighth(x: float):  # type: ignore[no-untyped-def]
+def _x_times_eighth(x: float) -> float:
     return x * 0.125
 
 
-def _x_times_2_pow_neg5(x: float):  # type: ignore[no-untyped-def]
+def _x_times_2_pow_neg5(x: float) -> float:
     return x * 2.0**-5
 
 
@@ -310,7 +311,7 @@ def test_power_of_two_strength_reduction_is_exact() -> None:
             assert got.bits == want.bits, f"{name}: {x}*{factor} bits=0x{got.bits:x} vs 0x{want.bits:x}"
 
 
-def _x_times_3(x: float):  # type: ignore[no-untyped-def]
+def _x_times_3(x: float) -> float:
     # 3.0 is NOT a power of two, so this stays an ordinary fmul; still must round-correctly.
     return x * 3.0
 
@@ -337,15 +338,15 @@ def test_power_of_two_overflow_and_underflow_edges() -> None:
     assert under.bits == 0, f"smallest_normal*0.125 not +0: bits=0x{under.bits:x} ({float(under)})"
 
 
-def _k_and(a: bool, b: bool):  # type: ignore[no-untyped-def]
+def _k_and(a: bool, b: bool) -> bool:
     return a and b
 
 
-def _k_or(a: bool, b: bool):  # type: ignore[no-untyped-def]
+def _k_or(a: bool, b: bool) -> bool:
     return a or b
 
 
-def _k_and_or(a: bool, b: bool, c: bool):  # type: ignore[no-untyped-def]
+def _k_and_or(a: bool, b: bool, c: bool) -> bool:
     return a and b or c  # (a and b) or c by Python precedence
 
 
@@ -366,11 +367,11 @@ def test_boolean_and_or_compound_truth_table() -> None:
                 assert sim.run(a, b, c)[0] is ((a and b) or c), f"and_or({a},{b},{c})"
 
 
-def _demorgan_lhs(a: bool, b: bool):  # type: ignore[no-untyped-def]
+def _demorgan_lhs(a: bool, b: bool) -> bool:
     return not (a and b)
 
 
-def _demorgan_rhs(a: bool, b: bool):  # type: ignore[no-untyped-def]
+def _demorgan_rhs(a: bool, b: bool) -> bool:
     return (not a) or (not b)
 
 
@@ -385,7 +386,7 @@ def test_de_morgan_equivalence_full_truth_table() -> None:
             assert lhs is want and rhs is want, f"de morgan ({a},{b}): lhs={lhs} rhs={rhs} want={want}"
 
 
-def _float_of_cond(x: float, y: float):  # type: ignore[no-untyped-def]
+def _float_of_cond(x: float, y: float) -> float:
     # float(x > y) must be exactly 0.0 or 1.0; feeding it into arithmetic gives a clean gate.
     return float(x > y) * 10.0 + 1.0
 
@@ -398,7 +399,7 @@ def test_float_of_bool_is_exactly_zero_or_one_feeding_arithmetic() -> None:
         assert got.bits == want.bits, f"float({x}>{y})*10+1 bits=0x{got.bits:x} vs 0x{want.bits:x}"
 
 
-def _cross_domain_chain(x: float, y: float):  # type: ignore[no-untyped-def]
+def _cross_domain_chain(x: float, y: float) -> float:
     # A float compared, the bool cast to float, then multiplied by a float: a full float->bool->float round trip.
     return float(x > y) * (x + y)
 
@@ -412,7 +413,7 @@ def test_compare_cast_multiply_cross_domain_chain() -> None:
         assert got.bits == want.bits, f"cross chain ({x},{y}) bits=0x{got.bits:x} vs 0x{want.bits:x}"
 
 
-def _bool_of_float(x: float):  # type: ignore[no-untyped-def]
+def _bool_of_float(x: float) -> bool:
     # bool(x) truthiness: nonzero -> True, +0 -> False.
     return bool(x)
 
@@ -427,7 +428,7 @@ def test_bool_of_float_truthiness() -> None:
     assert sim.run(_val(1 << frac_bits))[0] is True
 
 
-def _fold_to_zero(x: float):  # type: ignore[no-untyped-def]
+def _fold_to_zero(x: float) -> float:
     # The subexpression 2*3 - 6 folds to 0.0 at compile time, so x + 0.0 == x exactly for every representable x.
     return x + (2.0 * 3.0 - 6.0)
 
@@ -439,7 +440,7 @@ def test_constant_subexpression_folds_to_zero() -> None:
         assert out.bits == bits, f"x + (2*3-6) changed bits: 0x{out.bits:x} vs 0x{bits:x}"
 
 
-def _dead_arm_divides_by_zero(x: float):  # type: ignore[no-untyped-def]
+def _dead_arm_divides_by_zero(x: float) -> float:
     # 3.0 < 2.0 folds to False; the THEN arm (which divides by a compile-time 0.0) must be pruned, never lowered.
     if 3.0 < 2.0:
         r = x / 0.0
@@ -462,7 +463,7 @@ class _AttributeConfig:
     def __init__(self, threshold: float) -> None:
         self._threshold = threshold
 
-    def __call__(self, x: float):  # type: ignore[no-untyped-def]
+    def __call__(self, x: float) -> float:
         if self._threshold > 2.0:  # _threshold == 3.0 is a compile-time snapshot -> the condition folds to True
             r = x + 1.0
         else:
@@ -478,7 +479,7 @@ def test_read_only_attribute_folds_in_condition() -> None:
         assert got.bits == want.bits, f"attr-fold x+1: {x} bits=0x{got.bits:x} vs 0x{want.bits:x}"
 
 
-def _horner_loop(x: float):  # type: ignore[no-untyped-def]
+def _horner_loop(x: float) -> float:
     # A bounded for-loop that fully unrolls a Horner evaluation of 1*x^4 + 1*x^3 + 1*x^2 + 1*x + 1.
     acc = 0.0
     for _ in range(5):
@@ -486,7 +487,7 @@ def _horner_loop(x: float):  # type: ignore[no-untyped-def]
     return acc
 
 
-def _horner_unrolled(x: float):  # type: ignore[no-untyped-def]
+def _horner_unrolled(x: float) -> float:
     # The SAME Horner recurrence written out straight-line: identical op order, so the bits must match exactly.
     acc = 0.0
     acc = acc * x + 1.0

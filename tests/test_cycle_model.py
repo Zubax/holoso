@@ -120,7 +120,7 @@ def test_deep_loop_runs_in_bounded_memory() -> None:
     assert not model._pending  # noqa: SLF001
 
 
-def _count_down(n: float):  # type: ignore[no-untyped-def]
+def _count_down(n: float) -> float:
     # A runtime-trip-count loop: subtract 1.0 until the value is no longer positive. The trip count is the input, so
     # it can be made arbitrarily large to stress the model's bounded state.
     while n > 0.0:

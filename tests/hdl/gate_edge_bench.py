@@ -17,7 +17,7 @@ from cocotb.triggers import FallingEdge, RisingEdge
 
 
 @cocotb.test()
-async def transacting_edge(dut) -> None:  # type: ignore[no-untyped-def]
+async def transacting_edge(dut: object) -> None:
     fetch_lag = int(os.environ["HOLOSO_FETCH_LAG"])
     k = int(os.environ["HOLOSO_DWELL_K"])
 
@@ -55,7 +55,7 @@ async def transacting_edge(dut) -> None:  # type: ignore[no-untyped-def]
 
 
 @cocotb.test()
-async def state_inert_during_dwell(dut) -> None:  # type: ignore[no-untyped-def]
+async def state_inert_during_dwell(dut: object) -> None:
     # A cycle-0 constant install to a persistent-state slot sits on ``ucode[0]``. While the PC dwells idle at pc 0 the
     # held word re-fetches every cycle, so without the ``transacting`` gate on the install write-enable it would commit
     # to the state register before any transaction. Assert the slot keeps its reset value across the whole idle dwell.
