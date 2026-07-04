@@ -15,7 +15,7 @@ import os
 import tempfile
 from collections import deque
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import cocotb
 import holoso
@@ -120,7 +120,7 @@ def bits_to_f32(bits: int) -> np.float32:
     return np.uint32(bits & 0xFFFFFFFF).view(np.float32)
 
 
-def f32_to_bits(x) -> int:
+def f32_to_bits(x: float | np.floating[Any]) -> int:
     return int(np.float32(x).view(np.uint32))
 
 
@@ -320,12 +320,12 @@ def get_random_count(default: int = 256) -> int:
     return int(os.environ.get("HOLOSO_TEST_RANDOM_COUNT", str(default)))
 
 
-async def start_clock(dut, period_ns: int = 10) -> None:
+async def start_clock(dut: Any, period_ns: int = 10) -> None:
     cocotb.start_soon(Clock(dut.clk, period_ns, unit="ns").start())
     await FallingEdge(dut.clk)
 
 
-async def drive_reset(dut, cycles: int = 4) -> None:
+async def drive_reset(dut: Any, cycles: int = 4) -> None:
     dut.rst.value = 1
     if hasattr(dut, "in_valid"):
         dut.in_valid.value = 0
@@ -346,14 +346,14 @@ class PipelineScoreboard:
     exactly that many sampled rising edges after the corresponding push.
     """
 
-    def __init__(self, dut, payload_fields: Iterable[tuple[str, str]], latency: int | None = None):
+    def __init__(self, dut: Any, payload_fields: Iterable[tuple[str, str]], latency: int | None = None):
         self.dut = dut
         self.payload_fields = tuple(payload_fields)
-        self.queue: deque = deque()
+        self.queue: deque[dict[str, Any]] = deque()
         self.latency = latency
         self.cycle = 0
 
-    def push(self, expected: dict) -> None:
+    def push(self, expected: dict[str, Any]) -> None:
         if self.latency is not None:
             expected["_due_cycle"] = self.cycle + self.latency
         self.queue.append(expected)

@@ -8,7 +8,7 @@ from pathlib import Path
 import holoso
 
 
-def poly3(x, c0, c1, c2, c3):
+def poly3(x: float, c0: float, c1: float, c2: float, c3: float) -> float:
     """
     Degree-3 polynomial evaluated in Horner form: ((c3 * x + c2) * x + c1) * x + c0.
     """

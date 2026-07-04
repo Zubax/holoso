@@ -24,21 +24,21 @@ from ._modelref import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-import ekf1_stateful  # noqa: E402
-import ekf1_stateless  # noqa: E402
+import ekf1_stateful as ekf1_stateful  # noqa: E402
+import ekf1_stateless as ekf1_stateless  # noqa: E402
 import madd  # noqa: E402
 import poly3  # noqa: E402
-from cordic_sincos import CordicSinCos  # noqa: E402
-from iir1_lpf import IIR1LPF  # noqa: E402
+from cordic_sincos import CordicSinCos as CordicSinCos  # noqa: E402
+from iir1_lpf import IIR1LPF as IIR1LPF  # noqa: E402
 from latching_fault_register import LatchingFaultRegister  # noqa: E402
 from majority_voter import MajorityVoter  # noqa: E402
 from octave_index import octave_index  # noqa: E402
-from pid import PID  # noqa: E402
-from phase_frequency_detector import PhaseFrequencyDetector  # noqa: E402
+from pid import PID as PID  # noqa: E402
+from phase_frequency_detector import PhaseFrequencyDetector as PhaseFrequencyDetector  # noqa: E402
 from quadrature_encoder import QuadratureEncoder  # noqa: E402
 from recip_newton import NewtonReciprocal  # noqa: E402
-from remainder import remainder  # noqa: E402
-from schmitt_trigger import SchmittTrigger  # noqa: E402
+from remainder import remainder as remainder  # noqa: E402
+from schmitt_trigger import SchmittTrigger as SchmittTrigger  # noqa: E402
 from signal_window import signal_window  # noqa: E402
 from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator  # noqa: E402
 from uart import OVERSAMPLE, UartRx, UartTx  # noqa: E402

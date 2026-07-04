@@ -35,7 +35,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -212,6 +212,7 @@ class _Emitter:
         self._counter = 0
         self._lines: list[tuple[int, str]] = []
         self.return_line = ""  # set by the assembly step before rendering
+        self.return_annotation = "float"  # a multi-lane return overrides this to a tuple[...]
 
     def then_value(self) -> _Fragment:
         if self.chance(0.4):
@@ -758,7 +759,7 @@ def _finish_function_kernel(
     mode: Mode,
     dead_arm_chain_depth: int | None = None,
 ) -> GeneratedKernel:
-    source = _assemble_function(name, params, bool_set, em.render_body(), em.return_line)
+    source = _assemble_function(name, params, bool_set, em.render_body(), em.return_line, em.return_annotation)
     module = _render_module(name, source)
     return GeneratedKernel(
         name=name,
@@ -791,7 +792,7 @@ def generate_stateless_kernel(
     produced: list[_Fragment] = []
     n_fragments = int(rng.integers(1, 4))
     for _ in range(n_fragments):
-        template = rng.choice(_STATELESS_TEMPLATES)  # type: ignore[arg-type]
+        template = cast(Callable[[_Emitter], _Fragment], rng.choice(_STATELESS_TEMPLATES))  # type: ignore[arg-type]
         produced.append(template(em))
 
     # Combining the produced fragments keeps every one LIVE so DCE cannot drop the diamonds/divisions feeding output.
@@ -870,18 +871,21 @@ def _emit_return(em: _Emitter, produced: list[_Fragment]) -> Mode:
         em.return_line = f"return {live[0]}"
         return Mode.EXACT
     elif em.chance(0.5):
-        lanes = ", ".join(live[:3])
-        em.return_line = f"return ({lanes},)"
+        lanes = live[:3]
+        em.return_line = f"return ({', '.join(lanes)},)"
+        em.return_annotation = f"tuple[{', '.join('float' for _ in lanes)}]"
         return Mode.EXACT
     else:
         em.return_line = f"return {' + '.join(live)}"
         return Mode.CONTINUOUS
 
 
-def _assemble_function(name: str, params: list[str], bool_set: set[str], body: str, return_line: str) -> str:
-    sig = ", ".join(f"{p}: bool" if p in bool_set else p for p in params)
+def _assemble_function(
+    name: str, params: list[str], bool_set: set[str], body: str, return_line: str, return_annotation: str
+) -> str:
+    sig = ", ".join(f"{p}: bool" if p in bool_set else f"{p}: float" for p in params)
     docstring = '    """A generated fuzz kernel."""'
-    return f"def {name}({sig}):\n{docstring}\n{body}\n    {return_line}\n"
+    return f"def {name}({sig}) -> {return_annotation}:\n{docstring}\n{body}\n    {return_line}\n"
 
 
 def generate_stateful_kernel(
@@ -954,13 +958,13 @@ def _assemble_class(
     name: str, inputs: list[str], slots: list[str], resets: list[float], body: str, return_line: str
 ) -> str:
     init_lines = "\n".join(f"        self.{slot} = {reset!r}" for slot, reset in zip(slots, resets))
-    sig = ", ".join(inputs)
+    sig = ", ".join(f"{p}: float" for p in inputs)
     return (
         f"class {name}:\n"
         f'    """A generated stateful fuzz kernel with private chained slots."""\n\n'
         f"    def __init__(self):\n"
         f"{init_lines}\n\n"
-        f"    def __call__(self, {sig}):\n"
+        f"    def __call__(self, {sig}) -> float:\n"
         f"{body}\n"
         f"        {return_line}\n"
     )

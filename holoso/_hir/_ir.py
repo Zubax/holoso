@@ -302,12 +302,6 @@ class HirBuilder:
         self._input_ids.append(vid)
         return vid
 
-    def float_input(self, name: str) -> ValueId:
-        return self.input(name, FloatType())
-
-    def bool_input(self, name: str) -> ValueId:
-        return self.input(name, BoolType())
-
     def state_read(self, slot: str, type: Type) -> ValueId:
         # Interned globally: repeated live-in reads of a slot share one value, resident from the initiation start.
         return self._global(StateRead(slot, type))

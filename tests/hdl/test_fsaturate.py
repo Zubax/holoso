@@ -1,6 +1,8 @@
 """Tests for holoso_fsaturate (combinational; +inf -> +max, -inf -> -max, finite passes through)."""
 
 from pathlib import Path
+from typing import Any
+
 import cocotb
 import numpy as np
 import pytest
@@ -24,7 +26,7 @@ from .hdl_float_oracle import (
 
 
 @cocotb.test()
-async def holoso_fsaturate_cocotb(dut) -> None:
+async def holoso_fsaturate_cocotb(dut: Any) -> None:
     async def check(x_bits: int) -> None:
         dut.x.value = x_bits
         await Timer(1, unit="ns")

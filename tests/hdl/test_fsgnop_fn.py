@@ -4,6 +4,8 @@ as a function/module name-coexistence canary across simulators.
 """
 
 from pathlib import Path
+from typing import Any
+
 import cocotb
 import numpy as np
 import pytest
@@ -30,7 +32,7 @@ _WFULL = _WEXP + _WMAN
 
 
 @cocotb.test()
-async def holoso_fsgnop_fn_cocotb(dut) -> None:
+async def holoso_fsgnop_fn_cocotb(dut: Any) -> None:
     async def check(x_bits: int, op: int) -> None:
         dut.x.value = x_bits
         dut.op.value = op

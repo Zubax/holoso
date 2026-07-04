@@ -185,7 +185,7 @@ def fcmp_s1_ops(fmt: FloatFormat) -> OpConfig:
     return fcmp_staged_ops(fmt, 1)
 
 
-def branch_boundary_kernel(a, b, c):  # type: ignore[no-untyped-def]
+def branch_boundary_kernel(a: float, b: float, c: float) -> float:
     """
     The boundary-slack corner kernel shared by the cosim test and its white-box schedule twin: the comparison is the
     LAST commit in its block and feeds the branch, so its result lands in the condition register exactly one step
@@ -201,7 +201,7 @@ def branch_boundary_kernel(a, b, c):  # type: ignore[no-untyped-def]
     return y
 
 
-def overlap_spill_kernel(x, y, z):  # type: ignore[no-untyped-def]
+def overlap_spill_kernel(x: float, y: float, z: float) -> float:
     """
     Cross-block software-pipelining corner shared by the cosim test and its white-box twin. The branch CONDITION
     (``x < y``) depends only on inputs, so it commits early; a wide chain (``w``) computed in the same block commits
@@ -218,7 +218,7 @@ def overlap_spill_kernel(x, y, z):  # type: ignore[no-untyped-def]
     return r
 
 
-def overlap_dead_arm_spill_kernel(x, y, z):  # type: ignore[no-untyped-def]
+def overlap_dead_arm_spill_kernel(x: float, y: float, z: float) -> float:
     """
     Cross-block overlap SOUNDNESS corner: a value live ONLY in one arm shares no register hazard with a value the
     sibling arm spills onto it. ``v`` is computed in the entry block and used only in the else arm; the wide chain
@@ -238,7 +238,7 @@ def overlap_dead_arm_spill_kernel(x, y, z):  # type: ignore[no-untyped-def]
     return r
 
 
-def const_branch_kernel(x, y):  # type: ignore[no-untyped-def]
+def const_branch_kernel(x: float, y: float) -> float:
     """
     Empty const-branch block corner shared by the cosim test and its white-box twin. The inner condition ``1.0 / 5.0 >
     0.0`` is constant-true but formed by DIVISION, which escapes the frontend's AST-level reachability fold (it
@@ -256,7 +256,7 @@ def const_branch_kernel(x, y):  # type: ignore[no-untyped-def]
     return r
 
 
-def diamond_then_loop_kernel(x, y):  # type: ignore[no-untyped-def]
+def diamond_then_loop_kernel(x: float, y: float) -> float:
     """
     Empty merge-block elimination (B4) corner shared by the cosim test and its white-box twin. The variable-divisor
     division keeps the diamond a REAL branch (unspeculatable), so its merge stays a separate block; that merge holds
@@ -274,7 +274,7 @@ def diamond_then_loop_kernel(x, y):  # type: ignore[no-untyped-def]
     return r
 
 
-def overlap_div_err_kernel(x, y, z):  # type: ignore[no-untyped-def]
+def overlap_div_err_kernel(x: float, y: float, z: float) -> float:
     """
     Cross-block overlap err_pc corner (shared by the white-box twin and the directed err_pc cosim). A division -- the
     one error-bearing op -- commits late, so its result spills past the shrunk terminator. The data write lands in the
@@ -331,7 +331,7 @@ class ChainedSlots:
         self._a = 0.0
         self._b = 0.0
 
-    def __call__(self, x):  # type: ignore[no-untyped-def]
+    def __call__(self, x: float) -> float:
         self._a = self._b
         self._b = x + 1.0
         return self._a * 2.0 + (x * 1.5) / (x - 0.5)
@@ -346,14 +346,14 @@ class SelectHold:
     def __init__(self) -> None:
         self._h = 1.0
 
-    def step(self, x, c):  # type: ignore[no-untyped-def]
+    def step(self, x: float, c: float) -> float:
         old = self._h
         self._h = x + 1.0
         y = old if c > 0.0 else x
         return y * 2.0 + (x * 1.5) / (x * x + 0.5)  # structurally nonzero divisor (the bench asserts err_pc == 0)
 
 
-def phi_swap_loop(x, n):  # type: ignore[no-untyped-def]
+def phi_swap_loop(x: float, n: float) -> float:
     """
     A while loop whose two carried values genuinely SWAP across the back edge (``a, b = b, a``), producing two
     loop-header phis whose back-edge arms cross-reference each other (phi_a's arm is phi_b and vice versa). The header
@@ -374,7 +374,7 @@ def phi_swap_loop(x, n):  # type: ignore[no-untyped-def]
     return a * 2.0 + b
 
 
-def overlap_drained_passthrough_kernel(x, y, z):  # type: ignore[no-untyped-def]
+def overlap_drained_passthrough_kernel(x: float, y: float, z: float) -> float:
     """
     A wide chain ``w`` computed in the overlapping entry block spills past the shrunk terminator into a then arm that
     does NO work and merely passes ``w`` through as the merged value, so ``w`` is the live-out of a fully-DRAINED,
@@ -393,7 +393,7 @@ def overlap_drained_passthrough_kernel(x, y, z):  # type: ignore[no-untyped-def]
     return r * 2.0
 
 
-def overlap_livein_branch_arm_kernel(x, y, z):  # type: ignore[no-untyped-def]
+def overlap_livein_branch_arm_kernel(x: float, y: float, z: float) -> float:
     """
     The wide chain ``w`` spills from the overlapping entry into an arm that ITSELF branches on a LIVE-IN condition ``c``
     (computed in the entry block, not the arm) -- exercising the overlap interaction the plain dead-arm shape never
@@ -425,7 +425,7 @@ class SlotSwap:
         self._a = 1.0
         self._b = -2.0
 
-    def step(self, x):  # type: ignore[no-untyped-def]
+    def step(self, x: float) -> float:
         old_a = self._a
         old_b = self._b
         self._a = old_b  # swap: a <- old b

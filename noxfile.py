@@ -94,7 +94,7 @@ def synth(session: nox.Session) -> None:
 
 @nox.session
 def typecheck(session: nox.Session) -> None:
-    session.install("-e", ".", "mypy~=2.1")
+    session.install("-e", ".[test]", "mypy~=2.1")
     session.run("mypy", *session.posargs)
 
 

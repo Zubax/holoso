@@ -2,6 +2,7 @@
 
 import math
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from holoso import (
     FCmpOperator,
     FDivOperator,
     FloatFormat,
+    FloatValue,
     FMulILog2OperatorFamily,
     FMulOperator,
     OpConfig,
@@ -27,9 +29,11 @@ from holoso._lir import (
     FloatConstRef,
     FloatOperand,
     Jump,
+    Lir,
     LirBlock,
     RegRef,
     Ret,
+    ScheduledOp,
     landing_cycle,
     operand_read_cycle,
 )
@@ -52,14 +56,22 @@ from holoso._mir import (
     MirFloatOutput,
     MirFloatView,
     MirInput,
+    MirNode,
     MirOperation,
     MirRet,
 )
-from holoso._operators import BoolAndOperator, BoolInversion, FMulILog2Operator, FloatSignControl, SelectOperator
+from holoso._operators import (
+    BoolAndOperator,
+    BoolInversion,
+    FMulILog2Operator,
+    FloatSignControl,
+    PooledHardwareOperator,
+    SelectOperator,
+)
 from holoso._hir import RelationalOp
 from ._modelref import build_model
 from holoso._lir import build
-from holoso._lir._schedule import resolve_pool, schedule_ops
+from holoso._lir._schedule import resolve_pool, schedule_ops, Schedule
 from holoso._type import BoolType, FloatType, ScalarType
 
 from ._modelref import (
@@ -78,7 +90,6 @@ from ._modelref import (
     staged_ops,
 )
 from ._writetimeline import InlineProducer, build_write_timeline, latest_producer_before
-from ._examples import PhaseFrequencyDetector
 
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
@@ -97,7 +108,7 @@ class OtherMirInput(MirInput):
     pass
 
 
-def _run(target, ops: OpConfig = OPS) -> Mir:  # type: ignore[no-untyped-def]
+def _run(target: Callable[..., object], ops: OpConfig = OPS) -> Mir:
     return lower_to_mir(optimize(lower(target)), ops)
 
 
@@ -105,7 +116,7 @@ def _view(mir: Mir) -> MirFloatView:
     return MirFloatView.from_mir(mir)
 
 
-def _schedule(mir: Mir):
+def _schedule(mir: Mir) -> Schedule:
     view = _view(mir)
     return schedule_ops(mir.nodes, resolve_pool(mir.nodes), set(view.operation_nodes), _FETCH_LAG)
 
@@ -114,8 +125,12 @@ def _muls(mir: Mir) -> list[int]:
     return [vid for vid, n in mir.nodes.items() if isinstance(n, MirOperation) and isinstance(n.operator, FMulOperator)]
 
 
+def _block_ops(block: LirBlock) -> list[ScheduledOp]:
+    return [*block.ops, *block.inline_ops]
+
+
 def test_schedule_respects_dependencies() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         return (a - b) * 0.25 + a * b
 
     mir = _run(f)
@@ -134,7 +149,7 @@ def test_schedule_respects_dependencies() -> None:
 
 def test_pipelined_issue_overlaps_a_slow_op() -> None:
     # A fast chain advances while an unrelated slow divide is still in flight -- the barrier model could not do this.
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float) -> float:
         return a / b + (a + b + c)
 
     mir = _run(f)
@@ -157,7 +172,7 @@ def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator(config: O
     # two must issue on distinct cycles. Before the contention rule the scheduler let both issue on the same cycle
     # -> they collided on the single comparator (one read the other's operands), corrupting the result in the RTL
     # while the model still passed.
-    def f(x, lo, hi):  # type: ignore[no-untyped-def]
+    def f(x: float, lo: float, hi: float) -> float:
         return 0.0 if lo < x < hi else x
 
     lir = build(_run(f, config.make_ops(FMT)), f"deadband_{config.label}", fetch_stages=3)
@@ -218,7 +233,7 @@ def test_entry_branch_on_resident_condition_skips_the_drained_boundary() -> None
         def __init__(self) -> None:
             self._armed = False
 
-        def step(self, a, b):  # type: ignore[no-untyped-def]
+        def step(self, a: float, b: float) -> float:
             if self._armed:
                 r = a / b  # a non-speculatable arm keeps this a real branch, not an if-converted select
             else:
@@ -246,7 +261,7 @@ def test_non_entry_branch_on_resident_condition_redirects_at_its_base() -> None:
         def __init__(self) -> None:
             self._armed = False
 
-        def step(self, p: bool, q: bool, a, b):  # type: ignore[no-untyped-def]
+        def step(self, p: bool, q: bool, a: float, b: float) -> float:
             if self._armed:  # entry branch on the resident boolean state
                 if q:  # non-entry branch on the resident input q; division arms keep it a real branch, not a select
                     r = a / b
@@ -281,7 +296,7 @@ def test_resident_bound_inline_select_lands_combinationally() -> None:
         def __init__(self) -> None:
             self._armed = False
 
-        def step(self, c, d):  # type: ignore[no-untyped-def]
+        def step(self, c: float, d: float) -> float:
             r = c if self._armed else d  # condition (state) and both arms are resident -> the select binds nothing
             self._armed = c > d
             return r
@@ -296,6 +311,7 @@ def test_resident_bound_inline_select_lands_combinationally() -> None:
     base = lir.block_base[block.index]
     landing = base + landing_cycle(op.commit_cycle, lir.fetch_lag)
     assert landing == base + op.commit_cycle + lir.fetch_lag + READ_FIRST_EDGE  # the combinational landing
+    assert isinstance(op.write.dst, RegRef), "the select's result is a wide float, not a boolean"
     assert landing in lir.reg_liveness[op.write.dst]  # the result is live on its true landing
 
 
@@ -380,8 +396,8 @@ def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase)
     from holoso._backend.numerical import NumericalSimulator
 
     class _Recorder(NumericalSimulator):
-        def __init__(self, lir: object) -> None:
-            super().__init__(lir)  # type: ignore[arg-type]
+        def __init__(self, lir: Lir) -> None:
+            super().__init__(lir)
             self.writes: dict[tuple[str, int], set[int]] = {}
 
         def _write(self, dst: object, value: object) -> None:
@@ -402,7 +418,7 @@ def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase)
         predicted: dict[tuple[str, int], set[int]] = {}
         multi_arm = 0
         for block in lir.blocks:
-            for op in (*block.ops, *block.inline_ops):
+            for op in _block_ops(block):
                 for write in op.writes:
                     pcs = lir.write_landing_pcs(block, op)
                     predicted.setdefault((type(write.dst).__name__, write.dst.index), set()).update(pcs)
@@ -414,8 +430,8 @@ def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase)
             sim.reset()
             sim.writes = {}
             sim.run(x, y, z)
-            for key, pcs in sim.writes.items():
-                actual.setdefault(key, set()).update(pcs)
+            for key, landed in sim.writes.items():
+                actual.setdefault(key, set()).update(landed)
         assert predicted == actual, f"{name}: write_landing_pcs {predicted} != model writebacks {actual}"
 
 
@@ -433,8 +449,8 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes(config: Operator
     from holoso._backend.numerical import NumericalSimulator
 
     class _Recorder(NumericalSimulator):
-        def __init__(self, lir: object) -> None:
-            super().__init__(lir)  # type: ignore[arg-type]
+        def __init__(self, lir: Lir) -> None:
+            super().__init__(lir)
             self.writes: dict[int, set[int]] = {}
 
         def _write(self, dst: object, value: object) -> None:
@@ -449,7 +465,7 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes(config: Operator
     ), "recip_newton's header branch did not drain at the tight boundary: the real-kernel layout changed"
     predicted: dict[int, set[int]] = {}
     for block in lir.blocks:
-        for op in (*block.ops, *block.inline_ops):
+        for op in _block_ops(block):
             for write in op.writes:
                 if isinstance(write.dst, RegRef):
                     predicted.setdefault(write.dst.index, set()).update(lir.write_landing_pcs(block, op))
@@ -476,9 +492,7 @@ def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyP
     # its read-first lands.
 
     def is_bool_only(block: LirBlock) -> bool:  # no wide register write and no float copy at the tail
-        return not block.copies and not any(
-            isinstance(w.dst, RegRef) for op in (*block.ops, *block.inline_ops) for w in op.writes
-        )
+        return not block.copies and not any(isinstance(w.dst, RegRef) for op in _block_ops(block) for w in op.writes)
 
     # phase_frequency_detector is a single-block all-boolean kernel: its Ret does real boolean WORK (makespan > 0) and
     # installs nothing, so it drains at the work boundary (distinct from a pure-drain Ret, whose resident output needs
@@ -503,10 +517,10 @@ def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyP
     # (In-place state commit elided the former majority_voter sticky-fault installs.)
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
 
-    def bool_install_blocks(lir: object) -> list[LirBlock]:  # bool-only blocks carrying a tail bool install
-        return [b for b in lir.blocks if b.bool_writes and is_bool_only(b)]  # type: ignore[attr-defined]
+    def bool_install_blocks(lir: Lir) -> list[LirBlock]:  # bool-only blocks carrying a tail bool install
+        return [b for b in lir.blocks if b.bool_writes and is_bool_only(b)]
 
-    def computed_source_install(a: bool, b: bool, c: bool):  # type: ignore[no-untyped-def]
+    def computed_source_install(a: bool, b: bool, c: bool) -> tuple[bool, bool]:
         x = a and b  # COMPUTED in-block; returned so the c-false arm (= x) cannot coalesce -> a computed-source install
         r = x
         if c:
@@ -522,7 +536,7 @@ def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyP
             block.block_makespan, _FETCH_LAG
         ), "a computed-source bool install reads-first past the work makespan, draining where its block_makespan lands"
 
-    def resident_source_install(a: bool, b: bool, c: bool):  # type: ignore[no-untyped-def]
+    def resident_source_install(a: bool, b: bool, c: bool) -> tuple[bool, bool]:
         r = a  # the c-false arm is the INPUT a (resident at block entry), returned so it cannot coalesce
         if c:
             r = a and b
@@ -564,12 +578,12 @@ def test_entry_state_liveout_producer_reclaims_cycle_0() -> None:
         def __init__(self) -> None:
             self._s = False
 
-        def __call__(self, a: bool, b: bool):  # type: ignore[no-untyped-def]
+        def __call__(self, a: bool, b: bool) -> bool:
             prev = self._s
             self._s = a and b  # the new state is a combinational inline op in the entry block
             return prev
 
-    def _stateless(a: bool, b: bool):  # type: ignore[no-untyped-def]
+    def _stateless(a: bool, b: bool) -> bool:
         return a and b
 
     stateful = build(_run(_Stateful().__call__), "dwell_stateful", fetch_stages=3)
@@ -629,7 +643,7 @@ def test_coalesced_install_block_pays_no_spurious_install_drain() -> None:
     arms = [b for b in lir.blocks if b.ops and not b.copies and not b.bool_writes and isinstance(b.terminator, Jump)]
     assert len(arms) == 2, "the division diamond's two coalesced arm blocks are the B2 target"
     for block in arms:
-        last_commit = max(op.commit_cycle for op in (*block.ops, *block.inline_ops))
+        last_commit = max(op.commit_cycle for op in _block_ops(block))
         assert block.block_makespan == last_commit, "a coalesced-install arm block paid a spurious +1 install drain"
 
 
@@ -675,7 +689,7 @@ def test_merge_threading_refuses_a_back_edge_carried_merge_phi() -> None:
     # BACK-EDGE arm is a successor-phi arm too, yet from a different predecessor, so composition would not rewrite it;
     # deleting the merge phi would dangle. The guard must refuse such a merge (the deferred self-latch case).
     # Crash-before: optimize() raised KeyError after threading deleted the still-referenced merge phi.
-    def loop_invariant_merge(a, den, c):  # type: ignore[no-untyped-def]
+    def loop_invariant_merge(a: float, den: float, c: float) -> float:
         if a > 0.0:
             x = a / den  # a real (non-speculatable) division branch -> a separate merge block holding phi x
         else:
@@ -759,14 +773,17 @@ def test_entry_busy_gates_a_successor_firing_at_its_inherited_instance_free_cycl
     # for every current kernel -- a residue survives only when an operator's initiation interval exceeds its latest
     # write word, which no II=1 operator does -- so no end-to-end build exercises it. Pin its consumption directly:
     # ``schedule_ops`` must hold a pooled firing off its instance until that instance frees in the successor frame.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         return a * b  # one pooled firing; both operands are inputs (block-start ready), so nothing else can delay it
 
     mir = _run(f)
     view = _view(mir)
     pool = resolve_pool(mir.nodes)
     (mul,) = _muls(mir)
-    operator = mir.nodes[mul].operator
+    mul_node = mir.nodes[mul]
+    assert isinstance(mul_node, MirOperation)
+    operator = mul_node.operator
+    assert isinstance(operator, PooledHardwareOperator)
     schedulable = set(view.operation_nodes)
 
     # With no residue the firing issues on cycle 0 (operands resident at block start) -- so any later issue is
@@ -807,7 +824,8 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     from recip_newton import NewtonReciprocal  # noqa: PLC0415 (example kernels live under examples/)
 
-    def join_spill(x, y, z):  # w spills from the entry into BOTH arms and is read after the merge
+    # w spills from the entry into BOTH arms and is read after the merge
+    def join_spill(x: float, y: float, z: float) -> float:
         w = (x * z + y) * z + y
         if x < y:
             a = z + 1.0
@@ -815,14 +833,16 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
             a = z / (y + 1.0)  # the division keeps this a real branch (not if-converted)
         return w + a
 
-    def phi_merge(x, y):  # the merged value is produced in each arm (no entry spill), read after the merge
+    # the merged value is produced in each arm (no entry spill), read after the merge
+    def phi_merge(x: float, y: float) -> float:
         if x < y:
             a = x + 1.0
         else:
             a = x / (y + 1.0)
         return a * 2.0
 
-    def bool_write_merge(x, y):  # a boolean phi whose else arm reads the value inverted -> a non-coalesced bool_write
+    # a boolean phi whose else arm reads the value inverted -> a non-coalesced bool_write
+    def bool_write_merge(x: float, y: float) -> tuple[bool, float]:
         p = x < y
         if x < 1.0:
             c = p
@@ -833,8 +853,8 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
         return c, d
 
     class _Trace(NumericalSimulator):
-        def __init__(self, lir: object) -> None:
-            super().__init__(lir)  # type: ignore[arg-type]
+        def __init__(self, lir: Lir) -> None:
+            super().__init__(lir)
             self.reads: set[int] = set()
             self.writes: set[int] = set()
             self.bool_reads: set[int] = set()
@@ -848,13 +868,13 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
             self.branch_read = (self.pc, terminator.cond.index) if isinstance(terminator, Branch) else None
             super().tick(in_valid, out_ready)
 
-        def _read(self, operand: object) -> object:
+        def _read(self, operand: FloatOperand | BoolOperand) -> FloatValue | bool:
             if isinstance(operand, FloatOperand):
                 if isinstance(operand.source, RegRef):
                     self.reads.add(operand.source.index)
-            elif isinstance(operand.source, BoolRegRef):  # type: ignore[attr-defined]
-                self.bool_reads.add(operand.source.index)  # type: ignore[attr-defined]
-            return super()._read(operand)  # type: ignore[arg-type]
+            elif isinstance(operand.source, BoolRegRef):
+                self.bool_reads.add(operand.source.index)
+            return super()._read(operand)
 
         def _write(self, dst: object, value: object) -> None:
             if isinstance(dst, RegRef):
@@ -863,9 +883,7 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
                 self.bool_writes.add(dst.index)
             super()._write(dst, value)  # type: ignore[arg-type]
 
-    def model_residence(
-        lir: object, vectors: list[tuple[float, ...]]
-    ) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
+    def model_residence(lir: Lir, vectors: list[tuple[float, ...]]) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
         wide: dict[int, set[int]] = {}
         boolean: dict[int, set[int]] = {}
         for vec in vectors:
@@ -899,8 +917,8 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
             _ = sim.output_values  # the output taps read their registers at the boundary PC
             pc, rd, wr, brd, bwr = steps[-1]
             steps[-1] = (pc, rd | frozenset(sim.reads), wr, brd | frozenset(sim.bool_reads), bwr)
-            live: set[int] = set()
-            blive: set[int] = set()
+            live: frozenset[int] = frozenset()
+            blive: frozenset[int] = frozenset()
             # Backward per-path liveness in the model's write-then-read order (a write lands then is read at the same
             # PC), so a read on a value's landing reads THAT value, not the prior occupant: kill the carry with the
             # write AFTER folding in the read. A def cell is resident even if its value is never read (it occupies the
@@ -915,7 +933,7 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
                 blive = (breads | blive) - bwrites
         return wide, boolean
 
-    cases: list[tuple[str, object, list[tuple[float, ...]]]] = [
+    cases: list[tuple[str, Lir, list[tuple[float, ...]]]] = [
         ("join_spill", build(_run(join_spill), "join_spill", fetch_stages=3), [(0.5, 2.0, 1.5), (2.0, 0.5, 1.5)]),
         ("phi_merge", build(_run(phi_merge), "phi_merge", fetch_stages=3), [(0.5, 2.0), (2.0, 0.5)]),
         (
@@ -944,8 +962,13 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
             assert tint == model, f"{name}: residence tint {tint} != model per-path residence {model}"
         # Convention-independent invariant (catches the same-PC def+use over-tint in either bank): no register holds a
         # live value before the program's first executing step.
-        for reg, rows in {**lir.reg_liveness, **lir.bool_liveness}.items():
-            assert min(rows) >= 1, f"{name}: {reg} tinted resident at PC {min(rows)} < 1"
+        combined_liveness: dict[RegRef | BoolRegRef, set[int]] = {}
+        for reg, rows in lir.reg_liveness.items():
+            combined_liveness[reg] = rows
+        for breg, brows in lir.bool_liveness.items():
+            combined_liveness[breg] = brows
+        for any_reg, any_rows in combined_liveness.items():
+            assert min(any_rows) >= 1, f"{name}: {any_reg} tinted resident at PC {min(any_rows)} < 1"
 
 
 def test_state_slot_residence_matches_the_model_under_carry() -> None:
@@ -967,7 +990,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         def __init__(self) -> None:
             self._d = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             prev = self._d
             self._d = x
             return prev
@@ -976,7 +999,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         def __init__(self) -> None:
             self._s = 0.0
 
-        def __call__(self, x, y):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float, y: float) -> float:
             out = self._s
             if x > 0.0:
                 self._s = x + y
@@ -988,7 +1011,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         def __init__(self) -> None:
             self._f = False
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> tuple[bool, float]:
             out = self._f
             if x > 0.0:
                 self._f = True
@@ -1000,7 +1023,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         def __init__(self) -> None:
             self._b = False
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             old = self._b
             self._b = not self._b
             return x if old else -x
@@ -1009,13 +1032,13 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         def __init__(self) -> None:  # the destination): the carry survives only if the boundary bundle is read-first
             self._b = False
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             self._b = not self._b
             return x
 
     class _Trace(NumericalSimulator):
-        def __init__(self, lir: object) -> None:
-            super().__init__(lir)  # type: ignore[arg-type]
+        def __init__(self, lir: Lir) -> None:
+            super().__init__(lir)
             self.events: list[tuple[int, str | None, str | None, int | None]] = []  # (pc, r/w, f/b, index) in order
             self.branch: tuple[int, int] | None = None
 
@@ -1024,14 +1047,14 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
             self.branch = (self.pc, term.cond.index) if isinstance(term, Branch) else None
             super().tick(in_valid, out_ready)
 
-        def _read(self, operand: object) -> object:
-            source = operand.source  # type: ignore[attr-defined]
+        def _read(self, operand: FloatOperand | BoolOperand) -> FloatValue | bool:
+            source = operand.source
             if isinstance(operand, FloatOperand):
                 if isinstance(source, RegRef):
                     self.events.append((self.pc, "r", "f", source.index))
             elif isinstance(source, BoolRegRef):
                 self.events.append((self.pc, "r", "b", source.index))
-            return super()._read(operand)  # type: ignore[arg-type]
+            return super()._read(operand)
 
         def _write(self, dst: object, value: object) -> None:
             if isinstance(dst, RegRef):
@@ -1061,13 +1084,14 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
                     out.append((cur, frozenset(rf), frozenset(wf), frozenset(rb), frozenset(wb), read_first))
                 cur, rf, wf, rb, wb = pc, set(), set(), set(), set()
             if idx is not None:
+                assert kind is not None and bank is not None
                 {("r", "f"): rf, ("w", "f"): wf, ("r", "b"): rb, ("w", "b"): wb}[(kind, bank)].add(idx)
         if cur is not None:
             out.append((cur, frozenset(rf), frozenset(wf), frozenset(rb), frozenset(wb), read_first))
         return out
 
     def model_slot_residence(
-        lir: object, vectors: list[tuple[float, ...]]
+        lir: Lir, vectors: list[tuple[float, ...]]
     ) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
         transactions = 16
         last_pc = lir.last_pc
@@ -1111,8 +1135,8 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         wide: dict[int, set[int]] = {}
         boolean: dict[int, set[int]] = {}
         resid: list[tuple[int, frozenset[int], frozenset[int]]] = []
-        live_f: set[int] = set()
-        live_b: set[int] = set()
+        live_f: frozenset[int] = frozenset()
+        live_b: frozenset[int] = frozenset()
         for pc, rf, wf, rb, wb, read_first in reversed(flat):
             resid.append((pc, rf | live_f | wf, rb | live_b | wb))
             if read_first:  # read-then-write bundle: a read outlives a same-register write (the live-in survives)
@@ -1135,7 +1159,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
                         boolean.setdefault(reg, set()).add(pc)
         return wide, boolean
 
-    cases: list[tuple[str, object, list[tuple[float, ...]]]] = [
+    cases: list[tuple[str, Lir, list[tuple[float, ...]]]] = [
         ("Delay", build(_run(Delay().__call__), "Delay", fetch_stages=3), [(0.5,), (-0.5,), (1.5,), (2.0,)]),
         (
             "MBWide",
@@ -1163,11 +1187,11 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
                 model = {pc for pc in model_wide.get(slot.reg.index, set()) if 1 <= pc <= last}
                 assert tint == model, f"{name}: wide slot {slot.reg} tint {sorted(tint)} != model {sorted(model)}"
                 compared += 1
-        for slot in [*lir.bool_state_slots]:
-            if slot.needs_copy:
-                tint = {pc for pc in lir.bool_liveness[slot.reg] if pc <= last}
-                model = {pc for pc in model_bool.get(slot.reg.index, set()) if 1 <= pc <= last}
-                assert tint == model, f"{name}: bool slot {slot.reg} tint {sorted(tint)} != model {sorted(model)}"
+        for bslot in [*lir.bool_state_slots]:
+            if bslot.needs_copy:
+                tint = {pc for pc in lir.bool_liveness[bslot.reg] if pc <= last}
+                model = {pc for pc in model_bool.get(bslot.reg.index, set()) if 1 <= pc <= last}
+                assert tint == model, f"{name}: bool slot {bslot.reg} tint {sorted(tint)} != model {sorted(model)}"
                 compared += 1
     # Guard against the kernels silently losing their non-coalesced slots (e.g. a future coalescing change) -- without
     # this the loop above would vacuously pass and re-open the read-first coverage gap this test exists to close.
@@ -1280,7 +1304,7 @@ def _ilog2(mir: Mir) -> list[int]:
 
 def test_fmul_ilog2_same_k_shares_one_instance() -> None:
     # Two K=2 scalings that never run on the same cycle (the second waits on a multiply) pool onto one instance.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> tuple[float, float]:
         return (a * b) * 4.0, b * 4.0
 
     mir = _run(f)
@@ -1294,7 +1318,7 @@ def test_fmul_ilog2_same_k_shares_one_instance() -> None:
 
 def test_fmul_ilog2_same_k_serializes_by_default_parallelizes_with_budget() -> None:
     # Two independent K=2 scalings are both ready at cycle 1; the per-kind budget governs them like any other kind.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> tuple[float, float]:
         return a * 4.0, b * 4.0
 
     mir = _run(f)
@@ -1307,7 +1331,7 @@ def test_fmul_ilog2_same_k_serializes_by_default_parallelizes_with_budget() -> N
 
 
 def test_fmul_ilog2_different_k_never_shares() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         return a * 4.0 + b * 8.0  # K=2 and K=3 -- distinct hardware modules
 
     mir = _run(f)
@@ -1315,12 +1339,17 @@ def test_fmul_ilog2_different_k_never_shares() -> None:
     assert len(il) == 2
     sched = _schedule(mir)
     assert sched.inst_of[il[0]] != sched.inst_of[il[1]]
-    assert {sched.inst_of[v].operator.k for v in il} == {2, 3}
+    ks: set[int] = set()
+    for v in il:
+        op = sched.inst_of[v].operator
+        assert isinstance(op, FMulILog2Operator)
+        ks.add(op.k)
+    assert ks == {2, 3}
     assert {sched.inst_of[v].index for v in il} == {0}  # indices are local to each concrete operator value
 
 
 def test_build_lir_small_kernel() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         return (a - b) * 0.25 + a * b
 
     lir = build(_run(f), "kernel", fetch_stages=3)
@@ -1355,7 +1384,7 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
         def __init__(self) -> None:
             self._p = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             out = self._p + x  # reads the old _p; the fadd result is the only output
             self._p = x  # a non-coalesced writeback whose source (the input x) is an ordinary register
             return out
@@ -1395,7 +1424,7 @@ def test_cfg_phi_merge_register_shows_residence(monkeypatch: pytest.MonkeyPatch)
     # register is written ONLY by the per-arm phi copies and read at the boundary, never by an operator. Before
     # phi-copy residence was added to reg_liveness, such a register had a use but no def and so collapsed to an empty
     # (untinted) live set -- the CFG-report liveness gap.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float) -> float:
         if x > 0.0:
             z = 1.0
         else:
@@ -1419,7 +1448,7 @@ def test_cfg_write_only_state_slot_is_reserved() -> None:
         def __init__(self) -> None:
             self.acc = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             if x > 0.0:
                 t = x * 2.0
             else:
@@ -1443,7 +1472,7 @@ def test_cfg_state_slot_coalesces_onto_its_register() -> None:
         def __init__(self) -> None:
             self.state = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             self.state = self.state * 0.9 + x
             return float(x > 0.0) * self.state
 
@@ -1464,7 +1493,7 @@ def test_cfg_branch_conditions_reuse_boolean_registers(monkeypatch: pytest.Monke
 
     # Sequential data-dependent branches: each condition is computed, tested at its boundary, and dead before the next,
     # so the boolean bank reuses one register across them instead of allocating one per branch.
-    def f(x, y, z):  # type: ignore[no-untyped-def]
+    def f(x: float, y: float, z: float) -> float:
         a = x
         if x > 0.0:
             a = a + 1.0
@@ -1482,7 +1511,7 @@ def test_cfg_branch_conditions_reuse_boolean_registers(monkeypatch: pytest.Monke
     assert abs(float(model.run(1.0, -1.0, 1.0)[0]) - 6.0) < 1e-3  # a=1; +1 (x>0); skip (y<=0); +4 (z>0) = 6
 
 
-def _coalescing_self_copies(lir) -> int:  # type: ignore[no-untyped-def]
+def _coalescing_self_copies(lir: Lir) -> int:
     """Count no-op identity copies (``r <= r`` with identity sign): a coalescable arm the pass should have merged."""
     return sum(
         1
@@ -1500,7 +1529,7 @@ def test_diamond_op_result_arms_coalesce(monkeypatch: pytest.MonkeyPatch) -> Non
     # correct on both arms -- bit-exact value preservation against the RTL is the cosim's job; here we pin the win.
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # keep the diamond a real phi merge, not a select
 
-    def f(x, y):  # type: ignore[no-untyped-def]
+    def f(x: float, y: float) -> float:
         if x > 0.0:
             z = x + y
         else:
@@ -1521,7 +1550,7 @@ def test_loop_carried_phi_coalesces_when_non_interfering() -> None:
     # A directed loop whose carried value is read once (read-first) before its update lands: the header phi and its
     # back-edge arm (an op result) do not interfere, so they coalesce -- the loop body installs no register-source copy.
     # Only the entry constants (acc=0, i=0) keep their copies.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float) -> float:
         acc = 0.0
         i = 0.0
         while i < 3.0:
@@ -1558,7 +1587,7 @@ def test_interfering_loop_carried_phi_keeps_its_copy() -> None:
     assert back_edge_op_copies, "the interfering loop-carried Newton update must keep its back-edge install copy"
 
 
-def _check_float_kernel(fn, name, samples):  # type: ignore[no-untyped-def]
+def _check_float_kernel(fn: Callable[..., tuple[float, ...]], name: str, samples: list[tuple[float, ...]]) -> None:
     lir = build(
         _run(fn), name, fetch_stages=3
     )  # crash-before: the install-free oracle admitted an unsound merge -> backstop assert
@@ -1577,7 +1606,7 @@ def test_phi_coalescing_residual_install_conflict_is_resolved() -> None:
     # (sign-folded) else-arm install writes that shared register. The final, install-aware interference then flags the
     # class against itself and the coloring backstop aborted the build. The fixpoint must de-coalesce ``a`` and build.
     # The division keeps the diamond a real branch (un-if-converted), which is what creates the phi merge.
-    def k(x, b, cc):  # type: ignore[no-untyped-def]
+    def k(x: float, b: float, cc: float) -> tuple[float, float, float]:
         if b < cc:
             a = x
             z = 1.0
@@ -1596,7 +1625,7 @@ def test_phi_coalescing_conflict_resolved_under_reversed_declaration_order() -> 
     # order the union-find follows -- change, so a DIFFERENT phi wins the merge onto ``x``. The fixpoint must converge
     # regardless of which phi coalesced first; this pins the resolution as order-independent, not an artifact of one id
     # assignment.
-    def k(x, b, cc):  # type: ignore[no-untyped-def]
+    def k(x: float, b: float, cc: float) -> tuple[float, float, float]:
         if b < cc:
             d = b
             z = 1.0
@@ -1613,7 +1642,7 @@ def test_phi_coalescing_conflict_resolved_under_reversed_declaration_order() -> 
 def test_phi_coalescing_conflict_resolved_with_swapped_branch_arms() -> None:
     # The mirror: the coalescing identity arm sits in the else block and the sign-folded residual arm in the then block,
     # so the conflict is exercised from the opposite branch polarity. Confirms the de-coalescing is arm-order agnostic.
-    def k(x, b, cc):  # type: ignore[no-untyped-def]
+    def k(x: float, b: float, cc: float) -> tuple[float, float, float]:
         if b < cc:
             a = -(x + 1.0)
             z = x
@@ -1634,7 +1663,7 @@ def test_bool_phi_coalescing_residual_install_conflict_is_resolved() -> None:
     # if-converted). The fixpoint must de-coalesce and build; checked bit-exact across all eight boolean input vectors.
     import itertools  # noqa: PLC0415
 
-    def k(p: bool, q: bool, r: bool):  # type: ignore[no-untyped-def]
+    def k(p: bool, q: bool, r: bool) -> tuple[bool, bool, bool]:
         if p:
             a = q
             z = True
@@ -1650,7 +1679,10 @@ def test_bool_phi_coalescing_residual_install_conflict_is_resolved() -> None:
     )  # crash-before: the bool oracle admitted the unsound merge -> backstop assert
     model = build_model(lir)
     for p, q, r in itertools.product([False, True], repeat=3):
-        got = [bool(int(v)) for v in model.run(p, q, r)]
+        got: list[bool] = []
+        for v in model.run(p, q, r):
+            assert isinstance(v, bool)
+            got.append(bool(int(v)))
         ref = list(k(p, q, r))
         assert got == ref, f"coal_bool({p},{q},{r}): {got} vs {ref}"
 
@@ -1662,7 +1694,7 @@ def test_state_war_backstop_allows_noop_writeback() -> None:
         def __init__(self) -> None:
             self.s = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             out = self.s + x
             self.s = self.s
             return out
@@ -1678,7 +1710,7 @@ def test_copy_slot_residence_unbroken_when_tapped_at_boundary() -> None:
         def __init__(self) -> None:
             self._d = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             prev = self._d
             self._d = x
             return prev
@@ -1734,7 +1766,7 @@ def test_build_lir_ekf1_stateless() -> None:
 
 def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
     # +c and -c share a single nonnegative pool entry; the sign rides the (free) per-operand sign control.
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> float:
         return a * 1000.0 + a * (-1000.0)
 
     lir = build(_run(f), "f", fetch_stages=3)
@@ -1745,7 +1777,7 @@ def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
 
 
 def test_negative_constant_operand_is_stored_as_magnitude_with_negate() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> float:
         return a + (-1000.0)
 
     lir = build(_run(f), "f", fetch_stages=3)
@@ -1774,7 +1806,7 @@ def test_constant_pool_is_canonically_nonnegative() -> None:
 def test_underflowing_negative_constant_is_not_sign_folded() -> None:
     # A negative value that rounds to +0 in ZKF (which has no -0) must NOT carry a folded negate: the magnitude already
     # encodes to the canonical +0, so a negate over it would emit an illegal -0 rather than the +0 the value encodes to.
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> float:
         return a + (-1e-12)  # -1e-12 underflows to +0 in FloatFormat(6, 18)
 
     lir = build(_run(f), "f", fetch_stages=3)
@@ -1784,7 +1816,7 @@ def test_underflowing_negative_constant_is_not_sign_folded() -> None:
 
 
 def test_underflowing_negative_constant_output_stays_canonical_zero() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> tuple[float, float]:
         return a + a, -1e-12  # the -1e-12 output underflows to +0; it must stay canonical, not fold to illegal -0
 
     lir = build(_run(f), "f", fetch_stages=3)
@@ -1886,9 +1918,9 @@ def test_mir_builder_rejects_mixed_float_operand_formats() -> None:
 
 def test_mir_operation_validates_invariants() -> None:
     with pytest.raises(TypeError, match="scalar_type"):
-        MirFloatInput("a", OtherScalarType())
+        MirFloatInput("a", OtherScalarType())  # type: ignore[arg-type]  # deliberately wrong scalar type
     with pytest.raises(TypeError, match="scalar_type"):
-        MirFloatConst(OtherScalarType(), 1.0)
+        MirFloatConst(OtherScalarType(), 1.0)  # type: ignore[arg-type]  # deliberately wrong scalar type
     with pytest.raises(ValueError, match="operand"):
         MirOperation(FAddOperator(FMT), [0], [FloatSignControl(), FloatSignControl()], 0, FloatSignControl(), ())
     with pytest.raises(ValueError, match="conditioner"):
@@ -1909,7 +1941,7 @@ def test_mir_operation_validates_invariants() -> None:
     with pytest.raises(ValueError, match="does not exist"):
         MirOperation(FAddOperator(FMT), [0, 0], [FloatSignControl(), FloatSignControl()], 1, FloatSignControl(), ())
     with pytest.raises(TypeError, match="sign"):
-        MirFloatOutput("out_0", 0, object())
+        MirFloatOutput("out_0", 0, object())  # type: ignore[arg-type]  # deliberately wrong sign control type
 
 
 def test_float_view_rejects_non_float_mir_before_scheduling() -> None:
@@ -1961,7 +1993,7 @@ def test_fmul_ilog2_operator_rejects_out_of_range_k() -> None:
         FMulILog2Operator(FMT, k=-limit - 1)
 
 
-def _read_mux_fan_in(lir) -> int:  # type: ignore[no-untyped-def]
+def _read_mux_fan_in(lir: Lir) -> int:
     return sum(max(0, len(regs) - 1) for regs in lir.read_set_per_port.values())
 
 
@@ -1983,8 +2015,8 @@ def test_marked_commutative_operators_are_bit_exact_commutative() -> None:
             assert evaluate(a, b).bits == evaluate(b, a).bits
 
 
-def test_commutative_port_assignment_never_increases_read_mux_fan_in(  # type: ignore[no-untyped-def]
-    monkeypatch,
+def test_commutative_port_assignment_never_increases_read_mux_fan_in(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import holoso._lir._build as build_module
 
@@ -2009,7 +2041,7 @@ def test_commutative_port_assignment_never_increases_read_mux_fan_in(  # type: i
 
 def test_optional_stages_raise_latency_without_changing_numerics() -> None:
     # A kernel touching every operator family: fadd, fmul, fdiv, and the 2^-2 strength-reduced fmul_ilog2.
-    def kernel(a, b, c):  # type: ignore[no-untyped-def]
+    def kernel(a: float, b: float, c: float) -> float:
         return (a - b) / c + a * b * 0.25
 
     fmt = FloatFormat(8, 36)
@@ -2017,28 +2049,40 @@ def test_optional_stages_raise_latency_without_changing_numerics() -> None:
     lirs = {name: build(_run(kernel, ops), f"stages_{name}", fetch_stages=3) for name, ops in configs.items()}
     assert lirs["default"].initiation_interval < lirs["staged"].initiation_interval
 
+    def bits(outputs: list[FloatValue | bool]) -> list[int]:  # the kernel is all-float, so every output is a FloatValue
+        result = []
+        for v in outputs:
+            assert isinstance(v, FloatValue)
+            result.append(v.bits)
+        return result
+
     # Optional stages only insert pipeline registers, so the numerical result is bit-identical across every config.
     models = {name: build_model(lir) for name, lir in lirs.items()}
     vectors = [(1.5, -0.5, 2.0), (3.25, 1.0, -4.0), (0.0, 2.5, 0.125), (-1.0, -1.0, 1e3)]
     for values in vectors:
-        want = [v.bits for v in models["default"].run(*values)]
+        want = bits(models["default"].run(*values))
         for name, model in models.items():
-            assert [v.bits for v in model.run(*values)] == want, f"{name} diverged from default at {values}"
+            assert bits(model.run(*values)) == want, f"{name} diverged from default at {values}"
 
 
-def test_reach_floor_seed_skips_annealing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_reach_floor_seed_skips_annealing(monkeypatch: pytest.MonkeyPatch) -> None:
     # The mux-fan-in objective bottoms out at 0 (every read port reaches one register, every register one producer). A
     # greedy seed already there is globally optimal, so refinement must short-circuit rather than burn the budget.
     import holoso._lir._regalloc as regalloc
 
     calls: list[int] = []
-    real = regalloc.dual_annealing
-    monkeypatch.setattr(regalloc, "dual_annealing", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    real = regalloc.dual_annealing  # type: ignore[attr-defined]  # scipy's dual_annealing, not reexported by _regalloc
 
-    def floor_kernel(a, b):  # type: ignore[no-untyped-def]
+    def tracking_dual_annealing(*args: object, **kwargs: object) -> object:
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(regalloc, "dual_annealing", tracking_dual_annealing)
+
+    def floor_kernel(a: float, b: float) -> float:
         return a + b  # no register sharing -> greedy seed is at the reach floor
 
-    def sharing_kernel(a, b, c):  # type: ignore[no-untyped-def]
+    def sharing_kernel(a: float, b: float, c: float) -> float:
         return a * b + c  # the product and the sum reuse registers, lifting the objective above the floor
 
     build(_run(floor_kernel), "floor", fetch_stages=3)
@@ -2047,13 +2091,13 @@ def test_reach_floor_seed_skips_annealing(monkeypatch) -> None:  # type: ignore[
     assert calls
 
 
-def test_zero_regalloc_effort_bypasses_annealing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_zero_regalloc_effort_bypasses_annealing(monkeypatch: pytest.MonkeyPatch) -> None:
     import holoso._lir._regalloc as regalloc
 
     monkeypatch.setattr(regalloc, "_REFINE_MAXITER", 0)
     monkeypatch.setattr(regalloc, "dual_annealing", lambda *args, **kwargs: pytest.fail("annealing was not bypassed"))
 
-    def sharing_kernel(a, b, c):  # type: ignore[no-untyped-def]
+    def sharing_kernel(a: float, b: float, c: float) -> float:
         return a * b + c
 
     build(_run(sharing_kernel), "sharing", fetch_stages=3)
@@ -2065,7 +2109,7 @@ def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
     # later marks it past its true landing (and, for a boundary cast, past the initiation interval, so its report cell
     # falls off the grid) and leaves a consumer's read cycle outside its residence. Here a multiply consumes the cast
     # result.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float) -> float:
         return float(x > 0.0) * x
 
     lir = build(_run(f), "cast_mul", fetch_stages=3)
@@ -2081,12 +2125,14 @@ def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
         # Landing it one cycle later would return base + commit + 4 here -- this is the discriminating guard, since
         # reg_liveness alone is a union over the register's reuse and stays satisfied even with the late landing.
         assert lir.write_landing_pcs(block, op) == [landing]
+        assert isinstance(op.write.dst, RegRef)
         assert landing in lir.reg_liveness[op.write.dst]
     cast_regs = {op.write.dst for _, op in casts}
     for fop in lir.ops:  # the consuming multiply must read the cast result within its residence (no late-def gap)
         for operand in fop.operands:
             if operand.source in cast_regs:
                 read = operand_read_cycle(fop.inst.operator, fop.issue_cycle, lir.fetch_lag)
+                assert isinstance(operand.source, RegRef)
                 assert read in lir.reg_liveness[operand.source]
 
 
@@ -2094,7 +2140,7 @@ def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
     # Two DIFFERENT relations over the same operand pair tap two distinct output ports of one comparator activation,
     # so they fuse into a single firing: one instance issue, one operand read, two boolean writes -- the multi-output
     # machinery exercised end to end on the boolean side. The model must still produce both values correctly.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> list[float]:
         below = a < b
         same = a == b
         return [float(below), float(same)]
@@ -2115,7 +2161,7 @@ def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
 def test_same_port_taps_with_different_inversions_do_not_fuse() -> None:
     # ``a < b`` taps the lt flag plainly and ``a >= b`` taps the SAME flag inverted: one output-port lane writes once
     # per firing, so these must stay two firings, spaced by instance contention. Both values must still be correct.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> list[float]:
         below = a < b
         not_below = a >= b
         return [float(below), float(not_below)]
@@ -2175,7 +2221,7 @@ def test_progress_cap_accommodates_long_initiation_intervals() -> None:
     # II with this many firings). Same-port duplicates do not fuse, so the
     # hand-built identical operations below are forty separate firings serialized on one instance.
     slow = _HeavilyThrottledAdd(FMT)
-    nodes = {0: MirFloatInput("a", FloatType(FMT)), 1: MirFloatInput("b", FloatType(FMT))}
+    nodes: dict[int, MirNode] = {0: MirFloatInput("a", FloatType(FMT)), 1: MirFloatInput("b", FloatType(FMT))}
     count = 40
     for i in range(count):
         nodes[2 + i] = MirOperation(slow, [0, 1], [FloatSignControl(), FloatSignControl()], 0, FloatSignControl(), ())
@@ -2212,7 +2258,7 @@ def test_write_timeline_resolves_inline_wide_producers() -> None:
     # Regression (review): the write timeline recorded only pooled firings' wide writes, so a register written by an
     # inline bool->float cast and read by a float operator resolved to NO producer at all -- latest_producer_before
     # raised KeyError on the cast-fed multiply below.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float) -> float:
         return float(x > 0.0) * x
 
     lir = build(_run(f), "cast_timeline", fetch_stages=3)
@@ -2236,7 +2282,7 @@ def test_commutative_comparator_swap_permutes_output_taps(config: OperatorCase) 
     # otherwise read (a,b) and (b,a) -- two registers per read port; the port assignment orients one of them swapped,
     # shrinking each port's read-set to a single register, and the swapped firing's lt tap moves to gt. Bit-exact
     # because the ZKF ordering is total and compare is antisymmetric.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> list[float]:
         below = a < b
         above = b < a
         return [float(below), float(above)]
@@ -2276,7 +2322,7 @@ def test_chained_slot_live_in_blocks_early_install(config: OperatorCase) -> None
 def test_select_folds_arm_signs_into_operand_conditioners() -> None:
     # ``x if c else -x`` costs exactly one comparison and one select: the arm negation rides the select's operand
     # conditioner (the inline dual of the pooled operators' sign sidebands), never a separate float operation.
-    def f(x, c):  # type: ignore[no-untyped-def]
+    def f(x: float, c: float) -> float:
         y = x if c > 0.0 else -x
         return y
 
@@ -2324,7 +2370,7 @@ def test_not_folds_into_every_sink_position() -> None:
     # A semantic NOT never materializes hardware: it becomes a free inversion conditioner at each consumer. The
     # kernel routes one comparison's negation into a logic operand, a bool output, and a bool->float cast; the LIR
     # must contain NO inline op beyond the band and the cast, and the inversions must ride the operand sidebands.
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float) -> list[float]:
         flag = not (a > b)
         out_logic = flag and (c > 0.0)
         return [float(flag), float(out_logic)]
@@ -2345,7 +2391,7 @@ def test_not_folds_into_every_sink_position() -> None:
 def test_not_on_a_branch_condition_swaps_the_targets() -> None:
     # ``if not cond`` costs nothing: the branch takes the complementary target instead of inverting the register.
     # The division arms keep the diamond a real branch (if-conversion refuses them).
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         if not (a > b):
             y = a / (b * b + 1.0)
         else:
@@ -2362,7 +2408,7 @@ def test_not_on_a_branch_condition_swaps_the_targets() -> None:
 
 
 def test_double_negation_cancels() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         flag = not (not (a > b))
         return float(flag)
 
@@ -2377,7 +2423,7 @@ def test_double_negation_cancels() -> None:
 
 def test_value_consumed_in_both_polarities_shares_one_producer() -> None:
     # ``x`` and ``not x`` share one comparator tap and one boolean register: the polarity lives on each consumer.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> list[float]:
         flag = a > b
         return [float(flag), float(not flag)]
 
@@ -2393,7 +2439,7 @@ class _InvertedState:
     def __init__(self) -> None:
         self._flip = False
 
-    def step(self, x):  # type: ignore[no-untyped-def]
+    def step(self, x: float) -> float:
         old = self._flip
         self._flip = not self._flip
         return x if old else -x
@@ -2417,7 +2463,7 @@ def test_inverted_bool_phi_arm_installs_with_opposite_polarities(config: Operato
     # opposite inversions (one arm rewrites the flag as its own negation). The two install copies must carry
     # opposite-polarity sources, and the model must take the correct value on both paths. The division keeps the
     # diamond a real branch (bool-phi diamonds are refused by if-conversion anyway; the div makes it doubly so).
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float) -> list[float]:
         flag = a > b
         if c > 0.0:
             flag = not flag
@@ -2445,7 +2491,7 @@ def test_boolean_registers_are_reused_within_a_block() -> None:
     # Exact per-consumer read steps free a condition's register once its last reader fires, so a chain of sequential
     # selects whose conditions die mid-block shares a few boolean registers instead of one per condition. The chain
     # is data-dependent (each select feeds the next comparison), so the conditions' lifetimes are disjoint.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float) -> float:
         for _ in range(6):
             x = (x - 1.0) if x > 1.0 else (x + 1.0)
         return x
@@ -2468,7 +2514,7 @@ def test_boolean_logic_chain_reuses_registers_on_the_tight_same_bank_edge() -> N
     # reduction over many comparisons produces intermediate flags that die as the next gate consumes them, on the
     # tightest read-first edge (an inline gate reads its operand on exactly the step the next result's write-enable
     # fires; landing = fire + 1 keeps R(a) < W(b)). The chain must collapse onto a handful of registers.
-    def f(a, b, c, d, e, g):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float, d: float, e: float, g: float) -> float:
         return 1.0 if (a > b and c > d and e > g and a > d and b > e) else 0.0
 
     lir = build(_run(f), "bool_chain", fetch_stages=3)
@@ -2521,7 +2567,7 @@ class _AliasedFloatState:
         self.pub = 0.0
         self._alias = 0.0
 
-    def step(self, a, b):  # type: ignore[no-untyped-def]
+    def step(self, a: float, b: float) -> float:
         self.pub = a + b
         self._alias = a + b
         return self.pub
@@ -2531,6 +2577,9 @@ def test_aliased_state_slots_merge_onto_one_register() -> None:
     # Regression (user): two state slots that always hold the same value share one register, so neither needs an
     # install copy. PFD's up/_ref_pending and down/_fb_pending collapse 7 bool registers to 5 with no copies; the
     # float path (a public attribute and its write-only alias) is exercised too.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    from phase_frequency_detector import PhaseFrequencyDetector  # noqa: PLC0415
+
     pfd = build(_run(PhaseFrequencyDetector().__call__), "pfd_merge", fetch_stages=3)
     assert pfd.bool_regfile.nreg == 5
     assert pfd.regfile.nreg == 0  # purely boolean: the wide bank is unused

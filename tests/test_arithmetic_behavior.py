@@ -39,6 +39,7 @@ Python float, and outputs are compared on ``.bits`` so the assertions cannot sil
 """
 
 import math
+from collections.abc import Callable
 
 import holoso
 from holoso import (
@@ -63,7 +64,7 @@ def _ops() -> OpConfig:
     )
 
 
-def _sim(fn, name: str) -> holoso.NumericalSimulator:  # type: ignore[no-untyped-def]
+def _sim(fn: Callable[..., object], name: str) -> holoso.NumericalSimulator:
     return holoso.synthesize(fn, _ops(), name=name).numerical_model.elaborate()
 
 
@@ -82,15 +83,15 @@ def _round(value: float) -> float:
 _EDGES = format_edge_bits(FMT)  # zero, ±0.5, ±1, ±smallest-normal, ±largest-finite (9 patterns)
 
 
-def _add(a, b):  # type: ignore[no-untyped-def]
+def _add(a: float, b: float) -> float:
     return a + b
 
 
-def _mul(a, b):  # type: ignore[no-untyped-def]
+def _mul(a: float, b: float) -> float:
     return a * b
 
 
-def _neg_self(x):  # type: ignore[no-untyped-def]
+def _neg_self(x: float) -> float:
     return x + (-x)
 
 
@@ -98,6 +99,7 @@ def test_additive_inverse_is_zero_over_edges() -> None:
     sim = _sim(_neg_self, "add_inverse")
     for bits in _EDGES:
         out = sim.run(_val(bits))[0]
+        assert isinstance(out, FloatValue)
         # x + (-x) == +0 for every finite edge; the largest-finite case does not overflow (it cancels exactly).
         assert out.bits == 0, f"x=0x{bits:x} ({float(_val(bits))}): x+(-x) bits=0x{out.bits:x} ({float(out)})"
 
@@ -107,6 +109,7 @@ def test_mul_by_one_is_identity_over_edges() -> None:
     one = FloatValue.from_float(FMT, 1.0)
     for bits in _EDGES:
         out = sim.run(_val(bits), one)[0]
+        assert isinstance(out, FloatValue)
         assert out.bits == bits, f"x*1.0 changed bits: 0x{out.bits:x} vs 0x{bits:x}"
 
 
@@ -116,10 +119,11 @@ def test_mul_by_zero_is_positive_zero_over_edges() -> None:
     zero = FloatValue.from_float(FMT, 0.0)
     for bits in _EDGES:
         out = sim.run(_val(bits), zero)[0]
+        assert isinstance(out, FloatValue)
         assert out.bits == 0 and out.sign == 0, f"x*0.0 not +0: bits=0x{out.bits:x} sign={out.sign}"
 
 
-def _abs_via_select(x):  # type: ignore[no-untyped-def]
+def _abs_via_select(x: float) -> float:
     # abs via a sign-select: -x if x < 0 else x. The magnitude must equal |x| exactly (a pure sign-bit clear in ZKF).
     return -x if x < 0.0 else x
 
@@ -129,11 +133,12 @@ def test_abs_via_select_clears_sign_over_edges() -> None:
     for bits in _EDGES:
         x = _val(bits)
         out = sim.run(x)[0]
+        assert isinstance(out, FloatValue)
         want = x.apply_sign(negate=False, absolute=True)
         assert out.bits == want.bits, f"abs(0x{bits:x}) bits=0x{out.bits:x} vs 0x{want.bits:x}"
 
 
-def _double_neg(x):  # type: ignore[no-untyped-def]
+def _double_neg(x: float) -> float:
     return -(-x)
 
 
@@ -141,6 +146,7 @@ def test_double_negation_is_identity_over_edges() -> None:
     sim = _sim(_double_neg, "double_neg")
     for bits in _EDGES:
         out = sim.run(_val(bits))[0]
+        assert isinstance(out, FloatValue)
         assert out.bits == bits, f"-(-x) changed bits: 0x{out.bits:x} vs 0x{bits:x}"
 
 
@@ -151,6 +157,7 @@ def test_addition_commutes_bit_identical_over_edges() -> None:
         for bb in _EDGES:
             forward = sim.run(_val(ab), _val(bb))[0]
             reverse = sim.run(_val(bb), _val(ab))[0]
+            assert isinstance(forward, FloatValue) and isinstance(reverse, FloatValue)
             assert (
                 forward.bits == reverse.bits
             ), f"a+b != b+a: a=0x{ab:x} b=0x{bb:x}: 0x{forward.bits:x} vs 0x{reverse.bits:x}"
@@ -162,6 +169,7 @@ def test_multiplication_commutes_bit_identical_over_edges() -> None:
         for bb in _EDGES:
             forward = sim.run(_val(ab), _val(bb))[0]
             reverse = sim.run(_val(bb), _val(ab))[0]
+            assert isinstance(forward, FloatValue) and isinstance(reverse, FloatValue)
             assert (
                 forward.bits == reverse.bits
             ), f"a*b != b*a: a=0x{ab:x} b=0x{bb:x}: 0x{forward.bits:x} vs 0x{reverse.bits:x}"
@@ -173,7 +181,7 @@ def _largest_finite() -> FloatValue:
     return _val((max_exp << frac_bits) | ((1 << frac_bits) - 1))
 
 
-def _overflow_then_mul(x, y):  # type: ignore[no-untyped-def]
+def _overflow_then_mul(x: float, y: float) -> float:
     # (x + x) overflows to +inf at the extreme; multiplying by y must keep it inf (inf * finite-positive == inf).
     return (x + x) * y
 
@@ -183,13 +191,14 @@ def test_overflow_to_inf_and_stays_inf() -> None:
     lf = _largest_finite()
     one = FloatValue.from_float(FMT, 1.0)
     out = sim.run(lf, one)[0]
+    assert isinstance(out, FloatValue)
     # largest + largest overflows: the ZKF-accurate reference is round(2*largest) == +inf, and inf*1 stays inf.
     want = _round(_round(2.0 * float(lf)) * 1.0)
     assert math.isinf(want) and want > 0.0  # guard the reference itself
     assert math.isinf(float(out)) and float(out) > 0.0, f"overflow chain not +inf: {float(out)} (bits 0x{out.bits:x})"
 
 
-def _div(a, b):  # type: ignore[no-untyped-def]
+def _div(a: float, b: float) -> float:
     return a / b
 
 
@@ -197,30 +206,31 @@ def test_divide_by_zero_emits_inf_error_path() -> None:
     # 1.0 / 0.0 is the error path; its OUTPUT value is +inf (err_pc is not model-observable, so it is not asserted).
     sim = _sim(_div, "div_zero")
     out = sim.run(FloatValue.from_float(FMT, 1.0), FloatValue.from_float(FMT, 0.0))[0]
+    assert isinstance(out, FloatValue)
     assert math.isinf(float(out)) and float(out) > 0.0, f"1.0/0.0 not +inf: {float(out)} (bits 0x{out.bits:x})"
 
 
-def _k_lt(x, y):  # type: ignore[no-untyped-def]
+def _k_lt(x: float, y: float) -> bool:
     return x < y
 
 
-def _k_le(x, y):  # type: ignore[no-untyped-def]
+def _k_le(x: float, y: float) -> bool:
     return x <= y
 
 
-def _k_gt(x, y):  # type: ignore[no-untyped-def]
+def _k_gt(x: float, y: float) -> bool:
     return x > y
 
 
-def _k_ge(x, y):  # type: ignore[no-untyped-def]
+def _k_ge(x: float, y: float) -> bool:
     return x >= y
 
 
-def _k_eq(x, y):  # type: ignore[no-untyped-def]
+def _k_eq(x: float, y: float) -> bool:
     return x == y
 
 
-def _k_ne(x, y):  # type: ignore[no-untyped-def]
+def _k_ne(x: float, y: float) -> bool:
     return x != y
 
 
@@ -231,14 +241,15 @@ def test_all_six_relational_operators_exact_at_boundary() -> None:
     below = float(_val(pivot_bits - 1))
     above = float(_val(pivot_bits + 1))
     pairs = [(pivot, pivot), (below, pivot), (above, pivot), (pivot, below), (pivot, above), (-pivot, pivot)]
-    for fn, py, name in [
+    cases: list[tuple[Callable[[float, float], bool], Callable[[float, float], bool], str]] = [
         (_k_lt, lambda a, b: a < b, "lt"),
         (_k_le, lambda a, b: a <= b, "le"),
         (_k_gt, lambda a, b: a > b, "gt"),
         (_k_ge, lambda a, b: a >= b, "ge"),
         (_k_eq, lambda a, b: a == b, "eq"),
         (_k_ne, lambda a, b: a != b, "ne"),
-    ]:
+    ]
+    for fn, py, name in cases:
         sim = _sim(fn, f"rel_{name}")
         for x, y in pairs:
             got = sim.run(FloatValue.from_float(FMT, x), FloatValue.from_float(FMT, y))[0]
@@ -246,7 +257,7 @@ def test_all_six_relational_operators_exact_at_boundary() -> None:
             assert got is want, f"{name}({x}, {y}) = {got}, want {want}"
 
 
-def _chained(lo, x, hi):  # type: ignore[no-untyped-def]
+def _chained(lo: float, x: float, hi: float) -> bool:
     # lo < x < hi lowers to two comparators AND-fused; must match Python's chained-comparison semantics exactly.
     return lo < x < hi
 
@@ -273,23 +284,23 @@ def test_equality_bit_equal_vs_bit_different() -> None:
     assert sim_ne.run(same, other)[0] is True
 
 
-def _x_times_2(x):  # type: ignore[no-untyped-def]
+def _x_times_2(x: float) -> float:
     return x * 2.0
 
 
-def _x_times_half(x):  # type: ignore[no-untyped-def]
+def _x_times_half(x: float) -> float:
     return x * 0.5
 
 
-def _x_times_8(x):  # type: ignore[no-untyped-def]
+def _x_times_8(x: float) -> float:
     return x * 8.0
 
 
-def _x_times_eighth(x):  # type: ignore[no-untyped-def]
+def _x_times_eighth(x: float) -> float:
     return x * 0.125
 
 
-def _x_times_2_pow_neg5(x):  # type: ignore[no-untyped-def]
+def _x_times_2_pow_neg5(x: float) -> float:
     return x * 2.0**-5
 
 
@@ -306,11 +317,12 @@ def test_power_of_two_strength_reduction_is_exact() -> None:
         sim = _sim(fn, f"pow2_{name}")
         for x in (-3.0, -1.0, -0.5, 0.0, 0.5, 1.0, 3.0, 17.0):
             got = sim.run(FloatValue.from_float(FMT, x))[0]
+            assert isinstance(got, FloatValue)
             want = FloatValue.from_float(FMT, _round(x * factor))
             assert got.bits == want.bits, f"{name}: {x}*{factor} bits=0x{got.bits:x} vs 0x{want.bits:x}"
 
 
-def _x_times_3(x):  # type: ignore[no-untyped-def]
+def _x_times_3(x: float) -> float:
     # 3.0 is NOT a power of two, so this stays an ordinary fmul; still must round-correctly.
     return x * 3.0
 
@@ -319,6 +331,7 @@ def test_non_power_of_two_stays_ordinary_fmul_and_correct() -> None:
     sim = _sim(_x_times_3, "mul3")
     for x in (-3.0, -1.0, 0.0, 0.5, 1.0, 3.0, 17.0, 100.0):
         got = sim.run(FloatValue.from_float(FMT, x))[0]
+        assert isinstance(got, FloatValue)
         want = FloatValue.from_float(FMT, _round(x * 3.0))
         assert got.bits == want.bits, f"x*3.0: {x} bits=0x{got.bits:x} vs 0x{want.bits:x}"
 
@@ -333,19 +346,20 @@ def test_power_of_two_overflow_and_underflow_edges() -> None:
     frac_bits = FMT.wman - 1
     smallest_normal = _val(1 << frac_bits)  # exponent 1, zero fraction
     under = sim_quarter.run(smallest_normal)[0]
+    assert isinstance(under, FloatValue)
     # smallest_normal * 0.125 underflows below the half-MIN_NORMAL boundary -> rounds to +0 (the format's own rule).
     assert under.bits == 0, f"smallest_normal*0.125 not +0: bits=0x{under.bits:x} ({float(under)})"
 
 
-def _k_and(a: bool, b: bool):  # type: ignore[no-untyped-def]
+def _k_and(a: bool, b: bool) -> bool:
     return a and b
 
 
-def _k_or(a: bool, b: bool):  # type: ignore[no-untyped-def]
+def _k_or(a: bool, b: bool) -> bool:
     return a or b
 
 
-def _k_and_or(a: bool, b: bool, c: bool):  # type: ignore[no-untyped-def]
+def _k_and_or(a: bool, b: bool, c: bool) -> bool:
     return a and b or c  # (a and b) or c by Python precedence
 
 
@@ -366,11 +380,11 @@ def test_boolean_and_or_compound_truth_table() -> None:
                 assert sim.run(a, b, c)[0] is ((a and b) or c), f"and_or({a},{b},{c})"
 
 
-def _demorgan_lhs(a: bool, b: bool):  # type: ignore[no-untyped-def]
+def _demorgan_lhs(a: bool, b: bool) -> bool:
     return not (a and b)
 
 
-def _demorgan_rhs(a: bool, b: bool):  # type: ignore[no-untyped-def]
+def _demorgan_rhs(a: bool, b: bool) -> bool:
     return (not a) or (not b)
 
 
@@ -385,7 +399,7 @@ def test_de_morgan_equivalence_full_truth_table() -> None:
             assert lhs is want and rhs is want, f"de morgan ({a},{b}): lhs={lhs} rhs={rhs} want={want}"
 
 
-def _float_of_cond(x, y):  # type: ignore[no-untyped-def]
+def _float_of_cond(x: float, y: float) -> float:
     # float(x > y) must be exactly 0.0 or 1.0; feeding it into arithmetic gives a clean gate.
     return float(x > y) * 10.0 + 1.0
 
@@ -394,11 +408,12 @@ def test_float_of_bool_is_exactly_zero_or_one_feeding_arithmetic() -> None:
     sim = _sim(_float_of_cond, "float_cond")
     for x, y in [(3.0, 1.0), (1.0, 3.0), (2.0, 2.0)]:
         got = sim.run(FloatValue.from_float(FMT, x), FloatValue.from_float(FMT, y))[0]
+        assert isinstance(got, FloatValue)
         want = FloatValue.from_float(FMT, (10.0 if x > y else 0.0) + 1.0)
         assert got.bits == want.bits, f"float({x}>{y})*10+1 bits=0x{got.bits:x} vs 0x{want.bits:x}"
 
 
-def _cross_domain_chain(x, y):  # type: ignore[no-untyped-def]
+def _cross_domain_chain(x: float, y: float) -> float:
     # A float compared, the bool cast to float, then multiplied by a float: a full float->bool->float round trip.
     return float(x > y) * (x + y)
 
@@ -407,12 +422,13 @@ def test_compare_cast_multiply_cross_domain_chain() -> None:
     sim = _sim(_cross_domain_chain, "cross_chain")
     for x, y in [(3.0, 1.0), (1.0, 3.0), (2.0, 2.0), (-1.0, -2.0)]:
         got = sim.run(FloatValue.from_float(FMT, x), FloatValue.from_float(FMT, y))[0]
+        assert isinstance(got, FloatValue)
         gate = 1.0 if x > y else 0.0
         want = FloatValue.from_float(FMT, _round(gate * _round(x + y)))  # the sum rounds, then the (exact) gate scales
         assert got.bits == want.bits, f"cross chain ({x},{y}) bits=0x{got.bits:x} vs 0x{want.bits:x}"
 
 
-def _bool_of_float(x):  # type: ignore[no-untyped-def]
+def _bool_of_float(x: float) -> bool:
     # bool(x) truthiness: nonzero -> True, +0 -> False.
     return bool(x)
 
@@ -427,7 +443,7 @@ def test_bool_of_float_truthiness() -> None:
     assert sim.run(_val(1 << frac_bits))[0] is True
 
 
-def _fold_to_zero(x):  # type: ignore[no-untyped-def]
+def _fold_to_zero(x: float) -> float:
     # The subexpression 2*3 - 6 folds to 0.0 at compile time, so x + 0.0 == x exactly for every representable x.
     return x + (2.0 * 3.0 - 6.0)
 
@@ -436,10 +452,11 @@ def test_constant_subexpression_folds_to_zero() -> None:
     sim = _sim(_fold_to_zero, "fold_zero")
     for bits in _EDGES:
         out = sim.run(_val(bits))[0]
+        assert isinstance(out, FloatValue)
         assert out.bits == bits, f"x + (2*3-6) changed bits: 0x{out.bits:x} vs 0x{bits:x}"
 
 
-def _dead_arm_divides_by_zero(x):  # type: ignore[no-untyped-def]
+def _dead_arm_divides_by_zero(x: float) -> float:
     # 3.0 < 2.0 folds to False; the THEN arm (which divides by a compile-time 0.0) must be pruned, never lowered.
     if 3.0 < 2.0:
         r = x / 0.0
@@ -452,6 +469,7 @@ def test_constant_condition_drops_divide_by_zero_dead_arm() -> None:
     sim = _sim(_dead_arm_divides_by_zero, "dead_arm")
     for x in (-3.0, 0.0, 1.0, 5.0, 7.0):
         got = sim.run(FloatValue.from_float(FMT, x))[0]
+        assert isinstance(got, FloatValue)
         want = FloatValue.from_float(FMT, _round(x + 1.0))
         assert got.bits == want.bits, f"x+1 (dead arm pruned): {x} bits=0x{got.bits:x} vs 0x{want.bits:x}"
 
@@ -462,7 +480,7 @@ class _AttributeConfig:
     def __init__(self, threshold: float) -> None:
         self._threshold = threshold
 
-    def __call__(self, x):  # type: ignore[no-untyped-def]
+    def __call__(self, x: float) -> float:
         if self._threshold > 2.0:  # _threshold == 3.0 is a compile-time snapshot -> the condition folds to True
             r = x + 1.0
         else:
@@ -474,11 +492,12 @@ def test_read_only_attribute_folds_in_condition() -> None:
     sim = _sim(_AttributeConfig(3.0).__call__, "attr_fold")
     for x in (-2.0, 0.0, 3.0, 9.0):
         got = sim.run(FloatValue.from_float(FMT, x))[0]
+        assert isinstance(got, FloatValue)
         want = FloatValue.from_float(FMT, _round(x + 1.0))
         assert got.bits == want.bits, f"attr-fold x+1: {x} bits=0x{got.bits:x} vs 0x{want.bits:x}"
 
 
-def _horner_loop(x):  # type: ignore[no-untyped-def]
+def _horner_loop(x: float) -> float:
     # A bounded for-loop that fully unrolls a Horner evaluation of 1*x^4 + 1*x^3 + 1*x^2 + 1*x + 1.
     acc = 0.0
     for _ in range(5):
@@ -486,7 +505,7 @@ def _horner_loop(x):  # type: ignore[no-untyped-def]
     return acc
 
 
-def _horner_unrolled(x):  # type: ignore[no-untyped-def]
+def _horner_unrolled(x: float) -> float:
     # The SAME Horner recurrence written out straight-line: identical op order, so the bits must match exactly.
     acc = 0.0
     acc = acc * x + 1.0
@@ -503,6 +522,7 @@ def test_bounded_for_loop_unrolls_to_straight_line_bit_identical() -> None:
     for x in (-2.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0):
         looped = sim_loop.run(FloatValue.from_float(FMT, x))[0]
         flat = sim_flat.run(FloatValue.from_float(FMT, x))[0]
+        assert isinstance(looped, FloatValue) and isinstance(flat, FloatValue)
         assert (
             looped.bits == flat.bits
         ), f"unrolled loop != straight-line at x={x}: 0x{looped.bits:x} vs 0x{flat.bits:x}"

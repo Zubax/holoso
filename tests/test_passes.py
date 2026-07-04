@@ -1,6 +1,7 @@
 """Unit tests for HIR optimization and MIR selection passes."""
 
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -27,6 +28,7 @@ from holoso._hir import (
     FloatAdd,
     FloatConst,
     FloatType as HirFloatType,
+    Hir,
     HirBuilder,
     InPort,
     Operation,
@@ -39,7 +41,7 @@ from holoso._hir import BoolSelect, FloatDiv as HirFloatDiv, Phi, Select
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir._const_fold import run as fold_constants
 from holoso._lir import build
-from holoso._mir import lower as lower_to_mir, Mir, MirFloatConst, MirFloatInput, MirOperation
+from holoso._mir import lower as lower_to_mir, Mir, MirFloatConst, MirFloatInput, MirFloatOutput, MirOperation
 from holoso._operators import FMulILog2Operator, FloatSignControl
 from ._importguard import forbidden_imports
 from ._modelref import build_model
@@ -81,7 +83,7 @@ class OtherFold(Operator):
         return f"other_fold({operand})"
 
 
-def _run(target, ops: OpConfig = OPS) -> Mir:  # type: ignore[no-untyped-def]
+def _run(target: Callable[..., object], ops: OpConfig = OPS) -> Mir:
     return lower_to_mir(optimize(lower(target)), ops)
 
 
@@ -100,7 +102,7 @@ def _consts(mir: Mir) -> list[float]:
 def test_hir_nodes_carry_float_type() -> None:
     builder = HirBuilder()
     builder.block()
-    a = builder.float_input("a")
+    a = builder.input("a", HirFloatType())
     one = builder.float_const(1.0)
     y = builder.operation(FloatAdd(), [a, one])
     builder.output("out_0", y)
@@ -119,7 +121,7 @@ def test_hir_builder_rejects_wrong_semantic_operand_type() -> None:
     builder = HirBuilder()
     builder.block()
     a = builder.input("a", OtherType())
-    b = builder.float_input("b")
+    b = builder.input("b", HirFloatType())
     try:
         builder.operation(FloatAdd(), [a, b])
     except ValueError as ex:
@@ -145,7 +147,7 @@ def test_lower_rejects_non_float_hir_input_type() -> None:
 
 
 def test_hir_constant_folding_returns_float_const() -> None:
-    def f():  # type: ignore[no-untyped-def]
+    def f() -> float:
         return 1.25 + 2.0
 
     hir = optimize(lower(f))
@@ -169,7 +171,7 @@ def test_hir_constant_folding_preserves_const_subclass() -> None:
 
 
 def test_mir_constant_only_node_carries_float_type() -> None:
-    def f():  # type: ignore[no-untyped-def]
+    def f() -> float:
         return 3.5
 
     mir = _run(f)
@@ -179,7 +181,7 @@ def test_mir_constant_only_node_carries_float_type() -> None:
 
 
 def test_mul_by_pow2_const_becomes_ilog2() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> float:
         return a * 0.25
 
     ops = _ops(_run(f))
@@ -188,7 +190,7 @@ def test_mul_by_pow2_const_becomes_ilog2() -> None:
 
 
 def test_left_const_mul_pow2_is_commutative() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> float:
         return 2 * a
 
     ops = _ops(_run(f))
@@ -197,7 +199,7 @@ def test_left_const_mul_pow2_is_commutative() -> None:
 
 
 def test_div_by_pow2_becomes_ilog2() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> float:
         return a / 4.0
 
     ops = _ops(_run(f))
@@ -206,7 +208,7 @@ def test_div_by_pow2_becomes_ilog2() -> None:
 
 
 def test_div_by_nonpow2_const_becomes_reciprocal_multiply() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> float:
         return a / 3.0
 
     mir = _run(f)
@@ -216,7 +218,7 @@ def test_div_by_nonpow2_const_becomes_reciprocal_multiply() -> None:
 
 
 def test_wide_supported_pow2_uses_ilog2_operator() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> float:
         return a * 16.0
 
     fmt = FloatFormat(3, 4)
@@ -226,12 +228,12 @@ def test_wide_supported_pow2_uses_ilog2_operator() -> None:
     mir = _run(f, ops)
     selected = _ops(mir)
     assert [type(o.operator) for o in selected] == [FMulILog2Operator]
-    assert selected[0].operator.k == 4
+    assert isinstance(selected[0].operator, FMulILog2Operator) and selected[0].operator.k == 4
     assert _consts(mir) == []
 
 
 def test_unsupported_pow2_shift_is_rejected() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> float:
         return a * 64.0
 
     fmt = FloatFormat(3, 4)
@@ -247,14 +249,14 @@ def test_unsupported_pow2_shift_is_rejected() -> None:
 
 
 def test_true_division_stays_fdiv() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         return a / b
 
     assert [type(o.operator) for o in _ops(_run(f))] == [FDivOperator]
 
 
 def test_subtraction_folds_into_second_operand_sign() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         return a - b
 
     ops = _ops(_run(f))
@@ -263,7 +265,7 @@ def test_subtraction_folds_into_second_operand_sign() -> None:
 
 
 def test_operand_negation_folds_into_operator() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         return a * (-b)
 
     ops = _ops(_run(f))
@@ -272,16 +274,17 @@ def test_operand_negation_folds_into_operator() -> None:
 
 
 def test_pure_sign_output_adds_no_operation() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> float:
         return -abs(a)
 
     mir = _run(f)
     assert _ops(mir) == []
+    assert isinstance(mir.outputs[0], MirFloatOutput)
     assert mir.outputs[0].sign == FloatSignControl(absolute=True).then(FloatSignControl(negate=True))
 
 
 def test_selected_mir_has_only_input_const_operation_nodes() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         return (a - b) * 0.25 + a * b
 
     mir = _run(f)
@@ -306,7 +309,7 @@ def test_unclosed_loop_phi_is_rejected() -> None:
     builder = HirBuilder()
     entry = builder.block()
     header = builder.block()
-    x = builder.float_input("x")
+    x = builder.input("x", HirFloatType())
     builder.position_at(entry)
     builder.jump(header)
     builder.position_at(header)
@@ -316,7 +319,7 @@ def test_unclosed_loop_phi_is_rejected() -> None:
         builder.finish()
 
 
-def _deep_cfg_kernel(p0):  # type: ignore[no-untyped-def]
+def _deep_cfg_kernel(p0: float) -> float:
     # A doubly-nested unrolled loop (each trip count well under the unroll threshold) with a per-iteration branch.
     # Unrolling chains ~2700 basic blocks, so the CFG reverse-postorder DFS recurses far deeper than Python's default
     # recursion limit. The accumulator stays >=0, so every iteration takes the add arm: the result is the input + 900.
@@ -365,12 +368,12 @@ def test_const_fold_handles_absorbing_and_identity_boolean_connectives() -> None
     assert isinstance(out["and_id"], InPort) and out["and_id"].name == "x"  # x and True -> x  (identity dropped)
 
 
-def _hir_of(target):  # type: ignore[no-untyped-def]
+def _hir_of(target: object) -> Hir:
     return optimize(lower(target))
 
 
 def test_if_conversion_collapses_a_pure_diamond() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         if a > b:
             y = a + b
         else:
@@ -385,7 +388,7 @@ def test_if_conversion_collapses_a_pure_diamond() -> None:
 
 def test_if_conversion_refuses_an_unspeculatable_arm() -> None:
     # Division must not be speculated: a div-by-zero on the not-taken path would assert the module error flag.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         if a > b:
             y = a + b
         else:
@@ -400,7 +403,7 @@ def test_if_conversion_refuses_an_unspeculatable_arm() -> None:
 def test_if_conversion_respects_the_arm_size_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 1)
 
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         if a > b:
             y = (a + b) * a + b  # three operations: over the per-arm budget of one
         else:
@@ -414,7 +417,7 @@ def test_if_conversion_respects_the_arm_size_budget(monkeypatch: pytest.MonkeyPa
 def test_if_conversion_knob_zero_disables_the_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
 
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         if a > b:
             y = a + b
         else:
@@ -430,7 +433,7 @@ def test_if_conversion_knob_zero_disables_the_pass(monkeypatch: pytest.MonkeyPat
 def test_if_conversion_converts_a_boolean_phi_merge() -> None:
     # Bool-phi if-conversion: a diamond merging a boolean collapses to one block, the merge becoming a bool_select
     # (a float select is the wide dual). Both arms here are dynamic comparisons, so strength reduction keeps the mux.
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float) -> float:
         if a > b:
             flag = b > c
         else:
@@ -446,7 +449,7 @@ def test_if_conversion_converts_a_boolean_phi_merge() -> None:
 def test_if_conversion_reduces_constant_armed_boolean_select() -> None:
     # The state-machine merge shape: arms are boolean constants, so the bool_select reduces to and/or/not via strength
     # reduction (no select node survives), exactly the schmitt/pfd collapse to a single straight-line block.
-    def f(a, b, hold: bool):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, hold: bool) -> float:
         if a > b:
             flag = True
         else:
@@ -467,63 +470,63 @@ def test_bool_select_reductions_are_truth_table_correct() -> None:
     # against its Python reference; a wrong identity -- e.g. (c,False,True) reduced to c not ~c -- mismatches here.
     import itertools
 
-    def s_tf(c: bool):  # type: ignore[no-untyped-def]   # (c, True, False) -> c
+    def s_tf(c: bool) -> bool:  # (c, True, False) -> c
         if c:
             y = True
         else:
             y = False
         return y
 
-    def s_ft(c: bool):  # type: ignore[no-untyped-def]   # (c, False, True) -> not c
+    def s_ft(c: bool) -> bool:  # (c, False, True) -> not c
         if c:
             y = False
         else:
             y = True
         return y
 
-    def s_t_dyn(c: bool, f: bool):  # type: ignore[no-untyped-def]   # (c, True, f) -> c or f
+    def s_t_dyn(c: bool, f: bool) -> bool:  # (c, True, f) -> c or f
         if c:
             y = True
         else:
             y = f
         return y
 
-    def s_f_dyn(c: bool, f: bool):  # type: ignore[no-untyped-def]   # (c, False, f) -> (not c) and f
+    def s_f_dyn(c: bool, f: bool) -> bool:  # (c, False, f) -> (not c) and f
         if c:
             y = False
         else:
             y = f
         return y
 
-    def s_dyn_t(c: bool, t: bool):  # type: ignore[no-untyped-def]   # (c, t, True) -> (not c) or t
+    def s_dyn_t(c: bool, t: bool) -> bool:  # (c, t, True) -> (not c) or t
         if c:
             y = t
         else:
             y = True
         return y
 
-    def s_dyn_f(c: bool, t: bool):  # type: ignore[no-untyped-def]   # (c, t, False) -> c and t
+    def s_dyn_f(c: bool, t: bool) -> bool:  # (c, t, False) -> c and t
         if c:
             y = t
         else:
             y = False
         return y
 
-    def s_dyn_dyn(c: bool, t: bool, f: bool):  # type: ignore[no-untyped-def]   # (c, t, f) -> bool_select kept
+    def s_dyn_dyn(c: bool, t: bool, f: bool) -> bool:  # (c, t, f) -> bool_select kept
         if c:
             y = t
         else:
             y = f
         return y
 
-    def s_dyn_not_dyn(c: bool, t: bool, f: bool):  # type: ignore[no-untyped-def]  # (c, t, ~f) -> kept, arm inverted
+    def s_dyn_not_dyn(c: bool, t: bool, f: bool) -> bool:  # (c, t, ~f) -> kept, arm inverted
         if c:
             y = t
         else:
             y = not f
         return y
 
-    cases = [
+    cases: list[tuple[Callable[..., bool], Callable[..., bool], int, bool]] = [
         (s_tf, lambda c: c, 1, False),
         (s_ft, lambda c: not c, 1, False),
         (s_t_dyn, lambda c, f: c or f, 2, False),
@@ -548,7 +551,7 @@ def test_bool_select_reductions_are_truth_table_correct() -> None:
 
 
 def test_if_conversion_collapses_nested_chains_to_one_block() -> None:
-    def f(x, y):  # type: ignore[no-untyped-def]
+    def f(x: float, y: float) -> float:
         if x > 0.0:
             a = x + y
         else:
@@ -568,7 +571,7 @@ def test_if_conversion_collapses_nested_chains_to_one_block() -> None:
 def test_if_conversion_repoints_loop_header_phi_arms() -> None:
     # A diamond inside a while body: the dissolved merge block fed the loop-header phis, whose arms must repoint to
     # the spliced block (the localized pin for the repoint path; the examples exercise it only end-to-end).
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float) -> float:
         w = x
         while w > 0.0:
             if w > 2.0:
@@ -600,7 +603,7 @@ def test_dead_diamond_frees_its_condition_cone() -> None:
     # its condition cone becomes ordinary dead code -- INCLUDING an error-bearing division feeding only the
     # condition, which then reports nothing (exactly as an unused division without a branch around it reports
     # nothing today). This pins the documented semantics of the error sideband: executed operators only.
-    def f(a, b, x):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, x: float) -> float:
         if bool(a / b):
             y = x + 1.0
         else:
