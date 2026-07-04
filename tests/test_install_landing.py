@@ -12,18 +12,18 @@ of any input vector, so it holds for the data-dependent branch/loop kernels (uar
 import pytest
 
 import holoso
-from holoso import FloatFormat
+from holoso import FloatFormat, FloatValue
 from holoso._frontend import lower as lower_frontend
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
-from holoso._lir import build
+from holoso._lir import BoolWrite, FloatCopy, InlineScheduledOp, Lir, LirBlock, PooledScheduledOp, build
 from holoso._mir import lower as lower_to_mir
 
-from ._examples import SPECS
-from ._modelref import assert_model_equals_interpreter, build_model_and_interpreter, default_ops
+from ._examples import SPECS, ExampleSpec
+from ._modelref import Vector, assert_model_equals_interpreter, build_model_and_interpreter, default_ops
 
 
-def _build(spec):  # type: ignore[no-untyped-def]
+def _build(spec: ExampleSpec) -> Lir:
     return build(
         lower_to_mir(optimize(lower_frontend(spec.make_kernel())), default_ops(spec.formats[0])),
         spec.name,
@@ -31,11 +31,19 @@ def _build(spec):  # type: ignore[no-untyped-def]
     )
 
 
+def _phi_arm_installs(block: LirBlock) -> list[FloatCopy | BoolWrite]:
+    return [*block.copies, *block.bool_writes]
+
+
+def _block_ops(block: LirBlock) -> list[PooledScheduledOp | InlineScheduledOp]:
+    return [*block.ops, *block.inline_ops]
+
+
 @pytest.mark.parametrize("spec", SPECS, ids=lambda s: s.name)
-def test_phi_arm_installs_land_within_their_block(spec) -> None:  # type: ignore[no-untyped-def]
+def test_phi_arm_installs_land_within_their_block(spec: ExampleSpec) -> None:
     lir = _build(spec)
     for block in lir.blocks:
-        for install in (*block.copies, *block.bool_writes):
+        for install in _phi_arm_installs(block):
             landing = install.landing(lir.fetch_lag)  # block-local; same fire+read-first edge the model/emitter commit
             assert landing <= block.term_offset, (
                 f"{spec.name} block {block.index}: install of {install.dst} lands at {landing}, past the terminator "
@@ -55,7 +63,7 @@ def test_targets_still_exercise_constant_installs(name: str) -> None:
     """
     spec = next(s for s in SPECS if s.name == name)
     lir = _build(spec)
-    const_installs = [x for b in lir.blocks for x in (*b.bool_writes, *b.copies) if x.is_const]
+    const_installs = [x for b in lir.blocks for x in _phi_arm_installs(b) if x.is_const]
     assert const_installs, f"{name} no longer emits constant phi-arm installs; the kernel shape changed"
 
 
@@ -69,9 +77,7 @@ def test_resident_register_source_install_is_inline_class() -> None:
     freeze (127); here we pin that the input path is what is being exercised.
     """
     lir = _build(next(s for s in SPECS if s.name == "uart_rx"))
-    resident_non_const = [
-        x for b in lir.blocks for x in (*b.bool_writes, *b.copies) if x.resident_source and not x.is_const
-    ]
+    resident_non_const = [x for b in lir.blocks for x in _phi_arm_installs(b) if x.resident_source and not x.is_const]
     assert resident_non_const, "uart_rx lost its non-const resident-source (input) install, or the predicate regressed"
 
 
@@ -89,7 +95,7 @@ def test_computed_copy_not_last_work_fits_at_work_makespan() -> None:
     bodies = [b for b in lir.blocks if any(not c.resident_source for c in b.copies)]
     assert bodies, "recip_newton no longer has a computed-source phi-arm copy; the kernel shape changed"
     for b in bodies:
-        work = max((op.commit_cycle for op in (*b.ops, *b.inline_ops)), default=0)
+        work = max((op.commit_cycle for op in _block_ops(b)), default=0)
         assert b.block_makespan == work, (
             f"recip_newton block {b.index}: a computed copy still pushes the makespan ({b.block_makespan} > work "
             f"{work}) -- the loop-carried install pin regressed to the conservative +1"
@@ -180,8 +186,8 @@ def test_cross_block_source_install_residence_stays_in_predecessor_frame() -> No
 
     fmt = FloatFormat(8, 36)
     model, interpreter = build_model_and_interpreter(kernel, ops, "live_through_arm")
-    vectors = [
-        [c, fmt.decode(fmt.encode(a)), fmt.decode(fmt.encode(b))]
+    vectors: list[Vector] = [
+        [c, FloatValue.from_float(fmt, a), FloatValue.from_float(fmt, b)]
         for c in (True, False)
         for a in (2.0, 5.0, 0.5, 9.0, 1.5)
         for b in (3.0, 1.5, 4.0, 0.25)
@@ -224,7 +230,7 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
         blk
         for blk in lir.blocks
         if any(not c.resident_source for c in blk.copies)
-        and blk.block_makespan == max((op.commit_cycle for op in (*blk.ops, *blk.inline_ops)), default=0) + 1
+        and blk.block_makespan == max((op.commit_cycle for op in _block_ops(blk)), default=0) + 1
     ]
     assert pushed, "no block takes the in-block +1 for a last-work copy source; the kernel shape changed"
     for blk in lir.blocks:
@@ -232,8 +238,8 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
 
     fmt = FloatFormat(8, 36)
     model, interpreter = build_model_and_interpreter(kernel, ops, "last_work_arm")
-    vectors = [
-        [c, fmt.decode(fmt.encode(a)), fmt.decode(fmt.encode(b))]
+    vectors: list[Vector] = [
+        [c, FloatValue.from_float(fmt, a), FloatValue.from_float(fmt, b)]
         for c in (True, False)
         for a in (2.0, 5.0, 0.5, 9.0, 1.5)
         for b in (3.0, 1.5, 4.0, 0.25)

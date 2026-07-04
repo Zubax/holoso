@@ -3,10 +3,11 @@
 import ast
 import builtins
 import inspect
+import logging
 import math
 import types
 from collections.abc import Callable, Iterator
-from typing import Any
+from typing import Any, get_args, get_origin
 
 import numpy as np
 
@@ -29,8 +30,38 @@ from ._ast_support import (
 from ._aggregate import Aggregate, Scalar, StateAttr, Value
 from ._scope import ArmResult, Scope, parse_fndef
 
+_logger = logging.getLogger(__name__)
+
 _ABSENT = object()  # sentinel distinguishing a missing global from one explicitly bound to None during name resolution
-_NO_PARAMETER_ANNOTATION = object()
+
+
+def _scalar_annotation_type(annotation: object) -> Type | None:
+    if annotation is float:
+        return FloatType()
+    if annotation is bool:
+        return BoolType()
+    return None
+
+
+def _aggregate_element_annotations(annotation: object, count: int) -> list[object] | None:
+    """The per-leaf annotations of a tuple/list return annotation, or None if it is not an aggregate annotation."""
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is list:
+        return [args[0]] * count if len(args) == 1 else None
+    if origin is tuple:
+        if len(args) == 2 and args[1] is Ellipsis:
+            return [args[0]] * count
+        return list(args)
+    return None
+
+
+def _annotation_name(annotation: object) -> str:
+    return annotation.__name__ if isinstance(annotation, type) else str(annotation)
+
+
+def _hir_type_name(scalar_type: Type) -> str:
+    return "bool" if isinstance(scalar_type, BoolType) else "float"
 
 
 # numpy array constructors that take one array-like and preserve its elements: in this compile-time model the operand is
@@ -143,6 +174,7 @@ class _Lowerer:
         self._builder.block()  # the entry block (id 0); subsequent blocks are created by branch lowering
         self._bind_parameters(self._entry_fndef)
         self._lower_body(self._entry_fndef)
+        self._check_return_annotation(self._entry_fndef)
         self._register_state_slots()
         self._emit_outputs()
         self._builder.ret()  # seal the current (function-exit) block; the frontend emits a single Ret
@@ -169,20 +201,74 @@ class _Lowerer:
             self._env[arg.arg] = Scalar(self._input(arg))
 
     def _input(self, arg: ast.arg) -> ValueId:
-        annotation = self._fn.__annotations__.get(arg.arg, _NO_PARAMETER_ANNOTATION)
-        if annotation is _NO_PARAMETER_ANNOTATION or annotation is float:
-            return self._builder.float_input(arg.arg)
-        if annotation is bool:
-            return self._builder.bool_input(arg.arg)
-        raise UnsupportedConstruct(
-            f"unsupported parameter annotation for {arg.arg!r}: expected float or bool", self._loc(arg)
-        )
+        annotations = self._fn.__annotations__
+        if arg.arg not in annotations:
+            raise UnsupportedConstruct(
+                f"parameter {arg.arg!r} requires an explicit type annotation (float or bool)", self._loc(arg)
+            )
+        scalar_type = _scalar_annotation_type(annotations[arg.arg])
+        if scalar_type is None:
+            raise UnsupportedConstruct(
+                f"unsupported parameter annotation for {arg.arg!r}: expected float or bool", self._loc(arg)
+            )
+        return self._builder.input(arg.arg, scalar_type)
 
     def _lower_body(self, fndef: ast.FunctionDef) -> None:
         returned = self._lower_stmts(fndef.body)
         # A stateful method need not return: its public state attributes are observable through their own ports.
         if not returned and self._instance is None:
             raise UnsupportedConstruct("function must end in a 'return'", self._loc(fndef))
+
+    def _check_return_annotation(self, fndef: ast.FunctionDef) -> None:
+        annotations = self._fn.__annotations__
+        loc = self._loc(fndef.returns if fndef.returns is not None else fndef)
+        if "return" not in annotations:
+            raise UnsupportedConstruct("the return type must be explicitly annotated", loc)
+        declared = annotations["return"]
+        if self._return is None:
+            if declared is not None:
+                raise UnsupportedConstruct(
+                    f"declared return type {_annotation_name(declared)} but the function returns no value", loc
+                )
+            return
+        if declared is None:
+            raise UnsupportedConstruct("declared return type None but a value is returned", loc)
+        self._check_return_shape(self._return, declared, loc)
+
+    def _check_return_shape(self, value: Value, declared: object, loc: SourceLocation) -> None:
+        match value:
+            case Scalar(id=vid):
+                expected = _scalar_annotation_type(declared)
+                if expected is None:
+                    if get_origin(declared) in (tuple, list):
+                        raise UnsupportedConstruct(
+                            f"declared return type {_annotation_name(declared)} but a single value is returned", loc
+                        )
+                    raise UnsupportedConstruct(
+                        f"unsupported return annotation {_annotation_name(declared)}: "
+                        "expected float, bool, a tuple or list of them, or None",
+                        loc,
+                    )
+                actual = self._builder.type_of(vid)
+                if actual != expected:
+                    raise UnsupportedConstruct(
+                        f"return type mismatch: declared {_annotation_name(declared)}, "
+                        f"inferred {_hir_type_name(actual)}",
+                        loc,
+                    )
+            case Aggregate(items=items):
+                elements = _aggregate_element_annotations(declared, len(items))
+                if elements is None:
+                    quantity = "value is" if len(items) == 1 else "values are"
+                    raise UnsupportedConstruct(
+                        f"declared return type {_annotation_name(declared)} but {len(items)} {quantity} returned", loc
+                    )
+                if len(elements) != len(items):
+                    raise UnsupportedConstruct(
+                        f"return arity mismatch: declared {len(elements)}, inferred {len(items)}", loc
+                    )
+                for item, element in zip(items, elements):
+                    self._check_return_shape(item, element, loc)
 
     def _lower_stmts(self, stmts: list[ast.stmt]) -> bool:
         """Lower a straight-line statement list, returning True when a ``return`` was reached."""
@@ -197,6 +283,14 @@ class _Lowerer:
             case ast.Expr(value=ast.Constant(value=str())):
                 return False  # docstring
             case ast.Pass():
+                return False
+            case ast.Assert():
+                # An assert is ignored wholesale: its test is never lowered. Any side effect it would have had is
+                # dropped, as under -O; that is the author's responsibility.
+                loc = self._loc(stmt)
+                _logger.info(
+                    "Assert statement at %s:%d has no effect in Holoso and is ignored", loc.filename, loc.lineno
+                )
                 return False
             case ast.Assign(targets=targets, value=value):
                 # Lower the right-hand side once and bind it to every target; this covers single, chained, and
@@ -234,7 +328,7 @@ class _Lowerer:
                 return self._lower_while(test, body, self._loc(stmt))
             case ast.While():
                 raise UnsupportedConstruct("a 'while' loop with an else clause is not supported", self._loc(stmt))
-            case ast.Return(value=None):
+            case ast.Return(value=None | ast.Constant(value=None)):
                 self._reject_nested_return(stmt)
                 return True
             case ast.Return(value=ast.expr() as value):
@@ -1728,27 +1822,32 @@ class _Lowerer:
         loc = where if isinstance(where, SourceLocation) else self._loc(where)
         raise UnsupportedConstruct(f"expected a scalar value here, got a {len(value.leaves())}-element aggregate", loc)
 
-    def _reject_shortcircuit_walrus(self, fndef: ast.FunctionDef) -> None:
+    def _reject_shortcircuit_walrus(self, node: ast.AST) -> None:
         """
         Reject a walrus inside an ``and``/``or`` operand or a chained comparison. Such an operand may be short-circuited
         -- statically dropped by the connective fold, or unevaluated in Python -- so whether its binding happens cannot
         be reconciled between the reachability scans (which see the syntactic walrus) and lowering (which may never
         evaluate it). A walrus is supported only where it is evaluated unconditionally: a single comparison or bare
-        test, an assignment/return value, an ``and``/``or``-free ``if``/``while`` test.
+        test, an assignment/return value, an ``and``/``or``-free ``if``/``while`` test. An ``assert`` is skipped -- it
+        is ignored (its test never lowered), so a short-circuited walrus within it is irrelevant here; its target still
+        counts as a function local (see ``scope_local_walrus_targets``), so a later use is a clean unbound-local error.
         """
-        for node in ast.walk(fndef):
-            operands: list[ast.expr] = []
-            if isinstance(node, ast.BoolOp):
-                operands = node.values
-            elif isinstance(node, ast.Compare) and len(node.ops) > 1:
-                operands = [node.left, *node.comparators]
-            for operand in operands:
-                if contains_walrus(operand):
-                    raise UnsupportedConstruct(
-                        "a walrus ':=' inside an 'and'/'or' or a chained comparison is not supported "
-                        "(its operand may be short-circuited)",
-                        self._loc(operand),
-                    )
+        if isinstance(node, ast.Assert):
+            return
+        operands: list[ast.expr] = []
+        if isinstance(node, ast.BoolOp):
+            operands = node.values
+        elif isinstance(node, ast.Compare) and len(node.ops) > 1:
+            operands = [node.left, *node.comparators]
+        for operand in operands:
+            if contains_walrus(operand):
+                raise UnsupportedConstruct(
+                    "a walrus ':=' inside an 'and'/'or' or a chained comparison is not supported "
+                    "(its operand may be short-circuited)",
+                    self._loc(operand),
+                )
+        for child in ast.iter_child_nodes(node):
+            self._reject_shortcircuit_walrus(child)
 
     def _collect_local_names(self, fndef: ast.FunctionDef) -> set[str]:
         """

@@ -172,9 +172,14 @@ inlined with the instance context kept, so the callee's own `self.<attr>` reads 
 class MRO; `@staticmethod` and `@property` getters are supported). A called method may read `self` but not write it --
 only the entry method owns the state-slot analysis. Name resolution follows Python.
 
-Parameters. Positional and keyword-only parameters become input ports: `bool`-annotated ones are 1-bit boolean ports,
-unannotated and float-annotated scalars are floating-point ports. An aggregate attribute's shape is read from its reset
-value, optionally validated against an explicit jaxtyping annotation; interior shapes are inferred.
+Parameters. Positional and keyword-only parameters become input ports and require an explicit scalar annotation:
+`float`-annotated scalars are floating-point ports, `bool`-annotated ones are 1-bit boolean ports; an unannotated
+scalar is rejected. An aggregate attribute's shape is read from its reset value, optionally validated against an
+explicit jaxtyping annotation; interior shapes are inferred.
+
+Return type. The return annotation is likewise mandatory and validated against the inferred output leaves: `float`,
+`bool`, an arbitrarily nested `tuple[...]`/`tuple[X, ...]`/`list[X]` of them, or `None` for a method that returns
+nothing. A missing annotation or any shape, arity, or scalar-type divergence rejects the kernel.
 
 ## HIR
 
@@ -228,6 +233,10 @@ A conditional expression `x if c else y` lowers exactly like an `if` lifted into
 test selects one arm with no branch). A walrus `(name := expr)` is supported only where evaluated unconditionally and
 rejected where the binding could be short-circuited (inside `and`/`or`, a chained comparison, a conditional-expression
 arm, or a `while` condition).
+
+An `assert` statement is accepted and ignored wholesale: its test is never lowered, mirroring Python under `-O`, so an
+assertion has no hardware effect (each reached assert is logged). Any effect the test would have had when executed is
+dropped along with it; as under `-O`, an assert must be side-effect-free.
 
 A nested `if` with no `else` on either level folds to a single combined-`and` branch (`if A: if B: S` becomes
 `if A and B: S`), emitting one branch instead of two. This is exact because a boolean test here is a pure combinational

@@ -69,7 +69,7 @@ class _OverlapAccumulator:
     def __init__(self) -> None:
         self._acc = 0.0
 
-    def __call__(self, x, y, z):  # type: ignore[no-untyped-def]
+    def __call__(self, x: float, y: float, z: float) -> float:
         w = (x * z + y) * z + y  # wide chain: commits late, spills past the shrunk terminator into both arms
         if x < y:
             r = w + 1.0  # then-arm reads the spilled w
@@ -86,7 +86,9 @@ def test_overlap_kernel_persistent_state_across_many_vectors() -> None:
     reference = _OverlapAccumulator()
     rng = np.random.default_rng(0xA11CE)
     samples = [(0.5, 0.5, 1.0), (2.0, 2.0, 1.0)]  # the x == y decision boundary on both sides
-    samples += [tuple(float(rng.uniform(-3.0, 3.0)) for _ in range(3)) for _ in range(60)]
+    samples += [
+        (float(rng.uniform(-3.0, 3.0)), float(rng.uniform(-3.0, 3.0)), float(rng.uniform(-3.0, 3.0))) for _ in range(60)
+    ]
     for x, y, z in samples:
         got = float(simulator.run(x, y, z)[0])
         want = reference(x, y, z)
@@ -170,7 +172,7 @@ def test_two_deep_shift_register_delays_by_two_and_resets() -> None:
             self._a = 0.0
             self._b = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             out = self._b
             self._b = self._a
             self._a = x
@@ -187,7 +189,7 @@ def test_two_deep_shift_register_delays_by_two_and_resets() -> None:
 
 
 def test_nested_pure_diamond_output_matches_reference() -> None:
-    def nested_pure(x, y):  # type: ignore[no-untyped-def]
+    def nested_pure(x: float, y: float) -> float:
         # A two-level pure diamond: every arm is speculatable, so it fully if-converts to selects. All four leaves and
         # the decision boundaries must be exact (additive/subtractive combinations of representable inputs).
         if x > 0.0:
@@ -204,7 +206,7 @@ def test_nested_pure_diamond_output_matches_reference() -> None:
 
 
 def test_nested_division_branch_output_matches_reference() -> None:
-    def nested_div(x, y):  # type: ignore[no-untyped-def]
+    def nested_div(x: float, y: float) -> float:
         # A nested diamond whose inner arm divides: the division is unspeculatable, so the inner diamond stays a REAL
         # branch (it cannot if-convert). The divisor ``y*y + 1`` is structurally nonzero, so the path is always valid.
         if x > 0.0:
@@ -225,7 +227,7 @@ def test_nested_division_branch_output_matches_reference() -> None:
 
 
 def test_spilled_in_branch_condition_is_read_after_it_lands() -> None:
-    def spilled_branch_condition(a, b, c, d):  # type: ignore[no-untyped-def]
+    def spilled_branch_condition(a: float, b: float, c: float, d: float) -> float:
         # A boolean comparison produced in the entry but BRANCHED ON in a single-predecessor successor. The entry
         # overlaps into that successor, and the DEEP condition (a long product, committing late) lands past the entry's
         # shrunk terminator -- so it spills into the successor frame rather than being resident there. The successor's
@@ -267,7 +269,7 @@ def test_spilled_wide_mul_operand_is_read_after_it_lands() -> None:
     # terminator and is ORPHANED (the model KeyErrors on its register; a wrong arm in general). This guards the WHOLE
     # latency-1-pooled-op spill surface, not only the single fcmp shape -- and the defect is invisible to the
     # interpreter<->model differential, so only a behavioral spill-then-read kernel catches it.
-    def spilled_wide_mul(a, b, c, d):  # type: ignore[no-untyped-def]
+    def spilled_wide_mul(a: float, b: float, c: float, d: float) -> float:
         x = a * b * c * d
         if c > 0.0:
             if d > a:
@@ -293,7 +295,7 @@ def test_spilled_wide_mul_operand_is_read_after_it_lands() -> None:
 
 
 def test_mixed_select_and_real_branch_output_matches_reference() -> None:
-    def mixed_select_and_branch(x, y):  # type: ignore[no-untyped-def]
+    def mixed_select_and_branch(x: float, y: float) -> float:
         # One kernel mixing an if-converted (select) pure diamond and a real (division-bearing) branch: the max folds
         # to a select, the division gates a real branch. Both the select polarity and the branch decision are crossed.
         m = x if x > y else y  # pure diamond -> select
@@ -312,7 +314,7 @@ def test_mixed_select_and_real_branch_output_matches_reference() -> None:
 
 
 def test_diamond_inside_loop_output_matches_reference() -> None:
-    def diamond_in_loop(x, n):  # type: ignore[no-untyped-def]
+    def diamond_in_loop(x: float, n: float) -> float:
         # A division-bearing diamond INSIDE a real back-edge while loop: a real branch nested in a loop, exercising the
         # loop-header phi merge of the accumulator across a data-dependent trip count. The divisor stays structurally
         # nonzero on the dividing arm.
@@ -337,7 +339,7 @@ def test_diamond_inside_loop_output_matches_reference() -> None:
 
 
 def test_multi_output_mixed_io_metadata_and_values() -> None:
-    def multi_io(flag: bool, x, y):  # type: ignore[no-untyped-def]
+    def multi_io(flag: bool, x: float, y: float) -> tuple[bool, float, float]:
         # A boolean input gating a division branch, a tuple return mixing a bool and two floats: the divisor y*y + 1 is
         # structurally nonzero, so the flag-true arm is always valid.
         inside = flag and (x > y)
@@ -396,7 +398,7 @@ def test_latching_fault_register_streams_and_resets() -> None:
             self._overvoltage = False
             self._overtemp = False
 
-        def __call__(self, overcurrent: bool, overvoltage: bool, overtemp: bool):  # type: ignore[no-untyped-def]
+        def __call__(self, overcurrent: bool, overvoltage: bool, overtemp: bool) -> tuple[bool, bool, bool, bool]:
             self._overcurrent = self._overcurrent or overcurrent
             self._overvoltage = self._overvoltage or overvoltage
             self._overtemp = self._overtemp or overtemp
@@ -438,7 +440,7 @@ def test_octave_index_resident_output_drain_only_ret_matches_reference() -> None
     # |x| >= 1 magnitudes (abs and *0.5 are exact, so the count is unambiguous) and |x| < 1 values comfortably inside
     # an octave (their reciprocal does not round across an octave boundary), so the ZKF count equals the float64 count
     # exactly. Do NOT broaden post-hoc: a value near a power-of-two boundary can flip the rounded count by one.
-    def octave_index(x):  # type: ignore[no-untyped-def]
+    def octave_index(x: float) -> float:
         # The order of magnitude of x in octaves: halvings (or doublings, for |x| < 1) to bring |x| into (0.5, 1]. The
         # division-bearing magnitude diamond stays a real branch; its merge is an empty pass-through threaded into the
         # halving loop, whose Ret is a resident-output drain (the float ``octaves`` is produced in the loop body and
@@ -474,7 +476,7 @@ def test_cross_bank_chain_edges_match_reference() -> None:
     # bools are derived from the SAME Python expression, and the operands are kept clear of those boundaries.
     import itertools  # noqa: PLC0415
 
-    def cross_bank_chain(a, b, c, d):  # type: ignore[no-untyped-def]
+    def cross_bank_chain(a: float, b: float, c: float, d: float) -> tuple[float, bool, bool]:
         # A deep cross-bank chain on the tight same-bank edge: back-to-back inline ``band``/``bor`` over comparisons, a
         # bool->float cast, a float op consuming the cast, and a float->bool reduction folded into a select. Inline ops
         # are latency 0 and the dependency edge is the unclamped landing-vs-read spacing, so this chain is the most

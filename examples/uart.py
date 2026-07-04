@@ -67,7 +67,7 @@ class UartTx(_UartFrame):
         self._busy = False
         self._phase = 0  # sub-bit countdown LAST_PHASE..0 within the current frame bit
         self._index = 0  # which frame bit is on the wire: 0 start, 1..8 data, then parity/stop
-        self._shift = 0  # the byte being shifted out, current bit in the MSB
+        self._shift = 0.0  # the byte being shifted out, current bit in the MSB
         self._parity = False  # the polarized parity bit, computed once at latch
 
     @staticmethod
@@ -78,7 +78,7 @@ class UartTx(_UartFrame):
         the original byte LSB first (standard UART order). TODO(integers): a one-instruction bit-reversal with integers.
         """
         rest = char
-        rev = 0
+        rev = 0.0
         for _ in range(8):
             bit = rest >= MSB
             rest = (rest - MSB if bit else rest) * 2
@@ -131,7 +131,7 @@ class UartRx(_UartFrame):
         self._busy = False
         self._count = 0  # ticks remaining until the next mid-bit sample
         self._index = 0  # which bit is being sampled: 0 start, 1..8 data, then parity/stop
-        self._char = 0  # the byte, accumulated bit by bit; only meaningful on the tick ``valid`` is high
+        self._char = 0.0  # the byte, accumulated bit by bit; only meaningful on the tick ``valid`` is high
         self._parity_rx = False  # the parity bit as sampled off the wire (E/O only)
 
     def __call__(self, rx: bool, /) -> tuple[bool, float, bool, bool]:

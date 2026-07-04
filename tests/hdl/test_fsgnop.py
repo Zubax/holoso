@@ -1,6 +1,7 @@
 """Tests for holoso_fsgnop (combinational, format-independent)."""
 
 import os
+from typing import Any
 
 import cocotb
 import numpy as np
@@ -25,7 +26,7 @@ WFULL_VALUES = (6, 12, 24, 32)
 
 
 @cocotb.test()
-async def holoso_fsgnop_cocotb(dut) -> None:
+async def holoso_fsgnop_cocotb(dut: Any) -> None:
     wfull = int(os.environ["HOLOSO_TEST_WFULL"])
 
     async def check(x: int, op: int) -> None:

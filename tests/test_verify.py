@@ -1,6 +1,7 @@
 """Unit tests for the pure-Python verification core."""
 
 import pickle
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -22,8 +23,9 @@ from ._modelref import build_model, generate
 from holoso._frontend import lower
 from holoso._hir import optimize
 from holoso._hir import _if_convert as if_convert_pass
-from holoso._lir import build
-from holoso._mir import lower as lower_to_mir
+from holoso._lir import FloatStateSlot, Lir, build
+from holoso._lir._ir import BoolStateSlot
+from holoso._mir import Mir, lower as lower_to_mir
 from ._modelref import (
     assert_model_equals_interpreter,
     bounded,
@@ -53,15 +55,15 @@ FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
 
 
-def _run(target):  # type: ignore[no-untyped-def]
+def _run(target: Callable[..., object]) -> Mir:
     return lower_to_mir(optimize(lower(target)), OPS)
 
 
 def test_model_exact_integer_comparison_is_not_folded_via_float() -> None:
-    def exact_int_comparison(a):  # type: ignore[no-untyped-def]
+    def exact_int_comparison(a: float) -> float:
         # Regression (user): two compile-time integers must be compared exactly, not via a lossy float64 fold. As
         # float64 both operands round to 9007199254740992.0 and the `==` would misfold true; as integers they differ.
-        if 9007199254740993 == 9007199254740992:
+        if 9007199254740993 == 9007199254740992:  # type: ignore[comparison-overlap]  # deliberately-distinct literals
             r = a
         else:
             r = a + 1.0
@@ -125,14 +127,14 @@ def test_is_legal_rejects_subnormal_and_negative_zero() -> None:
 
 
 def test_reference_evaluates_and_flattens() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> list[float]:
         return [a + b, a * b]
 
     assert evaluate_reference(f, {"a": 2.0, "b": 3.0}) == [5.0, 6.0]
 
 
 def test_model_matches_reference_small_kernels() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         return (a - b) * 0.25 + a * b
 
     inputs = {"a": 1.25, "b": -3.5}
@@ -149,11 +151,11 @@ def test_model_matches_reference_dense_boolean_chain() -> None:
     # after its producer's commit, and the wide-result cast one later, so this pins the model's read/landing
     # frames against the exact Python reference at exactly that spacing. All values are chosen exactly representable,
     # so every comparison, cast, and product is exact and the outputs must match the reference bit-for-bit.
-    def f(a, b, c, d, k):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float, d: float, k: float) -> tuple[float, bool]:
         inside = a < b and not (c < d)
         gated = float(inside) * k
         live = bool(gated + a)
-        return [gated, live]
+        return (gated, live)
 
     model = build_model(build(_run(f), "dense_bool", fetch_stages=3))
     values = (-1.5, -0.25, 0.0, 0.25, 1.5)
@@ -168,7 +170,7 @@ def test_model_matches_reference_dense_boolean_chain() -> None:
 def test_tuple_unpacking_matches_python_reference() -> None:
     # The reference runs the kernel as ordinary Python (which unpacks natively), so a bit-faithful hardware model must
     # route the swapped operands identically before the arithmetic.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> list[float]:
         x, y = b, a
         return [x - y, x * y]
 
@@ -185,9 +187,9 @@ def test_for_counter_reassigned_to_runtime_clears_static_binding() -> None:
     # binding, so a subsequent branch on that name is a real runtime branch -- not folded with the stale counter value.
     # With the defect, the loop-counter's static-int binding survived the reassignment and ``1.0 >= i`` was folded as
     # ``1.0 >= 0`` (the counter), silently taking the wrong arm and miscompiling the output for any ``i`` above 1.
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> float:
         for i in range(1):
-            i = a  # reassign the loop variable to a runtime value inside the (single-trip) body
+            i = a  # type: ignore[assignment]  # reassign the loop variable to a runtime value (single-trip body)
         if 1.0 >= i:
             r = 100.0
         else:
@@ -203,11 +205,11 @@ def test_for_counter_reassigned_after_loop_clears_static_binding() -> None:
     # The same hazard when the counter (leaked after the loop) is reassigned to a runtime value past the loop: the
     # stale static-int binding must not fold a later branch. Without the fix, ``1.0 >= i`` folds with the counter's
     # final value (2) and the conditional state update is dropped on every call.
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> float:
         acc = 0.0
         for i in range(3):
             acc = acc + 1.0
-        i = a
+        i = a  # type: ignore[assignment]
         if 1.0 >= i:
             acc = acc + 50.0
         return acc
@@ -222,10 +224,10 @@ def test_runtime_reassigned_for_counter_is_not_a_static_index() -> None:
     # array index must be REJECTED (it is out-of-subset -- plain Python raises ``TypeError`` indexing with a float).
     # With the defect, the stale static-int binding let the index silently resolve to the counter value, miscompiling
     # an invalid kernel into a constant element selection.
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float) -> float:
         vec = [a, b, c]
         for i in range(1):
-            i = a  # i is now a runtime value, not a compile-time index
+            i = a  # type: ignore[assignment]  # i is now a runtime value, not a compile-time index
         return vec[i]
 
     with pytest.raises(UnsupportedConstruct):
@@ -243,9 +245,9 @@ def test_for_counter_reassign_keeps_scan_and_lowering_in_lockstep() -> None:
         def __init__(self) -> None:
             self.s = 4.0
 
-        def step(self, a):  # type: ignore[no-untyped-def]
+        def step(self, a: float) -> float:
             for t in range(1):
-                t = a  # reassign the counter to a runtime value -> the following branch is dynamic
+                t = a  # type: ignore[assignment]  # reassign the counter to a runtime value -> a dynamic branch
             # Both sides are otherwise compile-time (the counter and a literal), so if the scan failed to demote the
             # reassigned counter it would fold ``0 < 1.0`` to True and never scan the else arm. With the counter
             # correctly demoted, this is a real runtime branch and the else arm's ``self.s`` write is reachable.
@@ -278,10 +280,10 @@ def test_walrus_counter_demotion_keeps_scan_and_lowering_in_lockstep() -> None:
         def __init__(self) -> None:
             self.s = 4.0
 
-        def step(self, a):  # type: ignore[no-untyped-def]
+        def step(self, a: float) -> float:
             for t in range(1):  # leaks t == 0 (a compile-time integer) into the enclosing scope
                 pass
-            if (t := a) < 1.0:  # the walrus rebinds t to a runtime value -> a real branch, not a stale 0<1.0 fold
+            if (t := a) < 1.0:  # type: ignore[assignment]  # the walrus rebinds t to a runtime value, not a fold
                 pass
             else:
                 c = 2.0
@@ -305,12 +307,12 @@ def test_for_counter_reassigned_inside_while_is_demoted_after_the_loop() -> None
     # resurrected the stale compile-time counter value (the body's ``_invalidate_static_int`` was undone). A later
     # comparison ``if i < 0.0`` was then folded against the stale counter (0) instead of the runtime value -- a SILENT
     # miscompile that took the wrong arm. The post-loop fold must follow the runtime value, matching plain Python.
-    def kernel(a):  # type: ignore[no-untyped-def]
+    def kernel(a: float) -> float:
         for i in range(1):  # leaks i == 0 (a compile-time integer) into the enclosing scope
             pass
         w = 0.0
         while w < 1.0:
-            i = a  # demote the counter to a runtime value INSIDE the while body
+            i = a  # type: ignore[assignment]  # demote the counter to a runtime value INSIDE the while body
             w = w + 1.0
         r = 0.0
         if i < 0.0:  # must be a real runtime branch on the reassigned value, not a fold on the stale counter (0)
@@ -329,12 +331,13 @@ def test_for_counter_reassigned_inside_while_is_demoted_after_the_loop() -> None
 def test_for_counter_reassigned_inside_while_rejects_later_static_use() -> None:
     # Companion to the above: once the counter is demoted by a while-body reassignment, a later static-only use of it
     # (a shift exponent) must be REJECTED as runtime, not silently folded to the stale compile-time counter value.
-    def kernel(a):  # type: ignore[no-untyped-def]
+    def kernel(a: float) -> float:
         for i in range(2):
             pass
         w = 0.0
         while w < 1.0:
-            i = a  # runtime reassignment inside the loop -> i is no longer a compile-time integer afterwards
+            # runtime reassignment inside the loop -> i is no longer a compile-time integer afterwards
+            i = a  # type: ignore[assignment]
             w = w + 1.0
         return a * 2.0**i  # a runtime exponent must be rejected, never folded against the stale counter
 
@@ -343,7 +346,7 @@ def test_for_counter_reassigned_inside_while_rejects_later_static_use() -> None:
 
 
 def test_model_uses_exact_ilog2_for_wide_supported_shift() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> float:
         return a * 16.0
 
     fmt = FloatFormat(3, 4)
@@ -355,7 +358,7 @@ def test_model_uses_exact_ilog2_for_wide_supported_shift() -> None:
 
 
 def test_model_handles_unused_input_ports() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         return b
 
     model = build_model(build(_run(f), "f", fetch_stages=3))
@@ -366,7 +369,7 @@ def test_model_handles_unused_input_ports() -> None:
 
 
 def test_model_rejects_ambiguous_int_and_mismatched_float_value_format() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float) -> float:
         return a
 
     model = build_model(build(_run(f), "f", fetch_stages=3))
@@ -379,7 +382,7 @@ def test_model_rejects_ambiguous_int_and_mismatched_float_value_format() -> None
 
 
 def test_model_is_bit_exact_for_wide_zkf_multiply_regression() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         return a * b
 
     fmt = FloatFormat(8, 36)
@@ -392,6 +395,7 @@ def test_model_is_bit_exact_for_wide_zkf_multiply_regression() -> None:
         FloatValue.from_bits(fmt, 0x42BF30E6505),
         FloatValue.from_bits(fmt, 0xBD734F60F3A),
     )
+    assert isinstance(got[0], FloatValue)
     assert got[0].bits == 0xC0B5B6B31D9
 
 
@@ -426,7 +430,7 @@ def test_model_matches_reference_ekf1_stateless() -> None:
 
 
 def test_model_matches_reference_aggregates() -> None:
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float) -> list[float]:
         v = [a, b, c]
         head = v[0:2]
         return [v[2], *head]  # index, slice, and unpack -> [c, a, b]
@@ -449,7 +453,7 @@ def test_model_matches_reference_ekf1_stateful() -> None:
     dt = bounded(rng, 1e-3, 1e-2)
     step_inputs = {"dt": dt, "u_shunt": bounded(rng, -1.0, 1.0), "di_dt": bounded(rng, -1.0, 1.0)}
 
-    def fresh():  # type: ignore[no-untyped-def]
+    def fresh() -> ekf1_stateful.Ekf1:
         return ekf1_stateful.Ekf1(x=list(x), P_urt=list(p_urt), R_diag=list(r_diag), Q_diag=np.array(q_diag))
 
     model = build_model(build(_run(fresh().update), "ekf1_stateful", fetch_stages=3))
@@ -466,7 +470,7 @@ def test_model_matches_reference_ekf1_stateful() -> None:
 
 
 def test_model_pickles_and_round_trips() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float) -> float:
         return (a - b) * 0.25 + a * b
 
     model = build_model(build(_run(f), "f", fetch_stages=3))
@@ -546,7 +550,7 @@ def test_model_pid_controller_all_arms_anti_windup_and_first_update() -> None:
 
 
 def test_model_walrus_binds_once_and_stays_visible_after_the_test() -> None:
-    def walrus(x):  # type: ignore[no-untyped-def]
+    def walrus(x: float) -> float:
         # ``(t := x*2)`` evaluates the subexpression once, binds ``t``, and yields it to the comparison; ``t`` then
         # stays visible to both arms (it is bound in the test, before the branch), as in Python.
         if (t := x * 2.0) > 4.0:
@@ -561,7 +565,7 @@ def test_model_walrus_binds_once_and_stays_visible_after_the_test() -> None:
 
 
 def test_model_walrus_reassigned_loop_variable_is_loop_carried() -> None:
-    def walrus_loop(x):  # type: ignore[no-untyped-def]
+    def walrus_loop(x: float) -> float:
         # A walrus reassigning a pre-defined accumulator inside a loop body must be loop-carried (a header phi), so the
         # accumulation persists across iterations rather than resetting to the preheader value each trip.
         acc = 0.0
@@ -604,7 +608,7 @@ def test_model_schmitt_trigger_hysteresis() -> None:
             self.low = -1.0
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             if x > self.high:
                 self.y = 1.0
             elif x < self.low:
@@ -645,7 +649,7 @@ def test_model_boolean_only_state_output() -> None:
 
 
 def test_model_boolean_input_and_mixed_outputs() -> None:
-    def gate(flag: bool, x):  # type: ignore[no-untyped-def]
+    def gate(flag: bool, x: float) -> tuple[bool, float]:
         if flag:
             y = x
         else:
@@ -667,7 +671,7 @@ def test_model_boolean_input_and_mixed_outputs() -> None:
 def test_model_ports_carry_scalar_types() -> None:
     # The model describes its I/O by typed ports (logical name + ScalarType), not parallel name/is-bool lists, so a
     # driver decides a port's encoding from its type. The handle exposes the same metadata as the elaborated simulator.
-    def gate(flag: bool, x):  # type: ignore[no-untyped-def]
+    def gate(flag: bool, x: float) -> tuple[bool, float]:
         if flag:
             y = x
         else:
@@ -689,7 +693,7 @@ def test_model_unused_boolean_input_keeps_cfg_state_timing() -> None:
         def __init__(self) -> None:
             self.y = 0.0
 
-        def __call__(self, flag: bool, x):  # type: ignore[no-untyped-def]
+        def __call__(self, flag: bool, x: float) -> float:
             self.y = self.y + x + 1.0
             return self.y
 
@@ -708,7 +712,7 @@ def test_run_drains_in_flight_transaction_before_presenting_new_inputs() -> None
         def __init__(self) -> None:
             self.total = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             self.total = self.total + x
             return self.total
 
@@ -748,7 +752,7 @@ def test_compare_float_values_exact_for_wide_formats() -> None:
 def test_model_unrolled_for_loop_newton_reciprocal() -> None:
     import math
 
-    def reciprocal(x):  # type: ignore[no-untyped-def]
+    def reciprocal(x: float) -> float:
         y = 1.5 - 0.5 * x
         for _ in range(4):
             y = y * (2.0 - x * y)
@@ -777,7 +781,7 @@ def test_model_attribute_written_only_in_loop_is_persistent_state() -> None:
         def __init__(self) -> None:
             self.acc = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             for _ in range(3):
                 self.acc = self.acc + x
             return self.acc
@@ -796,7 +800,7 @@ def test_model_state_liveout_does_not_clobber_live_in_branch() -> None:
         def __init__(self) -> None:
             self.y = 2.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             if self.y > 0.0:  # reads the live-in y
                 z = self.y
             else:
@@ -817,7 +821,7 @@ def test_model_state_phi_does_not_clobber_returned_live_in() -> None:
         def __init__(self) -> None:
             self.y = 1.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             old = self.y
             if x > 0.0:
                 self.y = x
@@ -837,7 +841,7 @@ def test_model_signed_state_liveout_persists_with_sign() -> None:
         def __init__(self) -> None:
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             if x > 0.0:
                 t = x + 1.0
             else:
@@ -854,7 +858,7 @@ def test_model_signed_state_liveout_persists_with_sign() -> None:
 def test_model_sign_conditioned_phi_arm() -> None:
     # Regression (#16): the merge resolution carries a per-arm folded sign, so a sign-conditioned phi arm lowers and
     # evaluates correctly (it was previously rejected with "a sign-conditioned value merged by a phi").
-    def neg_abs_phi(x):  # type: ignore[no-untyped-def]
+    def neg_abs_phi(x: float) -> float:
         if x > 0.0:
             y = -x
         else:
@@ -872,11 +876,11 @@ def test_model_sign_conditioned_phi_arm() -> None:
 # elided (``not needs_copy``) -- a correctness and a tightness guard, so a regression back to the copy-back fails here.
 
 
-def _bool_slot(lir, name):  # type: ignore[no-untyped-def]
+def _bool_slot(lir: Lir, name: str) -> BoolStateSlot:
     return next(s for s in lir.bool_state_slots if s.name == name)
 
 
-def _float_slot(lir, name):  # type: ignore[no-untyped-def]
+def _float_slot(lir: Lir, name: str) -> FloatStateSlot:
     return next(s for s in lir.float_state_slots if s.name == name)
 
 
@@ -887,7 +891,7 @@ def test_inplace_bool_conditional_sticky_latch() -> None:
         def __init__(self) -> None:
             self._f = False
 
-        def __call__(self, en: bool, x: bool):  # type: ignore[no-untyped-def]
+        def __call__(self, en: bool, x: bool) -> bool:
             if en:
                 self._f = self._f or x
             return self._f
@@ -910,7 +914,7 @@ def test_inplace_bool_unconditional_self_update() -> None:
         def __init__(self) -> None:
             self._f = False
 
-        def __call__(self, x: bool):  # type: ignore[no-untyped-def]
+        def __call__(self, x: bool) -> bool:
             self._f = self._f or x
             return self._f
 
@@ -932,7 +936,7 @@ def test_inplace_loop_preheader_arm_is_dwell_safe() -> None:
         def __init__(self) -> None:
             self._s = False
 
-        def __call__(self, a: bool, n: float):  # type: ignore[no-untyped-def]
+        def __call__(self, a: bool, n: float) -> bool:
             self._s = self._s or a
             i = n
             while i > 0.0:
@@ -959,7 +963,7 @@ def test_inplace_write_only_slot_gap_tenant_is_dwell_safe() -> None:
             self._x = False
             self._w = False
 
-        def __call__(self, cond: bool, y: bool):  # type: ignore[no-untyped-def]
+        def __call__(self, cond: bool, y: bool) -> tuple[bool, bool]:
             if cond:
                 self._x = y or self._x
                 self._w = y
@@ -984,7 +988,7 @@ def test_inplace_float_conditional_accumulator() -> None:
         def __init__(self) -> None:
             self._acc = 0.0
 
-        def __call__(self, x: float, en: bool):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float, en: bool) -> float:
             if en:
                 self._acc = self._acc + x
             return self._acc
@@ -1006,7 +1010,7 @@ def test_chained_float_slots_do_not_coalesce() -> None:
             self.a = 0.0
             self.b = 1.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             self.a = self.b
             self.b = self.b + x
             return self.a
@@ -1027,7 +1031,7 @@ def test_inplace_multiarm_float_phi() -> None:
         def __init__(self) -> None:
             self._s = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             if x > 0.0:
                 if x > 10.0:
                     self._s = x
@@ -1055,7 +1059,7 @@ def test_state_livein_feeding_another_slot_phi_does_not_coalesce(monkeypatch: py
             self.x = 0.0
             self.w = 0.0
 
-        def __call__(self, cond: bool, y: float):  # type: ignore[no-untyped-def]
+        def __call__(self, cond: bool, y: float) -> tuple[float, float]:
             old_x = self.x  # the live-in of slot x
             if cond:
                 self.x = y + 1.0
@@ -1086,7 +1090,7 @@ def test_state_livein_feeding_unrelated_phi_does_not_coalesce(monkeypatch: pytes
         def __init__(self) -> None:
             self.x = 0.0
 
-        def __call__(self, cond: bool):  # type: ignore[no-untyped-def]
+        def __call__(self, cond: bool) -> tuple[float, float]:
             new_y = self.x if cond else 0.0  # an unrelated phi taking x's live-in as an arm
             self.x = 1.0 if cond else 2.0
             return new_y, self.x
@@ -1106,7 +1110,7 @@ def test_state_livein_feeding_unrelated_phi_does_not_coalesce(monkeypatch: pytes
 
 def test_model_while_loop_accumulates() -> None:
     # Regression (#14): a variable-count while loop follows the back-edge in the model and converges to x * n.
-    def while_sum(x, n):  # type: ignore[no-untyped-def]
+    def while_sum(x: float, n: float) -> float:
         acc = 0.0
         i = n
         while i > 0.0:
@@ -1126,7 +1130,7 @@ def test_model_while_loop_carries_persistent_state() -> None:
         def __init__(self) -> None:
             self._total = 0.0
 
-        def __call__(self, x, n):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float, n: float) -> float:
             i = n
             while i > 0.0:
                 self._total = self._total + x
@@ -1140,7 +1144,7 @@ def test_model_while_loop_carries_persistent_state() -> None:
 
 
 def test_model_for_counter_inside_while_is_loop_carried() -> None:
-    def for_counter_inside_while(x):  # type: ignore[no-untyped-def]
+    def for_counter_inside_while(x: float) -> float:
         # Regression (Codex iter5): a `for` counter bound inside a `while` body is a loop-carried local; its value at
         # the body's end must flow through the while-header phi, not be dropped when the preheader env is restored.
         j = 0.0
@@ -1157,7 +1161,7 @@ def test_model_for_counter_inside_while_is_loop_carried() -> None:
 
 
 def test_model_counter_assigned_only_on_dead_path_stays_static() -> None:
-    def counter_dead_arm_in_while(x):  # type: ignore[no-untyped-def]
+    def counter_dead_arm_in_while(x: float) -> float:
         # Regression (Codex iter7): a leaked `for` counter assigned only on a statically-dead path (`if False:`) inside
         # a `while` is NOT actually reassigned, so it stays a compile-time int -- a later static index must still
         # resolve, not be rejected (the demotion is fold-aware: only a counter reassigned on a reachable path is
@@ -1178,7 +1182,7 @@ def test_model_counter_assigned_only_on_dead_path_stays_static() -> None:
 
 
 def test_model_zero_trip_inner_for_keeps_outer_counter_static() -> None:
-    def zero_trip_inner_for(x):  # type: ignore[no-untyped-def]
+    def zero_trip_inner_for(x: float) -> float:
         # Regression (Codex iter8): `for i in range(0)` runs zero times and never binds `i` (Python semantics), so it
         # must not be recorded as a loop-carried reassignment of the outer leaked counter -- the later static index
         # still uses the outer for's leaked value.
@@ -1205,7 +1209,7 @@ def test_model_attr_written_under_counter_gated_branch_in_while() -> None:
             self.s1 = -1.0
             self._s2 = 2.0
 
-        def step(self, a):  # type: ignore[no-untyped-def]
+        def step(self, a: float) -> float:
             for i in range(3):
                 pass
             w = 2.0
@@ -1214,7 +1218,7 @@ def test_model_attr_written_under_counter_gated_branch_in_while() -> None:
                     self.s1 = a
                 else:
                     self._s2 = a
-                i = a
+                i = a  # type: ignore[assignment]
                 w = w - 1.0
             return self._s2
 
@@ -1235,7 +1239,7 @@ def test_model_shared_constant_branch_condition() -> None:
         def __init__(self) -> None:
             self.flag = True
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             if x > 0.0:
                 if self.flag:
                     y = 1.0
@@ -1262,7 +1266,7 @@ def test_model_statically_dead_attribute_write_is_not_state() -> None:
         def __init__(self) -> None:
             self.y = 1.25
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             for _ in range(0):  # statically empty: the body never lowers
                 self.y = x
             return self.y
@@ -1271,12 +1275,13 @@ def test_model_statically_dead_attribute_write_is_not_state() -> None:
         def __init__(self) -> None:
             self.y = 2.5
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             if False:  # statically never taken
                 self.y = x
             return self.y
 
-    for kernel, constant in [(DeadLoopWrite, 1.25), (DeadIfWrite, 2.5)]:
+    kernels: list[tuple[type[DeadLoopWrite] | type[DeadIfWrite], float]] = [(DeadLoopWrite, 1.25), (DeadIfWrite, 2.5)]
+    for kernel, constant in kernels:
         lir = build(_run(kernel().__call__), "dead", fetch_stages=3)
         assert [slot.name for slot in lir.float_state_slots] == []  # no state slot; no crash building it
         model = build_model(lir)
@@ -1292,7 +1297,7 @@ def test_model_counter_dependent_empty_inner_loop_is_not_state() -> None:
         def __init__(self) -> None:
             self.y = 1.25
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             for i in range(1):  # the only outer trip has i == 0
                 for _ in range(i):  # range(0) on that trip: the body never lowers
                     self.y = x
@@ -1302,7 +1307,7 @@ def test_model_counter_dependent_empty_inner_loop_is_not_state() -> None:
         def __init__(self) -> None:
             self.s = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             for i in range(3):  # inner runs 0 + 1 + 2 = 3 times per call
                 for _ in range(i):
                     self.s = self.s + x
@@ -1327,7 +1332,7 @@ def test_model_return_in_literal_if_arm_ends_the_scan() -> None:
         def __init__(self) -> None:
             self.y = 2.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             if True:
                 return x + self.y  # the only live path; reads y as a constant
             self.y = x  # unreachable: lowering stops at the return above
@@ -1346,7 +1351,7 @@ def test_model_loop_counter_does_not_leak_across_branch_arms_in_scan() -> None:
         def __init__(self) -> None:
             self.y = 1.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             for i in range(1):  # leaves i == 0 before the branch
                 pass
             if x > 0.0:
@@ -1371,7 +1376,7 @@ def test_model_chained_state_copy_delay_line() -> None:
             self._prev = 0.0
             self.c = 1.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float) -> float:
             out = self._prev
             self._prev = self.c  # chained copy of c's live-in; c also self-accumulates below
             self.c = self.c + x
@@ -1392,14 +1397,14 @@ def test_synthesis_result_reports_latency_metric() -> None:
         FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT)
     )
 
-    def straight_line(a, b):  # type: ignore[no-untyped-def]
+    def straight_line(a: float, b: float) -> float:
         return a * b + a
 
     flat = holoso.synthesize(straight_line, ops)
     flat_min, flat_max = flat.initiation_interval
     assert flat_min > 0 and flat_max == flat_min  # exact: min == max
 
-    def looping(x):  # type: ignore[no-untyped-def]
+    def looping(x: float) -> float:
         w = x
         while w > 1.0:
             w = w - 1.0
@@ -1423,7 +1428,7 @@ def test_model_handle_round_trips_through_pickle() -> None:
 
 
 def test_model_boolean_connectives_and_chained_and_ternary_are_exact() -> None:
-    def kernel(x, lo, hi):  # type: ignore[no-untyped-def]
+    def kernel(x: float, lo: float, hi: float) -> tuple[float, float, float, float, float]:
         deadband = 0.0 if lo < x < hi else x  # chained comparison + ternary
         gate = 1.0 if (x > lo and x < hi) else 0.0  # and-connective in a condition
         outside = 1.0 if (x < lo or x > hi) else 0.0  # or-connective
@@ -1441,7 +1446,7 @@ def test_model_boolean_connectives_and_chained_and_ternary_are_exact() -> None:
 def test_model_bool_cast_matches_float_nonzero() -> None:
     # bool(x) is the ZKF exponent-nonzero test: true iff the value is nonzero *after* encoding into the format (a
     # magnitude too small to represent rounds to zero, like any ZKF value), including for +0.0 and -0.0.
-    def kernel(x, y):  # type: ignore[no-untyped-def]
+    def kernel(x: float, y: float) -> float:
         return y if bool(x) else 0.0
 
     model = build_model(build(_run(kernel), "bool_cast", fetch_stages=3))
@@ -1454,7 +1459,7 @@ def test_model_bool_cast_matches_float_nonzero() -> None:
 def test_model_cross_domain_cast_chain_is_exact() -> None:
     # Regression: a branch-free float->bool->float->float chain (float(x>0)*k) builds via the CFG path even with a
     # single block (it has combinational ops, no branch); the model must take the same path and be bit-exact.
-    def kernel(x, k):  # type: ignore[no-untyped-def]
+    def kernel(x: float, k: float) -> tuple[float, float]:
         gate = float(x > 0.0) * k  # cross-domain chain
         cast = float(x < 0.0)  # branch-free bool->float
         return (gate, cast)
@@ -1472,7 +1477,7 @@ def test_model_bool_cast_of_underflowing_constant_is_false() -> None:
     # cast is False -- the HIR const-folder must not fold it to True.
     assert FMT.encode(2.0**-200) == 0  # the constant underflows to ZKF zero in this format
 
-    def kernel(a):  # type: ignore[no-untyped-def]
+    def kernel(a: float) -> float:
         return a if bool(2.0**-200) else -a  # the gate is False -> the model returns -a
 
     model = build_model(build(_run(kernel), "tiny_bool", fetch_stages=3))
@@ -1486,11 +1491,11 @@ def test_connective_branch_does_not_create_a_phantom_state_slot() -> None:
     # descended both arms (strict ``_static_bool`` does not fold ``X or True``) while lowering folded one, so the dead
     # else-arm's ``self.y`` became a state slot with no value and ``_register_state_slots`` crashed with KeyError.
     class K:
-        def __init__(self):
+        def __init__(self) -> None:
             self.x = 0.0
             self.y = 0.0
 
-        def __call__(self, u):  # type: ignore[no-untyped-def]
+        def __call__(self, u: float) -> float:
             if u > 0.0 or True:
                 self.x = self.x + u
             else:
@@ -1509,11 +1514,11 @@ def test_connective_branch_in_a_loop_body_does_not_carry_a_phantom_attribute() -
     # Same desync hazard via the loop-carried scan (``_loop_assigned``): a folded connective ``if`` inside a loop body
     # must not open a loop-header phi for an attribute the body never actually writes.
     class K:
-        def __init__(self):
+        def __init__(self) -> None:
             self.acc = 0.0
             self.dead = 0.0
 
-        def __call__(self, u):  # type: ignore[no-untyped-def]
+        def __call__(self, u: float) -> float:
             n = 0.0
             while n < 3.0:
                 if u > 0.0 or True:
@@ -1558,7 +1563,7 @@ def test_aliased_slot_with_phi_live_in_builds(monkeypatch: pytest.MonkeyPatch) -
             self.x = 0.0
             self._alias = 0.0
 
-        def __call__(self, cond: bool):  # type: ignore[no-untyped-def]
+        def __call__(self, cond: bool) -> tuple[float, float]:
             y = self.x if cond else 0.0
             self.x = 1.0 if cond else 2.0
             self._alias = self.x
@@ -1569,7 +1574,7 @@ def test_aliased_slot_with_phi_live_in_builds(monkeypatch: pytest.MonkeyPatch) -
             self._alias = 0.0
             self.x = 0.0
 
-        def __call__(self, cond: bool):  # type: ignore[no-untyped-def]
+        def __call__(self, cond: bool) -> tuple[float, float]:
             y = self.x if cond else 0.0
             self.x = 1.0 if cond else 2.0
             self._alias = self.x
@@ -1580,7 +1585,7 @@ def test_aliased_slot_with_phi_live_in_builds(monkeypatch: pytest.MonkeyPatch) -
             self.x = 0.0
             self._alias = 0.0
 
-        def __call__(self, cond: bool, a, b):  # type: ignore[no-untyped-def]
+        def __call__(self, cond: bool, a: float, b: float) -> tuple[float, float]:
             old = self.x if cond else 0.0
             self.x = a if cond else b
             self._alias = self.x
