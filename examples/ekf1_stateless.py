@@ -9,7 +9,25 @@ from pathlib import Path
 import holoso
 
 
-def update_x_P(P00, P01, P02, P11, P12, P22, Q_R, Q_g, Q_i, R_ct, R_shunt, dt, x_R, x_g, x_i, z_ct, z_shunt):
+def update_x_P(
+    P00: float,
+    P01: float,
+    P02: float,
+    P11: float,
+    P12: float,
+    P22: float,
+    Q_R: float,
+    Q_g: float,
+    Q_i: float,
+    R_ct: float,
+    R_shunt: float,
+    dt: float,
+    x_R: float,
+    x_g: float,
+    x_i: float,
+    z_ct: float,
+    z_shunt: float,
+) -> list[list[float]]:
     """
     All inputs are floating point scalars. The float format to use in the generated RTL code is specified at synthesis.
     The return values are flattened in the row-major order, and each element thereof becomes a separate RTL output port.

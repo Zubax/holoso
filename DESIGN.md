@@ -172,9 +172,10 @@ inlined with the instance context kept, so the callee's own `self.<attr>` reads 
 class MRO; `@staticmethod` and `@property` getters are supported). A called method may read `self` but not write it --
 only the entry method owns the state-slot analysis. Name resolution follows Python.
 
-Parameters. Positional and keyword-only parameters become input ports: `bool`-annotated ones are 1-bit boolean ports,
-unannotated and float-annotated scalars are floating-point ports. An aggregate attribute's shape is read from its reset
-value, optionally validated against an explicit jaxtyping annotation; interior shapes are inferred.
+Parameters. Positional and keyword-only parameters become input ports and require an explicit scalar annotation:
+`float`-annotated scalars are floating-point ports, `bool`-annotated ones are 1-bit boolean ports; an unannotated
+scalar is rejected. An aggregate attribute's shape is read from its reset value, optionally validated against an
+explicit jaxtyping annotation; interior shapes are inferred.
 
 ## HIR
 

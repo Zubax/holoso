@@ -34,7 +34,7 @@ class TwoCarried:
         self.s1 = -1.0
         self._s2 = 2.0
 
-    def step(self, a):  # type: ignore[no-untyped-def]
+    def step(self, a: float):  # type: ignore[no-untyped-def]
         w = 2.0
         while w > 0.0:
             if a > w:
@@ -45,7 +45,7 @@ class TwoCarried:
         return self.s1 + self._s2
 
 
-def coalesce_conflict(x, b, cc):  # type: ignore[no-untyped-def]
+def coalesce_conflict(x: float, b: float, cc: float):  # type: ignore[no-untyped-def]
     """
     The phi-coalescing residual-install hazard: ``a`` coalesces onto ``x`` while ``x`` is still live as ``z``'s arm,
     so the soundness fixpoint must de-coalesce. The fixpoint's de-coalescing is set-driven, so this exercises that its

@@ -100,7 +100,7 @@ def test_flatten_value_returns_leaves() -> None:
 
 
 def test_small_kernel_inputs_outputs_and_ops() -> None:
-    def kernel(a, b):  # type: ignore[no-untyped-def]
+    def kernel(a: float, b: float):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
     hir = lower(kernel)
@@ -141,6 +141,15 @@ def test_unsupported_scalar_parameter_annotation_is_rejected() -> None:
         lower(passthrough)
 
 
+def test_missing_parameter_annotation_is_rejected() -> None:
+    # An unannotated parameter is rejected: there is no implicit float default.
+    def passthrough(value):  # type: ignore[no-untyped-def]
+        return value
+
+    with pytest.raises(UnsupportedConstruct, match="requires an explicit type annotation"):
+        lower(passthrough)
+
+
 def test_assert_is_ignored_with_info_message(caplog: pytest.LogCaptureFixture) -> None:
     # The whole test subtree -- the comparison and its nested call -- is dropped, so neither op reaches HIR.
     def with_assert(x: float):  # type: ignore[no-untyped-def]
@@ -178,7 +187,7 @@ def test_dropped_assert_walrus_used_later_is_unknown_name() -> None:
 
 
 def test_pow_expands_to_multiply_chain() -> None:
-    def cube(a):  # type: ignore[no-untyped-def]
+    def cube(a: float):  # type: ignore[no-untyped-def]
         return a**3
 
     hir = lower(cube)
@@ -186,7 +195,7 @@ def test_pow_expands_to_multiply_chain() -> None:
 
 
 def test_abs_lowers_to_semantic_operation() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return abs(a)
 
     hir = lower(f)
@@ -195,7 +204,7 @@ def test_abs_lowers_to_semantic_operation() -> None:
 
 
 def test_division_lowers_to_div() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         return a / b
 
     hir = lower(f)
@@ -215,7 +224,7 @@ def test_ekf1_stateless_structure() -> None:
 
 
 def test_static_for_loop_unrolls() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         x = a
         for _ in range(3):
             x = x + a
@@ -227,7 +236,7 @@ def test_static_for_loop_unrolls() -> None:
 
 def test_for_loop_counter_is_a_compile_time_constant() -> None:
     # The counter indexes a constant table and sets a power-of-two shift exponent; both fold per unrolled trip.
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         table = (1.0, 2.0, 4.0)
         y = a
         for i in range(3):
@@ -246,7 +255,7 @@ def test_dead_arm_attr_write_does_not_block_readonly_fold() -> None:
             self._flag = False
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             if self._flag:  # _flag is read-only False -> folds away; the return arm is dead
                 return x
             if False:
@@ -266,7 +275,7 @@ def test_static_comparison_dead_arm_does_not_block_readonly_fold() -> None:
             self._flag = False
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             if 1.0 < 0.0:
                 self._flag = True  # noqa -- dead arm (statically-false comparison): must not assign _flag
             if self._flag:
@@ -286,7 +295,7 @@ def test_over_threshold_for_in_statically_dead_arm_is_skipped() -> None:
             self.flag = True
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             if self.flag:
                 y = x
             else:
@@ -307,7 +316,7 @@ def test_zero_trip_for_write_does_not_mark_attribute_assigned() -> None:
             self._flag = False
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             for _ in range(0):
                 self._flag = True  # noqa -- zero-trip loop: never runs
             if self._flag:
@@ -328,7 +337,7 @@ def test_zero_trip_self_attr_range_write_does_not_mark_attribute_assigned() -> N
             self._flag = False
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             for _ in range(self.iterations):
                 self._flag = True  # noqa -- zero-trip loop: never runs
             if self._flag:
@@ -343,7 +352,7 @@ def test_zero_trip_self_attr_range_write_does_not_mark_attribute_assigned() -> N
 def test_nested_function_scope_does_not_shadow_global() -> None:
     # Regression (Codex): a name bound in a nested (here dead) def is a separate scope; it must not make the OUTER
     # function treat that name as local, which would shadow the numpy alias (or a builtin) at an earlier use.
-    def kernel(x):  # type: ignore[no-untyped-def]
+    def kernel(x: float):  # type: ignore[no-untyped-def]
         y = np.asarray([x])
         return y[0]
 
@@ -363,7 +372,7 @@ def test_globally_shadowed_range_is_rejected(tmp_path: Path) -> None:
     source = textwrap.dedent("""
         range = lambda n: [0, 0, 0]
 
-        def kernel(a):
+        def kernel(a: float):
             y = a
             for _ in range(3):
                 y = y + 1.0
@@ -375,7 +384,7 @@ def test_globally_shadowed_range_is_rejected(tmp_path: Path) -> None:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    with pytest.raises(UnsupportedConstruct, match="range"):
+    with pytest.raises(UnsupportedConstruct, match="for-loop must iterate over range"):
         lower(module.kernel)
 
 
@@ -387,7 +396,7 @@ def test_constant_boolean_attribute_branch_folds() -> None:
             self.flag = False
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             if self.flag:
                 self.y = x
             return self.y
@@ -405,7 +414,7 @@ def test_numpy_boolean_attribute_branch_folds() -> None:
             self.flag = np.bool_(False)
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             if self.flag:
                 self.y = x
             return self.y
@@ -423,7 +432,7 @@ def test_static_integer_comparison_branch_folds() -> None:
         def __init__(self) -> None:
             self.x = 0.0
 
-        def __call__(self, v):  # type: ignore[no-untyped-def]
+        def __call__(self, v: float):  # type: ignore[no-untyped-def]
             for i in range(3):
                 if i > 5:  # never true over range(3): x must not become state
                     self.x = v
@@ -437,7 +446,7 @@ def test_static_integer_comparison_branch_folds() -> None:
         def __init__(self) -> None:
             self.acc = 0.0
 
-        def __call__(self, v):  # type: ignore[no-untyped-def]
+        def __call__(self, v: float):  # type: ignore[no-untyped-def]
             for i in range(3):
                 if i > 0:  # true for i in {1, 2}: acc genuinely accumulates
                     self.acc = self.acc + v
@@ -459,7 +468,7 @@ def test_static_float_comparison_branch_folds() -> None:
             self.gain = 2.0
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             if self.threshold > 1.0:
                 self.y = x
             if self.gain * 3.0 > 10.0:  # 6.0 > 10.0 is statically false
@@ -475,7 +484,7 @@ def test_static_float_comparison_branch_folds() -> None:
             self.threshold = 5.0
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             if self.threshold > 1.0:  # 5.0 > 1.0 statically true: the write is taken
                 self.y = x
             return self.y
@@ -493,7 +502,7 @@ def test_dead_assignment_after_return_does_not_suppress_fold() -> None:
             self.flag = False
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             if self.flag:  # flag is read-only -> folds to the (empty) else arm
                 self.y = x
             result = self.y
@@ -529,7 +538,7 @@ def test_public_boolean_state_attribute_is_output() -> None:
             self.flag = False
             self.y = 0.0
 
-        def __call__(self, a, b):  # type: ignore[no-untyped-def]
+        def __call__(self, a: float, b: float):  # type: ignore[no-untyped-def]
             self.flag = a < b
             self.y = a
             return self.y
@@ -541,7 +550,7 @@ def test_public_boolean_state_attribute_is_output() -> None:
 
 def test_while_loop_lowers_to_back_edge() -> None:
     # A while loop lowers to preheader -> header(loop phi + exit branch) -> body(back-edge jump) -> exit(ret).
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         x = a
         while x < 10.0:
             x = x + 1.0
@@ -558,7 +567,7 @@ def test_while_loop_lowers_to_back_edge() -> None:
 
 
 def test_while_loop_with_else_is_unsupported() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         x = a
         while x < 10.0:
             x = x + 1.0
@@ -582,7 +591,7 @@ def test_loop_else_write_keeps_attribute_assigned_so_the_loop_else_is_rejected()
             self.flag = True
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             if self.flag:
                 self.y = x
             else:
@@ -605,7 +614,7 @@ def test_while_else_write_keeps_attribute_assigned_so_the_while_else_is_rejected
             self.flag = True
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             if self.flag:
                 self.y = x
             else:
@@ -620,7 +629,7 @@ def test_while_else_write_keeps_attribute_assigned_so_the_while_else_is_rejected
 
 
 def test_return_inside_while_is_unsupported() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         x = a
         while x < 10.0:
             return x
@@ -630,7 +639,7 @@ def test_return_inside_while_is_unsupported() -> None:
         lower(f)
 
 
-def _helper_with_return_in_while(a):  # type: ignore[no-untyped-def]
+def _helper_with_return_in_while(a: float):  # type: ignore[no-untyped-def]
     while a > 0.0:
         return a
     return a + 1.0
@@ -640,7 +649,7 @@ def test_return_inside_inlined_callee_while_is_unsupported() -> None:
     # Regression (user): a return inside an inlined callee's while body is exempt from _reject_nested_return (the
     # callee's own return is consumed locally), so _lower_while must reject it on the body's lowered-a-return result --
     # otherwise the back-edge is emitted and the early return is silently dropped (the model would not reach Ret).
-    def kernel(x):  # type: ignore[no-untyped-def]
+    def kernel(x: float):  # type: ignore[no-untyped-def]
         return _helper_with_return_in_while(x)
 
     with pytest.raises(UnsupportedConstruct, match="return"):
@@ -654,7 +663,7 @@ def test_statically_false_while_is_skipped() -> None:
         def __init__(self) -> None:
             self.s = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             while False:
                 self.s = 1.0
             return x
@@ -664,7 +673,7 @@ def test_statically_false_while_is_skipped() -> None:
     assert [o.name for o in hir.outputs] == ["out_0"]
     assert len(hir.blocks) == 1  # the loop is skipped, no back-edge emitted
 
-    def dead_while_return(a):  # type: ignore[no-untyped-def]
+    def dead_while_return(a: float):  # type: ignore[no-untyped-def]
         while False:
             return a
         return a + 1.0
@@ -674,7 +683,7 @@ def test_statically_false_while_is_skipped() -> None:
 
 
 def test_for_loop_over_unroll_threshold_is_unsupported() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         x = a
         for _ in range(1000):
             x = x + a
@@ -687,7 +696,7 @@ def test_for_loop_over_unroll_threshold_is_unsupported() -> None:
 def test_enormous_range_is_rejected_not_crashed() -> None:
     # Regression (Codex F10): a trip count beyond a C ssize_t must be rejected cleanly, not crash with OverflowError
     # from len(range(...)) (the unroll threshold is checked with a big-integer trip count).
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         x = a
         for _ in range(100000000000000000000000000000000000000):
             x = x + a
@@ -698,7 +707,7 @@ def test_enormous_range_is_rejected_not_crashed() -> None:
 
 
 def test_range_zero_step_is_rejected() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         x = a
         for _ in range(0, 10, 0):
             x = x + a
@@ -711,7 +720,7 @@ def test_range_zero_step_is_rejected() -> None:
 def test_divergent_loop_counter_as_static_index_is_rejected() -> None:
     # A counter left differing by the two branch arms must not leak as a trusted compile-time index: using it to index
     # a table afterwards is path-dependent and must be rejected, not silently compiled to one arm's value.
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         table = (10.0, 20.0)
         if a > 0.0:
             for i in range(1):  # leaves i == 0
@@ -727,7 +736,7 @@ def test_divergent_loop_counter_as_static_index_is_rejected() -> None:
 
 def test_agreeing_loop_counter_as_static_index_after_branch() -> None:
     # When both arms leave the same counter value, it stays a usable compile-time index past the merge.
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         table = (10.0, 20.0)
         if a > 0.0:
             for i in range(1):
@@ -750,7 +759,7 @@ def test_attribute_written_only_in_while_is_not_read_only() -> None:
         def __init__(self) -> None:
             self.acc = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             c = 3.0
             while c > 0.0:
                 self.acc = self.acc + x
@@ -776,7 +785,7 @@ def test_loop_carried_attr_in_statically_dead_arm_does_not_crash() -> None:
         def __init__(self) -> None:
             self.acc = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             c = 2.0
             while c > 0.0:
                 if 0.5 > 1.0:  # statically false: the only write of acc is unreachable
@@ -795,7 +804,7 @@ def test_loop_carried_attr_written_only_in_live_folded_arm() -> None:
         def __init__(self) -> None:
             self.b = 0.5
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             h = 1.0
             while h > 0.0:
                 if 1.5 <= 2.0:  # statically true: this arm's write is the reachable one
@@ -810,7 +819,7 @@ def test_loop_carried_attr_written_only_in_live_folded_arm() -> None:
 
 
 def test_unknown_global_is_unsupported() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return a + UNDEFINED_GLOBAL  # type: ignore[name-defined]  # noqa: F821
 
     with pytest.raises(UnsupportedConstruct):
@@ -818,7 +827,7 @@ def test_unknown_global_is_unsupported() -> None:
 
 
 def test_missing_intrinsic_message() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return math.sqrt(a)
 
     with pytest.raises(MissingIntrinsic, match="sqrt"):
@@ -852,7 +861,7 @@ def test_returned_public_state_alias_is_deduped() -> None:
         def __init__(self) -> None:
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             self.y = x
             y = self.y
             return y
@@ -866,7 +875,7 @@ def test_mixed_return_dedupes_public_alias_keeps_distinct_leaf() -> None:
         def __init__(self) -> None:
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             self.y = x * 2.0
             a = self.y
             return (a, x)  # a aliases public self.y (deduped to state_y); x is distinct (keeps its positional out_1)
@@ -883,7 +892,7 @@ def test_return_value_equal_to_public_state_is_deduped_even_without_aliasing() -
         def __init__(self) -> None:
             self.last = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             self.last = x
             return x
 
@@ -898,7 +907,7 @@ def test_unreachable_state_write_is_ignored() -> None:
         def __init__(self) -> None:
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             return x
             self.y = x  # unreachable
 
@@ -914,7 +923,7 @@ def test_attribute_written_only_in_dead_code_reads_as_constant() -> None:
         def __init__(self) -> None:
             self.y = 5.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             r = x + self.y  # y folds to its snapshot 5.0 -- its only write is dead
             return r
             self.y = x  # unreachable
@@ -990,7 +999,7 @@ def test_nested_attribute_access_is_rejected() -> None:
 
 
 def test_tuple_build_and_index() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         z = a, b
         return [z[1], z[0]]
 
@@ -998,7 +1007,7 @@ def test_tuple_build_and_index() -> None:
 
 
 def test_list_slice() -> None:
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
         v = [a, b, c]
         return v[1:3]
 
@@ -1006,7 +1015,7 @@ def test_list_slice() -> None:
 
 
 def test_vector_scalar_broadcast() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         v = [a, b]
         return v * 0.5
 
@@ -1016,7 +1025,7 @@ def test_vector_scalar_broadcast() -> None:
 
 
 def test_flatten_collapses_nesting() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         m = [[a], [b]]
         return m.flatten()
 
@@ -1024,7 +1033,7 @@ def test_flatten_collapses_nesting() -> None:
 
 
 def test_index_out_of_range_is_rejected() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         v = [a]
         return v[3]
 
@@ -1033,7 +1042,7 @@ def test_index_out_of_range_is_rejected() -> None:
 
 
 def test_indexing_a_scalar_is_rejected() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return a[0]
 
     with pytest.raises(UnsupportedConstruct, match="index or slice a scalar"):
@@ -1041,7 +1050,7 @@ def test_indexing_a_scalar_is_rejected() -> None:
 
 
 def test_star_unpacking_a_scalar_is_rejected() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return [*a]
 
     with pytest.raises(UnsupportedConstruct, match="unpack"):
@@ -1050,7 +1059,7 @@ def test_star_unpacking_a_scalar_is_rejected() -> None:
 
 def test_tuple_unpacking_routes_values() -> None:
     # The right-hand side is built once before any binding, so a swap reads both sources first (no clobber).
-    def swap(a, b):  # type: ignore[no-untyped-def]
+    def swap(a: float, b: float):  # type: ignore[no-untyped-def]
         x, y = b, a
         return [x, y]
 
@@ -1060,7 +1069,7 @@ def test_tuple_unpacking_routes_values() -> None:
 
 
 def test_starred_and_nested_unpacking_route_values() -> None:
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
         first, *rest = [a, b, c]
         r0, r1 = rest
         return [first, r0, r1]
@@ -1070,7 +1079,7 @@ def test_starred_and_nested_unpacking_route_values() -> None:
 
 
 def test_chained_assignment_binds_every_target() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         x = y = a + a
         return [x, y]
 
@@ -1080,7 +1089,7 @@ def test_chained_assignment_binds_every_target() -> None:
 
 
 def test_unpacking_a_scalar_source_is_rejected() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         x, y = a
         return x + y
 
@@ -1089,7 +1098,7 @@ def test_unpacking_a_scalar_source_is_rejected() -> None:
 
 
 def test_unpacking_arity_mismatch_is_rejected() -> None:
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
         x, y = [a, b, c]
         return x + y
 
@@ -1104,7 +1113,7 @@ def test_stateful_tuple_assignment_to_attributes() -> None:
             self.x = 1.0
             self.y = 2.0
 
-        def step(self, k):  # type: ignore[no-untyped-def]
+        def step(self, k: float):  # type: ignore[no-untyped-def]
             self.x, self.y = self.y, self.x + k
             return self.x
 
@@ -1116,7 +1125,7 @@ def test_stateful_tuple_assignment_to_attributes() -> None:
 def test_unpacked_name_shadows_global_callable() -> None:
     # A name bound only via tuple unpacking is local, so a same-named global function is not inlined at a call site;
     # this exercises _collect_local_names descending into unpacking targets.
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         _addmul, b = a, a  # _addmul is now a local value (Python would raise 'float not callable' when called)
         return _addmul(b)
 
@@ -1124,12 +1133,12 @@ def test_unpacked_name_shadows_global_callable() -> None:
         lower(f)
 
 
-def _addmul(p, q):  # type: ignore[no-untyped-def]
+def _addmul(p: float, q: float):  # type: ignore[no-untyped-def]
     return [p + q, p * q]
 
 
 def test_inlined_global_function() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         return _addmul(a, b)
 
     hir = lower(f)
@@ -1138,7 +1147,7 @@ def test_inlined_global_function() -> None:
 
 
 def test_inlined_global_with_star_args() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         v = [a, b]
         return _addmul(*v)
 
@@ -1147,20 +1156,20 @@ def test_inlined_global_with_star_args() -> None:
 
 
 def test_inline_arity_mismatch_is_rejected() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return _addmul(a)
 
     with pytest.raises(UnsupportedConstruct, match="positional arguments"):
         lower(f)
 
 
-def cbrt(x):  # type: ignore[no-untyped-def]
+def cbrt(x: float):  # type: ignore[no-untyped-def]
     return x * x  # a user-defined global whose name collides with the same-named intrinsic placeholder
 
 
 def test_user_global_function_shadows_intrinsic_name() -> None:
     # A module-level def named like an intrinsic is the caller's own function; Python would call it, so it is inlined.
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return cbrt(a)
 
     assert _arith_count(lower(f), FloatMul) == 1  # the inlined x * x, not a MissingIntrinsic rejection
@@ -1168,7 +1177,7 @@ def test_user_global_function_shadows_intrinsic_name() -> None:
 
 def test_local_name_shadows_global_callable() -> None:
     # A parameter named like a global function refers to the parameter (a value), which is not callable.
-    def f(_addmul, a):  # type: ignore[no-untyped-def]
+    def f(_addmul: float, a: float):  # type: ignore[no-untyped-def]
         return _addmul(a)
 
     with pytest.raises(UnsupportedConstruct, match="not a callable"):
@@ -1176,7 +1185,7 @@ def test_local_name_shadows_global_callable() -> None:
 
 
 def test_flatten_on_a_scalar_is_rejected() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return a.flatten()
 
     with pytest.raises(UnsupportedConstruct, match="aggregate"):
@@ -1194,7 +1203,7 @@ def test_boolean_in_float_arithmetic_is_rejected() -> None:
 
 
 def test_abs_accepts_a_star_unpacked_argument() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         v = [a]
         return abs(*v)
 
@@ -1202,12 +1211,12 @@ def test_abs_accepts_a_star_unpacked_argument() -> None:
 
 
 def test_unary_plus_is_scalar_identity_and_rejects_aggregates() -> None:
-    def scalar_ok(a):  # type: ignore[no-untyped-def]
+    def scalar_ok(a: float):  # type: ignore[no-untyped-def]
         return +a
 
     assert [o.name for o in lower(scalar_ok).outputs] == ["out_0"]
 
-    def aggregate_bad(a, b):  # type: ignore[no-untyped-def]
+    def aggregate_bad(a: float, b: float):  # type: ignore[no-untyped-def]
         v = [a, b]
         return +v
 
@@ -1218,7 +1227,7 @@ def test_unary_plus_is_scalar_identity_and_rejects_aggregates() -> None:
 def test_method_style_abs_call_is_rejected() -> None:
     # Only a bare-name abs(...) is the builtin; a method-style a.abs(b) must not be silently treated as it (which would
     # drop the receiver) -- there is no supported scalar method, so it is an unsupported call.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         return a.abs(b)
 
     with pytest.raises(UnsupportedConstruct, match="abs"):
@@ -1227,21 +1236,23 @@ def test_method_style_abs_call_is_rejected() -> None:
 
 def _rebind_globals(fn, **overrides):  # type: ignore[no-untyped-def]
     """A copy of ``fn`` whose module globals carry ``overrides`` (its source stays retrievable via the shared code)."""
-    return types.FunctionType(
+    copy = types.FunctionType(
         fn.__code__, {**fn.__globals__, **overrides}, fn.__name__, fn.__defaults__, fn.__closure__
     )
+    copy.__annotations__ = dict(fn.__annotations__)  # FunctionType does not copy these; the entry point reads them
+    return copy
 
 
 def test_noncallable_global_shadowing_builtin_is_rejected() -> None:
     # A non-callable global shadows the built-in (Python raises TypeError on the call), so the name is not the builtin
     # it spells; holoso must reject rather than silently emitting FloatAbs / the list-tuple identity.
-    def use_abs(a):  # type: ignore[no-untyped-def]
+    def use_abs(a: float):  # type: ignore[no-untyped-def]
         return abs(a)
 
-    def use_list(a):  # type: ignore[no-untyped-def]
+    def use_list(a: float):  # type: ignore[no-untyped-def]
         return list((a, a))
 
-    def use_tuple(a):  # type: ignore[no-untyped-def]
+    def use_tuple(a: float):  # type: ignore[no-untyped-def]
         return tuple((a, a))
 
     # ``None`` shadows too -- it is present-but-non-callable, distinct from an absent global (the _ABSENT sentinel).
@@ -1254,7 +1265,7 @@ def test_noncallable_global_shadowing_builtin_is_rejected() -> None:
 def test_callable_global_shadowing_abs_is_inlined_not_floatabs() -> None:
     # A callable global named ``abs`` is the caller's own function; Python would call it, so holoso inlines it instead
     # of emitting the FloatAbs builtin -- the non-callable guard must not disturb this legitimate shadow.
-    def use_abs(a):  # type: ignore[no-untyped-def]
+    def use_abs(a: float):  # type: ignore[no-untyped-def]
         return abs(a)
 
     hir = lower(_rebind_globals(use_abs, abs=cbrt))
@@ -1268,7 +1279,7 @@ def test_numpy_array_state_decomposes_like_a_list() -> None:
     class Filt:
         v: npt.NDArray[np.float64]  # shape-less annotation: holoso infers the length from the reset value
 
-        def step(self, a):  # type: ignore[no-untyped-def]
+        def step(self, a: float):  # type: ignore[no-untyped-def]
             self.v = self.v * a
 
     hir = lower(Filt(np.array([1.0, 2.0, 3.0])).step)
@@ -1283,7 +1294,7 @@ def test_jaxtyping_array_field_lowers_and_is_validated() -> None:
     class Filt:
         v: Float64[np.ndarray, "3"]
 
-        def step(self, a):  # type: ignore[no-untyped-def]
+        def step(self, a: float):  # type: ignore[no-untyped-def]
             self.v = self.v * a
 
     assert {s.name for s in lower(Filt(np.array([1.0, 2.0, 3.0])).step).state_slots} == {"v_0", "v_1", "v_2"}
@@ -1296,21 +1307,21 @@ def test_numpy_integer_array_values_coerce_to_real() -> None:
     class Filt:
         v: np.ndarray  # type: ignore[type-arg]
 
-        def step(self, a):  # type: ignore[no-untyped-def]
+        def step(self, a: float):  # type: ignore[no-untyped-def]
             self.v = self.v * a
 
     assert {s.name for s in lower(Filt(np.array([2, 3])).step).state_slots} == {"v_0", "v_1"}
 
 
 def test_numpy_asarray_is_identity_on_an_aggregate() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         return np.asarray([a, b]).flatten()  # asarray of an array-like is identity in this compile-time model
 
     assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
 
 
 def test_list_is_identity_on_an_aggregate() -> None:
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
         v = [a, b, c]
         return list(v[0:2])
 
@@ -1318,7 +1329,7 @@ def test_list_is_identity_on_an_aggregate() -> None:
 
 
 def test_list_of_a_scalar_is_rejected() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return list(a)  # Python: list(scalar) is a TypeError -- a scalar is not iterable
 
     with pytest.raises(UnsupportedConstruct, match="list"):
@@ -1326,7 +1337,7 @@ def test_list_of_a_scalar_is_rejected() -> None:
 
 
 def test_tuple_is_identity_on_an_aggregate() -> None:
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
         v = [a, b, c]
         return tuple(v[0:2])
 
@@ -1335,7 +1346,7 @@ def test_tuple_is_identity_on_an_aggregate() -> None:
 
 def test_numpy_alias_shadowed_by_a_local_is_not_numpy() -> None:
     # ``np`` is rebound to a local value, so ``np.asarray`` is a method call on that value, not the numpy function.
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         np = [a]
         return np.asarray([a])
 
@@ -1346,7 +1357,7 @@ def test_numpy_alias_shadowed_by_a_local_is_not_numpy() -> None:
 def test_name_assigned_later_is_local_before_its_assignment() -> None:
     # A name assigned anywhere in a function is local throughout (Python's rule); using it as a global/builtin/numpy
     # before that assignment is invalid Python (UnboundLocalError), so holoso rejects it rather than seeing the global.
-    def shadows_numpy(a):  # type: ignore[no-untyped-def]
+    def shadows_numpy(a: float):  # type: ignore[no-untyped-def]
         y = np.asarray([a])
         np = [a]  # noqa: F841  # makes np local for the whole body
         return y
@@ -1354,7 +1365,7 @@ def test_name_assigned_later_is_local_before_its_assignment() -> None:
     with pytest.raises(UnsupportedConstruct):
         lower(shadows_numpy)
 
-    def shadows_builtin(a):  # type: ignore[no-untyped-def]
+    def shadows_builtin(a: float):  # type: ignore[no-untyped-def]
         y = abs(a)
         abs = [a]  # noqa: F841  # makes abs local for the whole body
         return y
@@ -1368,7 +1379,7 @@ def test_multidimensional_array_state_is_rejected() -> None:
     class Filt:
         m: np.ndarray  # type: ignore[type-arg]
 
-        def step(self, a):  # type: ignore[no-untyped-def]
+        def step(self, a: float):  # type: ignore[no-untyped-def]
             self.m = self.m * a
 
     with pytest.raises(UnsupportedConstruct, match="1-D"):
@@ -1396,7 +1407,7 @@ def test_vector_state_decomposes_to_per_element_slots() -> None:
         def __init__(self) -> None:
             self.v = [1.0, 2.0, 3.0]
 
-        def update(self, a):  # type: ignore[no-untyped-def]
+        def update(self, a: float):  # type: ignore[no-untyped-def]
             self.v = [self.v[0] + a, self.v[1], self.v[2]]
 
     hir = lower(Vec().update)
@@ -1409,7 +1420,7 @@ def test_vector_state_shape_mismatch_is_rejected() -> None:
         def __init__(self) -> None:
             self.v = [0.0, 0.0]
 
-        def update(self, a):  # type: ignore[no-untyped-def]
+        def update(self, a: float):  # type: ignore[no-untyped-def]
             self.v = [a]
 
     with pytest.raises(UnsupportedConstruct, match="2-element vector"):
@@ -1423,7 +1434,7 @@ def test_vector_state_nested_shape_is_rejected() -> None:
         def __init__(self) -> None:
             self.v = [0.0, 0.0]
 
-        def update(self, a, b):  # type: ignore[no-untyped-def]
+        def update(self, a: float, b: float):  # type: ignore[no-untyped-def]
             self.v = [[a, b]]
 
     with pytest.raises(UnsupportedConstruct, match="incompatible shape"):
@@ -1437,7 +1448,7 @@ def test_vector_state_slot_name_collision_is_rejected() -> None:
             self.v = [1.0]
             self.v_0 = 2.0
 
-        def update(self, a):  # type: ignore[no-untyped-def]
+        def update(self, a: float):  # type: ignore[no-untyped-def]
             self.v = [a]
             self.v_0 = a + 1.0
 
@@ -1446,7 +1457,7 @@ def test_vector_state_slot_name_collision_is_rejected() -> None:
 
 
 def test_keyword_only_params_become_inputs() -> None:
-    def f(a, *, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, *, b: float, c: float):  # type: ignore[no-untyped-def]
         return a + b + c
 
     assert lower(f).input_names() == ["a", "b", "c"]
@@ -1458,7 +1469,7 @@ def test_dataclass_instance_is_stateful() -> None:
         total: float
         gain: list  # type: ignore[type-arg]
 
-        def step(self, x):  # type: ignore[no-untyped-def]
+        def step(self, x: float):  # type: ignore[no-untyped-def]
             self.total = self.total + x * self.gain[0]
 
     hir = lower(Acc(0.0, [2.0]).step)
@@ -1476,7 +1487,7 @@ def test_first_sample_branch_if_converts_to_one_block() -> None:
             self.y = 0.0
             self._first = True
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             if self._first:
                 self._first = False
                 self.y = x
@@ -1502,7 +1513,7 @@ def test_nested_if_lowers_through_optimize() -> None:
         def __init__(self):  # type: ignore[no-untyped-def]
             self.y = 0.0
 
-        def __call__(self, x, w):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float, w: float):  # type: ignore[no-untyped-def]
             if x > 0.0:
                 if w > 0.0:
                     self.y = x
@@ -1525,7 +1536,7 @@ def test_attribute_written_on_one_arm_becomes_a_phi() -> None:
         def __init__(self):  # type: ignore[no-untyped-def]
             self.acc = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             if x > 0.0:
                 self.acc = x
             return self.acc
@@ -1545,7 +1556,7 @@ def _op_count(hir, op_type):  # type: ignore[no-untyped-def]
 
 
 def test_boolean_and_in_condition_lowers_to_combinational_bool_and() -> None:
-    def f(x, a, b):  # type: ignore[no-untyped-def]
+    def f(x: float, a: float, b: float):  # type: ignore[no-untyped-def]
         return 1.0 if (x > a and x < b) else 0.0
 
     hir = lower(f)
@@ -1554,7 +1565,7 @@ def test_boolean_and_in_condition_lowers_to_combinational_bool_and() -> None:
 
 
 def test_boolean_or_lowers_to_combinational_bool_or() -> None:
-    def f(x, a, b):  # type: ignore[no-untyped-def]
+    def f(x: float, a: float, b: float):  # type: ignore[no-untyped-def]
         return 1.0 if (x < a or x > b) else 0.0
 
     hir = lower(f)
@@ -1563,7 +1574,7 @@ def test_boolean_or_lowers_to_combinational_bool_or() -> None:
 
 
 def test_not_lowers_to_combinational_bool_not() -> None:
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         return -1.0 if not (x > 0.0) else 1.0
 
     hir = lower(f)
@@ -1572,7 +1583,7 @@ def test_not_lowers_to_combinational_bool_not() -> None:
 
 
 def test_chained_comparison_lowers_to_two_comparisons_and_one_and() -> None:
-    def f(x, lo, hi):  # type: ignore[no-untyped-def]
+    def f(x: float, lo: float, hi: float):  # type: ignore[no-untyped-def]
         return 0.0 if lo < x < hi else x
 
     hir = lower(f)
@@ -1582,7 +1593,7 @@ def test_chained_comparison_lowers_to_two_comparisons_and_one_and() -> None:
 
 def test_chained_comparison_evaluates_each_operand_once() -> None:
     # The shared middle operand ``x`` feeds both comparisons but is evaluated once: only one Sub (x - 0.5) is built.
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         x = a - 0.5
         return 0.0 if 0.0 < x < 1.0 else x
 
@@ -1598,20 +1609,20 @@ def test_nested_if_without_else_folds_into_one_and_branch() -> None:
     # ``if A: (if B: S)`` with no ``else`` on either is exactly ``if (A and B): S``: the frontend folds it to a single
     # branch (one combinational ``and``), NOT two nested jumps. Folded repeatedly, ``if A: if B: if C: S`` collapses to
     # one ``A and B and C`` branch. Regression: the nested form must compile identically to the hand-written ``and``.
-    def nested(x, lo, hi):  # type: ignore[no-untyped-def]
+    def nested(x: float, lo: float, hi: float):  # type: ignore[no-untyped-def]
         r = 0.0
         if x > lo:
             if x < hi:
                 r = 1.0
         return r
 
-    def manual(x, lo, hi):  # type: ignore[no-untyped-def]
+    def manual(x: float, lo: float, hi: float):  # type: ignore[no-untyped-def]
         r = 0.0
         if x > lo and x < hi:
             r = 1.0
         return r
 
-    def triple(x, lo, hi):  # type: ignore[no-untyped-def]
+    def triple(x: float, lo: float, hi: float):  # type: ignore[no-untyped-def]
         r = 0.0
         if x > lo:
             if x < hi:
@@ -1630,7 +1641,7 @@ def test_nested_if_with_outer_else_does_not_fold() -> None:
     # The fold must NOT trigger when the outer ``if`` has an ``else``: ``if A: (if B: S) else: T`` is not
     # ``if (A and B): S``, because T runs whenever ``not A``, whereas ``not (A and B)`` also covers A-and-not-B. Both
     # branches must survive and no spurious conjunction is synthesized.
-    def f(x, lo, hi):  # type: ignore[no-untyped-def]
+    def f(x: float, lo: float, hi: float):  # type: ignore[no-untyped-def]
         r = 0.0
         if x > lo:
             if x < hi:
@@ -1646,7 +1657,7 @@ def test_nested_if_with_outer_else_does_not_fold() -> None:
 def test_nested_if_fold_is_suppressed_when_the_inner_test_has_a_walrus() -> None:
     # The fold must NOT absorb an inner test that carries a walrus: nested, the walrus binds only when the outer test
     # holds, but ``A and B`` evaluates B unconditionally -- folding would over-bind it. The two branches must survive.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         r = 0.0
         if x > 0.0:
             if (t := x * 3.0) < 100.0:
@@ -1658,7 +1669,7 @@ def test_nested_if_fold_is_suppressed_when_the_inner_test_has_a_walrus() -> None
 
 def test_walrus_in_conditional_expression_arm_is_rejected() -> None:
     # A ternary arm is evaluated only when selected; a walrus binding there cannot leak across arms, so it is rejected.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         return (t := 1.0) if x > 0.0 else (t := 2.0)
 
     with pytest.raises(UnsupportedConstruct, match="walrus"):
@@ -1669,7 +1680,7 @@ def test_walrus_in_and_or_operand_is_rejected() -> None:
     # An ``and``/``or`` operand may be short-circuited (statically dropped by the connective fold, or unevaluated in
     # Python), so whether its walrus binds cannot be reconciled between the scans and lowering -- rejected. (Regression:
     # the scan invalidated the target unconditionally while lowering short-circuited past it, desyncing the two.)
-    def f(x, y):  # type: ignore[no-untyped-def]
+    def f(x: float, y: float):  # type: ignore[no-untyped-def]
         if x > 0.0 and (t := y) > 0.0:
             return t
         return 0.0
@@ -1679,7 +1690,7 @@ def test_walrus_in_and_or_operand_is_rejected() -> None:
 
 
 def test_walrus_in_chained_comparison_is_rejected() -> None:
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         if x < 0.0 < (t := 5.0):
             return t
         return 0.0
@@ -1695,7 +1706,7 @@ def test_walrus_in_dead_or_unsupported_statement_still_scopes_the_name_local() -
     # Local-name collection is syntactic, as in Python: a walrus target is a function local throughout the body even in
     # dead or out-of-subset code, so it shadows a same-named global. Here the earlier ``range(_DEAD_WALRUS_GLOBAL)``
     # must see the runtime local (rejected), NOT silently fold the module int 3 from the global.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         v = x
         for _ in range(_DEAD_WALRUS_GLOBAL):
             v = v + 1.0
@@ -1710,7 +1721,7 @@ def test_walrus_in_a_nested_scope_default_scopes_the_name_in_the_enclosing_funct
     # A nested def/lambda is a separate scope, but its default-argument expressions execute in the ENCLOSING scope, so a
     # walrus there binds an enclosing local (as in Python). The earlier ``range(_DEAD_WALRUS_GLOBAL)`` must therefore
     # see the runtime local, not the module int -- even though the lambda is dead code that lowering never reaches.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         v = x
         for _ in range(_DEAD_WALRUS_GLOBAL):
             v = v + 1.0
@@ -1724,7 +1735,7 @@ def test_walrus_in_a_nested_scope_default_scopes_the_name_in_the_enclosing_funct
 def test_walrus_in_while_condition_is_rejected() -> None:
     # A while-condition walrus rebinds every iteration and its post-test value is the loop-exit value, which the header
     # phi does not capture; rejected rather than miscompiled.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         while (x := x - 1.0) > 0.0:
             pass
         return x
@@ -1739,7 +1750,7 @@ _WALRUS_SHADOWED_INT = 3  # a module global an inner walrus shadows in the test 
 def test_walrus_target_shadowing_a_global_int_is_a_runtime_local() -> None:
     # Python makes a walrus target a function local for the whole body, shadowing a same-named module global. Using it
     # as a static range bound must therefore see the runtime local (rejected), NOT silently fold the global's value.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         v = x
         if (_WALRUS_SHADOWED_INT := x) > 0.0:
             for _ in range(_WALRUS_SHADOWED_INT):  # the local float, not the module int 3
@@ -1757,7 +1768,7 @@ def test_reassigning_the_instance_parameter_self_is_rejected() -> None:
         def __init__(self) -> None:
             self.a = 1.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             self = x
             return self.a
 
@@ -1765,7 +1776,7 @@ def test_reassigning_the_instance_parameter_self_is_rejected() -> None:
         def __init__(self) -> None:
             self.a = 1.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             y = (self := x)
             return self.a + y
 
@@ -1773,7 +1784,7 @@ def test_reassigning_the_instance_parameter_self_is_rejected() -> None:
         def __init__(self) -> None:
             self.a = 1.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             self += x
             return self.a
 
@@ -1781,7 +1792,7 @@ def test_reassigning_the_instance_parameter_self_is_rejected() -> None:
         def __init__(self) -> None:
             self.a = 1.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             for self in range(2):
                 pass
             return self.a
@@ -1790,7 +1801,7 @@ def test_reassigning_the_instance_parameter_self_is_rejected() -> None:
         def __init__(self) -> None:
             self.a = 1.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             self, y = x, x
             return self.a + y
 
@@ -1806,13 +1817,13 @@ def test_writing_a_self_attribute_and_a_plain_local_named_self_are_accepted() ->
         def __init__(self) -> None:
             self.a = 1.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             self.a = self.a + x
             return self.a
 
     lower(_StateWrite().__call__)  # no exception
 
-    def plain(x):  # type: ignore[no-untyped-def]
+    def plain(x: float):  # type: ignore[no-untyped-def]
         self = x  # an ordinary local in a plain function (no instance)
         return self + 1.0
 
@@ -1820,7 +1831,7 @@ def test_writing_a_self_attribute_and_a_plain_local_named_self_are_accepted() ->
 
 
 def test_conditional_expression_lowers_to_branch_and_phi() -> None:
-    def f(x, y, c):  # type: ignore[no-untyped-def]
+    def f(x: float, y: float, c: float):  # type: ignore[no-untyped-def]
         return x if c > 0.0 else y
 
     hir = lower(f)
@@ -1829,7 +1840,7 @@ def test_conditional_expression_lowers_to_branch_and_phi() -> None:
 
 
 def test_nested_conditional_expression_clamp_lowers() -> None:
-    def f(x, lo, hi):  # type: ignore[no-untyped-def]
+    def f(x: float, lo: float, hi: float):  # type: ignore[no-untyped-def]
         return hi if x > hi else (lo if x < lo else x)
 
     hir = lower(f)
@@ -1838,7 +1849,7 @@ def test_nested_conditional_expression_clamp_lowers() -> None:
 
 
 def test_statically_true_connective_in_condition_does_not_branch() -> None:
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         return 1.0 if (1.0 < 2.0 and 3.0 > 2.0) else 0.0
 
     hir = lower(f)
@@ -1848,7 +1859,7 @@ def test_statically_true_connective_in_condition_does_not_branch() -> None:
 
 
 def test_statically_true_connective_operand_is_dropped() -> None:
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         return 1.0 if (True and x > 0.0) else 0.0
 
     hir = lower(f)
@@ -1859,7 +1870,7 @@ def test_statically_true_connective_operand_is_dropped() -> None:
 def test_non_boolean_connective_operand_is_rejected() -> None:
     # Python's value-returning ``and``/``or`` over non-booleans is out of subset: a float operand in a boolean
     # position must raise rather than silently feed a non-boolean into the logic.
-    def f(x, y):  # type: ignore[no-untyped-def]
+    def f(x: float, y: float):  # type: ignore[no-untyped-def]
         return 1.0 if (x and y) else 0.0
 
     with pytest.raises(UnsupportedConstruct, match="boolean"):
@@ -1872,7 +1883,7 @@ def test_chained_comparison_with_boolean_operand_is_rejected() -> None:
             self.flag = False
             self.y = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             return 1.0 if 0.0 < self.flag < 1.0 else self.y  # noqa -- exercising the rejection
 
     with pytest.raises(UnsupportedConstruct, match="floating-point"):
@@ -1880,7 +1891,7 @@ def test_chained_comparison_with_boolean_operand_is_rejected() -> None:
 
 
 def test_not_of_non_boolean_is_rejected() -> None:
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         return 1.0 if not x else 0.0
 
     with pytest.raises(UnsupportedConstruct, match="boolean"):
@@ -1888,7 +1899,7 @@ def test_not_of_non_boolean_is_rejected() -> None:
 
 
 def test_bool_cast_lowers_to_float_to_bool() -> None:
-    def f(x, y):  # type: ignore[no-untyped-def]
+    def f(x: float, y: float):  # type: ignore[no-untyped-def]
         return 1.0 if bool(x) else y
 
     hir = lower(f)
@@ -1896,7 +1907,7 @@ def test_bool_cast_lowers_to_float_to_bool() -> None:
 
 
 def test_bool_of_a_boolean_is_identity() -> None:
-    def f(x, a):  # type: ignore[no-untyped-def]
+    def f(x: float, a: float):  # type: ignore[no-untyped-def]
         return 1.0 if bool(x > a) else 0.0
 
     hir = lower(f)
@@ -1905,7 +1916,7 @@ def test_bool_of_a_boolean_is_identity() -> None:
 
 
 def test_bool_cast_rejects_aggregate_argument() -> None:
-    def f(x, y):  # type: ignore[no-untyped-def]
+    def f(x: float, y: float):  # type: ignore[no-untyped-def]
         return 1.0 if bool((x, y)) else 0.0
 
     with pytest.raises(UnsupportedConstruct, match="scalar"):
@@ -1913,7 +1924,7 @@ def test_bool_cast_rejects_aggregate_argument() -> None:
 
 
 def test_bool_cast_rejects_multiple_arguments() -> None:
-    def f(x, y):  # type: ignore[no-untyped-def]
+    def f(x: float, y: float):  # type: ignore[no-untyped-def]
         return 1.0 if bool(x, y) else 0.0  # type: ignore[call-arg, arg-type]
 
     with pytest.raises(UnsupportedConstruct, match="single scalar"):
@@ -1921,7 +1932,7 @@ def test_bool_cast_rejects_multiple_arguments() -> None:
 
 
 def test_float_cast_of_bool_lowers_to_bool_to_float() -> None:
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         return float(x > 0.0)
 
     hir = lower(f)
@@ -1930,7 +1941,7 @@ def test_float_cast_of_bool_lowers_to_bool_to_float() -> None:
 
 
 def test_float_cast_of_float_is_identity() -> None:
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         return float(x) + 1.0
 
     hir = lower(f)
@@ -1939,7 +1950,7 @@ def test_float_cast_of_float_is_identity() -> None:
 
 
 def test_cross_domain_cast_chain_lowers() -> None:
-    def f(x, k):  # type: ignore[no-untyped-def]
+    def f(x: float, k: float):  # type: ignore[no-untyped-def]
         return float(x > 0.0) * k
 
     hir = lower(f)
@@ -1949,7 +1960,7 @@ def test_cross_domain_cast_chain_lowers() -> None:
 
 
 def test_float_cast_rejects_aggregate_argument() -> None:
-    def f(x, y):  # type: ignore[no-untyped-def]
+    def f(x: float, y: float):  # type: ignore[no-untyped-def]
         return float((x, y))[0]  # type: ignore[index]
 
     with pytest.raises(UnsupportedConstruct, match="scalar"):
@@ -1960,7 +1971,7 @@ def test_non_boolean_or_operand_before_absorbing_constant_is_rejected() -> None:
     # Regression (Codex): ``x or True`` with a float x must be rejected, not folded to constant True. Python evaluates
     # x first and returns it when falsy, so a non-boolean operand reached before the absorbing constant cannot be
     # silently folded away -- it must be lowered and type-checked.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         return 1.0 if (x or True) else 0.0
 
     with pytest.raises(UnsupportedConstruct, match="boolean"):
@@ -1981,11 +1992,11 @@ def test_callable_global_shadowing_bool_is_not_treated_as_the_builtin() -> None:
     # Regression (Codex): a callable global named ``bool`` (e.g. a callable instance) is what Python would call, so the
     # bare-name ``bool(x)`` must NOT be lowered as the builtin float->bool cast; it is rejected as an unsupported call.
     class AlwaysFalse:
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             return False
 
-    f = _fn_with_globals("f", "def f(x):\n    return 1.0 if bool(x) else 0.0\n", {"bool": AlwaysFalse()})
-    with pytest.raises(UnsupportedConstruct, match="bool"):
+    f = _fn_with_globals("f", "def f(x: float):\n    return 1.0 if bool(x) else 0.0\n", {"bool": AlwaysFalse()})
+    with pytest.raises(UnsupportedConstruct, match="unsupported call"):
         lower(f)
 
 
@@ -1993,7 +2004,7 @@ def test_static_bool_sees_through_bool_cast_so_return_in_branch_folds() -> None:
     # Regression (Codex round 2): the static evaluator must see through ``bool(<static bool>)`` so a guard like
     # ``if bool(True):`` folds to the taken arm with no branch -- otherwise the return in the dead arm is wrongly
     # rejected as a return-inside-a-branch.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         if bool(True):
             return 1.0
         return x  # unreachable; must not force a branch nor a return-in-branch rejection
@@ -2005,7 +2016,7 @@ def test_static_bool_sees_through_bool_cast_so_return_in_branch_folds() -> None:
 def test_static_bool_cast_short_circuits_a_dead_non_boolean_operand() -> None:
     # ``bool(False) and x`` short-circuits to False exactly like ``False and x``; the dead float operand is not
     # evaluated and must not be rejected (the static evaluator folds the bool() cast of a static bool).
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         return 1.0 if (bool(False) and x) else 0.0
 
     hir = lower(f)
@@ -2015,7 +2026,7 @@ def test_static_bool_cast_short_circuits_a_dead_non_boolean_operand() -> None:
 
 def test_static_float_sees_through_float_cast_of_a_bool() -> None:
     # ``float(True) > 0.5`` folds: float(<static bool>) is 1.0/0.0, so the comparison and the ternary fold statically.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         return x if float(True) > 0.5 else 0.0
 
     hir = lower(f)
@@ -2026,7 +2037,7 @@ def test_static_float_sees_through_float_cast_of_a_bool() -> None:
 def test_or_true_in_a_condition_folds_and_permits_a_return() -> None:
     # Regression (user): ``X or True`` (X a valid boolean) is the constant True, so the guard must fold to its taken
     # arm with no branch -- including allowing the return in that arm, which a runtime branch would reject.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         if x > 0.0 or True:
             return 1.0
         return x  # unreachable
@@ -2037,7 +2048,7 @@ def test_or_true_in_a_condition_folds_and_permits_a_return() -> None:
 
 
 def test_and_false_in_a_condition_folds_to_the_else_arm() -> None:
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         if x > 0.0 and False:
             y = 1.0
         else:
@@ -2052,7 +2063,7 @@ def test_and_false_in_a_condition_folds_to_the_else_arm() -> None:
 def test_chained_comparison_with_a_static_true_link_collapses_the_dead_and() -> None:
     # ``0.0 < 1.0 < x`` is ``(0 < 1) and (1 < x)``; the static-true link folds, and the constant folder's identity
     # element collapses ``True and (1 < x)`` to just ``1 < x`` -- no residual dead AND.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         return 1.0 if 0.0 < 1.0 < x else 0.0
 
     hir = optimize(lower(f))
@@ -2064,7 +2075,7 @@ def test_statically_false_while_still_type_checks_its_condition() -> None:
     # Regression (review): a statically-false ``while`` is skipped, but its condition must still be type-checked --
     # ``while x and False:`` with a non-boolean x must be rejected (symmetric with ``if x and False:``), not silently
     # accepted because the loop never runs.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         while x and False:
             x = x + 1.0
         return x
@@ -2074,7 +2085,7 @@ def test_statically_false_while_still_type_checks_its_condition() -> None:
 
 
 def test_statically_false_while_with_a_boolean_condition_is_skipped() -> None:
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         while x > 0.0 and False:  # a valid boolean condition that is statically false: the loop never runs
             x = x + 1.0
         return x
@@ -2085,7 +2096,7 @@ def test_statically_false_while_with_a_boolean_condition_is_skipped() -> None:
 def test_reachability_folds_through_a_bool_cast_of_a_connective() -> None:
     # ``bool(X or True)`` carries the truthiness of ``X or True`` (= True), so the guard folds and the return is
     # allowed.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         if bool(x > 0.0 or True):
             return 1.0
         return x
@@ -2096,7 +2107,7 @@ def test_reachability_folds_through_a_bool_cast_of_a_connective() -> None:
 def test_ternary_condition_with_equal_arms_folds() -> None:
     # ``True if x > 0.0 else True`` is True regardless of the (runtime) test, so the enclosing guard folds and the
     # return is not rejected as branch-nested (the inner ternary still lowers, but the outer ``if`` takes no branch).
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         if True if x > 0.0 else True:
             return 1.0
         return x
@@ -2113,7 +2124,7 @@ def test_readonly_scan_stops_at_a_returning_folded_arm() -> None:
             self.gate = True
             self.y = 0.0
 
-        def __call__(self, u):  # type: ignore[no-untyped-def]
+        def __call__(self, u: float):  # type: ignore[no-untyped-def]
             if self.gate:
                 return u + 1.0
             self.y = u
@@ -2132,7 +2143,7 @@ def test_float_cast_connective_comparison_condition_folds_without_spurious_state
             self.y = 0.0
             self.z = 0.0
 
-        def __call__(self, u):  # type: ignore[no-untyped-def]
+        def __call__(self, u: float):  # type: ignore[no-untyped-def]
             if float(u > 0.0 or True) > 0.5:
                 self.y = u
             else:
@@ -2155,7 +2166,7 @@ def test_absorbing_attribute_connective_keeps_a_dead_arm_attribute_read_only() -
             self.y = 0.0
             self.z = 0.0
 
-        def __call__(self, u):  # type: ignore[no-untyped-def]
+        def __call__(self, u: float):  # type: ignore[no-untyped-def]
             if self.flag or True:
                 pass
             else:
@@ -2173,7 +2184,7 @@ def test_absorbing_attribute_connective_keeps_a_dead_arm_attribute_read_only() -
 def test_equal_arm_ternary_condition_leaves_no_dead_branch() -> None:
     # Regression (review #4): a ternary whose arms agree is that value with no branch, so a statically-false loop
     # guarded by one is skipped cleanly (no dead diamond left in the CFG).
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         while False if x > 0.0 else False:
             x = x + 1.0
         return x
@@ -2186,7 +2197,7 @@ def test_equal_arm_ternary_value_fold_does_not_bypass_operand_type_checks() -> N
     # reachability one. ``(float(x or True) > 0.5) if c else (float(x or True) > 0.5)`` has equal arms, but folding it
     # without lowering would skip type-checking ``x or True`` -- accepting a non-boolean x and miscompiling. It must
     # be rejected, exactly as the un-wrapped ``float(x or True) > 0.5`` is.
-    def f(x, c):  # type: ignore[no-untyped-def]
+    def f(x: float, c: float):  # type: ignore[no-untyped-def]
         return 1.0 if ((float(x or True) > 0.5) if c > 0.0 else (float(x or True) > 0.5)) else 0.0
 
     with pytest.raises(UnsupportedConstruct, match="boolean"):
@@ -2204,7 +2215,7 @@ def test_read_only_scan_does_not_misfold_a_reassigned_for_counter() -> None:
             self.y = 0.0
             self.z = 0.0
 
-        def __call__(self, u):  # type: ignore[no-untyped-def]
+        def __call__(self, u: float):  # type: ignore[no-untyped-def]
             for i in range(1):
                 i = u  # the loop counter is reassigned to a runtime value
                 if i > 0.0:
@@ -2222,7 +2233,7 @@ def test_read_only_scan_does_not_misfold_a_reassigned_for_counter() -> None:
 def test_ternary_with_mismatched_scalar_arm_types_is_cleanly_rejected() -> None:
     # Regression (review): a conditional whose arms have different scalar types (a boolean and a float) is out of
     # subset; it must be rejected with a clear UnsupportedConstruct, not leak an internal phi type-mismatch error.
-    def f(x, c):  # type: ignore[no-untyped-def]
+    def f(x: float, c: float):  # type: ignore[no-untyped-def]
         return 1.0 if (False if c > 0.0 else x) else 0.0
 
     with pytest.raises(UnsupportedConstruct, match="different scalar types"):

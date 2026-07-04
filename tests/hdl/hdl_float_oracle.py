@@ -120,7 +120,7 @@ def bits_to_f32(bits: int) -> np.float32:
     return np.uint32(bits & 0xFFFFFFFF).view(np.float32)
 
 
-def f32_to_bits(x) -> int:
+def f32_to_bits(x: float) -> int:
     return int(np.float32(x).view(np.uint32))
 
 

@@ -64,12 +64,12 @@ def _close(got: float, want: float, op_count: int = 12) -> bool:
     return within(got, want, rtol, atol)
 
 
-def _abs_via_select(x, c):  # type: ignore[no-untyped-def]
+def _abs_via_select(x: float, c: float):  # type: ignore[no-untyped-def]
     # x if c>0 else -x : the negation folds into the select's operand sign conditioner -- one compare, one mux.
     return x if c > 0.0 else -x
 
 
-def _neg_abs_via_select(x, c):  # type: ignore[no-untyped-def]
+def _neg_abs_via_select(x: float, c: float):  # type: ignore[no-untyped-def]
     # The sign rides the OTHER arm, exercising the conditioner on the opposite operand. Both arms are sign chains over
     # the same input, so the whole diamond collapses to one select.
     return -x if c > 0.0 else x
@@ -86,7 +86,7 @@ def test_sign_folds_into_select_both_orientations() -> None:
             assert float(sim_b.run(x, c)[0]) == _neg_abs_via_select(x, c), f"neg_abs x={x} c={c}"
 
 
-def _cmp_select_float_chain(x, y):  # type: ignore[no-untyped-def]
+def _cmp_select_float_chain(x: float, y: float):  # type: ignore[no-untyped-def]
     # max(x, y) via a pure compare->select diamond, then a float multiply -- a cross-bank chain (boolean comparison
     # feeding a wide select feeding a wide multiply) that stays STRAIGHT-LINE (no branch). Doubling is exact in ZKF.
     return (x if x > y else y) * 2.0
@@ -102,7 +102,7 @@ def test_comparison_select_float_chain_stays_straight_line() -> None:
                 assert got == _cmp_select_float_chain(*xy), f"xy={xy}: {got}"
 
 
-def _diff_arith_select(x, y, c):  # type: ignore[no-untyped-def]
+def _diff_arith_select(x: float, y: float, c: float):  # type: ignore[no-untyped-def]
     # A select whose two arms are DIFFERENT arithmetic (product vs sum), both speculatable -> if-converts to a select
     # over two distinct sub-DAGs.
     return (x * y) if c > 0.0 else (x + y)
@@ -118,7 +118,7 @@ def test_select_arms_different_arithmetic() -> None:
                 assert _close(got, want, op_count=4), f"x={x} y={y} c={c}: {got} vs {want}"
 
 
-def _nested_ternary(x, y):  # type: ignore[no-untyped-def]
+def _nested_ternary(x: float, y: float):  # type: ignore[no-untyped-def]
     # A nested ternary in expression position: the inner sign-select is one arm of the outer select. All four leaves
     # are sign chains of representable inputs, so every result is exact.
     return (x if x > 0.0 else -x) if y > 0.0 else (y if x > 0.0 else -y)
@@ -131,14 +131,14 @@ def test_nested_ternary_select() -> None:
             assert float(sim.run(x, y)[0]) == _nested_ternary(x, y), f"x={x} y={y}"
 
 
-def _ifconv_division_form(x, y, c):  # type: ignore[no-untyped-def]
+def _ifconv_division_form(x: float, y: float, c: float):  # type: ignore[no-untyped-def]
     # IF-CONVERTIBLE formulation: the diamond merges two speculatable arms (add/sub), then ONE division outside it.
     # The select collapses the diamond to straight-line code; the division is not inside an arm, so nothing blocks it.
     m = (x + y) if c > 0.0 else (x - y)
     return m / (y * y + 1.0)  # structurally-nonzero, non-power-of-two divisor
 
 
-def _real_branch_division_form(x, y, c):  # type: ignore[no-untyped-def]
+def _real_branch_division_form(x: float, y: float, c: float):  # type: ignore[no-untyped-def]
     # REAL-BRANCH formulation of the SAME math: each arm carries the (unspeculatable) division, so the diamond CANNOT
     # if-convert and stays a genuine branch -- yet the value computed on each path is identical to the if-converted
     # form. The two must agree (a strong cross-check: one compiles to a select + one divide, the other to a branch
@@ -172,7 +172,7 @@ def test_ifconvertible_and_real_branch_forms_agree() -> None:
 # M3: ``not`` never materializes hardware -- it folds into the consumer's sideband on the CONSUMER side.
 
 
-def _not_in_branch_condition(c: bool, x, y):  # type: ignore[no-untyped-def]
+def _not_in_branch_condition(c: bool, x: float, y: float):  # type: ignore[no-untyped-def]
     if not c:
         r = x + y
     else:
@@ -254,7 +254,7 @@ def test_double_negation_is_identity() -> None:
     assert sim.run(False)[0] is False
 
 
-def _comparison_both_polarities(x, y):  # type: ignore[no-untyped-def]
+def _comparison_both_polarities(x: float, y: float):  # type: ignore[no-untyped-def]
     # ONE comparison consumed in BOTH polarities: ``x > y`` drives a boolean output directly, and ``not (x > y)`` (the
     # complement) gates a float select. One comparator tap must serve both -- the polarities must stay consistent.
     gt = x > y
@@ -274,7 +274,7 @@ def test_comparison_in_both_polarities() -> None:
                 assert float(got[1]) == want_val, f"xy={xy}: val {float(got[1])} vs {want_val}"
 
 
-def _pure_recurrence(x, n):  # type: ignore[no-untyped-def]
+def _pure_recurrence(x: float, n: float):  # type: ignore[no-untyped-def]
     # A PURE loop-carried recurrence (no division -- the existing in-loop test is division-bearing): a Horner-like
     # multiply-accumulate over a data-dependent trip count. The header phi for ``acc`` is loop-carried; its live-in
     # overlaps its back-edge arm, so the coalescer must judge it correctly (it keeps a copy where it must, coalesces
@@ -296,7 +296,7 @@ def test_pure_loop_carried_recurrence_matches_reference() -> None:
         assert _close(got, want, op_count=2 * max(1, int(n)) + 2), f"x={x} n={n}: {got} vs {want}"
 
 
-def _soundness_corner(x, n):  # type: ignore[no-untyped-def]
+def _soundness_corner(x: float, n: float):  # type: ignore[no-untyped-def]
     # The coalescing soundness corner: a REAL diamond INSIDE a loop whose arms reuse an input (``x``) that is ALSO the
     # seed of the phi result (``acc`` is seeded from x and is the loop-carried header phi), branching ON that phi
     # result (``acc > 0.0``). The else arm divides (structurally-nonzero, non-power-of-two divisor) so the diamond
@@ -320,7 +320,7 @@ def test_coalescing_soundness_corner_matches_reference() -> None:
         assert _close(got, want, op_count=2 * max(1, int(n)) + 2), f"x={x} n={n}: {got} vs {want}"
 
 
-def _mixed_tuple_io(flag: bool, x, y):  # type: ignore[no-untyped-def]
+def _mixed_tuple_io(flag: bool, x: float, y: float):  # type: ignore[no-untyped-def]
     # The two float outputs are exact (sum/difference of representable inputs).
     inside = flag and (x > y)
     return inside, x + y, x - y
@@ -360,7 +360,7 @@ def test_logical_port_is_the_single_public_port_type() -> None:
     assert all(isinstance(port, holoso.LogicalPort) for port in (*sim.inputs, *sim.outputs))
 
 
-def _mixed_list_io(flag: bool, x):  # type: ignore[no-untyped-def]
+def _mixed_list_io(flag: bool, x: float):  # type: ignore[no-untyped-def]
     # A LIST return (vs the tuple above) mixing a float and a bool: same aggregate-flattening path, different literal.
     return [x + 1.0, not flag]
 
@@ -376,7 +376,7 @@ def test_mixed_list_io_metadata_and_values() -> None:
             assert got[1] is (not flag), f"flag={flag} x={x}: {got[1]}"
 
 
-def _unused_bool_input(flag: bool, x, y):  # type: ignore[no-untyped-def]
+def _unused_bool_input(flag: bool, x: float, y: float):  # type: ignore[no-untyped-def]
     # An UNUSED boolean input: it is a real port but the float result must not depend on it at all.
     return x * y + 1.0
 
@@ -405,7 +405,7 @@ class _ChainedSlots:
         self._a = 0.0
         self._b = 0.0
 
-    def __call__(self, x):  # type: ignore[no-untyped-def]
+    def __call__(self, x: float):  # type: ignore[no-untyped-def]
         out = self._a
         self._a = self._b
         self._b = x
@@ -431,7 +431,7 @@ class _BoolStateMachine:
     def __init__(self) -> None:
         self.armed = False
 
-    def __call__(self, x):  # type: ignore[no-untyped-def]
+    def __call__(self, x: float):  # type: ignore[no-untyped-def]
         # latch ``armed`` once x crosses 1.0, and keep it latched; the float output is gated on the PREVIOUS armed.
         gated = 100.0 if self.armed else x
         if x > 1.0:
@@ -459,11 +459,11 @@ def test_boolean_state_slot_stream_and_reset() -> None:
         assert got[1] is want_armed, f"post-reset armed at x={x}: {got[1]} vs {want_armed}"
 
 
-def _lt_kernel(x, y):  # type: ignore[no-untyped-def]
+def _lt_kernel(x: float, y: float):  # type: ignore[no-untyped-def]
     return x < y
 
 
-def _gt_swapped_kernel(x, y):  # type: ignore[no-untyped-def]
+def _gt_swapped_kernel(x: float, y: float):  # type: ignore[no-untyped-def]
     return y > x
 
 
@@ -482,7 +482,7 @@ def test_commuted_comparisons_agree_bool_exact() -> None:
                 assert a is want and b is want, f"xy={xy}: lt={a} gt={b} want={want}"
 
 
-def _constant_subexpression(x):  # type: ignore[no-untyped-def]
+def _constant_subexpression(x: float):  # type: ignore[no-untyped-def]
     # A purely constant subexpression (``2*3 + 1`` -> 7.0) must fold at compile time; only ``x + 7.0`` survives. The
     # output is checked against the float64 reference, so a folding bug that changed the constant would be caught.
     k = 2.0 * 3.0 + 1.0
@@ -496,7 +496,7 @@ def test_constant_subexpression_folds_and_is_correct() -> None:
         assert got == _constant_subexpression(x), f"x={x}: {got}"  # x + 7.0 is exact for these x
 
 
-def _constant_condition_folds_arm(x):  # type: ignore[no-untyped-def]
+def _constant_condition_folds_arm(x: float):  # type: ignore[no-untyped-def]
     # A comparison of two COMPILE-TIME constants (``2.0 > 1.0``) folds the condition; only the true arm is lowered.
     # The else arm divides by a compile-time zero -- if it were ever lowered the build would record an error / produce
     # a wrong value, so a correct result on the kept arm proves the dead arm was pruned, not merely never taken.

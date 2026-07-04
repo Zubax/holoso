@@ -68,7 +68,7 @@ def _assert_bits_equal(  # type: ignore[no-untyped-def]
 # --------------------------------------------------------------------------------------------------------------------
 
 
-def _branchy_diamond(x, y, c):  # type: ignore[no-untyped-def]
+def _branchy_diamond(x: float, y: float, c: float):  # type: ignore[no-untyped-def]
     t = (x * y + c) * y  # a multiply-add-multiply chain that commits late
     if t > c:
         r = t + x
@@ -94,7 +94,7 @@ def test_branchy_diamond_timing_invariant() -> None:
 # --------------------------------------------------------------------------------------------------------------------
 
 
-def _newton_reciprocal(a, n):  # type: ignore[no-untyped-def]
+def _newton_reciprocal(a: float, n: float):  # type: ignore[no-untyped-def]
     # y_{k+1} = y_k * (2 - a*y_k) converges to 1/a; the loop carries y across a data-dependent number of iterations.
     y = 0.5
     i = n
@@ -146,7 +146,7 @@ class _LeakyAccumulator:
     def __init__(self) -> None:
         self._acc = 0.0
 
-    def __call__(self, x, y):  # type: ignore[no-untyped-def]
+    def __call__(self, x: float, y: float):  # type: ignore[no-untyped-def]
         d = x * y + x
         if x > y:
             r = d + 1.0

@@ -179,7 +179,7 @@ def test_mir_constant_only_node_carries_float_type() -> None:
 
 
 def test_mul_by_pow2_const_becomes_ilog2() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return a * 0.25
 
     ops = _ops(_run(f))
@@ -188,7 +188,7 @@ def test_mul_by_pow2_const_becomes_ilog2() -> None:
 
 
 def test_left_const_mul_pow2_is_commutative() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return 2 * a
 
     ops = _ops(_run(f))
@@ -197,7 +197,7 @@ def test_left_const_mul_pow2_is_commutative() -> None:
 
 
 def test_div_by_pow2_becomes_ilog2() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return a / 4.0
 
     ops = _ops(_run(f))
@@ -206,7 +206,7 @@ def test_div_by_pow2_becomes_ilog2() -> None:
 
 
 def test_div_by_nonpow2_const_becomes_reciprocal_multiply() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return a / 3.0
 
     mir = _run(f)
@@ -216,7 +216,7 @@ def test_div_by_nonpow2_const_becomes_reciprocal_multiply() -> None:
 
 
 def test_wide_supported_pow2_uses_ilog2_operator() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return a * 16.0
 
     fmt = FloatFormat(3, 4)
@@ -231,7 +231,7 @@ def test_wide_supported_pow2_uses_ilog2_operator() -> None:
 
 
 def test_unsupported_pow2_shift_is_rejected() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return a * 64.0
 
     fmt = FloatFormat(3, 4)
@@ -247,14 +247,14 @@ def test_unsupported_pow2_shift_is_rejected() -> None:
 
 
 def test_true_division_stays_fdiv() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         return a / b
 
     assert [type(o.operator) for o in _ops(_run(f))] == [FDivOperator]
 
 
 def test_subtraction_folds_into_second_operand_sign() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         return a - b
 
     ops = _ops(_run(f))
@@ -263,7 +263,7 @@ def test_subtraction_folds_into_second_operand_sign() -> None:
 
 
 def test_operand_negation_folds_into_operator() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         return a * (-b)
 
     ops = _ops(_run(f))
@@ -272,7 +272,7 @@ def test_operand_negation_folds_into_operator() -> None:
 
 
 def test_pure_sign_output_adds_no_operation() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return -abs(a)
 
     mir = _run(f)
@@ -281,7 +281,7 @@ def test_pure_sign_output_adds_no_operation() -> None:
 
 
 def test_selected_mir_has_only_input_const_operation_nodes() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
     mir = _run(f)
@@ -316,7 +316,7 @@ def test_unclosed_loop_phi_is_rejected() -> None:
         builder.finish()
 
 
-def _deep_cfg_kernel(p0):  # type: ignore[no-untyped-def]
+def _deep_cfg_kernel(p0: float):  # type: ignore[no-untyped-def]
     # A doubly-nested unrolled loop (each trip count well under the unroll threshold) with a per-iteration branch.
     # Unrolling chains ~2700 basic blocks, so the CFG reverse-postorder DFS recurses far deeper than Python's default
     # recursion limit. The accumulator stays >=0, so every iteration takes the add arm: the result is the input + 900.
@@ -370,7 +370,7 @@ def _hir_of(target):  # type: ignore[no-untyped-def]
 
 
 def test_if_conversion_collapses_a_pure_diamond() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         if a > b:
             y = a + b
         else:
@@ -385,7 +385,7 @@ def test_if_conversion_collapses_a_pure_diamond() -> None:
 
 def test_if_conversion_refuses_an_unspeculatable_arm() -> None:
     # Division must not be speculated: a div-by-zero on the not-taken path would assert the module error flag.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         if a > b:
             y = a + b
         else:
@@ -400,7 +400,7 @@ def test_if_conversion_refuses_an_unspeculatable_arm() -> None:
 def test_if_conversion_respects_the_arm_size_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 1)
 
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         if a > b:
             y = (a + b) * a + b  # three operations: over the per-arm budget of one
         else:
@@ -414,7 +414,7 @@ def test_if_conversion_respects_the_arm_size_budget(monkeypatch: pytest.MonkeyPa
 def test_if_conversion_knob_zero_disables_the_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
 
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         if a > b:
             y = a + b
         else:
@@ -430,7 +430,7 @@ def test_if_conversion_knob_zero_disables_the_pass(monkeypatch: pytest.MonkeyPat
 def test_if_conversion_converts_a_boolean_phi_merge() -> None:
     # Bool-phi if-conversion: a diamond merging a boolean collapses to one block, the merge becoming a bool_select
     # (a float select is the wide dual). Both arms here are dynamic comparisons, so strength reduction keeps the mux.
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
         if a > b:
             flag = b > c
         else:
@@ -446,7 +446,7 @@ def test_if_conversion_converts_a_boolean_phi_merge() -> None:
 def test_if_conversion_reduces_constant_armed_boolean_select() -> None:
     # The state-machine merge shape: arms are boolean constants, so the bool_select reduces to and/or/not via strength
     # reduction (no select node survives), exactly the schmitt/pfd collapse to a single straight-line block.
-    def f(a, b, hold: bool):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, hold: bool):  # type: ignore[no-untyped-def]
         if a > b:
             flag = True
         else:
@@ -548,7 +548,7 @@ def test_bool_select_reductions_are_truth_table_correct() -> None:
 
 
 def test_if_conversion_collapses_nested_chains_to_one_block() -> None:
-    def f(x, y):  # type: ignore[no-untyped-def]
+    def f(x: float, y: float):  # type: ignore[no-untyped-def]
         if x > 0.0:
             a = x + y
         else:
@@ -568,7 +568,7 @@ def test_if_conversion_collapses_nested_chains_to_one_block() -> None:
 def test_if_conversion_repoints_loop_header_phi_arms() -> None:
     # A diamond inside a while body: the dissolved merge block fed the loop-header phis, whose arms must repoint to
     # the spliced block (the localized pin for the repoint path; the examples exercise it only end-to-end).
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         w = x
         while w > 0.0:
             if w > 2.0:
@@ -600,7 +600,7 @@ def test_dead_diamond_frees_its_condition_cone() -> None:
     # its condition cone becomes ordinary dead code -- INCLUDING an error-bearing division feeding only the
     # condition, which then reports nothing (exactly as an unused division without a branch around it reports
     # nothing today). This pins the documented semantics of the error sideband: executed operators only.
-    def f(a, b, x):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, x: float):  # type: ignore[no-untyped-def]
         if bool(a / b):
             y = x + 1.0
         else:

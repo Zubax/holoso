@@ -16,7 +16,7 @@ class SignHold:
     def __init__(self) -> None:
         self.acc = 0.0
 
-    def __call__(self, a):
+    def __call__(self, a: float):
         prev = self.acc
         self.acc = -a
         return -prev

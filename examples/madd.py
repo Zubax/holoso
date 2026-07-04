@@ -8,7 +8,7 @@ from pathlib import Path
 import holoso
 
 
-def madd(a, b, c):
+def madd(a: float, b: float, c: float) -> float:
     """``c`` is an unused argument, kept as given to exercise dead-input handling."""
     return (a - b) * 0.25 + a * b * 8
 

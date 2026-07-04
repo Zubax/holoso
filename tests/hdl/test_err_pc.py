@@ -46,7 +46,7 @@ def _ops(stage_output: int) -> OpConfig:
     )
 
 
-def _divide(a, b):  # type: ignore[no-untyped-def]
+def _divide(a: float, b: float):  # type: ignore[no-untyped-def]
     return a / b
 
 

@@ -115,7 +115,7 @@ def _muls(mir: Mir) -> list[int]:
 
 
 def test_schedule_respects_dependencies() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
     mir = _run(f)
@@ -134,7 +134,7 @@ def test_schedule_respects_dependencies() -> None:
 
 def test_pipelined_issue_overlaps_a_slow_op() -> None:
     # A fast chain advances while an unrelated slow divide is still in flight -- the barrier model could not do this.
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
         return a / b + (a + b + c)
 
     mir = _run(f)
@@ -157,7 +157,7 @@ def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator(config: O
     # two must issue on distinct cycles. Before the contention rule the scheduler let both issue on the same cycle
     # -> they collided on the single comparator (one read the other's operands), corrupting the result in the RTL
     # while the model still passed.
-    def f(x, lo, hi):  # type: ignore[no-untyped-def]
+    def f(x: float, lo: float, hi: float):  # type: ignore[no-untyped-def]
         return 0.0 if lo < x < hi else x
 
     lir = build(_run(f, config.make_ops(FMT)), f"deadband_{config.label}", fetch_stages=3)
@@ -218,7 +218,7 @@ def test_entry_branch_on_resident_condition_skips_the_drained_boundary() -> None
         def __init__(self) -> None:
             self._armed = False
 
-        def step(self, a, b):  # type: ignore[no-untyped-def]
+        def step(self, a: float, b: float):  # type: ignore[no-untyped-def]
             if self._armed:
                 r = a / b  # a non-speculatable arm keeps this a real branch, not an if-converted select
             else:
@@ -246,7 +246,7 @@ def test_non_entry_branch_on_resident_condition_redirects_at_its_base() -> None:
         def __init__(self) -> None:
             self._armed = False
 
-        def step(self, p: bool, q: bool, a, b):  # type: ignore[no-untyped-def]
+        def step(self, p: bool, q: bool, a: float, b: float):  # type: ignore[no-untyped-def]
             if self._armed:  # entry branch on the resident boolean state
                 if q:  # non-entry branch on the resident input q; division arms keep it a real branch, not a select
                     r = a / b
@@ -281,7 +281,7 @@ def test_resident_bound_inline_select_lands_combinationally() -> None:
         def __init__(self) -> None:
             self._armed = False
 
-        def step(self, c, d):  # type: ignore[no-untyped-def]
+        def step(self, c: float, d: float):  # type: ignore[no-untyped-def]
             r = c if self._armed else d  # condition (state) and both arms are resident -> the select binds nothing
             self._armed = c > d
             return r
@@ -675,7 +675,7 @@ def test_merge_threading_refuses_a_back_edge_carried_merge_phi() -> None:
     # BACK-EDGE arm is a successor-phi arm too, yet from a different predecessor, so composition would not rewrite it;
     # deleting the merge phi would dangle. The guard must refuse such a merge (the deferred self-latch case).
     # Crash-before: optimize() raised KeyError after threading deleted the still-referenced merge phi.
-    def loop_invariant_merge(a, den, c):  # type: ignore[no-untyped-def]
+    def loop_invariant_merge(a: float, den: float, c: float):  # type: ignore[no-untyped-def]
         if a > 0.0:
             x = a / den  # a real (non-speculatable) division branch -> a separate merge block holding phi x
         else:
@@ -759,7 +759,7 @@ def test_entry_busy_gates_a_successor_firing_at_its_inherited_instance_free_cycl
     # for every current kernel -- a residue survives only when an operator's initiation interval exceeds its latest
     # write word, which no II=1 operator does -- so no end-to-end build exercises it. Pin its consumption directly:
     # ``schedule_ops`` must hold a pooled firing off its instance until that instance frees in the successor frame.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         return a * b  # one pooled firing; both operands are inputs (block-start ready), so nothing else can delay it
 
     mir = _run(f)
@@ -807,7 +807,7 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     from recip_newton import NewtonReciprocal  # noqa: PLC0415 (example kernels live under examples/)
 
-    def join_spill(x, y, z):  # w spills from the entry into BOTH arms and is read after the merge
+    def join_spill(x: float, y: float, z: float):  # w spills from the entry into BOTH arms and is read after the merge
         w = (x * z + y) * z + y
         if x < y:
             a = z + 1.0
@@ -815,14 +815,16 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
             a = z / (y + 1.0)  # the division keeps this a real branch (not if-converted)
         return w + a
 
-    def phi_merge(x, y):  # the merged value is produced in each arm (no entry spill), read after the merge
+    # the merged value is produced in each arm (no entry spill), read after the merge
+    def phi_merge(x: float, y: float):
         if x < y:
             a = x + 1.0
         else:
             a = x / (y + 1.0)
         return a * 2.0
 
-    def bool_write_merge(x, y):  # a boolean phi whose else arm reads the value inverted -> a non-coalesced bool_write
+    # a boolean phi whose else arm reads the value inverted -> a non-coalesced bool_write
+    def bool_write_merge(x: float, y: float):
         p = x < y
         if x < 1.0:
             c = p
@@ -967,7 +969,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         def __init__(self) -> None:
             self._d = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             prev = self._d
             self._d = x
             return prev
@@ -976,7 +978,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         def __init__(self) -> None:
             self._s = 0.0
 
-        def __call__(self, x, y):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float, y: float):  # type: ignore[no-untyped-def]
             out = self._s
             if x > 0.0:
                 self._s = x + y
@@ -988,7 +990,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         def __init__(self) -> None:
             self._f = False
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             out = self._f
             if x > 0.0:
                 self._f = True
@@ -1000,7 +1002,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         def __init__(self) -> None:
             self._b = False
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             old = self._b
             self._b = not self._b
             return x if old else -x
@@ -1009,7 +1011,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         def __init__(self) -> None:  # the destination): the carry survives only if the boundary bundle is read-first
             self._b = False
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             self._b = not self._b
             return x
 
@@ -1280,7 +1282,7 @@ def _ilog2(mir: Mir) -> list[int]:
 
 def test_fmul_ilog2_same_k_shares_one_instance() -> None:
     # Two K=2 scalings that never run on the same cycle (the second waits on a multiply) pool onto one instance.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         return (a * b) * 4.0, b * 4.0
 
     mir = _run(f)
@@ -1294,7 +1296,7 @@ def test_fmul_ilog2_same_k_shares_one_instance() -> None:
 
 def test_fmul_ilog2_same_k_serializes_by_default_parallelizes_with_budget() -> None:
     # Two independent K=2 scalings are both ready at cycle 1; the per-kind budget governs them like any other kind.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         return a * 4.0, b * 4.0
 
     mir = _run(f)
@@ -1307,7 +1309,7 @@ def test_fmul_ilog2_same_k_serializes_by_default_parallelizes_with_budget() -> N
 
 
 def test_fmul_ilog2_different_k_never_shares() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         return a * 4.0 + b * 8.0  # K=2 and K=3 -- distinct hardware modules
 
     mir = _run(f)
@@ -1320,7 +1322,7 @@ def test_fmul_ilog2_different_k_never_shares() -> None:
 
 
 def test_build_lir_small_kernel() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         return (a - b) * 0.25 + a * b
 
     lir = build(_run(f), "kernel", fetch_stages=3)
@@ -1355,7 +1357,7 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
         def __init__(self) -> None:
             self._p = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             out = self._p + x  # reads the old _p; the fadd result is the only output
             self._p = x  # a non-coalesced writeback whose source (the input x) is an ordinary register
             return out
@@ -1395,7 +1397,7 @@ def test_cfg_phi_merge_register_shows_residence(monkeypatch: pytest.MonkeyPatch)
     # register is written ONLY by the per-arm phi copies and read at the boundary, never by an operator. Before
     # phi-copy residence was added to reg_liveness, such a register had a use but no def and so collapsed to an empty
     # (untinted) live set -- the CFG-report liveness gap.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         if x > 0.0:
             z = 1.0
         else:
@@ -1419,7 +1421,7 @@ def test_cfg_write_only_state_slot_is_reserved() -> None:
         def __init__(self) -> None:
             self.acc = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             if x > 0.0:
                 t = x * 2.0
             else:
@@ -1443,7 +1445,7 @@ def test_cfg_state_slot_coalesces_onto_its_register() -> None:
         def __init__(self) -> None:
             self.state = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             self.state = self.state * 0.9 + x
             return float(x > 0.0) * self.state
 
@@ -1464,7 +1466,7 @@ def test_cfg_branch_conditions_reuse_boolean_registers(monkeypatch: pytest.Monke
 
     # Sequential data-dependent branches: each condition is computed, tested at its boundary, and dead before the next,
     # so the boolean bank reuses one register across them instead of allocating one per branch.
-    def f(x, y, z):  # type: ignore[no-untyped-def]
+    def f(x: float, y: float, z: float):  # type: ignore[no-untyped-def]
         a = x
         if x > 0.0:
             a = a + 1.0
@@ -1500,7 +1502,7 @@ def test_diamond_op_result_arms_coalesce(monkeypatch: pytest.MonkeyPatch) -> Non
     # correct on both arms -- bit-exact value preservation against the RTL is the cosim's job; here we pin the win.
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # keep the diamond a real phi merge, not a select
 
-    def f(x, y):  # type: ignore[no-untyped-def]
+    def f(x: float, y: float):  # type: ignore[no-untyped-def]
         if x > 0.0:
             z = x + y
         else:
@@ -1521,7 +1523,7 @@ def test_loop_carried_phi_coalesces_when_non_interfering() -> None:
     # A directed loop whose carried value is read once (read-first) before its update lands: the header phi and its
     # back-edge arm (an op result) do not interfere, so they coalesce -- the loop body installs no register-source copy.
     # Only the entry constants (acc=0, i=0) keep their copies.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         acc = 0.0
         i = 0.0
         while i < 3.0:
@@ -1577,7 +1579,7 @@ def test_phi_coalescing_residual_install_conflict_is_resolved() -> None:
     # (sign-folded) else-arm install writes that shared register. The final, install-aware interference then flags the
     # class against itself and the coloring backstop aborted the build. The fixpoint must de-coalesce ``a`` and build.
     # The division keeps the diamond a real branch (un-if-converted), which is what creates the phi merge.
-    def k(x, b, cc):  # type: ignore[no-untyped-def]
+    def k(x: float, b: float, cc: float):  # type: ignore[no-untyped-def]
         if b < cc:
             a = x
             z = 1.0
@@ -1596,7 +1598,7 @@ def test_phi_coalescing_conflict_resolved_under_reversed_declaration_order() -> 
     # order the union-find follows -- change, so a DIFFERENT phi wins the merge onto ``x``. The fixpoint must converge
     # regardless of which phi coalesced first; this pins the resolution as order-independent, not an artifact of one id
     # assignment.
-    def k(x, b, cc):  # type: ignore[no-untyped-def]
+    def k(x: float, b: float, cc: float):  # type: ignore[no-untyped-def]
         if b < cc:
             d = b
             z = 1.0
@@ -1613,7 +1615,7 @@ def test_phi_coalescing_conflict_resolved_under_reversed_declaration_order() -> 
 def test_phi_coalescing_conflict_resolved_with_swapped_branch_arms() -> None:
     # The mirror: the coalescing identity arm sits in the else block and the sign-folded residual arm in the then block,
     # so the conflict is exercised from the opposite branch polarity. Confirms the de-coalescing is arm-order agnostic.
-    def k(x, b, cc):  # type: ignore[no-untyped-def]
+    def k(x: float, b: float, cc: float):  # type: ignore[no-untyped-def]
         if b < cc:
             a = -(x + 1.0)
             z = x
@@ -1662,7 +1664,7 @@ def test_state_war_backstop_allows_noop_writeback() -> None:
         def __init__(self) -> None:
             self.s = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             out = self.s + x
             self.s = self.s
             return out
@@ -1678,7 +1680,7 @@ def test_copy_slot_residence_unbroken_when_tapped_at_boundary() -> None:
         def __init__(self) -> None:
             self._d = 0.0
 
-        def __call__(self, x):  # type: ignore[no-untyped-def]
+        def __call__(self, x: float):  # type: ignore[no-untyped-def]
             prev = self._d
             self._d = x
             return prev
@@ -1734,7 +1736,7 @@ def test_build_lir_ekf1_stateless() -> None:
 
 def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
     # +c and -c share a single nonnegative pool entry; the sign rides the (free) per-operand sign control.
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return a * 1000.0 + a * (-1000.0)
 
     lir = build(_run(f), "f", fetch_stages=3)
@@ -1745,7 +1747,7 @@ def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
 
 
 def test_negative_constant_operand_is_stored_as_magnitude_with_negate() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return a + (-1000.0)
 
     lir = build(_run(f), "f", fetch_stages=3)
@@ -1774,7 +1776,7 @@ def test_constant_pool_is_canonically_nonnegative() -> None:
 def test_underflowing_negative_constant_is_not_sign_folded() -> None:
     # A negative value that rounds to +0 in ZKF (which has no -0) must NOT carry a folded negate: the magnitude already
     # encodes to the canonical +0, so a negate over it would emit an illegal -0 rather than the +0 the value encodes to.
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return a + (-1e-12)  # -1e-12 underflows to +0 in FloatFormat(6, 18)
 
     lir = build(_run(f), "f", fetch_stages=3)
@@ -1784,7 +1786,7 @@ def test_underflowing_negative_constant_is_not_sign_folded() -> None:
 
 
 def test_underflowing_negative_constant_output_stays_canonical_zero() -> None:
-    def f(a):  # type: ignore[no-untyped-def]
+    def f(a: float):  # type: ignore[no-untyped-def]
         return a + a, -1e-12  # the -1e-12 output underflows to +0; it must stay canonical, not fold to illegal -0
 
     lir = build(_run(f), "f", fetch_stages=3)
@@ -2009,7 +2011,7 @@ def test_commutative_port_assignment_never_increases_read_mux_fan_in(  # type: i
 
 def test_optional_stages_raise_latency_without_changing_numerics() -> None:
     # A kernel touching every operator family: fadd, fmul, fdiv, and the 2^-2 strength-reduced fmul_ilog2.
-    def kernel(a, b, c):  # type: ignore[no-untyped-def]
+    def kernel(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
         return (a - b) / c + a * b * 0.25
 
     fmt = FloatFormat(8, 36)
@@ -2035,10 +2037,10 @@ def test_reach_floor_seed_skips_annealing(monkeypatch) -> None:  # type: ignore[
     real = regalloc.dual_annealing
     monkeypatch.setattr(regalloc, "dual_annealing", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
 
-    def floor_kernel(a, b):  # type: ignore[no-untyped-def]
+    def floor_kernel(a: float, b: float):  # type: ignore[no-untyped-def]
         return a + b  # no register sharing -> greedy seed is at the reach floor
 
-    def sharing_kernel(a, b, c):  # type: ignore[no-untyped-def]
+    def sharing_kernel(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
         return a * b + c  # the product and the sum reuse registers, lifting the objective above the floor
 
     build(_run(floor_kernel), "floor", fetch_stages=3)
@@ -2053,7 +2055,7 @@ def test_zero_regalloc_effort_bypasses_annealing(monkeypatch) -> None:  # type: 
     monkeypatch.setattr(regalloc, "_REFINE_MAXITER", 0)
     monkeypatch.setattr(regalloc, "dual_annealing", lambda *args, **kwargs: pytest.fail("annealing was not bypassed"))
 
-    def sharing_kernel(a, b, c):  # type: ignore[no-untyped-def]
+    def sharing_kernel(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
         return a * b + c
 
     build(_run(sharing_kernel), "sharing", fetch_stages=3)
@@ -2065,7 +2067,7 @@ def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
     # later marks it past its true landing (and, for a boundary cast, past the initiation interval, so its report cell
     # falls off the grid) and leaves a consumer's read cycle outside its residence. Here a multiply consumes the cast
     # result.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         return float(x > 0.0) * x
 
     lir = build(_run(f), "cast_mul", fetch_stages=3)
@@ -2094,7 +2096,7 @@ def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
     # Two DIFFERENT relations over the same operand pair tap two distinct output ports of one comparator activation,
     # so they fuse into a single firing: one instance issue, one operand read, two boolean writes -- the multi-output
     # machinery exercised end to end on the boolean side. The model must still produce both values correctly.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         below = a < b
         same = a == b
         return [float(below), float(same)]
@@ -2115,7 +2117,7 @@ def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
 def test_same_port_taps_with_different_inversions_do_not_fuse() -> None:
     # ``a < b`` taps the lt flag plainly and ``a >= b`` taps the SAME flag inverted: one output-port lane writes once
     # per firing, so these must stay two firings, spaced by instance contention. Both values must still be correct.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         below = a < b
         not_below = a >= b
         return [float(below), float(not_below)]
@@ -2212,7 +2214,7 @@ def test_write_timeline_resolves_inline_wide_producers() -> None:
     # Regression (review): the write timeline recorded only pooled firings' wide writes, so a register written by an
     # inline bool->float cast and read by a float operator resolved to NO producer at all -- latest_producer_before
     # raised KeyError on the cast-fed multiply below.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         return float(x > 0.0) * x
 
     lir = build(_run(f), "cast_timeline", fetch_stages=3)
@@ -2236,7 +2238,7 @@ def test_commutative_comparator_swap_permutes_output_taps(config: OperatorCase) 
     # otherwise read (a,b) and (b,a) -- two registers per read port; the port assignment orients one of them swapped,
     # shrinking each port's read-set to a single register, and the swapped firing's lt tap moves to gt. Bit-exact
     # because the ZKF ordering is total and compare is antisymmetric.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         below = a < b
         above = b < a
         return [float(below), float(above)]
@@ -2276,7 +2278,7 @@ def test_chained_slot_live_in_blocks_early_install(config: OperatorCase) -> None
 def test_select_folds_arm_signs_into_operand_conditioners() -> None:
     # ``x if c else -x`` costs exactly one comparison and one select: the arm negation rides the select's operand
     # conditioner (the inline dual of the pooled operators' sign sidebands), never a separate float operation.
-    def f(x, c):  # type: ignore[no-untyped-def]
+    def f(x: float, c: float):  # type: ignore[no-untyped-def]
         y = x if c > 0.0 else -x
         return y
 
@@ -2324,7 +2326,7 @@ def test_not_folds_into_every_sink_position() -> None:
     # A semantic NOT never materializes hardware: it becomes a free inversion conditioner at each consumer. The
     # kernel routes one comparison's negation into a logic operand, a bool output, and a bool->float cast; the LIR
     # must contain NO inline op beyond the band and the cast, and the inversions must ride the operand sidebands.
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
         flag = not (a > b)
         out_logic = flag and (c > 0.0)
         return [float(flag), float(out_logic)]
@@ -2345,7 +2347,7 @@ def test_not_folds_into_every_sink_position() -> None:
 def test_not_on_a_branch_condition_swaps_the_targets() -> None:
     # ``if not cond`` costs nothing: the branch takes the complementary target instead of inverting the register.
     # The division arms keep the diamond a real branch (if-conversion refuses them).
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         if not (a > b):
             y = a / (b * b + 1.0)
         else:
@@ -2362,7 +2364,7 @@ def test_not_on_a_branch_condition_swaps_the_targets() -> None:
 
 
 def test_double_negation_cancels() -> None:
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         flag = not (not (a > b))
         return float(flag)
 
@@ -2377,7 +2379,7 @@ def test_double_negation_cancels() -> None:
 
 def test_value_consumed_in_both_polarities_shares_one_producer() -> None:
     # ``x`` and ``not x`` share one comparator tap and one boolean register: the polarity lives on each consumer.
-    def f(a, b):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float):  # type: ignore[no-untyped-def]
         flag = a > b
         return [float(flag), float(not flag)]
 
@@ -2393,7 +2395,7 @@ class _InvertedState:
     def __init__(self) -> None:
         self._flip = False
 
-    def step(self, x):  # type: ignore[no-untyped-def]
+    def step(self, x: float):  # type: ignore[no-untyped-def]
         old = self._flip
         self._flip = not self._flip
         return x if old else -x
@@ -2417,7 +2419,7 @@ def test_inverted_bool_phi_arm_installs_with_opposite_polarities(config: Operato
     # opposite inversions (one arm rewrites the flag as its own negation). The two install copies must carry
     # opposite-polarity sources, and the model must take the correct value on both paths. The division keeps the
     # diamond a real branch (bool-phi diamonds are refused by if-conversion anyway; the div makes it doubly so).
-    def f(a, b, c):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float):  # type: ignore[no-untyped-def]
         flag = a > b
         if c > 0.0:
             flag = not flag
@@ -2445,7 +2447,7 @@ def test_boolean_registers_are_reused_within_a_block() -> None:
     # Exact per-consumer read steps free a condition's register once its last reader fires, so a chain of sequential
     # selects whose conditions die mid-block shares a few boolean registers instead of one per condition. The chain
     # is data-dependent (each select feeds the next comparison), so the conditions' lifetimes are disjoint.
-    def f(x):  # type: ignore[no-untyped-def]
+    def f(x: float):  # type: ignore[no-untyped-def]
         for _ in range(6):
             x = (x - 1.0) if x > 1.0 else (x + 1.0)
         return x
@@ -2468,7 +2470,7 @@ def test_boolean_logic_chain_reuses_registers_on_the_tight_same_bank_edge() -> N
     # reduction over many comparisons produces intermediate flags that die as the next gate consumes them, on the
     # tightest read-first edge (an inline gate reads its operand on exactly the step the next result's write-enable
     # fires; landing = fire + 1 keeps R(a) < W(b)). The chain must collapse onto a handful of registers.
-    def f(a, b, c, d, e, g):  # type: ignore[no-untyped-def]
+    def f(a: float, b: float, c: float, d: float, e: float, g: float):  # type: ignore[no-untyped-def]
         return 1.0 if (a > b and c > d and e > g and a > d and b > e) else 0.0
 
     lir = build(_run(f), "bool_chain", fetch_stages=3)
@@ -2521,7 +2523,7 @@ class _AliasedFloatState:
         self.pub = 0.0
         self._alias = 0.0
 
-    def step(self, a, b):  # type: ignore[no-untyped-def]
+    def step(self, a: float, b: float):  # type: ignore[no-untyped-def]
         self.pub = a + b
         self._alias = a + b
         return self.pub

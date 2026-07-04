@@ -879,7 +879,7 @@ def _emit_return(em: _Emitter, produced: list[_Fragment]) -> Mode:
 
 
 def _assemble_function(name: str, params: list[str], bool_set: set[str], body: str, return_line: str) -> str:
-    sig = ", ".join(f"{p}: bool" if p in bool_set else p for p in params)
+    sig = ", ".join(f"{p}: bool" if p in bool_set else f"{p}: float" for p in params)
     docstring = '    """A generated fuzz kernel."""'
     return f"def {name}({sig}):\n{docstring}\n{body}\n    {return_line}\n"
 
@@ -954,7 +954,7 @@ def _assemble_class(
     name: str, inputs: list[str], slots: list[str], resets: list[float], body: str, return_line: str
 ) -> str:
     init_lines = "\n".join(f"        self.{slot} = {reset!r}" for slot, reset in zip(slots, resets))
-    sig = ", ".join(inputs)
+    sig = ", ".join(f"{p}: float" for p in inputs)
     return (
         f"class {name}:\n"
         f'    """A generated stateful fuzz kernel with private chained slots."""\n\n'

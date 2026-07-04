@@ -173,7 +173,11 @@ class _Lowerer:
 
     def _input(self, arg: ast.arg) -> ValueId:
         annotation = self._fn.__annotations__.get(arg.arg, _NO_PARAMETER_ANNOTATION)
-        if annotation is _NO_PARAMETER_ANNOTATION or annotation is float:
+        if annotation is _NO_PARAMETER_ANNOTATION:
+            raise UnsupportedConstruct(
+                f"parameter {arg.arg!r} requires an explicit type annotation (float or bool)", self._loc(arg)
+            )
+        if annotation is float:
             return self._builder.float_input(arg.arg)
         if annotation is bool:
             return self._builder.bool_input(arg.arg)
