@@ -6,8 +6,10 @@ numpy executing the very same kernel.
 """
 
 import dataclasses
+import sys
 import warnings
 from collections.abc import Callable
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -1029,3 +1031,21 @@ def test_stateful_kalman_style_filter_matches_numpy_across_transactions() -> Non
         want = np.array([float(v) for v in (*prediction, *reference.x, *reference.P.flatten())])
         assert np.all(np.isfinite(want))
         assert np.allclose(got, want, rtol=1e-9, atol=1e-12), step
+
+
+def test_imu_frame_transform_example_matches_numpy() -> None:
+    # The bundled 3D rigid-body / IMU frame transform example must lower and agree with its own plain-numpy execution,
+    # confirming the matmul/transpose/broadcast composition it demonstrates is valid, runnable Python.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import imu_frame_transform
+
+    yaw90 = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    roll90 = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
+    for rotation in (yaw90, roll90):
+        _assert_python_matches_holoso(
+            imu_frame_transform.transform,
+            rotation,
+            np.array([1.0, 2.0, 3.0]),
+            np.array([0.1, -0.2, 9.9]),
+            np.array([2.0, 0.0, -1.0]),
+        )
