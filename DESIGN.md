@@ -148,7 +148,11 @@ Abstract interpretation over the Python AST/CFG with a binding-time lattice (sta
 `__init__`-derived constants, compile-time tables) are evaluated concretely -- real Python/NumPy runs at synthesis time.
 Dynamic values (input ports, persistent state) become SSA handles that accumulate HIR. A `for` over a static `range` is
 unrolled (unless the count exceeds the unroll threshold); a `while` lowers to a real back-edge loop; an `if` on a static
-test takes one branch, on a dynamic test emits a real branch.
+test takes one branch, on a dynamic test emits a real branch. Static evaluation (used for branch/loop reachability and
+compile-time indices) resolves only the operands that both the reachability scan and lowering reconstruct identically:
+numeric literals, module-level numeric/array constants, read-only instance attributes, and loop counters -- including
+numpy navigation (indexing, slicing, transpose, `.flatten()`) of a module-level array constant or read-only array
+attribute.
 
 Persistent state. A synthesized method's `self` is not a port: each instance attribute the method writes becomes a
 persistent register (a loop-carried value, the back-edge of the initiation loop), and each attribute it only reads is a
@@ -156,14 +160,39 @@ frozen constant folded from the `__init__` snapshot. Within the method `self.att
 and writes interleave freely. Public attributes additionally drive a `state_<attr>` output port, so a method need not
 return anything (and a returned value that is by dataflow a public attribute is deduped onto that state port);
 underscore-prefixed attributes stay internal. A vector-valued attribute (list, tuple, or 1-D numpy array) decomposes
-into one scalar register per element (`attr_0`, `attr_1`, ...); a scalar keeps its bare name. Whether an attribute is
-state follows reachability. Reassigning `self` itself is rejected: attributes resolve against the fixed original
-instance, so a rebinding would silently miscompile.
+into one scalar register per element (`attr_0`, `attr_1`, ...), a matrix-valued one (2-D numpy array) row-major into
+`attr_0_0`, `attr_0_1`, ...; a scalar keeps its bare name. Whether an attribute is state follows reachability.
+Reassigning `self` itself is rejected: attributes resolve against the fixed original instance, so a rebinding would
+silently miscompile.
 
 Matrices/vectors are statically shaped and unrolled to scalar operations; arrays never exist as hardware aggregates,
 only as compile-time bookkeeping over scalar registers. That bookkeeping is a front-end value -- either a scalar wire or
-an ordered aggregate -- supporting list/tuple literals, indexing and constant slicing, unpacking, elementwise broadcast,
-and the identity sequence wrappers; only scalar leaves reach HIR, so the supported source is executable numpy.
+an ordered aggregate -- supporting list/tuple literals, numpy-style indexing and constant slicing (`m[i, j]`,
+`m[:, j]`, chained `m[i][j]`), unpacking, transpose (`.T`), and the array factories `np.array`/`asarray`/`asanyarray`;
+only scalar leaves reach HIR, so the supported source is executable numpy. Module-level numeric and ndarray globals
+fold into constants.
+
+List/tuple vs. array. A front-end aggregate carries its Python flavor. The guiding principle is to follow Python
+semantics where sensible and otherwise reject a construct rather than silently reinterpret it; in particular a Python
+list/tuple is never given numpy semantics. A Python list/tuple (a list/tuple literal, the `list()`/`tuple()` builtins,
+or a starred-unpack remainder) has sequence semantics: indexing, constant slicing, unpacking, splatting, building, and
+returning all work on it. A numpy array -- a shaped parameter, an ndarray module constant or state attribute,
+`np.array`/`asarray`/`asanyarray(...)`, or the result of any array operation -- additionally carries numpy semantics.
+The numpy-only operations (elementwise arithmetic, the matrix product, transpose, `.flatten()`, and multi-axis
+indexing) apply to arrays and are rejected on a list/tuple: on a Python sequence they mean something else or nothing
+(list `+`/`*` are concatenation/repetition, list `-`/`@`/`.T` are undefined), none of which is the array operation
+intended.
+
+Array arithmetic. The elementwise arithmetic operators `+ - * /` apply leafwise to same-shape arrays, and a scalar
+operand broadcasts over the other side's leaves; this is deliberately narrower than numpy broadcasting -- a mixed-rank
+pair (vector + matrix) is rejected rather than silently aligned along a different axis than numpy would pick, and `**`
+stays scalar-only. Augmented assignment to any aggregate (`+=`, `@=`) is rejected: an array would be mutated in place by
+numpy while the front-end rebinds (diverging for an alias), and a list `+=` is concatenation, which is unsupported. The
+matrix product `@` (equivalently `np.matmul`) follows numpy's shape rules for 1-D and 2-D operands -- inner dimensions
+must agree, a 1-D operand is promoted and its axis dropped from the result, vector @ vector is a scalar -- and expands
+into scalar multiply/add chains. Each dot product is a left fold, which keeps every product single-use feeding an add of
+the running sum: exactly the shape MIR's FMA contraction fuses into one multiply plus an FMA chain when configured. All
+shapes are static; there is no batching (ndim > 2) and no runtime sizing.
 
 Inlining. A pure function reachable through `__globals__` is inlined -- its body lowered in a fresh scope, its return
 consumed as an aggregate -- so kernels compose. A method call on the synthesized instance (`self.helper(...)`) is
@@ -171,14 +200,18 @@ inlined with the instance context kept, so the callee's own `self.<attr>` reads 
 class MRO; `@staticmethod` and `@property` getters are supported). A called method may read `self` but not write it --
 only the entry method owns the state-slot analysis. Name resolution follows Python.
 
-Parameters. Positional and keyword-only parameters become input ports and require an explicit scalar annotation:
-`float`-annotated scalars are floating-point ports, `bool`-annotated ones are 1-bit boolean ports; an unannotated
-scalar is rejected. An aggregate attribute's shape is read from its reset value, optionally validated against an
-explicit jaxtyping annotation; interior shapes are inferred.
+Parameters. Positional and keyword-only parameters become input ports and require an explicit annotation:
+`float`-annotated scalars are floating-point ports, `bool`-annotated ones are 1-bit boolean ports, and a jaxtyping
+array annotation with fixed 1-D/2-D dimensions and a floating dtype (e.g. `Float64[np.ndarray, "3 3"]`) decomposes
+row-major into one float port per element (a vector's are `name_0, name_1, ...`, a matrix's `name_0_0, name_0_1, ...`).
+The jaxtyping types are detected structurally, so jaxtyping stays a dependency of the user's code only.
+An aggregate attribute's shape is read from its reset value, optionally validated against an explicit jaxtyping
+annotation; interior shapes are inferred.
 
 Return type. The return annotation is likewise mandatory and validated against the inferred output leaves: `float`,
-`bool`, an arbitrarily nested `tuple[...]`/`tuple[X, ...]`/`list[X]` of them, or `None` for a method that returns
-nothing. A missing annotation or any shape, arity, or scalar-type divergence rejects the kernel.
+`bool`, a fixed-shape jaxtyping array, an arbitrarily nested `tuple[...]`/`tuple[X, ...]`/`list[X]` of them, or
+`None` for a method that returns nothing. A missing annotation or any shape, arity, or scalar-type divergence rejects
+the kernel.
 
 ## HIR
 
@@ -277,6 +310,12 @@ Variable-trip `for` loops: a `for` above the unroll threshold is rejected, not l
 needs a runtime integer counter).
 
 Early return from a loop body.
+
+Static folding of a constant that reaches a static position (a branch/loop condition or a compile-time index) only
+through a local alias or an inline-built value, e.g. `g = CONST; if g[0] > 0:` or `if np.asarray([...])[0] > 0:`. Such
+a value still lowers correctly but is treated as dynamic, because folding it would require the reachability scan to
+track arbitrary local bindings it does not build. Only module-level constants, read-only instance attributes, and loop
+counters fold in static positions.
 
 Integer operands: typed int operands/constants/operators sharing the wide register bank when their width matches the
 build.

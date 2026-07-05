@@ -19,6 +19,7 @@ from holoso import (
     FAddOperator,
     FCmpOperator,
     FDivOperator,
+    FFmaOperator,
     FloatFormat,
     FMulILog2OperatorFamily,
     FMulOperator,
@@ -26,7 +27,7 @@ from holoso import (
 )
 from synth.flows import FlowId
 
-from ._examples import SPECS, ekf1_stateful
+from ._examples import SPECS, ekf1_stateful, imu_frame_transform
 
 F_e6m18 = FloatFormat(6, 18)
 F_e8m36 = FloatFormat(8, 36)
@@ -41,14 +42,20 @@ def op_config(
     fdiv: FDivOperator | None = None,
     fmul_ilog2: FMulILog2OperatorFamily | None = None,
     fcmp: FCmpOperator | None = None,
+    ffma: FFmaOperator | None = None,
 ) -> OpConfig:
-    """The OpConfig for fmt; pass a fully-constructed operator to give it stage knobs, else that operator is lean."""
+    """
+    The OpConfig for fmt; pass a fully-constructed operator to give it stage knobs, else that operator is lean. ffma is
+    absent unless supplied, so multiply-accumulate chains stay expanded (fmul + fadd) rather than contracting to fused
+    FMAs.
+    """
     return OpConfig(
         fadd=fadd or FAddOperator(fmt),
         fmul=fmul or FMulOperator(fmt),
         fdiv=fdiv or FDivOperator(fmt),
         fmul_ilog2=fmul_ilog2 or FMulILog2OperatorFamily(fmt),
         fcmp=fcmp or FCmpOperator(fmt),
+        ffma=ffma,
     )
 
 
@@ -116,6 +123,12 @@ def _ekf1_stateful_kernel() -> Callable[..., object]:
     # synthesize. SPEC.make_kernel instead uses _fresh_stateful_ekf, a cosim-only divisor-safe reset that folds
     # different constants into different RTL, so the synth rows pass this explicitly.
     return ekf1_stateful.Ekf1().update
+
+
+def _imu_frame_transform_kernel() -> Callable[..., object]:
+    # Off-catalogue: the shaped matrix/vector ports have no scalar-lane SPEC, so this stateless kernel is referenced
+    # directly rather than through the cosim registry.
+    return imu_frame_transform.transform
 
 
 TARGETS: list[SynthTarget] = [
@@ -360,6 +373,71 @@ TARGETS: list[SynthTarget] = [
             fdiv=FDivOperator(F_e8m36, stage_input=1, stage_pack=1, stage_output=1),
         ),
         kernel=_ekf1_stateful_kernel,
+    ),
+    # imu_frame_transform: a stack of static 3x3 matrix products -- the widest, most multiply-heavy datapath in the
+    # suite -- off-catalogue (matrix/vector ports have no scalar-lane SPEC). Two datapaths per flow: the plain
+    # fmul+fadd expansion, and the ffma-contracted form where each dot-product multiply-accumulate fuses into a single
+    # rounding. Stage knobs are the measured lean-start closure per (flow, datapath).
+    SynthTarget(
+        kernel=_imu_frame_transform_kernel,
+        flow=FlowId.YOSYS_ECP5,
+        target_frequency_MHz=100,
+        ops=op_config(
+            F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_decode=1),
+            fmul=FMulOperator(F_e6m18, stage_product=1),
+            fmul_ilog2=FMulILog2OperatorFamily(F_e6m18, stage_decode=1),
+        ),
+        name="imu_frame_transform_e6m18",
+    ),
+    SynthTarget(
+        kernel=_imu_frame_transform_kernel,
+        flow=FlowId.DIAMOND_ECP5,
+        target_frequency_MHz=100,
+        ops=op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_input=1)),
+        name="imu_frame_transform_e6m18",
+    ),
+    SynthTarget(
+        kernel=_imu_frame_transform_kernel,
+        flow=FlowId.VIVADO_ARTIX7,
+        target_frequency_MHz=150,
+        ops=op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_input=1, stage_normalize=1, stage_output=1)),
+        name="imu_frame_transform_e6m18",
+    ),
+    SynthTarget(
+        kernel=_imu_frame_transform_kernel,
+        flow=FlowId.YOSYS_ECP5,
+        target_frequency_MHz=100,
+        ops=op_config(
+            F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_input=1, stage_decode=1, stage_pack=1),
+            fmul=FMulOperator(F_e6m18, stage_product=1),
+            ffma=FFmaOperator(F_e6m18, stage_product=1, stage_decode=1, stage_normalize=1, stage_pack=1),
+        ),
+        name="imu_frame_transform_e6m18_fma",
+    ),
+    SynthTarget(
+        kernel=_imu_frame_transform_kernel,
+        flow=FlowId.DIAMOND_ECP5,
+        target_frequency_MHz=100,
+        ops=op_config(
+            F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_normalize=1),
+            fmul=FMulOperator(F_e6m18, stage_output=1),
+            ffma=FFmaOperator(F_e6m18, stage_normalize=1, stage_pack=1),
+        ),
+        name="imu_frame_transform_e6m18_fma",
+    ),
+    SynthTarget(
+        kernel=_imu_frame_transform_kernel,
+        flow=FlowId.VIVADO_ARTIX7,
+        target_frequency_MHz=150,
+        ops=op_config(
+            F_e6m18,
+            fmul=FMulOperator(F_e6m18, stage_product=1),
+            ffma=FFmaOperator(F_e6m18, stage_product=1, stage_normalize=1),
+        ),
+        name="imu_frame_transform_e6m18_fma",
     ),
 ]
 

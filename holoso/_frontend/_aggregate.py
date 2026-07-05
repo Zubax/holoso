@@ -1,8 +1,9 @@
 """Compile-time lowering values: scalar wires and ordered aggregates, plus the persistent-attribute shape."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from math import prod
 
 from .._hir import Const
 from .._util import ValueId
@@ -24,8 +25,8 @@ class Value(ABC):
         return [vid for _, vid in self.walk([])]
 
     def flatten(self) -> "Aggregate":
-        """The leaves flatten in row-major order."""
-        return Aggregate(tuple(Scalar(vid) for vid in self.leaves()))
+        """The leaves flatten in row-major order; ``.flatten()`` is a numpy operation, so the result is an array."""
+        return Aggregate(tuple(Scalar(vid) for vid in self.leaves()), array=True)
 
     def output_leaves(self) -> list[tuple[Path, ValueId]]:
         return list(self.walk([]))
@@ -46,40 +47,95 @@ class Scalar(Value):
 
 @dataclass(frozen=True, slots=True)
 class Aggregate(Value):
+    """
+    An ordered aggregate of values with an explicit semantic marker: ``array`` is True for a numpy array (a shaped
+    parameter, an ndarray constant/state, ``np.array(...)``, or a result of an array operation) and False for a plain
+    Python list/tuple. The two spellings differ in Python -- list ``+`` concatenates, list ``-``/``@``/``.T`` are
+    errors -- so the numpy-only operations (arithmetic, the matrix product, transpose, ``.flatten()``, multi-axis
+    indexing) are rejected on a Python sequence, while the structural operations valid on both (indexing, slicing,
+    unpacking, building, returning) apply regardless of the flag.
+    """
+
     items: tuple[Value, ...]
+    array: bool
 
     def walk(self, path: Path) -> Iterator[tuple[Path, ValueId]]:
         for index, item in enumerate(self.items):
             yield from item.walk([*path, index])
 
 
+def array_shape(value: Value) -> tuple[int, ...] | None:
+    """
+    The numpy-style shape of a value when it forms a rectangular array: ``()`` for a scalar, ``(n,)`` for a flat
+    aggregate, ``(m, n)`` for an aggregate of equal-shape aggregates, and so on. A ragged or empty aggregate is not an
+    array and yields None; array-typed operations (matmul, transpose, shape validation) gate on this while purely
+    structural ones (tuple returns, unpacking) do not.
+    """
+    match value:
+        case Scalar():
+            return ()
+        case Aggregate(items=items):
+            if not items:
+                return None
+            shapes = {array_shape(item) for item in items}
+            if len(shapes) != 1 or (inner := next(iter(shapes))) is None:
+                return None
+            return (len(items), *inner)
+    raise TypeError(f"unexpected value {value!r}")
+
+
+def shape_name(shape: tuple[int, ...]) -> str:
+    """A shape for a diagnostic: ``a scalar``, ``a 3-element vector``, ``a 2×3 matrix``, ``a 2×2×2 array``."""
+    match shape:
+        case ():
+            return "a scalar"
+        case (n,):
+            return f"a {n}-element vector"
+        case (_, _):
+            return f"a {'×'.join(str(dim) for dim in shape)} matrix"
+        case _:
+            return f"a {'×'.join(str(dim) for dim in shape)} array"
+
+
+def array_of(shape: tuple[int, ...], leaves: Sequence[Value], *, array: bool) -> Value:
+    """Rebuild a value of the given shape from its row-major scalar leaves, stamping every level with ``array``."""
+    if shape == ():
+        (leaf,) = leaves
+        return leaf
+    assert leaves and len(leaves) % shape[0] == 0
+    stride = len(leaves) // shape[0]
+    return Aggregate(
+        tuple(array_of(shape[1:], leaves[stride * i : stride * (i + 1)], array=array) for i in range(shape[0])),
+        array=array,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class StateAttr:
     """
     The scalar-slot decomposition of one instance attribute, derived from the reset snapshot: a scalar occupies a single
-    bare-named slot, a vector one indexed slot per element. It is the single source of an attribute's shape -- its slot
-    names, its typed reset values, and whether an assigned value must be a scalar or a same-length flat aggregate. The
+    bare-named slot, a vector or matrix one indexed slot per element in row-major order. It is the single source of an
+    attribute's shape -- its slot names, its typed reset values, and the array shape an assigned value must have. The
     element type lives in the typed ``resets`` (a :class:`BoolConst` reset marks a boolean attribute, a scalar only
-    since boolean vectors are not supported), so no separate type flag is carried.
+    since boolean aggregates are not supported), so no separate type flag is carried.
     """
 
-    is_vector: bool
+    shape: tuple[int, ...]
     slots: list[str]
     resets: list[Const]
+    array: bool  # True when the reset snapshot is a numpy array, False for a Python list/tuple (or a scalar)
+
+    def __post_init__(self) -> None:
+        count = prod(self.shape)  # prod(()) == 1: a scalar occupies exactly one slot
+        assert len(self.slots) == count and len(self.resets) == count
 
     def accepts(self, value: Value) -> bool:
         """
-        Whether an assigned value matches this shape: a scalar attribute accepts only a scalar, a vector only a flat
-        aggregate of the same length. Checking the full shape -- not merely the leaf count -- keeps the assigned value
-        consistent with the per-element slot layout that the next transaction reconstructs from the reset snapshot.
+        Whether an assigned value matches this shape exactly. Checking the full shape -- not merely the leaf count --
+        keeps the assigned value consistent with the per-element slot layout that the next transaction reconstructs
+        from the reset snapshot.
         """
-        if not self.is_vector:
-            return isinstance(value, Scalar)
-        return (
-            isinstance(value, Aggregate)
-            and len(value.items) == len(self.slots)
-            and all(isinstance(item, Scalar) for item in value.items)
-        )
+        return array_shape(value) == self.shape
 
     def compose(self, scalars: tuple[Scalar, ...]) -> Value:
-        return Aggregate(scalars) if self.is_vector else scalars[0]
+        return array_of(self.shape, scalars, array=self.array)
