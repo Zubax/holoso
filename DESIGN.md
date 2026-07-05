@@ -181,10 +181,7 @@ returning all work on it. A numpy array -- a shaped parameter, an ndarray module
 The numpy-only operations (elementwise arithmetic, the matrix product, transpose, `.flatten()`, and multi-axis
 indexing) apply to arrays and are rejected on a list/tuple: on a Python sequence they mean something else or nothing
 (list `+`/`*` are concatenation/repetition, list `-`/`@`/`.T` are undefined), none of which is the array operation
-intended. A bare list is never coerced -- `matrix - [row0, row1]` is rejected; the user writes
-`matrix - np.array([row0, row1])`. `np.array([...])` is the list-accepting factory that converts a sequence into an
-array (numpy rejects a ragged literal, so a non-rectangular argument is rejected too), the idiomatic fix when a kernel
-needs array arithmetic over a value built as a list.
+intended.
 
 Array arithmetic. The elementwise arithmetic operators `+ - * /` apply leafwise to same-shape arrays, and a scalar
 operand broadcasts over the other side's leaves; this is deliberately narrower than numpy broadcasting -- a mixed-rank
@@ -207,9 +204,8 @@ Parameters. Positional and keyword-only parameters become input ports and requir
 `float`-annotated scalars are floating-point ports, `bool`-annotated ones are 1-bit boolean ports, and a jaxtyping
 array annotation with fixed 1-D/2-D dimensions and a floating dtype (e.g. `Float64[np.ndarray, "3 3"]`) decomposes
 row-major into one float port per element (a vector's are `name_0, name_1, ...`, a matrix's `name_0_0, name_0_1, ...`).
-The jaxtyping types are detected structurally, so jaxtyping stays a dependency of the user's code only. Symbolic or
-broadcastable dimensions are rejected -- shapes must be fully static. An unannotated parameter is rejected. An
-aggregate attribute's shape is read from its reset value, optionally validated against an explicit jaxtyping
+The jaxtyping types are detected structurally, so jaxtyping stays a dependency of the user's code only.
+An aggregate attribute's shape is read from its reset value, optionally validated against an explicit jaxtyping
 annotation; interior shapes are inferred.
 
 Return type. The return annotation is likewise mandatory and validated against the inferred output leaves: `float`,
