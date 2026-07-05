@@ -44,7 +44,6 @@ References:
 ### Python
 
 Follow PEP8 with one exception: the maximum line length is 120 columns. This is already configured in Black.
-Comment block lines should utilize the 120 column limit well, avoiding overly short lines.
 
 Use strongly typed primitives. Instead of int constants, prefer enums; instead of dicts, prefer dataclasses;
 instead of existence/vaidity flags, prefer optional type or unions, etc.
