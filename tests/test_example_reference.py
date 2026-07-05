@@ -25,9 +25,9 @@ from holoso import BoolType, FloatFormat
 from ._examples import SPECS, ExampleSpec, ReferenceComparison
 from ._modelref import default_ops, default_tolerance, flatten_value, within
 
-# A kernel whose result is purely persistent PUBLIC VECTOR state (``ReferenceComparison.EXCLUDED`` -- ``ekf1_stateful``,
-# whose ``update`` returns nothing) is excluded: this generic harness compares scalar lanes only, and that kernel's
-# aggregate-state read-back is already validated against the Python reference in ``test_verify.py``. Every other example
+# A kernel the generic scalar-lane harness cannot drive (``ReferenceComparison.EXCLUDED``) is skipped here: it has
+# public VECTOR state this harness would read by a non-existent per-element attribute (``ekf1_stateful``); its
+# aggregate-state read-back is validated against the Python reference in ``test_verify.py`` instead. Every other example
 # returns its outputs (optionally alongside scalar public state), which this harness compares directly.
 #
 # A public state attribute drives an output port named ``state_<attr>``; a return value drives ``out_<n>``. The model

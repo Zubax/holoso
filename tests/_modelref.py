@@ -11,7 +11,7 @@ import numpy as np
 from holoso import FAddOperator, FCmpOperator, FDivOperator, FMulILog2OperatorFamily, FMulOperator, OpConfig
 from holoso._backend.numerical import NumericalSimulator, generate as generate
 from holoso._frontend import lower as lower_frontend
-from holoso._hir import optimize
+from holoso._hir import Hir, Operation, Operator, optimize
 from holoso._lir import Lir, build
 from holoso._mir import MirInterpreter, lower as lower_to_mir
 from holoso._type import FloatFormat
@@ -45,6 +45,11 @@ def build_model_and_interpreter(
     return build_model(build(mir, name, fetch_stages=3)), MirInterpreter(mir)
 
 
+def arith_count(hir: Hir, op_type: type[Operator]) -> int:
+    """The number of HIR operations whose operator is exactly ``op_type`` -- a structural probe for lowering tests."""
+    return sum(1 for n in hir.nodes.values() if isinstance(n, Operation) and type(n.operator) is op_type)
+
+
 def show_value(value: FloatValue | bool) -> str:
     return f"{float(value):.6g}" if isinstance(value, FloatValue) else str(value)
 
@@ -64,9 +69,12 @@ def assert_model_equals_interpreter(
 
 
 def flatten_value(root: object) -> list[tuple[Path, Any]]:
+    # An ndarray flattens row-major (via tolist), matching the frontend's leaf order for array-valued kernel results.
     leaves: list[tuple[Path, Any]] = []
 
     def walk(node: object, path: Path) -> None:
+        if isinstance(node, np.ndarray):
+            node = node.tolist()
         if isinstance(node, (list, tuple)) and not isinstance(node, str):
             for index, item in enumerate(node):
                 walk(item, [*path, index])
@@ -76,6 +84,8 @@ def flatten_value(root: object) -> list[tuple[Path, Any]]:
         else:
             leaves.append((path, node))
 
+    if isinstance(root, np.ndarray):
+        root = root.tolist()
     if (isinstance(root, (list, tuple)) and not isinstance(root, str)) or (
         dataclasses.is_dataclass(root) and not isinstance(root, type)
     ):

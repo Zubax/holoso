@@ -44,11 +44,7 @@ from holoso._hir import (
     StateRead,
 )
 
-from ._modelref import flatten_value, output_names
-
-
-def _arith_count(hir: Hir, op_type: type) -> int:
-    return sum(1 for n in hir.nodes.values() if isinstance(n, Operation) and type(n.operator) is op_type)
+from ._modelref import arith_count as _arith_count, flatten_value, output_names
 
 
 def test_scalar_is_output_zero() -> None:
@@ -1022,8 +1018,8 @@ def test_list_slice() -> None:
 
 def test_vector_scalar_broadcast() -> None:
     def f(a: float, b: float) -> list[float]:
-        v = [a, b]
-        return v * 0.5  # type: ignore[no-any-return, operator]
+        v = np.array([a, b])
+        return v * 0.5  # type: ignore[return-value]
 
     hir = lower(f)
     assert _arith_count(hir, FloatMul) == 2
@@ -1032,8 +1028,8 @@ def test_vector_scalar_broadcast() -> None:
 
 def test_flatten_collapses_nesting() -> None:
     def f(a: float, b: float) -> list[float]:
-        m = [[a], [b]]
-        return m.flatten()  # type: ignore[no-any-return, attr-defined]
+        m = np.array([[a], [b]])
+        return m.flatten()  # type: ignore[return-value]
 
     assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
 
@@ -1216,18 +1212,25 @@ def test_abs_accepts_a_star_unpacked_argument() -> None:
     assert _arith_count(lower(f), FloatAbs) == 1
 
 
-def test_unary_plus_is_scalar_identity_and_rejects_aggregates() -> None:
+def test_unary_plus_and_minus_apply_elementwise_to_aggregates() -> None:
     def scalar_ok(a: float) -> float:
         return +a
 
     assert [o.name for o in lower(scalar_ok).outputs] == ["out_0"]
 
-    def aggregate_bad(a: float, b: float) -> list[float]:
-        v = [a, b]
-        return +v  # type: ignore[no-any-return, operator]
+    def aggregate_ok(a: float, b: float) -> list[float]:
+        v = np.array([a, b])
+        return +v  # type: ignore[return-value]
 
-    with pytest.raises(UnsupportedConstruct, match="scalar"):
-        lower(aggregate_bad)
+    assert [o.name for o in lower(aggregate_ok).outputs] == ["out_0", "out_1"]
+
+    def negated(a: float, b: float) -> list[float]:
+        v = np.array([a, b])
+        return -v  # type: ignore[return-value]
+
+    hir = lower(negated)
+    assert [o.name for o in hir.outputs] == ["out_0", "out_1"]
+    assert _arith_count(hir, FloatNeg) == 2
 
 
 def test_method_style_abs_call_is_rejected() -> None:
@@ -1381,7 +1384,7 @@ def test_name_assigned_later_is_local_before_its_assignment() -> None:
         lower(shadows_builtin)
 
 
-def test_multidimensional_array_state_is_rejected() -> None:
+def test_matrix_state_decomposes_row_major() -> None:
     @dataclasses.dataclass
     class Filt:
         m: np.ndarray
@@ -1389,8 +1392,22 @@ def test_multidimensional_array_state_is_rejected() -> None:
         def step(self, a: float) -> None:
             self.m = self.m * a
 
-    with pytest.raises(UnsupportedConstruct, match="1-D"):
-        lower(Filt(np.array([[1.0, 2.0], [3.0, 4.0]])).step)
+    hir = lower(Filt(np.array([[1.0, 2.0], [3.0, 4.0]])).step)
+    assert [s.name for s in hir.state_slots] == ["m_0_0", "m_0_1", "m_1_0", "m_1_1"]
+    assert [cast(FloatConst, s.reset_value).value for s in hir.state_slots] == [1.0, 2.0, 3.0, 4.0]
+    assert [o.name for o in hir.outputs] == ["state_m_0_0", "state_m_0_1", "state_m_1_0", "state_m_1_1"]
+
+
+def test_three_dimensional_array_state_is_rejected() -> None:
+    @dataclasses.dataclass
+    class Filt:
+        m: np.ndarray
+
+        def step(self, a: float) -> None:
+            self.m = self.m * a
+
+    with pytest.raises(UnsupportedConstruct, match="3-D"):
+        lower(Filt(np.zeros((2, 2, 2))).step)
 
 
 def test_ekf1_stateful_structure() -> None:

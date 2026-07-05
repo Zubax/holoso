@@ -1,6 +1,7 @@
 """Stateless AST/walrus helpers and naming utilities shared by the front-end lowerer."""
 
 import ast
+import itertools
 from collections.abc import Iterator
 
 Path = list[int | str]
@@ -28,6 +29,15 @@ def port_name(path: Path) -> str:
 def state_port_name(slot: str) -> str:
     """Map a public state slot to its observable port name, e.g. ``"y"`` -> ``state_y``, ``"x_0"`` -> ``state_x_0``."""
     return f"state_{slot}"
+
+
+def indexed_names(base: str, shape: tuple[int, ...]) -> list[str]:
+    """
+    The row-major per-element names of a shaped base name: ``()`` -> ``[base]``, ``(2,)`` -> ``[base_0, base_1]``,
+    ``(2, 2)`` -> ``[base_0_0, base_0_1, base_1_0, base_1_1]``. The one naming convention shared by decomposed state
+    slots and decomposed array-parameter input ports.
+    """
+    return [base + "".join(f"_{i}" for i in index) for index in itertools.product(*(range(dim) for dim in shape))]
 
 
 def leaf_targets(target: ast.expr) -> Iterator[ast.expr]:

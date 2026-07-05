@@ -80,8 +80,9 @@ class ReferenceComparison(Enum):
     EXACT: every float output is exact in the format (boolean logic, integer-valued counters/bytes, or exact
     Sterbenz reductions), so it must match the float64 reference bit-for-bit. APPROXIMATE: float outputs
     accumulate rounding (continuous arithmetic), so the comparison allows a format-derived tolerance. EXCLUDED:
-    the result is purely persistent public VECTOR state with no scalar lane to compare, so the scalar harness
-    skips it -- its aggregate-state read-back is validated against Python separately in ``test_verify``.
+    the generic scalar-lane harness cannot drive the kernel -- it has public VECTOR state it would read by a
+    non-existent per-element attribute -- so its aggregate-state read-back is validated against Python separately in
+    ``test_verify``.
     """
 
     EXACT = "exact"

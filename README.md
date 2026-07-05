@@ -206,9 +206,15 @@ For a detailed technical review of the design and trade-offs, please refer to `D
 
 Holoso follows Python with minimal deviations where it makes sense for hardware synthesis.
 
-- Static typing only. Parameters must be annotated `float` or `bool`; the return type must be annotated too — a
-  scalar, a `tuple`/`list` of scalars (arbitrarily nested), or `None` for a method that returns nothing — and is
-  validated against the kernel's actual outputs.
+- Static typing only. Parameters must be annotated `float`, `bool`, or a fixed-shape jaxtyping array
+  (`Float64[np.ndarray, "3 3"]`); the return type must be annotated too — a scalar, such an array, a `tuple`/`list` of
+  them (arbitrarily nested), or `None` for a method that returns nothing — and is validated against the actual outputs.
+- NumPy arrays and Python sequences are distinct, following Python. A numpy array (a shaped parameter, an `np.ndarray`
+  constant or state, `np.array([...])`, or the result of an array operation) supports elementwise arithmetic, the
+  matrix product `@`, transpose, and multi-axis indexing. A plain Python list/tuple keeps ordinary Python semantics
+  (indexing, slicing, unpacking, building) and those numpy-only operations are rejected on it: on a list `+`/`*` are
+  concatenation/repetition, not elementwise math, and `-`/`@`/`.T` are undefined. Wrap it in `np.array([...])` for array
+  arithmetic.
 - No implicit type conversions.
 - Boolean short-circuiting is not supported, all operands evaluated eagerly.
 - Floating-point precision depends on the selected floating-point format. See below for more info about floats.

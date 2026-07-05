@@ -19,6 +19,7 @@ from ._ast_support import (
     Path,
     UNROLL_THRESHOLD,
     contains_walrus,
+    indexed_names,
     leaf_targets,
     port_name,
     range_trip_count,
@@ -27,7 +28,7 @@ from ._ast_support import (
     statement_walrus_names,
     walrus_target_names,
 )
-from ._aggregate import Aggregate, Scalar, StateAttr, Value
+from ._aggregate import Aggregate, Scalar, StateAttr, Value, array_of, array_shape, shape_name
 from ._scope import ArmResult, Scope, parse_fndef
 
 _logger = logging.getLogger(__name__)
@@ -41,6 +42,78 @@ def _scalar_annotation_type(annotation: object) -> Type | None:
     if annotation is bool:
         return BoolType()
     return None
+
+
+def _is_array_annotation(annotation: object) -> bool:
+    """
+    A jaxtyping-style array annotation: a class carrying ``dims``. Detected structurally so that jaxtyping remains an
+    optional dependency of the user's code, never of Holoso itself.
+    """
+    return isinstance(annotation, type) and hasattr(annotation, "dims")
+
+
+def _real_or_none(value: object) -> float | None:
+    """The value as a float if it is a real number (a builtin or numpy int/float, never a boolean), else None."""
+    if isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(value, (bool, np.bool_)):
+        return float(value)
+    return None
+
+
+def _ndarray_reals(
+    value: np.ndarray, what: str, loc: SourceLocation | None = None
+) -> tuple[tuple[int, ...], list[float]]:
+    """
+    Validate a numpy array used as a constant or reset value and return its shape and row-major real elements. An
+    ndarray subclass (``np.matrix``, a masked array) is rejected because its operators mean different things -- e.g.
+    ``np.matrix`` treats ``*`` as matrix multiplication -- so silently folding it as a plain array would diverge from
+    the value's own Python semantics.
+    """
+    if type(value) is not np.ndarray:
+        raise UnsupportedConstruct(
+            f"{what} must be a plain numpy array, not a {type(value).__name__} "
+            "(an ndarray subclass such as np.matrix has different operator semantics)",
+            loc,
+        )
+    if value.ndim not in (1, 2):
+        raise UnsupportedConstruct(f"{what} must be a 1-D or 2-D array, got a {value.ndim}-D array", loc)
+    if 0 in value.shape:
+        raise UnsupportedConstruct(f"{what} must not be an empty array", loc)
+    reals: list[float] = []
+    for element in value.flatten():
+        real = _real_or_none(element)
+        if real is None:
+            raise UnsupportedConstruct(f"{what} must hold real numbers, got {type(element).__name__}", loc)
+        reals.append(real)
+    return tuple(value.shape), reals
+
+
+def _annotation_shape(annotation: object, what: str, loc: SourceLocation) -> tuple[int, ...]:
+    """
+    The fixed shape of a jaxtyping-style array annotation. Everything must be static -- a symbolic, variadic, or
+    broadcastable dimension is rejected, since there is no memory to size at run time. The dtype category must be
+    floating-point; the concrete hardware format still comes from the operator configuration, not the annotation.
+    """
+    dims = getattr(annotation, "dims", None)
+    if not isinstance(dims, tuple):  # a real jaxtyping type always carries a dims tuple; anything else is not one
+        raise UnsupportedConstruct(f"{what}: not a valid fixed-shape array annotation", loc)
+    sizes: list[int] = []
+    for dim in dims:
+        size = getattr(dim, "size", None)
+        if not isinstance(size, int) or getattr(dim, "broadcastable", False):
+            raise UnsupportedConstruct(
+                f'{what}: array dimensions must be fixed integers (e.g. Float64[np.ndarray, "3 3"])', loc
+            )
+        if size < 1:
+            raise UnsupportedConstruct(f"{what}: array dimensions must be at least 1", loc)
+        sizes.append(size)
+    if len(sizes) not in (1, 2):
+        raise UnsupportedConstruct(f"{what}: only 1-D and 2-D arrays are supported, got {len(sizes)}-D", loc)
+    dtypes = getattr(annotation, "dtypes", None)  # e.g. jaxtyping Shaped carries a non-iterable any-dtype marker
+    if not isinstance(dtypes, (tuple, list)) or not all(
+        isinstance(name, str) and name.startswith(("float", "bfloat")) for name in dtypes
+    ):
+        raise UnsupportedConstruct(f"{what}: the array element type must be floating-point (e.g. Float64)", loc)
+    return tuple(sizes)
 
 
 def _aggregate_element_annotations(annotation: object, count: int) -> list[object] | None:
@@ -123,6 +196,7 @@ class _Lowerer:
         self._entry_fndef, self._lines, self._start, self._filename = parse_fndef(fn)
         self._builder = HirBuilder()
         self._env: dict[str, Value] = {}
+        self._input_port_names: set[str] = set()  # guards against aliasing between decomposed parameter ports
         # Stateful-class lowering context; all empty/None for a plain stateless function. The snapshot is the instance
         # as handed to the synthesizer (whatever __init__ and any later mutation produced); its values seed reset.
         self._instance = instance
@@ -196,22 +270,44 @@ class _Lowerer:
             self._assigned_attrs = self._syntactically_assigned_attrs(fndef)
             self._collect_written_attrs(fndef)
             self._check_state_slot_names()
-        # Positional then keyword-only parameters each become a scalar input port, in declaration order.
+        # Positional then keyword-only parameters bind in declaration order; arrays decompose into per-element ports.
         for arg in [*params, *args.kwonlyargs]:
-            self._env[arg.arg] = Scalar(self._input(arg))
+            self._env[arg.arg] = self._input(arg)
 
-    def _input(self, arg: ast.arg) -> ValueId:
+    def _input(self, arg: ast.arg) -> Value:
         annotations = self._fn.__annotations__
         if arg.arg not in annotations:
             raise UnsupportedConstruct(
-                f"parameter {arg.arg!r} requires an explicit type annotation (float or bool)", self._loc(arg)
+                f"parameter {arg.arg!r} requires an explicit type annotation "
+                "(float, bool, or a fixed-shape jaxtyping array)",
+                self._loc(arg),
             )
-        scalar_type = _scalar_annotation_type(annotations[arg.arg])
-        if scalar_type is None:
+        annotation = annotations[arg.arg]
+        scalar_type = _scalar_annotation_type(annotation)
+        shape: tuple[int, ...]
+        element_type: Type
+        if scalar_type is not None:
+            shape, element_type = (), scalar_type
+        elif _is_array_annotation(annotation):
+            shape, element_type = _annotation_shape(annotation, f"parameter {arg.arg!r}", self._loc(arg)), FloatType()
+        else:
             raise UnsupportedConstruct(
-                f"unsupported parameter annotation for {arg.arg!r}: expected float or bool", self._loc(arg)
+                f"unsupported parameter annotation for {arg.arg!r}: expected float, bool, or a jaxtyping array type "
+                'with fixed dimensions (e.g. Float64[np.ndarray, "3 3"])',
+                self._loc(arg),
             )
-        return self._builder.input(arg.arg, scalar_type)
+        # A decomposed port coinciding with another parameter's port (an array ``v`` beside a scalar ``v_0``)
+        # would alias distinct inputs, so it is rejected.
+        names = indexed_names(arg.arg, shape)
+        for name in names:
+            if name in self._input_port_names:
+                raise UnsupportedConstruct(
+                    f"parameter {arg.arg!r} produces input port {name!r} that collides with another parameter; "
+                    "rename a parameter to avoid the aliasing",
+                    self._loc(arg),
+                )
+            self._input_port_names.add(name)
+        return array_of(shape, [Scalar(self._builder.input(name, element_type)) for name in names], array=True)
 
     def _lower_body(self, fndef: ast.FunctionDef) -> None:
         returned = self._lower_stmts(fndef.body)
@@ -236,6 +332,9 @@ class _Lowerer:
         self._check_return_shape(self._return, declared, loc)
 
     def _check_return_shape(self, value: Value, declared: object, loc: SourceLocation) -> None:
+        if _is_array_annotation(declared):
+            self._check_array_return(value, declared, loc)
+            return
         match value:
             case Scalar(id=vid):
                 expected = _scalar_annotation_type(declared)
@@ -246,7 +345,7 @@ class _Lowerer:
                         )
                     raise UnsupportedConstruct(
                         f"unsupported return annotation {_annotation_name(declared)}: "
-                        "expected float, bool, a tuple or list of them, or None",
+                        "expected float, bool, a jaxtyping array, a tuple or list of them, or None",
                         loc,
                     )
                 actual = self._builder.type_of(vid)
@@ -269,6 +368,16 @@ class _Lowerer:
                     )
                 for item, element in zip(items, elements):
                     self._check_return_shape(item, element, loc)
+
+    def _check_array_return(self, value: Value, declared: object, loc: SourceLocation) -> None:
+        expected = _annotation_shape(declared, "return", loc)
+        actual = array_shape(value)
+        if actual != expected:
+            inferred = shape_name(actual) if actual is not None else "a non-rectangular value"
+            raise UnsupportedConstruct(
+                f"return shape mismatch: declared {shape_name(expected)}, inferred {inferred}", loc
+            )
+        self._require_float_leaves(value, "an array return must be floating-point", loc)
 
     def _lower_stmts(self, stmts: list[ast.stmt]) -> bool:
         """Lower a straight-line statement list, returning True when a ``return`` was reached."""
@@ -309,10 +418,13 @@ class _Lowerer:
                 self._reject_self_rebinding(name, self._loc(stmt))
                 if name not in self._env:
                     raise UnsupportedConstruct(f"augmented assignment to unknown name {name!r}", self._loc(stmt))
-                self._bind_name(name, self._apply_binop(op, self._env[name], self._lower_expr(value), self._loc(stmt)))
+                current = self._env[name]
+                self._reject_aggregate_augassign(current, self._loc(stmt))
+                self._bind_name(name, self._apply_binop(op, current, self._lower_expr(value), self._loc(stmt)))
                 return False
             case ast.AugAssign(target=ast.Attribute() as target, op=op, value=value):
                 current = self._read_attr(target)
+                self._reject_aggregate_augassign(current, self._loc(stmt))
                 self._assign_attr(target, self._apply_binop(op, current, self._lower_expr(value), self._loc(stmt)))
                 return False
             case ast.If(test=test, body=body, orelse=orelse):
@@ -650,8 +762,84 @@ class _Lowerer:
             case _:
                 raise UnsupportedConstruct("a for-loop must iterate over range(...)", loc)
 
+    def _static_ndarray_value(self, node: ast.expr) -> Any:
+        """
+        Resolve a compile-time constant-array expression to its numpy value (an array or a scalar element), or None.
+        It mirrors value-position lowering by applying the same numpy navigation (never arithmetic) directly to the
+        snapshot array, so a constant-array condition folds statically and reachability stays consistent with lowering
+        -- the array counterpart of the ``_static_int``/``_static_float`` mirrors. Only a plain ``np.ndarray`` base
+        qualifies, matching the subclass rejection elsewhere.
+        """
+        if isinstance(node, ast.Name) and not self._is_local(node.id):
+            glob = self._module_global(node.id)
+            return glob if type(glob) is np.ndarray else None
+        if isinstance(node, ast.Attribute):
+            if node.attr == "T" and not self._is_self_attr(node):
+                base = self._static_ndarray_value(node.value)
+                return base.T if isinstance(base, np.ndarray) else None
+            if self._is_self_attr(node):
+                value = self._readonly_snapshot_value(node.attr)
+                return value if type(value) is np.ndarray else None
+            return None
+        if isinstance(node, ast.Call):
+            return self._static_ndarray_call(node)
+        if isinstance(node, ast.Subscript):
+            base = self._static_ndarray_value(node.value)
+            key = self._static_index_key(node.slice)
+            if not isinstance(base, np.ndarray) or key is None:
+                return None
+            try:
+                return base[key]
+            except IndexError:
+                return None
+        return None
+
+    def _static_ndarray_call(self, node: ast.Call) -> Any:
+        """
+        The two shape-preserving call forms on a constant array: ``x.flatten()`` and the numpy array-identity wrappers
+        ``np.array``/``asarray``/``asanyarray`` (all no-ops on a value already resolved to an array).
+        """
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "flatten" and not node.args and not node.keywords:
+            base = self._static_ndarray_value(func.value)
+            return base.flatten() if isinstance(base, np.ndarray) else None
+        if self._numpy_function(func) in _NUMPY_IDENTITY and len(node.args) == 1 and not node.keywords:
+            return self._static_ndarray_value(node.args[0])
+        return None
+
+    def _static_index_key(self, index: ast.expr) -> tuple[int | slice, ...] | None:
+        """A subscript's axes as a numpy index tuple of static ints and step-free slices, or None if not all static."""
+        axes = index.elts if isinstance(index, ast.Tuple) else [index]
+        key: list[int | slice] = []
+        for axis in axes:
+            if isinstance(axis, ast.Slice):
+                if axis.step is not None:
+                    return None
+                lower = None if axis.lower is None else self._static_int(axis.lower)
+                upper = None if axis.upper is None else self._static_int(axis.upper)
+                if (axis.lower is not None and lower is None) or (axis.upper is not None and upper is None):
+                    return None
+                key.append(slice(lower, upper))
+            else:
+                selected = self._static_int(axis)
+                if selected is None:
+                    return None
+                key.append(selected)
+        return tuple(key)
+
+    def _static_ndarray_element(self, node: ast.expr) -> Any:
+        """
+        The scalar element of a compile-time constant-array expression, or None. Lets a constant-array element fold in
+        a static position exactly as it folds in value position.
+        """
+        value = self._static_ndarray_value(node)
+        return value if value is not None and np.ndim(value) == 0 else None
+
     def _static_int(self, node: ast.expr) -> int | None:
         """Evaluate an expression to a compile-time integer (counter, index, or exponent), or None if it is not one."""
+        element = self._static_ndarray_element(node)
+        if isinstance(element, np.integer) or type(element) is int:
+            return int(element)
         match node:
             case ast.Constant(value=int(literal)) if not isinstance(literal, bool):
                 return literal
@@ -1127,8 +1315,16 @@ class _Lowerer:
                         loc,
                     )
                 return Scalar(self._builder.phi(self._builder.type_of(ia), [(pred_a, ia), (pred_b, ib)]))
-            case (Aggregate(items=items_a), Aggregate(items=items_b)) if len(items_a) == len(items_b):
-                return Aggregate(tuple(self._merge_values(x, y, pred_a, pred_b, loc) for x, y in zip(items_a, items_b)))
+            case (Aggregate(items=items_a, array=array_a), Aggregate(items=items_b, array=array_b)) if len(
+                items_a
+            ) == len(items_b):
+                # The merged value is a numpy array only if BOTH arms are: if either arm is a Python list the runtime
+                # value may be a list, so the merge must not silently grant array semantics (which would make a later
+                # ``v * s`` accepted or rejected depending on arm order). Structural use stays valid on either flavor.
+                return Aggregate(
+                    tuple(self._merge_values(x, y, pred_a, pred_b, loc) for x, y in zip(items_a, items_b)),
+                    array=array_a and array_b,
+                )
             case _:
                 raise UnsupportedConstruct("the two branches produce incompatible shapes for a merged value", loc)
 
@@ -1173,6 +1369,20 @@ class _Lowerer:
         """
         self._static_ints.pop(name, None)
 
+    def _reject_aggregate_augassign(self, current: Value, loc: SourceLocation) -> None:
+        """
+        Reject augmented assignment (``+=``, ``@=``, ...) whose target currently holds an aggregate. For an array numpy
+        mutates in place, so an alias taken before the statement observes the update while Holoso rebinds the name to a
+        fresh value, diverging silently; for a list ``+=`` is concatenation, which is unsupported anyway. So the
+        explicit ``x = x + ...`` form is required. Scalars are immutable in Python, so they never diverge.
+        """
+        if isinstance(current, Aggregate):
+            raise UnsupportedConstruct(
+                "augmented assignment to a list or array is not supported (an array would be mutated in place by numpy "
+                "while Holoso rebinds, diverging for an alias; a list '+=' is concatenation); write 'x = x + ...'",
+                loc,
+            )
+
     def _assign_target(self, target: ast.expr, value: Value) -> None:
         match target:
             case ast.Name(id=name):
@@ -1212,7 +1422,9 @@ class _Lowerer:
                 f"cannot unpack {len(items)} values into at least {len(elts) - 1} targets", self._loc(node)
             )
         head = list(zip(elts[:star], items[:star]))
-        rest = Aggregate(tuple(items[star : len(items) - len(after)]))  # the starred target binds the surplus
+        # PEP 3132: a starred target always binds a plain list, even when unpacking an array -- so the remainder is a
+        # Python sequence (array=False), while its items keep their own flavor.
+        rest = Aggregate(tuple(items[star : len(items) - len(after)]), array=False)
         tail = list(zip(after, items[len(items) - len(after) :]))
         return [*head, (starred.value, rest), *tail]
 
@@ -1229,20 +1441,26 @@ class _Lowerer:
                 if bound is not None:
                     return bound
                 if not self._is_local(name):
-                    # A module-level numeric/boolean constant resolves like a literal, mirroring Python's global lookup
-                    # for a name the function never binds (a local name never falls through here: an unbound local is an
-                    # error, not a silent reach for a same-named global). bool is checked before int (it is a subclass).
+                    # A module-level numeric/boolean/array constant resolves like a literal, mirroring Python's global
+                    # lookup for a name the function never binds (a local name never falls through here: an unbound
+                    # local is an error, not a silent reach for a same-named global). bool is checked before int (it is
+                    # a subclass).
                     glob = self._module_global(name)
                     if isinstance(glob, bool):
                         return Scalar(self._builder.bool_const(glob))
                     if isinstance(glob, (int, float)):
                         return Scalar(self._builder.float_const(float(glob)))
+                    if isinstance(glob, np.ndarray):
+                        return self._constant_array(name, glob, self._loc(node))
                 raise UnsupportedConstruct(
-                    f"unknown name {name!r} (only parameters, locals, and module-level numeric constants are in scope)",
+                    f"unknown name {name!r} (only parameters, locals, and module-level numeric or array constants "
+                    "are in scope)",
                     self._loc(node),
                 )
             case ast.List(elts=elts) | ast.Tuple(elts=elts):
-                return Aggregate(tuple(self._lower_elements(elts)))
+                # A list/tuple literal has Python sequence semantics (array=False): numpy-only operations on it are
+                # rejected; wrapping it in np.array(...) converts it to an array.
+                return Aggregate(tuple(self._lower_elements(elts)), array=False)
             case ast.Subscript(value=value, slice=index):
                 return self._lower_subscript(self._lower_expr(value), index, self._loc(node))
             case ast.UnaryOp(op=ast.USub(), operand=ast.Constant(value=(int() | float()) as value)) if not isinstance(
@@ -1250,10 +1468,16 @@ class _Lowerer:
             ):
                 return Scalar(self._builder.float_const(-float(value)))
             case ast.UnaryOp(op=ast.USub(), operand=operand):
-                return Scalar(self._builder.operation(FloatNeg(), [self._scalar(self._lower_expr(operand), node)]))
+                return self._negate(self._lower_expr(operand), self._loc(node))
             case ast.UnaryOp(op=ast.UAdd(), operand=operand):
-                # Unary plus is scalar identity; like negation, it rejects an aggregate operand.
-                return Scalar(self._scalar(self._lower_expr(operand), node))
+                # Unary plus is identity on a float scalar or array, but a boolean operand is rejected like every other
+                # arithmetic position (Python's ``+True`` is int 1, which has no runtime representation here).
+                operand_value = self._lower_expr(operand)
+                self._reject_sequence_operand(operand_value, "arithmetic", self._loc(node))
+                self._require_float_leaves(
+                    operand_value, "arithmetic operands must be floating-point, not boolean", self._loc(node)
+                )
+                return operand_value
             case ast.UnaryOp(op=ast.Not()):
                 return self._lower_bool(node)
             case ast.BinOp(left=left, op=ast.Pow(), right=right):
@@ -1268,6 +1492,10 @@ class _Lowerer:
                 return self._lower_ifexp(test, body, orelse, self._loc(node))
             case ast.Call():
                 return self._lower_call(node)
+            case ast.Attribute(attr="T") if not self._is_self_attr(node):
+                # ``value.T`` is numpy transpose unless the receiver is the instance itself (an attribute named ``T``
+                # keeps Python's own resolution priority: ``self.T`` is a state read, ``self.P.T`` a transpose).
+                return self._transpose(self._lower_expr(node.value), self._loc(node))
             case ast.Attribute():
                 return self._read_attr(node)
             case ast.NamedExpr(target=ast.Name(id=name), value=value):
@@ -1281,7 +1509,7 @@ class _Lowerer:
                 raise UnsupportedConstruct(f"unsupported expression {type(node).__name__}", self._loc(node))
 
     def _lower_elements(self, elts: list[ast.expr]) -> Iterator[Value]:
-        """A ``*aggregate`` element is spliced in place (its leaves inlined into the surrounding sequence)."""
+        """A ``*aggregate`` element splices its top-level items (a matrix's rows) in place, as in Python."""
         for elt in elts:
             if isinstance(elt, ast.Starred):
                 yield from self._unpack(self._lower_expr(elt.value), elt)
@@ -1294,20 +1522,41 @@ class _Lowerer:
         return value.items
 
     def _lower_subscript(self, value: Value, index: ast.expr, loc: SourceLocation) -> Value:
+        if isinstance(index, ast.Tuple):
+            # Multi-axis ``m[i, j]`` is a numpy-array op with no meaning on a Python list/tuple (list ``[i, j]`` is a
+            # tuple key -- a TypeError), so it is rejected on a sequence; single-axis indexing works on any aggregate,
+            # matching plain list indexing. A numpy array is always rectangular by construction.
+            self._reject_sequence_operand(value, "multi-axis indexing", loc)
+            assert not isinstance(value, Aggregate) or array_shape(value) is not None
+            return self._subscript_axes(value, index.elts, loc)
+        return self._subscript_axes(value, [index], loc)
+
+    def _subscript_axes(self, value: Value, axes: list[ast.expr], loc: SourceLocation) -> Value:
+        """
+        Apply subscript axes left to right, numpy-style: an integer index selects along the current axis and consumes
+        it, a slice keeps the axis and applies the remaining axes within every kept element -- so ``M[i, j]``,
+        ``M[i][j]``, ``M[:, j]``, and ``M[1:, 0]`` all work over the nested aggregates.
+        """
+        if not axes:
+            return value
         if not isinstance(value, Aggregate):
             raise UnsupportedConstruct("cannot index or slice a scalar value", loc)
-        match index:
+        head, rest = axes[0], axes[1:]
+        match head:
             case ast.Slice(lower=lower, upper=upper, step=None):
                 start = 0 if lower is None else self._const_index(lower)
                 stop = len(value.items) if upper is None else self._const_index(upper)
-                return Aggregate(value.items[start:stop])
+                # A slice preserves the semantic flavor of the base: a slice of a list is a list, of an array an array.
+                return Aggregate(
+                    tuple(self._subscript_axes(item, rest, loc) for item in value.items[start:stop]), array=value.array
+                )
             case ast.Slice():
                 raise UnsupportedConstruct("a slice step is not supported", loc)
             case _:
-                i = self._const_index(index)
+                i = self._const_index(head)
                 if not -len(value.items) <= i < len(value.items):
                     raise UnsupportedConstruct(f"index {i} is out of range for a {len(value.items)}-element value", loc)
-                return value.items[i]
+                return self._subscript_axes(value.items[i], rest, loc)
 
     def _const_index(self, node: ast.expr) -> int:
         index = self._static_int(node)
@@ -1322,12 +1571,20 @@ class _Lowerer:
             receiver = self._lower_expr(func.value)
             if not isinstance(receiver, Aggregate):
                 raise UnsupportedConstruct(".flatten() is only supported on an aggregate value", self._loc(node))
+            self._reject_sequence_operand(receiver, "flattening", self._loc(node))
             return receiver.flatten()
         numpy_fn = self._numpy_function(func)
         if numpy_fn in _NUMPY_IDENTITY:
             if node.keywords or len(node.args) != 1 or isinstance(node.args[0], ast.Starred):
                 raise UnsupportedConstruct(f"np.{numpy_fn}() takes a single array-like argument", self._loc(node))
-            return self._lower_expr(node.args[0])
+            return self._as_array(self._lower_expr(node.args[0]), numpy_fn, self._loc(node))
+        if self._is_np_matmul(func):
+            if node.keywords:
+                raise UnsupportedConstruct("matmul() takes no keyword arguments", self._loc(node))
+            operands = self._lower_args(node)
+            if len(operands) != 2:
+                raise UnsupportedConstruct(f"matmul() takes 2 arguments, got {len(operands)}", self._loc(node))
+            return self._lower_matmul(operands[0], operands[1], self._loc(node))
         if isinstance(func, ast.Attribute) and self._is_self_name(func.value):
             return self._lower_method_call(node, func)
         intrinsic = self._intrinsic_call(node)
@@ -1357,7 +1614,7 @@ class _Lowerer:
             if func.id == "abs" and not node.keywords and builtin_unshadowed:
                 operands = self._lower_args(node)
                 if len(operands) == 1:
-                    return Scalar(self._builder.operation(FloatAbs(), [self._scalar(operands[0], node)]))
+                    return Scalar(self._builder.operation(FloatAbs(), [self._float_operand(operands[0], node)]))
             if func.id == "round" and not node.keywords and builtin_unshadowed:
                 # ``round(x)`` rounds to a whole-number float (ties to even); the format-aware hardware does the work.
                 # ``round(x, ndigits)`` (decimal rounding) is rejected rather than silently dropping the digit count.
@@ -1366,7 +1623,7 @@ class _Lowerer:
                     raise UnsupportedConstruct(
                         "round() takes a single argument; round(x, ndigits) is not supported", self._loc(node)
                     )
-                return Scalar(self._builder.operation(FloatRound(), [self._scalar(operands[0], node)]))
+                return Scalar(self._builder.operation(FloatRound(), [self._float_operand(operands[0], node)]))
             if func.id in ("min", "max") and not node.keywords and builtin_unshadowed:
                 # Binary min(a, b)/max(a, b) only; the variadic and iterable forms (and key=/default=) are not lowered.
                 operands = self._lower_args(node)
@@ -1375,13 +1632,15 @@ class _Lowerer:
                         f"{func.id}() is supported only with two scalar arguments", self._loc(node)
                     )
                 operator = FloatMin() if func.id == "min" else FloatMax()
-                return Scalar(self._builder.operation(operator, [self._scalar(operand, node) for operand in operands]))
+                return Scalar(
+                    self._builder.operation(operator, [self._float_operand(operand, node) for operand in operands])
+                )
             if func.id in ("list", "tuple") and not node.keywords and builtin_unshadowed:
-                # list(seq)/tuple(seq) of an aggregate is identity here: it carries the element order the model holds,
-                # and the front-end already treats list and tuple aggregates co-equally (the list/tuple-literal case).
+                # list(seq)/tuple(seq) produce a Python sequence (array=False) even from a numpy array; only the top
+                # level is rebuilt as a sequence, elements keep their own flavor (the rows of an array stay arrays).
                 operands = self._lower_args(node)
                 if len(operands) == 1 and isinstance(operands[0], Aggregate):
-                    return operands[0]
+                    return Aggregate(operands[0].items, array=False)
             if func.id == "bool" and not node.keywords and builtin_unshadowed:
                 operands = self._lower_args(node)
                 if len(operands) != 1:
@@ -1415,20 +1674,27 @@ class _Lowerer:
         operands = self._lower_args(node)
         if len(operands) != arity:
             raise UnsupportedConstruct(f"{name}() takes {arity} argument(s), got {len(operands)}", self._loc(node))
-        return Scalar(self._builder.operation(operator, [self._scalar(operand, node) for operand in operands]))
+        return Scalar(self._builder.operation(operator, [self._float_operand(operand, node) for operand in operands]))
 
-    def _intrinsic_name(self, func: ast.expr) -> str | None:
+    def _resolved_callee(self, func: ast.expr) -> object:
         """
-        The canonical intrinsic name if ``func`` targets a supported ``math``/``numpy`` function -- a
-        ``<module>.<name>`` attribute access or a bare name bound to the function. Both resolve the callee object and
-        defer the identity/shadow decision to ``_intrinsic_of``; spelling alone never dispatches.
+        The module-global object a call targets -- an unshadowed ``<module>.<attr>`` attribute access or an unshadowed
+        bare name -- else None. The object is returned so callers decide dispatch by identity (never by spelling): a
+        shadowing local, a rebound global, or an absent attribute all fail the downstream identity check.
         """
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and not self._is_local(func.value.id):
-            module = self._fn.__globals__.get(func.value.id)
-            return _intrinsic_of(getattr(module, func.attr, None)) if module is math or module is np else None
+            return getattr(self._fn.__globals__.get(func.value.id), func.attr, None)
         if isinstance(func, ast.Name) and not self._is_local(func.id):
-            return _intrinsic_of(self._fn.__globals__.get(func.id))
+            return self._fn.__globals__.get(func.id)
         return None
+
+    def _intrinsic_name(self, func: ast.expr) -> str | None:
+        """The canonical intrinsic name if ``func`` resolves to a supported ``math``/``numpy`` function, else None."""
+        return _intrinsic_of(self._resolved_callee(func))
+
+    def _is_np_matmul(self, func: ast.expr) -> bool:
+        """Dispatched apart from the scalar intrinsics because matmul is aggregate-valued."""
+        return self._resolved_callee(func) is np.matmul
 
     def _numpy_function(self, func: ast.expr) -> str | None:
         """
@@ -1441,7 +1707,7 @@ class _Lowerer:
         return None
 
     def _lower_args(self, node: ast.Call) -> list[Value]:
-        """A ``*aggregate`` argument is spliced in place (its leaves inlined into the positional list)."""
+        """A ``*aggregate`` argument is spliced in place: its top-level items (a matrix's rows) inline, as in Python."""
         args: list[Value] = []
         for arg in node.args:
             if isinstance(arg, ast.Starred):
@@ -1579,7 +1845,7 @@ class _Lowerer:
             if base_value is None:
                 raise UnsupportedConstruct("a negative power is only supported for a constant base", self._loc(base))
             return self._builder.float_const(base_value**n)
-        base_id = self._scalar(self._lower_expr(base), base)
+        base_id = self._float_operand(self._lower_expr(base), base)
         if n == 0:
             return self._builder.float_const(1.0)
         result = base_id
@@ -1599,6 +1865,9 @@ class _Lowerer:
         if cast is not None and cast[0] == "float":
             condition = self._static_bool(cast[1])  # float(<static bool>) -> 1.0 / 0.0; float(<static float>) identity
             return (1.0 if condition else 0.0) if condition is not None else self._static_float(cast[1])
+        element = _real_or_none(self._static_ndarray_element(node))
+        if element is not None:
+            return element
         match node:
             case ast.Constant(value=(int() | float()) as value) if not isinstance(value, bool):
                 return float(value)
@@ -1634,28 +1903,138 @@ class _Lowerer:
                 integer = self._static_int(node)
                 return None if integer is None else float(integer)
 
+    def _as_array(self, value: Value, numpy_fn: str, loc: SourceLocation) -> Value:
+        """
+        The ``np.array``/``asarray``/``asanyarray`` factory: convert a Python list/tuple into a numpy array by
+        rebuilding every nested aggregate with array semantics (scalar leaves unchanged, a scalar argument stays a
+        scalar). numpy rejects a ragged array literal, so a non-rectangular aggregate is rejected here too.
+        """
+        if isinstance(value, Aggregate) and array_shape(value) is None:
+            raise UnsupportedConstruct(f"np.{numpy_fn}() requires a rectangular (non-ragged) list/tuple", loc)
+        match value:
+            case Scalar():
+                return value
+            case Aggregate(items=items):
+                return Aggregate(tuple(self._as_array(item, numpy_fn, loc) for item in items), array=True)
+        raise TypeError(f"unexpected value {value!r}")
+
+    def _reject_sequence_operand(self, value: Value, what: str, loc: SourceLocation) -> None:
+        """
+        Reject a numpy-only operation applied to a plain Python list/tuple aggregate. Under Python sequence semantics
+        the operation is undefined (list ``+`` concatenates, list ``-``/``@``/``.T``/``.flatten()`` are errors), so the
+        user must build a numpy array; a scalar or an array operand passes.
+        """
+        if isinstance(value, Aggregate) and not value.array:
+            raise UnsupportedConstruct(
+                f"{what} on a Python list/tuple is not supported; build a numpy array with np.array([...])", loc
+            )
+
     def _apply_binop(self, op: ast.operator, a: Value, b: Value, loc: SourceLocation) -> Value:
+        if isinstance(op, ast.MatMult):
+            return self._lower_matmul(a, b, loc)
+        if isinstance(a, Aggregate) or isinstance(b, Aggregate):
+            # Elementwise arithmetic is a numpy operation; a Python list/tuple operand (including a scalar broadcast
+            # like ``list * s``) is rejected. The recursion below only ever revisits array-internal or scalar values.
+            self._reject_sequence_operand(a, "arithmetic", loc)
+            self._reject_sequence_operand(b, "arithmetic", loc)
+            return self._elementwise(op, a, b, loc)
+        # Reject an unsupported operator before the float-operand check, so its diagnostic wins over the operand one.
+        if not isinstance(op, (ast.Mult, ast.Add, ast.Sub, ast.Div)):
+            raise UnsupportedConstruct(f"unsupported binary operator {type(op).__name__}", loc)
+        a_id, b_id = self._float_operand(a, loc), self._float_operand(b, loc)
         match op:
             case ast.Mult():
-                # Scalar*scalar, or the elementwise broadcast of a scalar over an aggregate's leaves (vector*scalar).
-                if isinstance(a, Aggregate) and isinstance(b, Scalar):
-                    return self._broadcast(a, b.id)
-                if isinstance(a, Scalar) and isinstance(b, Aggregate):
-                    return self._broadcast(b, a.id)
-                if isinstance(a, Aggregate) or isinstance(b, Aggregate):
-                    raise UnsupportedConstruct(
-                        "elementwise aggregate-by-aggregate multiplication is not supported", loc
-                    )
-                return Scalar(self._builder.operation(FloatMul(), [self._scalar(a, loc), self._scalar(b, loc)]))
+                return Scalar(self._builder.operation(FloatMul(), [a_id, b_id]))
             case ast.Add():
-                return Scalar(self._builder.operation(FloatAdd(), [self._scalar(a, loc), self._scalar(b, loc)]))
+                return Scalar(self._builder.operation(FloatAdd(), [a_id, b_id]))
             case ast.Sub():
-                negated = self._builder.operation(FloatNeg(), [self._scalar(b, loc)])
-                return Scalar(self._builder.operation(FloatAdd(), [self._scalar(a, loc), negated]))
-            case ast.Div():
-                return Scalar(self._builder.operation(FloatDiv(), [self._scalar(a, loc), self._scalar(b, loc)]))
+                negated = self._builder.operation(FloatNeg(), [b_id])
+                return Scalar(self._builder.operation(FloatAdd(), [a_id, negated]))
             case _:
-                raise UnsupportedConstruct(f"unsupported binary operator {type(op).__name__}", loc)
+                return Scalar(self._builder.operation(FloatDiv(), [a_id, b_id]))
+
+    def _elementwise(self, op: ast.operator, a: Value, b: Value, loc: SourceLocation) -> Value:
+        """
+        Apply a binary arithmetic operator elementwise: two aggregate operands must have identical structure (zipped
+        level by level), while a scalar operand broadcasts against every leaf of the other side, preserving its shape.
+        This is deliberately narrower than numpy broadcasting -- a mixed-rank pair such as vector + matrix is rejected
+        rather than silently aligned along a different axis than numpy would pick.
+        """
+        # Name an unsupported operator before checking shapes, so its diagnostic wins over a mismatched-shape one.
+        if not isinstance(op, (ast.Mult, ast.Add, ast.Sub, ast.Div)):
+            raise UnsupportedConstruct(f"unsupported binary operator {type(op).__name__}", loc)
+        if isinstance(a, Aggregate) and isinstance(b, Aggregate):
+            return self._zip_elementwise(op, a, b, loc)
+        match (a, b):
+            case (Aggregate(items=items), Scalar()):
+                return Aggregate(tuple(self._elementwise(op, item, b, loc) for item in items), array=True)
+            case (Scalar(), Aggregate(items=items)):
+                return Aggregate(tuple(self._elementwise(op, a, item, loc) for item in items), array=True)
+            case _:
+                return self._apply_binop(op, a, b, loc)
+
+    def _zip_elementwise(self, op: ast.operator, a: Value, b: Value, loc: SourceLocation) -> Value:
+        match (a, b):
+            case (Scalar(), Scalar()):
+                return self._apply_binop(op, a, b, loc)
+            case (Aggregate(items=items_a), Aggregate(items=items_b)) if len(items_a) == len(items_b):
+                return Aggregate(
+                    tuple(self._zip_elementwise(op, x, y, loc) for x, y in zip(items_a, items_b)), array=True
+                )
+            case _:
+                raise UnsupportedConstruct(
+                    "elementwise operands have mismatched shapes "
+                    "(only same-shape operands and scalar broadcasts are supported)",
+                    loc,
+                )
+
+    def _lower_matmul(self, a: Value, b: Value, loc: SourceLocation) -> Value:
+        """
+        Expand ``a @ b`` into scalar multiply/add chains, following numpy's shape rules exactly: operands are 1-D or
+        2-D rectangular arrays with an agreeing inner dimension; a 1-D left operand is promoted to a row, a 1-D right
+        operand to a column, and each promoted axis is dropped from the result -- so vector @ vector is a scalar dot
+        product. There is no batching (ndim > 2) and no hardware aggregate: the result is an ordinary compile-time
+        aggregate of scalar dot products.
+        """
+        self._reject_sequence_operand(a, "the matrix product", loc)
+        self._reject_sequence_operand(b, "the matrix product", loc)
+        shape_a, shape_b = array_shape(a), array_shape(b)
+        if shape_a is None or shape_b is None:
+            raise UnsupportedConstruct("matmul operands must be rectangular vectors or matrices", loc)
+        if shape_a == () or shape_b == ():
+            raise UnsupportedConstruct("matmul does not accept scalar operands", loc)
+        if len(shape_a) > 2 or len(shape_b) > 2:
+            raise UnsupportedConstruct(
+                f"matmul operands must be 1-D or 2-D, got {len(shape_a)}-D @ {len(shape_b)}-D", loc
+            )
+        if shape_a[-1] != shape_b[0]:
+            raise UnsupportedConstruct(f"matmul dimension mismatch: {shape_name(shape_a)} @ {shape_name(shape_b)}", loc)
+        self._require_float_leaves(a, "matmul operands must be floating-point", loc)
+        self._require_float_leaves(b, "matmul operands must be floating-point", loc)
+        rows = [a] if len(shape_a) == 1 else list(self._row_items(a))
+        cols = [b] if len(shape_b) == 1 else list(self._row_items(self._transpose(b, loc)))
+        leaves = [self._dot(self._row_items(row), self._row_items(col), loc) for row in rows for col in cols]
+        return array_of((*shape_a[:-1], *shape_b[1:]), leaves, array=True)
+
+    @staticmethod
+    def _row_items(value: Value) -> tuple[Value, ...]:
+        assert isinstance(value, Aggregate)
+        return value.items
+
+    def _require_float_leaves(self, value: Value, message: str, loc: SourceLocation) -> None:
+        for vid in value.leaves():
+            if not isinstance(self._builder.type_of(vid), FloatType):
+                raise UnsupportedConstruct(message, loc)
+
+    def _dot(self, xs: tuple[Value, ...], ys: tuple[Value, ...], loc: SourceLocation) -> Scalar:
+        # A left fold rather than a balanced tree: it keeps every product single-use with an add of the running sum,
+        # which is exactly the shape MIR's FMA contraction fuses into one fmul plus a chain of ffma when configured.
+        acc: ValueId | None = None
+        for x, y in zip(xs, ys, strict=True):
+            term = self._builder.operation(FloatMul(), [self._scalar(x, loc), self._scalar(y, loc)])
+            acc = term if acc is None else self._builder.operation(FloatAdd(), [acc, term])
+        assert acc is not None
+        return Scalar(acc)
 
     _RELATIONAL_OPS: dict[type[ast.cmpop], RelationalOp] = {
         ast.Lt: RelationalOp.LT,
@@ -1809,18 +2188,50 @@ class _Lowerer:
         self._builder.position_at(merge_block)
         return self._merge_values(then, else_, then_end, else_end, loc)
 
-    def _broadcast(self, value: Value, scalar: ValueId) -> Value:
-        """The one elementwise vector op: every scalar leaf is multiplied by ``scalar``, preserving shape."""
-        if isinstance(value, Aggregate):
-            return Aggregate(tuple(self._broadcast(item, scalar) for item in value.items))
-        assert isinstance(value, Scalar)
-        return Scalar(self._builder.operation(FloatMul(), [value.id, scalar]))
+    def _transpose(self, value: Value, loc: SourceLocation) -> Value:
+        """
+        ``.T`` with numpy semantics over the supported shapes: identity on a 1-D vector, row/column swap on a 2-D
+        matrix; a scalar, a ragged aggregate, or a deeper nesting is rejected.
+        """
+        self._reject_sequence_operand(value, "transpose", loc)
+        match array_shape(value):
+            case None:
+                raise UnsupportedConstruct("only a rectangular vector or matrix can be transposed", loc)
+            case ():
+                raise UnsupportedConstruct("cannot transpose a scalar value", loc)
+            case (_,):
+                return value
+            case (_, _):
+                columns = zip(*[self._row_items(row) for row in self._row_items(value)])
+                return Aggregate(tuple(Aggregate(column, array=True) for column in columns), array=True)
+            case shape:
+                raise UnsupportedConstruct(f"transpose of a {len(shape)}-D value is not supported", loc)
+
+    def _negate(self, value: Value, loc: SourceLocation) -> Value:
+        self._reject_sequence_operand(value, "arithmetic", loc)
+        match value:
+            case Scalar():
+                return Scalar(self._builder.operation(FloatNeg(), [self._float_operand(value, loc)]))
+            case Aggregate(items=items):
+                return Aggregate(tuple(self._negate(item, loc) for item in items), array=True)
+        raise TypeError(f"unexpected value {value!r}")
 
     def _scalar(self, value: Value, where: ast.AST | SourceLocation) -> ValueId:
         if isinstance(value, Scalar):
             return value.id
         loc = where if isinstance(where, SourceLocation) else self._loc(where)
         raise UnsupportedConstruct(f"expected a scalar value here, got a {len(value.leaves())}-element aggregate", loc)
+
+    def _float_operand(self, value: Value, where: ast.AST | SourceLocation) -> ValueId:
+        """
+        A scalar operand for a floating-point operator, rejecting a boolean with a source location rather than letting
+        it reach HIR construction as a bare, location-less type error.
+        """
+        vid = self._scalar(value, where)
+        if isinstance(self._builder.type_of(vid), BoolType):
+            loc = where if isinstance(where, SourceLocation) else self._loc(where)
+            raise UnsupportedConstruct("arithmetic operands must be floating-point, not boolean", loc)
+        return vid
 
     def _reject_shortcircuit_walrus(self, node: ast.AST) -> None:
         """
@@ -1884,6 +2295,11 @@ class _Lowerer:
 
     def _is_local(self, name: str) -> bool:
         return name in self._local_names[self._fn]
+
+    def _constant_array(self, name: str, value: np.ndarray, loc: SourceLocation) -> Value:
+        """A module-level ndarray constant folds into an aggregate of interned float constants, like a literal."""
+        shape, reals = _ndarray_reals(value, f"module constant {name!r}", loc)
+        return array_of(shape, [Scalar(self._builder.float_const(x)) for x in reals], array=True)
 
     def _module_global(self, name: str) -> object:
         """
@@ -2020,7 +2436,8 @@ class _Lowerer:
         The reset-snapshot value of a self attribute eligible for compile-time folding, or ``_ABSENT`` when none is. An
         attribute folds only if it is never assigned on a reachable path (``_attr_assigned_set``) and is not a class
         data descriptor (read through the descriptor, never as a stored value -- ``_is_class_data_descriptor``). Shared
-        by ``_static_int``, ``_static_bool``, and ``_static_float`` so all three fold a read-only attribute the same.
+        by the static evaluators (``_static_int``/``_static_bool``/``_static_float``/``_static_ndarray_value``) so they
+        fold a read-only attribute the same.
         """
         if attr in self._attr_assigned_set() or self._is_class_data_descriptor(attr):
             return _ABSENT
@@ -2076,18 +2493,34 @@ class _Lowerer:
         attr = self._attr_of(target)
         shape = self._shape(attr)
         if not shape.accepts(value):
-            kind = f"a {len(shape.slots)}-element vector" if shape.is_vector else "a scalar"
             raise UnsupportedConstruct(
-                f"self.{attr} is {kind}; the assigned value has an incompatible shape", self._loc(target)
+                f"self.{attr} is {shape_name(shape.shape)}; the assigned value has an incompatible shape",
+                self._loc(target),
             )
+        # The reset snapshot fixes whether the attribute reads back as a numpy array or a Python list next transaction;
+        # storing the other flavor would round-trip wrong (a list stored into an ndarray slot reads back as an array),
+        # so the assigned value's flavor must match. A scalar attribute has no flavor.
+        if isinstance(value, Aggregate) and value.array != shape.array:
+            held, given = ("a numpy array", "a Python list") if shape.array else ("a Python list", "a numpy array")
+            raise UnsupportedConstruct(f"self.{attr} holds {held}; the assigned value is {given}", self._loc(target))
+        # The slot bank is fixed by the reset snapshot; a written leaf whose bank differs (a bool into a float slot or
+        # vice versa) would leave the slot's live-in and live-out disagreeing, so it is rejected here rather than
+        # producing a mistyped state register.
+        for reset, vid in zip(shape.resets, value.leaves()):
+            expected: Type = BoolType() if isinstance(reset, BoolConst) else FloatType()
+            if self._builder.type_of(vid) != expected:
+                raise UnsupportedConstruct(
+                    f"self.{attr} holds {_hir_type_name(expected)} values; the assigned value has an incompatible type",
+                    self._loc(target),
+                )
         self._state_env[attr] = value
 
     def _shape(self, attr: str) -> StateAttr:
         """
         The scalar-slot decomposition of an instance attribute, derived once from the reset snapshot and memoized so it
-        is the single source of the attribute's shape. A list/tuple or 1-D numpy array is a vector; a real number is a
-        scalar. A jaxtyping array annotation, when present, must agree with the value; a shape-less annotation
-        (``list``, ``numpy.typing.NDArray``) leaves the shape to the value.
+        is the single source of the attribute's shape. A list/tuple is a vector, a numpy array a vector or matrix, and
+        a real number a scalar. A jaxtyping array annotation, when present, must agree with the value; a shape-less
+        annotation (``list``, ``numpy.typing.NDArray``) leaves the shape to the value.
         """
         if attr not in self._shapes:
             self._shapes[attr] = self._derive_shape(attr)
@@ -2096,33 +2529,30 @@ class _Lowerer:
     def _derive_shape(self, attr: str) -> StateAttr:
         value = self._snapshot[attr]
         self._check_annotation(attr, value)
+        what = f"instance attribute self.{attr}"
         if isinstance(value, (bool, np.bool_)):  # checked before the numeric paths: bool is an int subclass
-            return StateAttr(is_vector=False, slots=[attr], resets=[BoolConst(bool(value))])
-        elements = self._aggregate_elements(attr, value)
-        if elements is None:
-            return StateAttr(False, [attr], [FloatConst(self._coerce_real(attr, value))])
-        slots = [f"{attr}_{index}" for index in range(len(elements))]
-        return StateAttr(True, slots, [FloatConst(self._coerce_real(attr, element)) for element in elements])
-
-    def _aggregate_elements(self, attr: str, value: object) -> list[object] | None:
+            return StateAttr(shape=(), slots=[attr], resets=[BoolConst(bool(value))], array=False)
+        # An ndarray reset carries numpy array semantics; a list/tuple reset carries Python sequence semantics.
+        array = isinstance(value, np.ndarray)
         if isinstance(value, np.ndarray):
-            if value.ndim != 1:
-                raise UnsupportedConstruct(
-                    f"instance attribute self.{attr} must be a scalar or 1-D array, got a {value.ndim}-D array"
-                )
-            return list(value)
-        if isinstance(value, (list, tuple)):
-            return list(value)
-        return None
+            shape, reals = _ndarray_reals(value, what)
+        elif isinstance(value, (list, tuple)):
+            if not value:
+                raise UnsupportedConstruct(f"{what} must not be an empty array")
+            shape, reals = (len(value),), [self._coerce_real(attr, element) for element in value]
+        else:
+            shape, reals = (), [self._coerce_real(attr, value)]
+        resets: list[Const] = [FloatConst(x) for x in reals]
+        return StateAttr(shape, indexed_names(attr, shape), resets, array=array)
 
     def _check_annotation(self, attr: str, value: object) -> None:
         """
         Enforce a jaxtyping array annotation against the reset value, so an explicitly declared shape cannot silently
-        disagree with it. A jaxtyping type is a class that exposes ``dims`` and validates shape and dtype via
-        ``isinstance``; a generic alias (``list[float]``, ``numpy.typing.NDArray``) is not a class and states no shape.
+        disagree with it. A jaxtyping type validates shape and dtype via ``isinstance``; a generic alias
+        (``list[float]``, ``numpy.typing.NDArray``) is not a class and states no shape.
         """
         annotation = self._annotation_of(attr)
-        if isinstance(annotation, type) and hasattr(annotation, "dims") and not isinstance(value, annotation):
+        if _is_array_annotation(annotation) and not isinstance(value, annotation):
             raise UnsupportedConstruct(f"self.{attr} value does not satisfy its declared array type {annotation}")
 
     def _annotation_of(self, attr: str) -> Any:
@@ -2135,17 +2565,19 @@ class _Lowerer:
         return None
 
     def _coerce_real(self, attr: str, value: object) -> float:
-        if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
+        real = _real_or_none(value)
+        if real is None:
             raise UnsupportedConstruct(
-                f"instance attribute self.{attr} must be a real number or a sequence of reals, "
-                f"got {type(value).__name__}"
+                f"instance attribute self.{attr} must hold real numbers (a matrix reset must be a 2-D numpy array, "
+                f"not nested lists), got {type(value).__name__}"
             )
-        return float(value)
+        return real
 
     def _check_state_slot_names(self) -> None:
         """
-        A vector attribute decomposes into slots ``attr_0, attr_1, ...``; guard against such a slot name coinciding with
-        another attribute's slot (e.g. a vector ``v`` and a scalar ``v_0``), which would otherwise alias distinct state.
+        A vector or matrix attribute decomposes into slots ``attr_0, attr_1, ...`` / ``attr_0_0, ...``; guard against
+        such a slot name coinciding with another attribute's slot (e.g. a vector ``v`` and a scalar ``v_0``), which
+        would otherwise alias distinct state.
         """
         owner: dict[str, str] = {}
         for attr in self._state_order:
