@@ -630,6 +630,12 @@ module zkf_atan2 #(
             $fatal(1, "zkf_atan2: residual divisor cd_xn sign bit set for a non-special transaction");
         if (!rst && cd_done && !be_special && (cd_xn == {WX{1'b0}}))
             $fatal(1, "zkf_atan2: residual divisor cd_xn == 0 for a non-special transaction");
+        // Residual radix-4 divide precondition: the initial remainder |y_K| must be strictly below the divisor x_K
+        // (the stepper assumes rem < den, and the residual quotient's integer bit is structurally 0). It holds because
+        // vectoring drives |y_N| <= x_N*2**-(N-1); the compare (both operands non-negative here) locks it under
+        // stimulus.
+        if (!rst && cd_done && !be_special && !be_bypass && ({1'b0, be_ykabs} >= {1'b0, cd_xn}))
+            $fatal(1, "zkf_atan2: residual |y_K| >= x_K at arm -- radix-4 divide precondition violated");
     end
 `endif
 

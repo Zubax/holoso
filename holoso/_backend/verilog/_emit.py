@@ -20,7 +20,6 @@ from typing import assert_never
 
 from ..._lir import *
 from ..._operators import *
-from ..._type import is_wide_type
 from ..._legal import output_header
 from ._microcode import *
 from ._support import inline_support, support_files
@@ -275,7 +274,7 @@ def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance,
     for inst in lir.instances:
         sig = _sig(inst)
         for pos, operand_type in enumerate(inst.operator.signature.operand_types):
-            assert is_wide_type(operand_type), "pooled operators read only wide operands today"
+            assert operand_type.is_wide, "pooled operators read only wide operands today"
             letter = PORT_LETTERS[pos]
             w(f"reg  [W-1:0] {sig}_{letter};")  # combinational read-mux output (driven in the read-mux always @*)
         # One net per TAPPED output port -- the raw operator output (wide W-bit or boolean 1-bit). The in_valid and
@@ -283,7 +282,7 @@ def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance,
         for q, result_type in enumerate(inst.operator.signature.result_types):
             if (inst, q) not in tapped:
                 continue  # a never-tapped output port: no nets, the module port is left unconnected
-            if is_wide_type(result_type):
+            if result_type.is_wide:
                 w(f"wire [W-1:0] {sig}_y{q};")
             else:
                 w(f"wire         {sig}_y{q};")
@@ -324,7 +323,7 @@ def _emit_operators(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, in
         # A float output port carries a hardware sign conditioner (piped inside the wrapper); an untapped one is tied
         # to the identity. Boolean output ports have none -- their inversion conditioner is fabric-side at the write.
         for q, result_type in enumerate(operator.signature.result_types):
-            if is_wide_type(result_type):
+            if result_type.is_wide:
                 conditioner = f_ysgn(base, q) if (inst, q) in tapped else "2'd0"
                 w(f".{operator.output_hdl_ports[q]}_sgnop({conditioner}),")
         for letter in letters:

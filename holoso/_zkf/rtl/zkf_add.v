@@ -296,6 +296,15 @@ module zkf_add #(
     wire [WRAW-1:0] s1_raw_result  = s1_adder_a + s1_adder_b + {{(WRAW-1){1'b0}}, !s1_same_sign};
     wire            s1_result_sign = s1_force_inf ? s1_inf_sign : s1_finite_sign;
 
+    // The sticky-jam rounding proof requires the anchor operand's low WGRS bits to be zero (see the s1_large_ext_exp
+    // capture above). Enforce it in simulation so a future datapath change cannot silently break RNTE.
+`ifdef SIMULATION
+    always @(posedge clk) begin
+        if (!rst && s1_valid && (|s1_large_ext_exp[WGRS-1:0]))
+            $fatal(1, "zkf_add: anchor operand GRS pad nonzero -- sticky-jam rounding invariant violated");
+    end
+`endif
+
     // Stage 2: registered raw add/sub result.
     reg                            s2_valid;
     reg                            s2_sign;
@@ -471,6 +480,11 @@ module zkf_add #(
         s1_force_zero        <= s0b_force_zero;
         s1_force_inf         <= s0b_force_inf;
         s1_exp_biased        <= s0b_exp_biased;
+        // The anchor (larger-magnitude) operand has NO fractional tail: its low WGRS bits are a hard-zero GRS pad. This
+        // is load-bearing for rounding -- the aligned smaller operand carries the jammed alignment sticky in its bit 0,
+        // and only because the anchor's bit 0 is 0 does that sticky survive into the raw result's bit 0 (hence into the
+        // extracted sticky). If a future edit ever packs payload into these low bits, RNTE breaks silently; the
+        // simulation assert below guards the invariant.
         s1_large_ext_exp     <= {s0b_large_sig_exp, {WGRS{1'b0}}};
         s1_small_aligned     <= s0_small_aligned;
 

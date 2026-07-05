@@ -258,7 +258,12 @@ module zkf_fma #(
     // Absolute exponent difference = alignment right-shift for the smaller operand.
     wire [WDIFF-1:0] exp_diff_abs = ediff[WDIFF-1] ? (~ediff + 1'b1) : ediff;
 
-    // Anchor exponent and the two operands extended (MSB-aligned) into the WF field.
+    // Anchor exponent and the two operands extended (MSB-aligned) into the WF field. The anchor (larger-magnitude)
+    // operand always has a hard-zero low tail: at least its low WGRS bits are 0 (product anchor -> {p_key, WGRS zeros};
+    // c anchor -> {c_key, WF-WMAN >= WGRS zeros}). This is load-bearing for rounding -- the aligned smaller operand
+    // carries the jammed alignment sticky in its bit 0, and only because the anchor's bit 0 is 0 does that sticky
+    // survive into the raw result's bit 0. The simulation assert further below guards the invariant on the registered
+    // anchor operand.
     wire signed [WEU-1:0] anchor_exp = product_ge_c ? d_ep_eff : d_ec_eff;
     wire         [WF-1:0] large_ext  = product_ge_c ? {d_p_key, {WGRS{1'b0}}} : {d_c_key, {(WF-WMAN){1'b0}}};
     wire         [WF-1:0] small_ext  = product_ge_c ? {d_c_key, {(WF-WMAN){1'b0}}} : {d_p_key, {WGRS{1'b0}}};
@@ -360,6 +365,15 @@ module zkf_fma #(
     wire [WRAW-1:0] s1_adder_b     = s1_same_sign ? s1_adder_b_abs : ~s1_adder_b_abs;
     wire [WRAW-1:0] s1_raw_result  = s1_adder_a + s1_adder_b + {{(WRAW-1){1'b0}}, !s1_same_sign};
     wire            s1_result_sign = s1_force_inf ? s1_inf_sign : s1_finite_sign;
+
+    // The sticky-jam rounding proof requires the anchor operand's low WGRS bits to be zero (see the large_ext assembly
+    // above). Enforce it in simulation so a future datapath change cannot silently break single-rounding RNTE.
+`ifdef SIMULATION
+    always @(posedge clk) begin
+        if (!rst && s1_valid && (|s1_large_ext[WGRS-1:0]))
+            $fatal(1, "zkf_fma: anchor operand GRS pad nonzero -- sticky-jam rounding invariant violated");
+    end
+`endif
 
     // -- Stage 2 register: raw add/subtract result --------------------------------------------------------------
     reg                  s2_valid;

@@ -1,9 +1,9 @@
-"""Scalar data types and the Zubax Kulibin float format."""
+"""Scalar data types."""
 
-import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from fractions import Fraction
+
+from ._zkf import ZkfFormat
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,6 +11,11 @@ class ScalarType(ABC):
     @property
     @abstractmethod
     def width(self) -> int: ...
+
+    @property
+    def is_wide(self) -> bool:
+        """In the wide data register bank, not the 1-bit boolean bank."""
+        return self.width > 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,9 +42,8 @@ class FloatFormat:
     ``holoso_support.v``. The total port width is ``wexp + wman`` (a sign bit, ``wexp`` exponent bits, and
     ``wman - 1`` stored significand bits).
 
-    ``encode``/``decode`` are the bit-exact round-trip codec between Python floats and ZKF bit patterns. The layout is
-    ``[sign | exponent(wexp) | stored-fraction(wman-1)]`` with a hidden leading significand bit: ``exp == 0`` is zero
-    and the all-ones exponent is infinity. Encoding rounds to nearest, ties to even, using exact rational arithmetic.
+    Engine-agnostic float facade: the codec delegates to the vendored bit-exact ZKF model, which is the single source
+    of numeric truth. ``exp == 0`` is zero and the all-ones exponent is infinity; ZKF has no subnormals.
     """
 
     wexp: int
@@ -52,116 +56,36 @@ class FloatFormat:
             raise ValueError(f"wman must be >= 4, got {self.wman}")
 
     @property
-    def width(self) -> int:
-        """``WFULL = wexp + wman``."""
-        return self.wexp + self.wman
+    def _zfmt(self) -> ZkfFormat:
+        return ZkfFormat(self.wexp, self.wman)
 
     def encode(self, value: float) -> int:
-        """Encode a Python float to the nearest ZKF bit pattern (ties to even). NaN is rejected; ZKF has no NaN."""
-        if math.isnan(value):
-            raise ValueError("NaN is not representable in ZKF")
-        sign = 1 if math.copysign(1.0, value) < 0 else 0
-        magnitude = abs(value)
-        if magnitude == 0.0:
-            return 0  # canonical positive zero
-        if math.isinf(magnitude):
-            return self._pack(sign, self.exp_inf, 0)
-        return self.pack(Fraction(value))
-
-    def pack(self, value: Fraction) -> int:
-        """Round a signed exact rational to the nearest float (round-to-nearest, ties to even) and assemble it."""
-        if value == 0:
-            return 0  # canonical positive zero
-        sign = 1 if value < 0 else 0
-        magnitude = abs(value)
-        wfrac = self.wfrac
-        exp = _floor_log2(magnitude)
-        min_exp = 1 - self.bias
-        max_exp = self.exp_inf - 1 - self.bias
-        if exp < min_exp:  # Underflow: round against the half-MIN_NORMAL boundary (no subnormals).
-            return self._pack(sign, 1, 0) if magnitude >= pow2(min_exp - 1) else 0
-        scaled = magnitude / pow2(exp) * (1 << wfrac)
-        quotient, remainder = divmod(scaled.numerator, scaled.denominator)
-        twice = 2 * remainder
-        if twice > scaled.denominator or (twice == scaled.denominator and (quotient & 1)):
-            quotient += 1
-        if quotient >= (1 << self.wman):
-            quotient >>= 1
-            exp += 1
-        if exp > max_exp:
-            return self._pack(sign, self.exp_inf, 0)
-        return self._pack(sign, exp + self.bias, quotient & self.frac_mask)
+        """NaN is rejected; ZKF has no NaN."""
+        return self._zfmt.encode(value).bits
 
     def decode(self, bits: int) -> float:
-        wfrac = self.wfrac
-        sign = (bits >> (self.width - 1)) & 1
-        exp = (bits >> wfrac) & self.exp_inf
-        frac = bits & self.frac_mask
-        if exp == 0:
-            return 0.0
-        if exp == self.exp_inf:
-            return -math.inf if sign else math.inf
-        significand = (1 << wfrac) | frac
-        value = math.ldexp(float(significand), exp - self.bias - wfrac)
-        return -value if sign else value
+        """
+        The value as the nearest Python double, correctly rounded in a single step. Formats wider than IEEE double
+        (``wman > 53``, reaching the double-subnormal range) round up to 1 ULP tighter than a naive ``ldexp`` decode
+        that double-rounds; no float32/float64-class ZKF format reaches that regime, so this is invisible in practice.
+        """
+        return float(self._zfmt.wrap(bits))
 
     def round(self, value: float) -> float:
-        """
-        Snap a real-valued result to the nearest value representable in this format (round-to-nearest, ties to even),
-        exactly as the hardware packer rounds after each operator. NaN may be rejected depending on the format
-        (e.g., ZKF has no NaN).
-        """
-        return self.decode(self.encode(value))
+        """Rounds exactly as the hardware packer does after each operator. NaN is rejected (ZKF has no NaN)."""
+        return float(self._zfmt.encode(value))
 
     def is_legal(self, bits: int) -> bool:
-        """Whether ``bits`` is a legal ZKF value (rejects subnormals and negative zero)."""
-        wfrac = self.wfrac
-        sign = (bits >> (self.width - 1)) & 1
-        exp = (bits >> wfrac) & self.exp_inf
-        frac = bits & self.frac_mask
-        if exp == 0:
-            return frac == 0 and sign == 0  # only canonical +0
-        return True
+        """Rejects subnormals and negative zero."""
+        value = self._zfmt.wrap(bits)
+        return (value.frac == 0 and not value.negative) if value.is_zero else True
 
     def is_finite(self, bits: int) -> bool:
-        """Whether ``bits`` encodes a finite value rather than an infinity."""
-        return ((bits >> self.wfrac) & self.exp_inf) != self.exp_inf
+        return self._zfmt.wrap(bits).is_finite
 
     @property
-    def bias(self) -> int:
-        return (1 << (self.wexp - 1)) - 1
-
-    @property
-    def wfrac(self) -> int:
-        """The number of stored fraction bits (the significand width minus the hidden leading bit)."""
-        return self.wman - 1
-
-    @property
-    def exp_inf(self) -> int:
-        """The all-ones biased exponent reserved for infinity."""
-        return (1 << self.wexp) - 1
-
-    @property
-    def exp_max_finite(self) -> int:
-        return self.exp_inf - 1
-
-    @property
-    def frac_mask(self) -> int:
-        return (1 << self.wfrac) - 1
-
-    @property
-    def min_exp_unbiased(self) -> int:
-        """The smallest unbiased exponent of a normal value (ZKF has no subnormals)."""
-        return 1 - self.bias
-
-    @property
-    def max_exp_unbiased(self) -> int:
-        return self.exp_max_finite - self.bias
-
-    def _pack(self, sign: int, exp: int, frac: int) -> int:
-        """Assemble raw sign/exponent/fraction fields without rounding (distinct from the rounding ``pack``)."""
-        wfrac = self.wfrac
-        return ((sign & 1) << (self.width - 1)) | ((exp & self.exp_inf) << wfrac) | (frac & self.frac_mask)
+    def width(self) -> int:
+        return self.wexp + self.wman
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,16 +112,6 @@ class BoolType(ScalarType):
         return "bool"
 
 
-def is_wide_type(scalar_type: ScalarType) -> bool:
-    """
-    Whether ``scalar_type`` lives in the WIDE data register bank (as opposed to the 1-bit boolean bank): the single
-    storage-bank predicate the timing model, the scheduler, and the backends share instead of open-coding
-    ``isinstance(x, FloatType)`` at each site. Float is the only wide tenant today; a future fixed-width int joins it
-    here, so a wide value is routed correctly everywhere without revisiting every dispatch.
-    """
-    return isinstance(scalar_type, FloatType)
-
-
 @dataclass(frozen=True, slots=True)
 class LogicalPort:
     """
@@ -209,17 +123,3 @@ class LogicalPort:
 
     name: str
     scalar_type: ScalarType
-
-
-def pow2(exp: int) -> Fraction:
-    """``2**exp`` as an exact rational, for either sign of ``exp``. Shared by the codec and the value arithmetic."""
-    return Fraction(1 << exp, 1) if exp >= 0 else Fraction(1, 1 << -exp)
-
-
-def _floor_log2(value: Fraction) -> int:
-    exp = value.numerator.bit_length() - value.denominator.bit_length()
-    while pow2(exp + 1) <= value:
-        exp += 1
-    while pow2(exp) > value:
-        exp -= 1
-    return exp

@@ -13,7 +13,7 @@ from .._operators import (
     identity_conditioner,
 )
 from .._errors import UnsupportedConstruct
-from .._type import BoolType, FloatFormat, FloatType, ScalarType, is_wide_type
+from .._type import BoolType, FloatFormat, FloatType, ScalarType
 from .._util import BlockId, ValueId
 
 
@@ -328,9 +328,7 @@ class MirFloatView(_MirBankView):
     @property
     def operation_nodes(self) -> dict[ValueId, MirOperation]:
         return {
-            vid: node
-            for vid, node in self.nodes.items()
-            if isinstance(node, MirOperation) and is_wide_type(node.scalar_type)
+            vid: node for vid, node in self.nodes.items() if isinstance(node, MirOperation) and node.scalar_type.is_wide
         }
 
     @classmethod
@@ -348,11 +346,11 @@ class MirFloatView(_MirBankView):
                 case MirFloatStateRead(scalar_type=scalar_type):
                     nodes[vid] = node
                     formats.add(scalar_type.fmt)
-                case MirOperation(scalar_type=scalar_type) if is_wide_type(scalar_type):
+                case MirOperation(scalar_type=scalar_type) if scalar_type.is_wide:
                     nodes[vid] = node
                     if isinstance(scalar_type, FloatType):
                         formats.add(scalar_type.fmt)
-                case MirPhi(scalar_type=scalar_type) if is_wide_type(scalar_type):
+                case MirPhi(scalar_type=scalar_type) if scalar_type.is_wide:
                     nodes[vid] = node
                     if isinstance(scalar_type, FloatType):
                         formats.add(scalar_type.fmt)

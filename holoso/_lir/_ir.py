@@ -17,7 +17,7 @@ from .._operators import (
     PooledHardwareOperator,
     PortConditioner,
 )
-from .._type import BoolType, FloatFormat, FloatType, ScalarType, is_wide_type
+from .._type import BoolType, FloatFormat, FloatType, ScalarType
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
 # The cycle-accurate timing model: one consistent physical story shared by the LIR cycle helpers below, the numerical
@@ -87,7 +87,7 @@ def operand_read_cycle(operator: HardwareOperator, issue_cycle: int, fetch_lag: 
     alike); an inline op fires -- and reads -- on its combinational fire step (``inline_fire_cycle``).
     """
     if isinstance(operator, PooledHardwareOperator):
-        assert all(is_wide_type(ty) for ty in operator.signature.operand_types), operator.mnemonic
+        assert all(ty.is_wide for ty in operator.signature.operand_types), operator.mnemonic
         return read_cycle(issue_cycle, fetch_lag)
     return inline_fire_cycle(issue_cycle + operator.latency, fetch_lag)
 
@@ -108,9 +108,9 @@ def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: Ha
     """
     landing = landing_cycle(0, fetch_lag)
     if isinstance(consumer, PooledHardwareOperator):
-        assert is_wide_type(
-            producer.signature.result_types[producer_port]
-        ), f"{consumer.mnemonic}: pooled operators read only wide operands today"
+        assert producer.signature.result_types[
+            producer_port
+        ].is_wide, f"{consumer.mnemonic}: pooled operators read only wide operands today"
         read = read_cycle(0, fetch_lag)
     else:
         read = inline_fire_cycle(consumer.latency, fetch_lag)

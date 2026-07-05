@@ -28,7 +28,6 @@ from ..._lir import (
     pooled_write_word,
 )
 from ..._operators import BoolInversion, InlineHardwareOperator, PortConditioner
-from ..._type import is_wide_type
 
 PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
 
@@ -302,7 +301,7 @@ def build_microcode(
             if len(read_book.sources) > 1:
                 add(f_rd(base, PORT_LETTERS[pos]), read_book.opcode_width)
         for q, result_type in enumerate(inst.operator.signature.result_types):
-            if is_wide_type(result_type) and (inst, q) in tapped:
+            if result_type.is_wide and (inst, q) in tapped:
                 add(f_ysgn(base, q), 2)
     for dst, book in write_books.items():
         add(f_op(dst), book.opcode_width, gated=True)
