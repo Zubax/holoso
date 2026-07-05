@@ -7,7 +7,7 @@
 ///   log2(+0)       = -inf, pole=1
 ///   log2(x<0)      = -inf, domain_error=1
 ///
-/// Algorithm (symmetric argument reduction; mirrors tb/zkf_model.py::log2_reference bit-for-bit):
+/// Algorithm (symmetric argument reduction):
 ///
 ///  1. With x = m * 2^e (m = 1.frac in [1,2), e = exp-BIAS), log2(x) = e + log2(m). Re-center the mantissa into the
 ///     symmetric interval: if m >= sqrt(2) (significand sig >= THR = round(sqrt(2)*2^WFRAC)), halve m and increment e,

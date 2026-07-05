@@ -124,7 +124,7 @@ module zkf_sincos #(
     // That already-narrowed WMAN+5-bit operand is what the grid sees, so the shared DSP column count is the narrowed
     // one, and every consumer derives its shift / exp-offset from CONST2PI_S directly --
     // product-scale minus target-scale. The magnitude container and shared _zkf_fixed_to_float back-end are sized on
-    // this narrowed CWB, so they shrink with it. Mirrors tb/zkf_model.py::sincos_reference.
+    // this narrowed CWB, so they shrink with it.
     localparam integer CWB  = WMAN + 5;                 // narrowed 2*pi width (== the table's const2pi port width)
     localparam integer TSA_BITS = (WT + 2) - ((WMAN + 1) / 2) - 3;  // small-angle handoff: t' < 2**TSA_BITS
     localparam integer WMAG = CWB + WT + 1;             // uniform magnitude width (small-angle full product is widest)
@@ -134,7 +134,7 @@ module zkf_sincos #(
     localparam integer EONE_XF = WMAG - 1 - XF;          // exp_offset reading a 2**-XF-scaled magnitude back as itself
     localparam integer EONE_S  = WMAG - 1 - CONST2PI_S;  // exp_offset reading a 2**-CONST2PI_S-scaled magnitude
     localparam integer WOP  = (WMAN > (TSA_BITS + 1)) ? WMAN : (TSA_BITS + 1);  // small-angle operand width
-    // Correction-multiply operand widths (mirror tb/zkf_model.py): phi keeps WPHI top bits of (const2pi*z_K)>>zf,
+    // Correction-multiply operand widths: phi keeps WPHI top bits of (const2pi*z_K)>>zf,
     // x_K/y_K keep WXC top bits -- so each correction multiply is small (~18 bits).
     localparam integer PHI_NAT      = XF - K + 2;
     localparam integer WPHI         = (WMAN + 6 < PHI_NAT) ? (WMAN + 6) : ((PHI_NAT > 2) ? PHI_NAT : 2);

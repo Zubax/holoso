@@ -216,7 +216,7 @@ Holoso follows Python with minimal deviations where it makes sense for hardware 
 
 ### Floating point
 
-The floating point engine is based on [Zubax Kulibin Float (ZKF)](https://github.com/Zubax/kulibin).
+The floating point engine is based on [Zubax Kulibin Float (ZKF)](https://github.com/Zubax/zkf).
 
 Differences from IEEE 754: no NaN, no subnormals (exponent 0 always encodes +0; finite magnitudes in `(0, min_normal/2)`
 round to +0; magnitudes in `[min_normal/2, min_normal)` round to signed min_normal), no exceptions, overflow produces ±∞.

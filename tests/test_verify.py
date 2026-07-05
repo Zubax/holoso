@@ -103,9 +103,8 @@ def test_float_value_factories_and_fields() -> None:
     value = FloatValue.from_bits(F32, 0x3F800001)
     assert value.fmt == F32
     assert value.bits == 0x3F800001
-    assert value.sign == 0
+    assert value.negative is False
     assert value.exponent == 0x7F
-    assert value.significand == 0x800001
     assert float(FloatValue.from_float(F32, 1.0)) == 1.0
 
     with pytest.raises(TypeError, match="from_bits"):

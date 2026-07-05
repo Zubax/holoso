@@ -5,7 +5,10 @@
 ///
 /// Elaboration fails when K is so extreme that every normal input either overflows to signed infinity or underflows
 /// to zero, since the module is then provably useless. Concretely, K must satisfy -EXP_MAX_FINITE <= K < EXP_MAX_FINITE
-/// where EXP_MAX_FINITE = 2**WEXP-2. This bound preserves at least one exponent value that maps to a normal output.
+/// where EXP_MAX_FINITE = 2**WEXP-2. This bound preserves at least one input exponent that maps to a representable
+/// nonzero output: for K >= 0 (and negative K down to -EXP_MAX_FINITE+1) at least one input stays normal, while at the
+/// negative extreme K = -EXP_MAX_FINITE only inputs at the top exponent (a_exp == EXP_MAX_FINITE, any fraction) survive
+/// -- to signed MIN_NORMAL -- and every smaller exponent flushes to +0.
 ///
 /// STAGE_INPUT=0: operand feeds the decode combinationally (default).
 /// STAGE_INPUT=1: latch the input before any combinational logic, isolating it from upstream paths (+1 cycle).

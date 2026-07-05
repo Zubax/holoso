@@ -120,7 +120,7 @@ def test_mul_by_zero_is_positive_zero_over_edges() -> None:
     for bits in _EDGES:
         out = sim.run(_val(bits), zero)[0]
         assert isinstance(out, FloatValue)
-        assert out.bits == 0 and out.sign == 0, f"x*0.0 not +0: bits=0x{out.bits:x} sign={out.sign}"
+        assert out.bits == 0 and not out.negative, f"x*0.0 not +0: bits=0x{out.bits:x} negative={out.negative}"
 
 
 def _abs_via_select(x: float) -> float:

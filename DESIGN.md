@@ -131,10 +131,9 @@ Compile-time ints/shapes/structure are resolved in the front-end and never reach
 HIR carries pure semantic operations from a HIR-local operator hierarchy; an operation is one operator applied to
 operand value IDs. Concrete hardware operators are frozen dataclasses whose fields are their parameters; the float ones
 own a `FloatFormat` and a typed, bit-exact `evaluate` reference matching the RTL. Each hardware operator owns its
-timing, signature, and a compact HDL-safe identity stem (a normalized mnemonic plus a hash of its parameters, e.g.
-`fadd_326215ea`), so the fully specified operator instance is itself the resource-sharing key and equal operators
-time-share one module. Per-node-parameterized operators are factories that instantiate a concrete operator (e.g.
-multiply-by-constant-power-of-two differs by exponent).
+timing, signature, and a compact HDL-safe identity stem, so the fully specified operator instance is itself the
+resource-sharing key and equal operators time-share one module. Per-node-parameterized operators are factories that
+instantiate a concrete operator (e.g. multiply-by-constant-power-of-two differs by exponent).
 
 Operators are chosen by a single `OpConfig`, constructed explicitly by the user and passed into `synthesize`; there is
 no implicit default. Its float format is verified consistent across the configured operators and drives HIR-to-MIR
@@ -486,15 +485,15 @@ loud elaboration error. The wrapper does not derive latency; it takes `LATENCY` 
 to the wrapped implementation, whose source is the reference for stage counts.
 
 Support library. The auxiliary HDL shipped with a module is a single self-contained `holoso_support.v`, assembled in
-memory from the hand-written operator wrappers and every third-party module under the vendored RTL set, so the end
+memory from the hand-written operator wrappers and every module of the vendored ZKF RTL, so the end
 application introduces all RTL dependencies by adding one large file to the synthesis input.
 
 ### Numerical model
 
 The numerical model gives bit-exact, cycle-exact emulation of the emitted HDL without HDL emission or simulation, so the
 synthesis logic can be verified through LIR during heavy refactors. It is bit-exact because it replaces native float
-operators with an exact software implementation of the selected float format, and cycle-exact because it mirrors the
-RTL's fetch PC, register files, and sequencer.
+operators with the ZKF model -- a bit-exact software implementation of the selected float format -- and
+cycle-exact because it mirrors the RTL's fetch PC, register files, and sequencer.
 
 It splits into a serializable handle and a runtime machine: the handle is a trivially-picklable wrapper carrying only
 the LIR (kept private, so the LIR never enters the public API) -- the artifact a generated testbench embeds -- and
