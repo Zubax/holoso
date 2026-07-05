@@ -26,6 +26,7 @@ from ._modelref import (
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import ekf1_stateful as ekf1_stateful  # noqa: E402
 import ekf1_stateless as ekf1_stateless  # noqa: E402
+import imu_frame_transform as imu_frame_transform  # noqa: E402  # synth matrix only; matrix/vector I/O has no scalar SPEC
 import madd  # noqa: E402
 import poly3  # noqa: E402
 from cordic_sincos import CordicSinCos as CordicSinCos  # noqa: E402

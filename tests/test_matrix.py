@@ -1049,3 +1049,19 @@ def test_imu_frame_transform_example_matches_numpy() -> None:
             np.array([0.1, -0.2, 9.9]),
             np.array([2.0, 0.0, -1.0]),
         )
+
+
+def test_imu_frame_transform_fma_matches_numpy() -> None:
+    # The ffma-contracted datapath the synth matrix's FMA rows exercise (each dot-product multiply-accumulate fused into
+    # a single-rounded a*b+c) must compute the same transform: FMA changes only the rounding, not the result.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+    import imu_frame_transform
+
+    ops = dataclasses.replace(default_ops(_FMT), ffma=FFmaOperator(_FMT))
+    sim = holoso.synthesize(imu_frame_transform.transform, ops, name="imu_fma").numerical_model.elaborate()
+    yaw90 = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    roll90 = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
+    for rotation in (yaw90, roll90):
+        inputs = (rotation, np.array([1.0, 2.0, 3.0]), np.array([0.1, -0.2, 9.9]), np.array([2.0, 0.0, -1.0]))
+        want = np.asarray(imu_frame_transform.transform(*inputs)).flatten()
+        assert np.allclose(_run(sim, *inputs), want, rtol=1e-9, atol=1e-300)
