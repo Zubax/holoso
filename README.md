@@ -206,12 +206,23 @@ For a detailed technical review of the design and trade-offs, please refer to `D
 
 Holoso follows Python with minimal deviations where it makes sense for hardware synthesis.
 
-- Static typing only. Parameters must be annotated `float`, `bool`, or a fixed-shape jaxtyping array
-  (`Float64[np.ndarray, "3 3"]`); the return type must be annotated too — a scalar, such an array, a `tuple`/`list` of
-  them (arbitrarily nested), or `None` for a method that returns nothing — and is validated against the actual outputs.
+- Static typing only.
+
 - No implicit type conversions.
+
 - Boolean short-circuiting is not supported, all operands evaluated eagerly.
-- Floating-point precision depends on the selected floating-point format. See below for more info about floats.
+
+- Floating-point precision depends on the selected floating-point format.
+  The width of the float type in the type annotation is ignored.
+  See below for more info about floats.
+
+- Dynamically-sized tensors are not supported. Dimensions must be annotated using jaxtyping
+  (e.g., `Float64[np.ndarray, "3 3"]`).
+
+- Augmented assignment (`+=`, `@=`, etc.) is supported only for scalars, where it simply rebinds the result.
+  Tensors mutate in place, which diverges from a rebind when the tensor is aliased; supporting it correctly would
+  require complex escape analysis.
+
 - No exceptions: division by zero, domain errors, etc. produce the closest meaningful result and assert the error flag.
 
 ### Floating point
