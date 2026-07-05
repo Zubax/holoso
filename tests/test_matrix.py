@@ -79,6 +79,15 @@ def _run(sim: holoso.NumericalSimulator, *arrays: np.ndarray | float) -> np.ndar
     return np.array([float(v) for v in sim.run(*flat)])
 
 
+def _assert_python_matches_holoso(fn: Callable[..., object], *inputs: np.ndarray | float) -> None:
+    # Runs the kernel as plain Python and asserts it agrees with Holoso; the Python call also proves the kernel is
+    # genuinely valid, runnable Python, so a construct Holoso accepts but Python rejects fails here instead of passing
+    # as a spurious "positive" (e.g. ``mat + [1, 2]`` sneaking into a success test).
+    want = np.asarray(fn(*inputs)).flatten()
+    got = _run(_sim(fn), *inputs)
+    assert np.allclose(got, want, rtol=1e-9, atol=1e-300), fn.__name__
+
+
 # ---------------------------------------------------------------- structure
 
 
@@ -90,21 +99,33 @@ def test_matmul_shapes_and_port_layout() -> None:
     assert hir.input_names() == ["a_0_0", "a_0_1", "a_0_2", "a_1_0", "a_1_1", "a_1_2", "x_0", "x_1", "x_2"]
     assert [o.name for o in hir.outputs] == ["out_0", "out_1"]
     assert _arith_count(hir, FloatMul) == 6 and _arith_count(hir, FloatAdd) == 4
+    _assert_python_matches_holoso(mat_vec, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), np.array([1.0, 0.0, -1.0]))
+    _assert_python_matches_holoso(mat_vec, np.array([[0.5, -1.0, 2.0], [3.0, -2.0, 0.25]]), np.array([2.0, -1.0, 0.5]))
 
     def vec_mat(x: Float64[np.ndarray, "2"], a: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "3"]:
         return x @ a  # type: ignore[no-any-return]
 
     assert [o.name for o in lower(vec_mat).outputs] == ["out_0", "out_1", "out_2"]
+    _assert_python_matches_holoso(vec_mat, np.array([1.0, -2.0]), np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
+    _assert_python_matches_holoso(vec_mat, np.array([0.5, 2.0]), np.array([[-1.0, 0.25, 3.0], [2.0, -2.0, 1.0]]))
 
     def dot(v: Float64[np.ndarray, "3"], w: Float64[np.ndarray, "3"]) -> float:
         return v @ w  # type: ignore[no-any-return]
 
     assert [o.name for o in lower(dot).outputs] == ["out_0"]
+    _assert_python_matches_holoso(dot, np.array([1.0, 2.0, 3.0]), np.array([4.0, -5.0, 6.0]))
+    _assert_python_matches_holoso(dot, np.array([0.5, -1.0, 2.0]), np.array([2.0, 3.0, -1.0]))
 
     def mat_mat(a: Float64[np.ndarray, "2 3"], b: Float64[np.ndarray, "3 2"]) -> Float64[np.ndarray, "2 2"]:
         return a @ b  # type: ignore[no-any-return]
 
     assert [o.name for o in lower(mat_mat).outputs] == ["out_0_0", "out_0_1", "out_1_0", "out_1_1"]
+    _assert_python_matches_holoso(
+        mat_mat, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    )
+    _assert_python_matches_holoso(
+        mat_mat, np.array([[0.5, -1.0, 2.0], [3.0, -2.0, 0.25]]), np.array([[2.0, -1.0], [0.5, 3.0], [-2.0, 1.0]])
+    )
 
 
 def test_matmul_rejections() -> None:
@@ -163,6 +184,8 @@ def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
 
     assert mnemonic_counts(with_fma=True) == {"fmul": 1, "ffma": 2}
     assert mnemonic_counts(with_fma=False) == {"fmul": 3, "fadd": 2}
+    _assert_python_matches_holoso(dot, np.array([1.0, 2.0, 3.0]), np.array([4.0, -5.0, 6.0]))
+    _assert_python_matches_holoso(dot, np.array([0.5, -1.0, 2.0]), np.array([2.0, 3.0, -1.0]))
 
 
 def test_np_matmul_call_is_the_operator() -> None:
@@ -174,6 +197,9 @@ def test_np_matmul_call_is_the_operator() -> None:
 
     ops = (_arith_count(lower(with_operator), FloatMul), _arith_count(lower(with_operator), FloatAdd))
     assert ops == (_arith_count(lower(with_call), FloatMul), _arith_count(lower(with_call), FloatAdd))
+    for kernel in (with_operator, with_call):
+        _assert_python_matches_holoso(kernel, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([1.0, -1.0]))
+        _assert_python_matches_holoso(kernel, np.array([[0.5, -1.0], [2.0, 0.25]]), np.array([2.0, 3.0]))
 
     def keywords(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return np.matmul(a, x, casting="no")  # type: ignore[no-any-return]
@@ -187,6 +213,8 @@ def test_np_matmul_bare_name_import_resolves() -> None:
         return _matmul(a, x)  # type: ignore[no-any-return]
 
     assert [o.name for o in lower(with_bare_name).outputs] == ["out_0", "out_1"]
+    _assert_python_matches_holoso(with_bare_name, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([1.0, -1.0]))
+    _assert_python_matches_holoso(with_bare_name, np.array([[0.5, -1.0], [2.0, 0.25]]), np.array([2.0, 3.0]))
 
 
 def test_augmented_assignment_to_array_is_rejected() -> None:
@@ -378,11 +406,15 @@ def test_transpose_structure() -> None:
     hir = lower(t)
     assert [o.name for o in hir.outputs] == ["out_0_0", "out_0_1", "out_1_0", "out_1_1", "out_2_0", "out_2_1"]
     assert _arith_count(hir, FloatMul) == 0  # a pure reindexing, no hardware
+    _assert_python_matches_holoso(t, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
+    _assert_python_matches_holoso(t, np.array([[-1.0, 0.5, 2.0], [3.0, -2.0, 0.25]]))
 
     def vector_identity(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return v.T
 
     assert [o.name for o in lower(vector_identity).outputs] == ["out_0", "out_1"]
+    _assert_python_matches_holoso(vector_identity, np.array([1.0, -2.0]))
+    _assert_python_matches_holoso(vector_identity, np.array([0.5, 3.0]))
 
     def scalar_t(a: float) -> float:
         return a.T  # type: ignore[attr-defined, no-any-return]
@@ -410,6 +442,8 @@ def test_numpy_subscripts() -> None:
         return m[0, 1], m[1][2], column[0], m[1:, 0][0]
 
     assert [o.name for o in lower(picks).outputs] == ["out_0", "out_1", "out_2", "out_3"]
+    _assert_python_matches_holoso(picks, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
+    _assert_python_matches_holoso(picks, np.array([[-1.0, 0.5, 2.0], [3.0, -2.0, 0.25]]))
 
     def too_many(m: Float64[np.ndarray, "2 2"]) -> float:
         return m[0, 1, 0]  # type: ignore[no-any-return]
