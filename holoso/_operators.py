@@ -3,7 +3,7 @@
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from enum import IntEnum
 from hashlib import blake2s
 from typing import ClassVar
@@ -1143,10 +1143,9 @@ class OpConfig:
 
     @property
     def float_format(self) -> FloatFormat:
-        formats = {self.fadd.fmt, self.fmul.fmt, self.fdiv.fmt, self.fmul_ilog2.fmt, self.fcmp.fmt}
-        optional = (self.fround, self.ffma, self.fsort, self.fexp2, self.flog2, self.fsincos, self.fatan2)
-        formats.update(op.fmt for op in optional if op is not None)
+        formats = {operator.fmt for field in fields(self) if (operator := getattr(self, field.name)) is not None}
         if len(formats) != 1:
             ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
             raise ValueError(f"all floating-point operators must use the same format; got {ordered}")
-        return self.fadd.fmt
+        (fmt,) = formats
+        return fmt  # type: ignore[no-any-return]
