@@ -23,7 +23,14 @@ def new_build_dir(prefix: str) -> Path:
     return Path(tempfile.mkdtemp(prefix=f"{prefix}_{stamp}_", dir=BUILD_ROOT))
 
 
-def run_logged(argv: list[str | Path], log_path: Path, *, cwd: Path, timeout_s: float = DEFAULT_TIMEOUT_S) -> None:
+def run_logged(
+    argv: list[str | Path],
+    log_path: Path,
+    *,
+    cwd: Path,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    env: Mapping[str, str] | None = None,
+) -> None:
     rendered = [str(item) for item in argv]
     log_path.parent.mkdir(parents=True, exist_ok=True)
     print("$ " + " ".join(shlex.quote(item) for item in rendered), flush=True)
@@ -32,7 +39,15 @@ def run_logged(argv: list[str | Path], log_path: Path, *, cwd: Path, timeout_s: 
         log.write("$ " + " ".join(shlex.quote(item) for item in rendered) + "\n\n")
         log.flush()
         try:
-            subprocess.run(rendered, cwd=cwd, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=timeout_s)
+            subprocess.run(
+                rendered,
+                cwd=cwd,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                check=True,
+                timeout=timeout_s,
+                env=dict(env) if env is not None else None,
+            )
         except subprocess.TimeoutExpired:
             log.write(f"\n\n[holoso synth] command exceeded {timeout_s:g}s timeout and was killed\n")
             raise

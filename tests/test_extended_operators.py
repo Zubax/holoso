@@ -540,7 +540,7 @@ def test_exp2_log2_of_constants_fold() -> None:
     folded = float(math.exp2(1.25) + math.log2(3.5) + np.exp2(-2.0) + log2(8.0))
 
     def kernel(x: float) -> float:
-        return x + (math.exp2(1.25) + math.log2(3.5) + np.exp2(-2.0) + log2(8.0))
+        return x + (math.exp2(1.25) + math.log2(3.5) + float(np.exp2(-2.0)) + log2(8.0))
 
     sim = holoso.synthesize(
         kernel, _ops(with_exp2=False, with_log2=False), name="exp2_log2_constants_fold"

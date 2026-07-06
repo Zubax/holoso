@@ -1,3 +1,4 @@
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,10 +45,13 @@ class VivadoArtix7Flow(Flow):
         commands = [CommandSpec(["vivado", "-mode", "batch", "-source", _TCL, "-nojournal"])]
 
         def runner(directory: Path) -> SynthReport:
+            env = dict(os.environ)
+            env["HOME"] = str(directory / ".vivado_home")
             run_logged(
                 [require_tool("vivado"), "-mode", "batch", "-source", _TCL, "-nojournal"],
                 directory / _LOG,
                 cwd=directory,
+                env=env,
             )
             return _parse(self, directory)
 
