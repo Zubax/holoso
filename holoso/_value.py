@@ -1,19 +1,31 @@
 """Runtime values and exact arithmetic for Zubax Kulibin float."""
 
 from dataclasses import dataclass
-from typing import Self
+from typing import NamedTuple, Self
 
 from ._type import FloatFormat
 from ._zkf import Zkf, ZkfFormat
 
 
+class SortResult(NamedTuple):
+    min: "FloatValue"
+    max: "FloatValue"
+
+
+class SinCos(NamedTuple):
+    sin: "FloatValue"
+    cos: "FloatValue"
+
+
+class Atan2Result(NamedTuple):
+    theta: "FloatValue"
+    magnitude: "FloatValue"
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class FloatValue:
     """
-    A concrete ZKF value: a format plus the exact bits carried by hardware.
-    ``__eq__`` stays the dataclass's structural ``(fmt, bits)`` equality (used for hashing/interning); numeric
-    ordering goes through :meth:`compare`. Every operation delegates to the vendored bit-exact ZKF model, so the
-    results match the ``zkf_*`` RTL bit-for-bit.
+    A concrete ZKF value. Results match the ``zkf_*`` RTL bit-for-bit.
     """
 
     fmt: FloatFormat
@@ -30,7 +42,10 @@ class FloatValue:
             raise TypeError(f"bits must be int, got {type(bits).__name__}")
         if not 0 <= bits < (1 << fmt.width):
             raise ValueError(f"bits 0x{bits:x} do not fit in {fmt.width} bits")
-        return cls._new(fmt, bits)
+        self = object.__new__(cls)  # __init__ is disabled, so build the frozen instance directly
+        object.__setattr__(self, "fmt", fmt)
+        object.__setattr__(self, "bits", bits)
+        return self
 
     @classmethod
     def from_float(cls, fmt: FloatFormat, value: float) -> Self:
@@ -39,13 +54,6 @@ class FloatValue:
         if type(value) is not float:
             raise TypeError(f"value must be float, got {type(value).__name__}")
         return cls.from_bits(fmt, fmt.encode(value))
-
-    @classmethod
-    def _new(cls, fmt: FloatFormat, bits: int) -> Self:
-        self = object.__new__(cls)
-        object.__setattr__(self, "fmt", fmt)
-        object.__setattr__(self, "bits", bits)
-        return self
 
     def _zval(self) -> Zkf:
         return ZkfFormat(self.fmt.wexp, self.fmt.wman).wrap(self.bits)
@@ -85,11 +93,9 @@ class FloatValue:
 
     def compare(self, other: "FloatValue") -> int:
         """
-        -1 if ``self < other``, 0 if equal, +1 if ``self > other``. ZKF has no NaN (the order is total) and no
-        negative zero. A method rather than overloaded ordering operators: ``__eq__`` is the frozen-dataclass
-        structural (bit) equality used for hashing, and numeric ordering would be inconsistent with it where equal
-        values differ in bits, so the relations could not form a coherent order with ``==``; one three-way result
-        also mirrors the single-firing hardware comparator.
+        -1/0/+1 three-way compare (ZKF's order is total: no NaN). A method, not ordering operators, because ``__eq__``
+        is the frozen-dataclass bit equality used for hashing -- numeric ordering would be inconsistent with it where
+        equal values differ in bits.
         """
         _matching_format(self, other)
         result = self._zval().cmp(other._zval())
@@ -112,14 +118,10 @@ class FloatValue:
         return FloatValue.from_bits(fmt, a._zval().fma(b._zval(), c._zval()).bits)
 
     @staticmethod
-    def sort(a: "FloatValue", b: "FloatValue") -> tuple["FloatValue", "FloatValue"]:
-        """
-        Ascending as ``(min, max)``: a bit-preserving selection by the total order of :meth:`compare` (ZKF has no
-        NaN). Equal values are bit-identical, so the tie direction is unobservable.
-        """
+    def sort(a: "FloatValue", b: "FloatValue") -> SortResult:
         fmt = _matching_format(a, b)
         lo, hi = a._zval().sort(b._zval())
-        return FloatValue.from_bits(fmt, lo.bits), FloatValue.from_bits(fmt, hi.bits)
+        return SortResult(FloatValue.from_bits(fmt, lo.bits), FloatValue.from_bits(fmt, hi.bits))
 
     def round(self) -> "FloatValue":
         return FloatValue.from_bits(self.fmt, self._zval().round().bits)
@@ -139,6 +141,18 @@ class FloatValue:
     def log2(self) -> "FloatValue":
         """``zkf_log2``'s domain-error/pole sidebands are intentionally not modeled (as with ``zkf_div``'s div0)."""
         return FloatValue.from_bits(self.fmt, self._zval().log2().value.bits)
+
+    def sincos(self) -> SinCos:
+        """``(sin(2*pi*self), cos(2*pi*self))`` -- turn-native, as ``zkf_sincos``; the quadrant sideband is dropped."""
+        r = self._zval().sincos()
+        return SinCos(FloatValue.from_bits(self.fmt, r.sin.bits), FloatValue.from_bits(self.fmt, r.cos.bits))
+
+    @staticmethod
+    def atan2(y: "FloatValue", x: "FloatValue") -> Atan2Result:
+        """``(theta, magnitude)`` of ``atan2(y, x)`` -- theta in turns, magnitude ``hypot(y, x)`` (``zkf_atan2``)."""
+        fmt = _matching_format(y, x)
+        r = y._zval().atan2(x._zval())
+        return Atan2Result(FloatValue.from_bits(fmt, r.theta.bits), FloatValue.from_bits(fmt, r.magnitude.bits))
 
 
 def _check_format(fmt: FloatFormat) -> None:

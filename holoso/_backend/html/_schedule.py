@@ -134,12 +134,18 @@ def render_schedule(lir: Lir) -> str:
                         f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
                     )
             base = stage_base[op.inst]
-            for k in range(op.latency):  # stamp the pipeline trail: stage k of this operator is busy on issue + k + lag
-                key = (base + k, issue_pc + k + lir.fetch_lag)
-                if key in stage_fill and stage_fill[key][1] != group:
-                    conflicts.add(key)
-                stage_fill[key] = (color, group)
-                stage_tip[key] = f"{op.inst.operator.mnemonic}_{op.inst.index} s{k}: {firing_tip}"
+            # A throughput-1 pipeline advances one stage per cycle: stage k is busy only on row issue + k + lag (a
+            # diagonal). A non-pipelined FSM core (initiation_interval > 1) holds one transaction and keeps every stage
+            # busy across the whole in-flight window (a rectangle over the same rows).
+            pipelined = op.inst.operator.initiation_interval == 1
+            rows = [issue_pc + i + lir.fetch_lag for i in range(op.latency)]
+            for k in range(op.latency):
+                for cyc in ([rows[k]] if pipelined else rows):
+                    key = (base + k, cyc)
+                    if key in stage_fill and stage_fill[key][1] != group:
+                        conflicts.add(key)
+                    stage_fill[key] = (color, group)
+                    stage_tip[key] = f"{op.inst.operator.mnemonic}_{op.inst.index} s{k}: {firing_tip}"
             group += 1
 
     # Inline firings (boolean logic and the float<->bool casts): single PC-gated statements with no pooled instance,

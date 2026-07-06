@@ -10,12 +10,14 @@ import numpy as np
 
 from holoso import (
     FAddOperator,
+    FAtan2Operator,
     FCmpOperator,
     FDivOperator,
     FExp2Operator,
     FLog2Operator,
     FMulILog2OperatorFamily,
     FMulOperator,
+    FSincosOperator,
     OpConfig,
 )
 from holoso._backend.numerical import NumericalSimulator, generate as generate
@@ -186,7 +188,8 @@ def format_edge_bits(fmt: FloatFormat) -> list[int]:
 
 
 def default_ops(fmt: FloatFormat) -> OpConfig:
-    # exp2/log2 are configured (lean) for the transcendental example; unused operators produce no hardware.
+    # exp2/log2 and the CORDIC pair are configured (lean) for the transcendental/trig examples; unused operators
+    # produce no hardware.
     return OpConfig(
         FAddOperator(fmt),
         FMulOperator(fmt),
@@ -195,6 +198,8 @@ def default_ops(fmt: FloatFormat) -> OpConfig:
         FCmpOperator(fmt),
         fexp2=FExp2Operator(fmt),
         flog2=FLog2Operator(fmt),
+        fsincos=FSincosOperator(fmt),
+        fatan2=FAtan2Operator(fmt),
     )
 
 
@@ -340,6 +345,9 @@ def staged_ops(fmt: FloatFormat) -> OpConfig:
             stage_pack=1,
             stage_output=1,
         ),
+        # A bench-verified CORDIC stage combo (tests/hdl/test_f{sincos,atan2}.py), so the latency formula is known-good.
+        fsincos=FSincosOperator(fmt, stage_product=1, stage_normalize=1, stage_pack=1),
+        fatan2=FAtan2Operator(fmt, stage_product=1, stage_normalize=1, stage_pack=1),
     )
 
 

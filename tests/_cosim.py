@@ -47,6 +47,7 @@ def run_cosim(
         includes=[HDL_DIR],
         hdl_toplevel=name,
         build_args=build_args(sim),
+        defines={"SIMULATION": 1},  # arm the vendored cores' and CORDIC wrappers' $fatal protocol/over-issue checks
         build_dir=str(build_dir),
         clean=True,
         timescale=("1ns", "1ps"),

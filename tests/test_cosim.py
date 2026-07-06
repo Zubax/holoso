@@ -657,3 +657,58 @@ def test_cosim_not_over_loop_phi_and_inverted_public_state(sim: str, config: Ope
 
     fmt = FloatFormat(6, 18)
     run_cosim(sim, LoopToggle().step, fmt, f"loop_toggle_{config.label}", ops=config.make_ops(fmt))
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_sincos(sim: str) -> None:
+    # RTL must match the model on exactly the out_valid cycle; a late/stale capture of the combinational
+    # (non-held under out_ready) CORDIC output would read wrong.
+    def kernel(x: float) -> tuple[float, float]:
+        return math.sin(x), math.cos(x)
+
+    run_cosim(sim, kernel, FloatFormat(8, 24), "cs_sincos")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_two_sincos_share_ii_instance(sim: str) -> None:
+    # Two independent sincos time-share one II>1 CORDIC; the schedule must space issues by the initiation interval.
+    # Under-spacing drops the second in_valid (SIMULATION $fatal) or diverges from the model -- end-to-end II>1 proof.
+    def kernel(a: float, b: float) -> tuple[float, float, float, float]:
+        return math.sin(a), math.cos(a), math.sin(b), math.cos(b)
+
+    run_cosim(sim, kernel, FloatFormat(8, 24), "cs_two_sincos")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_two_atan2_share_ii_instance(sim: str) -> None:
+    # The fatan2 twin of test_cosim_two_sincos: deeper latency than fsincos, so a distinct re-accept boundary the
+    # schedule must space by the initiation interval.
+    def kernel(a: float, b: float, c: float, d: float) -> tuple[float, float]:
+        return math.atan2(a, b), math.atan2(c, d)
+
+    run_cosim(sim, kernel, FloatFormat(8, 24), "cs_two_atan2")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_atan2_hypot_fused(sim: str) -> None:
+    # hypot and atan2 over one operand pair fuse into a single CORDIC firing (theta + magnitude).
+    def kernel(y: float, x: float) -> tuple[float, float]:
+        return math.hypot(y, x), math.atan2(y, x)
+
+    run_cosim(sim, kernel, FloatFormat(8, 24), "cs_atan2_hypot")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_sincos_in_back_edge_loop(sim: str) -> None:
+    # An fsincos reused across a data-dependent while back edge: the II>1 instance must be idle at each re-entry (the
+    # drained-edge bound in Lir.__post_init__ for II=latency+1). Trip count is fixed at 3 but it is a real back edge,
+    # not an unrolled for.
+    def kernel(x: float) -> float:
+        acc = x
+        i = 0.0
+        while i < 3.0:
+            acc = math.cos(acc)
+            i = i + 1.0
+        return acc
+
+    run_cosim(sim, kernel, FloatFormat(8, 24), "cs_sincos_loop")

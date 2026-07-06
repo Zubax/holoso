@@ -152,6 +152,11 @@ _FLOAT_INTRINSICS: dict[str, Callable[[], Operator]] = {
     "maximum": FloatMax,
     "exp2": FloatExp2,
     "log2": FloatLog2,
+    "sin": FloatSin,
+    "cos": FloatCos,
+    "sqrt": FloatSqrt,
+    "atan2": FloatAtan2,  # numpy spells it arctan2; np.atan2 is the same object on numpy>=2.0
+    "hypot": FloatHypot2,
 }
 
 
@@ -172,20 +177,14 @@ def _intrinsic_of(obj: object) -> str | None:
 # Standard numeric operators that are recognized but not yet implemented; calling them fails with a clear message.
 _KNOWN_INTRINSICS = frozenset(
     {
-        "sqrt",
         "cbrt",
-        "sin",
-        "cos",
         "tan",
         "asin",
         "acos",
         "atan",
-        "atan2",
-        "sincos",
         "exp",
         "log",
         "log10",
-        "hypot",
         "pow",
     }
 )

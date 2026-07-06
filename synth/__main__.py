@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import sys
+import types
 from dataclasses import dataclass, fields
 from pathlib import Path
 
@@ -165,9 +166,12 @@ def _parse_op_knob(parser: argparse.ArgumentParser, spec: str, key: str, raw_val
 def _op_config_operator_classes() -> dict[str, type]:
     classes: dict[str, type] = {}
     for item in fields(OpConfig):
-        if not isinstance(item.type, type):
+        annotation = item.type
+        if isinstance(annotation, types.UnionType):
+            (annotation,) = [arg for arg in annotation.__args__ if arg is not type(None)]
+        if not isinstance(annotation, type):
             raise TypeError(f"OpConfig field {item.name!r} has unsupported annotation {item.type!r}")
-        classes[item.name] = item.type
+        classes[item.name] = annotation
     return classes
 
 
@@ -192,10 +196,13 @@ def _op_config(fmt: FloatFormat, op_knobs: list[_OperatorKnob]) -> OpConfig:
     grouped_overrides: dict[str, dict[str, object]] = {}
     for override in op_knobs:
         grouped_overrides.setdefault(override.operator_name, {})[override.field_name] = override.value
+    # ffma contracts multiply-adds, altering the datapath even for kernels that never spell math.fma, so it is
+    # instantiated only when a knob opts in. Other operators are inert when unused, so they stay always available.
     return OpConfig(
         **{  # type: ignore
             name: _instantiate_operator(operator_cls, fmt, grouped_overrides.get(name, {}))
             for name, operator_cls in _op_config_operator_classes().items()
+            if name != "ffma" or "ffma" in grouped_overrides
         }
     )
 

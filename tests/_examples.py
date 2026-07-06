@@ -5,6 +5,7 @@ baseline, curated and random vector generators, and the datapath format(s). Cons
 the model vs the original Python), so the two views stay in lockstep over one source of truth.
 """
 
+import math
 import os
 import sys
 from collections.abc import Callable, Mapping
@@ -27,8 +28,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import ekf1_stateful as ekf1_stateful  # noqa: E402
 import ekf1_stateless as ekf1_stateless  # noqa: E402
 import imu_frame_transform as imu_frame_transform  # noqa: E402  # synth matrix only; matrix/vector I/O has no scalar SPEC
+import kepler  # noqa: E402
 import madd  # noqa: E402
+import polar as polar  # noqa: E402  # scalar-driven below; vector I/O pinned in test_verify
 import poly3  # noqa: E402
+from polar import from_polar, to_polar  # noqa: E402  # bare names so the frontend inlines them into the wrappers
 from cordic_sincos import CordicSinCos as CordicSinCos  # noqa: E402
 from equal_temperament import equal_temperament as equal_temperament  # noqa: E402
 from iir1_lpf import IIR1LPF as IIR1LPF  # noqa: E402
@@ -213,6 +217,19 @@ _EKF_STATELESS_INPUTS = (
     "Q_R", "Q_g", "Q_i", "R_ct", "R_shunt", "dt",
     "x_R", "x_g", "x_i", "z_ct", "z_shunt",
 )  # fmt: skip
+
+
+# Scalar wrappers so the generic scalar harness can drive the vector-only polar kernels; the frontend inlines the
+# bare-name calls, so these reuse the example's own arithmetic.
+def polar_to(x: float, y: float) -> tuple[float, float]:
+    r = to_polar(np.array([x, y]))
+    return r[0], r[1]
+
+
+def polar_from(magnitude: float, angle: float) -> tuple[float, float]:
+    v = from_polar(np.array([magnitude, angle]))
+    return v[0], v[1]
+
 
 SPECS = [
     ExampleSpec(
@@ -511,6 +528,69 @@ SPECS = [
         manual=[{"theta": v} for v in (0.0, 0.3, 0.7, -0.5, 1.0, -1.0)],  # angles within the convergence range
         draw_random=_draw_scalars(("theta",), -1.4, 1.4),
         edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="polar_to",  # fused hypot+atan2 -> one fatan2
+        inputs=("x", "y"),
+        make_kernel=lambda: polar_to,
+        reference=ReferenceComparison.APPROXIMATE,  # the turn scale rounds; the CORDIC is faithful, not exact
+        nominal={"x": 1.0, "y": 1.0},
+        manual=[
+            {"x": 3.0, "y": 4.0},
+            {"x": -1.0, "y": 2.0},
+            {"x": -2.0, "y": -1.5},
+            {"x": 0.5, "y": -0.5},
+            {"x": 1.0, "y": 0.0},
+            {"x": 0.0, "y": 1.0},
+            {"x": 0.0, "y": 0.0},  # origin: the fused path yields (0, 0)
+        ],
+        draw_random=_draw_scalars(("x", "y"), -4.0, 4.0),
+        edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="polar_from",  # coalesced cos+sin -> one fsincos
+        inputs=("magnitude", "angle"),
+        make_kernel=lambda: polar_from,
+        reference=ReferenceComparison.APPROXIMATE,
+        nominal={"magnitude": 1.0, "angle": 0.5},
+        manual=[
+            {"magnitude": 1.0, "angle": 0.0},
+            {"magnitude": 2.0, "angle": math.pi / 2},
+            {"magnitude": 1.5, "angle": -math.pi / 2},
+            {"magnitude": 0.5, "angle": math.pi},
+            {"magnitude": 3.0, "angle": -math.pi},
+            {"magnitude": 2.0, "angle": 0.7},
+        ],
+        draw_random=lambda rng: {"magnitude": bounded(rng, -4.0, 4.0), "angle": bounded(rng, -math.pi, math.pi)},
+        edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="kepler",  # Newton loop; sin(E)+cos(E) coalesce into one fsincos per iteration
+        inputs=("mean_anomaly", "eccentricity"),
+        make_kernel=lambda: kepler.eccentric_anomaly,
+        reference=ReferenceComparison.APPROXIMATE,
+        nominal={"mean_anomaly": 0.5, "eccentricity": 0.3},
+        manual=[
+            {"mean_anomaly": 0.8, "eccentricity": 0.3},
+            {"mean_anomaly": 2.5, "eccentricity": 0.6},
+            {"mean_anomaly": -1.0, "eccentricity": 0.9},
+            {"mean_anomaly": 0.1, "eccentricity": 0.0},  # e=0: E=M immediately
+            {"mean_anomaly": math.pi, "eccentricity": 0.5},
+            {"mean_anomaly": -math.pi, "eccentricity": 0.8},
+        ],
+        draw_random=lambda rng: {
+            "mean_anomaly": bounded(rng, -math.pi, math.pi),
+            # Capping e at 0.7 keeps 1-e*cos >= 0.3 so the Newton update crosses the exit threshold at the same trip
+            # count in model and float64; the high-e corner (0.9) is pinned by the manual/edge vectors.
+            "eccentricity": bounded(rng, 0.0, 0.7),
+        },
+        # Off-domain (huge M, or e -> 1) the Newton loop diverges and never terminates, so both inputs are pinned to the
+        # convergent domain instead of the format-edge sweep.
+        edge_overrides={
+            "mean_anomaly": (-math.pi, -1.0, 0.0, 1.0, math.pi),
+            "eccentricity": (0.0, 0.3, 0.6, 0.9),
+        },
+        edge_values=(),
     ),
     ExampleSpec(
         name="integrator",

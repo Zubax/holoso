@@ -246,6 +246,84 @@ class FloatLog2(Operator):
 
 
 @dataclass(frozen=True, slots=True)
+class FloatSin(Operator):
+    mnemonic: ClassVar[str] = "sin"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+    def fold_constants(self, operands: list[Const]) -> Const | None:
+        (a,) = [_float_const(operand) for operand in operands]
+        return FloatConst(math.sin(a.value)) if math.isfinite(a.value) else None
+
+
+@dataclass(frozen=True, slots=True)
+class FloatCos(Operator):
+    mnemonic: ClassVar[str] = "cos"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+    def fold_constants(self, operands: list[Const]) -> Const | None:
+        (a,) = [_float_const(operand) for operand in operands]
+        return FloatConst(math.cos(a.value)) if math.isfinite(a.value) else None
+
+
+@dataclass(frozen=True, slots=True)
+class FloatSqrt(Operator):
+    mnemonic: ClassVar[str] = "sqrt"
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+    def fold_constants(self, operands: list[Const]) -> Const | None:
+        (a,) = [_float_const(operand) for operand in operands]
+        return FloatConst(math.sqrt(a.value)) if math.isfinite(a.value) and a.value >= 0.0 else None
+
+
+@dataclass(frozen=True, slots=True)
+class FloatAtan2(Operator):
+    mnemonic: ClassVar[str] = "atan2"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(2)
+
+    def fold_constants(self, operands: list[Const]) -> Const | None:
+        y, x = [_float_const(operand) for operand in operands]
+        if not (math.isfinite(y.value) and math.isfinite(x.value)):
+            return None
+        return FloatConst(math.atan2(y.value, x.value))
+
+
+@dataclass(frozen=True, slots=True)
+class FloatHypot2(Operator):
+    """
+    A semantic op only because it may be computed as a byproduct of atan2 -- the MIR op selector will manage this.
+    If not, it is expected to be lowered as the ordinary sqrt(x**2+y**2).
+    """
+
+    mnemonic: ClassVar[str] = "hypot2"
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(2)
+
+    def fold_constants(self, operands: list[Const]) -> Const | None:
+        a, b = [_float_const(operand) for operand in operands]
+        if not (math.isfinite(a.value) and math.isfinite(b.value)):
+            return None
+        result = math.hypot(a.value, b.value)
+        return FloatConst(result) if math.isfinite(result) else None
+
+
+@dataclass(frozen=True, slots=True)
 class FloatFma(Operator):
     """
     Fused multiply-add ``a*b + c`` from an explicit ``math.fma`` call: always single-rounds.

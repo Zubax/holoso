@@ -142,6 +142,8 @@ Some operators are optional (default `None`).
 
 An operator may declare per-firing small microcode-driven immediate inputs.
 
+Each operator declares a per-instance initiation interval; most operators have II=1, i.e., fully pipelined.
+
 ## Front-end
 
 Abstract interpretation over the Python AST/CFG with a binding-time lattice (static vs. dynamic). Static values (shapes,
@@ -301,7 +303,8 @@ composing the phi arms. A merge phi reached any other way (e.g. a loop-invariant
 back-edge arm) keeps its real branch -- deferred (see LIR DEFERRED).
 
 FP math is non-associative, so some of these optimizations may produce non-bit-exact results -- accepted, analogous to
-fast-math in C/C++ compilers.
+fast-math in C/C++ compilers. The transcendental folds likewise take the ideal (infinite-precision) result,
+so a folded constant can differ from the datapath's own value.
 
 ### DEFERRED
 
@@ -328,17 +331,12 @@ hardware operator and collapses semantic negation/absolute-value chains into MIR
 results, or output wires. Multiply-by-power-of-two selects the constant-shift operator when the float format supports
 that exponent; an out-of-range exponent is rejected, since the equivalent constant would overflow or underflow the
 format anyway. The four rounding operators map to one shared `fround` distinguished by its `round_mode` immediate.
-Binary `min`/`max` map to the low and high output ports of one shared `fsort` sorter, so a `min` and a `max` over one
-operand pair fuse into a single firing. Base-two exp/log map to the optional `fexp2`/`flog2`; `flog2` is
-non-speculatable, carrying `domain_error`/`pole` sidebands. Lowering rejects semantic domains that have no selected MIR
-representation.
 
-When `ffma` is configured, lowering contracts a single-use `a*b + c` into one fused multiply-add -- a faithful
-contraction that single-rounds instead of double-rounding, in the spirit of the HIR fast-math folding. It fires only
-when the product (and every sign node on its chain) is used nowhere else; a shared product is observed elsewhere as a
-rounded value, so its add keeps the separate multiply-then-add. The product's folded sign distributes onto the
-multiplier operands (negation onto one, absolute onto both).
-The use-count shares one enumerator with the dead-code seeds so the two cannot drift.
+Some operator lowerings are context-sensitive, where the final lowering depends on the nearby operations.
+Examples include computing min/max in a single pooled comparison operator transaction,
+sin/cos being simultaneously computed by the sincos hardware operator, etc.
+Another example is the FMA contraction, where a single-use `a*b+c` is lowered into one fused multiply-add.
+The matching is done at the MIR level because this is the first layer that is aware of the hardware semantics.
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float format explicitly so float-less modules still elaborate with a known scalar width. The CFG is carried

@@ -17,6 +17,10 @@ class Const(ABC):
 class FloatConst(Const):
     value: float
 
+    def __post_init__(self) -> None:
+        if self.value == 0.0:  # Normalize -0.0 to +0.0.
+            object.__setattr__(self, "value", 0.0)
+
     @property
     def type(self) -> FloatType:
         return FloatType()

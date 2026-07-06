@@ -51,6 +51,7 @@ from ._examples import (
     ekf1_stateful,
     ekf1_stateless,
     equal_temperament,
+    polar,
     remainder,
 )
 
@@ -1611,3 +1612,23 @@ def test_aliased_slot_with_phi_live_in_builds(monkeypatch: pytest.MonkeyPatch) -
         model, interpreter = build_model_and_interpreter(cls().__call__, OPS, cls.__name__)
         assert_model_equals_interpreter(model, interpreter, vectors, cls.__name__)
     build(_run(InputPhi().__call__), "input_phi_alias", fetch_stages=3)  # phi-of-inputs shape must compile
+
+
+def test_polar_example_round_trip_and_native_reference() -> None:
+    # The examples/polar.py vector kernels are off-catalogue (2-vector ports, no scalar SPEC), verified here: each
+    # conversion against native math (approximate), and a round trip that must recover the input away from the origin.
+    # Operator correctness lives in the scalar suite; this pins only the vector I/O and the two-kernel composition.
+    fmt = holoso.FloatFormat(8, 36)
+    ops = default_ops(fmt)
+    to_model = holoso.synthesize(polar.to_polar, ops=ops).numerical_model.elaborate()
+    from_model = holoso.synthesize(polar.from_polar, ops=ops).numerical_model.elaborate()
+    rng = np.random.default_rng(0x901A5)
+    for _ in range(64):
+        x, y = (float(v) for v in rng.uniform(-8.0, 8.0, size=2))
+        r, theta = (float(v) for v in to_model.run(x, y))
+        assert math.isclose(r, math.hypot(x, y), rel_tol=1e-6, abs_tol=1e-6), f"magnitude ({x}, {y})"
+        assert math.isclose(theta, math.atan2(y, x), rel_tol=1e-6, abs_tol=1e-6), f"angle ({x}, {y})"
+        if math.hypot(x, y) > 1e-2:  # the origin's angle is ill-defined
+            xr, yr = (float(v) for v in from_model.run(r, theta))
+            assert math.isclose(xr, x, rel_tol=1e-5, abs_tol=1e-5), f"round-trip x ({x}, {y})"
+            assert math.isclose(yr, y, rel_tol=1e-5, abs_tol=1e-5), f"round-trip y ({x}, {y})"

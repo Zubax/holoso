@@ -37,6 +37,7 @@ from ._backend.verilog import VerilogOutput as VerilogOutput
 
 from ._operators import (
     FAddOperator as FAddOperator,
+    FAtan2Operator as FAtan2Operator,
     FDivOperator as FDivOperator,
     FExp2Operator as FExp2Operator,
     FLog2Operator as FLog2Operator,
@@ -45,6 +46,7 @@ from ._operators import (
     FCmpOperator as FCmpOperator,
     FFmaOperator as FFmaOperator,
     FRoundOperator as FRoundOperator,
+    FSincosOperator as FSincosOperator,
     FSortOperator as FSortOperator,
     OpConfig as OpConfig,
 )

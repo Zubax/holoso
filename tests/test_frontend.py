@@ -828,9 +828,9 @@ def test_unknown_global_is_unsupported() -> None:
 
 def test_missing_intrinsic_message() -> None:
     def f(a: float) -> float:
-        return math.sqrt(a)
+        return math.tan(a)
 
-    with pytest.raises(MissingIntrinsic, match="sqrt"):
+    with pytest.raises(MissingIntrinsic, match="tan"):
         lower(f)
 
 

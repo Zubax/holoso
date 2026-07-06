@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from holoso import (
     FAddOperator,
+    FAtan2Operator,
     FCmpOperator,
     FDivOperator,
     FExp2Operator,
@@ -25,11 +26,12 @@ from holoso import (
     FLog2Operator,
     FMulILog2OperatorFamily,
     FMulOperator,
+    FSincosOperator,
     OpConfig,
 )
 from synth.flows import FlowId
 
-from ._examples import SPECS, ekf1_stateful, imu_frame_transform
+from ._examples import SPECS, ekf1_stateful, imu_frame_transform, polar
 
 F_e6m18 = FloatFormat(6, 18)
 F_e8m36 = FloatFormat(8, 36)
@@ -47,11 +49,13 @@ def op_config(
     ffma: FFmaOperator | None = None,
     fexp2: FExp2Operator | None = None,
     flog2: FLog2Operator | None = None,
+    fsincos: FSincosOperator | None = None,
+    fatan2: FAtan2Operator | None = None,
 ) -> OpConfig:
     """
-    The OpConfig for fmt; pass a fully-constructed operator to give it stage knobs, else that operator is lean. ffma,
-    fexp2, and flog2 are absent unless supplied: multiply-accumulate chains stay expanded (fmul + fadd) rather than
-    contracting to fused FMAs, and a kernel that uses no transcendental needs no exp2/log2 module.
+    The OpConfig for fmt; pass a fully-constructed operator to give it stage knobs, else that operator is lean.
+    ffma/fexp2/flog2/fsincos/fatan2 are absent unless supplied, so MAC chains stay expanded (fmul + fadd) and a
+    kernel that uses no transcendental needs no such module.
     """
     return OpConfig(
         fadd=fadd or FAddOperator(fmt),
@@ -62,6 +66,8 @@ def op_config(
         ffma=ffma,
         fexp2=fexp2,
         flog2=flog2,
+        fsincos=fsincos,
+        fatan2=fatan2,
     )
 
 
@@ -135,6 +141,25 @@ def _imu_frame_transform_kernel() -> Callable[..., object]:
     # Off-catalogue: the shaped matrix/vector ports have no scalar-lane SPEC, so this stateless kernel is referenced
     # directly rather than through the cosim registry.
     return imu_frame_transform.transform
+
+
+def _to_polar_kernel() -> Callable[..., object]:
+    # Off-catalogue (2-vector I/O); exercises the fused atan2+hypot CORDIC.
+    return polar.to_polar
+
+
+def _from_polar_kernel() -> Callable[..., object]:
+    # Off-catalogue (2-vector I/O); exercises the coalesced sin+cos CORDIC.
+    return polar.from_polar
+
+
+# One measured CORDIC config per polar kernel closes all three flows, so the three per-flow rows share it (unlike the
+# per-flow stage knobs elsewhere in the matrix).
+_TO_POLAR_FATAN2 = FAtan2Operator(F_e6m18, unroll100=50, stage_pack=1, stage_normalize=2, stage_product=3)
+_FROM_POLAR_FSINCOS = FSincosOperator(F_e6m18, stage_pack=1, stage_product=2, stage_normalize=1)
+# kepler's fsincos (coalesced sin+cos per Newton iteration) dominates timing, so its measured closure coincides with
+# from_polar's -- the same operator -- and one config closes all three flows.
+_KEPLER_FSINCOS = FSincosOperator(F_e6m18, stage_pack=1, stage_product=2, stage_normalize=1)
 
 
 TARGETS: list[SynthTarget] = [
@@ -477,6 +502,54 @@ TARGETS: list[SynthTarget] = [
         ),
         name="imu_frame_transform_e6m18_fma",
     ),
+    # polar: two off-catalogue 2-vector CORDIC kernels (no scalar-lane SPEC). to_polar fuses atan2+hypot into one
+    # CORDIC; from_polar coalesces sin+cos.
+    SynthTarget(
+        kernel=_to_polar_kernel,
+        flow=FlowId.YOSYS_ECP5,
+        target_frequency_MHz=100,
+        ops=op_config(F_e6m18, fatan2=_TO_POLAR_FATAN2),
+        name="to_polar_e6m18",
+    ),
+    SynthTarget(
+        kernel=_to_polar_kernel,
+        flow=FlowId.DIAMOND_ECP5,
+        target_frequency_MHz=100,
+        ops=op_config(F_e6m18, fatan2=_TO_POLAR_FATAN2),
+        name="to_polar_e6m18",
+    ),
+    SynthTarget(
+        kernel=_to_polar_kernel,
+        flow=FlowId.VIVADO_ARTIX7,
+        target_frequency_MHz=150,
+        ops=op_config(F_e6m18, fatan2=_TO_POLAR_FATAN2),
+        name="to_polar_e6m18",
+    ),
+    SynthTarget(
+        kernel=_from_polar_kernel,
+        flow=FlowId.YOSYS_ECP5,
+        target_frequency_MHz=100,
+        ops=op_config(F_e6m18, fsincos=_FROM_POLAR_FSINCOS),
+        name="from_polar_e6m18",
+    ),
+    SynthTarget(
+        kernel=_from_polar_kernel,
+        flow=FlowId.DIAMOND_ECP5,
+        target_frequency_MHz=100,
+        ops=op_config(F_e6m18, fsincos=_FROM_POLAR_FSINCOS),
+        name="from_polar_e6m18",
+    ),
+    SynthTarget(
+        kernel=_from_polar_kernel,
+        flow=FlowId.VIVADO_ARTIX7,
+        target_frequency_MHz=150,
+        ops=op_config(F_e6m18, fsincos=_FROM_POLAR_FSINCOS),
+        name="from_polar_e6m18",
+    ),
+    # kepler: fsincos inside a data-dependent Newton back-edge loop -- the only II>1 operator in a loop in the matrix.
+    for_example("kepler", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18, fsincos=_KEPLER_FSINCOS)),
+    for_example("kepler", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fsincos=_KEPLER_FSINCOS)),
+    for_example("kepler", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fsincos=_KEPLER_FSINCOS)),
 ]
 
 assert len({t.label for t in TARGETS}) == len(TARGETS)  # labels key build dirs and pytest ids

@@ -260,6 +260,23 @@ def log2_oracle(a_bits: int) -> tuple[int, int, int]:
     return y, domain_error, pole
 
 
+def sincos_oracle(a_bits: int) -> tuple[int, int]:
+    """
+    Reference turn-native ``(sin(2*pi*a), cos(2*pi*a))`` via the exact ``FloatValue.sincos``; numpy is unusable because
+    the CORDIC is faithfully rounded, not correctly rounded.
+    """
+    s, c = holoso.FloatValue.from_bits(_ZKF_F32, a_bits).sincos()
+    return s.bits, c.bits
+
+
+def atan2_oracle(y_bits: int, x_bits: int) -> tuple[int, int]:
+    """Reference turn-native ``(theta, magnitude)`` of ``atan2(y, x)`` via the exact ``FloatValue.atan2``."""
+    th, mag = holoso.FloatValue.atan2(
+        holoso.FloatValue.from_bits(_ZKF_F32, y_bits), holoso.FloatValue.from_bits(_ZKF_F32, x_bits)
+    )
+    return th.bits, mag.bits
+
+
 def sort_oracle_bits(a_bits: int, b_bits: int) -> tuple[int, int]:
     """Return (min_bits, max_bits) for the float32 min/max of two ZKF-legal inputs."""
     a = bits_to_f32(a_bits)

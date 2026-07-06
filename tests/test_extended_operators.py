@@ -13,6 +13,7 @@ import pytest
 import holoso
 from holoso import (
     FAddOperator,
+    FAtan2Operator,
     FCmpOperator,
     FDivOperator,
     FExp2Operator,
@@ -23,6 +24,7 @@ from holoso import (
     FMulILog2OperatorFamily,
     FMulOperator,
     FRoundOperator,
+    FSincosOperator,
     FSortOperator,
     OpConfig,
     UnsupportedConstruct,
@@ -45,6 +47,8 @@ def _ops(
     with_sort: bool = True,
     with_exp2: bool = True,
     with_log2: bool = True,
+    with_sincos: bool = True,
+    with_atan2: bool = True,
 ) -> OpConfig:
     return OpConfig(
         FAddOperator(FMT),
@@ -57,6 +61,8 @@ def _ops(
         fsort=FSortOperator(FMT) if with_sort else None,
         fexp2=FExp2Operator(FMT) if with_exp2 else None,
         flog2=FLog2Operator(FMT) if with_log2 else None,
+        fsincos=FSincosOperator(FMT) if with_sincos else None,
+        fatan2=FAtan2Operator(FMT) if with_atan2 else None,
     )
 
 
@@ -583,3 +589,251 @@ def test_exp2_log2_unconfigured_is_rejected() -> None:
     for fn, ops in ((exp2_kernel, _ops(with_exp2=False)), (log2_kernel, _ops(with_log2=False))):
         with pytest.raises(UnsupportedConstruct):
             holoso.synthesize(fn, ops, name=fn.__name__)
+
+
+# The turn<->radian scale constants MIR inserts, encoded in the format exactly as the compiler does.
+_INV_TAU = FloatValue.from_float(FMT, 1.0 / (2.0 * math.pi))
+_TAU = FloatValue.from_float(FMT, 2.0 * math.pi)
+
+# Angles within a few periods; the turn-scale multiply grows absolute phase error with |x|.
+_TRIG_VECTORS = [0.0, 0.25, -0.25, 0.5, -0.5, 1.0, -1.0, 2.0, -2.0, math.pi / 2, math.pi, -math.pi, 3.0, -6.0]
+
+
+def _sincos_ref(x: float) -> tuple[int, int]:
+    # Bit-exact reference: turn-native model of the format-scaled operand, mirroring MIR's fmul + fsincos.
+    s, c = (_v(x) * _INV_TAU).sincos()
+    return s.bits, c.bits
+
+
+def test_sincos_matches_model_and_native() -> None:
+    def kernel(x: float) -> tuple[float, float]:
+        return (math.sin(x), math.cos(x))
+
+    sim = _sim(kernel, "sincos_basic")
+    for x in _TRIG_VECTORS:
+        out = sim.run(x)
+        sin_bits, cos_bits = _sincos_ref(x)
+        assert _bits(out[0]) == sin_bits and _bits(out[1]) == cos_bits, f"sin/cos bit-exact x={x}"
+        assert abs(float(out[0]) - math.sin(x)) <= 4 * _ulp32(1.0), f"sin accuracy x={x}"
+        assert abs(float(out[1]) - math.cos(x)) <= 4 * _ulp32(1.0), f"cos accuracy x={x}"
+    rng = np.random.default_rng(0x51C)
+    for _ in range(200):
+        x = float(np.float32(rng.standard_normal() * 3))
+        out = sim.run(x)
+        sin_bits, cos_bits = _sincos_ref(x)
+        assert _bits(out[0]) == sin_bits and _bits(out[1]) == cos_bits, f"sincos sweep x={x}"
+
+
+def test_lone_sin_value() -> None:
+    # A lone sin still synthesizes (cos port untapped); this checks its value. The firing count is asserted
+    # structurally in test_schedule.
+    def sin_only(x: float) -> float:
+        return math.sin(x)
+
+    sim = _sim(sin_only, "sin_only")
+    for x in _TRIG_VECTORS:
+        assert _bits(sim.run(x)[0]) == _sincos_ref(x)[0], f"lone sin x={x}"
+
+
+def test_sincos_sign_folds_into_operand() -> None:
+    # sin(-x)/cos(-x) fold the negation onto the scaled operand (CORDIC fed -(x/tau)), so both reuse one firing.
+    def kernel(x: float) -> tuple[float, float]:
+        return (math.sin(-x), math.cos(-x))
+
+    sim = _sim(kernel, "sincos_signs")
+    for x in _TRIG_VECTORS:
+        out = sim.run(x)
+        sin_bits, cos_bits = _sincos_ref(-x)
+        assert _bits(out[0]) == sin_bits and _bits(out[1]) == cos_bits, f"sin/cos(-x) x={x}"
+
+
+def test_sincos_dispatch_numpy() -> None:
+    def kernel(x: float) -> tuple[float, float]:
+        return (np.sin(x), np.cos(x))
+
+    sim = _sim(kernel, "sincos_numpy")
+    for x in (0.5, 1.0, -2.0):
+        out = sim.run(x)
+        sin_bits, cos_bits = _sincos_ref(x)
+        assert _bits(out[0]) == sin_bits and _bits(out[1]) == cos_bits, f"np.sin/cos x={x}"
+
+
+def test_sincos_unconfigured_is_rejected() -> None:
+    def kernel(x: float) -> float:
+        return math.sin(x)
+
+    with pytest.raises(UnsupportedConstruct):
+        holoso.synthesize(kernel, _ops(with_sincos=False), name="sincos_unconfigured")
+
+
+_ATAN2_VECTORS = [(1.0, 1.0), (3.0, 4.0), (-3.0, 4.0), (3.0, -4.0), (-3.0, -4.0), (1.0, 0.0), (0.0, 1.0), (2.5, -0.5)]
+
+
+def _atan2_ref(y: float, x: float) -> tuple[int, int]:
+    # theta is scaled from turns to radians by MIR's post-multiply; magnitude (hypot) is units-free and unscaled.
+    theta_turns, mag = FloatValue.atan2(_v(y), _v(x))
+    return (theta_turns * _TAU).bits, mag.bits
+
+
+def test_atan2_matches_model_and_native() -> None:
+    def kernel(y: float, x: float) -> float:
+        return math.atan2(y, x)
+
+    sim = _sim(kernel, "atan2_basic")
+    for y, x in _ATAN2_VECTORS:
+        out = sim.run(y, x)[0]
+        assert _bits(out) == _atan2_ref(y, x)[0], f"atan2 bit-exact y={y} x={x}"
+        assert abs(float(out) - math.atan2(y, x)) <= 4 * _ulp32(math.pi), f"atan2 accuracy y={y} x={x}"
+    rng = np.random.default_rng(0xA7A)
+    for _ in range(200):
+        y, x = (float(np.float32(rng.standard_normal() * 8)) for _ in range(2))
+        assert _bits(sim.run(y, x)[0]) == _atan2_ref(y, x)[0], f"atan2 sweep y={y} x={x}"
+
+
+def test_atan2_dispatch_numpy_arctan2() -> None:
+    # numpy spells the two-arg arctangent ``arctan2`` (== ``np.atan2`` on numpy>=2.0).
+    def kernel(y: float, x: float) -> float:
+        return np.arctan2(y, x)  # type: ignore[no-any-return]
+
+    sim = _sim(kernel, "atan2_numpy")
+    for y, x in _ATAN2_VECTORS:
+        assert _bits(sim.run(y, x)[0]) == _atan2_ref(y, x)[0], f"np.arctan2 y={y} x={x}"
+
+
+def test_atan2_unconfigured_is_rejected() -> None:
+    def kernel(y: float, x: float) -> float:
+        return math.atan2(y, x)
+
+    with pytest.raises(UnsupportedConstruct):
+        holoso.synthesize(kernel, _ops(with_atan2=False), name="atan2_unconfigured")
+
+
+def test_hypot_fused_with_atan2() -> None:
+    # hypot(y, x) beside atan2(y, x) fuses into the atan2 CORDIC's magnitude port (units-free, no scale), exact
+    # against the model even at the origin and infinities.
+    def kernel(y: float, x: float) -> tuple[float, float]:
+        return (math.hypot(y, x), math.atan2(y, x))
+
+    sim = _sim(kernel, "hypot_fused")
+    for y, x in [*_ATAN2_VECTORS, (0.0, 0.0), (float("inf"), 2.0)]:
+        theta_bits, mag_bits = _atan2_ref(y, x)
+        out = sim.run(y, x)
+        assert _bits(out[0]) == mag_bits, f"fused hypot y={y} x={x}"
+        assert _bits(out[1]) == theta_bits, f"fused atan2 y={y} x={x}"
+
+
+def test_hypot_sign_flipped_still_fuses_with_atan2() -> None:
+    # The fusion collapses operand signs, so hypot(-x, y) still fuses into atan2(y, x)'s magnitude port. The magnitude
+    # is sign-invariant; bit-exactness against the atan2 model confirms the fused path (the primitive decomposition
+    # would only be approximate).
+    def kernel(y: float, x: float) -> tuple[float, float]:
+        return (math.hypot(-x, y), math.atan2(y, x))
+
+    sim = _sim(kernel, "hypot_sign_flipped")
+    for y, x in [*_ATAN2_VECTORS, (0.0, 0.0), (float("inf"), 2.0)]:
+        _theta_bits, mag_bits = _atan2_ref(y, x)
+        assert _bits(sim.run(y, x)[0]) == mag_bits, f"sign-flipped fused hypot y={y} x={x}"
+
+
+def test_hypot_lone_decomposition_is_approximate() -> None:
+    # A lone hypot (no adjacent atan2) falls back to the primitive decomposition (needs fsort/fexp2/flog2); approximate
+    # on finite nonzero inputs, with the origin and infinities the documented stopgap gaps.
+    def kernel(y: float, x: float) -> float:
+        return math.hypot(y, x)
+
+    sim = _sim(kernel, "hypot_lone")
+    rng = np.random.default_rng(0x4F0)
+    for _ in range(200):
+        y, x = (float(np.float32(rng.standard_normal() * 8)) for _ in range(2))
+        native = math.hypot(y, x)
+        if native < 1e-3:
+            continue
+        assert abs(float(sim.run(y, x)[0]) - native) <= 64 * _ulp32(native), f"lone hypot y={y} x={x}"
+
+
+def test_hypot_lone_missing_primitive_is_rejected() -> None:
+    # The decomposition needs fsort/fexp2/flog2; absent any of them, a lone hypot is a clear configuration error.
+    def kernel(y: float, x: float) -> float:
+        return math.hypot(y, x)
+
+    for ops in (_ops(with_sort=False), _ops(with_exp2=False), _ops(with_log2=False)):
+        with pytest.raises(UnsupportedConstruct):
+            holoso.synthesize(kernel, ops, name="hypot_lone_reject")
+
+
+def _sqrt_ref(x: float) -> int:
+    # Bit-exact reference for the exp2(log2(x)/2) stopgap: mirrors MIR's flog2, fmul_ilog2(-1), fexp2 chain.
+    return _v(x).log2().scale_pow2(-1).exp2().bits
+
+
+def test_sqrt_matches_decomposition_and_native() -> None:
+    def kernel(x: float) -> float:
+        return math.sqrt(x)
+
+    sim = _sim(kernel, "sqrt_basic")
+    for x in [0.25, 0.5, 1.0, 2.0, 4.0, 9.0, 100.0, 1e-3, 1e6, math.pi]:
+        out = sim.run(x)[0]
+        assert _bits(out) == _sqrt_ref(x), f"sqrt bit-exact x={x}"
+        native = math.sqrt(x)
+        assert abs(float(out) - native) <= 32 * _ulp32(native), f"sqrt accuracy x={x}"
+    rng = np.random.default_rng(0x59A)
+    for _ in range(200):
+        x = float(np.float32(abs(rng.standard_normal()) * 100 + 1e-6))
+        assert _bits(sim.run(x)[0]) == _sqrt_ref(x), f"sqrt sweep x={x}"
+
+
+def test_sqrt_dispatch_numpy() -> None:
+    def kernel(x: float) -> float:
+        return np.sqrt(x)  # type: ignore[no-any-return]
+
+    sim = _sim(kernel, "sqrt_numpy")
+    for x in (2.0, 9.0, 0.25):
+        assert _bits(sim.run(x)[0]) == _sqrt_ref(x), f"np.sqrt x={x}"
+
+
+def test_trig_of_constants_fold() -> None:
+    # Trig of literal operands folds in the format-agnostic HIR, so a kernel of only constant trig needs no CORDIC:
+    # synthesizing with fsincos/fatan2 unconfigured proves the fold.
+    def kernel(x: float) -> tuple[float, float, float, float, float]:
+        return (math.sin(0.5), math.cos(0.5), math.atan2(1.0, 2.0), math.hypot(3.0, 4.0), math.sqrt(2.0))
+
+    ops = _ops(with_sincos=False, with_atan2=False, with_exp2=False, with_log2=False, with_sort=False)
+    sim = holoso.synthesize(kernel, ops, name="trig_fold").numerical_model.elaborate()
+    out = sim.run(0.0)
+    for index, ref in enumerate(
+        (math.sin(0.5), math.cos(0.5), math.atan2(1.0, 2.0), math.hypot(3.0, 4.0), math.sqrt(2.0))
+    ):
+        assert _bits(out[index]) == _v(ref).bits, f"folded output {index}"
+
+
+def test_constant_fold_declines_nonfinite_result() -> None:
+    # A constant subexpression that overflows to inf must be left unfolded, not baked into a non-finite FloatConst.
+    # Regression: the inf previously reached sin/cos's fold and crashed with a raw ValueError from math.sin. Mirrors
+    # the exp2/log2 finiteness convention.
+    def unfoldable(x: float) -> tuple[float, float]:
+        overflow = math.hypot(1.5e308, 1.5e308)  # stays unfolded -> a hardware op, so sin/cos of it lower normally
+        return math.sin(overflow), math.cos(overflow)
+
+    holoso.synthesize(unfoldable, _ops(), name="nonfinite_fold_unfold").numerical_model.elaborate()
+
+    def sin_of_inf(x: float) -> float:
+        return math.sin(1e300 * 1e300) + x  # the product folds to inf; sin must decline it with a clean diagnostic
+
+    with pytest.raises(UnsupportedConstruct):  # rejected, not a raw ValueError crash
+        holoso.synthesize(sin_of_inf, _ops(), name="nonfinite_fold_reject")
+
+
+def test_atan2_fold_normalizes_signed_zero() -> None:
+    # ZKF has no negative zero, so a folded atan2 over -0.0 must match the datapath's atan2(+0.0), not Python's
+    # signed-zero branch cut (+/-pi) the datapath can never produce. Regression: FloatConst previously kept -0.0 and
+    # flipped the result to -pi.
+    def folded(x: float) -> float:
+        z = 0.0
+        return math.atan2(0.0, -z) + x  # atan2(0.0, -0.0) is a compile-time constant
+
+    def runtime(y: float, x: float) -> float:
+        return math.atan2(y, x)
+
+    fold_bits = _bits(_sim(folded, "atan2_fold_neg_zero").run(0.0)[0])
+    runtime_bits = _bits(_sim(runtime, "atan2_runtime_zero").run(0.0, 0.0)[0])
+    assert fold_bits == runtime_bits, "folded signed-zero atan2 must match the datapath's atan2(0, 0)"
