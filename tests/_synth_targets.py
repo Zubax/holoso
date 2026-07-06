@@ -297,9 +297,8 @@ TARGETS: list[SynthTarget] = [
         ),
     ),
     for_example("octave_index", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    # octave_index's transcendental sibling. The exp2/log2 Horner products have a multiplicand wider than the DSP
-    # input, so their STAGE_PRODUCT=2 split (registered partial-product reduction) is load-bearing; this one config
-    # closes all three flows.
+    # octave_index's transcendental sibling. The exp2/log2 Horner products and log2's final f*C(f) product need
+    # registered partial-product reduction; this one config closes all three flows.
     for_example(
         "equal_temperament",
         FlowId.YOSYS_ECP5,
@@ -307,7 +306,7 @@ TARGETS: list[SynthTarget] = [
         op_config(
             F_e6m18,
             fexp2=FExp2Operator(F_e6m18, stage_product=2),
-            flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=1, stage_normalize=1, stage_pack=1),
+            flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=2, stage_normalize=1, stage_pack=1),
         ),
     ),
     for_example(
@@ -317,7 +316,7 @@ TARGETS: list[SynthTarget] = [
         op_config(
             F_e6m18,
             fexp2=FExp2Operator(F_e6m18, stage_product=2),
-            flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=1, stage_normalize=1, stage_pack=1),
+            flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=2, stage_normalize=1, stage_pack=1),
         ),
     ),
     for_example(
@@ -327,7 +326,7 @@ TARGETS: list[SynthTarget] = [
         op_config(
             F_e6m18,
             fexp2=FExp2Operator(F_e6m18, stage_product=2),
-            flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=1, stage_normalize=1, stage_pack=1),
+            flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=2, stage_normalize=1, stage_pack=1),
         ),
     ),
     for_example("remainder", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
