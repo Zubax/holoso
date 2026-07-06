@@ -150,6 +150,8 @@ _FLOAT_INTRINSICS: dict[str, Callable[[], Operator]] = {
     "fma": FloatFma,
     "minimum": FloatMin,  # numpy.minimum/maximum are the binary elementwise forms; np.min/np.max are reductions
     "maximum": FloatMax,
+    "exp2": FloatExp2,
+    "log2": FloatLog2,
 }
 
 
@@ -182,7 +184,6 @@ _KNOWN_INTRINSICS = frozenset(
         "sincos",
         "exp",
         "log",
-        "log2",
         "log10",
         "hypot",
         "pow",
@@ -1837,7 +1838,11 @@ class _Lowerer:
     def _lower_pow(self, base: ast.expr, exponent: ast.expr) -> ValueId:
         n = self._static_int(exponent)
         if n is None:
-            raise UnsupportedConstruct("exponent must be a compile-time integer", self._loc(exponent))
+            if self._static_float(base) == 2.0:
+                return self._builder.operation(FloatExp2(), [self._float_operand(self._lower_expr(exponent), exponent)])
+            raise UnsupportedConstruct(
+                "exponent must be a compile-time integer unless the base is 2 (2 ** x is exp2)", self._loc(exponent)
+            )
         if n < 0:
             # A negative power is only meaningful for a constant base (e.g. the per-iteration shift 2**-i); it folds to
             # a constant, then strength reduction turns a multiply by it into an exact power-of-two scale.
@@ -1858,8 +1863,7 @@ class _Lowerer:
         Evaluate an expression to a compile-time float, or None if it is not one: a literal, a static integer (an
         unrolled loop counter), a read-only float attribute (a float instance attribute never assigned in the body, so
         it keeps its snapshot value), or ``+``/``-``/``*`` arithmetic of these. The fold is fast-math (float64),
-        matching the constant folder and accepted per DESIGN.md; it drives compile-time branch decisions and the
-        negative-power base.
+        matching the constant folder and accepted per DESIGN.md.
         """
         cast = self._cast_call(node)
         if cast is not None and cast[0] == "float":

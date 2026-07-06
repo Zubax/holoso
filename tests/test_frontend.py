@@ -28,6 +28,7 @@ from holoso._hir import (
     FloatAdd,
     FloatConst,
     FloatDiv,
+    FloatExp2,
     FloatMul,
     FloatNeg,
     FloatRelational,
@@ -831,6 +832,15 @@ def test_missing_intrinsic_message() -> None:
 
     with pytest.raises(MissingIntrinsic, match="sqrt"):
         lower(f)
+
+
+def test_pow_static_integer_exponent_stays_multiplication() -> None:
+    # The static-integer path precedes the base-2 exp2 path, so ``2 ** 3`` still unrolls to multiplies.
+    def f(x: float) -> float:
+        return x * (2**3)
+
+    hir = lower(f)
+    assert _arith_count(hir, FloatExp2) == 0
 
 
 def _integrator_class() -> type:

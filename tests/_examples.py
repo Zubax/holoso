@@ -30,6 +30,7 @@ import imu_frame_transform as imu_frame_transform  # noqa: E402  # synth matrix 
 import madd  # noqa: E402
 import poly3  # noqa: E402
 from cordic_sincos import CordicSinCos as CordicSinCos  # noqa: E402
+from equal_temperament import equal_temperament as equal_temperament  # noqa: E402
 from iir1_lpf import IIR1LPF as IIR1LPF  # noqa: E402
 from latching_fault_register import LatchingFaultRegister  # noqa: E402
 from majority_voter import MajorityVoter  # noqa: E402
@@ -490,6 +491,16 @@ SPECS = [
         edge_overrides={"x": (0.25, 0.5, 1.0, 2.0, 8.0)},
         edge_values=(0.25, 0.5, 1.0, 2.0, 8.0),
         formats=(FloatFormat(6, 18), _FMT),  # the shallow and deep datapaths, both bit-exact against the model
+    ),
+    ExampleSpec(
+        name="equal_temperament",
+        inputs=("note",),
+        make_kernel=lambda: equal_temperament,
+        reference=ReferenceComparison.APPROXIMATE,  # continuous transcendental arithmetic rounds each step
+        nominal={"note": 69.0},
+        manual=[{"note": v} for v in (69.0, 60.0, 81.0, 57.0, 69.5, 0.0, 127.0)],  # landmark notes + MIDI-range ends
+        draw_random=lambda rng: {"note": bounded(rng, 0.0, 127.0)},
+        edge_values=(0.0, 21.0, 60.0, 69.0, 108.0, 127.0),  # note edges over the MIDI range
     ),
     ExampleSpec(
         name="cordic_sincos",

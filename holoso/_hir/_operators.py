@@ -210,6 +210,25 @@ class FloatTrunc(Operator):
 
 
 @dataclass(frozen=True, slots=True)
+class FloatExp2(Operator):
+    mnemonic: ClassVar[str] = "exp2"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatLog2(Operator):
+    mnemonic: ClassVar[str] = "log2"
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+
+@dataclass(frozen=True, slots=True)
 class FloatFma(Operator):
     """
     Fused multiply-add ``a*b + c`` from an explicit ``math.fma`` call: always single-rounds.

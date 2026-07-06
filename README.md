@@ -127,6 +127,9 @@ operators = holoso.OpConfig(
 )
 ```
 
+Optional operators such as `fexp2` etc. are supplied the same way.
+The compiler will complain explicitly if an optional operator required by the program is missing.
+
 How does one actually obtain the optimal staging configuration? Empirically.
 Start with the default configuration (all stages disabled) and see if it achieves timing closure at the target frequency.
 If not, inspect the synthesis logs to see where the critical path is --

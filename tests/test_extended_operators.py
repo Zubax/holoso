@@ -15,9 +15,11 @@ from holoso import (
     FAddOperator,
     FCmpOperator,
     FDivOperator,
+    FExp2Operator,
     FloatFormat,
     FloatValue,
     FFmaOperator,
+    FLog2Operator,
     FMulILog2OperatorFamily,
     FMulOperator,
     FRoundOperator,
@@ -27,7 +29,7 @@ from holoso import (
 )
 
 # Bare-name imports so a ``from math import floor`` style kernel resolves through the test module globals.
-from math import ceil, floor, trunc
+from math import ceil, floor, log2, trunc
 
 # Aliased imports: the local name is NOT the canonical spelling, so dispatch must resolve by callee-object identity.
 from math import floor as aliased_floor
@@ -36,7 +38,14 @@ from math import fma as aliased_fma
 FMT = FloatFormat(8, 24)  # binary32: a float64 decode of any in-format value is exact, so math/round is an exact oracle
 
 
-def _ops(*, with_round: bool = True, with_fma: bool = True, with_sort: bool = True) -> OpConfig:
+def _ops(
+    *,
+    with_round: bool = True,
+    with_fma: bool = True,
+    with_sort: bool = True,
+    with_exp2: bool = True,
+    with_log2: bool = True,
+) -> OpConfig:
     return OpConfig(
         FAddOperator(FMT),
         FMulOperator(FMT),
@@ -46,6 +55,8 @@ def _ops(*, with_round: bool = True, with_fma: bool = True, with_sort: bool = Tr
         fround=FRoundOperator(FMT) if with_round else None,
         ffma=FFmaOperator(FMT) if with_fma else None,
         fsort=FSortOperator(FMT) if with_sort else None,
+        fexp2=FExp2Operator(FMT) if with_exp2 else None,
+        flog2=FLog2Operator(FMT) if with_log2 else None,
     )
 
 
@@ -442,3 +453,119 @@ def test_min_max_nonfinite_constant_is_rejected() -> None:
     for fn in (min_selects_finite, max_selects_finite):
         with pytest.raises(UnsupportedConstruct):
             holoso.synthesize(fn, _ops(), name=fn.__name__)
+
+
+def _ulp32(value: float) -> float:
+    """The binary32 quantum at ``value``'s magnitude, for the coarse native-accuracy guards."""
+    if value == 0.0 or not math.isfinite(value):
+        return math.ldexp(1.0, -149)
+    return math.ldexp(1.0, max(math.frexp(abs(value))[1] - FMT.wman, -149))
+
+
+_EXP2_VECTORS = [0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 3.5, -3.5, 7.25, -7.25, 10.0, 0.125, -12.5, 100.0, -100.0]
+_LOG2_VECTORS = [1.0, 2.0, 4.0, 8.0, 0.5, 0.25, 3.0, 5.0, 1.5, 100.0, 1e-12, 1e12, 16777216.0, 0.1, math.pi]
+
+
+def test_exp2_matches_model_and_native() -> None:
+    def kernel(x: float) -> float:
+        return math.exp2(x)
+
+    sim = _sim(kernel, "exp2_basic")
+    for x in _EXP2_VECTORS:
+        # sim and the reference share FloatValue.exp2 (circular); the native check breaks the circularity.
+        out = sim.run(x)[0]
+        assert _bits(out) == _v(x).exp2().bits, f"exp2 bit-exact x={x}"
+        native = math.exp2(x)
+        assert abs(float(out) - native) <= 2 * _ulp32(native), f"exp2 accuracy x={x}"
+    rng = np.random.default_rng(0xE2)
+    for _ in range(200):
+        x = float(np.float32(rng.standard_normal() * 20))
+        assert _bits(sim.run(x)[0]) == _v(x).exp2().bits, f"exp2 sweep x={x}"
+
+
+def test_log2_matches_model_and_native() -> None:
+    def kernel(x: float) -> float:
+        return math.log2(x)
+
+    sim = _sim(kernel, "log2_basic")
+    for x in _LOG2_VECTORS:
+        out = sim.run(x)[0]
+        assert _bits(out) == _v(x).log2().bits, f"log2 bit-exact x={x}"
+        native = math.log2(x)
+        assert abs(float(out) - native) <= 2 * _ulp32(native), f"log2 accuracy x={x}"
+    rng = np.random.default_rng(0x109)
+    for _ in range(200):
+        x = float(np.float32(abs(rng.standard_normal()) * 1000 + 1e-9))
+        assert _bits(sim.run(x)[0]) == _v(x).log2().bits, f"log2 sweep x={x}"
+
+
+def test_pow_two_lowers_to_exp2() -> None:
+    def k_int_base(x: float) -> float:
+        return 2**x
+
+    def k_float_base(x: float) -> float:
+        return 2.0**x  # type: ignore[no-any-return]
+
+    for kernel in (k_int_base, k_float_base):
+        sim = _sim(kernel, kernel.__name__)
+        for x in (0.5, 3.5, -2.5, 7.25):  # fractional: a multiply chain could not produce these
+            assert _bits(sim.run(x)[0]) == _v(x).exp2().bits, f"{kernel.__name__} x={x}"
+
+
+def test_pow_nonconstant_or_nontwo_base_is_rejected() -> None:
+    def k_runtime_base(x: float, y: float) -> float:
+        return x**y  # type: ignore[no-any-return]
+
+    def k_ten_base(x: float) -> float:
+        return 10**x
+
+    for fn in (k_runtime_base, k_ten_base):
+        with pytest.raises(UnsupportedConstruct):
+            holoso.synthesize(fn, _ops(), name=fn.__name__)
+
+
+def test_exp2_log2_dispatch_numpy_and_bare_name() -> None:
+    def kernel(x: float) -> tuple[float, float, float]:
+        return (np.exp2(x), np.log2(x), log2(x))
+
+    sim = _sim(kernel, "exp2_log2_dispatch")
+    for x in (2.0, 3.0, 100.0):  # positive; dispatch resolves by callee identity, so it is value-independent
+        out = sim.run(x)
+        assert _bits(out[0]) == _v(x).exp2().bits, f"np.exp2 x={x}"
+        assert _bits(out[1]) == _v(x).log2().bits, f"np.log2 x={x}"
+        assert _bits(out[2]) == _v(x).log2().bits, f"bare log2 x={x}"
+
+
+def test_exp2_log2_sign_folds_into_operand() -> None:
+    def kernel(x: float) -> tuple[float, float]:
+        return (math.exp2(-x), math.log2(abs(x)))
+
+    sim = _sim(kernel, "exp2_log2_signs")
+    for x in [1.0, -1.0, 2.5, -2.5, 0.5, -0.5, 7.0, -7.0, 0.0]:
+        out = sim.run(x)
+        assert _bits(out[0]) == _v(-x).exp2().bits, f"exp2(-x) x={x}"
+        assert _bits(out[1]) == _v(abs(x)).log2().bits, f"log2(|x|) x={x}"
+
+
+def test_log2_pole_and_domain_values() -> None:
+    # Error cases yield -inf; the pole/domain flags are not modeled here (the HDL bench checks them on the RTL).
+    def kernel(x: float) -> float:
+        return math.log2(x)
+
+    sim = _sim(kernel, "log2_poles")
+    assert float(sim.run(0.0)[0]) == float("-inf")
+    for x in [-1.0, -2.5, -1e30]:
+        assert float(sim.run(x)[0]) == float("-inf"), f"domain x={x}"
+    assert float(sim.run(float("inf"))[0]) == float("inf")
+
+
+def test_exp2_log2_unconfigured_is_rejected() -> None:
+    def exp2_kernel(x: float) -> float:
+        return math.exp2(x)
+
+    def log2_kernel(x: float) -> float:
+        return math.log2(x)
+
+    for fn, ops in ((exp2_kernel, _ops(with_exp2=False)), (log2_kernel, _ops(with_log2=False))):
+        with pytest.raises(UnsupportedConstruct):
+            holoso.synthesize(fn, ops, name=fn.__name__)

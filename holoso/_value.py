@@ -133,6 +133,13 @@ class FloatValue:
     def trunc(self) -> "FloatValue":
         return FloatValue.from_bits(self.fmt, self._zval().trunc().bits)
 
+    def exp2(self) -> "FloatValue":
+        return FloatValue.from_bits(self.fmt, self._zval().exp2().bits)
+
+    def log2(self) -> "FloatValue":
+        """``zkf_log2``'s domain-error/pole sidebands are intentionally not modeled (as with ``zkf_div``'s div0)."""
+        return FloatValue.from_bits(self.fmt, self._zval().log2().value.bits)
+
 
 def _check_format(fmt: FloatFormat) -> None:
     if not isinstance(fmt, FloatFormat):

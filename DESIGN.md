@@ -186,7 +186,8 @@ intended.
 Array arithmetic. The elementwise arithmetic operators `+ - * /` apply leafwise to same-shape arrays, and a scalar
 operand broadcasts over the other side's leaves; this is deliberately narrower than numpy broadcasting -- a mixed-rank
 pair (vector + matrix) is rejected rather than silently aligned along a different axis than numpy would pick, and `**`
-stays scalar-only. Augmented assignment to any aggregate (`+=`, `@=`) is rejected: an array would be mutated in place by
+stays scalar-only (base two with a runtime exponent lowers to exp2; otherwise the exponent must be a compile-time
+integer). Augmented assignment to any aggregate (`+=`, `@=`) is rejected: an array would be mutated in place by
 numpy while the front-end rebinds (diverging for an alias), and a list `+=` is concatenation, which is unsupported. The
 matrix product `@` (equivalently `np.matmul`) follows numpy's shape rules for 1-D and 2-D operands -- inner dimensions
 must agree, a 1-D operand is promoted and its axis dropped from the result, vector @ vector is a scalar -- and expands
@@ -218,9 +219,9 @@ the kernel.
 HIR is a real CFG of basic blocks -- entry first, a single `Ret` exit -- carrying an SSA value DAG. Values are input
 ports (one per parameter), float and boolean constants, state reads (persistent state at block entry), phis (SSA
 merges), and pure semantic operations; terminators are `jump`, `branch`, and `ret` (which commits state live-outs and
-output ports). The pure operations cover float arithmetic (add, mul, div, neg, abs, multiply-by-power-of-two),
-relational comparisons and boolean logic yielding `bool`, float<->bool casts, and `select` (a data mux produced by
-if-conversion, distinct from control flow).
+output ports). The pure operations cover float arithmetic (add, mul, div, neg, abs, multiply-by-power-of-two,
+base-two exponential and logarithm), relational comparisons and boolean logic yielding `bool`, float<->bool casts, and
+`select` (a data mux produced by if-conversion, distinct from control flow).
 
 `bool` is implemented alongside `float` throughout (constants, input ports, state reads, phis), and a state slot's reset
 is a typed constant, so a boolean state register carries a boolean snapshot. Node names stay explicit (`FloatConst`,
@@ -328,7 +329,9 @@ results, or output wires. Multiply-by-power-of-two selects the constant-shift op
 that exponent; an out-of-range exponent is rejected, since the equivalent constant would overflow or underflow the
 format anyway. The four rounding operators map to one shared `fround` distinguished by its `round_mode` immediate.
 Binary `min`/`max` map to the low and high output ports of one shared `fsort` sorter, so a `min` and a `max` over one
-operand pair fuse into a single firing. Lowering rejects semantic domains that have no selected MIR representation.
+operand pair fuse into a single firing. Base-two exp/log map to the optional `fexp2`/`flog2`; `flog2` is
+non-speculatable, carrying `domain_error`/`pole` sidebands. Lowering rejects semantic domains that have no selected MIR
+representation.
 
 When `ffma` is configured, lowering contracts a single-use `a*b + c` into one fused multiply-add -- a faithful
 contraction that single-rounds instead of double-rounding, in the spirit of the HIR fast-math folding. It fires only

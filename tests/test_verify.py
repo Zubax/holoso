@@ -1,11 +1,13 @@
 """Unit tests for the pure-Python verification core."""
 
+import math
 import pickle
 from collections.abc import Callable
 
 import numpy as np
 import pytest
 
+import holoso
 from holoso import (
     BoolType,
     FloatValue,
@@ -30,6 +32,7 @@ from ._modelref import (
     assert_model_equals_interpreter,
     bounded,
     build_model_and_interpreter,
+    default_ops,
     default_tolerance,
     encode_inputs,
     evaluate_reference,
@@ -47,12 +50,24 @@ from ._examples import (
     SchmittTrigger,
     ekf1_stateful,
     ekf1_stateless,
+    equal_temperament,
     remainder,
 )
 
 F32 = FloatFormat(8, 24)
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
+
+
+def test_equal_temperament_default_sweep_has_no_log2_sidebands() -> None:
+    # The shipped self-test bench sweeps every input over cocotb's default (-4, 4) range (the _DEFAULT_RANGE template
+    # constant in holoso/_backend/cocotb.py) and asserts err_pc == 0, so log2's argument must stay positive across it or
+    # the artifact aborts on a domain_error/pole.
+    sim = holoso.synthesize(equal_temperament, default_ops(F32), name="et_sweep").numerical_model.elaborate()
+    for raw in np.linspace(-4.0, 4.0, 25):  # hertz is monotonic in note, so a coarse grid suffices
+        x = F32.decode(F32.encode(float(raw)))
+        out = sim.run(x)
+        assert all(math.isfinite(float(v)) for v in out), f"log2 sideband at note={x}: {[float(v) for v in out]}"
 
 
 def _run(target: Callable[..., object]) -> Mir:
@@ -328,8 +343,9 @@ def test_for_counter_reassigned_inside_while_is_demoted_after_the_loop() -> None
 
 
 def test_for_counter_reassigned_inside_while_rejects_later_static_use() -> None:
-    # Companion to the above: once the counter is demoted by a while-body reassignment, a later static-only use of it
-    # (a shift exponent) must be REJECTED as runtime, not silently folded to the stale compile-time counter value.
+    # Companion to the above: once the counter is demoted by a while-body reassignment, a later static-only exponent
+    # use must be rejected as runtime, not folded to the stale counter. The base is 3 not 2 because ``2 ** i`` with a
+    # runtime ``i`` is the exp2 operator, which does not require a static exponent.
     def kernel(a: float) -> float:
         for i in range(2):
             pass
@@ -338,7 +354,7 @@ def test_for_counter_reassigned_inside_while_rejects_later_static_use() -> None:
             # runtime reassignment inside the loop -> i is no longer a compile-time integer afterwards
             i = a  # type: ignore[assignment]
             w = w + 1.0
-        return a * 2.0**i  # a runtime exponent must be rejected, never folded against the stale counter
+        return a * 3.0**i
 
     with pytest.raises(UnsupportedConstruct, match="compile-time integer"):
         lower(kernel)

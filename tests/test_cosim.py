@@ -1,5 +1,6 @@
 """Functional cosimulation: drive generated modules and check their outputs bit-for-bit against the model backend."""
 
+import math
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -21,7 +22,7 @@ from holoso import (
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._frontend import lower
 from holoso._hir import optimize
-from holoso._lir import build, pooled_write_word
+from holoso._lir import Lir, build, pooled_write_word
 from holoso._mir import lower as lower_to_mir
 
 from ._cosim import run_cosim
@@ -351,24 +352,14 @@ async def div0_errpc(dut):
 """
 
 
-@pytest.mark.parametrize("config", PIPELINE_OP_CASES, ids=lambda config: config.label)
-@pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_div0_error(sim: str, config: OperatorCase) -> None:
-    def kdiv(a: float, b: float) -> float:
-        return a / b
-
-    fmt = FloatFormat(6, 18)
-    name = f"kdiv_{config.label}"
-    lir = build(lower_to_mir(optimize(lower(kdiv)), config.make_ops(fmt)), name, fetch_stages=3)
-    gen_dir = REPO_ROOT / "build" / "holoso_gen" / sim / f"{name}_err_w{fmt.wexp}_{fmt.wman}"
+def _run_err_bench(sim: str, name: str, fmt: FloatFormat, lir: Lir, bench_text: str, suffix: str = "err") -> None:
+    """Build ``name``'s RTL plus a custom error-checking cocotb bench and run it -- the shared tail of the err tests."""
+    gen_dir = REPO_ROOT / "build" / "holoso_gen" / sim / f"{name}_{suffix}_w{fmt.wexp}_{fmt.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"err_{name}_w{fmt.wexp}_{fmt.wman}"
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"{suffix}_{name}_w{fmt.wexp}_{fmt.wman}"
     (gen_dir / f"{name}.v").write_text(generate_verilog(lir).verilog)
-    test_module = f"test_{name}_err"
-    (gen_dir / f"{test_module}.py").write_text(
-        _ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
-    )
-
+    test_module = f"test_{name}_{suffix}"
+    (gen_dir / f"{test_module}.py").write_text(bench_text)
     runner = get_runner(sim)
     runner.build(
         sources=[gen_dir / f"{name}.v", *sources()],
@@ -386,6 +377,82 @@ def test_cosim_div0_error(sim: str, config: OperatorCase) -> None:
         build_dir=str(build_dir),
         results_xml=str(build_dir / "results.xml"),
     )
+
+
+@pytest.mark.parametrize("config", PIPELINE_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_div0_error(sim: str, config: OperatorCase) -> None:
+    def kdiv(a: float, b: float) -> float:
+        return a / b
+
+    fmt = FloatFormat(6, 18)
+    name = f"kdiv_{config.label}"
+    lir = build(lower_to_mir(optimize(lower(kdiv)), config.make_ops(fmt)), name, fetch_stages=3)
+    bench = _ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
+    _run_err_bench(sim, name, fmt, lir, bench)
+
+
+# log2 has two error ports (domain_error for x<0, pole for x==0), both ORed into the single err_pc. Like div0, the
+# generated bench never reaches the error path (it asserts err_pc == 0 and the numerical model does not predict errors),
+# so this custom bench drives both error operands and asserts err_pc latches for each, then clears.
+_LOG2_ERR_BENCH = """
+import cocotb
+from cocotb.clock import Clock
+from cocotb.triggers import FallingEdge, RisingEdge, Timer
+import holoso
+
+_FMT = holoso.FloatFormat(@@WEXP@@, @@WMAN@@)
+
+
+async def _transact(dut, x):
+    while int(dut.in_ready.value) != 1:
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+    dut.in_x.value = int(_FMT.encode(x))
+    dut.in_valid.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    dut.in_valid.value = 0
+    while int(dut.out_valid.value) != 1:
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+    err = int(dut.err_pc.value)
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    return err
+
+
+@cocotb.test()
+async def log2_errpc(dut):
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await FallingEdge(dut.clk)
+    dut.rst.value = 1
+    dut.in_valid.value = 0
+    for _ in range(4):
+        await RisingEdge(dut.clk)
+    dut.rst.value = 0
+    await FallingEdge(dut.clk)
+    dut.out_ready.value = 1
+
+    assert await _transact(dut, 8.0) == 0, "clean log2 spuriously flagged err_pc"
+    assert await _transact(dut, 0.0) != 0, "log2(+0) pole did not set err_pc"
+    assert await _transact(dut, 8.0) == 0, "err_pc was not cleared after the pole"
+    assert await _transact(dut, -4.0) != 0, "log2(x<0) domain error did not set err_pc"
+    assert await _transact(dut, 8.0) == 0, "err_pc was not cleared after the domain error"
+"""
+
+
+@pytest.mark.parametrize("config", PIPELINE_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_log2_error(sim: str, config: OperatorCase) -> None:
+    def klog2(x: float) -> float:
+        return math.log2(x)
+
+    fmt = FloatFormat(6, 18)
+    name = f"klog2_{config.label}"
+    lir = build(lower_to_mir(optimize(lower(klog2)), config.make_ops(fmt)), name, fetch_stages=3)
+    bench = _LOG2_ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
+    _run_err_bench(sim, name, fmt, lir, bench)
 
 
 # A 3-input variant of the err bench for the cross-block-overlap err_pc corner: it asserts the EXACT latched step
@@ -453,33 +520,12 @@ def test_cosim_overlap_div0_errpc(sim: str, config: OperatorCase) -> None:
     entry = next(block for block in lir.blocks if block.index == lir.entry)
     (fdiv,) = [op for op in entry.ops if op.inst.operator.error_ports]
     err_pc = lir.block_base[entry.index] + pooled_write_word(fdiv.commit_cycle)
-    gen_dir = REPO_ROOT / "build" / "holoso_gen" / sim / f"{name}_errpc_w{fmt.wexp}_{fmt.wman}"
-    gen_dir.mkdir(parents=True, exist_ok=True)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"errpc_{name}_w{fmt.wexp}_{fmt.wman}"
-    (gen_dir / f"{name}.v").write_text(generate_verilog(lir).verilog)
-    test_module = f"test_{name}_errpc"
-    (gen_dir / f"{test_module}.py").write_text(
+    bench = (
         _ERR_BENCH3.replace("@@WEXP@@", str(fmt.wexp))
         .replace("@@WMAN@@", str(fmt.wman))
         .replace("@@ERRPC@@", str(err_pc))
     )
-    runner = get_runner(sim)
-    runner.build(
-        sources=[gen_dir / f"{name}.v", *sources()],
-        includes=[HDL_DIR],
-        hdl_toplevel=name,
-        build_args=build_args(sim),
-        build_dir=str(build_dir),
-        clean=True,
-        timescale=("1ns", "1ps"),
-    )
-    runner.test(
-        hdl_toplevel=name,
-        test_module=test_module,
-        test_dir=str(gen_dir),
-        build_dir=str(build_dir),
-        results_xml=str(build_dir / "results.xml"),
-    )
+    _run_err_bench(sim, name, fmt, lir, bench, suffix="errpc")
 
 
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)

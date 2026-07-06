@@ -38,6 +38,8 @@ from ._backend.verilog import VerilogOutput as VerilogOutput
 from ._operators import (
     FAddOperator as FAddOperator,
     FDivOperator as FDivOperator,
+    FExp2Operator as FExp2Operator,
+    FLog2Operator as FLog2Operator,
     FMulILog2OperatorFamily as FMulILog2OperatorFamily,
     FMulOperator as FMulOperator,
     FCmpOperator as FCmpOperator,

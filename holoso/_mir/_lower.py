@@ -19,8 +19,10 @@ from .._hir import (
     FloatCeil,
     FloatConst,
     FloatDiv,
+    FloatExp2,
     FloatFloor,
     FloatFma,
+    FloatLog2,
     FloatMax,
     FloatMin,
     FloatMul,
@@ -457,6 +459,10 @@ class _FloatLowerer:
                 operator=(FloatRound() | FloatFloor() | FloatCeil() | FloatTrunc()) as semantic, operands=(a,)
             ):
                 return self._lower_round(semantic, a)
+            case Operation(operator=FloatExp2() as semantic, operands=(a,)):
+                return self._lower_unary_pooled(semantic, self.context.ops.fexp2, "fexp2", a)
+            case Operation(operator=FloatLog2() as semantic, operands=(a,)):
+                return self._lower_unary_pooled(semantic, self.context.ops.flog2, "flog2", a)
             case Operation(operator=(FloatMin() | FloatMax()) as semantic, operands=(a, b)):
                 return self._lower_minmax(semantic, a, b)
             case Operation(operator=FloatFma() as semantic, operands=(a, b, c)):
@@ -521,25 +527,34 @@ class _FloatLowerer:
         )
 
     def _lower_round(self, semantic: FloatRound | FloatFloor | FloatCeil | FloatTrunc, a: ValueId) -> ValueId:
-        # The input sign chain folds onto the operand sign conditioner, applied before the round: ``floor(-x)`` is the
-        # rounder fed ``-x`` (correct -- floor of the conditioned input), not a negation of ``floor(x)``.
-        operator = self.context.ops.fround
-        if operator is None:
-            raise UnsupportedConstruct(
-                f"the kernel uses {semantic.mnemonic!r} but no 'fround' operator is configured; add it to OpConfig"
-            )
-        base, sign = _collapse_signs(self.context.hir.nodes, a)
         mode = {
             FloatRound: FRoundOperator.Mode.ROUND,
             FloatFloor: FRoundOperator.Mode.FLOOR,
             FloatCeil: FRoundOperator.Mode.CEIL,
             FloatTrunc: FRoundOperator.Mode.TRUNC,
         }[type(semantic)]
+        return self._lower_unary_pooled(semantic, self.context.ops.fround, "fround", a, immediates=(int(mode),))
+
+    def _lower_unary_pooled(
+        self,
+        semantic: Operator,
+        operator: FloatHardwareOperator | None,
+        config_field: str,
+        a: ValueId,
+        immediates: tuple[int, ...] = (),
+    ) -> ValueId:
+        if operator is None:
+            raise UnsupportedConstruct(
+                f"the kernel uses {semantic.mnemonic!r} but no {config_field!r} operator is configured; "
+                "add it to OpConfig"
+            )
+        # Sign chain folds onto the operand (applied before the op): floor(-x)/exp2(-x) feed -x, not -floor(x)/-exp2(x).
+        base, sign = _collapse_signs(self.context.hir.nodes, a)
         return self.context.builder.operation(
             _select_hardware(semantic, operator),
             [self.context.remap[base]],
             [sign],
-            immediates=(int(mode),),
+            immediates=immediates,
         )
 
     def _lower_minmax(self, semantic: FloatMin | FloatMax, a: ValueId, b: ValueId) -> ValueId:

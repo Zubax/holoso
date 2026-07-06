@@ -11,6 +11,7 @@ from typing import ClassVar
 from ._value import FloatValue
 from ._type import BoolType, FloatFormat, FloatType, ScalarSignature, ScalarType
 from ._util import RelationalOp
+from ._zkf import ZkfFormat
 
 
 def _instance_stem_text(text: str) -> str:
@@ -708,6 +709,123 @@ class FSortOperator(FloatHardwareOperator):
 
 
 @dataclass(frozen=True, slots=True)
+class FExp2Operator(FloatHardwareOperator):
+    mnemonic: ClassVar[str] = "fexp2"
+    stage_input: int = 0
+    stage_reduce: int = 0
+    stage_product: int = 0
+    stage_pack: int = 0
+    stage_output: int = 0
+
+    def __post_init__(self) -> None:
+        if self.stage_input < 0:
+            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
+        if self.stage_product not in range(5):
+            raise ValueError(f"stage_product invalid: {self.stage_product!r}")
+        for field in ("stage_reduce", "stage_pack", "stage_output"):
+            if getattr(self, field) not in (0, 1):
+                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
+
+    @property
+    def latency(self) -> int:
+        degree = ZkfFormat(self.fmt.wexp, self.fmt.wman).exp2_poly_degree
+        return (
+            self.stage_input
+            + self.stage_reduce
+            + 4
+            + degree * (2 + self.stage_product)
+            + self.stage_pack
+            + self.stage_output
+        )
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return self.float_signature(1)
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
+        (a,) = self._validated_operands(operands, 1)
+        return (a.exp2(),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"2^{a}"
+
+    def hdl_params(self) -> dict[str, int]:
+        return {
+            "STAGE_INPUT": self.stage_input,
+            "STAGE_REDUCE": self.stage_reduce,
+            "STAGE_PRODUCT": self.stage_product,
+            "STAGE_PACK": self.stage_pack,
+            "STAGE_OUTPUT": self.stage_output,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FLog2Operator(FloatHardwareOperator):
+    mnemonic: ClassVar[str] = "flog2"
+    error_ports: ClassVar[list[str]] = ["domain_error", "pole"]
+    stage_input: int = 0
+    stage_decode: int = 0
+    stage_product: int = 0
+    stage_product_final: int = 0
+    stage_normalize: int = 0
+    stage_normalize_output: int = 0
+    stage_pack: int = 0
+    stage_output: int = 0
+
+    def __post_init__(self) -> None:
+        if self.stage_input < 0:
+            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
+        for field in ("stage_product", "stage_product_final"):
+            if getattr(self, field) not in range(5):
+                raise ValueError(f"{field} invalid: {getattr(self, field)!r}")
+        if self.stage_normalize not in (0, 1, 2):
+            raise ValueError(f"stage_normalize must be 0, 1, or 2; got {self.stage_normalize!r}")
+        for field in ("stage_decode", "stage_normalize_output", "stage_pack", "stage_output"):
+            if getattr(self, field) not in (0, 1):
+                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
+
+    @property
+    def latency(self) -> int:
+        degree = ZkfFormat(self.fmt.wexp, self.fmt.wman).log2_poly_degree
+        return (
+            self.stage_input
+            + self.stage_decode
+            + 5
+            + self.stage_product_final
+            + self.stage_normalize
+            + self.stage_normalize_output
+            + self.stage_pack
+            + degree * (2 + self.stage_product)
+            + self.stage_output
+        )
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return self.float_signature(1)
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
+        (a,) = self._validated_operands(operands, 1)
+        return (a.log2(),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"log2({a})"
+
+    def hdl_params(self) -> dict[str, int]:
+        return {
+            "STAGE_INPUT": self.stage_input,
+            "STAGE_DECODE": self.stage_decode,
+            "STAGE_PRODUCT": self.stage_product,
+            "STAGE_PRODUCT_FINAL": self.stage_product_final,
+            "STAGE_NORMALIZE": self.stage_normalize,
+            "STAGE_NORMALIZE_OUTPUT": self.stage_normalize_output,
+            "STAGE_PACK": self.stage_pack,
+            "STAGE_OUTPUT": self.stage_output,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class BoolLogicOperator(InlineHardwareOperator, ABC):
     """
     A boolean-logic operator (AND/OR/XOR): a plain ``& | ^`` gate folded into its boolean register's write. Never
@@ -901,11 +1019,13 @@ class OpConfig:
     fround: FRoundOperator | None = None
     ffma: FFmaOperator | None = None
     fsort: FSortOperator | None = None
+    fexp2: FExp2Operator | None = None
+    flog2: FLog2Operator | None = None
 
     @property
     def float_format(self) -> FloatFormat:
         formats = {self.fadd.fmt, self.fmul.fmt, self.fdiv.fmt, self.fmul_ilog2.fmt, self.fcmp.fmt}
-        formats.update(op.fmt for op in (self.fround, self.ffma, self.fsort) if op is not None)
+        formats.update(op.fmt for op in (self.fround, self.ffma, self.fsort, self.fexp2, self.flog2) if op is not None)
         if len(formats) != 1:
             ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
             raise ValueError(f"all floating-point operators must use the same format; got {ordered}")

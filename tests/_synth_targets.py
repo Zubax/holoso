@@ -19,8 +19,10 @@ from holoso import (
     FAddOperator,
     FCmpOperator,
     FDivOperator,
+    FExp2Operator,
     FFmaOperator,
     FloatFormat,
+    FLog2Operator,
     FMulILog2OperatorFamily,
     FMulOperator,
     OpConfig,
@@ -43,11 +45,13 @@ def op_config(
     fmul_ilog2: FMulILog2OperatorFamily | None = None,
     fcmp: FCmpOperator | None = None,
     ffma: FFmaOperator | None = None,
+    fexp2: FExp2Operator | None = None,
+    flog2: FLog2Operator | None = None,
 ) -> OpConfig:
     """
-    The OpConfig for fmt; pass a fully-constructed operator to give it stage knobs, else that operator is lean. ffma is
-    absent unless supplied, so multiply-accumulate chains stay expanded (fmul + fadd) rather than contracting to fused
-    FMAs.
+    The OpConfig for fmt; pass a fully-constructed operator to give it stage knobs, else that operator is lean. ffma,
+    fexp2, and flog2 are absent unless supplied: multiply-accumulate chains stay expanded (fmul + fadd) rather than
+    contracting to fused FMAs, and a kernel that uses no transcendental needs no exp2/log2 module.
     """
     return OpConfig(
         fadd=fadd or FAddOperator(fmt),
@@ -56,6 +60,8 @@ def op_config(
         fmul_ilog2=fmul_ilog2 or FMulILog2OperatorFamily(fmt),
         fcmp=fcmp or FCmpOperator(fmt),
         ffma=ffma,
+        fexp2=fexp2,
+        flog2=flog2,
     )
 
 
@@ -291,6 +297,39 @@ TARGETS: list[SynthTarget] = [
         ),
     ),
     for_example("octave_index", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
+    # octave_index's transcendental sibling. The exp2/log2 Horner products have a multiplicand wider than the DSP
+    # input, so their STAGE_PRODUCT=2 split (registered partial-product reduction) is load-bearing; this one config
+    # closes all three flows.
+    for_example(
+        "equal_temperament",
+        FlowId.YOSYS_ECP5,
+        100,
+        op_config(
+            F_e6m18,
+            fexp2=FExp2Operator(F_e6m18, stage_product=2),
+            flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=1, stage_normalize=1, stage_pack=1),
+        ),
+    ),
+    for_example(
+        "equal_temperament",
+        FlowId.DIAMOND_ECP5,
+        100,
+        op_config(
+            F_e6m18,
+            fexp2=FExp2Operator(F_e6m18, stage_product=2),
+            flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=1, stage_normalize=1, stage_pack=1),
+        ),
+    ),
+    for_example(
+        "equal_temperament",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        op_config(
+            F_e6m18,
+            fexp2=FExp2Operator(F_e6m18, stage_product=2),
+            flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=1, stage_normalize=1, stage_pack=1),
+        ),
+    ),
     for_example("remainder", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example(
         "remainder",
