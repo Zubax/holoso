@@ -2,8 +2,7 @@
 """
 Twelve-tone equal temperament -- the transcendental counterpart to octave_index.py (which does log2 the hard way). It
 maps a MIDI note to its frequency (exp2, reached through ``2 ** x``) and recovers the note back from that frequency
-(log2), so the two operators are exercised as inverses. log2's argument is the exp2 output, positive across the note
-ranges the example drives, so its pole/domain sidebands stay quiet.
+(log2), so the two operators are exercised as inverses. log2's argument is the exp2 output, always positive.
 """
 
 import math
