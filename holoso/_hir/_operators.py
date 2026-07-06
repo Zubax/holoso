@@ -218,6 +218,16 @@ class FloatExp2(Operator):
     def signature(self) -> Signature:
         return _float_signature(1)
 
+    def fold_constants(self, operands: list[Const]) -> Const | None:
+        (a,) = [_float_const(operand) for operand in operands]
+        if not math.isfinite(a.value):
+            return None
+        try:
+            result = math.exp2(a.value)
+        except OverflowError:
+            return None
+        return FloatConst(result) if math.isfinite(result) else None
+
 
 @dataclass(frozen=True, slots=True)
 class FloatLog2(Operator):
@@ -226,6 +236,13 @@ class FloatLog2(Operator):
     @property
     def signature(self) -> Signature:
         return _float_signature(1)
+
+    def fold_constants(self, operands: list[Const]) -> Const | None:
+        (a,) = [_float_const(operand) for operand in operands]
+        if not (math.isfinite(a.value) and a.value > 0.0):
+            return None
+        result = math.log2(a.value)
+        return FloatConst(result) if math.isfinite(result) else None
 
 
 @dataclass(frozen=True, slots=True)

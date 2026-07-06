@@ -536,6 +536,20 @@ def test_exp2_log2_dispatch_numpy_and_bare_name() -> None:
         assert _bits(out[2]) == _v(x).log2().bits, f"bare log2 x={x}"
 
 
+def test_exp2_log2_of_constants_fold() -> None:
+    folded = float(math.exp2(1.25) + math.log2(3.5) + np.exp2(-2.0) + log2(8.0))
+
+    def kernel(x: float) -> float:
+        return x + (math.exp2(1.25) + math.log2(3.5) + np.exp2(-2.0) + log2(8.0))
+
+    sim = holoso.synthesize(
+        kernel, _ops(with_exp2=False, with_log2=False), name="exp2_log2_constants_fold"
+    ).numerical_model.elaborate()
+    for x in [0.0, 3.0, -1.5, 100.25]:
+        ref = _v(x) + _v(folded)
+        assert _bits(sim.run(x)[0]) == ref.bits, f"x={x}"
+
+
 def test_exp2_log2_sign_folds_into_operand() -> None:
     def kernel(x: float) -> tuple[float, float]:
         return (math.exp2(-x), math.log2(abs(x)))
