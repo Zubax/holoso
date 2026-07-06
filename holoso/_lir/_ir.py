@@ -707,9 +707,7 @@ class Lir:
         # single-predecessor successor inherits the residue explicitly via ``entry_busy`` and is sound for any
         # initiation interval.) The gap beyond the drain is the one-step terminator redirect into the successor
         # frame; every block's first pooled issue is block-local cycle 0, so it adds nothing past the redirect.
-        # This bound guards those drained edges; a deeper-throttled operator on a back-edge loop would additionally
-        # need a post-layout re-entry-distance check, deferred until one exists. Checked here, where the fetch lag
-        # is known, over every pooled instance.
+        # This bound guards those drained edges. Checked here, where the fetch lag is known, over every pooled instance.
         drain = boundary_step(0, self.fetch_lag)
         for inst in self.instances:
             bound = inst.operator.latency + drain + 1

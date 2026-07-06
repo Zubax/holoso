@@ -24,9 +24,7 @@ class Atan2Result(NamedTuple):
 
 @dataclass(frozen=True, slots=True, init=False)
 class FloatValue:
-    """
-    A concrete ZKF value. Results match the ``zkf_*`` RTL bit-for-bit.
-    """
+    """A concrete ZKF value. Results match the ``zkf_*`` RTL bit-for-bit."""
 
     fmt: FloatFormat
     bits: int

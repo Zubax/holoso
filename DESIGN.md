@@ -219,11 +219,10 @@ the kernel.
 ## HIR
 
 HIR is a real CFG of basic blocks -- entry first, a single `Ret` exit -- carrying an SSA value DAG. Values are input
-ports (one per parameter), float and boolean constants, state reads (persistent state at block entry), phis (SSA
-merges), and pure semantic operations; terminators are `jump`, `branch`, and `ret` (which commits state live-outs and
-output ports). The pure operations cover float arithmetic (add, mul, div, neg, abs, multiply-by-power-of-two,
-base-two exponential and logarithm), relational comparisons and boolean logic yielding `bool`, float<->bool casts, and
-`select` (a data mux produced by if-conversion, distinct from control flow).
+ports (one per parameter), constants, state reads (persistent state at block entry), phis (SSA merges),
+and pure semantic operations; terminators are `jump`, `branch`, and `ret` (which commits state live-outs and
+output ports). The pure operations cover float arithmetic, relational comparisons and boolean logic yielding `bool`,
+float<->bool casts, and `select` (a data mux produced by if-conversion, distinct from control flow).
 
 `bool` is implemented alongside `float` throughout (constants, input ports, state reads, phis), and a state slot's reset
 is a typed constant, so a boolean state register carries a boolean snapshot. Node names stay explicit (`FloatConst`,
@@ -308,8 +307,6 @@ so a folded constant can differ from the datapath's own value.
 
 ### DEFERRED
 
-Composite intrinsics that have no directly matching low-level operator module.
-
 Variable-trip `for` loops: a `for` above the unroll threshold is rejected, not lowered to a counted back-edge loop (that
 needs a runtime integer counter).
 
@@ -337,6 +334,11 @@ Examples include computing min/max in a single pooled comparison operator transa
 sin/cos being simultaneously computed by the sincos hardware operator, etc.
 Another example is the FMA contraction, where a single-use `a*b+c` is lowered into one fused multiply-add.
 The matching is done at the MIR level because this is the first layer that is aware of the hardware semantics.
+
+Some semantic operators are lowered into a combination of hardware operators depending on the available hardware
+operators and the context. This is only done for operators for which a possibility of specialized hardware
+handling exists (e.g., hypotenuse calculation can be done using the fatan2 operator, but it only makes sense
+if arctan is also computed simultaneously).
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float format explicitly so float-less modules still elaborate with a known scalar width. The CFG is carried
