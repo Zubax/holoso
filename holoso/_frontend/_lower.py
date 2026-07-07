@@ -137,13 +137,9 @@ def _hir_type_name(scalar_type: Type) -> str:
     return "bool" if isinstance(scalar_type, BoolType) else "float"
 
 
-# numpy array constructors that take one array-like and preserve its elements: in this compile-time model the operand is
-# already an aggregate, so they lower to identity. Recognizing them lets a kernel be ordinary executable numpy code.
 _NUMPY_IDENTITY = frozenset({"array", "asarray", "asanyarray"})
 
-# Float->float math/numpy intrinsics implemented as HIR operators: canonical name -> HIR operator factory (arity comes
-# from the operator's signature). Dispatched only when the callee genuinely resolves to the math/numpy function.
-_FLOAT_INTRINSICS: dict[str, Callable[[], Operator]] = {
+_SCALAR_INTRINSICS: dict[str, Callable[[], Operator]] = {
     "floor": FloatFloor,
     "ceil": FloatCeil,
     "trunc": FloatTrunc,
@@ -157,6 +153,10 @@ _FLOAT_INTRINSICS: dict[str, Callable[[], Operator]] = {
     "sqrt": FloatSqrt,
     "atan2": FloatAtan2,  # numpy spells it arctan2; np.atan2 is the same object on numpy>=2.0
     "hypot": FloatHypot2,
+    "isfinite": FloatIsFinite,
+    "isinf": FloatIsInf,
+    "isposinf": FloatIsPosInf,
+    "isneginf": FloatIsNegInf,
 }
 
 
@@ -168,7 +168,7 @@ def _intrinsic_of(obj: object) -> str | None:
     """
     if obj is None:
         return None
-    for name in _FLOAT_INTRINSICS:
+    for name in _SCALAR_INTRINSICS:
         if obj is getattr(math, name, None) or obj is getattr(np, name, None):
             return name
     return None
@@ -1663,11 +1663,11 @@ class _Lowerer:
         raise UnsupportedConstruct(f"unsupported call to {name or '<expr>'!r}", self._loc(node))
 
     def _intrinsic_call(self, node: ast.Call) -> Value | None:
-        """Lower a ``math``/``numpy`` float intrinsic to its HIR operator, or None otherwise."""
+        """Lower a ``math``/``numpy`` scalar intrinsic to its HIR operator, or None otherwise."""
         name = self._intrinsic_name(node.func)
         if name is None:
             return None
-        operator = _FLOAT_INTRINSICS[name]()
+        operator = _SCALAR_INTRINSICS[name]()
         arity = operator.signature.arity  # the operator's own signature is the single source of truth for arity
         if node.keywords:
             raise UnsupportedConstruct(f"{name}() takes no keyword arguments", self._loc(node))

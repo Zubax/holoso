@@ -221,8 +221,9 @@ the kernel.
 HIR is a real CFG of basic blocks -- entry first, a single `Ret` exit -- carrying an SSA value DAG. Values are input
 ports (one per parameter), constants, state reads (persistent state at block entry), phis (SSA merges),
 and pure semantic operations; terminators are `jump`, `branch`, and `ret` (which commits state live-outs and
-output ports). The pure operations cover float arithmetic, relational comparisons and boolean logic yielding `bool`,
-float<->bool casts, and `select` (a data mux produced by if-conversion, distinct from control flow).
+output ports). The pure operations cover float arithmetic, scalar float classification, relational comparisons and
+boolean logic yielding `bool`, float<->bool casts, and `select` (a data mux produced by if-conversion, distinct from
+control flow).
 
 `bool` is implemented alongside `float` throughout (constants, input ports, state reads, phis), and a state slot's reset
 is a typed constant, so a boolean state register carries a boolean snapshot. Node names stay explicit (`FloatConst`,
@@ -333,12 +334,16 @@ Some operator lowerings are context-sensitive, where the final lowering depends 
 Examples include computing min/max in a single pooled comparison operator transaction,
 sin/cos being simultaneously computed by the sincos hardware operator, etc.
 Another example is the FMA contraction, where a single-use `a*b+c` is lowered into one fused multiply-add.
+Boolean infinity predicates adjacent to a zero sign-test, such as `isinf(x) and x > 0`, lower directly to the
+corresponding directional infinity classifier.
 The matching is done at the MIR level because this is the first layer that is aware of the hardware semantics.
 
 Some semantic operators are lowered into a combination of hardware operators depending on the available hardware
 operators and the context. This is only done for operators for which a possibility of specialized hardware
 handling exists (e.g., hypotenuse calculation can be done using the fatan2 operator, but it only makes sense
-if arctan is also computed simultaneously).
+if arctan is also computed simultaneously). Such composite lowerings may use inline muxes to sanitize operands fed into
+their internal primitives so that semantically valid edge cases do not raise avoidable primitive-side errors, while
+invalid source inputs still reach the error-bearing primitive.
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float format explicitly so float-less modules still elaborate with a known scalar width. The CFG is carried

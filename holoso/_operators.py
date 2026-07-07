@@ -1002,6 +1002,69 @@ class BoolXorOperator(BoolLogicOperator):
 
 
 @dataclass(frozen=True, slots=True)
+class FloatClassificationOperator(InlineHardwareOperator, ABC):
+    fmt: FloatFormat
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((FloatType(self.fmt),), (BoolType(),))
+
+
+@dataclass(frozen=True, slots=True)
+class FloatIsFiniteOperator(FloatClassificationOperator):
+    mnemonic: ClassVar[str] = "fisfinite"
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"isfinite({a})"
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        (a,) = operand_nets
+        return f"holoso_fisfinite({a})"
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
+        (a,) = operands
+        assert isinstance(a, FloatValue)
+        return (a.fmt.is_finite(a.bits),)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatIsPosInfOperator(FloatClassificationOperator):
+    mnemonic: ClassVar[str] = "fisposinf"
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"isposinf({a})"
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        (a,) = operand_nets
+        return f"holoso_fisposinf({a})"
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
+        (a,) = operands
+        assert isinstance(a, FloatValue)
+        return (not a.fmt.is_finite(a.bits) and not a.negative,)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatIsNegInfOperator(FloatClassificationOperator):
+    mnemonic: ClassVar[str] = "fisneginf"
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"isneginf({a})"
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        (a,) = operand_nets
+        return f"holoso_fisneginf({a})"
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
+        (a,) = operands
+        assert isinstance(a, FloatValue)
+        return (not a.fmt.is_finite(a.bits) and a.negative,)
+
+
+@dataclass(frozen=True, slots=True)
 class FloatToBoolOperator(InlineHardwareOperator):
     """
     A float->bool cast ``bool(x)``: true iff the operand is nonzero, i.e. its ZKF exponent field is nonzero (sign- and
@@ -1034,9 +1097,10 @@ class FloatToBoolOperator(InlineHardwareOperator):
 class SelectOperator(InlineHardwareOperator):
     """
     A data mux ``cond ? a : b`` over wide values, folded into the destination register write as a ternary over the
-    operand nets. Produced exclusively by HIR if-conversion; never added to :class:`OpConfig`. Each operand is a
-    dedicated direct (unlatched) register read -- an area/timing characteristic of inline operators; the cost is one
-    mux per merged value, the same order as the per-arm phi-copy installs the branch would otherwise need.
+    operand nets. Produced by HIR if-conversion and by selected MIR composite lowerings; never added to
+    :class:`OpConfig`. Each operand is a dedicated direct (unlatched) register read -- an area/timing characteristic of
+    inline operators; the cost is one mux per merged value, the same order as the per-arm phi-copy installs the branch
+    would otherwise need.
     """
 
     mnemonic: ClassVar[str] = "select"

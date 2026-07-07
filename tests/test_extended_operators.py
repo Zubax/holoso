@@ -38,6 +38,8 @@ from math import floor as aliased_floor
 from math import fma as aliased_fma
 
 FMT = FloatFormat(8, 24)  # binary32: a float64 decode of any in-format value is exact, so math/round is an exact oracle
+_POS_INF = float("inf")
+_NEG_INF = float("-inf")
 
 
 def _ops(
@@ -90,6 +92,56 @@ def _round_ref(value: float, mode: int) -> int:
     else:
         n = math.trunc(v)
     return FloatValue.from_float(FMT, float(n)).bits
+
+
+def test_float_classification_intrinsics() -> None:
+    def kernel(x: float) -> tuple[bool, bool, bool, bool, bool, bool]:
+        return (
+            math.isfinite(x),
+            math.isinf(x),
+            bool(np.isfinite(x)),
+            bool(np.isinf(x)),
+            bool(np.isposinf(x)),
+            bool(np.isneginf(x)),
+        )
+
+    sim = _sim(kernel, "float_classification")
+    for x in (0.0, 1.5, -2.0, float("inf"), float("-inf")):
+        got = sim.run(x)
+        want = [
+            math.isfinite(x),
+            math.isinf(x),
+            bool(np.isfinite(x)),
+            bool(np.isinf(x)),
+            bool(np.isposinf(x)),
+            bool(np.isneginf(x)),
+        ]
+        assert got == want, f"x={x}: {got} vs {want}"
+
+
+def test_float_classification_constants_use_target_format() -> None:
+    def kernel(x: float) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:
+        return (
+            math.isfinite(1e100),
+            math.isinf(1e100),
+            bool(np.isposinf(1e100)),
+            bool(np.isneginf(-1e100)),
+            math.isfinite(_POS_INF),
+            math.isinf(_NEG_INF),
+            bool(np.isposinf(_POS_INF)),
+            bool(np.isneginf(_NEG_INF)),
+        )
+
+    assert _sim(kernel, "float_classification_const").run(0.0) == [
+        False,
+        True,
+        True,
+        True,
+        False,
+        True,
+        True,
+        True,
+    ]
 
 
 # A battery spanning ties (x.5 at both parities), the sub-one band (|x| < 1), already-integral values, and infinities.
@@ -737,11 +789,13 @@ def test_hypot_sign_flipped_still_fuses_with_atan2() -> None:
 
 def test_hypot_lone_decomposition_is_approximate() -> None:
     # A lone hypot (no adjacent atan2) falls back to the primitive decomposition (needs fsort/fexp2/flog2); approximate
-    # on finite nonzero inputs, with the origin and infinities the documented stopgap gaps.
+    # on ordinary finite nonzero inputs.
     def kernel(y: float, x: float) -> float:
         return math.hypot(y, x)
 
     sim = _sim(kernel, "hypot_lone")
+    assert _bits(sim.run(0.0, 0.0)[0]) == _v(0.0).bits
+    assert _bits(sim.run(float("inf"), 2.0)[0]) == _v(float("inf")).bits
     rng = np.random.default_rng(0x4F0)
     for _ in range(200):
         y, x = (float(np.float32(rng.standard_normal() * 8)) for _ in range(2))
@@ -762,7 +816,8 @@ def test_hypot_lone_missing_primitive_is_rejected() -> None:
 
 
 def _sqrt_ref(x: float) -> int:
-    # Bit-exact reference for the exp2(log2(x)/2) stopgap: mirrors MIR's flog2, fmul_ilog2(-1), fexp2 chain.
+    if x == 0.0:
+        return _v(0.0).bits
     return _v(x).log2().scale_pow2(-1).exp2().bits
 
 
@@ -771,6 +826,7 @@ def test_sqrt_matches_decomposition_and_native() -> None:
         return math.sqrt(x)
 
     sim = _sim(kernel, "sqrt_basic")
+    assert _bits(sim.run(0.0)[0]) == _v(0.0).bits
     for x in [0.25, 0.5, 1.0, 2.0, 4.0, 9.0, 100.0, 1e-3, 1e6, math.pi]:
         out = sim.run(x)[0]
         assert _bits(out) == _sqrt_ref(x), f"sqrt bit-exact x={x}"

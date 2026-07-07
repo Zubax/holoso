@@ -324,6 +324,46 @@ class FloatHypot2(Operator):
 
 
 @dataclass(frozen=True, slots=True)
+class FloatIsFinite(Operator):
+    mnemonic: ClassVar[str] = "isfinite"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((FloatType(),), BoolType())
+
+
+@dataclass(frozen=True, slots=True)
+class FloatIsInf(Operator):
+    mnemonic: ClassVar[str] = "isinf"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((FloatType(),), BoolType())
+
+
+@dataclass(frozen=True, slots=True)
+class FloatIsPosInf(Operator):
+    mnemonic: ClassVar[str] = "isposinf"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((FloatType(),), BoolType())
+
+
+@dataclass(frozen=True, slots=True)
+class FloatIsNegInf(Operator):
+    mnemonic: ClassVar[str] = "isneginf"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((FloatType(),), BoolType())
+
+
+@dataclass(frozen=True, slots=True)
 class FloatFma(Operator):
     """
     Fused multiply-add ``a*b + c`` from an explicit ``math.fma`` call: always single-rounds.
@@ -464,9 +504,8 @@ class BoolNot(Operator):
 @dataclass(frozen=True, slots=True)
 class Select(Operator):
     """
-    A data mux ``a if cond else b`` over float values, produced exclusively by the if-conversion pass, which refuses
-    constant conditions -- so a constant-condition select never exists and ``fold_constants`` never fires (the folder
-    re-runs after if-conversion, so it does see selects, but never one whose condition is constant).
+    A data mux ``a if cond else b`` over float values. In HIR it is produced by the if-conversion pass, which refuses
+    constant conditions; MIR composite lowerings may also use the selected inline hardware mux directly.
     """
 
     mnemonic: ClassVar[str] = "select"
