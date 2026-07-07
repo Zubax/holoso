@@ -24,7 +24,7 @@ and degrades every answer. Cover at least these angles, one agent each:
 - Opportunities for SIMPLIFICATION.
 - Functional CORRECTNESS and ROBUSTNESS.
 - ARCHITECTURAL CLEANLINESS, DESIGN PRACTICES, CODE QUALITY.
-- POLICY and STYLE compliance with the project's own docs.
+- POLICY and STYLE compliance with the project's own docs, including the comment cleanup.
 
 ### Dissimilar agents
 

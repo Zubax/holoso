@@ -137,19 +137,26 @@ def _hir_type_name(scalar_type: Type) -> str:
     return "bool" if isinstance(scalar_type, BoolType) else "float"
 
 
-# numpy array constructors that take one array-like and preserve its elements: in this compile-time model the operand is
-# already an aggregate, so they lower to identity. Recognizing them lets a kernel be ordinary executable numpy code.
 _NUMPY_IDENTITY = frozenset({"array", "asarray", "asanyarray"})
 
-# Float->float math/numpy intrinsics implemented as HIR operators: canonical name -> HIR operator factory (arity comes
-# from the operator's signature). Dispatched only when the callee genuinely resolves to the math/numpy function.
-_FLOAT_INTRINSICS: dict[str, Callable[[], Operator]] = {
+_SCALAR_INTRINSICS: dict[str, Callable[[], Operator]] = {
     "floor": FloatFloor,
     "ceil": FloatCeil,
     "trunc": FloatTrunc,
     "fma": FloatFma,
     "minimum": FloatMin,  # numpy.minimum/maximum are the binary elementwise forms; np.min/np.max are reductions
     "maximum": FloatMax,
+    "exp2": FloatExp2,
+    "log2": FloatLog2,
+    "sin": FloatSin,
+    "cos": FloatCos,
+    "sqrt": FloatSqrt,
+    "atan2": FloatAtan2,  # numpy spells it arctan2; np.atan2 is the same object on numpy>=2.0
+    "hypot": FloatHypot2,
+    "isfinite": FloatIsFinite,
+    "isinf": FloatIsInf,
+    "isposinf": FloatIsPosInf,
+    "isneginf": FloatIsNegInf,
 }
 
 
@@ -161,7 +168,7 @@ def _intrinsic_of(obj: object) -> str | None:
     """
     if obj is None:
         return None
-    for name in _FLOAT_INTRINSICS:
+    for name in _SCALAR_INTRINSICS:
         if obj is getattr(math, name, None) or obj is getattr(np, name, None):
             return name
     return None
@@ -170,21 +177,14 @@ def _intrinsic_of(obj: object) -> str | None:
 # Standard numeric operators that are recognized but not yet implemented; calling them fails with a clear message.
 _KNOWN_INTRINSICS = frozenset(
     {
-        "sqrt",
         "cbrt",
-        "sin",
-        "cos",
         "tan",
         "asin",
         "acos",
         "atan",
-        "atan2",
-        "sincos",
         "exp",
         "log",
-        "log2",
         "log10",
-        "hypot",
         "pow",
     }
 )
@@ -1663,11 +1663,11 @@ class _Lowerer:
         raise UnsupportedConstruct(f"unsupported call to {name or '<expr>'!r}", self._loc(node))
 
     def _intrinsic_call(self, node: ast.Call) -> Value | None:
-        """Lower a ``math``/``numpy`` float intrinsic to its HIR operator, or None otherwise."""
+        """Lower a ``math``/``numpy`` scalar intrinsic to its HIR operator, or None otherwise."""
         name = self._intrinsic_name(node.func)
         if name is None:
             return None
-        operator = _FLOAT_INTRINSICS[name]()
+        operator = _SCALAR_INTRINSICS[name]()
         arity = operator.signature.arity  # the operator's own signature is the single source of truth for arity
         if node.keywords:
             raise UnsupportedConstruct(f"{name}() takes no keyword arguments", self._loc(node))
@@ -1837,7 +1837,11 @@ class _Lowerer:
     def _lower_pow(self, base: ast.expr, exponent: ast.expr) -> ValueId:
         n = self._static_int(exponent)
         if n is None:
-            raise UnsupportedConstruct("exponent must be a compile-time integer", self._loc(exponent))
+            if self._static_float(base) == 2.0:
+                return self._builder.operation(FloatExp2(), [self._float_operand(self._lower_expr(exponent), exponent)])
+            raise UnsupportedConstruct(
+                "exponent must be a compile-time integer unless the base is 2 (2 ** x is exp2)", self._loc(exponent)
+            )
         if n < 0:
             # A negative power is only meaningful for a constant base (e.g. the per-iteration shift 2**-i); it folds to
             # a constant, then strength reduction turns a multiply by it into an exact power-of-two scale.
@@ -1858,8 +1862,7 @@ class _Lowerer:
         Evaluate an expression to a compile-time float, or None if it is not one: a literal, a static integer (an
         unrolled loop counter), a read-only float attribute (a float instance attribute never assigned in the body, so
         it keeps its snapshot value), or ``+``/``-``/``*`` arithmetic of these. The fold is fast-math (float64),
-        matching the constant folder and accepted per DESIGN.md; it drives compile-time branch decisions and the
-        negative-power base.
+        matching the constant folder and accepted per DESIGN.md.
         """
         cast = self._cast_call(node)
         if cast is not None and cast[0] == "float":

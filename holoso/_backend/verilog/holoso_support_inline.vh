@@ -19,6 +19,16 @@ function holoso_fisfinite;
     holoso_fisfinite = ~&x[W-2:WMAN-1];
 endfunction
 
+function holoso_fisposinf;
+    input [W-1:0] x;
+    holoso_fisposinf = ~holoso_fisfinite(x) & ~x[W-1];
+endfunction
+
+function holoso_fisneginf;
+    input [W-1:0] x;
+    holoso_fisneginf = ~holoso_fisfinite(x) & x[W-1];
+endfunction
+
 // Combinational saturator: replaces infinity with the largest finite value of the same sign; finite pass through.
 function [W-1:0] holoso_fsaturate;
     input [W-1:0] x;

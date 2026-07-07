@@ -8,7 +8,18 @@ from typing import Any
 
 import numpy as np
 
-from holoso import FAddOperator, FCmpOperator, FDivOperator, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso import (
+    FAddOperator,
+    FAtan2Operator,
+    FCmpOperator,
+    FDivOperator,
+    FExp2Operator,
+    FLog2Operator,
+    FMulILog2OperatorFamily,
+    FMulOperator,
+    FSincosOperator,
+    OpConfig,
+)
 from holoso._backend.numerical import NumericalSimulator, generate as generate
 from holoso._frontend import lower as lower_frontend
 from holoso._hir import Hir, Operation, Operator, optimize
@@ -177,18 +188,24 @@ def format_edge_bits(fmt: FloatFormat) -> list[int]:
 
 
 def default_ops(fmt: FloatFormat) -> OpConfig:
-    return fcmp_staged_ops(fmt, 0)
-
-
-def fcmp_staged_ops(fmt: FloatFormat, stage_input: int) -> OpConfig:
-    """Default operators with only the comparator's stage knob varied (latency ``1 + stage_input``)."""
+    # exp2/log2 and the CORDIC pair are configured (lean) for the transcendental/trig examples; unused operators
+    # produce no hardware.
     return OpConfig(
         FAddOperator(fmt),
         FMulOperator(fmt),
         FDivOperator(fmt),
         FMulILog2OperatorFamily(fmt),
-        FCmpOperator(fmt, stage_input=stage_input),
+        FCmpOperator(fmt),
+        fexp2=FExp2Operator(fmt),
+        flog2=FLog2Operator(fmt),
+        fsincos=FSincosOperator(fmt),
+        fatan2=FAtan2Operator(fmt),
     )
+
+
+def fcmp_staged_ops(fmt: FloatFormat, stage_input: int) -> OpConfig:
+    """The default config with only the comparator's stage knob varied (latency ``1 + stage_input``)."""
+    return dataclasses.replace(default_ops(fmt), fcmp=FCmpOperator(fmt, stage_input=stage_input))
 
 
 def fcmp_s1_ops(fmt: FloatFormat) -> OpConfig:
@@ -316,6 +333,21 @@ def staged_ops(fmt: FloatFormat) -> OpConfig:
         FDivOperator(fmt, stage_input=1, stage_pack=1, stage_output=1),
         FMulILog2OperatorFamily(fmt, stage_input=1, stage_decode=1),
         FCmpOperator(fmt, stage_input=1),
+        fexp2=FExp2Operator(fmt, stage_input=1, stage_reduce=1, stage_product=1, stage_pack=1, stage_output=1),
+        flog2=FLog2Operator(
+            fmt,
+            stage_input=1,
+            stage_decode=1,
+            stage_product=1,
+            stage_product_final=1,
+            stage_normalize=1,
+            stage_normalize_output=1,
+            stage_pack=1,
+            stage_output=1,
+        ),
+        # A bench-verified CORDIC stage combo (tests/hdl/test_f{sincos,atan2}.py), so the latency formula is known-good.
+        fsincos=FSincosOperator(fmt, stage_product=1, stage_normalize=1, stage_pack=1),
+        fatan2=FAtan2Operator(fmt, stage_product=1, stage_normalize=1, stage_pack=1),
     )
 
 

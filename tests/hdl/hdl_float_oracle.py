@@ -240,6 +240,43 @@ def fma_oracle_bits(a_bits: int, b_bits: int, c_bits: int) -> int:
     return holoso.FloatValue.fma(a, b, c).bits
 
 
+def exp2_oracle_bits(a_bits: int) -> int:
+    """
+    Reference ``2**a`` via the exact ``FloatValue.exp2``; numpy is not usable as it is correctly rounded while zkf_exp2
+    is faithfully rounded (within 1 ULP).
+    """
+    return holoso.FloatValue.from_bits(_ZKF_F32, a_bits).exp2().bits
+
+
+def log2_oracle(a_bits: int) -> tuple[int, int, int]:
+    """
+    Reference ``(y_bits, domain_error, pole)``. The value is the exact ``FloatValue.log2`` (numpy is not usable: it
+    rounds the true value, which the zkf table+polynomial core need not match to the last bit). The flags are an
+    independent classification: ``pole`` when the operand is zero, ``domain_error`` when it is negative and nonzero.
+    """
+    y = holoso.FloatValue.from_bits(_ZKF_F32, a_bits).log2().bits
+    pole = 1 if is_zero_f32(a_bits) else 0
+    domain_error = 1 if ((a_bits & F32_SIGN_MASK) and not is_zero_f32(a_bits)) else 0
+    return y, domain_error, pole
+
+
+def sincos_oracle(a_bits: int) -> tuple[int, int]:
+    """
+    Reference turn-native ``(sin(2*pi*a), cos(2*pi*a))`` via the exact ``FloatValue.sincos``; numpy is unusable because
+    the CORDIC is faithfully rounded, not correctly rounded.
+    """
+    s, c = holoso.FloatValue.from_bits(_ZKF_F32, a_bits).sincos()
+    return s.bits, c.bits
+
+
+def atan2_oracle(y_bits: int, x_bits: int) -> tuple[int, int]:
+    """Reference turn-native ``(theta, magnitude)`` of ``atan2(y, x)`` via the exact ``FloatValue.atan2``."""
+    th, mag = holoso.FloatValue.atan2(
+        holoso.FloatValue.from_bits(_ZKF_F32, y_bits), holoso.FloatValue.from_bits(_ZKF_F32, x_bits)
+    )
+    return th.bits, mag.bits
+
+
 def sort_oracle_bits(a_bits: int, b_bits: int) -> tuple[int, int]:
     """Return (min_bits, max_bits) for the float32 min/max of two ZKF-legal inputs."""
     a = bits_to_f32(a_bits)
@@ -318,6 +355,10 @@ def get_seed(default: int = 0x9E3779B97F4A7C15) -> int:
 
 def get_random_count(default: int = 256) -> int:
     return int(os.environ.get("HOLOSO_TEST_RANDOM_COUNT", str(default)))
+
+
+def stage_tag(stages: dict[str, int]) -> str:
+    return "_".join(f"{k}{v}" for k, v in stages.items()) or "base"
 
 
 async def start_clock(dut: Any, period_ns: int = 10) -> None:

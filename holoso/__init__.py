@@ -37,15 +37,19 @@ from ._backend.verilog import VerilogOutput as VerilogOutput
 
 from ._operators import (
     FAddOperator as FAddOperator,
+    FAtan2Operator as FAtan2Operator,
     FDivOperator as FDivOperator,
+    FExp2Operator as FExp2Operator,
+    FLog2Operator as FLog2Operator,
     FMulILog2OperatorFamily as FMulILog2OperatorFamily,
     FMulOperator as FMulOperator,
     FCmpOperator as FCmpOperator,
     FFmaOperator as FFmaOperator,
     FRoundOperator as FRoundOperator,
+    FSincosOperator as FSincosOperator,
     FSortOperator as FSortOperator,
     OpConfig as OpConfig,
 )
 
-__version__ = "0.1.9"
+__version__ = "0.1.10"
 __url__ = "https://holoso.digital"

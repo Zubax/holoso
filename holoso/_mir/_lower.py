@@ -1,5 +1,6 @@
 """Lower optimized HIR to selected MIR."""
 
+import math
 from dataclasses import dataclass
 
 from .._errors import UnsupportedConstruct
@@ -16,11 +17,20 @@ from .._hir import (
     Const,
     FloatAbs,
     FloatAdd,
+    FloatAtan2,
     FloatCeil,
     FloatConst,
+    FloatCos,
     FloatDiv,
+    FloatExp2,
     FloatFloor,
     FloatFma,
+    FloatHypot2,
+    FloatIsFinite,
+    FloatIsInf,
+    FloatIsNegInf,
+    FloatIsPosInf,
+    FloatLog2,
     FloatMax,
     FloatMin,
     FloatMul,
@@ -28,6 +38,8 @@ from .._hir import (
     FloatNeg,
     FloatRelational,
     FloatRound,
+    FloatSin,
+    FloatSqrt,
     FloatToBool,
     FloatTrunc,
     FloatType as HirFloatType,
@@ -45,7 +57,7 @@ from .._hir import (
     Terminator,
     reverse_postorder,
 )
-from .._util import ValueId
+from .._util import RelationalOp, ValueId
 from .._operators import (
     BoolAndOperator,
     BoolInversion,
@@ -53,7 +65,11 @@ from .._operators import (
     BoolSelectOperator,
     BoolToFloatOperator,
     BoolXorOperator,
+    FloatClassificationOperator,
     FloatHardwareOperator,
+    FloatIsFiniteOperator,
+    FloatIsNegInfOperator,
+    FloatIsPosInfOperator,
     FloatSignControl,
     FloatToBoolOperator,
     FRoundOperator,
@@ -64,6 +80,7 @@ from .._operators import (
     SelectOperator,
 )
 from .._type import BoolType as ScalarBoolType, FloatType as ScalarFloatType, ScalarType
+from .._value import FloatValue
 from ._ir import Mir, MirBuilder
 
 
@@ -147,6 +164,16 @@ class _FmaPlan:
     product_sign: FloatSignControl
 
 
+@dataclass(frozen=True, slots=True)
+class _DirectionalInfPlan:
+    """A planned contraction of ``isinf(x) and x`` sign tests into one directional infinity predicate."""
+
+    operand: ValueId
+    sign: FloatSignControl
+    semantic: FloatIsPosInf | FloatIsNegInf
+    members: frozenset[ValueId]
+
+
 def _compute_use_counts(hir: Hir) -> dict[ValueId, int]:
     """Total reference count per value across every use site: operation operands, phi arms, and external references."""
     counts: dict[ValueId, int] = {vid: 0 for vid in hir.nodes}
@@ -160,6 +187,83 @@ def _compute_use_counts(hir: Hir) -> dict[ValueId, int]:
     for vid in hir.external_value_references():
         counts[vid] += 1
     return counts
+
+
+def _is_zero_float(hir: Hir, vid: ValueId) -> bool:
+    base, _ = _collapse_signs(hir.nodes, vid)
+    node = hir.nodes[base]
+    return isinstance(node, FloatConst) and node.value == 0.0
+
+
+def _match_isinf_operand(hir: Hir, vid: ValueId) -> ValueId | None:
+    match hir.nodes[vid]:
+        case Operation(operator=FloatIsInf(), operands=(operand,)):
+            base, _ = _collapse_signs(hir.nodes, operand)
+            return base
+        case _:
+            return None
+
+
+def _match_zero_sign_relation(
+    hir: Hir, vid: ValueId
+) -> tuple[ValueId, FloatSignControl, FloatIsPosInf | FloatIsNegInf] | None:
+    """Recognize zero-sided sign tests that distinguish positive from negative infinity."""
+    match hir.nodes[vid]:
+        case Operation(operator=FloatRelational(op=relation), operands=(left, right)):
+            pass
+        case _:
+            return None
+    left_zero = _is_zero_float(hir, left)
+    right_zero = _is_zero_float(hir, right)
+    if left_zero == right_zero:
+        return None
+    if right_zero:
+        operand, sign = _collapse_signs(hir.nodes, left)
+        positive = relation in {RelationalOp.GT, RelationalOp.GE}
+        negative = relation in {RelationalOp.LT, RelationalOp.LE}
+    else:
+        operand, sign = _collapse_signs(hir.nodes, right)
+        positive = relation in {RelationalOp.LT, RelationalOp.LE}
+        negative = relation in {RelationalOp.GT, RelationalOp.GE}
+    if sign.absolute or not (positive or negative):
+        return None
+    return operand, sign, FloatIsPosInf() if positive else FloatIsNegInf()
+
+
+def _directional_inf_plan(hir: Hir, isinf_id: ValueId, relation_id: ValueId) -> _DirectionalInfPlan | None:
+    isinf_operand = _match_isinf_operand(hir, isinf_id)
+    relation = _match_zero_sign_relation(hir, relation_id)
+    if isinf_operand is None or relation is None:
+        return None
+    operand, sign, semantic = relation
+    if operand != isinf_operand:
+        return None
+    return _DirectionalInfPlan(operand, sign, semantic, frozenset((isinf_id, relation_id)))
+
+
+def _plan_directional_inf_fusions(hir: Hir) -> dict[ValueId, _DirectionalInfPlan]:
+    use_counts = _compute_use_counts(hir)
+    candidates: dict[ValueId, _DirectionalInfPlan] = {}
+    consumers_by_member: dict[ValueId, set[ValueId]] = {}
+    for vid, node in hir.nodes.items():
+        if not (isinstance(node, Operation) and isinstance(node.operator, BoolAnd)):
+            continue
+        a, b = node.operands
+        plan = _directional_inf_plan(hir, a, b)
+        if plan is None:
+            plan = _directional_inf_plan(hir, b, a)
+        if plan is not None:
+            candidates[vid] = plan
+            for member in plan.members:
+                consumers_by_member.setdefault(member, set()).add(vid)
+    plans: dict[ValueId, _DirectionalInfPlan] = {}
+    for vid, plan in candidates.items():
+        fused_members = frozenset(
+            member for member in plan.members if use_counts[member] == len(consumers_by_member[member])
+        )
+        if fused_members:
+            plans[vid] = _DirectionalInfPlan(plan.operand, plan.sign, plan.semantic, fused_members)
+    return plans
 
 
 def _exclusive_mul(hir: Hir, use_counts: dict[ValueId, int], vid: ValueId) -> tuple[ValueId, FloatSignControl] | None:
@@ -210,6 +314,36 @@ def _plan_fma_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, _FmaPlan]:
     return plans
 
 
+def _operand_base_set(hir: Hir, node: Operation) -> tuple[ValueId, ...]:
+    """
+    Order-independent: hypot is commutative and sign-invariant, as is the fatan2 magnitude it taps, so a hypot fuses
+    with any same-block atan2 over the same value pair.
+    """
+    return tuple(sorted(_collapse_signs(hir.nodes, operand)[0] for operand in node.operands))
+
+
+def _plan_hypot_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
+    """
+    Map each FloatHypot2 to a same-block FloatAtan2 over the same value pair so MIR can tap the atan2's magnitude port
+    (the two fuse into one CORDIC) rather than decompose into primitives. Block-local, like the LIR firing fusion it
+    feeds.
+    """
+    if ops.fatan2 is None:
+        return {}
+    plans: dict[ValueId, ValueId] = {}
+    for block in hir.blocks:
+        atan2_by_pair: dict[tuple[ValueId, ...], ValueId] = {}
+        for vid in block.operations:
+            if isinstance(node := hir.nodes[vid], Operation) and isinstance(node.operator, FloatAtan2):
+                atan2_by_pair.setdefault(_operand_base_set(hir, node), vid)
+        for vid in block.operations:
+            if isinstance(node := hir.nodes[vid], Operation) and isinstance(node.operator, FloatHypot2):
+                match = atan2_by_pair.get(_operand_base_set(hir, node))
+                if match is not None:
+                    plans[vid] = match
+    return plans
+
+
 class _LoweringContext:
     def __init__(self, hir: Hir, ops: OpConfig) -> None:
         self.hir = hir
@@ -218,6 +352,11 @@ class _LoweringContext:
         self.remap: dict[ValueId, ValueId] = {}
         self.fma_plans = _plan_fma_fusions(hir, ops)
         self.fused_muls = {plan.mul for plan in self.fma_plans.values()}
+        self.directional_inf_plans = _plan_directional_inf_fusions(hir)
+        self.fused_directional_inf_members = {
+            member for plan in self.directional_inf_plans.values() for member in plan.members
+        }
+        self.fused_hypots = _plan_hypot_fusions(hir, ops)
         self.float_lowerer = _FloatLowerer(self)
 
     def run(self) -> Mir:
@@ -311,6 +450,12 @@ class _LoweringContext:
                 raise UnsupportedConstruct(f"no hardware lowering rule for HIR operator {operator.mnemonic!r}")
 
     def _lower_bool_node(self, old_id: ValueId, node: Node) -> bool:
+        if old_id in self.fused_directional_inf_members:
+            return True
+        plan = self.directional_inf_plans.get(old_id)
+        if plan is not None:
+            self.remap[old_id] = self.float_lowerer.lower_directional_inf(plan)
+            return True
         match node:
             case InPort(name=name, type=HirBoolType()):
                 self.remap[old_id] = self.builder.bool_input(name, ScalarBoolType())
@@ -335,6 +480,12 @@ class _LoweringContext:
                     output_port=port,
                     output_conditioner=inversion,
                 )
+                return True
+            case Operation(
+                operator=(FloatIsFinite() | FloatIsInf() | FloatIsPosInf() | FloatIsNegInf()) as semantic,
+                operands=(a,),
+            ):
+                self._lower_float_classification(old_id, semantic, a)
                 return True
             case Operation(operator=BoolAnd() as semantic, operands=(a, b)):
                 self._lower_bool_logic(old_id, _select_hardware(semantic, BoolAndOperator()), [a, b])
@@ -371,6 +522,20 @@ class _LoweringContext:
         bases = [_collapse_bool_inversions(self.hir.nodes, operand) for operand in operands]
         self.remap[old_id] = self.builder.operation(
             operator, [self.remap[base] for base, _ in bases], [inversion for _, inversion in bases]
+        )
+
+    def _lower_float_classification(
+        self, old_id: ValueId, semantic: FloatIsFinite | FloatIsInf | FloatIsPosInf | FloatIsNegInf, a: ValueId
+    ) -> None:
+        operator, output = self.float_lowerer.classification_lowering(semantic)
+        base, sign = _collapse_signs(self.hir.nodes, a)
+        folded = self.float_lowerer.constant_classification(operator, output, base, sign)
+        self.remap[old_id] = (
+            folded
+            if folded is not None
+            else self.builder.operation(
+                _select_hardware(semantic, operator), [self.remap[base]], [sign], output_conditioner=output
+            )
         )
 
     def _lower_output(self, name: str, value: ValueId) -> None:
@@ -432,6 +597,10 @@ class _FloatLowerer:
                         operation.operator, plan.ma, plan.mb, plan.c, plan.product_sign
                     )
                     return True
+                atan2_id = self.context.fused_hypots.get(old_id)
+                if atan2_id is not None:
+                    self.context.remap[old_id] = self._lower_fused_hypot(atan2_id)
+                    return True
                 lowered = self._lower_operation(operation)
                 if lowered is None:
                     return False
@@ -442,6 +611,31 @@ class _FloatLowerer:
 
     def _lower_float_const(self, value: float) -> ValueId:
         return self.context.builder.float_const(value, self.float_type)
+
+    def lower_directional_inf(self, plan: _DirectionalInfPlan) -> ValueId:
+        operator: FloatClassificationOperator = (
+            FloatIsPosInfOperator(self.context.ops.float_format)
+            if isinstance(plan.semantic, FloatIsPosInf)
+            else FloatIsNegInfOperator(self.context.ops.float_format)
+        )
+        folded = self.constant_classification(operator, BoolInversion(), plan.operand, plan.sign)
+        if folded is not None:
+            return folded
+        return self.context.builder.operation(
+            _select_hardware(plan.semantic, operator), [self.context.remap[plan.operand]], [plan.sign]
+        )
+
+    def constant_classification(
+        self, operator: FloatClassificationOperator, output: BoolInversion, operand: ValueId, sign: FloatSignControl
+    ) -> ValueId | None:
+        """Fold a HIR float constant through the selected-format inline classifier."""
+        node = self.context.hir.nodes[operand]
+        if not isinstance(node, FloatConst):
+            return None
+        value = sign.apply_value(FloatValue.from_float(self.context.ops.float_format, node.value))
+        (result,) = operator.evaluate(value)
+        assert isinstance(result, bool)
+        return self.context.builder.bool_const(output.apply(result), ScalarBoolType())
 
     def _lower_operation(self, node: Operation) -> ValueId | None:
         match node:
@@ -457,6 +651,19 @@ class _FloatLowerer:
                 operator=(FloatRound() | FloatFloor() | FloatCeil() | FloatTrunc()) as semantic, operands=(a,)
             ):
                 return self._lower_round(semantic, a)
+            case Operation(operator=FloatExp2() as semantic, operands=(a,)):
+                return self._lower_unary_pooled(semantic, self.context.ops.fexp2, "fexp2", a)
+            case Operation(operator=FloatLog2() as semantic, operands=(a,)):
+                return self._lower_unary_pooled(semantic, self.context.ops.flog2, "flog2", a)
+            case Operation(operator=(FloatSin() | FloatCos()) as semantic, operands=(a,)):
+                return self._lower_sincos(semantic, a)
+            case Operation(operator=FloatSqrt() as semantic, operands=(a,)):
+                base, sign = _collapse_signs(self.context.hir.nodes, a)
+                return self._sqrt_via_exp2_log2(semantic, self.context.remap[base], sign)
+            case Operation(operator=FloatAtan2() as semantic, operands=(y, x)):
+                return self._lower_atan2(semantic, y, x)
+            case Operation(operator=FloatHypot2() as semantic, operands=(y, x)):
+                return self._lower_hypot2_naive(semantic, y, x)  # a fusible hypot is intercepted in lower_node
             case Operation(operator=(FloatMin() | FloatMax()) as semantic, operands=(a, b)):
                 return self._lower_minmax(semantic, a, b)
             case Operation(operator=FloatFma() as semantic, operands=(a, b, c)):
@@ -484,15 +691,24 @@ class _FloatLowerer:
             case _:
                 return None
 
+    def _require(self, operator: FloatHardwareOperator | None, semantic: Operator, field: str) -> FloatHardwareOperator:
+        if operator is None:
+            raise UnsupportedConstruct(
+                f"the kernel uses {semantic.mnemonic!r} but no {field!r} operator is configured; add it to OpConfig"
+            )
+        return operator
+
     def _lower_binary_float(
-        self, semantic: Operator, hardware: FloatHardwareOperator, a: ValueId, b: ValueId
+        self, semantic: Operator, hardware: FloatHardwareOperator, a: ValueId, b: ValueId, output_port: int = 0
     ) -> ValueId:
+        # Each operand's sign chain folds onto its conditioner, applied before the op (min(-a, b) feeds the sorter -a).
         base_a, sign_a = _collapse_signs(self.context.hir.nodes, a)
         base_b, sign_b = _collapse_signs(self.context.hir.nodes, b)
         return self.context.builder.operation(
             _select_hardware(semantic, hardware),
             [self.context.remap[base_a], self.context.remap[base_b]],
             [sign_a, sign_b],
+            output_port=output_port,
         )
 
     def _emit_ffma(
@@ -521,42 +737,180 @@ class _FloatLowerer:
         )
 
     def _lower_round(self, semantic: FloatRound | FloatFloor | FloatCeil | FloatTrunc, a: ValueId) -> ValueId:
-        # The input sign chain folds onto the operand sign conditioner, applied before the round: ``floor(-x)`` is the
-        # rounder fed ``-x`` (correct -- floor of the conditioned input), not a negation of ``floor(x)``.
-        operator = self.context.ops.fround
-        if operator is None:
-            raise UnsupportedConstruct(
-                f"the kernel uses {semantic.mnemonic!r} but no 'fround' operator is configured; add it to OpConfig"
-            )
-        base, sign = _collapse_signs(self.context.hir.nodes, a)
         mode = {
             FloatRound: FRoundOperator.Mode.ROUND,
             FloatFloor: FRoundOperator.Mode.FLOOR,
             FloatCeil: FRoundOperator.Mode.CEIL,
             FloatTrunc: FRoundOperator.Mode.TRUNC,
         }[type(semantic)]
+        return self._lower_unary_pooled(semantic, self.context.ops.fround, "fround", a, immediates=(int(mode),))
+
+    def _lower_unary_pooled(
+        self,
+        semantic: Operator,
+        operator: FloatHardwareOperator | None,
+        config_field: str,
+        a: ValueId,
+        immediates: tuple[int, ...] = (),
+    ) -> ValueId:
+        # Sign chain folds onto the operand (applied before the op): floor(-x)/exp2(-x) feed -x, not -floor(x)/-exp2(x).
+        base, sign = _collapse_signs(self.context.hir.nodes, a)
         return self.context.builder.operation(
-            _select_hardware(semantic, operator),
+            _select_hardware(semantic, self._require(operator, semantic, config_field)),
             [self.context.remap[base]],
             [sign],
-            immediates=(int(mode),),
+            immediates=immediates,
         )
 
     def _lower_minmax(self, semantic: FloatMin | FloatMax, a: ValueId, b: ValueId) -> ValueId:
-        # Each input sign chain folds onto its operand conditioner, applied before the sort: min(-a, b) is the sorter
-        # fed (-a, b). min taps the low output port, max the high one; a min and a max over one pair fuse at LIR build.
-        operator = self.context.ops.fsort
-        if operator is None:
-            raise UnsupportedConstruct(
-                f"the kernel uses {semantic.mnemonic!r} but no 'fsort' operator is configured; add it to OpConfig"
-            )
-        base_a, sign_a = _collapse_signs(self.context.hir.nodes, a)
-        base_b, sign_b = _collapse_signs(self.context.hir.nodes, b)
+        # min taps the low output port, max the high one; a min and a max over one pair fuse into one sorter firing.
+        operator = self._require(self.context.ops.fsort, semantic, "fsort")
+        return self._lower_binary_float(
+            semantic, operator, a, b, output_port=0 if isinstance(semantic, FloatMin) else 1
+        )
+
+    def _lower_sincos(self, semantic: FloatSin | FloatCos, a: ValueId) -> ValueId:
+        # The turn-native zkf_sincos is fed radians/(2*pi) via a VISIBLE fmul -- its rounding is part of the model<->RTL
+        # contract and must not hide in the wrapper. The sign folds onto that fmul, so one scaled value serves
+        # sin(-x)/cos(-x) and a sin+cos over one argument fuse into one firing.
+        operator = self._require(self.context.ops.fsincos, semantic, "fsincos")
+        base, sign = _collapse_signs(self.context.hir.nodes, a)
+        inv_tau = self._lower_float_const(1.0 / (2.0 * math.pi))
+        scaled = self.context.builder.operation(
+            _select_hardware(semantic, self.context.ops.fmul),
+            [self.context.remap[base], inv_tau],
+            [sign, FloatSignControl()],
+        )
+        return self._mir_op(semantic, operator, [scaled], output_port=0 if isinstance(semantic, FloatSin) else 1)
+
+    def _lower_atan2(self, semantic: FloatAtan2, y: ValueId, x: ValueId) -> ValueId:
+        # zkf_atan2 returns theta in turns; a visible post-scale by 2*pi gives radians. Its magnitude port is tapped
+        # only by a fusible adjacent hypot (intercepted in lower_node).
+        operator = self._require(self.context.ops.fatan2, semantic, "fatan2")
+        turns = self._lower_binary_float(semantic, operator, y, x)
+        tau = self._lower_float_const(2.0 * math.pi)
+        return self._mir_op(semantic, self.context.ops.fmul, [turns, tau])
+
+    def _lower_fused_hypot(self, atan2_id: ValueId) -> ValueId:
+        # Emitting the fatan2 firing from the ATAN2's own operands/signs makes the two collapse into one CORDIC; the
+        # magnitude is symmetric and sign-invariant, so the hypot's own operand order/signs are immaterial.
+        node = self.context.hir.nodes[atan2_id]
+        assert isinstance(node, Operation)
+        y, x = node.operands
+        operator = self.context.ops.fatan2
+        assert operator is not None  # only reached for a planned fusion, which exists only when fatan2 is configured
+        return self._lower_binary_float(node.operator, operator, y, x, output_port=1)
+
+    def _lower_hypot2_naive(self, semantic: FloatHypot2, y: ValueId, x: ValueId) -> ValueId:
+        """
+        Standalone hypot has no dedicated primitive, so it uses h*sqrt((x/h)^2 + (y/h)^2), h=max(|x|,|y|).
+        The h==0 and h==inf cases are semantically valid but would feed 0/0 or inf/inf into fdiv causing err latch.
+        The mux keeps those internal divisions finite while the surrounding formula still returns 0 or inf.
+        """
+        ops = self.context.ops
+        fsort = self._require(ops.fsort, semantic, "fsort")
+        base_y, sign_y = _collapse_signs(self.context.hir.nodes, y)
+        base_x, sign_x = _collapse_signs(self.context.hir.nodes, x)
+        my, mx = self.context.remap[base_y], self.context.remap[base_x]
+        absolute = FloatSignControl(absolute=True)
+        h = self.context.builder.operation(
+            _select_hardware(semantic, fsort), [mx, my], [absolute, absolute], output_port=1
+        )
+        bypass = self._bool_or(self._float_eq_zero(h, FloatSignControl()), self._float_isinf(h))
+        safe_h = self._float_select(bypass, self._lower_float_const(1.0), h)
+        xn = self.context.builder.operation(
+            _select_hardware(semantic, ops.fdiv), [mx, safe_h], [sign_x, FloatSignControl()]
+        )
+        yn = self.context.builder.operation(
+            _select_hardware(semantic, ops.fdiv), [my, safe_h], [sign_y, FloatSignControl()]
+        )
+        squares = self._mir_op(
+            semantic, ops.fadd, [self._mir_op(semantic, ops.fmul, [xn, xn]), self._mir_op(semantic, ops.fmul, [yn, yn])]
+        )
+        computed = self._mir_op(
+            semantic, ops.fmul, [h, self._sqrt_via_exp2_log2(semantic, squares, FloatSignControl())]
+        )
+        return computed
+
+    def _sqrt_via_exp2_log2(self, semantic: Operator, operand: ValueId, conditioner: FloatSignControl) -> ValueId:
+        """
+        sqrt is expanded as exp2(log2(x)*0.5) until a native sqrt primitive exists.
+        Zero is a valid sqrt input but a pole for log2, so the log sees 1.0 and the result is muxed back to 0.0.
+        Negative nonzero inputs are not sanitized, so they still reach log2 and report the domain error.
+        """
+        ops = self.context.ops
+        is_zero = self._float_eq_zero(operand, conditioner)
+        zero = self._lower_float_const(0.0)
+        safe_operand = self._float_select(is_zero, self._lower_float_const(1.0), operand, sign_b=conditioner)
+        log = self.context.builder.operation(
+            _select_hardware(semantic, self._require(ops.flog2, semantic, "flog2")),
+            [safe_operand],
+            [FloatSignControl()],
+        )
+        half = self._mir_op(semantic, ops.fmul_ilog2.instantiate(-1), [log])
+        sqrt = self._mir_op(semantic, self._require(ops.fexp2, semantic, "fexp2"), [half])
+        return self._float_select(is_zero, zero, sqrt)
+
+    def classification_lowering(
+        self, semantic: FloatIsFinite | FloatIsInf | FloatIsPosInf | FloatIsNegInf
+    ) -> tuple[FloatClassificationOperator, BoolInversion]:
+        fmt = self.context.ops.float_format
+        match semantic:
+            case FloatIsFinite():
+                return FloatIsFiniteOperator(fmt), BoolInversion()
+            case FloatIsInf():
+                return FloatIsFiniteOperator(fmt), BoolInversion(invert=True)
+            case FloatIsPosInf():
+                return FloatIsPosInfOperator(fmt), BoolInversion()
+            case FloatIsNegInf():
+                return FloatIsNegInfOperator(fmt), BoolInversion()
+
+    def _float_eq_zero(self, operand: ValueId, conditioner: FloatSignControl) -> ValueId:
+        port, inversion = self.context.ops.fcmp.tap_of(RelationalOp.EQ)
         return self.context.builder.operation(
-            _select_hardware(semantic, operator),
-            [self.context.remap[base_a], self.context.remap[base_b]],
-            [sign_a, sign_b],
-            output_port=0 if isinstance(semantic, FloatMin) else 1,
+            _select_hardware(FloatRelational(RelationalOp.EQ), self.context.ops.fcmp),
+            [operand, self._lower_float_const(0.0)],
+            [conditioner, FloatSignControl()],
+            output_port=port,
+            output_conditioner=inversion,
+        )
+
+    def _float_isinf(self, operand: ValueId, conditioner: FloatSignControl = FloatSignControl()) -> ValueId:
+        semantic = FloatIsInf()
+        operator, output = self.classification_lowering(semantic)
+        return self.context.builder.operation(
+            _select_hardware(semantic, operator), [operand], [conditioner], output_conditioner=output
+        )
+
+    def _bool_or(self, a: ValueId, b: ValueId) -> ValueId:
+        return self.context.builder.operation(
+            _select_hardware(BoolOr(), BoolOrOperator()), [a, b], [BoolInversion(), BoolInversion()]
+        )
+
+    def _float_select(
+        self,
+        cond: ValueId,
+        a: ValueId,
+        b: ValueId,
+        *,
+        sign_a: FloatSignControl = FloatSignControl(),
+        sign_b: FloatSignControl = FloatSignControl(),
+    ) -> ValueId:
+        return self.context.builder.operation(
+            _select_hardware(Select(), SelectOperator(self.context.ops.float_format)),
+            [cond, a, b],
+            [BoolInversion(), sign_a, sign_b],
+        )
+
+    def _mir_op(
+        self, semantic: Operator, hardware: HardwareOperator, operands: list[ValueId], output_port: int = 0
+    ) -> ValueId:
+        # Operands are already-lowered MIR ids taking identity conditioners -- a decomposition's interior.
+        return self.context.builder.operation(
+            _select_hardware(semantic, hardware),
+            operands,
+            [FloatSignControl()] * len(operands),
+            output_port=output_port,
         )
 
     def _lower_float_mul_pow2(self, semantic: Operator, a: ValueId, k: int) -> ValueId:

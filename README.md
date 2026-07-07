@@ -127,6 +127,8 @@ operators = holoso.OpConfig(
 )
 ```
 
+Optional operators such as `fexp2` etc. are supplied the same way.
+
 How does one actually obtain the optimal staging configuration? Empirically.
 Start with the default configuration (all stages disabled) and see if it achieves timing closure at the target frequency.
 If not, inspect the synthesis logs to see where the critical path is --
@@ -136,6 +138,14 @@ and enable the operator stage that splits that path. Repeat until timings close.
 Pro tip: even small (local) LLMs can execute this loop very efficiently, no need to waste human time on this.
 With AI automation this approach is superior to automatic target-frequency-based pipelining (e.g., XLS, FloPoCo, etc)
 because it does not rely on heuristics, but instead utilizes feedback from final PnR, thus being truly closed-loop.
+
+Synthesis output depends not only on the kernel but also on the configured operators due to optimization.
+For example, if the fused multiply-add (FMA) operator is set up, Holoso will fuse all eligible `a*b+c` patterns into
+FMA rather than separate `fmul` and `fadd` (fast-math style -- bit-exact results are not guaranteed across transforms),
+hypotenuse is folded into `atan2` when computed nearby, etc.
+Overall, Holoso pattern-matches heavily to reduce execution latency;
+e.g., nearby sin and cos are folded into a single `fsincos`.
+If the kernel cannot be lowered using the available operators, Holoso will raise an error.
 
 ### Construct the RTL
 

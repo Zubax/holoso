@@ -13,6 +13,24 @@ module holoso_fisfinite_tb #(parameter WEXP = 6, parameter WMAN = 18) (
     assign y = holoso_fisfinite(x);
 endmodule
 
+module holoso_fisposinf_tb #(parameter WEXP = 6, parameter WMAN = 18) (
+    input  wire [WEXP+WMAN-1:0] x,
+    output wire                 y
+);
+    localparam W = WEXP + WMAN;
+    `include "holoso_support_inline.vh"
+    assign y = holoso_fisposinf(x);
+endmodule
+
+module holoso_fisneginf_tb #(parameter WEXP = 6, parameter WMAN = 18) (
+    input  wire [WEXP+WMAN-1:0] x,
+    output wire                 y
+);
+    localparam W = WEXP + WMAN;
+    `include "holoso_support_inline.vh"
+    assign y = holoso_fisneginf(x);
+endmodule
+
 module holoso_fsaturate_tb #(parameter WEXP = 6, parameter WMAN = 18) (
     input  wire [WEXP+WMAN-1:0] x,
     output wire [WEXP+WMAN-1:0] y

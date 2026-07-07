@@ -142,6 +142,8 @@ Some operators are optional (default `None`).
 
 An operator may declare per-firing small microcode-driven immediate inputs.
 
+Each operator declares a per-instance initiation interval; most operators have II=1, i.e., fully pipelined.
+
 ## Front-end
 
 Abstract interpretation over the Python AST/CFG with a binding-time lattice (static vs. dynamic). Static values (shapes,
@@ -186,7 +188,8 @@ intended.
 Array arithmetic. The elementwise arithmetic operators `+ - * /` apply leafwise to same-shape arrays, and a scalar
 operand broadcasts over the other side's leaves; this is deliberately narrower than numpy broadcasting -- a mixed-rank
 pair (vector + matrix) is rejected rather than silently aligned along a different axis than numpy would pick, and `**`
-stays scalar-only. Augmented assignment to any aggregate (`+=`, `@=`) is rejected: an array would be mutated in place by
+stays scalar-only (base two with a runtime exponent lowers to exp2; otherwise the exponent must be a compile-time
+integer). Augmented assignment to any aggregate (`+=`, `@=`) is rejected: an array would be mutated in place by
 numpy while the front-end rebinds (diverging for an alias), and a list `+=` is concatenation, which is unsupported. The
 matrix product `@` (equivalently `np.matmul`) follows numpy's shape rules for 1-D and 2-D operands -- inner dimensions
 must agree, a 1-D operand is promoted and its axis dropped from the result, vector @ vector is a scalar -- and expands
@@ -216,11 +219,11 @@ the kernel.
 ## HIR
 
 HIR is a real CFG of basic blocks -- entry first, a single `Ret` exit -- carrying an SSA value DAG. Values are input
-ports (one per parameter), float and boolean constants, state reads (persistent state at block entry), phis (SSA
-merges), and pure semantic operations; terminators are `jump`, `branch`, and `ret` (which commits state live-outs and
-output ports). The pure operations cover float arithmetic (add, mul, div, neg, abs, multiply-by-power-of-two),
-relational comparisons and boolean logic yielding `bool`, float<->bool casts, and `select` (a data mux produced by
-if-conversion, distinct from control flow).
+ports (one per parameter), constants, state reads (persistent state at block entry), phis (SSA merges),
+and pure semantic operations; terminators are `jump`, `branch`, and `ret` (which commits state live-outs and
+output ports). The pure operations cover float arithmetic, scalar float classification, relational comparisons and
+boolean logic yielding `bool`, float<->bool casts, and `select` (a data mux produced by if-conversion, distinct from
+control flow).
 
 `bool` is implemented alongside `float` throughout (constants, input ports, state reads, phis), and a state slot's reset
 is a typed constant, so a boolean state register carries a boolean snapshot. Node names stay explicit (`FloatConst`,
@@ -300,11 +303,10 @@ composing the phi arms. A merge phi reached any other way (e.g. a loop-invariant
 back-edge arm) keeps its real branch -- deferred (see LIR DEFERRED).
 
 FP math is non-associative, so some of these optimizations may produce non-bit-exact results -- accepted, analogous to
-fast-math in C/C++ compilers.
+fast-math in C/C++ compilers. The transcendental folds likewise take the ideal (infinite-precision) result,
+so a folded constant can differ from the datapath's own value.
 
 ### DEFERRED
-
-Composite intrinsics that have no directly matching low-level operator module.
 
 Variable-trip `for` loops: a `for` above the unroll threshold is rejected, not lowered to a counted back-edge loop (that
 needs a runtime integer counter).
@@ -327,15 +329,21 @@ hardware operator and collapses semantic negation/absolute-value chains into MIR
 results, or output wires. Multiply-by-power-of-two selects the constant-shift operator when the float format supports
 that exponent; an out-of-range exponent is rejected, since the equivalent constant would overflow or underflow the
 format anyway. The four rounding operators map to one shared `fround` distinguished by its `round_mode` immediate.
-Binary `min`/`max` map to the low and high output ports of one shared `fsort` sorter, so a `min` and a `max` over one
-operand pair fuse into a single firing. Lowering rejects semantic domains that have no selected MIR representation.
 
-When `ffma` is configured, lowering contracts a single-use `a*b + c` into one fused multiply-add -- a faithful
-contraction that single-rounds instead of double-rounding, in the spirit of the HIR fast-math folding. It fires only
-when the product (and every sign node on its chain) is used nowhere else; a shared product is observed elsewhere as a
-rounded value, so its add keeps the separate multiply-then-add. The product's folded sign distributes onto the
-multiplier operands (negation onto one, absolute onto both).
-The use-count shares one enumerator with the dead-code seeds so the two cannot drift.
+Some operator lowerings are context-sensitive, where the final lowering depends on the nearby operations.
+Examples include computing min/max in a single pooled comparison operator transaction,
+sin/cos being simultaneously computed by the sincos hardware operator, etc.
+Another example is the FMA contraction, where a single-use `a*b+c` is lowered into one fused multiply-add.
+Boolean infinity predicates adjacent to a zero sign-test, such as `isinf(x) and x > 0`, lower directly to the
+corresponding directional infinity classifier.
+The matching is done at the MIR level because this is the first layer that is aware of the hardware semantics.
+
+Some semantic operators are lowered into a combination of hardware operators depending on the available hardware
+operators and the context. This is only done for operators for which a possibility of specialized hardware
+handling exists (e.g., hypotenuse calculation can be done using the fatan2 operator, but it only makes sense
+if arctan is also computed simultaneously). Such composite lowerings may use inline muxes to sanitize operands fed into
+their internal primitives so that semantically valid edge cases do not raise avoidable primitive-side errors, while
+invalid source inputs still reach the error-bearing primitive.
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float format explicitly so float-less modules still elaborate with a known scalar width. The CFG is carried

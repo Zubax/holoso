@@ -3,7 +3,7 @@
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from enum import IntEnum
 from hashlib import blake2s
 from typing import ClassVar
@@ -11,6 +11,7 @@ from typing import ClassVar
 from ._value import FloatValue
 from ._type import BoolType, FloatFormat, FloatType, ScalarSignature, ScalarType
 from ._util import RelationalOp
+from ._zkf import ZkfFormat
 
 
 def _instance_stem_text(text: str) -> str:
@@ -708,6 +709,240 @@ class FSortOperator(FloatHardwareOperator):
 
 
 @dataclass(frozen=True, slots=True)
+class FExp2Operator(FloatHardwareOperator):
+    mnemonic: ClassVar[str] = "fexp2"
+    stage_input: int = 0
+    stage_reduce: int = 0
+    stage_product: int = 0
+    stage_pack: int = 0
+    stage_output: int = 0
+
+    def __post_init__(self) -> None:
+        if self.stage_input < 0:
+            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
+        if self.stage_product not in range(5):
+            raise ValueError(f"stage_product invalid: {self.stage_product!r}")
+        for field in ("stage_reduce", "stage_pack", "stage_output"):
+            if getattr(self, field) not in (0, 1):
+                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
+
+    @property
+    def latency(self) -> int:
+        degree = ZkfFormat(self.fmt.wexp, self.fmt.wman).exp2_poly_degree
+        return (
+            self.stage_input
+            + self.stage_reduce
+            + 4
+            + degree * (2 + self.stage_product)
+            + self.stage_pack
+            + self.stage_output
+        )
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return self.float_signature(1)
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
+        (a,) = self._validated_operands(operands, 1)
+        return (a.exp2(),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"2^{a}"
+
+    def hdl_params(self) -> dict[str, int]:
+        return {
+            "STAGE_INPUT": self.stage_input,
+            "STAGE_REDUCE": self.stage_reduce,
+            "STAGE_PRODUCT": self.stage_product,
+            "STAGE_PACK": self.stage_pack,
+            "STAGE_OUTPUT": self.stage_output,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FLog2Operator(FloatHardwareOperator):
+    mnemonic: ClassVar[str] = "flog2"
+    error_ports: ClassVar[list[str]] = ["domain_error", "pole"]
+    stage_input: int = 0
+    stage_decode: int = 0
+    stage_product: int = 0
+    stage_product_final: int = 0
+    stage_normalize: int = 0
+    stage_normalize_output: int = 0
+    stage_pack: int = 0
+    stage_output: int = 0
+
+    def __post_init__(self) -> None:
+        if self.stage_input < 0:
+            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
+        for field in ("stage_product", "stage_product_final"):
+            if getattr(self, field) not in range(5):
+                raise ValueError(f"{field} invalid: {getattr(self, field)!r}")
+        if self.stage_normalize not in (0, 1, 2):
+            raise ValueError(f"stage_normalize must be 0, 1, or 2; got {self.stage_normalize!r}")
+        for field in ("stage_decode", "stage_normalize_output", "stage_pack", "stage_output"):
+            if getattr(self, field) not in (0, 1):
+                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
+
+    @property
+    def latency(self) -> int:
+        degree = ZkfFormat(self.fmt.wexp, self.fmt.wman).log2_poly_degree
+        return (
+            self.stage_input
+            + self.stage_decode
+            + 5
+            + self.stage_product_final
+            + self.stage_normalize
+            + self.stage_normalize_output
+            + self.stage_pack
+            + degree * (2 + self.stage_product)
+            + self.stage_output
+        )
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return self.float_signature(1)
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
+        (a,) = self._validated_operands(operands, 1)
+        return (a.log2(),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"log2({a})"
+
+    def hdl_params(self) -> dict[str, int]:
+        return {
+            "STAGE_INPUT": self.stage_input,
+            "STAGE_DECODE": self.stage_decode,
+            "STAGE_PRODUCT": self.stage_product,
+            "STAGE_PRODUCT_FINAL": self.stage_product_final,
+            "STAGE_NORMALIZE": self.stage_normalize,
+            "STAGE_NORMALIZE_OUTPUT": self.stage_normalize_output,
+            "STAGE_PACK": self.stage_pack,
+            "STAGE_OUTPUT": self.stage_output,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _FCordicOperator(FloatHardwareOperator, ABC):
+    """
+    These are NOT throughput-1: the core holds one transaction in flight and re-accepts one cycle after retiring.
+    """
+
+    unroll100: int = 100
+    stage_input: int = 0
+    stage_product: int = 0
+    stage_normalize: int = 0
+    stage_pack: int = 0
+    stage_output: int = 0
+
+    def __post_init__(self) -> None:
+        if not (self.unroll100 == 50 or (self.unroll100 >= 100 and self.unroll100 % 100 == 0)):
+            raise ValueError(f"unroll100 must be 50 or a positive multiple of 100; got {self.unroll100!r}")
+        for name in ("stage_input", "stage_pack", "stage_output"):
+            if getattr(self, name) not in (0, 1):
+                raise ValueError(f"{name} must be 0 or 1; got {getattr(self, name)!r}")
+        if self.stage_product not in range(5):
+            raise ValueError(f"stage_product invalid: {self.stage_product!r}")
+        if self.stage_normalize not in (0, 1, 2):
+            raise ValueError(f"stage_normalize must be 0, 1, or 2; got {self.stage_normalize!r}")
+
+    @property
+    def initiation_interval(self) -> int:
+        return self.latency + 1
+
+    def hdl_params(self) -> dict[str, int]:
+        return {
+            "UNROLL100": self.unroll100,
+            "STAGE_INPUT": self.stage_input,
+            "STAGE_PRODUCT": self.stage_product,
+            "STAGE_NORMALIZE": self.stage_normalize,
+            "STAGE_PACK": self.stage_pack,
+            "STAGE_OUTPUT": self.stage_output,
+        }
+
+    def render_output(
+        self, port: int, conditioner: "PortConditioner", *operands: str, immediates: tuple[int, ...] = ()
+    ) -> str:
+        assert isinstance(conditioner, FloatSignControl)
+        return conditioner.decorate(f"{self.output_hdl_ports[port]}({', '.join(operands)})")
+
+
+@dataclass(frozen=True, slots=True)
+class FSincosOperator(_FCordicOperator):
+    mnemonic: ClassVar[str] = "fsincos"
+    output_hdl_ports: ClassVar[list[str]] = ["sin", "cos"]
+
+    @property
+    def latency(self) -> int:
+        # Reproduces zkf_sincos.v's LATENCY_REF exactly (elaboration-checked). SAVED is the core's PARALLEL fast-path
+        # overlap, active only for unroll100 < 100 (where the RTL derives PARALLEL = 1).
+        k = ZkfFormat(self.fmt.wexp, self.fmt.wman).sincos_iterations
+        xycyc = (k * 100 + self.unroll100 - 1) // self.unroll100
+        saved = min(xycyc - k, 1 + self.stage_product) if self.unroll100 < 100 else 0
+        return (
+            11
+            + 2 * self.stage_product
+            + xycyc
+            - saved
+            + self.stage_input
+            + self.stage_normalize
+            + self.stage_pack
+            + self.stage_output
+        )
+
+    @property
+    def signature(self) -> ScalarSignature:
+        ty = FloatType(self.fmt)
+        return ScalarSignature((ty,), (ty, ty))
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
+        (a,) = self._validated_operands(operands, 1)
+        return a.sincos()
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"sincos({a})"
+
+
+@dataclass(frozen=True, slots=True)
+class FAtan2Operator(_FCordicOperator):
+    mnemonic: ClassVar[str] = "fatan2"
+    output_hdl_ports: ClassVar[list[str]] = ["theta", "mag"]
+
+    @property
+    def latency(self) -> int:
+        geom = ZkfFormat(self.fmt.wexp, self.fmt.wman)
+        xycyc = (geom.atan2_iterations * 100 + self.unroll100 - 1) // self.unroll100
+        divcyc = (geom.atan2_divider_width + 1) // 2 + 1
+        return (
+            8
+            + self.stage_input
+            + xycyc
+            + divcyc
+            + self.stage_product
+            + self.stage_normalize
+            + self.stage_pack
+            + self.stage_output
+        )
+
+    @property
+    def signature(self) -> ScalarSignature:
+        ty = FloatType(self.fmt)
+        return ScalarSignature((ty, ty), (ty, ty))
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
+        y, x = self._validated_operands(operands, 2)
+        return FloatValue.atan2(y, x)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        y, x = operands
+        return f"atan2({y},{x})"
+
+
+@dataclass(frozen=True, slots=True)
 class BoolLogicOperator(InlineHardwareOperator, ABC):
     """
     A boolean-logic operator (AND/OR/XOR): a plain ``& | ^`` gate folded into its boolean register's write. Never
@@ -767,6 +1002,69 @@ class BoolXorOperator(BoolLogicOperator):
 
 
 @dataclass(frozen=True, slots=True)
+class FloatClassificationOperator(InlineHardwareOperator, ABC):
+    fmt: FloatFormat
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((FloatType(self.fmt),), (BoolType(),))
+
+
+@dataclass(frozen=True, slots=True)
+class FloatIsFiniteOperator(FloatClassificationOperator):
+    mnemonic: ClassVar[str] = "fisfinite"
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"isfinite({a})"
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        (a,) = operand_nets
+        return f"holoso_fisfinite({a})"
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
+        (a,) = operands
+        assert isinstance(a, FloatValue)
+        return (a.fmt.is_finite(a.bits),)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatIsPosInfOperator(FloatClassificationOperator):
+    mnemonic: ClassVar[str] = "fisposinf"
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"isposinf({a})"
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        (a,) = operand_nets
+        return f"holoso_fisposinf({a})"
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
+        (a,) = operands
+        assert isinstance(a, FloatValue)
+        return (not a.fmt.is_finite(a.bits) and not a.negative,)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatIsNegInfOperator(FloatClassificationOperator):
+    mnemonic: ClassVar[str] = "fisneginf"
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"isneginf({a})"
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        (a,) = operand_nets
+        return f"holoso_fisneginf({a})"
+
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
+        (a,) = operands
+        assert isinstance(a, FloatValue)
+        return (not a.fmt.is_finite(a.bits) and a.negative,)
+
+
+@dataclass(frozen=True, slots=True)
 class FloatToBoolOperator(InlineHardwareOperator):
     """
     A float->bool cast ``bool(x)``: true iff the operand is nonzero, i.e. its ZKF exponent field is nonzero (sign- and
@@ -799,9 +1097,10 @@ class FloatToBoolOperator(InlineHardwareOperator):
 class SelectOperator(InlineHardwareOperator):
     """
     A data mux ``cond ? a : b`` over wide values, folded into the destination register write as a ternary over the
-    operand nets. Produced exclusively by HIR if-conversion; never added to :class:`OpConfig`. Each operand is a
-    dedicated direct (unlatched) register read -- an area/timing characteristic of inline operators; the cost is one
-    mux per merged value, the same order as the per-arm phi-copy installs the branch would otherwise need.
+    operand nets. Produced by HIR if-conversion and by selected MIR composite lowerings; never added to
+    :class:`OpConfig`. Each operand is a dedicated direct (unlatched) register read -- an area/timing characteristic of
+    inline operators; the cost is one mux per merged value, the same order as the per-arm phi-copy installs the branch
+    would otherwise need.
     """
 
     mnemonic: ClassVar[str] = "select"
@@ -901,12 +1200,16 @@ class OpConfig:
     fround: FRoundOperator | None = None
     ffma: FFmaOperator | None = None
     fsort: FSortOperator | None = None
+    fexp2: FExp2Operator | None = None
+    flog2: FLog2Operator | None = None
+    fsincos: FSincosOperator | None = None
+    fatan2: FAtan2Operator | None = None
 
     @property
     def float_format(self) -> FloatFormat:
-        formats = {self.fadd.fmt, self.fmul.fmt, self.fdiv.fmt, self.fmul_ilog2.fmt, self.fcmp.fmt}
-        formats.update(op.fmt for op in (self.fround, self.ffma, self.fsort) if op is not None)
+        formats = {operator.fmt for field in fields(self) if (operator := getattr(self, field.name)) is not None}
         if len(formats) != 1:
             ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
             raise ValueError(f"all floating-point operators must use the same format; got {ordered}")
-        return self.fadd.fmt
+        (fmt,) = formats
+        return fmt  # type: ignore[no-any-return]
