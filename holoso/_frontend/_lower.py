@@ -1057,8 +1057,7 @@ class _Lowerer:
         """
         Fold one relational link of compile-time operands, or None if either is not compile-time. Two integers are
         compared exactly (a float64 fold would round operands beyond 2**53 and misfold, e.g.
-        ``9007199254740993 == 9007199254740992``); otherwise the fast-math float64 fold is used (accepted per
-        DESIGN.md), leaving a NaN operand to the comparator.
+        ``9007199254740993 == 9007199254740992``); otherwise the fast-math float64 fold is used.
         """
         left_int, right_int = self._static_int(left), self._static_int(right)
         if left_int is not None and right_int is not None:

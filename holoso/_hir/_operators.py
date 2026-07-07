@@ -381,8 +381,6 @@ class FloatFma(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatMin(Operator):
-    """Binary minimum of two floats."""
-
     mnemonic: ClassVar[str] = "min"
     speculatable: ClassVar[bool] = True
 
@@ -392,15 +390,13 @@ class FloatMin(Operator):
 
     def fold_constants(self, operands: list[Const]) -> Const | None:
         a, b = [_float_const(operand) for operand in operands]
-        if not (math.isfinite(a.value) and math.isfinite(b.value)):
-            return None  # do not let selection silently discard a non-finite operand
+        if math.isnan(a.value) or math.isnan(b.value):
+            return None
         return a if a.value < b.value else b
 
 
 @dataclass(frozen=True, slots=True)
 class FloatMax(Operator):
-    """Binary maximum of two floats."""
-
     mnemonic: ClassVar[str] = "max"
     speculatable: ClassVar[bool] = True
 
@@ -410,8 +406,8 @@ class FloatMax(Operator):
 
     def fold_constants(self, operands: list[Const]) -> Const | None:
         a, b = [_float_const(operand) for operand in operands]
-        if not (math.isfinite(a.value) and math.isfinite(b.value)):
-            return None  # do not let selection silently discard a non-finite operand
+        if math.isnan(a.value) or math.isnan(b.value):
+            return None
         return b if a.value < b.value else a
 
 

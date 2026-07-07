@@ -186,8 +186,8 @@ including the register liveness, operator pipeline occupancy/utilization, latenc
 Holoso implements essentially a separate programming language whose syntax is a strict subset of Python,
 and whose semantics is largely equivalent to Python with minor deviations that make sense in chip design context.
 Save for the minor differences in semantics, Holoso ensures that one can execute the original Python code
-and run the generated circuit (RTL) side by side, and obtain equivalent results (bit-exact unless floating points
-are used, in which case small errors inherent to floats may creep up).
+and run the generated circuit (RTL) side by side, and obtain equivalent results
+(modulo non-bit-exact fast math optimizations).
 
 Holoso designs a narrowly specialized computing core (a zero-instruction-set computer, ZISC)
 with custom statically scheduled microcode that implements the behavior of the original Python kernel.
@@ -233,18 +233,27 @@ Holoso follows Python with minimal deviations where it makes sense for hardware 
   Tensors mutate in place, which diverges from a rebind when the tensor is aliased; supporting it correctly would
   require complex escape analysis.
 
-- No exceptions: division by zero, domain errors, etc. produce the closest meaningful result and assert the error flag.
+- Math optimizations are non-bit-exact, fastmath style, aggressive. Holoso assumes commutativity/associativity,
+  may perform constant folding using higher-precision arithmetic than the target format,
+  assumes that domain errors do not occur, may freely discard constant and non-constant operations
+  (e.g., Holoso assumes `x/x==1` but this does not hold per IEEE 754),
+  arbitrarily increase the local precision (e.g., by FMA-folding nearby multiplications and additions), etc.
+
+- No exceptions: division by zero, domain errors, etc. produce zero or infinity (depending on context) and assert
+  the error flag (unless the operation is thrown away by the optimizer).
 
 ### Floating point
 
 The floating point engine is based on [Zubax Kulibin Float (ZKF)](https://github.com/Zubax/zkf).
 
 Differences from IEEE 754: no NaN, no subnormals (exponent 0 always encodes +0; finite magnitudes in `(0, min_normal/2)`
-round to +0; magnitudes in `[min_normal/2, min_normal)` round to signed min_normal), no exceptions, overflow produces ±∞.
+round to +0; magnitudes in `[min_normal/2, min_normal)` round to signed min_normal), no exceptions,
+overflow produces ±∞.
 Canonical representations do not include negative zero (it is not an error to pass negative zero though).
 
 Floating-point optimizations are fast-math style, assuming commutativity and associativity,
-allowing non-bit-exact rewrites.
+allowing non-bit-exact rewrites. They may also rewrite the zero/infinity special cases below and erase the associated
+error flags when an operation is optimized away.
 
 Infinity cases that would be NaN in IEEE 754:
 

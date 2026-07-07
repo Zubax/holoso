@@ -6,7 +6,19 @@ from ._const import BoolConst, FloatConst
 from ._copy import copy_node, rebuild
 from .._util import ValueId
 from ._ir import Hir, HirBuilder, Node, Operation
-from ._operators import BoolAnd, BoolNot, BoolOr, BoolSelect, FloatDiv, FloatMul, FloatMulPow2, Select
+from ._operators import (
+    BoolAnd,
+    BoolNot,
+    BoolOr,
+    BoolSelect,
+    FloatAdd,
+    FloatDiv,
+    FloatMul,
+    FloatMulPow2,
+    FloatNeg,
+    Operator,
+    Select,
+)
 
 
 def _ilog2_exact(c: float) -> int | None:
@@ -19,11 +31,81 @@ def _ilog2_exact(c: float) -> int | None:
 
 def run(hir: Hir) -> Hir:
     """
-    Rewrite exact power-of-two scaling and finite constant division, and reduce the if-conversion muxes: a ``select``
-    with identical arms drops out, and a ``bool_select`` with one or two constant arms collapses to ``and``/``or``/
-    ``not``/passthrough (the common state-machine merge with ``True``/``False`` arms). All before hardware selection.
+    Rewrite trivial fast-math float identities, exact power-of-two scaling, and finite constant division, and reduce
+    the if-conversion muxes. All before hardware selection.
     """
     cval: dict[ValueId, float] = {}
+    neg_of: dict[ValueId, ValueId] = {}
+
+    def emit_float_const(builder: HirBuilder, value: float) -> ValueId:
+        new_id = builder.float_const(value)
+        cval[new_id] = value
+        return new_id
+
+    def emit_float_operation(builder: HirBuilder, operation: Operator, operands: list[ValueId]) -> ValueId:
+        return builder.operation(operation, operands)
+
+    def is_zero(vid: ValueId) -> bool:
+        return cval.get(vid) == 0.0
+
+    def is_one(vid: ValueId) -> bool:
+        return cval.get(vid) == 1.0
+
+    def is_neg_one(vid: ValueId) -> bool:
+        return cval.get(vid) == -1.0
+
+    def make_neg(builder: HirBuilder, value: ValueId) -> ValueId:
+        base = neg_of.get(value)
+        if base is not None:
+            return base
+        new_id = emit_float_operation(builder, FloatNeg(), [value])
+        neg_of[new_id] = value
+        return new_id
+
+    def reduce_add(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
+        if is_zero(a):
+            return b
+        if is_zero(b):
+            return a
+        if neg_of.get(a) == b or neg_of.get(b) == a:
+            return emit_float_const(builder, 0.0)
+        return emit_float_operation(builder, FloatAdd(), [a, b])
+
+    def reduce_mul(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
+        if is_zero(a) or is_zero(b):
+            return emit_float_const(builder, 0.0)
+        if is_one(a):
+            return b
+        if is_one(b):
+            return a
+        if is_neg_one(a):
+            return make_neg(builder, b)
+        if is_neg_one(b):
+            return make_neg(builder, a)
+        for const_side, other in ((b, a), (a, b)):
+            if const_side in cval:
+                k = _ilog2_exact(cval[const_side])
+                if k is not None:
+                    return emit_float_operation(builder, FloatMulPow2(k), [other])
+        return emit_float_operation(builder, FloatMul(), [a, b])
+
+    def reduce_div(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
+        if a == b:
+            return emit_float_const(builder, 1.0)  # Fast-math fold: intentionally ignores div0 for 0.0 / 0.0.
+        if is_zero(a):
+            return emit_float_const(builder, 0.0)  # Fast-math fold: intentionally drops the fdiv error sideband.
+        if is_one(b):
+            return a
+        if is_neg_one(b):
+            return make_neg(builder, a)
+        if b in cval:
+            c = cval[b]
+            k = _ilog2_exact(c)
+            if k is not None:
+                return emit_float_operation(builder, FloatMulPow2(-k), [a])
+            if c != 0.0 and math.isfinite(c):
+                return emit_float_operation(builder, FloatMul(), [a, emit_float_const(builder, 1.0 / c)])
+        return emit_float_operation(builder, FloatDiv(), [a, b])
 
     def bool_const(vid: ValueId) -> bool | None:
         node = hir.nodes[vid]
@@ -32,16 +114,24 @@ def run(hir: Hir) -> Hir:
     def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
         match node:
             case FloatConst(value=value):
-                new_id = builder.float_const(value)
-                cval[new_id] = value
-                return new_id
+                return emit_float_const(builder, value)
+            case Operation(operator=FloatNeg(), operands=(a,)):
+                return make_neg(builder, remap[a])
+            case Operation(operator=FloatAdd(), operands=(a, b)):
+                return reduce_add(builder, remap[a], remap[b])
             case Operation(operator=FloatMul(), operands=(a, b)):
-                return _reduce_mul(builder, remap[a], remap[b], cval)
+                return reduce_mul(builder, remap[a], remap[b])
             case Operation(operator=FloatDiv(), operands=(a, b)):
-                return _reduce_div(builder, remap[a], remap[b], cval)
+                return reduce_div(builder, remap[a], remap[b])
+            case Operation(operator=FloatMulPow2(k=0), operands=(a,)):
+                return remap[a]
+            case Operation(operator=FloatMulPow2(k=k), operands=(a,)):
+                return emit_float_operation(builder, FloatMulPow2(k), [remap[a]])
             case Operation(operator=Select(), operands=(_cond, a, b)) if remap[a] == remap[b]:
                 return remap[a]  # select(c, X, X) == X
             case Operation(operator=BoolSelect(), operands=(cond, a, b)):
+                if remap[a] == remap[b]:
+                    return remap[a]
                 return _reduce_bool_select(builder, remap[cond], remap[a], remap[b], bool_const(a), bool_const(b))
             case _:
                 return copy_node(builder, node, remap)
@@ -66,23 +156,3 @@ def _reduce_bool_select(
     if b_const is False:
         return builder.operation(BoolAnd(), [cond, a])  # (c, a, False) == c and a
     return builder.operation(BoolSelect(), [cond, a, b])  # both arms dynamic: keep the mux
-
-
-def _reduce_mul(builder: HirBuilder, a: ValueId, b: ValueId, cval: dict[ValueId, float]) -> ValueId:
-    for const_side, other in ((b, a), (a, b)):
-        if const_side in cval:
-            k = _ilog2_exact(cval[const_side])
-            if k is not None:
-                return builder.operation(FloatMulPow2(k), [other])
-    return builder.operation(FloatMul(), [a, b])
-
-
-def _reduce_div(builder: HirBuilder, a: ValueId, b: ValueId, cval: dict[ValueId, float]) -> ValueId:
-    if b in cval:
-        c = cval[b]
-        k = _ilog2_exact(c)
-        if k is not None:
-            return builder.operation(FloatMulPow2(-k), [a])
-        if c != 0.0 and math.isfinite(c):
-            return builder.operation(FloatMul(), [a, builder.float_const(1.0 / c)])
-    return builder.operation(FloatDiv(), [a, b])

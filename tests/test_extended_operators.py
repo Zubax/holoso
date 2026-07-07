@@ -499,18 +499,22 @@ def test_min_max_of_constants_fold() -> None:
         assert _bits(sim.run(x)[0]) == ref.bits, f"x={x}"
 
 
-def test_min_max_nonfinite_constant_is_rejected() -> None:
-    # A non-finite constant operand must not be hidden by the fold's selection: even when the finite side would be
-    # selected, the non-finite constant must reach the validator and be rejected, as a bare non-finite literal is.
-    def min_selects_finite(x: float) -> float:
-        return x + min(1e400, 2.0)  # 1e400 overflows to +inf; the fold would select 2.0 but must not drop the inf
+def test_min_max_infinity_constants_fold() -> None:
+    def kernel(x: float) -> float:
+        return x + min(1e400, 2.0) + max(-1e400, 3.0)
 
+    sim = holoso.synthesize(kernel, _ops(with_sort=False), name="min_max_inf_fold").numerical_model.elaborate()
+    for x in [0.0, 3.0, -1.5, 100.25]:
+        ref = (_v(x) + _v(2.0)) + _v(3.0)
+        assert _bits(sim.run(x)[0]) == ref.bits, f"x={x}"
+
+
+def test_min_max_nan_constant_is_rejected() -> None:
     def max_selects_finite(x: float) -> float:
-        return x + max(2.0, 1e400 - 1e400)  # 1e400 - 1e400 is NaN; must be rejected, not selected away
+        return x + max(2.0, 1e400 - 1e400)
 
-    for fn in (min_selects_finite, max_selects_finite):
-        with pytest.raises(UnsupportedConstruct):
-            holoso.synthesize(fn, _ops(), name=fn.__name__)
+    with pytest.raises(UnsupportedConstruct):
+        holoso.synthesize(max_selects_finite, _ops(), name="max_selects_finite")
 
 
 def _ulp32(value: float) -> float:
@@ -862,21 +866,19 @@ def test_trig_of_constants_fold() -> None:
         assert _bits(out[index]) == _v(ref).bits, f"folded output {index}"
 
 
-def test_constant_fold_declines_nonfinite_result() -> None:
-    # A constant subexpression that overflows to inf must be left unfolded, not baked into a non-finite FloatConst.
-    # Regression: the inf previously reached sin/cos's fold and crashed with a raw ValueError from math.sin. Mirrors
-    # the exp2/log2 finiteness convention.
+def test_constant_fold_declines_unsupported_transcendental_results() -> None:
+    # Regression: an inf input to sin/cos's fold crashed with a raw ValueError from math.sin. The fold is declined
+    # instead, leaving the legal infinity operand for the hardware path.
     def unfoldable(x: float) -> tuple[float, float]:
         overflow = math.hypot(1.5e308, 1.5e308)  # stays unfolded -> a hardware op, so sin/cos of it lower normally
         return math.sin(overflow), math.cos(overflow)
 
-    holoso.synthesize(unfoldable, _ops(), name="nonfinite_fold_unfold").numerical_model.elaborate()
+    holoso.synthesize(unfoldable, _ops(), name="inf_fold_unfold").numerical_model.elaborate()
 
     def sin_of_inf(x: float) -> float:
-        return math.sin(1e300 * 1e300) + x  # the product folds to inf; sin must decline it with a clean diagnostic
+        return math.sin(1e300 * 1e300) + x
 
-    with pytest.raises(UnsupportedConstruct):  # rejected, not a raw ValueError crash
-        holoso.synthesize(sin_of_inf, _ops(), name="nonfinite_fold_reject")
+    holoso.synthesize(sin_of_inf, _ops(), name="inf_fold_decline").numerical_model.elaborate()
 
 
 def test_atan2_fold_normalizes_signed_zero() -> None:
