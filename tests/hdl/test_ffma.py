@@ -2,7 +2,7 @@
 Tests for holoso_ffma (pipelined; sgnop on a, b, c, y; y = sgnop(sgnop(a)*sgnop(b) + sgnop(c)), single rounding).
 
 The wrapper delays y_sgnop through the same number of stages as zkf_fma, so all sgnop controls are allowed to vary
-every input cycle. The oracle is the exact FloatValue.fma; the vendored zkf_fma RTL is the independent anchor, so a
+every input cycle. The oracle is the exact FloatValue.fma; the packaged zkf_fma RTL is the independent anchor, so a
 bit-exact match proves the single-rounding fused result against hardware (including cases where a separate
 multiply-then-add would double-round differently).
 """
@@ -117,7 +117,7 @@ async def holoso_ffma_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_ffma(sim: str, stages: tuple[int, int, int, int, int, int, int]) -> None:
     si, sp, sd, sa, sn, spk, so = stages
-    latency = FFmaOperator(
+    operator = FFmaOperator(
         FloatFormat(8, 24),
         stage_input=si,
         stage_product=sp,
@@ -126,25 +126,14 @@ def test_holoso_ffma(sim: str, stages: tuple[int, int, int, int, int, int, int])
         stage_normalize=sn,
         stage_pack=spk,
         stage_output=so,
-    ).latency
+    )
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"ffma_{''.join(str(v) for v in stages)}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_ffma",
-        parameters={
-            "WEXP": 8,
-            "WMAN": 24,
-            "STAGE_INPUT": si,
-            "STAGE_PRODUCT": sp,
-            "STAGE_DECODE": sd,
-            "STAGE_ALIGN": sa,
-            "STAGE_NORMALIZE": sn,
-            "STAGE_PACK": spk,
-            "STAGE_OUTPUT": so,
-            "LATENCY": latency,
-        },
+        parameters=operator.params,
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
@@ -155,6 +144,6 @@ def test_holoso_ffma(sim: str, stages: tuple[int, int, int, int, int, int, int])
         test_module="tests.hdl.test_ffma",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": str(latency)},
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latency)},
         results_xml=str(build_dir / "results.xml"),
     )

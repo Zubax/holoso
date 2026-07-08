@@ -3,8 +3,9 @@
 from dataclasses import dataclass
 from typing import NamedTuple, Self
 
+import zkf
+
 from ._type import FloatFormat
-from ._zkf import Zkf, ZkfFormat
 
 
 class SortResult(NamedTuple):
@@ -53,23 +54,20 @@ class FloatValue:
             raise TypeError(f"value must be float, got {type(value).__name__}")
         return cls.from_bits(fmt, fmt.encode(value))
 
-    def _zval(self) -> Zkf:
-        return ZkfFormat(self.fmt.wexp, self.fmt.wman).wrap(self.bits)
-
     def __float__(self) -> float:
         return self.fmt.decode(self.bits)
 
     @property
     def negative(self) -> bool:
-        return self._zval().negative
+        return self._zval.negative
 
     @property
     def exponent(self) -> int:
-        return self._zval().exp
+        return self._zval.exp
 
     def apply_sign(self, *, negate: bool, absolute: bool) -> "FloatValue":
         """Apply the sign conditioner of ``holoso_fsgnop``: absolute value first, then optional negation."""
-        value = self._zval()
+        value = self._zval
         if absolute:
             value = abs(value)
         if negate:
@@ -78,16 +76,16 @@ class FloatValue:
 
     def __add__(self, other: "FloatValue") -> "FloatValue":
         fmt = _matching_format(self, other)
-        return FloatValue.from_bits(fmt, (self._zval() + other._zval()).bits)
+        return FloatValue.from_bits(fmt, (self._zval + other._zval).bits)
 
     def __mul__(self, other: "FloatValue") -> "FloatValue":
         fmt = _matching_format(self, other)
-        return FloatValue.from_bits(fmt, (self._zval() * other._zval()).bits)
+        return FloatValue.from_bits(fmt, (self._zval * other._zval).bits)
 
     def __truediv__(self, other: "FloatValue") -> "FloatValue":
         """``zkf_div``'s error sidebands are intentionally not modeled."""
         fmt = _matching_format(self, other)
-        return FloatValue.from_bits(fmt, (self._zval() / other._zval()).bits)
+        return FloatValue.from_bits(fmt, (self._zval / other._zval).bits)
 
     def compare(self, other: "FloatValue") -> int:
         """
@@ -96,14 +94,14 @@ class FloatValue:
         equal values differ in bits.
         """
         _matching_format(self, other)
-        result = self._zval().cmp(other._zval())
+        result = self._zval.cmp(other._zval)
         return result.gt - result.lt
 
     def scale_pow2(self, k: int) -> "FloatValue":
         """Matches ``zkf_mul_ilog2_const``."""
         if isinstance(k, bool) or not isinstance(k, int):
             raise TypeError(f"k must be int, got {type(k).__name__}")
-        return FloatValue.from_bits(self.fmt, self._zval().mul_ilog2(k).bits)
+        return FloatValue.from_bits(self.fmt, self._zval.mul_ilog2(k).bits)
 
     @staticmethod
     def fma(a: "FloatValue", b: "FloatValue", c: "FloatValue") -> "FloatValue":
@@ -113,44 +111,48 @@ class FloatValue:
             raise TypeError(f"fma addend must be FloatValue, got {type(c).__name__}")
         if c.fmt != fmt:
             raise ValueError(f"operand format mismatch: {c.fmt} != {fmt}")
-        return FloatValue.from_bits(fmt, a._zval().fma(b._zval(), c._zval()).bits)
+        return FloatValue.from_bits(fmt, a._zval.fma(b._zval, c._zval).bits)
 
     @staticmethod
     def sort(a: "FloatValue", b: "FloatValue") -> SortResult:
         fmt = _matching_format(a, b)
-        lo, hi = a._zval().sort(b._zval())
+        lo, hi = a._zval.sort(b._zval)
         return SortResult(FloatValue.from_bits(fmt, lo.bits), FloatValue.from_bits(fmt, hi.bits))
 
     def round(self) -> "FloatValue":
-        return FloatValue.from_bits(self.fmt, self._zval().round().bits)
+        return FloatValue.from_bits(self.fmt, self._zval.round().bits)
 
     def floor(self) -> "FloatValue":
-        return FloatValue.from_bits(self.fmt, self._zval().floor().bits)
+        return FloatValue.from_bits(self.fmt, self._zval.floor().bits)
 
     def ceil(self) -> "FloatValue":
-        return FloatValue.from_bits(self.fmt, self._zval().ceil().bits)
+        return FloatValue.from_bits(self.fmt, self._zval.ceil().bits)
 
     def trunc(self) -> "FloatValue":
-        return FloatValue.from_bits(self.fmt, self._zval().trunc().bits)
+        return FloatValue.from_bits(self.fmt, self._zval.trunc().bits)
 
     def exp2(self) -> "FloatValue":
-        return FloatValue.from_bits(self.fmt, self._zval().exp2().bits)
+        return FloatValue.from_bits(self.fmt, self._zval.exp2().bits)
 
     def log2(self) -> "FloatValue":
         """``zkf_log2``'s domain-error/pole sidebands are intentionally not modeled (as with ``zkf_div``'s div0)."""
-        return FloatValue.from_bits(self.fmt, self._zval().log2().value.bits)
+        return FloatValue.from_bits(self.fmt, self._zval.log2().value.bits)
 
     def sincos(self) -> SinCos:
         """``(sin(2*pi*self), cos(2*pi*self))`` -- turn-native, as ``zkf_sincos``; the quadrant sideband is dropped."""
-        r = self._zval().sincos()
+        r = self._zval.sincos()
         return SinCos(FloatValue.from_bits(self.fmt, r.sin.bits), FloatValue.from_bits(self.fmt, r.cos.bits))
 
     @staticmethod
     def atan2(y: "FloatValue", x: "FloatValue") -> Atan2Result:
         """``(theta, magnitude)`` of ``atan2(y, x)`` -- theta in turns, magnitude ``hypot(y, x)`` (``zkf_atan2``)."""
         fmt = _matching_format(y, x)
-        r = y._zval().atan2(x._zval())
+        r = y._zval.atan2(x._zval)
         return Atan2Result(FloatValue.from_bits(fmt, r.theta.bits), FloatValue.from_bits(fmt, r.magnitude.bits))
+
+    @property
+    def _zval(self) -> zkf.Zkf:
+        return zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman).wrap(self.bits)
 
 
 def _check_format(fmt: FloatFormat) -> None:

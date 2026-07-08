@@ -3,15 +3,16 @@
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from enum import IntEnum
 from hashlib import blake2s
 from typing import ClassVar
 
+import zkf
+
 from ._value import FloatValue
 from ._type import BoolType, FloatFormat, FloatType, ScalarSignature, ScalarType
 from ._util import RelationalOp
-from ._zkf import ZkfFormat
 
 
 def _instance_stem_text(text: str) -> str:
@@ -191,14 +192,15 @@ class PooledHardwareOperator(HardwareOperator, ABC):
     @property
     def instance_stem(self) -> str:
         """
-        Verilog-safe physical instance stem, compactly identifying this operator family and its HDL params.
-        Override this if the operator's hardware identity is not fully captured by its mnemonic and HDL params.
+        Verilog-safe physical instance stem, compactly identifying this operator family and its RTL parameters.
+        Override this if the operator's hardware identity is not fully captured by its mnemonic and parameters.
         """
-        return _hashed_instance_stem(self.mnemonic, self.hdl_params())
+        return _hashed_instance_stem(self.mnemonic, self.params)
 
+    @property
     @abstractmethod
-    def hdl_params(self) -> dict[str, int]:
-        """Operator-specific ``#(.NAME(v))`` params; the backend prepends ``WEXP``/``WMAN``."""
+    def params(self) -> dict[str, int]:
+        """The complete RTL ``#(.NAME(value))`` parameter set (WEXP/WMAN, LATENCY, and every operator knob)."""
 
 
 @dataclass(frozen=True)
@@ -235,11 +237,19 @@ class ParameterizedHardwareOperator(ABC):
 class FloatHardwareOperator(PooledHardwareOperator, ABC):
     fmt: FloatFormat
 
+    _model: zkf.OperatorModel = field(init=False, compare=False, repr=False)
+
     @property
-    def instance_stem(self) -> str:
-        params = {"WEXP": self.fmt.wexp, "WMAN": self.fmt.wman}
-        params.update(self.hdl_params())
-        return _hashed_instance_stem(self.mnemonic, params)
+    def latency(self) -> int:
+        return self._model.latency
+
+    @property
+    def initiation_interval(self) -> int:
+        return self._model.initiation_interval
+
+    @property
+    def params(self) -> dict[str, int]:
+        return self._model.params
 
     def float_signature(self, arity: int) -> ScalarSignature:
         ty = FloatType(self.fmt)
@@ -270,30 +280,21 @@ class FAddOperator(FloatHardwareOperator):
     stage_input: int = 0  # takes any count of input register stages (extra stages relieve routing congestion)
     stage_decode: int = 0
     stage_align: int = 0
-    stage_normalize: int = 0  # close-cancellation normshift barriers, 0..2 (forwarded to _zkf_normshift.STAGE_SPLIT)
+    stage_normalize: int = 0
     stage_pack: int = 0
     stage_output: int = 0
 
     def __post_init__(self) -> None:
-        if self.stage_input < 0:
-            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
-        for field in ("stage_decode", "stage_align", "stage_pack", "stage_output"):
-            if getattr(self, field) not in (0, 1):
-                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
-        if self.stage_normalize not in (0, 1, 2):
-            raise ValueError(f"stage_normalize must be 0, 1, or 2; got {self.stage_normalize!r}")
-
-    @property
-    def latency(self) -> int:
-        return (
-            4
-            + self.stage_input
-            + self.stage_decode
-            + self.stage_align
-            + self.stage_normalize
-            + self.stage_pack
-            + self.stage_output
+        model = zkf.AddModel(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
+            stage_input=self.stage_input,
+            stage_decode=self.stage_decode,
+            stage_align=self.stage_align,
+            stage_normalize=self.stage_normalize,
+            stage_pack=self.stage_pack,
+            stage_output=self.stage_output,
         )
+        object.__setattr__(self, "_model", model)
 
     @property
     def signature(self) -> ScalarSignature:
@@ -307,16 +308,6 @@ class FAddOperator(FloatHardwareOperator):
         a, b = operands
         return f"{a}+{b}"
 
-    def hdl_params(self) -> dict[str, int]:
-        return {
-            "STAGE_INPUT": self.stage_input,
-            "STAGE_DECODE": self.stage_decode,
-            "STAGE_ALIGN": self.stage_align,
-            "STAGE_NORMALIZE": self.stage_normalize,
-            "STAGE_PACK": self.stage_pack,
-            "STAGE_OUTPUT": self.stage_output,
-        }
-
 
 @dataclass(frozen=True, slots=True)
 class FMulOperator(FloatHardwareOperator):
@@ -328,17 +319,14 @@ class FMulOperator(FloatHardwareOperator):
     stage_output: int = 0
 
     def __post_init__(self) -> None:
-        if self.stage_input < 0:
-            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
-        for field in ("stage_pack", "stage_output"):
-            if getattr(self, field) not in (0, 1):
-                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
-        if self.stage_product not in range(5):
-            raise ValueError(f"stage_product invalid: {self.stage_product!r}")
-
-    @property
-    def latency(self) -> int:
-        return 1 + self.stage_input + self.stage_product + self.stage_pack + self.stage_output
+        model = zkf.MulModel(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
+            stage_input=self.stage_input,
+            stage_product=self.stage_product,
+            stage_pack=self.stage_pack,
+            stage_output=self.stage_output,
+        )
+        object.__setattr__(self, "_model", model)
 
     @property
     def signature(self) -> ScalarSignature:
@@ -352,14 +340,6 @@ class FMulOperator(FloatHardwareOperator):
         a, b = operands
         return f"{a}×{b}"
 
-    def hdl_params(self) -> dict[str, int]:
-        return {
-            "STAGE_INPUT": self.stage_input,
-            "STAGE_PRODUCT": self.stage_product,
-            "STAGE_PACK": self.stage_pack,
-            "STAGE_OUTPUT": self.stage_output,
-        }
-
 
 @dataclass(frozen=True, slots=True)
 class FDivOperator(FloatHardwareOperator):
@@ -370,16 +350,13 @@ class FDivOperator(FloatHardwareOperator):
     stage_output: int = 0
 
     def __post_init__(self) -> None:
-        if self.stage_input < 0:
-            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
-        for field in ("stage_pack", "stage_output"):
-            if getattr(self, field) not in (0, 1):
-                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
-
-    @property
-    def latency(self) -> int:
-        w = self.fmt.wman
-        return 2 + self.stage_input + ((w + 2 + ((w + 2) % 2)) // 2) + self.stage_pack + self.stage_output
+        model = zkf.DivModel(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
+            stage_input=self.stage_input,
+            stage_pack=self.stage_pack,
+            stage_output=self.stage_output,
+        )
+        object.__setattr__(self, "_model", model)
 
     @property
     def signature(self) -> ScalarSignature:
@@ -393,9 +370,6 @@ class FDivOperator(FloatHardwareOperator):
         a, b = operands
         return f"{a}/{b}"
 
-    def hdl_params(self) -> dict[str, int]:
-        return {"STAGE_INPUT": self.stage_input, "STAGE_PACK": self.stage_pack, "STAGE_OUTPUT": self.stage_output}
-
 
 @dataclass(frozen=True, slots=True)
 class FMulILog2Operator(FloatHardwareOperator):
@@ -407,17 +381,13 @@ class FMulILog2Operator(FloatHardwareOperator):
     stage_decode: int = 0
 
     def __post_init__(self) -> None:
-        limit = (1 << self.fmt.wexp) - 2
-        if self.k < -limit or self.k >= limit:
-            raise ValueError(f"k must satisfy {-limit} <= k < {limit} for {self.fmt}; got {self.k!r}")
-        if self.stage_input < 0:
-            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
-        if self.stage_decode not in (0, 1):
-            raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
-
-    @property
-    def latency(self) -> int:
-        return 1 + self.stage_input + self.stage_decode
+        model = zkf.MulIlog2ConstModel(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
+            k=self.k,
+            stage_input=self.stage_input,
+            stage_decode=self.stage_decode,
+        )
+        object.__setattr__(self, "_model", model)
 
     @property
     def signature(self) -> ScalarSignature:
@@ -431,9 +401,6 @@ class FMulILog2Operator(FloatHardwareOperator):
         (a,) = operands
         return f"{a}×2^{self.k}"
 
-    def hdl_params(self) -> dict[str, int]:
-        return {"K": self.k, "STAGE_INPUT": self.stage_input, "STAGE_DECODE": self.stage_decode}
-
 
 @dataclass(frozen=True, slots=True)
 class FMulILog2OperatorFamily(FloatParameterizedHardwareOperator):
@@ -441,12 +408,6 @@ class FMulILog2OperatorFamily(FloatParameterizedHardwareOperator):
 
     stage_input: int = 0
     stage_decode: int = 0
-
-    def __post_init__(self) -> None:
-        if self.stage_input < 0:
-            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
-        if self.stage_decode not in (0, 1):
-            raise ValueError(f"stage_decode must be 0 or 1; got {self.stage_decode!r}")
 
     def instantiate(self, *params: int) -> FMulILog2Operator:
         (k,) = params
@@ -494,12 +455,8 @@ class FCmpOperator(FloatHardwareOperator):
     stage_input: int = 0
 
     def __post_init__(self) -> None:
-        if self.stage_input < 0:
-            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
-
-    @property
-    def latency(self) -> int:
-        return 1 + self.stage_input
+        model = zkf.CmpModel(zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman), stage_input=self.stage_input)
+        object.__setattr__(self, "_model", model)
 
     @property
     def signature(self) -> ScalarSignature:
@@ -522,9 +479,6 @@ class FCmpOperator(FloatHardwareOperator):
         assert isinstance(conditioner, BoolInversion)
         a, b = operands
         return f"{a}{self._RELATION_SYMBOL[self._RELATION_OF_TAP[(port, conditioner)]]}{b}"
-
-    def hdl_params(self) -> dict[str, int]:
-        return {"STAGE_INPUT": self.stage_input}
 
     def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
         a, b = self._validated_operands(operands, 2)
@@ -563,17 +517,16 @@ class FRoundOperator(FloatHardwareOperator):
     }
 
     def __post_init__(self) -> None:
-        if self.stage_input < 0:
-            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
-        for field in ("stage_decode", "stage_pack", "stage_output"):
-            if getattr(self, field) not in (0, 1):
-                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
+        model = zkf.RoundModel(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
+            stage_input=self.stage_input,
+            stage_decode=self.stage_decode,
+            stage_pack=self.stage_pack,
+            stage_output=self.stage_output,
+        )
+        object.__setattr__(self, "_model", model)
         if self.latency < 1:
             raise ValueError("fround needs at least one register stage (a pooled operator must have latency >= 1)")
-
-    @property
-    def latency(self) -> int:
-        return self.stage_input + self.stage_decode + self.stage_pack + self.stage_output
 
     @property
     def signature(self) -> ScalarSignature:
@@ -588,14 +541,6 @@ class FRoundOperator(FloatHardwareOperator):
         (a,) = operands
         (mode,) = immediates
         return f"{self.Mode(mode).name.lower()}({a})"
-
-    def hdl_params(self) -> dict[str, int]:
-        return {
-            "STAGE_INPUT": self.stage_input,
-            "STAGE_DECODE": self.stage_decode,
-            "STAGE_PACK": self.stage_pack,
-            "STAGE_OUTPUT": self.stage_output,
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,28 +560,17 @@ class FFmaOperator(FloatHardwareOperator):
     stage_output: int = 0
 
     def __post_init__(self) -> None:
-        if self.stage_input < 0:
-            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
-        for field in ("stage_decode", "stage_align", "stage_pack", "stage_output"):
-            if getattr(self, field) not in (0, 1):
-                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
-        if self.stage_normalize not in (0, 1, 2):
-            raise ValueError(f"stage_normalize must be 0, 1, or 2; got {self.stage_normalize!r}")
-        if self.stage_product not in range(5):
-            raise ValueError(f"stage_product invalid: {self.stage_product!r}")
-
-    @property
-    def latency(self) -> int:
-        return (
-            5
-            + self.stage_input
-            + self.stage_product
-            + self.stage_decode
-            + self.stage_align
-            + self.stage_normalize
-            + self.stage_pack
-            + self.stage_output
+        model = zkf.FmaModel(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
+            stage_input=self.stage_input,
+            stage_product=self.stage_product,
+            stage_decode=self.stage_decode,
+            stage_align=self.stage_align,
+            stage_normalize=self.stage_normalize,
+            stage_pack=self.stage_pack,
+            stage_output=self.stage_output,
         )
+        object.__setattr__(self, "_model", model)
 
     @property
     def signature(self) -> ScalarSignature:
@@ -649,17 +583,6 @@ class FFmaOperator(FloatHardwareOperator):
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         a, b, c = operands
         return f"{a}×{b}+{c}"
-
-    def hdl_params(self) -> dict[str, int]:
-        return {
-            "STAGE_INPUT": self.stage_input,
-            "STAGE_PRODUCT": self.stage_product,
-            "STAGE_DECODE": self.stage_decode,
-            "STAGE_ALIGN": self.stage_align,
-            "STAGE_NORMALIZE": self.stage_normalize,
-            "STAGE_PACK": self.stage_pack,
-            "STAGE_OUTPUT": self.stage_output,
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -677,12 +600,8 @@ class FSortOperator(FloatHardwareOperator):
     stage_input: int = 0
 
     def __post_init__(self) -> None:
-        if self.stage_input < 0:
-            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
-
-    @property
-    def latency(self) -> int:
-        return 1 + self.stage_input
+        model = zkf.SortModel(zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman), stage_input=self.stage_input)
+        object.__setattr__(self, "_model", model)
 
     @property
     def signature(self) -> ScalarSignature:
@@ -704,9 +623,6 @@ class FSortOperator(FloatHardwareOperator):
         a, b = operands
         return conditioner.decorate(f"{self.output_hdl_ports[port]}({a}, {b})")
 
-    def hdl_params(self) -> dict[str, int]:
-        return {"STAGE_INPUT": self.stage_input}
-
 
 @dataclass(frozen=True, slots=True)
 class FExp2Operator(FloatHardwareOperator):
@@ -718,25 +634,15 @@ class FExp2Operator(FloatHardwareOperator):
     stage_output: int = 0
 
     def __post_init__(self) -> None:
-        if self.stage_input < 0:
-            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
-        if self.stage_product not in range(5):
-            raise ValueError(f"stage_product invalid: {self.stage_product!r}")
-        for field in ("stage_reduce", "stage_pack", "stage_output"):
-            if getattr(self, field) not in (0, 1):
-                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
-
-    @property
-    def latency(self) -> int:
-        degree = ZkfFormat(self.fmt.wexp, self.fmt.wman).exp2_poly_degree
-        return (
-            self.stage_input
-            + self.stage_reduce
-            + 4
-            + degree * (2 + self.stage_product)
-            + self.stage_pack
-            + self.stage_output
+        model = zkf.Exp2Model(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
+            stage_input=self.stage_input,
+            stage_reduce=self.stage_reduce,
+            stage_product=self.stage_product,
+            stage_pack=self.stage_pack,
+            stage_output=self.stage_output,
         )
+        object.__setattr__(self, "_model", model)
 
     @property
     def signature(self) -> ScalarSignature:
@@ -749,15 +655,6 @@ class FExp2Operator(FloatHardwareOperator):
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         (a,) = operands
         return f"2^{a}"
-
-    def hdl_params(self) -> dict[str, int]:
-        return {
-            "STAGE_INPUT": self.stage_input,
-            "STAGE_REDUCE": self.stage_reduce,
-            "STAGE_PRODUCT": self.stage_product,
-            "STAGE_PACK": self.stage_pack,
-            "STAGE_OUTPUT": self.stage_output,
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -774,31 +671,18 @@ class FLog2Operator(FloatHardwareOperator):
     stage_output: int = 0
 
     def __post_init__(self) -> None:
-        if self.stage_input < 0:
-            raise ValueError(f"stage_input must be >= 0; got {self.stage_input!r}")
-        for field in ("stage_product", "stage_product_final"):
-            if getattr(self, field) not in range(5):
-                raise ValueError(f"{field} invalid: {getattr(self, field)!r}")
-        if self.stage_normalize not in (0, 1, 2):
-            raise ValueError(f"stage_normalize must be 0, 1, or 2; got {self.stage_normalize!r}")
-        for field in ("stage_decode", "stage_normalize_output", "stage_pack", "stage_output"):
-            if getattr(self, field) not in (0, 1):
-                raise ValueError(f"{field} must be 0 or 1; got {getattr(self, field)!r}")
-
-    @property
-    def latency(self) -> int:
-        degree = ZkfFormat(self.fmt.wexp, self.fmt.wman).log2_poly_degree
-        return (
-            self.stage_input
-            + self.stage_decode
-            + 5
-            + self.stage_product_final
-            + self.stage_normalize
-            + self.stage_normalize_output
-            + self.stage_pack
-            + degree * (2 + self.stage_product)
-            + self.stage_output
+        model = zkf.Log2Model(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
+            stage_input=self.stage_input,
+            stage_decode=self.stage_decode,
+            stage_product=self.stage_product,
+            stage_product_final=self.stage_product_final,
+            stage_normalize=self.stage_normalize,
+            stage_normalize_output=self.stage_normalize_output,
+            stage_pack=self.stage_pack,
+            stage_output=self.stage_output,
         )
+        object.__setattr__(self, "_model", model)
 
     @property
     def signature(self) -> ScalarSignature:
@@ -811,18 +695,6 @@ class FLog2Operator(FloatHardwareOperator):
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         (a,) = operands
         return f"log2({a})"
-
-    def hdl_params(self) -> dict[str, int]:
-        return {
-            "STAGE_INPUT": self.stage_input,
-            "STAGE_DECODE": self.stage_decode,
-            "STAGE_PRODUCT": self.stage_product,
-            "STAGE_PRODUCT_FINAL": self.stage_product_final,
-            "STAGE_NORMALIZE": self.stage_normalize,
-            "STAGE_NORMALIZE_OUTPUT": self.stage_normalize_output,
-            "STAGE_PACK": self.stage_pack,
-            "STAGE_OUTPUT": self.stage_output,
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -838,31 +710,6 @@ class _FCordicOperator(FloatHardwareOperator, ABC):
     stage_pack: int = 0
     stage_output: int = 0
 
-    def __post_init__(self) -> None:
-        if not (self.unroll100 == 50 or (self.unroll100 >= 100 and self.unroll100 % 100 == 0)):
-            raise ValueError(f"unroll100 must be 50 or a positive multiple of 100; got {self.unroll100!r}")
-        for name in ("stage_input", "stage_pack", "stage_output"):
-            if getattr(self, name) not in (0, 1):
-                raise ValueError(f"{name} must be 0 or 1; got {getattr(self, name)!r}")
-        if self.stage_product not in range(5):
-            raise ValueError(f"stage_product invalid: {self.stage_product!r}")
-        if self.stage_normalize not in (0, 1, 2):
-            raise ValueError(f"stage_normalize must be 0, 1, or 2; got {self.stage_normalize!r}")
-
-    @property
-    def initiation_interval(self) -> int:
-        return self.latency + 1
-
-    def hdl_params(self) -> dict[str, int]:
-        return {
-            "UNROLL100": self.unroll100,
-            "STAGE_INPUT": self.stage_input,
-            "STAGE_PRODUCT": self.stage_product,
-            "STAGE_NORMALIZE": self.stage_normalize,
-            "STAGE_PACK": self.stage_pack,
-            "STAGE_OUTPUT": self.stage_output,
-        }
-
     def render_output(
         self, port: int, conditioner: "PortConditioner", *operands: str, immediates: tuple[int, ...] = ()
     ) -> str:
@@ -875,23 +722,17 @@ class FSincosOperator(_FCordicOperator):
     mnemonic: ClassVar[str] = "fsincos"
     output_hdl_ports: ClassVar[list[str]] = ["sin", "cos"]
 
-    @property
-    def latency(self) -> int:
-        # Reproduces zkf_sincos.v's LATENCY_REF exactly (elaboration-checked). SAVED is the core's PARALLEL fast-path
-        # overlap, active only for unroll100 < 100 (where the RTL derives PARALLEL = 1).
-        k = ZkfFormat(self.fmt.wexp, self.fmt.wman).sincos_iterations
-        xycyc = (k * 100 + self.unroll100 - 1) // self.unroll100
-        saved = min(xycyc - k, 1 + self.stage_product) if self.unroll100 < 100 else 0
-        return (
-            11
-            + 2 * self.stage_product
-            + xycyc
-            - saved
-            + self.stage_input
-            + self.stage_normalize
-            + self.stage_pack
-            + self.stage_output
+    def __post_init__(self) -> None:
+        model = zkf.SincosModel(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
+            unroll100=self.unroll100,
+            stage_input=self.stage_input,
+            stage_product=self.stage_product,
+            stage_normalize=self.stage_normalize,
+            stage_pack=self.stage_pack,
+            stage_output=self.stage_output,
         )
+        object.__setattr__(self, "_model", model)
 
     @property
     def signature(self) -> ScalarSignature:
@@ -912,21 +753,17 @@ class FAtan2Operator(_FCordicOperator):
     mnemonic: ClassVar[str] = "fatan2"
     output_hdl_ports: ClassVar[list[str]] = ["theta", "mag"]
 
-    @property
-    def latency(self) -> int:
-        geom = ZkfFormat(self.fmt.wexp, self.fmt.wman)
-        xycyc = (geom.atan2_iterations * 100 + self.unroll100 - 1) // self.unroll100
-        divcyc = (geom.atan2_divider_width + 1) // 2 + 1
-        return (
-            8
-            + self.stage_input
-            + xycyc
-            + divcyc
-            + self.stage_product
-            + self.stage_normalize
-            + self.stage_pack
-            + self.stage_output
+    def __post_init__(self) -> None:
+        model = zkf.Atan2Model(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
+            unroll100=self.unroll100,
+            stage_input=self.stage_input,
+            stage_product=self.stage_product,
+            stage_normalize=self.stage_normalize,
+            stage_pack=self.stage_pack,
+            stage_output=self.stage_output,
         )
+        object.__setattr__(self, "_model", model)
 
     @property
     def signature(self) -> ScalarSignature:

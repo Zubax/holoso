@@ -107,14 +107,14 @@ CONFIG_MATRIX = [(k, 0) for k in K_VALUES] + [(0, 1)]
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fmul_ilog2_const(sim: str, config: tuple[int, int]) -> None:
     k, stage_decode = config
-    latency = FMulILog2Operator(fmt=FloatFormat(8, 24), k=0, stage_decode=stage_decode).latency
+    operator = FMulILog2Operator(fmt=FloatFormat(8, 24), k=k, stage_decode=stage_decode)
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fmlog_k{k}_d{stage_decode}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_fmul_ilog2_const",
-        parameters={"WEXP": 8, "WMAN": 24, "K": k, "STAGE_DECODE": stage_decode, "LATENCY": latency},
+        parameters=operator.params,
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
@@ -127,7 +127,7 @@ def test_holoso_fmul_ilog2_const(sim: str, config: tuple[int, int]) -> None:
         build_dir=build_dir,
         extra_env={
             "HOLOSO_TEST_K": str(k),
-            "HOLOSO_EXPECTED_LATENCY": str(latency),
+            "HOLOSO_EXPECTED_LATENCY": str(operator.latency),
         },
         results_xml=str(build_dir / "results.xml"),
     )

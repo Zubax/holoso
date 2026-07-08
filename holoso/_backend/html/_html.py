@@ -91,7 +91,7 @@ def _stage_config(lir: Lir) -> str:
         seen.setdefault(inst.operator, None)
     rows = 0
     for op in seen:
-        for param, value in op.hdl_params().items():
+        for param, value in op.params.items():
             out.append(f"<tr><td>{_esc(op.instance_stem)}</td><td>{_esc(param)}</td><td>{value}</td></tr>")
             rows += 1
     if rows == 0:

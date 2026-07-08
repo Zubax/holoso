@@ -231,7 +231,7 @@ _ZKF_F32 = holoso.FloatFormat(8, 24)
 def fma_oracle_bits(a_bits: int, b_bits: int, c_bits: int) -> int:
     """
     Reference fused multiply-add a*b + c (single rounding) for ZKF-legal float32 inputs, via the exact
-    ``FloatValue.fma``. The vendored zkf_fma RTL is the independent hardware anchor; this bench proves the two agree
+    ``FloatValue.fma``. The packaged zkf_fma RTL is the independent hardware anchor; this bench proves the two agree
     bit-for-bit. No None case: ZKF has no NaN, so fma of legal inputs is always a legal value.
     """
     a = holoso.FloatValue.from_bits(_ZKF_F32, a_bits)

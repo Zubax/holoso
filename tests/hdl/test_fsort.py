@@ -124,14 +124,14 @@ async def holoso_fsort_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("stage_input", (0, 1, 2), ids=lambda s: f"i{s}")
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fsort(sim: str, stage_input: int) -> None:
-    latency = FSortOperator(FloatFormat(8, 24), stage_input=stage_input).latency
+    operator = FSortOperator(FloatFormat(8, 24), stage_input=stage_input)
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fsort_i{stage_input}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_fsort",
-        parameters={"WEXP": 8, "WMAN": 24, "STAGE_INPUT": stage_input, "LATENCY": latency},
+        parameters=operator.params,
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
@@ -142,6 +142,6 @@ def test_holoso_fsort(sim: str, stage_input: int) -> None:
         test_module="tests.hdl.test_fsort",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": str(latency)},
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latency)},
         results_xml=str(build_dir / "results.xml"),
     )

@@ -14,6 +14,8 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
+from holoso import FCmpOperator, FloatFormat
+
 from .hdl_float_oracle import (
     DIRECTED_F32,
     PipelineScoreboard,
@@ -129,13 +131,14 @@ async def holoso_fcmp_cocotb(dut: Any) -> None:
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fcmp(sim: str) -> None:
+    operator = FCmpOperator(FloatFormat(8, 24))
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / "fcmp"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_fcmp",
-        parameters={"WEXP": 8, "WMAN": 24, "LATENCY": 1},
+        parameters=operator.params,
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
@@ -146,6 +149,6 @@ def test_holoso_fcmp(sim: str) -> None:
         test_module="tests.hdl.test_fcmp",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": "1"},
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latency)},
         results_xml=str(build_dir / "results.xml"),
     )

@@ -15,9 +15,9 @@ from holoso import (
     FCmpOperator,
     FDivOperator,
     FloatFormat,
-    FloatValue,
     FMulILog2OperatorFamily,
     FMulOperator,
+    FSortOperator,
     OpConfig,
     UnsupportedConstruct,
 )
@@ -344,13 +344,6 @@ def test_error_gate_ors_over_multiple_landing_registers() -> None:
 
 
 def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Path) -> None:
-    # No shipped operator has several WIDE outputs yet (fsort will), so the per-port wide lane machinery -- per-output
-    # sign-conditioner fields plus the per-register write opcodes, each result driven combinationally from the operator
-    # into its register write -- is exercised with a synthetic two-output operator on a hand-built
-    # Lir, down to Icarus elaboration against a matching stub module.
-    from dataclasses import dataclass
-    from typing import ClassVar
-
     from holoso._lir import (
         FloatInputLoad,
         FloatOperand,
@@ -365,39 +358,12 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         boundary_step,
     )
     from holoso._lir._ir import BoolRegFileLayout
-    from holoso._operators import FloatHardwareOperator, FloatSignControl
-    from holoso._type import ScalarSignature, FloatType as ScalarFloatType
+    from holoso._operators import FloatSignControl
 
     _FETCH_LAG = 2  # datapath lag matching the 3-stage control fetch: one less than fetch_stages
 
-    @dataclass(frozen=True, slots=True)
-    class _SortLike(FloatHardwareOperator):
-        mnemonic: ClassVar[str] = "fsortlike"
-        output_hdl_ports: ClassVar[list[str]] = ["min", "max"]
-
-        @property
-        def latency(self) -> int:
-            return 1
-
-        @property
-        def signature(self) -> ScalarSignature:
-            ty = ScalarFloatType(self.fmt)
-            return ScalarSignature((ty, ty), (ty, ty))
-
-        def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
-            return f"sortlike({operands[0]},{operands[1]})"
-
-        def hdl_params(self) -> dict[str, int]:
-            return {}
-
-        def evaluate(
-            self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()
-        ) -> tuple[FloatValue | bool, ...]:
-            a, b = self._validated_operands(operands, 2)
-            return (a, b)  # semantics are irrelevant here; only the lane structure is under test
-
     fmt = FloatFormat(6, 18)
-    inst = OperatorInstance(_SortLike(fmt), 0)
+    inst = OperatorInstance(FSortOperator(fmt), 0)
     op = PooledScheduledOp(
         inst=inst,
         operands=[FloatOperand(RegRef(0)), FloatOperand(RegRef(1))],
@@ -406,11 +372,11 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
             PortWrite(1, RegRef(3), FloatSignControl(negate=True)),
         ],
         issue_cycle=1,
-        latency=1,
+        latency=inst.operator.latency,
         immediates=(),
     )
     lir = Lir(
-        module_name="sortlike_probe",
+        module_name="fsort_probe",
         instances=[inst],
         float_consts=[],
         float_format=fmt,
@@ -433,41 +399,15 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         # Each per-port result is a combinational output wire (s_..._y{q}, no _q register) that drives the register
         # write directly.
         assert f"_y{q}_q" not in verilog, "the per-port result register must not be emitted"
+        assert re.search(rf"wire\s+\[W-1:0\]\s+s_fsort_\w+_0_y{q}\s*;", verilog), "per-port combinational result wire"
         assert re.search(
-            rf"wire\s+\[W-1:0\]\s+s_fsortlike_\w+_0_y{q}\s*;", verilog
-        ), "per-port combinational result wire"
-        assert re.search(
-            rf"regs\[\d+\] <= s_fsortlike_\w+_0_y{q}\b", verilog
+            rf"regs\[\d+\] <= s_fsort_\w+_0_y{q}\b", verilog
         ), "the wide write must read the combinational output wire directly"
-        assert re.search(rf"uc_fsortlike_\w+_0_y{q}sgn\b", verilog)
+        assert re.search(rf"uc_fsort_\w+_0_y{q}sgn\b", verilog)
     assert ".min(" in verilog and ".max(" in verilog and ".min_sgnop(" in verilog and ".max_sgnop(" in verilog
     if shutil.which("iverilog") is None:
         pytest.skip("iverilog not installed")
-    stub = """
-module holoso_fsortlike#(parameter WEXP=6, parameter WMAN=18, parameter integer LATENCY=0) (
-    input  wire clk, input wire rst, input wire in_valid,
-    input  wire [1:0] a_sgnop, input wire [1:0] b_sgnop,
-    input  wire [1:0] min_sgnop, input wire [1:0] max_sgnop,
-    input  wire [WEXP+WMAN-1:0] a, input wire [WEXP+WMAN-1:0] b,
-    output wire out_valid,
-    output wire [WEXP+WMAN-1:0] min, output wire [WEXP+WMAN-1:0] max
-);
-    assign out_valid = 1'b0;
-    assign min = a;
-    assign max = b;
-endmodule
-"""
-    top = tmp_path / "sortlike_probe.v"
-    top.write_text(verilog)
-    (tmp_path / "stub.v").write_text(stub)
-    result = subprocess.run(
-        ["iverilog", "-g2012", "-I", str(HDL_DIR), "-s", "sortlike_probe", "-o", str(tmp_path / "out")]
-        + [str(top), str(tmp_path / "stub.v")]
-        + [str(s) for s in sources()],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
+    _elaborate("fsort_probe", verilog, tmp_path)
 
 
 def _and_gate(a: bool, b: bool, /) -> bool:

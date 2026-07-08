@@ -1990,10 +1990,21 @@ def test_fmul_ilog2_operator_rejects_out_of_range_k() -> None:
     limit = (1 << FMT.wexp) - 2
     assert FMulILog2Operator(FMT, k=-limit).k == -limit
     assert FMulILog2Operator(FMT, k=limit - 1).k == limit - 1
-    with pytest.raises(ValueError, match="k must satisfy"):
+    with pytest.raises(ValueError, match="outside"):
         FMulILog2Operator(FMT, k=limit)
-    with pytest.raises(ValueError, match="k must satisfy"):
+    with pytest.raises(ValueError, match="outside"):
         FMulILog2Operator(FMT, k=-limit - 1)
+
+
+def test_float_operator_rejects_bad_stage_knob_at_construction() -> None:
+    with pytest.raises(ValueError, match="outside"):
+        FAddOperator(FMT, stage_decode=7)
+
+
+def test_default_ops_omits_transcendentals_unrealizable_on_narrow_formats() -> None:
+    ops = default_ops(FloatFormat(4, 8))
+    assert ops.flog2 is None and ops.fsincos is None and ops.fatan2 is None
+    assert ops.fadd is not None
 
 
 def _read_mux_fan_in(lir: Lir) -> int:

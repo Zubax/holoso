@@ -119,7 +119,7 @@ def test_holoso_flog2(sim: str, stages: dict[str, int]) -> None:
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_flog2",
-        parameters={"WEXP": 8, "WMAN": 24, **operator.hdl_params(), "LATENCY": operator.latency},
+        parameters=operator.params,
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,

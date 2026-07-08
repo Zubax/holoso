@@ -119,13 +119,13 @@ async def holoso_fround_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fround(sim: str, stages: tuple[int, int, int, int]) -> None:
     stage_input, stage_decode, stage_pack, stage_output = stages
-    latency = FRoundOperator(
+    operator = FRoundOperator(
         FloatFormat(8, 24),
         stage_input=stage_input,
         stage_decode=stage_decode,
         stage_pack=stage_pack,
         stage_output=stage_output,
-    ).latency
+    )
     runner = get_runner(sim)
     build_dir = (
         REPO_ROOT / "build" / "cocotb" / sim / f"fround_i{stage_input}d{stage_decode}p{stage_pack}o{stage_output}"
@@ -134,15 +134,7 @@ def test_holoso_fround(sim: str, stages: tuple[int, int, int, int]) -> None:
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_fround",
-        parameters={
-            "WEXP": 8,
-            "WMAN": 24,
-            "STAGE_INPUT": stage_input,
-            "STAGE_DECODE": stage_decode,
-            "STAGE_PACK": stage_pack,
-            "STAGE_OUTPUT": stage_output,
-            "LATENCY": latency,
-        },
+        parameters=operator.params,
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
@@ -153,6 +145,6 @@ def test_holoso_fround(sim: str, stages: tuple[int, int, int, int]) -> None:
         test_module="tests.hdl.test_fround",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": str(latency)},
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latency)},
         results_xml=str(build_dir / "results.xml"),
     )

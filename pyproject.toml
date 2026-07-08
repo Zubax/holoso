@@ -43,6 +43,7 @@ classifiers = [
 dependencies = [
     "numpy~=2.4",
     "scipy~=1.17",
+    "zkf~=0.2.1",
 ]
 
 [project.optional-dependencies]
@@ -67,7 +68,6 @@ include = ["holoso*"]
 [tool.setuptools.package-data]
 "holoso._backend.verilog" = ["*.v", "*.vh"]
 "holoso._backend.html" = ["*.css", "*.js"]
-"holoso._zkf" = ["rtl/**/*.v", "README.md"]
 "holoso" = ["py.typed"]
 
 [tool.pytest.ini_options]
@@ -86,7 +86,6 @@ markers = [
 [tool.black]
 line-length = 120
 target-version = ["py312"]
-extend-exclude = "holoso/_zkf/_model/"  # vendored third-party model; kept verbatim so re-vendoring stays churn-free
 
 [tool.mypy]
 python_version = "3.14"
@@ -96,7 +95,3 @@ files = ["holoso", "tests", "examples", "synth", "tools"]
 [[tool.mypy.overrides]]
 module = ["scipy.*", "cocotb.*", "cocotb_tools.*"]
 ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["holoso._zkf._model.*"]  # vendored third-party model; not held to Holoso's strict typing
-ignore_errors = true

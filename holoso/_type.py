@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from ._zkf import ZkfFormat
+import zkf
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +42,7 @@ class FloatFormat:
     ``holoso_support.v``. The total port width is ``wexp + wman`` (a sign bit, ``wexp`` exponent bits, and
     ``wman - 1`` stored significand bits).
 
-    Engine-agnostic float facade: the codec delegates to the vendored bit-exact ZKF model, which is the single source
+    Engine-agnostic float facade: the codec delegates to the bit-exact ZKF model, which is the single source
     of numeric truth. ``exp == 0`` is zero and the all-ones exponent is infinity; ZKF has no subnormals.
     """
 
@@ -56,8 +56,8 @@ class FloatFormat:
             raise ValueError(f"wman must be >= 4, got {self.wman}")
 
     @property
-    def _zfmt(self) -> ZkfFormat:
-        return ZkfFormat(self.wexp, self.wman)
+    def _zfmt(self) -> zkf.ZkfFormat:
+        return zkf.ZkfFormat(self.wexp, self.wman)
 
     def encode(self, value: float) -> int:
         """NaN is rejected; ZKF has no NaN."""

@@ -5,8 +5,10 @@ Assemble the shared support library that every Holoso-generated module instantia
 import logging
 from functools import cache
 from importlib import resources
+
+import zkf
+
 from ..._legal import output_header
-from ..._zkf import get_rtl
 
 _logger = logging.getLogger(__name__)
 
@@ -26,8 +28,8 @@ def _megafile_header() -> str:
 
 def _build_megafile() -> str:
     # Public modules sort before internal ones for readability of the assembled file.
-    modules = sorted(get_rtl().items(), key=lambda rc: (rc[0].rsplit("/", 1)[-1].startswith("_"), rc[0]))
-    assert modules, "no .v files in the vendored ZKF RTL"
+    modules = sorted(zkf.get_rtl().items(), key=lambda rc: (rc[0].rsplit("/", 1)[-1].startswith("_"), rc[0]))
+    assert modules, "no .v files in the ZKF RTL package"
     template = resources.files(__package__).joinpath(_TEMPLATE_FILE).read_text(encoding="utf-8").strip()
     blocks = [_megafile_header(), template]
     for rel, content in modules:
