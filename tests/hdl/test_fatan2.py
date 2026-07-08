@@ -111,7 +111,7 @@ def test_holoso_fatan2(sim: str, stages: dict[str, int]) -> None:
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_fatan2",
-        parameters={"WEXP": 8, "WMAN": 24, **operator.hdl_params(), "LATENCY": operator.latency},
+        parameters=operator.params,
         build_args=build_args(sim),
         defines={"SIMULATION": 1},
         build_dir=build_dir,

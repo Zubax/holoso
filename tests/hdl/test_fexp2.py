@@ -1,7 +1,7 @@
 """
 Tests for holoso_fexp2 (pipelined; y = sgnop(2 ** sgnop(a))).
 
-The oracle is the exact ZKF model (FloatValue.exp2); the vendored zkf_exp2 RTL is the independent hardware anchor, so
+The oracle is the exact ZKF model (FloatValue.exp2); the packaged zkf_exp2 RTL is the independent hardware anchor, so
 this bench proves the two agree bit-for-bit across the directed corner cases, the sign-conditioning sweep, and a random
 sweep -- at several pipeline-stage configurations that also exercise the latency contract.
 """
@@ -36,8 +36,7 @@ from .hdl_float_oracle import (
     start_clock,
 )
 
-# A few stage configurations spanning every knob and a range of latencies (not the full cross-product); keyed by the
-# operator's own field names so the DUT parameters come from hdl_params().
+# A few stage configurations spanning every knob and a range of latencies (not the full cross-product).
 STAGE_COMBOS: tuple[dict[str, int], ...] = (
     {},
     {"stage_input": 1, "stage_output": 1},
@@ -110,7 +109,7 @@ def test_holoso_fexp2(sim: str, stages: dict[str, int]) -> None:
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_fexp2",
-        parameters={"WEXP": 8, "WMAN": 24, **operator.hdl_params(), "LATENCY": operator.latency},
+        parameters=operator.params,
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,

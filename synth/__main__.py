@@ -27,15 +27,6 @@ from holoso import synthesize, FloatFormat, OpConfig
 from ._synth import BUILD_ROOT, SynthReport
 from .flows import Flow, FlowId, make_flow
 
-_RESET = "\033[0m"
-_BOLD = "\033[1m"
-_DIM = "\033[2m"
-_RED = "\033[31m"
-_GREEN = "\033[32m"
-_YELLOW = "\033[33m"
-_MAGENTA = "\033[35m"
-_CYAN = "\033[36m"
-
 
 @dataclass(frozen=True, slots=True)
 class _Failure:
@@ -196,15 +187,12 @@ def _op_config(fmt: FloatFormat, op_knobs: list[_OperatorKnob]) -> OpConfig:
     grouped_overrides: dict[str, dict[str, object]] = {}
     for override in op_knobs:
         grouped_overrides.setdefault(override.operator_name, {})[override.field_name] = override.value
-    # ffma contracts multiply-adds, altering the datapath even for kernels that never spell math.fma, so it is
-    # instantiated only when a knob opts in. Other operators are inert when unused, so they stay always available.
-    return OpConfig(
-        **{  # type: ignore
-            name: _instantiate_operator(operator_cls, fmt, grouped_overrides.get(name, {}))
-            for name, operator_cls in _op_config_operator_classes().items()
-            if name != "ffma" or "ffma" in grouped_overrides
-        }
-    )
+    operators: dict[str, object] = {}
+    for name, operator_cls in _op_config_operator_classes().items():
+        if name == "ffma" and name not in grouped_overrides:
+            continue
+        operators[name] = _instantiate_operator(operator_cls, fmt, grouped_overrides.get(name, {}))
+    return OpConfig(**operators)  # type: ignore
 
 
 def _select_flows(requests: list[_FlowRequest]) -> tuple[list[_SelectedFlow], list[FlowId]]:
@@ -236,16 +224,12 @@ def _run_flow(
 
 def _print_outcome(outcome: SynthReport | _Failure) -> None:
     if isinstance(outcome, _Failure):
-        print(
-            f"💥 {_BOLD}{_RED}{outcome.tool} FAILED{_RESET}: {outcome.message}; "
-            f"logs in {_BOLD}{outcome.directory}{_RESET}"
-        )
+        print(f"💥 {outcome.tool} FAILED: {outcome.message}; logs in {outcome.directory}")
         return
     succ = outcome.fmax_MHz >= outcome.target_frequency_MHz
-    color = _GREEN if succ else _RED
     emo = "✅" if succ else "❌"
     print(
-        f"{emo} {_BOLD}{color}{outcome.flow}: f_max {outcome.fmax_MHz:.2f} MHz{_RESET} "
+        f"{emo} {outcome.flow}: f_max {outcome.fmax_MHz:.2f} MHz "
         f"(target {outcome.target_frequency_MHz:.0f}, slack {outcome.slack_ns:+.3f} ns)"
     )
     if resources := [
@@ -253,16 +237,16 @@ def _print_outcome(outcome: SynthReport | _Failure) -> None:
         for use in outcome.resources.values()
         if use.used
     ]:
-        print(f"\t{_DIM}{'\n\t'.join(resources)}{_RESET}")
+        print(f"\t{'\n\t'.join(resources)}")
 
 
 def main() -> int:
     args = _parse_args()
     flows, skipped = _select_flows(args.flow_requests)
     if skipped:
-        print(f"{_BOLD}{_YELLOW}Skipping unavailable flows:{_RESET} {', '.join(skipped)}{_RESET}")
+        print(f"Skipping unavailable flows: {', '.join(skipped)}")
     if not flows:
-        print(f"{_BOLD}{_RED}No requested synthesis flows are available; nothing to run.{_RESET}")
+        print("No requested synthesis flows are available; nothing to run.")
         return 10
 
     fmt = FloatFormat(wexp=args.wexp, wman=args.wman)
@@ -274,7 +258,7 @@ def main() -> int:
 
     outcomes: list[SynthReport | _Failure] = []
     workers = max(2, (os.cpu_count() or 1) // 2)
-    print(f"{_BOLD}{_CYAN}Running {len(flows)} synthesis flows with ≤{workers} worker(s).{_RESET}")
+    print(f"Running {len(flows)} synthesis flows with ≤{workers} worker(s).")
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {}
         for selected in flows:
@@ -282,14 +266,13 @@ def main() -> int:
             directory = out_dir / type(flow).__name__
             ops = _op_config(fmt, selected.request.op_knobs)
             print(
-                f"🛠️ Synthesizing {_MAGENTA}{args.kernel}::{args.expression}{_RESET} as "
-                f"{_BOLD}{_MAGENTA}{name}{_RESET} using {_BOLD}{_CYAN}{flow.__class__.__name__}{_RESET} "
-                f"in {_BOLD}{directory}{_RESET}"
+                f"🛠️ Synthesizing {args.kernel}::{args.expression} as {name} "
+                f"using {flow.__class__.__name__} in {directory}"
             )
             print("⚙ Operators:")
             for field in fields(ops):
                 operator = getattr(ops, field.name)
-                print(f"    {_BOLD}{_CYAN}{field.name:12}{_RESET}: {operator}")
+                print(f"    {field.name:12}: {operator}")
             print(flush=True)
             futures[executor.submit(_run_flow, flow, ops, target, name, directory)] = flow
 

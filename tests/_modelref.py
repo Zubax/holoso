@@ -187,19 +187,24 @@ def format_edge_bits(fmt: FloatFormat) -> list[int]:
     return edges
 
 
+def _optional[T](build: Callable[[], T]) -> T | None:
+    try:
+        return build()
+    except KeyError:
+        return None
+
+
 def default_ops(fmt: FloatFormat) -> OpConfig:
-    # exp2/log2 and the CORDIC pair are configured (lean) for the transcendental/trig examples; unused operators
-    # produce no hardware.
     return OpConfig(
         FAddOperator(fmt),
         FMulOperator(fmt),
         FDivOperator(fmt),
         FMulILog2OperatorFamily(fmt),
         FCmpOperator(fmt),
-        fexp2=FExp2Operator(fmt),
-        flog2=FLog2Operator(fmt),
-        fsincos=FSincosOperator(fmt),
-        fatan2=FAtan2Operator(fmt),
+        fexp2=_optional(lambda: FExp2Operator(fmt)),
+        flog2=_optional(lambda: FLog2Operator(fmt)),
+        fsincos=_optional(lambda: FSincosOperator(fmt)),
+        fatan2=_optional(lambda: FAtan2Operator(fmt)),
     )
 
 
@@ -333,21 +338,25 @@ def staged_ops(fmt: FloatFormat) -> OpConfig:
         FDivOperator(fmt, stage_input=1, stage_pack=1, stage_output=1),
         FMulILog2OperatorFamily(fmt, stage_input=1, stage_decode=1),
         FCmpOperator(fmt, stage_input=1),
-        fexp2=FExp2Operator(fmt, stage_input=1, stage_reduce=1, stage_product=1, stage_pack=1, stage_output=1),
-        flog2=FLog2Operator(
-            fmt,
-            stage_input=1,
-            stage_decode=1,
-            stage_product=1,
-            stage_product_final=1,
-            stage_normalize=1,
-            stage_normalize_output=1,
-            stage_pack=1,
-            stage_output=1,
+        fexp2=_optional(
+            lambda: FExp2Operator(fmt, stage_input=1, stage_reduce=1, stage_product=1, stage_pack=1, stage_output=1)
+        ),
+        flog2=_optional(
+            lambda: FLog2Operator(
+                fmt,
+                stage_input=1,
+                stage_decode=1,
+                stage_product=1,
+                stage_product_final=1,
+                stage_normalize=1,
+                stage_normalize_output=1,
+                stage_pack=1,
+                stage_output=1,
+            )
         ),
         # A bench-verified CORDIC stage combo (tests/hdl/test_f{sincos,atan2}.py), so the latency formula is known-good.
-        fsincos=FSincosOperator(fmt, stage_product=1, stage_normalize=1, stage_pack=1),
-        fatan2=FAtan2Operator(fmt, stage_product=1, stage_normalize=1, stage_pack=1),
+        fsincos=_optional(lambda: FSincosOperator(fmt, stage_product=1, stage_normalize=1, stage_pack=1)),
+        fatan2=_optional(lambda: FAtan2Operator(fmt, stage_product=1, stage_normalize=1, stage_pack=1)),
     )
 
 
