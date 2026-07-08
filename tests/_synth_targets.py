@@ -464,7 +464,11 @@ TARGETS: list[SynthTarget] = [
         kernel=_imu_frame_transform_kernel,
         flow=FlowId.VIVADO_ARTIX7,
         target_frequency_MHz=150,
-        ops=op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_input=1, stage_normalize=1, stage_output=1)),
+        ops=op_config(
+            F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_input=1, stage_normalize=1, stage_output=1),
+            fmul=FMulOperator(F_e6m18, stage_input=1),
+        ),
         name="imu_frame_transform_e6m18",
     ),
     SynthTarget(
