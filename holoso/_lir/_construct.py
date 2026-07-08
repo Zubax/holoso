@@ -240,8 +240,8 @@ def build_const_pool(
     pool: dict[ValueId, PooledConst] = {}
     for vid in ids:
         value = mir.const_nodes[vid].value
-        if not math.isfinite(value):
-            raise UnsupportedConstruct(f"non-finite constant {value!r} is not representable in the ZKF format")
+        if math.isnan(value):
+            raise UnsupportedConstruct(f"Cannot represent a NaN constant. Only [in]finite numbers are supported.")
         magnitude = abs(value)
         index = magnitude_index.get(magnitude)
         if index is None:

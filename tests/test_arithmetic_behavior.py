@@ -1,11 +1,11 @@
 """
-Public-API, black-box behavioral tests for floating-point edge behavior, the full relational/boolean breadth, the
-fmul_ilog2 power-of-two strength reduction, and constant folding / static evaluation (round-3 axes B-F).
+Public-API behavioral tests for floating-point edge behavior, the full relational/boolean breadth, fmul_ilog2
+power-of-two strength reduction, trivial fast-math float folding, and constant folding / static evaluation.
 
-Every test drives the compiler ONLY through the public API (``holoso.synthesize(fn, ops).numerical_model.elaborate()``
-then the simulator's ``run``) and asserts solely on observable output VALUES -- bits for floats, identity for bools --
-never on any internal structure. The references are chosen to be FALSIFIABLE without a tolerance fudge wherever the
-hardware must be exact:
+Every test drives the compiler only through the public API (``holoso.synthesize(fn, ops)`` and the numerical simulator).
+Most assertions are on observable output values -- bits for floats, identity for bools -- while explicit operator
+selection guards inspect generated Verilog text through the public synthesis result. The references are chosen to be
+FALSIFIABLE without a tolerance fudge wherever the hardware must be exact:
 
   - Axis B (float edge behavior): kernels driven with ``format_edge_bits``-derived inputs (±0, ±smallest-normal,
     ±largest-finite, ±0.5, ±1) passed as exact ``FloatValue`` bit patterns, asserting algebraic identities the hardware
@@ -24,6 +24,9 @@ hardware must be exact:
     lowers to the fmul_ilog2 family and is EXACT (a power-of-two only shifts the exponent, barring overflow/underflow);
     a non-power-of-two constant (x*3) stays an ordinary fmul and is still correct; a power-of-two that pushes a normal
     input to overflow (largest*2 -> inf) and to underflow (smallest_normal*0.25 -> 0).
+
+  - Trivial fast-math folds: algebraic identities, zero folds, sign folds, self-division, and self-subtraction remove
+    fadd/fmul/fdiv/fmul_ilog2 hardware where policy permits, including observable sideband and signed-zero deviations.
 
   - Axis E (boolean connectives + float<->bool casts): full truth tables for ``a and b``, ``a or b``, ``a and b or c``,
     De Morgan equivalence ``not (a and b)`` == ``(not a) or (not b)``; ``float(cond)`` (exactly 0.0/1.0) feeding
@@ -349,6 +352,94 @@ def test_power_of_two_overflow_and_underflow_edges() -> None:
     assert isinstance(under, FloatValue)
     # smallest_normal * 0.125 underflows below the half-MIN_NORMAL boundary -> rounds to +0 (the format's own rule).
     assert under.bits == 0, f"smallest_normal*0.125 not +0: bits=0x{under.bits:x} ({float(under)})"
+
+
+def _trivial_float_folds(x: float, y: float) -> list[float]:
+    return [
+        x * 1.0,
+        1.0 * x,
+        x / 1.0,
+        x + 0.0,
+        0.0 + x,
+        x - 0.0,
+        0.0 - x,
+        x * 0.0,
+        0.0 * x,
+        0.0 / y,
+        x * -1.0,
+        -1.0 * x,
+        x / -1.0,
+        x / x,
+        x - x,
+    ]
+
+
+def test_trivial_fast_math_float_folds_are_operator_free_and_bit_exact() -> None:
+    result = holoso.synthesize(_trivial_float_folds, _ops(), name="trivial_float_folds")
+    verilog = result.verilog_output.verilog
+    assert "holoso_fadd #" not in verilog
+    assert "holoso_fmul #" not in verilog
+    assert "holoso_fdiv #" not in verilog
+    assert "holoso_fmul_ilog2_const" not in verilog
+
+    sim = result.numerical_model.elaborate()
+    vectors = [
+        FloatValue.from_float(FMT, 0.0),
+        FloatValue.from_bits(FMT, 1 << (FMT.width - 1)),
+        FloatValue.from_float(FMT, 1.5),
+        FloatValue.from_float(FMT, -2.0),
+        FloatValue.from_float(FMT, float("inf")),
+        FloatValue.from_float(FMT, float("-inf")),
+    ]
+    one = FloatValue.from_float(FMT, 1.0)
+    for x in vectors:
+        for y in vectors:
+            out = sim.run(x, y)
+            values: list[FloatValue] = []
+            for value in out:
+                assert isinstance(value, FloatValue)
+                values.append(value)
+            negated = x.apply_sign(negate=True, absolute=False).bits
+            expected_bits = [
+                x.bits,
+                x.bits,
+                x.bits,
+                x.bits,
+                x.bits,
+                x.bits,
+                negated,
+                0,
+                0,
+                0,
+                negated,
+                negated,
+                negated,
+                one.bits,
+                0,
+            ]
+            for index, (got, want) in enumerate(zip(values, expected_bits, strict=True)):
+                assert got.bits == want, f"fold {index} x=0x{x.bits:x} y=0x{y.bits:x}: 0x{got.bits:x} != 0x{want:x}"
+
+
+def _dynamic_div(x: float, y: float) -> float:
+    return x / y
+
+
+def test_dynamic_non_identical_division_still_emits_fdiv() -> None:
+    result = holoso.synthesize(_dynamic_div, _ops(), name="dynamic_div")
+    assert "holoso_fdiv #" in result.verilog_output.verilog
+
+
+def _div_by_zero_const(x: float) -> float:
+    return x / 0.0
+
+
+def test_nonzero_division_by_zero_constant_still_emits_fdiv_and_value_path() -> None:
+    result = holoso.synthesize(_div_by_zero_const, _ops(), name="div_by_zero_const")
+    assert "holoso_fdiv #" in result.verilog_output.verilog
+    out = result.numerical_model.elaborate().run(FloatValue.from_float(FMT, 1.0))[0]
+    assert isinstance(out, FloatValue)
+    assert math.isinf(float(out)) and float(out) > 0.0
 
 
 def _k_and(a: bool, b: bool) -> bool:

@@ -1,6 +1,7 @@
 """End-to-end tests of the public synthesize() API, the report, artifact writing, and the generated testbench."""
 
 import html
+import math
 import re
 import sys
 from pathlib import Path
@@ -24,6 +25,7 @@ def _kernel(a: float, b: float) -> float:  # module-level so inspect.getsource w
 
 
 FMT32 = FloatFormat(8, 24)
+_NAN = float("nan")
 
 
 def _ops(fmt: FloatFormat = FMT32) -> OpConfig:
@@ -84,16 +86,31 @@ def test_synthesize_threads_pipeline_stages() -> None:
     assert ".LATENCY(5)" in staged.verilog_output.verilog and ".LATENCY(3)" in staged.verilog_output.verilog
 
 
-def test_rejects_non_finite_constants() -> None:
-    def overflow(a: float) -> float:
-        return a + 1e400  # overflows to +inf, not representable in the ZKF format
+def test_rejects_nan_constants() -> None:
+    def nan_global(a: float) -> float:
+        return a + _NAN
 
     def folds_to_nan(a: float) -> float:
-        return a + (1e400 - 1e400)  # inf - inf const-folds to NaN
+        return a + (1e400 - 1e400)
 
-    for fn in (overflow, folds_to_nan):
+    for fn in (nan_global, folds_to_nan):
         with pytest.raises(holoso.UnsupportedConstruct):
             holoso.synthesize(fn, ops=_ops())
+
+
+def test_infinity_constants_are_allowed() -> None:
+    def overflow(a: float) -> float:
+        return a + 1e400
+
+    def hidden_by_fast_math(a: float) -> tuple[float, float, float]:
+        t = a + 1e400
+        return 0.0 * t, 0.0 / t, t / t
+
+    out = holoso.synthesize(overflow, ops=_ops()).numerical_model.elaborate().run(1.0)[0]
+    assert math.isinf(float(out)) and float(out) > 0.0
+
+    folded = holoso.synthesize(hidden_by_fast_math, ops=_ops()).numerical_model.elaborate().run(1.0)
+    assert [float(value) for value in folded] == [0.0, 0.0, 1.0]
 
 
 def test_write_artifacts(tmp_path: Path) -> None:

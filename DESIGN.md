@@ -291,11 +291,14 @@ Newton-Raphson reciprocal iterated to a tolerance illustrates this, on its conve
 
 ### HIR optimization
 
-HIR optimization is hardware-agnostic and ordered so each pass sees final costs: const-fold + algebraic simplify
-(SymPy-assisted) -> CSE -> strength reduction (powers of two to shifts, `x/c` to `x*(1/c)`, `x**n` to a multiply chain)
--> diamond if-conversion (after folding, so arm costs are final; before DCE, which then sweeps a converted diamond's
-now-dead condition cone) -> merge threading -> DCE. Constant folding is typed, so bool/int constants need no
-float-specific rebuilding.
+Holoso is intentionally very liberal when it comes to expression optimization.
+Bit-exactness, numerical determinism, or strict IEEE 754 compliance are anti-goals.
+
+HIR optimization is hardware-agnostic and ordered so each pass sees final costs: const-fold -> strength reduction
+(trivial fast-math identities, powers of two to shifts, `x/c` to `x*(1/c)`) -> diamond if-conversion (after folding, so
+arm costs are final; before DCE, which then sweeps a converted diamond's now-dead condition cone) -> a second
+const-fold/strength-reduction pass for the muxes created by if-conversion -> merge threading -> DCE. Constant folding
+is typed, so bool/int constants need no float-specific rebuilding.
 
 Merge threading eliminates an empty pass-through merge block -- the shape a non-convertible diamond leaves when its
 merge feeds a following control structure -- by retargeting each predecessor's jump onto the merge's successor and
@@ -303,8 +306,11 @@ composing the phi arms. A merge phi reached any other way (e.g. a loop-invariant
 back-edge arm) keeps its real branch -- deferred (see LIR DEFERRED).
 
 FP math is non-associative, so some of these optimizations may produce non-bit-exact results -- accepted, analogous to
-fast-math in C/C++ compilers. The transcendental folds likewise take the ideal (infinite-precision) result,
-so a folded constant can differ from the datapath's own value.
+fast-math in C/C++ compilers. Division identities may also rewrite zero/infinity special cases and drop sidebands when
+they remove an error-bearing op; sign/identity folds may preserve or expose a zero sign through raw sign conditioning.
+NaN constants are rejected because ZKF has no NaN, including float64 constant folds of ZKF-defined infinity cases;
+infinities are ordinary float values. The transcendental folds likewise take the ideal (infinite-precision) result, so
+a folded constant can differ from the datapath's own value.
 
 ### DEFERRED
 
@@ -509,9 +515,10 @@ measures smaller and faster on every flow. A single-source read port drives its 
 opcode field (a single-source register still carries a 1-bit write opcode -- its folded write-enable/NOP); every opcode
 is sized to its own codebook, never the file-wide index, so the ROM word stays narrow.
 
-Errors are non-fatal and informative: each error-bearing operator's flag (`div0`, `domain_error`, etc.) ORs into a
-global `err` gated by whether some destination register's write opcode selects that instance's output this step (its
-commit window), and an `err_pc` latch records the executing step of the last error (reset at every accept).
+For error-bearing operators that survive optimization, errors are non-fatal and informative: each flag (`div0`,
+`domain_error`, etc.) ORs into a global `err` gated by whether some destination register's write opcode selects that
+instance's output this step (its commit window), and an `err_pc` latch records the executing step of the last error
+(reset at every accept).
 
 Reset covers the control registers and the persistent state registers: the reset arm loads each state register with its
 snapshot while the non-reset arm applies that register's opcode-selected update and its boundary install (a
