@@ -11,9 +11,10 @@ from typing import Any, get_args, get_origin
 
 import numpy as np
 
-from .._errors import MissingIntrinsic, SourceLocation, UnsupportedConstruct
+from .._errors import SourceLocation, SynthesisError, UnsupportedConstruct, UnsupportedLibraryFunction
 from .._util import BlockId, ValueId
 from .._hir import *
+from ._lib import Intrinsic, Library, resolve
 
 from ._ast_support import (
     Path,
@@ -137,57 +138,19 @@ def _hir_type_name(scalar_type: Type) -> str:
     return "bool" if isinstance(scalar_type, BoolType) else "float"
 
 
-_NUMPY_IDENTITY = frozenset({"array", "asarray", "asanyarray"})
-
-_SCALAR_INTRINSICS: dict[str, Callable[[], Operator]] = {
-    "floor": FloatFloor,
-    "ceil": FloatCeil,
-    "trunc": FloatTrunc,
-    "fma": FloatFma,
-    "minimum": FloatMin,  # numpy.minimum/maximum are the binary elementwise forms; np.min/np.max are reductions
-    "maximum": FloatMax,
-    "exp2": FloatExp2,
-    "log2": FloatLog2,
-    "sin": FloatSin,
-    "cos": FloatCos,
-    "sqrt": FloatSqrt,
-    "atan2": FloatAtan2,  # numpy spells it arctan2; np.atan2 is the same object on numpy>=2.0
-    "hypot": FloatHypot2,
-    "isfinite": FloatIsFinite,
-    "isinf": FloatIsInf,
-    "isposinf": FloatIsPosInf,
-    "isneginf": FloatIsNegInf,
-}
+# The numpy array factories, matched by object identity: shape-preserving wrappers that are no-ops on a value already
+# resolved to an aggregate. A tuple (probed with ``is``) rather than a set, so an unhashable shadow cannot crash it.
+_NUMPY_ARRAY_FACTORIES = (np.array, np.asarray, np.asanyarray)
 
 
-def _intrinsic_of(obj: object) -> str | None:
-    """
-    The canonical intrinsic name whose actual ``math``/``numpy`` function object is ``obj``, by identity and
-    independent of the bound spelling -- so an alias (``from math import floor as f``) resolves while a shadow
-    (``ceil = abs``), a non-callable (``fma = None``), or a name a module lacks (``np.fma``) yields None.
-    """
-    if obj is None:
-        return None
-    for name in _SCALAR_INTRINSICS:
-        if obj is getattr(math, name, None) or obj is getattr(np, name, None):
+def _spelled_callee(func: ast.expr) -> str:
+    match func:
+        case ast.Name(id=name):
             return name
-    return None
-
-
-# Standard numeric operators that are recognized but not yet implemented; calling them fails with a clear message.
-_KNOWN_INTRINSICS = frozenset(
-    {
-        "cbrt",
-        "tan",
-        "asin",
-        "acos",
-        "atan",
-        "exp",
-        "log",
-        "log10",
-        "pow",
-    }
-)
+        case ast.Attribute(attr=attr):
+            return attr
+        case _:
+            return "<expr>"
 
 
 class _Lowerer:
@@ -803,8 +766,9 @@ class _Lowerer:
         if isinstance(func, ast.Attribute) and func.attr == "flatten" and not node.args and not node.keywords:
             base = self._static_ndarray_value(func.value)
             return base.flatten() if isinstance(base, np.ndarray) else None
-        if self._numpy_function(func) in _NUMPY_IDENTITY and len(node.args) == 1 and not node.keywords:
-            return self._static_ndarray_value(node.args[0])
+        if any(self._resolved_callee(func) is factory for factory in _NUMPY_ARRAY_FACTORIES):
+            if len(node.args) == 1 and not node.keywords:
+                return self._static_ndarray_value(node.args[0])
         return None
 
     def _static_index_key(self, index: ast.expr) -> tuple[int | slice, ...] | None:
@@ -874,21 +838,11 @@ class _Lowerer:
             case _:
                 return None
 
-    def _resolves_to_builtin(self, name: str) -> bool:
-        """
-        Whether a bare ``name`` resolves to the actual Python builtin -- absent from the module globals, or explicitly
-        rebound to the builtin itself -- rather than being shadowed by a user global (a local, or any other object).
-        A shadow is what Python would call, so the name is not the builtin cast/intrinsic it spells.
-        """
-        if self._is_local(name):
-            return False
-        callee = self._fn.__globals__.get(name, _ABSENT)
-        return callee is _ABSENT or callee is getattr(builtins, name, None)
-
     def _cast_call(self, node: ast.expr) -> tuple[str, ast.expr] | None:
         """
-        If ``node`` is an unshadowed builtin ``bool(x)`` / ``float(x)`` call on a single positional argument, return
-        ``(builtin name, argument)``; else None. Lets the static evaluators see through a cast exactly as lowering does.
+        If ``node`` is a builtin ``bool(x)`` / ``float(x)`` call on a single positional argument -- the callee resolved
+        to the actual builtin by identity, under any spelling and never a shadow -- return ``(builtin name, argument)``;
+        else None. Lets the static evaluators see through a cast exactly as lowering does.
         """
         if (
             not isinstance(node, ast.Call)
@@ -897,10 +851,12 @@ class _Lowerer:
             or isinstance(node.args[0], ast.Starred)
         ):
             return None
-        func = node.func
-        if not isinstance(func, ast.Name) or func.id not in ("bool", "float") or not self._resolves_to_builtin(func.id):
-            return None
-        return func.id, node.args[0]
+        resolved = self._resolved_callee(node.func)
+        if resolved is bool:
+            return "bool", node.args[0]
+        if resolved is float:
+            return "float", node.args[0]
+        return None
 
     def _static_bool(self, test: ast.expr) -> bool | None:
         """
@@ -1572,101 +1528,90 @@ class _Lowerer:
                 raise UnsupportedConstruct(".flatten() is only supported on an aggregate value", self._loc(node))
             self._reject_sequence_operand(receiver, "flattening", self._loc(node))
             return receiver.flatten()
-        numpy_fn = self._numpy_function(func)
-        if numpy_fn in _NUMPY_IDENTITY:
+        if isinstance(func, ast.Attribute) and self._is_self_name(func.value):
+            return self._lower_method_call(node, func)
+        # Everything else dispatches on the resolved callee OBJECT, by identity -- never by spelling, so an alias
+        # (``from numpy import asarray as aa``) resolves and a shadow does not. resolve() owns the registry lookup and
+        # its unhashable-shadow guard; the aggregate factories and casts below are the non-operator builtins.
+        resolved = self._resolved_callee(func)
+        name = _spelled_callee(func)
+        if any(resolved is factory for factory in _NUMPY_ARRAY_FACTORIES):
             if node.keywords or len(node.args) != 1 or isinstance(node.args[0], ast.Starred):
-                raise UnsupportedConstruct(f"np.{numpy_fn}() takes a single array-like argument", self._loc(node))
-            return self._as_array(self._lower_expr(node.args[0]), numpy_fn, self._loc(node))
-        if self._is_np_matmul(func):
+                raise UnsupportedConstruct(f"{name}() takes a single array-like argument", self._loc(node))
+            return self._as_array(self._lower_expr(node.args[0]), name, self._loc(node))
+        if resolved is np.matmul:
             if node.keywords:
                 raise UnsupportedConstruct("matmul() takes no keyword arguments", self._loc(node))
             operands = self._lower_args(node)
             if len(operands) != 2:
                 raise UnsupportedConstruct(f"matmul() takes 2 arguments, got {len(operands)}", self._loc(node))
             return self._lower_matmul(operands[0], operands[1], self._loc(node))
-        if isinstance(func, ast.Attribute) and self._is_self_name(func.value):
-            return self._lower_method_call(node, func)
-        intrinsic = self._intrinsic_call(node)
-        if intrinsic is not None:
-            return intrinsic
-        # Resolve a bare name as Python does: a locally bound name shadows any global (and is not callable); a
-        # user-defined global function shadows the built-in ``abs``; ``abs`` is a bare-name builtin, so a method-style
-        # call such as ``x.abs(...)`` is never mistaken for it and falls through to the unsupported-call error.
+        match resolve(resolved):
+            case Intrinsic(operator=operator):
+                return self._lower_intrinsic(node, operator)
+            case Library(stub=stub):
+                return self._inline_library_stub(node, stub)
+        cast = self._lower_cast_builtin(node, resolved)  # bool/float casts and list/tuple sequence rebuilds
+        if cast is not None:
+            return cast
+        # A bare-name GLOBAL function is inlined; a non-callable global shadow is rejected. Gated on ``resolved is
+        # glob`` so this fires only when the module global is what the name actually resolves to -- a freevar shadowing
+        # it makes ``resolved`` the freevar instead, and the global must not be lowered in its place.
         if isinstance(func, ast.Name):
             if self._is_local(func.id):
                 raise UnsupportedConstruct(f"{func.id!r} is a local name, not a callable function", self._loc(node))
-            callee = self._fn.__globals__.get(func.id, _ABSENT)
-            if isinstance(callee, types.FunctionType):
-                return self._inline_call(callee, node)
-            if callee is not _ABSENT and not callable(callee):
-                # A non-callable global shadows the built-in (Python raises ``TypeError`` when calling it), so the name
-                # is not the intrinsic it spells; reject rather than silently lowering, e.g., ``abs`` to a FloatAbs. The
-                # _ABSENT sentinel distinguishes a missing global from one explicitly bound to None, which also shadows.
-                raise UnsupportedConstruct(
-                    f"{func.id!r} is shadowed by a non-callable global; it cannot be called", self._loc(node)
-                )
-            # A bare name is one of the recognized builtins (abs/list/tuple/bool/float) only when it is the actual
-            # builtin. A callable GLOBAL of the same name (a class, partial, or callable instance) is a shadow Python
-            # would call instead, so it must not be mistaken for the builtin cast/abs; it falls through to the
-            # unsupported-call rejection below.
-            builtin_unshadowed = self._resolves_to_builtin(func.id)
-            if func.id == "abs" and not node.keywords and builtin_unshadowed:
-                operands = self._lower_args(node)
-                if len(operands) == 1:
-                    return Scalar(self._builder.operation(FloatAbs(), [self._float_operand(operands[0], node)]))
-            if func.id == "round" and not node.keywords and builtin_unshadowed:
-                # ``round(x)`` rounds to a whole-number float (ties to even); the format-aware hardware does the work.
-                # ``round(x, ndigits)`` (decimal rounding) is rejected rather than silently dropping the digit count.
-                operands = self._lower_args(node)
-                if len(operands) != 1:
+            glob = self._module_global(func.id)
+            if resolved is glob:
+                if isinstance(glob, types.FunctionType):
+                    return self._inline_call(glob, node)
+                if glob is not _ABSENT and not callable(glob):
+                    # A non-callable global shadows the builtin (Python raises TypeError on the call), so the name is
+                    # not the operator/cast it spells. The _ABSENT sentinel distinguishes a missing global from one
+                    # bound to None, which also shadows.
                     raise UnsupportedConstruct(
-                        "round() takes a single argument; round(x, ndigits) is not supported", self._loc(node)
+                        f"{func.id!r} is shadowed by a non-callable global; it cannot be called", self._loc(node)
                     )
-                return Scalar(self._builder.operation(FloatRound(), [self._float_operand(operands[0], node)]))
-            if func.id in ("min", "max") and not node.keywords and builtin_unshadowed:
-                # Binary min(a, b)/max(a, b) only; the variadic and iterable forms (and key=/default=) are not lowered.
-                operands = self._lower_args(node)
-                if len(operands) != 2:
-                    raise UnsupportedConstruct(
-                        f"{func.id}() is supported only with two scalar arguments", self._loc(node)
-                    )
-                operator = FloatMin() if func.id == "min" else FloatMax()
-                return Scalar(
-                    self._builder.operation(operator, [self._float_operand(operand, node) for operand in operands])
-                )
-            if func.id in ("list", "tuple") and not node.keywords and builtin_unshadowed:
-                # list(seq)/tuple(seq) produce a Python sequence (array=False) even from a numpy array; only the top
-                # level is rebuilt as a sequence, elements keep their own flavor (the rows of an array stay arrays).
-                operands = self._lower_args(node)
-                if len(operands) == 1 and isinstance(operands[0], Aggregate):
-                    return Aggregate(operands[0].items, array=False)
-            if func.id == "bool" and not node.keywords and builtin_unshadowed:
-                operands = self._lower_args(node)
-                if len(operands) != 1:
-                    raise UnsupportedConstruct("bool() takes a single scalar argument", self._loc(node))
-                operand = self._scalar(operands[0], node)  # an aggregate argument is rejected here
-                if isinstance(self._builder.type_of(operand), BoolType):
-                    return Scalar(operand)  # bool(<bool>) is identity
-                return Scalar(self._builder.operation(FloatToBool(), [operand]))
-            if func.id == "float" and not node.keywords and builtin_unshadowed:
-                operands = self._lower_args(node)
-                if len(operands) != 1:
-                    raise UnsupportedConstruct("float() takes a single scalar argument", self._loc(node))
-                operand = self._scalar(operands[0], node)  # an aggregate argument is rejected here
-                if isinstance(self._builder.type_of(operand), BoolType):
-                    return Scalar(self._builder.operation(BoolToFloat(), [operand]))
-                return Scalar(operand)  # float(<float>) is identity
-        name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
-        if name in _KNOWN_INTRINSICS:
-            raise MissingIntrinsic(f"implement this operator: {name}", self._loc(node))
-        raise UnsupportedConstruct(f"unsupported call to {name or '<expr>'!r}", self._loc(node))
+        if callable(resolved) and (
+            isinstance(resolved, np.ufunc) or any(resolved is member for member in vars(math).values())
+        ):
+            raise UnsupportedLibraryFunction(f"library function {name!r} is not implemented yet", self._loc(node))
+        raise UnsupportedConstruct(f"unsupported call to {name!r}", self._loc(node))
 
-    def _intrinsic_call(self, node: ast.Call) -> Value | None:
-        """Lower a ``math``/``numpy`` scalar intrinsic to its HIR operator, or None otherwise."""
-        name = self._intrinsic_name(node.func)
-        if name is None:
+    def _lower_cast_builtin(self, node: ast.Call, resolved: object) -> Value | None:
+        """
+        The type-dispatching builtins that are not operators: ``bool(x)``/``float(x)`` casts and ``list()``/``tuple()``
+        sequence rebuilds, matched by identity so an alias resolves and a shadow does not. Returns None when the callee
+        is not one of them (or is list/tuple on a non-sequence argument), so the caller keeps looking.
+        """
+        if node.keywords:
             return None
-        operator = _SCALAR_INTRINSICS[name]()
+        if resolved is list or resolved is tuple:
+            # list(seq)/tuple(seq) produce a Python sequence (array=False) even from a numpy array; only the top level
+            # is rebuilt as a sequence, elements keep their own flavor (the rows of an array stay arrays).
+            operands = self._lower_args(node)
+            if len(operands) == 1 and isinstance(operands[0], Aggregate):
+                return Aggregate(operands[0].items, array=False)
+            return None
+        if resolved is bool:
+            operands = self._lower_args(node)
+            if len(operands) != 1:
+                raise UnsupportedConstruct("bool() takes a single scalar argument", self._loc(node))
+            operand = self._scalar(operands[0], node)  # an aggregate argument is rejected here
+            if isinstance(self._builder.type_of(operand), BoolType):
+                return Scalar(operand)  # bool(<bool>) is identity
+            return Scalar(self._builder.operation(FloatToBool(), [operand]))
+        if resolved is float:
+            operands = self._lower_args(node)
+            if len(operands) != 1:
+                raise UnsupportedConstruct("float() takes a single scalar argument", self._loc(node))
+            operand = self._scalar(operands[0], node)  # an aggregate argument is rejected here
+            if isinstance(self._builder.type_of(operand), BoolType):
+                return Scalar(self._builder.operation(BoolToFloat(), [operand]))
+            return Scalar(operand)  # float(<float>) is identity
+        return None
+
+    def _lower_intrinsic(self, node: ast.Call, operator: Operator) -> Value:
+        name = _spelled_callee(node.func)
         arity = operator.signature.arity  # the operator's own signature is the single source of truth for arity
         if node.keywords:
             raise UnsupportedConstruct(f"{name}() takes no keyword arguments", self._loc(node))
@@ -1675,35 +1620,44 @@ class _Lowerer:
             raise UnsupportedConstruct(f"{name}() takes {arity} argument(s), got {len(operands)}", self._loc(node))
         return Scalar(self._builder.operation(operator, [self._float_operand(operand, node) for operand in operands]))
 
+    def _inline_library_stub(self, node: ast.Call, stub: types.FunctionType) -> Value:
+        """
+        Inline a composite library stub as an ordinary function, attributing any rejection inside its body to the
+        user's call site: the stub source is not the user's code, so a location pointing into it is not actionable.
+        A stub calling a sibling stub resolves it directly as a plain function, so only this outermost frame wraps.
+        """
+        name = _spelled_callee(node.func)
+        if node.keywords:
+            raise UnsupportedConstruct(f"{name}() takes no keyword arguments", self._loc(node))
+        args = self._lower_args(node)
+        loc = self._loc(node)
+        # Reject arity here, against the spelled name, so the error never surfaces the underscore-prefixed stub name
+        # that _inline would format from the callee's __name__.
+        arity = stub.__code__.co_argcount
+        if len(args) != arity:
+            raise UnsupportedConstruct(f"{name}() takes {arity} argument(s), got {len(args)}", loc)
+        try:
+            return self._inline(stub, args, loc)
+        except SynthesisError as exc:
+            # Re-attribute ANY synthesis error from the stub body (a rejection, or an unimplemented library function it
+            # itself calls) to the user's call site, preserving the concrete error type.
+            raise type(exc)(f"in {name}(): {exc.message}", loc) from exc
+
     def _resolved_callee(self, func: ast.expr) -> object:
         """
-        The module-global object a call targets -- an unshadowed ``<module>.<attr>`` attribute access or an unshadowed
-        bare name -- else None. The object is returned so callers decide dispatch by identity (never by spelling): a
-        shadowing local, a rebound global, or an absent attribute all fail the downstream identity check.
+        The object a call targets -- an unshadowed bare name completing Python's lookup order (enclosing freevar, else
+        module global, else builtin), or an attribute chain rooted in an unshadowed global and walked only through
+        module objects -- else None. The object is returned so callers decide dispatch by identity (never by spelling):
+        a shadowing local, a closure/global rebinding, or an absent attribute all fail the downstream identity check.
         """
-        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and not self._is_local(func.value.id):
-            return getattr(self._fn.__globals__.get(func.value.id), func.attr, None)
-        if isinstance(func, ast.Name) and not self._is_local(func.id):
-            return self._fn.__globals__.get(func.id)
-        return None
-
-    def _intrinsic_name(self, func: ast.expr) -> str | None:
-        """The canonical intrinsic name if ``func`` resolves to a supported ``math``/``numpy`` function, else None."""
-        return _intrinsic_of(self._resolved_callee(func))
-
-    def _is_np_matmul(self, func: ast.expr) -> bool:
-        """Dispatched apart from the scalar intrinsics because matmul is aggregate-valued."""
-        return self._resolved_callee(func) is np.matmul
-
-    def _numpy_function(self, func: ast.expr) -> str | None:
-        """
-        The function name if ``func`` is a ``<numpy>.<name>`` access (under any alias), else None. A locally bound name
-        shadows the global, mirroring Python scoping, so a local ``np`` is not mistaken for the numpy module.
-        """
-        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-            if not self._is_local(func.value.id) and self._fn.__globals__.get(func.value.id) is np:
-                return func.attr
-        return None
+        match func:
+            case ast.Name(id=name):
+                return self._resolve_name(name)
+            case ast.Attribute(value=base, attr=attr):
+                base_obj = self._resolved_callee(base)
+                return getattr(base_obj, attr, None) if isinstance(base_obj, types.ModuleType) else None
+            case _:
+                return None
 
     def _lower_args(self, node: ast.Call) -> list[Value]:
         """A ``*aggregate`` argument is spliced in place: its top-level items (a matrix's rows) inline, as in Python."""
@@ -1782,7 +1736,6 @@ class _Lowerer:
         outer = self._capture()
         self._inlining.add(callee)
         bindings = {param.arg: arg for param, arg in zip(params, args)}
-        # An instance method inherits the caller's scope as its state context; a pure function gets none.
         context = outer if bound_self else None
         self._install(Scope.fresh(callee, bindings, lines, start, filename, context=context, self_name=self_param))
         self._local_names[callee] = self._collect_local_names(fndef)
@@ -2310,6 +2263,36 @@ class _Lowerer:
         global) and apply their own type filter (the int/bool/float positions accept different subsets).
         """
         return self._fn.__globals__.get(name, _ABSENT)
+
+    def _freevar(self, name: str) -> object:
+        """
+        The value ``name`` is closed over from an enclosing scope (a freevar cell of the synthesized function), or
+        ``_ABSENT`` if it is not a freevar. Python resolves an enclosing binding before any global or builtin, so
+        callable dispatch MUST consult this: otherwise a closure that shadows ``pow``/``abs``/... would be miscompiled
+        to the stub/operator it merely spells instead of resolving to the captured object.
+        """
+        code = self._fn.__code__
+        if name in code.co_freevars and self._fn.__closure__ is not None:
+            cell = self._fn.__closure__[code.co_freevars.index(name)]
+            try:
+                return cell.cell_contents
+            except ValueError:  # an unbound cell (the enclosing binding never ran); treat as unresolved
+                return _ABSENT
+        return _ABSENT
+
+    def _resolve_name(self, name: str) -> object:
+        """
+        The object a bare ``name`` resolves to under Python's scoping order -- an enclosing-scope freevar, else a module
+        global, else a builtin -- for callable dispatch by identity. A function-local binding shadows all of these and
+        is a value rather than a callable, so it (and an unbound/unknown name) yields None.
+        """
+        if self._is_local(name):
+            return None
+        freevar = self._freevar(name)
+        if freevar is not _ABSENT:
+            return freevar
+        glob = self._module_global(name)
+        return getattr(builtins, name, None) if glob is _ABSENT else glob
 
     def _collect_written_attrs(self, fndef: ast.FunctionDef) -> None:
         """

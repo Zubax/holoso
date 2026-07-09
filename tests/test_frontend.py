@@ -13,7 +13,7 @@ from typing import cast
 import numpy as np
 import pytest
 
-from holoso import MissingIntrinsic, UnsupportedConstruct
+from holoso import UnsupportedConstruct, UnsupportedLibraryFunction
 from holoso._frontend import lower
 from holoso._frontend._ast_support import port_name
 from holoso._hir import (
@@ -27,11 +27,13 @@ from holoso._hir import (
     FloatAbs,
     FloatAdd,
     FloatConst,
+    FloatCos,
     FloatDiv,
     FloatExp2,
     FloatMul,
     FloatNeg,
     FloatRelational,
+    FloatSin,
     FloatToBool,
     FloatType,
     Hir,
@@ -826,11 +828,39 @@ def test_unknown_global_is_unsupported() -> None:
         lower(f)
 
 
-def test_missing_intrinsic_message() -> None:
+def test_tan_lowers_to_sin_cos_division() -> None:
     def f(a: float) -> float:
         return math.tan(a)
 
-    with pytest.raises(MissingIntrinsic, match="tan"):
+    hir = lower(f)
+    assert _arith_count(hir, FloatSin) == 1
+    assert _arith_count(hir, FloatCos) == 1
+    assert _arith_count(hir, FloatDiv) == 1
+
+
+def test_unsupported_library_function_message() -> None:
+    def f(a: float) -> float:
+        return math.erf(a)
+
+    with pytest.raises(UnsupportedLibraryFunction, match="erf"):
+        lower(f)
+
+
+def test_unsupported_library_function_covers_unregistered_ufuncs() -> None:
+    # np.spacing is a ufunc with no fast-math float equivalent (it reads the format's ULP), so it stays unregistered
+    # and reports an unimplemented library function rather than a generic unsupported-call.
+    def f(a: float) -> float:
+        return np.spacing(a)  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedLibraryFunction, match="spacing"):
+        lower(f)
+
+
+def test_non_operator_numpy_call_stays_unsupported() -> None:
+    def f(a: float) -> float:
+        return np.sum(a)  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="unsupported call to 'sum'"):
         lower(f)
 
 
@@ -1184,7 +1214,7 @@ def test_user_global_function_shadows_intrinsic_name() -> None:
     def f(a: float) -> float:
         return cbrt(a)
 
-    assert _arith_count(lower(f), FloatMul) == 1  # the inlined x * x, not a MissingIntrinsic rejection
+    assert _arith_count(lower(f), FloatMul) == 1  # the inlined x * x, not an UnsupportedLibraryFunction rejection
 
 
 def test_local_name_shadows_global_callable() -> None:
@@ -1290,6 +1320,129 @@ def test_callable_global_shadowing_abs_is_inlined_not_floatabs() -> None:
 
     hir = lower(_rebind_globals(use_abs, abs=cbrt))
     assert _arith_count(hir, FloatAbs) == 0 and _arith_count(hir, FloatMul) == 1
+
+
+def test_unhashable_global_shadowing_registered_name_is_rejected() -> None:
+    # A registry lookup on an unhashable shadow must not crash the compiler; the shadow simply misses and gets the
+    # standard non-callable diagnostic instead. Various unhashable shapes are covered.
+    def use_abs(a: float) -> float:
+        return abs(a)
+
+    for shadow in (np.zeros(3), (1.0, [2.0]), {1: 2}, {1, 2}):
+        with pytest.raises(UnsupportedConstruct, match="non-callable"):
+            lower(_rebind_globals(use_abs, abs=shadow))
+
+
+def test_closure_freevar_shadowing_a_registered_name_is_rejected() -> None:
+    # A freevar (enclosing-scope binding) shadows the name Python would call, so holoso must resolve it to the captured
+    # object -- never dispatch to the stub/operator it merely spells. Regression: a freevar 'pow' bound to a user
+    # function was silently lowered to the pow stub (256 instead of the user function's value), and a non-callable
+    # freevar 'abs' to FloatAbs where Python raises.
+    def make_pow(pow: Callable[[float, float], float]) -> Callable[[float], float]:  # noqa: A002 -- closure shadow
+        def kernel(x: float) -> float:
+            return pow(x, x)
+
+        return kernel
+
+    def user_pow(a: float, b: float) -> float:
+        return a - b
+
+    with pytest.raises(UnsupportedConstruct, match="pow"):
+        lower(make_pow(user_pow))
+
+    def make_abs(abs: float) -> Callable[[float], float]:  # noqa: A002 -- a non-callable closure shadow
+        def kernel(x: float) -> float:
+            return abs(x)  # type: ignore[operator, no-any-return]
+
+        return kernel
+
+    with pytest.raises(UnsupportedConstruct, match="abs"):
+        lower(make_abs(3.0))
+
+
+def test_closure_freevar_bound_to_a_library_function_still_dispatches() -> None:
+    # The fix must not over-reject: a freevar capturing an actual library function dispatches by identity as usual.
+    def make() -> Callable[[float], float]:
+        s = math.sin
+
+        def kernel(x: float) -> float:
+            return s(x)
+
+        return kernel
+
+    assert _arith_count(lower(make()), FloatSin) == 1
+
+
+def test_call_dispatch_is_by_identity_not_spelling() -> None:
+    # Dispatch resolves the callee object, so an aliased import lowers exactly like the canonical spelling -- the numpy
+    # array factories and the cast/sequence builtins are matched by identity, not by the name written at the call.
+    def use_asarray(a: float, b: float) -> list[float]:
+        return aa([a, b])  # type: ignore[name-defined, no-any-return]  # noqa: F821 -- 'aa' is np.asarray, injected
+
+    assert [o.name for o in lower(_rebind_globals(use_asarray, aa=np.asarray)).outputs] == ["out_0", "out_1"]
+
+    def use_float(a: bool) -> float:
+        return f(a)  # type: ignore[name-defined, no-any-return]  # noqa: F821 -- 'f' is the builtin float, injected
+
+    assert _arith_count(lower(_rebind_globals(use_float, f=float)), BoolToFloat) == 1
+
+
+def _module_scoped_helper(a: float) -> float:  # a module global used by the freevar-shadowing test below
+    return a + 100.0
+
+
+def test_freevar_shadowing_a_global_function_is_not_inlined_as_the_global() -> None:
+    # A freevar shadows the same-named module global Python would otherwise call. Dispatch is freevar-aware (resolved),
+    # so the inline path must not lower the module global in its place -- the captured user function is a closure
+    # callable, which is rejected, never silently swapped for the wrong global.
+    def outer(helper: Callable[[float], float]) -> Callable[[float], float]:  # noqa: A002 -- shadows the global name
+        def kernel(x: float) -> float:
+            return helper(x)  # 'helper' is the freevar
+
+        return kernel
+
+    def captured(a: float) -> float:
+        return a * 3.0
+
+    kernel = _rebind_globals(outer(captured), helper=_module_scoped_helper)  # freevar helper + a same-named global
+    with pytest.raises(UnsupportedConstruct, match="helper"):
+        lower(kernel)
+
+
+def test_library_stub_error_is_attributed_to_the_call_site() -> None:
+    def f(a: float) -> float:
+        return math.tan((a, a))  # type: ignore[arg-type]
+
+    with pytest.raises(UnsupportedConstruct, match=r"in tan\(\):") as excinfo:
+        lower(f)
+    location = excinfo.value.location
+    assert location is not None
+    assert location.filename == __file__
+    assert location.line is not None and "math.tan((a, a))" in location.line
+
+
+def test_stub_calling_an_unimplemented_library_function_is_reattributed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A stub body can itself call an unimplemented library function, raising UnsupportedLibraryFunction -- a sibling of
+    # UnsupportedConstruct under SynthesisError. Re-attribution must catch it too (not just UnsupportedConstruct), so
+    # the error points at the user's call site with the concrete type preserved, never the stub-internal location.
+    from holoso._frontend._lib import Library
+    from holoso._frontend._lib._registry import _REGISTRY
+
+    def sentinel(x: float) -> float:  # a stand-in external callable, mapped into the registry for this test
+        return x
+
+    def bad_stub(x: float) -> float:  # a composite whose body calls an unimplemented library function
+        return math.erf(x)
+
+    monkeypatch.setitem(_REGISTRY, sentinel, Library(bad_stub))  # type: ignore[arg-type]
+
+    def kernel(x: float) -> float:
+        return sentinel(x)
+
+    with pytest.raises(UnsupportedLibraryFunction, match="erf") as excinfo:
+        lower(kernel)
+    assert excinfo.value.message.startswith("in sentinel():")
+    assert excinfo.value.location is not None and excinfo.value.location.filename == __file__
 
 
 def test_numpy_array_state_decomposes_like_a_list() -> None:

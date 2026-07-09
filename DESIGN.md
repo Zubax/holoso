@@ -203,6 +203,11 @@ inlined with the instance context kept, so the callee's own `self.<attr>` reads 
 class MRO; `@staticmethod` and `@property` getters are supported). A called method may read `self` but not write it --
 only the entry method owns the state-slot analysis. Name resolution follows Python.
 
+Math library. A call dispatches through a registry on the object identity its callee resolves to, not the spelled name,
+so an alias resolves and a shadow does not. The registry maps that object to its lowering: an intrinsic stub (1:1 onto
+an HIR float operator) or a composite stub (built from the intrinsics and inlined).
+Each stub is its own numerical reference.
+
 Parameters. Positional and keyword-only parameters become input ports and require an explicit annotation:
 `float`-annotated scalars are floating-point ports, `bool`-annotated ones are 1-bit boolean ports, and a jaxtyping
 array annotation with fixed 1-D/2-D dimensions and a floating dtype (e.g. `Float64[np.ndarray, "3 3"]`) decomposes
