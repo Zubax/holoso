@@ -72,7 +72,7 @@ def test_registry_resolves_the_expected_externals() -> None:
     for external in library_externals:
         assert isinstance(resolve(external), Library), external
     # ``@`` and ``.T`` are lowered by resolving these two, so the frontend holds no matrix expansion of its own.
-    assert resolve(np.matmul) == Library(matmul_) and resolve(np.transpose) == Library(transpose_)
+    assert resolve(np.matmul) == Library(matmul_) and resolve(np.transpose) == Library(transpose_)  # type: ignore[arg-type]
     assert resolve(np.dot) == resolve(np.matmul)  # identical on the supported 1-D/2-D non-scalar domain
     # An unregistered callable resolves to nothing; an unhashable shadow does not crash the lookup.
     assert resolve(math.erf) is None and resolve(np.zeros(3)) is None
@@ -234,14 +234,14 @@ def test_linalg_stubs_reject_the_shapes_they_do_not_support() -> None:
     # frontend surfaces at the user's call site, so they are asserted here rather than only through the compiler.
     scalar, vector, matrix, cube = np.float64(2.0), np.arange(3.0), np.ones((2, 3)), np.ones((2, 2, 2))
     with pytest.raises(ValueError, match="scalar"):
-        matmul_(scalar, vector)
+        matmul_(scalar, vector)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="1-D or 2-D"):
         matmul_(cube, vector)
     assert np.allclose(matmul_(matrix, vector), matrix @ vector)  # 2×3 @ 3 agrees, so the mismatch below is genuine
     with pytest.raises(ValueError, match="mismatch"):
         matmul_(matrix, np.arange(2.0))
     with pytest.raises(ValueError, match="transpose a scalar"):
-        transpose_(scalar)
+        transpose_(scalar)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="1-D or 2-D|not supported"):
         transpose_(cube)
     with pytest.raises(ValueError, match="square"):

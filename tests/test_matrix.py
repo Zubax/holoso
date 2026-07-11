@@ -1141,7 +1141,7 @@ def test_np_trace_and_np_outer() -> None:
     _assert_python_matches_holoso(tr, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]))
 
     def outer(u: Float64[np.ndarray, "2"], v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2 3"]:
-        return np.outer(u, v)  # type: ignore[no-any-return]
+        return np.outer(u, v)
 
     assert _arith_count(lower(outer), FloatMul) == 6 and _arith_count(lower(outer), FloatAdd) == 0
     _assert_python_matches_holoso(outer, np.array([1.0, -2.0]), np.array([0.5, 3.0, -1.0]))
@@ -1154,7 +1154,7 @@ def test_np_trace_and_np_outer() -> None:
         lower(rect_trace)
 
     def outer_of_matrix(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 2"]:
-        return np.outer(m, m)  # type: ignore[no-any-return]
+        return np.outer(m, m)
 
     with pytest.raises(UnsupportedConstruct, match="1-D"):
         lower(outer_of_matrix)
