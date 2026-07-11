@@ -148,13 +148,34 @@ Each operator declares a per-instance initiation interval; most operators have I
 
 Abstract interpretation over the Python AST/CFG with a binding-time lattice (static vs. dynamic). Static values (shapes,
 `__init__`-derived constants, compile-time tables) are evaluated concretely -- real Python/NumPy runs at synthesis time.
-Dynamic values (input ports, persistent state) become SSA handles that accumulate HIR. A `for` over a static `range` is
-unrolled (unless the count exceeds the unroll threshold); a `while` lowers to a real back-edge loop; an `if` on a static
-test takes one branch, on a dynamic test emits a real branch. Static evaluation (used for branch/loop reachability and
-compile-time indices) resolves only the operands that both the reachability scan and lowering reconstruct identically:
-numeric literals, module-level numeric/array constants, read-only instance attributes, and loop counters -- including
-numpy navigation (indexing, slicing, transpose, `.flatten()`) of a module-level array constant or read-only array
-attribute.
+Dynamic values (input ports, persistent state) become SSA handles that accumulate HIR. A `for` over a static `range` or
+an aggregate is unrolled (unless the count exceeds the unroll threshold); a list comprehension unrolls the same way
+(its generator count is likewise bounded, so the unroller cannot recurse without limit),
+yielding a Python list, with every `if` filter folded statically and its targets confined to the comprehension -- which,
+being its own scope in Python, also has them shadow a same-named module constant while bound; a `while` lowers to a real
+back-edge loop; an `if` on a static test takes one branch, on a dynamic test emits a real branch. Static evaluation
+(used for branch/loop reachability and compile-time indices) resolves only the operands that both the reachability
+scan and lowering reconstruct identically: numeric literals, module-level numeric/array constants,
+read-only instance attributes, and loop counters -- including numpy navigation (indexing, slicing, transpose,
+`.flatten()`) of a module-level array constant or read-only array attribute.
+
+Shape queries. An aggregate's shape is a static value, so `len`, `.ndim`, and `.shape[k]` evaluate to compile-time
+integers usable wherever one is expected, there being no runtime integer type to carry one into a value position.
+`len` follows Python and counts the items of any aggregate; `.ndim` and `.shape` are numpy-only and rejected on
+a list/tuple, whatever expression the receiver is spelled as.
+A scalar is rank zero, as a numpy scalar is and a bare Python float is not, which is how the matrix product
+rejects a scalar operand by asking its rank; consistently, an empty-tuple key `x[()]` yields the scalar itself, as it
+does for a numpy scalar, while `x[0]` or a slice is rejected. The resolver sees a closed set of receivers --
+a bound name, a static subscript of one, a state attribute, a module constant,
+a transpose of those -- so a shape query on anything else is rejected rather than guessed at.
+
+Rejecting from within the subset. Lowering descends only the arms the static fold selects, so a `raise` it reaches sits
+on a path taken unconditionally within its own function: it becomes a synthesis error carrying the exception's own
+message (a literal, or an f-string interpolating compile-time integers), located at the raising line. Guarded by a
+data-dependent test it would have to become a runtime exception, which the hardware cannot signal, so it is rejected.
+Branch depth restarts per inlined function -- whether a `raise` is data-dependent is a property of the function that
+writes it, not of a call site that happens to sit in a branch arm. This is what lets a library stub validate its own
+operand shapes while remaining ordinary, executable Python that raises the very same error.
 
 Persistent state. A synthesized method's `self` is not a port: each instance attribute the method writes becomes a
 persistent register (a loop-carried value, the back-edge of the initiation loop), and each attribute it only reads is a
@@ -163,16 +184,33 @@ and writes interleave freely. Public attributes additionally drive a `state_<att
 return anything (and a returned value that is by dataflow a public attribute is deduped onto that state port);
 underscore-prefixed attributes stay internal. A vector-valued attribute (list, tuple, or 1-D numpy array) decomposes
 into one scalar register per element (`attr_0`, `attr_1`, ...), a matrix-valued one (2-D numpy array) row-major into
-`attr_0_0`, `attr_0_1`, ...; a scalar keeps its bare name. Whether an attribute is state follows reachability.
-Reassigning `self` itself is rejected: attributes resolve against the fixed original instance, so a rebinding would
-silently miscompile.
+`attr_0_0`, `attr_0_1`, ...; a scalar keeps its bare name. Reassigning `self` itself is rejected: attributes resolve
+against the fixed original instance, so a rebinding would silently miscompile.
+
+Whether an attribute is state follows reachability, and the scan that decides it runs before the body is lowered, so
+it cannot always fold what lowering folds -- a branch on the shape of a local, or a `for` over an aggregate whose trip
+count it does not know. Where it cannot see a trip count it must fold less, not guess: it walks such a body once with
+the loop target and every counter the body rebinds demoted, and restores that same context afterwards, since an empty
+aggregate runs the body zero times and an unrolled one runs it many. The contract is therefore one-sided: the scan
+yields a conservative superset, trimmed back to the truth once lowering has run, since an attribute lowering never
+touched keeps its reset value for good and is no more state than a read-only one. An attribute lowering only read is
+the other half of that trim: its reads are already in the graph, so it stays a slot whose live-out is its live-in -- a
+register that holds, and, if the attribute is public, a port. Dead code can therefore cost a register and a port an
+exact scan would have folded away, and can make an otherwise read-only attribute look written, costing it the constant
+folding a frozen attribute enjoys -- but never a wrong value. The opposite direction is forbidden and asserted
+against, a write lowering reaches but the scan missed having nowhere to land. The duality is a wart, not a design: see
+DEFERRED.
+
+State lives in the float registers, so an integer reset the format cannot represent exactly is rejected rather than
+silently rounded: it would read back as a different number than the source compares against, and there is no integer
+type to fall back on yet -- see DEFERRED.
 
 Matrices/vectors are statically shaped and unrolled to scalar operations; arrays never exist as hardware aggregates,
 only as compile-time bookkeeping over scalar registers. That bookkeeping is a front-end value -- either a scalar wire or
-an ordered aggregate -- supporting list/tuple literals, numpy-style indexing and constant slicing (`m[i, j]`,
-`m[:, j]`, chained `m[i][j]`), unpacking, transpose (`.T`), and the array factories `np.array`/`asarray`/`asanyarray`;
-only scalar leaves reach HIR, so the supported source is executable numpy. Module-level numeric and ndarray globals
-fold into constants.
+an ordered aggregate -- supporting list/tuple literals and comprehensions, numpy-style indexing and constant slicing
+(`m[i, j]`, `m[:, j]`, chained `m[i][j]`), iteration, unpacking, transpose (`.T`), and the array factories
+`np.array`/`asarray`/`asanyarray`; only scalar leaves reach HIR, so the supported source is executable numpy.
+Module-level numeric and ndarray globals fold into constants.
 
 List/tuple vs. array. A front-end aggregate carries its Python flavor. The guiding principle is to follow Python
 semantics where sensible and otherwise reject a construct rather than silently reinterpret it; in particular a Python
@@ -190,18 +228,29 @@ operand broadcasts over the other side's leaves; this is deliberately narrower t
 pair (vector + matrix) is rejected rather than silently aligned along a different axis than numpy would pick, and `**`
 stays scalar-only (base two with a runtime exponent lowers to exp2; otherwise the exponent must be a compile-time
 integer). Augmented assignment to any aggregate (`+=`, `@=`) is rejected: an array would be mutated in place by
-numpy while the front-end rebinds (diverging for an alias), and a list `+=` is concatenation, which is unsupported. The
-matrix product `@` (equivalently `np.matmul`) follows numpy's shape rules for 1-D and 2-D operands -- inner dimensions
-must agree, a 1-D operand is promoted and its axis dropped from the result, vector @ vector is a scalar -- and expands
-into scalar multiply/add chains. Each dot product is a left fold, which keeps every product single-use feeding an add of
-the running sum: exactly the shape MIR's FMA contraction fuses into one multiply plus an FMA chain when configured. All
-shapes are static; there is no batching (ndim > 2) and no runtime sizing.
+numpy while the front-end rebinds (diverging for an alias), and a list `+=` is concatenation, which is unsupported.
+
+Linear algebra is ordinary library code. The matrix product `@` and the transpose `.T` lower by resolving `np.matmul`
+and `np.transpose` in the same registry a spelled call goes through, so an operator and its call are necessarily
+one implementation. The stubs follow numpy's shape rules for 1-D and 2-D operands and expand into scalar
+multiply/add chains. Each dot product is a left fold, enabling FMA contraction in the MIR.
+Also provided are `np.dot` (the matrix product, since the two agree on this domain), `np.trace`,
+and `np.outer`. Because the stubs expand through the same comprehensions any kernel uses, a matrix dimension is
+bounded by the unroll threshold exactly as a loop trip count is -- an operand axis wider than the threshold is
+rejected rather than unrolled into thousands of scalar operations.
 
 Inlining. A pure function reachable through `__globals__` is inlined -- its body lowered in a fresh scope, its return
 consumed as an aggregate -- so kernels compose. A method call on the synthesized instance (`self.helper(...)`) is
 inlined with the instance context kept, so the callee's own `self.<attr>` reads resolve (the method is found through the
 class MRO; `@staticmethod` and `@property` getters are supported). A called method may read `self` but not write it --
 only the entry method owns the state-slot analysis. Name resolution follows Python.
+
+Math library. A call dispatches through a registry on the object identity its callee resolves to, not the spelled name,
+so an alias resolves and a shadow does not. The registry maps that object to its lowering: an intrinsic stub (1:1 onto
+an HIR float operator) or a composite stub (built from the intrinsics and inlined). A composite is ordinary Python in
+the supported subset -- shape queries, comprehensions, and `raise` let the linear-algebra stubs be shape-polymorphic and
+self-validating -- so each stub is its own numerical reference, and a rejection inside one is re-attributed to the
+user's call site under the spelling they wrote.
 
 Parameters. Positional and keyword-only parameters become input ports and require an explicit annotation:
 `float`-annotated scalars are floating-point ports, `bool`-annotated ones are 1-bit boolean ports, and a jaxtyping
@@ -325,8 +374,22 @@ a value still lowers correctly but is treated as dynamic, because folding it wou
 track arbitrary local bindings it does not build. Only module-level constants, read-only instance attributes, and loop
 counters fold in static positions.
 
+The scan/lowering duality itself. The reachability scan runs before the body it describes, so it cannot see the local
+bindings lowering will have, and shape queries on locals therefore fold at lowering but not in the scan. Today the
+mismatch is contained by making the contract one-sided -- the scan over-approximates, the truth is trimmed out
+afterwards, and the opposite direction is asserted against -- so the cost is a stray register or port, an attribute
+that stops folding as a constant, or a conservative rejection, never a wrong value. It remains a duality, and every
+new static-evaluation source has to be checked against it by hand. The way out is to give the scan a real
+binding-time environment over locals (shapes at least, values where cheap) so that scan and lowering fold identically
+and neither the trim nor the assertion is needed; short of that, folding could be confined to bindings both phases
+reconstruct. Either is a redesign of the scan, not a patch to it.
+
 Integer operands: typed int operands/constants/operators sharing the wide register bank when their width matches the
-build.
+build. Until then every integer enters the float datapath, so one that binary64 cannot represent exactly is rejected
+rather than silently rounded -- otherwise a stored integer reads back as a different number than the source compares
+against. The check is against binary64, not against the build's own float format: the front end does not know that
+format, and a narrow one rounds every constant, integer or not. An integer attribute in a narrow build can therefore
+still lose its exact value, which typed integers, not a wider check here, are what fix.
 
 ## MIR
 

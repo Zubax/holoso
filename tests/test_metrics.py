@@ -43,6 +43,7 @@ from cordic_sincos import CordicSinCos  # noqa: E402
 from ekf1_stateful import Ekf1  # noqa: E402
 from ekf1_stateless import update_x_P  # noqa: E402
 from iir1_lpf import IIR1LPF  # noqa: E402
+import imu_frame_transform  # noqa: E402
 from latching_fault_register import LatchingFaultRegister  # noqa: E402
 from majority_voter import MajorityVoter  # noqa: E402
 from octave_index import octave_index  # noqa: E402
@@ -73,6 +74,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "octave_index": lambda: octave_index,
     "cordic_sincos": lambda: CordicSinCos().__call__,
     "integrator": lambda: TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__,
+    "imu_frame_transform": lambda: imu_frame_transform.transform,
     "ekf1_stateless": lambda: update_x_P,
     "ekf1_stateful": lambda: Ekf1().update,
 }
@@ -207,6 +209,11 @@ BASELINE: dict[str, Metrics] = {
         False, nreg=7, bnreg=1, steering=53, copies=0, min_ii=105, last_pc=105, max_block_span=105
     ),
     "integrator": Metrics(True, nreg=5, bnreg=0, steering=4, copies=0, min_ii=17, last_pc=17, max_block_span=17),
+    # The only example whose datapath is built entirely from the matrix product and transpose, so it is the gate that
+    # would catch a linear-algebra library stub expanding into more hardware than the operators it replaced.
+    "imu_frame_transform": Metrics(
+        True, nreg=20, bnreg=0, steering=35, copies=0, min_ii=42, last_pc=42, max_block_span=42
+    ),
     # The two largest kernels carry slightly higher register pressure as a deliberate latency-for-area point: the
     # uniform landing keeps min_ii/last_pc tight, so a result resides a cycle longer, raising register
     # pressure (nreg, and ekf1_stateless's steering with it). The baselines are non-regression ceilings (``<=``) pinned

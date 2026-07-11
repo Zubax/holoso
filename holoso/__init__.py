@@ -21,10 +21,10 @@ from ._type import (
 from ._value import FloatValue as FloatValue
 from ._errors import (
     HolosoError as HolosoError,
-    MissingIntrinsic as MissingIntrinsic,
     SourceUnavailable as SourceUnavailable,
     SynthesisError as SynthesisError,
     UnsupportedConstruct as UnsupportedConstruct,
+    UnsupportedLibraryFunction as UnsupportedLibraryFunction,
 )
 
 from ._backend.cocotb import CocotbOutput as CocotbOutput
@@ -51,5 +51,5 @@ from ._operators import (
     OpConfig as OpConfig,
 )
 
-__version__ = "0.1.12"
+__version__ = "0.1.13"
 __url__ = "https://holoso.digital"

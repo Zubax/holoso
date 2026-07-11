@@ -13,7 +13,8 @@ from typing import cast
 import numpy as np
 import pytest
 
-from holoso import MissingIntrinsic, UnsupportedConstruct
+import holoso
+from holoso import FloatFormat, UnsupportedConstruct, UnsupportedLibraryFunction
 from holoso._frontend import lower
 from holoso._frontend._ast_support import port_name
 from holoso._hir import (
@@ -27,11 +28,13 @@ from holoso._hir import (
     FloatAbs,
     FloatAdd,
     FloatConst,
+    FloatCos,
     FloatDiv,
     FloatExp2,
     FloatMul,
     FloatNeg,
     FloatRelational,
+    FloatSin,
     FloatToBool,
     FloatType,
     Hir,
@@ -45,7 +48,7 @@ from holoso._hir import (
     StateRead,
 )
 
-from ._modelref import arith_count as _arith_count, flatten_value, output_names
+from ._modelref import arith_count as _arith_count, default_ops, flatten_value, output_names
 
 
 def test_scalar_is_output_zero() -> None:
@@ -385,6 +388,45 @@ def test_globally_shadowed_range_is_rejected(tmp_path: Path) -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     with pytest.raises(UnsupportedConstruct, match="for-loop must iterate over range"):
+        lower(module.kernel)
+
+
+def _lower_generated_kernel(tmp_path: Path, name: str, source: str):  # type: ignore[no-untyped-def]
+    import importlib.util
+
+    module_path = tmp_path / f"_{name}.py"
+    module_path.write_text(source)
+    spec = importlib.util.spec_from_file_location(f"_{name}", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_comprehension_with_too_many_generators_is_a_located_rejection(tmp_path: Path) -> None:
+    # Regression (Codex): each generator adds one `_expand_comprehension` frame, so a comprehension with hundreds of
+    # generators used to leak a bare RecursionError. It now rejects with a located error; CPython runs it normally.
+    clauses = " ".join(f"for a{i} in [{float(i)!r}]" for i in range(200))
+    module = _lower_generated_kernel(
+        tmp_path, "many_generators", f"def kernel(x: float) -> float:\n    return [x {clauses}][0]\n"
+    )
+    assert module.kernel(6.5) == 6.5  # valid, runnable Python
+    with pytest.raises(UnsupportedConstruct, match="comprehension nesting expands"):
+        lower(module.kernel)
+
+
+def test_deeply_nested_comprehensions_are_a_located_rejection(tmp_path: Path) -> None:
+    # Regression (Codex): a single comprehension's generators are bounded, but nested comprehensions accumulate
+    # expansion frames across levels, so deep nesting used to leak a bare RecursionError; it is now a located error.
+    inner = "x"
+    for depth in range(15):
+        clauses = " ".join(f"for a{depth}_{i} in [0.0]" for i in range(64))
+        inner = f"[{inner} {clauses}][0]"
+    module = _lower_generated_kernel(
+        tmp_path, "nested_comprehensions", f"def kernel(x: float) -> float:\n    return {inner}\n"
+    )
+    assert module.kernel(3.25) == 3.25  # valid, runnable Python (below CPython's own compiler limit)
+    with pytest.raises(UnsupportedConstruct, match="comprehension nesting expands"):
         lower(module.kernel)
 
 
@@ -826,11 +868,39 @@ def test_unknown_global_is_unsupported() -> None:
         lower(f)
 
 
-def test_missing_intrinsic_message() -> None:
+def test_tan_lowers_to_sin_cos_division() -> None:
     def f(a: float) -> float:
         return math.tan(a)
 
-    with pytest.raises(MissingIntrinsic, match="tan"):
+    hir = lower(f)
+    assert _arith_count(hir, FloatSin) == 1
+    assert _arith_count(hir, FloatCos) == 1
+    assert _arith_count(hir, FloatDiv) == 1
+
+
+def test_unsupported_library_function_message() -> None:
+    def f(a: float) -> float:
+        return math.erf(a)
+
+    with pytest.raises(UnsupportedLibraryFunction, match="erf"):
+        lower(f)
+
+
+def test_unsupported_library_function_covers_unregistered_ufuncs() -> None:
+    # np.spacing is a ufunc with no fast-math float equivalent (it reads the format's ULP), so it stays unregistered
+    # and reports an unimplemented library function rather than a generic unsupported-call.
+    def f(a: float) -> float:
+        return np.spacing(a)  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedLibraryFunction, match="spacing"):
+        lower(f)
+
+
+def test_non_operator_numpy_call_stays_unsupported() -> None:
+    def f(a: float) -> float:
+        return np.sum(a)  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="unsupported call to 'sum'"):
         lower(f)
 
 
@@ -1184,7 +1254,7 @@ def test_user_global_function_shadows_intrinsic_name() -> None:
     def f(a: float) -> float:
         return cbrt(a)
 
-    assert _arith_count(lower(f), FloatMul) == 1  # the inlined x * x, not a MissingIntrinsic rejection
+    assert _arith_count(lower(f), FloatMul) == 1  # the inlined x * x, not an UnsupportedLibraryFunction rejection
 
 
 def test_local_name_shadows_global_callable() -> None:
@@ -1290,6 +1360,129 @@ def test_callable_global_shadowing_abs_is_inlined_not_floatabs() -> None:
 
     hir = lower(_rebind_globals(use_abs, abs=cbrt))
     assert _arith_count(hir, FloatAbs) == 0 and _arith_count(hir, FloatMul) == 1
+
+
+def test_unhashable_global_shadowing_registered_name_is_rejected() -> None:
+    # A registry lookup on an unhashable shadow must not crash the compiler; the shadow simply misses and gets the
+    # standard non-callable diagnostic instead. Various unhashable shapes are covered.
+    def use_abs(a: float) -> float:
+        return abs(a)
+
+    for shadow in (np.zeros(3), (1.0, [2.0]), {1: 2}, {1, 2}):
+        with pytest.raises(UnsupportedConstruct, match="non-callable"):
+            lower(_rebind_globals(use_abs, abs=shadow))
+
+
+def test_closure_freevar_shadowing_a_registered_name_is_rejected() -> None:
+    # A freevar (enclosing-scope binding) shadows the name Python would call, so holoso must resolve it to the captured
+    # object -- never dispatch to the stub/operator it merely spells. Regression: a freevar 'pow' bound to a user
+    # function was silently lowered to the pow stub (256 instead of the user function's value), and a non-callable
+    # freevar 'abs' to FloatAbs where Python raises.
+    def make_pow(pow: Callable[[float, float], float]) -> Callable[[float], float]:  # noqa: A002 -- closure shadow
+        def kernel(x: float) -> float:
+            return pow(x, x)
+
+        return kernel
+
+    def user_pow(a: float, b: float) -> float:
+        return a - b
+
+    with pytest.raises(UnsupportedConstruct, match="pow"):
+        lower(make_pow(user_pow))
+
+    def make_abs(abs: float) -> Callable[[float], float]:  # noqa: A002 -- a non-callable closure shadow
+        def kernel(x: float) -> float:
+            return abs(x)  # type: ignore[operator, no-any-return]
+
+        return kernel
+
+    with pytest.raises(UnsupportedConstruct, match="abs"):
+        lower(make_abs(3.0))
+
+
+def test_closure_freevar_bound_to_a_library_function_still_dispatches() -> None:
+    # The fix must not over-reject: a freevar capturing an actual library function dispatches by identity as usual.
+    def make() -> Callable[[float], float]:
+        s = math.sin
+
+        def kernel(x: float) -> float:
+            return s(x)
+
+        return kernel
+
+    assert _arith_count(lower(make()), FloatSin) == 1
+
+
+def test_call_dispatch_is_by_identity_not_spelling() -> None:
+    # Dispatch resolves the callee object, so an aliased import lowers exactly like the canonical spelling -- the numpy
+    # array factories and the cast/sequence builtins are matched by identity, not by the name written at the call.
+    def use_asarray(a: float, b: float) -> list[float]:
+        return aa([a, b])  # type: ignore[name-defined, no-any-return]  # noqa: F821 -- 'aa' is np.asarray, injected
+
+    assert [o.name for o in lower(_rebind_globals(use_asarray, aa=np.asarray)).outputs] == ["out_0", "out_1"]
+
+    def use_float(a: bool) -> float:
+        return f(a)  # type: ignore[name-defined, no-any-return]  # noqa: F821 -- 'f' is the builtin float, injected
+
+    assert _arith_count(lower(_rebind_globals(use_float, f=float)), BoolToFloat) == 1
+
+
+def _module_scoped_helper(a: float) -> float:  # a module global used by the freevar-shadowing test below
+    return a + 100.0
+
+
+def test_freevar_shadowing_a_global_function_is_not_inlined_as_the_global() -> None:
+    # A freevar shadows the same-named module global Python would otherwise call. Dispatch is freevar-aware (resolved),
+    # so the inline path must not lower the module global in its place -- the captured user function is a closure
+    # callable, which is rejected, never silently swapped for the wrong global.
+    def outer(helper: Callable[[float], float]) -> Callable[[float], float]:  # noqa: A002 -- shadows the global name
+        def kernel(x: float) -> float:
+            return helper(x)  # 'helper' is the freevar
+
+        return kernel
+
+    def captured(a: float) -> float:
+        return a * 3.0
+
+    kernel = _rebind_globals(outer(captured), helper=_module_scoped_helper)  # freevar helper + a same-named global
+    with pytest.raises(UnsupportedConstruct, match="helper"):
+        lower(kernel)
+
+
+def test_library_stub_error_is_attributed_to_the_call_site() -> None:
+    def f(a: float) -> float:
+        return math.tan((a, a))  # type: ignore[arg-type]
+
+    with pytest.raises(UnsupportedConstruct, match=r"in tan\(\):") as excinfo:
+        lower(f)
+    location = excinfo.value.location
+    assert location is not None
+    assert location.filename == __file__
+    assert location.line is not None and "math.tan((a, a))" in location.line
+
+
+def test_stub_calling_an_unimplemented_library_function_is_reattributed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A stub body can itself call an unimplemented library function, raising UnsupportedLibraryFunction -- a sibling of
+    # UnsupportedConstruct under SynthesisError. Re-attribution must catch it too (not just UnsupportedConstruct), so
+    # the error points at the user's call site with the concrete type preserved, never the stub-internal location.
+    from holoso._frontend._lib import Library
+    from holoso._frontend._lib._registry import _REGISTRY
+
+    def sentinel(x: float) -> float:  # a stand-in external callable, mapped into the registry for this test
+        return x
+
+    def bad_stub(x: float) -> float:  # a composite whose body calls an unimplemented library function
+        return math.erf(x)
+
+    monkeypatch.setitem(_REGISTRY, sentinel, Library(bad_stub))  # type: ignore[arg-type]
+
+    def kernel(x: float) -> float:
+        return sentinel(x)
+
+    with pytest.raises(UnsupportedLibraryFunction, match="erf") as excinfo:
+        lower(kernel)
+    assert excinfo.value.message.startswith("in sentinel():")
+    assert excinfo.value.location is not None and excinfo.value.location.filename == __file__
 
 
 def test_numpy_array_state_decomposes_like_a_list() -> None:
@@ -2421,3 +2614,1282 @@ def test_explicit_return_none_is_accepted_for_stateful_method() -> None:
             return None
 
     lower(Acc().update)
+
+
+# ---------------------------------------------------------------- compile-time shape queries
+
+
+def test_static_shape_queries_in_index_range_and_branch_positions() -> None:
+    from jaxtyping import Float64
+
+    def kernel(v: Float64[np.ndarray, "3"], m: Float64[np.ndarray, "2 3"]) -> float:
+        acc = v[0]
+        for i in range(1, len(v)):  # len() bounds an unrolled range
+            acc = acc + v[i]
+        acc = acc + m[m.ndim - 2][m.shape[-1] - 3]  # .ndim and .shape[k] are compile-time integers
+        if v.ndim == 1:  # a shape comparison folds, so only the taken arm is lowered
+            acc = acc * 2.0
+        return acc  # type: ignore[no-any-return]
+
+    hir = lower(kernel)
+    assert [o.name for o in hir.outputs] == ["out_0"]
+    assert _arith_count(hir, FloatAdd) == 3  # v[0]+v[1]+v[2] then +m[0][0]; the ndim branch adds no add
+    assert _arith_count(hir, FloatMul) == 1
+
+
+def test_len_follows_python_and_accepts_a_ragged_list() -> None:
+    # len() is a Python builtin, not a numpy one, so it counts the items of any aggregate; only .ndim/.shape are
+    # numpy-only and rejected on a sequence.
+    def ragged(a: float, b: float) -> float:
+        rows = [[a, b], [a]]
+        acc = 0.0
+        for i in range(len(rows)):
+            for j in range(len(rows[i])):
+                acc = acc + rows[i][j]
+        return acc
+
+    assert _arith_count(lower(ragged), FloatAdd) == 3
+
+
+def test_shape_queries_are_rejected_outside_a_static_position() -> None:
+    from jaxtyping import Float64
+
+    def ndim_as_value(v: Float64[np.ndarray, "3"]) -> float:
+        return float(v.ndim)
+
+    def shape_as_value(v: Float64[np.ndarray, "3"]) -> float:
+        return float(v.shape[0])
+
+    def len_as_value(v: Float64[np.ndarray, "3"]) -> float:
+        return float(len(v))
+
+    for kernel in (ndim_as_value, shape_as_value, len_as_value):
+        with pytest.raises(UnsupportedConstruct, match="compile-time integer"):
+            lower(kernel)
+
+    def ndim_of_list(a: float, b: float) -> float:
+        rows = [a, b]
+        return a if rows.ndim == 1 else b  # type: ignore[attr-defined]
+
+    with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
+        lower(ndim_of_list)
+
+    def len_of_scalar(a: float) -> float:
+        acc = 0.0
+        for _ in range(len(a)):  # type: ignore[arg-type]
+            acc = acc + a
+        return acc
+
+    with pytest.raises(UnsupportedConstruct, match="len\\(\\) of a scalar"):
+        lower(len_of_scalar)
+
+    def bad_axis(v: Float64[np.ndarray, "3"]) -> float:
+        return v[v.shape[2]]  # type: ignore[return-value]
+
+    with pytest.raises(UnsupportedConstruct, match="axis 2 is out of range"):
+        lower(bad_axis)
+
+
+def test_numpy_only_shape_queries_are_rejected_on_a_sequence_however_it_is_spelled() -> None:
+    # A shape query never lowers its receiver, so the list/tuple rejection has to walk the receiver expression itself.
+    # Reaching a list through a subscript, a transpose, or a state attribute must not hand it .ndim/.shape/.T, none of
+    # which Python gives a list -- otherwise Holoso would accept a kernel that is not runnable Python.
+    def ndim_through_a_subscript(a: float, b: float) -> float:
+        rows = [[a, b], [b, a]]
+        return a if rows[0].ndim == 1 else b  # type: ignore[attr-defined]
+
+    with pytest.raises(UnsupportedConstruct, match="ndim on a Python list/tuple"):
+        lower(ndim_through_a_subscript)
+
+    def transpose_of_a_sequence_in_a_static_position(a: float, b: float) -> float:
+        rows = [a, b]
+        acc = 0.0
+        for i in range(len(rows.T)):  # type: ignore[attr-defined]
+            acc = acc + rows[i]
+        return acc
+
+    with pytest.raises(UnsupportedConstruct, match="transpose on a Python list/tuple"):
+        lower(transpose_of_a_sequence_in_a_static_position)
+
+    class ListState:
+        def __init__(self) -> None:
+            self.vec = [1.0, 2.0]
+
+        def __call__(self, a: float) -> float:
+            return a if self.vec.ndim == 1 else -a  # type: ignore[attr-defined]
+
+    with pytest.raises(UnsupportedConstruct, match="ndim on a Python list/tuple"):
+        lower(ListState().__call__)
+
+
+def test_empty_slice_has_no_shape_but_still_has_a_length() -> None:
+    # An empty aggregate is not an array (array_shape says so), so the static shape probe must not report a zero-length
+    # axis that lowering can never produce. Iteration and len() still follow Python, which give an empty slice a length.
+    from jaxtyping import Float64
+
+    def iterate_an_empty_slice(v: Float64[np.ndarray, "5"]) -> float:
+        acc = v[0]
+        for x in v[2:2]:
+            acc = acc + x
+        return acc  # type: ignore[no-any-return]
+
+    assert iterate_an_empty_slice(np.arange(5.0)) == 0.0  # the kernel is runnable Python, and the loop is empty
+    assert _arith_count(lower(iterate_an_empty_slice), FloatAdd) == 0
+
+    def ndim_of_an_empty_slice(v: Float64[np.ndarray, "5"]) -> float:
+        return v[0] if v[2:2].ndim == 1 else v[1]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="rectangular"):
+        lower(ndim_of_an_empty_slice)
+
+    def matmul_of_an_empty_slice(v: Float64[np.ndarray, "5"], w: Float64[np.ndarray, "5"]) -> float:
+        return v[2:2] @ w  # type: ignore[no-any-return]
+
+    # The stub's own shape guard surfaces the same diagnostic through the operator, at the user's call site.
+    with pytest.raises(UnsupportedConstruct, match="rectangular"):
+        lower(matmul_of_an_empty_slice)
+
+
+def test_shape_queries_still_reach_arrays_through_the_same_spellings() -> None:
+    # The complement of the rejection above: an array receiver keeps .ndim/.shape/.T through a subscript or a state
+    # attribute, and len() keeps working on a list attribute, where Python does give it a length.
+    class Mixed:
+        def __init__(self) -> None:
+            self.m = np.array([[1.0, 2.0], [3.0, 4.0]])
+            self.v = [1.0, 2.0]
+
+        def __call__(self, a: float) -> float:
+            acc = a
+            for i in range(len(self.v)):
+                acc = acc + self.v[i]
+            for i in range(self.m.ndim):
+                acc = acc + self.m[i][i]
+            return acc + self.m.T[0][1]  # type: ignore[no-any-return]
+
+    assert [o.name for o in lower(Mixed().__call__).outputs] == ["out_0"]
+
+    from jaxtyping import Float64
+
+    def array_row_has_ndim(m: Float64[np.ndarray, "2 3"]) -> float:
+        return m[0][0] if m[0].ndim == 1 else m[1][0]  # type: ignore[no-any-return]
+
+    assert [o.name for o in lower(array_row_has_ndim).outputs] == ["out_0"]
+
+
+# ---------------------------------------------------------------- comprehensions and aggregate iteration
+
+
+def test_list_comprehension_unrolls_and_scopes_its_target() -> None:
+    from jaxtyping import Float64
+
+    def scaled(v: Float64[np.ndarray, "3"], s: float) -> Float64[np.ndarray, "3"]:
+        return np.array([v[i] * s for i in range(len(v))])
+
+    hir = lower(scaled)
+    assert [o.name for o in hir.outputs] == ["out_0", "out_1", "out_2"]
+    assert _arith_count(hir, FloatMul) == 3
+
+    def nested(m: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "3 2"]:
+        return np.array([[m[i][j] for i in range(2)] for j in range(3)])
+
+    assert [o.name for o in lower(nested).outputs] == [f"out_{i}_{j}" for i in range(3) for j in range(2)]
+
+    def filtered(m: Float64[np.ndarray, "3 3"]) -> Float64[np.ndarray, "3"]:
+        return np.array([m[i][j] for i in range(3) for j in range(3) if i < j])
+
+    assert [o.name for o in lower(filtered).outputs] == ["out_0", "out_1", "out_2"]
+
+    def target_does_not_leak(v: Float64[np.ndarray, "3"]) -> float:
+        rows = [v[k] for k in range(3)]
+        return rows[0] + k  # type: ignore[name-defined, no-any-return]  # noqa: F821
+
+    # Unlike a ``for`` counter, a comprehension target is confined to the comprehension, exactly as in Python.
+    with pytest.raises(UnsupportedConstruct, match="unknown name 'k'"):
+        lower(target_does_not_leak)
+
+
+def test_comprehension_yields_a_python_list_not_an_array() -> None:
+    from jaxtyping import Float64
+
+    def arithmetic_on_a_comprehension(v: Float64[np.ndarray, "2"]) -> float:
+        rows = [v[i] for i in range(2)]
+        return (rows * 2.0)[0]  # type: ignore[no-any-return, operator]
+
+    # A comprehension is a Python list, so numpy-only operations need np.array(...) around it, as in Python.
+    with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
+        lower(arithmetic_on_a_comprehension)
+
+
+def test_comprehension_rejections() -> None:
+    from jaxtyping import Float64
+
+    def dynamic_filter(v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        return np.array([v[i] for i in range(3) if v[i] > 0.0])
+
+    with pytest.raises(UnsupportedConstruct, match="compile-time condition"):
+        lower(dynamic_filter)
+
+    def walrus_inside(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        return np.array([(t := v[i]) + t for i in range(2)])
+
+    with pytest.raises(UnsupportedConstruct, match="walrus"):
+        lower(walrus_inside)
+
+    def tuple_target(v: Float64[np.ndarray, "2"]) -> float:
+        pairs = [[v[0], v[1]]]
+        return [a + b for a, b in pairs][0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="comprehension target must be a plain name"):
+        lower(tuple_target)
+
+    def over_threshold(a: float) -> float:
+        return [a for _ in range(1000)][0]
+
+    with pytest.raises(UnsupportedConstruct, match="unroll threshold"):
+        lower(over_threshold)
+
+
+def test_for_loop_iterates_an_aggregate() -> None:
+    from jaxtyping import Float64
+
+    def sum_rows(m: Float64[np.ndarray, "2 3"]) -> float:
+        acc = 0.0
+        for row in m:
+            for x in row:
+                acc = acc + x
+        return acc
+
+    hir = lower(sum_rows)
+    assert _arith_count(hir, FloatAdd) == 6  # the 0.0 seed folds away only later, in the optimizer
+    assert [o.name for o in hir.outputs] == ["out_0"]
+
+    def iterate_a_scalar(a: float) -> float:
+        acc = 0.0
+        for x in a:  # type: ignore[attr-defined]
+            acc = acc + x
+        return acc
+
+    with pytest.raises(UnsupportedConstruct, match="range|aggregate"):
+        lower(iterate_a_scalar)
+
+
+# ---------------------------------------------------------------- statically reachable raise
+
+
+def test_raise_on_a_statically_taken_path_is_a_located_synthesis_error() -> None:
+    from jaxtyping import Float64
+
+    def rejects(m: Float64[np.ndarray, "2 3"]) -> float:
+        if m.ndim != 1:
+            raise ValueError(f"expected 1-D, got {m.ndim}-D with {len(m)} rows")
+        return m[0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="expected 1-D, got 2-D with 2 rows") as excinfo:
+        lower(rejects)
+    assert excinfo.value.location is not None and "raise ValueError" in (excinfo.value.location.line or "")
+
+    def accepts(v: Float64[np.ndarray, "3"]) -> float:
+        if v.ndim != 1:
+            raise ValueError("expected 1-D")  # the fold never takes this arm, so it never lowers
+        return v[0]  # type: ignore[no-any-return]
+
+    assert [o.name for o in lower(accepts).outputs] == ["out_0"]
+
+
+def test_raise_rejections() -> None:
+    def data_dependent(a: float) -> float:
+        if a > 0.0:
+            raise ValueError("positive")
+        return a
+
+    # Hardware cannot signal a runtime exception, so a raise whose reachability depends on data is rejected as such.
+    with pytest.raises(UnsupportedConstruct, match="data-dependent"):
+        lower(data_dependent)
+
+    def bare(a: float) -> float:
+        raise  # noqa: PLE0704
+
+    with pytest.raises(UnsupportedConstruct, match="only 'raise"):
+        lower(bare)
+
+    def not_an_exception(a: float) -> float:
+        raise a  # type: ignore[misc]
+
+    with pytest.raises(UnsupportedConstruct, match="does not name an exception type"):
+        lower(not_an_exception)
+
+    def runtime_interpolation(a: float) -> float:
+        raise ValueError(f"bad {a}")
+
+    with pytest.raises(UnsupportedConstruct, match="interpolated value must be a compile-time integer"):
+        lower(runtime_interpolation)
+
+
+def _raises_under_a_dynamic_guard(a: float) -> float:
+    if a > 0.0:
+        raise ValueError("positive")
+    return a
+
+
+def test_branch_depth_restarts_per_inlined_function() -> None:
+    # Whether a raise is data-dependent is a property of the function that WRITES it, not of a call site that happens to
+    # sit in a branch arm. So a callee's own dynamic guard is rejected even from a straight-line caller, and a stub's
+    # static guard is still a compile-time rejection even when the call site is inside a dynamic arm.
+    from jaxtyping import Float64
+
+    def dynamic_guard_in_callee(a: float, b: float) -> float:
+        r = b
+        if b > 0.0:
+            r = _raises_under_a_dynamic_guard(a)
+        return r
+
+    with pytest.raises(UnsupportedConstruct, match="data-dependent"):
+        lower(dynamic_guard_in_callee)
+
+    def static_guard_in_stub(c: bool, m: Float64[np.ndarray, "2 3"], v: Float64[np.ndarray, "2"]) -> float:
+        r = 0.0
+        if c:
+            r = (m @ v)[0]  # a shape error, though the arm it sits in is data-dependent
+        return r
+
+    with pytest.raises(UnsupportedConstruct, match=r"in matmul\(\).*mismatch"):
+        lower(static_guard_in_stub)
+
+
+# ---------------------------------------------------------------- reachability scan vs lowering
+
+
+def test_state_write_only_on_a_folded_away_shape_branch_is_not_state() -> None:
+    # The scan runs before the body is lowered, so it cannot fold a shape query and descends both arms, registering the
+    # write. Lowering folds the branch away and never touches the attribute, which therefore keeps its reset value for
+    # good and is not state. Before ``_prune_untouched_state`` this crashed with a raw KeyError from slot registration.
+    from jaxtyping import Float64
+
+    class DeadShapeBranch:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def step(self, x: Float64[np.ndarray, "3"]) -> float:
+            if len(x) == 4:  # statically false for a declared 3-vector
+                self.s = x[0]
+            return x[0]  # type: ignore[no-any-return]
+
+    hir = lower(DeadShapeBranch().step)
+    assert [slot.name for slot in hir.state_slots] == []
+    assert [o.name for o in hir.outputs] == ["out_0"]
+
+    class DeadAggregateLoop:
+        def __init__(self) -> None:
+            self.a = 0.0
+
+        def step(self, x: float) -> float:
+            for _ in []:  # zero trips, so the write is unreachable
+                self.a = x
+            return x
+
+    assert [slot.name for slot in lower(DeadAggregateLoop().step).state_slots] == []
+
+    class AlsoRead:
+        # When the attribute is also READ on a live path, lowering must emit the read before it can know the write is
+        # unreachable, so the conservative classification stands and the slot survives as a register that holds its
+        # reset value. Correct -- reads see the reset, as in Python -- at the cost of one register and one port.
+        def __init__(self) -> None:
+            self.s = 0.25
+
+        def step(self, x: Float64[np.ndarray, "3"]) -> float:
+            if len(x) == 4:
+                self.s = x[0]
+            return self.s + x[0]  # type: ignore[no-any-return]
+
+    hir = lower(AlsoRead().step)
+    assert [slot.name for slot in hir.state_slots] == ["s"]
+    sim = holoso.synthesize(AlsoRead().step, default_ops(FloatFormat(11, 52)), name="alsoread").numerical_model
+    simulator = sim.elaborate()
+    reference = AlsoRead()
+    inputs = np.array([1.5, 0.0, 0.0])
+    for _ in range(3):
+        returned, state = simulator.run(*inputs.tolist())
+        assert float(returned) == pytest.approx(reference.step(inputs))
+        assert float(state) == pytest.approx(0.25)  # never written, so the register holds its reset forever
+
+
+def test_state_write_under_an_aggregate_for_is_not_dropped_by_a_stale_counter() -> None:
+    # ``for i in <aggregate>`` binds a runtime value, so the target's compile-time binding must be demoted in the
+    # reachability scan exactly as lowering demotes it. Otherwise the scan folds ``i == 2.0`` on the leaked counter of
+    # the preceding range loop, walks only one arm, misses the write, and the state slot silently disappears -- the
+    # module would return the reset constant forever. ``_assign_attr`` now asserts against that direction outright.
+    from jaxtyping import Float64
+
+    class StaleCounter:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def step(self, x: Float64[np.ndarray, "2"]) -> float:
+            for i in range(3):
+                pass
+            for i in x:  # i is demoted here; the scan must not keep the leaked value 2
+                if i == 2.0:
+                    pass
+                else:
+                    self.s = i
+            return self.s
+
+    hir = lower(StaleCounter().step)
+    assert [slot.name for slot in hir.state_slots] == ["s"]
+
+    sim = holoso.synthesize(StaleCounter().step, default_ops(FloatFormat(11, 52)), name="stale").numerical_model
+    simulator = sim.elaborate()
+    inputs = np.array([5.0, 7.0])
+    assert float(simulator.run(*inputs.tolist())[0]) == pytest.approx(StaleCounter().step(inputs))
+
+
+_COMPREHENSION_SHADOW = 1  # a module-level integer constant a comprehension target below deliberately shadows
+
+
+def test_comprehension_target_shadows_a_same_named_module_constant() -> None:
+    # A comprehension is its own scope in Python, so its target shadows a same-named global while it is bound. If the
+    # target were not registered as a local for its extent, the static evaluators would resolve the global integer
+    # behind the binding and fold the comparison to a compile-time answer -- a silent miscompile: the kernel would
+    # return all ones instead of a one-hot vector.
+    from jaxtyping import Float64
+
+    def one_hot(v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        return np.array([1.0 if _COMPREHENSION_SHADOW == 1 else 0.0 for _COMPREHENSION_SHADOW in v])
+
+    hir = lower(one_hot)
+    assert _arith_count(hir, FloatRelational) == 3  # three runtime comparisons, not a folded constant
+
+    inputs = np.array([5.0, 1.0, 9.0])
+    sim = holoso.synthesize(one_hot, default_ops(FloatFormat(11, 52)), name="onehot").numerical_model.elaborate()
+    assert [float(x) for x in sim.run(*inputs.tolist())] == pytest.approx(list(np.asarray(one_hot(inputs))))
+
+    def indexed(v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        # The complement: a range-bound target IS a compile-time integer, so its comparison still folds away.
+        return np.array([v[i] * 2.0 if i == 1 else v[i] for i in range(3)])
+
+    assert _arith_count(lower(indexed), FloatRelational) == 0 and _arith_count(lower(indexed), FloatMul) == 1
+
+
+_COMPREHENSION_BOUND = 2  # a module-level integer the outermost generator below reads from the enclosing scope
+
+
+def test_comprehension_scoping_follows_python_exactly() -> None:
+    # Python evaluates the OUTERMOST iterable in the enclosing scope, before the comprehension's scope exists, so the
+    # range bound below is the module constant, not the (as yet unbound) target that shadows it.
+    from jaxtyping import Float64
+
+    def outermost_iterable_reads_the_enclosing_scope(x: float) -> Float64[np.ndarray, "2"]:
+        return np.array([x for _COMPREHENSION_BOUND in range(_COMPREHENSION_BOUND)])
+
+    assert [o.name for o in lower(outermost_iterable_reads_the_enclosing_scope).outputs] == ["out_0", "out_1"]
+    assert len(outermost_iterable_reads_the_enclosing_scope(1.0)) == 2  # and it is runnable Python
+
+    def inner_generator_sees_the_unbound_comprehension_local(v: Float64[np.ndarray, "2"]) -> float:
+        y = v
+        return [y for x in range(1) for y in y][0]  # type: ignore[no-any-return]  # Python: UnboundLocalError on the inner y
+
+    with pytest.raises(UnboundLocalError):
+        inner_generator_sees_the_unbound_comprehension_local(np.array([1.0, 2.0]))
+    with pytest.raises(UnsupportedConstruct, match="unknown name 'y'"):
+        lower(inner_generator_sees_the_unbound_comprehension_local)
+
+
+def test_comprehension_filter_is_lowered_before_it_is_folded() -> None:
+    # The filter decides which items exist, so it must fold -- but it is lowered first, exactly as an ``if`` test is,
+    # so its operands are type-checked. A fold that never looked at the condition would wave an unsupported operand
+    # through whenever the other side of an ``or`` happened to be statically true.
+    from jaxtyping import Float64
+
+    def unsupported_operand(v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "1"]:
+        return np.array([v[i] for i in range(1) if _returns_a_dict(v) or True])
+
+    with pytest.raises(UnsupportedConstruct, match="Dict"):
+        lower(unsupported_operand)
+
+
+def _returns_a_dict(v: object) -> object:
+    return {"not": v}
+
+
+def test_state_write_after_a_raise_does_not_poison_the_read_only_scan() -> None:
+    # A raise ends the block, so the assignment below it is unreachable and must not mark ``flag`` as written --
+    # otherwise ``flag`` stops being a read-only constant, the guard becomes a runtime branch, and the raise in the
+    # statically-dead else arm is misreported as sitting on a data-dependent path.
+    class GuardedByAReadOnlyFlag:
+        def __init__(self) -> None:
+            self.flag = True
+            self.y = 0.0
+
+        def step(self, a: float) -> float:
+            if self.flag:
+                self.y = a
+            else:
+                raise ValueError("flag must be set")
+                self.flag = False  # noqa: F841  # unreachable: the raise ends the block
+
+            return self.y
+
+    hir = lower(GuardedByAReadOnlyFlag().step)
+    assert [slot.name for slot in hir.state_slots] == ["y"]  # flag stays a read-only constant
+
+
+def test_an_untouched_state_attribute_is_not_resurrected_by_an_unrelated_branch() -> None:
+    # _merge_state must not load the live-in of an attribute NEITHER arm touched: both arms start from the same
+    # pre-branch state, so doing so would conjure a register (and a public port) out of a branch that never
+    # mentions the attribute, undoing _prune_untouched_state.
+    from jaxtyping import Float64
+
+    class DeadWritePlusUnrelatedBranch:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def step(self, x: Float64[np.ndarray, "3"]) -> float:
+            if len(x) == 4:  # dead: the write never happens
+                self.s = x[0]
+            r = x[0]
+            if x[1] > 0.0:  # an unrelated dynamic branch, which merges state
+                r = x[2]
+            return r  # type: ignore[no-any-return]
+
+    hir = lower(DeadWritePlusUnrelatedBranch().step)
+    assert [slot.name for slot in hir.state_slots] == []
+    assert [o.name for o in hir.outputs] == ["out_0"]
+
+
+def test_a_scan_never_folds_a_shape_query_against_an_environment_lowering_will_not_have() -> None:
+    # The loop-carried scan walks a while body BEFORE its phis exist, so the environment it sees is the preheader's.
+    # Were it allowed to resolve a name there, it would fold ``i.ndim == 1`` against the scalar ``i`` bound before the
+    # loop, miss the state write in the arm it skipped, open no loop phi, and discard the accumulation entirely --
+    # a silent miscompile returning the reset value forever.
+    from jaxtyping import Float64
+
+    class AccumulateOverRows:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def step(self, c: bool, m: Float64[np.ndarray, "2 3"]) -> float:
+            i = 0.0
+            while c:
+                for i in m:
+                    if i.ndim == 1:
+                        self.s = self.s + i[0]
+                i = 0.0
+                c = False
+            return self.s
+
+    rows = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    assert AccumulateOverRows().step(True, rows) == 5.0  # the kernel is runnable Python
+    assert [slot.name for slot in lower(AccumulateOverRows().step).state_slots] == ["s"]
+
+    sim = holoso.synthesize(
+        AccumulateOverRows().step, default_ops(FloatFormat(11, 52)), name="accumulate_rows"
+    ).numerical_model
+    assert float(sim.elaborate().run(True, *rows.flatten().tolist())[0]) == pytest.approx(5.0)
+
+
+def test_a_state_attribute_read_only_inside_a_while_loop_keeps_its_slot() -> None:
+    # A while loop restores the pre-loop state environment on exit, dropping whatever its body loaded, so membership
+    # there cannot decide whether an attribute was touched. Pruning on it would drop a slot whose StateRead is still
+    # in the HIR, leaving the register allocator to trip over an undeclared slot.
+    class ReadOnlyInsideLoop:
+        def __init__(self) -> None:
+            self.gain = 2.0
+
+        def update(self, x: float) -> float:
+            v = [1.0, 2.0]
+            if len(v) == 3:  # dead: the scan cannot fold it, so ``gain`` is over-registered as state
+                self.gain = x
+            acc = 0.0
+            while acc < x:
+                acc = acc + self.gain
+            return acc
+
+    assert ReadOnlyInsideLoop().update(5.0) == 6.0
+    hir = lower(ReadOnlyInsideLoop().update)
+    slots = {slot.name for slot in hir.state_slots}
+    reads = {node.slot for node in hir.nodes.values() if isinstance(node, StateRead)}
+    assert reads <= slots  # every StateRead names a declared slot
+
+    sim = holoso.synthesize(
+        ReadOnlyInsideLoop().update, default_ops(FloatFormat(11, 52)), name="read_only_in_loop"
+    ).numerical_model
+    assert float(sim.elaborate().run(5.0)[0]) == pytest.approx(6.0)
+
+
+def test_a_shape_query_cannot_slip_past_a_rejection_the_stub_makes() -> None:
+    # ``.T`` is rejected on a scalar, so asking for the shape of one must be rejected identically -- otherwise a
+    # static position would quietly accept an expression a value position rejects, and neither is runnable Python.
+    def transpose_of_a_scalar_as_a_value(a: float) -> float:
+        return a.T  # type: ignore[attr-defined, no-any-return]
+
+    def transpose_of_a_scalar_in_a_shape_query(a: float) -> float:
+        return a if a.T.ndim == 0 else -a  # type: ignore[attr-defined]
+
+    for kernel in (transpose_of_a_scalar_as_a_value, transpose_of_a_scalar_in_a_shape_query):
+        with pytest.raises(UnsupportedConstruct, match="transpose a scalar"):
+            lower(kernel)
+
+
+def test_only_a_write_lowering_reaches_is_validated() -> None:
+    # The scan walks paths lowering folds away, so it validates nothing: a write it cannot turn into state is passed
+    # over, and the rejection happens at the write itself, if and when lowering gets there. A dead branch assigning an
+    # attribute the instance never had is dead code, exactly as it is in Python.
+    from jaxtyping import Float64
+
+    class DeadWriteToAnUninitializedAttribute:
+        def __init__(self) -> None:
+            self.ok = 0.0
+
+        def step(self, v: Float64[np.ndarray, "2"]) -> float:
+            if v.ndim == 2:  # statically false for a vector
+                self.never_initialized = 1.0
+            return v[0]  # type: ignore[no-any-return]
+
+    assert DeadWriteToAnUninitializedAttribute().step(np.array([3.0, 4.0])) == 3.0  # runnable Python
+    assert [slot.name for slot in lower(DeadWriteToAnUninitializedAttribute().step).state_slots] == []
+
+    class ReachableWriteToAnUninitializedAttribute:
+        def __init__(self) -> None:
+            self.ok = 0.0
+
+        def step(self, x: float) -> float:
+            if x > 0.0:  # a runtime arm is lowered, so the write is reached
+                self.never_initialized = x
+            return x
+
+    with pytest.raises(UnsupportedConstruct, match="assigned but not initialized"):
+        lower(ReachableWriteToAnUninitializedAttribute().step)
+
+
+def test_an_integer_state_reset_the_float_registers_cannot_hold_is_rejected() -> None:
+    # Persistent state lives in float registers and there is no integer type, so an integer reset the format cannot
+    # represent would read back rounded and a comparison against the original literal would take the other branch.
+    # Rejecting is the only honest option: silently rounding it miscompiles the guard below.
+    inexact = 2**53 + 1  # the first integer float64 cannot represent
+
+    class Selector:
+        def __init__(self) -> None:
+            self.selector = inexact
+            self.total = 0.0
+
+        def step(self, x: float) -> float:
+            if x > 100.0:  # a runtime guard, so `selector` really is persistent state
+                self.selector = 0
+            if self.selector == 2**53:  # False in Python; True once the reset rounds down
+                self.total = self.total + 100.0 * x
+            else:
+                self.total = self.total + x
+            return self.total
+
+    assert Selector().step(1.0) == 1.0  # Python compares the integer exactly
+    with pytest.raises(UnsupportedConstruct, match="hold exactly"):
+        lower(Selector().step)
+
+    class ExactVector:
+        # The guard is about exactness, not about integers: 2**53 itself round-trips, and so does any small integer.
+        def __init__(self) -> None:
+            self.taps = [1, 2**53, -3]
+            self.y = 0.0
+
+        def step(self, x: float) -> float:
+            self.taps = [self.taps[0], self.taps[1], self.taps[2]]  # written, so the vector really is state
+            self.y = self.y + self.taps[1] * x
+            return self.y
+
+    assert [slot.name for slot in lower(ExactVector().step).state_slots] == ["taps_0", "taps_1", "taps_2", "y"]
+
+
+def test_state_slot_names_only_collide_among_the_attributes_lowering_keeps() -> None:
+    # The scan over-registers `v_0` from a write lowering folds away, and `v_0` is also the first slot of the vector
+    # `v`. Checking for the collision before the prune would reject a kernel whose colliding attribute is dead code.
+    from jaxtyping import Float64
+
+    class DeadCollider:
+        def __init__(self) -> None:
+            self.v = np.array([1.0, 2.0])
+            self.v_0 = 100.0
+
+        def step(self, x: Float64[np.ndarray, "1"]) -> float:
+            if x.ndim == 2:  # dead: the scan cannot fold it, so `v_0` is over-registered
+                self.v_0 = x[0]
+            self.v = self.v + x[0]
+            return self.v[0]  # type: ignore[no-any-return]
+
+    assert [slot.name for slot in lower(DeadCollider().step).state_slots] == ["v_0", "v_1"]
+
+    class LiveCollider:
+        def __init__(self) -> None:
+            self.v = np.array([1.0, 2.0])
+            self.v_0 = 100.0
+
+        def step(self, x: float) -> float:
+            self.v_0 = x  # reached, so both attributes really do claim the slot name `v_0`
+            self.v = self.v + x
+            return self.v[0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="aliasing collision"):
+        lower(LiveCollider().step)
+
+
+def test_iteration_and_shape_queries_reach_every_aggregate_spelling() -> None:
+    # A `for` iterates whatever Python iterates: a slice, a transpose, a flattened matrix, a comprehension. The shape
+    # queries reach the same values. Each kernel is runnable Python, so a construct Holoso accepts but Python rejects
+    # would fail here rather than pass as a spurious positive.
+    from jaxtyping import Float64
+
+    def over_a_slice(m: Float64[np.ndarray, "2 3"]) -> float:
+        acc = 0.0
+        for e in m[0][1:]:
+            acc = acc + e
+        return acc
+
+    def over_a_transpose(m: Float64[np.ndarray, "2 3"]) -> float:
+        acc = 0.0
+        for row in m.T:
+            acc = acc + row[0]
+        return acc
+
+    def over_a_flatten(m: Float64[np.ndarray, "2 2"]) -> float:
+        acc = 0.0
+        for e in m.flatten():
+            acc = acc + e
+        return acc
+
+    def over_a_comprehension(v: Float64[np.ndarray, "3"]) -> float:
+        acc = 0.0
+        for e in [v[i] * 2.0 for i in range(3)]:
+            acc = acc + e
+        return acc
+
+    def negative_axis_on_a_vector(v: Float64[np.ndarray, "3"]) -> float:
+        return v[v.shape[-1] - 1]  # type: ignore[no-any-return]
+
+    m23, m22, v3 = np.arange(6.0).reshape(2, 3), np.arange(4.0).reshape(2, 2), np.arange(3.0)
+    for kernel, args in (
+        (over_a_slice, (m23,)),
+        (over_a_transpose, (m23,)),
+        (over_a_flatten, (m22,)),
+        (over_a_comprehension, (v3,)),
+        (negative_axis_on_a_vector, (v3,)),
+    ):
+        assert [o.name for o in lower(kernel).outputs] == ["out_0"]
+        kernel(*args)  # runnable Python
+
+
+def test_a_raise_message_may_interpolate_a_shape_and_a_counter() -> None:
+    from jaxtyping import Float64
+
+    def guard(m: Float64[np.ndarray, "2 3"]) -> float:
+        if m.shape[1] == 3:
+            raise ValueError(f"width {m.shape[1]} of a {m.ndim}-D value is not allowed")
+        return m[0][0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="width 3 of a 2-D value is not allowed"):
+        lower(guard)
+
+    def dead_elif_chain(v: Float64[np.ndarray, "3"]) -> float:
+        if v.ndim == 3:
+            raise ValueError("three")
+        elif v.ndim == 2:
+            raise ValueError("two")
+        return v[0]  # type: ignore[no-any-return]
+
+    assert dead_elif_chain(np.arange(3.0)) == 0.0  # runnable Python: neither arm is taken
+    assert [o.name for o in lower(dead_elif_chain).outputs] == ["out_0"]
+
+
+def test_a_loop_carries_only_attributes_that_are_really_state() -> None:
+    # The scan collects self-attribute writes syntactically, so a write it cannot turn into state must not open a
+    # loop-header phi for it; otherwise the phi's live-in lookup fails with a bare KeyError.
+    from jaxtyping import Float64
+
+    class DeadWriteInLoop:
+        def __init__(self) -> None:
+            self.ok = 0.0
+
+        def step(self, run: bool, v: Float64[np.ndarray, "3"]) -> float:
+            while run:
+                if v.ndim == 2:  # dead
+                    self.never_initialized = v[1]
+                run = False
+            return v[0]  # type: ignore[no-any-return]
+
+    assert DeadWriteInLoop().step(True, np.array([2.0, 3.0, 5.0])) == 2.0
+    assert [slot.name for slot in lower(DeadWriteInLoop().step).state_slots] == []
+
+
+def test_a_shape_query_reads_the_reset_value_not_the_state_decomposition() -> None:
+    # `.ndim` of a read-only 3-D array attribute is a compile-time integer; only STATE is restricted to 1-D and 2-D.
+    from jaxtyping import Float64
+
+    class Cube:
+        def __init__(self) -> None:
+            self.cube = np.zeros((2, 2, 2))
+
+        def step(self, v: Float64[np.ndarray, "2"]) -> float:
+            if v.ndim == 2:
+                if self.cube.ndim == 3:
+                    return v[1]  # type: ignore[no-any-return]
+            return v[0]  # type: ignore[no-any-return]
+
+    assert Cube().step(np.array([2.0, 9.0])) == 2.0
+    assert [o.name for o in lower(Cube().step).outputs] == ["out_0"]
+
+
+def test_multi_axis_indexing_validates_its_axes_against_the_shape() -> None:
+    from jaxtyping import Float64
+
+    def out_of_range_behind_an_empty_slice(m: Float64[np.ndarray, "2 2"]) -> float:
+        if len(m[:0, 99]) == 0:  # Python: IndexError, axis 1 has size 2
+            return 17.0
+        return -17.0
+
+    with pytest.raises(IndexError):
+        out_of_range_behind_an_empty_slice(np.array([[1.0, 2.0], [3.0, 4.0]]))
+
+    # An empty leading slice selects no item, so a per-item bounds check never fires: the axes need an up-front probe.
+    with pytest.raises(UnsupportedConstruct, match="invalid index"):
+        lower(out_of_range_behind_an_empty_slice)
+
+    def too_many_axes_behind_an_empty_slice(m: Float64[np.ndarray, "2 2"]) -> float:
+        if len(m[:0, 0, 0]) == 0:  # Python: IndexError, too many indices
+            return 17.0
+        return -17.0
+
+    with pytest.raises(IndexError):
+        too_many_axes_behind_an_empty_slice(np.array([[1.0, 2.0], [3.0, 4.0]]))
+    with pytest.raises(UnsupportedConstruct, match="too many indices"):
+        lower(too_many_axes_behind_an_empty_slice)
+
+    def multi_axis_on_an_empty_slice(m: Float64[np.ndarray, "2 2"]) -> float:
+        acc = 2.0
+        for x in m[0:0, :][:, 0]:
+            acc = acc + x
+        return acc
+
+    # An empty aggregate is not an array, so it has no axes to index; this must be a located error, not an assertion.
+    with pytest.raises(UnsupportedConstruct, match="rectangular"):
+        lower(multi_axis_on_an_empty_slice)
+
+
+def test_a_sequence_stays_a_sequence_through_a_subscript() -> None:
+    class ListState:
+        def __init__(self) -> None:
+            self.values = [1.0, 2.0]
+
+        def step(self, x: float) -> float:
+            return x if self.values[0:1].ndim == 1 else -x  # type: ignore[attr-defined]
+
+    with pytest.raises(AttributeError):
+        ListState().step(3.0)  # a Python list slice has no .ndim
+    with pytest.raises(UnsupportedConstruct, match="ndim on a Python list/tuple"):
+        lower(ListState().step)
+
+
+def test_a_write_is_validated_only_where_lowering_reaches_it() -> None:
+    # The scan walks paths lowering folds away, so it cannot validate. Each attribute below is unrepresentable as
+    # state; a dead write to it is dead code, a reachable one is an error. Both halves must hold, in a loop body too.
+    from jaxtyping import Float64
+
+    class Descriptor:
+        def __init__(self) -> None:
+            self.__dict__["p"] = 1.0
+            self.y = 0.0
+
+        @property
+        def p(self) -> float:
+            return 2.0
+
+        @p.setter
+        def p(self, value: float) -> None:
+            pass
+
+    class DeadDescriptorWriteInLoop(Descriptor):
+        def step(self, run: bool, v: Float64[np.ndarray, "2"]) -> float:
+            while run:
+                if v.ndim == 2:  # dead
+                    self.p = v[0]
+                run = False
+            return v[0]  # type: ignore[no-any-return]
+
+    class LiveDescriptorWriteInLoop(Descriptor):
+        def step(self, run: bool, v: Float64[np.ndarray, "2"]) -> float:
+            while run:
+                self.p = v[0]
+                run = False
+            return v[0]  # type: ignore[no-any-return]
+
+    class DeadCubeWrite:
+        def __init__(self) -> None:
+            self.cube = np.zeros((2, 2, 2))
+            self.ok = 0.0
+
+        def step(self, v: Float64[np.ndarray, "2"]) -> float:
+            if v.ndim == 2:  # dead: a 3-D attribute cannot be state
+                self.cube = v
+            return v[0]  # type: ignore[no-any-return]
+
+    v = np.array([1.0, 2.0])
+    assert DeadDescriptorWriteInLoop().step(True, v) == 1.0
+    assert [slot.name for slot in lower(DeadDescriptorWriteInLoop().step).state_slots] == []
+    assert [slot.name for slot in lower(DeadCubeWrite().step).state_slots] == []
+
+    with pytest.raises(UnsupportedConstruct, match="descriptor"):
+        lower(LiveDescriptorWriteInLoop().step)
+
+
+def test_an_integer_the_float_datapath_cannot_hold_never_enters_it() -> None:
+    # An integer that rounds would read back as another number, so a comparison against the source literal flips.
+    # The guard is on the value entering the datapath, not on the spelling: a reset, a literal, or a module constant.
+    inexact, colliding = 2**53 + 1, 2**53
+
+    class WrittenFromAModuleConstant:
+        def __init__(self) -> None:
+            self.selector = 0
+            self.total = 0.0
+
+        def step(self, x: float) -> float:
+            if x > 100.0:
+                self.selector = _INEXACT_INTEGER
+            self.total = self.total + (100.0 * x if self.selector == colliding else x)
+            return self.total
+
+    reference = WrittenFromAModuleConstant()
+    assert [reference.step(v) for v in (1.0, 101.0)] == [1.0, 102.0]  # the integer never equals 2**53 in Python
+    with pytest.raises(UnsupportedConstruct, match="no exact float representation"):
+        lower(WrittenFromAModuleConstant().step)
+
+    class HugeReset:
+        def __init__(self) -> None:
+            self.counter = 10**400  # beyond the float range entirely
+
+        def step(self, x: float) -> float:
+            if x > 0.0:
+                self.counter = 0
+            return x
+
+    with pytest.raises(UnsupportedConstruct, match="hold exactly"):
+        lower(HugeReset().step)  # a located rejection, not a bare OverflowError
+
+    class ReadOnlyInexact:
+        # Never written, so it is a folded constant. Python's own `int + float` rounds it the same way: no divergence.
+        def __init__(self) -> None:
+            self.offset = inexact
+
+        def step(self, x: float) -> float:
+            return self.offset + x
+
+    assert [o.name for o in lower(ReadOnlyInexact().step).outputs] == ["out_0"]
+
+
+_INEXACT_INTEGER = 2**53 + 1
+
+
+def test_only_a_shaped_value_answers_a_shape_query() -> None:
+    # An arbitrary stored object is not a shaped value, whatever attributes it happens to carry.
+    class Config:
+        ndim = 1
+
+    class Kernel:
+        def __init__(self) -> None:
+            self.config = Config()
+
+        def step(self, x: float) -> float:
+            return x if self.config.ndim == 0 else -x  # Python: -x, because Config.ndim is 1
+
+    assert Kernel().step(3.0) == -3.0
+    with pytest.raises(UnsupportedConstruct, match="compile-time integer"):
+        lower(Kernel().step)
+
+
+def test_an_empty_aggregate_makes_no_check_vacuous() -> None:
+    # An empty aggregate has no leaves, so a per-leaf type check and a per-item shape check both prove nothing.
+    from jaxtyping import Float64
+
+    def negate_an_empty_boolean_slice(c: bool) -> float:
+        flags = np.array([c])
+        invalid = -flags[:0]  # Python: TypeError, numpy cannot negate booleans
+        return 17.0 if len(invalid) == 0 else -17.0
+
+    with pytest.raises(TypeError):
+        negate_an_empty_boolean_slice(True)
+    with pytest.raises(UnsupportedConstruct, match="empty aggregate"):
+        lower(negate_an_empty_boolean_slice)
+
+    def add_empty_slices_of_different_widths(a: Float64[np.ndarray, "2 3"], b: Float64[np.ndarray, "2 2"]) -> float:
+        invalid = a[:0, :] + b[:0, :]  # Python: ValueError, shapes (0,3) and (0,2)
+        return 17.0 if len(invalid) == 0 else -17.0
+
+    with pytest.raises(ValueError):
+        add_empty_slices_of_different_widths(np.zeros((2, 3)), np.zeros((2, 2)))
+    with pytest.raises(UnsupportedConstruct, match="empty aggregate"):
+        lower(add_empty_slices_of_different_widths)
+
+
+def test_indexing_a_sequence_of_arrays_yields_an_array() -> None:
+    from jaxtyping import Float64
+
+    def row_of_a_list(a: Float64[np.ndarray, "2"], x: float) -> float:
+        rows = [a]
+        return x if rows[0].ndim == 1 else -x  # the element is the ndarray, not a list
+
+    assert row_of_a_list(np.zeros(2), 3.0) == 3.0
+    assert [o.name for o in lower(row_of_a_list).outputs] == ["out_0"]
+
+
+def test_a_scan_never_rejects_an_arm_lowering_folds_away() -> None:
+    # The scan descends both arms of a shape-dependent branch, so it must not validate what it finds there.
+    from jaxtyping import Float64
+
+    class DeadInvalidShapeQuery:
+        def __init__(self) -> None:
+            self.values = [1.0, 2.0]
+            self.total = 0.0
+
+        def step(self, v: Float64[np.ndarray, "2"], x: float) -> float:
+            if v.ndim == 2:  # dead
+                if self.values.ndim == 1:  # type: ignore[attr-defined]  # a list has no .ndim
+                    self.total = x
+            return self.total
+
+    assert DeadInvalidShapeQuery().step(np.zeros(2), 1.0) == 0.0
+    # `total` is read on a live path, so it keeps a register holding its reset; the point is that it LOWERS at all.
+    assert [slot.name for slot in lower(DeadInvalidShapeQuery().step).state_slots] == ["total"]
+
+
+def _assert_shape_kernel_matches_python(fn: Callable[..., float], v: np.ndarray) -> None:
+    sim = holoso.synthesize(fn, default_ops(FloatFormat(11, 52)), name=fn.__qualname__.split(".")[0]).numerical_model
+    assert [float(x) for x in sim.elaborate().run(*v.tolist())] == pytest.approx([fn(v)])
+
+
+def test_a_nested_reset_sequence_is_shaped_like_the_aggregate_it_denotes() -> None:
+    # `len(self.nested[0])` is 3 in Python, so the snapshot's shape must describe every axis, not just the outermost.
+    from jaxtyping import Float64
+
+    class NestedRows:
+        def __init__(self) -> None:
+            self.nested = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+
+        def step(self, v: Float64[np.ndarray, "3"]) -> float:
+            acc = 0.0
+            for i in range(len(self.nested[0])):
+                acc = acc + v[i]
+            return acc
+
+    v = np.array([10.0, 20.0, 30.0])
+    assert NestedRows().step(v) == 60.0
+    _assert_shape_kernel_matches_python(NestedRows().step, v)
+
+
+def test_a_ragged_or_empty_reset_sequence_still_has_a_length() -> None:
+    from jaxtyping import Float64
+
+    class RaggedRows:
+        def __init__(self) -> None:
+            self.ragged = [[1.0], [2.0, 3.0]]
+            self.empty: list[float] = []
+
+        def step(self, v: Float64[np.ndarray, "3"]) -> float:
+            return v[len(self.ragged)] + v[len(self.ragged[1])] + v[len(self.empty)]  # type: ignore[no-any-return]
+
+    v = np.array([10.0, 20.0, 30.0])
+    assert RaggedRows().step(v) == 70.0
+    _assert_shape_kernel_matches_python(RaggedRows().step, v)
+
+
+def test_indexing_a_reset_sequence_of_arrays_yields_an_array() -> None:
+    from jaxtyping import Float64
+
+    class ArrayRows:
+        def __init__(self) -> None:
+            self.rows = [np.array([1.0, 2.0]), np.array([3.0, 4.0])]
+
+        def step(self, v: Float64[np.ndarray, "3"]) -> float:
+            return v[self.rows[0].ndim]  # type: ignore[no-any-return]  # the element is the ndarray, not a list
+
+    v = np.array([10.0, 20.0, 30.0])
+    assert ArrayRows().step(v) == 20.0
+    _assert_shape_kernel_matches_python(ArrayRows().step, v)
+
+
+def test_a_shape_query_on_a_nested_reset_sequence_element_is_rejected() -> None:
+    from jaxtyping import Float64
+
+    class NestedNdim:
+        def __init__(self) -> None:
+            self.nested = [[1.0, 2.0]]
+
+        def step(self, v: Float64[np.ndarray, "3"]) -> float:
+            return v[self.nested[0].ndim]  # type: ignore[attr-defined, return-value]  # a list has no .ndim
+
+    with pytest.raises(UnsupportedConstruct, match="ndim on a Python list/tuple"):
+        lower(NestedNdim().step)
+
+
+def test_subscripting_a_non_container_reset_attribute_is_a_located_rejection() -> None:
+    # Navigating the reset snapshot must not index whatever `__getitem__` a stored object happens to carry.
+    from jaxtyping import Float64
+
+    class ForeignAttr:
+        def __init__(self) -> None:
+            self.lookup = {"a": 1}
+
+        def step(self, v: Float64[np.ndarray, "3"]) -> float:
+            return v[len(self.lookup[0])]  # type: ignore[arg-type, index, no-any-return]  # a KeyError in Python
+
+    with pytest.raises(UnsupportedConstruct):
+        lower(ForeignAttr().step)
+
+
+def test_a_scan_must_not_fold_a_counter_an_empty_aggregate_never_rebinds() -> None:
+    # Lowering runs an empty aggregate's body zero times, so `i` keeps its outer value. A scan that walks the body once
+    # and adopts the inner counter would fold `i == 1` away and never see the state write it guards.
+    class EmptyAggregateCounter:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def step(self, a: float) -> float:
+            for i in range(2):
+                pass
+            for _unused in []:  # type: ignore[var-annotated]
+                for i in range(5):  # noqa: B007  # never runs; must not leak i == 4 into the scan
+                    pass
+            if i == 1:
+                self.s = a
+            return self.s
+
+    reference = EmptyAggregateCounter()
+    assert reference.step(7.0) == 7.0 and reference.s == 7.0
+    assert [slot.name for slot in lower(EmptyAggregateCounter().step).state_slots] == ["s"]
+    sim = holoso.synthesize(
+        EmptyAggregateCounter().step, default_ops(FloatFormat(11, 52)), name="empty_aggregate_counter"
+    ).numerical_model.elaborate()
+    assert dict(zip([p.name for p in sim.outputs], [float(x) for x in sim.run(7.0)], strict=True))["state_s"] == 7.0
+
+
+def test_a_scan_must_not_fold_a_branch_on_a_counter_the_loop_body_rebinds() -> None:
+    # The aggregate loop's first trip rebinds `i` to a runtime value, so lowering takes the else arm on the second
+    # trip. A scan that keeps `i == 0` static walks only the then arm and misses `self.s`, whose write then has
+    # nowhere to land.
+    from jaxtyping import Float64
+
+    class RebindingCounter:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def step(self, v: Float64[np.ndarray, "2"]) -> float:
+            for i in range(1):
+                pass
+            for x in v:
+                if i == 0:
+                    i = x  # noqa: PLW2901
+                else:
+                    self.s = x
+            return self.s
+
+    reference = RebindingCounter()
+    assert reference.step(np.array([5.0, 7.0])) == 7.0
+    sim = holoso.synthesize(
+        RebindingCounter().step, default_ops(FloatFormat(11, 52)), name="rebinding_counter"
+    ).numerical_model.elaborate()
+    assert (
+        dict(zip([p.name for p in sim.outputs], [float(x) for x in sim.run(5.0, 7.0)], strict=True))["state_s"] == 7.0
+    )
+
+
+def test_a_scan_demotes_the_aggregate_target_before_discovering_body_rebinds() -> None:
+    # The aggregate loop's target `x` leaks a stale value from an earlier same-named range loop. Discovering what the
+    # body rebinds must happen with `x` already demoted, or the fold of `if x != 0` hides the `j = x` rebind, `j` is
+    # restored stale, and the guarded state write is missed -- tripping `assert attr in self._state_order`.
+    class LeakedAggregateTarget:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def step(self, a: float) -> float:
+            for x in range(1):  # noqa: B007  # leaks x == 0
+                pass
+            for j in range(1):  # noqa: B007  # leaks j == 0
+                pass
+            for x in [a]:  # type: ignore[assignment]  # noqa: B007  # aggregate: target demoted, body rebinds j
+                if x != 0:
+                    j = x  # noqa: PLW2901
+            if j != 0:
+                self.s = j
+            return self.s
+
+    reference = LeakedAggregateTarget()
+    assert reference.step(5.0) == 5.0 and reference.s == 5.0
+    sim = holoso.synthesize(
+        LeakedAggregateTarget().step, default_ops(FloatFormat(11, 52)), name="leaked_aggregate_target"
+    ).numerical_model.elaborate()
+    assert dict(zip([p.name for p in sim.outputs], [float(x) for x in sim.run(5.0)], strict=True))["state_s"] == 5.0
+
+
+def test_a_tuple_index_of_a_list_reset_attribute_is_a_located_rejection() -> None:
+    # `self.rows[0,]` indexes a Python list with a one-tuple, which CPython rejects; the reset-state navigator must
+    # not silently reinterpret it as the numpy-style `self.rows[0]`.
+    from jaxtyping import Float64
+
+    class TupleIndexedRows:
+        def __init__(self) -> None:
+            self.rows = [[1.0, 2.0]]
+
+        def step(self, v: Float64[np.ndarray, "3"]) -> float:
+            return v[len(self.rows[0,])]  # type: ignore[call-overload,no-any-return]  # a TypeError in Python
+
+    with pytest.raises(UnsupportedConstruct):
+        lower(TupleIndexedRows().step)
+
+
+_INEXACT_COUNTER_START = 2**53 + 1  # a compile-time range bound whose counter no float holds exactly
+
+
+def test_an_inexact_integer_loop_counter_is_rejected_not_silently_rounded() -> None:
+    # A counter the float register cannot hold exactly would round in value position, flipping a comparison against a
+    # runtime float. The range binds the single counter 2**53+1, which rounds to 2**53.
+    def counter_rounds(x: float) -> float:
+        return (  # type: ignore[no-any-return]
+            x
+            + np.array(
+                [1.0 if i == float(2**53) else 0.0 for i in range(_INEXACT_COUNTER_START, _INEXACT_COUNTER_START + 1)]
+            )[0]
+        )
+
+    assert counter_rounds(0.0) == 0.0  # (2**53+1) == 2.0**53 is False in Python, so the element is 0.0
+    with pytest.raises(UnsupportedConstruct, match="no exact float"):
+        lower(counter_rounds)
+
+
+def test_a_scalar_takes_an_empty_tuple_key_as_identity_like_a_numpy_scalar() -> None:
+    # A Holoso scalar is rank zero, as a numpy scalar is, so `x[()]` yields the scalar itself -- while `x[0]` and a
+    # slice, which a numpy scalar also rejects, stay rejected.
+    from jaxtyping import Float64
+
+    def element_full_index(v: Float64[np.ndarray, "3"]) -> float:
+        return v[0][()]  # type: ignore[no-any-return]  # numpy: v[0], a 0-D identity
+
+    assert element_full_index(np.array([2.0, 4.0, 6.0])) == 2.0
+    _assert_shape_kernel_matches_python(element_full_index, np.array([2.0, 4.0, 6.0]))
+
+    def index_a_scalar(v: Float64[np.ndarray, "3"]) -> float:
+        return v[0][0]  # type: ignore[no-any-return]  # numpy: IndexError, too many indices for a scalar
+
+    with pytest.raises(IndexError):
+        index_a_scalar(np.array([2.0, 4.0, 6.0]))
+    with pytest.raises(UnsupportedConstruct, match="cannot index or slice a scalar"):
+        lower(index_a_scalar)
+
+
+def test_a_negative_inexact_integer_literal_is_rejected_not_rounded() -> None:
+    # The negated-constant fold path (a spelled `-<literal>`, not a module global) must apply the same exactness check
+    # as a positive literal, or an aggregate over `[-(2**53+1)]` rounds the counter to -2**53 and a comparison flips.
+    def negative_counter_rounds(x: float) -> float:
+        result = 0.0
+        for i in [-9007199254740993]:  # -(2**53+1), which no float holds exactly
+            if i == x:
+                result = 1.0
+        return result
+
+    assert negative_counter_rounds(float(-(2**53))) == 0.0  # -(2**53+1) != -2.0**53 in Python
+    with pytest.raises(UnsupportedConstruct, match="no exact float"):
+        lower(negative_counter_rounds)

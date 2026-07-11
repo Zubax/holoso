@@ -712,3 +712,33 @@ def test_cosim_sincos_in_back_edge_loop(sim: str) -> None:
         return acc
 
     run_cosim(sim, kernel, FloatFormat(8, 24), "cs_sincos_loop")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_library_composites(sim: str) -> None:
+    # Composite library stubs end-to-end: cbrt's sign/exp2/log2 expansion behind its zero guard, tan's sincos+div,
+    # the pow rung ladder under a static exponent, sinh's exp difference, and tanh's stable sigmoid form -- all
+    # bit-exact against the model backend.
+    def kernel(x: float, y: float) -> tuple[float, float, float, float, float]:
+        return math.cbrt(x), math.tan(y), pow(x, 3.0), math.sinh(x), math.tanh(y)
+
+    run_cosim(sim, kernel, FloatFormat(8, 24), "cs_lib_composites")
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_tan_pole_latches_no_error(sim: str) -> None:
+    # At the format-nearest pi/2, cos rounds to exactly zero. tan's c==0 guard is a real branch (the divide is
+    # unspeculatable, so if-conversion cannot fold it into an always-executed select), which skips the divide at the
+    # pole -- so no divide-by-zero error is latched. The bench asserts err_pc==0 on every vector, so an unguarded
+    # sin/cos would fail here; a normal input in the same run confirms the divide path still works.
+    def kernel(x: float) -> float:
+        return math.tan(x)
+
+    fmt = FloatFormat(8, 24)
+    pole = float(np.float32(math.pi / 2))
+    vectors: list[Mapping[str, int]] = [
+        {"x": fmt.encode(pole)},
+        {"x": fmt.encode(-pole)},
+        {"x": fmt.encode(0.5)},
+    ]
+    run_cosim(sim, kernel, fmt, "cs_tan_pole", vectors=vectors)

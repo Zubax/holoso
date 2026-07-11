@@ -438,6 +438,34 @@ def test_state_attribute_named_t_shadows_transpose() -> None:
     assert [s.name for s in hir.state_slots] == ["T"]
 
 
+def test_state_attributes_named_shape_and_ndim_shadow_the_shape_queries() -> None:
+    # ``.shape``/``.ndim`` on the instance keep Python's own attribute-resolution priority, exactly as ``.T`` does:
+    # they are state reads, not compile-time shape queries.
+    @dataclasses.dataclass
+    class Holder:
+        shape: float
+        ndim: float
+        T: float
+
+        def step(self, a: float) -> float:
+            self.shape = self.shape + a
+            self.ndim = self.ndim * 2.0
+            self.T = self.T - a
+            return self.shape + self.ndim + self.T
+
+    hir = lower(Holder(0.0, 1.0, 2.0).step)
+    assert [s.name for s in hir.state_slots] == ["shape", "ndim", "T"]
+
+    # The reset snapshot is read at synthesis time, so the reference instance must stay untouched until then.
+    sim = _sim(Holder(0.5, 1.0, 2.0).step)
+    reference = Holder(0.5, 1.0, 2.0)
+    for a in (0.25, -1.5, 3.0):
+        want = reference.step(a)
+        returned, state_shape, state_ndim, state_t = _run(sim, a)
+        assert returned == pytest.approx(want)
+        assert (state_shape, state_ndim, state_t) == pytest.approx((reference.shape, reference.ndim, reference.T))
+
+
 def test_numpy_subscripts() -> None:
     def picks(m: Float64[np.ndarray, "2 3"]) -> tuple[float, float, float, float]:
         column = m[:, 2]
@@ -450,7 +478,7 @@ def test_numpy_subscripts() -> None:
     def too_many(m: Float64[np.ndarray, "2 2"]) -> float:
         return m[0, 1, 0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="scalar"):
+    with pytest.raises(UnsupportedConstruct, match="too many indices"):
         lower(too_many)
 
 
@@ -1065,3 +1093,167 @@ def test_imu_frame_transform_fma_matches_numpy() -> None:
         inputs = (rotation, np.array([1.0, 2.0, 3.0]), np.array([0.1, -0.2, 9.9]), np.array([2.0, 0.0, -1.0]))
         want = np.asarray(imu_frame_transform.transform(*inputs)).flatten()
         assert np.allclose(_run(sim, *inputs), want, rtol=1e-9, atol=1e-300)
+
+
+# ---------------------------------------------------------------- linear algebra library functions
+
+
+def test_operators_are_the_library_functions() -> None:
+    # ``@`` and ``.T`` lower by resolving np.matmul / np.transpose in the registry, so the operator and its spelled
+    # call cannot drift apart: identical HIR, not merely identical values.
+    def with_operators(a: Float64[np.ndarray, "2 3"], b: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "2 2"]:
+        return a @ b.T  # type: ignore[no-any-return]
+
+    def with_calls(a: Float64[np.ndarray, "2 3"], b: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "2 2"]:
+        return np.matmul(a, np.transpose(b))  # type: ignore[no-any-return]
+
+    counts = [
+        (_arith_count(lower(k), FloatMul), _arith_count(lower(k), FloatAdd)) for k in (with_operators, with_calls)
+    ]
+    assert counts[0] == counts[1] == (12, 8)
+    for kernel in (with_operators, with_calls):
+        _assert_python_matches_holoso(
+            kernel, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), np.array([[0.5, -1.0, 2.0], [3.0, -2.0, 0.25]])
+        )
+
+
+def test_np_dot_is_the_matrix_product() -> None:
+    def dot_kernel(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        return np.dot(a, x)  # type: ignore[no-any-return]
+
+    assert [o.name for o in lower(dot_kernel).outputs] == ["out_0", "out_1"]
+    _assert_python_matches_holoso(dot_kernel, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([1.0, -1.0]))
+
+    def scalar_dot(a: float, x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        return np.dot(a, x)  # type: ignore[no-any-return]
+
+    # numpy would multiply here; Holoso rejects rather than silently reinterpreting the matrix product as a broadcast.
+    with pytest.raises(UnsupportedConstruct, match="scalar"):
+        lower(scalar_dot)
+
+
+def test_np_trace_and_np_outer() -> None:
+    def tr(m: Float64[np.ndarray, "3 3"]) -> float:
+        return np.trace(m)  # type: ignore[no-any-return]
+
+    assert [o.name for o in lower(tr).outputs] == ["out_0"]
+    assert _arith_count(lower(tr), FloatMul) == 0  # a fold of the diagonal, no multiplies
+    _assert_python_matches_holoso(tr, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]))
+
+    def outer(u: Float64[np.ndarray, "2"], v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2 3"]:
+        return np.outer(u, v)
+
+    assert _arith_count(lower(outer), FloatMul) == 6 and _arith_count(lower(outer), FloatAdd) == 0
+    _assert_python_matches_holoso(outer, np.array([1.0, -2.0]), np.array([0.5, 3.0, -1.0]))
+
+    def rect_trace(m: Float64[np.ndarray, "2 3"]) -> float:
+        return np.trace(m)  # type: ignore[no-any-return]
+
+    # numpy walks the shorter diagonal; Holoso rejects rather than reinterpreting.
+    with pytest.raises(UnsupportedConstruct, match="square"):
+        lower(rect_trace)
+
+    def outer_of_matrix(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 2"]:
+        return np.outer(m, m)
+
+    with pytest.raises(UnsupportedConstruct, match="1-D"):
+        lower(outer_of_matrix)
+
+
+def test_trace_of_a_1x1_boolean_matrix_is_rejected_like_a_larger_one() -> None:
+    # The diagonal fold is seeded at 0.0, so even a 1x1 trace contracts through an addition and rejects a boolean
+    # diagonal, rather than passing the boolean through where numpy would widen it to an integer.
+    def bool_trace(flag: bool) -> bool:
+        return np.trace(np.array([[flag]]))  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="floating-point"):
+        lower(bool_trace)
+
+
+def test_library_shape_rejection_is_attributed_to_the_user_call_site() -> None:
+    # A stub validates its own operands with a ``raise`` on a statically taken path; the error must name the user's
+    # spelling and point at the user's line, never into the stub source.
+    def bad(a: Float64[np.ndarray, "2 3"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        return a @ x  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match=r"in matmul\(\).*mismatch") as excinfo:
+        lower(bad)
+    assert excinfo.value.location is not None
+    assert excinfo.value.location.line is not None and "a @ x" in excinfo.value.location.line
+
+    def bad_t(a: float) -> float:
+        return a.T  # type: ignore[attr-defined, no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match=r"in transpose\(\).*transpose a scalar"):
+        lower(bad_t)
+
+
+def test_matrix_state_transposed_under_a_shape_guard_across_transactions() -> None:
+    # The reset snapshot fixes the shape, so the guard folds identically in the scan and in lowering, while the
+    # attribute itself is reassigned every transaction. Compare every port by NAME: the returned leaf is deduped onto
+    # the public state port that already carries it, so a positional comparison would read the wrong wire.
+    class Flip:
+        def __init__(self) -> None:
+            self.P = np.array([[1.0, 2.0], [3.0, 4.0]])
+            self.s = 0.0
+
+        def step(self, x: float) -> float:
+            self.P = self.P.T
+            if self.P.ndim == 2:
+                self.s = self.s + self.P[0][1] * x
+            return self.s
+
+    sim = _sim(Flip().step)
+    ports = [p.name for p in sim.outputs]
+    assert ports == ["state_P_0_0", "state_P_0_1", "state_P_1_0", "state_P_1_1", "state_s"]
+    reference = Flip()
+    for _ in range(4):
+        want = reference.step(2.0)
+        got = dict(zip(ports, [float(v) for v in sim.run(2.0)]))
+        assert got["state_s"] == pytest.approx(want)
+        assert [got[f"state_P_{i}_{j}"] for i in range(2) for j in range(2)] == pytest.approx(
+            list(reference.P.flatten())
+        )
+
+
+def test_matrix_product_inside_a_comprehension_inside_a_loop() -> None:
+    # The stub is inlined from inside a comprehension element, itself inside an unrolled loop, and its result feeds
+    # persistent state. Exercises the interaction of aggregate iteration, comprehension scoping, and stub inlining.
+    class Accumulate:
+        def __init__(self) -> None:
+            self.acc = 0.0
+
+        def step(self, a: Float64[np.ndarray, "2 2"], v: Float64[np.ndarray, "2"]) -> float:
+            for _ in range(2):
+                w = [(a @ v)[k] + (a.T @ v)[k] for k in range(2)]
+                self.acc = self.acc + w[0] + w[1]
+            return self.acc
+
+    a, v = np.array([[1.0, 0.5], [-0.5, 2.0]]), np.array([3.0, -1.0])
+    sim = _sim(Accumulate().step)
+    reference = Accumulate()
+    for _ in range(3):
+        want = reference.step(a, v)
+        assert _run(sim, a, v)[0] == pytest.approx(want)
+
+
+def test_for_over_an_aggregate_inside_a_while_loop() -> None:
+    # A target first bound inside the loop is not loop-carried, so aggregate iteration composes with a back-edge loop.
+    class SumRows:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def step(self, m: Float64[np.ndarray, "2 2"], n: float) -> float:
+            j = 0.0
+            while j < n:
+                for row in m:
+                    self.s = self.s + row[0]
+                j = j + 1.0
+            return self.s
+
+    m = np.array([[1.0, 2.0], [3.0, 4.0]])
+    sim = _sim(SumRows().step)
+    reference = SumRows()
+    for _ in range(3):
+        want = reference.step(m, 2.0)
+        assert _run(sim, m, 2.0)[0] == pytest.approx(want)

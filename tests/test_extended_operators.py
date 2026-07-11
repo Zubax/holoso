@@ -36,6 +36,7 @@ from math import ceil, floor, log2, trunc
 # Aliased imports: the local name is NOT the canonical spelling, so dispatch must resolve by callee-object identity.
 from math import floor as aliased_floor
 from math import fma as aliased_fma
+from math import tan as aliased_tan
 
 FMT = FloatFormat(8, 24)  # binary32: a float64 decode of any in-format value is exact, so math/round is an exact oracle
 _POS_INF = float("inf")
@@ -895,3 +896,229 @@ def test_atan2_fold_normalizes_signed_zero() -> None:
     fold_bits = _bits(_sim(folded, "atan2_fold_neg_zero").run(0.0)[0])
     runtime_bits = _bits(_sim(runtime, "atan2_runtime_zero").run(0.0, 0.0)[0])
     assert fold_bits == runtime_bits, "folded signed-zero atan2 must match the datapath's atan2(0, 0)"
+
+
+# --- Composite library stubs: black-box value checks against the substituted math/numpy references. The stubs lower
+# --- through the ordinary operator set, so tolerances cover binary32 rounding plus the identity's error amplification.
+
+
+def test_sign_values() -> None:
+    def kernel(x: float) -> float:
+        return np.sign(x)  # type: ignore[no-any-return]
+
+    sim = _sim(kernel, "lib_sign")
+    for x, want in ((3.5, 1.0), (-1e-30, -1.0), (0.0, 0.0), (_POS_INF, 1.0), (_NEG_INF, -1.0)):
+        assert float(sim.run(x)[0]) == want, f"sign({x})"
+
+
+def test_cbrt_matches_reference() -> None:
+    def kernel(x: float) -> float:
+        return math.cbrt(x)
+
+    sim = _sim(kernel, "lib_cbrt")
+    for x in (8.0, -27.0, 0.5, -1e-6, 1e18, 3.7, -0.125):
+        assert float(sim.run(x)[0]) == pytest.approx(math.cbrt(x), rel=4e-6), f"cbrt({x})"
+    assert float(sim.run(0.0)[0]) == 0.0
+
+
+def test_tan_matches_reference() -> None:
+    def kernel(x: float) -> float:
+        return math.tan(x)
+
+    sim = _sim(kernel, "lib_tan")
+    for x in (0.0, 0.3, 1.0, -1.2, 2.0):
+        assert float(sim.run(x)[0]) == pytest.approx(math.tan(x), rel=1e-5, abs=1e-6), f"tan({x})"
+
+
+def test_tan_pole_returns_signed_infinity() -> None:
+    # At the format-nearest pi/2, cos rounds to exactly zero; the c==0 guard returns a signed infinity (by sin's sign)
+    # rather than dividing. Only the value is asserted here; that the divide is skipped (no div-by-zero error) is a
+    # real-branch property the cosim exercises via its err_pc check.
+    def kernel(x: float) -> float:
+        return math.tan(x)
+
+    sim = _sim(kernel, "lib_tan_pole")
+    pole = float(np.float32(math.pi / 2))
+    assert float(sim.run(pole)[0]) == _POS_INF
+    assert float(sim.run(-pole)[0]) == _NEG_INF
+    assert float(sim.run(0.5)[0]) == pytest.approx(math.tan(0.5), rel=1e-5)  # a normal input still divides
+
+
+def test_atan_asin_acos_match_references() -> None:
+    def kernel(x: float) -> tuple[float, float, float]:
+        return (math.atan(x), math.asin(x), math.acos(x))
+
+    sim = _sim(kernel, "lib_arcs")
+    for x in (0.0, 0.5, -0.5, 0.9, -0.999, 1.0, -1.0):
+        out = sim.run(x)
+        assert float(out[0]) == pytest.approx(math.atan(x), abs=1e-5), f"atan({x})"
+        assert float(out[1]) == pytest.approx(math.asin(x), abs=1e-4), f"asin({x})"
+        assert float(out[2]) == pytest.approx(math.acos(x), abs=1e-4), f"acos({x})"
+
+
+def test_exp_log_log10_match_references() -> None:
+    def kernel(x: float) -> tuple[float, float, float]:
+        return (math.exp(x), math.log(x), math.log10(x))
+
+    sim = _sim(kernel, "lib_exp_log")
+    for x in (0.001, 0.5, 2.0, math.e, 100.0, 1e30):
+        out = sim.run(x)
+        assert float(out[0]) == pytest.approx(math.exp(min(x, 80.0)), rel=2e-5) or x > 80.0, f"exp({x})"
+        assert float(out[1]) == pytest.approx(math.log(x), rel=1e-5, abs=1e-6), f"log({x})"
+        assert float(out[2]) == pytest.approx(math.log10(x), rel=1e-5, abs=1e-6), f"log10({x})"
+
+
+def test_composite_dispatch_numpy_spellings() -> None:
+    def kernel(x: float) -> tuple[float, float, float, float]:
+        return (np.cbrt(x), np.tan(x), np.arcsin(x), np.exp(x))
+
+    sim = _sim(kernel, "lib_np_spellings")
+    for x in (0.25, -0.5):
+        out = sim.run(x)
+        assert float(out[0]) == pytest.approx(math.cbrt(x), rel=4e-6)
+        assert float(out[1]) == pytest.approx(math.tan(x), rel=1e-5)
+        assert float(out[2]) == pytest.approx(math.asin(x), abs=1e-5)
+        assert float(out[3]) == pytest.approx(math.exp(x), rel=1e-5)
+
+
+def test_composite_dispatch_aliased_import() -> None:
+    def kernel(x: float) -> float:
+        return aliased_tan(x)
+
+    sim = _sim(kernel, "lib_tan_aliased")
+    assert float(sim.run(0.7)[0]) == pytest.approx(math.tan(0.7), rel=1e-5)
+
+
+def test_composite_unconfigured_operator_is_rejected() -> None:
+    # cbrt expands through exp2/log2; without them configured the synthesis must fail, proving the expansion is real.
+    def kernel(x: float) -> float:
+        return math.cbrt(x)
+
+    with pytest.raises(UnsupportedConstruct):
+        holoso.synthesize(kernel, _ops(with_exp2=False), name="lib_cbrt_unconfigured")
+
+
+def test_pow_needs_transcendentals_even_for_a_constant_exponent() -> None:
+    # The rung ladder never prunes the general exp2/log2 path, so even a compile-time exponent requires both
+    # configured -- unlike ** which is a bare multiply chain. Guards the DESIGN.md claim.
+    def kernel(x: float) -> float:
+        return pow(x, 3.0)  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct):
+        holoso.synthesize(kernel, _ops(with_exp2=False), name="lib_pow_needs_exp2")
+    with pytest.raises(UnsupportedConstruct):
+        holoso.synthesize(kernel, _ops(with_log2=False), name="lib_pow_needs_log2")
+
+
+def test_pow_static_exponent_matches_star_star_bit_exactly() -> None:
+    def with_pow(x: float) -> float:
+        return pow(x, 3.0)  # type: ignore[no-any-return]
+
+    def with_star(x: float) -> float:
+        return x**3
+
+    sim_pow, sim_star = _sim(with_pow, "lib_pow_static"), _sim(with_star, "lib_pow_star")
+    for x in (2.0, -2.0, 0.5, -1.5, 100.0):
+        assert _bits(sim_pow.run(x)[0]) == _bits(sim_star.run(x)[0]), f"pow(x,3) vs x**3 x={x}"
+    assert float(sim_pow.run(-2.0)[0]) == -8.0
+
+
+def test_pow_runtime_exponent_rungs_and_general_path() -> None:
+    def kernel(b: float, e: float) -> float:
+        return math.pow(b, e)
+
+    sim = _sim(kernel, "lib_pow_runtime")
+    for b in (2.0, -2.0, 0.5, -1.5):  # a rung-hit runtime exponent is exact even for a negative base
+        for e in (0.0, 1.0, 2.0, 3.0, 4.0, 5.0):
+            assert float(sim.run(b, e)[0]) == pytest.approx(math.pow(b, e), rel=1e-6), f"rung b={b} e={e}"
+    for b, e in ((2.0, 0.5), (3.0, 2.5), (10.0, -1.5), (0.5, 8.5)):  # general path: the a>0 exp2/log2 identity
+        assert float(sim.run(b, e)[0]) == pytest.approx(math.pow(b, e), rel=1e-5), f"general b={b} e={e}"
+
+
+def test_pow_dispatch_builtin_and_numpy_spellings() -> None:
+    def kernel(b: float, e: float) -> tuple[float, float, float]:
+        return (pow(b, e), np.power(b, e), np.float_power(b, e))
+
+    sim = _sim(kernel, "lib_pow_spellings")
+    out = sim.run(3.0, 2.0)
+    assert float(out[0]) == 9.0 and float(out[1]) == 9.0 and float(out[2]) == 9.0
+
+
+def test_pow_zero_base_returns_correct_value() -> None:
+    # The b==0 short-circuit keeps the value correct (0**0 == 1, 0**positive == 0); only the datapath value is asserted
+    # here, not the pole error signal (unmodeled by the numerical backend; the RTL cosim is where signals are checked).
+    def kernel(b: float, e: float) -> float:
+        return math.pow(b, e)
+
+    sim = _sim(kernel, "lib_pow_zero_base")
+    assert float(sim.run(0.0, 0.0)[0]) == 1.0
+    for e in (0.5, 1.0, 2.0, 7.0, 20.0):
+        assert float(sim.run(0.0, e)[0]) == 0.0, f"pow(0, {e})"
+
+
+def test_pow_unit_base_returns_one_including_infinite_exponent() -> None:
+    # The b==1 short-circuit gives pow(1, e) == 1 for every representable e, avoiding the exp2(inf*0)=nan the general
+    # path hits at a non-finite exponent. (A NaN exponent is not ZKF-representable, so only +-inf is exercised here.)
+    def kernel(b: float, e: float) -> float:
+        return math.pow(b, e)
+
+    sim = _sim(kernel, "lib_pow_unit_base")
+    for e in (0.0, 2.5, 7.0, _POS_INF, _NEG_INF):
+        assert float(sim.run(1.0, e)[0]) == 1.0, f"pow(1, {e})"
+
+
+def test_hyperbolic_match_references() -> None:
+    def kernel(x: float) -> tuple[float, float, float]:
+        return (math.sinh(x), math.cosh(x), math.tanh(x))
+
+    sim = _sim(kernel, "lib_hyperbolic")
+    # 88, 89 are inside binary32's exp-overflow band [88.7, 89.4]: sinh/cosh are ~2e38 (representable), so folding the
+    # /2 into the exponent must keep them finite instead of overflowing exp before the halving.
+    for x in (0.0, 0.5, -0.5, 2.0, -2.0, 5.0, -5.0, 88.0, 89.0, -89.0):
+        out = sim.run(x)
+        assert float(out[0]) == pytest.approx(math.sinh(x), rel=1e-5, abs=1e-5), f"sinh({x})"
+        assert float(out[1]) == pytest.approx(math.cosh(x), rel=1e-5), f"cosh({x})"
+        assert float(out[2]) == pytest.approx(math.tanh(x), rel=1e-5, abs=1e-5), f"tanh({x})"
+
+
+def test_inverse_hyperbolic_match_references() -> None:
+    # Independent inputs: asinh spans all reals, acosh needs w>=1, atanh needs |u|<1.
+    def kernel(x: float, w: float, u: float) -> tuple[float, float, float]:
+        return (math.asinh(x), math.acosh(w), math.atanh(u))
+
+    sim = _sim(kernel, "lib_inverse_hyperbolic")
+    # The large-|x| cases (>= 1e19) are the regression: binary32 x*x overflows to inf there, so without the branch
+    # asinh/acosh returned inf across the whole band up to FLT_MAX, where the true values (~44..89) are representable.
+    cases = [(0.0, 1.0, 0.0), (2.0, 1.5, 0.5), (-2.0, 2.0, -0.5), (100.0, 100.0, 0.9), (-100.0, 4.0, -0.9)]
+    cases += [(1e19, 1e19, 0.5), (1e30, 1e38, -0.5), (-1e30, 3e38, 0.9)]
+    for x, w, u in cases:
+        out = sim.run(x, w, u)
+        assert float(out[0]) == pytest.approx(math.asinh(x), rel=1e-5, abs=1e-4), f"asinh({x})"
+        assert float(out[1]) == pytest.approx(math.acosh(w), rel=1e-5, abs=1e-4), f"acosh({w})"
+        assert float(out[2]) == pytest.approx(math.atanh(u), rel=1e-5, abs=1e-5), f"atanh({u})"
+
+
+def test_expm1_log1p_degrees_radians_match_references() -> None:
+    def kernel(x: float) -> tuple[float, float, float, float]:
+        return (math.expm1(x), math.log1p(x * x), math.degrees(x), math.radians(x))
+
+    sim = _sim(kernel, "lib_expm1_log1p_angles")
+    for x in (0.0, 0.5, -0.5, 2.0, -2.0):
+        out = sim.run(x)
+        assert float(out[0]) == pytest.approx(math.expm1(x), rel=1e-5, abs=1e-5), f"expm1({x})"
+        assert float(out[1]) == pytest.approx(math.log1p(x * x), rel=1e-5, abs=1e-5), f"log1p({x * x})"
+        assert float(out[2]) == pytest.approx(math.degrees(x), rel=1e-5, abs=1e-5), f"degrees({x})"
+        assert float(out[3]) == pytest.approx(math.radians(x), rel=1e-5, abs=1e-5), f"radians({x})"
+
+
+def test_new_composite_and_binary_numpy_spellings() -> None:
+    def kernel(x: float, y: float) -> tuple[float, float, float, float, float]:
+        return (np.sinh(x), np.arcsinh(x), np.fmin(x, y), np.fmax(x, y), np.fix(x))  # type: ignore[return-value]
+
+    sim = _sim(kernel, "lib_new_spellings")
+    for x, y in ((1.5, -2.0), (-0.5, 3.0)):
+        out = sim.run(x, y)
+        assert float(out[0]) == pytest.approx(math.sinh(x), rel=1e-5, abs=1e-5)
+        assert float(out[1]) == pytest.approx(math.asinh(x), rel=1e-5, abs=1e-5)
+        assert float(out[2]) == min(x, y) and float(out[3]) == max(x, y)
+        assert float(out[4]) == math.trunc(x)
