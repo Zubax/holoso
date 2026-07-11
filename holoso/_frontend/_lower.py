@@ -2,12 +2,13 @@
 
 import ast
 import builtins
+import contextlib
 import inspect
 import logging
 import math
 import types
 from collections.abc import Callable, Iterator
-from typing import Any, get_args, get_origin
+from typing import Any, NoReturn, get_args, get_origin
 
 import numpy as np
 
@@ -53,10 +54,41 @@ def _is_array_annotation(annotation: object) -> bool:
     return isinstance(annotation, type) and hasattr(annotation, "dims")
 
 
+def _exactly_a_float(value: object) -> bool:
+    """
+    Whether a real number survives the round trip through the float registers that hold persistent state. Only an
+    integer can fail: a reset the format cannot represent would read back rounded, so a later comparison against the
+    original literal would take the other branch. There is no integer type to fall back on.
+    """
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        return True
+    exact = int(value)
+    try:
+        return float(exact) == exact
+    except OverflowError:
+        return False
+
+
+def _reset_value_shape(value: object) -> tuple[int, ...] | None:
+    """``array_shape`` over a reset-state object: a nested sequence is shaped exactly like the aggregate it denotes."""
+    if isinstance(value, np.ndarray):
+        return tuple(value.shape)
+    if isinstance(value, (list, tuple)):
+        shapes = {_reset_value_shape(item) for item in value}
+        if len(shapes) != 1 or (inner := next(iter(shapes))) is None:
+            return None
+        return (len(value), *inner)
+    # An arbitrary stored object is not a shaped value, whatever attributes it happens to carry.
+    return () if isinstance(value, (bool, np.bool_)) or _real_or_none(value) is not None else None
+
+
 def _real_or_none(value: object) -> float | None:
     """The value as a float if it is a real number (a builtin or numpy int/float, never a boolean), else None."""
     if isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(value, (bool, np.bool_)):
-        return float(value)
+        try:
+            return float(value)
+        except OverflowError:  # an integer beyond the float range; the exactness guard reports it
+            return None
     return None
 
 
@@ -143,6 +175,27 @@ def _hir_type_name(scalar_type: Type) -> str:
 _NUMPY_ARRAY_FACTORIES = (np.array, np.asarray, np.asanyarray)
 
 
+def _library_stub(callee: object) -> types.FunctionType:
+    """
+    The registered stub behind an operator the frontend lowers itself. Going through the registry rather than importing
+    the stub keeps it the single dispatch boundary, so ``a @ b`` and ``np.matmul(a, b)`` are one implementation.
+    """
+    match = resolve(callee)
+    assert isinstance(match, Library), callee
+    return match.stub
+
+
+# A shape query yields a compile-time integer, and there is no runtime integer type to carry it into a value position.
+_STATIC_ONLY = (
+    "{what} yields a compile-time integer, so it is usable only where one is expected: an index, a slice or range "
+    "bound, an exponent, or a branch condition"
+)
+
+# Under Python sequence semantics a numpy-only operation is undefined: list ``+`` concatenates, list ``-``/``@``/``.T``
+# and the ``.ndim``/``.shape`` attributes are errors. So it is rejected rather than silently reinterpreted.
+_SEQUENCE_REJECTION = "{what} on a Python list/tuple is not supported; build a numpy array with np.array([...])"
+
+
 def _spelled_callee(func: ast.expr) -> str:
     match func:
         case ast.Name(id=name):
@@ -200,6 +253,29 @@ class _Lowerer:
         self._readonly_scan_assigned_attrs: set[str] | None = None
         # The names each lowered function binds (parameters and assignment targets); shadow resolution consults these.
         self._local_names: dict[types.FunctionType, set[str]] = {}
+        # Nesting depth of the reachability scans. They run before (or ahead of) the code they describe, so the lowering
+        # environment they would see is not the one lowering will have -- ``_scanning`` is the single gate on that.
+        self._scan_depth = 0
+        # Generators live on the comprehension-expansion recursion stack right now (this comprehension plus every one
+        # it nests inside). Each generator is one frame, so bounding the running total bounds the recursion depth.
+        self._comprehension_frames = 0
+        # Instance attributes lowering actually read or wrote. The scans over-approximate the state set; this is the
+        # truth, and ``_prune_untouched_state`` trims to it. A while loop rewrites ``_state_env`` wholesale on exit, so
+        # membership there does NOT record whether an attribute was ever touched.
+        self._touched_attrs: set[str] = set()
+
+    @contextlib.contextmanager
+    def _scanning(self) -> Iterator[None]:
+        """
+        Mark a reachability scan as running. A scan walks statements it is not lowering, so the environment it would see
+        is not the one lowering will have there; static evaluation therefore resolves no name while a scan runs. Every
+        scan then folds strictly less than lowering, so it can only over-approximate, never miss.
+        """
+        self._scan_depth += 1
+        try:
+            yield
+        finally:
+            self._scan_depth -= 1
 
     def _loc(self, node: ast.AST) -> SourceLocation:
         lineno = getattr(node, "lineno", 1)
@@ -211,6 +287,8 @@ class _Lowerer:
         self._builder.block()  # the entry block (id 0); subsequent blocks are created by branch lowering
         self._bind_parameters(self._entry_fndef)
         self._lower_body(self._entry_fndef)
+        self._prune_untouched_state()
+        self._check_state_slot_names()  # after the prune: an attribute lowering never touched owns no slot to collide
         self._check_return_annotation(self._entry_fndef)
         self._register_state_slots()
         self._emit_outputs()
@@ -232,7 +310,6 @@ class _Lowerer:
             params = params[1:]
             self._assigned_attrs = self._syntactically_assigned_attrs(fndef)
             self._collect_written_attrs(fndef)
-            self._check_state_slot_names()
         # Positional then keyword-only parameters bind in declaration order; arrays decompose into per-element ports.
         for arg in [*params, *args.kwonlyargs]:
             self._env[arg.arg] = self._input(arg)
@@ -396,7 +473,7 @@ class _Lowerer:
                 return self._lower_for(name, iterable, body, self._loc(stmt))
             case ast.For():
                 raise UnsupportedConstruct(
-                    "only 'for <name> in range(...)' over a static count (with no else clause) is supported",
+                    "only 'for <name> in <range(...) or aggregate>' (with no else clause) is supported",
                     self._loc(stmt),
                 )
             case ast.While(test=test, body=body, orelse=[]):
@@ -410,8 +487,60 @@ class _Lowerer:
                 self._reject_nested_return(stmt)
                 self._return = self._lower_expr(value)
                 return True
+            case ast.Raise():
+                self._lower_raise(stmt)
             case _:
                 raise UnsupportedConstruct(f"unsupported statement {type(stmt).__name__}", self._loc(stmt))
+
+    def _lower_raise(self, stmt: ast.Raise) -> NoReturn:
+        """
+        Lowering descends only the arms the static fold selects, so a ``raise`` it reaches is taken unconditionally
+        within its own function: it becomes a located rejection carrying the exception's message. On a data-dependent
+        path it would have to be a runtime exception, which the hardware cannot signal, so it is rejected.
+        """
+        loc = self._loc(stmt)
+        if self._in_branch > 0:
+            raise UnsupportedConstruct(
+                "a 'raise' on a data-dependent path (a runtime branch arm or a loop body) cannot be lowered", loc
+            )
+        if stmt.exc is None or stmt.cause is not None:
+            raise UnsupportedConstruct("only 'raise <Exception>' or 'raise <Exception>(<message>)' is supported", loc)
+        if isinstance(stmt.exc, ast.Call):
+            if stmt.exc.keywords or len(stmt.exc.args) > 1:
+                raise UnsupportedConstruct("a raised exception takes at most one message argument", loc)
+            func = stmt.exc.func
+            message = self._static_str(stmt.exc.args[0]) if stmt.exc.args else _spelled_callee(func)
+        else:
+            func, message = stmt.exc, _spelled_callee(stmt.exc)
+        exception = self._resolved_callee(func)
+        if not (isinstance(exception, type) and issubclass(exception, BaseException)):
+            raise UnsupportedConstruct(f"{_spelled_callee(func)!r} does not name an exception type", loc)
+        raise UnsupportedConstruct(message, loc)
+
+    def _static_str(self, node: ast.expr) -> str:
+        """A compile-time string: a literal, or an f-string interpolating compile-time integers (shapes, counters)."""
+        match node:
+            case ast.Constant(value=str(text)):
+                return text
+            case ast.JoinedStr(values=values):
+                parts: list[str] = []
+                for piece in values:
+                    match piece:
+                        case ast.Constant(value=str(text)):
+                            parts.append(text)
+                        case ast.FormattedValue(value=interpolated, conversion=-1, format_spec=None):
+                            number = self._static_int(interpolated)
+                            if number is None:
+                                raise UnsupportedConstruct(
+                                    "an interpolated value must be a compile-time integer", self._loc(piece)
+                                )
+                            parts.append(str(number))
+                        case _:
+                            raise UnsupportedConstruct(
+                                "only plain '{...}' interpolation is supported", self._loc(piece)
+                            )
+                return "".join(parts)
+        raise UnsupportedConstruct("expected a string literal or an f-string of compile-time integers", self._loc(node))
 
     def _reject_nested_return(self, stmt: ast.stmt) -> None:
         # A return inside a branch arm would need the returns funneled to a single exit with an output phi; deferred.
@@ -419,31 +548,150 @@ class _Lowerer:
         if self._in_branch > 0 and not self._inlining:
             raise UnsupportedConstruct("a 'return' inside a branch or loop is not yet supported", self._loc(stmt))
 
+    def _unroll_sequence(self, iterable: ast.expr, loc: SourceLocation) -> range | tuple[Value, ...]:
+        """
+        The compile-time sequence a ``for`` or a comprehension iterates: a static ``range`` -- left lazy, so an
+        enormous bound is rejected before it is ever materialized -- or the top-level items of an aggregate (a matrix's
+        rows), as in Python. A ``range``-spelled call routes to ``_static_range`` whether or not the name is shadowed,
+        so a shadowed ``range`` is rejected as an unusable range rather than iterated as a value.
+        """
+        if isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name) and iterable.func.id == "range":
+            trips = self._static_range(iterable, loc)
+            count = range_trip_count(trips)  # big-int count: reject without materializing, even for range(10**40)
+            self._reject_over_threshold(count, loc)
+            return trips
+        value = self._lower_expr(iterable)
+        if not isinstance(value, Aggregate):
+            raise UnsupportedConstruct("only a range(...) or an aggregate value can be iterated", loc)
+        self._reject_over_threshold(len(value.items), loc)
+        return value.items
+
+    @staticmethod
+    def _reject_over_threshold(count: int, loc: SourceLocation) -> None:
+        if count > UNROLL_THRESHOLD:
+            raise UnsupportedConstruct(
+                f"trip count {count} exceeds the unroll threshold {UNROLL_THRESHOLD}; a counted back-edge loop is "
+                "not supported (use a 'while' loop for a variable trip count)",
+                loc,
+            )
+
+    def _bind_iteration(self, name: str, item: int | Value, loc: SourceLocation) -> None:
+        """
+        Bind one ``for``/comprehension target. A ``range`` counter binds twice -- as a compile-time integer for
+        index/exponent positions and as a float constant for value positions -- while an aggregate item is just a value,
+        so it demotes any stale static-integer binding of the same name. A counter the float register cannot hold
+        exactly is rejected like any inexact integer, since its value-position use would silently round.
+        """
+        if isinstance(item, int):
+            self._reject_inexact_integer(item, loc)
+            self._static_ints[name] = item
+            self._env[name] = Scalar(self._builder.float_const(float(item)))
+        else:
+            self._invalidate_static_int(name)
+            self._env[name] = item
+
     def _lower_for(self, name: str, iterable: ast.expr, body: list[ast.stmt], loc: SourceLocation) -> bool:
         """
-        Lower a ``for <name> in range(...)`` by fully unrolling it: the loop counter is a compile-time integer, so each
-        trip lowers the body once with the counter bound (both as a static int for index/exponent positions and as a
-        float-constant local for value positions). A trip count above the unroll threshold is rejected (a counted
-        back-edge loop is not implemented; use a ``while`` for a variable count, lowered by ``_lower_while``). A
-        ``return`` inside the body is rejected (the single-exit invariant), as in a branch arm.
-        The counter leaks its final value after the loop, matching Python's ``for`` scoping (an empty range leaves any
+        Lower a ``for`` over a static ``range`` or an aggregate by fully unrolling it: each trip lowers the body once
+        with the target bound. A trip count above the unroll threshold is rejected (a counted back-edge loop is not
+        implemented; use a ``while`` for a variable count, lowered by ``_lower_while``). A ``return`` inside the body is
+        rejected (the single-exit invariant), as in a branch arm.
+        The target leaks its final value after the loop, matching Python's ``for`` scoping (an empty range leaves any
         pre-loop binding untouched); restoring it instead would silently miscompile a nested loop that reuses the name.
         """
         self._reject_self_rebinding(name, loc)  # ``for self in ...`` rebinds the instance parameter -- rejected
-        trips = self._static_range(iterable, loc)
-        count = range_trip_count(trips)  # big-int count: reject without materializing, even for range(10**40)
-        if count > UNROLL_THRESHOLD:
-            raise UnsupportedConstruct(
-                f"loop trip count {count} exceeds the unroll threshold {UNROLL_THRESHOLD}; a counted back-edge "
-                "for-loop is not supported (use a 'while' loop for a variable trip count)",
-                loc,
-            )
-        for index in trips:
-            self._static_ints[name] = index
-            self._env[name] = Scalar(self._builder.float_const(float(index)))
+        for item in self._unroll_sequence(iterable, loc):
+            self._bind_iteration(name, item, loc)
             if self._lower_stmts(body):
                 raise UnsupportedConstruct("a 'return' inside a loop is not yet supported", loc)
         return False
+
+    def _lower_listcomp(self, node: ast.ListComp) -> Value:
+        """
+        A list comprehension unrolls into a Python list aggregate, as the equivalent ``for`` loop would. It is its own
+        scope in Python: the targets do not leak, and while bound they shadow a same-named module global -- were they
+        not registered as locals, a static evaluator would resolve that global behind the binding.
+        """
+        if contains_walrus(node):
+            raise UnsupportedConstruct("a walrus inside a comprehension is not supported", self._loc(node))
+        # One expansion frame per generator, and a nested comprehension's frames sit atop this one's, so bound the
+        # running total (not just this comprehension's) to keep the recursion below the interpreter's limit.
+        self._comprehension_frames += len(node.generators)
+        if self._comprehension_frames > UNROLL_THRESHOLD:
+            self._comprehension_frames -= len(node.generators)
+            raise UnsupportedConstruct(
+                f"comprehension nesting expands more than {UNROLL_THRESHOLD} generators", self._loc(node)
+            )
+        # Python evaluates the OUTERMOST iterable in the ENCLOSING scope, before the comprehension's own scope exists,
+        # so ``[x for n in range(n)]`` reads the enclosing ``n`` as the bound. Everything after it sees the targets.
+        head = node.generators[0]
+        outermost = self._unroll_sequence(head.iter, self._loc(self._generator_target(head)))
+        env, static_ints = dict(self._env), dict(self._static_ints)
+        scope_locals = self._local_names[self._fn]
+        targets = {self._generator_target(gen).id for gen in node.generators}
+        added = targets - scope_locals
+        scope_locals |= added
+        for name in targets:  # a comprehension local is unbound until its own generator binds it, as in Python
+            self._env.pop(name, None)
+            self._invalidate_static_int(name)
+        items: list[Value] = []
+        try:
+            self._expand_comprehension(node.elt, node.generators, items, outermost)
+        finally:
+            self._comprehension_frames -= len(node.generators)
+            scope_locals -= added
+            self._env.clear()
+            self._env.update(env)
+            self._static_ints.clear()
+            self._static_ints.update(static_ints)
+        return Aggregate(tuple(items), array=False)
+
+    def _generator_target(self, generator: ast.comprehension) -> ast.Name:
+        loc = self._loc(generator.iter)
+        if generator.is_async:
+            raise UnsupportedConstruct("an async comprehension is not supported", loc)
+        if not isinstance(generator.target, ast.Name):
+            raise UnsupportedConstruct("a comprehension target must be a plain name", loc)
+        self._reject_self_rebinding(generator.target.id, loc)
+        return generator.target
+
+    def _expand_comprehension(
+        self,
+        elt: ast.expr,
+        generators: list[ast.comprehension],
+        items: list[Value],
+        sequence: range | tuple[Value, ...] | None = None,
+    ) -> None:
+        """
+        Unroll the leftmost generator, recursing on the rest; the innermost body lowers ``elt`` once per surviving
+        binding. Only the outermost iterable is pre-evaluated (``sequence``, in the enclosing scope); a nested one is
+        evaluated per outer trip, as in Python, so it may depend on the outer target.
+        """
+        if not generators:
+            items.append(self._lower_expr(elt))
+            return
+        head, *rest = generators
+        target = self._generator_target(head)
+        if sequence is None:
+            sequence = self._unroll_sequence(head.iter, self._loc(head.iter))
+        for item in sequence:
+            self._bind_iteration(target.id, item, self._loc(target))
+            if all(self._static_filter(condition) for condition in head.ifs):
+                self._expand_comprehension(elt, rest, items)
+
+    def _static_filter(self, condition: ast.expr) -> bool:
+        """
+        A comprehension's ``if`` selects which items exist, so it must be a compile-time condition, not a value. The
+        condition is lowered first -- as ``_lower_if`` does -- so its operands are type-checked and an unsupported one
+        is rejected rather than skipped over by a fold that never looks at it.
+        """
+        cond = self._scalar(self._lower_bool(condition), condition)
+        if not isinstance(self._builder.type_of(cond), BoolType):
+            raise UnsupportedConstruct("a comprehension filter must be a boolean value", self._loc(condition))
+        folded = self._static_condition(condition)
+        if folded is None:
+            raise UnsupportedConstruct("a comprehension filter must be a compile-time condition", self._loc(condition))
+        return folded
 
     def _lower_while(self, test: ast.expr, body: list[ast.stmt], loc: SourceLocation) -> bool:
         """
@@ -576,7 +824,9 @@ class _Lowerer:
         attrs: set[str] = set()
         outer_static = dict(self._static_ints)  # the fold-aware walk binds counters; do not perturb lowering's context
         try:
-            self._walk_reachable(stmts, on_attr=lambda node: attrs.add(node.attr), on_name=names.add)
+            with self._scanning():
+                carried = lambda node: attrs.add(node.attr) if node.attr in self._state_order else None
+                self._walk_reachable(stmts, on_attr=carried, on_name=names.add)
         finally:
             self._static_ints = outer_static
         return names, attrs
@@ -611,8 +861,8 @@ class _Lowerer:
                     on_name(name)
                 self._invalidate_static_int(name)  # mirror lowering: a reassigned name is no longer static
             match stmt:
-                case ast.Return():
-                    return True  # statements after a return are unreachable, exactly as lowering stops here
+                case ast.Return() | ast.Raise():
+                    return True  # statements after a return or a raise are unreachable, exactly as lowering stops here
                 case ast.If(test=test, body=body, orelse=orelse):
                     constant = self._static_condition(test)
                     if constant is not None:
@@ -681,31 +931,41 @@ class _Lowerer:
         self, counter: str, iterable: ast.expr, body: list[ast.stmt], recur: Callable[[list[ast.stmt]], bool]
     ) -> None:
         """
-        Unroll a static ``for`` exactly as ``_lower_for`` does -- bind the counter per trip and walk the body (via
-        ``recur``, the enclosing ``_walk_reachable`` continuation) once per trip so a counter-dependent inner range
-        resolves consistently; a non-static / over-threshold range is rejected at lowering, so walk the body once
-        (unbound) so a real write is not missed before that rejection.
+        Walk a ``for`` exactly as ``_lower_for`` does -- bind the counter per trip and walk the body (via ``recur``, the
+        enclosing ``_walk_reachable`` continuation) once per trip so a counter-dependent inner range resolves
+        consistently. Any other iterable is an aggregate (or a range lowering will reject) whose trip count the scan
+        cannot see: the target is demoted first -- so a branch on it cannot fold and hide a rebind while discovering
+        what the body rebinds -- then every name the body rebinds is demoted too, the body is walked once, and that
+        reduced context is restored, exactly as a ``while`` is walked. Letting the single walk's counters escape, or
+        discovering the rebinds while the target is still static, would fold a later branch on a value lowering never
+        produces (an empty aggregate runs the body zero times, an unrolled one runs it more) and miss the state write
+        in the arm it skipped.
         """
         try:
-            trips = self._static_range(iterable, self._loc(iterable))
+            trips: range | None = self._static_range(iterable, self._loc(iterable))
         except UnsupportedConstruct:
+            trips = None
+        if trips is None or range_trip_count(trips) > UNROLL_THRESHOLD:
+            self._static_ints = {n: v for n, v in self._static_ints.items() if n != counter}
+            _, _, demoted = self._loop_carried(body)
+            surviving = {n: v for n, v in self._static_ints.items() if n not in demoted}
+            self._static_ints = dict(surviving)
             recur(body)
-            return
-        if range_trip_count(trips) > UNROLL_THRESHOLD:
-            recur(body)
+            self._static_ints = surviving
             return
         for index in trips:
             self._static_ints[counter] = index
             recur(body)
 
-    def _is_builtin_range(self) -> bool:
+    def _is_builtin_name(self, name: str) -> bool:
         """
-        Whether bare ``range`` resolves to the builtin: not a local, and not shadowed by a module global (which Python
-        resolves before the builtin). A shadowed ``range`` is not the unrollable builtin and is rejected.
+        Whether a bare name still resolves to the builtin: not a local, and not shadowed by a module global (which
+        Python resolves before the builtin). A shadowed ``range``/``len`` is not the builtin and is not special-cased.
         """
-        if self._is_local("range"):
+        if self._is_local(name):
             return False
-        return self._fn.__globals__.get("range", builtins.range) is builtins.range
+        builtin = getattr(builtins, name)
+        return self._fn.__globals__.get(name, builtin) is builtin
 
     def _static_range(self, iterable: ast.expr, loc: SourceLocation) -> range:
         """
@@ -714,7 +974,7 @@ class _Lowerer:
         against the unroll threshold without ever building the sequence (``range(10**9)`` must not OOM the compiler).
         """
         match iterable:
-            case ast.Call(func=ast.Name(id="range"), args=args, keywords=[]) if self._is_builtin_range():
+            case ast.Call(func=ast.Name(id="range"), args=args, keywords=[]) if self._is_builtin_name("range"):
                 bounds = [self._static_int(arg) for arg in args]
                 if not 1 <= len(bounds) <= 3 or any(bound is None for bound in bounds):
                     raise UnsupportedConstruct("range(...) needs 1 to 3 static integer arguments", loc)
@@ -799,6 +1059,145 @@ class _Lowerer:
         value = self._static_ndarray_value(node)
         return value if value is not None and np.ndim(value) == 0 else None
 
+    def _static_shape(self, node: ast.expr) -> tuple[int, ...] | None:
+        """
+        The shape of a value-position expression, resolved without lowering it, or None when it is not a rectangular
+        shaped value the static evaluator can see. A shape it reports must equal ``array_shape`` of the value lowering
+        would produce. Names resolve through the lowering environment, hence the ``_scanning`` gate.
+        """
+        match node:
+            case ast.Name(id=name) if not self._scan_depth and (bound := self._env.get(name)) is not None:
+                return array_shape(bound)
+            case ast.Attribute(attr="T") if not self._is_self_attr(node):
+                self._reject_sequence_receiver(node.value, "transpose", self._loc(node))
+                inner = self._static_shape(node.value)
+                if inner == () and not self._scan_depth:  # the rejection the transpose stub makes
+                    raise UnsupportedConstruct("cannot transpose a scalar value", self._loc(node))
+                return None if inner is None else tuple(reversed(inner))
+            case ast.Attribute(attr=attr) if self._is_self_attr(node) and self._is_stored_attr(attr):
+                return self._snapshot_shape(attr)
+            case ast.Subscript() as sub if self._is_snapshot_rooted(sub):
+                # A subscript of reset state navigates the reset object itself, so a Python list obeys Python indexing
+                # (no numpy tuple key) while an ndarray obeys numpy's -- the probe below would give both numpy rules.
+                obj = self._snapshot_object(sub)
+                return None if obj is None else _reset_value_shape(obj)
+            case ast.Subscript(value=base, slice=index):
+                base_shape, key = self._static_shape(base), self._static_index_key(index)
+                if base_shape is None or key is None:
+                    return None
+                try:  # numpy owns the basic-indexing shape algebra; the probe is a zero-strided view, not a buffer
+                    shape = np.broadcast_to(np.False_, base_shape)[key].shape
+                except IndexError:  # an out-of-range index: unknown here, and rejected when the subscript lowers
+                    return None
+                # An empty slice yields no leaves, and an empty aggregate is not an array (see ``array_shape``), so the
+                # probe must agree rather than report a zero-length axis lowering cannot produce.
+                return None if 0 in shape else shape
+        array = self._static_ndarray_value(node)
+        return array.shape if isinstance(array, np.ndarray) else None
+
+    def _static_value(self, node: ast.expr) -> Value | None:
+        """
+        The already-lowered value an expression denotes, without emitting anything: a bound name, or a static subscript
+        of one. Structural navigation only, so it cannot introduce HIR.
+        """
+        if self._scan_depth:
+            return None
+        match node:
+            case ast.Name(id=name):
+                return self._env.get(name)
+            case ast.Subscript(value=base, slice=index) if (bound := self._static_value(base)) is not None:
+                return self._lower_subscript(bound, index, self._loc(node))
+        return None
+
+    def _static_len(self, node: ast.expr) -> int | None:
+        """
+        ``len()`` follows Python: it counts the top-level items of any aggregate, ragged or not, and rejects a scalar.
+        The rectangular shape is consulted only for a value the environment cannot produce (a module-level constant).
+        """
+        match self._static_value(node):
+            case Aggregate(items=items):
+                return len(items)
+            case Scalar():
+                raise UnsupportedConstruct("len() of a scalar value", self._loc(node))
+        if isinstance(stored := self._snapshot_object(node), (list, tuple)):
+            return len(stored)  # a ragged or empty reset sequence still has a length, as in Python
+        shape = self._static_shape(node)
+        if shape == ():
+            if self._scan_depth:
+                return None
+            raise UnsupportedConstruct("len() of a scalar value", self._loc(node))
+        return None if shape is None else shape[0]
+
+    def _snapshot_shape(self, attr: str) -> tuple[int, ...] | None:
+        """The reset value's own shape. Not ``_shape(attr)``, whose state decomposition admits only 1-D and 2-D."""
+        return _reset_value_shape(self._snapshot[attr])
+
+    def _is_snapshot_rooted(self, node: ast.expr) -> bool:
+        """Whether a subscript chain bottoms out at a stored ``self.<attr>``, so the reset object is authoritative."""
+        match node:
+            case ast.Attribute(attr=attr):
+                return self._is_self_attr(node) and self._is_stored_attr(attr)
+            case ast.Subscript(value=base):
+                return self._is_snapshot_rooted(base)
+        return False
+
+    def _snapshot_object(self, node: ast.expr) -> object | None:
+        """The reset-state object a ``self.<attr>`` chain of static subscripts denotes, or None if it denotes none."""
+        match node:
+            case ast.Attribute(attr=attr) if self._is_self_attr(node) and self._is_stored_attr(attr):
+                return self._snapshot[attr]
+            # An arbitrary stored object is not navigable, whatever `__getitem__` it happens to carry.
+            case ast.Subscript(value=base, slice=index) if isinstance(
+                obj := self._snapshot_object(base), (np.ndarray, list, tuple)
+            ):
+                key = self._static_index_key(index)
+                if key is None:
+                    return None
+                element: object
+                try:
+                    if isinstance(obj, np.ndarray):
+                        element = obj[key]
+                    elif len(key) == 1 and not isinstance(index, ast.Tuple):
+                        element = obj[key[0]]  # a Python sequence takes one int or slice, never a tuple key
+                    else:
+                        return None
+                except IndexError:
+                    return None
+                return element
+        return None
+
+    def _reject_sequence_receiver(self, receiver: ast.expr, what: str, loc: SourceLocation) -> None:
+        """
+        Reject a numpy-only shape query or transpose on a Python list/tuple, however the receiver is spelled. A shape
+        query never lowers its receiver, so ``_reject_sequence_operand`` would only ever see a bare name. A scan walks
+        arms lowering folds away, so it stays silent and lets the rejection happen where lowering reaches it.
+        """
+        if self._scan_depth:
+            return
+        bound = self._static_value(receiver)  # indexing a list of arrays yields an array, not a sequence
+        if bound is not None:
+            self._reject_sequence_operand(bound, what, loc)
+            return
+        match receiver:
+            case ast.Attribute(attr="T") if not self._is_self_attr(receiver):
+                self._reject_sequence_receiver(receiver.value, what, loc)
+            case _ if isinstance(self._snapshot_object(receiver), (list, tuple)):
+                raise UnsupportedConstruct(_SEQUENCE_REJECTION.format(what=what), loc)
+            case ast.Subscript(value=base) if self._snapshot_object(receiver) is None:
+                self._reject_sequence_receiver(base, what, loc)
+
+    def _numpy_property_shape(self, receiver: ast.expr, prop: str, loc: SourceLocation) -> tuple[int, ...] | None:
+        """The shape behind a numpy-only ``.ndim``/``.shape`` query, rejecting a Python sequence receiver as Python does."""
+        self._reject_sequence_receiver(receiver, prop, loc)
+        shape = self._static_shape(receiver)
+        if self._scan_depth:
+            return shape
+        if shape is None and isinstance(self._static_value(receiver), Aggregate):
+            # An aggregate the shape probe cannot describe is ragged or empty; say so rather than let the query surface
+            # as a bare "not a compile-time integer" from wherever it happened to be spelled.
+            raise UnsupportedConstruct(f"{prop} requires a rectangular vector or matrix", loc)
+        return shape
+
     def _static_int(self, node: ast.expr) -> int | None:
         """Evaluate an expression to a compile-time integer (counter, index, or exponent), or None if it is not one."""
         element = self._static_ndarray_element(node)
@@ -807,6 +1206,22 @@ class _Lowerer:
         match node:
             case ast.Constant(value=int(literal)) if not isinstance(literal, bool):
                 return literal
+            case ast.Call(func=ast.Name(id="len"), args=[arg], keywords=[]) if self._is_builtin_name("len"):
+                return self._static_len(arg)
+            case ast.Attribute(attr="ndim") if not self._is_self_attr(node):
+                shape = self._numpy_property_shape(node.value, "ndim", self._loc(node))
+                return None if shape is None else len(shape)
+            case ast.Subscript(value=ast.Attribute(attr="shape") as prop, slice=axis) if not self._is_self_attr(prop):
+                assert isinstance(prop, ast.Attribute)
+                shape = self._numpy_property_shape(prop.value, "shape", self._loc(node))
+                index = self._static_int(axis)
+                if shape is None or index is None:
+                    return None
+                if not -len(shape) <= index < len(shape):
+                    if self._scan_depth:
+                        return None
+                    raise UnsupportedConstruct(f"axis {index} is out of range for {shape_name(shape)}", self._loc(node))
+                return shape[index]
             case ast.Name(id=name) if name in self._static_ints:
                 return self._static_ints[name]
             case ast.Name(id=name) if not self._is_local(name):
@@ -1071,7 +1486,8 @@ class _Lowerer:
             while True:
                 self._readonly_scan_assigned_attrs = current
                 following: set[str] = set()
-                self._collect_assigned(fndef.body, following)
+                with self._scanning():
+                    self._collect_assigned(fndef.body, following)
                 if following == current:
                     return current
                 current = following
@@ -1089,8 +1505,8 @@ class _Lowerer:
         """
         for stmt in stmts:
             match stmt:
-                case ast.Return():
-                    return True  # statements after a return are unreachable, exactly as lowering stops here
+                case ast.Return() | ast.Raise():
+                    return True  # statements after a return or a raise are unreachable, exactly as lowering stops here
                 case ast.If(test=test, body=body, orelse=orelse):
                     # Fold a statically-known guard to its live arm, as lowering does, so a write in the dead arm is not
                     # counted as an assignment (which would wrongly mark a read-only attribute as written and suppress a
@@ -1246,12 +1662,16 @@ class _Lowerer:
     ) -> dict[str, Value]:
         """
         Merge persistent state across the arms: an attribute an arm did not touch carries its live-in there, so a
-        write on only one path becomes a phi against the carried-over value.
+        write on only one path becomes a phi against the carried-over value. An attribute NEITHER arm touched is left
+        alone -- both arms start from the same pre-branch state, so it has no live-in yet, and loading one here would
+        conjure a register out of a branch that never mentions the attribute, defeating ``_prune_untouched_state``.
         """
         merged: dict[str, Value] = {}
         for attr in self._state_order:
             a = then_state.get(attr)
             b = else_state.get(attr)
+            if a is None and b is None:
+                continue
             a = self._live_in(attr) if a is None else a
             b = self._live_in(attr) if b is None else b
             merged[attr] = self._merge_values(a, b, pred_then, pred_else, loc)
@@ -1389,6 +1809,7 @@ class _Lowerer:
                 if isinstance(value, bool):  # checked before int: bool is an int subclass
                     return Scalar(self._builder.bool_const(value))
                 if isinstance(value, (int, float)):
+                    self._reject_inexact_integer(value, self._loc(node))
                     return Scalar(self._builder.float_const(float(value)))
                 raise UnsupportedConstruct(f"unsupported constant {value!r}", self._loc(node))
             case ast.Name(id=name):
@@ -1404,6 +1825,7 @@ class _Lowerer:
                     if isinstance(glob, bool):
                         return Scalar(self._builder.bool_const(glob))
                     if isinstance(glob, (int, float)):
+                        self._reject_inexact_integer(glob, self._loc(node))
                         return Scalar(self._builder.float_const(float(glob)))
                     if isinstance(glob, np.ndarray):
                         return self._constant_array(name, glob, self._loc(node))
@@ -1416,11 +1838,14 @@ class _Lowerer:
                 # A list/tuple literal has Python sequence semantics (array=False): numpy-only operations on it are
                 # rejected; wrapping it in np.array(...) converts it to an array.
                 return Aggregate(tuple(self._lower_elements(elts)), array=False)
+            case ast.ListComp():
+                return self._lower_listcomp(node)
             case ast.Subscript(value=value, slice=index):
                 return self._lower_subscript(self._lower_expr(value), index, self._loc(node))
             case ast.UnaryOp(op=ast.USub(), operand=ast.Constant(value=(int() | float()) as value)) if not isinstance(
                 value, bool
             ):
+                self._reject_inexact_integer(value, self._loc(node))  # a negative literal rounds like a positive one
                 return Scalar(self._builder.float_const(-float(value)))
             case ast.UnaryOp(op=ast.USub(), operand=operand):
                 return self._negate(self._lower_expr(operand), self._loc(node))
@@ -1429,6 +1854,7 @@ class _Lowerer:
                 # arithmetic position (Python's ``+True`` is int 1, which has no runtime representation here).
                 operand_value = self._lower_expr(operand)
                 self._reject_sequence_operand(operand_value, "arithmetic", self._loc(node))
+                self._reject_empty_aggregate(operand_value, "arithmetic", self._loc(node))
                 self._require_float_leaves(
                     operand_value, "arithmetic operands must be floating-point, not boolean", self._loc(node)
                 )
@@ -1450,7 +1876,10 @@ class _Lowerer:
             case ast.Attribute(attr="T") if not self._is_self_attr(node):
                 # ``value.T`` is numpy transpose unless the receiver is the instance itself (an attribute named ``T``
                 # keeps Python's own resolution priority: ``self.T`` is a state read, ``self.P.T`` a transpose).
-                return self._transpose(self._lower_expr(node.value), self._loc(node))
+                receiver = [self._lower_expr(node.value)]
+                return self._inline_library_stub(_library_stub(np.transpose), receiver, self._loc(node), "transpose")
+            case ast.Attribute(attr="ndim" | "shape" as prop) if not self._is_self_attr(node):
+                raise UnsupportedConstruct(_STATIC_ONLY.format(what=f".{prop}"), self._loc(node))
             case ast.Attribute():
                 return self._read_attr(node)
             case ast.NamedExpr(target=ast.Name(id=name), value=value):
@@ -1478,11 +1907,19 @@ class _Lowerer:
 
     def _lower_subscript(self, value: Value, index: ast.expr, loc: SourceLocation) -> Value:
         if isinstance(index, ast.Tuple):
-            # Multi-axis ``m[i, j]`` is a numpy-array op with no meaning on a Python list/tuple (list ``[i, j]`` is a
-            # tuple key -- a TypeError), so it is rejected on a sequence; single-axis indexing works on any aggregate,
-            # matching plain list indexing. A numpy array is always rectangular by construction.
+            # Multi-axis ``m[i, j]`` is a numpy-array op with no meaning on a Python list/tuple, where ``[i, j]`` is a
+            # tuple key. Single-axis indexing works on any aggregate, as plain list indexing does.
             self._reject_sequence_operand(value, "multi-axis indexing", loc)
-            assert not isinstance(value, Aggregate) or array_shape(value) is not None
+            shape = array_shape(value)
+            if shape is None:
+                raise UnsupportedConstruct("multi-axis indexing requires a rectangular vector or matrix", loc)
+            key = self._static_index_key(index)
+            if key is not None:
+                # An axis whose leading slice is empty selects no item, so per-item bounds never fire; probe up front.
+                try:
+                    np.broadcast_to(np.False_, shape)[key]
+                except IndexError as exc:
+                    raise UnsupportedConstruct(f"invalid index: {exc}", loc) from exc
             return self._subscript_axes(value, index.elts, loc)
         return self._subscript_axes(value, [index], loc)
 
@@ -1535,22 +1972,19 @@ class _Lowerer:
         # its unhashable-shadow guard; the aggregate factories and casts below are the non-operator builtins.
         resolved = self._resolved_callee(func)
         name = _spelled_callee(func)
+        if resolved is builtins.len:
+            raise UnsupportedConstruct(_STATIC_ONLY.format(what="len()"), self._loc(node))
         if any(resolved is factory for factory in _NUMPY_ARRAY_FACTORIES):
             if node.keywords or len(node.args) != 1 or isinstance(node.args[0], ast.Starred):
                 raise UnsupportedConstruct(f"{name}() takes a single array-like argument", self._loc(node))
             return self._as_array(self._lower_expr(node.args[0]), name, self._loc(node))
-        if resolved is np.matmul:
-            if node.keywords:
-                raise UnsupportedConstruct("matmul() takes no keyword arguments", self._loc(node))
-            operands = self._lower_args(node)
-            if len(operands) != 2:
-                raise UnsupportedConstruct(f"matmul() takes 2 arguments, got {len(operands)}", self._loc(node))
-            return self._lower_matmul(operands[0], operands[1], self._loc(node))
         match resolve(resolved):
             case Intrinsic(operator=operator):
                 return self._lower_intrinsic(node, operator)
             case Library(stub=stub):
-                return self._inline_library_stub(node, stub)
+                if node.keywords:
+                    raise UnsupportedConstruct(f"{name}() takes no keyword arguments", self._loc(node))
+                return self._inline_library_stub(stub, self._lower_args(node), self._loc(node), name)
         cast = self._lower_cast_builtin(node, resolved)  # bool/float casts and list/tuple sequence rebuilds
         if cast is not None:
             return cast
@@ -1620,19 +2054,17 @@ class _Lowerer:
             raise UnsupportedConstruct(f"{name}() takes {arity} argument(s), got {len(operands)}", self._loc(node))
         return Scalar(self._builder.operation(operator, [self._float_operand(operand, node) for operand in operands]))
 
-    def _inline_library_stub(self, node: ast.Call, stub: types.FunctionType) -> Value:
+    def _inline_library_stub(
+        self, stub: types.FunctionType, args: list[Value], loc: SourceLocation, name: str
+    ) -> Value:
         """
         Inline a composite library stub as an ordinary function, attributing any rejection inside its body to the
         user's call site: the stub source is not the user's code, so a location pointing into it is not actionable.
         A stub calling a sibling stub resolves it directly as a plain function, so only this outermost frame wraps.
+        Also the whole lowering of the operators that ARE library functions -- ``@`` is ``np.matmul`` and ``.T`` is
+        ``np.transpose`` -- so an operator and its spelled call cannot drift apart. ``name`` is the user's spelling,
+        never the underscore-suffixed stub name, which is meaningless to them.
         """
-        name = _spelled_callee(node.func)
-        if node.keywords:
-            raise UnsupportedConstruct(f"{name}() takes no keyword arguments", self._loc(node))
-        args = self._lower_args(node)
-        loc = self._loc(node)
-        # Reject arity here, against the spelled name, so the error never surfaces the underscore-prefixed stub name
-        # that _inline would format from the callee's __name__.
         arity = stub.__code__.co_argcount
         if len(args) != arity:
             raise UnsupportedConstruct(f"{name}() takes {arity} argument(s), got {len(args)}", loc)
@@ -1641,7 +2073,7 @@ class _Lowerer:
         except SynthesisError as exc:
             # Re-attribute ANY synthesis error from the stub body (a rejection, or an unimplemented library function it
             # itself calls) to the user's call site, preserving the concrete error type.
-            raise type(exc)(f"in {name}(): {exc.message}", loc) from exc
+            raise type(exc)(f"in {name}(): {exc.message}", loc) from None  # a cause would point into the stub
 
     def _resolved_callee(self, func: ast.expr) -> object:
         """
@@ -1738,7 +2170,10 @@ class _Lowerer:
         bindings = {param.arg: arg for param, arg in zip(params, args)}
         context = outer if bound_self else None
         self._install(Scope.fresh(callee, bindings, lines, start, filename, context=context, self_name=self_param))
-        self._local_names[callee] = self._collect_local_names(fndef)
+        if (
+            callee not in self._local_names
+        ):  # a pure function of the callee's source, and matmul inlines its dot n*m times
+            self._local_names[callee] = self._collect_local_names(fndef)
         try:
             if bound_self and self._all_assigned_attrs(fndef.body):
                 # A state-mutating helper would have to fold its writes into the entry method's state-slot analysis,
@@ -1762,6 +2197,7 @@ class _Lowerer:
             env=self._env,
             static_ints=self._static_ints,
             return_=self._return,
+            in_branch=self._in_branch,
             instance=self._instance,
             self_name=self._self_name,
             snapshot=self._snapshot,
@@ -1777,6 +2213,7 @@ class _Lowerer:
         self._env = scope.env
         self._static_ints = scope.static_ints
         self._return = scope.return_
+        self._in_branch = scope.in_branch
         self._instance = scope.instance
         self._self_name = scope.self_name
         self._snapshot = scope.snapshot
@@ -1874,19 +2311,13 @@ class _Lowerer:
         raise TypeError(f"unexpected value {value!r}")
 
     def _reject_sequence_operand(self, value: Value, what: str, loc: SourceLocation) -> None:
-        """
-        Reject a numpy-only operation applied to a plain Python list/tuple aggregate. Under Python sequence semantics
-        the operation is undefined (list ``+`` concatenates, list ``-``/``@``/``.T``/``.flatten()`` are errors), so the
-        user must build a numpy array; a scalar or an array operand passes.
-        """
+        """Reject a numpy-only operation applied to a plain Python list/tuple; a scalar or an array operand passes."""
         if isinstance(value, Aggregate) and not value.array:
-            raise UnsupportedConstruct(
-                f"{what} on a Python list/tuple is not supported; build a numpy array with np.array([...])", loc
-            )
+            raise UnsupportedConstruct(_SEQUENCE_REJECTION.format(what=what), loc)
 
     def _apply_binop(self, op: ast.operator, a: Value, b: Value, loc: SourceLocation) -> Value:
         if isinstance(op, ast.MatMult):
-            return self._lower_matmul(a, b, loc)
+            return self._inline_library_stub(_library_stub(np.matmul), [a, b], loc, "matmul")
         if isinstance(a, Aggregate) or isinstance(b, Aggregate):
             # Elementwise arithmetic is a numpy operation; a Python list/tuple operand (including a scalar broadcast
             # like ``list * s``) is rejected. The recursion below only ever revisits array-internal or scalar values.
@@ -1918,6 +2349,8 @@ class _Lowerer:
         # Name an unsupported operator before checking shapes, so its diagnostic wins over a mismatched-shape one.
         if not isinstance(op, (ast.Mult, ast.Add, ast.Sub, ast.Div)):
             raise UnsupportedConstruct(f"unsupported binary operator {type(op).__name__}", loc)
+        self._reject_empty_aggregate(a, "arithmetic", loc)
+        self._reject_empty_aggregate(b, "arithmetic", loc)
         if isinstance(a, Aggregate) and isinstance(b, Aggregate):
             return self._zip_elementwise(op, a, b, loc)
         match (a, b):
@@ -1943,53 +2376,15 @@ class _Lowerer:
                     loc,
                 )
 
-    def _lower_matmul(self, a: Value, b: Value, loc: SourceLocation) -> Value:
-        """
-        Expand ``a @ b`` into scalar multiply/add chains, following numpy's shape rules exactly: operands are 1-D or
-        2-D rectangular arrays with an agreeing inner dimension; a 1-D left operand is promoted to a row, a 1-D right
-        operand to a column, and each promoted axis is dropped from the result -- so vector @ vector is a scalar dot
-        product. There is no batching (ndim > 2) and no hardware aggregate: the result is an ordinary compile-time
-        aggregate of scalar dot products.
-        """
-        self._reject_sequence_operand(a, "the matrix product", loc)
-        self._reject_sequence_operand(b, "the matrix product", loc)
-        shape_a, shape_b = array_shape(a), array_shape(b)
-        if shape_a is None or shape_b is None:
-            raise UnsupportedConstruct("matmul operands must be rectangular vectors or matrices", loc)
-        if shape_a == () or shape_b == ():
-            raise UnsupportedConstruct("matmul does not accept scalar operands", loc)
-        if len(shape_a) > 2 or len(shape_b) > 2:
-            raise UnsupportedConstruct(
-                f"matmul operands must be 1-D or 2-D, got {len(shape_a)}-D @ {len(shape_b)}-D", loc
-            )
-        if shape_a[-1] != shape_b[0]:
-            raise UnsupportedConstruct(f"matmul dimension mismatch: {shape_name(shape_a)} @ {shape_name(shape_b)}", loc)
-        self._require_float_leaves(a, "matmul operands must be floating-point", loc)
-        self._require_float_leaves(b, "matmul operands must be floating-point", loc)
-        rows = [a] if len(shape_a) == 1 else list(self._row_items(a))
-        cols = [b] if len(shape_b) == 1 else list(self._row_items(self._transpose(b, loc)))
-        leaves = [self._dot(self._row_items(row), self._row_items(col), loc) for row in rows for col in cols]
-        return array_of((*shape_a[:-1], *shape_b[1:]), leaves, array=True)
-
-    @staticmethod
-    def _row_items(value: Value) -> tuple[Value, ...]:
-        assert isinstance(value, Aggregate)
-        return value.items
+    def _reject_empty_aggregate(self, value: Value, what: str, loc: SourceLocation) -> None:
+        """An empty aggregate has no leaves, so a check over them proves nothing; it is not an array either."""
+        if isinstance(value, Aggregate) and not value.leaves():
+            raise UnsupportedConstruct(f"{what} on an empty aggregate is not supported", loc)
 
     def _require_float_leaves(self, value: Value, message: str, loc: SourceLocation) -> None:
         for vid in value.leaves():
             if not isinstance(self._builder.type_of(vid), FloatType):
                 raise UnsupportedConstruct(message, loc)
-
-    def _dot(self, xs: tuple[Value, ...], ys: tuple[Value, ...], loc: SourceLocation) -> Scalar:
-        # A left fold rather than a balanced tree: it keeps every product single-use with an add of the running sum,
-        # which is exactly the shape MIR's FMA contraction fuses into one fmul plus a chain of ffma when configured.
-        acc: ValueId | None = None
-        for x, y in zip(xs, ys, strict=True):
-            term = self._builder.operation(FloatMul(), [self._scalar(x, loc), self._scalar(y, loc)])
-            acc = term if acc is None else self._builder.operation(FloatAdd(), [acc, term])
-        assert acc is not None
-        return Scalar(acc)
 
     _RELATIONAL_OPS: dict[type[ast.cmpop], RelationalOp] = {
         ast.Lt: RelationalOp.LT,
@@ -2143,27 +2538,9 @@ class _Lowerer:
         self._builder.position_at(merge_block)
         return self._merge_values(then, else_, then_end, else_end, loc)
 
-    def _transpose(self, value: Value, loc: SourceLocation) -> Value:
-        """
-        ``.T`` with numpy semantics over the supported shapes: identity on a 1-D vector, row/column swap on a 2-D
-        matrix; a scalar, a ragged aggregate, or a deeper nesting is rejected.
-        """
-        self._reject_sequence_operand(value, "transpose", loc)
-        match array_shape(value):
-            case None:
-                raise UnsupportedConstruct("only a rectangular vector or matrix can be transposed", loc)
-            case ():
-                raise UnsupportedConstruct("cannot transpose a scalar value", loc)
-            case (_,):
-                return value
-            case (_, _):
-                columns = zip(*[self._row_items(row) for row in self._row_items(value)])
-                return Aggregate(tuple(Aggregate(column, array=True) for column in columns), array=True)
-            case shape:
-                raise UnsupportedConstruct(f"transpose of a {len(shape)}-D value is not supported", loc)
-
     def _negate(self, value: Value, loc: SourceLocation) -> Value:
         self._reject_sequence_operand(value, "arithmetic", loc)
+        self._reject_empty_aggregate(value, "arithmetic", loc)
         match value:
             case Scalar():
                 return Scalar(self._builder.operation(FloatNeg(), [self._float_operand(value, loc)]))
@@ -2251,6 +2628,13 @@ class _Lowerer:
     def _is_local(self, name: str) -> bool:
         return name in self._local_names[self._fn]
 
+    def _is_stored_attr(self, attr: str) -> bool:
+        """
+        Whether ``self.<attr>`` is a plain snapshotted instance attribute, so its shape may be read off the reset
+        snapshot. A class data descriptor shadows the ``__dict__`` entry for reads, making that entry dead state.
+        """
+        return attr in self._snapshot and not self._is_class_data_descriptor(attr)
+
     def _constant_array(self, name: str, value: np.ndarray, loc: SourceLocation) -> Value:
         """A module-level ndarray constant folds into an aggregate of interned float constants, like a literal."""
         shape, reals = _ndarray_reals(value, f"module constant {name!r}", loc)
@@ -2297,24 +2681,37 @@ class _Lowerer:
     def _collect_written_attrs(self, fndef: ast.FunctionDef) -> None:
         """
         Find the instance attributes the method assigns on any reachable path; these become persistent state, the rest
-        stay constant. Scanning must mirror lowering's static reachability exactly: it descends into both arms of a
-        DYNAMIC ``if`` (an attribute written on only one path is still state, carrying its live-in on the other) but
-        only the taken arm of a literal-constant ``if``, and the body of a ``for`` once per unrolled trip with the
-        counter bound (so a counter-dependent inner range that is empty on every trip -- e.g. ``for i in range(1): for
-        j in range(i): self.s = ...`` -- is never scanned). A write that lowering never reaches must not be classified
-        as state: it would crash slot registration or silently add a spurious state port. Stops at the first top-level
-        return, like ``_lower_stmts``.
+        stay constant. Scanning tracks lowering's static reachability: it descends into both arms of a DYNAMIC ``if``
+        (an attribute written on only one path is still state, carrying its live-in on the other) but only the taken arm
+        of a literal-constant ``if``, and the body of a ``for`` once per unrolled trip with the counter bound (so a
+        counter-dependent inner range that is empty on every trip -- e.g. ``for i in range(1): for j in range(i):
+        self.s = ...`` -- is never scanned). Stops at the first top-level return, like ``_lower_stmts``.
+
+        The scan runs before the body is lowered, so it cannot always fold what lowering folds -- a branch on the shape
+        of a local, or an aggregate ``for`` whose trip count is unknown here. The contract is therefore one-sided: the
+        result is a conservative SUPERSET, trimmed back to the truth by ``_prune_untouched_state`` once lowering has
+        run. The other direction is forbidden and asserted in ``_assign_attr``, since a write lowering reaches but the
+        scan missed would be dropped from the slot set and vanish silently.
+
+        Because the superset covers paths lowering folds away, the scan validates nothing: a write it cannot make state
+        is passed over, and ``_assign_attr`` rejects it if and when lowering reaches it.
         """
-        self._walk_reachable(fndef.body, on_attr=self._register_state_attr)
+        with self._scanning():
+            self._walk_reachable(fndef.body, on_attr=self._register_state_attr)
         self._static_ints.clear()  # the scan binds loop counters to mirror the unroll; lowering re-binds from scratch
 
     def _register_state_attr(self, target: ast.Attribute) -> None:
         """
-        Register a reachable ``self.<attr>`` write target as a persistent state slot, in first-write order. A write
-        through a class data descriptor (e.g. a property setter) or to an attribute with no instance snapshot is
-        rejected with the same diagnostic ``_lower_stmts`` raises -- the state set must be discovered here exactly as
-        lowering will treat it.
+        Register a ``self.<attr>`` write target as a persistent state slot, in first-write order. The scan walks paths
+        lowering may fold away, so a target it cannot make state -- a class data descriptor, or a name the instance
+        snapshot does not hold -- is passed over rather than rejected here: only a write lowering actually reaches is a
+        real write, and ``_reject_unwritable_attr`` rejects it there.
         """
+        if self._is_stored_attr(target.attr) and target.attr not in self._state_order:
+            self._state_order.append(target.attr)
+
+    def _reject_unwritable_attr(self, target: ast.Attribute) -> None:
+        """The two instance attributes a reachable ``self.<attr> = ...`` may not target."""
         attr = target.attr
         if self._is_class_data_descriptor(attr):
             # Python routes ``self.<name> = ...`` through a class data descriptor (e.g. a property setter) even when
@@ -2331,8 +2728,6 @@ class _Lowerer:
                 "(all persistent state must have an initial value)",
                 self._loc(target),
             )
-        if attr not in self._state_order:
-            self._state_order.append(attr)
 
     def _is_self_attr(self, node: ast.expr) -> bool:
         return (
@@ -2444,6 +2839,7 @@ class _Lowerer:
         header phi for an attribute first written in the loop -- sees the value carried over from the previous call.
         """
         if attr in self._state_order and attr not in self._state_env:
+            self._touched_attrs.add(attr)
             shape = self._shape(attr)
             reads = tuple(Scalar(self._read_slot(shape, slot)) for slot in shape.slots)
             self._state_env[attr] = shape.compose(reads)
@@ -2475,6 +2871,8 @@ class _Lowerer:
         return shape.compose(consts)
 
     def _assign_attr(self, target: ast.Attribute, value: Value) -> None:
+        if self._is_self_attr(target):
+            self._reject_unwritable_attr(target)  # deferred from the scan, which also walks paths lowering folds away
         attr = self._attr_of(target)
         shape = self._shape(attr)
         if not shape.accepts(value):
@@ -2498,6 +2896,10 @@ class _Lowerer:
                     f"self.{attr} holds {_hir_type_name(expected)} values; the assigned value has an incompatible type",
                     self._loc(target),
                 )
+        # A write lowering reaches that the scan classified as unreachable would be dropped from the slot set here and
+        # vanish without a trace, so the scan is allowed to over-approximate the state set but never to under-approximate.
+        assert attr in self._state_order, attr
+        self._touched_attrs.add(attr)
         self._state_env[attr] = value
 
     def _shape(self, attr: str) -> StateAttr:
@@ -2551,6 +2953,8 @@ class _Lowerer:
 
     def _coerce_real(self, attr: str, value: object) -> float:
         real = _real_or_none(value)
+        if real is None and isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)):
+            self._reject_inexact_integer_element(attr, value)  # float() overflowed: beyond the format entirely
         if real is None:
             raise UnsupportedConstruct(
                 f"instance attribute self.{attr} must hold real numbers (a matrix reset must be a 2-D numpy array, "
@@ -2579,8 +2983,44 @@ class _Lowerer:
         """A public attribute (no leading underscore) drives state_<attr> ports; an underscored one stays internal."""
         return not attr.startswith("_")
 
+    def _prune_untouched_state(self) -> None:
+        """
+        Drop the attributes the scan classified as state but lowering never touched: they keep their reset value, as a
+        read-only attribute does, so nothing in HIR refers to them. An attribute lowering only READ stays a slot whose
+        live-out is its live-in; its live-in is re-materialized here because a ``while`` restores the pre-loop state
+        environment on exit, dropping whatever its body loaded.
+        """
+        for attr in [attr for attr in self._state_order if attr not in self._touched_attrs]:
+            _logger.debug("state attribute %r is written only on paths lowering folded away; not a state slot", attr)
+            self._state_order.remove(attr)
+        for attr in self._state_order:
+            self._ensure_state_loaded(attr)
+
+    def _reject_inexact_integer(self, value: object, loc: SourceLocation) -> None:
+        if not _exactly_a_float(value):
+            raise UnsupportedConstruct(
+                f"the integer {value} has no exact float representation, so it cannot enter the datapath", loc
+            )
+
+    def _reject_inexact_integer_element(self, attr: str, element: object) -> NoReturn:
+        raise UnsupportedConstruct(
+            f"instance attribute self.{attr} resets to the integer {element}, which a float state register cannot "
+            "hold exactly; persistent state has no integer type"
+        )
+
+    def _reject_inexact_integer_reset(self, attr: str) -> None:
+        """A state register holds floats, so an integer reset it cannot represent would read back as another number."""
+        value = self._snapshot[attr]
+        elements = (
+            value.flatten() if isinstance(value, np.ndarray) else value if isinstance(value, (list, tuple)) else [value]
+        )
+        for element in elements:
+            if not _exactly_a_float(element):
+                self._reject_inexact_integer_element(attr, element)
+
     def _register_state_slots(self) -> None:
         for attr in self._state_order:
+            self._reject_inexact_integer_reset(attr)
             shape = self._shape(attr)
             for slot, reset, live_out in zip(shape.slots, shape.resets, self._state_env[attr].leaves()):
                 self._builder.state_slot(slot, reset, live_out)

@@ -1,7 +1,8 @@
 """
 Plain-Python numerical verification of the library stubs: each composite stub is executed directly (no compiler
 involved) and compared against the math/numpy function it substitutes. This checks the ALGORITHM (the identity the
-stub encodes); the lowering of the same stubs is checked end-to-end in test_extended_operators / test_cosim.
+stub encodes); the lowering of the same stubs is checked end-to-end in test_extended_operators / test_matrix /
+test_cosim.
 """
 
 import math
@@ -10,6 +11,7 @@ import numpy as np
 import pytest
 
 from holoso._frontend._lib import Intrinsic, Library, resolve
+from holoso._frontend._lib._linalg import matmul_, outer_, trace_, transpose_
 from holoso._frontend._lib._intrinsics import (
     abs_,
     atan2_,
@@ -66,10 +68,15 @@ def test_registry_resolves_the_expected_externals() -> None:
     library_externals += [pow, math.pow, np.power, np.float_power]
     library_externals += [math.sinh, np.cosh, math.tanh, math.asinh, np.arcsinh, math.acosh, math.atanh]
     library_externals += [math.expm1, np.log1p, math.degrees, np.rad2deg, math.radians, np.deg2rad]
+    library_externals += [np.matmul, np.dot, np.transpose, np.trace, np.outer]
     for external in library_externals:
         assert isinstance(resolve(external), Library), external
+    # ``@`` and ``.T`` are lowered by resolving these two, so the frontend holds no matrix expansion of its own.
+    assert resolve(np.matmul) == Library(matmul_) and resolve(np.transpose) == Library(transpose_)
+    assert resolve(np.dot) == resolve(np.matmul)  # identical on the supported 1-D/2-D non-scalar domain
     # An unregistered callable resolves to nothing; an unhashable shadow does not crash the lookup.
     assert resolve(math.erf) is None and resolve(np.zeros(3)) is None
+    assert resolve(np.linalg.inv) is None and resolve(np.inner) is None  # deliberately not implemented yet
 
 
 def test_intrinsic_stubs_match_their_references() -> None:
@@ -194,3 +201,52 @@ def test_degrees_radians() -> None:
     for x in (-3.14, -1.0, 0.0, 1.0, 90.0):
         assert degrees_(x) == pytest.approx(math.degrees(x), rel=1e-12, abs=1e-15), x
         assert radians_(x) == pytest.approx(math.radians(x), rel=1e-12, abs=1e-15), x
+
+
+def test_matmul_matches_numpy_in_every_rank_combination() -> None:
+    rng = np.random.default_rng(20260710)
+    a, b = rng.normal(size=(3, 4)), rng.normal(size=(4, 2))
+    u, w = rng.normal(size=4), rng.normal(size=3)
+    # The left fold is not BLAS's summation order, so the agreement is up to rounding, not bit-exact.
+    assert np.allclose(matmul_(a, b), a @ b)
+    assert np.allclose(matmul_(a, u), a @ u)  # a 1-D right operand is a column whose axis is dropped
+    assert np.allclose(matmul_(w, a), w @ a)  # a 1-D left operand is a row whose axis is dropped
+    assert np.allclose(matmul_(u, u), u @ u)  # both promoted and both dropped: a scalar dot product
+    assert np.ndim(matmul_(u, u)) == 0
+
+
+def test_transpose_matches_numpy() -> None:
+    rng = np.random.default_rng(20260711)
+    m, v = rng.normal(size=(2, 5)), rng.normal(size=3)
+    assert np.allclose(transpose_(m), m.T)
+    assert np.allclose(transpose_(v), v.T)  # numpy leaves a vector alone
+
+
+def test_trace_and_outer_match_numpy() -> None:
+    rng = np.random.default_rng(20260712)
+    s, u, v = rng.normal(size=(4, 4)), rng.normal(size=3), rng.normal(size=5)
+    assert trace_(s) == pytest.approx(np.trace(s))
+    assert np.allclose(outer_(u, v), np.outer(u, v))
+
+
+def test_linalg_stubs_reject_the_shapes_they_do_not_support() -> None:
+    # The stub raises in plain Python exactly where lowering rejects the kernel; the messages are the diagnostics the
+    # frontend surfaces at the user's call site, so they are asserted here rather than only through the compiler.
+    scalar, vector, matrix, cube = np.float64(2.0), np.arange(3.0), np.ones((2, 3)), np.ones((2, 2, 2))
+    with pytest.raises(ValueError, match="scalar"):
+        matmul_(scalar, vector)
+    with pytest.raises(ValueError, match="1-D or 2-D"):
+        matmul_(cube, vector)
+    assert np.allclose(matmul_(matrix, vector), matrix @ vector)  # 2×3 @ 3 agrees, so the mismatch below is genuine
+    with pytest.raises(ValueError, match="mismatch"):
+        matmul_(matrix, np.arange(2.0))
+    with pytest.raises(ValueError, match="transpose a scalar"):
+        transpose_(scalar)
+    with pytest.raises(ValueError, match="1-D or 2-D|not supported"):
+        transpose_(cube)
+    with pytest.raises(ValueError, match="square"):
+        trace_(matrix)
+    with pytest.raises(ValueError, match="matrix"):
+        trace_(vector)
+    with pytest.raises(ValueError, match="1-D"):
+        outer_(matrix, vector)

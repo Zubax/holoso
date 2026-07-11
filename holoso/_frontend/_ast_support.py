@@ -89,16 +89,17 @@ def statement_walrus_names(stmt: ast.stmt) -> set[str]:
 def scope_local_walrus_targets(node: ast.AST) -> set[str]:
     """
     Every walrus target name bound in ``node``'s OWN scope, descending into nested statements/expressions but NOT into a
-    nested function/lambda/comprehension/class (a walrus there binds in that scope, not this one). Unlike the
-    reachability scans, this is purely syntactic: a walrus target is a function local throughout the body -- as in
-    Python -- even inside a dead or out-of-subset statement, so it shadows a same-named global everywhere.
+    nested function/lambda/class (a walrus there binds in that scope, not this one). Unlike the reachability scans, this
+    is purely syntactic: a walrus target is a function local throughout the body -- as in Python -- even inside a dead
+    or out-of-subset statement, so it shadows a same-named global everywhere. A comprehension is also its own scope in
+    Python, but a walrus inside one is rejected outright, so over-collecting from it here can bind no name.
     """
     names: set[str] = set()
     for child in ast.iter_child_nodes(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
             # The body is a separate scope, but a nested def/lambda/class's default-argument, decorator, and base
-            # expressions execute in THIS scope, so a walrus in one of them binds an enclosing local (comprehensions
-            # are out of subset). The body itself is not descended into.
+            # expressions execute in THIS scope, so a walrus in one of them binds an enclosing local.
+            # The body itself is not descended into.
             enclosing: list[ast.expr] = []
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                 enclosing += [d for d in (*child.args.defaults, *child.args.kw_defaults) if d is not None]
