@@ -46,11 +46,12 @@ For every correctness defect, add a regression test verified to fail before the 
 
 ## When to stop
 
-Repeat until the reviewers surface only trivial feedback (or none) for THREE consecutive turns — this is
-non-negotiable, however many iterations it takes. Do not chase literal zero feedback: with no real issues
-left, agents degrade into nitpicking, so stop as soon as significant findings cease, not before the
-three-turn streak. A blank turn followed by one that digs up a real defect is exactly why the streak must
-be consecutive; expect dozens (sometimes over a hundred) of agent sessions per full pass.
+A round is clean when the reviewers surface only trivial feedback or none. Repeat until EITHER stopping
+rule is met, whichever comes first: TWO CONSECUTIVE clean rounds, or THREE clean rounds in total across
+the run (nonconsecutive rounds count). Do not chase literal zero feedback: with no real issues left,
+agents degrade into nitpicking, so a round is clean as soon as significant findings cease. A clean round
+followed by one that digs up a real defect resets the consecutive streak but not the running total;
+expect dozens (sometimes over a hundred) of agent sessions per full pass.
 
 ## Operational notes
 
