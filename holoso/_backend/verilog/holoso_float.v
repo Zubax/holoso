@@ -1,9 +1,6 @@
-`timescale 1ns/1ps
-
-// =====================================================================================================================
-// FLOATING POINT BASIC OPERATORS
+// FLOATING POINT OPERATORS
 //
-// Using Zubax Kulibin float (ZKF) -- an IEEE 754-like format with simplifications: no NaN, no subnormals.
+// Using Zubax Kulibin float (ZKF) -- an IEEE 754-like format optimized for control systems and DSP applications.
 // ZKF technically has no negative zero, but it is not an error to produce it -- all operators ignore the sign bit
 // when the magnitude is zero.
 //
@@ -12,6 +9,8 @@
 //
 // Streaming wrappers require a LATENCY parameter, which is forwarded to the wrapped Kulibin operator for checking.
 // Operator-specific parameters are forwarded to the corresponding operator.
+
+`timescale 1ns/1ps
 
 // Combinational floating-point sign conditioner operator; to be used at the inputs/outputs of arithmetic operators.
 // Sign conditioning is a trivial and/xor single-bit gate enabling free computation of abs/neg.

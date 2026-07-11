@@ -15,7 +15,7 @@ import shutil
 import pytest
 
 import holoso
-from synth._synth import BUILD_ROOT
+from synth._synth import BUILD_ROOT, build_compiler_ooc_design
 from synth.flows import make_flow
 
 from ._synth_targets import TARGETS, SynthTarget
@@ -46,7 +46,7 @@ def test_target_closes_timing(target: SynthTarget) -> None:
     result = holoso.synthesize(target.kernel(), target.ops, name=target.name)
     directory = BUILD_ROOT / "examples" / target.label
     shutil.rmtree(directory, ignore_errors=True)
-    report = flow.prepare(result).synthesize(directory)
+    report = flow.prepare(build_compiler_ooc_design(result)).synthesize(directory)
 
     assert report.fmax_MHz >= target.target_frequency_MHz, (
         f"{target.label}: f_max {report.fmax_MHz:.2f} MHz < target {target.target_frequency_MHz:.2f} MHz "

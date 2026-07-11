@@ -1,5 +1,30 @@
 // BEGIN holoso_support_inline.vh: the file is spliced into each generated module.
 
+// Arithmetic shift by a constant. Positive shamt shifts left. For variable shamt use holoso_ashift.
+function signed [W-1:0] holoso_ashiftc;
+    input signed [W-1:0] x;
+    input signed [W-1:0] shamt;
+    reg signed [W:0] shamt_ext;
+    reg [$clog2(W)-1:0] shamt_narrow;
+    reg signed [W-1:0] shifted_left;
+    reg signed [W-1:0] shifted_right;
+    begin
+        shamt_ext = {shamt[W-1], shamt};
+        shamt_narrow = shamt[$clog2(W)-1:0];
+        shifted_left = x << shamt_narrow;
+        shifted_right = x >>> -shamt_narrow;
+        if (shamt_ext >= W) begin
+            holoso_ashiftc = {W{1'b0}};
+        end else if (shamt_ext <= -W) begin
+            holoso_ashiftc = {W{x[W-1]}};
+        end else if (shamt[W-1]) begin
+            holoso_ashiftc = shifted_right;
+        end else begin
+            holoso_ashiftc = shifted_left;
+        end
+    end
+endfunction
+
 // Combinational mapping from float to boolean: a zero or a subnormal (if supported) float is false, otherwise true.
 // E.g., if IEEE 754 binary32 is used (with subnormals), values with magnitude under ~1e-38 are mapped to falsity.
 function holoso_ftobool;

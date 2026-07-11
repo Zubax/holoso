@@ -601,7 +601,7 @@ Each operator instance carries its own Holoso-exposed parameters and float forma
 param-name mismatch into a loud elaboration error.
 
 Support library. The auxiliary HDL shipped with a module is a single self-contained `holoso_support.v`, assembled in
-memory from the hand-written operators, wrappers, and included external RTL sources, so the end application introduces
+memory from hand-written operator catalogues plus included external RTL sources, so the end application introduces
 all RTL dependencies by adding one large file to the synthesis input.
 
 ### Numerical model
