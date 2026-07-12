@@ -330,7 +330,7 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fexp2=FExp2Operator(F_e6m18, stage_product=2),
+            fexp2=FExp2Operator(F_e6m18, stage_reduce=1, stage_product=2),
             flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=2, stage_normalize=1, stage_pack=1),
         ),
     ),
