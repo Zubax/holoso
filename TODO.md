@@ -37,15 +37,6 @@ comprehension target. This is acceptable, no fix required at the moment.
 
 ## Known defects needing resolution
 
-Several compile-time integer→float folds round an inexact integer where CPython stays exact, so a guarded branch can
-take the wrong arm silently. The recently-added `_reject_inexact_integer` guard covers a literal, a module global, a
-negated literal, and a for/comprehension counter in value position, but not: `_static_relation` (a mixed int/float
-comparison such as `A + B == float(2**53)` with `A = 2**53`, `B = 1`, which folds true where CPython yields false);
-a ternary whose two arms are the same inexact int; a read-only inexact-int attribute read into the datapath; and an
-inexact-int element of a module-level numpy array. Each reproduces at HEAD. The new `raise` and comprehension-`if`
-surfaces re-expose the comparison variant but do not cause it. Fix: route every compile-time integer→float fold
-(`_static_float` and the ternary/attribute/ndarray-element paths) through the exactness check, closing the family.
-
 Closure free variables are not consulted, so a captured name resolves to a same-named module global (or to the
 builtin). A kernel reading a closure variable folds in a module-level global sharing its name (`x * gain` takes a
 module `gain`, not the freevar), and a captured rebinding of `range`/`len` is treated as the builtin (a freevar
@@ -68,8 +59,3 @@ boundary-install slot must carry no opcode write sources"` (`_emit.py:639`) fire
 transaction on the same live-out register -- e.g. two writes to `self.a` followed by `self.b = self.a` (a single copy
 is fine). The front-end, HIR, MIR, and LIR all accept it; only Verilog emission trips. It fails loudly with no output,
 but the message is addressed to a compiler developer, not the user, who deserves a located `SynthesisError`.
-
-A huge integer exponent hangs the compiler. `_lower_pow` (`_lower.py:2194`) expands `x ** n` into an `n - 1` multiply
-chain without bounding `n`, so a large literal exponent spins `lower()` indefinitely. Check the exponent against
-`UNROLL_THRESHOLD` before expanding and raise a located `UnsupportedConstruct`, as the `for`/comprehension unroll paths
-already do.
