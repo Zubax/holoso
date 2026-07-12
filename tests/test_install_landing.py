@@ -72,13 +72,17 @@ def test_resident_register_source_install_is_inline_class() -> None:
     The generalization beyond literal constants: uart_rx installs the rx INPUT directly (b2 <- rx, b4 <- ~rx). A
     register source resident at block entry has nothing to read-first, so the install is classified inline-class
     (``resident_source``) and fires one cycle earlier than a computed-source copy -- exactly like a constant. Pin that
-    such a non-const resident-source install is present and so classified; a build that reverted inputs (or any entry-
-    resident value) to copy-class would leave this empty. The recovered cycles are pinned end-to-end by the uart_rx
-    freeze (127); here we pin that the input path is what is being exercised.
+    an INPUT-sourced install is present and so classified, matched by its source register against the input loads --
+    phi-sourced installs are also resident, so a resident-and-non-const filter alone could pass through a phi while the
+    input path regressed. The recovered cycles are pinned end-to-end by the uart_rx freeze (127); here we pin that the
+    input path is what is being exercised.
     """
     lir = _build(next(s for s in SPECS if s.name == "uart_rx"))
-    resident_non_const = [x for b in lir.blocks for x in _phi_arm_installs(b) if x.resident_source and not x.is_const]
-    assert resident_non_const, "uart_rx lost its non-const resident-source (input) install, or the predicate regressed"
+    input_regs = {load.dst for load in lir.inputs}
+    input_sourced = [
+        x for b in lir.blocks for x in _phi_arm_installs(b) if x.resident_source and x.source.source in input_regs
+    ]
+    assert input_sourced, "uart_rx lost its input-sourced resident install, or the predicate regressed"
 
 
 def test_computed_copy_not_last_work_fits_at_work_makespan() -> None:

@@ -170,15 +170,15 @@ def _measure(name: str) -> Metrics:
 #   NOT-folding (a semantic NOT is a free consumer-side inversion), and cross-block software pipelining. Bool-phi
 #   if-conversion runs both arms unconditionally, so it can RAISE min_ii (the shortest static path) while LOWERING
 #   realized per-transaction latency -- the true goal, guarded by test_cycle_model. A converted diamond keeps both
-#   arms' values simultaneously live, so it can need an extra register -- the cost of the mux. Coalescing is
-#   layout-neutral and does not move min_ii.
+#   arms' values simultaneously live, so it can need an extra register -- the cost of the mux. Coalescing never
+#   changes behavior, but the surviving copy set feeds the drain/push classification, so min_ii can move with it.
 # - bnreg reflects exact per-consumer boolean read steps and phi coalescing: a condition consumed mid-block frees
 #   its register for a later value in the same block, and a boolean phi merging onto its arms drops its own register.
 # - last_pc and max_block_span are the stage-count guards. They reflect the per-block drain tightener: the
 #   coalesced-install fixpoint -- a phi-arm predecessor whose every arm coalesces installs nothing, so its
 #   +1 install drain is dropped. The drained boundary is the latest value LANDING per op: every op -- inline (a
 #   select or a bool->float cast) or pooled -- lands at the same uniform per-op landing, and an install reading a
-#   block-entry-RESIDENT source (constant, input, or state read) fires at the
+#   block-entry-RESIDENT source (``value_resident_at_entry``) fires at the
 #   combinational step and drops its +1 install drain. last_pc tiles every block's span (a per-block drain regression
 #   anywhere inflates it); max_block_span localizes it to one block. These timing rules move the schedule-length
 #   guards but not nreg/bnreg/steering/copies; signal_window carries a deliberately-loosened steering arm (one freed

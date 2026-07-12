@@ -478,7 +478,8 @@ port-affinity greedy seed refined by simulated annealing over the same objective
 Phi-arm coalescing eliminates most install copies: before coloring, each phi and its register-backed, identity-arm
 predecessors merge by union-find whenever the two sides do not interfere, so the arm value flows straight into the
 merged register with no copy (a diamond's mutually-exclusive arms always coalesce away). The pass is pure post-schedule
-register reassignment -- it changes only register and copy counts, never behavior or PC layout.
+register reassignment -- it changes only register and copy counts, never behavior; the surviving copy set feeds the
+per-block drain/push classification, so PC layout may shift with it.
 
 Commutative port assignment, after allocation, orients each commutative firing's two operands across its read ports to
 minimize total read-set size (a register read in both positions would otherwise sit in both ports' muxes). Commutation
@@ -507,8 +508,12 @@ A block's terminator offset is the latest cycle a value still lands in its frame
 block does not forward to a successor. A block whose boundary values are all already resident in predecessors pays none
 (the drain-only `Ret`s of loop/diamond kernels, whose body produces every output the `Ret` reads combinationally).
 A tail install lands at the block's work makespan, read-first at the boundary, and costs an extra terminator cycle only
-when its source is the block's own last-committing work; a source resident at block entry, or computed earlier than that
-last work, lands at the makespan and recovers cycles in every downstream block.
+when its source is an operator result committing at the block's makespan (its own last work, or conservatively any
+operator result from outside the block); a resident source (a constant, input, state read, or phi result) or an
+earlier-committing computed source lands at the makespan and recovers cycles in every downstream block. A source register
+that a sibling install writes is always a phi's, hence resident, hence fired at the makespan -- strictly before any
+sibling's write lands (same-step installs read all sources before any write lands; a pushed sibling lands later
+still) -- the invariant that keeps cross-referencing loop-carried phis (a swap) correct.
 
 Cross-block software pipelining then shrinks the terminator offset down to the issue-side envelope -- the latest PC at
 which the block still drives a control word -- whenever every successor is single-predecessor, so a spill cannot reach a

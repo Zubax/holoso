@@ -31,7 +31,9 @@ from ._modelref import (
     SlotSwap,
     Vector,
     assert_model_equals_interpreter,
+    bool_phi_swap_computed_loop,
     branch_boundary_kernel,
+    branchy_swap_mixed_arm_loop,
     build_model_and_interpreter,
     const_branch_kernel,
     default_ops,
@@ -41,6 +43,7 @@ from ._modelref import (
     overlap_drained_passthrough_kernel,
     overlap_livein_branch_arm_kernel,
     overlap_spill_kernel,
+    phi_swap_computed_loop,
     phi_swap_loop,
     random_legal_bits,
     staged_ops,
@@ -138,6 +141,64 @@ def test_loop_header_phi_swap_resolves_in_parallel() -> None:
             assert (
                 float(model_out[0]) == reference
             ), f"model != python at x={x} n={n}: {float(model_out[0])} vs {reference}"
+
+
+def test_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
+    """
+    The computed-arm swap (``a, b = b, a + x``): the latch mixes a phi-sourced install with a computed-source install,
+    so a placement that fires one tail install after a sibling has overwritten its source register miscompiles even
+    though the pure swap (same-placement installs) stays correct. Python is the oracle; the model and the RTL replay
+    the same LIR, and interp==model is asserted so a divergence localizes the guilty layer.
+    """
+    fmt = FloatFormat(6, 18)
+    model, interpreter = build_model_and_interpreter(phi_swap_computed_loop, default_ops(fmt), "phi_swap_computed")
+    for x in (1.0, 2.0, -1.5):
+        for n in (1.0, 2.0, 3.0, 4.0):
+            vector = [FloatValue.from_float(fmt, x), FloatValue.from_float(fmt, n)]
+            model_out = model.run(*vector)
+            interp_out = interpreter.run(*vector)
+            reference = phi_swap_computed_loop(x, n)
+            assert (
+                float(interp_out[0]) == reference
+            ), f"interp != python at x={x} n={n}: {float(interp_out[0])} vs {reference}"
+            assert model_out == interp_out, f"interp != model at x={x} n={n}"
+
+
+def test_bool_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
+    """The boolean-bank twin of the computed-arm swap: the latch installs are BoolWrites, not FloatCopys."""
+    fmt = FloatFormat(6, 18)
+    model, interpreter = build_model_and_interpreter(
+        bool_phi_swap_computed_loop, default_ops(fmt), "bool_phi_swap_computed"
+    )
+    for x in (False, True):
+        for n in (1.0, 2.0, 3.0, 4.0):
+            vector: Vector = [x, FloatValue.from_float(fmt, n)]
+            model_out = model.run(*vector)
+            interp_out = interpreter.run(*vector)
+            reference = bool_phi_swap_computed_loop(x, n)
+            assert (
+                bool(interp_out[0]),
+                bool(interp_out[1]),
+            ) == reference, f"interp != python at x={x} n={n}: {interp_out} vs {reference}"
+            assert model_out == interp_out, f"interp != model at x={x} n={n}"
+
+
+def test_mixed_arm_swap_diamond_builds_and_matches_python() -> None:
+    """
+    Pins transient tolerance in the install fixpoint: under a narrowing classification with a strict interference
+    residence bound this kernel does not even BUILD (the boundary shrinks below a transiently de-coalesced computed
+    arm's install and the residence assert trips), so the value grid is secondary to synthesis itself.
+    """
+    fmt = FloatFormat(6, 18)
+    model, interpreter = build_model_and_interpreter(branchy_swap_mixed_arm_loop, default_ops(fmt), "mixed_arm_swap")
+    for x in (1.0, -1.0):
+        for n in (1.0, 2.0, 3.0):
+            vector = [FloatValue.from_float(fmt, x), FloatValue.from_float(fmt, 4.0), FloatValue.from_float(fmt, n)]
+            model_out = model.run(*vector)
+            interp_out = interpreter.run(*vector)
+            reference = branchy_swap_mixed_arm_loop(x, 4.0, n)
+            assert (float(interp_out[0]), float(interp_out[1])) == reference, f"interp != python at x={x} n={n}"
+            assert model_out == interp_out, f"interp != model at x={x} n={n}"
 
 
 def test_state_slot_swap_writeback_is_parallel() -> None:
