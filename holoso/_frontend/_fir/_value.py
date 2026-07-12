@@ -68,6 +68,9 @@ class StaticRange:
 class StaticArray:
     """
     A frozen ndarray SNAPSHOT (a private read-only copy): plain ``np.ndarray`` of a numeric dtype only.
+    Snapshots normalize to C-contiguous layout: memory-order-sensitive operations (``ravel(order="K")`` on a
+    transposed table) may observe a different order than the original object -- a documented value-semantics
+    deviation.
     Equality and hash are hand-written because the dataclass-generated ones delegate to the ndarray, whose ``==``
     yields an ndarray (poisoning ``in``/``==`` on any enclosing value) and whose hash raises.
     """

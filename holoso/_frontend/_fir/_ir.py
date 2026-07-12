@@ -304,6 +304,7 @@ class StaticFor:
     iterable: BindingId
     body_entry: BlockId
     exit_target: BlockId
+    body_blocks: frozenset[BlockId]
     origin: OriginStack
 
 

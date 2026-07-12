@@ -291,9 +291,10 @@ def test_wraps_decorated_kernels_build_the_wrapped_function() -> None:
         t = x + 1.0
         return t * 2.0
 
-    unit = build_unit(kernel)
-    assert unit.name.endswith("kernel")  # the wrapper is unwrapped: source, code, and globals stay consistent
-    assert not any(isinstance(t, Fail) for t in _terminators(unit))
+    # A wrapper may add behavior, so it is never silently unwrapped: the variadic wrapper rejects on its own
+    # parameters with a located message instead of building either function's semantics wrongly.
+    with pytest.raises(BuildRejection, match="variadic parameters"):
+        build_unit(kernel)
 
 
 def test_unpack_arity_is_guarded() -> None:

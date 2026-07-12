@@ -167,6 +167,18 @@ outermost iterable evaluated in the enclosing scope); lazy PyCall; raise/assert/
 short-circuit positions; nested def/class/lambda, imports, subscript stores, and variadic parameters are located
 rejections. A structural verifier and a deterministic printer close the stage.
 
+The analyzer is SCCP-style optimistic executable-edge abstract interpretation over the FIR with flow-sensitive
+per-edge environments (strong updates, joins only over executable in-edges). Facts: Unbound | Known(StaticValue) |
+Residual(type) | fact-level sequences (static shape, runtime leaves) | MaybeUnbound (a read of one is a located
+rejection: Python may raise). Folding is Python-exact on Knowns; runtime-typed values never fold (width rule); a
+Known Bool always drives edge selection. StaticFor unrolls by cloning the body per trip once the iterable is Known;
+calls expand on demand by grafting the callee template (defaults/kwargs bound, member __call__ dispatch, recursion
+rejected by function+receiver ancestry, origins re-attributed to the user call site). State: the W/D fixed point --
+W accumulates executable exit-co-reachable store leaves (typing by reset value), D live-ins start at Known(reset)
+and join executable exit live-outs, descending only; each round rebuilds the working graph from immutable
+templates. Executable Fail terminators are located rejections (data-dependent raise included). Fuel bounds cover
+visits and blocks; exhaustion is a located rejection, never a truncated fixed point.
+
 The production front-end below remains authoritative until the staged cutover.
 
 Abstract interpretation over the Python AST/CFG with a binding-time lattice (static vs. dynamic). Static values (shapes,

@@ -59,3 +59,8 @@ boundary-install slot must carry no opcode write sources"` (`_emit.py:639`) fire
 transaction on the same live-out register -- e.g. two writes to `self.a` followed by `self.b = self.a` (a single copy
 is fine). The front-end, HIR, MIR, and LIR all accept it; only Verilog emission trips. It fails loudly with no output,
 but the message is addressed to a compiler developer, not the user, who deserves a located `SynthesisError`.
+
+The shadow FIR analyzer has no aggregate story for W-typed state: tuple-valued attributes (the delay-line idiom
+`self.window = (self.window[1], x)`) reject with "unsupported reset type" while the production front-end decomposes
+vector attributes into scalar state. The W/D fixed point needs elementwise FactSeq live-ins before the cutover can
+cover such kernels (stage 9 / wiring milestone territory).
