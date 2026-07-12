@@ -3583,6 +3583,99 @@ def test_an_integer_the_float_datapath_cannot_hold_never_enters_it() -> None:
 
 
 _INEXACT_INTEGER = 2**53 + 1
+_BIG_A = 2**53
+_BIG_B = 1
+_INT_TABLE = np.array([[2**53 + 1, 3]], dtype=np.int64)
+_BIG_F = float(2**53)
+
+
+def test_mixed_int_float_static_comparison_folds_exactly() -> None:
+    # Regression (TODO): a static comparison mixing an integer expression with a float must compare exactly, as
+    # Python does; a float64 fold of the integer side rounds 2**53 + 1 onto 2**53 and takes the wrong arm silently.
+    class WrongArmGuard:
+        def __init__(self) -> None:
+            self.x = 0.0
+
+        def step(self, v: float) -> float:
+            if _BIG_A + _BIG_B == _BIG_F:  # False in Python: the integer sum compares exactly
+                self.x = v
+            return self.x
+
+    assert WrongArmGuard().step(1.0) == 0.0
+    hir = lower(WrongArmGuard().step)
+    assert [slot.name for slot in hir.state_slots] == []
+    assert len(hir.blocks) == 1
+
+    class RightArmGuard:
+        def __init__(self) -> None:
+            self.x = 0.0
+
+        def step(self, v: float) -> float:
+            if _BIG_A + _BIG_B > _BIG_F:  # True in Python: the fold must still take the arm, not reject
+                self.x = v
+            return self.x
+
+    assert RightArmGuard().step(1.0) == 1.0
+    assert [slot.name for slot in lower(RightArmGuard().step).state_slots] == ["x"]
+
+
+def test_read_only_inexact_int_attribute_comparison_folds_exactly() -> None:
+    # Regression (TODO): a read-only integer attribute keeps its exact value in a static comparison; the float64
+    # fold of the attribute would round it onto the comparand and take the wrong arm silently.
+    class Selector:
+        def __init__(self) -> None:
+            self._sel = 2**53 + 1
+            self.y = 0.0
+
+        def step(self, v: float) -> float:
+            if self._sel == _BIG_F:  # False in Python
+                self.y = v
+            return self.y
+
+    assert Selector().step(1.0) == 0.0
+    hir = lower(Selector().step)
+    assert [slot.name for slot in hir.state_slots] == []
+    assert len(hir.blocks) == 1
+
+
+def test_np_int_array_element_comparison_follows_numpy_semantics() -> None:
+    # Companion pin to the Python-int exactness fix: a numpy scalar operand must NOT be folded exactly, because
+    # numpy itself converts an np.int64 to float64 in a comparison -- np.int64(2**53 + 1) == float(2**53) is True in
+    # numpy -- so each operand folds under its own source semantics.
+    class Selector:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def step(self, v: float) -> float:
+            if _INT_TABLE[0, 0] == _BIG_F:  # True under numpy: the element converts to float64 and rounds
+                self.y = v
+            return self.y
+
+    assert Selector().step(1.0) == 1.0
+    hir = lower(Selector().step)
+    assert [slot.name for slot in hir.state_slots] == ["y"]
+    assert len(hir.blocks) == 1
+
+
+def test_equal_inexact_int_ternary_arms_are_rejected_like_the_literal() -> None:
+    # Regression (TODO): the equal-arm ternary fold used to bypass the value-position literal guard, silently
+    # rounding an inexact integer that a plain literal read would have rejected.
+    def kernel(x: float, c: bool) -> float:
+        return x + (_INEXACT_INTEGER if c else _INEXACT_INTEGER)
+
+    with pytest.raises(UnsupportedConstruct, match="no exact float representation"):
+        lower(kernel)
+
+
+def test_huge_literal_exponent_is_rejected_not_expanded() -> None:
+    # Regression (TODO): an unbounded literal exponent used to expand a multiply chain of that length (a compiler
+    # hang for a large literal); it is bounded like the loop unrolls. 66 is the smallest rejected exponent at the
+    # threshold of 64, so this also pins the bound.
+    def kernel(x: float) -> float:
+        return x**66
+
+    with pytest.raises(UnsupportedConstruct, match="unroll threshold"):
+        lower(kernel)
 
 
 def test_only_a_shaped_value_answers_a_shape_query() -> None:

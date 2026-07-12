@@ -1399,10 +1399,8 @@ class _Lowerer:
                 relation = self._RELATIONAL_OPS.get(type(op))
                 if relation is None:
                     return None
-                left_value = self._reach_float_cast(left)
-                left_value = self._static_float(left) if left_value is None else left_value
-                right_value = self._reach_float_cast(right)
-                right_value = self._static_float(right) if right_value is None else right_value
+                left_value = self._reach_operand(left)
+                right_value = self._reach_operand(right)
                 if left_value is None or right_value is None or left_value != left_value or right_value != right_value:
                     return None
                 return relation.apply(left_value, right_value)
@@ -1424,24 +1422,41 @@ class _Lowerer:
         condition = self._static_condition(cast[1])
         return None if condition is None else (1.0 if condition else 0.0)
 
+    def _reach_operand(self, node: ast.expr) -> int | float | None:
+        """
+        A comparison operand for the reachability fold: a folded ``float(<connective>)`` cast, else the operand under
+        its own source semantics (``_relation_operand``: exact for a Python int, numpy's float64 for a numpy scalar).
+        """
+        value = self._reach_float_cast(node)
+        return value if value is not None else self._relation_operand(node)
+
     def _static_relation(self, relation: RelationalOp, left: ast.expr, right: ast.expr) -> bool | None:
         """
-        Fold one relational link of compile-time operands, or None if either is not compile-time. Two integers are
-        compared exactly (a float64 fold would round operands beyond 2**53 and misfold, e.g.
-        ``9007199254740993 == 9007199254740992``); otherwise the fast-math float64 fold is used.
+        Fold one relational link of compile-time operands, or None if either is not compile-time. Each operand folds
+        with the semantics of its own source object: a Python integer keeps its exact value (Python compares an int
+        with an int or a float exactly, so a float64 fold of the integer side would round it beyond 2**53 and misfold
+        -- ``A + B == float(2**53)`` with ``A + B == 2**53 + 1`` must be False), while a numpy scalar converts to
+        float64 exactly as numpy's own comparison does, and a genuinely-float operand uses the fast-math float64 fold.
         """
-        left_int, right_int = self._static_int(left), self._static_int(right)
-        if left_int is not None and right_int is not None:
-            return relation.apply(left_int, right_int)
-        left_float, right_float = self._static_float(left), self._static_float(right)
+        left_value = self._relation_operand(left)
+        right_value = self._relation_operand(right)
         if (
-            left_float is not None
-            and right_float is not None
-            and left_float == left_float
-            and right_float == right_float
+            left_value is not None
+            and right_value is not None
+            and left_value == left_value
+            and right_value == right_value
         ):
-            return relation.apply(left_float, right_float)
+            return relation.apply(left_value, right_value)
         return None
+
+    def _relation_operand(self, node: ast.expr) -> int | float | None:
+        element = _real_or_none(self._static_ndarray_element(node))
+        if element is not None:
+            return element
+        integer = self._static_int(node)
+        if integer is not None:
+            return integer
+        return self._static_float(node)
 
     def _record_self_targets(self, targets: list[ast.expr], attrs: set[str]) -> None:
         for leaf in (leaf for target in targets for leaf in leaf_targets(target)):
@@ -2238,6 +2253,13 @@ class _Lowerer:
             if base_value is None:
                 raise UnsupportedConstruct("a negative power is only supported for a constant base", self._loc(base))
             return self._builder.float_const(base_value**n)
+        if n - 1 > UNROLL_THRESHOLD:
+            # Bounded like the for/comprehension unrolls: an unbounded literal exponent would spin the multiply-chain
+            # expansion indefinitely.
+            raise UnsupportedConstruct(
+                f"exponent {n} expands to {n - 1} chained multiplies, above the unroll threshold {UNROLL_THRESHOLD}",
+                self._loc(exponent),
+            )
         base_id = self._float_operand(self._lower_expr(base), base)
         if n == 0:
             return self._builder.float_const(1.0)
@@ -2513,6 +2535,12 @@ class _Lowerer:
             return Scalar(self._builder.bool_const(both_bool))
         both_float = self._static_float(body)
         if both_float is not None and both_float == self._static_float(orelse):
+            for arm in (body, orelse):
+                arm_int = self._static_int(arm)
+                if arm_int is not None and not self._is_self_attr(arm):
+                    # Value-position parity: a literal/global inexact integer is rejected here exactly as lowering the
+                    # arm would reject it; a read-only attribute keeps its accepted Python-identical rounding.
+                    self._reject_inexact_integer(arm_int, loc)
             return Scalar(self._builder.float_const(both_float))
         return self._branch_value(cond, lambda: self._lower_expr(body), lambda: self._lower_expr(orelse), loc)
 
