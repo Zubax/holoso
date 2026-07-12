@@ -44,6 +44,20 @@ interpreter (e.g. `.nox/tests/bin/python`, which mutates nothing) rather than wh
 a version-skewed interpreter or dependency set can produce findings that do not apply to the project
 or miss ones that do. Reproducing their own findings before reporting remains mandatory.
 
+## Inputs are trusted — reject cybersec framing
+
+This is a compiler for trusted, well-meaning users, not a security boundary. Corner cases arise from
+honest mistakes, never from adversaries. Weigh every finding by its plausibility under honest use: a
+defect matters if a well-meaning user could plausibly trigger it (a typo, a misunderstood API, an
+unusual but legitimate code pattern), not if only a contrived hostile input can reach it. Findings
+whose reproduction requires deliberately pathological constructions — operator-overriding subclasses
+planted to lie, stateful accessors crafted to pass checks and then diverge, hostile metaclasses,
+sandbox-mangled namespaces — are out of scope: reject them outright at consolidation instead of
+hardening against them, and say so in the reviewer prompts. Graceful refusal of the honestly-weird is
+sufficient; airtightness against the malicious is explicitly a non-goal. A round is NOT unclean merely
+because such findings exist. Long loops degrade into exactly this kind of hardening; treat a round
+whose only findings are adversarial-input constructions as clean and stop.
+
 ## Consolidate and act
 
 When all reviewers return, merge their findings, discard the noise, and fix what is real.
