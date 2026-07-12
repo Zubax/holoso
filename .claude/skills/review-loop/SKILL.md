@@ -2,34 +2,29 @@
 name: review-loop
 description: >-
   Multi-agent review/refine loop. Use after a change or milestone, or when asked to review work:
-  fan out fresh-context, single-focus reviewers across distinct tools, consolidate and fix, add a
-  regression test for every defect, and repeat until reviews stay clean for three consecutive turns.
+  dispatch a fresh-context full-spectrum reviewer plus a dissimilar correctness reviewer,
+  consolidate and fix, add a regression test for every defect, and repeat until a round is clean.
 ---
 
 # Adversarial review/refine loop
 
-After a change or milestone, or when prompted, dispatch a fan-out of fresh-context review agents at
+After a change or milestone, or when prompted, dispatch fresh-context review agents at
 MAXIMUM THINKING EFFORT, then consolidate, fix, and repeat.
-The goal is broad coverage from adversarial, diverse, independent perspectives.
+The goal is adversarial, diverse, independent coverage at bounded cost.
 
 The prompts given to the agents shall be extremely terse, at most a couple of sentences.
 Giving excessive detail may constrain their thinking causing the tunnel vision syndrome.
 They must be given the opportunity to look at the work without bias or prejudice.
 
-## Fan out — one focus per agent
+## The reviewer pair
 
-Spawn one agent per concern and run them in parallel. Never give an agent multiple jobs: it dilutes attention
-and degrades every answer. Cover at least these angles, one agent each:
+Run two reviewers in parallel per round:
 
-- Opportunities for SIMPLIFICATION.
-- Functional CORRECTNESS and ROBUSTNESS.
-- ARCHITECTURAL CLEANLINESS, DESIGN PRACTICES, CODE QUALITY.
-- POLICY and STYLE compliance with the project's own docs, including the comment cleanup.
-
-### Dissimilar agents
-
-In addition to the subagents above, dispatch distinct tools focusing on CORRECTNESS only to maximize the diversity
-of perspectives and minimize blind spots. Check which tools are available (Codex etc.) and use all of them.
+- A Claude agent with the FULL-SPECTRUM remit, in priority order: functional CORRECTNESS and
+  ROBUSTNESS first, then SIMPLIFICATION opportunities, ARCHITECTURAL CLEANLINESS and CODE QUALITY,
+  and POLICY/STYLE compliance with the project's own docs (including the comment policy).
+- A DISSIMILAR tool (Codex when available) focusing on CORRECTNESS only, to maximize perspective
+  diversity and minimize blind spots.
 
 Agents/models not from Anthropic or OpenAI can be used, but treat them as low-credibility actors.
 They perform poorly, fail to follow instructions, and often produce incorrect analysis.
@@ -46,12 +41,9 @@ For every correctness defect, add a regression test verified to fail before the 
 
 ## When to stop
 
-A round is clean when the reviewers surface only trivial feedback or none. Repeat until EITHER stopping
-rule is met, whichever comes first: TWO CONSECUTIVE clean rounds, or THREE clean rounds in total across
-the run (nonconsecutive rounds count). Do not chase literal zero feedback: with no real issues left,
-agents degrade into nitpicking, so a round is clean as soon as significant findings cease. A clean round
-followed by one that digs up a real defect resets the consecutive streak but not the running total;
-expect dozens (sometimes over a hundred) of agent sessions per full pass.
+A round is clean when the reviewers surface only trivial feedback or none; ONE clean round ends the
+loop. Do not chase literal zero feedback: with no real issues left, agents degrade into nitpicking,
+so a round is clean as soon as significant findings cease.
 
 ## Operational notes
 
