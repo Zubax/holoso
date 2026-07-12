@@ -190,6 +190,14 @@ class NameResolver:
     def local_names(self) -> frozenset[str]:
         return self._locals
 
+    def runtime_spelling(self, name: str) -> str:
+        """
+        The code-object spelling of an AST identifier: private names mangle inside a class, and that applies to
+        ATTRIBUTES as well as locals (``self.__state`` stores under ``_Klass__state``). Idempotent on names that
+        are already mangled.
+        """
+        return _mangle(name, self._klass)
+
     def resolve(self, name: str) -> Resolution:
         """
         The queried name is the AST spelling; the returned Resolution carries the runtime spelling (private names

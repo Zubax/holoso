@@ -158,6 +158,15 @@ distinct, NaN stable). Static execution runs real Python/numpy on the domain's o
 defer to runtime, float overflow folds to infinity per the charter, numpy wraparound folds faithfully, NaN never
 folds, and integer powers fold only under a result-width bound.
 
+The FIR itself is a private non-SSA CFG over mutable Places (Local/StateLeaf/ReturnPlace), built syntax-directed
+with no analysis: ANF write-once temporaries in exact Python evaluation order; ordered stores; one canonical exit
+per FunctionUnit (return = store + jump); eager and/or/chained-compares via selects (pinned semantics); ifexp as
+real branches; for-loops and comprehensions as StaticFor templates (comprehension targets in their own frame, the
+outermost iterable evaluated in the enclosing scope); lazy PyCall; raise/assert/missing-name as Fail terminators
+(dead branches stay dead); del as UnbindPlace; origin stacks on every node. Walrus is supported except in
+short-circuit positions; nested def/class/lambda, imports, subscript stores, and variadic parameters are located
+rejections. A structural verifier and a deterministic printer close the stage.
+
 The production front-end below remains authoritative until the staged cutover.
 
 Abstract interpretation over the Python AST/CFG with a binding-time lattice (static vs. dynamic). Static values (shapes,
