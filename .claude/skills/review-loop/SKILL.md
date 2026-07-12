@@ -12,7 +12,7 @@ After a change or milestone, or when prompted, dispatch fresh-context review age
 MAXIMUM THINKING EFFORT, then consolidate, fix, and repeat.
 The goal is adversarial, diverse, independent coverage at bounded cost.
 
-The prompts given to the agents shall be extremely terse, at most a couple of sentences.
+The prompts given to the agents shall be extremely terse, at most a few sentences.
 Giving excessive detail may constrain their thinking causing the tunnel vision syndrome.
 They must be given the opportunity to look at the work without bias or prejudice.
 
