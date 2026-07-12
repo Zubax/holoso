@@ -30,6 +30,7 @@ class BinOp(enum.Enum):
     FLOORDIV = "//"
     MOD = "%"
     POW = "**"
+    MATMUL = "@"
 
 
 class UnOp(enum.Enum):
@@ -47,6 +48,7 @@ _BINOP_FN: dict[BinOp, Callable[[object, object], object]] = {
     BinOp.FLOORDIV: operator.floordiv,
     BinOp.MOD: operator.mod,
     BinOp.POW: operator.pow,
+    BinOp.MATMUL: operator.matmul,
 }
 
 
@@ -76,7 +78,7 @@ def _evaluate(fn: Callable[[], object]) -> object | None:
     try:
         with np.errstate(divide="raise", invalid="raise", over="ignore", under="ignore"):
             result = fn()
-    except (ZeroDivisionError, OverflowError, ValueError, FloatingPointError):
+    except (ZeroDivisionError, OverflowError, ValueError, TypeError, FloatingPointError):
         return None
     assert result is not None
     return result
