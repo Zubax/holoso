@@ -146,6 +146,20 @@ Each operator declares a per-instance initiation interval; most operators have I
 
 ## Front-end
 
+A rewrite is in progress under `holoso/_frontend/_fir/` (shadow-only until cutover; nothing in production consumes
+it). Landed so far, terse facts: name classification comes from the live code object (CPython's own; `del`-locality
+and PEP 709 targets correct by construction) with comprehension-only targets carved out via the AST; non-locals
+resolve closure-cell before global before builtin, values read at resolve time. Static values form a closed
+whitelisted domain with provenance as identity: exact Python ints (MetaInt) are distinct from numpy 64-bit scalars
+(NpInt/NpFloat, numpy's own mixed-operand semantics; narrower numpy widths are not static); arrays admit as read-only
+snapshots; sequences keep list/tuple flavor; dataclasses admit as records only when reconstructible from fields;
+containers bound depth and refuse cycles. Fixed-point equality is tagged and bitwise (True is not 1, signed zero
+distinct, NaN stable). Static execution runs real Python/numpy on the domain's own objects; zero-division/invalid
+defer to runtime, float overflow folds to infinity per the charter, numpy wraparound folds faithfully, NaN never
+folds, and integer powers fold only under a result-width bound.
+
+The production front-end below remains authoritative until the staged cutover.
+
 Abstract interpretation over the Python AST/CFG with a binding-time lattice (static vs. dynamic). Static values (shapes,
 `__init__`-derived constants, compile-time tables) are evaluated concretely -- real Python/NumPy runs at synthesis time.
 Dynamic values (input ports, persistent state) become SSA handles that accumulate HIR. A `for` over a static `range` or
