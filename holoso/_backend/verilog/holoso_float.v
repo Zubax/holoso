@@ -175,35 +175,36 @@ module holoso_fmul_ilog2_const#(parameter WEXP = 6, parameter WMAN = 18, paramet
     );
 endmodule
 
-// Floating point round-to-integer with sign conditioning:  y = sgnop(round(sgnop(a), round_mode))
-// round_mode selects the mode per transaction: 0 nearest-even, 1 floor, 2 ceil, 3 trunc (the zkf_round encoding).
-// The input is sampled once at in_valid and is not required to remain stable during operation.
-module holoso_fround#(parameter WEXP = 6, parameter WMAN = 18,
-                      parameter STAGE_INPUT = 0, parameter STAGE_DECODE = 0,
-                      parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
-                      parameter integer LATENCY = 0) (
+// Power-of-two scaler with sign conditioning: y = sgnop(sgnop(a) * 2^k).
+// Every representable k is legal; large values collapse to infinities or zero.
+// Scaling is exact while the result remains normal and finite.
+// Zero and infinity retain their class regardless of k before output sign conditioning.
+module holoso_fmul_ilog2#(parameter WEXP = 6, parameter WMAN = 18, parameter WINT = WEXP + WMAN,
+                          parameter STAGE_INPUT = 0, parameter STAGE_DECODE = 0,
+                          parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire                 in_valid,
     input  wire           [1:0] a_sgnop,
-    input  wire           [1:0] round_mode,
     input  wire           [1:0] y_sgnop,
     input  wire [WEXP+WMAN-1:0] a,
+    input  wire signed [WINT-1:0] k,
     output wire                 out_valid,
     output wire [WEXP+WMAN-1:0] y
 );
     localparam WFULL = WEXP + WMAN;
+    localparam Y_SGNOP_LATENCY = (LATENCY == 0) ? 1 + STAGE_INPUT + STAGE_DECODE : LATENCY;
     wire [WFULL-1:0] a1;
     wire [WFULL-1:0] y1;
     wire       [1:0] y_sgnop_q;
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
-    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
+    zkf_pipe#(.W(2), .N(Y_SGNOP_LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
                                                   .out_valid(), .out(y_sgnop_q));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
-    zkf_round#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT), .STAGE_DECODE(STAGE_DECODE),
-               .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT), .LATENCY(LATENCY)) u_round (
+    zkf_mul_ilog2#(.WEXP(WEXP), .WMAN(WMAN), .WK(WINT), .STAGE_INPUT(STAGE_INPUT),
+                   .STAGE_DECODE(STAGE_DECODE), .LATENCY(LATENCY)) u_mul_ilog2 (
         .clk(clk), .rst(rst),
-        .in_valid(in_valid), .a(a1), .round_mode(round_mode),
+        .in_valid(in_valid), .a(a1), .k(k),
         .out_valid(out_valid), .y(y1)
     );
 endmodule
@@ -473,5 +474,93 @@ module holoso_flog2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPL
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .x(a1),
         .out_valid(out_valid), .y(y1), .domain_error(domain_error), .pole(pole)
+    );
+endmodule
+
+// Floating point round-to-integer with sign conditioning:  y = sgnop(round(sgnop(a), round_mode))
+// round_mode selects the mode per transaction: 0 nearest-even, 1 floor, 2 ceil, 3 trunc (the zkf_round encoding).
+// The input is sampled once at in_valid and is not required to remain stable during operation.
+module holoso_fround#(parameter WEXP = 6, parameter WMAN = 18,
+                      parameter STAGE_INPUT = 0, parameter STAGE_DECODE = 0,
+                      parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
+                      parameter integer LATENCY = 0) (
+    input  wire clk,
+    input  wire rst,
+    input  wire                 in_valid,
+    input  wire           [1:0] a_sgnop,
+    input  wire           [1:0] round_mode,
+    input  wire           [1:0] y_sgnop,
+    input  wire [WEXP+WMAN-1:0] a,
+    output wire                 out_valid,
+    output wire [WEXP+WMAN-1:0] y
+);
+    localparam WFULL = WEXP + WMAN;
+    wire [WFULL-1:0] a1;
+    wire [WFULL-1:0] y1;
+    wire       [1:0] y_sgnop_q;
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
+    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
+                                                  .out_valid(), .out(y_sgnop_q));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
+    zkf_round#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT), .STAGE_DECODE(STAGE_DECODE),
+               .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT), .LATENCY(LATENCY)) u_round (
+        .clk(clk), .rst(rst),
+        .in_valid(in_valid), .a(a1), .round_mode(round_mode),
+        .out_valid(out_valid), .y(y1)
+    );
+endmodule
+
+// Signed-integer-to-float conversion with output sign conditioning.
+// Conversion is round-to-nearest, ties-to-even; values outside the finite float range become signed infinity.
+module holoso_ffromint#(parameter WEXP = 6, parameter WMAN = 18, parameter WINT = WEXP + WMAN,
+                        parameter STAGE_INPUT = 0, parameter STAGE_NORMALIZE = 0,
+                        parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
+                        parameter integer LATENCY = 0) (
+    input  wire clk,
+    input  wire rst,
+    input  wire                 in_valid,
+    input  wire signed [WINT-1:0] a,
+    input  wire           [1:0] y_sgnop,
+    output wire                 out_valid,
+    output wire [WEXP+WMAN-1:0] y
+);
+    localparam WFULL = WEXP + WMAN;
+    localparam Y_SGNOP_LATENCY =
+        (LATENCY == 0) ? 1 + STAGE_INPUT + STAGE_NORMALIZE + STAGE_PACK + STAGE_OUTPUT : LATENCY;
+    wire [WFULL-1:0] y1;
+    wire       [1:0] y_sgnop_q;
+    zkf_pipe#(.W(2), .N(Y_SGNOP_LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
+                                                  .out_valid(), .out(y_sgnop_q));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
+    zkf_from_int#(.WEXP(WEXP), .WMAN(WMAN), .WINT(WINT), .STAGE_INPUT(STAGE_INPUT),
+                  .STAGE_NORMALIZE(STAGE_NORMALIZE), .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT),
+                  .LATENCY(LATENCY)) u_from_int (
+        .clk(clk), .rst(rst),
+        .in_valid(in_valid), .a(a),
+        .out_valid(out_valid), .y(y1)
+    );
+endmodule
+
+// Float-to-signed-integer conversion with input sign conditioning.
+// Finite values round to nearest, ties-to-even. Saturation is normal behavior, not an error.
+// Values above 2^(WINT-1)-1 saturate to that maximum; values below -2^(WINT-1) saturate to that minimum (incl. infs).
+module holoso_ftoint#(parameter WEXP = 6, parameter WMAN = 18, parameter WINT = WEXP + WMAN,
+                      parameter STAGE_INPUT = 0, parameter integer LATENCY = 0) (
+    input  wire clk,
+    input  wire rst,
+    input  wire                 in_valid,
+    input  wire           [1:0] a_sgnop,
+    input  wire           [1:0] round_mode,
+    input  wire [WEXP+WMAN-1:0] a,
+    output wire                 out_valid,
+    output wire signed [WINT-1:0] y
+);
+    localparam WFULL = WEXP + WMAN;
+    wire [WFULL-1:0] a1;
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
+    zkf_to_int#(.WEXP(WEXP), .WMAN(WMAN), .WINT(WINT), .STAGE_INPUT(STAGE_INPUT), .LATENCY(LATENCY)) u_to_int (
+        .clk(clk), .rst(rst),
+        .in_valid(in_valid), .round_mode(round_mode), .a(a1),
+        .out_valid(out_valid), .y(y)
     );
 endmodule
