@@ -17,7 +17,18 @@ from collections.abc import Callable
 import numpy as np
 
 from ..._util import RelationalOp
-from ._value import MetaInt, NpFloat, NpInt, StaticBool, StaticFloat, StaticSeq, StaticValue, admit, as_python
+from ._value import (
+    MetaInt,
+    NpFloat,
+    NpInt,
+    StaticBool,
+    StaticFloat,
+    StaticSeq,
+    StaticStr,
+    StaticValue,
+    admit,
+    as_python,
+)
 
 _MAX_FOLD_BITS = 1 << 16  # refuse to fold an integer whose result would be astronomically wide
 
@@ -101,6 +112,8 @@ def static_binop(op: BinOp, left: StaticValue, right: StaticValue) -> StaticValu
     float64 fast-math). Sequences fall outside: list/tuple ``+``/``*`` are structural operations owned by the
     aggregate layer, not scalar arithmetic.
     """
+    if isinstance(left, StaticStr) and isinstance(right, StaticStr) and op is BinOp.ADD:
+        return StaticStr(left.value + right.value)
     if not isinstance(left, _NUMERIC) or not isinstance(right, _NUMERIC) or _has_nan(left, right):
         return None
     if _too_wide(left, right):
@@ -138,6 +151,11 @@ def static_compare(relation: RelationalOp, left: StaticValue, right: StaticValue
             return None
         equal = left.value == right.value
         return StaticBool(equal if relation is RelationalOp.EQ else not equal)
+    if isinstance(left, StaticStr) and isinstance(right, StaticStr):
+        if relation not in (RelationalOp.EQ, RelationalOp.NE):
+            return None  # config strings compare for identity of meaning; ordering them is not in the subset
+        equal = left.value == right.value
+        return StaticBool(equal if relation is RelationalOp.EQ else not equal)
     if not isinstance(left, _NUMERIC) or not isinstance(right, _NUMERIC) or _has_nan(left, right):
         return None
     result = _evaluate(lambda: bool(relation.apply(as_python(left), as_python(right))))  # type: ignore[arg-type]
@@ -158,5 +176,7 @@ def static_truth(value: StaticValue) -> bool | None:
             return None if math.isnan(v) else v != 0.0
         case StaticSeq(items=items):
             return len(items) != 0
+        case StaticStr(value=v):
+            return len(v) != 0
         case _:
             return None

@@ -103,10 +103,11 @@ def build_unit(fn: object) -> FunctionUnit:
     if isinstance(fn, types.MethodType):
         bound_self = fn.__self__
         fn = fn.__func__
-    assert callable(fn)
-    fn = inspect.unwrap(fn)  # a wraps-style decorator hands us the wrapper; the KERNEL is the wrapped function
     assert isinstance(fn, types.FunctionType), fn
-    source_lines, first_line = inspect.getsourcelines(fn)
+    # The callable is built AS-IS: a wraps-style decorator may add behavior, so silently unwrapping would diverge.
+    # Reading source via the CODE OBJECT (never the function) keeps inspect from following __wrapped__; a variadic
+    # wrapper then rejects on its own parameters, which is the honest answer.
+    source_lines, first_line = inspect.getsourcelines(fn.__code__)
     module = ast.parse(textwrap.dedent("".join(source_lines)))
     fndef = module.body[0]
     if not isinstance(fndef, ast.FunctionDef):
@@ -301,9 +302,6 @@ class _Builder:
                 iterable_temp = self._expression(iterable)
                 header, body_block, after = self._new_block(), self._new_block(), self._new_block()
                 self._current.terminator = Jump(header.id, origin)
-                header.terminator = StaticFor(
-                    Local(self._bind(target.id)), iterable_temp, body_block.id, after.id, origin
-                )
                 self._start_block(body_block)
                 self._loops.append(_LoopContext(header.id, after.id))
                 for inner in body:
@@ -312,6 +310,13 @@ class _Builder:
                 if self._current.terminator is None:
                     self._current.terminator = Jump(header.id, origin)
                 self._start_block(after)
+                members = frozenset(block_id for block_id in self._blocks if block_id.index >= body_block.id.index) - {
+                    header.id,
+                    after.id,
+                }
+                header.terminator = StaticFor(
+                    Local(self._bind(target.id)), iterable_temp, body_block.id, after.id, members, origin
+                )
             case ast.Break():
                 if not self._loops:
                     raise BuildRejection("break outside a loop", origin)
@@ -635,7 +640,6 @@ class _Builder:
         target = frame[self._resolver.runtime_spelling(generator.target.id)]
         header, body_block, after = self._new_block(), self._new_block(), self._new_block()
         self._current.terminator = Jump(header.id, origin)
-        header.terminator = StaticFor(Local(target), iterable_temp, body_block.id, after.id, origin)
         self._start_block(body_block)
         for condition_expr in generator.ifs:
             condition = self._truth(condition_expr)
@@ -646,3 +650,8 @@ class _Builder:
         if self._current.terminator is None:
             self._current.terminator = Jump(header.id, origin)
         self._start_block(after)
+        members = frozenset(block_id for block_id in self._blocks if block_id.index >= body_block.id.index) - {
+            header.id,
+            after.id,
+        }
+        header.terminator = StaticFor(Local(target), iterable_temp, body_block.id, after.id, members, origin)
