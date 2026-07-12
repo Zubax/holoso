@@ -34,6 +34,16 @@ They perform poorly, fail to follow instructions, and often produce incorrect an
 Review agents must not modify the worktree or run mutating commands. If one needs a mutable environment,
 it copies the worktree elsewhere.
 
+## Reviewers do not re-run the project test suites
+
+The gates (unit suite, typecheck, formatter) are already green at the reviewed commit; re-running them
+duplicates work and, for the broad sessions, wastes minutes of compute per round. State this in the
+reviewer prompts. Reviewer effort goes instead into adversarial counterexamples for behaviors the
+existing tests do NOT cover, executed in a scratch clone. Probes must run under the repo's own test
+interpreter (e.g. `.nox/tests/bin/python`, which mutates nothing) rather than whatever is on PATH:
+a version-skewed interpreter or dependency set can produce findings that do not apply to the project
+or miss ones that do. Reproducing their own findings before reporting remains mandatory.
+
 ## Consolidate and act
 
 When all reviewers return, merge their findings, discard the noise, and fix what is real.
