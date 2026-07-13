@@ -44,6 +44,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "madd": (14, 14),
     "poly3": (23, 23),
     "iir1_lpf": (15, 15),
+    "iir1_hpf": (24, 24),
     "schmitt_trigger": (6, 6),
     # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
     # is), so the install fits at the work makespan instead of one past it -- shaving a cycle off every iteration.

@@ -89,10 +89,6 @@ def lower_fir(kernel: object) -> Hir:
     return _Emitter(result, analyzer).emit()
 
 
-def _slot_name(leaf: StateLeaf) -> str:
-    return ".".join(leaf.path)
-
-
 def _exact_float(value: object) -> float:
     # A datapath value must be binary64-exact: an integer too wide (2**53 + 1) would silently round on the way in
     # and change a comparison against a runtime value, so it is a located rejection per the materialization policy.
@@ -161,6 +157,8 @@ class _Emitter:
             self._predecessors.setdefault(target, []).append(source)
         self._state_reads: dict[StateLeaf, int] = {}
         self._state_order: list[StateLeaf] = []
+        self._provenance = analyzer.provenance()  # component id -> canonical member path from the root
+        self._slot_names: dict[str, StateLeaf] = {}  # encoded slot name -> its leaf, to catch a rare name collision
         self._layouts: dict[BindingId, _SeqHandle] = {}  # FactSeq bindings -> their typed element layout
         self._binding_fact_cache: dict[BindingId, Fact] | None = None
 
@@ -304,17 +302,28 @@ class _Emitter:
             return self._state_read(place)
         raise AssertionError(f"read of an undefined place '{place}' escaped analysis")
 
+    def _slot_name(self, leaf: StateLeaf) -> str:
+        # The slot name is the owning component's canonical member path from the root joined to the leaf attribute by a
+        # double underscore, so a top-level attribute ``m`` stays the bare ``m`` (the established port ABI) while a
+        # nested child's ``m`` becomes ``child__m``. This is injective except when an attribute name literally spans a
+        # ``__`` boundary (a rare dunder-ish name); that alias is a located collision rejection, never a silent merge.
+        path = self._provenance.get(id(leaf.component))
+        if path is None:
+            raise EmissionRejection(
+                "a stateful component reached only through an unanchored reference is not supported; "
+                "hold it as a direct attribute of the synthesized component"
+            )
+        name = "__".join(path + leaf.path)
+        owner = self._slot_names.setdefault(name, leaf)
+        if owner != leaf:
+            raise EmissionRejection(f"state slot name collision on '{name}' between distinct component attributes")
+        return name
+
     def _state_read(self, leaf: StateLeaf) -> int:
-        # Slot names are the attribute path alone, which is injective only within ONE component. Distinct components
-        # sharing an attribute name (hierarchical state) would collide into one slot -- a silent miscompile -- so
-        # until the injective multi-component encoding lands (stage 7) more than one owner is a located rejection.
-        owners = {id(existing.component) for existing in self._state_reads} | {id(leaf.component)}
-        if len(owners) > 1:  # by identity: a mutable component is unhashable, and StateLeaf itself keys by identity
-            raise EmissionRejection("multiple stateful components in one kernel are not supported yet")
         if leaf not in self._state_reads:
             reset = self._leaf_reset(leaf)
             self._state_reads[leaf] = self._builder.state_read(
-                _slot_name(leaf), BoolType() if isinstance(reset, BoolConst) else FloatType()
+                self._slot_name(leaf), BoolType() if isinstance(reset, BoolConst) else FloatType()
             )
             self._state_order.append(leaf)
         return self._state_reads[leaf]
@@ -329,7 +338,9 @@ class _Emitter:
             return BoolConst(bool(current))
         if isinstance(current, (int, float, np.integer, np.floating)):
             return FloatConst(_exact_float(current))  # the same exactness guard as a datapath constant
-        raise EmissionRejection(f"state '{_slot_name(leaf)}' has a reset of unsupported type {type(current).__name__}")
+        raise EmissionRejection(
+            f"state '{'.'.join(leaf.path)}' has a reset of unsupported type {type(current).__name__}"
+        )
 
     # ---------------------------------------- values and ops ----------------------------------------
 
@@ -525,6 +536,8 @@ class _Emitter:
                 env[Local(dst)] = fact
                 if isinstance(fact, Known):
                     pass  # a concrete builtin fold; the value materializes at its use sites
+                elif id(op) in self._analyzer.identity_calls():
+                    define(dst, value_of(args[0]))  # float(x) on a float: dst aliases the argument's value
                 elif id(op) in self._analyzer.intrinsic_calls():
                     from .._lib import Intrinsic, resolve
 
@@ -791,14 +804,14 @@ class _Emitter:
         public_live_outs: set[int] = set()
         for leaf in store_order:
             live_out = self._read(unit.exit, leaf)
-            self._builder.state_slot(_slot_name(leaf), self._leaf_reset(leaf), live_out)
+            self._builder.state_slot(self._slot_name(leaf), self._leaf_reset(leaf), live_out)
             if not leaf.path[-1].startswith("_"):
                 public_live_outs.add(live_out)
         if return_vid is not None and return_vid not in public_live_outs:
             self._builder.output(port_name([0]), return_vid)  # a scalar return is leaf 0 of the bundle
         for leaf in store_order:
             if not leaf.path[-1].startswith("_"):
-                self._builder.output(state_port_name(_slot_name(leaf)), self._read(unit.exit, leaf))
+                self._builder.output(state_port_name(self._slot_name(leaf)), self._read(unit.exit, leaf))
         self._builder.ret()
 
 
