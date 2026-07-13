@@ -387,7 +387,10 @@ def test_inexact_integer_constant_is_a_located_rejection() -> None:
         lower_fir(kernel)
 
 
-def test_multiple_components_are_a_located_rejection() -> None:
+def test_unanchored_global_components_are_a_located_rejection() -> None:
+    # Multiple stateful owners are now supported when they are MEMBERS of the synthesized component (see
+    # test_hierarchical_components.py). Stateful components reached only through module globals from a plain function
+    # have no member path from a root, so they are rejected as unanchored rather than silently slotted.
     from holoso._frontend._fir._emit import EmissionRejection
 
     class Filter:
@@ -401,7 +404,7 @@ def test_multiple_components_are_a_located_rejection() -> None:
         _b.total = _b.total + x
         return _a.total + _b.total
 
-    with pytest.raises(EmissionRejection, match="multiple stateful components"):
+    with pytest.raises(EmissionRejection, match="unanchored reference"):
         lower_fir(kernel)
 
 

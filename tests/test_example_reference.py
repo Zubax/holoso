@@ -17,6 +17,8 @@ The example specs are shared with the cosimulation suite via ``_examples``: the 
 ``raw_vectors()`` (manual + random + edges), this suite the ``reference_vectors()`` subset, over one source of truth.
 """
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -74,7 +76,9 @@ def test_example_matches_python_reference(spec: ExampleSpec, fmt: FloatFormat) -
         return_index = 0
         for port in model.outputs:
             if port.name.startswith(_STATE_PREFIX):
-                value = getattr(instance, port.name[len(_STATE_PREFIX) :])
+                value: Any = instance
+                for segment in port.name[len(_STATE_PREFIX) :].split("__"):  # a hierarchical slot walks the member path
+                    value = getattr(value, segment)
                 assert not isinstance(value, (list, tuple, np.ndarray)), f"{spec.name}: unexpected vector public state"
                 expected.append(value)
             else:

@@ -302,9 +302,12 @@ class Analyzer:
         self._discovered_stores: set[tuple[BlockId, StateLeaf]] = set()
         self._concrete_calls: set[int] = set()
         self._intrinsic_calls: set[int] = set()
+        self._identity_calls: set[int] = set()
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._value_methods: dict[tuple[StaticValue, str], object] = {}
+        self._roots: dict[int, tuple[str, ...]] = {}  # root component id -> the empty member path
+        self._component_edges: set[tuple[int, str, int]] = set()  # (parent id, attribute, child id) sub-object graph
 
     def fixpoint(self, param_facts: dict[str, Fact] | None = None) -> ResidualUnit:
         """
@@ -340,7 +343,7 @@ class Analyzer:
                     header = result.unit.blocks[header_id]
                     assert isinstance(header.terminator, StaticFor)
                     header.terminator = Jump(chain_entry, header.terminator.origin)
-                _validate(result, self._concrete_calls | self._intrinsic_calls)
+                _validate(result, self._concrete_calls | self._intrinsic_calls | self._identity_calls)
                 return result
             self._runtime_state = new_w
             self._state_livein = new_d
@@ -348,6 +351,7 @@ class Analyzer:
             self._discovered_stores = set()
             self._concrete_calls = set()
             self._intrinsic_calls = set()
+            self._identity_calls = set()
             self._unroll_cache = {}
             _logger.info("state round %d: %d runtime leaves, %d live-in facts", round_index + 1, len(new_w), len(new_d))
         raise AnalysisRejection("state fixpoint failed to stabilize", (Origin(self._root_template.name, 0, 0),))
@@ -433,6 +437,26 @@ class Analyzer:
     def intrinsic_calls(self) -> set[int]:
         return set(self._intrinsic_calls)
 
+    def identity_calls(self) -> set[int]:
+        return set(self._identity_calls)
+
+    def provenance(self) -> dict[int, tuple[str, ...]]:
+        # Canonical member path per component: the shortest path from a root over the recorded sub-object edges, ties
+        # broken lexicographically. Bellman-Ford-style relaxation to a fixpoint, so the result is independent of both
+        # edge-discovery order and set-iteration order (paths only ever shrink, so it converges).
+        result: dict[int, tuple[str, ...]] = dict(self._roots)
+        changed = True
+        while changed:
+            changed = False
+            for parent_id, name, child_id in self._component_edges:
+                if parent_id in result:
+                    candidate = result[parent_id] + (name,)
+                    existing = result.get(child_id)
+                    if existing is None or (len(candidate), candidate) < (len(existing), existing):
+                        result[child_id] = candidate
+                        changed = True
+        return result
+
     def runtime_state(self) -> set[StateLeaf]:
         return set(self._runtime_state)
 
@@ -467,6 +491,10 @@ class Analyzer:
             entry_env.set(Local(param), fact)
         if unit.bound_self is not None and unit.params:
             entry_env.set(Local(unit.params[0]), Known(ObjectRef(unit.bound_self)))
+            self._roots = {id(unit.bound_self): ()}  # the root component anchors the member-path tree
+        else:
+            self._roots = {}
+        self._component_edges = set()
         executable_edges: set[tuple[BlockId, BlockId]] = set()
         executable_blocks: set[BlockId] = set()
 
@@ -688,9 +716,16 @@ class Analyzer:
                     raise AnalysisRejection("assignment to a module or class attribute is not supported", op.origin)
                 _reject_attribute_hooks(type(obj_fact.value.obj), op.origin)
                 _reject_descriptor(type(obj_fact.value.obj), name, op.origin)
+                src_fact = env.get(Local(src))
+                if isinstance(src_fact, Known) and isinstance(src_fact.value, ObjectRef):
+                    # Storing a component/sub-object into an attribute would change the component topology per
+                    # transaction (a slot's owner is fixed at the initial snapshot); reject it at the store, located.
+                    raise AnalysisRejection(
+                        f"component member '{name}' cannot be rebound; component topology is fixed", op.origin
+                    )
                 leaf = StateLeaf(obj_fact.value.obj, (name,))
                 self._discovered_stores.add((block.id, leaf))
-                env.set(leaf, env.get(Local(src)))
+                env.set(leaf, src_fact)
             case PyCall(dst=dst, callee=callee):
                 return self._expand_call(unit, block, index, op, env)
         return False
@@ -824,6 +859,12 @@ class Analyzer:
             except AttributeError as error:
                 raise AnalysisRejection(str(error), origin) from None
             admitted = admit(concrete)
+            if admitted is None:
+                # ``concrete`` is a sub-object (a potential child component): record the parent -> child graph edge.
+                # Canonical member paths are resolved from these edges by a shortest-path fixpoint in ``provenance()``,
+                # so a child's slot name is order-independent even when a lexicographically-smaller alias is discovered
+                # later (the state-leaf cache above would otherwise freeze a stale first-seen path).
+                self._component_edges.add((id(component), name, id(concrete)))
             fact = Known(admitted) if admitted is not None else Known(ObjectRef(concrete))
             env.set(leaf, fact)
             return fact
@@ -994,6 +1035,18 @@ class Analyzer:
             keyword_facts = [(keyword, env.get(Local(value))) for keyword, value in call.kwargs]
             if not all(isinstance(fact, Known) for fact in argument_facts + [fact for _, fact in keyword_facts]):
                 name = getattr(target, "__name__", repr(target))
+                # ``float(x)`` on a value already typed float is the identity -- a documented no-op, not a runtime
+                # conversion. (bool/int -> float conversions stay deferred to the integer stage.)
+                if (
+                    target is float
+                    and not keyword_facts
+                    and len(argument_facts) == 1
+                    and isinstance(argument_facts[0], Residual)
+                    and argument_facts[0].type is SemType.FLOAT
+                ):
+                    env.set(Local(call.dst), argument_facts[0])
+                    self._identity_calls.add(id(call))
+                    return False
                 if _is_unimplemented_library(target):
                     # A recognized math/numpy function with no fast-math hardware equivalent (erf, spacing, a ufunc):
                     # a distinct public error so the user knows it is a missing library primitive, not a bad call.

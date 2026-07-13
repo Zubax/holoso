@@ -295,6 +295,17 @@ call and is inlined like any method, so it recomputes from the current state on 
 read AND write `self`: the state-slot analysis spans the whole expansion, so a write in an inlined method promotes and
 carries its slot exactly as a write in the entry method does. Name resolution follows Python.
 
+Hierarchical components. A component may hold other components as members (`self.lpf = IIR1LPF()`) and call them; each
+child's persistent attributes become nested state slots, so several stateful owners coexist in one kernel. An owner is
+identified by object identity, and its slot name is its canonical member path from the root -- the fewest segments,
+lexicographically least, so an aliased child (two member names for one object) resolves to one slot -- joined to the
+leaf attribute by a double underscore. A root attribute keeps its bare name (`m`, port `state_m`, preserving the flat
+ABI); a child's becomes `lpf__m`. The encoding is injective except when an attribute name literally spans a `__`
+boundary, which is a located slot-name collision rejection. Public/private visibility is read from the leaf attribute
+itself, not the owning alias. A stateful component reached only through an unanchored reference (a global, not a member
+of the root) is rejected at its state access, and rebinding a component member -- a per-transaction topology change --
+is a located rejection.
+
 Math library. A call dispatches through a registry on the object identity its callee resolves to, not the spelled name,
 so an alias resolves and a shadow does not. The registry maps that object to its lowering: an intrinsic stub (1:1 onto
 an HIR float operator) or a composite stub (built from the intrinsics and inlined). A composite is ordinary Python in

@@ -38,6 +38,7 @@ from polar import from_polar, to_polar  # noqa: E402  # bare names so the fronte
 from cordic_sincos import CordicSinCos as CordicSinCos  # noqa: E402
 from equal_temperament import equal_temperament as equal_temperament  # noqa: E402
 from iir1_lpf import IIR1LPF as IIR1LPF  # noqa: E402
+from iir1_hpf import IIR1HPF as IIR1HPF  # noqa: E402
 from latching_fault_register import LatchingFaultRegister  # noqa: E402
 from majority_voter import MajorityVoter  # noqa: E402
 from octave_index import octave_index  # noqa: E402
@@ -297,6 +298,20 @@ SPECS = [
         reference=ReferenceComparison.APPROXIMATE,
         nominal={"x": 1.0},
         manual=[  # one continuous stream: the first sample latches y=x, then the IIR settles toward the input
+            *({"x": v} for v in (1.0, 1.0, 1.0, 1.0)),
+            *({"x": v} for v in (5.0, 5.0, 0.0, 0.0)),
+            *({"x": v} for v in (-2.0, 3.0, 0.5, -1.0)),
+        ],
+        draw_random=_draw_scalars(("x",), -4.0, 4.0),
+        edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="iir1_hpf",
+        inputs=("x",),
+        make_kernel=lambda: IIR1HPF().step,  # a hierarchical component: the HPF holds a stateful LPF child
+        reference=ReferenceComparison.APPROXIMATE,
+        nominal={"x": 1.0},
+        manual=[  # a continuous stream; the high-pass output decays to ~0 for a constant input as the LPF bias tracks it
             *({"x": v} for v in (1.0, 1.0, 1.0, 1.0)),
             *({"x": v} for v in (5.0, 5.0, 0.0, 0.0)),
             *({"x": v} for v in (-2.0, 3.0, 0.5, -1.0)),
