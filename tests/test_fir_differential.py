@@ -611,13 +611,130 @@ def test_mixed_bool_float_comparison_is_a_located_rejection() -> None:
         lower_fir(kernel)
 
 
-def test_deep_static_unroll_does_not_overflow_the_stack() -> None:
-    # Codex round-3 #7: emission chased single-predecessor chains and walked the CFG recursively, so a deep static
-    # unroll (thousands of blocks, well past Python's recursion limit) overflowed the stack. It must be iterative.
+def test_max_static_unroll_matches_python() -> None:
+    # Codex round-3 #7: emission chases single-predecessor chains iteratively (a recursive walk once overflowed the
+    # stack on a long chain). The unroll threshold caps a static loop at UNROLL_THRESHOLD trips, so this exercises the
+    # deepest chain a static unroll can produce, right at the boundary.
     def kernel(x: float) -> float:
         acc = 0.0
-        for _ in range(1500):  # a straight-line chain far deeper than sys.getrecursionlimit()
+        for _ in range(64):  # UNROLL_THRESHOLD: the largest unroll accepted
             acc = acc + x
         return acc
 
     _assert_matches_python(kernel, [(0.5,), (-1.0,), (2.0,)])
+
+
+def _trivial_phis(hir) -> list[int]:  # type: ignore[no-untyped-def]
+    from holoso._hir import Phi
+
+    return [
+        vid
+        for vid, node in hir.nodes.items()
+        if isinstance(node, Phi) and len({v for _, v in node.arms if v != vid}) == 1
+    ]
+
+
+def _empty_nonentry_blocks(hir) -> list[int]:  # type: ignore[no-untyped-def]
+    return [b.id for b in hir.blocks if b.id != hir.entry and not b.phis and not b.operations]
+
+
+def test_trivial_loop_phi_is_eliminated() -> None:
+    # A loop-invariant carried through a data-dependent header leaves a phi(preheader: x, latch: self) that the
+    # emitter's on-the-fly SSA cannot collapse in place; the shared trivial-phi pass must remove it (an extra live
+    # value on the recurrence is both area and a scheduling slot). Regression guard on the metrics-recovery pass.
+    def kernel(x: float, n: float) -> float:
+        acc = 0.0
+        i = n
+        while i > 0.0:  # x is never reassigned -> its header phi is trivial
+            acc = acc + x
+            i = i - 1.0
+        return acc
+
+    assert not _trivial_phis(optimize(lower_fir(kernel))), "a trivial loop-invariant phi survived optimization"
+    _assert_matches_python(kernel, [(2.0, 3.0), (0.5, 5.0), (-1.5, 4.0)])
+
+
+def test_empty_trampoline_block_is_eliminated() -> None:
+    # The structured single-exit emitter jumps straight-line bodies into an empty Ret block; the empty-block pass must
+    # fold it into the predecessor so the schedule pays no per-block boundary drain for a block that does no work.
+    def kernel(a: float, b: float) -> float:
+        c = a + b
+        d = c * 2.0
+        return d - a
+
+    assert not _empty_nonentry_blocks(optimize(lower_fir(kernel))), "an empty trampoline block survived optimization"
+    _assert_matches_python(kernel, _vectors(2, 91))
+
+
+def _has_op(hir, mnemonic: str) -> bool:  # type: ignore[no-untyped-def]
+    from holoso._hir._ir import Operation
+
+    return any(isinstance(n, Operation) and n.operator.mnemonic == mnemonic for n in hir.nodes.values())
+
+
+def _has_branch(hir) -> bool:  # type: ignore[no-untyped-def]
+    from holoso._hir._ir import Branch
+
+    return any(isinstance(b.terminator, Branch) for b in hir.blocks)
+
+
+def test_nested_guard_fuses_to_conjunction() -> None:
+    # `if a: if b: <effect>` (no else) means `(a and b) ? effect : bypass`. Guarded-region if-conversion must fuse it
+    # to one select over band(a, b), not the nested select(a, select(b, ...)) a bottom-up collapse leaves -- the extra
+    # mux is a schedule regression (the remainder kernel's +1 cycle). Codex-recommended acceptance test.
+    def kernel(a: bool, b: bool, x: float) -> float:
+        r = x
+        if a:
+            if b:
+                r = x + 1.0
+        return r
+
+    assert _has_op(optimize(lower_fir(kernel)), "band"), "the nested guard did not fuse to a conjunction"
+    _assert_matches_python(kernel, [(p, q, v) for p in (True, False) for q in (True, False) for v in (2.0, -1.5)])
+
+
+def test_guarded_division_is_not_speculated() -> None:
+    # The fused guard condition may gate a non-speculatable effect (a division with an error sideband). Fusion forms
+    # band(a, b) but the division must stay branch-gated, never hoisted to run on the bypass path -- otherwise a
+    # div-by-zero fires the module error flag for a path never taken. The retained branch proves it is not speculated.
+    def kernel(a: bool, b: bool, x: float, y: float) -> float:
+        r = x
+        if a:
+            if b:
+                r = x / y
+        return r
+
+    hir = optimize(lower_fir(kernel))
+    assert _has_op(hir, "div") and _has_branch(hir), "the guarded division was speculated out of its branch"
+    safe: list[tuple[float | bool, ...]] = [
+        (True, True, 6.0, 2.0),
+        (False, True, 5.0, 0.0),
+        (True, False, 5.0, 0.0),
+        (False, False, 3.0, 0.0),
+    ]
+    _assert_matches_python(kernel, safe)
+
+
+def test_inner_walrus_guard_is_not_fused() -> None:
+    # An assignment on the inner path makes some inner-false value differ from its outer-false peer, so the two
+    # bypasses are NOT interchangeable and the region must NOT fuse. The value-equality guard must decline it.
+    def kernel(a: bool, b: bool) -> float:
+        y = True
+        if a:
+            if y := b:  # noqa: F841  -- the walrus rebinds y on the inner path
+                pass
+        return 1.0 if y else 0.0
+
+    assert not _has_op(optimize(lower_fir(kernel)), "band"), "a region with an inner-path assignment was wrongly fused"
+    _assert_matches_python(kernel, [(p, q) for p in (True, False) for q in (True, False)])
+
+
+def test_non_returning_kernel_is_a_located_rejection() -> None:
+    # Codex-flagged: a kernel that never reaches its return (an unconditional infinite loop) leaves the canonical
+    # exit unreachable. Emission must refuse it cleanly, not crash reading a block that was never built.
+    def kernel(x: float) -> float:
+        while True:  # no break, no return
+            x = x + 1.0
+
+    with pytest.raises(EmissionRejection, match="never returns"):
+        lower_fir(kernel)

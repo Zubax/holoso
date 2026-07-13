@@ -344,6 +344,7 @@ class FunctionUnit:
     exit: BlockId
     bound_self: object | None
     bool_params: frozenset[str]  # parameters annotated ``bool``; the analyzer seeds them as a runtime bool
+    declared_return_bool: bool | None  # True for ``-> bool``, False for ``-> float``, None for void/aggregate
 
 
 def _op_reads(op: Op) -> list[BindingId]:
