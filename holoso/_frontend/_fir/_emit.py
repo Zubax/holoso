@@ -23,6 +23,7 @@ from ..._hir import (
     BoolConst,
     BoolNot,
     BoolSelect,
+    BoolToFloat,
     BoolType,
     FloatAdd,
     FloatConst,
@@ -31,14 +32,33 @@ from ..._hir import (
     FloatNeg,
     FloatRelational,
     BoolXor,
+    BoolToInt,
     FloatToBool,
+    FloatToInt,
     FloatType,
     Hir,
     HirBuilder,
+    IntAbs,
+    IntAdd,
+    IntAnd,
+    IntDivFloor,
+    IntMod,
+    IntMul,
+    IntNeg,
+    IntOr,
+    IntRelational,
+    IntSelect,
+    IntShiftLeft,
+    IntShiftRight,
+    IntSub,
+    IntToBool,
+    IntToFloat,
+    IntType,
+    IntXor,
     Select,
     Type,
 )
-from ._analyze import Analyzer, Fact, FactSeq, Known, Residual, ResidualUnit, SemType
+from ._analyze import Analyzer, Fact, FactSeq, Known, Residual, ResidualUnit
 from ._ir import (
     BindingId,
     BlockId as FirBlockId,
@@ -70,7 +90,7 @@ from ._ir import (
     UnitExit,
 )
 from ._opsem import BinOp, UnOp
-from ._value import ObjectRef, StaticSeq, StaticValue, as_python
+from ._value import MetaInt, NpInt, ObjectRef, SemType, StaticSeq, StaticValue, as_python
 
 _logger = logging.getLogger(__name__)
 
@@ -175,8 +195,7 @@ class _Emitter:
         parameters = unit.params[1:] if unit.bound_self is not None else unit.params
         entry_facts = self._result.block_in[unit.entry].facts
         for parameter in parameters:
-            is_bool = _is_bool_fact(entry_facts.get(Local(parameter)))
-            vid = self._builder.input(parameter.name, BoolType() if is_bool else FloatType())
+            vid = self._builder.input(parameter.name, self._fact_port_type(entry_facts.get(Local(parameter))))
             self._write(unit.entry, Local(parameter), vid)
         for fir_id in order:
             self._emit_block(fir_id)
@@ -264,7 +283,14 @@ class _Emitter:
         return self._fill_phi(block, place, phi)
 
     def _fill_phi(self, block: FirBlockId, place: Place, phi: int) -> int:
-        arms = [(self._fir_to_hir[p], self._read(p, place)) for p in self._predecessors[block]]
+        phi_type = self._place_type(block, place)
+        arms: list[tuple[int, int]] = []
+        for p in self._predecessors[block]:
+            arm = self._read(p, place)
+            if isinstance(phi_type, FloatType) and isinstance(self._type_of(arm), IntType):
+                with self._at(p):  # a mixed int/float join promotes the integer arm to float on its own edge
+                    arm = self._builder.operation(IntToFloat(), [arm])
+            arms.append((self._fir_to_hir[p], arm))
         self._builder.set_phi_arms(phi, arms)
         distinct = {vid for _, vid in arms if vid != phi}  # ignore the phi's own self-reference
         if len(distinct) == 1:
@@ -279,7 +305,33 @@ class _Emitter:
         fact = self._result.block_in[block].facts.get(place)
         if fact is None and isinstance(place, StateLeaf):
             fact = self._leaf_fact(place)
-        return BoolType() if _is_bool_fact(fact) else FloatType()
+        return self._fact_port_type(fact)
+
+    @staticmethod
+    def _sem_of(ty: Type) -> SemType:
+        if isinstance(ty, BoolType):
+            return SemType.BOOL
+        if isinstance(ty, IntType):
+            return SemType.INT
+        return SemType.FLOAT
+
+    @staticmethod
+    def _fact_port_type(fact: Fact | None) -> Type:
+        if _is_bool_fact(fact):
+            return BoolType()
+        if fact == Residual(SemType.INT):
+            return IntType()
+        return FloatType()
+
+    @staticmethod
+    def _fact_sem(fact: Fact) -> SemType:
+        if _is_bool_fact(fact):
+            return SemType.BOOL
+        if isinstance(fact, Residual) and fact.type is SemType.INT:
+            return SemType.INT
+        if isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)):
+            return SemType.INT
+        return SemType.FLOAT
 
     @contextmanager
     def _at(self, block: FirBlockId) -> Iterator[None]:
@@ -372,16 +424,23 @@ class _Emitter:
 
         def as_float(binding: BindingId) -> int:
             if fact_of(binding) == Residual(SemType.INT):
-                # A runtime integer in the float datapath would lose its wraparound semantics; the integer datapath
-                # is stage 8. (A Known integer materializes exactly via _const; only a RESIDUAL int is refused.)
-                raise EmissionRejection("a runtime integer value in the float datapath is not supported yet")
+                return self._builder.operation(IntToFloat(), [value_of(binding)])  # Python promotes int -> float
             vid = value_of(binding)
             if isinstance(self._type_of(vid), FloatType):
                 return vid
             raise EmissionRejection("a boolean value reaches a float operation")
 
+        def as_int(binding: BindingId) -> int:
+            fact = fact_of(binding)
+            if isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)):
+                return self._builder.int_const(int(fact.value.value))  # a Known integer materializes as IntConst
+            vid = value_of(binding)
+            if isinstance(self._type_of(vid), IntType):
+                return vid
+            raise EmissionRejection("a non-integer value reaches an integer operation")
+
         for op in block.ops:
-            self._emit_op(fir_id, op, env, fact_of, value_of, as_float)
+            self._emit_op(fir_id, op, env, fact_of, value_of, as_float, as_int)
         match block.terminator:
             case FirJump(target=target):
                 if target in self._result.executable_blocks:
@@ -405,6 +464,7 @@ class _Emitter:
         fact_of: "FactOf",
         value_of: "ValueOf",
         as_float: "ValueOf",
+        as_int: "ValueOf",
     ) -> None:
         def define(dst: BindingId, vid: int) -> None:
             self._write(fir_id, Local(dst), vid)
@@ -432,6 +492,10 @@ class _Emitter:
                     raise EmissionRejection("a runtime aggregate in a local is not supported yet")  # layout: stage 9
                 if isinstance(fact, Known) and isinstance(fact.value, (StaticSeq, ObjectRef)):
                     pass  # a fully-static sequence (subscripts fold) or a non-datapath value: no HIR value flows
+                elif isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)):
+                    # a Known integer stored to a local materializes as IntConst so an integer phi over it stays typed;
+                    # a downstream float use promotes it on that edge (phi arm coercion / as_float).
+                    self._write(fir_id, place, self._builder.int_const(int(fact.value.value)))
                 elif isinstance(fact, Known):
                     self._write(fir_id, place, self._const(fact.value))
                 else:
@@ -439,23 +503,23 @@ class _Emitter:
             case UnbindPlace(place=place):
                 env[place] = _unbound()
             case PyBin(dst=dst, op=bin_op, lhs=lhs, rhs=rhs):
-                self._emit_binary(fir_id, dst, bin_op, lhs, rhs, env, fact_of, value_of, as_float, op)
+                self._emit_binary(fir_id, dst, bin_op, lhs, rhs, env, fact_of, value_of, as_float, as_int, op)
             case PyUn(dst=dst, op=un_op, operand=operand):
-                self._emit_unary(fir_id, dst, un_op, operand, env, fact_of, as_float)
+                self._emit_unary(fir_id, dst, un_op, operand, env, fact_of, as_float, as_int)
             case PyCompare(dst=dst, op=rel, lhs=lhs, rhs=rhs):
                 lhs_fact, rhs_fact = fact_of(lhs), fact_of(rhs)
                 folded = self._replay_compare(rel, lhs_fact, rhs_fact)
                 env[Local(dst)] = folded
                 if not isinstance(folded, Known):
-                    left, right = value_of(lhs), value_of(rhs)
-                    left_bool = isinstance(self._type_of(left), BoolType)
-                    right_bool = isinstance(self._type_of(right), BoolType)
-                    if left_bool != right_bool:
-                        raise EmissionRejection("a comparison mixes a boolean and a float without an explicit cast")
-                    if left_bool:
-                        define(dst, self._bool_compare(rel, left, right))  # bool ==/!= is XNOR/XOR, not float compare
-                    else:
-                        define(dst, self._builder.operation(FloatRelational(rel), [left, right]))
+                    lsem, rsem = self._fact_sem(lhs_fact), self._fact_sem(rhs_fact)
+                    if lsem is SemType.BOOL or rsem is SemType.BOOL:
+                        if lsem is not rsem:
+                            raise EmissionRejection("a comparison mixes a boolean and a non-boolean without a cast")
+                        define(dst, self._bool_compare(rel, value_of(lhs), value_of(rhs)))  # bool ==/!= is XNOR/XOR
+                    elif lsem is SemType.INT and rsem is SemType.INT:
+                        define(dst, self._builder.operation(IntRelational(rel), [as_int(lhs), as_int(rhs)]))
+                    else:  # both float, or mixed int/float -- promote the integer edge and compare in the float domain
+                        define(dst, self._builder.operation(FloatRelational(rel), [as_float(lhs), as_float(rhs)]))
             case PyNot(dst=dst, operand=operand):
                 fact = fact_of(operand)
                 truth = self._replay_truth(fact)
@@ -538,6 +602,8 @@ class _Emitter:
                     pass  # a concrete builtin fold; the value materializes at its use sites
                 elif id(op) in self._analyzer.identity_calls():
                     define(dst, value_of(args[0]))  # float(x) on a float: dst aliases the argument's value
+                elif id(op) in self._analyzer.conversion_calls():
+                    define(dst, self._emit_conversion(fact_of(args[0]), fact, args[0], value_of, as_float, as_int))
                 elif id(op) in self._analyzer.intrinsic_calls():
                     from .._lib import Intrinsic, resolve
 
@@ -660,6 +726,7 @@ class _Emitter:
         fact_of: "FactOf",
         value_of: "ValueOf",
         as_float: "ValueOf",
+        as_int: "ValueOf",
         op: Op,
     ) -> None:
         from ._opsem import static_binop
@@ -676,6 +743,10 @@ class _Emitter:
             if folded is not None:
                 env[Local(dst)] = Known(folded)
                 return
+        if result_fact == Residual(SemType.INT):  # a runtime integer result: stay in the integer datapath
+            env[Local(dst)] = result_fact
+            self._write(fir_id, Local(dst), self._emit_int_binary(bin_op, as_int(lhs), as_int(rhs)))
+            return
         env[Local(dst)] = Residual(SemType.FLOAT)
         if bin_op is BinOp.POW:
             self._write(fir_id, Local(dst), self._emit_power(lhs, rhs, fact_of, as_float, op))
@@ -693,6 +764,51 @@ class _Emitter:
             case _:
                 raise EmissionRejection(f"operator {bin_op.value} is not lowerable yet")
         self._write(fir_id, Local(dst), result)
+
+    def _emit_conversion(
+        self,
+        src_fact: Fact,
+        dst_fact: Fact,
+        arg: BindingId,
+        value_of: "ValueOf",
+        as_float: "ValueOf",
+        as_int: "ValueOf",
+    ) -> int:
+        # A runtime scalar cast between kinds. int<->float is truncation toward zero / exact promotion; bool casts are a
+        # truthiness test (to bool) or a 0/1 widening (from bool). A same-kind cast is handled as an identity upstream.
+        src, dst = self._fact_sem(src_fact), self._fact_sem(dst_fact)
+        match (src, dst):
+            case (SemType.INT, SemType.FLOAT):
+                return self._builder.operation(IntToFloat(), [as_int(arg)])
+            case (SemType.FLOAT, SemType.INT):
+                return self._builder.operation(FloatToInt(), [as_float(arg)])
+            case (SemType.BOOL, SemType.FLOAT):
+                return self._builder.operation(BoolToFloat(), [value_of(arg)])
+            case (SemType.FLOAT, SemType.BOOL):
+                return self._builder.operation(FloatToBool(), [as_float(arg)])
+            case (SemType.BOOL, SemType.INT):
+                return self._builder.operation(BoolToInt(), [value_of(arg)])
+            case (SemType.INT, SemType.BOOL):
+                return self._builder.operation(IntToBool(), [as_int(arg)])
+            case _:
+                raise EmissionRejection(f"conversion from {src.value} to {dst.value} is not supported")
+
+    def _emit_int_binary(self, bin_op: BinOp, left: int, right: int) -> int:
+        # Signed-integer arithmetic in the integer datapath. Floor-division and modulo are floor-coupled (one hardware
+        # divmod at the wiring milestone); ``/`` never reaches here (Python true division promotes to float upstream).
+        match bin_op:
+            case BinOp.ADD:
+                return self._builder.operation(IntAdd(), [left, right])
+            case BinOp.SUB:
+                return self._builder.operation(IntSub(), [left, right])
+            case BinOp.MUL:
+                return self._builder.operation(IntMul(), [left, right])
+            case BinOp.FLOORDIV:
+                return self._builder.operation(IntDivFloor(), [left, right])
+            case BinOp.MOD:
+                return self._builder.operation(IntMod(), [left, right])
+            case _:
+                raise EmissionRejection(f"integer operator {bin_op.value!r} is not lowerable yet")
 
     def _emit_power(self, base: BindingId, exponent: BindingId, fact_of: "FactOf", as_float: "ValueOf", op: Op) -> int:
         # A runtime base raised to a COMPILE-TIME integer exponent expands to a multiply chain (x**3 -> x*x*x); a
@@ -722,6 +838,7 @@ class _Emitter:
         env: dict[Place, Fact],
         fact_of: "FactOf",
         as_float: "ValueOf",
+        as_int: "ValueOf",
     ) -> None:
         from ._opsem import static_unop
 
@@ -731,6 +848,14 @@ class _Emitter:
             if folded is not None:
                 env[Local(dst)] = Known(folded)
                 return
+        result_fact = self._binding_facts()[dst]
+        if result_fact == Residual(SemType.INT):  # runtime integer negation stays in the integer datapath
+            env[Local(dst)] = result_fact
+            source = as_int(operand)
+            self._write(
+                fir_id, Local(dst), source if un_op is UnOp.POS else self._builder.operation(IntNeg(), [source])
+            )
+            return
         env[Local(dst)] = Residual(SemType.FLOAT)
         source = as_float(operand)
         self._write(fir_id, Local(dst), source if un_op is UnOp.POS else self._builder.operation(FloatNeg(), [source]))
@@ -783,18 +908,31 @@ class _Emitter:
         if return_fact is not None and not (
             isinstance(return_fact, Known) and isinstance(return_fact.value, ObjectRef)
         ):
-            if isinstance(return_fact, Known):
+            if (
+                isinstance(return_fact, Known)
+                and isinstance(return_fact.value, (MetaInt, NpInt))
+                and unit.declared_return is SemType.INT
+            ):
+                return_vid = self._builder.int_const(int(return_fact.value.value))  # a Known integer -> integer port
+            elif isinstance(return_fact, Known):
                 return_vid = self._const(return_fact.value)
             else:
                 return_vid = self._read(unit.exit, ReturnPlace())
-        if unit.declared_return_bool is not None:  # a scalar return type was declared: the value must match it
-            declared = "bool" if unit.declared_return_bool else "float"
+        if (
+            unit.declared_return is SemType.FLOAT
+            and return_vid is not None
+            and isinstance(self._type_of(return_vid), IntType)
+        ):
+            return_vid = self._builder.operation(
+                IntToFloat(), [return_vid]
+            )  # Python returns an int where float declared
+        if unit.declared_return is not None:  # a scalar return type was declared: the value must match it
             if return_vid is None:
-                raise EmissionRejection(f"return type mismatch: declared {declared}, returns nothing")
-            got_bool = isinstance(self._type_of(return_vid), BoolType)
-            if got_bool != unit.declared_return_bool:
+                raise EmissionRejection(f"return type mismatch: declared {unit.declared_return.value}, returns nothing")
+            got = self._sem_of(self._type_of(return_vid))
+            if got is not unit.declared_return:
                 raise EmissionRejection(
-                    f"return type mismatch: declared {declared}, returns {'bool' if got_bool else 'float'}"
+                    f"return type mismatch: declared {unit.declared_return.value}, returns {got.value}"
                 )
         promoted = self._analyzer.runtime_state()
         # Slots and public ports emit in first-STORE source order (matching production), not the order the RPO walk

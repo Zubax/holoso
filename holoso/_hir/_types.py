@@ -19,6 +19,11 @@ class BoolType(Type):
 
 
 @dataclass(frozen=True, slots=True)
+class IntType(Type):
+    """A semantic signed integer before hardware width selection: bit-true bitwise/shift and saturating arithmetic."""
+
+
+@dataclass(frozen=True, slots=True)
 class Signature:
     operand_types: tuple[Type, ...]
     result_type: Type

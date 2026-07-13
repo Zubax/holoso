@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from .._util import RelationalOp
-from ._const import BoolConst, Const, FloatConst
-from ._types import BoolType, FloatType, Signature
+from ._const import BoolConst, Const, FloatConst, IntConst
+from ._types import BoolType, FloatType, IntType, Signature
 
 
 def _float_signature(arity: int) -> Signature:
@@ -557,3 +557,230 @@ class BoolToFloat(Operator):
     def fold_constants(self, operands: list[Const]) -> Const:
         (a,) = [_bool_const(operand) for operand in operands]
         return FloatConst(1.0 if a.value else 0.0)
+
+
+# ------------------------------------ integer operators (HIR readiness) ------------------------------------
+# Signed integers before hardware width selection. Per the layering, HIR does NO integer constant arithmetic (only the
+# identity/elision rewrites below and in the passes), so these carry no ``fold_constants`` -- the exact static folds
+# live in the frontend (MetaInt) and the saturating const-eval belongs to MIR. Saturating add/sub/mul/neg/abs are
+# speculatable (no error sideband); floor-division and modulo assert the div-by-zero error flag so they are not.
+
+
+def _int_signature(arity: int) -> Signature:
+    ty = IntType()
+    return Signature((ty,) * arity, ty)
+
+
+@dataclass(frozen=True, slots=True)
+class IntAdd(Operator):
+    mnemonic: ClassVar[str] = "iadd"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+    def identity(self) -> Const:
+        return IntConst(0)  # n + 0 == n
+
+
+@dataclass(frozen=True, slots=True)
+class IntSub(Operator):
+    mnemonic: ClassVar[str] = "isub"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+
+@dataclass(frozen=True, slots=True)
+class IntMul(Operator):
+    mnemonic: ClassVar[str] = "imul"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+    def identity(self) -> Const:
+        return IntConst(1)  # n * 1 == n
+
+
+@dataclass(frozen=True, slots=True)
+class IntNeg(Operator):
+    mnemonic: ClassVar[str] = "ineg"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(1)
+
+
+@dataclass(frozen=True, slots=True)
+class IntAbs(Operator):
+    mnemonic: ClassVar[str] = "iabs"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(1)
+
+
+@dataclass(frozen=True, slots=True)
+class IntDivFloor(Operator):
+    mnemonic: ClassVar[str] = "idivfloor"
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+
+@dataclass(frozen=True, slots=True)
+class IntMod(Operator):
+    mnemonic: ClassVar[str] = "imod"
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+
+@dataclass(frozen=True, slots=True)
+class IntShiftLeft(Operator):
+    mnemonic: ClassVar[str] = "ishl"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+
+@dataclass(frozen=True, slots=True)
+class IntShiftRight(Operator):
+    mnemonic: ClassVar[str] = "ishr"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+
+@dataclass(frozen=True, slots=True)
+class IntAnd(Operator):
+    mnemonic: ClassVar[str] = "iand"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+
+@dataclass(frozen=True, slots=True)
+class IntOr(Operator):
+    mnemonic: ClassVar[str] = "ior"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+    def identity(self) -> Const:
+        return IntConst(0)  # n | 0 == n
+
+
+@dataclass(frozen=True, slots=True)
+class IntXor(Operator):
+    mnemonic: ClassVar[str] = "ixor"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+    def identity(self) -> Const:
+        return IntConst(0)  # n ^ 0 == n
+
+
+@dataclass(frozen=True, slots=True)
+class IntNot(Operator):
+    mnemonic: ClassVar[str] = "inot"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(1)
+
+
+@dataclass(frozen=True, slots=True)
+class IntRelational(Operator):
+    mnemonic: ClassVar[str] = "irelational"
+    speculatable: ClassVar[bool] = True
+    op: RelationalOp
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((IntType(), IntType()), BoolType())
+
+
+@dataclass(frozen=True, slots=True)
+class IntSelect(Operator):
+    """A data mux ``a if cond else b`` over integer values, the integer dual of :class:`Select`."""
+
+    mnemonic: ClassVar[str] = "int_select"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((BoolType(), IntType(), IntType()), IntType())
+
+
+@dataclass(frozen=True, slots=True)
+class IntToFloat(Operator):
+    mnemonic: ClassVar[str] = "int_to_float"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((IntType(),), FloatType())
+
+    def fold_constants(self, operands: list[Const]) -> Const | None:
+        # A Known integer promoted to float folds to the float constant (a conversion, not integer arithmetic): this
+        # keeps a Known integer that flows into a float join out of the integer datapath. An integer too wide to be
+        # binary64-exact stays unfolded so the exactness guard fires downstream rather than silently rounding.
+        (a,) = operands
+        if not isinstance(a, IntConst):
+            raise TypeError(f"expected IntConst, got {a!r}")
+        result = float(a.value)
+        return FloatConst(result) if int(result) == a.value else None
+
+
+@dataclass(frozen=True, slots=True)
+class FloatToInt(Operator):
+    """A truncation-toward-zero cast ``int(x)``; no error sideband, so speculatable."""
+
+    mnemonic: ClassVar[str] = "float_to_int"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((FloatType(),), IntType())
+
+
+@dataclass(frozen=True, slots=True)
+class IntToBool(Operator):
+    mnemonic: ClassVar[str] = "int_to_bool"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((IntType(),), BoolType())
+
+
+@dataclass(frozen=True, slots=True)
+class BoolToInt(Operator):
+    mnemonic: ClassVar[str] = "bool_to_int"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((BoolType(),), IntType())

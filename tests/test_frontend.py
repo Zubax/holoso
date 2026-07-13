@@ -138,8 +138,8 @@ def test_float_parameter_annotation_remains_float_input() -> None:
 
 
 def test_unsupported_scalar_parameter_annotation_is_rejected() -> None:
-    def passthrough(value: int) -> float:
-        return value
+    def passthrough(value: str) -> float:  # int is now a supported scalar; str/bytes/complex remain rejected
+        return float(len(value))
 
     with pytest.raises(UnsupportedConstruct, match="parameter annotation"):
         lower(passthrough)
@@ -574,7 +574,7 @@ def test_boolean_ordering_and_mixed_comparison_are_rejected() -> None:
         def __call__(self, flag: bool, x: float) -> bool:
             return flag == x
 
-    with pytest.raises(UnsupportedConstruct, match="mixes a boolean and a float"):
+    with pytest.raises(UnsupportedConstruct, match="mixes a boolean and a non-boolean"):
         lower(MixedComparison().__call__)
 
 
@@ -2174,7 +2174,7 @@ def test_chained_comparison_with_boolean_operand_is_rejected() -> None:
         def __call__(self, x: float) -> float:
             return 1.0 if 0.0 < self.flag < 1.0 else self.y  # noqa -- exercising the rejection
 
-    with pytest.raises(UnsupportedConstruct, match="mixes a boolean and a float"):
+    with pytest.raises(UnsupportedConstruct, match="mixes a boolean and a non-boolean"):
         lower(BoolMid().__call__)
 
 
@@ -2579,9 +2579,9 @@ def test_return_annotation_bool_declared_float_inferred_is_rejected() -> None:
 
 def test_unsupported_return_annotation_is_rejected() -> None:
     def f(a: float) -> int:
-        return a  # type: ignore[return-value]
+        return a  # type: ignore[return-value]  # int is now valid, but a float value cannot match a declared int return
 
-    with pytest.raises(UnsupportedConstruct, match="unsupported return annotation"):
+    with pytest.raises(UnsupportedConstruct, match="return type mismatch"):
         lower(f)
 
 
@@ -4085,8 +4085,11 @@ def test_an_inexact_integer_loop_counter_is_rejected_not_silently_rounded() -> N
         )
 
     assert counter_rounds(0.0) == 0.0  # (2**53+1) == 2.0**53 is False in Python, so the element is 0.0
-    with pytest.raises(UnsupportedConstruct, match="not exactly representable in the float datapath"):
-        lower(counter_rounds)
+    # The integer counter is now compared EXACTLY as a MetaInt (Python-faithful), not silently rounded into float64:
+    # (2**53+1) != 2**53, so the element folds to 0.0 and the kernel lowers to the correct passthrough ``x``. No
+    # datapath materialization of the inexact integer occurs, so there is nothing to reject.
+    hir = lower(counter_rounds)
+    assert [o.name for o in hir.outputs] == ["out_0"]
 
 
 @pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime subscript/indexing — stage 9")

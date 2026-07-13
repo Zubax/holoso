@@ -66,6 +66,7 @@ from ._value import (
     NpFloat,
     NpInt,
     ObjectRef,
+    SemType,
     StaticBool,
     StaticFloat,
     StaticSeq,
@@ -79,12 +80,6 @@ _logger = logging.getLogger(__name__)
 
 _MAX_BLOCKS = 200_000
 _MAX_VISITS = 1_000_000
-
-
-class SemType(enum.Enum):
-    FLOAT = "float"
-    BOOL = "bool"
-    INT = "int"
 
 
 class AnalysisRejection(UnsupportedConstruct):
@@ -303,6 +298,7 @@ class Analyzer:
         self._concrete_calls: set[int] = set()
         self._intrinsic_calls: set[int] = set()
         self._identity_calls: set[int] = set()
+        self._conversion_calls: set[int] = set()  # runtime float()/int()/bool() casts, lowered to a conversion op
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._value_methods: dict[tuple[StaticValue, str], object] = {}
@@ -343,7 +339,10 @@ class Analyzer:
                     header = result.unit.blocks[header_id]
                     assert isinstance(header.terminator, StaticFor)
                     header.terminator = Jump(chain_entry, header.terminator.origin)
-                _validate(result, self._concrete_calls | self._intrinsic_calls | self._identity_calls)
+                _validate(
+                    result,
+                    self._concrete_calls | self._intrinsic_calls | self._identity_calls | self._conversion_calls,
+                )
                 return result
             self._runtime_state = new_w
             self._state_livein = new_d
@@ -352,6 +351,7 @@ class Analyzer:
             self._concrete_calls = set()
             self._intrinsic_calls = set()
             self._identity_calls = set()
+            self._conversion_calls = set()
             self._unroll_cache = {}
             _logger.info("state round %d: %d runtime leaves, %d live-in facts", round_index + 1, len(new_w), len(new_d))
         raise AnalysisRejection("state fixpoint failed to stabilize", (Origin(self._root_template.name, 0, 0),))
@@ -440,6 +440,9 @@ class Analyzer:
     def identity_calls(self) -> set[int]:
         return set(self._identity_calls)
 
+    def conversion_calls(self) -> set[int]:
+        return set(self._conversion_calls)
+
     def provenance(self) -> dict[int, tuple[str, ...]]:
         # Canonical member path per component: the shortest path from a root over the recorded sub-object edges, ties
         # broken lexicographically. Bellman-Ford-style relaxation to a fixpoint, so the result is independent of both
@@ -486,7 +489,7 @@ class Analyzer:
         block_in: dict[BlockId, _Env] = {unit.entry: _Env()}
         entry_env = block_in[unit.entry]
         for param in unit.params:
-            default = Residual(SemType.BOOL if param.name in unit.bool_params else SemType.FLOAT)
+            default = Residual(unit.param_types.get(param.name, SemType.FLOAT))
             fact = (param_facts or {}).get(param.name, default)
             entry_env.set(Local(param), fact)
         if unit.bound_self is not None and unit.params:
@@ -1035,17 +1038,28 @@ class Analyzer:
             keyword_facts = [(keyword, env.get(Local(value))) for keyword, value in call.kwargs]
             if not all(isinstance(fact, Known) for fact in argument_facts + [fact for _, fact in keyword_facts]):
                 name = getattr(target, "__name__", repr(target))
-                # ``float(x)`` on a value already typed float is the identity -- a documented no-op, not a runtime
-                # conversion. (bool/int -> float conversions stay deferred to the integer stage.)
+                # ``float()``/``int()``/``bool()`` on a runtime scalar: a same-kind cast is the identity (a documented
+                # no-op); a cross-kind cast lowers to a conversion op (int<->float truncation/promotion, truthiness,
+                # bool widening). Explicit casts are how bool crosses into arithmetic and how float truncates to int.
+                # Identity comparisons, never a dict/set membership test: ``target`` may be an unhashable shadow of a
+                # builtin name (a bound array, a dict), which must miss cleanly rather than raise on hashing.
+                cast_target = (
+                    SemType.FLOAT
+                    if target is float
+                    else SemType.INT if target is int else SemType.BOOL if target is bool else None
+                )
                 if (
-                    target is float
+                    cast_target is not None
                     and not keyword_facts
                     and len(argument_facts) == 1
                     and isinstance(argument_facts[0], Residual)
-                    and argument_facts[0].type is SemType.FLOAT
                 ):
-                    env.set(Local(call.dst), argument_facts[0])
-                    self._identity_calls.add(id(call))
+                    if argument_facts[0].type is cast_target:
+                        env.set(Local(call.dst), argument_facts[0])  # same kind: identity
+                        self._identity_calls.add(id(call))
+                    else:
+                        env.set(Local(call.dst), Residual(cast_target))
+                        self._conversion_calls.add(id(call))
                     return False
                 if _is_unimplemented_library(target):
                     # A recognized math/numpy function with no fast-math hardware equivalent (erf, spacing, a ufunc):

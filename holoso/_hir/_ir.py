@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import assert_never
 
 from .._util import BlockId, ValueId
-from ._const import BoolConst, Const, FloatConst
+from ._const import BoolConst, Const, FloatConst, IntConst
 from ._operators import Operator
 from ._types import BoolType, FloatType, Type
 
@@ -326,6 +326,9 @@ class HirBuilder:
 
     def bool_const(self, value: bool) -> ValueId:
         return self.const_node(BoolConst(bool(value)))
+
+    def int_const(self, value: int) -> ValueId:
+        return self.const_node(IntConst(int(value)))
 
     def operation(self, operator: Operator, operands: list[ValueId]) -> ValueId:
         signature = operator.signature

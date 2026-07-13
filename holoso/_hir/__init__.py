@@ -1,7 +1,7 @@
 """Thin API for the hardware-agnostic high-level IR."""
 
 from .._util import RelationalOp as RelationalOp
-from ._const import BoolConst as BoolConst, Const as Const, FloatConst as FloatConst
+from ._const import BoolConst as BoolConst, Const as Const, FloatConst as FloatConst, IntConst as IntConst
 from ._copy import reverse_postorder as reverse_postorder
 from ._ir import (
     Branch as Branch,
@@ -24,6 +24,7 @@ from ._operators import (
     BoolOr as BoolOr,
     BoolSelect as BoolSelect,
     BoolToFloat as BoolToFloat,
+    BoolToInt as BoolToInt,
     BoolXor as BoolXor,
     FloatAbs as FloatAbs,
     FloatAdd as FloatAdd,
@@ -50,9 +51,33 @@ from ._operators import (
     FloatSin as FloatSin,
     FloatSqrt as FloatSqrt,
     FloatToBool as FloatToBool,
+    FloatToInt as FloatToInt,
     FloatTrunc as FloatTrunc,
+    IntAbs as IntAbs,
+    IntAdd as IntAdd,
+    IntAnd as IntAnd,
+    IntDivFloor as IntDivFloor,
+    IntMod as IntMod,
+    IntMul as IntMul,
+    IntNeg as IntNeg,
+    IntNot as IntNot,
+    IntOr as IntOr,
+    IntRelational as IntRelational,
+    IntSelect as IntSelect,
+    IntShiftLeft as IntShiftLeft,
+    IntShiftRight as IntShiftRight,
+    IntSub as IntSub,
+    IntToBool as IntToBool,
+    IntToFloat as IntToFloat,
+    IntXor as IntXor,
     Operator as Operator,
     Select as Select,
 )
 from ._optimize import optimize as optimize
-from ._types import BoolType as BoolType, FloatType as FloatType, Signature as Signature, Type as Type
+from ._types import (
+    BoolType as BoolType,
+    FloatType as FloatType,
+    IntType as IntType,
+    Signature as Signature,
+    Type as Type,
+)
