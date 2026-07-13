@@ -16,6 +16,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from ..._errors import UnsupportedConstruct
 from ..._util import RelationalOp
 from .._ast_support import port_name, state_port_name
 from ..._hir import (
@@ -77,10 +78,8 @@ type FactOf = Callable[[BindingId], Fact]
 type ValueOf = Callable[[BindingId], int]
 
 
-class EmissionRejection(Exception):
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
+class EmissionRejection(UnsupportedConstruct):
+    """A located refusal discovered during HIR emission: an unsupported construct that survived analysis."""
 
 
 def lower_fir(kernel: object) -> Hir:
@@ -99,7 +98,12 @@ def _exact_float(value: object) -> float:
     # and change a comparison against a runtime value, so it is a located rejection per the materialization policy.
     import numpy as np
 
-    result = float(value)  # type: ignore[arg-type]
+    try:
+        result = float(value)  # type: ignore[arg-type]
+    except OverflowError:  # an integer too large to convert (10**400): far beyond binary64 range
+        raise EmissionRejection(
+            "integer constant is not exactly representable in the float datapath (too large)"
+        ) from None
     if isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)) and result != int(value):
         raise EmissionRejection(f"integer constant {value} is not exactly representable in the float datapath")
     return result
@@ -163,6 +167,10 @@ class _Emitter:
     def emit(self) -> Hir:
         unit = self._result.unit
         order = self._reverse_postorder()
+        if unit.exit not in order:
+            # No path reaches the canonical exit (e.g. an unconditional `while True` with no break): the kernel
+            # produces no output, so there is nothing to synthesize. A located refusal, not a downstream crash.
+            raise EmissionRejection("the function never returns on any path")
         for fir_id in order:
             self._fir_to_hir[fir_id] = self._builder.block()
         self._builder.position_at(self._fir_to_hir[unit.entry])
@@ -294,7 +302,7 @@ class _Emitter:
     def _entry_value(self, place: Place) -> int:
         if isinstance(place, StateLeaf):
             return self._state_read(place)
-        raise EmissionRejection(f"read of an undefined place '{place}' escaped analysis")
+        raise AssertionError(f"read of an undefined place '{place}' escaped analysis")
 
     def _state_read(self, leaf: StateLeaf) -> int:
         # Slot names are the attribute path alone, which is injective only within ONE component. Distinct components
@@ -376,7 +384,7 @@ class _Emitter:
             case UnitExit():
                 pass  # _finish_exit seals the exit block with outputs, slots, and the single Ret
             case other:
-                raise EmissionRejection(f"terminator {type(other).__name__} survived analysis into emission")
+                raise AssertionError(f"terminator {type(other).__name__} survived analysis into emission")
 
     def _emit_op(
         self,
@@ -463,16 +471,24 @@ class _Emitter:
                     if not isinstance(env[Local(dst)], Known):
                         define(dst, value_of(chosen))
                 else:
-                    then_binding, else_binding = (rhs, lhs) if mode is SelectMode.AND else (lhs, rhs)
-                    then_vid = value_of(then_binding)
-                    else_vid = value_of(else_binding)
-                    condition = value_of(cond)
-                    both_bool = isinstance(self._type_of(then_vid), BoolType) and isinstance(
-                        self._type_of(else_vid), BoolType
-                    )
-                    operator = BoolSelect() if both_bool else Select()
-                    env[Local(dst)] = Residual(SemType.BOOL if both_bool else SemType.FLOAT)
-                    define(dst, self._builder.operation(operator, [condition, then_vid, else_vid]))
+                    rhs_fact = fact_of(rhs)
+                    rhs_const = as_python(rhs_fact.value) if isinstance(rhs_fact, Known) else None
+                    if (mode is SelectMode.OR and rhs_const is True) or (mode is SelectMode.AND and rhs_const is False):
+                        # Boolean identity with a runtime condition: ``A or True`` is always True and ``A and False``
+                        # always False. The analyzer folded the result to this constant; emission honors the same fold
+                        # so a consumer never builds a select over the bool/float arm pair a residual would leave.
+                        env[Local(dst)] = rhs_fact
+                    else:
+                        then_binding, else_binding = (rhs, lhs) if mode is SelectMode.AND else (lhs, rhs)
+                        then_vid = value_of(then_binding)
+                        else_vid = value_of(else_binding)
+                        condition = value_of(cond)
+                        both_bool = isinstance(self._type_of(then_vid), BoolType) and isinstance(
+                            self._type_of(else_vid), BoolType
+                        )
+                        operator = BoolSelect() if both_bool else Select()
+                        env[Local(dst)] = Residual(SemType.BOOL if both_bool else SemType.FLOAT)
+                        define(dst, self._builder.operation(operator, [condition, then_vid, else_vid]))
             case BuildTuple(dst=dst, items=items) | BuildList(dst=dst, items=items):
                 from ._analyze import _pack_seq
 
@@ -518,9 +534,9 @@ class _Emitter:
                     assert isinstance(match, Intrinsic)
                     define(dst, self._builder.operation(match.operator, [as_float(arg) for arg in args]))
                 else:
-                    raise EmissionRejection(f"call {dst} left an unexpected residual value in the graph")
+                    raise AssertionError(f"call {dst} left an unexpected residual value in the graph")
             case _:
-                raise EmissionRejection(f"operation {type(op).__name__} survived analysis into emission")
+                raise AssertionError(f"operation {type(op).__name__} survived analysis into emission")
 
     def _handle_of(self, binding: BindingId, fact_of: "FactOf", value_of: "ValueOf") -> _Handle:
         # A per-element handle for a FactSeq: nested layout, a Known scalar (materialize on use), or an HIR value.
@@ -758,6 +774,15 @@ class _Emitter:
                 return_vid = self._const(return_fact.value)
             else:
                 return_vid = self._read(unit.exit, ReturnPlace())
+        if unit.declared_return_bool is not None:  # a scalar return type was declared: the value must match it
+            declared = "bool" if unit.declared_return_bool else "float"
+            if return_vid is None:
+                raise EmissionRejection(f"return type mismatch: declared {declared}, returns nothing")
+            got_bool = isinstance(self._type_of(return_vid), BoolType)
+            if got_bool != unit.declared_return_bool:
+                raise EmissionRejection(
+                    f"return type mismatch: declared {declared}, returns {'bool' if got_bool else 'float'}"
+                )
         promoted = self._analyzer.runtime_state()
         # Slots and public ports emit in first-STORE source order (matching production), not the order the RPO walk
         # happened to touch attributes; a leaf touched only by a read still trails a leaf stored earlier.

@@ -290,8 +290,10 @@ rejected rather than unrolled into thousands of scalar operations.
 Inlining. A pure function reachable through `__globals__` is inlined -- its body lowered in a fresh scope, its return
 consumed as an aggregate -- so kernels compose. A method call on the synthesized instance (`self.helper(...)`) is
 inlined with the instance context kept, so the callee's own `self.<attr>` reads resolve (the method is found through the
-class MRO; `@staticmethod` and `@property` getters are supported). A called method may read `self` but not write it --
-only the entry method owns the state-slot analysis. Name resolution follows Python.
+class MRO; `@staticmethod` and `@property` getters are supported -- a property getter desugars to a bound zero-argument
+call and is inlined like any method, so it recomputes from the current state on each read). A called member method may
+read AND write `self`: the state-slot analysis spans the whole expansion, so a write in an inlined method promotes and
+carries its slot exactly as a write in the entry method does. Name resolution follows Python.
 
 Math library. A call dispatches through a registry on the object identity its callee resolves to, not the spelled name,
 so an alias resolves and a shadow does not. The registry maps that object to its lowering: an intrinsic stub (1:1 onto
@@ -370,9 +372,14 @@ An `assert` statement is accepted and ignored wholesale: its test is never lower
 assertion has no hardware effect (each reached assert is logged). Any effect the test would have had when executed is
 dropped along with it; as under `-O`, an assert must be side-effect-free.
 
-A nested `if` with no `else` on either level folds to a single combined-`and` branch (`if A: if B: S` becomes
-`if A and B: S`), emitting one branch instead of two. This is exact because a boolean test here is a pure combinational
-value; the fold is disabled the moment the outer `if` carries an `else` (then the `and` would mis-route the `else`).
+A nested `if` with no `else` (`if A: if B: S`) is predicated to a single combined-`and` branch by guarded-region
+if-conversion in HIR: the two-branch region reconverging at one merge collapses to `select(A and B, ...)`, emitting one
+mux instead of the nested pair a bottom-up diamond collapse would leave. It fires only when every value the merge
+observes on the inner-false path equals its outer-false peer, so the two bypasses are interchangeable -- an assignment,
+walrus, or state write on the inner path makes some value differ and disables it, as does a faulting or stateful
+operation in the guard block (which leaves it non-empty) or an `else` on either level. It combines existing boolean SSA
+values only, so eager-`and` evaluation is unchanged; the guard `B` must already dominate the outer branch, so nothing
+is newly speculated.
 
 Loops. A `for` over a static trip count fully unrolls below the unroll threshold: the counter is a compile-time integer,
 so each trip lowers the body once with the counter bound. Reassigning the counter to a runtime value demotes it,

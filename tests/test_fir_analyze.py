@@ -139,13 +139,14 @@ def test_dynamic_trip_loop_is_a_located_rejection() -> None:
         Analyzer(kernel).fixpoint()
 
 
-def test_residual_assert_is_a_data_dependent_raise_rejection() -> None:
+def test_assert_is_dropped_wholesale() -> None:
+    # An assert is accepted and ignored (its test is never lowered), mirroring Python under -O, so even a
+    # data-dependent assert has no effect and the kernel lowers to just its body.
     def kernel(x: float) -> float:
         assert x > 0.0, "input must be positive"
         return x
 
-    with pytest.raises(AnalysisRejection, match="input must be positive"):
-        Analyzer(kernel).fixpoint()
+    assert _analyzed_return(kernel) == Residual(SemType.FLOAT)
 
 
 def test_statically_true_assert_folds_away() -> None:
@@ -221,15 +222,14 @@ def test_member_call_expands_through_dunder_call() -> None:
 
 def test_expansion_origins_point_at_the_user_call_site() -> None:
     def failing_helper(v: float) -> float:
-        assert v > 0.0, "helper needs a positive input"
-        return v
+        return v & 1  # type: ignore[operator]  # an unsupported operator inside the inlined callee
 
     def kernel(x: float) -> float:
         return failing_helper(x)
 
     with pytest.raises(AnalysisRejection) as info:
         Analyzer(kernel).fixpoint()
-    assert "helper needs a positive input" in str(info.value)
+    assert "not supported" in str(info.value)
     assert any(frame.function.endswith("kernel") for frame in info.value.origin)  # re-attributed via origin stack
 
 
@@ -397,7 +397,7 @@ def test_huge_range_is_refused_before_materialization() -> None:
             total = total + x
         return total
 
-    with pytest.raises(AnalysisRejection, match="unroll budget"):
+    with pytest.raises(AnalysisRejection, match="unroll threshold"):
         Analyzer(kernel).fixpoint()
 
 
@@ -450,7 +450,9 @@ def test_keyword_only_defaults_bind_like_python() -> None:
     _assert_known_matches_python(kernel)
 
 
-def test_component_properties_are_a_located_rejection() -> None:
+def test_component_property_getter_inlines_and_recomputes() -> None:
+    # A @property getter on a component is inlined (desugared to a bound call), so it recomputes from the current state
+    # each read: after `self.value = x`, `self.doubled` reads the just-stored value.
     class Scaler:
         def __init__(self) -> None:
             self.value = 0.0
@@ -463,8 +465,7 @@ def test_component_properties_are_a_located_rejection() -> None:
             self.value = x
             return self.doubled
 
-    with pytest.raises(AnalysisRejection, match="property"):
-        Analyzer(Scaler().step).fixpoint()
+    assert _analyzed_return(Scaler().step) == Residual(SemType.FLOAT)
 
 
 def test_conditional_state_store_keeps_the_read_bound() -> None:
@@ -645,7 +646,7 @@ def test_record_method_calls_are_a_located_rejection() -> None:
 
 
 def test_bool_arithmetic_is_a_located_rejection() -> None:
-    def kernel() -> int:
+    def kernel() -> float:
         flag = 3.0 > 1.0
         return -flag  # the charter demands an explicit conversion; np-bool provenance makes folds unsound
 

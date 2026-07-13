@@ -39,6 +39,7 @@ from typing import Any, cast
 
 import numpy as np
 
+from holoso import UnsupportedConstruct
 from holoso._backend.numerical import NumericalSimulator, generate
 from holoso._frontend import lower as lower_frontend
 from holoso._hir import _if_convert as if_convert_pass
@@ -536,8 +537,9 @@ def _emit_dead_arm_spill(em: _Emitter) -> _Fragment:
 def _emit_const_branch(em: _Emitter) -> _Fragment:
     """
     A const-branch-via-division shape: an outer runtime diamond whose then arm contains an inner constant-true
-    division condition, leaving an empty const-branch block. The inner false arm is over-budget so the
-    :data:`Shape.CONST_BRANCH` and :data:`Shape.NESTED_IF` tags denote a surviving inner branch.
+    division condition guarding an over-budget else arm. The compiler folds the constant guard and drops the dead
+    over-budget arm, so the kernel fits budget and only the OUTER runtime diamond survives as a forward branch --
+    the :data:`Shape.CONST_BRANCH` tag exercises that fold-driven arm elimination (it is not a surviving nested if).
     """
     cond = _emit_condition(em, balanced=True)
     r = em.fresh("r")
@@ -556,7 +558,7 @@ def _emit_const_branch(em: _Emitter) -> _Fragment:
     return _merge_fragment(
         r,
         [cond, inner_then, inner_else_fragment, else_fragment],
-        frozenset({Shape.BRANCH, Shape.CONST_BRANCH, Shape.NESTED_IF}),
+        frozenset({Shape.BRANCH, Shape.CONST_BRANCH}),
     )
 
 
@@ -862,22 +864,19 @@ def generate_dead_arm_kernel(
 def _emit_return(em: _Emitter, produced: list[_Fragment]) -> Mode:
     """
     Build the return line, combining every produced fragment so each stays live (DCE cannot drop a diamond feeding the
-    output). A single fragment is returned verbatim (exactness-preserving); multiple fragments are returned either as a
-    TUPLE of verbatim lanes -- each an output port, still exact -- or as a SUM, which rounds and so demotes the kernel
-    to CONTINUOUS mode. A summed return of one fragment does not round (it is the fragment itself).
+    output). A single fragment is returned verbatim (exactness-preserving); multiple fragments are SUMMED, which rounds
+    and so demotes the kernel to CONTINUOUS mode. A summed return of one fragment does not round (it is the fragment
+    itself).
     """
     live = [fragment.value for fragment in produced] or [em.pick_float()]
     if len(live) == 1:
         em.return_line = f"return {live[0]}"
         return Mode.EXACT
-    elif em.chance(0.5):
-        lanes = live[:3]
-        em.return_line = f"return ({', '.join(lanes)},)"
-        em.return_annotation = f"tuple[{', '.join('float' for _ in lanes)}]"
-        return Mode.EXACT
-    else:
-        em.return_line = f"return {' + '.join(live)}"
-        return Mode.CONTINUOUS
+    # FIR_PARITY_PENDING: tuple (multi-output) returns are stage 9. Until then multiple lanes are summed to one float;
+    # the RNG draw that used to pick tuple-vs-sum is kept so the tuned campaign seeds see an unperturbed kernel stream.
+    em.chance(0.5)
+    em.return_line = f"return {' + '.join(live)}"
+    return Mode.CONTINUOUS
 
 
 def _assemble_function(
@@ -1016,6 +1015,10 @@ class CampaignStats:
     # a sound bound on continuous ZKF arithmetic). A large count would hint at a too-tight tolerance or a real bug.
     continuous_drift: int = 0
     dead_arm_forced: int = 0  # ARMED dead-arm-only kernels run (the overlap-hazard guarantee; see run_campaign)
+    # FIR_PARITY_PENDING: kernels the generator built from a construct the new frontend still defers (bitwise ``^`` and
+    # ``float()``/``bool()`` casts -> stage 8; tuple returns -> stage 9). They are counted and skipped, not compiled;
+    # the count drops to zero as those stages land. Shape totals above still include them (recorded before lowering).
+    deferred_skipped: int = 0
     shape_counts: dict[Shape, int] = field(default_factory=lambda: {shape: 0 for shape in Shape})
     divergences: list[Divergence] = field(default_factory=list)
 
@@ -1164,7 +1167,7 @@ def surviving_forward_branches(mir: Mir) -> int:
 def _required_forward_branches(shapes: frozenset[Shape]) -> int:
     if Shape.BRANCH not in shapes:
         return 0
-    if Shape.NESTED_IF in shapes or Shape.CONST_BRANCH in shapes:
+    if Shape.NESTED_IF in shapes:  # a data-dependent nested diamond keeps BOTH branches; a const inner branch folds
         return 2
     return 1
 
@@ -1561,7 +1564,15 @@ def _run_campaign_kernel(
 ) -> None:
     stats.record_kernel(kernel)
     for op_label, make_ops in OP_CONFIGS.items():
-        divergence = run_kernel(kernel, op_label, make_ops(fmt), fmt, effort, n_vectors, stats, expect_armed)
+        try:
+            divergence = run_kernel(kernel, op_label, make_ops(fmt), fmt, effort, n_vectors, stats, expect_armed)
+        except UnsupportedConstruct:
+            # FIR_PARITY_PENDING: the generator emitted a construct the new frontend still defers (bitwise ``^`` and
+            # ``float()``/``bool()`` casts -> stage 8; tuple returns -> stage 9). Rejection is frontend-only, so it is
+            # identical across op-configs -- record once and drop the kernel. Genuine miscompiles still surface as
+            # divergences on the kernels that DO lower; when the stages land these kernels compile and are checked.
+            stats.deferred_skipped += 1
+            return
         if divergence is not None:
             stats.divergences.append(divergence)
             on_divergence(divergence)

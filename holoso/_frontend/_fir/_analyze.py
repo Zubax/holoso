@@ -18,6 +18,8 @@ import types
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
+from ..._errors import UnsupportedConstruct, UnsupportedLibraryFunction
+from .._ast_support import UNROLL_THRESHOLD
 from ._build import BuildRejection, build_unit
 from ._ir import (
     BindingId,
@@ -77,7 +79,6 @@ _logger = logging.getLogger(__name__)
 
 _MAX_BLOCKS = 200_000
 _MAX_VISITS = 1_000_000
-_MAX_TRIPS = 65_536
 
 
 class SemType(enum.Enum):
@@ -86,7 +87,7 @@ class SemType(enum.Enum):
     INT = "int"
 
 
-class AnalysisRejection(Exception):
+class AnalysisRejection(UnsupportedConstruct):
     """A located refusal discovered during analysis (dynamic structure, recursion, possibly-unbound reads...)."""
 
     def __init__(self, message: str, origin: OriginStack) -> None:
@@ -94,6 +95,37 @@ class AnalysisRejection(Exception):
         super().__init__(f"{frame.function}:{frame.line}:{frame.column}: {message}")
         self.message = message
         self.origin = origin
+
+
+class LibraryAnalysisRejection(UnsupportedLibraryFunction):
+    """A recognized math/numpy library function that has no hardware implementation yet -- a sibling refusal."""
+
+    def __init__(self, message: str, origin: OriginStack) -> None:
+        frame = origin[0]
+        super().__init__(f"{frame.function}:{frame.line}:{frame.column}: {message}")
+        self.message = message
+        self.origin = origin
+
+
+def _is_unimplemented_library(target: object) -> bool:
+    """A numpy ufunc or a ``math`` module member: a recognized library primitive, distinct from an arbitrary call."""
+    import math
+
+    import numpy as np
+
+    return isinstance(target, np.ufunc) or any(target is member for member in vars(math).values())
+
+
+def _datapath_zero(value: object) -> object:
+    """Normalize a -0.0 fold input to +0.0: the ZKF datapath has no signed zero, so a static fold must not either."""
+    return value + 0.0 if isinstance(value, float) and value == 0.0 else value
+
+
+@dataclass(frozen=True, slots=True)
+class _PropertyRead:
+    """A component attribute read that resolved to a ``@property`` getter, to be desugared into a bound call."""
+
+    getter: object  # a ``MethodType(fget, component)`` bound to the exact receiver
 
 
 @dataclass(frozen=True, slots=True)
@@ -596,7 +628,18 @@ class Analyzer:
                         chosen = lhs if taken else rhs
                     result = env.get(Local(chosen))
                 else:
-                    result = join_facts(env.get(Local(lhs)), env.get(Local(rhs)), op.origin)
+                    lhs_fact, rhs_fact = env.get(Local(lhs)), env.get(Local(rhs))
+                    # The merge is evaluated unconditionally for its kind-check: a non-boolean operand reached before an
+                    # absorbing constant (``float(x) or True``) is still irreconcilable and must reject, never fold away.
+                    merged = join_facts(lhs_fact, rhs_fact, op.origin)
+                    # A boolean identity holds even with a runtime condition: ``A or True`` is always True and
+                    # ``A and False`` always False (the arm chosen when the condition is false is a decisive constant),
+                    # so the connective folds and a branch that consumes it has a statically dead arm carrying no state.
+                    rhs_const = as_python(rhs_fact.value) if isinstance(rhs_fact, Known) else None
+                    if (mode is SelectMode.OR and rhs_const is True) or (mode is SelectMode.AND and rhs_const is False):
+                        result = rhs_fact
+                    else:
+                        result = merged
                 env.set(Local(dst), result)
             case BuildTuple(dst=dst, items=items) | BuildList(dst=dst, items=items):
                 facts = tuple(env.get(Local(item)) for item in items)
@@ -623,8 +666,18 @@ class Analyzer:
                 result = self._subscript(env.get(Local(obj)), env.get(Local(idx)), op.origin)
                 env.set(Local(dst), result)
             case PyAttr(dst=dst, obj=obj, name=name):
-                result = self._attribute(env, env.get(Local(obj)), name, op.origin)
-                env.set(Local(dst), result)
+                attr = self._attribute(env, env.get(Local(obj)), name, op.origin)
+                if isinstance(attr, _PropertyRead):
+                    # Desugar the property read into a bound zero-argument call and re-run: the generic call-expansion
+                    # machinery then inlines the getter, remaps its return, and threads state through unchanged.
+                    callee = BindingId(f"%p{self._binding_serial}", self._binding_serial)
+                    self._binding_serial += 1
+                    block.ops[index : index + 1] = [
+                        LoadConst(callee, ObjectRef(attr.getter), op.origin),
+                        PyCall(dst, callee, (), (), op.origin),
+                    ]
+                    return True
+                env.set(Local(dst), attr)
             case PyStoreAttr(obj=obj, name=name, src=src):
                 obj_fact = env.get(Local(obj))
                 if not (isinstance(obj_fact, Known) and isinstance(obj_fact.value, ObjectRef)):
@@ -724,7 +777,7 @@ class Analyzer:
             return Known(admitted)
         raise AnalysisRejection("subscript of a runtime value is not supported yet", origin)
 
-    def _attribute(self, env: _Env, obj: Fact, name: str, origin: OriginStack) -> Fact:
+    def _attribute(self, env: _Env, obj: Fact, name: str, origin: OriginStack) -> "Fact | _PropertyRead":
         if isinstance(obj, Known) and isinstance(obj.value, ObjectRef):
             component = obj.value.obj
             if isinstance(component, (types.ModuleType, type)):
@@ -737,8 +790,14 @@ class Analyzer:
                 admitted = admit(attribute)
                 return Known(admitted) if admitted is not None else Known(ObjectRef(attribute))
             _reject_attribute_hooks(type(component), origin)
-            _reject_descriptor(type(component), name, origin)
             class_attribute = _mro_attribute_of(type(component), name)
+            if type(class_attribute) is property:  # an exact property (not a subclass) wins over any __dict__ entry
+                if not isinstance(class_attribute.fget, types.FunctionType):
+                    raise AnalysisRejection(f"property {name!r} has an unsupported getter", origin)
+                # Bind the getter to the exact receiver so its ``self.stored`` reads resolve to the same StateLeaf/Known
+                # a direct read would, and so recursion identity and the ``self`` parameter bind correctly.
+                return _PropertyRead(types.MethodType(class_attribute.fget, component))
+            _reject_descriptor(type(component), name, origin)
             if name not in getattr(component, "__dict__", {}) and isinstance(
                 class_attribute, (types.FunctionType, classmethod, staticmethod)
             ):
@@ -834,8 +893,18 @@ class Analyzer:
             trip_count = len(concrete)  # type: ignore[arg-type]  # sized BEFORE materializing (range(10**9)!)
         except TypeError:
             raise AnalysisRejection("loop iterable has no static length", loop.origin) from None
-        if trip_count > _MAX_TRIPS:
-            raise AnalysisRejection(f"loop trip count {trip_count} exceeds the unroll budget", loop.origin)
+        except OverflowError:  # len() of an astronomically large range (range(10**38)): far past any threshold
+            raise AnalysisRejection(
+                f"loop trip count exceeds the unroll threshold {UNROLL_THRESHOLD}; a counted back-edge loop is not "
+                "supported yet",
+                loop.origin,
+            ) from None
+        if trip_count > UNROLL_THRESHOLD:
+            raise AnalysisRejection(
+                f"trip count {trip_count} exceeds the unroll threshold {UNROLL_THRESHOLD}; a counted back-edge loop "
+                "is not supported yet",
+                loop.origin,
+            )
         elements = list(concrete)  # type: ignore[call-overload]
         _logger.info("unrolling %d trip(s) at %s", trip_count, loop.origin[0])
         chain_target = loop.exit_target
@@ -924,14 +993,20 @@ class Analyzer:
             argument_facts = [env.get(Local(arg)) for arg in call.args]
             keyword_facts = [(keyword, env.get(Local(value))) for keyword, value in call.kwargs]
             if not all(isinstance(fact, Known) for fact in argument_facts + [fact for _, fact in keyword_facts]):
-                raise AnalysisRejection(
-                    f"call to {getattr(target, '__name__', repr(target))} with runtime arguments is not supported yet",
-                    call.origin,
-                )
+                name = getattr(target, "__name__", repr(target))
+                if _is_unimplemented_library(target):
+                    # A recognized math/numpy function with no fast-math hardware equivalent (erf, spacing, a ufunc):
+                    # a distinct public error so the user knows it is a missing library primitive, not a bad call.
+                    raise LibraryAnalysisRejection(f"library function {name!r} is not implemented yet", call.origin)
+                raise AnalysisRejection(f"call to {name} with runtime arguments is not supported yet", call.origin)
             try:
                 concrete = target(  # type: ignore[operator]
-                    *[as_python(fact.value) for fact in argument_facts if isinstance(fact, Known)],
-                    **{keyword: as_python(fact.value) for keyword, fact in keyword_facts if isinstance(fact, Known)},
+                    *[_datapath_zero(as_python(fact.value)) for fact in argument_facts if isinstance(fact, Known)],
+                    **{
+                        keyword: _datapath_zero(as_python(fact.value))
+                        for keyword, fact in keyword_facts
+                        if isinstance(fact, Known)
+                    },
                 )
             except Exception as error:
                 raise AnalysisRejection(f"call fails here: {error}", call.origin) from None
@@ -1217,12 +1292,16 @@ def _reject_attribute_hooks(klass: type, origin: OriginStack) -> None:
 
 
 def _reject_descriptor(klass: type, name: str, origin: OriginStack) -> None:
-    attribute = getattr(klass, name, None)
+    # Raw MRO lookup, never getattr (which would run a property getter). A data descriptor (``__set__``/``__delete__``)
+    # -- a property with or without a setter, a property subclass, or any other data descriptor -- cannot back a
+    # writable component attribute, since its accessor would bypass the abstract state. Property GETTER reads are
+    # handled earlier; only stores and unsupported reads reach here.
+    descriptor = _mro_attribute_of(klass, name)
     if (
-        attribute is not None
-        and hasattr(type(attribute), "__set__")
-        and not isinstance(attribute, types.MemberDescriptorType)  # slots ARE the fields, not accessors
+        descriptor is not None
+        and (hasattr(type(descriptor), "__set__") or hasattr(type(descriptor), "__delete__"))
+        and not isinstance(descriptor, types.MemberDescriptorType)  # slots ARE the fields, not accessors
     ):
         raise AnalysisRejection(
-            f"property '{name}' on a component is not supported (it would bypass abstract state)", origin
+            f"descriptor '{name}' on a component is not supported (it would bypass abstract state)", origin
         )

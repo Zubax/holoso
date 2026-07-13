@@ -19,15 +19,27 @@ Both arms are computed, so conversion only pays where arms are cheap: the per-ar
 is neither float nor boolean (none exist today) is left as a real branch. A boolean mux's constant arms (the common
 ``True``/``False`` of a state-machine merge) reduce to ``and``/``or``/``not`` in the strength-reduction pass that
 re-runs after if-conversion.
+
+Guarded-region predication runs FIRST each iteration: a nested guard ``if A: if B: <effect>`` (no else) lowers to a
+two-branch region ``P: A?G:F0`` / ``G: B?T:F1`` (``G`` phi- and operation-free, so ``B`` is already available at
+``P`` and nothing is newly speculated) whose inner merge ``I`` and the outer bypass ``F0`` reconverge at ``O``. When
+every value ``O`` observes on the inner-false path equals the value on the outer-false path -- so the two bypasses are
+interchangeable -- the region is exactly ``(A and B) ? effect : bypass``. It is rewritten to the single diamond
+``P: band(A,B) ? T : F0`` reconverging at ``O``, which the ordinary splicer then collapses. This recovers the tight
+``select(A and B, ...)`` the region means, rather than the nested ``select(A, select(B, ...))`` a bottom-up diamond
+collapse leaves. It must precede diamond conversion and any merge/empty-block cleanup, which would erase the
+two-merge evidence. It combines existing boolean SSA values only, so eager-``and`` evaluation semantics are unchanged;
+a walrus or state write on the inner path makes some inner-false value differ from its outer-false peer, failing the
+equality test, and a faulting or stateful operation inside ``G`` leaves it non-empty, so neither is fused.
 """
 
 import logging
 import os
 
 from ._const import BoolConst
-from .._util import BlockId
-from ._ir import Block, Branch, Hir, Jump, Operation, Phi, predecessors, renumber
-from ._operators import BoolSelect, Select
+from .._util import BlockId, ValueId
+from ._ir import Block, Branch, Hir, Jump, Operation, Phi, predecessors, renumber, validate_phi_predecessors
+from ._operators import BoolAnd, BoolSelect, Select
 from ._types import BoolType, FloatType
 
 _IFCONV_MAX_OPS = int(os.getenv("HOLOSO_IFCONV_MAX_OPS", "8"))
@@ -114,14 +126,128 @@ def _splice(hir: Hir, diamond: tuple[Block, Block, Block, Block]) -> Hir:
     return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=hir.outputs, state_slots=hir.state_slots)
 
 
+def _arm_from(hir: Hir, value: ValueId, inner_phis: set[ValueId], pred: BlockId) -> ValueId:
+    """A value the inner merge carries as seen on one incoming edge: an inner phi's arm from ``pred``, else itself."""
+    node = hir.nodes[value]
+    return dict(node.arms)[pred] if value in inner_phis and isinstance(node, Phi) else value
+
+
+def _inner_phis_consumed_only_as_outer_arm(hir: Hir, inner: set[ValueId], inner_id: BlockId, outer: BlockId) -> bool:
+    """Every use of every inner-merge phi is the arm the outer merge takes from it -- else deleting it would dangle."""
+    outer_phis = {phi for block in hir.blocks if block.id == outer for phi in block.phis}
+    for vid, node in hir.nodes.items():
+        if isinstance(node, Operation) and any(operand in inner for operand in node.operands):
+            return False
+        if isinstance(node, Phi):
+            for pred, value in node.arms:
+                if value in inner and (vid not in outer_phis or pred != inner_id):
+                    return False
+    for block in hir.blocks:
+        if isinstance(block.terminator, Branch) and block.terminator.cond in inner:
+            return False
+    return not (any(o.value in inner for o in hir.outputs) or any(s.live_out in inner for s in hir.state_slots))
+
+
+def _find_guarded_region(hir: Hir, preds: dict[BlockId, set[BlockId]]) -> tuple[Block, Block, Block, Block] | None:
+    """
+    The first fusible nested guard ``(P, G, T, F0)``, or None. ``P: A?G:F0``; ``G: B?T:F1`` is phi- and
+    operation-free; ``T``/``F1`` reconverge at an operation-free inner merge ``I`` that meets the outer bypass ``F0``
+    at ``O``; and every value ``O`` observes on the inner-false path equals its outer-false peer.
+    """
+    by = {block.id: block for block in hir.blocks}
+    for p in hir.blocks:
+        if not isinstance(p.terminator, Branch) or p.terminator.if_true == p.terminator.if_false:
+            continue
+        g, f0 = by[p.terminator.if_true], by[p.terminator.if_false]
+        if preds[g.id] != {p.id} or g.phis or g.operations or not isinstance(g.terminator, Branch):
+            continue
+        if g.terminator.if_true == g.terminator.if_false:
+            continue
+        t, f1 = by[g.terminator.if_true], by[g.terminator.if_false]
+        if preds[t.id] != {g.id} or preds[f1.id] != {g.id} or t.phis or f1.phis:
+            continue
+        if not (isinstance(t.terminator, Jump) and isinstance(f1.terminator, Jump)):
+            continue
+        if t.terminator.target != f1.terminator.target:
+            continue
+        inner = by[t.terminator.target]
+        if preds[inner.id] != {t.id, f1.id} or inner.operations or not isinstance(inner.terminator, Jump):
+            continue
+        outer = by[inner.terminator.target]
+        if preds[f0.id] != {p.id} or f0.phis or not isinstance(f0.terminator, Jump):
+            continue
+        if f0.terminator.target != outer.id or outer.id in (p.id, inner.id):
+            continue
+        if preds[outer.id] != {inner.id, f0.id}:
+            continue
+        inner_phis = set(inner.phis)
+        if not _inner_phis_consumed_only_as_outer_arm(hir, inner_phis, inner.id, outer.id):
+            continue
+        arms = [dict(hir.nodes[vid].arms) for vid in outer.phis]  # type: ignore[union-attr]
+        if all(_arm_from(hir, arm[inner.id], inner_phis, f1.id) == arm[f0.id] for arm in arms):
+            return p, g, t, f0
+    return None
+
+
+def _fuse_guard(hir: Hir, region: tuple[Block, Block, Block, Block]) -> Hir:
+    """Rewrite the guard into a single diamond ``P: band(A,B)?T:F0`` -> ``O``; the splicer then collapses it."""
+    p, g, t, f0 = region
+    assert isinstance(p.terminator, Branch) and isinstance(g.terminator, Branch)
+    inner = {block.id: block for block in hir.blocks}[t.terminator.target]  # type: ignore[union-attr]
+    outer_id = inner.terminator.target  # type: ignore[union-attr]
+    inner_phis = set(inner.phis)
+    f1_id = g.terminator.if_false if g.terminator.if_true == t.id else g.terminator.if_true
+
+    nodes = dict(hir.nodes)
+    combined = max(nodes) + 1
+    nodes[combined] = Operation(BoolAnd(), (p.terminator.cond, g.terminator.cond))
+    for block in hir.blocks:
+        if block.id != outer_id:
+            continue
+        for vid in block.phis:
+            phi = nodes[vid]
+            assert isinstance(phi, Phi)
+            arm = dict(phi.arms)
+            true_value = _arm_from(hir, arm[inner.id], inner_phis, t.id)
+            nodes[vid] = Phi(type=phi.type, arms=((t.id, true_value), (f0.id, arm[f0.id])))
+    for vid in inner.phis:
+        del nodes[vid]
+
+    dissolved = {g.id, f1_id, inner.id}
+    blocks = []
+    for block in hir.blocks:
+        if block.id in dissolved:
+            continue
+        if block.id == p.id:
+            blocks.append(Block(p.id, p.phis, p.operations + (combined,), Branch(combined, t.id, f0.id)))
+        elif block.id == t.id:
+            blocks.append(Block(t.id, t.phis, t.operations, Jump(outer_id)))
+        else:
+            blocks.append(block)
+    return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=hir.outputs, state_slots=hir.state_slots)
+
+
 def run(hir: Hir) -> Hir:
     if _IFCONV_MAX_OPS <= 0:
         return hir
-    converted = 0
-    while (diamond := _find_diamond(hir, predecessors(hir.blocks))) is not None:
-        hir = _splice(hir, diamond)
-        converted += 1
-    if converted:
-        _logger.info("If-conversion: %d diamond(s) collapsed to selects; %d blocks remain", converted, len(hir.blocks))
+    converted = fused = 0
+    while True:
+        preds = predecessors(hir.blocks)
+        if (region := _find_guarded_region(hir, preds)) is not None:
+            hir = _fuse_guard(hir, region)
+            fused += 1
+        elif (diamond := _find_diamond(hir, preds)) is not None:
+            hir = _splice(hir, diamond)
+            converted += 1
+        else:
+            break
+    if converted or fused:
+        _logger.info(
+            "If-conversion: %d guard(s) fused, %d diamond(s) collapsed to selects; %d blocks remain",
+            fused,
+            converted,
+            len(hir.blocks),
+        )
         hir = renumber(hir)
+        validate_phi_predecessors(hir)
     return hir

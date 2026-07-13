@@ -49,7 +49,8 @@ def _print_summary(stats: object) -> None:
         f"{_ansi('stateful', '96')}={stats.stateful}  {_ansi('exact-mode', '96')}={stats.exact_mode}  "
         f"{_ansi('secondary', '96')}={stats.secondary_checked}✓/{stats.secondary_skipped}⤳  "
         f"{_ansi('cont-drift', '96')}={stats.continuous_drift}  "
-        f"{_ansi('armed-deadarm', '96')}={stats.dead_arm_forced}"
+        f"{_ansi('armed-deadarm', '96')}={stats.dead_arm_forced}  "
+        f"{_ansi('deferred-skip', '96')}={stats.deferred_skipped}"
     )
     print(f"  {_ansi('shape histogram (kernels realizing each shape)', '93')}")
     peak = max((stats.shape_counts[s] for s in Shape), default=1) or 1
@@ -123,11 +124,14 @@ def _surviving_forward_branches_for_probe(name: str, emit: Callable[[fuzz_impl._
 
 
 def test_branch_claiming_inner_shapes_survive_compilation() -> None:
-    """A branch-claiming inner shape must not pass merely because an outer branch survived."""
+    """
+    A data-dependent nested diamond must keep BOTH branches (an inner shape must not pass merely because the outer
+    survived); a const-guarded inner branch, by contrast, folds away and leaves only the outer runtime diamond.
+    """
     assert (
         _surviving_forward_branches_for_probe("nested_probe", lambda em: fuzz_impl._emit_diamond(em, nested=True)) >= 2
     )
-    assert _surviving_forward_branches_for_probe("const_probe", fuzz_impl._emit_const_branch) >= 2
+    assert _surviving_forward_branches_for_probe("const_probe", fuzz_impl._emit_const_branch) == 1
 
 
 @pytest.mark.fuzz

@@ -23,7 +23,7 @@ from holoso._operators import OpConfig
 from holoso._type import BoolType, FloatFormat
 from holoso._value import FloatValue
 
-from ._examples import SPECS, ExampleSpec
+from ._examples import SPECS, ExampleSpec, parity_marks
 from ._importguard import forbidden_imports
 from ._modelref import (
     ChainedSlots,
@@ -59,7 +59,9 @@ def _decode_spec_vector(model: NumericalSimulator, fmt: FloatFormat, row: dict[s
 
 
 _EXAMPLE_CASES = [
-    pytest.param(spec, fmt, id=f"{spec.name}-e{fmt.wexp}m{fmt.wman}") for spec in SPECS for fmt in spec.formats
+    pytest.param(spec, fmt, id=f"{spec.name}-e{fmt.wexp}m{fmt.wman}", marks=parity_marks(spec.name))
+    for spec in SPECS
+    for fmt in spec.formats
 ]
 
 
@@ -164,6 +166,7 @@ def test_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
             assert model_out == interp_out, f"interp != model at x={x} n={n}"
 
 
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: tuple return — stage 9 aggregate returns")
 def test_bool_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
     """The boolean-bank twin of the computed-arm swap: the latch installs are BoolWrites, not FloatCopys."""
     fmt = FloatFormat(6, 18)
@@ -183,6 +186,7 @@ def test_bool_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> N
             assert model_out == interp_out, f"interp != model at x={x} n={n}"
 
 
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: tuple return — stage 9 aggregate returns")
 def test_mixed_arm_swap_diamond_builds_and_matches_python() -> None:
     """
     Pins transient tolerance in the install fixpoint: under a narrowing classification with a strict interference

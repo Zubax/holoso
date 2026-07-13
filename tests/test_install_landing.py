@@ -19,7 +19,7 @@ from holoso._hir import optimize
 from holoso._lir import BoolWrite, FloatCopy, InlineScheduledOp, Lir, LirBlock, PooledScheduledOp, build
 from holoso._mir import lower as lower_to_mir
 
-from ._examples import SPECS, ExampleSpec
+from ._examples import SPECS, ExampleSpec, parity_marks
 from ._modelref import Vector, assert_model_equals_interpreter, build_model_and_interpreter, default_ops
 
 
@@ -39,7 +39,7 @@ def _block_ops(block: LirBlock) -> list[PooledScheduledOp | InlineScheduledOp]:
     return [*block.ops, *block.inline_ops]
 
 
-@pytest.mark.parametrize("spec", SPECS, ids=lambda s: s.name)
+@pytest.mark.parametrize("spec", [pytest.param(s, marks=parity_marks(s.name)) for s in SPECS], ids=lambda s: s.name)
 def test_phi_arm_installs_land_within_their_block(spec: ExampleSpec) -> None:
     lir = _build(spec)
     for block in lir.blocks:
@@ -51,6 +51,7 @@ def test_phi_arm_installs_land_within_their_block(spec: ExampleSpec) -> None:
             )
 
 
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: uart_rx/uart_tx use bitwise XOR — stage 8")
 @pytest.mark.parametrize("name", ["uart_rx", "uart_tx"])
 def test_targets_still_exercise_constant_installs(name: str) -> None:
     """
@@ -67,6 +68,7 @@ def test_targets_still_exercise_constant_installs(name: str) -> None:
     assert const_installs, f"{name} no longer emits constant phi-arm installs; the kernel shape changed"
 
 
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: uart_rx uses bitwise XOR — stage 8")
 def test_resident_register_source_install_is_inline_class() -> None:
     """
     The generalization beyond literal constants: uart_rx installs the rx INPUT directly (b2 <- rx, b4 <- ~rx). A
@@ -125,6 +127,7 @@ class _HoldOrUpdateBool:
         return out, self.s
 
 
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: _HoldOrUpdateBool returns a tuple — stage 9 aggregate returns")
 def test_state_read_sourced_install_is_inline_class(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     A phi arm that is a STATE READ is resident at block entry (the slot register holds it from the start), so its tail

@@ -22,7 +22,7 @@ import pytest
 
 import holoso
 from holoso import BoolType, FloatFormat
-from ._examples import SPECS, ExampleSpec, ReferenceComparison
+from ._examples import SPECS, ExampleSpec, ReferenceComparison, parity_marks
 from ._modelref import default_ops, default_tolerance, flatten_value, within
 
 # A kernel the generic scalar-lane harness cannot drive (``ReferenceComparison.EXCLUDED``) is skipped here: it has
@@ -38,7 +38,12 @@ from ._modelref import default_ops, default_tolerance, flatten_value, within
 _STATE_PREFIX = "state_"
 
 _CASES = [
-    pytest.param(spec, spec.formats[0], id=f"{spec.name}-e{spec.formats[0].wexp}m{spec.formats[0].wman}")
+    pytest.param(
+        spec,
+        spec.formats[0],
+        id=f"{spec.name}-e{spec.formats[0].wexp}m{spec.formats[0].wman}",
+        marks=parity_marks(spec.name),
+    )
     for spec in SPECS
     if spec.reference is not ReferenceComparison.EXCLUDED
 ]

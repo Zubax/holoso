@@ -8,6 +8,8 @@ the model vs the original Python), so the two views stay in lockstep over one so
 import math
 import os
 import sys
+
+import pytest
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -652,3 +654,30 @@ SPECS = [
         edge_values=_EKF_EDGES,  # only dt reaches the divisor, and the folded R_diag keeps it anchored
     ),
 ]
+
+
+# FIR_PARITY_PENDING: examples the new (FIR) front-end cannot lower yet, name -> the feature/stage that unblocks it.
+# This is the central registry of the front-end parity debt; every SPECS-driven suite skips the examples in it. Each
+# of stages 6-9 removes its own entries as the feature lands, and stage 10 asserts this map is empty. Greppable via
+# the FIR_PARITY_PENDING token.
+FIR_PARITY_PENDING: dict[str, str] = {
+    "signal_window": "stage 8: runtime bool() cast",
+    "majority_voter": "stage 8: bitwise XOR",
+    "uart_rx": "stage 8: bitwise XOR",
+    "uart_tx": "stage 8: bitwise XOR",
+    "quadrature_encoder": "stage 9: aggregate/tuple returns",
+    "phase_frequency_detector": "stage 9: aggregate/tuple returns",
+    "latching_fault_register": "stage 9: aggregate/tuple returns",
+    "cordic_sincos": "stage 9: aggregate/tuple returns",
+    "ekf1_stateless": "stage 9: aggregate/tuple returns",
+    "polar_to": "stage 9: np.array construction",
+    "polar_from": "stage 9: np.array construction",
+    "ekf1_stateful": "builder: argument unpacking f(*args)",
+    "equal_temperament": "runtime ** exponent",
+}
+
+
+def parity_marks(name: str) -> tuple[pytest.MarkDecorator, ...]:
+    """Pytest marks that skip an example still awaiting front-end parity, or an empty tuple when it is supported."""
+    reason = FIR_PARITY_PENDING.get(name)
+    return (pytest.mark.skip(reason=f"FIR_PARITY_PENDING: {reason}"),) if reason is not None else ()

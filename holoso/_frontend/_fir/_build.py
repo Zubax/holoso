@@ -11,12 +11,15 @@ becomes a Fail terminator so a dead branch can stay dead. Everything the subset 
 
 import ast
 import inspect
+import logging
 import textwrap
 import types
 import typing
 from dataclasses import dataclass
 
+from ..._errors import SourceUnavailable, UnsupportedConstruct
 from ..._util import RelationalOp
+from .._ast_support import UNROLL_THRESHOLD
 from ._ir import (
     BindingId,
     Block,
@@ -66,8 +69,10 @@ from ._resolve import (
 )
 from ._value import admit, admit_ref
 
+_logger = logging.getLogger(__name__)
 
-class BuildRejection(Exception):
+
+class BuildRejection(UnsupportedConstruct):
     """A located refusal: the construct is outside the supported subset (or plainly wrong Python)."""
 
     def __init__(self, message: str, origin: OriginStack) -> None:
@@ -104,11 +109,17 @@ def build_unit(fn: object) -> FunctionUnit:
     if isinstance(fn, types.MethodType):
         bound_self = fn.__self__
         fn = fn.__func__
-    assert isinstance(fn, types.FunctionType), fn
+    if not isinstance(fn, types.FunctionType):
+        raise SourceUnavailable(
+            f"the synthesis target must be a Python function or bound method, not {type(fn).__name__}"
+        )
     # The callable is built AS-IS: a wraps-style decorator may add behavior, so silently unwrapping would diverge.
     # Reading source via the CODE OBJECT (never the function) keeps inspect from following __wrapped__; a variadic
     # wrapper then rejects on its own parameters, which is the honest answer.
-    source_lines, first_line = inspect.getsourcelines(fn.__code__)
+    try:
+        source_lines, first_line = inspect.getsourcelines(fn.__code__)
+    except (OSError, TypeError) as error:
+        raise SourceUnavailable(f"could not retrieve source for {fn.__code__.co_qualname}: {error}") from None
     module = ast.parse(textwrap.dedent("".join(source_lines)))
     fndef = module.body[0]
     if not isinstance(fndef, ast.FunctionDef):
@@ -157,19 +168,43 @@ class _Builder:
         self._temp_serial = 0
         self._frames: list[dict[str, BindingId]] = [{}]
         self._loops: list[_LoopContext] = []
+        self._comprehension_frames = 0  # running total of nested generators, bounded to keep recursion finite
+        self._self_spelling: str | None = None  # the receiver parameter's runtime spelling, once known
+        self._params_bound = False  # gate so the receiver's own initial binding is not mistaken for a rebinding
+        self._fn_origin: OriginStack = ()
 
     def build(self, fndef: ast.FunctionDef) -> FunctionUnit:
         origin = self._origin(fndef)
+        self._fn_origin = origin
         args = fndef.args
         if args.vararg or args.kwarg:
             raise BuildRejection("variadic parameters are not supported", origin)
         declared = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+        if self._bound_self is not None and not declared:
+            raise BuildRejection("a bound method must declare a receiver parameter", origin)
+        if self._bound_self is not None:
+            self._self_spelling = self._resolver.runtime_spelling(declared[0].arg)
+        # A bound method's leading ``self`` is the instance receiver, not a datapath input, so it is exempt from
+        # annotation validation; every other parameter needs an explicit scalar annotation (there is no implicit
+        # float default). An array (jaxtyping/ndarray) annotation is admitted here and deferred at its point of use.
+        for arg in declared[1:] if self._bound_self is not None else declared:
+            hint = self._hints.get(self._resolver.runtime_spelling(arg.arg))
+            if hint is None:
+                raise BuildRejection(
+                    f"parameter {arg.arg!r} requires an explicit type annotation (float or bool)", self._origin(arg)
+                )
+            if hint in (int, str, bytes, complex):
+                raise BuildRejection(
+                    f"unsupported parameter annotation for {arg.arg!r}: expected float or bool", self._origin(arg)
+                )
         params = [self._bind(arg.arg) for arg in declared]
+        self._params_bound = True  # any further store to the receiver name is now a rebinding, not the initial bind
         # Annotation keys are CPython-mangled just like the param slots (``__enabled`` -> ``_Klass__enabled``), so
         # both the hint lookup and the bool_params entry use the runtime spelling.
         bool_params = frozenset(
             spelled for arg in declared if self._hints.get(spelled := self._resolver.runtime_spelling(arg.arg)) is bool
         )
+        declared_return_bool = self._validate_return_annotation(fndef, origin)
         entry = self._current.id
         exit_block = self._new_block()
         exit_block.terminator = UnitExit(origin)
@@ -188,9 +223,31 @@ class _Builder:
             exit=exit_block.id,
             bound_self=self._bound_self,
             bool_params=bool_params,
+            declared_return_bool=declared_return_bool,
         )
         verify(unit)
         return unit
+
+    def _validate_return_annotation(self, fndef: ast.FunctionDef, origin: OriginStack) -> bool | None:
+        # The declared return type is mandatory and drives the output-port type; a mismatch against the inferred value
+        # type is caught at emission. ``None`` here means void or an aggregate (deferred), so no scalar check applies.
+        if fndef.returns is None:
+            raise BuildRejection("the return type must be explicitly annotated (float or bool)", origin)
+        hint = self._hints.get("return")
+        # ``float | None`` (Optional): the None arm is the implicit fall-off of an early-return kernel, so unwrap it.
+        args = typing.get_args(hint)
+        if typing.get_origin(hint) in (typing.Union, types.UnionType) and type(None) in args:
+            remainder = [arg for arg in args if arg is not type(None)]
+            hint = remainder[0] if len(remainder) == 1 else hint
+        if hint is float:
+            return False
+        if hint is bool:
+            return True
+        if hint is type(None) or typing.get_origin(hint) in (tuple, list):
+            return None
+        raise BuildRejection(
+            f"unsupported return annotation {getattr(hint, '__name__', hint)}: expected float, bool, or None", origin
+        )
 
     # ---------------------------------------- machinery ----------------------------------------
 
@@ -218,6 +275,8 @@ class _Builder:
         function scope even inside one (PEP 572). Only comprehension targets live in overlay frames.
         """
         name = self._resolver.runtime_spelling(name)
+        if self._params_bound and name == self._self_spelling:
+            raise BuildRejection("reassigning the instance parameter is not supported", self._fn_origin)
         if name in self._frames[0]:
             return self._frames[0][name]
         binding = BindingId(name, self._serial)
@@ -363,15 +422,11 @@ class _Builder:
             case ast.Raise(exc=exc):
                 self._current.terminator = Fail(self._raise_message(exc), origin)
                 self._start_block(self._new_block())
-            case ast.Assert(test=test, msg=msg):
-                condition = self._truth(test)
-                ok_block, fail_block = self._new_block(), self._new_block()
-                self._current.terminator = Branch(condition, ok_block.id, fail_block.id, origin)
-                message = "assertion failed"
-                if isinstance(msg, ast.Constant) and isinstance(msg.value, str):
-                    message = msg.value
-                fail_block.terminator = Fail(message, origin)
-                self._start_block(ok_block)
+            case ast.Assert():
+                # Accepted and ignored wholesale: the test is never lowered, mirroring Python under -O. Any effect the
+                # test would have had (a walrus binding, a call) is dropped with it, so an assert must be side-effect-
+                # free; a later read of a name a dropped assert would have bound is a normal unbound-name rejection.
+                _logger.info("assert at %s has no effect in Holoso and is dropped", origin[0])
             case ast.FunctionDef() | ast.AsyncFunctionDef() | ast.ClassDef():
                 raise BuildRejection("nested function and class definitions are not supported in kernels", origin)
             case ast.Import() | ast.ImportFrom():
@@ -609,6 +664,17 @@ class _Builder:
                 return self._none(origin)
 
     def _comprehension(self, elt: ast.expr, generators: list[ast.comprehension], origin: OriginStack) -> BindingId:
+        # One expansion frame per generator, and a nested comprehension's frames sit atop this one's, so bounding the
+        # running total bounds the build recursion (a deeply nested comprehension would otherwise overflow the stack).
+        self._comprehension_frames += len(generators)
+        if self._comprehension_frames > UNROLL_THRESHOLD:
+            raise BuildRejection(f"comprehension nesting expands more than {UNROLL_THRESHOLD} generators", origin)
+        try:
+            return self._comprehension_body(elt, generators, origin)
+        finally:
+            self._comprehension_frames -= len(generators)
+
+    def _comprehension_body(self, elt: ast.expr, generators: list[ast.comprehension], origin: OriginStack) -> BindingId:
         accumulator = BindingId(f"listcomp@{origin[0].line}", self._serial)
         self._serial += 1
         empty = self._temp()
