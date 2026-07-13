@@ -179,6 +179,19 @@ and join executable exit live-outs, descending only; each round rebuilds the wor
 templates. Executable Fail terminators are located rejections (data-dependent raise included). Fuel bounds cover
 visits and blocks; exhaustion is a located rejection, never a truncated fixed point.
 
+Emission lowers the stabilized residual graph to HIR: executable blocks/edges only, in reverse post-order, with
+value numbering by Braun sealed-block SSA over Places (named locals, state leaves, the hidden return place) and
+write-once ANF temps unified into the same layer. Known facts materialize as interned constants at each use;
+residual operations become typed HIR operations; folded branches lower to jumps; a loop header reads its init arm
+by recursing through already-emitted predecessors and closes its latch arm at sealing (phi insertion saves/restores
+the builder position; a write-once temp never needs a phi). Registered library calls dispatch through the `_lib`
+registry: an Intrinsic with runtime arguments becomes its HIR operator, a Library stub inlines like a user function,
+a fully-static call folds concretely. Module and class attribute access is a plain namespace lookup, not component
+state. State slots carry the reset snapshot and canonical-exit live-out; the port contract (out ports, public
+`state_<slot>` ports, live-out dedup) mirrors the production front-end so a differential harness can compare model
+I/O across front-ends. The harness's primary oracle is the kernel's own Python float64 evaluation (the old
+front-end is a low-credibility cross-check, used only where it can lower).
+
 The production front-end below remains authoritative until the staged cutover.
 
 Abstract interpretation over the Python AST/CFG with a binding-time lattice (static vs. dynamic). Static values (shapes,

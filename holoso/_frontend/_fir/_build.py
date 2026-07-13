@@ -13,6 +13,7 @@ import ast
 import inspect
 import textwrap
 import types
+import typing
 from dataclasses import dataclass
 
 from ..._util import RelationalOp
@@ -115,7 +116,16 @@ def build_unit(fn: object) -> FunctionUnit:
     assert fndef.name == fn.__code__.co_name, "source and code object must describe the same function"
     resolver = NameResolver(fn, comprehension_only=comprehension_only_targets(fndef))
     indent = len(source_lines[0]) - len(source_lines[0].lstrip())
-    builder = _Builder(fn.__code__.co_qualname, first_line, indent, resolver, bound_self)
+    # Parameter bool-ness comes from the RESOLVED annotation object (``fn.__annotations__``), not the AST spelling:
+    # ``x: builtins.bool`` and ``x: Alias`` are bool just as ``x: bool`` is. String annotations that fail to resolve
+    # simply fall back to float, which is the safe default.
+    try:
+        hints = typing.get_type_hints(fn)
+    except Exception:
+        hints = {
+            name: value for name, value in getattr(fn, "__annotations__", {}).items() if not isinstance(value, str)
+        }
+    builder = _Builder(fn.__code__.co_qualname, first_line, indent, resolver, bound_self, hints)
     return builder.build(fndef)
 
 
@@ -127,13 +137,20 @@ class _LoopContext:
 
 class _Builder:
     def __init__(
-        self, qualname: str, first_line: int, indent: int, resolver: NameResolver, bound_self: object | None
+        self,
+        qualname: str,
+        first_line: int,
+        indent: int,
+        resolver: NameResolver,
+        bound_self: object | None,
+        hints: dict[str, object],
     ) -> None:
         self._qualname = qualname
         self._line_offset = first_line - 1
         self._column_offset = indent  # ast columns are post-dedent; diagnostics report source-file columns
         self._resolver = resolver
         self._bound_self = bound_self
+        self._hints = hints
         self._blocks: dict[BlockId, Block] = {}
         self._current = self._new_block()
         self._serial = 0
@@ -146,7 +163,13 @@ class _Builder:
         args = fndef.args
         if args.vararg or args.kwarg:
             raise BuildRejection("variadic parameters are not supported", origin)
-        params = [self._bind(arg.arg) for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]]
+        declared = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+        params = [self._bind(arg.arg) for arg in declared]
+        # Annotation keys are CPython-mangled just like the param slots (``__enabled`` -> ``_Klass__enabled``), so
+        # both the hint lookup and the bool_params entry use the runtime spelling.
+        bool_params = frozenset(
+            spelled for arg in declared if self._hints.get(spelled := self._resolver.runtime_spelling(arg.arg)) is bool
+        )
         entry = self._current.id
         exit_block = self._new_block()
         exit_block.terminator = UnitExit(origin)
@@ -164,6 +187,7 @@ class _Builder:
             entry=entry,
             exit=exit_block.id,
             bound_self=self._bound_self,
+            bool_params=bool_params,
         )
         verify(unit)
         return unit

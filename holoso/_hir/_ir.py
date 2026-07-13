@@ -251,6 +251,9 @@ class HirBuilder:
             raise RuntimeError("no current block; call block() first")
         return self._cur
 
+    def current_block_or_none(self) -> BlockId | None:
+        return self._cur
+
     def set_terminator(self, block: BlockId, terminator: Terminator) -> None:
         self._blocks[block].terminator = terminator
 
@@ -345,6 +348,16 @@ class HirBuilder:
             if arm in self._nodes and self._type_of(arm) != type:
                 raise ValueError(f"phi arm {arm} has type {self._type_of(arm)}, expected {type}")
         vid = self._fresh(Phi(type, tuple(arms)))
+        self._blocks[self.current_block].phis.append(vid)
+        return vid
+
+    def empty_phi(self, type: Type) -> ValueId:
+        """
+        A phi with no arms yet, for Braun-style SSA cycle breaking: the value is cached at the block before its
+        operands are read, so a read cycling back through the same block finds it instead of recursing forever.
+        :meth:`set_phi_arms` supplies the arms before :meth:`finish`.
+        """
+        vid = self._fresh(Phi(type, ()))
         self._blocks[self.current_block].phis.append(vid)
         return vid
 

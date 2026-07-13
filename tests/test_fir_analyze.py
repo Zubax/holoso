@@ -425,7 +425,7 @@ def test_string_concatenation_folds() -> None:
     _assert_known_matches_python(kernel)
 
 
-def test_builtin_folds_survive_argument_widening() -> None:
+def test_intrinsic_folds_survive_argument_widening() -> None:
     def kernel(x: float) -> float:
         y = 2.0
         result = 0.0
@@ -434,8 +434,10 @@ def test_builtin_folds_survive_argument_widening() -> None:
             y = y - x
         return result
 
-    with pytest.raises(AnalysisRejection, match="runtime arguments"):
-        Analyzer(kernel).fixpoint()  # abs must not stay folded at Known(2.0); the widened case rejects for now
+    # abs is a registered intrinsic: a first pass sees Known(2.0), but once y widens to a runtime value the fold is
+    # non-destructively redone as an HIR FloatAbs operation -- never left stale at Known(2.0).
+    result = Analyzer(kernel).fixpoint()
+    assert result.block_in[result.unit.exit].get(ReturnPlace()) == Residual(SemType.FLOAT)
 
 
 def test_keyword_only_defaults_bind_like_python() -> None:

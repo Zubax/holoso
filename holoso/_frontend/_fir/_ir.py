@@ -343,6 +343,7 @@ class FunctionUnit:
     entry: BlockId
     exit: BlockId
     bound_self: object | None
+    bool_params: frozenset[str]  # parameters annotated ``bool``; the analyzer seeds them as a runtime bool
 
 
 def _op_reads(op: Op) -> list[BindingId]:
