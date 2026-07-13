@@ -21,6 +21,14 @@ _MAX_DEPTH = 64
 _MAX_ELEMENTS = 1 << 20
 
 
+class SemType(enum.Enum):
+    """The runtime semantic kind of a scalar value: float, bool, or signed integer."""
+
+    FLOAT = "float"
+    BOOL = "bool"
+    INT = "int"
+
+
 @dataclass(frozen=True, slots=True)
 class StaticBool:
     value: bool

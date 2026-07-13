@@ -67,7 +67,7 @@ from ._resolve import (
     UnboundCell,
     comprehension_only_targets,
 )
-from ._value import admit, admit_ref
+from ._value import SemType, admit, admit_ref
 
 _logger = logging.getLogger(__name__)
 
@@ -193,18 +193,22 @@ class _Builder:
                 raise BuildRejection(
                     f"parameter {arg.arg!r} requires an explicit type annotation (float or bool)", self._origin(arg)
                 )
-            if hint in (int, str, bytes, complex):
+            if hint in (str, bytes, complex):
                 raise BuildRejection(
-                    f"unsupported parameter annotation for {arg.arg!r}: expected float or bool", self._origin(arg)
+                    f"unsupported parameter annotation for {arg.arg!r}: expected float, bool, or int", self._origin(arg)
                 )
         params = [self._bind(arg.arg) for arg in declared]
         self._params_bound = True  # any further store to the receiver name is now a rebinding, not the initial bind
         # Annotation keys are CPython-mangled just like the param slots (``__enabled`` -> ``_Klass__enabled``), so
-        # both the hint lookup and the bool_params entry use the runtime spelling.
-        bool_params = frozenset(
-            spelled for arg in declared if self._hints.get(spelled := self._resolver.runtime_spelling(arg.arg)) is bool
-        )
-        declared_return_bool = self._validate_return_annotation(fndef, origin)
+        # both the hint lookup and the param_types entry use the runtime spelling. A non-scalar (array) parameter is
+        # seeded FLOAT here and handled specially at its point of use.
+        scalar_kinds: dict[object, SemType] = {bool: SemType.BOOL, int: SemType.INT}  # array hints fall back to FLOAT
+        param_types = {
+            spelled: scalar_kinds.get(self._hints.get(spelled), SemType.FLOAT)
+            for arg in declared
+            if (spelled := self._resolver.runtime_spelling(arg.arg)) is not None
+        }
+        declared_return = self._validate_return_annotation(fndef, origin)
         entry = self._current.id
         exit_block = self._new_block()
         exit_block.terminator = UnitExit(origin)
@@ -222,13 +226,13 @@ class _Builder:
             entry=entry,
             exit=exit_block.id,
             bound_self=self._bound_self,
-            bool_params=bool_params,
-            declared_return_bool=declared_return_bool,
+            param_types=param_types,
+            declared_return=declared_return,
         )
         verify(unit)
         return unit
 
-    def _validate_return_annotation(self, fndef: ast.FunctionDef, origin: OriginStack) -> bool | None:
+    def _validate_return_annotation(self, fndef: ast.FunctionDef, origin: OriginStack) -> SemType | None:
         # The declared return type is mandatory and drives the output-port type; a mismatch against the inferred value
         # type is caught at emission. ``None`` here means void or an aggregate (deferred), so no scalar check applies.
         if fndef.returns is None:
@@ -240,9 +244,11 @@ class _Builder:
             remainder = [arg for arg in args if arg is not type(None)]
             hint = remainder[0] if len(remainder) == 1 else hint
         if hint is float:
-            return False
+            return SemType.FLOAT
         if hint is bool:
-            return True
+            return SemType.BOOL
+        if hint is int:
+            return SemType.INT
         if hint is type(None) or typing.get_origin(hint) in (tuple, list):
             return None
         raise BuildRejection(

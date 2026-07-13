@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from .._errors import UnsupportedConstruct
-from ._types import BoolType, FloatType, Type
+from ._types import BoolType, FloatType, IntType, Type
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,3 +37,12 @@ class BoolConst(Const):
     @property
     def type(self) -> BoolType:
         return BoolType()
+
+
+@dataclass(frozen=True, slots=True)
+class IntConst(Const):
+    value: int
+
+    @property
+    def type(self) -> IntType:
+        return IntType()

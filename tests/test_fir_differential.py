@@ -563,16 +563,18 @@ def test_namespace_attribute_store_is_a_located_rejection() -> None:
         lower_fir(kernel)
 
 
-def test_runtime_integer_in_float_datapath_is_a_located_rejection() -> None:
-    # Codex round-3 #2: a runtime selection between two distinct int literals joins to a runtime int, not a Known
-    # value. The integer datapath is stage 8, so feeding that int into a float operation must be a located rejection
-    # rather than a silent reinterpretation of the integer bits as a float.
+def test_runtime_integer_in_float_datapath_promotes_to_float() -> None:
+    # A runtime selection between two distinct int literals joins to a runtime int (a phi over two Known ints); feeding
+    # that integer into a float operation promotes it via IntToFloat, exactly as Python promotes ``x + n`` int->float.
+    from holoso._hir import FloatAdd, IntToFloat, Operation, optimize
+
     def kernel(flag: bool, x: float) -> float:
         n = 1 if flag else 0  # a runtime int (a phi over two distinct Known ints), not a foldable constant
         return x + n
 
-    with pytest.raises(EmissionRejection, match="runtime integer value in the float datapath"):
-        lower_fir(kernel)
+    hir = optimize(lower_fir(kernel))
+    ops = {type(n.operator).__name__ for n in hir.nodes.values() if isinstance(n, Operation)}
+    assert IntToFloat.__name__ in ops and FloatAdd.__name__ in ops  # the integer edge is promoted, then added in float
 
 
 def test_inexact_numpy_integer_state_reset_is_a_located_rejection() -> None:
@@ -610,7 +612,7 @@ def test_mixed_bool_float_comparison_is_a_located_rejection() -> None:
         hit = flag == x  # a bool compared directly against a float
         return 1.0 if hit else 0.0
 
-    with pytest.raises(EmissionRejection, match="mixes a boolean and a float"):
+    with pytest.raises(EmissionRejection, match="mixes a boolean and a non-boolean"):
         lower_fir(kernel)
 
 

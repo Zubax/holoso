@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from ..._util import RelationalOp
 from ._opsem import BinOp, UnOp
-from ._value import ObjectRef, StaticValue
+from ._value import ObjectRef, SemType, StaticValue
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,8 +343,8 @@ class FunctionUnit:
     entry: BlockId
     exit: BlockId
     bound_self: object | None
-    bool_params: frozenset[str]  # parameters annotated ``bool``; the analyzer seeds them as a runtime bool
-    declared_return_bool: bool | None  # True for ``-> bool``, False for ``-> float``, None for void/aggregate
+    param_types: dict[str, SemType]  # each datapath parameter's declared kind, by runtime spelling; seeds the analyzer
+    declared_return: SemType | None  # the declared scalar return kind (FLOAT/BOOL/INT); None for void or an aggregate
 
 
 def _op_reads(op: Op) -> list[BindingId]:
