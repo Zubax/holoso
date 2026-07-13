@@ -64,3 +64,14 @@ The shadow FIR analyzer has no aggregate story for W-typed state: tuple-valued a
 `self.window = (self.window[1], x)`) reject with "unsupported reset type" while the production front-end decomposes
 vector attributes into scalar state. The W/D fixed point needs elementwise FactSeq live-ins before the cutover can
 cover such kernels (stage 9 / wiring milestone territory).
+
+The shadow FIR emitter does not yet emit aggregate (tuple/list) returns or multi-leaf return places; such kernels
+get a located EmissionRejection. The per-leaf return-place decomposition lands with records in stage 9 (it shares
+the product-leaf scalarization the record work introduces). The differential harness covers scalar-returning
+kernels only until then.
+
+Two shadow-emitter capability gaps deferred to their proper stages, each a clean located rejection today:
+runtime scalar conversions bool(x)/float(x)/int(x) (they should become inline HIR casts FloatToBool/BoolToFloat --
+stage 8, conversions); and iteration/indexing over a static-LENGTH runtime-element aggregate (for v in (x, y, x+y);
+[x]*3 then indexed) which needs the FactSeq layout to thread through named-local stores and the loop unroller --
+stage 9, records/reductions/gather.

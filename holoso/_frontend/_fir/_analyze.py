@@ -57,6 +57,7 @@ from ._ir import (
     UnitExit,
 )
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
+from ..._hir import BoolType
 from ._value import (
     MetaInt,
     StaticRecord,
@@ -268,6 +269,7 @@ class Analyzer:
         self._state_livein: dict[StateLeaf, Fact] = {}
         self._discovered_stores: set[tuple[BlockId, StateLeaf]] = set()
         self._concrete_calls: set[int] = set()
+        self._intrinsic_calls: set[int] = set()
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._value_methods: dict[tuple[StaticValue, str], object] = {}
@@ -306,13 +308,14 @@ class Analyzer:
                     header = result.unit.blocks[header_id]
                     assert isinstance(header.terminator, StaticFor)
                     header.terminator = Jump(chain_entry, header.terminator.origin)
-                _validate(result, self._concrete_calls)
+                _validate(result, self._concrete_calls | self._intrinsic_calls)
                 return result
             self._runtime_state = new_w
             self._state_livein = new_d
             self._block_ancestry = {}
             self._discovered_stores = set()
             self._concrete_calls = set()
+            self._intrinsic_calls = set()
             self._unroll_cache = {}
             _logger.info("state round %d: %d runtime leaves, %d live-in facts", round_index + 1, len(new_w), len(new_d))
         raise AnalysisRejection("state fixpoint failed to stabilize", (Origin(self._root_template.name, 0, 0),))
@@ -355,6 +358,55 @@ class Analyzer:
             return Known(admitted)  # a Known Bool folds exactly (no width) and keeps invariant flags folding
         return Residual(sem)
 
+    def state_store_order(self, result: ResidualUnit) -> list[StateLeaf]:
+        """
+        State leaves in first-store SOURCE order, matching the production front-end's port contract. The order key is
+        the storing op's source origin (line, column), not the CFG block index -- a store nested in a branch has a
+        higher block id than a later top-level store yet comes first in the source text.
+        """
+        first_store: dict[StateLeaf, tuple[int, int]] = {}
+        for block_id in result.executable_blocks:
+            block = result.unit.blocks[block_id]
+            env = result.block_in[block_id].copy()
+            for index, op in enumerate(block.ops):
+                if isinstance(op, PyStoreAttr):
+                    obj_fact = env.get(Local(op.obj))
+                    if isinstance(obj_fact, Known) and isinstance(obj_fact.value, ObjectRef):
+                        leaf = StateLeaf(obj_fact.value.obj, (op.name,))
+                        position = (op.origin[0].line, op.origin[0].column)
+                        if leaf not in first_store or position < first_store[leaf]:
+                            first_store[leaf] = position
+                self._transfer(result.unit, block, index, op, env)
+        return sorted(first_store, key=lambda leaf: first_store[leaf])
+
+    def binding_facts(self, result: ResidualUnit) -> dict[BindingId, Fact]:
+        """
+        The final fact of every op-produced binding, by replaying the transfer over the stabilized graph. Temporaries
+        are write-once, so one pass records each binding's authoritative fact; emission consults it instead of
+        re-deriving folds. The replay does not mutate the graph (all calls are already expanded or concrete-folded).
+        """
+        from ._ir import op_dst
+
+        facts: dict[BindingId, Fact] = {}
+        for block_id in result.executable_blocks:
+            block = result.unit.blocks[block_id]
+            env = result.block_in[block_id].copy()
+            for index, op in enumerate(block.ops):
+                self._transfer(result.unit, block, index, op, env)
+                dst = op_dst(op)
+                if dst is not None:
+                    facts[dst] = env.get(Local(dst))
+        return facts
+
+    def intrinsic_calls(self) -> set[int]:
+        return set(self._intrinsic_calls)
+
+    def runtime_state(self) -> set[StateLeaf]:
+        return set(self._runtime_state)
+
+    def state_livein(self) -> dict[StateLeaf, Fact]:
+        return dict(self._state_livein)
+
     def _template(self, fn: object) -> FunctionUnit:
         key: tuple[int, int | None]
         if isinstance(fn, types.MethodType):
@@ -378,7 +430,8 @@ class Analyzer:
         block_in: dict[BlockId, _Env] = {unit.entry: _Env()}
         entry_env = block_in[unit.entry]
         for param in unit.params:
-            fact = (param_facts or {}).get(param.name, Residual(SemType.FLOAT))
+            default = Residual(SemType.BOOL if param.name in unit.bool_params else SemType.FLOAT)
+            fact = (param_facts or {}).get(param.name, default)
             entry_env.set(Local(param), fact)
         if unit.bound_self is not None and unit.params:
             entry_env.set(Local(unit.params[0]), Known(ObjectRef(unit.bound_self)))
@@ -576,6 +629,10 @@ class Analyzer:
                 obj_fact = env.get(Local(obj))
                 if not (isinstance(obj_fact, Known) and isinstance(obj_fact.value, ObjectRef)):
                     raise AnalysisRejection("attribute store on a non-component value", op.origin)
+                if isinstance(obj_fact.value.obj, (types.ModuleType, type)):
+                    # A module/class is a compile-time namespace, not runtime state: mutating it would make later
+                    # reads (which snapshot the live object) disagree with the store. Reject, as production does.
+                    raise AnalysisRejection("assignment to a module or class attribute is not supported", op.origin)
                 _reject_attribute_hooks(type(obj_fact.value.obj), op.origin)
                 _reject_descriptor(type(obj_fact.value.obj), name, op.origin)
                 leaf = StateLeaf(obj_fact.value.obj, (name,))
@@ -670,6 +727,15 @@ class Analyzer:
     def _attribute(self, env: _Env, obj: Fact, name: str, origin: OriginStack) -> Fact:
         if isinstance(obj, Known) and isinstance(obj.value, ObjectRef):
             component = obj.value.obj
+            if isinstance(component, (types.ModuleType, type)):
+                # A namespace (math, np, a class), not a stateful component: attribute access is a plain lookup,
+                # so math.sqrt/np.floor resolve to the callable the call site then dispatches through the registry.
+                try:
+                    attribute = getattr(component, name)
+                except AttributeError as error:
+                    raise AnalysisRejection(str(error), origin) from None
+                admitted = admit(attribute)
+                return Known(admitted) if admitted is not None else Known(ObjectRef(attribute))
             _reject_attribute_hooks(type(component), origin)
             _reject_descriptor(type(component), name, origin)
             class_attribute = _mro_attribute_of(type(component), name)
@@ -822,16 +888,39 @@ class Analyzer:
     # ------------------------------------ call expansion ------------------------------------
 
     def _expand_call(self, unit: FunctionUnit, block: Block, index: int, call: PyCall, env: _Env) -> bool:
+        from .._lib import Intrinsic, Library, resolve
+
         callee_fact = env.get(Local(call.callee))
         if not (isinstance(callee_fact, Known) and isinstance(callee_fact.value, ObjectRef)):
             raise AnalysisRejection("call target is not resolvable here", call.origin)
         target = callee_fact.value.obj
+        match = resolve(target)
+        if isinstance(match, Library):
+            target = match.stub  # a composite library stub inlines exactly like a user function
+        elif isinstance(match, Intrinsic):
+            argument_facts = [env.get(Local(arg)) for arg in call.args] + [
+                env.get(Local(value)) for _, value in call.kwargs
+            ]
+            if all(isinstance(fact, Known) for fact in argument_facts):
+                pass  # fully static: fold concretely below through the original callable
+            else:
+                # A runtime-operand intrinsic (sqrt(x), sin(x)...) becomes an HIR operation at emission; keep the
+                # PyCall in the graph, typed by the operator's result, and let emission resolve the registry match.
+                if call.kwargs:
+                    raise AnalysisRejection("keyword arguments to a hardware intrinsic are not supported", call.origin)
+                arity = match.operator.signature.arity
+                if len(call.args) != arity:
+                    raise AnalysisRejection(f"intrinsic expects {arity} argument(s), got {len(call.args)}", call.origin)
+                sem = SemType.BOOL if isinstance(match.operator.signature.result_type, BoolType) else SemType.FLOAT
+                env.set(Local(call.dst), Residual(sem))
+                self._intrinsic_calls.add(id(call))
+                return False
         if not isinstance(target, (types.FunctionType, types.MethodType)) and not (
             hasattr(type(target), "__call__")
             and isinstance(getattr(type(target), "__call__", None), types.FunctionType)
         ):
-            # A builtin (range, float, abs, math.sin...) evaluates concretely under the snapshot doctrine; its
-            # runtime-operand form becomes a registry-lowered HIR operation at the emission stage, not here.
+            # A builtin (range, float, abs...) or a fully-static intrinsic evaluates concretely under the snapshot
+            # doctrine; its runtime-operand form was already routed to an HIR operation above.
             argument_facts = [env.get(Local(arg)) for arg in call.args]
             keyword_facts = [(keyword, env.get(Local(value))) for keyword, value in call.kwargs]
             if not all(isinstance(fact, Known) for fact in argument_facts + [fact for _, fact in keyword_facts]):
