@@ -45,10 +45,10 @@ def run(hir: Hir) -> Hir:
     neg_of: dict[ValueId, ValueId] = {}
 
     def is_integral(vid: ValueId) -> bool:
-        """A value provably equal to an integer-valued float: a rounding result, or a bool widened to 0.0/1.0."""
+        """A value provably equal to an integer-valued float: a rounding result, a promoted integer, or a widened bool."""
         node = hir.nodes[vid]
         return isinstance(node, Operation) and isinstance(
-            node.operator, (FloatFloor, FloatCeil, FloatRound, FloatTrunc, BoolToFloat)
+            node.operator, (FloatFloor, FloatCeil, FloatRound, FloatTrunc, BoolToFloat, IntToFloat)
         )
 
     def emit_float_const(builder: HirBuilder, value: float) -> ValueId:

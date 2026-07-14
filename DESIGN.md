@@ -387,7 +387,7 @@ int<->float/int<->bool conversions). All exact integer folding is the front end'
 HIR performs no integer constant arithmetic, only the conversion folds and the identity/elision peepholes. Genuinely
 pure integer expressions stay integer end-to-end and stop at MIR: the integer BACKEND (typed MIR views sharing the
 wide register bank) is a later milestone, so any integer node -- operator, constant, input, or state slot -- reaching
-MIR is a clean located "not yet lowerable" rejection.
+MIR is a clean "not yet lowerable" rejection (not yet source-located; the integer wiring milestone owns that).
 
 Everything mixed promotes to float, C-style. An `IntToFloat` sits on each integer edge feeding a float operation, a
 `return`, or a state store into a float slot; `/` and int+float promote while `//`/`%` stay integer and floor-couple.
@@ -410,10 +410,12 @@ finite). Bitwise and shift operators are bit-true and require two integers (or t
 stay in the boolean bank); a boolean shift or a mixed bool/int operand is rejected, as is a compile-time-known
 negative shift count, while a runtime negative count is the hardware's documented reverse-shift deviation.
 
-Power: a compile-time integer exponent expands to a bounded multiply chain in the base's own kind (an integer base
-with a nonnegative exponent stays an exact integer chain, contained at MIR; a negative exponent reciprocates in
-float). A runtime exponent computes as the direct fastmath identity `exp2(e * log2(b))` -- base two skips the log2 --
-with a constant base's log2 folding statically; a negative base is a log2 domain error, as in C. The `pow`/`np.power`
+Power: a compile-time integer or INTEGRAL-float exponent expands to a bounded multiply chain in the base's own kind
+(an integer base with a nonnegative integer exponent stays an exact integer chain, contained at MIR; a negative
+exponent reciprocates in float). A runtime exponent computes as the direct fastmath identity `exp2(e * log2(b))` --
+base two skips the log2 -- with a constant base's log2 folding statically. A compile-time nonpositive base with a
+runtime exponent is a located rejection (it would assert the log2 pole/domain error on every transaction where
+Python computes a plain value); a runtime zero or negative base is a log2 domain error, as in C. The `pow`/`np.power`
 spellings still route through the guarded composite stub, which honors negative bases on small integer exponents;
 collapsing them onto `**` and giving `np.power` an integer overload is deferred to the integer wiring milestone, as
 is an integer lowering for `np.sign` (an integer operand is a located rejection meanwhile).

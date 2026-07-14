@@ -676,6 +676,85 @@ def test_a_promoted_merge_flows_through_every_use_as_a_plain_float() -> None:
     assert _run_model(in_list, True, 0.0) == [1.0]
 
 
+def test_a_known_integer_store_to_a_float_slot_folds_the_rounded_value() -> None:
+    # Review round 1 (Codex): the store into a float slot rounds the integer into the binary64 carrier, so the fact a
+    # read-back sees must be the ROUNDED float -- folding the comparison with the exact 2**53 + 1 would disagree with
+    # the value the datapath actually stored (observed: model returned 0.0 where the RTL stores 2**53).
+    class K:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def step(self) -> float:
+            self.y = 2**53 + 1
+            return 1.0 if self.y == float(2**53) else 0.0
+
+    hir = _hir(K().step)
+    from holoso._hir import FloatConst, Operation
+
+    (out,) = [o for o in hir.outputs if o.name == "out_0"]
+    result = hir.nodes[out.value]
+    assert isinstance(result, FloatConst) and result.value == 1.0  # folded on the rounded store, matching the datapath
+    assert not any(isinstance(n, Operation) for n in hir.nodes.values())
+
+
+def test_a_nonpositive_known_base_with_a_runtime_exponent_is_rejected() -> None:
+    # Review round 1 (Codex): 0.0**e through the general exp2(e * log2(b)) path would assert the log2 pole error on
+    # every transaction (Python: plain 0.0). A compile-time nonpositive base is a located rejection instead; a runtime
+    # base keeps the documented C-style log2 domain-error behavior.
+    def zero_base(e: float) -> float:
+        return 0.0**e  # type: ignore[no-any-return]  # typeshed types float**float as Any
+
+    def negative_base(e: float) -> float:
+        return (-2.0) ** e  # type: ignore[no-any-return]
+
+    for kernel in (zero_base, negative_base):
+        with pytest.raises(UnsupportedConstruct, match="positive base"):
+            lower(kernel)
+
+
+def test_a_known_integer_rejoining_a_pure_int_phi_stays_integer() -> None:
+    # Review round 1: a diamond whose arms both bind the same Known integer used to type the rejoin phi as float,
+    # crashing a later pure-int phi with a raw ValueError instead of lowering to a typed integer merge.
+    def kernel(x: float, a: bool, b: bool) -> float:
+        if a:
+            i = 0
+            u = x + 1.0
+        else:
+            i = 0
+            u = x - 1.0
+        if b:
+            i = int(u)
+        return float(i + 1)
+
+    hir = _hir(kernel)
+    assert IntAdd.__name__ in _op_names(hir)
+    with pytest.raises(UnsupportedConstruct, match="not yet lowerable"):
+        lower_to_mir(hir, _ops())
+
+
+def test_an_integer_element_of_an_aggregate_stays_integer() -> None:
+    # Review round 1: an integer element flowing through a tuple/list must keep its integer typing (it used to be
+    # reclassified float by the aggregate handle, escaping the MIR containment).
+    def kernel(x: float) -> float:
+        return 1.0 if [int(x)][0] == 3 else 0.0
+
+    hir = _hir(kernel)
+    assert IntRelational.__name__ in _op_names(hir) and "FloatRelational" not in _op_names(hir)
+    with pytest.raises(UnsupportedConstruct, match="not yet lowerable"):
+        lower_to_mir(hir, _ops())
+
+
+def test_a_known_integral_float_exponent_expands_to_a_chain() -> None:
+    # x ** 3.0 is the same monomial as x ** 3 under fastmath: it expands to the multiply chain instead of paying the
+    # exp2/log2 pair (which would also drag in a domain-error cone for a negative base).
+    def kernel(x: float) -> float:
+        return x**3.0  # type: ignore[no-any-return]
+
+    names = _op_names(_hir(kernel))
+    assert "FloatMul" in names and "FloatExp2" not in names and "FloatLog2" not in names
+    assert _run_model(kernel, 2.0) == [8.0]
+
+
 def test_int_float_int_round_trip_collapses_to_the_identity() -> None:
     # The fastmath charter: int -> float -> int collapses away completely, precision loss ignored.
     def kernel(a: int) -> int:

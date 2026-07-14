@@ -25,6 +25,10 @@ slots end a transaction on the same live-out register -- e.g. two writes to `sel
 loudly with no output, but the message is addressed to a compiler developer, not the user, who deserves a located
 `SynthesisError`.
 
+EmissionRejection messages carry no source location, unlike Build/Analysis rejections (e.g. the aggregate-return
+refusal and the beyond-carrier constant name no `function:line:column`). Thread op origins through the emitter's
+refusal paths so every front-end rejection is located.
+
 ## Deferred capability gaps (tracked in the FIR_PARITY_PENDING registry; stage 10 asserts the registry empty)
 
 The analyzer has no aggregate story for W-typed state: tuple-valued attributes (the delay-line idiom

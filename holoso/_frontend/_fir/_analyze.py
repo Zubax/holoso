@@ -4,7 +4,8 @@ environments over Places. Facts form the lattice Unbound < Known(StaticValue) < 
 per-Place, strong updates on stores, and only executable in-edges contribute. An int/float join promotes the
 integer side to float, C-style, its rounding accepted under the fastmath charter (Python instead keeps each
 path's runtime kind -- the documented deviation). Static folding is Python-exact and runs on the closed value
-domain (the width rule: runtime-typed numeric values never fold; a Known Bool always drives edge selection). StaticFor headers unroll by cloning the body per trip once the iterable is Known; PyCall
+domain (the width rule: runtime-typed numeric values never fold; a Known Bool always drives edge selection).
+StaticFor headers unroll by cloning the body per trip once the iterable is Known; PyCall
 sites expand on demand by grafting the callee's freshly instantiated template into the working graph (recursion is
 a located rejection keyed by function and receiver identity). The result is a stable residual graph plus final
 facts, validated to contain no unresolved calls, loop templates, or possibly-unbound reads on executable paths.
@@ -60,7 +61,7 @@ from ._ir import (
     UnitExit,
 )
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
-from ..._hir import BoolType, FloatIsFinite
+from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
 from ._value import (
     MetaInt,
     StaticRecord,
@@ -799,10 +800,26 @@ class Analyzer:
                     )
                 leaf = StateLeaf(obj_fact.value.obj, (name,))
                 self._discovered_stores.add((block.id, leaf))
+                if self._leaf_kind(leaf) is SemType.FLOAT and _numeric_sem(src_fact) is SemType.INT:
+                    # The datapath store rounds the integer into the float slot, so the fact a read-back sees must be
+                    # the promoted (rounded) float -- an exact-integer fact here would fold against a value the slot
+                    # does not hold. On the first W/D round the slot kind falls back to the reset's; the fixed point
+                    # then converges with the same descending joins as the live-in itself.
+                    src_fact = _float_promoted(src_fact, op.origin)
                 env.set(leaf, src_fact)
             case PyCall(dst=dst, callee=callee):
                 return self._expand_call(unit, block, index, op, env)
         return False
+
+    def _leaf_kind(self, leaf: StateLeaf) -> SemType | None:
+        """The numeric kind the slot stores at: the current live-in's, else the reset's; None when unresolvable."""
+        fact = self._state_livein.get(leaf)
+        if fact is None:
+            try:
+                fact = self._state_reset_fact(leaf)
+            except AnalysisRejection:
+                return None
+        return _numeric_sem(fact)
 
     def _residual_of(self, fact: Fact, origin: OriginStack) -> Fact:
         match fact:
@@ -1147,7 +1164,10 @@ class Analyzer:
                     _numeric_sem(fact) is SemType.INT for fact in argument_facts
                 ):
                     # A classification of an integer folds ideally: an integer is always finite and never an infinity
-                    # (hardware integers saturate, so this holds in the datapath too, not only in Python).
+                    # (hardware integers saturate, so this holds in the datapath too, not only in Python). The fold's
+                    # closed world is the four registered classifiers; a new bool-result intrinsic (a signbit, say)
+                    # must extend this fold rather than silently inherit the isfinite/isinf split.
+                    assert isinstance(match.operator, (FloatIsFinite, FloatIsInf, FloatIsPosInf, FloatIsNegInf))
                     verdict = isinstance(match.operator, FloatIsFinite)
                     env.set(Local(call.dst), Known(StaticBool(verdict)))
                     self._concrete_calls.add(id(call))

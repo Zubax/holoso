@@ -33,6 +33,7 @@ from ..._hir import (
     FloatConst,
     FloatDiv,
     FloatExp2,
+    FloatLog2,
     FloatMul,
     FloatNeg,
     FloatRelational,
@@ -121,7 +122,9 @@ def _carrier_float(value: object) -> float:
     try:
         return float(value)  # type: ignore[arg-type]
     except OverflowError:
-        raise EmissionRejection(f"integer constant {value} is beyond the binary64 carrier range") from None
+        raise EmissionRejection(
+            f"an integer constant of {int(value):.0e} magnitude is beyond the binary64 carrier range"  # type: ignore[call-overload]
+        ) from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,7 +319,7 @@ class _Emitter:
     def _fact_port_type(fact: Fact | None) -> Type:
         if _is_bool_fact(fact):
             return BoolType()
-        if fact == Residual(SemType.INT):
+        if fact == Residual(SemType.INT) or (isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt))):
             return IntType()
         return FloatType()
 
@@ -753,15 +756,25 @@ class _Emitter:
 
     def _emit_power(self, block: FirBlockId, base: BindingId, exponent: BindingId) -> int:
         # A base raised to a COMPILE-TIME integer exponent expands to a multiply chain (x**3 -> x*x*x) in the base's
-        # own kind -- an integer base stays exact integer (contained at MIR), a float base multiplies in float -- both
-        # bounded like the loop unroller so ``x ** 10**9`` refuses instead of hanging. A negative exponent is the
-        # reciprocal of the float chain (Python: a negative power is float even on an integer base).
+        # own kind -- an integer base with an integer exponent stays exact integer (contained at MIR), a float base
+        # multiplies in float -- both bounded like the loop unroller so ``x ** 10**9`` refuses instead of hanging. A
+        # negative exponent is the reciprocal of the float chain (Python: a negative power is float even on an
+        # integer base), and a Known INTEGRAL float exponent (x ** 3.0) chains identically under fastmath rather
+        # than paying the exp2/log2 pair and its domain-error cone.
         exp_fact = self._fact(exponent)
-        if isinstance(exp_fact, Known) and isinstance(exp_fact.value, (MetaInt, NpInt)):
+        exponent_is_int = isinstance(exp_fact, Known) and isinstance(exp_fact.value, (MetaInt, NpInt))
+        power: int | None = None
+        if exponent_is_int:
+            assert isinstance(exp_fact, Known) and isinstance(exp_fact.value, (MetaInt, NpInt))
             power = int(exp_fact.value.value)
             if abs(power) > _MAX_POWER_CHAIN:
                 raise EmissionRejection(f"a compile-time power exponent of {power} is too large to expand")
-            if self._fact_sem(self._fact(base)) is SemType.INT and power >= 0:
+        elif isinstance(exp_fact, Known) and isinstance(exp_fact.value, (StaticFloat, NpFloat)):
+            exact = float(exp_fact.value.value)
+            if exact.is_integer() and abs(exact) <= _MAX_POWER_CHAIN:
+                power = int(exact)  # an oversized or fractional float exponent falls to the exp2/log2 path below
+        if power is not None:
+            if exponent_is_int and self._fact_sem(self._fact(base)) is SemType.INT and power >= 0:
                 if power == 0:
                     return self._builder.int_const(1)  # x**0 is the INTEGER 1 on an integer base, as in Python
                 source = self._materialize(block, base, SemType.INT)
@@ -779,19 +792,19 @@ class _Emitter:
                 return self._builder.operation(FloatDiv(), [self._builder.float_const(1.0), chain])
             return chain
         # A runtime exponent computes in float as the direct fastmath identity exp2(e * log2(b)); base two skips the
-        # log2 (the common 2**e spelling costs one exp2). An integer base or exponent promotes C-style; a negative
-        # base is a log2 domain error, as in C. No identity-guard diamonds: strength reduction owns the provable
-        # identities, and the ZKF zero/infinity algebra (0*inf = 0) covers the IEEE corner b == 1, e = inf.
-        from ..._hir import FloatLog2
-
+        # log2 (the common 2**e spelling costs one exp2). An integer base or exponent promotes C-style. A Known
+        # nonpositive base would assert the log2 pole/domain error on every transaction where Python computes a
+        # plain value, so it is a located rejection; a RUNTIME zero or negative base keeps the documented C-style
+        # log2 domain-error behavior. No identity-guard diamonds: strength reduction owns the provable identities,
+        # and the ZKF zero/infinity algebra (0*inf = 0) covers the IEEE corner b == 1, e = inf.
         exponent_vid = self._materialize(block, exponent, SemType.FLOAT)
         base_fact = self._fact(base)
-        if (
-            isinstance(base_fact, Known)
-            and isinstance(base_fact.value, (MetaInt, NpInt, StaticFloat, NpFloat))
-            and as_python(base_fact.value) == 2
-        ):
-            return self._builder.operation(FloatExp2(), [exponent_vid])
+        if isinstance(base_fact, Known) and isinstance(base_fact.value, (MetaInt, NpInt, StaticFloat, NpFloat)):
+            base_value = base_fact.value.value
+            if base_value == 2:
+                return self._builder.operation(FloatExp2(), [exponent_vid])
+            if not base_value > 0:
+                raise EmissionRejection("a power with a runtime exponent requires a positive base (log2 domain)")
         log_base = self._builder.operation(FloatLog2(), [self._materialize(block, base, SemType.FLOAT)])
         return self._builder.operation(FloatExp2(), [self._builder.operation(FloatMul(), [exponent_vid, log_base])])
 
