@@ -455,8 +455,17 @@ Integers. HIR carries a typed integer vocabulary -- `IntType`/`IntConst` and sig
 add/sub/mul/neg/abs, floor-coupled `//`/`%`, dynamic shifts, bitwise, relational, int-select, and the
 int<->float/int<->bool conversions). All exact integer folding is the front end's (`MetaInt`, arbitrary precision);
 HIR performs no integer constant arithmetic, only the conversion folds and the identity/elision peepholes. Promotion
-into a float position is explicit: an `IntToFloat` sits on every integer edge that feeds a float operation, phi, select,
-state join, or return; `/` and int+float promote to float while `//`/`%` stay integer and floor-couple. Bitwise and
+into a float position is explicit: an `IntToFloat` sits on an integer edge feeding a float operation, a definite-float
+arithmetic operand, or a `return`; `/` and int+float promote while `//`/`%` stay integer and floor-couple. A
+control-flow merge (phi, conditional select, state-leaf join) of an integer path with a float path is NOT a promotion
+but an int-or-float value (`MixedNumeric`), since Python keeps each path's runtime kind: integer arithmetic on it is a
+located rejection (it would round the integer path in the float datapath), a definite-float operation resolves it to
+float, and a comparison is admitted only when its integer alternatives are exactly representable. Library intrinsics are
+typed by operand kind via a declarative registry rule: an integer-preserving spelling (`abs`/`np.abs`, `np.floor`/`ceil`/
+`trunc`/`round`, `min`/`max` of two integers via int-relational + int-select, `pow`/`np.power` of integers) keeps an
+integer result contained at MIR; a float-forcing spelling (`math.fabs`/`np.fabs`, the int-returning `math.floor`/`ceil`/
+`trunc`/`round`, `np.rint`) promotes an integer operand; `np.minimum`/`maximum` promote a mixed operand while a builtin
+`min`/`max` mixing an integer and a float rejects. Bitwise and
 shift operators are bit-true and require two integers (or two booleans for `&`/`|`/`^`, which stay in the boolean bank);
 a boolean shift or a mixed bool/int operand is rejected, as is a compile-time-known negative shift count, while a runtime
 negative count is the hardware's documented reverse-shift deviation. A base-two power with a runtime float exponent
@@ -464,7 +473,11 @@ lowers to `exp2`. Two conversion round-trips canonicalize in HIR: `f2i(i2f(n)) -
 (collapsing to `x` when `x` is already integer-valued), which keeps a `float(int(x))` truncation inside the float
 datapath. The integer BACKEND (typed MIR views sharing the wide register bank) is a later milestone, so any integer
 node -- operator, constant, input, or state slot -- reaching MIR is a clean located "not yet lowerable" rejection. An
-integer forced into a float position that binary64 cannot represent exactly is rejected rather than silently rounded.
+integer promoted into a float position is rejected rather than silently rounded when it is not exactly representable: a
+datapath constant is checked at materialization, and an exact int/float comparison carries a `RequireExactIntFloat`
+obligation verified against the selected target format at HIR->MIR (a runtime integer, whose value is unknown, is
+rejected outright). Deferred to the integer wiring milestone: an integer `pow` still rounds through the float stub, and
+a runtime integer compared with a float over-rejects even when it is a truncation (its provenance is not tracked).
 
 ## MIR
 
