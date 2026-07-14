@@ -47,6 +47,7 @@ from .._hir import (
     InPort,
     IntType as HirIntType,
     Jump,
+    RequireExactIntFloat,
     Node,
     Operation,
     Operator,
@@ -648,6 +649,15 @@ class _FloatLowerer:
 
     def _lower_operation(self, node: Operation) -> ValueId | None:
         match node:
+            case Operation(operator=RequireExactIntFloat(integers=integers, location=location), operands=(a,)):
+                fmt = self.context.ops.float_format
+                for value in sorted(integers):
+                    if not fmt.represents_integer_exactly(value):
+                        raise UnsupportedConstruct(
+                            f"{location}: integer {value} is not exactly representable in the target format for an "
+                            "exact comparison against a float; cast to float first"
+                        )
+                return self.context.remap[a]  # obligation met: identity on the float carrier
             case Operation(operator=FloatAdd() as semantic, operands=(a, b)):
                 return self._lower_binary_float(semantic, self.context.ops.fadd, a, b)
             case Operation(operator=FloatMul() as semantic, operands=(a, b)):

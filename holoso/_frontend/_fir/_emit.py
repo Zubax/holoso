@@ -41,6 +41,7 @@ from ..._hir import (
     FloatType,
     Hir,
     HirBuilder,
+    RequireExactIntFloat,
     IntAbs,
     IntAdd,
     IntAnd,
@@ -550,8 +551,10 @@ class _Emitter:
                         define(dst, self._bool_compare(rel, value_of(lhs), value_of(rhs)))  # bool ==/!= is XNOR/XOR
                     elif lsem is SemType.INT and rsem is SemType.INT:
                         define(dst, self._builder.operation(IntRelational(rel), [as_int(lhs), as_int(rhs)]))
-                    else:  # both float, or mixed int/float -- promote the integer edge and compare in the float domain
-                        define(dst, self._builder.operation(FloatRelational(rel), [as_float(lhs), as_float(rhs)]))
+                    else:  # a float on at least one side: promote an integer edge under a MIR-checked exactness guard
+                        left = self._exact_compare_operand(lhs, lhs_fact, as_float, op.origin)
+                        right = self._exact_compare_operand(rhs, rhs_fact, as_float, op.origin)
+                        define(dst, self._builder.operation(FloatRelational(rel), [left, right]))
             case PyNot(dst=dst, operand=operand):
                 fact = fact_of(operand)
                 truth = self._replay_truth(fact)
@@ -705,6 +708,36 @@ class _Emitter:
                 condition = self._builder.operation(IntRelational(RelationalOp.GE), [vids[0], vids[1]])
                 return self._builder.operation(IntSelect(), [condition, vids[0], vids[1]])
         raise AssertionError(f"no integer implementation for {implementation!r}")
+
+    def _exact_compare_operand(
+        self, binding: BindingId, fact: Fact, as_float: Callable[[BindingId], int], origin: object
+    ) -> int:
+        """
+        A comparison operand promoted to the float domain. A genuine float passes through; a KNOWN integer (or an
+        all-static int-or-float value) is promoted under a RequireExactIntFloat obligation so MIR rejects the comparison
+        when the integer is not exactly representable in the target format (Python compares an int and a float exactly).
+        A runtime integer -- alone or inside the mix -- cannot be proven representable, so it is a located rejection.
+        """
+        from ._analyze import MixedNumeric
+
+        frame = origin[0]  # type: ignore[index]
+        location = f"{frame.function}:{frame.line}:{frame.column}"
+        if isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)):
+            guard = RequireExactIntFloat(frozenset({int(fact.value.value)}), location)
+            return self._builder.operation(guard, [as_float(binding)])
+        if fact == Residual(SemType.INT):
+            raise EmissionRejection(
+                f"{location}: a runtime integer compared with a float is not exactly representable; cast to float first"
+            )
+        if isinstance(fact, MixedNumeric):
+            if fact.integer_alternatives is None:
+                raise EmissionRejection(
+                    f"{location}: an int-or-float value carrying a runtime integer is compared with a float; "
+                    "cast to float first"
+                )
+            integers = frozenset(int(value.value) for value in fact.integer_alternatives)
+            return self._builder.operation(RequireExactIntFloat(integers, location), [as_float(binding)])
+        return as_float(binding)
 
     def _handle_of(self, binding: BindingId, fact_of: "FactOf", value_of: "ValueOf") -> _Handle:
         # A per-element handle for a FactSeq: nested layout, a Known scalar (materialize on use), or an HIR value.
