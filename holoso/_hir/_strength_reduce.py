@@ -137,17 +137,13 @@ def run(hir: Hir) -> Hir:
                 return reduce_mul(builder, remap[a], remap[b])
             case Operation(operator=FloatDiv(), operands=(a, b)):
                 return reduce_div(builder, remap[a], remap[b])
-            case Operation(operator=FloatToInt(), operands=(a,)):
-                inner = hir.nodes[a]  # match the ORIGINAL operand so a chain canonicalizes fully in one pass
-                if isinstance(inner, Operation) and isinstance(inner.operator, IntToFloat):
-                    return remap[inner.operands[0]]  # f2i(i2f(n)) == n: the integer round-trip is exact
-                return copy_node(builder, node, remap)
             case Operation(operator=IntToFloat(), operands=(a,)):
+                # i2f(f2i(x)) is a round-toward-zero of the FLOAT x, which is FloatTrunc(x) exactly (f2i(x) is x's
+                # integer value, exactly representable back as a float because x already was one). It collapses to x
+                # itself only when x is already integer-valued, so the truncation is provably a no-op. The reverse,
+                # f2i(i2f(n)), is NOT rewritten: i2f rounds an integer wider than the mantissa, so it is not identity.
                 inner = hir.nodes[a]
                 if isinstance(inner, Operation) and isinstance(inner.operator, FloatToInt):
-                    # i2f(f2i(x)) is a round-toward-zero of a float, which is FloatTrunc(x) exactly (Python-faithful
-                    # under the ideal unbounded integers this milestone lowers). It collapses to x itself only when x
-                    # is already integer-valued, so the truncation is provably a no-op.
                     x = inner.operands[0]
                     return remap[x] if is_integral(x) else emit_float_operation(builder, FloatTrunc(), [remap[x]])
                 return copy_node(builder, node, remap)

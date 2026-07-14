@@ -391,3 +391,73 @@ def test_integer_state_counter_is_a_located_mir_rejection() -> None:
 
     with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(Counter().step, _ops(), name="int_state_counter")
+
+
+# ------------------------ regressions: integer values must never float-promote and round ------------------------
+
+
+def test_abs_of_an_integer_operand_is_rejected_not_float_promoted() -> None:
+    # abs/min/max are int-polymorphic: promoting abs(int(x)) to float would let the following integer arithmetic round
+    # (2**53 + 1 -> 2**53). With no integer abs/min/max operator yet, an integer operand is a located rejection.
+    def kernel(x: float) -> float:
+        return float(abs(int(x)) + 1 + 1)
+
+    with pytest.raises(UnsupportedConstruct, match="not yet lowerable"):
+        lower(kernel)
+
+
+def test_math_floor_is_integer_returning() -> None:
+    # math.floor(x) is an int in Python, so integer arithmetic on it stays exact (an integer-backend rejection) rather
+    # than rounding in float; a pure float use elides the int round-trip back to the float rounding operator.
+    def int_context(x: float) -> float:
+        return float(floor(x) + 1 + 1)
+
+    def float_context(x: float) -> float:
+        return floor(x) * 2.0
+
+    with pytest.raises(UnsupportedConstruct):
+        lower_to_mir(_hir(int_context), _ops())
+    names = _op_names(_hir(float_context))
+    assert "FloatFloor" in names and "FloatToInt" not in names  # the integer round-trip elided, metrics preserved
+
+
+def test_integer_base_raised_to_a_power_is_rejected() -> None:
+    def kernel(x: float) -> float:
+        return float(int(x) ** 3)  # exact integer exponentiation, not a rounding float multiply chain
+
+    with pytest.raises(UnsupportedConstruct, match="power"):
+        lower(kernel)
+
+
+def test_a_huge_integer_promoted_to_float_is_a_clean_rejection() -> None:
+    # 10**400 is beyond binary64; promoting it to a float leaf is a located rejection, never a raw OverflowError.
+    def kernel(flag: bool, x: float) -> float:
+        if flag:
+            y = 10**400
+        else:
+            y = x
+        return y
+
+    with pytest.raises(UnsupportedConstruct):
+        lower_to_mir(_hir(kernel), _ops())
+
+
+def test_integer_and_or_lowers_to_int_select_without_crashing() -> None:
+    def kernel(a: int, b: int) -> int:
+        return a or b  # integer eager-or -> IntSelect (then the integer-backend rejection), never a raw builder crash
+
+    assert "IntSelect" in _op_names(_hir(kernel))
+
+
+def test_a_known_integer_stored_into_a_float_state_slot_stays_float() -> None:
+    # A Known integer written to a FLOAT-typed leaf materializes as a float, matching the slot, not an IntConst.
+    class K:
+        def __init__(self) -> None:
+            self.x = 0.0
+
+        def step(self) -> float:
+            self.x = 1
+            return self.x
+
+    (slot,) = lower(K().step).state_slots
+    assert type(lower(K().step).nodes[slot.live_out].type).__name__ == "FloatType"

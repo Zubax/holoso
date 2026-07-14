@@ -750,7 +750,10 @@ class IntToFloat(Operator):
         (a,) = operands
         if not isinstance(a, IntConst):
             raise TypeError(f"expected IntConst, got {a!r}")
-        result = float(a.value)
+        try:
+            result = float(a.value)
+        except OverflowError:
+            return None  # an integer beyond binary64 range cannot fold; the datapath exactness guard refuses it later
         return FloatConst(result) if int(result) == a.value else None
 
 

@@ -59,7 +59,7 @@ from ._ir import (
     UnitExit,
 )
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
-from ..._hir import BoolType
+from ..._hir import BoolType, FloatAbs, FloatMax, FloatMin
 from ._value import (
     MetaInt,
     StaticRecord,
@@ -799,6 +799,12 @@ class Analyzer:
             folded = static_binop(bin_op, lhs.value, rhs.value)
             if folded is not None:
                 return Known(folded)
+            if isinstance(lhs.value, StaticBool) and isinstance(rhs.value, StaticBool):
+                # static_binop covers only numerics; combine two Known booleans here so ``True & False`` folds to a
+                # Known bool and drives edge selection (a dead branch guarded by it is never analyzed).
+                a, b = lhs.value.value, rhs.value.value
+                combined = a and b if bin_op is BinOp.BITAND else a or b if bin_op is BinOp.BITOR else a != b
+                return Known(StaticBool(bool(combined)))
         return Residual(result_type)
 
     def _operand_type(self, fact: Fact, origin: OriginStack) -> SemType:
@@ -1056,7 +1062,21 @@ class Analyzer:
                 arity = match.operator.signature.arity
                 if len(call.args) != arity:
                     raise AnalysisRejection(f"intrinsic expects {arity} argument(s), got {len(call.args)}", call.origin)
-                sem = SemType.BOOL if isinstance(match.operator.signature.result_type, BoolType) else SemType.FLOAT
+                # abs/min/max are int-polymorphic in Python: on an integer operand they return an EXACT integer, so
+                # promoting to float here would let subsequent integer arithmetic round (2**53 + 1 -> 2**53). There is
+                # no integer abs/min/max operator yet, so an integer operand is a located rejection, never a silent float.
+                if isinstance(match.operator, (FloatAbs, FloatMin, FloatMax)) and any(
+                    fact == Residual(SemType.INT) for fact in argument_facts
+                ):
+                    raise AnalysisRejection(
+                        f"an integer operand to {match.operator.mnemonic} is not yet lowerable; cast to float first",
+                        call.origin,
+                    )
+                sem = (
+                    SemType.INT
+                    if match.returns_int
+                    else SemType.BOOL if isinstance(match.operator.signature.result_type, BoolType) else SemType.FLOAT
+                )
                 env.set(Local(call.dst), Residual(sem))
                 self._intrinsic_calls.add(id(call))
                 return False
@@ -1068,19 +1088,6 @@ class Analyzer:
             # doctrine; its runtime-operand form was already routed to an HIR operation above.
             argument_facts = [env.get(Local(arg)) for arg in call.args]
             keyword_facts = [(keyword, env.get(Local(value))) for keyword, value in call.kwargs]
-            # ``bool()`` of a compile-time FLOAT constant must NOT fold on float64 truthiness: the datapath encodes the
-            # constant into the target format first, where a tiny nonzero magnitude underflows to zero (False). Only the
-            # format knows that, so the truth test defers to a runtime FloatToBool. Integer and boolean truth stay exact.
-            if (
-                target is bool
-                and not keyword_facts
-                and len(argument_facts) == 1
-                and isinstance(argument_facts[0], Known)
-                and isinstance(argument_facts[0].value, (StaticFloat, NpFloat))
-            ):
-                env.set(Local(call.dst), Residual(SemType.BOOL))
-                self._conversion_calls.add(id(call))
-                return False
             if not all(isinstance(fact, Known) for fact in argument_facts + [fact for _, fact in keyword_facts]):
                 name = getattr(target, "__name__", repr(target))
                 # ``float()``/``int()``/``bool()`` on a runtime scalar: a same-kind cast is the identity (a documented

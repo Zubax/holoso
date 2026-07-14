@@ -9,24 +9,47 @@ from ..._hir import *
 from ._registry import intrinsic
 
 
-@intrinsic(FloatFloor, math.floor, np.floor)
+# The math spellings return a Python int (int-returning), so a floored value stays an exact integer and downstream
+# integer arithmetic does not round in the float datapath; the numpy spellings return float. Both run the same float
+# rounding operator, so a float-context use (float(math.floor(x))) elides the int round-trip back to the operator.
+@intrinsic(FloatFloor, np.floor)
 def floor_(x: float) -> float:
     return float(np.floor(x))
 
 
-@intrinsic(FloatCeil, math.ceil, np.ceil)
+@intrinsic(FloatFloor, math.floor, returns_int=True)
+def math_floor_(x: float) -> int:
+    return math.floor(x)
+
+
+@intrinsic(FloatCeil, np.ceil)
 def ceil_(x: float) -> float:
     return float(np.ceil(x))
 
 
-@intrinsic(FloatTrunc, math.trunc, np.trunc, np.fix)
+@intrinsic(FloatCeil, math.ceil, returns_int=True)
+def math_ceil_(x: float) -> int:
+    return math.ceil(x)
+
+
+@intrinsic(FloatTrunc, np.trunc, np.fix)
 def trunc_(x: float) -> float:
     return float(np.trunc(x))
 
 
-@intrinsic(FloatRound, round, np.round, np.rint, np.around)
+@intrinsic(FloatTrunc, math.trunc, returns_int=True)
+def math_trunc_(x: float) -> int:
+    return math.trunc(x)
+
+
+@intrinsic(FloatRound, np.round, np.rint, np.around)
 def round_(x: float) -> float:
     return float(np.round(x))
+
+
+@intrinsic(FloatRound, round, returns_int=True)
+def builtin_round_(x: float) -> int:
+    return round(x)
 
 
 @intrinsic(FloatAbs, abs, math.fabs, np.abs, np.absolute, np.fabs)

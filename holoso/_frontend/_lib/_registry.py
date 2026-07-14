@@ -12,9 +12,13 @@ from ..._hir import Operator
 
 @dataclass(frozen=True, slots=True)
 class Intrinsic:
-    """A call that lowers to a single HIR float operator."""
+    """A call that lowers to a single HIR float operator, optionally wrapped to an integer result."""
 
     operator: Operator
+    # True for the int-returning spellings (``math.floor``/``ceil``/``trunc``, one-argument ``round``): the operator
+    # runs in float, then the result is a typed integer, so subsequent integer arithmetic stays exact rather than
+    # rounding in the float datapath. The numpy spellings (``np.floor`` ...) return float and keep this False.
+    returns_int: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,13 +41,15 @@ def _register(match: Match, keys: Iterable[object]) -> None:
         _REGISTRY[key] = match
 
 
-def intrinsic[F: Callable[..., object]](operator: Callable[[], Operator], *substituted: object) -> Callable[[F], F]:
+def intrinsic[F: Callable[..., object]](
+    operator: Callable[[], Operator], *substituted: object, returns_int: bool = False
+) -> Callable[[F], F]:
     op = operator()  # instantiated once here, so the registry stores an operator instance rather than a live factory
 
     def register(fn: F) -> F:
         assert isinstance(fn, types.FunctionType)
         assert fn.__code__.co_argcount == op.signature.arity
-        _register(Intrinsic(op), (fn, *substituted))
+        _register(Intrinsic(op, returns_int), (fn, *substituted))
         return fn
 
     return register

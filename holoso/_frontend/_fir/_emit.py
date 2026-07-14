@@ -59,6 +59,7 @@ from ..._hir import (
     IntToFloat,
     IntType,
     IntXor,
+    Operator,
     Select,
     Type,
 )
@@ -577,11 +578,19 @@ class _Emitter:
                         then_vid = value_of(then_binding)
                         else_vid = value_of(else_binding)
                         condition = value_of(cond)
-                        both_bool = isinstance(self._type_of(then_vid), BoolType) and isinstance(
-                            self._type_of(else_vid), BoolType
-                        )
-                        operator = BoolSelect() if both_bool else Select()
-                        env[Local(dst)] = Residual(SemType.BOOL if both_bool else SemType.FLOAT)
+                        then_type, else_type = self._type_of(then_vid), self._type_of(else_vid)
+                        operator: Operator
+                        if isinstance(then_type, BoolType) and isinstance(else_type, BoolType):
+                            operator, sem = BoolSelect(), SemType.BOOL
+                        elif isinstance(then_type, IntType) and isinstance(else_type, IntType):
+                            operator, sem = IntSelect(), SemType.INT  # integer and/or: IntSelect, then the MIR refusal
+                        else:  # a mixed int/float select promotes the integer arm to float on its own edge, like a phi
+                            if isinstance(then_type, IntType):
+                                then_vid = self._builder.operation(IntToFloat(), [then_vid])
+                            if isinstance(else_type, IntType):
+                                else_vid = self._builder.operation(IntToFloat(), [else_vid])
+                            operator, sem = Select(), SemType.FLOAT
+                        env[Local(dst)] = Residual(sem)
                         define(dst, self._builder.operation(operator, [condition, then_vid, else_vid]))
             case BuildTuple(dst=dst, items=items) | BuildList(dst=dst, items=items):
                 from ._analyze import _pack_seq
@@ -612,12 +621,14 @@ class _Emitter:
                 leaf = StateLeaf(obj_fact.value.obj, (name,))
                 src_fact = fact_of(src)
                 env[leaf] = src_fact
-                if isinstance(src_fact, Known) and isinstance(src_fact.value, (MetaInt, NpInt)):
-                    stored = self._builder.int_const(
-                        int(src_fact.value.value)
-                    )  # a Known integer keeps an int leaf typed
+                if (
+                    isinstance(src_fact, Known)
+                    and isinstance(src_fact.value, (MetaInt, NpInt))
+                    and self._leaf_is_int(leaf)
+                ):
+                    stored = self._builder.int_const(int(src_fact.value.value))  # a Known int keeps an int-typed leaf
                 elif isinstance(src_fact, Known):
-                    stored = self._const(src_fact.value)
+                    stored = self._const(src_fact.value)  # a Known int stored to a FLOAT leaf floats via the guard
                 else:
                     stored = value_of(src)
                 self._write(fir_id, leaf, stored)
@@ -638,7 +649,10 @@ class _Emitter:
                     assert isinstance(callee_fact, Known) and isinstance(callee_fact.value, ObjectRef)
                     match = resolve(callee_fact.value.obj)
                     assert isinstance(match, Intrinsic)
-                    define(dst, self._builder.operation(match.operator, [as_float(arg) for arg in args]))
+                    result = self._builder.operation(match.operator, [as_float(arg) for arg in args])
+                    if match.returns_int:  # math.floor/ceil/trunc/round yield a typed integer (int(round(x)))
+                        result = self._builder.operation(FloatToInt(), [result])
+                    define(dst, result)
                 else:
                     raise AssertionError(f"call {dst} left an unexpected residual value in the graph")
             case _:
@@ -872,6 +886,10 @@ class _Emitter:
                 raise EmissionRejection(f"a compile-time power exponent of {power} is too large to expand")
             if power == 0:
                 return self._builder.float_const(1.0)
+            if self._fact_sem(fact_of(base)) is SemType.INT:
+                # An integer base raised to a power is exact integer exponentiation in Python; a float multiply chain
+                # would round it. There is no integer-power operator yet, so it is a located rejection, not a miscompile.
+                raise EmissionRejection("an integer raised to a compile-time power is not yet lowerable")
             source = as_float(base)
             chain = source
             for _ in range(abs(power) - 1):
@@ -883,8 +901,8 @@ class _Emitter:
         # ``2.0**xf`` are float (-> exp2, the integer exponent promoting through as_float); ``2**i`` is int-or-float by
         # the sign of i (no integer-power operator) and every non-two base grows unbounded, so both refuse.
         base_fact = fact_of(base)
-        if isinstance(base_fact, Known) and isinstance(base_fact.value, (MetaInt, StaticFloat)):
-            base_is_float = isinstance(base_fact.value, StaticFloat)
+        if isinstance(base_fact, Known) and isinstance(base_fact.value, (MetaInt, NpInt, StaticFloat, NpFloat)):
+            base_is_float = isinstance(base_fact.value, (StaticFloat, NpFloat))
             exp_sem = self._fact_sem(exp_fact)
             if as_python(base_fact.value) == 2 and (
                 exp_sem is SemType.FLOAT or (base_is_float and exp_sem is SemType.INT)
