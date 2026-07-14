@@ -36,20 +36,30 @@ from ._modelref import default_ops
 # end of the static schedule across all blocks -- so it pins the full schedule even for data-dependent (branch/loop)
 # kernels. A representative cross-section of shapes: straight-line and deep arithmetic, clamp/select, stateful
 # filters, branchy logic, data-dependent loops, and a large kernel.
-# FIR_PARITY_PENDING: signal_window (stage 9 tuple return), majority_voter/uart_rx/uart_tx (stage 9 tuple return
-# XOR), cordic_sincos/ekf1_stateless (stage 9 aggregate returns) use features the new front-end does not lower yet,
-# so they are dropped from the freeze until their stage lands. iir1_hpf improved when jump-chain fusion let its
-# guard diamond if-convert (24 -> 20); the others schedule identically to the old front-end on every field.
+# FIR_PARITY_PENDING: ekf1_stateless (ndarray returns) is dropped from the freeze until its stage lands. The
+# tuple-returning rows (signal_window, majority_voter, uart_rx/uart_tx, cordic_sincos) are restored at their exact
+# pre-cutover values: with jump-chain fusion the new front-end schedules them identically to the old. iir1_hpf
+# improved when fusion let its guard diamond if-convert (24 -> 20).
 _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "madd": (14, 14),
+    "signal_window": (9, 9),
     "poly3": (23, 23),
     "iir1_lpf": (15, 15),
     "iir1_hpf": (20, 20),
     "schmitt_trigger": (6, 6),
+    "majority_voter": (14, 19),
     # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
     # is), so the install fits at the work makespan instead of one past it -- shaving a cycle off every iteration.
     "recip_newton": (15, 32),
     "remainder": (36, 53),
+    "cordic_sincos": (104, 104),
+    # Branchy kernels whose phi-arm installs source block-entry-resident values (boolean/float live-out constants, or
+    # an input/state read) on the normal path -- the inline-class timing (no source-sample edge, no +1 step) lands each
+    # within the work makespan rather than at the copy-pipeline boundary, shrinking every downstream block base.
+    "uart_rx": (6, 120),
+    # uart_tx additionally has an empty overlapping branch block (the idle "not busy" arm) whose only act is to test a
+    # resident input condition; a non-entry branch may redirect at its own base PC, so its terminator drains nothing.
+    "uart_tx": (7, 103),
     "octave_index": (14, 38),
 }
 

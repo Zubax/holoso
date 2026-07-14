@@ -377,7 +377,6 @@ def test_multi_output_mixed_io_metadata_and_values() -> None:
 # inline read step or dependency edge would read a stale/not-yet-landed value and diverge.
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: tuple return — stage 9 aggregate returns")
 def test_latching_fault_register_streams_and_resets() -> None:
     # Each channel latches on its first trip and HOLDS until reset; ``any_fault`` summarizes the just-updated channels.
     # Demonstrates the edge guard (a): on the FIRST-TRIP vector (True, False, False) the correct summary is
@@ -466,7 +465,6 @@ def test_octave_index_resident_output_drain_only_ret_matches_reference() -> None
         assert got == want, f"octave count at x={x}: {got} vs {want}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: tuple return — stage 9 aggregate returns")
 def test_cross_bank_chain_edges_match_reference() -> None:
     # Could-have-failed (a, reasoned): an off-by-one in the inline read step or a dependency edge would let a consumer
     # in this chain read before its producer's value lands, so the model (which commits each PC's landings before its

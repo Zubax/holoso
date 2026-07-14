@@ -161,7 +161,6 @@ def test_model_matches_reference_small_kernels() -> None:
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: a tuple return — stage 9 aggregate returns")
 def test_model_matches_reference_dense_boolean_chain() -> None:
     # A boolean-dense chain at the tightest legal scheduling distance: comparisons -> logic (not/and) -> bool->float
     # cast -> float arithmetic -> float->bool cast. The boolean bank's latch-free read lets a logic op issue one cycle
@@ -422,7 +421,6 @@ def test_model_is_bit_exact_for_wide_zkf_multiply_regression() -> None:
     assert got[0].bits == 0xC0B5B6B31D9
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: ekf1_stateless returns a tuple — stage 9 aggregate returns")
 def test_model_matches_reference_ekf1_stateless() -> None:
     rng = np.random.default_rng(12345)
     cov = spd_matrix(rng, 3, 0.5, 2.0)
@@ -674,7 +672,6 @@ def test_model_boolean_only_state_output() -> None:
         assert model.run()[0] is reference()
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: gate returns a tuple — stage 9 aggregate returns")
 def test_model_boolean_input_and_mixed_outputs() -> None:
     def gate(flag: bool, x: float) -> tuple[bool, float]:
         if flag:
@@ -695,7 +692,6 @@ def test_model_boolean_input_and_mixed_outputs() -> None:
         model.run(1.0, 2.0)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: gate returns a tuple — stage 9 aggregate returns")
 def test_model_ports_carry_scalar_types() -> None:
     # The model describes its I/O by typed ports (logical name + ScalarType), not parallel name/is-bool lists, so a
     # driver decides a port's encoding from its type. The handle exposes the same metadata as the elaborated simulator.
@@ -984,7 +980,6 @@ def test_inplace_loop_preheader_arm_is_dwell_safe() -> None:
         assert bool(model.run(a, n)[0]) is reference(a, n)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: kernel returns a tuple — stage 9 aggregate returns")
 def test_inplace_write_only_slot_gap_tenant_is_dwell_safe() -> None:
     class WriteOnlyDwellTenant:
         # Regression (Codex): an if-converted kernel where a temporary (``y or self._x``) lands as a gap tenant on the
@@ -1081,7 +1076,6 @@ def test_inplace_multiarm_float_phi() -> None:
         assert float(model.run(x)[0]) == reference(x)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: kernel returns a tuple — stage 9 aggregate returns")
 def test_state_livein_feeding_another_slot_phi_does_not_coalesce(monkeypatch: pytest.MonkeyPatch) -> None:
     class LiveInFeedsAnotherSlotPhi:
         # Regression: slot ``x``'s live-in is the if-arm of slot ``w``'s phi. ``x``'s live-out must NOT coalesce in
@@ -1114,7 +1108,6 @@ def test_state_livein_feeding_another_slot_phi_does_not_coalesce(monkeypatch: py
         assert got == exp, (cond, y, got, exp)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: kernel returns a tuple — stage 9 aggregate returns")
 def test_state_livein_feeding_unrelated_phi_does_not_coalesce(monkeypatch: pytest.MonkeyPatch) -> None:
     class LiveInFeedsUnrelatedPhi:
         # Regression: slot ``x``'s live-in is an arm of an unrelated (non-state) phi. With x's live-out coalesced and
@@ -1461,7 +1454,6 @@ def test_model_handle_round_trips_through_pickle() -> None:
         assert float(restored.run(v)[0]) == float(fresh.run(v)[0])
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: kernel returns a tuple — stage 9 aggregate returns")
 def test_model_boolean_connectives_and_chained_and_ternary_are_exact() -> None:
     def kernel(x: float, lo: float, hi: float) -> tuple[float, float, float, float, float]:
         deadband = 0.0 if lo < x < hi else x  # chained comparison + ternary
@@ -1491,7 +1483,6 @@ def test_model_bool_cast_matches_float_nonzero() -> None:
         assert got == ref, f"x={x}: {got} != {ref}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: a tuple return — stage 9 aggregate returns")
 def test_model_cross_domain_cast_chain_is_exact() -> None:
     # Regression: a branch-free float->bool->float->float chain (float(x>0)*k) builds via the CFG path even with a
     # single block (it has combinational ops, no branch); the model must take the same path and be bit-exact.

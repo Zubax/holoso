@@ -268,7 +268,6 @@ def _comparison_both_polarities(x: float, y: float) -> tuple[bool, float]:
     return gt, sel + other
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: returns a tuple — stage 9 aggregate returns")
 def test_comparison_in_both_polarities() -> None:
     sim = _sim(_comparison_both_polarities, "both_pol")
     for x in (-1.0, 0.0, 1.0, 2.0):
@@ -332,7 +331,6 @@ def _mixed_tuple_io(flag: bool, x: float, y: float) -> tuple[bool, float, float]
     return inside, x + y, x - y
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: tuple return — stage 9 aggregate returns")
 def test_mixed_tuple_io_metadata_and_values() -> None:
     sim = _sim(_mixed_tuple_io, "mixed_tuple")
     assert [(p.name, p.scalar_type) for p in sim.inputs] == [
@@ -449,7 +447,6 @@ class _BoolStateMachine:
         return gated, self.armed
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: returns a tuple — stage 9 aggregate returns")
 def test_boolean_state_slot_stream_and_reset() -> None:
     sim = _sim(_BoolStateMachine().__call__, "bool_state_machine")
     reference = _BoolStateMachine()

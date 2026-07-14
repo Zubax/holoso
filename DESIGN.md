@@ -253,9 +253,15 @@ reference, and a rejection inside one is re-attributed to the user's call site.
 
 Parameters and return. Positional and keyword-only parameters become input ports and require an explicit
 annotation: `float` scalars are floating-point ports, `bool` are 1-bit boolean ports, `int` are typed integer ports
-(contained at MIR until the integer backend). The return annotation is likewise mandatory and validated against the
-emitted kind: `float`, `bool`, `int`, or `None` for a method that returns nothing (an `X | None` union unwraps its
-None arm for early-return kernels).
+(contained at MIR until the integer backend); fixed-shape jaxtyping array annotations parse into array contracts
+whose ports await the ndarray stages. The return annotation is likewise mandatory, parsed into a recursive
+contract -- scalar kinds, `tuple[...]` with per-position contracts, `tuple[X, ...]` variadic over the emitted
+arity, `list[X]`, `tuple[()]` the empty tuple, `None` for a method that returns nothing, and an `X | None` union
+unwrapping its None arm for early-return kernels -- and validated structurally against the emitted value: any
+arity, flavor, or leaf-kind divergence is a located rejection. An aggregate return flattens to one scalar output
+port per leaf in canonical order, named by the leaf's path, so the module ABI stays scalar; a leaf that is by
+dataflow a public state live-out is deduped onto that state port exactly as a scalar return is. Contracts bind at
+the root kernel only: a callee's annotations are documentation, never a lowering directive.
 
 An `assert` statement is accepted and ignored wholesale: its test is never lowered, mirroring Python under `-O`, so
 an assertion has no hardware effect. Any effect the test would have had when executed is dropped along with it; as
@@ -264,10 +270,11 @@ under `-O`, an assert must be side-effect-free.
 ### Deferred: the aggregate contract (tracked by FIR_PARITY_PENDING; stage 10 asserts the registry empty)
 
 The structural spine already carries runtime tuples/lists through locals, diamonds, conditional selections,
-concatenation/repetition, indexing, and record field projection; what remains deferred is the BOUNDARY surface --
-aggregate returns and ports, aggregate persistent state, runtime-element iteration, slicing/starred syntax, and
-the array/record/reduction/gather semantics below -- and every disabled test carries the greppable marker. The
-contract the remaining stages restore (and extend with records, reductions, and the bounded gather):
+concatenation/repetition, indexing, record field projection, and returns; what remains deferred is the rest of the
+BOUNDARY surface -- aggregate parameter ports, aggregate persistent state, runtime-element iteration,
+slicing/starred syntax, and the array/record/reduction/gather semantics below -- and every disabled test carries
+the greppable marker. The contract the remaining stages restore (and extend with records, reductions, and the
+bounded gather):
 
 Matrices/vectors are statically shaped and unrolled to scalar operations; arrays never exist as hardware
 aggregates, only as compile-time bookkeeping over scalar leaves -- list/tuple literals and comprehensions,

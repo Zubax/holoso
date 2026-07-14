@@ -218,7 +218,6 @@ def test_division_lowers_to_div() -> None:
     assert len(divs) == 1
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate returns — stage 9")
 def test_ekf1_stateless_structure() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateless
@@ -964,7 +963,6 @@ def test_returned_public_state_alias_is_deduped() -> None:
     assert [o.name for o in hir.outputs] == ["state_y"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate returns — stage 9")
 def test_mixed_return_dedupes_public_alias_keeps_distinct_leaf() -> None:
     class Mixed:
         def __init__(self) -> None:
@@ -1162,7 +1160,6 @@ def test_star_unpacking_a_scalar_is_rejected() -> None:
         lower(f)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate returns — stage 9")
 def test_tuple_unpacking_routes_values() -> None:
     # The right-hand side is built once before any binding, so a swap reads both sources first (no clobber).
     def swap(a: float, b: float) -> list[float]:
@@ -1185,7 +1182,6 @@ def test_starred_and_nested_unpacking_route_values() -> None:
     assert [o.value for o in hir.outputs] == list(hir.input_ids)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate returns — stage 9")
 def test_chained_assignment_binds_every_target() -> None:
     def f(a: float) -> list[float]:
         x = y = a + a
@@ -2578,16 +2574,14 @@ def test_unsupported_return_annotation_is_rejected() -> None:
         lower(f)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate returns — stage 9")
 def test_scalar_declared_but_tuple_returned_is_rejected() -> None:
     def f(a: float) -> float:
         return a, a  # type: ignore[return-value]
 
-    with pytest.raises(UnsupportedConstruct, match="values are returned"):
+    with pytest.raises(UnsupportedConstruct, match="declared float, returns an aggregate"):
         lower(f)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate returns — stage 9")
 def test_return_tuple_arity_mismatch_is_rejected() -> None:
     def f(a: float) -> tuple[float, float, float]:
         return a, a  # type: ignore[return-value]
@@ -2618,7 +2612,6 @@ def test_return_value_declared_but_method_returns_nothing_is_rejected() -> None:
         lower(Acc().update)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate returns — stage 9")
 def test_tuple_return_annotation_accepted() -> None:
     def f(a: float, b: float) -> tuple[float, bool]:
         return a + b, a > b
@@ -2626,7 +2619,6 @@ def test_tuple_return_annotation_accepted() -> None:
     assert [port.name for port in lower(f).outputs] == ["out_0", "out_1"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate returns — stage 9")
 def test_variadic_tuple_return_annotation_accepted() -> None:
     def f(a: bool, b: bool) -> tuple[bool, ...]:
         return a, b, a and b
@@ -2634,7 +2626,6 @@ def test_variadic_tuple_return_annotation_accepted() -> None:
     assert [port.name for port in lower(f).outputs] == ["out_0", "out_1", "out_2"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate returns — stage 9")
 def test_list_return_annotation_accepted() -> None:
     def f(a: float, b: float) -> list[float]:
         return [a, b]
@@ -2680,20 +2671,18 @@ def test_shaped_array_ports_are_honest_contract_rejections() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="array ports are not lowerable yet"):
         lower(array_parameter)
-    with pytest.raises(UnsupportedConstruct, match="returns are not emitted yet"):
+    with pytest.raises(UnsupportedConstruct, match="array returns are not lowerable yet"):
         lower(array_return)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate returns — stage 9")
 def test_malformed_list_return_annotation_is_rejected() -> None:
     def f(a: float) -> list[float, float]:  # type: ignore[type-arg]
         return [a, a]
 
-    with pytest.raises(UnsupportedConstruct, match="values are returned"):
+    with pytest.raises(UnsupportedConstruct, match="exactly one element type"):
         lower(f)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate returns — stage 9")
 def test_nested_tuple_return_annotation_accepted() -> None:
     def f(a: float, b: float) -> tuple[tuple[float, float], bool]:
         return (a, b), a > b
@@ -2701,12 +2690,11 @@ def test_nested_tuple_return_annotation_accepted() -> None:
     assert [port.name for port in lower(f).outputs] == ["out_0_0", "out_0_1", "out_1"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate returns — stage 9")
 def test_nested_tuple_return_shape_mismatch_is_rejected() -> None:
     def f(a: float, b: float) -> tuple[tuple[float, float], float]:
         return a, a + b  # type: ignore[return-value]
 
-    with pytest.raises(UnsupportedConstruct, match="a single value is returned"):
+    with pytest.raises(UnsupportedConstruct, match="declared a tuple, returns a scalar"):
         lower(f)
 
 

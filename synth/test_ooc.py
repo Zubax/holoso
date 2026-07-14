@@ -53,7 +53,6 @@ def _wide_result() -> SynthesisResult:
 
 requires_diamond = pytest.mark.skipif(not DiamondEcp5Flow().available(), reason="Lattice Diamond not found")
 requires_vivado = pytest.mark.skipif(not VivadoArtix7Flow().available(), reason="Vivado not found")
-_WIDE_PENDING = pytest.mark.skip(reason="FIR_PARITY_PENDING: stage 9: aggregate/tuple returns (the wide kernel)")
 
 
 def _artifact_file(design: OocDesign, flow: YosysEcp5Flow | VivadoArtix7Flow, path: str) -> str:
@@ -92,7 +91,6 @@ def test_wrapper_reduces_io_to_bounded_words() -> None:
     assert kern_w.primary_io_bits == 32 + 32 + 1 + 1 + 6
 
 
-@_WIDE_PENDING
 def test_wrapper_reduces_wide_io_to_bounded_words() -> None:
     wide_w = build_ooc_wrapper(_wide_result())
     assert wide_w.in_sel_width == 3  # six inputs
@@ -131,7 +129,6 @@ def test_yosys_ecp5_end_to_end() -> None:
     assert wrapper.primary_io_bits < _native_data_bits(_kern_result()) + 64
 
 
-@_WIDE_PENDING
 def test_yosys_ecp5_wide_selectors_synthesize() -> None:
     # A kernel whose selectors are multi-bit must still elaborate and route.
     report = YosysEcp5Flow(target_frequency_MHz=100.0).prepare(build_compiler_ooc_design(_wide_result())).synthesize()

@@ -166,7 +166,6 @@ def test_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
             assert model_out == interp_out, f"interp != model at x={x} n={n}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: tuple return — stage 9 aggregate returns")
 def test_bool_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
     """The boolean-bank twin of the computed-arm swap: the latch installs are BoolWrites, not FloatCopys."""
     fmt = FloatFormat(6, 18)
@@ -186,7 +185,6 @@ def test_bool_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> N
             assert model_out == interp_out, f"interp != model at x={x} n={n}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: tuple return — stage 9 aggregate returns")
 def test_mixed_arm_swap_diamond_builds_and_matches_python() -> None:
     """
     Pins transient tolerance in the install fixpoint: under a narrowing classification with a strict interference

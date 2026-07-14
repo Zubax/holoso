@@ -51,7 +51,6 @@ def test_phi_arm_installs_land_within_their_block(spec: ExampleSpec) -> None:
             )
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: uart_rx/uart_tx return a tuple — stage 9 aggregate returns")
 @pytest.mark.parametrize("name", ["uart_rx", "uart_tx"])
 def test_targets_still_exercise_constant_installs(name: str) -> None:
     """

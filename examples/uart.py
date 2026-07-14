@@ -65,8 +65,9 @@ class UartTx(_UartFrame):
     def __init__(self, parity: bool | None) -> None:
         super().__init__(parity)
         self._busy = False
-        self._phase = 0  # sub-bit countdown LAST_PHASE..0 within the current frame bit
-        self._index = 0  # which frame bit is on the wire: 0 start, 1..8 data, then parity/stop
+        # Float-carried counters (integer-valued, exactly representable) until the integer backend lands.
+        self._phase = 0.0  # sub-bit countdown LAST_PHASE..0 within the current frame bit
+        self._index = 0.0  # which frame bit is on the wire: 0 start, 1..8 data, then parity/stop
         self._shift = 0.0  # the byte being shifted out, current bit in the MSB
         self._parity = False  # the polarized parity bit, computed once at latch
 
@@ -129,8 +130,9 @@ class UartRx(_UartFrame):
     def __init__(self, parity: bool | None) -> None:
         super().__init__(parity)
         self._busy = False
-        self._count = 0  # ticks remaining until the next mid-bit sample
-        self._index = 0  # which bit is being sampled: 0 start, 1..8 data, then parity/stop
+        # Float-carried counters (integer-valued, exactly representable) until the integer backend lands.
+        self._count = 0.0  # ticks remaining until the next mid-bit sample
+        self._index = 0.0  # which bit is being sampled: 0 start, 1..8 data, then parity/stop
         self._char = 0.0  # the byte, accumulated bit by bit; only meaningful on the tick ``valid`` is high
         self._parity_rx = False  # the parity bit as sampled off the wire (E/O only)
 

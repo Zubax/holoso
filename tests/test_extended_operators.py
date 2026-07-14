@@ -95,7 +95,6 @@ def _round_ref(value: float, mode: int) -> int:
     return FloatValue.from_float(FMT, float(n)).bits
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: tuple return — stage 9 aggregate returns")
 def test_float_classification_intrinsics() -> None:
     def kernel(x: float) -> tuple[bool, bool, bool, bool, bool, bool]:
         return (
@@ -121,8 +120,10 @@ def test_float_classification_intrinsics() -> None:
         assert got == want, f"x={x}: {got} vs {want}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
-def test_float_classification_constants_use_target_format() -> None:
+def test_float_classification_constants_fold_python_exact() -> None:
+    # Static folding is Python-exact and width-agnostic (the front-end charter): a finite binary64 constant
+    # classifies as finite even when the TARGET format would overflow it to infinity at materialization. Only a
+    # genuine infinity constant classifies as infinite.
     def kernel(x: float) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:
         return (
             math.isfinite(1e100),
@@ -136,10 +137,10 @@ def test_float_classification_constants_use_target_format() -> None:
         )
 
     assert _sim(kernel, "float_classification_const").run(0.0) == [
+        True,
         False,
-        True,
-        True,
-        True,
+        False,
+        False,
         False,
         True,
         True,
@@ -177,7 +178,6 @@ _ROUND_VECTORS = [
 ]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_round_modes_match_reference() -> None:
     def kernel(x: float) -> tuple[float, float, float, float]:
         return (math.floor(x), math.ceil(x), math.trunc(x), round(x))
@@ -190,7 +190,6 @@ def test_round_modes_match_reference() -> None:
             assert _bits(out[index]) == _round_ref(value, mode), f"value={value} output={index} mode={mode}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_round_dispatch_numpy_and_bare_name() -> None:
     # numpy.<name> under an alias, and bare names imported via ``from math import ...`` must both dispatch.
     def kernel(x: float) -> tuple[float, float, float, float, float, float]:
@@ -203,7 +202,6 @@ def test_round_dispatch_numpy_and_bare_name() -> None:
             assert _bits(out[index]) == _round_ref(value, mode), f"value={value} output={index}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_round_sign_folds_into_operand() -> None:
     # The input sign chain folds onto the rounder operand and is applied BEFORE rounding: floor(-x) is the rounder fed
     # -x, NOT a negation of floor(x). Asserts the directional modes against the directly-negated reference.
@@ -275,7 +273,6 @@ def test_fma_unconfigured_is_rejected() -> None:
         holoso.synthesize(kernel, _ops(with_fma=False), name="fma_unconfigured")
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_intrinsic_dispatch_resolves_aliased_imports() -> None:
     # An aliased import binds a non-canonical local name to the real function object; dispatch resolves by callee
     # identity, so ``aliased_floor`` (= math.floor) lowers as floor and ``aliased_fma`` (= math.fma) as fma.
@@ -325,7 +322,6 @@ def test_implicit_mul_add_contracts_to_fma_only_with_ffma() -> None:
     assert diverged > 0, "expected single- and double-rounded results to differ on some inputs"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_implicit_fma_not_contracted_when_product_is_shared() -> None:
     # A product used by more than the add (here also returned) must NOT contract -- the rounded product is observed
     # elsewhere, so the add keeps double-rounding semantics even with ffma configured.
@@ -411,7 +407,6 @@ _MINMAX_VECTORS = [
 ]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_min_max_match_reference() -> None:
     # min(a,b) and max(a,b) over the same pair fuse into one sorter firing that writes two wide registers at once;
     # both outputs are checked against the bit-preserving reference (FloatValue.sort), which the HDL bench anchors to
@@ -433,7 +428,6 @@ def test_min_max_match_reference() -> None:
         assert _bits(out[0]) == lo.bits and _bits(out[1]) == hi.bits, f"a={a} b={b}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_min_max_sign_folds_into_operands() -> None:
     # Each operand's sign chain folds onto its sorter operand and is applied BEFORE the sort: min(-a, |b|) is the
     # sorter fed (-a, |b|). This drives the operand conditioners on a commutative multi-output operator.
@@ -451,7 +445,6 @@ def test_min_max_sign_folds_into_operands() -> None:
         assert _bits(out[1]) == hi.bits, f"max(|a|,-b) a={a} b={b}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_min_max_dispatch_numpy() -> None:
     # numpy.minimum/maximum are the binary elementwise forms and must dispatch by callee identity to the sorter.
     def kernel(a: float, b: float) -> tuple[float, float]:
@@ -480,7 +473,6 @@ def test_min_max_unconfigured_is_rejected() -> None:
         holoso.synthesize(kernel, _ops(with_sort=False), name="min_max_unconfigured")
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_min_max_is_not_bit_commutative() -> None:
     # min/max preserve the selected operand's exact bits and break ties toward the second operand, so they are NOT
     # bit-commutative: swapping operands can flip the sign of a zero. Two mirrored mins over the same pair must each
@@ -603,7 +595,6 @@ def test_pow_nonconstant_or_nontwo_base_lowers_via_exp2_log2() -> None:
         assert float(sim_ten.run(exponent)[0]) == pytest.approx(10.0**exponent, rel=1e-5)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_exp2_log2_dispatch_numpy_and_bare_name() -> None:
     def kernel(x: float) -> tuple[float, float, float]:
         return (np.exp2(x), np.log2(x), log2(x))
@@ -630,7 +621,6 @@ def test_exp2_log2_of_constants_fold() -> None:
         assert _bits(sim.run(x)[0]) == ref.bits, f"x={x}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_exp2_log2_sign_folds_into_operand() -> None:
     def kernel(x: float) -> tuple[float, float]:
         return (math.exp2(-x), math.log2(abs(x)))
@@ -680,7 +670,6 @@ def _sincos_ref(x: float) -> tuple[int, int]:
     return s.bits, c.bits
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_sincos_matches_model_and_native() -> None:
     def kernel(x: float) -> tuple[float, float]:
         return (math.sin(x), math.cos(x))
@@ -711,7 +700,6 @@ def test_lone_sin_value() -> None:
         assert _bits(sim.run(x)[0]) == _sincos_ref(x)[0], f"lone sin x={x}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_sincos_sign_folds_into_operand() -> None:
     # sin(-x)/cos(-x) fold the negation onto the scaled operand (CORDIC fed -(x/tau)), so both reuse one firing.
     def kernel(x: float) -> tuple[float, float]:
@@ -724,7 +712,6 @@ def test_sincos_sign_folds_into_operand() -> None:
         assert _bits(out[0]) == sin_bits and _bits(out[1]) == cos_bits, f"sin/cos(-x) x={x}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_sincos_dispatch_numpy() -> None:
     def kernel(x: float) -> tuple[float, float]:
         return (np.sin(x), np.cos(x))
@@ -786,7 +773,6 @@ def test_atan2_unconfigured_is_rejected() -> None:
         holoso.synthesize(kernel, _ops(with_atan2=False), name="atan2_unconfigured")
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_hypot_fused_with_atan2() -> None:
     # hypot(y, x) beside atan2(y, x) fuses into the atan2 CORDIC's magnitude port (units-free, no scale), exact
     # against the model even at the origin and infinities.
@@ -801,7 +787,6 @@ def test_hypot_fused_with_atan2() -> None:
         assert _bits(out[1]) == theta_bits, f"fused atan2 y={y} x={x}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_hypot_sign_flipped_still_fuses_with_atan2() -> None:
     # The fusion collapses operand signs, so hypot(-x, y) still fuses into atan2(y, x)'s magnitude port. The magnitude
     # is sign-invariant; bit-exactness against the atan2 model confirms the fused path (the primitive decomposition
@@ -875,7 +860,6 @@ def test_sqrt_dispatch_numpy() -> None:
         assert _bits(sim.run(x)[0]) == _sqrt_ref(x), f"np.sqrt x={x}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_trig_of_constants_fold() -> None:
     # Trig of literal operands folds in the format-agnostic HIR, so a kernel of only constant trig needs no CORDIC:
     # synthesizing with fsincos/fatan2 unconfigured proves the fold.
@@ -971,7 +955,6 @@ def test_tan_pole_returns_signed_infinity() -> None:
     assert float(sim.run(0.5)[0]) == pytest.approx(math.tan(0.5), rel=1e-5)  # a normal input still divides
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_atan_asin_acos_match_references() -> None:
     def kernel(x: float) -> tuple[float, float, float]:
         return (math.atan(x), math.asin(x), math.acos(x))
@@ -984,7 +967,6 @@ def test_atan_asin_acos_match_references() -> None:
         assert float(out[2]) == pytest.approx(math.acos(x), abs=1e-4), f"acos({x})"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_exp_log_log10_match_references() -> None:
     def kernel(x: float) -> tuple[float, float, float]:
         return (math.exp(x), math.log(x), math.log10(x))
@@ -997,7 +979,6 @@ def test_exp_log_log10_match_references() -> None:
         assert float(out[2]) == pytest.approx(math.log10(x), rel=1e-5, abs=1e-6), f"log10({x})"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: tuple return — stage 9 aggregate returns")
 def test_composite_dispatch_numpy_spellings() -> None:
     def kernel(x: float) -> tuple[float, float, float, float]:
         return (np.cbrt(x), np.tan(x), np.arcsin(x), np.exp(x))
@@ -1065,7 +1046,6 @@ def test_pow_runtime_exponent_rungs_and_general_path() -> None:
         assert float(sim.run(b, e)[0]) == pytest.approx(math.pow(b, e), rel=1e-5), f"general b={b} e={e}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_pow_dispatch_builtin_and_numpy_spellings() -> None:
     def kernel(b: float, e: float) -> tuple[float, float, float]:
         return (pow(b, e), np.power(b, e), np.float_power(b, e))
@@ -1098,7 +1078,6 @@ def test_pow_unit_base_returns_one_including_infinite_exponent() -> None:
         assert float(sim.run(1.0, e)[0]) == 1.0, f"pow(1, {e})"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_hyperbolic_match_references() -> None:
     def kernel(x: float) -> tuple[float, float, float]:
         return (math.sinh(x), math.cosh(x), math.tanh(x))
@@ -1113,7 +1092,6 @@ def test_hyperbolic_match_references() -> None:
         assert float(out[2]) == pytest.approx(math.tanh(x), rel=1e-5, abs=1e-5), f"tanh({x})"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_inverse_hyperbolic_match_references() -> None:
     # Independent inputs: asinh spans all reals, acosh needs w>=1, atanh needs |u|<1.
     def kernel(x: float, w: float, u: float) -> tuple[float, float, float]:
@@ -1131,7 +1109,6 @@ def test_inverse_hyperbolic_match_references() -> None:
         assert float(out[2]) == pytest.approx(math.atanh(u), rel=1e-5, abs=1e-5), f"atanh({u})"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_expm1_log1p_degrees_radians_match_references() -> None:
     def kernel(x: float) -> tuple[float, float, float, float]:
         return (math.expm1(x), math.log1p(x * x), math.degrees(x), math.radians(x))
@@ -1145,7 +1122,6 @@ def test_expm1_log1p_degrees_radians_match_references() -> None:
         assert float(out[3]) == pytest.approx(math.radians(x), rel=1e-5, abs=1e-5), f"radians({x})"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_new_composite_and_binary_numpy_spellings() -> None:
     def kernel(x: float, y: float) -> tuple[float, float, float, float, float]:
         return (np.sinh(x), np.arcsinh(x), np.fmin(x, y), np.fmax(x, y), np.fix(x))  # type: ignore[return-value]

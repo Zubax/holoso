@@ -2,10 +2,11 @@
 
 import math
 
-from ._const import BoolConst, FloatConst
+from ._const import BoolConst, FloatConst, IntConst
 from ._copy import copy_node, rebuild
 from .._util import ValueId
-from ._ir import Hir, HirBuilder, Node, Operation
+from ._ir import Hir, HirBuilder, Node, Operation, Phi
+from ._types import FloatType, IntType
 from ._operators import (
     BoolAnd,
     BoolNot,
@@ -28,6 +29,30 @@ from ._operators import (
 )
 
 
+def _const_int_phis_used_only_as_float(hir: Hir) -> frozenset[ValueId]:
+    """Integer phis whose every arm is an IntConst and whose every use is an IntToFloat promotion."""
+    candidates = {
+        vid
+        for vid, node in hir.nodes.items()
+        if isinstance(node, Phi)
+        and isinstance(node.type, IntType)
+        and all(isinstance(hir.nodes[value], IntConst) for _, value in node.arms)
+    }
+    if not candidates:
+        return frozenset()
+    for vid, node in hir.nodes.items():
+        if isinstance(node, Operation):
+            promotes = isinstance(node.operator, IntToFloat)
+            candidates -= {operand for operand in node.operands if not promotes and operand in candidates}
+        elif isinstance(node, Phi):
+            candidates -= {value for _, value in node.arms if value in candidates and value != vid}
+    for slot in hir.state_slots:
+        candidates.discard(slot.live_out)
+    for output in hir.outputs:
+        candidates.discard(output.value)
+    return frozenset(candidates)
+
+
 def _ilog2_exact(c: float) -> int | None:
     """Return ``k`` if ``c == 2**k`` exactly for a positive ``c``, else ``None``."""
     if c <= 0.0 or not math.isfinite(c):
@@ -43,6 +68,7 @@ def run(hir: Hir) -> Hir:
     """
     cval: dict[ValueId, float] = {}
     neg_of: dict[ValueId, ValueId] = {}
+    promotable_phis = _const_int_phis_used_only_as_float(hir)
 
     def is_integral(vid: ValueId) -> bool:
         """A value provably equal to an integer-valued float: a rounding result, a promoted integer, or a widened bool."""
@@ -137,6 +163,17 @@ def run(hir: Hir) -> Hir:
                 return reduce_mul(builder, remap[a], remap[b])
             case Operation(operator=FloatDiv(), operands=(a, b)):
                 return reduce_div(builder, remap[a], remap[b])
+            case Operation(operator=IntToFloat(), operands=(a,)) if a in promotable_phis:
+                return remap[a]  # the phi itself was rebuilt as a float phi; the conversion dissolves
+            case Phi(type=IntType(), arms=arms) if vid in promotable_phis:
+                # An all-constant integer phi consumed only as float promotes wholesale (the ``1 if c else 0``
+                # idiom): the merge happens in the float bank instead of surviving to the integer containment.
+                float_arms = []
+                for pred, value in arms:
+                    arm_node = hir.nodes[value]
+                    assert isinstance(arm_node, IntConst)
+                    float_arms.append((pred, emit_float_const(builder, float(arm_node.value))))
+                return builder.phi(FloatType(), float_arms)
             case Operation(operator=IntToFloat(), operands=(a,)):
                 # i2f(f2i(x)) is a round-toward-zero of the FLOAT x, which is FloatTrunc(x) exactly (f2i(x) is x's
                 # integer value, exactly representable back as a float because x already was one). It collapses to x
@@ -179,6 +216,10 @@ def _reduce_bool_select(
     """Reduce ``bool_select(cond, a, b)`` using its constant arms; the NOTs fold consumer-side at MIR lowering."""
     if a == b:
         return a  # bool_select(c, X, X) == X (covers both arms the same interned constant)
+    if b == cond:
+        return builder.operation(BoolAnd(), [cond, a])  # (c, a, c) == c and a: Python's eager ``and`` shape
+    if a == cond:
+        return builder.operation(BoolOr(), [cond, b])  # (c, c, b) == c or b: Python's eager ``or`` shape
     if a_const is not None and b_const is not None:  # both constant and distinct -> True/False or False/True
         return cond if a_const else builder.operation(BoolNot(), [cond])
     if a_const is True:

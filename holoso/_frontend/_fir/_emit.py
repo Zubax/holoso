@@ -69,16 +69,35 @@ from ..._hir import (
 from ._analyze import Analyzer, CallLowering, CallPlan, ResidualUnit
 from ._fact import (
     AggregateFact,
+    ArrayIndex,
     AtomicFact,
+    ContainerFlavor,
     Fact,
     Known,
     LeafPath,
+    ListIndex,
+    ListLayout,
+    RecordField,
     Residual,
+    StructuralIndex,
+    StructuralLayout,
+    TupleIndex,
+    TupleLayout,
+    ValueLayout,
+    child_layouts,
     child_slice,
     leaf_paths,
     outer_arity,
 )
-from ._signature import ScalarReturn, VoidReturn
+from ._signature import (
+    ArrayReturn,
+    ListReturn,
+    ReturnContract,
+    ScalarReturn,
+    TupleReturn,
+    VariadicTupleReturn,
+    VoidReturn,
+)
 from ._ir import (
     BindingId,
     BlockId as FirBlockId,
@@ -158,6 +177,75 @@ class _LeafPlace:
 
     root: Place
     path: LeafPath
+
+
+def _port_path(path: LeafPath) -> list[int | str]:
+    """A typed leaf path as the established port-name key sequence (indices flatten; array coordinates spread)."""
+    keys: list[int | str] = []
+    for segment in path:
+        match segment:
+            case TupleIndex(value=value) | ListIndex(value=value) | StructuralIndex(value=value):
+                keys.append(value)
+            case ArrayIndex(coordinates=coordinates):
+                keys.extend(coordinates)
+            case RecordField(name=name):
+                keys.append(name)
+    return keys
+
+
+def _validate_return_layout(contract: ReturnContract, layout: "ValueLayout") -> None:
+    """The declared return structure against the emitted layout; any shape/arity/flavor divergence rejects."""
+    match contract:
+        case ScalarReturn():
+            if layout is not None:
+                raise EmissionRejection("return type mismatch: declared a scalar, returns an aggregate")
+        case TupleReturn(items=items):
+            children = _positional_children(layout, ContainerFlavor.TUPLE, "tuple")
+            if len(children) != len(items):
+                raise EmissionRejection(
+                    f"return arity mismatch: declared a {len(items)}-tuple, returns {len(children)} values"
+                )
+            for item, child in zip(items, children):
+                _validate_return_layout(item, child)
+        case VariadicTupleReturn(item=item):
+            for child in _positional_children(layout, ContainerFlavor.TUPLE, "tuple"):
+                _validate_return_layout(item, child)
+        case ListReturn(item=item):
+            for child in _positional_children(layout, ContainerFlavor.LIST, "list"):
+                _validate_return_layout(item, child)
+        case _:
+            raise EmissionRejection("array returns are not lowerable yet")  # ArrayReturn under a nested position
+
+
+def _positional_children(layout: "ValueLayout", flavor: ContainerFlavor, spelled: str) -> tuple["ValueLayout", ...]:
+    match layout:
+        case TupleLayout() if flavor is ContainerFlavor.TUPLE:
+            return child_layouts(layout)
+        case ListLayout() if flavor is ContainerFlavor.LIST:
+            return child_layouts(layout)
+        case StructuralLayout(flavors=flavors) if flavor in flavors:
+            return child_layouts(layout)  # the declared contract disambiguates a flavor-erased join
+        case None:
+            raise EmissionRejection(f"return type mismatch: declared a {spelled}, returns a scalar")
+        case _:
+            raise EmissionRejection(f"return type mismatch: declared a {spelled}, returns a different container")
+
+
+def _contract_leaf_kind(contract: ReturnContract, path: LeafPath) -> SemType:
+    """The declared scalar kind governing the leaf at ``path`` (the leaf's contract, walked structurally)."""
+    current = contract
+    for segment in path:
+        match current, segment:
+            case (TupleReturn(items=items), TupleIndex(value=value) | StructuralIndex(value=value)):
+                current = items[value]
+            case (VariadicTupleReturn(item=item), TupleIndex() | StructuralIndex()):
+                current = item
+            case (ListReturn(item=item), ListIndex() | StructuralIndex()):
+                current = item
+            case _:
+                raise AssertionError(f"contract walk diverged at {segment} under {current}")
+    assert isinstance(current, ScalarReturn), current
+    return current.kind
 
 
 def _leaf_at(fact: AggregateFact, path: LeafPath) -> AtomicFact:
@@ -573,8 +661,6 @@ class _Emitter:
             case StorePlace(place=place, src=src):
                 fact = self._fact(src)
                 if isinstance(fact, AggregateFact):
-                    if isinstance(place, ReturnPlace):
-                        raise EmissionRejection("aggregate (tuple/list/array) returns are not emitted yet")  # stage 9
                     self._copy_leaves(fir_id, Local(src), fact, place)
                 elif isinstance(fact, Known) and not isinstance(
                     fact.value, (StaticBool, MetaInt, NpInt, StaticFloat, NpFloat)
@@ -953,6 +1039,24 @@ class _Emitter:
         xor = self._builder.operation(BoolXor(), [left, right])
         return xor if rel is RelationalOp.NE else self._builder.operation(BoolNot(), [xor])
 
+    def _exit_leaf(self, exit_block: FirBlockId, path: LeafPath, leaf: AtomicFact, kind: SemType) -> int:
+        """One returned leaf, coerced onto its declared contract kind exactly like a scalar return."""
+        if isinstance(leaf, Known):
+            if isinstance(leaf.value, (MetaInt, NpInt)) and kind is SemType.INT:
+                vid = self._builder.int_const(int(leaf.value.value))
+            else:
+                vid = self._const(leaf.value)
+        else:
+            vid = self._read(exit_block, _LeafPlace(ReturnPlace(), path))
+        if kind is SemType.FLOAT and isinstance(self._type_of(vid), IntType):
+            vid = self._builder.operation(IntToFloat(), [vid])  # an integer leaf returned as a declared float
+        got = self._sem_of(self._type_of(vid))
+        if got is not kind:
+            raise EmissionRejection(
+                f"return type mismatch at leaf {_port_path(path)}: declared {kind.value}, returns {got.value}"
+            )
+        return vid
+
     # ---------------------------------------- exit ----------------------------------------
 
     def _finish_exit(self) -> None:
@@ -960,14 +1064,13 @@ class _Emitter:
         exit_env = self._result.block_in[unit.exit]
         self._builder.position_at(self._fir_to_hir[unit.exit])
         return_fact = exit_env.facts.get(ReturnPlace())
-        if isinstance(return_fact, AggregateFact):
-            raise EmissionRejection("aggregate (tuple/list/array) returns are not emitted yet")  # per-leaf: stage 9
         contract = unit.return_contract
         assert contract is not None, "emission runs only on the root unit"
         returns_value = return_fact is not None and not (
             isinstance(return_fact, Known) and isinstance(return_fact.value, ObjectRef)
         )
         return_vid: int | None = None
+        return_leaves: list[tuple[LeafPath, int]] = []
         match contract:
             case VoidReturn():
                 if returns_value:
@@ -975,6 +1078,8 @@ class _Emitter:
             case ScalarReturn(kind=kind):
                 if not returns_value:
                     raise EmissionRejection(f"return type mismatch: declared {kind.value}, returns nothing")
+                if isinstance(return_fact, AggregateFact):
+                    raise EmissionRejection(f"return type mismatch: declared {kind.value}, returns an aggregate")
                 if isinstance(return_fact, Known) and isinstance(return_fact.value, (MetaInt, NpInt)):
                     if kind is SemType.INT:
                         return_vid = self._builder.int_const(int(return_fact.value.value))  # an integer port
@@ -989,10 +1094,17 @@ class _Emitter:
                 got = self._sem_of(self._type_of(return_vid))
                 if got is not kind:
                     raise EmissionRejection(f"return type mismatch: declared {kind.value}, returns {got.value}")
-            case _:  # an aggregate contract (tuple/list/array): the value must be an aggregate too
+            case ArrayReturn():
+                raise EmissionRejection("array returns are not lowerable yet")  # the ndarray stages
+            case _:  # a tuple/list contract: the value must be an aggregate of the declared structure
                 if not returns_value:
                     raise EmissionRejection("declared an aggregate return but returns nothing")
-                raise EmissionRejection("declared an aggregate return but returns a scalar")
+                if not isinstance(return_fact, AggregateFact):
+                    raise EmissionRejection("declared an aggregate return but returns a scalar")
+                _validate_return_layout(contract, return_fact.layout)
+                for path, leaf_fact in zip(leaf_paths(return_fact.layout), return_fact.leaves, strict=True):
+                    kind = _contract_leaf_kind(contract, path)
+                    return_leaves.append((path, self._exit_leaf(unit.exit, path, leaf_fact, kind)))
         promoted = self._result.runtime_state
         # Slots and public ports emit in first-STORE source order (matching production), not the order the RPO walk
         # happened to touch attributes; a leaf touched only by a read still trails a leaf stored earlier.
@@ -1006,6 +1118,9 @@ class _Emitter:
                 public_live_outs.add(live_out)
         if return_vid is not None and return_vid not in public_live_outs:
             self._builder.output(port_name([0]), return_vid)  # a scalar return is leaf 0 of the bundle
+        for path, vid in return_leaves:
+            if vid not in public_live_outs:  # a leaf equal to a public state live-out rides that state port
+                self._builder.output(port_name(_port_path(path)), vid)
         for leaf in store_order:
             if not leaf.path[-1].startswith("_"):
                 self._builder.output(state_port_name(self._slot_name(leaf)), self._read(unit.exit, leaf))

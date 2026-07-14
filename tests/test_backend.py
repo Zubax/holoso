@@ -266,7 +266,6 @@ def test_state_slot_folded_sign_coexists_with_sibling_port(tmp_path: Path) -> No
     _elaborate("collide_state", generate(lir).verilog, tmp_path)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: ekf1_stateless returns a tuple — stage 9 aggregate returns")
 @requires_iverilog
 def test_ekf1_stateless_elaborates(tmp_path: Path) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))

@@ -295,16 +295,6 @@ def test_new_frontend_matches_python_reference() -> None:
         assert float(out[0]) == pytest.approx(kernel(x, g), rel=1e-5, abs=1e-5)
 
 
-def test_aggregate_return_is_a_located_rejection() -> None:
-    from holoso._frontend._fir._emit import EmissionRejection
-
-    def kernel(x: float) -> tuple[float, float]:
-        return x + 1.0, x - 1.0
-
-    with pytest.raises(EmissionRejection, match="aggregate"):
-        lower_fir(kernel)
-
-
 def test_component_helper_method_matches_python() -> None:
     # Codex-flagged: self.helper(x) must dispatch, not be mistaken for state.
     class WithHelper:

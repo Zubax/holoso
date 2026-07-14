@@ -291,7 +291,6 @@ def test_selected_mir_has_only_input_const_operation_nodes() -> None:
     assert all(isinstance(n, (MirFloatInput, MirFloatConst, MirOperation)) for n in mir.nodes.values())
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: ekf1_stateless returns a tuple — stage 9 aggregate returns")
 def test_ekf1_stateless_lowering() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateless

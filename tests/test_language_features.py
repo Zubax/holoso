@@ -146,7 +146,6 @@ def _local_shadows_module_constant(x: float) -> float:
     return x * _GAIN
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_module_constants_resolve_in_value_position() -> None:
     sim = _model(_uses_module_constants)
     for x in (0.0, 1.0, 2.0, 3.0, 5.0):
@@ -236,7 +235,6 @@ def _bool_eq_branch(a: bool, b: bool, x: float) -> float:
     return y
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")
 def test_bool_eq_is_xnor_and_ne_is_xor() -> None:
     sim = _model(_bool_eq_ne)
     for a, b in itertools.product((False, True), repeat=2):

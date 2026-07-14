@@ -247,7 +247,6 @@ def test_metrics_do_not_regress(name: str) -> None:
         ), f"{name}: {field} regressed {getattr(base, field)} -> {getattr(got, field)}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: ekf1_stateless returns a tuple — stage 9 aggregate returns")
 def test_build_is_deterministic() -> None:
     """The allocator's annealing is ``seed=0``; two builds of the same kernel must agree, so the baseline is stable."""
     first = _measure("ekf1_stateless")

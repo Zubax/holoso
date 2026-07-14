@@ -487,7 +487,6 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes(config: Operator
         ), f"reg {index}: landings {sorted(pcs)} not all model writebacks {sorted(actual.get(index, set()))}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
     # A drained block that does WORK carrying only boolean values at its boundary lands at boundary_step(makespan) (the
     # one bank-independent drain). The drain distinction that remains is the install's SOURCE, not its bank: a tail
@@ -499,13 +498,14 @@ def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyP
     def is_bool_only(block: LirBlock) -> bool:  # no wide register write and no float copy at the tail
         return not block.copies and not any(isinstance(w.dst, RegRef) for op in _block_ops(block) for w in op.writes)
 
-    # phase_frequency_detector is a single-block all-boolean kernel: its Ret does real boolean WORK (makespan > 0) and
+    # A straight-line all-boolean kernel is a single block: its Ret does real boolean WORK (makespan > 0) and
     # installs nothing, so it drains at the work boundary (distinct from a pure-drain Ret, whose resident output needs
-    # no boundary at all -- covered separately).
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    from phase_frequency_detector import PhaseFrequencyDetector  # noqa: PLC0415
+    # no boundary at all -- covered separately). The PFD example no longer serves here: its state-writing diamonds
+    # stay real branches, leaving its Ret block empty.
+    def all_bool_work(a: bool, b: bool, c: bool) -> bool:
+        return (a ^ b) & c
 
-    pfd = build(_run(PhaseFrequencyDetector().__call__), "pfd_bool_drain", fetch_stages=3)
+    pfd = build(_run(all_bool_work), "inline_bool_drain", fetch_stages=3)
     pfd_ret = next(block for block in pfd.blocks if isinstance(block.terminator, Ret))
     assert (
         is_bool_only(pfd_ret) and not pfd_ret.bool_writes and pfd_ret.block_makespan > 0
@@ -558,7 +558,6 @@ def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyP
         )
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_entry_block_reclaims_its_first_control_word() -> None:
     # An inline op reads combinationally (latency 0), so the entry block's first boolean operation
     # issues on block-local cycle 0 and FIRES on executing step 0 -- reclaiming ``ucode[0]``. Crash-before: the cycle-1
@@ -797,7 +796,6 @@ def test_entry_busy_gates_a_successor_firing_at_its_inherited_instance_free_cycl
     assert sched.busy_until[(operator, 0)] == inherited + operator.initiation_interval
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_residence_tint_is_path_exact_across_a_merge() -> None:
     # Regression (review P1, all three reviewers): the report's residence tint was not path-exact. Three manifestations,
     # all fixed: (a) a single global residence_rows collapsed a register's def/use across mutually-exclusive arms, so a
@@ -967,7 +965,6 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
             assert min(any_rows) >= 1, f"{name}: {any_reg} tinted resident at PC {min(any_rows)} < 1"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_state_slot_residence_matches_the_model_under_carry() -> None:
     # Regression (review): the READ-FIRST boundary-install path -- residence_rows' read_first_defs and _cfg_residence
     # `upward` refinement -- governs only persistent state slots, which the stateless oracle above never builds. A
@@ -1299,7 +1296,6 @@ def _ilog2(mir: Mir) -> list[int]:
     ]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_fmul_ilog2_same_k_shares_one_instance() -> None:
     # Two K=2 scalings that never run on the same cycle (the second waits on a multiply) pool onto one instance.
     def f(a: float, b: float) -> tuple[float, float]:
@@ -1314,7 +1310,6 @@ def test_fmul_ilog2_same_k_shares_one_instance() -> None:
     assert sum(1 for i in sched.instances if isinstance(i.operator, FMulILog2Operator)) == 1
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_fmul_ilog2_same_k_serializes_by_default_parallelizes_with_budget() -> None:
     # Two independent K=2 scalings are both ready at cycle 1; the per-kind budget governs them like any other kind.
     def f(a: float, b: float) -> tuple[float, float]:
@@ -1599,7 +1594,6 @@ def _check_float_kernel(fn: Callable[..., tuple[float, ...]], name: str, samples
             assert abs(g - r) <= 1e-2 * max(1.0, abs(r)), f"{name}{args}: {got} vs {ref}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_phi_coalescing_residual_install_conflict_is_resolved() -> None:
     # Regression: a phi (``a``) coalesces onto input ``x``'s register because the install-free oracle sees no overlap,
     # yet ``x`` stays live in the else block as a sibling phi's identity arm (``z = x``) exactly where ``a``'s residual
@@ -1620,7 +1614,6 @@ def test_phi_coalescing_residual_install_conflict_is_resolved() -> None:
     _check_float_kernel(k, "coal_c1", [(2.0, 3.0, 5.0), (2.0, 3.0, 1.0), (-4.0, 2.0, 10.0), (1.5, 4.0, 0.5)])
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_phi_coalescing_conflict_resolved_under_reversed_declaration_order() -> None:
     # The same hazard with the assignments and the return reversed: value ids -- hence the deterministic phi processing
     # order the union-find follows -- change, so a DIFFERENT phi wins the merge onto ``x``. The fixpoint must converge
@@ -1640,7 +1633,6 @@ def test_phi_coalescing_conflict_resolved_under_reversed_declaration_order() -> 
     _check_float_kernel(k, "coal_c2", [(2.0, 3.0, 5.0), (2.0, 3.0, 1.0), (-4.0, 2.0, 10.0), (1.5, 4.0, 0.5)])
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_phi_coalescing_conflict_resolved_with_swapped_branch_arms() -> None:
     # The mirror: the coalescing identity arm sits in the else block and the sign-folded residual arm in the then block,
     # so the conflict is exercised from the opposite branch polarity. Confirms the de-coalescing is arm-order agnostic.
@@ -1658,7 +1650,6 @@ def test_phi_coalescing_conflict_resolved_with_swapped_branch_arms() -> None:
     _check_float_kernel(k, "coal_c3", [(2.0, 3.0, 5.0), (2.0, 3.0, 1.0), (-4.0, 2.0, 10.0), (1.5, 4.0, 0.5)])
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_bool_phi_coalescing_residual_install_conflict_is_resolved() -> None:
     # The boolean-bank twin of the residual-install conflict: phi ``a`` coalesces onto input ``q``'s 1-bit register
     # while ``q`` stays live as sibling phi ``z``'s identity arm (``z = q``) where ``a``'s residual (inverted) else-arm
@@ -1739,7 +1730,6 @@ def test_state_early_copy_frees_source_register() -> None:
     assert any(write.dst == in_x.dst for op in lir.ops for write in op.writes)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_build_lir_ekf1_stateless() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateless
@@ -1820,7 +1810,6 @@ def test_underflowing_negative_constant_is_not_sign_folded() -> None:
     assert operand.sign == FloatSignControl()
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_underflowing_negative_constant_output_stays_canonical_zero() -> None:
     def f(a: float) -> tuple[float, float]:
         return a + a, -1e-12  # the -1e-12 output underflows to +0; it must stay canonical, not fold to illegal -0
@@ -1849,7 +1838,6 @@ def test_stateful_slot_register_gaps_are_reused() -> None:
     assert lir.regfile.nreg <= 40  # gap-reuse sheds ~6; a regression to the fully-reserved 45 trips this
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_register_sharing_is_hardware_disjoint() -> None:
     # ekf1_stateless time-multiplexes many values onto each register. Verify the hardware-frame interference invariant
     # directly: within a register, each value's last read precedes the next value's landing, R(a) < W(b) -- the same
@@ -2034,7 +2022,6 @@ def test_marked_commutative_operators_are_bit_exact_commutative() -> None:
             assert evaluate(a, b).bits == evaluate(b, a).bits
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_commutative_port_assignment_never_increases_read_mux_fan_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2156,7 +2143,6 @@ def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
                 assert read in lir.reg_liveness[operand.source]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: multi-tap tuple return — stage 9 aggregate returns")
 def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
     # Two DIFFERENT relations over the same operand pair tap two distinct output ports of one comparator activation,
     # so they fuse into a single firing: one instance issue, one operand read, two boolean writes -- the multi-output
@@ -2179,7 +2165,6 @@ def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
         assert below == float(a < b) and same == float(a == b), f"a={a} b={b}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: multi-tap tuple return — stage 9 aggregate returns")
 def test_same_port_taps_with_different_inversions_do_not_fuse() -> None:
     # ``a < b`` taps the lt flag plainly and ``a >= b`` taps the SAME flag inverted: one output-port lane writes once
     # per firing, so these must stay two firings, spaced by instance contention. Both values must still be correct.
@@ -2298,7 +2283,6 @@ def test_write_timeline_resolves_inline_wide_producers() -> None:
 
 
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: multi-tap tuple return — stage 9 aggregate returns")
 def test_commutative_comparator_swap_permutes_output_taps(config: OperatorCase) -> None:
     # The comparator is commutative under the gt/lt flag exchange. Two mirrored comparisons over one operand pair
     # otherwise read (a,b) and (b,a) -- two registers per read port; the port assignment orients one of them swapped,
@@ -2388,7 +2372,6 @@ def test_state_early_install_respects_a_select_reader(config: OperatorCase) -> N
         assert abs(got - want) <= 1e-2 * max(1.0, abs(want)), f"x={x} c={c}: {got} vs {want}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: multi-tap tuple return — stage 9 aggregate returns")
 def test_not_folds_into_every_sink_position() -> None:
     # A semantic NOT never materializes hardware: it becomes a free inversion conditioner at each consumer. The
     # kernel routes one comparison's negation into a logic operand, a bool output, and a bool->float cast; the LIR
@@ -2444,7 +2427,6 @@ def test_double_negation_cancels() -> None:
     assert float(model.run(2.0, 1.0)[0]) == 1.0 and float(model.run(1.0, 2.0)[0]) == 0.0
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: multi-tap tuple return — stage 9 aggregate returns")
 def test_value_consumed_in_both_polarities_shares_one_producer() -> None:
     # ``x`` and ``not x`` share one comparator tap and one boolean register: the polarity lives on each consumer.
     def f(a: float, b: float) -> list[float]:
@@ -2482,7 +2464,6 @@ def test_bool_state_slot_carries_a_live_out_inversion() -> None:
 
 
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: multi-tap tuple return — stage 9 aggregate returns")
 def test_inverted_bool_phi_arm_installs_with_opposite_polarities(config: OperatorCase) -> None:
     # The headline M3 generalization end to end: a bool phi whose two arms reference the SAME base value under
     # opposite inversions (one arm rewrites the flag as its own negation). The two install copies must carry
@@ -2544,8 +2525,8 @@ def test_boolean_logic_chain_reuses_registers_on_the_tight_same_bank_edge() -> N
 
     lir = build(_run(f), "bool_chain", fetch_stages=3)
     comparisons = sum(1 for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator))
-    short_circuits = sum(1 for block in lir.blocks for op in block.inline_ops if op.operator.mnemonic == "bool_select")
-    assert comparisons == 5 and short_circuits >= 4, (comparisons, short_circuits)
+    gates = sum(1 for block in lir.blocks for op in block.inline_ops if op.operator.mnemonic == "band")
+    assert comparisons == 5 and gates >= 4, (comparisons, gates)
     assert lir.bool_regfile.nreg <= 3, f"the chained flags must reuse registers, got {lir.bool_regfile.nreg}"
     model = build_model(lir)
     import itertools
@@ -2598,7 +2579,6 @@ class _AliasedFloatState:
         return self.pub
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_aliased_state_slots_merge_onto_one_register() -> None:
     # Regression (user): two state slots that always hold the same value share one register, so neither needs an
     # install copy. PFD's up/_ref_pending and down/_fb_pending collapse 7 bool registers to 5 with no copies; the
@@ -2632,7 +2612,6 @@ def _firings(lir: Lir, mnemonic: str) -> list[PooledScheduledOp]:
     return [op for op in lir.ops if op.inst.operator.mnemonic == mnemonic]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_sincos_coalesces_sin_and_cos_into_one_firing() -> None:
     def kernel(x: float) -> tuple[float, float]:
         return math.sin(x), math.cos(x)
@@ -2643,7 +2622,6 @@ def test_sincos_coalesces_sin_and_cos_into_one_firing() -> None:
     assert len(firings) == 1 and len(firings[0].writes) == 2
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_atan2_and_hypot_coalesce_into_one_firing() -> None:
     def kernel(y: float, x: float) -> tuple[float, float]:
         return math.hypot(y, x), math.atan2(y, x)
@@ -2654,7 +2632,6 @@ def test_atan2_and_hypot_coalesce_into_one_firing() -> None:
     assert len(firings) == 1 and len(firings[0].writes) == 2
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_hypot_fuses_with_atan2_regardless_of_operand_order() -> None:
     # hypot is commutative and sign-invariant, so hypot(x, y) must still fuse into atan2(y, x)'s CORDIC despite the
     # operand order; otherwise the idiomatic spelling silently spins up primitives.
@@ -2685,7 +2662,6 @@ def test_lone_hypot_decomposes_without_spinning_up_a_cordic() -> None:
     assert counts.get("flog2") == 1 and counts.get("fexp2") == 1  # the exp2(log2/2) sqrt stopgap
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_independent_sincos_share_one_instance_spaced_by_ii() -> None:
     def kernel(a: float, b: float) -> tuple[float, float, float, float]:
         return math.sin(a), math.cos(a), math.sin(b), math.cos(b)
@@ -2694,7 +2670,6 @@ def test_independent_sincos_share_one_instance_spaced_by_ii() -> None:
     _assert_two_firings_at_minimal_ii(lir, "fsincos")
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns — stage 9")
 def test_independent_atan2_share_one_instance_spaced_by_ii() -> None:
     def kernel(a: float, b: float, c: float, d: float) -> tuple[float, float]:
         return math.atan2(a, b), math.atan2(c, d)

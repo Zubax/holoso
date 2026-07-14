@@ -376,7 +376,6 @@ def _trivial_float_folds(x: float, y: float) -> list[float]:
     ]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: returns a tuple — stage 9 aggregate returns")
 def test_trivial_fast_math_float_folds_are_operator_free_and_bit_exact() -> None:
     result = holoso.synthesize(_trivial_float_folds, _ops(), name="trivial_float_folds")
     verilog = result.verilog_output.verilog

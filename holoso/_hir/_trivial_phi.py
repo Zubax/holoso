@@ -1,13 +1,20 @@
 """
-Trivial-phi elimination.
+Trivial- and duplicate-phi elimination.
 
 A phi whose arms, ignoring self-references, name a single distinct value is redundant: it always equals that value.
 The most common source is a loop-invariant carried through a header -- ``phi(preheader: x, latch: self)`` -- which the
 emitter's on-the-fly SSA construction can leave behind when a later user of the phi was already wired to it before the
 header sealed and the phi turned out trivial. Such a phi is one extra node and, inside a loop, one extra live value on
-the recurrence, so it costs both area and a scheduling slot. This pass replaces every use of a trivial phi with its one
-real operand and deletes it, repeating to a fixpoint (collapsing one phi can make a phi that referenced it trivial in
-turn). Block structure and predecessors are untouched, so no phi's arm count changes.
+the recurrence, so it costs both area and a scheduling slot.
+
+Two phis of one block with identical arms are likewise one value: per-leaf SSA emits a separate phi per Place cell,
+so two state attributes that always hold the same value (an aliased pair like PFD's up/_ref_pending) arrive as twin
+phis, and deduplicating them is what lets the register allocator coalesce their slots onto one register with no
+install copies.
+
+The pass replaces every use of a trivial or duplicate phi with its survivor and deletes it, repeating to a fixpoint
+(each collapse can make another phi trivial or a duplicate in turn). Block structure and predecessors are untouched,
+so no phi's arm count changes.
 """
 
 import logging
@@ -56,6 +63,19 @@ def _substitute(hir: Hir, victim: ValueId, replacement: ValueId) -> Hir:
     return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=outputs, state_slots=slots)
 
 
+def _duplicate_target(hir: Hir) -> tuple[ValueId, ValueId] | None:
+    for block in hir.blocks:
+        seen: dict[tuple[object, tuple[tuple[int, ValueId], ...]], ValueId] = {}
+        for vid in block.phis:
+            node = hir.nodes[vid]
+            assert isinstance(node, Phi)
+            key = (node.type, node.arms)
+            survivor = seen.setdefault(key, vid)
+            if survivor != vid:
+                return (vid, survivor)
+    return None
+
+
 def run(hir: Hir) -> Hir:
     removed = 0
     while True:
@@ -65,9 +85,11 @@ def run(hir: Hir) -> Hir:
                 target = (vid, replacement)
                 break
         if target is None:
+            target = _duplicate_target(hir)
+        if target is None:
             break
         hir = _substitute(hir, *target)
         removed += 1
     if removed:
-        _logger.info("Trivial-phi elimination: %d redundant phi(s) removed", removed)
+        _logger.info("Trivial/duplicate-phi elimination: %d redundant phi(s) removed", removed)
     return hir

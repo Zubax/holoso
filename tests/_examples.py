@@ -676,22 +676,9 @@ SPECS = [
 # of stages 6-9 removes its own entries as the feature lands, and stage 10 asserts this map is empty. Greppable via
 # the FIR_PARITY_PENDING token.
 FIR_PARITY_PENDING: dict[str, str] = {
-    # These four use stage-8 features (bool cast, bitwise XOR) that now lower, but each returns a tuple, so the
-    # aggregate-return work in stage 9 is their true remaining blocker.
-    "signal_window": "stage 9: aggregate/tuple returns",
-    "majority_voter": "stage 9: aggregate/tuple returns",
-    "uart_rx": "stage 9: aggregate/tuple returns",
-    "uart_tx": "stage 9: aggregate/tuple returns",
-    "quadrature_encoder": "stage 9: aggregate/tuple returns",
-    "phase_frequency_detector": "stage 9: aggregate/tuple returns",
-    "latching_fault_register": "stage 9: aggregate/tuple returns",
-    "cordic_sincos": "stage 9: aggregate/tuple returns",
-    "ekf1_stateless": "stage 9: aggregate/tuple returns",
     "polar_to": "stage 9: np.array construction",
     "polar_from": "stage 9: np.array construction",
     "ekf1_stateful": "builder: argument unpacking f(*args)",
-    # equal_temperament's runtime 2**note lowers to exp2 now; the tuple return is its remaining blocker.
-    "equal_temperament": "stage 9: aggregate/tuple returns",
     # Off-catalogue examples (no SPECS entry) whose synth targets and eventual suites key off these names too.
     "imu_frame_transform": "stage 9: jaxtyping ndarray ports + matmul over array parameters",
     "finite_set_current_controller": "stage 9: records, reductions, array comparison, Index[N] gather",

@@ -35,7 +35,6 @@ def _mir_operation_counts(mir: Mir) -> Counter[str]:
     return Counter(n.operator.mnemonic for n in mir.nodes.values() if isinstance(n, MirOperation))
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: tuple return — stage 9 aggregate returns")
 def test_directional_inf_composites_lower_to_one_classifier() -> None:
     def kernel(a: float, b: float, c: float, d: float) -> list[bool]:
         return [
@@ -62,7 +61,6 @@ def test_directional_inf_composites_lower_to_one_classifier() -> None:
         assert got == want, f"x={x}: {got} vs {want}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: tuple return — stage 9 aggregate returns")
 def test_directional_inf_fusion_preserves_reused_predicates() -> None:
     def kernel(x: float) -> list[bool]:
         inf = math.isinf(x)
@@ -83,7 +81,6 @@ def test_directional_inf_fusion_preserves_reused_predicates() -> None:
         assert model.run(x) == [inf and pos, inf, pos]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: tuple return — stage 9 aggregate returns")
 def test_directional_inf_fusion_suppresses_predicate_shared_only_by_fused_ands() -> None:
     def kernel(x: float) -> list[bool]:
         inf = math.isinf(x)
