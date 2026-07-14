@@ -210,6 +210,25 @@ class FloatTrunc(Operator):
 
 
 @dataclass(frozen=True, slots=True)
+class RequireExactIntFloat(Operator):
+    """
+    An identity on a float carrier that obligates every listed integer to be exactly representable in the selected
+    target format. It wraps a float produced by promoting an integer for an exact Python int/float comparison: HIR->MIR
+    lowers it to the carrier unchanged once representability is verified, and otherwise rejects (located at ``location``).
+    It never folds -- the target format is unknown until MIR.
+    """
+
+    mnemonic: ClassVar[str] = "require_exact_int_float"
+    speculatable: ClassVar[bool] = True
+    integers: frozenset[int]
+    location: str
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+
+@dataclass(frozen=True, slots=True)
 class FloatExp2(Operator):
     mnemonic: ClassVar[str] = "exp2"
     speculatable: ClassVar[bool] = True

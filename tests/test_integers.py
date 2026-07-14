@@ -559,19 +559,21 @@ def test_a_constant_integer_merge_then_integer_arithmetic_is_rejected() -> None:
         lower(kernel)
 
 
-def test_a_mixed_value_in_float_arithmetic_promotes_and_lowers() -> None:
-    # The escape: arithmetic against a definite float operand promotes every path to float (Python does too), so it is a
-    # genuine promotion, not a rounding int operation -- it lowers. A leaked-counter comparison is likewise fine.
+def test_a_mixed_value_promotes_in_float_arithmetic_but_an_exact_compare_needs_representability() -> None:
+    # Arithmetic against a definite float operand promotes every path to float (Python does too), a genuine promotion
+    # that lowers. But comparing an int-or-float value whose integer path is a RUNTIME integer cannot be proven exactly
+    # representable in the target format, so it is a located rejection (Python compares an integer and a float exactly).
     def promote(flag: bool, x: float) -> float:
         y = int(x) if flag else x
         return y + 1.5  # a definite float operand: every path is float, matching Python
 
     def compare(flag: bool, x: float) -> float:
         y = int(x) if flag else x
-        return 1.0 if y > 2.0 else 0.0  # a comparison of the int-or-float value is allowed
+        return 1.0 if y > 2.0 else 0.0  # a runtime-integer mix compared with a float cannot be proven exact
 
-    for kernel in (promote, compare):
-        lower(kernel)  # must not raise
+    lower(promote)  # must not raise
+    with pytest.raises(UnsupportedConstruct, match="cast to float first"):
+        lower(compare)
 
 
 def test_a_runtime_integer_state_join_then_arithmetic_is_rejected() -> None:
@@ -588,3 +590,18 @@ def test_a_runtime_integer_state_join_then_arithmetic_is_rejected() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="integer on one path and a float on another"):
         lower(K().step)
+
+
+def test_an_exact_int_float_comparison_requires_target_representability() -> None:
+    # Python compares an integer and a float exactly. (2**18 + 1) == x promotes the integer to float, but in FMT(6, 18)
+    # it rounds to 2**18, so the comparison would diverge -- MIR rejects it under the exactness obligation. A constant
+    # that IS representable (2**18, or a small integer) lowers.
+    def non_representable(x: float) -> float:
+        return 1.0 if (2**18 + 1) == x else 0.0
+
+    def representable(x: float) -> float:
+        return 1.0 if x > 5 else 0.0
+
+    with pytest.raises(UnsupportedConstruct, match="not exactly representable"):
+        lower_to_mir(_hir(non_representable), _ops())
+    lower_to_mir(_hir(representable), _ops())  # a small representable integer lowers cleanly
