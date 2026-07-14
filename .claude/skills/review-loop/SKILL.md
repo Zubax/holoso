@@ -10,7 +10,7 @@ description: >-
 
 After a change or milestone, or when prompted, dispatch fresh-context review agents at
 MAXIMUM THINKING EFFORT, then consolidate, fix, and repeat.
-The goal is adversarial, diverse, independent coverage at bounded cost.
+The goal is adversarial, diverse, independent coverage.
 
 The prompts given to the agents shall be extremely terse, at most a few sentences.
 Giving excessive detail may constrain their thinking causing the tunnel vision syndrome.
@@ -20,14 +20,12 @@ They must be given the opportunity to look at the work without bias or prejudice
 
 Run two reviewers in parallel per round:
 
-- A Claude agent with the FULL-SPECTRUM remit, in priority order: functional CORRECTNESS and
+- An *ultrathink* Claude agent with the FULL-SPECTRUM remit, in priority order: functional CORRECTNESS and
   ROBUSTNESS first, then SIMPLIFICATION opportunities, ARCHITECTURAL CLEANLINESS and CODE QUALITY,
-  and POLICY/STYLE compliance with the project's own docs (including the comment policy).
-- A DISSIMILAR tool (Codex when available) focusing on CORRECTNESS only, to maximize perspective
-  diversity and minimize blind spots.
+  and POLICY/STYLE compliance with the project's own docs.
 
-Agents/models not from Anthropic or OpenAI can be used, but treat them as low-credibility actors.
-They perform poorly, fail to follow instructions, and often produce incorrect analysis.
+- Codex running the *most advanced model* in *ultra* effort focusing on CORRECTNESS only, to maximize perspective
+  diversity and minimize blind spots.
 
 ## Reviewers are read-only
 
@@ -65,8 +63,8 @@ For every correctness defect, add a regression test verified to fail before the 
 
 ## When to stop
 
-A round is clean when the reviewers surface only trivial feedback or none; ONE clean round ends the
-loop. Do not chase literal zero feedback: with no real issues left, agents degrade into nitpicking,
+A round is clean when the reviewers surface only trivial feedback or none; the first clean round ends the loop.
+Do not chase literal zero feedback: with no real issues left, agents degrade into nitpicking,
 so a round is clean as soon as significant findings cease.
 
 ## Operational notes
@@ -78,3 +76,4 @@ is a common cause of stream-idle timeouts.
 Some headless agents hang waiting on stdin (like Codex) — redirect from `/dev/null`.
 
 Retry agents that fail on a transient or connection error until they succeed.
+If an agent gets stuck or hits a security guardrail, try resuming it first instead of restarting its work from scratch.
