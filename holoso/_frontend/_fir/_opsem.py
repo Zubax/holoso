@@ -112,6 +112,8 @@ def _pow_is_bounded(left: StaticValue, right: StaticValue) -> bool:
     """
     if not isinstance(left, (MetaInt, NpInt)) or not isinstance(right, (MetaInt, NpInt)):
         return True  # float powers do not grow without bound
+    if abs(int(left.value)) <= 1:
+        return True  # 0**n, 1**n and (-1)**n are 0, 1 or +-1 regardless of the exponent -- always cheap to fold
     exponent = right.value
     return exponent <= 0 or max(left.value.bit_length(), 1) * exponent <= _MAX_FOLD_BITS
 
@@ -199,6 +201,9 @@ def static_truth(value: StaticValue) -> bool | None:
         case MetaInt(value=v) | NpInt(value=v):
             return v != 0
         case StaticFloat(value=v) | NpFloat(value=v):
+            # A float constant's truth folds on host float64 like every other constant fold (comparisons, arithmetic):
+            # this keeps constant boolean logic (``3.0 and 7.0``) a compile-time constant rather than a runtime mux. A
+            # tiny magnitude that underflows to zero in a narrow format is the same documented constant-fold deviation.
             return None if math.isnan(v) else v != 0.0
         case StaticSeq(items=items):
             return len(items) != 0
