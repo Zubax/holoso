@@ -443,10 +443,16 @@ def test_a_huge_integer_promoted_to_float_is_a_clean_rejection() -> None:
 
 
 def test_integer_and_or_lowers_to_int_select_without_crashing() -> None:
-    def kernel(a: int, b: int) -> int:
-        return a or b  # integer eager-or -> IntSelect (then the integer-backend rejection), never a raw builder crash
+    # Both a runtime-int arm and a Known-int arm must stay integer: a Known integer materialized as a float would make
+    # the select FLOAT while the analyzer typed it INT, crashing the integer phi (regression).
+    def runtime_arms(a: int, b: int) -> int:
+        return a or b
 
-    assert "IntSelect" in _op_names(_hir(kernel))
+    def known_arm(a: int) -> int:
+        return a or 5
+
+    for kernel in (runtime_arms, known_arm):
+        assert "IntSelect" in _op_names(_hir(kernel))  # IntSelect, then the integer-backend rejection, never a crash
 
 
 def test_a_known_integer_stored_into_a_float_state_slot_stays_float() -> None:
@@ -457,6 +463,50 @@ def test_a_known_integer_stored_into_a_float_state_slot_stays_float() -> None:
 
         def step(self) -> float:
             self.x = 1
+            return self.x
+
+    (slot,) = lower(K().step).state_slots
+    assert type(lower(K().step).nodes[slot.live_out].type).__name__ == "FloatType"
+
+
+def test_min_max_of_a_known_integer_and_a_runtime_float_is_rejected() -> None:
+    # A Known-integer min/max operand can be the winner, so the result is int-polymorphic; promoting it to float would
+    # round the following integer arithmetic (regression: only residual-int operands were caught before).
+    def kernel(x: float) -> float:
+        return float(min(2**24, x) + 1 + 1)
+
+    with pytest.raises(UnsupportedConstruct, match="not yet lowerable"):
+        lower(kernel)
+
+
+def test_integer_base_to_the_zeroth_power_is_rejected() -> None:
+    # int(x)**0 is the integer 1 in Python; floating it to 1.0 would round subsequent integer arithmetic (regression:
+    # the power==0 shortcut fired before the integer-base check).
+    def kernel(x: float) -> float:
+        return float(int(x) ** 0 + int(x) + 1)
+
+    with pytest.raises(UnsupportedConstruct, match="power"):
+        lower(kernel)
+
+
+def test_a_constant_boolean_bitwise_guard_folds_and_lowers() -> None:
+    # Regression: True & False folds to a Known bool in the analyzer, but emission replayed it as a runtime bitwise and
+    # hit "boolean reaches a float operation"; the guard must fold so the branch resolves.
+    def kernel(x: float) -> float:
+        return x if True & False else -x
+
+    assert _op_names(_hir(kernel)) == {"FloatNeg"}  # the guard folded to False -> the -x arm, no bitwise/select
+
+
+def test_a_runtime_integer_stored_into_a_float_slot_promotes() -> None:
+    # Regression: math.floor(v) is an integer; storing it to a float leaf must promote on that edge, not leave a
+    # FloatToInt that the slot's float reset mismatches.
+    class K:
+        def __init__(self) -> None:
+            self.x = 0.0
+
+        def step(self, v: float) -> float:
+            self.x = floor(v)
             return self.x
 
     (slot,) = lower(K().step).state_slots

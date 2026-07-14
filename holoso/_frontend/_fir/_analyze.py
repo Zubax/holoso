@@ -1062,11 +1062,14 @@ class Analyzer:
                 arity = match.operator.signature.arity
                 if len(call.args) != arity:
                     raise AnalysisRejection(f"intrinsic expects {arity} argument(s), got {len(call.args)}", call.origin)
-                # abs/min/max are int-polymorphic in Python: on an integer operand they return an EXACT integer, so
-                # promoting to float here would let subsequent integer arithmetic round (2**53 + 1 -> 2**53). There is
-                # no integer abs/min/max operator yet, so an integer operand is a located rejection, never a silent float.
+                # abs/min/max are int-polymorphic in Python: on an integer operand (runtime OR a Known integer that can
+                # be the min/max winner) they return an EXACT integer, so promoting to float here would let subsequent
+                # integer arithmetic round (min(2**24, x) + 1 + 1). There is no integer abs/min/max operator yet, so an
+                # integer operand is a located rejection, never a silent float promotion (cast an operand to float first).
                 if isinstance(match.operator, (FloatAbs, FloatMin, FloatMax)) and any(
-                    fact == Residual(SemType.INT) for fact in argument_facts
+                    fact == Residual(SemType.INT)
+                    or (isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)))
+                    for fact in argument_facts
                 ):
                     raise AnalysisRejection(
                         f"an integer operand to {match.operator.mnemonic} is not yet lowerable; cast to float first",

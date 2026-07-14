@@ -442,6 +442,14 @@ class _Emitter:
                 return self._const(fact.value)
             return self._read(fir_id, Local(binding))  # a residual temp is an SSA-numbered place, cross-block safe
 
+        def arm_value(binding: BindingId) -> int:
+            # Like value_of but a Known integer materializes as an IntConst, so a select/phi over it keeps the
+            # analyzer's integer type; value_of would float it via _const and mismatch an IntSelect or an integer phi.
+            fact = fact_of(binding)
+            if isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)):
+                return self._builder.int_const(int(fact.value.value))
+            return value_of(binding)
+
         def as_float(binding: BindingId) -> int:
             if fact_of(binding) == Residual(SemType.INT):
                 return self._builder.operation(IntToFloat(), [value_of(binding)])  # Python promotes int -> float
@@ -460,7 +468,7 @@ class _Emitter:
             raise EmissionRejection("a non-integer value reaches an integer operation")
 
         for op in block.ops:
-            self._emit_op(fir_id, op, env, fact_of, value_of, as_float, as_int)
+            self._emit_op(fir_id, op, env, fact_of, value_of, arm_value, as_float, as_int)
         match block.terminator:
             case FirJump(target=target):
                 if target in self._result.executable_blocks:
@@ -483,6 +491,7 @@ class _Emitter:
         env: dict[Place, Fact],
         fact_of: "FactOf",
         value_of: "ValueOf",
+        arm_value: "ValueOf",
         as_float: "ValueOf",
         as_int: "ValueOf",
     ) -> None:
@@ -575,8 +584,8 @@ class _Emitter:
                         env[Local(dst)] = rhs_fact
                     else:
                         then_binding, else_binding = (rhs, lhs) if mode is SelectMode.AND else (lhs, rhs)
-                        then_vid = value_of(then_binding)
-                        else_vid = value_of(else_binding)
+                        then_vid = arm_value(then_binding)
+                        else_vid = arm_value(else_binding)
                         condition = value_of(cond)
                         then_type, else_type = self._type_of(then_vid), self._type_of(else_vid)
                         operator: Operator
@@ -629,6 +638,8 @@ class _Emitter:
                     stored = self._builder.int_const(int(src_fact.value.value))  # a Known int keeps an int-typed leaf
                 elif isinstance(src_fact, Known):
                     stored = self._const(src_fact.value)  # a Known int stored to a FLOAT leaf floats via the guard
+                elif src_fact == Residual(SemType.INT) and not self._leaf_is_int(leaf):
+                    stored = as_float(src)  # a runtime integer stored to a float leaf promotes on its own edge
                 else:
                     stored = value_of(src)
                 self._write(fir_id, leaf, stored)
@@ -784,6 +795,11 @@ class _Emitter:
             if folded is not None:
                 env[Local(dst)] = Known(folded)
                 return
+            if isinstance(result_fact, Known):
+                # A Known result static_binop cannot produce -- ``&``/``|``/``^`` on two booleans, which the analyzer
+                # folds. Replay that fold so it materializes at its use site rather than reaching a float operation.
+                env[Local(dst)] = result_fact
+                return
         if result_fact == Residual(SemType.INT):  # a runtime integer result: stay in the integer datapath
             env[Local(dst)] = result_fact
             self._write(fir_id, Local(dst), self._emit_int_binary(bin_op, as_int(lhs), as_int(rhs)))
@@ -884,12 +900,13 @@ class _Emitter:
             power = int(exp_fact.value.value)
             if abs(power) > _MAX_POWER_CHAIN:
                 raise EmissionRejection(f"a compile-time power exponent of {power} is too large to expand")
+            if self._fact_sem(fact_of(base)) is SemType.INT:
+                # An integer base raised to a power is exact integer exponentiation in Python (int(x)**0 is the integer
+                # 1, not 1.0); a float chain would round it and int(x)**0 would silently float. No integer-power operator
+                # yet, so it is a located rejection -- checked before the power==0 shortcut so int(x)**0 refuses too.
+                raise EmissionRejection("an integer raised to a compile-time power is not yet lowerable")
             if power == 0:
                 return self._builder.float_const(1.0)
-            if self._fact_sem(fact_of(base)) is SemType.INT:
-                # An integer base raised to a power is exact integer exponentiation in Python; a float multiply chain
-                # would round it. There is no integer-power operator yet, so it is a located rejection, not a miscompile.
-                raise EmissionRejection("an integer raised to a compile-time power is not yet lowerable")
             source = as_float(base)
             chain = source
             for _ in range(abs(power) - 1):
