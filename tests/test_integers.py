@@ -522,3 +522,67 @@ def test_a_runtime_integer_stored_into_a_float_slot_promotes() -> None:
 
     (slot,) = lower(K().step).state_slots
     assert type(lower(K().step).nodes[slot.live_out].type).__name__ == "FloatType"
+
+
+# --------- regressions: an int/float control-flow merge is an int-or-float value, never rounded (review round 3) ---------
+
+
+def test_a_runtime_integer_merge_then_integer_arithmetic_is_rejected() -> None:
+    # int(x) merged with a float at a phi (if/else) or a conditional select is an int-or-float value; subsequent integer
+    # arithmetic (+1+1) would round the integer path in the float datapath (2**53 -> 2**53, not 2**53+2). Located reject.
+    def phi_join(flag: bool, x: float) -> float:
+        if flag:
+            y = int(x)
+        else:
+            y = x
+        return y + 1 + 1
+
+    def sel_mixed(flag: bool, x: float) -> float:
+        y = int(x) if flag else x
+        return y + 1 + 1
+
+    for kernel in (phi_join, sel_mixed):
+        with pytest.raises(UnsupportedConstruct, match="integer on one path and a float on another"):
+            lower(kernel)
+
+
+def test_a_constant_integer_merge_then_integer_arithmetic_is_rejected() -> None:
+    # The constant-integer counterpart: a Known 2**53 arm is still an int-or-float value at the merge, and float-datapath
+    # arithmetic rounds it just the same. It must reject, not coerce the constant and round (the C-3 fix missed this).
+    def kernel(flag: bool, x: float) -> float:
+        v = 2**53 if flag else x
+        return v + 1 + 1
+
+    with pytest.raises(UnsupportedConstruct, match="integer on one path and a float on another"):
+        lower(kernel)
+
+
+def test_a_mixed_value_in_float_arithmetic_promotes_and_lowers() -> None:
+    # The escape: arithmetic against a definite float operand promotes every path to float (Python does too), so it is a
+    # genuine promotion, not a rounding int operation -- it lowers. A leaked-counter comparison is likewise fine.
+    def promote(flag: bool, x: float) -> float:
+        y = int(x) if flag else x
+        return y + 1.5  # a definite float operand: every path is float, matching Python
+
+    def compare(flag: bool, x: float) -> float:
+        y = int(x) if flag else x
+        return 1.0 if y > 2.0 else 0.0  # a comparison of the int-or-float value is allowed
+
+    for kernel in (promote, compare):
+        lower(kernel)  # must not raise
+
+
+def test_a_runtime_integer_state_join_then_arithmetic_is_rejected() -> None:
+    # A conditional runtime-integer store into a float state slot makes the slot int-or-float; reading it into integer
+    # arithmetic rounds the integer path. Reject. (A plain read that only promotes to float still lowers.)
+    class K:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def step(self, flag: bool, x: float) -> float:
+            if flag:
+                self.y = int(x)
+            return self.y + 1 + 1
+
+    with pytest.raises(UnsupportedConstruct, match="integer on one path and a float on another"):
+        lower(K().step)

@@ -141,6 +141,20 @@ class Residual:
 
 
 @dataclass(frozen=True, slots=True)
+class MixedNumeric:
+    """
+    An int-or-float value: a control-flow merge (phi / conditional select / state-leaf join) reconciled a numeric
+    integer path with a float path. Python keeps each path's runtime kind, so the integer path stays exact-integer and
+    the float path stays float, while Holoso has one datapath. A genuine promotion -- ``float()``, ``/``, or arithmetic
+    with a definite float operand -- makes every path float and resolves this to ``Residual(FLOAT)``. Integer arithmetic
+    on it would round the integer path in the float datapath, so it is a located rejection (real integer support is the
+    integer wiring milestone). ``all_constant`` records whether every integer alternative is a compile-time constant.
+    """
+
+    all_constant: bool
+
+
+@dataclass(frozen=True, slots=True)
 class FactSeq:
     """An aggregate whose elements are facts, present when at least one element is not Known (all-Known aggregates
     stay Known(StaticSeq)); subscripts and lengths stay static even when the payload is runtime."""
@@ -153,10 +167,10 @@ class FactSeq:
 class MaybeUnbound:
     """Joined bound-and-unbound: reading this is a located rejection (Python may raise here)."""
 
-    inner: "Known | Residual | FactSeq"
+    inner: "Known | Residual | FactSeq | MixedNumeric"
 
 
-type Fact = Unbound | Known | Residual | FactSeq | MaybeUnbound
+type Fact = Unbound | Known | Residual | FactSeq | MaybeUnbound | MixedNumeric
 
 _UNBOUND = Unbound()
 
@@ -173,14 +187,26 @@ def _residual_type(value: StaticValue) -> SemType | None:
             return None
 
 
+def _numeric_sem(fact: "Fact") -> SemType | None:
+    """FLOAT or INT for a numeric fact (a Known number or a Residual FLOAT/INT); None for bool, aggregate, or unbound."""
+    match fact:
+        case Known(value=value):
+            sem = _residual_type(value)
+            return sem if sem in (SemType.FLOAT, SemType.INT) else None
+        case Residual(type=t) if t in (SemType.FLOAT, SemType.INT):
+            return t
+        case _:
+            return None
+
+
 def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
     if a is b:
         return a
     match a, b:
         case (Unbound(), Unbound()):
             return _UNBOUND
-        case (Unbound(), (Known() | Residual() | FactSeq()) as bound) | (
-            (Known() | Residual() | FactSeq()) as bound,
+        case (Unbound(), (Known() | Residual() | FactSeq() | MixedNumeric()) as bound) | (
+            (Known() | Residual() | FactSeq() | MixedNumeric()) as bound,
             Unbound(),
         ):
             return MaybeUnbound(bound)
@@ -188,15 +214,23 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
             return half
         case (MaybeUnbound(inner=x), MaybeUnbound(inner=y)):
             joined = join_facts(x, y, origin)
-            assert isinstance(joined, (Known, Residual, FactSeq))
+            assert isinstance(joined, (Known, Residual, FactSeq, MixedNumeric))
             return MaybeUnbound(joined)
-        case (MaybeUnbound(inner=x), (Known() | Residual() | FactSeq()) as y) | (
-            (Known() | Residual() | FactSeq()) as y,
+        case (MaybeUnbound(inner=x), (Known() | Residual() | FactSeq() | MixedNumeric()) as y) | (
+            (Known() | Residual() | FactSeq() | MixedNumeric()) as y,
             MaybeUnbound(inner=x),
         ):
             joined = join_facts(x, y, origin)
-            assert isinstance(joined, (Known, Residual, FactSeq))
+            assert isinstance(joined, (Known, Residual, FactSeq, MixedNumeric))
             return MaybeUnbound(joined)
+        case (MixedNumeric() as m, other) | (other, MixedNumeric() as m):
+            if isinstance(other, MixedNumeric):
+                return MixedNumeric(m.all_constant and other.all_constant)
+            sem = _numeric_sem(other)
+            if sem is None:  # BOOL, an aggregate, or a non-numeric merges with a numeric mix: irreconcilable kinds
+                raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
+            runtime_int = sem is SemType.INT and isinstance(other, Residual)
+            return MixedNumeric(m.all_constant and not runtime_int)
         case (Known(value=x), Known(value=y)):
             if same(x, y):
                 return a
@@ -210,22 +244,24 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
             x_type, y_type = _residual_type(x), _residual_type(y)
             if x_type is not None and x_type == y_type:
                 return Residual(x_type)
-            if {x_type, y_type} <= {SemType.FLOAT, SemType.INT}:  # BOOL never promotes: explicit conversions only
-                return Residual(SemType.FLOAT)
+            if {x_type, y_type} <= {SemType.FLOAT, SemType.INT}:  # two constants: an int-or-float value, never rounded
+                return MixedNumeric(all_constant=True)
             raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
         case (Known(value=x), Residual(type=t)) | (Residual(type=t), Known(value=x)):
             x_type = _residual_type(x)
             if x_type == t:
                 return Residual(t)
-            if x_type is not None and SemType.BOOL not in (x_type, t):
-                return Residual(SemType.FLOAT)
+            if x_type is not None and {x_type, t} <= {SemType.FLOAT, SemType.INT}:
+                return MixedNumeric(
+                    all_constant=x_type is SemType.INT
+                )  # constant iff the integer side is the Known one
             raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
         case (Residual(type=x_t), Residual(type=y_t)):
             if x_t == y_t:
                 return a
-            if SemType.BOOL in (x_t, y_t):
-                raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
-            return Residual(SemType.FLOAT)
+            if {x_t, y_t} <= {SemType.FLOAT, SemType.INT}:
+                return MixedNumeric(all_constant=False)  # a runtime integer merges with a float
+            raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
         case (FactSeq() as x, FactSeq() as y) if len(x.items) == len(y.items) and x.is_list == y.is_list:
             return _pack_seq(tuple(join_facts(p, q, origin) for p, q in zip(x.items, y.items)), x.is_list)
         case (FactSeq() as x, Known(value=StaticSeq() as y)) | (Known(value=StaticSeq() as y), FactSeq() as x):
@@ -605,6 +641,8 @@ class Analyzer:
                     raise AnalysisRejection("arithmetic on an aggregate value", op.origin)
                 elif bin_op in _BITWISE_OPS:
                     env.set(Local(dst), self._fold_bitwise(bin_op, lhs_fact, rhs_fact, op.origin))
+                elif isinstance(lhs_fact, MixedNumeric) or isinstance(rhs_fact, MixedNumeric):
+                    env.set(Local(dst), self._mixed_arith(bin_op, lhs_fact, rhs_fact, op.origin))
                 else:
                     env.set(
                         Local(dst),
@@ -746,10 +784,27 @@ class Analyzer:
                 return Residual(SemType.INT if sem is SemType.BOOL else sem)  # Python: unary on bool yields int
             case Residual(type=SemType.BOOL):
                 return Residual(SemType.INT)
-            case Residual():
-                return fact
+            case Residual() | MixedNumeric():
+                return fact  # a unary negation/plus preserves the operand's numeric kind (int-or-float stays mixed)
             case _:
                 raise AnalysisRejection("a runtime operation reads an aggregate or unbound value", origin)
+
+    def _mixed_arith(self, bin_op: BinOp, lhs: Fact, rhs: Fact, origin: OriginStack) -> Fact:
+        """
+        A binary arithmetic operation with an int-or-float (:class:`MixedNumeric`) operand. ``/`` always yields float in
+        Python, and a definite float operand promotes every path to float; otherwise the integer path would do exact
+        integer arithmetic that this operation cannot replicate in the float datapath, so it is a located rejection.
+        """
+        if bin_op is BinOp.DIV:
+            return Residual(SemType.FLOAT)
+        other = rhs if isinstance(lhs, MixedNumeric) else lhs
+        if not isinstance(other, MixedNumeric) and _numeric_sem(other) is SemType.FLOAT:
+            return Residual(SemType.FLOAT)
+        raise AnalysisRejection(
+            "integer arithmetic on a value that is an integer on one path and a float on another; convert to float "
+            "first (real integer support is the integer wiring milestone)",
+            origin,
+        )
 
     def _fold_binary(
         self,
@@ -764,6 +819,8 @@ class Analyzer:
             folded = fold(lhs.value, rhs.value)
             if folded is not None:
                 return Known(folded)
+        if (isinstance(lhs, MixedNumeric) or isinstance(rhs, MixedNumeric)) and default is not None:
+            return Residual(default)  # a comparison of an int-or-float value: result kind fixed, compared in float
         operand_types = [self._operand_type(fact, origin) for fact in (lhs, rhs)]
         if default is None and SemType.BOOL in operand_types:
             raise AnalysisRejection("arithmetic on a bool requires an explicit conversion", origin)
@@ -816,6 +873,12 @@ class Analyzer:
                 return sem
             case Residual(type=sem):
                 return sem
+            case MixedNumeric():
+                raise AnalysisRejection(
+                    "this operation is not defined on a value that is an integer on one path and a float on another; "
+                    "convert to float first",
+                    origin,
+                )
             case _:
                 raise AnalysisRejection("a runtime operation reads an aggregate or unbound value", origin)
 
