@@ -5,8 +5,8 @@ per-Place, strong updates on stores, and only executable in-edges contribute. An
 integer side to float, C-style, its rounding accepted under the fastmath charter (Python instead keeps each
 path's runtime kind -- the documented deviation). Static folding is Python-exact and runs on the closed value
 domain (the width rule: runtime-typed numeric values never fold; a Known Bool always drives edge selection).
-StaticFor headers unroll by cloning the body per trip once the iterable is Known; PyCall
-sites expand on demand by grafting the callee's freshly instantiated template into the working graph (recursion is
+StaticFor headers unroll by cloning the body per trip once the iterable is Known; PyCall sites
+expand on demand by grafting the callee's freshly instantiated template into the working graph (recursion is
 a located rejection keyed by function and receiver identity). The result is a stable residual graph plus final
 facts, validated to contain no unresolved calls, loop templates, or possibly-unbound reads on executable paths.
 
@@ -17,6 +17,7 @@ point can rebuild from scratch each outer round.
 import enum
 import logging
 import types
+from typing import TYPE_CHECKING
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
@@ -59,6 +60,7 @@ from ._ir import (
     Terminator,
     UnbindPlace,
     UnitExit,
+    op_dst,
 )
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
@@ -77,6 +79,9 @@ from ._value import (
     as_python,
     same,
 )
+
+if TYPE_CHECKING:
+    from .._lib import Intrinsic
 
 _logger = logging.getLogger(__name__)
 
@@ -315,15 +320,14 @@ class CallLowering(enum.Enum):
     """How a PyCall surviving in the residual graph lowers; expanded calls no longer exist as calls."""
 
     FOLDED = enum.auto()  # a concrete static fold: the destination fact is Known, nothing to emit
-    IDENTITY = enum.auto()  # a same-kind cast (float(x) on a float): the destination aliases the argument
-    CONVERSION = enum.auto()  # a cross-kind scalar cast: one HIR conversion operation
+    CAST = enum.auto()  # a scalar float()/int()/bool() cast; same-kind-vs-conversion is decided by the FINAL facts
     INTRINSIC = enum.auto()  # a registered hardware intrinsic: ``intrinsic`` carries the resolved registry match
 
 
 @dataclass(frozen=True, slots=True)
 class CallPlan:
     lowering: CallLowering
-    intrinsic: "object | None" = None  # the _lib.Intrinsic match for INTRINSIC (typed loosely to keep _lib lazy)
+    intrinsic: "Intrinsic | None" = None  # the resolved registry match for INTRINSIC
 
 
 @dataclass(slots=True)
@@ -359,8 +363,7 @@ class Analyzer:
         self._discovered_stores: set[tuple[BlockId, StateLeaf]] = set()
         self._concrete_calls: set[int] = set()
         self._intrinsic_calls: set[int] = set()
-        self._identity_calls: set[int] = set()
-        self._conversion_calls: set[int] = set()  # runtime float()/int()/bool() casts, lowered to a conversion op
+        self._cast_calls: set[int] = set()  # runtime float()/int()/bool() casts (identity or conversion at emission)
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._value_methods: dict[tuple[StaticValue, str], object] = {}
@@ -403,7 +406,7 @@ class Analyzer:
                     header.terminator = Jump(chain_entry, header.terminator.origin)
                 _validate(
                     result,
-                    self._concrete_calls | self._intrinsic_calls | self._identity_calls | self._conversion_calls,
+                    self._concrete_calls | self._intrinsic_calls | self._cast_calls,
                 )
                 self._finalize(result)
                 return result
@@ -413,8 +416,7 @@ class Analyzer:
             self._discovered_stores = set()
             self._concrete_calls = set()
             self._intrinsic_calls = set()
-            self._identity_calls = set()
-            self._conversion_calls = set()
+            self._cast_calls = set()
             self._unroll_cache = {}
             _logger.info("state round %d: %d runtime leaves, %d live-in facts", round_index + 1, len(new_w), len(new_d))
         raise AnalysisRejection("state fixpoint failed to stabilize", (Origin(self._root_template.name, 0, 0),))
@@ -466,8 +468,6 @@ class Analyzer:
         top-level store yet comes first in the source text). The replay does not mutate the graph: every call is
         already expanded, folded, or classified. Emission consumes only this plan.
         """
-        from ._ir import op_dst
-
         first_store: dict[StateLeaf, tuple[int, int]] = {}
         for block_id in result.executable_blocks:
             block = result.unit.blocks[block_id]
@@ -495,10 +495,11 @@ class Analyzer:
         result.provenance = self._component_provenance()
 
     def _call_plan(self, call: PyCall, env: _Env) -> CallPlan:
-        if id(call) in self._identity_calls:
-            return CallPlan(CallLowering.IDENTITY)
-        if id(call) in self._conversion_calls:
-            return CallPlan(CallLowering.CONVERSION)
+        # Optimistic SCCP may reclassify a cast across revisits (int(y) is an identity while y is still integer and a
+        # conversion once the other edge promotes it), so a cast plan deliberately carries no same-kind/cross-kind
+        # split: emission decides from the FINAL facts, which only stabilized rounds produce.
+        if id(call) in self._cast_calls:
+            return CallPlan(CallLowering.CAST)
         if id(call) in self._intrinsic_calls:
             from .._lib import Intrinsic, resolve
 
@@ -1159,6 +1160,9 @@ class Analyzer:
                 arity = match.operator.signature.arity
                 if len(call.args) != arity:
                     raise AnalysisRejection(f"intrinsic expects {arity} argument(s), got {len(call.args)}", call.origin)
+                for fact in argument_facts:
+                    if _numeric_sem(fact) is None:
+                        raise AnalysisRejection("a non-numeric operand reaches a numeric intrinsic", call.origin)
                 signature_result = match.operator.signature.result_type
                 if isinstance(signature_result, BoolType) and all(
                     _numeric_sem(fact) is SemType.INT for fact in argument_facts
@@ -1181,13 +1185,7 @@ class Analyzer:
                 elif rule is IntrinsicResultRule.SIGNATURE:
                     result = Residual(SemType.BOOL if isinstance(signature_result, BoolType) else SemType.FLOAT)
                 else:  # INT_OVERLOAD
-                    kinds = []
-                    for fact in argument_facts:
-                        operand_sem = _numeric_sem(fact)
-                        if operand_sem is None:
-                            raise AnalysisRejection("a non-numeric operand reaches a numeric intrinsic", call.origin)
-                        kinds.append(operand_sem)
-                    all_int = all(kind is SemType.INT for kind in kinds)
+                    all_int = all(_numeric_sem(fact) is SemType.INT for fact in argument_facts)
                     result = Residual(SemType.INT) if all_int else Residual(SemType.FLOAT)
                 env.set(Local(call.dst), result)
                 self._intrinsic_calls.add(id(call))
@@ -1218,12 +1216,8 @@ class Analyzer:
                     and len(argument_facts) == 1
                     and isinstance(argument_facts[0], Residual)
                 ):
-                    if argument_facts[0].type is cast_target:
-                        env.set(Local(call.dst), argument_facts[0])  # same kind: identity
-                        self._identity_calls.add(id(call))
-                    else:
-                        env.set(Local(call.dst), Residual(cast_target))
-                        self._conversion_calls.add(id(call))
+                    env.set(Local(call.dst), Residual(cast_target))
+                    self._cast_calls.add(id(call))
                     return False
                 if _is_unimplemented_library(target):
                     # A recognized math/numpy function with no fast-math hardware equivalent (erf, spacing, a ufunc):

@@ -14,7 +14,7 @@ following the established port ABI.
 """
 
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -98,7 +98,18 @@ from ._ir import (
     UnitExit,
 )
 from ._opsem import BinOp, UnOp
-from ._value import MetaInt, NpFloat, NpInt, ObjectRef, SemType, StaticFloat, StaticSeq, StaticValue, as_python
+from ._value import (
+    MetaInt,
+    NpFloat,
+    NpInt,
+    ObjectRef,
+    SemType,
+    StaticBool,
+    StaticFloat,
+    StaticSeq,
+    StaticValue,
+    as_python,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -122,8 +133,9 @@ def _carrier_float(value: object) -> float:
     try:
         return float(value)  # type: ignore[arg-type]
     except OverflowError:
+        digits = len(str(abs(int(value))))  # type: ignore[call-overload]
         raise EmissionRejection(
-            f"an integer constant of {int(value):.0e} magnitude is beyond the binary64 carrier range"  # type: ignore[call-overload]
+            f"an integer constant of {digits} decimal digits is beyond the binary64 carrier range"
         ) from None
 
 
@@ -136,10 +148,9 @@ class _KnownHandle:
 
 @dataclass(frozen=True, slots=True)
 class _ValueHandle:
-    """A residual scalar element, already emitted as the given HIR value, tagged with its semantic kind."""
+    """A residual scalar element, already emitted as the given HIR value."""
 
     vid: int
-    sem: SemType
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,7 +444,7 @@ class _Emitter:
         """
         fact = self._fact(binding)
         if isinstance(fact, Known):
-            if isinstance(fact.value, (MetaInt, NpInt)) and expected is not SemType.FLOAT:
+            if isinstance(fact.value, (MetaInt, NpInt)) and expected in (SemType.INT, None):
                 return self._builder.int_const(int(fact.value.value))
             vid = self._const(fact.value)
         else:
@@ -491,12 +502,14 @@ class _Emitter:
                     raise EmissionRejection("aggregate (tuple/list) returns are not emitted yet")  # per-leaf: stage 9
                 if isinstance(fact, FactSeq):
                     raise EmissionRejection("a runtime aggregate in a local is not supported yet")  # layout: stage 9
-                if isinstance(fact, Known) and isinstance(fact.value, (StaticSeq, ObjectRef)):
-                    pass  # a fully-static sequence (subscripts fold) or a non-datapath value: no HIR value flows
+                if isinstance(fact, Known) and not isinstance(
+                    fact.value, (StaticBool, MetaInt, NpInt, StaticFloat, NpFloat)
+                ):
+                    pass  # a non-datapath Known (a sequence, a string, a record, an object): every use folds
                 else:
                     self._write(fir_id, place, self._materialize(fir_id, src))  # in the value's own kind
             case PyBin(dst=dst, op=bin_op, lhs=lhs, rhs=rhs):
-                self._emit_binary(fir_id, dst, bin_op, lhs, rhs, op)
+                self._emit_binary(fir_id, dst, bin_op, lhs, rhs)
             case PyUn(dst=dst, op=un_op, operand=operand):
                 self._emit_unary(fir_id, dst, un_op, operand)
             case PyCompare(dst=dst, op=rel, lhs=lhs, rhs=rhs):
@@ -584,10 +597,8 @@ class _Emitter:
                 match plan.lowering:
                     case CallLowering.FOLDED:
                         pass  # a concrete fold; the Known value materializes at its use sites
-                    case CallLowering.IDENTITY:
-                        define(dst, self._materialize(fir_id, args[0]))  # float(x) on a float aliases the argument
-                    case CallLowering.CONVERSION:
-                        define(dst, self._emit_conversion(fir_id, args[0], dst))
+                    case CallLowering.CAST:
+                        define(dst, self._emit_cast(fir_id, args[0], dst))
                     case CallLowering.INTRINSIC:
                         define(dst, self._emit_intrinsic(fir_id, plan, list(args)))
             case _:
@@ -634,14 +645,13 @@ class _Emitter:
 
     def _handle_of(self, block: FirBlockId, binding: BindingId) -> _Handle:
         # A per-element handle for a FactSeq: nested layout, a Known scalar (materialize on use), or an HIR value
-        # tagged with its semantic kind (so an integer element extracted later keeps its integer typing).
+        # (whose kind the extracted binding's plan fact preserves -- an integer element stays integer-typed).
         if binding in self._layouts:
             return self._layouts[binding]
         fact = self._fact(binding)
         if isinstance(fact, Known):
             return _KnownHandle(fact.value)
-        vid = self._read(block, Local(binding))
-        return _ValueHandle(vid, self._sem_of(self._type_of(vid)))
+        return _ValueHandle(self._read(block, Local(binding)))
 
     def _bind_handle(self, block: FirBlockId, dst: BindingId, handle: _Handle) -> None:
         match handle:
@@ -665,9 +675,7 @@ class _Emitter:
         assert admitted is not None
         return Known(admitted)
 
-    def _emit_binary(
-        self, block: FirBlockId, dst: BindingId, bin_op: BinOp, lhs: BindingId, rhs: BindingId, op: Op
-    ) -> None:
+    def _emit_binary(self, block: FirBlockId, dst: BindingId, bin_op: BinOp, lhs: BindingId, rhs: BindingId) -> None:
         result_fact = self._fact(dst)
         if isinstance(result_fact, Known):
             return  # the analyzer folded it (a static fold, a sequence concat/repeat, a bool &/|/^ identity)
@@ -707,10 +715,13 @@ class _Emitter:
             case _:
                 raise EmissionRejection(f"operator {bin_op.value} is not lowerable yet")
 
-    def _emit_conversion(self, block: FirBlockId, arg: BindingId, dst: BindingId) -> int:
-        # A runtime scalar cast between kinds. int<->float is truncation toward zero / exact promotion; bool casts are a
-        # truthiness test (to bool) or a 0/1 widening (from bool). A same-kind cast is handled as an identity upstream.
+    def _emit_cast(self, block: FirBlockId, arg: BindingId, dst: BindingId) -> int:
+        # A runtime scalar float()/int()/bool() cast, kinded by the FINAL facts (the analyzer's optimistic revisits
+        # may have seen either kind mid-flight). A same-kind cast is the identity; int<->float is truncation toward
+        # zero / promotion; bool casts are a truthiness test (to bool) or a 0/1 widening (from bool).
         src, target = self._fact_sem(self._fact(arg)), self._fact_sem(self._fact(dst))
+        if src is target:
+            return self._materialize(block, arg, target)
         match (src, target):
             case (SemType.INT, SemType.FLOAT):
                 return self._materialize(block, arg, SemType.FLOAT)
@@ -771,8 +782,10 @@ class _Emitter:
                 raise EmissionRejection(f"a compile-time power exponent of {power} is too large to expand")
         elif isinstance(exp_fact, Known) and isinstance(exp_fact.value, (StaticFloat, NpFloat)):
             exact = float(exp_fact.value.value)
-            if exact.is_integer() and abs(exact) <= _MAX_POWER_CHAIN:
-                power = int(exact)  # an oversized or fractional float exponent falls to the exp2/log2 path below
+            if exact.is_integer():  # only a FRACTIONAL float exponent falls to the exp2/log2 path below
+                if abs(exact) > _MAX_POWER_CHAIN:
+                    raise EmissionRejection(f"a compile-time power exponent of {exact:.0f} is too large to expand")
+                power = int(exact)
         if power is not None:
             if exponent_is_int and self._fact_sem(self._fact(base)) is SemType.INT and power >= 0:
                 if power == 0:

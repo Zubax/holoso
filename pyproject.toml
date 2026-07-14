@@ -91,6 +91,7 @@ target-version = ["py312"]
 python_version = "3.14"
 strict = true
 files = ["holoso", "tests", "examples", "synth", "tools"]
+exclude = ["examples/build/"]  # generated cosim testbenches land there when examples run locally
 
 [[tool.mypy.overrides]]
 module = ["scipy.*", "cocotb.*", "cocotb_tools.*"]

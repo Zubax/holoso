@@ -755,6 +755,43 @@ def test_a_known_integral_float_exponent_expands_to_a_chain() -> None:
     assert _run_model(kernel, 2.0) == [8.0]
 
 
+def test_a_cast_reclassified_across_sccp_revisits_follows_the_final_facts() -> None:
+    # Review round 2 (Codex): optimistic SCCP may classify int(y) as a same-kind identity on the first visit (y still
+    # integer) and as a float->int conversion after the other edge promotes y; the stale identity must not win. The
+    # cast plan carries no kind split -- emission derives identity-vs-conversion from the FINAL facts.
+    def kernel(flag: bool, x: float) -> float:
+        if flag:
+            y = x
+        else:
+            y = int(x)  # deliberately mixes int and float across the merge
+        return float(int(y))
+
+    assert _run_model(kernel, True, 2.75) == [2.0]  # int(2.75) truncates on the promoted path too
+    assert _run_model(kernel, False, 2.75) == [2.0]
+
+
+def test_an_oversized_integral_float_exponent_is_rejected_like_the_integer_spelling() -> None:
+    # Review round 2 (Codex): x**1025.0 must reject exactly as x**1025 does, not silently fall through to the
+    # exp2/log2 path and acquire runtime-power negative-base semantics.
+    def kernel(x: float) -> float:
+        return x**1025.0  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="too large"):
+        lower(kernel)
+
+
+def test_a_beyond_carrier_comparison_is_a_clean_rejection() -> None:
+    # Review round 2 (Codex): the carrier-overflow diagnostic itself must not overflow while formatting the constant.
+    def kernel(x: float) -> float:
+        return 1.0 if _HUGE == x else 0.0
+
+    with pytest.raises(UnsupportedConstruct, match="carrier"):
+        lower(kernel)
+
+
+_HUGE = 2**1024
+
+
 def test_int_float_int_round_trip_collapses_to_the_identity() -> None:
     # The fastmath charter: int -> float -> int collapses away completely, precision loss ignored.
     def kernel(a: int) -> int:

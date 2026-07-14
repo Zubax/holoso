@@ -4108,6 +4108,41 @@ def test_a_scalar_takes_an_empty_tuple_key_as_identity_like_a_numpy_scalar() -> 
         lower(index_a_scalar)
 
 
+def test_an_aggregate_operand_to_an_intrinsic_is_a_located_rejection() -> None:
+    # Review round 2: a tuple fed to a scalar intrinsic (valid NumPy, an honest porting mistake) must be a located
+    # rejection at analysis, not an internal assertion crash during emission.
+    def in_sqrt(x: float) -> float:
+        return float(np.sqrt((x, 1.0))[0])
+
+    def in_isfinite(x: float) -> float:
+        return 1.0 if math.isfinite((x, 1.0)) else 0.0  # type: ignore[arg-type]
+
+    for kernel in (in_sqrt, in_isfinite):
+        with pytest.raises(UnsupportedConstruct, match="non-numeric operand"):
+            lower(kernel)
+
+
+def test_static_string_and_record_locals_lower_because_every_use_folds() -> None:
+    # Review round 2: a fully-static string or record bound to a NAMED local never reaches the datapath (every use
+    # folds), so the store must not try to materialize it.
+    def string_mode(x: float) -> float:
+        mode = "fast"
+        return x * 2.0 if mode == "fast" else x
+
+    @dataclasses.dataclass(frozen=True)
+    class Params:
+        gain: float
+
+    def record_local(x: float) -> float:
+        p = Params(gain=2.0)
+        return x * p.gain
+
+    for kernel, argument, expected in ((string_mode, 3.0, 6.0), (record_local, 3.0, 6.0)):
+        hir = optimize(lower(kernel))
+        assert kernel(argument) == expected  # the plain-Python reference agrees with the folded lowering
+        assert all(not isinstance(b.terminator, Branch) for b in hir.blocks)  # the static guard folded away
+
+
 def test_a_negative_inexact_integer_literal_promotes_and_rounds() -> None:
     # A negative inexact counter compared with a runtime float promotes into the float datapath and rounds onto
     # -2**53 (Python compares the integer exactly -- the documented C-style deviation).

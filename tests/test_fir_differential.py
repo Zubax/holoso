@@ -52,8 +52,8 @@ def _new_hir(kernel: Callable[..., object]):  # type: ignore[no-untyped-def]
 
 
 def _assert_matches_python(kernel: Callable[..., object], vectors: list[tuple[float | bool, ...]]) -> None:
-    # PRIMARY oracle: the new front-end's model output must reproduce the kernel's own float64 evaluation on the
-    # QUANTIZED inputs. Secondary: the low-credibility old front-end must agree EXACTLY where it can lower at all.
+    # The oracle: the front-end's model output must reproduce the kernel's own float64 evaluation on the
+    # QUANTIZED inputs.
     hir = _new_hir(kernel)
     new = MirInterpreter(lower_to_mir(hir, _OPS))
     port_count = len(hir.outputs)
