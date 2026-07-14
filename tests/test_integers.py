@@ -780,16 +780,22 @@ def test_an_oversized_integral_float_exponent_is_rejected_like_the_integer_spell
         lower(kernel)
 
 
+_HUGE = 2**1024
+_BEYOND_STR_CAP = 10**4300
+
+
 def test_a_beyond_carrier_comparison_is_a_clean_rejection() -> None:
-    # Review round 2 (Codex): the carrier-overflow diagnostic itself must not overflow while formatting the constant.
-    def kernel(x: float) -> float:
+    # Review rounds 2-3 (Codex): the carrier-overflow diagnostic itself must neither overflow while formatting the
+    # constant nor trip CPython's 4300-digit integer-to-string conversion cap on a wider one.
+    def small(x: float) -> float:
         return 1.0 if _HUGE == x else 0.0
 
-    with pytest.raises(UnsupportedConstruct, match="carrier"):
-        lower(kernel)
+    def wide(x: float) -> float:
+        return x + _BEYOND_STR_CAP
 
-
-_HUGE = 2**1024
+    for kernel in (small, wide):
+        with pytest.raises(UnsupportedConstruct, match="carrier"):
+            lower(kernel)
 
 
 def test_int_float_int_round_trip_collapses_to_the_identity() -> None:

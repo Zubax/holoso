@@ -4139,8 +4139,9 @@ def test_static_string_and_record_locals_lower_because_every_use_folds() -> None
 
     for kernel, argument, expected in ((string_mode, 3.0, 6.0), (record_local, 3.0, 6.0)):
         hir = optimize(lower(kernel))
-        assert kernel(argument) == expected  # the plain-Python reference agrees with the folded lowering
         assert all(not isinstance(b.terminator, Branch) for b in hir.blocks)  # the static guard folded away
+        model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name=kernel.__name__)
+        assert float(model.numerical_model.elaborate().run(argument)[0]) == expected == kernel(argument)
 
 
 def test_a_negative_inexact_integer_literal_promotes_and_rounds() -> None:

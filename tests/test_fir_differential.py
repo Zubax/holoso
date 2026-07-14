@@ -90,8 +90,7 @@ def test_loop_carried_swap_kernels_match_python() -> None:
 
 
 def test_local_scalar_kernels_match_python() -> None:
-    # `calls` exercises local-helper inlining, which the OLD front-end rejects (`unsupported call to 'helper'`) --
-    # a capability gap in the baseline, not the new front-end; the Python oracle carries the proof here.
+    # `calls` exercises local-helper inlining; the Python oracle carries the proof.
     def affine(x: float, g: float) -> float:
         y = x * 2.0 + g
         if y > 1.0:
@@ -157,8 +156,8 @@ def _port_contract_violations(
 
 
 def _stateful_agree(make: Callable[[], object], transactions: list[tuple[float | bool, ...]]) -> None:
-    # A stateful component holds a running reference instance; each transaction advances it and the new front-end's
-    # model output must track that Python state. The baseline runs in parallel where it can, as a cross-check.
+    # A stateful component holds a running reference instance; each transaction advances it and the front-end's
+    # model output must track that Python state.
     reference = make()
     hir = optimize(lower_fir(make().step))  # type: ignore[attr-defined]
     new = MirInterpreter(lower_to_mir(hir, _OPS))

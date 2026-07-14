@@ -187,7 +187,8 @@ Fuel bounds cover visits and blocks; exhaustion is a located rejection, never a 
 
 On stabilization the analyzer finalizes its result into the emission plan: the authoritative fact per binding
 (temporaries are write-once, so one replay of the transfer records each), a typed plan per surviving call --
-folded | identity | conversion | intrinsic, keyed by the call's destination binding -- and the state leaves in
+folded | cast (same-kind-vs-conversion decided at emission from the final facts) | intrinsic, keyed by the call's
+destination binding -- and the state leaves in
 first-store source order (the established port ABI orders ports by source text, not CFG shape). This plan is the
 whole analyzer/emitter contract: emission never re-derives a fold, never resolves the library registry, and never
 replays the transfer function, so the two layers cannot disagree about a value's meaning.

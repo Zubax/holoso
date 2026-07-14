@@ -108,6 +108,7 @@ from ._value import (
     StaticFloat,
     StaticSeq,
     StaticValue,
+    admit,
     as_python,
 )
 
@@ -133,10 +134,8 @@ def _carrier_float(value: object) -> float:
     try:
         return float(value)  # type: ignore[arg-type]
     except OverflowError:
-        digits = len(str(abs(int(value))))  # type: ignore[call-overload]
-        raise EmissionRejection(
-            f"an integer constant of {digits} decimal digits is beyond the binary64 carrier range"
-        ) from None
+        bits = int(value).bit_length()  # type: ignore[call-overload]  # never via str(): 4300-digit conversion cap
+        raise EmissionRejection(f"a {bits}-bit integer constant is beyond the binary64 carrier range") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,8 +168,6 @@ def _is_bool_fact(fact: Fact | None) -> bool:
         case Residual(type=SemType.BOOL):
             return True
         case Known(value=value):
-            from ._value import StaticBool
-
             return isinstance(value, StaticBool)
         case _:
             return False
@@ -668,9 +665,7 @@ class _Emitter:
             return livein[leaf]
         reset = self._leaf_reset(leaf)
         if isinstance(reset, BoolConst):
-            return Known(_static_bool(reset.value))
-        from ._value import admit
-
+            return Known(StaticBool(reset.value))
         admitted = admit(reset.value)
         assert admitted is not None
         return Known(admitted)
@@ -909,9 +904,3 @@ class _Emitter:
             if not leaf.path[-1].startswith("_"):
                 self._builder.output(state_port_name(self._slot_name(leaf)), self._read(unit.exit, leaf))
         self._builder.ret()
-
-
-def _static_bool(value: bool) -> StaticValue:
-    from ._value import StaticBool
-
-    return StaticBool(value)

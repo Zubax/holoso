@@ -203,8 +203,9 @@ def _float_promoted(fact: Fact, origin: OriginStack) -> Fact:
             try:
                 promoted = float(value.value)
             except OverflowError:
+                bits = value.value.bit_length()  # never via str(): the 4300-digit conversion cap
                 raise AnalysisRejection(
-                    f"integer {value.value} merged with a float is beyond the binary64 carrier range", origin
+                    f"a {bits}-bit integer merged with a float is beyond the binary64 carrier range", origin
                 ) from None
             return Known(NpFloat(promoted) if isinstance(value, NpInt) else StaticFloat(promoted))
         case Residual(type=SemType.INT):
@@ -404,10 +405,7 @@ class Analyzer:
                     header = result.unit.blocks[header_id]
                     assert isinstance(header.terminator, StaticFor)
                     header.terminator = Jump(chain_entry, header.terminator.origin)
-                _validate(
-                    result,
-                    self._concrete_calls | self._intrinsic_calls | self._cast_calls,
-                )
+                _validate(result, self._concrete_calls | self._intrinsic_calls | self._cast_calls)
                 self._finalize(result)
                 return result
             self._runtime_state = new_w
