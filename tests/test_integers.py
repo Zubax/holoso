@@ -14,6 +14,7 @@ another:
 
 from math import floor
 
+import numpy as np
 import pytest
 
 import holoso
@@ -426,6 +427,16 @@ def test_integer_base_raised_to_a_power_is_rejected() -> None:
         return float(int(x) ** 3)  # exact integer exponentiation, not a rounding float multiply chain
 
     with pytest.raises(UnsupportedConstruct, match="power"):
+        lower(kernel)
+
+
+def test_numpy_sign_of_an_integer_is_rejected() -> None:
+    # np.sign is int-polymorphic (np.sign of an integer is an integer); its float composite would round subsequent
+    # integer arithmetic, so an integer operand is a located rejection.
+    def kernel(x: float) -> float:
+        return float(np.sign(int(x)) + int(x) + 1)
+
+    with pytest.raises(UnsupportedConstruct, match="np.sign"):
         lower(kernel)
 
 

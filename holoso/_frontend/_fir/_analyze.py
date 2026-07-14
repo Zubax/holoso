@@ -1047,6 +1047,18 @@ class Analyzer:
         target = callee_fact.value.obj
         match = resolve(target)
         if isinstance(match, Library):
+            import numpy as np
+
+            # np.sign is int-polymorphic like abs (np.sign of an integer is an integer); its float composite would
+            # round subsequent integer arithmetic, and there is no integer sign yet, so an integer operand refuses.
+            if target is np.sign and any(
+                env.get(Local(arg)) == Residual(SemType.INT)
+                or (isinstance(env.get(Local(arg)), Known) and isinstance(env.get(Local(arg)).value, (MetaInt, NpInt)))  # type: ignore[union-attr]
+                for arg in call.args
+            ):
+                raise AnalysisRejection(
+                    "an integer operand to np.sign is not yet lowerable; cast to float first", call.origin
+                )
             target = match.stub  # a composite library stub inlines exactly like a user function
         elif isinstance(match, Intrinsic):
             argument_facts = [env.get(Local(arg)) for arg in call.args] + [
