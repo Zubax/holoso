@@ -538,17 +538,19 @@ def test_namespace_attribute_store_is_a_located_rejection() -> None:
 
 
 def test_runtime_integer_in_float_datapath_promotes_to_float() -> None:
-    # A runtime selection between two distinct int literals joins to a runtime int (a phi over two Known ints); feeding
-    # that integer into a float operation promotes it via IntToFloat, exactly as Python promotes ``x + n`` int->float.
-    from holoso._hir import FloatAdd, IntToFloat, Operation, optimize
+    # A runtime selection between two distinct int literals joins to a runtime int; feeding it into a float operation
+    # promotes it C-style, exactly as Python promotes ``x + n``. Jump-chain fusion lets the diamond if-convert, so the
+    # promoted arms fold to float constants: the pin is that the add runs in float and no integer arithmetic survives.
+    from holoso._hir import FloatAdd, IntAdd, Operation, optimize
 
     def kernel(flag: bool, x: float) -> float:
-        n = 1 if flag else 0  # a runtime int (a phi over two distinct Known ints), not a foldable constant
+        n = 1 if flag else 0  # a runtime int (a merge of two distinct Known ints), not a foldable constant
         return x + n
 
     hir = optimize(lower_fir(kernel))
     ops = {type(n.operator).__name__ for n in hir.nodes.values() if isinstance(n, Operation)}
-    assert IntToFloat.__name__ in ops and FloatAdd.__name__ in ops  # the integer edge is promoted, then added in float
+    assert FloatAdd.__name__ in ops and IntAdd.__name__ not in ops
+    _assert_matches_python(kernel, [(True, 1.5), (False, 1.5)])
 
 
 def test_static_multidim_subscript_matches_python() -> None:

@@ -38,13 +38,13 @@ from ._modelref import default_ops
 # filters, branchy logic, data-dependent loops, and a large kernel.
 # FIR_PARITY_PENDING: signal_window (stage 9 tuple return), majority_voter/uart_rx/uart_tx (stage 9 tuple return
 # XOR), cordic_sincos/ekf1_stateless (stage 9 aggregate returns) use features the new front-end does not lower yet,
-# so they are dropped from the freeze until their stage lands. The frozen values for the ten below are unchanged: the
-# new front-end schedules them identically to the old on every field (min II, last PC, blocks, registers, copies).
+# so they are dropped from the freeze until their stage lands. iir1_hpf improved when jump-chain fusion let its
+# guard diamond if-convert (24 -> 20); the others schedule identically to the old front-end on every field.
 _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "madd": (14, 14),
     "poly3": (23, 23),
     "iir1_lpf": (15, 15),
-    "iir1_hpf": (24, 24),
+    "iir1_hpf": (20, 20),
     "schmitt_trigger": (6, 6),
     # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
     # is), so the install fits at the work makespan instead of one past it -- shaving a cycle off every iteration.
