@@ -1,9 +1,10 @@
 """
 The FIR analyzer: optimistic executable-edge abstract interpretation (SCCP-style) with flow-sensitive per-edge
 environments over Places. Facts form the lattice Unbound < Known(StaticValue) < Residual(SemType); joins are
-per-Place, strong updates on stores, and only executable in-edges contribute. Static folding is Python-exact and
-runs on the closed value domain (the width rule: runtime-typed numeric values never fold; a Known Bool always
-drives edge selection). StaticFor headers unroll by cloning the body per trip once the iterable is Known; PyCall
+per-Place, strong updates on stores, and only executable in-edges contribute. An int/float join promotes the
+integer side to float, C-style, its rounding accepted under the fastmath charter (Python instead keeps each
+path's runtime kind -- the documented deviation). Static folding is Python-exact and runs on the closed value
+domain (the width rule: runtime-typed numeric values never fold; a Known Bool always drives edge selection). StaticFor headers unroll by cloning the body per trip once the iterable is Known; PyCall
 sites expand on demand by grafting the callee's freshly instantiated template into the working graph (recursion is
 a located rejection keyed by function and receiver identity). The result is a stable residual graph plus final
 facts, validated to contain no unresolved calls, loop templates, or possibly-unbound reads on executable paths.
@@ -59,7 +60,7 @@ from ._ir import (
     UnitExit,
 )
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
-from ..._hir import BoolType
+from ..._hir import BoolType, FloatIsFinite
 from ._value import (
     MetaInt,
     StaticRecord,
@@ -141,22 +142,6 @@ class Residual:
 
 
 @dataclass(frozen=True, slots=True)
-class MixedNumeric:
-    """
-    An int-or-float value: a control-flow merge (phi / conditional select / state-leaf join) reconciled a numeric
-    integer path with a float path. Python keeps each path's runtime kind, so the integer path stays exact-integer and
-    the float path stays float, while Holoso has one datapath. A genuine promotion -- ``float()``, ``/``, or arithmetic
-    with a definite float operand -- makes every path float and resolves this to ``Residual(FLOAT)``. Integer arithmetic
-    on it would round the integer path in the float datapath, so it is a located rejection (real integer support is the
-    integer wiring milestone). ``integer_alternatives`` retains the static integer values the value may take, so an
-    exact int/float comparison can require their target-format representability; ``None`` means at least one runtime
-    integer alternative exists (its value is not statically known), which a comparison rejects conservatively.
-    """
-
-    integer_alternatives: "frozenset[MetaInt | NpInt] | None"
-
-
-@dataclass(frozen=True, slots=True)
 class FactSeq:
     """An aggregate whose elements are facts, present when at least one element is not Known (all-Known aggregates
     stay Known(StaticSeq)); subscripts and lengths stay static even when the payload is runtime."""
@@ -169,10 +154,10 @@ class FactSeq:
 class MaybeUnbound:
     """Joined bound-and-unbound: reading this is a located rejection (Python may raise here)."""
 
-    inner: "Known | Residual | FactSeq | MixedNumeric"
+    inner: "Known | Residual | FactSeq"
 
 
-type Fact = Unbound | Known | Residual | FactSeq | MaybeUnbound | MixedNumeric
+type Fact = Unbound | Known | Residual | FactSeq | MaybeUnbound
 
 _UNBOUND = Unbound()
 
@@ -201,28 +186,25 @@ def _numeric_sem(fact: "Fact") -> SemType | None:
             return None
 
 
-def _merge_int_alternatives(a: "Fact", b: "Fact") -> "frozenset[MetaInt | NpInt] | None":
+def _float_promoted(fact: Fact, origin: OriginStack) -> Fact:
     """
-    The static integer alternatives of a value formed by merging two numeric facts: each Known integer contributes
-    its exact value, a runtime integer (Residual INT) or a mix that already contains one contributes ``None`` (an
-    unknown runtime alternative), and a float contributes nothing. ``None`` dominates the union.
+    The C-style promotion applied at an int/float merge: the integer side becomes float, its provenance kept
+    (MetaInt -> StaticFloat, NpInt -> NpFloat) and its rounding accepted under the fastmath charter. An integer
+    beyond the binary64 carrier cannot promote at all and is a located rejection, never a raw OverflowError.
     """
-
-    def contribution(fact: "Fact") -> "frozenset[MetaInt | NpInt] | None":
-        match fact:
-            case Known(value=(MetaInt() | NpInt()) as value):
-                return frozenset({value})
-            case Residual(type=SemType.INT):
-                return None
-            case MixedNumeric(integer_alternatives=alternatives):
-                return alternatives
-            case _:
-                return frozenset()
-
-    left, right = contribution(a), contribution(b)
-    if left is None or right is None:
-        return None
-    return left | right
+    match fact:
+        case Known(value=(MetaInt() | NpInt()) as value):
+            try:
+                promoted = float(value.value)
+            except OverflowError:
+                raise AnalysisRejection(
+                    f"integer {value.value} merged with a float is beyond the binary64 carrier range", origin
+                ) from None
+            return Known(NpFloat(promoted) if isinstance(value, NpInt) else StaticFloat(promoted))
+        case Residual(type=SemType.INT):
+            return Residual(SemType.FLOAT)
+        case _:
+            return fact
 
 
 def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
@@ -231,8 +213,8 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
     match a, b:
         case (Unbound(), Unbound()):
             return _UNBOUND
-        case (Unbound(), (Known() | Residual() | FactSeq() | MixedNumeric()) as bound) | (
-            (Known() | Residual() | FactSeq() | MixedNumeric()) as bound,
+        case (Unbound(), (Known() | Residual() | FactSeq()) as bound) | (
+            (Known() | Residual() | FactSeq()) as bound,
             Unbound(),
         ):
             return MaybeUnbound(bound)
@@ -240,19 +222,15 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
             return half
         case (MaybeUnbound(inner=x), MaybeUnbound(inner=y)):
             joined = join_facts(x, y, origin)
-            assert isinstance(joined, (Known, Residual, FactSeq, MixedNumeric))
+            assert isinstance(joined, (Known, Residual, FactSeq))
             return MaybeUnbound(joined)
-        case (MaybeUnbound(inner=x), (Known() | Residual() | FactSeq() | MixedNumeric()) as y) | (
-            (Known() | Residual() | FactSeq() | MixedNumeric()) as y,
+        case (MaybeUnbound(inner=x), (Known() | Residual() | FactSeq()) as y) | (
+            (Known() | Residual() | FactSeq()) as y,
             MaybeUnbound(inner=x),
         ):
             joined = join_facts(x, y, origin)
-            assert isinstance(joined, (Known, Residual, FactSeq, MixedNumeric))
+            assert isinstance(joined, (Known, Residual, FactSeq))
             return MaybeUnbound(joined)
-        case (MixedNumeric(), other) | (other, MixedNumeric()):
-            if not isinstance(other, MixedNumeric) and _numeric_sem(other) is None:
-                raise AnalysisRejection("values of irreconcilable kinds merge here", origin)  # bool/aggregate meets mix
-            return MixedNumeric(_merge_int_alternatives(a, b))
         case (Known(value=x), Known(value=y)):
             if same(x, y):
                 return a
@@ -264,23 +242,23 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
             ):
                 return join_facts(_lift_seq(x), _lift_seq(y), origin)
             x_type, y_type = _residual_type(x), _residual_type(y)
+            if {x_type, y_type} == {SemType.FLOAT, SemType.INT}:  # an int/float merge promotes the integer, C-style
+                return join_facts(_float_promoted(a, origin), _float_promoted(b, origin), origin)
             if x_type is not None and x_type == y_type:
                 return Residual(x_type)
-            if {x_type, y_type} <= {SemType.FLOAT, SemType.INT}:  # two constants: an int-or-float value, never rounded
-                return MixedNumeric(_merge_int_alternatives(a, b))
             raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
         case (Known(value=x), Residual(type=t)) | (Residual(type=t), Known(value=x)):
             x_type = _residual_type(x)
             if x_type == t:
                 return Residual(t)
-            if x_type is not None and {x_type, t} <= {SemType.FLOAT, SemType.INT}:
-                return MixedNumeric(_merge_int_alternatives(a, b))
+            if x_type is not None and {x_type, t} == {SemType.FLOAT, SemType.INT}:
+                return join_facts(_float_promoted(a, origin), _float_promoted(b, origin), origin)
             raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
         case (Residual(type=x_t), Residual(type=y_t)):
             if x_t == y_t:
                 return a
-            if {x_t, y_t} <= {SemType.FLOAT, SemType.INT}:
-                return MixedNumeric(_merge_int_alternatives(a, b))  # a runtime integer merges with a float
+            if {x_t, y_t} == {SemType.FLOAT, SemType.INT}:
+                return Residual(SemType.FLOAT)  # a runtime integer merged with a float promotes
             raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
         case (FactSeq() as x, FactSeq() as y) if len(x.items) == len(y.items) and x.is_list == y.is_list:
             return _pack_seq(tuple(join_facts(p, q, origin) for p, q in zip(x.items, y.items)), x.is_list)
@@ -661,9 +639,17 @@ class Analyzer:
                     raise AnalysisRejection("arithmetic on an aggregate value", op.origin)
                 elif bin_op in _BITWISE_OPS:
                     env.set(Local(dst), self._fold_bitwise(bin_op, lhs_fact, rhs_fact, op.origin))
-                elif isinstance(lhs_fact, MixedNumeric) or isinstance(rhs_fact, MixedNumeric):
-                    env.set(Local(dst), self._mixed_arith(bin_op, lhs_fact, rhs_fact, op.origin))
                 else:
+                    # Python's / always yields float. A residual power stays integer only for an integer base with a
+                    # compile-time nonnegative integer exponent (a multiply chain); any other exponent may go float
+                    # (negative exponents reciprocate), so the static common type is float.
+                    integer_power = (
+                        bin_op is BinOp.POW
+                        and _numeric_sem(lhs_fact) is SemType.INT
+                        and isinstance(rhs_fact, Known)
+                        and isinstance(rhs_fact.value, (MetaInt, NpInt))
+                        and int(rhs_fact.value.value) >= 0
+                    )
                     env.set(
                         Local(dst),
                         self._fold_binary(
@@ -671,8 +657,7 @@ class Analyzer:
                             lhs_fact,
                             rhs_fact,
                             op.origin,
-                            # Python's / always yields float; residual int**int may too (negative exponents).
-                            promotes_to_float=bin_op in (BinOp.DIV, BinOp.POW),
+                            promotes_to_float=bin_op is BinOp.DIV or (bin_op is BinOp.POW and not integer_power),
                         ),
                     )
             case PyUn(dst=dst, op=un_op, operand=operand):
@@ -681,14 +666,6 @@ class Analyzer:
                     isinstance(operand_fact, Residual) and operand_fact.type is SemType.BOOL
                 ):
                     raise AnalysisRejection("arithmetic on a bool requires an explicit conversion", op.origin)
-                if isinstance(operand_fact, MixedNumeric):
-                    # Negating/abs-ing an int-or-float value is integer arithmetic on the integer path (numpy int64
-                    # wraps); it cannot be done faithfully in the float datapath, so it is a located rejection.
-                    raise AnalysisRejection(
-                        "a unary operation on a value that is an integer on one path and a float on another is not yet "
-                        "lowerable; convert to float first",
-                        op.origin,
-                    )
                 if isinstance(operand_fact, Known):
                     folded = static_unop(un_op, operand_fact.value)
                     env.set(
@@ -744,13 +721,6 @@ class Analyzer:
                 env.set(Local(dst), result)
             case BuildTuple(dst=dst, items=items) | BuildList(dst=dst, items=items):
                 facts = tuple(env.get(Local(item)) for item in items)
-                if any(isinstance(fact, MixedNumeric) for fact in facts):
-                    # An aggregate element handle carries no mixed provenance, so extracting it would drop the
-                    # int-or-float value's comparison obligation. A located rejection until aggregates carry it.
-                    raise AnalysisRejection(
-                        "an int-or-float value inside a list or tuple is not yet lowerable; convert to float first",
-                        op.origin,
-                    )
                 result = _pack_seq(facts, is_list=isinstance(op, BuildList))
                 env.set(Local(dst), result)
             case PyLen(dst=dst, obj=obj):
@@ -819,27 +789,10 @@ class Analyzer:
                 return Residual(SemType.INT if sem is SemType.BOOL else sem)  # Python: unary on bool yields int
             case Residual(type=SemType.BOOL):
                 return Residual(SemType.INT)
-            case Residual() | MixedNumeric():
-                return fact  # a unary negation/plus preserves the operand's numeric kind (int-or-float stays mixed)
+            case Residual():
+                return fact  # a unary negation/plus preserves the operand's numeric kind
             case _:
                 raise AnalysisRejection("a runtime operation reads an aggregate or unbound value", origin)
-
-    def _mixed_arith(self, bin_op: BinOp, lhs: Fact, rhs: Fact, origin: OriginStack) -> Fact:
-        """
-        A binary arithmetic operation with an int-or-float (:class:`MixedNumeric`) operand. ``/`` always yields float in
-        Python, and a definite float operand promotes every path to float; otherwise the integer path would do exact
-        integer arithmetic that this operation cannot replicate in the float datapath, so it is a located rejection.
-        """
-        if bin_op is BinOp.DIV:
-            return Residual(SemType.FLOAT)
-        other = rhs if isinstance(lhs, MixedNumeric) else lhs
-        if not isinstance(other, MixedNumeric) and _numeric_sem(other) is SemType.FLOAT:
-            return Residual(SemType.FLOAT)
-        raise AnalysisRejection(
-            "integer arithmetic on a value that is an integer on one path and a float on another; convert to float "
-            "first (real integer support is the integer wiring milestone)",
-            origin,
-        )
 
     def _fold_binary(
         self,
@@ -854,8 +807,6 @@ class Analyzer:
             folded = fold(lhs.value, rhs.value)
             if folded is not None:
                 return Known(folded)
-        if (isinstance(lhs, MixedNumeric) or isinstance(rhs, MixedNumeric)) and default is not None:
-            return Residual(default)  # a comparison of an int-or-float value: result kind fixed, compared in float
         operand_types = [self._operand_type(fact, origin) for fact in (lhs, rhs)]
         if default is None and SemType.BOOL in operand_types:
             raise AnalysisRejection("arithmetic on a bool requires an explicit conversion", origin)
@@ -908,12 +859,6 @@ class Analyzer:
                 return sem
             case Residual(type=sem):
                 return sem
-            case MixedNumeric():
-                raise AnalysisRejection(
-                    "this operation is not defined on a value that is an integer on one path and a float on another; "
-                    "convert to float first",
-                    origin,
-                )
             case _:
                 raise AnalysisRejection("a runtime operation reads an aggregate or unbound value", origin)
 
@@ -1173,36 +1118,25 @@ class Analyzer:
                 arity = match.operator.signature.arity
                 if len(call.args) != arity:
                     raise AnalysisRejection(f"intrinsic expects {arity} argument(s), got {len(call.args)}", call.origin)
-                # An int-or-float operand promoted through an intrinsic would lose its integer path (unary/abs int64
-                # semantics, an all-integer numpy min/max, a comparison obligation), so it is a located rejection.
-                if any(isinstance(fact, MixedNumeric) for fact in argument_facts):
-                    raise AnalysisRejection(
-                        f"an int-or-float operand to {match.operator.mnemonic} is not yet lowerable; "
-                        "convert to float first",
-                        call.origin,
-                    )
                 signature_result = match.operator.signature.result_type
-                if isinstance(signature_result, BoolType) and any(
-                    fact == Residual(SemType.INT)
-                    or (isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)))
-                    for fact in argument_facts
+                if isinstance(signature_result, BoolType) and all(
+                    _numeric_sem(fact) is SemType.INT for fact in argument_facts
                 ):
-                    # A classification (isfinite/isinf/...) treats an integer as the finite integer it is; Holoso would
-                    # promote it to the target format, where a large integer overflows to infinity and misclassifies.
-                    raise AnalysisRejection(
-                        f"an integer operand to {match.operator.mnemonic} is not yet lowerable; convert to float first",
-                        call.origin,
-                    )
-                # The result kind follows the spelling's declared rule (see the library registry): an integer-preserving
-                # spelling keeps an integer operand integer (contained at MIR, never rounded in the float datapath), a
-                # float-forcing spelling promotes it, and a builtin min/max mixing an integer with a float is an exact
-                # Python comparison, deferred, so it is a located rejection.
+                    # A classification of an integer folds ideally: an integer is always finite and never an infinity
+                    # (hardware integers saturate, so this holds in the datapath too, not only in Python).
+                    verdict = isinstance(match.operator, FloatIsFinite)
+                    env.set(Local(call.dst), Known(StaticBool(verdict)))
+                    self._concrete_calls.add(id(call))
+                    return False
+                # The result kind follows the spelling's declared rule (see the library registry): an all-integer
+                # operand list keeps an integer-overloaded spelling integer (contained at MIR); any float operand,
+                # or a float-forcing spelling, promotes the integer operands C-style and runs the float operator.
                 rule = match.result_rule
                 if rule is IntrinsicResultRule.ALWAYS_INT:
                     result: Fact = Residual(SemType.INT)
                 elif rule is IntrinsicResultRule.SIGNATURE:
                     result = Residual(SemType.BOOL if isinstance(signature_result, BoolType) else SemType.FLOAT)
-                else:
+                else:  # INT_OVERLOAD
                     kinds = []
                     for fact in argument_facts:
                         operand_sem = _numeric_sem(fact)
@@ -1210,20 +1144,7 @@ class Analyzer:
                             raise AnalysisRejection("a non-numeric operand reaches a numeric intrinsic", call.origin)
                         kinds.append(operand_sem)
                     all_int = all(kind is SemType.INT for kind in kinds)
-                    if rule is IntrinsicResultRule.PRESERVE:
-                        result = Residual(kinds[0])
-                    elif rule is IntrinsicResultRule.NUMPY_PROMOTE:
-                        result = Residual(SemType.INT) if all_int else Residual(SemType.FLOAT)
-                    elif all_int:
-                        result = Residual(SemType.INT)  # SELECT (builtin min/max) of two integers stays integer
-                    elif all(kind is SemType.FLOAT for kind in kinds):
-                        result = Residual(SemType.FLOAT)
-                    else:
-                        raise AnalysisRejection(
-                            f"{match.operator.mnemonic} of an integer and a float returns an int-or-float value; cast "
-                            "an operand to float first (real integer support is the integer wiring milestone)",
-                            call.origin,
-                        )
+                    result = Residual(SemType.INT) if all_int else Residual(SemType.FLOAT)
                 env.set(Local(call.dst), result)
                 self._intrinsic_calls.add(id(call))
                 return False

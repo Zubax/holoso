@@ -3365,11 +3365,9 @@ def test_only_a_write_lowering_reaches_is_validated() -> None:
         lower(ReachableWriteToAnUninitializedAttribute().step)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: vector/array-valued state — stage 9")
-def test_an_integer_state_reset_the_float_registers_cannot_hold_is_rejected() -> None:
-    # Persistent state lives in float registers and there is no integer type, so an integer reset the format cannot
-    # represent would read back rounded and a comparison against the original literal would take the other branch.
-    # Rejecting is the only honest option: silently rounding it miscompiles the guard below.
+def test_an_all_integer_state_selector_stays_a_typed_integer_slot() -> None:
+    # An integer reset with only integer stores keeps a typed integer slot: the exact 2**53 + 1 never enters the
+    # float bank, the guard compares integer-to-integer, and the kernel is contained at the MIR integer boundary.
     inexact = 2**53 + 1  # the first integer float64 cannot represent
 
     class Selector:
@@ -3380,18 +3378,22 @@ def test_an_integer_state_reset_the_float_registers_cannot_hold_is_rejected() ->
         def step(self, x: float) -> float:
             if x > 100.0:  # a runtime guard, so `selector` really is persistent state
                 self.selector = 0
-            if self.selector == 2**53:  # False in Python; True once the reset rounds down
+            if self.selector == 2**53:  # False in Python: the integer slot compares exactly, never rounded
                 self.total = self.total + 100.0 * x
             else:
                 self.total = self.total + x
             return self.total
 
     assert Selector().step(1.0) == 1.0  # Python compares the integer exactly
-    with pytest.raises(UnsupportedConstruct, match="not exactly representable"):
-        lower(Selector().step)
+    hir = lower(Selector().step)
+    slot = next(s for s in hir.state_slots if s.name == "selector")
+    assert isinstance(hir.nodes[slot.live_out].type, IntType)
 
+
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: vector/array-valued state — stage 9")
+def test_an_integer_vector_state_reset_keeps_exact_per_element_slots() -> None:
     class ExactVector:
-        # The guard is about exactness, not about integers: 2**53 itself round-trips, and so does any small integer.
+        # 2**53 itself round-trips into the float bank exactly, and so does any small integer.
         def __init__(self) -> None:
             self.taps = [1, 2**53, -3]
             self.y = 0.0
@@ -3687,16 +3689,16 @@ def test_an_integer_the_float_datapath_cannot_hold_never_enters_it() -> None:
     assert isinstance(hir.nodes[counter.live_out].type, IntType)
 
     class ReadOnlyInexact:
-        # An inexact integer attribute in a float-add position is refused: the frontend will not silently round an
-        # integer the float datapath cannot hold exactly, even though Python's `int + float` would.
+        # An inexact integer attribute in a float-add position promotes and rounds, exactly as Python's `int + float`
+        # promotes -- accepted fastmath precision loss, not a rejection.
         def __init__(self) -> None:
             self.offset = inexact
 
         def step(self, x: float) -> float:
             return self.offset + x
 
-    with pytest.raises(UnsupportedConstruct, match="not exactly representable"):
-        lower(ReadOnlyInexact().step)
+    rounded = lower(ReadOnlyInexact().step)
+    assert float(2**53) in [n.value for n in rounded.nodes.values() if isinstance(n, FloatConst)]
 
 
 _INEXACT_INTEGER = 2**53 + 1
@@ -3774,14 +3776,14 @@ def test_np_int_array_element_comparison_follows_numpy_semantics() -> None:
     assert len(optimize(hir).blocks) == 1
 
 
-def test_equal_inexact_int_ternary_arms_are_rejected_like_the_literal() -> None:
-    # Regression (TODO): the equal-arm ternary fold used to bypass the value-position literal guard, silently
-    # rounding an inexact integer that a plain literal read would have rejected.
+def test_equal_inexact_int_ternary_arms_round_like_the_literal() -> None:
+    # The equal-arm ternary folds to the one integer, which then promotes into the float add and rounds under
+    # fastmath -- the same accepted rounding a plain literal read gets.
     def kernel(x: float, c: bool) -> float:
         return x + (_INEXACT_INTEGER if c else _INEXACT_INTEGER)
 
-    with pytest.raises(UnsupportedConstruct, match="not exactly representable in the float datapath"):
-        lower(kernel)
+    hir = lower(kernel)
+    assert float(2**53) in [n.value for n in hir.nodes.values() if isinstance(n, FloatConst)]
 
 
 def test_literal_exponent_expands_to_a_multiply_chain() -> None:
@@ -4106,9 +4108,9 @@ def test_a_scalar_takes_an_empty_tuple_key_as_identity_like_a_numpy_scalar() -> 
         lower(index_a_scalar)
 
 
-def test_a_negative_inexact_integer_literal_is_rejected_not_rounded() -> None:
-    # The negated-constant fold path (a spelled `-<literal>`, not a module global) must apply the same exactness check
-    # as a positive literal, or an aggregate over `[-(2**53+1)]` rounds the counter to -2**53 and a comparison flips.
+def test_a_negative_inexact_integer_literal_promotes_and_rounds() -> None:
+    # A negative inexact counter compared with a runtime float promotes into the float datapath and rounds onto
+    # -2**53 (Python compares the integer exactly -- the documented C-style deviation).
     def negative_counter_rounds(x: float) -> float:
         result = 0.0
         for i in [-9007199254740993]:  # -(2**53+1), which no float holds exactly
@@ -4117,5 +4119,5 @@ def test_a_negative_inexact_integer_literal_is_rejected_not_rounded() -> None:
         return result
 
     assert negative_counter_rounds(float(-(2**53))) == 0.0  # -(2**53+1) != -2.0**53 in Python
-    with pytest.raises(UnsupportedConstruct, match="not exactly representable in the float datapath"):
-        lower(negative_counter_rounds)
+    hir = lower(negative_counter_rounds)
+    assert float(2**53) in [abs(n.value) for n in hir.nodes.values() if isinstance(n, FloatConst)]

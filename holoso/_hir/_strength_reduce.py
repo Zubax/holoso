@@ -140,12 +140,18 @@ def run(hir: Hir) -> Hir:
             case Operation(operator=IntToFloat(), operands=(a,)):
                 # i2f(f2i(x)) is a round-toward-zero of the FLOAT x, which is FloatTrunc(x) exactly (f2i(x) is x's
                 # integer value, exactly representable back as a float because x already was one). It collapses to x
-                # itself only when x is already integer-valued, so the truncation is provably a no-op. The reverse,
-                # f2i(i2f(n)), is NOT rewritten: i2f rounds an integer wider than the mantissa, so it is not identity.
+                # itself only when x is already integer-valued, so the truncation is provably a no-op.
                 inner = hir.nodes[a]
                 if isinstance(inner, Operation) and isinstance(inner.operator, FloatToInt):
                     x = inner.operands[0]
                     return remap[x] if is_integral(x) else emit_float_operation(builder, FloatTrunc(), [remap[x]])
+                return copy_node(builder, node, remap)
+            case Operation(operator=FloatToInt(), operands=(a,)):
+                # f2i(i2f(n)) collapses to n per the fastmath charter: int -> float -> int is the identity with the
+                # promotion's precision loss deliberately ignored (an integer wider than the mantissa notwithstanding).
+                inner = hir.nodes[a]
+                if isinstance(inner, Operation) and isinstance(inner.operator, IntToFloat):
+                    return remap[inner.operands[0]]
                 return copy_node(builder, node, remap)
             case Operation(
                 operator=FloatFloor() | FloatCeil() | FloatRound() | FloatTrunc(), operands=(a,)

@@ -19,9 +19,7 @@ class IntrinsicResultRule(enum.Enum):
 
     SIGNATURE = enum.auto()  # the operator's own result type; an integer operand promotes to float (float-forcing)
     ALWAYS_INT = enum.auto()  # always a typed integer (math.floor/ceil/trunc, one-argument round)
-    PRESERVE = enum.auto()  # integer-in -> integer, float-in -> float, mixed-in -> mixed (abs, np.floor ...)
-    NUMPY_PROMOTE = enum.auto()  # all-integer -> integer, any definite float -> float (np.minimum/maximum)
-    SELECT = enum.auto()  # builtin min/max: the result kind is that of the selected operand (an exact Python compare)
+    INT_OVERLOAD = enum.auto()  # all-integer operands -> the integer implementation; otherwise promote and run float
 
 
 class IntegerImplementation(enum.Enum):

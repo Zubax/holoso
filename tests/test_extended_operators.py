@@ -586,16 +586,21 @@ def test_pow_two_lowers_to_exp2() -> None:
             assert _bits(sim.run(x)[0]) == _v(x).exp2().bits, f"{kernel.__name__} x={x}"
 
 
-def test_pow_nonconstant_or_nontwo_base_is_rejected() -> None:
+def test_pow_nonconstant_or_nontwo_base_lowers_via_exp2_log2() -> None:
+    # The general runtime-exponent power is the direct fastmath identity exp2(e * log2(b)); a constant non-two base
+    # folds its log2 statically. Positive bases only -- log2 of a negative base is a domain error, as in C.
     def k_runtime_base(x: float, y: float) -> float:
         return x**y  # type: ignore[no-any-return]
 
     def k_ten_base(x: float) -> float:
         return 10**x
 
-    for fn in (k_runtime_base, k_ten_base):
-        with pytest.raises(UnsupportedConstruct):
-            holoso.synthesize(fn, _ops(), name=fn.__name__)
+    sim_runtime = _sim(k_runtime_base, "pow_runtime_base")
+    for base, exponent in ((1.5, 2.5), (7.0, -1.25), (100.0, 0.75)):
+        assert float(sim_runtime.run(base, exponent)[0]) == pytest.approx(base**exponent, rel=1e-5)
+    sim_ten = _sim(k_ten_base, "pow_ten_base")
+    for exponent in (0.5, -2.0, 3.0):
+        assert float(sim_ten.run(exponent)[0]) == pytest.approx(10.0**exponent, rel=1e-5)
 
 
 @pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate (tuple) returns — stage 9 (aggregate returns/np.array)")

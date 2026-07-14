@@ -218,7 +218,10 @@ Holoso follows Python with minimal deviations where it makes sense for hardware 
 
 - Static typing only.
 
-- No implicit type conversions.
+- Numeric typing is C-style: an expression that mixes int and float -- including a control-flow merge like
+  `int(x) if c else y` -- promotes the integer side to float, with the precision loss accepted under the fastmath
+  policy. Python instead keeps each path's runtime type; wrap explicitly (e.g. `int(...)`) to demand different
+  promotion. Bool never converts implicitly.
 
 - Boolean short-circuiting is not supported, all operands evaluated eagerly.
 

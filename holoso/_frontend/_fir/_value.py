@@ -36,7 +36,10 @@ class StaticBool:
 
 @dataclass(frozen=True, slots=True)
 class MetaInt:
-    """An exact arbitrary-precision Python integer; never rounded implicitly."""
+    """
+    An exact arbitrary-precision Python integer: exact while static or integer-typed, rounding only at a typed
+    int-to-float promotion point (accepted C-style under the fastmath charter).
+    """
 
     value: int
 

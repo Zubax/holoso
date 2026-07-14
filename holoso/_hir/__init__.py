@@ -53,7 +53,6 @@ from ._operators import (
     FloatToBool as FloatToBool,
     FloatToInt as FloatToInt,
     FloatTrunc as FloatTrunc,
-    RequireExactIntFloat as RequireExactIntFloat,
     IntAbs as IntAbs,
     IntAdd as IntAdd,
     IntAnd as IntAnd,

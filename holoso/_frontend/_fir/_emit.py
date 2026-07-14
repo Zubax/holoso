@@ -41,7 +41,6 @@ from ..._hir import (
     FloatType,
     Hir,
     HirBuilder,
-    RequireExactIntFloat,
     IntAbs,
     IntAdd,
     IntAnd,
@@ -119,20 +118,13 @@ def lower_fir(kernel: object) -> Hir:
     return _Emitter(result, analyzer).emit()
 
 
-def _exact_float(value: object) -> float:
-    # A datapath value must be binary64-exact: an integer too wide (2**53 + 1) would silently round on the way in
-    # and change a comparison against a runtime value, so it is a located rejection per the materialization policy.
-    import numpy as np
-
+def _carrier_float(value: object) -> float:
+    # A finite inexact integer (2**53 + 1) rounds into the binary64 carrier -- accepted C-style precision loss under
+    # the fastmath charter. Only a value beyond the carrier range entirely (10**400) is a located rejection.
     try:
-        result = float(value)  # type: ignore[arg-type]
-    except OverflowError:  # an integer too large to convert (10**400): far beyond binary64 range
-        raise EmissionRejection(
-            "integer constant is not exactly representable in the float datapath (too large)"
-        ) from None
-    if isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)) and result != int(value):
-        raise EmissionRejection(f"integer constant {value} is not exactly representable in the float datapath")
-    return result
+        return float(value)  # type: ignore[arg-type]
+    except OverflowError:
+        raise EmissionRejection(f"integer constant {value} is beyond the binary64 carrier range") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,7 +402,7 @@ class _Emitter:
         if isinstance(current, (int, np.integer)) and self._leaf_is_int(leaf):
             return IntConst(int(current))
         if isinstance(current, (int, float, np.integer, np.floating)):
-            return FloatConst(_exact_float(current))  # the same exactness guard as a datapath constant
+            return FloatConst(_carrier_float(current))  # the same carrier policy as a datapath constant
         raise EmissionRejection(
             f"state '{'.'.join(leaf.path)}' has a reset of unsupported type {type(current).__name__}"
         )
@@ -424,7 +416,7 @@ class _Emitter:
         import numpy as np
 
         if isinstance(concrete, (int, float, np.integer, np.floating)) and not isinstance(concrete, np.bool_):
-            return self._builder.float_const(_exact_float(concrete))
+            return self._builder.float_const(_carrier_float(concrete))
         raise EmissionRejection(f"a {type(concrete).__name__} value cannot materialize in the datapath")
 
     def _emit_block(self, fir_id: FirBlockId) -> None:
@@ -452,8 +444,8 @@ class _Emitter:
             return value_of(binding)
 
         def as_float(binding: BindingId) -> int:
-            # Dispatch on the actual HIR type, not the analyzer fact: a value can be float-carried (a MixedNumeric, or a
-            # runtime integer already promoted at a state boundary) while its fact still reads integer.
+            # Dispatch on the actual HIR type, not the analyzer fact: a value can be float-carried (a runtime integer
+            # already promoted at a state boundary) while its fact still reads integer.
             vid = value_of(binding)
             ty = self._type_of(vid)
             if isinstance(ty, FloatType):
@@ -551,10 +543,8 @@ class _Emitter:
                         define(dst, self._bool_compare(rel, value_of(lhs), value_of(rhs)))  # bool ==/!= is XNOR/XOR
                     elif lsem is SemType.INT and rsem is SemType.INT:
                         define(dst, self._builder.operation(IntRelational(rel), [as_int(lhs), as_int(rhs)]))
-                    else:  # a float on at least one side: promote an integer edge under a MIR-checked exactness guard
-                        left = self._exact_compare_operand(lhs, lhs_fact, as_float, op.origin)
-                        right = self._exact_compare_operand(rhs, rhs_fact, as_float, op.origin)
-                        define(dst, self._builder.operation(FloatRelational(rel), [left, right]))
+                    else:  # a float on at least one side: the integer side promotes C-style and compares in float
+                        define(dst, self._builder.operation(FloatRelational(rel), [as_float(lhs), as_float(rhs)]))
             case PyNot(dst=dst, operand=operand):
                 fact = fact_of(operand)
                 truth = self._replay_truth(fact)
@@ -605,9 +595,7 @@ class _Emitter:
                             if isinstance(else_type, IntType):
                                 else_vid = self._builder.operation(IntToFloat(), [else_vid])
                             operator = Select()
-                        env[Local(dst)] = self._binding_facts()[
-                            dst
-                        ]  # keep the analyzer's fact (a MixedNumeric stays mixed)
+                        env[Local(dst)] = self._binding_facts()[dst]  # keep the analyzer's authoritative fact
                         define(dst, self._builder.operation(operator, [condition, then_vid, else_vid]))
             case BuildTuple(dst=dst, items=items) | BuildList(dst=dst, items=items):
                 from ._analyze import _pack_seq
@@ -645,7 +633,7 @@ class _Emitter:
                 ):
                     stored = self._builder.int_const(int(src_fact.value.value))  # a Known int keeps an int-typed leaf
                 elif isinstance(src_fact, Known):
-                    stored = self._const(src_fact.value)  # a Known int stored to a FLOAT leaf floats via the guard
+                    stored = self._const(src_fact.value)  # a Known int stored to a FLOAT leaf rounds into the carrier
                 elif src_fact == Residual(SemType.INT) and not self._leaf_is_int(leaf):
                     stored = as_float(src)  # a runtime integer stored to a float leaf promotes on its own edge
                 else:
@@ -672,19 +660,16 @@ class _Emitter:
                     # with the analyzer's INT classification -- value_of would float it via _const, misread it as float,
                     # and emit a rounding float min/max/identity instead of the contained integer operation.
                     arg_vids = [arm_value(arg) for arg in args]
-                    first_is_int = isinstance(self._type_of(arg_vids[0]), IntType)
                     all_int = all(isinstance(self._type_of(vid), IntType) for vid in arg_vids)
                     rule = match.result_rule
-                    if rule is IntrinsicResultRule.ALWAYS_INT and first_is_int:
+                    if rule is IntrinsicResultRule.ALWAYS_INT and all_int:
                         result = arg_vids[0]  # rounding an integer is the integer (identity)
                     elif rule is IntrinsicResultRule.ALWAYS_INT:
                         rounded = self._builder.operation(match.operator, [as_float(arg) for arg in args])
                         result = self._builder.operation(FloatToInt(), [rounded])
-                    elif rule is IntrinsicResultRule.PRESERVE and first_is_int:
+                    elif rule is IntrinsicResultRule.INT_OVERLOAD and all_int:
                         result = self._integer_intrinsic(match.integer_implementation, arg_vids)
-                    elif rule in (IntrinsicResultRule.NUMPY_PROMOTE, IntrinsicResultRule.SELECT) and all_int:
-                        result = self._integer_intrinsic(match.integer_implementation, arg_vids)
-                    else:  # SIGNATURE, or a float/mixed operand: promote every operand and run the float operator
+                    else:  # SIGNATURE, or a float operand present: promote the integer operands and run the float op
                         result = self._builder.operation(match.operator, [as_float(arg) for arg in args])
                     define(dst, result)
                 else:
@@ -711,36 +696,6 @@ class _Emitter:
                 condition = self._builder.operation(IntRelational(RelationalOp.GE), [vids[0], vids[1]])
                 return self._builder.operation(IntSelect(), [condition, vids[0], vids[1]])
         raise AssertionError(f"no integer implementation for {implementation!r}")
-
-    def _exact_compare_operand(
-        self, binding: BindingId, fact: Fact, as_float: Callable[[BindingId], int], origin: object
-    ) -> int:
-        """
-        A comparison operand promoted to the float domain. A genuine float passes through; a KNOWN integer (or an
-        all-static int-or-float value) is promoted under a RequireExactIntFloat obligation so MIR rejects the comparison
-        when the integer is not exactly representable in the target format (Python compares an int and a float exactly).
-        A runtime integer -- alone or inside the mix -- cannot be proven representable, so it is a located rejection.
-        """
-        from ._analyze import MixedNumeric
-
-        frame = origin[0]  # type: ignore[index]
-        location = f"{frame.function}:{frame.line}:{frame.column}"
-        if isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)):
-            guard = RequireExactIntFloat(frozenset({int(fact.value.value)}), location)
-            return self._builder.operation(guard, [as_float(binding)])
-        if fact == Residual(SemType.INT):
-            raise EmissionRejection(
-                f"{location}: a runtime integer compared with a float is not exactly representable; cast to float first"
-            )
-        if isinstance(fact, MixedNumeric):
-            if fact.integer_alternatives is None:
-                raise EmissionRejection(
-                    f"{location}: an int-or-float value carrying a runtime integer is compared with a float; "
-                    "cast to float first"
-                )
-            integers = frozenset(int(value.value) for value in fact.integer_alternatives)
-            return self._builder.operation(RequireExactIntFloat(integers, location), [as_float(binding)])
-        return as_float(binding)
 
     def _handle_of(self, binding: BindingId, fact_of: "FactOf", value_of: "ValueOf") -> _Handle:
         # A per-element handle for a FactSeq: nested layout, a Known scalar (materialize on use), or an HIR value.
@@ -873,6 +828,10 @@ class _Emitter:
                 # folds. Replay that fold so it materializes at its use site rather than reaching a float operation.
                 env[Local(dst)] = result_fact
                 return
+        if bin_op is BinOp.POW:  # dispatched on the exponent, in the base's own kind (an integer chain stays integer)
+            env[Local(dst)] = result_fact
+            self._write(fir_id, Local(dst), self._emit_power(lhs, rhs, fact_of, as_float, as_int, op))
+            return
         if result_fact == Residual(SemType.INT):  # a runtime integer result: stay in the integer datapath
             env[Local(dst)] = result_fact
             self._write(fir_id, Local(dst), self._emit_int_binary(bin_op, as_int(lhs), as_int(rhs)))
@@ -890,9 +849,6 @@ class _Emitter:
             self._write(fir_id, Local(dst), result)
             return
         env[Local(dst)] = Residual(SemType.FLOAT)
-        if bin_op is BinOp.POW:
-            self._write(fir_id, Local(dst), self._emit_power(lhs, rhs, fact_of, as_float, op))
-            return
         left, right = as_float(lhs), as_float(rhs)
         match bin_op:
             case BinOp.ADD:
@@ -962,10 +918,13 @@ class _Emitter:
             case _:
                 raise EmissionRejection(f"integer operator {bin_op.value!r} is not lowerable yet")
 
-    def _emit_power(self, base: BindingId, exponent: BindingId, fact_of: "FactOf", as_float: "ValueOf", op: Op) -> int:
-        # A runtime base raised to a COMPILE-TIME integer exponent expands to a multiply chain (x**3 -> x*x*x), bounded
-        # like the loop unroller so ``x ** 10**9`` refuses instead of hanging; a negative exponent is the reciprocal of
-        # the chain, and x**0 is 1.0.
+    def _emit_power(
+        self, base: BindingId, exponent: BindingId, fact_of: "FactOf", as_float: "ValueOf", as_int: "ValueOf", op: Op
+    ) -> int:
+        # A base raised to a COMPILE-TIME integer exponent expands to a multiply chain (x**3 -> x*x*x) in the base's
+        # own kind -- an integer base stays exact integer (contained at MIR), a float base multiplies in float -- both
+        # bounded like the loop unroller so ``x ** 10**9`` refuses instead of hanging. A negative exponent is the
+        # reciprocal of the float chain (Python: a negative power is float even on an integer base).
         from ._value import MetaInt, NpInt
 
         exp_fact = fact_of(exponent)
@@ -973,11 +932,14 @@ class _Emitter:
             power = int(exp_fact.value.value)
             if abs(power) > _MAX_POWER_CHAIN:
                 raise EmissionRejection(f"a compile-time power exponent of {power} is too large to expand")
-            if self._fact_sem(fact_of(base)) is SemType.INT:
-                # An integer base raised to a power is exact integer exponentiation in Python (int(x)**0 is the integer
-                # 1, not 1.0); a float chain would round it and int(x)**0 would silently float. No integer-power operator
-                # yet, so it is a located rejection -- checked before the power==0 shortcut so int(x)**0 refuses too.
-                raise EmissionRejection("an integer raised to a compile-time power is not yet lowerable")
+            if self._fact_sem(fact_of(base)) is SemType.INT and power >= 0:
+                if power == 0:
+                    return self._builder.int_const(1)  # x**0 is the INTEGER 1 on an integer base, as in Python
+                source = as_int(base)
+                chain = source
+                for _ in range(power - 1):
+                    chain = self._builder.operation(IntMul(), [chain, source])
+                return chain
             if power == 0:
                 return self._builder.float_const(1.0)
             source = as_float(base)
@@ -987,18 +949,23 @@ class _Emitter:
             if power < 0:
                 return self._builder.operation(FloatDiv(), [self._builder.float_const(1.0), chain])
             return chain
-        # A runtime exponent: only base two lowers, and only when the result is float. ``2.0**i``, ``2**xf`` and
-        # ``2.0**xf`` are float (-> exp2, the integer exponent promoting through as_float); ``2**i`` is int-or-float by
-        # the sign of i (no integer-power operator) and every non-two base grows unbounded, so both refuse.
+        # A runtime exponent computes in float as the direct fastmath identity exp2(e * log2(b)); base two skips the
+        # log2 (the common 2**e spelling costs one exp2). An integer base or exponent promotes C-style; a negative
+        # base is a log2 domain error, as in C. No identity-guard diamonds: strength reduction owns the provable
+        # identities, and the ZKF zero/infinity algebra (0*inf = 0) covers the IEEE corner b == 1, e = inf.
+        from ..._hir import FloatLog2
+
         base_fact = fact_of(base)
-        if isinstance(base_fact, Known) and isinstance(base_fact.value, (MetaInt, NpInt, StaticFloat, NpFloat)):
-            base_is_float = isinstance(base_fact.value, (StaticFloat, NpFloat))
-            exp_sem = self._fact_sem(exp_fact)
-            if as_python(base_fact.value) == 2 and (
-                exp_sem is SemType.FLOAT or (base_is_float and exp_sem is SemType.INT)
-            ):
-                return self._builder.operation(FloatExp2(), [as_float(exponent)])
-        raise EmissionRejection("a power with a runtime exponent is not supported")
+        if (
+            isinstance(base_fact, Known)
+            and isinstance(base_fact.value, (MetaInt, NpInt, StaticFloat, NpFloat))
+            and as_python(base_fact.value) == 2
+        ):
+            return self._builder.operation(FloatExp2(), [as_float(exponent)])
+        log_base = self._builder.operation(FloatLog2(), [as_float(base)])
+        return self._builder.operation(
+            FloatExp2(), [self._builder.operation(FloatMul(), [as_float(exponent), log_base])]
+        )
 
     def _emit_unary(
         self,

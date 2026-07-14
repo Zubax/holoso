@@ -25,6 +25,8 @@ from holoso import (
     FloatFormat,
     FMulILog2OperatorFamily,
     FMulOperator,
+    FRoundOperator,
+    FSortOperator,
     OpConfig,
     UnsupportedConstruct,
 )
@@ -49,19 +51,33 @@ from holoso._hir import (
     Operation,
     optimize,
 )
-from holoso._mir import lower as lower_to_mir
+from holoso._mir import MirInterpreter, lower as lower_to_mir
+from holoso._value import FloatValue
 
 FMT = FloatFormat(6, 18)
 
 
 def _ops() -> OpConfig:
     return OpConfig(
-        FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT)
+        FAddOperator(FMT),
+        FMulOperator(FMT),
+        FDivOperator(FMT),
+        FMulILog2OperatorFamily(FMT),
+        FCmpOperator(FMT),
+        fround=FRoundOperator(FMT),
+        fsort=FSortOperator(FMT),
     )
 
 
 def _hir(kernel: object) -> Hir:
     return optimize(lower(kernel))
+
+
+def _run_model(kernel: object, *args: float | bool) -> list[float | bool]:
+    """One transaction through the numerical model at FMT; the e6m18 rounding of promoted integers is the point."""
+    interpreter = MirInterpreter(lower_to_mir(_hir(kernel), _ops()))
+    encoded = [a if type(a) is bool else FloatValue.from_float(FMT, float(a)) for a in args]
+    return [v if isinstance(v, bool) else float(v) for v in interpreter.run(*encoded)]
 
 
 def _op_names(hir: Hir) -> set[str]:
@@ -345,12 +361,14 @@ def test_power_of_two_with_a_runtime_exponent_lowers_to_exp2() -> None:
         assert _op_names(_hir(kernel)) == {"FloatExp2"}
 
 
-def test_a_non_two_base_with_a_runtime_exponent_is_rejected() -> None:
+def test_a_non_two_base_with_a_runtime_exponent_lowers_via_exp2_log2() -> None:
+    # The general runtime-exponent power is the direct fastmath identity exp2(e * log2(b)); the constant base's log2
+    # folds statically, so 10**x costs one multiply and one exp2.
     def ten_base(x: float) -> float:
         return 10**x
 
-    with pytest.raises(UnsupportedConstruct, match="runtime exponent"):
-        lower(ten_base)
+    names = _op_names(_hir(ten_base))
+    assert "FloatExp2" in names and "FloatLog2" not in names  # log2(10) folded to a constant
 
 
 # ----------------------------------- integer truthiness and persistent state -----------------------------------
@@ -425,12 +443,14 @@ def test_math_floor_is_integer_returning() -> None:
     assert "FloatFloor" in names and "FloatToInt" not in names  # the integer round-trip elided, metrics preserved
 
 
-def test_integer_base_raised_to_a_power_is_rejected() -> None:
+def test_integer_base_raised_to_a_known_power_stays_integer_and_is_contained() -> None:
     def kernel(x: float) -> float:
-        return float(int(x) ** 3)  # exact integer exponentiation, not a rounding float multiply chain
+        return float(int(x) ** 3)  # exact integer exponentiation (an IntMul chain), not a rounding float chain
 
-    with pytest.raises(UnsupportedConstruct, match="power"):
-        lower(kernel)
+    hir = _hir(kernel)
+    assert IntMul.__name__ in _op_names(hir) and "FloatMul" not in _op_names(hir)
+    with pytest.raises(UnsupportedConstruct, match="not yet lowerable"):
+        lower_to_mir(hir, _ops())
 
 
 def test_numpy_sign_of_an_integer_is_rejected() -> None:
@@ -443,13 +463,14 @@ def test_numpy_sign_of_an_integer_is_rejected() -> None:
         lower(kernel)
 
 
-def test_a_huge_integer_promoted_to_float_is_a_clean_rejection() -> None:
-    # 10**400 is beyond binary64; promoting it to a float leaf is a located rejection, never a raw OverflowError.
+def test_an_integer_beyond_the_binary64_carrier_is_a_clean_rejection() -> None:
+    # A finite inexact integer merged with a float rounds (fastmath), but 10**400 is beyond the binary64 carrier
+    # entirely, so the promotion at the merge is a located rejection, never a raw OverflowError.
     def kernel(flag: bool, x: float) -> float:
         if flag:
             y = 10**400
         else:
-            y = x  # type: ignore[assignment]  # y is an int-or-float merge by design
+            y = x  # type: ignore[assignment]  # deliberately mixes int and float across the merge
         return y
 
     with pytest.raises(UnsupportedConstruct):
@@ -483,24 +504,27 @@ def test_a_known_integer_stored_into_a_float_state_slot_stays_float() -> None:
     assert type(lower(K().step).nodes[slot.live_out].type).__name__ == "FloatType"
 
 
-def test_min_max_of_a_known_integer_and_a_runtime_float_is_rejected() -> None:
-    # Builtin min/max return the winning operand, so min(int, float) is an int-or-float value (its result kind depends
-    # on which wins); promoting it to float would round the following integer arithmetic. It is a located rejection.
+def test_min_max_of_a_known_integer_and_a_runtime_float_promotes_to_float_min_max() -> None:
+    # min/max mixing an integer with a float promote the integer operand and select in the float datapath; the
+    # winning operand's Python type is not preserved (the documented C-style deviation from builtin min/max).
     def kernel(x: float) -> float:
         return float(min(2**24, x) + 1 + 1)
 
-    with pytest.raises(UnsupportedConstruct, match="returns an int-or-float value"):
-        lower(kernel)
+    hir = _hir(kernel)
+    assert "FloatMin" in _op_names(hir) and IntSelect.__name__ not in _op_names(hir)
+    assert _run_model(kernel, 0.5) == [2.5]
 
 
-def test_integer_base_to_the_zeroth_power_is_rejected() -> None:
-    # int(x)**0 is the integer 1 in Python; floating it to 1.0 would round subsequent integer arithmetic (regression:
-    # the power==0 shortcut fired before the integer-base check).
+def test_integer_base_to_the_zeroth_power_is_the_integer_one_and_is_contained() -> None:
+    # int(x)**0 is the integer 1 in Python, so the following arithmetic stays exact integer (contained at MIR),
+    # never a floated 1.0 (regression: the power==0 shortcut once fired before the integer-base check).
     def kernel(x: float) -> float:
         return float(int(x) ** 0 + int(x) + 1)
 
-    with pytest.raises(UnsupportedConstruct, match="power"):
-        lower(kernel)
+    hir = _hir(kernel)
+    assert IntAdd.__name__ in _op_names(hir)
+    with pytest.raises(UnsupportedConstruct, match="not yet lowerable"):
+        lower_to_mir(hir, _ops())
 
 
 def test_a_constant_boolean_bitwise_guard_folds_and_lowers() -> None:
@@ -527,17 +551,19 @@ def test_a_runtime_integer_stored_into_a_float_slot_promotes() -> None:
     assert type(lower(K().step).nodes[slot.live_out].type).__name__ == "FloatType"
 
 
-# --------- regressions: an int/float control-flow merge is an int-or-float value, never rounded (review round 3) ---------
+# --------- an int/float control-flow merge promotes the integer path to float, C-style (accepted rounding) ---------
 
 
-def test_a_runtime_integer_merge_then_integer_arithmetic_is_rejected() -> None:
-    # int(x) merged with a float at a phi (if/else) or a conditional select is an int-or-float value; subsequent integer
-    # arithmetic (+1+1) would round the integer path in the float datapath (2**53 -> 2**53, not 2**53+2). Located reject.
+def test_a_runtime_integer_merge_promotes_to_float_and_lowers() -> None:
+    # int(x) merged with a float at a phi (if/else) or a conditional select promotes the integer path to float on its
+    # own edge, so the following arithmetic runs in the float datapath. Python keeps each path's runtime kind; the
+    # promotion is the documented C-style deviation, its rounding accepted under the fastmath charter. The promoted
+    # int(x) arm collapses to FloatTrunc (i2f(f2i(x))), keeping the truncation inside the float datapath.
     def phi_join(flag: bool, x: float) -> float:
         if flag:
             y = int(x)
         else:
-            y = x  # type: ignore[assignment]  # y is an int-or-float merge by design
+            y = x  # type: ignore[assignment]  # deliberately mixes int and float across the merge
         return y + 1 + 1
 
     def sel_mixed(flag: bool, x: float) -> float:
@@ -545,41 +571,42 @@ def test_a_runtime_integer_merge_then_integer_arithmetic_is_rejected() -> None:
         return y + 1 + 1
 
     for kernel in (phi_join, sel_mixed):
-        with pytest.raises(UnsupportedConstruct, match="integer on one path and a float on another"):
-            lower(kernel)
+        assert "FloatTrunc" in _op_names(_hir(kernel))
+        assert _run_model(kernel, True, 2.5) == [4.0]  # trunc(2.5) + 2
+        assert _run_model(kernel, False, 2.5) == [4.5]
 
 
-def test_a_constant_integer_merge_then_integer_arithmetic_is_rejected() -> None:
-    # The constant-integer counterpart: a Known 2**53 arm is still an int-or-float value at the merge, and float-datapath
-    # arithmetic rounds it just the same. It must reject, not coerce the constant and round (the C-3 fix missed this).
+def test_a_constant_integer_merge_promotes_and_rounds_in_the_target_format() -> None:
+    # A Known integer arm merged with a float promotes to a float constant; a value the target format cannot hold
+    # exactly rounds (2**18 + 1 -> 2**18 in e6m18) -- accepted C-style precision loss, not a rejection. The two
+    # datapath +1 additions round back onto 2**18 each time (ties-to-even), pinning the promoted semantics.
     def kernel(flag: bool, x: float) -> float:
-        v = 2**53 if flag else x
+        v = 2**18 + 1 if flag else x
         return v + 1 + 1
 
-    with pytest.raises(UnsupportedConstruct, match="integer on one path and a float on another"):
-        lower(kernel)
+    assert _run_model(kernel, True, 0.0) == [float(2**18)]
+    assert _run_model(kernel, False, 1.0) == [3.0]
 
 
-def test_a_mixed_value_promotes_in_float_arithmetic_but_an_exact_compare_needs_representability() -> None:
-    # Arithmetic against a definite float operand promotes every path to float (Python does too), a genuine promotion
-    # that lowers. But comparing an int-or-float value whose integer path is a RUNTIME integer cannot be proven exactly
-    # representable in the target format, so it is a located rejection (Python compares an integer and a float exactly).
+def test_a_mixed_merge_promotes_in_arithmetic_and_comparison_alike() -> None:
+    # Arithmetic against a definite float operand promotes every path (as Python does); a comparison likewise promotes
+    # the integer path and compares in float -- no exactness obligation remains.
     def promote(flag: bool, x: float) -> float:
         y = int(x) if flag else x
-        return y + 1.5  # a definite float operand: every path is float, matching Python
+        return y + 1.5
 
     def compare(flag: bool, x: float) -> float:
         y = int(x) if flag else x
-        return 1.0 if y > 2.0 else 0.0  # a runtime-integer mix compared with a float cannot be proven exact
+        return 1.0 if y > 2.0 else 0.0
 
-    lower(promote)  # must not raise
-    with pytest.raises(UnsupportedConstruct, match="cast to float first"):
-        lower(compare)
+    assert _run_model(promote, True, 2.5) == [3.5]
+    assert _run_model(compare, True, 2.9) == [0.0]  # trunc(2.9) == 2.0 is not > 2.0
+    assert _run_model(compare, False, 2.9) == [1.0]
 
 
-def test_a_runtime_integer_state_join_then_arithmetic_is_rejected() -> None:
-    # A conditional runtime-integer store into a float state slot makes the slot int-or-float; reading it into integer
-    # arithmetic rounds the integer path. Reject. (A plain read that only promotes to float still lowers.)
+def test_a_runtime_integer_state_join_promotes_the_slot_to_float() -> None:
+    # A conditional runtime-integer store into a float-reset slot promotes the slot to float: the integer store edge
+    # casts on its own edge, the live-in stays float, and reads run in the float datapath.
     class K:
         def __init__(self) -> None:
             self.y = 0.0
@@ -589,23 +616,25 @@ def test_a_runtime_integer_state_join_then_arithmetic_is_rejected() -> None:
                 self.y = int(x)
             return self.y + 1 + 1
 
-    with pytest.raises(UnsupportedConstruct, match="integer on one path and a float on another"):
-        lower(K().step)
+    hir = lower(K().step)
+    slot = next(s for s in hir.state_slots if s.name == "y")
+    assert type(hir.nodes[slot.live_out].type).__name__ == "FloatType"
+    assert _run_model(K().step, True, 3.5) == [5.0, 3.0]  # return trunc(3.5)+2, then the public state port y
 
 
-def test_an_exact_int_float_comparison_requires_target_representability() -> None:
-    # Python compares an integer and a float exactly. (2**18 + 1) == x promotes the integer to float, but in FMT(6, 18)
-    # it rounds to 2**18, so the comparison would diverge -- MIR rejects it under the exactness obligation. A constant
-    # that IS representable (2**18, or a small integer) lowers.
-    def non_representable(x: float) -> float:
+def test_an_int_float_comparison_promotes_and_rounds_in_the_target_format() -> None:
+    # Python compares an integer and a float exactly; Holoso instead promotes the integer into the float datapath,
+    # where 2**18 + 1 rounds onto 2**18 in e6m18 -- so the comparison sees the rounded constant. Accepted C-style
+    # deviation (the plain-Python oracle legitimately diverges here); a representable integer compares unchanged.
+    def rounded(x: float) -> float:
         return 1.0 if (2**18 + 1) == x else 0.0
 
     def representable(x: float) -> float:
         return 1.0 if x > 5 else 0.0
 
-    with pytest.raises(UnsupportedConstruct, match="not exactly representable"):
-        lower_to_mir(_hir(non_representable), _ops())
-    lower_to_mir(_hir(representable), _ops())  # a small representable integer lowers cleanly
+    assert _run_model(rounded, float(2**18)) == [1.0]  # False in Python, True after the accepted rounding
+    assert _run_model(rounded, float(2**18 + 2)) == [0.0]
+    assert _run_model(representable, 6.0) == [1.0]
 
 
 def test_min_max_of_a_known_integer_operand_stays_integer_and_is_contained() -> None:
@@ -622,27 +651,45 @@ def test_min_max_of_a_known_integer_operand_stays_integer_and_is_contained() -> 
         lower_to_mir(_hir(kernel), _ops())
 
 
-def test_a_mixed_value_leaks_are_contained_at_every_unhandled_use() -> None:
-    # Regression (review round 4): a MixedNumeric (int-or-float) value silently promoted to float through a unary
-    # operation, an intrinsic, or a list/tuple, dropping its integer path (and its exact-comparison obligation) and
-    # miscompiling. Each unhandled use is now a located rejection; only definite-float arithmetic, a comparison, and a
-    # merge/return still carry it.
+def test_a_promoted_merge_flows_through_every_use_as_a_plain_float() -> None:
+    # A promoted int/float merge is an ordinary float everywhere: unary negation, an intrinsic (np.minimum, abs), and
+    # an aggregate element all lower and compute in the float datapath (review round 4 rejected each of these).
     def unary(flag: bool, x: float) -> float:
         y = 2**18 + 1 if flag else x
-        return 1.0 if -y == float(2**18) else 0.0  # negating the int-or-float value
+        return 1.0 if -y == -float(2**18) else 0.0  # the promoted constant rounds onto 2**18, then negates
 
     def numpy_min(flag: bool, x: float) -> float:
         y = 2**18 if flag else x
-        return float(np.minimum(y, 2**18) + 1 + 1)  # np.minimum of a mixed operand and an integer
+        return float(np.minimum(y, 2**18) + 1 + 1)
 
     def in_abs(flag: bool, x: float) -> float:
         y = 5 if flag else x
-        return 1.0 if abs(y) > 2.0 else 0.0  # abs of a mixed value (once crashed with a raw KeyError at MIR)
+        return 1.0 if abs(y) > 2.0 else 0.0
 
     def in_list(flag: bool, x: float) -> float:
         y = 2**18 + 1 if flag else x
-        return 1.0 if [y][0] == float(2**18) else 0.0  # a mixed value inside a list
+        return 1.0 if [y][0] == float(2**18) else 0.0
 
-    for kernel in (unary, numpy_min, in_abs, in_list):
-        with pytest.raises(UnsupportedConstruct, match="not yet lowerable"):
-            lower(kernel)
+    assert _run_model(unary, True, 0.0) == [1.0]
+    assert _run_model(numpy_min, False, 5.0) == [7.0]  # min(5.0, 2**18) + 2
+    assert _run_model(in_abs, True, 0.0) == [1.0]  # abs(5) promoted: 5.0 > 2.0
+    assert _run_model(in_list, True, 0.0) == [1.0]
+
+
+def test_int_float_int_round_trip_collapses_to_the_identity() -> None:
+    # The fastmath charter: int -> float -> int collapses away completely, precision loss ignored.
+    def kernel(a: int) -> int:
+        return int(float(a))
+
+    assert _op_names(_hir(kernel)) == set()
+
+
+def test_an_inexact_integer_constant_in_a_float_position_rounds() -> None:
+    # 2**53 + 1 is not binary64-exact; the promotion rounds it under fastmath instead of rejecting.
+    from holoso._hir import FloatConst
+
+    def kernel(x: float) -> float:
+        return x + (2**53 + 1)
+
+    hir = _hir(kernel)
+    assert float(2**53) in [n.value for n in hir.nodes.values() if isinstance(n, FloatConst)]

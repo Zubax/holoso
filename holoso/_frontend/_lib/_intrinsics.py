@@ -8,7 +8,7 @@ import numpy as np
 from ..._hir import *
 from ._registry import IntegerImplementation, IntrinsicResultRule, intrinsic
 
-_PRESERVE = IntrinsicResultRule.PRESERVE
+_INT_OVERLOAD = IntrinsicResultRule.INT_OVERLOAD
 _ALWAYS_INT = IntrinsicResultRule.ALWAYS_INT
 _IDENTITY = IntegerImplementation.IDENTITY
 
@@ -17,7 +17,7 @@ _IDENTITY = IntegerImplementation.IDENTITY
 # int64), the math spellings always return a Python int; both run the float rounding operator on a float operand. An
 # integer operand is thus an identity (contained at MIR), never promoted and rounded in the float datapath. np.rint is
 # the exception -- it always returns float -- so it stays the default SIGNATURE (float-forcing) rule.
-@intrinsic(FloatFloor, np.floor, result_rule=_PRESERVE, integer_implementation=_IDENTITY)
+@intrinsic(FloatFloor, np.floor, result_rule=_INT_OVERLOAD, integer_implementation=_IDENTITY)
 def floor_(x: float) -> float:
     return float(np.floor(x))
 
@@ -27,7 +27,7 @@ def math_floor_(x: float) -> int:
     return math.floor(x)
 
 
-@intrinsic(FloatCeil, np.ceil, result_rule=_PRESERVE, integer_implementation=_IDENTITY)
+@intrinsic(FloatCeil, np.ceil, result_rule=_INT_OVERLOAD, integer_implementation=_IDENTITY)
 def ceil_(x: float) -> float:
     return float(np.ceil(x))
 
@@ -37,7 +37,7 @@ def math_ceil_(x: float) -> int:
     return math.ceil(x)
 
 
-@intrinsic(FloatTrunc, np.trunc, np.fix, result_rule=_PRESERVE, integer_implementation=_IDENTITY)
+@intrinsic(FloatTrunc, np.trunc, np.fix, result_rule=_INT_OVERLOAD, integer_implementation=_IDENTITY)
 def trunc_(x: float) -> float:
     return float(np.trunc(x))
 
@@ -47,7 +47,7 @@ def math_trunc_(x: float) -> int:
     return math.trunc(x)
 
 
-@intrinsic(FloatRound, np.round, np.around, result_rule=_PRESERVE, integer_implementation=_IDENTITY)
+@intrinsic(FloatRound, np.round, np.around, result_rule=_INT_OVERLOAD, integer_implementation=_IDENTITY)
 def round_(x: float) -> float:
     return float(np.round(x))
 
@@ -64,7 +64,9 @@ def builtin_round_(x: float) -> int:
 
 # abs/np.abs preserve the operand kind (an integer uses IntAbs, contained at MIR); math.fabs/np.fabs always return
 # float, so an integer operand promotes at the call (the default SIGNATURE rule).
-@intrinsic(FloatAbs, abs, np.abs, np.absolute, result_rule=_PRESERVE, integer_implementation=IntegerImplementation.ABS)
+@intrinsic(
+    FloatAbs, abs, np.abs, np.absolute, result_rule=_INT_OVERLOAD, integer_implementation=IntegerImplementation.ABS
+)
 def abs_(x: float) -> float:
     return math.fabs(x)
 
@@ -74,11 +76,11 @@ def fabs_(x: float) -> float:
     return math.fabs(x)
 
 
-# np.minimum/maximum (and NaN-suppressing np.fmin/fmax) promote to a common dtype: an all-integer form stays integer,
-# any definite float promotes. Builtin min/max instead return the winning original operand, so their result kind is
-# that of the selected operand -- an exact Python comparison. An all-integer form uses IntRelational + IntSelect
-# (contained at MIR); np.min/np.max are reductions and stay unregistered.
-@intrinsic(FloatMin, min, result_rule=IntrinsicResultRule.SELECT, integer_implementation=IntegerImplementation.MIN)
+# min/max in every spelling share one numeric rule: an all-integer form uses IntRelational + IntSelect (contained
+# at MIR), any float operand promotes the integer side and selects in float. Builtin min/max thus do NOT preserve the
+# winning operand's Python type on a mixed call -- the documented C-style deviation. np.min/np.max are reductions and
+# stay unregistered.
+@intrinsic(FloatMin, min, result_rule=_INT_OVERLOAD, integer_implementation=IntegerImplementation.MIN)
 def min_(a: float, b: float) -> float:
     return min(a, b)
 
@@ -87,14 +89,14 @@ def min_(a: float, b: float) -> float:
     FloatMin,
     np.minimum,
     np.fmin,
-    result_rule=IntrinsicResultRule.NUMPY_PROMOTE,
+    result_rule=_INT_OVERLOAD,
     integer_implementation=IntegerImplementation.MIN,
 )
 def numpy_min_(a: float, b: float) -> float:
     return min(a, b)
 
 
-@intrinsic(FloatMax, max, result_rule=IntrinsicResultRule.SELECT, integer_implementation=IntegerImplementation.MAX)
+@intrinsic(FloatMax, max, result_rule=_INT_OVERLOAD, integer_implementation=IntegerImplementation.MAX)
 def max_(a: float, b: float) -> float:
     return max(a, b)
 
@@ -103,7 +105,7 @@ def max_(a: float, b: float) -> float:
     FloatMax,
     np.maximum,
     np.fmax,
-    result_rule=IntrinsicResultRule.NUMPY_PROMOTE,
+    result_rule=_INT_OVERLOAD,
     integer_implementation=IntegerImplementation.MAX,
 )
 def numpy_max_(a: float, b: float) -> float:

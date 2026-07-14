@@ -376,15 +376,15 @@ def test_aliased_bool_annotation_types_a_bool_port() -> None:
     assert isinstance(flag_port.type, BoolType)
 
 
-def test_inexact_integer_constant_is_a_located_rejection() -> None:
-    from holoso._frontend._fir._emit import EmissionRejection
+def test_inexact_integer_constant_promotes_and_rounds() -> None:
+    from holoso._hir import FloatConst
 
     def kernel(x: float) -> float:
-        big = 2**53 + 1  # not binary64-exact: materializing it would silently round and change comparisons
+        big = 2**53 + 1  # not binary64-exact: the comparison promotes it and rounds onto 2**53 (accepted fastmath)
         return 1.0 if x == big else 0.0
 
-    with pytest.raises(EmissionRejection, match="not exactly representable"):
-        lower_fir(kernel)
+    hir = lower_fir(kernel)
+    assert float(2**53) in [n.value for n in hir.nodes.values() if isinstance(n, FloatConst)]
 
 
 def test_unanchored_global_components_are_a_located_rejection() -> None:
@@ -441,19 +441,24 @@ def test_intrinsic_arity_mismatch_is_a_located_rejection() -> None:
         lower_fir(kernel)
 
 
-def test_inexact_integer_state_reset_is_a_located_rejection() -> None:
-    from holoso._frontend._fir._emit import EmissionRejection
+@pytest.mark.parametrize("reset", [2**53 + 1, np.int64(2**53 + 1)], ids=["python_int", "np_int64"])
+def test_inexact_integer_state_reset_promotes_and_rounds(reset: object) -> None:
+    # An integer reset feeding a float accumulator promotes the slot to float; a reset binary64 cannot hold exactly
+    # rounds onto 2**53 under fastmath instead of rejecting (both the Python-int and the np.int64 spellings).
+    from holoso._hir import FloatConst, FloatType
 
     class Counter:
         def __init__(self) -> None:
-            self.value: float = 2**53 + 1  # a reset the float bank cannot hold exactly
+            self.value: float = reset  # type: ignore[assignment]
 
         def step(self, x: float) -> float:
-            self.value = self.value + x  # a store promotes value to a runtime slot; its reset must materialize
+            self.value = self.value + x
             return self.value
 
-    with pytest.raises(EmissionRejection, match="not exactly representable"):
-        lower_fir(Counter().step)
+    hir = lower_fir(Counter().step)
+    (slot,) = hir.state_slots
+    assert isinstance(hir.nodes[slot.live_out].type, FloatType)
+    assert isinstance(slot.reset_value, FloatConst) and slot.reset_value.value == float(2**53)
 
 
 def test_mutable_dataclass_component_lowers() -> None:
@@ -575,23 +580,6 @@ def test_runtime_integer_in_float_datapath_promotes_to_float() -> None:
     hir = optimize(lower_fir(kernel))
     ops = {type(n.operator).__name__ for n in hir.nodes.values() if isinstance(n, Operation)}
     assert IntToFloat.__name__ in ops and FloatAdd.__name__ in ops  # the integer edge is promoted, then added in float
-
-
-def test_inexact_numpy_integer_state_reset_is_a_located_rejection() -> None:
-    # Codex round-3 #3: a numpy integer reset value too wide for binary64 would silently round on the way in. The
-    # exactness guard previously checked only Python int, letting np.int64 slip through; it must catch np.integer too.
-    class Bad:
-        acc: float
-
-        def __init__(self) -> None:
-            self.acc = np.int64(2**53 + 1)  # type: ignore[assignment]  # exact in int64, rounds in binary64
-
-        def step(self, x: float) -> float:
-            self.acc = self.acc + x
-            return self.acc
-
-    with pytest.raises(EmissionRejection, match="not exactly representable"):
-        lower_fir(Bad().step)
 
 
 def test_static_multidim_subscript_matches_python() -> None:

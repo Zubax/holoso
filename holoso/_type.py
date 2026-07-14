@@ -83,14 +83,6 @@ class FloatFormat:
     def is_finite(self, bits: int) -> bool:
         return self._zfmt.wrap(bits).is_finite
 
-    def represents_integer_exactly(self, value: int) -> bool:
-        """
-        Whether the integer is exactly representable in this format, so promoting it to float loses nothing (used to
-        validate an exact Python int/float comparison). The binary64 carrier is a current containment limit: the value
-        must also be double-exact, since a datapath constant is carried as a Python float until the MIR/LIR pool widens.
-        """
-        return float(value) == value and self.decode(self.encode(float(value))) == value
-
     @property
     def width(self) -> int:
         return self.wexp + self.wman

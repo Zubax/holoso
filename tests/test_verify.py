@@ -346,10 +346,11 @@ def test_for_counter_reassigned_inside_while_is_demoted_after_the_loop() -> None
         assert float(model.run(a)[0]) == float(kernel(a)), f"mismatch at a={a}"
 
 
-def test_for_counter_reassigned_inside_while_rejects_later_static_use() -> None:
-    # Companion to the above: once the counter is demoted by a while-body reassignment, a later static-only exponent
-    # use must be rejected as runtime, not folded to the stale counter. The base is 3 not 2 because ``2 ** i`` with a
-    # runtime ``i`` is the exp2 operator, which does not require a static exponent.
+def test_for_counter_reassigned_inside_while_demotes_to_a_runtime_exponent() -> None:
+    # Companion to the above: once the counter is demoted by a while-body reassignment, a later exponent use must see
+    # the RUNTIME value, never fold to the stale compile-time counter. The demoted ``3.0**i`` lowers through the
+    # general runtime-exponent path (exp2(i * log2(3))), so an exp2 operation -- not a folded constant -- is the proof
+    # that the stale fold did not happen.
     def kernel(a: float) -> float:
         for i in range(2):
             pass
@@ -360,10 +361,11 @@ def test_for_counter_reassigned_inside_while_rejects_later_static_use() -> None:
             w = w + 1.0
         return a * 3.0**i
 
-    # The runtime-reassigned counter can no longer serve as a static exponent; the new front-end rejects the resulting
-    # runtime ``**`` rather than naming the demoted counter, but the rejection of the invalid kernel is the point.
-    with pytest.raises(UnsupportedConstruct, match="compile-time integer|power with a runtime exponent"):
-        lower(kernel)
+    from holoso._hir import Operation
+
+    hir = optimize(lower(kernel))
+    ops = {type(n.operator).__name__ for n in hir.nodes.values() if isinstance(n, Operation)}
+    assert "FloatExp2" in ops
 
 
 def test_model_uses_exact_ilog2_for_wide_supported_shift() -> None:

@@ -210,25 +210,6 @@ class FloatTrunc(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class RequireExactIntFloat(Operator):
-    """
-    An identity on a float carrier that obligates every listed integer to be exactly representable in the selected
-    target format. It wraps a float produced by promoting an integer for an exact Python int/float comparison: HIR->MIR
-    lowers it to the carrier unchanged once representability is verified, and otherwise rejects (located at ``location``).
-    It never folds -- the target format is unknown until MIR.
-    """
-
-    mnemonic: ClassVar[str] = "require_exact_int_float"
-    speculatable: ClassVar[bool] = True
-    integers: frozenset[int]
-    location: str
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
-
-
-@dataclass(frozen=True, slots=True)
 class FloatExp2(Operator):
     mnemonic: ClassVar[str] = "exp2"
     speculatable: ClassVar[bool] = True
@@ -763,17 +744,15 @@ class IntToFloat(Operator):
         return Signature((IntType(),), FloatType())
 
     def fold_constants(self, operands: list[Const]) -> Const | None:
-        # A Known integer promoted to float folds to the float constant (a conversion, not integer arithmetic): this
-        # keeps a Known integer that flows into a float join out of the integer datapath. An integer too wide to be
-        # binary64-exact stays unfolded so the exactness guard fires downstream rather than silently rounding.
+        # A Known integer promoted to float folds to the float constant, rounding accepted C-style under the fastmath
+        # charter. An integer beyond the binary64 carrier cannot fold at all and stays contained in the integer domain.
         (a,) = operands
         if not isinstance(a, IntConst):
             raise TypeError(f"expected IntConst, got {a!r}")
         try:
-            result = float(a.value)
+            return FloatConst(float(a.value))
         except OverflowError:
-            return None  # an integer beyond binary64 range cannot fold; the datapath exactness guard refuses it later
-        return FloatConst(result) if int(result) == a.value else None
+            return None
 
 
 @dataclass(frozen=True, slots=True)
