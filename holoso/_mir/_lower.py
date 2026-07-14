@@ -45,6 +45,7 @@ from .._hir import (
     FloatType as HirFloatType,
     Hir,
     InPort,
+    IntType as HirIntType,
     Jump,
     Node,
     Operation,
@@ -433,6 +434,8 @@ class _LoweringContext:
                 return ScalarFloatType(self.ops.float_format)
             case HirBoolType():
                 return ScalarBoolType()
+            case HirIntType():
+                raise UnsupportedConstruct("integer values are not yet lowerable to hardware")
             case _:
                 raise UnsupportedConstruct(f"no MIR lowering rule for phi of type {node.type!r}")
 
@@ -442,6 +445,10 @@ class _LoweringContext:
         if self._lower_bool_node(old_id, node):
             return
         match node:
+            case Operation(operator=operator) if isinstance(node.type, HirIntType):
+                raise UnsupportedConstruct(f"integer operator {operator.mnemonic!r} is not yet lowerable to hardware")
+            case Const(type=HirIntType()) | InPort(type=HirIntType()) | StateRead(type=HirIntType()):
+                raise UnsupportedConstruct("integer values are not yet lowerable to hardware")
             case Const(type=type):
                 raise UnsupportedConstruct(f"no MIR lowering rule for HIR constant type {type!r}")
             case InPort(type=type):

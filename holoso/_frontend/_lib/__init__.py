@@ -6,4 +6,10 @@ resolve(callee) maps a callee object to the Match saying how to lower a call to 
 from . import _intrinsics as _intrinsics
 from . import _linalg as _linalg
 from . import _numpy as _numpy
-from ._registry import Intrinsic as Intrinsic, Library as Library, resolve as resolve
+from ._registry import (
+    IntegerImplementation as IntegerImplementation,
+    Intrinsic as Intrinsic,
+    IntrinsicResultRule as IntrinsicResultRule,
+    Library as Library,
+    resolve as resolve,
+)

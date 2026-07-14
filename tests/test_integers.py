@@ -34,6 +34,7 @@ from holoso._hir import (
     FloatToInt,
     Hir,
     InPort,
+    IntAbs,
     IntAdd,
     IntConst,
     IntDivFloor,
@@ -397,14 +398,15 @@ def test_integer_state_counter_is_a_located_mir_rejection() -> None:
 # ------------------------ regressions: integer values must never float-promote and round ------------------------
 
 
-def test_abs_of_an_integer_operand_is_rejected_not_float_promoted() -> None:
-    # abs/min/max are int-polymorphic: promoting abs(int(x)) to float would let the following integer arithmetic round
-    # (2**53 + 1 -> 2**53). With no integer abs/min/max operator yet, an integer operand is a located rejection.
+def test_abs_of_an_integer_operand_is_contained_not_float_promoted() -> None:
+    # abs preserves the operand kind: abs(int(x)) is an integer (IntAbs), so the following integer arithmetic stays
+    # exact and is contained at MIR, never promoted to float and rounded (2**53 + 1 -> 2**53).
     def kernel(x: float) -> float:
         return float(abs(int(x)) + 1 + 1)
 
+    assert IntAbs.__name__ in _op_names(_hir(kernel))  # abs(int) is IntAbs, not a float promotion
     with pytest.raises(UnsupportedConstruct, match="not yet lowerable"):
-        lower(kernel)
+        lower_to_mir(_hir(kernel), _ops())
 
 
 def test_math_floor_is_integer_returning() -> None:
@@ -481,12 +483,12 @@ def test_a_known_integer_stored_into_a_float_state_slot_stays_float() -> None:
 
 
 def test_min_max_of_a_known_integer_and_a_runtime_float_is_rejected() -> None:
-    # A Known-integer min/max operand can be the winner, so the result is int-polymorphic; promoting it to float would
-    # round the following integer arithmetic (regression: only residual-int operands were caught before).
+    # Builtin min/max return the winning operand, so min(int, float) is an int-or-float value (its result kind depends
+    # on which wins); promoting it to float would round the following integer arithmetic. It is a located rejection.
     def kernel(x: float) -> float:
         return float(min(2**24, x) + 1 + 1)
 
-    with pytest.raises(UnsupportedConstruct, match="not yet lowerable"):
+    with pytest.raises(UnsupportedConstruct, match="returns an int-or-float value"):
         lower(kernel)
 
 
