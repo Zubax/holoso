@@ -1,14 +1,16 @@
 """
-FIR -> HIR emission over the analyzer's stabilized residual graph: only executable blocks and edges are walked,
-per-block facts are replayed from the final environments, Known values materialize as constants at their use
-sites, and residual operations become typed HIR operations. Value numbering is Braun-style sealed-block SSA over
-Places (named locals, state leaves, the return place): straight-line reads chase the unique predecessor, joins
-create phis, loop headers read through open phis closed once their latch block is emitted, and single-value joins
-collapse without a phi. HIR phi arms are keyed by predecessor block, which the 1:1 block mapping preserves.
+FIR -> HIR emission over the analyzer's stabilized residual graph and its emission plan: only executable blocks and
+edges are walked, every fact and call plan comes from the analysis result (emission never folds, never resolves the
+library registry, never replays the transfer), Known values materialize as constants at their use sites, and
+residual operations become typed HIR operations through one typed materializer. Value numbering is Braun-style
+sealed-block SSA over Places (named locals, state leaves, the return place): straight-line reads chase the unique
+predecessor, joins create phis, loop headers read through open phis closed once their latch block is emitted, and
+single-value joins collapse without a phi. HIR phi arms are keyed by predecessor block, which the 1:1 block mapping
+preserves.
 
 State: every read/written leaf becomes a state_read and, if in the promoted set, a state slot named by its
-attribute path with its reset snapshot and canonical-exit live-out; the returned value becomes the out port. The
-port contract mirrors the production front-end so the differential harness compares model I/O across front-ends.
+attribute path with its reset snapshot and canonical-exit live-out; the returned value becomes the out port,
+following the established port ABI.
 """
 
 import logging
@@ -63,7 +65,7 @@ from ..._hir import (
     Select,
     Type,
 )
-from ._analyze import Analyzer, Fact, FactSeq, Known, Residual, ResidualUnit
+from ._analyze import Analyzer, CallLowering, CallPlan, Fact, FactSeq, Known, Residual, ResidualUnit
 from ._ir import (
     BindingId,
     BlockId as FirBlockId,
@@ -103,19 +105,14 @@ _logger = logging.getLogger(__name__)
 # instead of hanging emission, while leaving any realistic exponent (a degree-N monomial) free to expand.
 _MAX_POWER_CHAIN = 1024
 
-type FactOf = Callable[[BindingId], Fact]
-type ValueOf = Callable[[BindingId], int]
-
 
 class EmissionRejection(UnsupportedConstruct):
     """A located refusal discovered during HIR emission: an unsupported construct that survived analysis."""
 
 
 def lower_fir(kernel: object) -> Hir:
-    """The shadow front-end pipeline: build, analyze to the W/D fixed point, emit HIR."""
-    analyzer = Analyzer(kernel)
-    result = analyzer.fixpoint()
-    return _Emitter(result, analyzer).emit()
+    """The front-end pipeline: build, analyze to the W/D fixed point, emit HIR from the analysis plan."""
+    return _Emitter(Analyzer(kernel).fixpoint()).emit()
 
 
 def _carrier_float(value: object) -> float:
@@ -136,9 +133,10 @@ class _KnownHandle:
 
 @dataclass(frozen=True, slots=True)
 class _ValueHandle:
-    """A residual scalar element, already emitted as the given HIR value."""
+    """A residual scalar element, already emitted as the given HIR value, tagged with its semantic kind."""
 
     vid: int
+    sem: SemType
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,9 +163,8 @@ def _is_bool_fact(fact: Fact | None) -> bool:
 
 
 class _Emitter:
-    def __init__(self, result: ResidualUnit, analyzer: Analyzer) -> None:
+    def __init__(self, result: ResidualUnit) -> None:
         self._result = result
-        self._analyzer = analyzer
         self._builder = HirBuilder()
         self._fir_to_hir: dict[FirBlockId, int] = {}
         self._definitions: dict[tuple[FirBlockId, Place], int] = {}
@@ -179,10 +176,8 @@ class _Emitter:
             self._predecessors.setdefault(target, []).append(source)
         self._state_reads: dict[StateLeaf, int] = {}
         self._state_order: list[StateLeaf] = []
-        self._provenance = analyzer.provenance()  # component id -> canonical member path from the root
         self._slot_names: dict[str, StateLeaf] = {}  # encoded slot name -> its leaf, to catch a rare name collision
         self._layouts: dict[BindingId, _SeqHandle] = {}  # FactSeq bindings -> their typed element layout
-        self._binding_fact_cache: dict[BindingId, Fact] | None = None
 
     def emit(self) -> Hir:
         unit = self._result.unit
@@ -361,7 +356,7 @@ class _Emitter:
         # double underscore, so a top-level attribute ``m`` stays the bare ``m`` (the established port ABI) while a
         # nested child's ``m`` becomes ``child__m``. This is injective except when an attribute name literally spans a
         # ``__`` boundary (a rare dunder-ish name); that alias is a located collision rejection, never a silent merge.
-        path = self._provenance.get(id(leaf.component))
+        path = self._result.provenance.get(id(leaf.component))
         if path is None:
             raise EmissionRejection(
                 "a stateful component reached only through an unanchored reference is not supported; "
@@ -387,7 +382,7 @@ class _Emitter:
 
     def _leaf_is_int(self, leaf: StateLeaf) -> bool:
         """An integer-typed persistent leaf: the analyzer carries a runtime integer across the initiation boundary."""
-        return self._analyzer.state_livein().get(leaf) == Residual(SemType.INT)
+        return self._result.state_livein.get(leaf) == Residual(SemType.INT)
 
     def _leaf_reset(self, leaf: StateLeaf) -> FloatConst | BoolConst | IntConst:
         import numpy as np
@@ -419,52 +414,45 @@ class _Emitter:
             return self._builder.float_const(_carrier_float(concrete))
         raise EmissionRejection(f"a {type(concrete).__name__} value cannot materialize in the datapath")
 
-    def _emit_block(self, fir_id: FirBlockId) -> None:
-        block = self._result.unit.blocks[fir_id]
-        self._builder.position_at(self._fir_to_hir[fir_id])
-        env: dict[Place, Fact] = dict(self._result.block_in[fir_id].facts)
+    def _fact(self, binding: BindingId) -> Fact:
+        fact = self._result.binding_facts.get(binding)
+        assert fact is not None, f"binding {binding} missing from the analysis plan"
+        return fact
 
-        def fact_of(binding: BindingId) -> Fact:
-            fact = env.get(Local(binding))
-            assert fact is not None, f"binding {binding} missing a fact during emission"
-            return fact
-
-        def value_of(binding: BindingId) -> int:
-            fact = fact_of(binding)
-            if isinstance(fact, Known):
-                return self._const(fact.value)
-            return self._read(fir_id, Local(binding))  # a residual temp is an SSA-numbered place, cross-block safe
-
-        def arm_value(binding: BindingId) -> int:
-            # Like value_of but a Known integer materializes as an IntConst, so a select/phi over it keeps the
-            # analyzer's integer type; value_of would float it via _const and mismatch an IntSelect or an integer phi.
-            fact = fact_of(binding)
-            if isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)):
+    def _materialize(self, block: FirBlockId, binding: BindingId, expected: SemType | None = None) -> int:
+        """
+        The one typed materializer. A Known value becomes a constant of the expected kind: a Known integer stays an
+        IntConst in an integer context and rounds into a float constant in a float context (the carrier policy). A
+        residual value is its SSA read, coerced onto the expected kind where the coercion is a genuine promotion
+        (int -> float) and a located rejection otherwise. ``expected=None`` materializes the value as carried: a
+        Known in its own kind, a residual as already emitted -- the carried kind can differ from the fact's (a
+        runtime integer promoted at a state boundary is float-carried while its fact still reads integer).
+        """
+        fact = self._fact(binding)
+        if isinstance(fact, Known):
+            if isinstance(fact.value, (MetaInt, NpInt)) and expected is not SemType.FLOAT:
                 return self._builder.int_const(int(fact.value.value))
-            return value_of(binding)
-
-        def as_float(binding: BindingId) -> int:
-            # Dispatch on the actual HIR type, not the analyzer fact: a value can be float-carried (a runtime integer
-            # already promoted at a state boundary) while its fact still reads integer.
-            vid = value_of(binding)
-            ty = self._type_of(vid)
-            if isinstance(ty, FloatType):
-                return vid
-            if isinstance(ty, IntType):
-                return self._builder.operation(IntToFloat(), [vid])  # Python promotes int -> float
+            vid = self._const(fact.value)
+        else:
+            vid = self._read(block, Local(binding))
+        if expected is None:
+            return vid
+        actual = self._sem_of(self._type_of(vid))
+        if actual is expected:
+            return vid
+        if actual is SemType.INT and expected is SemType.FLOAT:
+            return self._builder.operation(IntToFloat(), [vid])  # Python promotes int -> float
+        if expected is SemType.FLOAT:
             raise EmissionRejection("a boolean value reaches a float operation")
-
-        def as_int(binding: BindingId) -> int:
-            fact = fact_of(binding)
-            if isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)):
-                return self._builder.int_const(int(fact.value.value))  # a Known integer materializes as IntConst
-            vid = value_of(binding)
-            if isinstance(self._type_of(vid), IntType):
-                return vid
+        if expected is SemType.INT:
             raise EmissionRejection("a non-integer value reaches an integer operation")
+        raise EmissionRejection("a non-boolean value reaches a boolean operation")
 
+    def _emit_block(self, fir_id: FirBlockId) -> None:
+        self._builder.position_at(self._fir_to_hir[fir_id])
+        block = self._result.unit.blocks[fir_id]
         for op in block.ops:
-            self._emit_op(fir_id, op, env, fact_of, value_of, arm_value, as_float, as_int)
+            self._emit_op(fir_id, op)
         match block.terminator:
             case FirJump(target=target):
                 if target in self._result.executable_blocks:
@@ -474,40 +462,25 @@ class _Emitter:
                 if len(live) == 1:
                     self._builder.jump(self._fir_to_hir[live[0]])
                 else:
-                    self._builder.branch(value_of(cond), self._fir_to_hir[then_target], self._fir_to_hir[else_target])
+                    condition = self._materialize(fir_id, cond, SemType.BOOL)
+                    self._builder.branch(condition, self._fir_to_hir[then_target], self._fir_to_hir[else_target])
             case UnitExit():
                 pass  # _finish_exit seals the exit block with outputs, slots, and the single Ret
             case other:
                 raise AssertionError(f"terminator {type(other).__name__} survived analysis into emission")
 
-    def _emit_op(
-        self,
-        fir_id: FirBlockId,
-        op: Op,
-        env: dict[Place, Fact],
-        fact_of: "FactOf",
-        value_of: "ValueOf",
-        arm_value: "ValueOf",
-        as_float: "ValueOf",
-        as_int: "ValueOf",
-    ) -> None:
+    def _emit_op(self, fir_id: FirBlockId, op: Op) -> None:
         def define(dst: BindingId, vid: int) -> None:
             self._write(fir_id, Local(dst), vid)
 
         match op:
-            case LoadConst(dst=dst, value=value):
-                env[Local(dst)] = Known(value)
+            case LoadConst() | UnbindPlace():
+                pass  # facts and boundness are the analyzer's; nothing materializes here
             case LoadPlace(dst=dst, place=place):
-                fact = env.get(place)
-                if fact is None and isinstance(place, StateLeaf):
-                    fact = self._leaf_fact(place)
-                assert fact is not None
-                env[Local(dst)] = fact
-                if not isinstance(fact, Known):
+                if not isinstance(self._fact(dst), Known):
                     define(dst, self._read(fir_id, place))
             case StorePlace(place=place, src=src):
-                fact = fact_of(src)
-                env[place] = fact
+                fact = self._fact(src)
                 is_aggregate = isinstance(fact, FactSeq) or (
                     isinstance(fact, Known) and isinstance(fact.value, StaticSeq)
                 )
@@ -517,165 +490,124 @@ class _Emitter:
                     raise EmissionRejection("a runtime aggregate in a local is not supported yet")  # layout: stage 9
                 if isinstance(fact, Known) and isinstance(fact.value, (StaticSeq, ObjectRef)):
                     pass  # a fully-static sequence (subscripts fold) or a non-datapath value: no HIR value flows
-                elif isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)):
-                    # a Known integer stored to a local materializes as IntConst so an integer phi over it stays typed;
-                    # a downstream float use promotes it on that edge (phi arm coercion / as_float).
-                    self._write(fir_id, place, self._builder.int_const(int(fact.value.value)))
-                elif isinstance(fact, Known):
-                    self._write(fir_id, place, self._const(fact.value))
                 else:
-                    self._write(fir_id, place, value_of(src))
-            case UnbindPlace(place=place):
-                env[place] = _unbound()
+                    self._write(fir_id, place, self._materialize(fir_id, src))  # in the value's own kind
             case PyBin(dst=dst, op=bin_op, lhs=lhs, rhs=rhs):
-                self._emit_binary(fir_id, dst, bin_op, lhs, rhs, env, fact_of, value_of, as_float, as_int, op)
+                self._emit_binary(fir_id, dst, bin_op, lhs, rhs, op)
             case PyUn(dst=dst, op=un_op, operand=operand):
-                self._emit_unary(fir_id, dst, un_op, operand, env, fact_of, as_float, as_int)
+                self._emit_unary(fir_id, dst, un_op, operand)
             case PyCompare(dst=dst, op=rel, lhs=lhs, rhs=rhs):
-                lhs_fact, rhs_fact = fact_of(lhs), fact_of(rhs)
-                folded = self._replay_compare(rel, lhs_fact, rhs_fact)
-                env[Local(dst)] = folded
-                if not isinstance(folded, Known):
-                    lsem, rsem = self._fact_sem(lhs_fact), self._fact_sem(rhs_fact)
+                if not isinstance(self._fact(dst), Known):
+                    lsem, rsem = self._fact_sem(self._fact(lhs)), self._fact_sem(self._fact(rhs))
                     if lsem is SemType.BOOL or rsem is SemType.BOOL:
                         if lsem is not rsem:
                             raise EmissionRejection("a comparison mixes a boolean and a non-boolean without a cast")
-                        define(dst, self._bool_compare(rel, value_of(lhs), value_of(rhs)))  # bool ==/!= is XNOR/XOR
+                        left = self._materialize(fir_id, lhs, SemType.BOOL)
+                        right = self._materialize(fir_id, rhs, SemType.BOOL)
+                        define(dst, self._bool_compare(rel, left, right))  # bool ==/!= is XNOR/XOR
                     elif lsem is SemType.INT and rsem is SemType.INT:
-                        define(dst, self._builder.operation(IntRelational(rel), [as_int(lhs), as_int(rhs)]))
+                        left = self._materialize(fir_id, lhs, SemType.INT)
+                        right = self._materialize(fir_id, rhs, SemType.INT)
+                        define(dst, self._builder.operation(IntRelational(rel), [left, right]))
                     else:  # a float on at least one side: the integer side promotes C-style and compares in float
-                        define(dst, self._builder.operation(FloatRelational(rel), [as_float(lhs), as_float(rhs)]))
+                        left = self._materialize(fir_id, lhs, SemType.FLOAT)
+                        right = self._materialize(fir_id, rhs, SemType.FLOAT)
+                        define(dst, self._builder.operation(FloatRelational(rel), [left, right]))
             case PyNot(dst=dst, operand=operand):
-                fact = fact_of(operand)
-                truth = self._replay_truth(fact)
-                if isinstance(truth, Known):
-                    concrete = as_python(truth.value)
-                    assert isinstance(concrete, bool)
-                    env[Local(dst)] = Known(_static_bool(not concrete))
-                else:
-                    env[Local(dst)] = Residual(SemType.BOOL)
-                    define(dst, self._not(self._truth_value(operand, fact, value_of)))
+                if not isinstance(self._fact(dst), Known):
+                    define(dst, self._not(self._truth_value(fir_id, operand)))
             case PyTruth(dst=dst, operand=operand):
-                fact = fact_of(operand)
-                truth = self._replay_truth(fact)
-                env[Local(dst)] = truth
-                if not isinstance(truth, Known):
-                    define(dst, self._truth_value(operand, fact, value_of))
+                if not isinstance(self._fact(dst), Known):
+                    define(dst, self._truth_value(fir_id, operand))
             case PySelect(dst=dst, mode=mode, cond=cond, lhs=lhs, rhs=rhs):
-                cond_fact = fact_of(cond)
-                if isinstance(cond_fact, Known):
+                result_fact = self._fact(dst)
+                if isinstance(result_fact, Known):
+                    pass  # the analyzer selected a Known arm or folded a boolean identity (``A or True``)
+                elif isinstance(result_fact, FactSeq):
+                    raise EmissionRejection("a conditional selection of aggregates is not supported yet")  # stage 9
+                elif isinstance(cond_fact := self._fact(cond), Known):
                     taken = as_python(cond_fact.value)
                     assert isinstance(taken, bool)
                     chosen = (rhs if taken else lhs) if mode is SelectMode.AND else (lhs if taken else rhs)
-                    env[Local(dst)] = fact_of(chosen)
-                    if not isinstance(env[Local(dst)], Known):
-                        define(dst, value_of(chosen))
+                    define(dst, self._materialize(fir_id, chosen))
                 else:
-                    rhs_fact = fact_of(rhs)
-                    rhs_const = as_python(rhs_fact.value) if isinstance(rhs_fact, Known) else None
-                    if (mode is SelectMode.OR and rhs_const is True) or (mode is SelectMode.AND and rhs_const is False):
-                        # Boolean identity with a runtime condition: ``A or True`` is always True and ``A and False``
-                        # always False. The analyzer folded the result to this constant; emission honors the same fold
-                        # so a consumer never builds a select over the bool/float arm pair a residual would leave.
-                        env[Local(dst)] = rhs_fact
-                    else:
-                        then_binding, else_binding = (rhs, lhs) if mode is SelectMode.AND else (lhs, rhs)
-                        then_vid = arm_value(then_binding)
-                        else_vid = arm_value(else_binding)
-                        condition = value_of(cond)
-                        then_type, else_type = self._type_of(then_vid), self._type_of(else_vid)
-                        operator: Operator
-                        if isinstance(then_type, BoolType) and isinstance(else_type, BoolType):
-                            operator = BoolSelect()
-                        elif isinstance(then_type, IntType) and isinstance(else_type, IntType):
-                            operator = IntSelect()  # integer and/or: IntSelect, then the MIR refusal
-                        else:  # a mixed int/float select promotes the integer arm to float on its own edge, like a phi
-                            if isinstance(then_type, IntType):
-                                then_vid = self._builder.operation(IntToFloat(), [then_vid])
-                            if isinstance(else_type, IntType):
-                                else_vid = self._builder.operation(IntToFloat(), [else_vid])
-                            operator = Select()
-                        env[Local(dst)] = self._binding_facts()[dst]  # keep the analyzer's authoritative fact
-                        define(dst, self._builder.operation(operator, [condition, then_vid, else_vid]))
+                    # The merged fact fixes the selection kind; each arm materializes onto it, so a mixed int/float
+                    # select promotes the integer arm on its own edge exactly like a phi.
+                    then_binding, else_binding = (rhs, lhs) if mode is SelectMode.AND else (lhs, rhs)
+                    sem = self._fact_sem(result_fact)
+                    operator: Operator = (
+                        BoolSelect() if sem is SemType.BOOL else IntSelect() if sem is SemType.INT else Select()
+                    )
+                    condition = self._materialize(fir_id, cond, SemType.BOOL)
+                    then_vid = self._materialize(fir_id, then_binding, sem)
+                    else_vid = self._materialize(fir_id, else_binding, sem)
+                    define(dst, self._builder.operation(operator, [condition, then_vid, else_vid]))
             case BuildTuple(dst=dst, items=items) | BuildList(dst=dst, items=items):
-                from ._analyze import _pack_seq
-
-                is_list = isinstance(op, BuildList)
-                facts = tuple(fact_of(item) for item in items)
-                packed = _pack_seq(facts, is_list=is_list)
-                env[Local(dst)] = packed
-                if isinstance(packed, FactSeq):
+                if isinstance(self._fact(dst), FactSeq):
                     self._layouts[dst] = _SeqHandle(
-                        tuple(self._handle_of(item, fact_of, value_of) for item in items), is_list=is_list
+                        tuple(self._handle_of(fir_id, item) for item in items), is_list=isinstance(op, BuildList)
                     )
             case PySubscript(dst=dst, obj=obj, index=index):
-                self._emit_subscript(fir_id, dst, obj, index, env, fact_of, value_of)
-            case PyLen(dst=dst, obj=obj):
-                from ._value import admit
+                if obj in self._layouts:
+                    import operator as operator_module
 
-                obj_fact = fact_of(obj)
-                length = len(self._layouts[obj].items) if obj in self._layouts else len(as_python(obj_fact.value))  # type: ignore[union-attr,arg-type]
-                admitted = admit(length)
-                assert admitted is not None
-                env[Local(dst)] = Known(admitted)
+                    index_fact = self._fact(index)
+                    assert isinstance(index_fact, Known)
+                    position = operator_module.index(as_python(index_fact.value))  # type: ignore[arg-type]
+                    self._bind_handle(fir_id, dst, self._layouts[obj].items[position])
+                # else the analyzer folded the subscript concretely: the Known fact materializes at its use sites
+            case PyLen():
+                pass  # always folded by the analyzer (static shape)
             case PyAttr(dst=dst, obj=obj, name=name):
-                self._emit_attr_read(fir_id, dst, obj, name, env, fact_of)
+                if not isinstance(self._fact(dst), Known):
+                    # Only a runtime component attribute is residual; it is backed by a state slot.
+                    obj_fact = self._fact(obj)
+                    assert isinstance(obj_fact, Known) and isinstance(obj_fact.value, ObjectRef)
+                    define(dst, self._read(fir_id, StateLeaf(obj_fact.value.obj, (name,))))
             case PyStoreAttr(obj=obj, name=name, src=src):
-                obj_fact = fact_of(obj)
+                obj_fact = self._fact(obj)
                 assert isinstance(obj_fact, Known) and isinstance(obj_fact.value, ObjectRef)
                 leaf = StateLeaf(obj_fact.value.obj, (name,))
-                src_fact = fact_of(src)
-                env[leaf] = src_fact
-                if (
-                    isinstance(src_fact, Known)
-                    and isinstance(src_fact.value, (MetaInt, NpInt))
-                    and self._leaf_is_int(leaf)
-                ):
-                    stored = self._builder.int_const(int(src_fact.value.value))  # a Known int keeps an int-typed leaf
-                elif isinstance(src_fact, Known):
-                    stored = self._const(src_fact.value)  # a Known int stored to a FLOAT leaf rounds into the carrier
-                elif src_fact == Residual(SemType.INT) and not self._leaf_is_int(leaf):
-                    stored = as_float(src)  # a runtime integer stored to a float leaf promotes on its own edge
-                else:
-                    stored = value_of(src)
-                self._write(fir_id, leaf, stored)
+                src_sem = self._fact_sem(self._fact(src))
+                kind = (
+                    SemType.INT
+                    if self._leaf_is_int(leaf)
+                    else SemType.BOOL if src_sem is SemType.BOOL else SemType.FLOAT
+                )
+                self._write(fir_id, leaf, self._materialize(fir_id, src, kind))
                 self._state_read(leaf)  # register the slot even if the entry live-in was never read
-            case PyCall(dst=dst, callee=callee, args=args):
-                fact = self._binding_facts()[dst]
-                env[Local(dst)] = fact
-                if isinstance(fact, Known):
-                    pass  # a concrete builtin fold; the value materializes at its use sites
-                elif id(op) in self._analyzer.identity_calls():
-                    define(dst, value_of(args[0]))  # float(x) on a float: dst aliases the argument's value
-                elif id(op) in self._analyzer.conversion_calls():
-                    define(dst, self._emit_conversion(fact_of(args[0]), fact, args[0], value_of, as_float, as_int))
-                elif id(op) in self._analyzer.intrinsic_calls():
-                    from .._lib import Intrinsic, IntrinsicResultRule, resolve
-
-                    callee_fact = fact_of(callee)
-                    assert isinstance(callee_fact, Known) and isinstance(callee_fact.value, ObjectRef)
-                    match = resolve(callee_fact.value.obj)
-                    assert isinstance(match, Intrinsic)
-                    # arm_value, not value_of: a Known integer must materialize as an IntConst so its HIR type agrees
-                    # with the analyzer's INT classification -- value_of would float it via _const, misread it as float,
-                    # and emit a rounding float min/max/identity instead of the contained integer operation.
-                    arg_vids = [arm_value(arg) for arg in args]
-                    all_int = all(isinstance(self._type_of(vid), IntType) for vid in arg_vids)
-                    rule = match.result_rule
-                    if rule is IntrinsicResultRule.ALWAYS_INT and all_int:
-                        result = arg_vids[0]  # rounding an integer is the integer (identity)
-                    elif rule is IntrinsicResultRule.ALWAYS_INT:
-                        rounded = self._builder.operation(match.operator, [as_float(arg) for arg in args])
-                        result = self._builder.operation(FloatToInt(), [rounded])
-                    elif rule is IntrinsicResultRule.INT_OVERLOAD and all_int:
-                        result = self._integer_intrinsic(match.integer_implementation, arg_vids)
-                    else:  # SIGNATURE, or a float operand present: promote the integer operands and run the float op
-                        result = self._builder.operation(match.operator, [as_float(arg) for arg in args])
-                    define(dst, result)
-                else:
-                    raise AssertionError(f"call {dst} left an unexpected residual value in the graph")
+            case PyCall(dst=dst, args=args):
+                plan = self._result.call_plans[dst]
+                match plan.lowering:
+                    case CallLowering.FOLDED:
+                        pass  # a concrete fold; the Known value materializes at its use sites
+                    case CallLowering.IDENTITY:
+                        define(dst, self._materialize(fir_id, args[0]))  # float(x) on a float aliases the argument
+                    case CallLowering.CONVERSION:
+                        define(dst, self._emit_conversion(fir_id, args[0], dst))
+                    case CallLowering.INTRINSIC:
+                        define(dst, self._emit_intrinsic(fir_id, plan, list(args)))
             case _:
                 raise AssertionError(f"operation {type(op).__name__} survived analysis into emission")
+
+    def _emit_intrinsic(self, block: FirBlockId, plan: CallPlan, args: list[BindingId]) -> int:
+        from .._lib import Intrinsic, IntrinsicResultRule
+
+        match_ = plan.intrinsic
+        assert isinstance(match_, Intrinsic)
+        rule = match_.result_rule
+        all_int = all(self._fact_sem(self._fact(arg)) is SemType.INT for arg in args)
+        if rule is IntrinsicResultRule.ALWAYS_INT and all_int:
+            return self._materialize(block, args[0], SemType.INT)  # rounding an integer is the integer (identity)
+        if rule is IntrinsicResultRule.ALWAYS_INT:
+            operands = [self._materialize(block, arg, SemType.FLOAT) for arg in args]
+            return self._builder.operation(FloatToInt(), [self._builder.operation(match_.operator, operands)])
+        if rule is IntrinsicResultRule.INT_OVERLOAD and all_int:
+            operands = [self._materialize(block, arg, SemType.INT) for arg in args]
+            return self._integer_intrinsic(match_.integer_implementation, operands)
+        # SIGNATURE, or a float operand present: promote the integer operands and run the float operator.
+        operands = [self._materialize(block, arg, SemType.FLOAT) for arg in args]
+        return self._builder.operation(match_.operator, operands)
 
     def _integer_intrinsic(self, implementation: object, vids: list[int]) -> int:
         """
@@ -697,93 +629,28 @@ class _Emitter:
                 return self._builder.operation(IntSelect(), [condition, vids[0], vids[1]])
         raise AssertionError(f"no integer implementation for {implementation!r}")
 
-    def _handle_of(self, binding: BindingId, fact_of: "FactOf", value_of: "ValueOf") -> _Handle:
-        # A per-element handle for a FactSeq: nested layout, a Known scalar (materialize on use), or an HIR value.
+    def _handle_of(self, block: FirBlockId, binding: BindingId) -> _Handle:
+        # A per-element handle for a FactSeq: nested layout, a Known scalar (materialize on use), or an HIR value
+        # tagged with its semantic kind (so an integer element extracted later keeps its integer typing).
         if binding in self._layouts:
             return self._layouts[binding]
-        fact = fact_of(binding)
+        fact = self._fact(binding)
         if isinstance(fact, Known):
             return _KnownHandle(fact.value)
-        return _ValueHandle(value_of(binding))
+        vid = self._read(block, Local(binding))
+        return _ValueHandle(vid, self._sem_of(self._type_of(vid)))
 
-    def _bind_handle(self, fir_id: FirBlockId, dst: BindingId, handle: _Handle, env: dict[Place, Fact]) -> None:
-        env[Local(dst)] = self._handle_fact(handle)
+    def _bind_handle(self, block: FirBlockId, dst: BindingId, handle: _Handle) -> None:
         match handle:
             case _ValueHandle(vid=vid):
-                self._write(fir_id, Local(dst), vid)
+                self._write(block, Local(dst), vid)
             case _SeqHandle():
                 self._layouts[dst] = handle
             case _KnownHandle():
-                pass
-
-    def _handle_fact(self, handle: _Handle) -> Fact:
-        match handle:
-            case _KnownHandle(value=value):
-                return Known(value)
-            case _ValueHandle(vid=vid):
-                return Residual(SemType.BOOL if isinstance(self._type_of(vid), BoolType) else SemType.FLOAT)
-            case _SeqHandle(items=items, is_list=is_list):
-                return FactSeq(tuple(self._handle_fact(item) for item in items), is_list=is_list)
-
-    def _emit_subscript(
-        self,
-        fir_id: FirBlockId,
-        dst: BindingId,
-        obj: BindingId,
-        index: BindingId,
-        env: dict[Place, Fact],
-        fact_of: "FactOf",
-        value_of: "ValueOf",
-    ) -> None:
-        import operator
-
-        from ._value import admit
-
-        index_fact = fact_of(index)
-        assert isinstance(index_fact, Known)
-        concrete_index = as_python(index_fact.value)
-        if obj in self._layouts:
-            position = operator.index(concrete_index)  # type: ignore[arg-type]  # a single int index (np.int64 too)
-            self._bind_handle(fir_id, dst, self._layouts[obj].items[position], env)
-            return
-        obj_fact = fact_of(obj)
-        assert isinstance(obj_fact, Known)
-        # A Known aggregate accepts any static index Python does -- an int, np.int64, or a multi-dim tuple index
-        # (TABLE[1, 0]) -- because the whole indexing folds concretely; only the RESULT must admit into the domain.
-        element = as_python(obj_fact.value)[concrete_index]  # type: ignore[index]
-        admitted = admit(element)
-        if admitted is None:
-            raise EmissionRejection("a subscript yields a value outside the datapath domain")
-        env[Local(dst)] = Known(admitted)
-
-    def _emit_attr_read(
-        self,
-        fir_id: FirBlockId,
-        dst: BindingId,
-        obj: BindingId,
-        name: str,
-        env: dict[Place, Fact],
-        fact_of: "FactOf",
-    ) -> None:
-        # The analyzer already classified this attribute: a bound method or namespace member is Known(ObjectRef)
-        # (no datapath value), a static attribute is a Known scalar, and only a runtime component attribute is
-        # residual and backed by a state slot. Deferring to that fact keeps the emitter from re-deriving it and
-        # mistaking a helper method for state.
-        fact = self._binding_facts()[dst]
-        env[Local(dst)] = fact
-        if isinstance(fact, Known):
-            return
-        obj_fact = fact_of(obj)
-        assert isinstance(obj_fact, Known) and isinstance(obj_fact.value, ObjectRef)
-        self._write(fir_id, Local(dst), self._read(fir_id, StateLeaf(obj_fact.value.obj, (name,))))
-
-    def _binding_facts(self) -> dict[BindingId, Fact]:
-        if self._binding_fact_cache is None:
-            self._binding_fact_cache = self._analyzer.binding_facts(self._result)
-        return self._binding_fact_cache
+                pass  # the Known fact is already in the plan; it materializes at its use sites
 
     def _leaf_fact(self, leaf: StateLeaf) -> Fact:
-        livein = self._analyzer.state_livein()
+        livein = self._result.state_livein
         if leaf in livein:
             return livein[leaf]
         reset = self._leaf_reset(leaf)
@@ -796,100 +663,66 @@ class _Emitter:
         return Known(admitted)
 
     def _emit_binary(
-        self,
-        fir_id: FirBlockId,
-        dst: BindingId,
-        bin_op: BinOp,
-        lhs: BindingId,
-        rhs: BindingId,
-        env: dict[Place, Fact],
-        fact_of: "FactOf",
-        value_of: "ValueOf",
-        as_float: "ValueOf",
-        as_int: "ValueOf",
-        op: Op,
+        self, block: FirBlockId, dst: BindingId, bin_op: BinOp, lhs: BindingId, rhs: BindingId, op: Op
     ) -> None:
-        from ._opsem import static_binop
-
-        result_fact = self._binding_facts()[dst]
-        if isinstance(result_fact, Known) and isinstance(result_fact.value, (StaticSeq, ObjectRef)):
-            env[Local(dst)] = result_fact  # a fully-static sequence concat/repeat (the comprehension accumulator):
-            return  # it flows as a Known fact whose eventual subscripts fold, exactly like a static list literal
+        result_fact = self._fact(dst)
+        if isinstance(result_fact, Known):
+            return  # the analyzer folded it (a static fold, a sequence concat/repeat, a bool &/|/^ identity)
         if isinstance(result_fact, FactSeq):
             raise EmissionRejection("a runtime aggregate operation is not supported yet")  # layout: stage 9
-        lhs_fact, rhs_fact = fact_of(lhs), fact_of(rhs)
-        if isinstance(lhs_fact, Known) and isinstance(rhs_fact, Known):
-            folded = static_binop(bin_op, lhs_fact.value, rhs_fact.value)
-            if folded is not None:
-                env[Local(dst)] = Known(folded)
-                return
-            if isinstance(result_fact, Known):
-                # A Known result static_binop cannot produce -- ``&``/``|``/``^`` on two booleans, which the analyzer
-                # folds. Replay that fold so it materializes at its use site rather than reaching a float operation.
-                env[Local(dst)] = result_fact
-                return
+
+        def define(vid: int) -> None:
+            self._write(block, Local(dst), vid)
+
         if bin_op is BinOp.POW:  # dispatched on the exponent, in the base's own kind (an integer chain stays integer)
-            env[Local(dst)] = result_fact
-            self._write(fir_id, Local(dst), self._emit_power(lhs, rhs, fact_of, as_float, as_int, op))
+            define(self._emit_power(block, lhs, rhs))
             return
         if result_fact == Residual(SemType.INT):  # a runtime integer result: stay in the integer datapath
-            env[Local(dst)] = result_fact
-            self._write(fir_id, Local(dst), self._emit_int_binary(bin_op, as_int(lhs), as_int(rhs)))
+            left, right = self._materialize(block, lhs, SemType.INT), self._materialize(block, rhs, SemType.INT)
+            define(self._emit_int_binary(bin_op, left, right))
             return
         if result_fact == Residual(SemType.BOOL):  # &/|/^ on two booleans lowers to the boolean-bank operators
-            env[Local(dst)] = result_fact
-            operands = [value_of(lhs), value_of(rhs)]
+            left, right = self._materialize(block, lhs, SemType.BOOL), self._materialize(block, rhs, SemType.BOOL)
             match bin_op:
                 case BinOp.BITAND:
-                    result = self._builder.operation(BoolAnd(), operands)
+                    define(self._builder.operation(BoolAnd(), [left, right]))
                 case BinOp.BITOR:
-                    result = self._builder.operation(BoolOr(), operands)
+                    define(self._builder.operation(BoolOr(), [left, right]))
                 case _:
-                    result = self._builder.operation(BoolXor(), operands)
-            self._write(fir_id, Local(dst), result)
+                    define(self._builder.operation(BoolXor(), [left, right]))
             return
-        env[Local(dst)] = Residual(SemType.FLOAT)
-        left, right = as_float(lhs), as_float(rhs)
+        left, right = self._materialize(block, lhs, SemType.FLOAT), self._materialize(block, rhs, SemType.FLOAT)
         match bin_op:
             case BinOp.ADD:
-                result = self._builder.operation(FloatAdd(), [left, right])
+                define(self._builder.operation(FloatAdd(), [left, right]))
             case BinOp.SUB:
-                result = self._builder.operation(FloatAdd(), [left, self._builder.operation(FloatNeg(), [right])])
+                define(self._builder.operation(FloatAdd(), [left, self._builder.operation(FloatNeg(), [right])]))
             case BinOp.MUL:
-                result = self._builder.operation(FloatMul(), [left, right])
+                define(self._builder.operation(FloatMul(), [left, right]))
             case BinOp.DIV:
-                result = self._builder.operation(FloatDiv(), [left, right])
+                define(self._builder.operation(FloatDiv(), [left, right]))
             case _:
                 raise EmissionRejection(f"operator {bin_op.value} is not lowerable yet")
-        self._write(fir_id, Local(dst), result)
 
-    def _emit_conversion(
-        self,
-        src_fact: Fact,
-        dst_fact: Fact,
-        arg: BindingId,
-        value_of: "ValueOf",
-        as_float: "ValueOf",
-        as_int: "ValueOf",
-    ) -> int:
+    def _emit_conversion(self, block: FirBlockId, arg: BindingId, dst: BindingId) -> int:
         # A runtime scalar cast between kinds. int<->float is truncation toward zero / exact promotion; bool casts are a
         # truthiness test (to bool) or a 0/1 widening (from bool). A same-kind cast is handled as an identity upstream.
-        src, dst = self._fact_sem(src_fact), self._fact_sem(dst_fact)
-        match (src, dst):
+        src, target = self._fact_sem(self._fact(arg)), self._fact_sem(self._fact(dst))
+        match (src, target):
             case (SemType.INT, SemType.FLOAT):
-                return self._builder.operation(IntToFloat(), [as_int(arg)])
+                return self._materialize(block, arg, SemType.FLOAT)
             case (SemType.FLOAT, SemType.INT):
-                return self._builder.operation(FloatToInt(), [as_float(arg)])
+                return self._builder.operation(FloatToInt(), [self._materialize(block, arg, SemType.FLOAT)])
             case (SemType.BOOL, SemType.FLOAT):
-                return self._builder.operation(BoolToFloat(), [value_of(arg)])
+                return self._builder.operation(BoolToFloat(), [self._materialize(block, arg, SemType.BOOL)])
             case (SemType.FLOAT, SemType.BOOL):
-                return self._builder.operation(FloatToBool(), [as_float(arg)])
+                return self._builder.operation(FloatToBool(), [self._materialize(block, arg, SemType.FLOAT)])
             case (SemType.BOOL, SemType.INT):
-                return self._builder.operation(BoolToInt(), [value_of(arg)])
+                return self._builder.operation(BoolToInt(), [self._materialize(block, arg, SemType.BOOL)])
             case (SemType.INT, SemType.BOOL):
-                return self._builder.operation(IntToBool(), [as_int(arg)])
+                return self._builder.operation(IntToBool(), [self._materialize(block, arg, SemType.INT)])
             case _:
-                raise EmissionRejection(f"conversion from {src.value} to {dst.value} is not supported")
+                raise EmissionRejection(f"conversion from {src.value} to {target.value} is not supported")
 
     def _emit_int_binary(self, bin_op: BinOp, left: int, right: int) -> int:
         # Signed-integer arithmetic in the integer datapath. Floor-division and modulo are floor-coupled (one hardware
@@ -918,31 +751,27 @@ class _Emitter:
             case _:
                 raise EmissionRejection(f"integer operator {bin_op.value!r} is not lowerable yet")
 
-    def _emit_power(
-        self, base: BindingId, exponent: BindingId, fact_of: "FactOf", as_float: "ValueOf", as_int: "ValueOf", op: Op
-    ) -> int:
+    def _emit_power(self, block: FirBlockId, base: BindingId, exponent: BindingId) -> int:
         # A base raised to a COMPILE-TIME integer exponent expands to a multiply chain (x**3 -> x*x*x) in the base's
         # own kind -- an integer base stays exact integer (contained at MIR), a float base multiplies in float -- both
         # bounded like the loop unroller so ``x ** 10**9`` refuses instead of hanging. A negative exponent is the
         # reciprocal of the float chain (Python: a negative power is float even on an integer base).
-        from ._value import MetaInt, NpInt
-
-        exp_fact = fact_of(exponent)
+        exp_fact = self._fact(exponent)
         if isinstance(exp_fact, Known) and isinstance(exp_fact.value, (MetaInt, NpInt)):
             power = int(exp_fact.value.value)
             if abs(power) > _MAX_POWER_CHAIN:
                 raise EmissionRejection(f"a compile-time power exponent of {power} is too large to expand")
-            if self._fact_sem(fact_of(base)) is SemType.INT and power >= 0:
+            if self._fact_sem(self._fact(base)) is SemType.INT and power >= 0:
                 if power == 0:
                     return self._builder.int_const(1)  # x**0 is the INTEGER 1 on an integer base, as in Python
-                source = as_int(base)
+                source = self._materialize(block, base, SemType.INT)
                 chain = source
                 for _ in range(power - 1):
                     chain = self._builder.operation(IntMul(), [chain, source])
                 return chain
             if power == 0:
                 return self._builder.float_const(1.0)
-            source = as_float(base)
+            source = self._materialize(block, base, SemType.FLOAT)
             chain = source
             for _ in range(abs(power) - 1):
                 chain = self._builder.operation(FloatMul(), [chain, source])
@@ -955,69 +784,31 @@ class _Emitter:
         # identities, and the ZKF zero/infinity algebra (0*inf = 0) covers the IEEE corner b == 1, e = inf.
         from ..._hir import FloatLog2
 
-        base_fact = fact_of(base)
+        exponent_vid = self._materialize(block, exponent, SemType.FLOAT)
+        base_fact = self._fact(base)
         if (
             isinstance(base_fact, Known)
             and isinstance(base_fact.value, (MetaInt, NpInt, StaticFloat, NpFloat))
             and as_python(base_fact.value) == 2
         ):
-            return self._builder.operation(FloatExp2(), [as_float(exponent)])
-        log_base = self._builder.operation(FloatLog2(), [as_float(base)])
-        return self._builder.operation(
-            FloatExp2(), [self._builder.operation(FloatMul(), [as_float(exponent), log_base])]
-        )
+            return self._builder.operation(FloatExp2(), [exponent_vid])
+        log_base = self._builder.operation(FloatLog2(), [self._materialize(block, base, SemType.FLOAT)])
+        return self._builder.operation(FloatExp2(), [self._builder.operation(FloatMul(), [exponent_vid, log_base])])
 
-    def _emit_unary(
-        self,
-        fir_id: FirBlockId,
-        dst: BindingId,
-        un_op: UnOp,
-        operand: BindingId,
-        env: dict[Place, Fact],
-        fact_of: "FactOf",
-        as_float: "ValueOf",
-        as_int: "ValueOf",
-    ) -> None:
-        from ._opsem import static_unop
-
-        fact = fact_of(operand)
-        if isinstance(fact, Known):
-            folded = static_unop(un_op, fact.value)
-            if folded is not None:
-                env[Local(dst)] = Known(folded)
-                return
-        result_fact = self._binding_facts()[dst]
+    def _emit_unary(self, block: FirBlockId, dst: BindingId, un_op: UnOp, operand: BindingId) -> None:
+        result_fact = self._fact(dst)
+        if isinstance(result_fact, Known):
+            return  # folded by the analyzer; materializes at its use sites
         if result_fact == Residual(SemType.INT):  # runtime integer negation stays in the integer datapath
-            env[Local(dst)] = result_fact
-            source = as_int(operand)
-            self._write(
-                fir_id, Local(dst), source if un_op is UnOp.POS else self._builder.operation(IntNeg(), [source])
-            )
-            return
-        env[Local(dst)] = Residual(SemType.FLOAT)
-        source = as_float(operand)
-        self._write(fir_id, Local(dst), source if un_op is UnOp.POS else self._builder.operation(FloatNeg(), [source]))
+            source = self._materialize(block, operand, SemType.INT)
+            result = source if un_op is UnOp.POS else self._builder.operation(IntNeg(), [source])
+        else:
+            source = self._materialize(block, operand, SemType.FLOAT)
+            result = source if un_op is UnOp.POS else self._builder.operation(FloatNeg(), [source])
+        self._write(block, Local(dst), result)
 
-    def _replay_compare(self, rel: RelationalOp, lhs: Fact, rhs: Fact) -> Fact:
-        from ._opsem import static_compare
-
-        if isinstance(lhs, Known) and isinstance(rhs, Known):
-            folded = static_compare(rel, lhs.value, rhs.value)
-            if folded is not None:
-                return Known(folded)
-        return Residual(SemType.BOOL)
-
-    def _replay_truth(self, fact: Fact) -> Fact:
-        from ._opsem import static_truth
-
-        if isinstance(fact, Known):
-            truth = static_truth(fact.value)
-            if truth is not None:
-                return Known(_static_bool(truth))
-        return Residual(SemType.BOOL)
-
-    def _truth_value(self, operand: BindingId, fact: Fact, value_of: "ValueOf") -> int:
-        vid = value_of(operand)
+    def _truth_value(self, block: FirBlockId, operand: BindingId) -> int:
+        vid = self._materialize(block, operand)
         vtype = self._type_of(vid)
         if isinstance(vtype, BoolType):
             return vid
@@ -1075,10 +866,10 @@ class _Emitter:
                 raise EmissionRejection(
                     f"return type mismatch: declared {unit.declared_return.value}, returns {got.value}"
                 )
-        promoted = self._analyzer.runtime_state()
+        promoted = self._result.runtime_state
         # Slots and public ports emit in first-STORE source order (matching production), not the order the RPO walk
         # happened to touch attributes; a leaf touched only by a read still trails a leaf stored earlier.
-        store_order = [leaf for leaf in self._analyzer.state_store_order(self._result) if leaf in promoted]
+        store_order = [leaf for leaf in self._result.store_order if leaf in promoted]
         store_order += [leaf for leaf in self._state_order if leaf in promoted and leaf not in store_order]
         public_live_outs: set[int] = set()
         for leaf in store_order:
@@ -1092,12 +883,6 @@ class _Emitter:
             if not leaf.path[-1].startswith("_"):
                 self._builder.output(state_port_name(self._slot_name(leaf)), self._read(unit.exit, leaf))
         self._builder.ret()
-
-
-def _unbound() -> Fact:
-    from ._analyze import _UNBOUND
-
-    return _UNBOUND
 
 
 def _static_bool(value: bool) -> StaticValue:

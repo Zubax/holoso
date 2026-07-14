@@ -1,11 +1,7 @@
 """
-The stage-5a correctness gate for the new (FIR) front-end. The PRIMARY oracle is the Python float64 evaluation of
-the kernel itself: the new front-end lowered to MIR must reproduce it within the configured float format's
-round-off. The old front-end is a LOW-CREDIBILITY baseline (it has known defects and rejects constructs the new one
-supports), so old-vs-new agreement is only a SECONDARY cross-check, asserted exactly where the old front-end can
-lower the kernel and skipped where it rejects. A divergence from the old front-end is therefore a signal to
-investigate, not proof the new front-end is wrong -- the Python reference decides. Comparison is on observable model
-I/O, never HIR structure.
+The differential correctness gate for the FIR front-end. The oracle is the Python float64 evaluation of the kernel
+itself: the front-end lowered to MIR must reproduce it within the configured float format's round-off. Comparison
+is on observable model I/O, never HIR structure.
 """
 
 from collections.abc import Callable
@@ -13,8 +9,6 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
-from holoso._errors import UnsupportedConstruct
-from holoso._frontend import lower as lower_frontend
 from holoso._frontend._fir._analyze import AnalysisRejection
 from holoso._frontend._fir._emit import EmissionRejection, lower_fir
 from holoso._hir import optimize
@@ -62,10 +56,6 @@ def _assert_matches_python(kernel: Callable[..., object], vectors: list[tuple[fl
     # QUANTIZED inputs. Secondary: the low-credibility old front-end must agree EXACTLY where it can lower at all.
     hir = _new_hir(kernel)
     new = MirInterpreter(lower_to_mir(hir, _OPS))
-    try:
-        old: MirInterpreter | None = MirInterpreter(lower_to_mir(optimize(lower_frontend(kernel)), _OPS))
-    except UnsupportedConstruct:
-        old = None  # a genuine capability gap in the baseline; the Python oracle stands alone (any OTHER error raises)
     port_count = len(hir.outputs)
     for vector in vectors:
         try:
@@ -82,9 +72,6 @@ def _assert_matches_python(kernel: Callable[..., object], vectors: list[tuple[fl
             assert float(produced) == pytest.approx(
                 float(want), rel=_RTOL, abs=_RTOL
             ), f"{kernel.__name__} != python at {vector}: {float(produced)} vs {float(want)}"
-        if old is not None:
-            old_out = old.run(*encoded)
-            assert new_out == old_out, f"{kernel.__name__} diverges from baseline at {vector}: {new_out} vs {old_out}"
 
 
 def test_branchy_scalar_kernels_match_python() -> None:
@@ -192,14 +179,6 @@ def _stateful_agree(make: Callable[[], object], transactions: list[tuple[float |
         mutated |= {slot for slot in _public_slots(probe) if float(getattr(probe, slot)) != initial[slot]}
     violations = _port_contract_violations(set(names), return_count, mutated, sample_state, returns0)
     assert not violations, "; ".join(violations)
-    old_hir = None
-    try:
-        old_hir = optimize(lower_frontend(make().step))  # type: ignore[attr-defined]
-    except UnsupportedConstruct:
-        old = None
-    if old_hir is not None:
-        old = MirInterpreter(lower_to_mir(old_hir, _OPS))
-        old_names = [o.name for o in old_hir.outputs]
     for vector in transactions:
         encoded = [_encode(v) for v in vector]
         new_by_name = dict(zip(names, new.run(*encoded), strict=True))
@@ -213,15 +192,6 @@ def _stateful_agree(make: Callable[[], object], transactions: list[tuple[float |
             assert float(produced) == pytest.approx(
                 target, rel=_RTOL, abs=_RTOL
             ), f"stateful port {name} != python at {vector}: {float(produced)} vs {target}"
-        if old_hir is not None:
-            # Map BOTH frontends' outputs by their OWN port names before comparing, so a differing port order is not
-            # mistaken for a value divergence (the whole point of a name-keyed cross-check).
-            assert old is not None
-            old_by_name = dict(zip(old_names, old.run(*encoded), strict=True))
-            shared = set(names) & set(old_by_name)
-            assert {k: new_by_name[k] for k in shared} == {
-                k: old_by_name[k] for k in shared
-            }, f"stateful diverges from baseline at {vector}"
 
 
 def test_stateful_kernels_agree() -> None:

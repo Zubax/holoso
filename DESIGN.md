@@ -146,17 +146,21 @@ Each operator declares a per-instance initiation interval; most operators have I
 
 ## Front-end
 
-A rewrite is in progress under `holoso/_frontend/_fir/` (shadow-only until cutover; nothing in production consumes
-it). Landed so far, terse facts: name classification comes from the live code object (CPython's own; `del`-locality
-and PEP 709 targets correct by construction) with comprehension-only targets carved out via the AST; non-locals
-resolve closure-cell before global before builtin, values read at resolve time. Static values form a closed
-whitelisted domain with provenance as identity: exact Python ints (MetaInt) are distinct from numpy 64-bit scalars
-(NpInt/NpFloat, numpy's own mixed-operand semantics; narrower numpy widths are not static); arrays admit as read-only
-snapshots; sequences keep list/tuple flavor; dataclasses admit as records only when reconstructible from fields;
-containers bound depth and refuse cycles. Fixed-point equality is tagged and bitwise (True is not 1, signed zero
-distinct, NaN stable). Static execution runs real Python/numpy on the domain's own objects; zero-division/invalid
-defer to runtime, float overflow folds to infinity per the charter, numpy wraparound folds faithfully, NaN never
-folds, and integer powers fold only under a result-width bound.
+The front-end is the FIR pipeline under `holoso/_frontend/_fir/`: build (AST -> FIR) -> analyze (facts + plan) ->
+emit (FIR -> HIR). The layering exists because a single-pass lowerer forces a reachability scan to run before the
+folds it must agree with -- the scan/lowering duality that plagued the previous front-end; here every semantic
+decision is the analyzer's, made once, over the same graph the emitter walks.
+
+Name classification comes from the live code object (CPython's own; `del`-locality and PEP 709 targets correct by
+construction) with comprehension-only targets carved out via the AST; non-locals resolve closure-cell before global
+before builtin, values read at resolve time. Static values form a closed whitelisted domain with provenance as
+identity: exact Python ints (MetaInt) are distinct from numpy 64-bit scalars (NpInt/NpFloat, numpy's own
+mixed-operand semantics; narrower numpy widths are not static); arrays admit as read-only snapshots; sequences keep
+list/tuple flavor; dataclasses admit as records only when reconstructible from fields; containers bound depth and
+refuse cycles. Fixed-point equality is tagged and bitwise (True is not 1, signed zero distinct, NaN stable). Static
+execution runs real Python/numpy on the domain's own objects; zero-division/invalid defer to runtime, float overflow
+folds to infinity per the charter, numpy wraparound folds faithfully, NaN never folds, and integer powers fold only
+under a result-width bound.
 
 The FIR itself is a private non-SSA CFG over mutable Places (Local/StateLeaf/ReturnPlace), built syntax-directed
 with no analysis: ANF write-once temporaries in exact Python evaluation order; ordered stores; one canonical exit
@@ -170,162 +174,106 @@ rejections. A structural verifier and a deterministic printer close the stage.
 The analyzer is SCCP-style optimistic executable-edge abstract interpretation over the FIR with flow-sensitive
 per-edge environments (strong updates, joins only over executable in-edges). Facts: Unbound | Known(StaticValue) |
 Residual(type) | fact-level sequences (static shape, runtime leaves) | MaybeUnbound (a read of one is a located
-rejection: Python may raise). Folding is Python-exact on Knowns; runtime-typed values never fold (width rule); a
-Known Bool always drives edge selection. StaticFor unrolls by cloning the body per trip once the iterable is Known;
-calls expand on demand by grafting the callee template (defaults/kwargs bound, member __call__ dispatch, recursion
-rejected by function+receiver ancestry, origins re-attributed to the user call site). State: the W/D fixed point --
-W accumulates executable exit-co-reachable store leaves (typing by reset value), D live-ins start at Known(reset)
-and join executable exit live-outs, descending only; each round rebuilds the working graph from immutable
-templates. Executable Fail terminators are located rejections (data-dependent raise included). Fuel bounds cover
-visits and blocks; exhaustion is a located rejection, never a truncated fixed point.
+rejection: Python may raise). An int/float join promotes the integer side to float, C-style (see Integers). Folding
+is Python-exact on Knowns; runtime-typed values never fold (width rule); a Known Bool always drives edge selection.
+StaticFor unrolls by cloning the body per trip once the iterable is Known; calls expand on demand by grafting the
+callee template (defaults/kwargs bound, member __call__ dispatch, recursion rejected by function+receiver ancestry,
+origins re-attributed to the user call site). State: the W/D fixed point -- W accumulates executable
+exit-co-reachable store leaves (typing by reset value), D live-ins start at Known(reset) and join executable exit
+live-outs, descending only; each round rebuilds the working graph from immutable templates. Executable Fail
+terminators are located rejections (data-dependent raise included) -- which is also what lets a library stub
+validate its own operand shapes in ordinary Python: a `raise` behind a statically-false shape check folds dead.
+Fuel bounds cover visits and blocks; exhaustion is a located rejection, never a truncated fixed point.
+
+On stabilization the analyzer finalizes its result into the emission plan: the authoritative fact per binding
+(temporaries are write-once, so one replay of the transfer records each), a typed plan per surviving call --
+folded | identity | conversion | intrinsic, keyed by the call's destination binding -- and the state leaves in
+first-store source order (the established port ABI orders ports by source text, not CFG shape). This plan is the
+whole analyzer/emitter contract: emission never re-derives a fold, never resolves the library registry, and never
+replays the transfer function, so the two layers cannot disagree about a value's meaning.
 
 Emission lowers the stabilized residual graph to HIR: executable blocks/edges only, in reverse post-order, with
 value numbering by Braun sealed-block SSA over Places (named locals, state leaves, the hidden return place) and
-write-once ANF temps unified into the same layer. Known facts materialize as interned constants at each use;
-residual operations become typed HIR operations; folded branches lower to jumps; a loop header reads its init arm
-by recursing through already-emitted predecessors and closes its latch arm at sealing (phi insertion saves/restores
-the builder position; a write-once temp never needs a phi). Registered library calls dispatch through the `_lib`
-registry: an Intrinsic with runtime arguments becomes its HIR operator, a Library stub inlines like a user function,
-a fully-static call folds concretely. Module and class attribute access is a plain namespace lookup, not component
-state. State slots carry the reset snapshot and canonical-exit live-out; the port contract (out ports, public
-`state_<slot>` ports, live-out dedup) mirrors the production front-end so a differential harness can compare model
-I/O across front-ends. The harness's primary oracle is the kernel's own Python float64 evaluation (the old
-front-end is a low-credibility cross-check, used only where it can lower).
+write-once ANF temps unified into the same layer. One typed materializer serves every operand position: a Known
+value becomes a constant of the expected kind (a Known integer stays an IntConst in an integer context and rounds
+into a float constant in a float context), a residual value is its SSA read, coerced only where the coercion is a
+genuine int->float promotion on its own edge (phi arms, select arms, state stores, comparison operands) and a
+located rejection otherwise. Folded branches lower to jumps; a loop header reads its init arm by recursing through
+already-emitted predecessors and closes its latch arm at sealing (phi insertion saves/restores the builder
+position; a write-once temp never needs a phi). Module and class attribute access is a plain namespace lookup, not
+component state. State slots carry the reset snapshot and canonical-exit live-out; out ports, public `state_<slot>`
+ports, and live-out dedup follow the established ABI. The differential harness's oracle is the kernel's own Python
+float64 evaluation on quantized inputs.
 
-The production front-end below remains authoritative until the staged cutover.
+Rejecting from within the subset. Analysis descends only executable edges, so a `raise` it reaches sits on a path
+taken unconditionally (or under a residual guard, which the hardware cannot signal either way): it becomes a
+synthesis error carrying the exception's own message, located at the raising line. A rejection inside an inlined
+library stub is re-attributed to the user's call site under the spelling they wrote.
 
-Abstract interpretation over the Python AST/CFG with a binding-time lattice (static vs. dynamic). Static values (shapes,
-`__init__`-derived constants, compile-time tables) are evaluated concretely -- real Python/NumPy runs at synthesis time.
-Dynamic values (input ports, persistent state) become SSA handles that accumulate HIR. A `for` over a static `range` or
-an aggregate is unrolled (unless the count exceeds the unroll threshold); a list comprehension unrolls the same way
-(its generator count is likewise bounded, so the unroller cannot recurse without limit),
-yielding a Python list, with every `if` filter folded statically and its targets confined to the comprehension -- which,
-being its own scope in Python, also has them shadow a same-named module constant while bound; a `while` lowers to a real
-back-edge loop; an `if` on a static test takes one branch, on a dynamic test emits a real branch. Static evaluation
-(used for branch/loop reachability and compile-time indices) resolves only the operands that both the reachability
-scan and lowering reconstruct identically: numeric literals, module-level numeric/array constants,
-read-only instance attributes, and loop counters -- including numpy navigation (indexing, slicing, transpose,
-`.flatten()`) of a module-level array constant or read-only array attribute.
+Persistent state. A synthesized method's `self` is not a port: each instance attribute the method writes on an
+executable exit-co-reachable path becomes a persistent register (a loop-carried value, the back-edge of the
+initiation loop), and each attribute it only reads is a frozen constant folded from the `__init__` snapshot. Within
+the method `self.attr` is an ordinary Place, so reads and writes interleave freely. Public attributes additionally
+drive a `state_<attr>` output port, so a method need not return anything (and a returned value that is by dataflow
+a public attribute is deduped onto that state port); underscore-prefixed attributes stay internal. Reassigning
+`self` itself is rejected: attributes resolve against the fixed original instance, so a rebinding would silently
+miscompile.
 
-Shape queries. An aggregate's shape is a static value, so `len`, `.ndim`, and `.shape[k]` evaluate to compile-time
-integers usable wherever one is expected, there being no runtime integer type to carry one into a value position.
-`len` follows Python and counts the items of any aggregate; `.ndim` and `.shape` are numpy-only and rejected on
-a list/tuple, whatever expression the receiver is spelled as.
-A scalar is rank zero, as a numpy scalar is and a bare Python float is not, which is how the matrix product
-rejects a scalar operand by asking its rank; consistently, an empty-tuple key `x[()]` yields the scalar itself, as it
-does for a numpy scalar, while `x[0]` or a slice is rejected. The resolver sees a closed set of receivers --
-a bound name, a static subscript of one, a state attribute, a module constant,
-a transpose of those -- so a shape query on anything else is rejected rather than guessed at.
+Inlining. A pure function reachable through `__globals__` is inlined -- its body grafted with a fresh activation
+frame, its return remapped to the caller -- so kernels compose. A method call on the synthesized instance
+(`self.helper(...)`) is inlined with the instance context kept, so the callee's own `self.<attr>` reads resolve
+(found through the class MRO; `@staticmethod` and `@property` getters are supported -- a property getter desugars
+to a bound zero-argument call and is inlined like any method, so it recomputes from the current state on each
+read). A called member method may read AND write `self`: the state fixed point spans the whole expansion, so a
+write in an inlined method promotes and carries its slot exactly as a write in the entry method does.
 
-Rejecting from within the subset. Lowering descends only the arms the static fold selects, so a `raise` it reaches sits
-on a path taken unconditionally within its own function: it becomes a synthesis error carrying the exception's own
-message (a literal, or an f-string interpolating compile-time integers), located at the raising line. Guarded by a
-data-dependent test it would have to become a runtime exception, which the hardware cannot signal, so it is rejected.
-Branch depth restarts per inlined function -- whether a `raise` is data-dependent is a property of the function that
-writes it, not of a call site that happens to sit in a branch arm. This is what lets a library stub validate its own
-operand shapes while remaining ordinary, executable Python that raises the very same error.
+Hierarchical components. A component may hold other components as members (`self.lpf = IIR1LPF()`) and call them;
+each child's persistent attributes become nested state slots, so several stateful owners coexist in one kernel. An
+owner is identified by object identity, and its slot name is its canonical member path from the root -- the fewest
+segments, lexicographically least, so an aliased child (two member names for one object) resolves to one slot --
+joined to the leaf attribute by a double underscore. A root attribute keeps its bare name (`m`, port `state_m`,
+preserving the flat ABI); a child's becomes `lpf__m`. The encoding is injective except when an attribute name
+literally spans a `__` boundary, which is a located slot-name collision rejection. Public/private visibility is
+read from the leaf attribute itself, not the owning alias. A stateful component reached only through an unanchored
+reference (a global, not a member of the root) is rejected at its state access, and rebinding a component member --
+a per-transaction topology change -- is a located rejection.
 
-Persistent state. A synthesized method's `self` is not a port: each instance attribute the method writes becomes a
-persistent register (a loop-carried value, the back-edge of the initiation loop), and each attribute it only reads is a
-frozen constant folded from the `__init__` snapshot. Within the method `self.attr` is an ordinary SSA variable, so reads
-and writes interleave freely. Public attributes additionally drive a `state_<attr>` output port, so a method need not
-return anything (and a returned value that is by dataflow a public attribute is deduped onto that state port);
-underscore-prefixed attributes stay internal. A vector-valued attribute (list, tuple, or 1-D numpy array) decomposes
-into one scalar register per element (`attr_0`, `attr_1`, ...), a matrix-valued one (2-D numpy array) row-major into
-`attr_0_0`, `attr_0_1`, ...; a scalar keeps its bare name. Reassigning `self` itself is rejected: attributes resolve
-against the fixed original instance, so a rebinding would silently miscompile.
+Math library. A call dispatches through a registry on the object identity its callee resolves to, not the spelled
+name, so an alias resolves and a shadow does not. The registry maps that object to its lowering: an intrinsic stub
+(1:1 onto an HIR operator, result kind per the three-rule scheme in Integers) or a composite stub (built from the
+intrinsics and inlined). A composite is ordinary Python in the supported subset, so each stub is its own numerical
+reference, and a rejection inside one is re-attributed to the user's call site.
 
-Whether an attribute is state follows reachability, and the scan that decides it runs before the body is lowered, so
-it cannot always fold what lowering folds -- a branch on the shape of a local, or a `for` over an aggregate whose trip
-count it does not know. Where it cannot see a trip count it must fold less, not guess: it walks such a body once with
-the loop target and every counter the body rebinds demoted, and restores that same context afterwards, since an empty
-aggregate runs the body zero times and an unrolled one runs it many. The contract is therefore one-sided: the scan
-yields a conservative superset, trimmed back to the truth once lowering has run, since an attribute lowering never
-touched keeps its reset value for good and is no more state than a read-only one. An attribute lowering only read is
-the other half of that trim: its reads are already in the graph, so it stays a slot whose live-out is its live-in -- a
-register that holds, and, if the attribute is public, a port. Dead code can therefore cost a register and a port an
-exact scan would have folded away, and can make an otherwise read-only attribute look written, costing it the constant
-folding a frozen attribute enjoys -- but never a wrong value. The opposite direction is forbidden and asserted
-against, a write lowering reaches but the scan missed having nowhere to land. The duality is a wart, not a design: see
-DEFERRED.
+Parameters and return. Positional and keyword-only parameters become input ports and require an explicit
+annotation: `float` scalars are floating-point ports, `bool` are 1-bit boolean ports, `int` are typed integer ports
+(contained at MIR until the integer backend). The return annotation is likewise mandatory and validated against the
+emitted kind: `float`, `bool`, `int`, or `None` for a method that returns nothing (an `X | None` union unwraps its
+None arm for early-return kernels).
 
-State lives in the float registers by default, but an all-integer leaf (a counter, a selector) keeps a typed
-integer slot with an exact integer reset -- never rounded. Such a leaf reaches the integer-backend boundary as a
-located rejection until that backend lands. An integer reset joined with a float store promotes the slot to float,
-its reset rounding into the binary64 carrier like any promoted constant.
+An `assert` statement is accepted and ignored wholesale: its test is never lowered, mirroring Python under `-O`, so
+an assertion has no hardware effect. Any effect the test would have had when executed is dropped along with it; as
+under `-O`, an assert must be side-effect-free.
 
-Matrices/vectors are statically shaped and unrolled to scalar operations; arrays never exist as hardware aggregates,
-only as compile-time bookkeeping over scalar registers. That bookkeeping is a front-end value -- either a scalar wire or
-an ordered aggregate -- supporting list/tuple literals and comprehensions, numpy-style indexing and constant slicing
-(`m[i, j]`, `m[:, j]`, chained `m[i][j]`), iteration, unpacking, transpose (`.T`), and the array factories
-`np.array`/`asarray`/`asanyarray`; only scalar leaves reach HIR, so the supported source is executable numpy.
-Module-level numeric and ndarray globals fold into constants.
+### Deferred: the aggregate contract (tracked by FIR_PARITY_PENDING; stage 10 asserts the registry empty)
 
-List/tuple vs. array. A front-end aggregate carries its Python flavor. The guiding principle is to follow Python
-semantics where sensible and otherwise reject a construct rather than silently reinterpret it; in particular a Python
-list/tuple is never given numpy semantics. A Python list/tuple (a list/tuple literal, the `list()`/`tuple()` builtins,
-or a starred-unpack remainder) has sequence semantics: indexing, constant slicing, unpacking, splatting, building, and
-returning all work on it. A numpy array -- a shaped parameter, an ndarray module constant or state attribute,
-`np.array`/`asarray`/`asanyarray(...)`, or the result of any array operation -- additionally carries numpy semantics.
-The numpy-only operations (elementwise arithmetic, the matrix product, transpose, `.flatten()`, and multi-axis
-indexing) apply to arrays and are rejected on a list/tuple: on a Python sequence they mean something else or nothing
-(list `+`/`*` are concatenation/repetition, list `-`/`@`/`.T` are undefined), none of which is the array operation
-intended.
+The previous front-end supported statically-shaped aggregates end-to-end; the FIR pipeline does not yet, and every
+disabled test carries the greppable marker. The contract the aggregate stages restore (and extend with records,
+reductions, and the bounded gather):
 
-Array arithmetic. The elementwise arithmetic operators `+ - * /` apply leafwise to same-shape arrays, and a scalar
-operand broadcasts over the other side's leaves; this is deliberately narrower than numpy broadcasting -- a mixed-rank
-pair (vector + matrix) is rejected rather than silently aligned along a different axis than numpy would pick, and `**`
-stays scalar-only (base two with a runtime exponent lowers to exp2; otherwise the exponent must be a compile-time
-integer). Augmented assignment to any aggregate (`+=`, `@=`) is rejected: an array would be mutated in place by
-numpy while the front-end rebinds (diverging for an alias), and a list `+=` is concatenation, which is unsupported.
-
-Linear algebra is ordinary library code. The matrix product `@` and the transpose `.T` lower by resolving `np.matmul`
-and `np.transpose` in the same registry a spelled call goes through, so an operator and its call are necessarily
-one implementation. The stubs follow numpy's shape rules for 1-D and 2-D operands and expand into scalar
-multiply/add chains. Each dot product is a left fold, enabling FMA contraction in the MIR.
-Also provided are `np.dot` (the matrix product, since the two agree on this domain), `np.trace`,
-and `np.outer`. Because the stubs expand through the same comprehensions any kernel uses, a matrix dimension is
-bounded by the unroll threshold exactly as a loop trip count is -- an operand axis wider than the threshold is
-rejected rather than unrolled into thousands of scalar operations.
-
-Inlining. A pure function reachable through `__globals__` is inlined -- its body lowered in a fresh scope, its return
-consumed as an aggregate -- so kernels compose. A method call on the synthesized instance (`self.helper(...)`) is
-inlined with the instance context kept, so the callee's own `self.<attr>` reads resolve (the method is found through the
-class MRO; `@staticmethod` and `@property` getters are supported -- a property getter desugars to a bound zero-argument
-call and is inlined like any method, so it recomputes from the current state on each read). A called member method may
-read AND write `self`: the state-slot analysis spans the whole expansion, so a write in an inlined method promotes and
-carries its slot exactly as a write in the entry method does. Name resolution follows Python.
-
-Hierarchical components. A component may hold other components as members (`self.lpf = IIR1LPF()`) and call them; each
-child's persistent attributes become nested state slots, so several stateful owners coexist in one kernel. An owner is
-identified by object identity, and its slot name is its canonical member path from the root -- the fewest segments,
-lexicographically least, so an aliased child (two member names for one object) resolves to one slot -- joined to the
-leaf attribute by a double underscore. A root attribute keeps its bare name (`m`, port `state_m`, preserving the flat
-ABI); a child's becomes `lpf__m`. The encoding is injective except when an attribute name literally spans a `__`
-boundary, which is a located slot-name collision rejection. Public/private visibility is read from the leaf attribute
-itself, not the owning alias. A stateful component reached only through an unanchored reference (a global, not a member
-of the root) is rejected at its state access, and rebinding a component member -- a per-transaction topology change --
-is a located rejection.
-
-Math library. A call dispatches through a registry on the object identity its callee resolves to, not the spelled name,
-so an alias resolves and a shadow does not. The registry maps that object to its lowering: an intrinsic stub (1:1 onto
-an HIR float operator) or a composite stub (built from the intrinsics and inlined). A composite is ordinary Python in
-the supported subset -- shape queries, comprehensions, and `raise` let the linear-algebra stubs be shape-polymorphic and
-self-validating -- so each stub is its own numerical reference, and a rejection inside one is re-attributed to the
-user's call site under the spelling they wrote.
-
-Parameters. Positional and keyword-only parameters become input ports and require an explicit annotation:
-`float`-annotated scalars are floating-point ports, `bool`-annotated ones are 1-bit boolean ports, and a jaxtyping
-array annotation with fixed 1-D/2-D dimensions and a floating dtype (e.g. `Float64[np.ndarray, "3 3"]`) decomposes
-row-major into one float port per element (a vector's are `name_0, name_1, ...`, a matrix's `name_0_0, name_0_1, ...`).
-The jaxtyping types are detected structurally, so jaxtyping stays a dependency of the user's code only.
-An aggregate attribute's shape is read from its reset value, optionally validated against an explicit jaxtyping
-annotation; interior shapes are inferred.
-
-Return type. The return annotation is likewise mandatory and validated against the inferred output leaves: `float`,
-`bool`, a fixed-shape jaxtyping array, an arbitrarily nested `tuple[...]`/`tuple[X, ...]`/`list[X]` of them, or
-`None` for a method that returns nothing. A missing annotation or any shape, arity, or scalar-type divergence rejects
-the kernel.
+Matrices/vectors are statically shaped and unrolled to scalar operations; arrays never exist as hardware
+aggregates, only as compile-time bookkeeping over scalar leaves -- list/tuple literals and comprehensions,
+numpy-style indexing and constant slicing, iteration, unpacking, transpose, and the array factories
+`np.array`/`asarray`/`asanyarray`. A Python list/tuple is never given numpy semantics: elementwise arithmetic, the
+matrix product, transpose, `.flatten()`, and multi-axis indexing apply to arrays and are rejected on a list/tuple.
+Elementwise `+ - * /` apply leafwise to same-shape arrays with scalar broadcast only (mixed-rank pairs reject
+rather than silently aligning). Shape queries (`len`, `.ndim`, `.shape[k]`) evaluate to compile-time integers.
+Linear algebra is ordinary library code: `@` and `np.matmul` resolve through the same registry a spelled call uses,
+expanding into scalar multiply/add chains with left-fold dot products (enabling FMA contraction); operand axes are
+bounded by the unroll threshold. A jaxtyping array annotation with fixed 1-D/2-D dimensions and a floating dtype
+decomposes row-major into one float port per element (`name_0, name_1, ...`; matrices `name_0_0, ...`), detected
+structurally so jaxtyping stays a dependency of the user's code only. Aggregate-valued state decomposes into one
+scalar slot per leaf (`attr_0`, ...; matrices row-major `attr_0_0`, ...). Aggregate returns flatten to ordered
+`out_<k>` ports, validated against an arbitrarily nested `tuple[...]`/`list[X]`/array return annotation.
 
 ## HIR
 
@@ -432,24 +380,6 @@ a folded constant can differ from the datapath's own value.
 
 Variable-trip `for` loops: a `for` above the unroll threshold is rejected, not lowered to a counted back-edge loop (that
 needs a runtime integer counter).
-
-Early return from a loop body.
-
-Static folding of a constant that reaches a static position (a branch/loop condition or a compile-time index) only
-through a local alias or an inline-built value, e.g. `g = CONST; if g[0] > 0:` or `if np.asarray([...])[0] > 0:`. Such
-a value still lowers correctly but is treated as dynamic, because folding it would require the reachability scan to
-track arbitrary local bindings it does not build. Only module-level constants, read-only instance attributes, and loop
-counters fold in static positions.
-
-The scan/lowering duality itself. The reachability scan runs before the body it describes, so it cannot see the local
-bindings lowering will have, and shape queries on locals therefore fold at lowering but not in the scan. Today the
-mismatch is contained by making the contract one-sided -- the scan over-approximates, the truth is trimmed out
-afterwards, and the opposite direction is asserted against -- so the cost is a stray register or port, an attribute
-that stops folding as a constant, or a conservative rejection, never a wrong value. It remains a duality, and every
-new static-evaluation source has to be checked against it by hand. The way out is to give the scan a real
-binding-time environment over locals (shapes at least, values where cheap) so that scan and lowering fold identically
-and neither the trim nor the assertion is needed; short of that, folding could be confined to bindings both phases
-reconstruct. Either is a redesign of the scan, not a patch to it.
 
 Integers. HIR carries a typed integer vocabulary -- `IntType`/`IntConst` and signed operators (saturating
 add/sub/mul/neg/abs, floor-coupled `//`/`%`, dynamic shifts, bitwise, relational, int-select, and the

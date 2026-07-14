@@ -310,14 +310,39 @@ class _Env:
         return changed
 
 
+class CallLowering(enum.Enum):
+    """How a PyCall surviving in the residual graph lowers; expanded calls no longer exist as calls."""
+
+    FOLDED = enum.auto()  # a concrete static fold: the destination fact is Known, nothing to emit
+    IDENTITY = enum.auto()  # a same-kind cast (float(x) on a float): the destination aliases the argument
+    CONVERSION = enum.auto()  # a cross-kind scalar cast: one HIR conversion operation
+    INTRINSIC = enum.auto()  # a registered hardware intrinsic: ``intrinsic`` carries the resolved registry match
+
+
+@dataclass(frozen=True, slots=True)
+class CallPlan:
+    lowering: CallLowering
+    intrinsic: "object | None" = None  # the _lib.Intrinsic match for INTRINSIC (typed loosely to keep _lib lazy)
+
+
 @dataclass(slots=True)
 class ResidualUnit:
-    """The analyzer's output: the stabilized working graph plus final facts for emission."""
+    """
+    The analyzer's single authoritative output: the stabilized working graph, the per-edge environments, and the
+    typed emission plan (final binding facts, call plans, state discovery, component provenance). Emission consumes
+    only this -- it never re-derives a fold, re-resolves the library registry, or replays the transfer function.
+    """
 
     unit: FunctionUnit
     block_in: dict[BlockId, _Env]
     executable_blocks: set[BlockId]
     executable_edges: set[tuple[BlockId, BlockId]]
+    binding_facts: dict[BindingId, Fact] = field(default_factory=dict)
+    call_plans: dict[BindingId, CallPlan] = field(default_factory=dict)
+    store_order: list[StateLeaf] = field(default_factory=list)
+    runtime_state: set[StateLeaf] = field(default_factory=set)
+    state_livein: dict[StateLeaf, Fact] = field(default_factory=dict)
+    provenance: dict[int, tuple[str, ...]] = field(default_factory=dict)
 
 
 class Analyzer:
@@ -379,6 +404,7 @@ class Analyzer:
                     result,
                     self._concrete_calls | self._intrinsic_calls | self._identity_calls | self._conversion_calls,
                 )
+                self._finalize(result)
                 return result
             self._runtime_state = new_w
             self._state_livein = new_d
@@ -430,12 +456,17 @@ class Analyzer:
             return Known(admitted)  # a Known Bool folds exactly (no width) and keeps invariant flags folding
         return Residual(sem)
 
-    def state_store_order(self, result: ResidualUnit) -> list[StateLeaf]:
+    def _finalize(self, result: ResidualUnit) -> None:
         """
-        State leaves in first-store SOURCE order, matching the production front-end's port contract. The order key is
-        the storing op's source origin (line, column), not the CFG block index -- a store nested in a branch has a
-        higher block id than a later top-level store yet comes first in the source text.
+        One replay of the transfer over the stabilized graph fills the emission plan: the authoritative fact per
+        binding (temporaries are write-once, so one pass records each), a typed plan per surviving call (keyed by
+        the call's destination binding, never by op identity), and state leaves in first-store SOURCE order (the
+        order key is the storing op's origin -- a store nested in a branch has a higher block id than a later
+        top-level store yet comes first in the source text). The replay does not mutate the graph: every call is
+        already expanded, folded, or classified. Emission consumes only this plan.
         """
+        from ._ir import op_dst
+
         first_store: dict[StateLeaf, tuple[int, int]] = {}
         for block_id in result.executable_blocks:
             block = result.unit.blocks[block_id]
@@ -448,38 +479,37 @@ class Analyzer:
                         position = (op.origin[0].line, op.origin[0].column)
                         if leaf not in first_store or position < first_store[leaf]:
                             first_store[leaf] = position
-                self._transfer(result.unit, block, index, op, env)
-        return sorted(first_store, key=lambda leaf: first_store[leaf])
-
-    def binding_facts(self, result: ResidualUnit) -> dict[BindingId, Fact]:
-        """
-        The final fact of every op-produced binding, by replaying the transfer over the stabilized graph. Temporaries
-        are write-once, so one pass records each binding's authoritative fact; emission consults it instead of
-        re-deriving folds. The replay does not mutate the graph (all calls are already expanded or concrete-folded).
-        """
-        from ._ir import op_dst
-
-        facts: dict[BindingId, Fact] = {}
-        for block_id in result.executable_blocks:
-            block = result.unit.blocks[block_id]
-            env = result.block_in[block_id].copy()
-            for index, op in enumerate(block.ops):
+                if isinstance(op, PyCall):
+                    result.call_plans[op.dst] = self._call_plan(op, env)
                 self._transfer(result.unit, block, index, op, env)
                 dst = op_dst(op)
                 if dst is not None:
-                    facts[dst] = env.get(Local(dst))
-        return facts
+                    result.binding_facts[dst] = env.get(Local(dst))
+        entry_env = result.block_in[result.unit.entry]
+        for param in result.unit.params:
+            result.binding_facts.setdefault(param, entry_env.get(Local(param)))
+        result.store_order = sorted(first_store, key=lambda leaf: first_store[leaf])
+        result.runtime_state = set(self._runtime_state)
+        result.state_livein = dict(self._state_livein)
+        result.provenance = self._component_provenance()
 
-    def intrinsic_calls(self) -> set[int]:
-        return set(self._intrinsic_calls)
+    def _call_plan(self, call: PyCall, env: _Env) -> CallPlan:
+        if id(call) in self._identity_calls:
+            return CallPlan(CallLowering.IDENTITY)
+        if id(call) in self._conversion_calls:
+            return CallPlan(CallLowering.CONVERSION)
+        if id(call) in self._intrinsic_calls:
+            from .._lib import Intrinsic, resolve
 
-    def identity_calls(self) -> set[int]:
-        return set(self._identity_calls)
+            callee_fact = env.get(Local(call.callee))
+            assert isinstance(callee_fact, Known) and isinstance(callee_fact.value, ObjectRef)
+            match = resolve(callee_fact.value.obj)
+            assert isinstance(match, Intrinsic)
+            return CallPlan(CallLowering.INTRINSIC, match)
+        assert id(call) in self._concrete_calls, "an unclassified call survived validation"
+        return CallPlan(CallLowering.FOLDED)
 
-    def conversion_calls(self) -> set[int]:
-        return set(self._conversion_calls)
-
-    def provenance(self) -> dict[int, tuple[str, ...]]:
+    def _component_provenance(self) -> dict[int, tuple[str, ...]]:
         # Canonical member path per component: the shortest path from a root over the recorded sub-object edges, ties
         # broken lexicographically. Bellman-Ford-style relaxation to a fixpoint, so the result is independent of both
         # edge-discovery order and set-iteration order (paths only ever shrink, so it converges).
@@ -495,12 +525,6 @@ class Analyzer:
                         result[child_id] = candidate
                         changed = True
         return result
-
-    def runtime_state(self) -> set[StateLeaf]:
-        return set(self._runtime_state)
-
-    def state_livein(self) -> dict[StateLeaf, Fact]:
-        return dict(self._state_livein)
 
     def _template(self, fn: object) -> FunctionUnit:
         key: tuple[int, int | None]
