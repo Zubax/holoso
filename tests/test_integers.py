@@ -339,7 +339,7 @@ def test_power_of_two_with_a_runtime_exponent_lowers_to_exp2() -> None:
         return 2**x
 
     def float_base(x: float) -> float:
-        return 2.0**x
+        return 2.0**x  # type: ignore[no-any-return]  # typeshed types float**float as Any (negative base -> complex)
 
     for kernel in (int_base, float_base):
         assert _op_names(_hir(kernel)) == {"FloatExp2"}
@@ -449,7 +449,7 @@ def test_a_huge_integer_promoted_to_float_is_a_clean_rejection() -> None:
         if flag:
             y = 10**400
         else:
-            y = x
+            y = x  # type: ignore[assignment]  # y is an int-or-float merge by design
         return y
 
     with pytest.raises(UnsupportedConstruct):
@@ -537,7 +537,7 @@ def test_a_runtime_integer_merge_then_integer_arithmetic_is_rejected() -> None:
         if flag:
             y = int(x)
         else:
-            y = x
+            y = x  # type: ignore[assignment]  # y is an int-or-float merge by design
         return y + 1 + 1
 
     def sel_mixed(flag: bool, x: float) -> float:
