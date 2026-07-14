@@ -172,9 +172,13 @@ short-circuit positions; nested def/class/lambda, imports, subscript stores, and
 rejections. A structural verifier and a deterministic printer close the stage.
 
 The analyzer is SCCP-style optimistic executable-edge abstract interpretation over the FIR with flow-sensitive
-per-edge environments (strong updates, joins only over executable in-edges). Facts: Unbound | Known(StaticValue) |
-Residual(type) | fact-level sequences (static shape, runtime leaves) | MaybeUnbound (a read of one is a located
-rejection: Python may raise). An int/float join promotes the integer side to float, C-style (see Integers). Folding
+per-edge environments (strong updates, joins only over executable in-edges). Facts: Unbound | Known(StaticValue,
+never structural) | Residual(type) | AggregateFact -- one canonical structural value: a typed recursive layout
+(tuple | list | fixed-shape ndarray with dtype | identity-keyed record | structural, the flavor-erased join of
+unlike positional containers) over one flat, canonically ordered tuple of atomic leaves -- | MaybeUnbound, always
+at the root (a read of one is a located rejection: Python may raise). Aggregate joins reconcile layouts first
+(identical flavors recurse; a tuple arm meeting a list arm of equal arity degrades to the structural flavor set,
+keeping only flavor-independent behavior; ndarray dtypes promote int64 to float64), then join leaves positionally. An int/float join promotes the integer side to float, C-style (see Integers). Folding
 is Python-exact on Knowns; runtime-typed values never fold (width rule); a Known Bool always drives edge selection.
 StaticFor unrolls by cloning the body per trip once the iterable is Known; calls expand on demand by grafting the
 callee template (defaults/kwargs bound, member __call__ dispatch, recursion rejected by function+receiver ancestry,
@@ -194,8 +198,10 @@ whole analyzer/emitter contract: emission never re-derives a fold, never resolve
 replays the transfer function, so the two layers cannot disagree about a value's meaning.
 
 Emission lowers the stabilized residual graph to HIR: executable blocks/edges only, in reverse post-order, with
-value numbering by Braun sealed-block SSA over Places (named locals, state leaves, the hidden return place) and
-write-once ANF temps unified into the same layer. One typed materializer serves every operand position: a Known
+value numbering by Braun sealed-block SSA over the scalar LEAF CELLS of Places -- (root place, typed layout path),
+a scalar root being the empty path -- so an aggregate store defines every leaf (a Known leaf as its interned
+constant: the invariant a later per-leaf merge relies on), a join phis only the leaves that differ, and a
+conditional selection emits one typed select per differing leaf. HIR stays entirely scalar. One typed materializer serves every operand position: a Known
 value becomes a constant of the expected kind (a Known integer stays an IntConst in an integer context and rounds
 into a float constant in a float context), a residual value is its SSA read, coerced only where the coercion is a
 genuine int->float promotion on its own edge (phi arms, select arms, state stores, comparison operands) and a
@@ -257,9 +263,11 @@ under `-O`, an assert must be side-effect-free.
 
 ### Deferred: the aggregate contract (tracked by FIR_PARITY_PENDING; stage 10 asserts the registry empty)
 
-The previous front-end supported statically-shaped aggregates end-to-end; the FIR pipeline does not yet, and every
-disabled test carries the greppable marker. The contract the aggregate stages restore (and extend with records,
-reductions, and the bounded gather):
+The structural spine already carries runtime tuples/lists through locals, diamonds, conditional selections,
+concatenation/repetition, indexing, and record field projection; what remains deferred is the BOUNDARY surface --
+aggregate returns and ports, aggregate persistent state, runtime-element iteration, slicing/starred syntax, and
+the array/record/reduction/gather semantics below -- and every disabled test carries the greppable marker. The
+contract the remaining stages restore (and extend with records, reductions, and the bounded gather):
 
 Matrices/vectors are statically shaped and unrolled to scalar operations; arrays never exist as hardware
 aggregates, only as compile-time bookkeeping over scalar leaves -- list/tuple literals and comprehensions,

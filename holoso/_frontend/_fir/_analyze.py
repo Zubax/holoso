@@ -62,6 +62,27 @@ from ._ir import (
     UnitExit,
     op_dst,
 )
+from ._fact import (
+    AggregateFact,
+    ArrayLayout,
+    AtomicFact,
+    BoundFact,
+    Fact,
+    Known,
+    LayoutMismatch,
+    ListLayout,
+    MaybeUnbound,
+    RecordLayout,
+    Residual,
+    StructuralLayout,
+    TupleLayout,
+    Unbound,
+    aggregate_of,
+    join_layouts,
+    materialize_static,
+    normalize_static,
+    outer_arity,
+)
 from ._signature import ScalarParameter
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
@@ -133,39 +154,6 @@ class _PropertyRead:
     getter: object  # a ``MethodType(fget, component)`` bound to the exact receiver
 
 
-@dataclass(frozen=True, slots=True)
-class Unbound:
-    pass
-
-
-@dataclass(frozen=True, slots=True)
-class Known:
-    value: StaticValue
-
-
-@dataclass(frozen=True, slots=True)
-class Residual:
-    type: SemType
-
-
-@dataclass(frozen=True, slots=True)
-class FactSeq:
-    """An aggregate whose elements are facts, present when at least one element is not Known (all-Known aggregates
-    stay Known(StaticSeq)); subscripts and lengths stay static even when the payload is runtime."""
-
-    items: tuple["Fact", ...]
-    is_list: bool
-
-
-@dataclass(frozen=True, slots=True)
-class MaybeUnbound:
-    """Joined bound-and-unbound: reading this is a located rejection (Python may raise here)."""
-
-    inner: "Known | Residual | FactSeq"
-
-
-type Fact = Unbound | Known | Residual | FactSeq | MaybeUnbound
-
 _UNBOUND = Unbound()
 
 
@@ -193,7 +181,7 @@ def _numeric_sem(fact: "Fact") -> SemType | None:
             return None
 
 
-def _float_promoted(fact: Fact, origin: OriginStack) -> Fact:
+def _float_promoted(fact: AtomicFact, origin: OriginStack) -> AtomicFact:
     """
     The C-style promotion applied at an int/float merge: the integer side becomes float, its provenance kept
     (MetaInt -> StaticFloat, NpInt -> NpFloat) and its rounding accepted under the fastmath charter. An integer
@@ -221,8 +209,8 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
     match a, b:
         case (Unbound(), Unbound()):
             return _UNBOUND
-        case (Unbound(), (Known() | Residual() | FactSeq()) as bound) | (
-            (Known() | Residual() | FactSeq()) as bound,
+        case (Unbound(), (Known() | Residual() | AggregateFact()) as bound) | (
+            (Known() | Residual() | AggregateFact()) as bound,
             Unbound(),
         ):
             return MaybeUnbound(bound)
@@ -230,28 +218,39 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
             return half
         case (MaybeUnbound(inner=x), MaybeUnbound(inner=y)):
             joined = join_facts(x, y, origin)
-            assert isinstance(joined, (Known, Residual, FactSeq))
+            assert isinstance(joined, (Known, Residual, AggregateFact))
             return MaybeUnbound(joined)
-        case (MaybeUnbound(inner=x), (Known() | Residual() | FactSeq()) as y) | (
-            (Known() | Residual() | FactSeq()) as y,
+        case (MaybeUnbound(inner=x), (Known() | Residual() | AggregateFact()) as y) | (
+            (Known() | Residual() | AggregateFact()) as y,
             MaybeUnbound(inner=x),
         ):
             joined = join_facts(x, y, origin)
-            assert isinstance(joined, (Known, Residual, FactSeq))
+            assert isinstance(joined, (Known, Residual, AggregateFact))
             return MaybeUnbound(joined)
+        case (AggregateFact() as x, AggregateFact() as y):
+            try:
+                layout = join_layouts(x.layout, y.layout)
+            except LayoutMismatch as error:
+                raise AnalysisRejection(str(error), origin) from None
+            assert layout is not None and not isinstance(layout, type(None))
+            leaves = tuple(_join_atoms(p, q, origin) for p, q in zip(x.leaves, y.leaves, strict=True))
+            return AggregateFact(layout, leaves)
+        case ((Known() | Residual()) as p, (Known() | Residual()) as q):
+            return _join_atoms(p, q, origin)
+    raise AnalysisRejection("values of irreconcilable shapes merge here", origin)
+
+
+def _join_atoms(a: AtomicFact, b: AtomicFact, origin: OriginStack) -> AtomicFact:
+    """The scalar join: same-kind residualization plus the C-style int/float promotion (see the module docstring)."""
+    if a is b:
+        return a
+    match a, b:
         case (Known(value=x), Known(value=y)):
             if same(x, y):
                 return a
-            if (
-                isinstance(x, StaticSeq)
-                and isinstance(y, StaticSeq)
-                and x.is_list == y.is_list
-                and len(x.items) == len(y.items)
-            ):
-                return join_facts(_lift_seq(x), _lift_seq(y), origin)
             x_type, y_type = _residual_type(x), _residual_type(y)
             if {x_type, y_type} == {SemType.FLOAT, SemType.INT}:  # an int/float merge promotes the integer, C-style
-                return join_facts(_float_promoted(a, origin), _float_promoted(b, origin), origin)
+                return _join_atoms(_float_promoted(a, origin), _float_promoted(b, origin), origin)
             if x_type is not None and x_type == y_type:
                 return Residual(x_type)
             raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
@@ -260,7 +259,7 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
             if x_type == t:
                 return Residual(t)
             if x_type is not None and {x_type, t} == {SemType.FLOAT, SemType.INT}:
-                return join_facts(_float_promoted(a, origin), _float_promoted(b, origin), origin)
+                return _join_atoms(_float_promoted(a, origin), _float_promoted(b, origin), origin)
             raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
         case (Residual(type=x_t), Residual(type=y_t)):
             if x_t == y_t:
@@ -268,22 +267,7 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
             if {x_t, y_t} == {SemType.FLOAT, SemType.INT}:
                 return Residual(SemType.FLOAT)  # a runtime integer merged with a float promotes
             raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
-        case (FactSeq() as x, FactSeq() as y) if len(x.items) == len(y.items) and x.is_list == y.is_list:
-            return _pack_seq(tuple(join_facts(p, q, origin) for p, q in zip(x.items, y.items)), x.is_list)
-        case (FactSeq() as x, Known(value=StaticSeq() as y)) | (Known(value=StaticSeq() as y), FactSeq() as x):
-            lifted = _lift_seq(y)
-            return join_facts(x, lifted, origin)
-    raise AnalysisRejection("values of irreconcilable shapes merge here", origin)
-
-
-def _lift_seq(value: StaticSeq) -> FactSeq:
-    return FactSeq(tuple(Known(item) for item in value.items), value.is_list)
-
-
-def _pack_seq(items: tuple[Fact, ...], is_list: bool) -> Fact:
-    if all(isinstance(item, Known) for item in items):
-        return Known(StaticSeq(tuple(item.value for item in items if isinstance(item, Known)), is_list=is_list))
-    return FactSeq(items, is_list)
+    raise AssertionError((a, b))
 
 
 @dataclass(slots=True)
@@ -636,7 +620,7 @@ class Analyzer:
         result: Fact
         match op:
             case LoadConst(dst=dst, value=value):
-                env.set(Local(dst), Known(value))
+                env.set(Local(dst), normalize_static(value))
             case LoadPlace(dst=dst, place=place):
                 fact = env.get(place)
                 if isinstance(fact, (Unbound, MaybeUnbound)) and isinstance(place, Local):
@@ -662,7 +646,7 @@ class Analyzer:
                 concat = _concat_seqs(bin_op, lhs_fact, rhs_fact)
                 if concat is not None:
                     env.set(Local(dst), concat)
-                elif isinstance(lhs_fact, FactSeq) or isinstance(rhs_fact, FactSeq):
+                elif isinstance(lhs_fact, AggregateFact) or isinstance(rhs_fact, AggregateFact):
                     raise AnalysisRejection("arithmetic on an aggregate value", op.origin)
                 elif bin_op in _BITWISE_OPS:
                     env.set(Local(dst), self._fold_bitwise(bin_op, lhs_fact, rhs_fact, op.origin))
@@ -747,13 +731,17 @@ class Analyzer:
                         result = merged
                 env.set(Local(dst), result)
             case BuildTuple(dst=dst, items=items) | BuildList(dst=dst, items=items):
-                facts = tuple(env.get(Local(item)) for item in items)
-                result = _pack_seq(facts, is_list=isinstance(op, BuildList))
-                env.set(Local(dst), result)
+                children = []
+                for item in items:
+                    fact = env.get(Local(item))
+                    if not isinstance(fact, (Known, Residual, AggregateFact)):
+                        raise AnalysisRejection("an unbound value flows into an aggregate literal", op.origin)
+                    children.append(fact)
+                env.set(Local(dst), aggregate_of(tuple(children), is_list=isinstance(op, BuildList)))
             case PyLen(dst=dst, obj=obj):
                 obj_fact = env.get(Local(obj))
-                if isinstance(obj_fact, FactSeq):
-                    length = admit(len(obj_fact.items))
+                if isinstance(obj_fact, AggregateFact):
+                    length = admit(outer_arity(obj_fact.layout))
                     assert length is not None
                     result = Known(length)
                 elif isinstance(obj_fact, Known):
@@ -802,7 +790,11 @@ class Analyzer:
                     )
                 leaf = StateLeaf(obj_fact.value.obj, (name,))
                 self._discovered_stores.add((block.id, leaf))
-                if self._leaf_kind(leaf) is SemType.FLOAT and _numeric_sem(src_fact) is SemType.INT:
+                if (
+                    self._leaf_kind(leaf) is SemType.FLOAT
+                    and isinstance(src_fact, (Known, Residual))
+                    and _numeric_sem(src_fact) is SemType.INT
+                ):
                     # The datapath store rounds the integer into the float slot, so the fact a read-back sees must be
                     # the promoted (rounded) float -- an exact-integer fact here would fold against a value the slot
                     # does not hold. On the first W/D round the slot kind falls back to the reset's; the fixed point
@@ -912,34 +904,69 @@ class Analyzer:
                 if truth is None and _residual_type(value) is None:
                     raise AnalysisRejection("the truth value of this object is not defined here", origin)
                 return Known(StaticBool(truth)) if truth is not None else Residual(SemType.BOOL)
-            case FactSeq(items=items):
-                return Known(StaticBool(len(items) != 0))
+            case AggregateFact() as aggregate:
+                if isinstance(aggregate.layout, ArrayLayout):
+                    raise AnalysisRejection(
+                        "the truth value of an array is ambiguous; use .any() or .all() in plain numpy", origin
+                    )
+                return Known(StaticBool(outer_arity(aggregate.layout) != 0))
             case _:
                 return Residual(SemType.BOOL)
 
     def _subscript(self, obj: Fact, index: Fact, origin: OriginStack) -> Fact:
-        if isinstance(obj, FactSeq) and isinstance(index, Known):
-            import operator
+        import operator
 
+        if isinstance(index, AggregateFact):
+            key = materialize_static(index)  # a static tuple key (m[1, 0]); runtime keys reject below
+            if key is not None:
+                index = Known(key)
+        if isinstance(obj, AggregateFact) and isinstance(index, Known):
             try:
                 position = operator.index(as_python(index.value))  # type: ignore[arg-type]  # np ints qualify
             except TypeError:
-                raise AnalysisRejection("sequence index is not an integer", origin) from None
-            if not -len(obj.items) <= position < len(obj.items):
+                # A non-integer static key (a tuple key ``m[1, 0]``, a slice) applies concretely to an all-Known
+                # aggregate; on a runtime-leaf aggregate it awaits the slicing/multi-axis stages.
+                concrete = materialize_static(obj)
+                if concrete is None:
+                    raise AnalysisRejection(
+                        "slicing or multi-axis indexing of a runtime aggregate is not supported yet", origin
+                    ) from None
+                return self._concrete_subscript(concrete, index, origin)
+            arity = outer_arity(obj.layout)
+            if not -arity <= position < arity:
                 raise AnalysisRejection("sequence index out of range", origin)
-            return obj.items[position]
+            return obj.child(position + arity if position < 0 else position)
         if isinstance(obj, Known) and isinstance(index, Known):
-            try:
-                concrete = as_python(obj.value)[as_python(index.value)]  # type: ignore[index]
-            except Exception as error:
-                raise AnalysisRejection(f"subscript fails here: {error}", origin) from None
-            admitted = admit(concrete)
-            if admitted is None:
-                return Known(ObjectRef(concrete))
-            return Known(admitted)
+            return self._concrete_subscript(obj.value, index, origin)
         raise AnalysisRejection("subscript of a runtime value is not supported yet", origin)
 
+    def _concrete_subscript(self, value: StaticValue, index: Known, origin: OriginStack) -> Fact:
+        try:
+            concrete = as_python(value)[as_python(index.value)]  # type: ignore[index]
+        except Exception as error:
+            raise AnalysisRejection(f"subscript fails here: {error}", origin) from None
+        admitted = admit(concrete)
+        if admitted is None:
+            return Known(ObjectRef(concrete))
+        return normalize_static(admitted)
+
     def _attribute(self, env: _Env, obj: Fact, name: str, origin: OriginStack) -> "Fact | _PropertyRead":
+        if isinstance(obj, AggregateFact):
+            if isinstance(obj.layout, RecordLayout):
+                names = [field for field, _ in obj.layout.fields]
+                if name in names:
+                    return obj.child(names.index(name))  # record field projection works on runtime leaves too
+            if isinstance(obj.layout, ListLayout):
+                raise AnalysisRejection(
+                    f"list method '{name}' is not supported (lists are immutable values here); rebind with + instead",
+                    origin,
+                )
+            concrete = materialize_static(obj)
+            if concrete is None:
+                raise AnalysisRejection(f"attribute '{name}' of a runtime aggregate is not supported yet", origin)
+            # Static navigation (``.T``, ``.shape``, ``.ndim``, ``.flatten`` on an all-Known array; a value method)
+            # folds through the concrete object, exactly as a Known value does.
+            obj = Known(concrete)
         if isinstance(obj, Known) and isinstance(obj.value, ObjectRef):
             component = obj.value.obj
             if isinstance(component, (types.ModuleType, type)):
@@ -1036,11 +1063,7 @@ class Analyzer:
                 cached = self._unroll_cache.get(block.id)
                 if cached is not None:
                     cached_fact, chain_entry = cached
-                    if (
-                        isinstance(iterable_fact, Known)
-                        and isinstance(cached_fact, Known)
-                        and same(iterable_fact.value, cached_fact.value)
-                    ):
+                    if _same_fact(iterable_fact, cached_fact):
                         return [chain_entry]
                     raise AnalysisRejection("loop iterable is not stable across analysis rounds", terminator.origin)
                 chain_entry = self._unroll(unit, block, terminator, env)
@@ -1054,6 +1077,9 @@ class Analyzer:
 
     def _unroll(self, unit: FunctionUnit, header: Block, loop: StaticFor, env: _Env) -> BlockId:
         iterable = env.get(Local(loop.iterable))
+        if isinstance(iterable, AggregateFact):
+            materialized = materialize_static(iterable)  # runtime leaves: per-trip projection is a later stage
+            iterable = Known(materialized) if materialized is not None else iterable
         if not isinstance(iterable, Known):
             raise AnalysisRejection("loop trip count is not static here", loop.origin)
         concrete = as_python(iterable.value)
@@ -1199,7 +1225,9 @@ class Analyzer:
             # doctrine; its runtime-operand form was already routed to an HIR operation above.
             argument_facts = [env.get(Local(arg)) for arg in call.args]
             keyword_facts = [(keyword, env.get(Local(value))) for keyword, value in call.kwargs]
-            if not all(isinstance(fact, Known) for fact in argument_facts + [fact for _, fact in keyword_facts]):
+            concrete_args = [_concrete_fact(fact) for fact in argument_facts]
+            concrete_kwargs = [(keyword, _concrete_fact(fact)) for keyword, fact in keyword_facts]
+            if any(value is None for value in concrete_args) or any(v is None for _, v in concrete_kwargs):
                 name = getattr(target, "__name__", repr(target))
                 # ``float()``/``int()``/``bool()`` on a runtime scalar: a same-kind cast is the identity (a documented
                 # no-op); a cross-kind cast lowers to a conversion op (int<->float truncation/promotion, truthiness,
@@ -1227,18 +1255,17 @@ class Analyzer:
                 raise AnalysisRejection(f"call to {name} with runtime arguments is not supported yet", call.origin)
             try:
                 concrete = target(  # type: ignore[operator]
-                    *[_datapath_zero(as_python(fact.value)) for fact in argument_facts if isinstance(fact, Known)],
+                    *[_datapath_zero(as_python(value)) for value in concrete_args if value is not None],
                     **{
-                        keyword: _datapath_zero(as_python(fact.value))
-                        for keyword, fact in keyword_facts
-                        if isinstance(fact, Known)
+                        keyword: _datapath_zero(as_python(value))
+                        for keyword, value in concrete_kwargs
+                        if value is not None
                     },
                 )
             except Exception as error:
                 raise AnalysisRejection(f"call fails here: {error}", call.origin) from None
             admitted = admit(concrete)
-            folded: StaticValue = admitted if admitted is not None else ObjectRef(concrete)
-            env.set(Local(call.dst), Known(folded))
+            env.set(Local(call.dst), normalize_static(admitted) if admitted is not None else Known(ObjectRef(concrete)))
             self._concrete_calls.add(id(call))
             return False
         receiver: object | None = None
@@ -1455,48 +1482,52 @@ def _validate(result: ResidualUnit, concrete_calls: set[int]) -> None:
             raise AnalysisRejection(block.terminator.message, block.terminator.origin)
 
 
+def _same_fact(a: Fact, b: Fact) -> bool:
+    """Fixed-point stability: Knowns compare by tagged bitwise sameness, everything else structurally."""
+    if isinstance(a, Known) and isinstance(b, Known):
+        return same(a.value, b.value)
+    return a == b
+
+
+def _concrete_fact(fact: Fact) -> StaticValue | None:
+    """The concrete static value behind a fact, when one exists: a Known directly, an all-Known aggregate rebuilt."""
+    if isinstance(fact, Known):
+        return fact.value
+    if isinstance(fact, AggregateFact):
+        return materialize_static(fact)
+    return None
+
+
 def _concat_seqs(bin_op: BinOp, lhs: Fact, rhs: Fact) -> Fact | None:
     if bin_op is BinOp.MUL:
-        seq, count = (lhs, rhs) if isinstance(lhs, (FactSeq, Known)) and _seq_side(lhs) else (rhs, lhs)
+        seq, count = (lhs, rhs) if _seq_side(lhs) is not None else (rhs, lhs)
         lifted = _seq_side(seq)
         if lifted is not None and isinstance(count, Known) and isinstance(count.value, (MetaInt, NpInt)):
             repetitions = count.value.value
             if 0 <= repetitions <= 1024:
-                return _pack_seq(lifted.items * repetitions, lifted.is_list)
+                children = tuple(lifted.child(i) for i in range(outer_arity(lifted.layout)))
+                return aggregate_of(children * repetitions, is_list=isinstance(lifted.layout, ListLayout))
         return None
     if bin_op is not BinOp.ADD:
         return None
-    sides = []
-    for fact in (lhs, rhs):
-        if isinstance(fact, FactSeq):
-            sides.append(fact)
-        elif isinstance(fact, Known) and isinstance(fact.value, StaticSeq):
-            sides.append(_lift_seq(fact.value))
-        else:
-            return None
-    if sides[0].is_list != sides[1].is_list:
-        return None
-    return _pack_seq(sides[0].items + sides[1].items, sides[0].is_list)
+    left, right = _seq_side(lhs), _seq_side(rhs)
+    if left is None or right is None or type(left.layout) is not type(right.layout):
+        return None  # Python: list + tuple is a TypeError, and a flavor-erased structural side has no ``+``
+    children = tuple(left.child(i) for i in range(outer_arity(left.layout))) + tuple(
+        right.child(i) for i in range(outer_arity(right.layout))
+    )
+    return aggregate_of(children, is_list=isinstance(left.layout, ListLayout))
 
 
-def _seq_side(fact: Fact) -> FactSeq | None:
-    match fact:
-        case FactSeq():
-            return fact
-        case Known(value=StaticSeq() as seq):
-            return _lift_seq(seq)
-        case _:
-            return None
+def _seq_side(fact: Fact) -> AggregateFact | None:
+    """A pure tuple/list-flavored aggregate; arrays and flavor-erased structural joins have different operators."""
+    if isinstance(fact, AggregateFact) and isinstance(fact.layout, (TupleLayout, ListLayout)):
+        return fact
+    return None
 
 
 def _is_list_fact(fact: Fact) -> bool:
-    match fact:
-        case FactSeq(is_list=True):
-            return True
-        case Known(value=StaticSeq(is_list=True)):
-            return True
-        case _:
-            return False
+    return isinstance(fact, AggregateFact) and isinstance(fact.layout, ListLayout)
 
 
 def _mro_attribute_of(klass: type, name: str) -> object | None:

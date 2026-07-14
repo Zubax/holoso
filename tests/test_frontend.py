@@ -1607,7 +1607,9 @@ def test_numpy_alias_shadowed_by_a_local_is_not_numpy() -> None:
         np = [a]
         return np.asarray([a])  # type: ignore[no-any-return, attr-defined]
 
-    with pytest.raises(UnsupportedConstruct, match="attribute access on a runtime value"):
+    # The shadowing local is a list, so the read is the (unsupported) list attribute -- a more specific message
+    # than the generic runtime-attribute rejection, but the same refusal.
+    with pytest.raises(UnsupportedConstruct, match="list method 'asarray'"):
         lower(f)
 
 
@@ -4137,6 +4139,66 @@ def test_an_aggregate_operand_to_an_intrinsic_is_a_located_rejection() -> None:
     for kernel in (in_sqrt, in_isfinite):
         with pytest.raises(UnsupportedConstruct, match="non-numeric operand"):
             lower(kernel)
+
+
+def test_a_runtime_aggregate_local_lowers_and_computes() -> None:
+    # The structural spine: a tuple of runtime leaves bound to a NAMED local (previously "a runtime aggregate in a
+    # local is not supported yet") flows leafwise through SSA and indexes back out.
+    def kernel(x: float, y: float) -> float:
+        pair = (x * 2.0, y + 1.0)
+        return pair[0] + pair[1]
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="agg_local").numerical_model.elaborate()
+    assert float(model.run(3.0, 4.0)[0]) == 11.0
+
+
+def test_an_aggregate_local_joins_across_a_diamond_per_leaf() -> None:
+    # A diamond whose arms bind different tuples to one local merges leafwise: the differing leaf gets a phi, the
+    # equal Known leaf stays a constant, and a Known-int leaf merging with a float leaf promotes C-style.
+    def kernel(c: bool, x: float) -> float:
+        if c:
+            pair = (x, 1.0)
+        else:
+            pair = (2, 1.0)  # the first leaf is a Known INTEGER on this arm: the merge promotes it
+        return pair[0] * 10.0 + pair[1]
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="agg_diamond").numerical_model.elaborate()
+    assert float(model.run(True, 3.5)[0]) == 36.0
+    assert float(model.run(False, 3.5)[0]) == 21.0
+
+
+def test_an_aggregate_conditional_selection_selects_per_leaf() -> None:
+    # ``t if c else u`` over tuples emits one typed select per differing residual leaf (previously rejected).
+    def kernel(c: bool, x: float, y: float) -> float:
+        chosen = (x, y) if c else (y, x)
+        return chosen[0] - chosen[1]
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="agg_select").numerical_model.elaborate()
+    assert float(model.run(True, 7.0, 2.0)[0]) == 5.0
+    assert float(model.run(False, 7.0, 2.0)[0]) == -5.0
+
+
+def test_aggregate_concat_and_repeat_of_runtime_leaves_compute() -> None:
+    # ``+`` and ``*`` on tuple/list values route leaves without hardware; the elements still compute.
+    def kernel(x: float, y: float) -> float:
+        joined = (x,) + (y,)
+        tripled = [x] * 3
+        return joined[1] * 100.0 + tripled[2]
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="agg_concat").numerical_model.elaborate()
+    assert float(model.run(3.0, 4.0)[0]) == 403.0
+
+
+def test_a_maybe_unbound_aggregate_read_is_a_located_rejection() -> None:
+    # Boundness stays at the aggregate ROOT: a tuple bound on one arm only is maybe-unbound at the join and its
+    # read rejects exactly as a scalar's would (Python would raise UnboundLocalError).
+    def kernel(c: bool, x: float) -> float:
+        if c:
+            pair = (x, x)
+        return pair[0]  # noqa: F821  # deliberately maybe-unbound: the kernel under test
+
+    with pytest.raises(UnsupportedConstruct, match="may be unbound"):
+        lower(kernel)
 
 
 def test_static_string_and_record_locals_lower_because_every_use_folds() -> None:

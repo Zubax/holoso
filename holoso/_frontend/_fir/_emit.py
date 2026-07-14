@@ -66,7 +66,18 @@ from ..._hir import (
     Select,
     Type,
 )
-from ._analyze import Analyzer, CallLowering, CallPlan, Fact, FactSeq, Known, Residual, ResidualUnit
+from ._analyze import Analyzer, CallLowering, CallPlan, ResidualUnit
+from ._fact import (
+    AggregateFact,
+    AtomicFact,
+    Fact,
+    Known,
+    LeafPath,
+    Residual,
+    child_slice,
+    leaf_paths,
+    outer_arity,
+)
 from ._signature import ScalarReturn, VoidReturn
 from ._ir import (
     BindingId,
@@ -142,28 +153,16 @@ def _carrier_float(value: object) -> float:
 
 
 @dataclass(frozen=True, slots=True)
-class _KnownHandle:
-    """A Known scalar element of a runtime aggregate; materializes as a constant only when used."""
+class _LeafPlace:
+    """One scalar cell of a root Place: the SSA unit. A scalar root is the empty path."""
 
-    value: StaticValue
-
-
-@dataclass(frozen=True, slots=True)
-class _ValueHandle:
-    """A residual scalar element, already emitted as the given HIR value."""
-
-    vid: int
+    root: Place
+    path: LeafPath
 
 
-@dataclass(frozen=True, slots=True)
-class _SeqHandle:
-    """A nested-sequence element (or a whole aggregate layout), carrying its list/tuple flavor honestly."""
-
-    items: "tuple[_Handle, ...]"
-    is_list: bool
-
-
-type _Handle = _KnownHandle | _ValueHandle | _SeqHandle
+def _leaf_at(fact: AggregateFact, path: LeafPath) -> AtomicFact:
+    index = leaf_paths(fact.layout).index(path)
+    return fact.leaves[index]
 
 
 def _is_bool_fact(fact: Fact | None) -> bool:
@@ -181,17 +180,16 @@ class _Emitter:
         self._result = result
         self._builder = HirBuilder()
         self._fir_to_hir: dict[FirBlockId, int] = {}
-        self._definitions: dict[tuple[FirBlockId, Place], int] = {}
+        self._definitions: dict[tuple[FirBlockId, _LeafPlace], int] = {}
         self._sealed: set[FirBlockId] = set()
         self._emitted: set[FirBlockId] = set()
-        self._open_phis: dict[FirBlockId, list[tuple[Place, int]]] = {}
+        self._open_phis: dict[FirBlockId, list[tuple[_LeafPlace, int]]] = {}
         self._predecessors: dict[FirBlockId, list[FirBlockId]] = {}
         for source, target in sorted(result.executable_edges, key=lambda e: (e[0].index, e[1].index)):
             self._predecessors.setdefault(target, []).append(source)
         self._state_reads: dict[StateLeaf, int] = {}
         self._state_order: list[StateLeaf] = []
         self._slot_names: dict[str, StateLeaf] = {}  # encoded slot name -> its leaf, to catch a rare name collision
-        self._layouts: dict[BindingId, _SeqHandle] = {}  # FactSeq bindings -> their typed element layout
 
     def emit(self) -> Hir:
         unit = self._result.unit
@@ -250,10 +248,13 @@ class _Emitter:
     def _type_of(self, vid: int) -> Type:
         return self._builder.type_of(vid)
 
-    def _write(self, block: FirBlockId, place: Place, vid: int) -> None:
-        self._definitions[(block, place)] = vid
+    def _write(self, block: FirBlockId, place: "Place | _LeafPlace", vid: int) -> None:
+        leaf = place if isinstance(place, _LeafPlace) else _LeafPlace(place, ())
+        self._definitions[(block, leaf)] = vid
 
-    def _read(self, block: FirBlockId, place: Place) -> int:
+    def _read(self, block: FirBlockId, place: "Place | _LeafPlace") -> int:
+        if not isinstance(place, _LeafPlace):
+            place = _LeafPlace(place, ())
         # Canonical Braun read: a multi-predecessor block ALWAYS caches an empty phi before reading its operands, so a
         # read cycling back through the same block (a loop's latch, whether or not the header is already sealed) finds
         # the phi instead of recursing forever. The phi's arms are filled straight away for a sealed block, or at
@@ -278,7 +279,7 @@ class _Emitter:
             self._write(member, place, vid)
         return vid
 
-    def _resolve_source(self, block: FirBlockId, place: Place) -> int:
+    def _resolve_source(self, block: FirBlockId, place: _LeafPlace) -> int:
         if (block, place) in self._definitions:
             return self._definitions[(block, place)]
         if not self._predecessors.get(block):
@@ -293,7 +294,7 @@ class _Emitter:
             return phi
         return self._fill_phi(block, place, phi)
 
-    def _fill_phi(self, block: FirBlockId, place: Place, phi: int) -> int:
+    def _fill_phi(self, block: FirBlockId, place: _LeafPlace, phi: int) -> int:
         phi_type = self._place_type(block, place)
         arms: list[tuple[int, int]] = []
         for p in self._predecessors[block]:
@@ -310,13 +311,18 @@ class _Emitter:
             return trivial
         return phi
 
-    def _place_type(self, block: FirBlockId, place: Place) -> Type:
+    def _place_type(self, block: FirBlockId, place: _LeafPlace) -> Type:
         # The phi's type is the Place's own type, known from the analyzer fact independently of its operands. A state
         # leaf whose live-in was never carried in the block environment falls back to its reset snapshot's type.
-        fact = self._result.block_in[block].facts.get(place)
-        if fact is None and isinstance(place, StateLeaf):
-            fact = self._leaf_fact(place)
-        return self._fact_port_type(fact)
+        fact = self._result.block_in[block].facts.get(place.root)
+        if fact is None and isinstance(place.root, StateLeaf):
+            fact = self._leaf_fact(place.root)
+        if isinstance(fact, AggregateFact):
+            atom: Fact | None = _leaf_at(fact, place.path)
+        else:
+            assert place.path == (), f"a leaf path into a scalar fact at {place}"
+            atom = fact
+        return self._fact_port_type(atom)
 
     @staticmethod
     def _sem_of(ty: Type) -> SemType:
@@ -360,9 +366,9 @@ class _Emitter:
         for place, phi in self._open_phis.pop(block, []):
             self._fill_phi(block, place, phi)
 
-    def _entry_value(self, place: Place) -> int:
-        if isinstance(place, StateLeaf):
-            return self._state_read(place)
+    def _entry_value(self, place: _LeafPlace) -> int:
+        if isinstance(place.root, StateLeaf) and place.path == ():
+            return self._state_read(place.root)
         raise AssertionError(f"read of an undefined place '{place}' escaped analysis")
 
     def _slot_name(self, leaf: StateLeaf) -> str:
@@ -428,6 +434,73 @@ class _Emitter:
             return self._builder.float_const(_carrier_float(concrete))
         raise EmissionRejection(f"a {type(concrete).__name__} value cannot materialize in the datapath")
 
+    def _emit_concat(
+        self, block: FirBlockId, dst: BindingId, bin_op: BinOp, lhs: BindingId, rhs: BindingId, result: AggregateFact
+    ) -> None:
+        """Sequence concat (+) and repeat (*): pure leaf routing, no HIR -- the layout work happened in analysis."""
+        target_paths = leaf_paths(result.layout)
+        sources: list[tuple[BindingId, LeafPath]] = []
+        if bin_op is BinOp.ADD:
+            for operand in (lhs, rhs):
+                fact = self._fact(operand)
+                assert isinstance(fact, AggregateFact)
+                sources += [(operand, path) for path in leaf_paths(fact.layout)]
+        else:
+            assert bin_op is BinOp.MUL
+            seq, seq_fact = next(
+                (operand, fact) for operand in (lhs, rhs) if isinstance(fact := self._fact(operand), AggregateFact)
+            )
+            assert isinstance(seq_fact, AggregateFact)
+            source_paths = leaf_paths(seq_fact.layout)
+            sources = [(seq, source_paths[i % len(source_paths)]) for i in range(len(target_paths))]
+        for target_path, leaf, (operand, source_path) in zip(target_paths, result.leaves, sources, strict=True):
+            if isinstance(leaf, Known):
+                vid = self._atom_vid(leaf)
+            else:
+                vid = self._read(block, _LeafPlace(Local(operand), source_path))
+            self._write(block, _LeafPlace(Local(dst), target_path), vid)
+
+    def _materialize_leaf(self, block: FirBlockId, binding: BindingId, path: LeafPath, expected: SemType) -> int:
+        """One leaf of an aggregate-valued binding, coerced onto the joined leaf kind exactly like a scalar arm."""
+        fact = self._fact(binding)
+        assert isinstance(fact, AggregateFact)
+        leaf = _leaf_at(fact, path)
+        if isinstance(leaf, Known):
+            if isinstance(leaf.value, (MetaInt, NpInt)) and expected is not SemType.FLOAT:
+                return self._builder.int_const(int(leaf.value.value))
+            vid = self._const(leaf.value)
+        else:
+            vid = self._read(block, _LeafPlace(Local(binding), path))
+        actual = self._sem_of(self._type_of(vid))
+        if actual is expected:
+            return vid
+        if actual is SemType.INT and expected is SemType.FLOAT:
+            return self._builder.operation(IntToFloat(), [vid])
+        raise EmissionRejection(f"a {actual.value} leaf reaches a {expected.value} selection")
+
+    def _atom_vid(self, leaf: Known) -> int:
+        """A Known leaf in its own kind (an integer leaf stays an IntConst; interning keeps duplicates free)."""
+        if isinstance(leaf.value, (MetaInt, NpInt)):
+            return self._builder.int_const(int(leaf.value.value))
+        return self._const(leaf.value)
+
+    def _copy_leaves(
+        self, block: FirBlockId, source_root: "Place | _LeafPlace", fact: AggregateFact, target: Place
+    ) -> None:
+        """
+        Define EVERY leaf of ``target``: a Known leaf as its constant, a residual leaf as the source's SSA value.
+        All-leaf definition is the invariant a later per-leaf CFG merge relies on -- a phi arm must resolve on every
+        predecessor, including one whose leaf happened to be a constant on that path.
+        """
+        base: LeafPath = source_root.path if isinstance(source_root, _LeafPlace) else ()
+        root: Place = source_root.root if isinstance(source_root, _LeafPlace) else source_root
+        for path, leaf in zip(leaf_paths(fact.layout), fact.leaves, strict=True):
+            if isinstance(leaf, Known):
+                self._write(block, _LeafPlace(target, path), self._atom_vid(leaf))
+            else:
+                vid = self._read(block, _LeafPlace(root, (*base, *path)))
+                self._write(block, _LeafPlace(target, path), vid)
+
     def _fact(self, binding: BindingId) -> Fact:
         fact = self._result.binding_facts.get(binding)
         assert fact is not None, f"binding {binding} missing from the analysis plan"
@@ -443,6 +516,7 @@ class _Emitter:
         runtime integer promoted at a state boundary is float-carried while its fact still reads integer).
         """
         fact = self._fact(binding)
+        assert not isinstance(fact, AggregateFact), "an aggregate value reaches a scalar operand position"
         if isinstance(fact, Known):
             if isinstance(fact.value, (MetaInt, NpInt)) and expected in (SemType.INT, None):
                 return self._builder.int_const(int(fact.value.value))
@@ -491,21 +565,21 @@ class _Emitter:
             case LoadConst() | UnbindPlace():
                 pass  # facts and boundness are the analyzer's; nothing materializes here
             case LoadPlace(dst=dst, place=place):
-                if not isinstance(self._fact(dst), Known):
+                fact = self._fact(dst)
+                if isinstance(fact, AggregateFact):
+                    self._copy_leaves(fir_id, place, fact, Local(dst))
+                elif not isinstance(fact, Known):
                     define(dst, self._read(fir_id, place))
             case StorePlace(place=place, src=src):
                 fact = self._fact(src)
-                is_aggregate = isinstance(fact, FactSeq) or (
-                    isinstance(fact, Known) and isinstance(fact.value, StaticSeq)
-                )
-                if isinstance(place, ReturnPlace) and is_aggregate:
-                    raise EmissionRejection("aggregate (tuple/list) returns are not emitted yet")  # per-leaf: stage 9
-                if isinstance(fact, FactSeq):
-                    raise EmissionRejection("a runtime aggregate in a local is not supported yet")  # layout: stage 9
-                if isinstance(fact, Known) and not isinstance(
+                if isinstance(fact, AggregateFact):
+                    if isinstance(place, ReturnPlace):
+                        raise EmissionRejection("aggregate (tuple/list/array) returns are not emitted yet")  # stage 9
+                    self._copy_leaves(fir_id, Local(src), fact, place)
+                elif isinstance(fact, Known) and not isinstance(
                     fact.value, (StaticBool, MetaInt, NpInt, StaticFloat, NpFloat)
                 ):
-                    pass  # a non-datapath Known (a sequence, a string, a record, an object): every use folds
+                    pass  # a non-datapath Known (a string, a range, an object reference): every use folds
                 else:
                     self._write(fir_id, place, self._materialize(fir_id, src))  # in the value's own kind
             case PyBin(dst=dst, op=bin_op, lhs=lhs, rhs=rhs):
@@ -539,8 +613,6 @@ class _Emitter:
                 result_fact = self._fact(dst)
                 if isinstance(result_fact, Known):
                     pass  # the analyzer selected a Known arm or folded a boolean identity (``A or True``)
-                elif isinstance(result_fact, FactSeq):
-                    raise EmissionRejection("a conditional selection of aggregates is not supported yet")  # stage 9
                 elif isinstance(cond_fact := self._fact(cond), Known):
                     taken = as_python(cond_fact.value)
                     assert isinstance(taken, bool)
@@ -548,29 +620,79 @@ class _Emitter:
                     define(dst, self._materialize(fir_id, chosen))
                 else:
                     # The merged fact fixes the selection kind; each arm materializes onto it, so a mixed int/float
-                    # select promotes the integer arm on its own edge exactly like a phi.
+                    # select promotes the integer arm on its own edge exactly like a phi. An aggregate selection
+                    # emits one typed select per differing residual leaf.
                     then_binding, else_binding = (rhs, lhs) if mode is SelectMode.AND else (lhs, rhs)
-                    sem = self._fact_sem(result_fact)
-                    operator: Operator = (
-                        BoolSelect() if sem is SemType.BOOL else IntSelect() if sem is SemType.INT else Select()
-                    )
                     condition = self._materialize(fir_id, cond, SemType.BOOL)
-                    then_vid = self._materialize(fir_id, then_binding, sem)
-                    else_vid = self._materialize(fir_id, else_binding, sem)
-                    define(dst, self._builder.operation(operator, [condition, then_vid, else_vid]))
+                    if isinstance(result_fact, AggregateFact):
+                        for path, leaf_fact in zip(leaf_paths(result_fact.layout), result_fact.leaves, strict=True):
+                            if isinstance(leaf_fact, Known):
+                                self._write(fir_id, _LeafPlace(Local(dst), path), self._atom_vid(leaf_fact))
+                                continue
+                            sem = self._fact_sem(leaf_fact)
+                            leaf_operator: Operator = (
+                                BoolSelect() if sem is SemType.BOOL else IntSelect() if sem is SemType.INT else Select()
+                            )
+                            then_vid = self._materialize_leaf(fir_id, then_binding, path, sem)
+                            else_vid = self._materialize_leaf(fir_id, else_binding, path, sem)
+                            selected = self._builder.operation(leaf_operator, [condition, then_vid, else_vid])
+                            self._write(fir_id, _LeafPlace(Local(dst), path), selected)
+                    else:
+                        sem = self._fact_sem(result_fact)
+                        operator: Operator = (
+                            BoolSelect() if sem is SemType.BOOL else IntSelect() if sem is SemType.INT else Select()
+                        )
+                        then_vid = self._materialize(fir_id, then_binding, sem)
+                        else_vid = self._materialize(fir_id, else_binding, sem)
+                        define(dst, self._builder.operation(operator, [condition, then_vid, else_vid]))
             case BuildTuple(dst=dst, items=items) | BuildList(dst=dst, items=items):
-                if isinstance(self._fact(dst), FactSeq):
-                    self._layouts[dst] = _SeqHandle(
-                        tuple(self._handle_of(fir_id, item) for item in items), is_list=isinstance(op, BuildList)
-                    )
+                fact = self._fact(dst)
+                if isinstance(fact, AggregateFact):
+                    for index, item in enumerate(items):
+                        child_layout, start, stop = child_slice(fact.layout, index)
+                        child_paths = leaf_paths(fact.layout)[start:stop]
+                        item_fact = self._fact(item)
+                        if isinstance(item_fact, AggregateFact):
+                            for target_path, (item_path, leaf_fact) in zip(
+                                child_paths, zip(leaf_paths(item_fact.layout), item_fact.leaves), strict=True
+                            ):
+                                if isinstance(leaf_fact, Known):
+                                    vid = self._atom_vid(leaf_fact)
+                                else:
+                                    vid = self._read(fir_id, _LeafPlace(Local(item), item_path))
+                                self._write(fir_id, _LeafPlace(Local(dst), target_path), vid)
+                        else:
+                            (target_path,) = child_paths
+                            if isinstance(item_fact, Known):
+                                vid = self._atom_vid(item_fact)
+                            else:
+                                vid = self._read(fir_id, Local(item))
+                            self._write(fir_id, _LeafPlace(Local(dst), target_path), vid)
             case PySubscript(dst=dst, obj=obj, index=index):
-                if obj in self._layouts:
+                obj_fact = self._fact(obj)
+                dst_fact = self._fact(dst)
+                if isinstance(obj_fact, AggregateFact) and not isinstance(dst_fact, Known):
                     import operator as operator_module
 
                     index_fact = self._fact(index)
                     assert isinstance(index_fact, Known)
                     position = operator_module.index(as_python(index_fact.value))  # type: ignore[arg-type]
-                    self._bind_handle(fir_id, dst, self._layouts[obj].items[position])
+                    width = outer_arity(obj_fact.layout)
+                    position = position + width if position < 0 else position
+                    _, start, stop = child_slice(obj_fact.layout, position)
+                    child_paths = leaf_paths(obj_fact.layout)[start:stop]
+                    if isinstance(dst_fact, AggregateFact):
+                        for target_path, obj_path, leaf_fact in zip(
+                            leaf_paths(dst_fact.layout), child_paths, dst_fact.leaves, strict=True
+                        ):
+                            if isinstance(leaf_fact, Known):
+                                vid = self._atom_vid(leaf_fact)
+                            else:
+                                vid = self._read(fir_id, _LeafPlace(Local(obj), obj_path))
+                            self._write(fir_id, _LeafPlace(Local(dst), target_path), vid)
+                    else:
+                        (obj_path,) = child_paths
+                        define(dst, self._read(fir_id, _LeafPlace(Local(obj), obj_path)))
                 # else the analyzer folded the subscript concretely: the Known fact materializes at its use sites
             case PyLen():
                 pass  # always folded by the analyzer (static shape)
@@ -643,25 +765,6 @@ class _Emitter:
                 return self._builder.operation(IntSelect(), [condition, vids[0], vids[1]])
         raise AssertionError(f"no integer implementation for {implementation!r}")
 
-    def _handle_of(self, block: FirBlockId, binding: BindingId) -> _Handle:
-        # A per-element handle for a FactSeq: nested layout, a Known scalar (materialize on use), or an HIR value
-        # (whose kind the extracted binding's plan fact preserves -- an integer element stays integer-typed).
-        if binding in self._layouts:
-            return self._layouts[binding]
-        fact = self._fact(binding)
-        if isinstance(fact, Known):
-            return _KnownHandle(fact.value)
-        return _ValueHandle(self._read(block, Local(binding)))
-
-    def _bind_handle(self, block: FirBlockId, dst: BindingId, handle: _Handle) -> None:
-        match handle:
-            case _ValueHandle(vid=vid):
-                self._write(block, Local(dst), vid)
-            case _SeqHandle():
-                self._layouts[dst] = handle
-            case _KnownHandle():
-                pass  # the Known fact is already in the plan; it materializes at its use sites
-
     def _leaf_fact(self, leaf: StateLeaf) -> Fact:
         livein = self._result.state_livein
         if leaf in livein:
@@ -677,8 +780,9 @@ class _Emitter:
         result_fact = self._fact(dst)
         if isinstance(result_fact, Known):
             return  # the analyzer folded it (a static fold, a sequence concat/repeat, a bool &/|/^ identity)
-        if isinstance(result_fact, FactSeq):
-            raise EmissionRejection("a runtime aggregate operation is not supported yet")  # layout: stage 9
+        if isinstance(result_fact, AggregateFact):
+            self._emit_concat(block, dst, bin_op, lhs, rhs, result_fact)  # the only aggregate PyBin the analyzer admits
+            return
 
         def define(vid: int) -> None:
             self._write(block, Local(dst), vid)
@@ -856,9 +960,7 @@ class _Emitter:
         exit_env = self._result.block_in[unit.exit]
         self._builder.position_at(self._fir_to_hir[unit.exit])
         return_fact = exit_env.facts.get(ReturnPlace())
-        if isinstance(return_fact, FactSeq) or (
-            isinstance(return_fact, Known) and isinstance(return_fact.value, (StaticSeq, StaticArray, StaticRecord))
-        ):
+        if isinstance(return_fact, AggregateFact):
             raise EmissionRejection("aggregate (tuple/list/array) returns are not emitted yet")  # per-leaf: stage 9
         contract = unit.return_contract
         assert contract is not None, "emission runs only on the root unit"
