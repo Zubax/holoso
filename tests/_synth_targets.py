@@ -156,10 +156,10 @@ def _from_polar_kernel() -> Callable[..., object]:
 # One measured CORDIC config per polar kernel closes all three flows, so the three per-flow rows share it (unlike the
 # per-flow stage knobs elsewhere in the matrix).
 _TO_POLAR_FATAN2 = FAtan2Operator(F_e6m18, unroll100=50, stage_pack=1, stage_normalize=2, stage_product=3)
-_FROM_POLAR_FSINCOS = FSincosOperator(F_e6m18, stage_pack=1, stage_product=2, stage_normalize=1)
+_FROM_POLAR_FSINCOS = FSincosOperator(F_e6m18, stage_pack=1, stage_product=2, stage_normalize=2)
 # kepler's fsincos (coalesced sin+cos per Newton iteration) dominates timing, so its measured closure coincides with
 # from_polar's -- the same operator -- and one config closes all three flows.
-_KEPLER_FSINCOS = FSincosOperator(F_e6m18, stage_pack=1, stage_product=2, stage_normalize=1)
+_KEPLER_FSINCOS = FSincosOperator(F_e6m18, stage_pack=1, stage_product=2, stage_normalize=2)
 
 
 TARGETS: list[SynthTarget] = [
@@ -330,6 +330,7 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
+            fmul=FMulOperator(F_e6m18, stage_pack=1),
             fexp2=FExp2Operator(F_e6m18, stage_reduce=1, stage_product=2),
             flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=2, stage_normalize=2, stage_pack=1),
         ),
@@ -350,6 +351,7 @@ TARGETS: list[SynthTarget] = [
         150,
         op_config(
             F_e6m18,
+            fadd=FAddOperator(F_e6m18, stage_normalize=1),
             fexp2=FExp2Operator(F_e6m18, stage_product=2),
             flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=2, stage_normalize=1, stage_pack=1),
         ),
@@ -547,7 +549,7 @@ TARGETS: list[SynthTarget] = [
         kernel=_from_polar_kernel,
         flow=FlowId.VIVADO_ARTIX7,
         target_frequency_MHz=150,
-        ops=op_config(F_e6m18, fsincos=_FROM_POLAR_FSINCOS),
+        ops=op_config(F_e6m18, fmul=FMulOperator(F_e6m18, stage_input=1), fsincos=_FROM_POLAR_FSINCOS),
         name="from_polar_e6m18",
     ),
     # kepler: fsincos inside a data-dependent Newton back-edge loop -- the only II>1 operator in a loop in the matrix.
