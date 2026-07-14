@@ -2594,15 +2594,14 @@ def test_return_tuple_arity_mismatch_is_rejected() -> None:
         lower(f)
 
 
-def test_return_none_declared_but_value_returned_is_lowered() -> None:
-    # A ``-> None`` annotation does not forbid returning a value; the frontend follows the actual return, lowering it
-    # to a single output that passes the argument through.
+def test_return_none_declared_but_value_returned_is_rejected() -> None:
+    # The return annotation is validated, per the design contract: a ``-> None`` kernel that returns a value is a
+    # located mismatch, never silently lowered against its own signature.
     def f(a: float) -> None:
         return a  # type: ignore[return-value]
 
-    assert [o.name for o in lower(f).outputs] == ["out_0"]
-    model = holoso.synthesize(f, default_ops(FloatFormat(11, 52)), name="none_decl").numerical_model.elaborate()
-    assert float(model.run(7.0)[0]) == 7.0
+    with pytest.raises(UnsupportedConstruct, match="-> None"):
+        lower(f)
 
 
 def test_return_value_declared_but_method_returns_nothing_is_rejected() -> None:
@@ -2652,15 +2651,35 @@ def test_none_return_annotation_accepted_for_stateful_method() -> None:
     lower(Acc().update)
 
 
-def test_scalar_returned_but_tuple_declared_is_lowered() -> None:
-    # A ``tuple`` return annotation does not force an aggregate; the frontend follows the actual scalar return and
-    # lowers it to a single output.
+def test_scalar_returned_but_tuple_declared_is_rejected() -> None:
+    # The return annotation is validated, per the design contract: an aggregate annotation demands an aggregate
+    # value, so a scalar return under ``tuple[...]`` is a located mismatch.
     def f(a: float) -> tuple[float, float]:
         return a  # type: ignore[return-value]
 
-    assert [o.name for o in lower(f).outputs] == ["out_0"]
-    model = holoso.synthesize(f, default_ops(FloatFormat(11, 52)), name="tuple_decl").numerical_model.elaborate()
-    assert float(model.run(7.0)[0]) == 7.0
+    with pytest.raises(UnsupportedConstruct, match="aggregate return"):
+        lower(f)
+
+
+_STATIC_PAIR = np.array([1.0, 2.0])
+
+
+def test_shaped_array_ports_are_honest_contract_rejections() -> None:
+    # A fixed-shape jaxtyping parameter or return parses as a real contract and rejects honestly pending the
+    # aggregate stages -- never a silent scalar seed that later surfaces as a nonsense diagnostic ("@ is not
+    # defined for scalars" on a matrix kernel).
+    from jaxtyping import Float64
+
+    def array_parameter(v: Float64[np.ndarray, "3"]) -> float:
+        return v[0]  # type: ignore[no-any-return]
+
+    def array_return(x: float) -> Float64[np.ndarray, "2"]:
+        return _STATIC_PAIR
+
+    with pytest.raises(UnsupportedConstruct, match="array ports are not lowerable yet"):
+        lower(array_parameter)
+    with pytest.raises(UnsupportedConstruct, match="returns are not emitted yet"):
+        lower(array_return)
 
 
 @pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate returns — stage 9")
@@ -3031,8 +3050,6 @@ def test_branch_depth_restarts_per_inlined_function() -> None:
     # Whether a raise is data-dependent is a property of the function that WRITES it, not of a call site that happens to
     # sit in a branch arm. So a callee's own dynamic guard is rejected even from a straight-line caller, and a stub's
     # static guard is still a compile-time rejection even when the call site is inside a dynamic arm.
-    from jaxtyping import Float64
-
     def dynamic_guard_in_callee(a: float, b: float) -> float:
         r = b
         if b > 0.0:
@@ -3042,13 +3059,13 @@ def test_branch_depth_restarts_per_inlined_function() -> None:
     with pytest.raises(UnsupportedConstruct, match="positive"):
         lower(dynamic_guard_in_callee)
 
-    def static_guard_in_stub(c: bool, m: Float64[np.ndarray, "2 3"], v: Float64[np.ndarray, "2"]) -> float:
+    def static_guard_in_stub(c: bool, x: float) -> float:
         r = 0.0
         if c:
-            r = (m @ v)[0]  # a shape error, though the arm it sits in is data-dependent
+            r = math.sqrt(-1.0) + x  # a static domain error, though the arm it sits in is data-dependent
         return r
 
-    with pytest.raises(UnsupportedConstruct, match="not defined for scalars"):
+    with pytest.raises(UnsupportedConstruct, match="nonnegative input"):
         lower(static_guard_in_stub)
 
 
@@ -3198,12 +3215,12 @@ def test_comprehension_filter_is_lowered_before_it_is_folded() -> None:
     # The filter decides which items exist, so it must fold -- but it is lowered first, exactly as an ``if`` test is,
     # so its operands are type-checked. A fold that never looked at the condition would wave an unsupported operand
     # through whenever the other side of an ``or`` happened to be statically true.
-    from jaxtyping import Float64
+    def unsupported_operand(x: float) -> float:
+        return [x for i in range(1) if _returns_a_dict(x) or True][0]
 
-    def unsupported_operand(v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "1"]:
-        return np.array([v[i] for i in range(1) if _returns_a_dict(v) or True])
-
-    with pytest.raises(UnsupportedConstruct, match="unsupported return annotation"):
+    # The rejection surfaces from BUILDING the filter's callee (its dict literal is unsupported), which is the
+    # point: the filter was lowered and expanded rather than being folded away by the statically-true ``or`` arm.
+    with pytest.raises(UnsupportedConstruct, match="Dict is not supported"):
         lower(unsupported_operand)
 
 

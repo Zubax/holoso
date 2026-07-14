@@ -20,6 +20,14 @@ from dataclasses import dataclass
 from ..._errors import SourceUnavailable, UnsupportedConstruct
 from ..._util import RelationalOp
 from .._ast_support import UNROLL_THRESHOLD
+from ._signature import (
+    ArrayParameter,
+    ContractError,
+    ParameterContract,
+    ReturnContract,
+    parameter_contract,
+    return_contract,
+)
 from ._ir import (
     BindingId,
     Block,
@@ -67,7 +75,7 @@ from ._resolve import (
     UnboundCell,
     comprehension_only_targets,
 )
-from ._value import SemType, admit, admit_ref
+from ._value import admit, admit_ref
 
 _logger = logging.getLogger(__name__)
 
@@ -108,7 +116,7 @@ _COMPARE_OPS: dict[type[ast.cmpop], RelationalOp] = {
 }
 
 
-def build_unit(fn: object) -> FunctionUnit:
+def build_unit(fn: object, root: bool = False) -> FunctionUnit:
     """Builds the FIR template of one live Python function (or bound method); verified before it is returned."""
     bound_self: object | None = None
     if isinstance(fn, types.MethodType):
@@ -141,7 +149,7 @@ def build_unit(fn: object) -> FunctionUnit:
         hints = {
             name: value for name, value in getattr(fn, "__annotations__", {}).items() if not isinstance(value, str)
         }
-    builder = _Builder(fn.__code__.co_qualname, first_line, indent, resolver, bound_self, hints)
+    builder = _Builder(fn.__code__.co_qualname, first_line, indent, resolver, bound_self, hints, root)
     return builder.build(fndef)
 
 
@@ -160,6 +168,7 @@ class _Builder:
         resolver: NameResolver,
         bound_self: object | None,
         hints: dict[str, object],
+        root: bool,
     ) -> None:
         self._qualname = qualname
         self._line_offset = first_line - 1
@@ -167,6 +176,7 @@ class _Builder:
         self._resolver = resolver
         self._bound_self = bound_self
         self._hints = hints
+        self._root = root
         self._blocks: dict[BlockId, Block] = {}
         self._current = self._new_block()
         self._serial = 0
@@ -190,30 +200,43 @@ class _Builder:
         if self._bound_self is not None:
             self._self_spelling = self._resolver.runtime_spelling(declared[0].arg)
         # A bound method's leading ``self`` is the instance receiver, not a datapath input, so it is exempt from
-        # annotation validation; every other parameter needs an explicit scalar annotation (there is no implicit
-        # float default). An array (jaxtyping/ndarray) annotation is admitted here and deferred at its point of use.
+        # annotation validation; every other parameter needs an explicit annotation (there is no implicit float
+        # default). Annotation keys are CPython-mangled just like the param slots (``__enabled`` ->
+        # ``_Klass__enabled``), so the hint lookup and the contract entry use the runtime spelling.
+        param_contracts: dict[str, ParameterContract] = {}
         for arg in declared[1:] if self._bound_self is not None else declared:
-            hint = self._hints.get(self._resolver.runtime_spelling(arg.arg))
+            spelled = self._resolver.runtime_spelling(arg.arg)
+            hint = self._hints.get(spelled) if spelled is not None else None
             if hint is None:
                 raise BuildRejection(
                     f"parameter {arg.arg!r} requires an explicit type annotation (float or bool)", self._origin(arg)
                 )
-            if hint in (str, bytes, complex):
+            if not self._root:
+                continue  # a callee's parameter facts flow from its call sites; the annotation is documentation
+            try:
+                contract = parameter_contract(hint)
+            except ContractError as error:
                 raise BuildRejection(
-                    f"unsupported parameter annotation for {arg.arg!r}: expected float, bool, or int", self._origin(arg)
+                    f"unsupported parameter annotation for {arg.arg!r}: {error}", self._origin(arg)
+                ) from None
+            if isinstance(contract, ArrayParameter):
+                # The contract parses (honest diagnostics, never a silent scalar seed) but its decomposed ports
+                # await the aggregate stages.
+                raise BuildRejection(
+                    f"parameter {arg.arg!r}: fixed-shape array ports are not lowerable yet", self._origin(arg)
                 )
+            assert spelled is not None
+            param_contracts[spelled] = contract
         params = [self._bind(arg.arg) for arg in declared]
         self._params_bound = True  # any further store to the receiver name is now a rebinding, not the initial bind
-        # Annotation keys are CPython-mangled just like the param slots (``__enabled`` -> ``_Klass__enabled``), so
-        # both the hint lookup and the param_types entry use the runtime spelling. A non-scalar (array) parameter is
-        # seeded FLOAT here and handled specially at its point of use.
-        scalar_kinds: dict[object, SemType] = {bool: SemType.BOOL, int: SemType.INT}  # array hints fall back to FLOAT
-        param_types = {
-            spelled: scalar_kinds.get(self._hints.get(spelled), SemType.FLOAT)
-            for arg in declared
-            if (spelled := self._resolver.runtime_spelling(arg.arg)) is not None
-        }
-        declared_return = self._validate_return_annotation(fndef, origin)
+        if fndef.returns is None:
+            raise BuildRejection("the return type must be explicitly annotated (float or bool)", origin)
+        declared_return: ReturnContract | None = None
+        if self._root:  # the port boundary; a callee's return remaps to a caller local, its annotation untouched
+            try:
+                declared_return = return_contract(self._hints.get("return"))
+            except ContractError as error:
+                raise BuildRejection(f"unsupported return annotation: {error}", origin)
         entry = self._current.id
         exit_block = self._new_block()
         exit_block.terminator = UnitExit(origin)
@@ -231,36 +254,11 @@ class _Builder:
             entry=entry,
             exit=exit_block.id,
             bound_self=self._bound_self,
-            param_types=param_types,
-            declared_return=declared_return,
+            param_contracts=param_contracts,
+            return_contract=declared_return,
         )
         verify(unit)
         return unit
-
-    def _validate_return_annotation(self, fndef: ast.FunctionDef, origin: OriginStack) -> SemType | None:
-        # The declared return type is mandatory and drives the output-port type; a mismatch against the inferred value
-        # type is caught at emission. ``None`` here means void or an aggregate (deferred), so no scalar check applies.
-        if fndef.returns is None:
-            raise BuildRejection("the return type must be explicitly annotated (float or bool)", origin)
-        hint = self._hints.get("return")
-        # ``float | None`` (Optional): the None arm is the implicit fall-off of an early-return kernel, so unwrap it.
-        args = typing.get_args(hint)
-        if typing.get_origin(hint) in (typing.Union, types.UnionType) and type(None) in args:
-            remainder = [arg for arg in args if arg is not type(None)]
-            hint = remainder[0] if len(remainder) == 1 else hint
-        if hint is float:
-            return SemType.FLOAT
-        if hint is bool:
-            return SemType.BOOL
-        if hint is int:
-            return SemType.INT
-        if hint is type(None) or typing.get_origin(hint) in (tuple, list):
-            return None
-        raise BuildRejection(
-            f"unsupported return annotation {getattr(hint, '__name__', hint)}: expected float, bool, or None", origin
-        )
-
-    # ---------------------------------------- machinery ----------------------------------------
 
     def _new_block(self) -> Block:
         block = Block(BlockId(len(self._blocks)))

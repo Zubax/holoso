@@ -62,6 +62,7 @@ from ._ir import (
     UnitExit,
     op_dst,
 )
+from ._signature import ScalarParameter
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
 from ._value import (
@@ -353,7 +354,7 @@ class ResidualUnit:
 
 class Analyzer:
     def __init__(self, fn: object) -> None:
-        self._root_template = build_unit(fn)
+        self._root_template = build_unit(fn, root=True)
         self._templates: dict[tuple[int, int | None], tuple[object, FunctionUnit]] = {}
         self._block_ancestry: dict[BlockId, tuple[tuple[int, int | None], ...]] = {}
         self._temp_serial = 1_000_000
@@ -549,7 +550,9 @@ class Analyzer:
         block_in: dict[BlockId, _Env] = {unit.entry: _Env()}
         entry_env = block_in[unit.entry]
         for param in unit.params:
-            default = Residual(unit.param_types.get(param.name, SemType.FLOAT))
+            contract = unit.param_contracts.get(param.name)
+            assert contract is None or isinstance(contract, ScalarParameter)  # array ports reject at build for now
+            default = Residual(contract.kind if contract is not None else SemType.FLOAT)
             fact = (param_facts or {}).get(param.name, default)
             entry_env.set(Local(param), fact)
         if unit.bound_self is not None and unit.params:

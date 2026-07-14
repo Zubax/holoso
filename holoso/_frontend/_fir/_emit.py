@@ -67,6 +67,7 @@ from ..._hir import (
     Type,
 )
 from ._analyze import Analyzer, CallLowering, CallPlan, Fact, FactSeq, Known, Residual, ResidualUnit
+from ._signature import ScalarReturn, VoidReturn
 from ._ir import (
     BindingId,
     BlockId as FirBlockId,
@@ -106,6 +107,8 @@ from ._value import (
     SemType,
     StaticBool,
     StaticFloat,
+    StaticArray,
+    StaticRecord,
     StaticSeq,
     StaticValue,
     admit,
@@ -854,39 +857,40 @@ class _Emitter:
         self._builder.position_at(self._fir_to_hir[unit.exit])
         return_fact = exit_env.facts.get(ReturnPlace())
         if isinstance(return_fact, FactSeq) or (
-            isinstance(return_fact, Known) and isinstance(return_fact.value, StaticSeq)
+            isinstance(return_fact, Known) and isinstance(return_fact.value, (StaticSeq, StaticArray, StaticRecord))
         ):
-            raise EmissionRejection("aggregate (tuple/list) returns are not emitted yet")  # per-leaf return: stage 9
-        return_vid: int | None = None
-        if return_fact is not None and not (
+            raise EmissionRejection("aggregate (tuple/list/array) returns are not emitted yet")  # per-leaf: stage 9
+        contract = unit.return_contract
+        assert contract is not None, "emission runs only on the root unit"
+        returns_value = return_fact is not None and not (
             isinstance(return_fact, Known) and isinstance(return_fact.value, ObjectRef)
-        ):
-            if (
-                isinstance(return_fact, Known)
-                and isinstance(return_fact.value, (MetaInt, NpInt))
-                and unit.declared_return is SemType.INT
-            ):
-                return_vid = self._builder.int_const(int(return_fact.value.value))  # a Known integer -> integer port
-            elif isinstance(return_fact, Known):
-                return_vid = self._const(return_fact.value)
-            else:
-                return_vid = self._read(unit.exit, ReturnPlace())
-        if (
-            unit.declared_return is SemType.FLOAT
-            and return_vid is not None
-            and isinstance(self._type_of(return_vid), IntType)
-        ):
-            return_vid = self._builder.operation(
-                IntToFloat(), [return_vid]
-            )  # Python returns an int where float declared
-        if unit.declared_return is not None:  # a scalar return type was declared: the value must match it
-            if return_vid is None:
-                raise EmissionRejection(f"return type mismatch: declared {unit.declared_return.value}, returns nothing")
-            got = self._sem_of(self._type_of(return_vid))
-            if got is not unit.declared_return:
-                raise EmissionRejection(
-                    f"return type mismatch: declared {unit.declared_return.value}, returns {got.value}"
-                )
+        )
+        return_vid: int | None = None
+        match contract:
+            case VoidReturn():
+                if returns_value:
+                    raise EmissionRejection("annotated '-> None' but returns a value")
+            case ScalarReturn(kind=kind):
+                if not returns_value:
+                    raise EmissionRejection(f"return type mismatch: declared {kind.value}, returns nothing")
+                if isinstance(return_fact, Known) and isinstance(return_fact.value, (MetaInt, NpInt)):
+                    if kind is SemType.INT:
+                        return_vid = self._builder.int_const(int(return_fact.value.value))  # an integer port
+                    else:
+                        return_vid = self._const(return_fact.value)
+                elif isinstance(return_fact, Known):
+                    return_vid = self._const(return_fact.value)
+                else:
+                    return_vid = self._read(unit.exit, ReturnPlace())
+                if kind is SemType.FLOAT and isinstance(self._type_of(return_vid), IntType):
+                    return_vid = self._builder.operation(IntToFloat(), [return_vid])  # int returned as declared float
+                got = self._sem_of(self._type_of(return_vid))
+                if got is not kind:
+                    raise EmissionRejection(f"return type mismatch: declared {kind.value}, returns {got.value}")
+            case _:  # an aggregate contract (tuple/list/array): the value must be an aggregate too
+                if not returns_value:
+                    raise EmissionRejection("declared an aggregate return but returns nothing")
+                raise EmissionRejection("declared an aggregate return but returns a scalar")
         promoted = self._result.runtime_state
         # Slots and public ports emit in first-STORE source order (matching production), not the order the RPO walk
         # happened to touch attributes; a leaf touched only by a read still trails a leaf stored earlier.
