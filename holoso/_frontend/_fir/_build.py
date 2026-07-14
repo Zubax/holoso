@@ -91,6 +91,11 @@ _BIN_OPS: dict[type[ast.operator], BinOp] = {
     ast.Mod: BinOp.MOD,
     ast.Pow: BinOp.POW,
     ast.MatMult: BinOp.MATMUL,
+    ast.LShift: BinOp.LSHIFT,
+    ast.RShift: BinOp.RSHIFT,
+    ast.BitAnd: BinOp.BITAND,
+    ast.BitOr: BinOp.BITOR,
+    ast.BitXor: BinOp.BITXOR,
 }
 
 _COMPARE_OPS: dict[type[ast.cmpop], RelationalOp] = {

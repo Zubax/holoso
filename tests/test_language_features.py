@@ -52,14 +52,12 @@ def _float_xor(x: float, y: float) -> float:
     return x ^ y  # type: ignore[operator, no-any-return]  # deliberately ill-typed: exercises rejection of float ^
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: boolean ^ (BitXor) operator — stage 8 (bitwise/int/bool-cast)")
 def test_bool_xor_truth_table() -> None:
     sim = _model(_xor2)
     for a, b in itertools.product((False, True), repeat=2):
         assert bool(sim.run(a, b)[0]) == (a != b), f"xor {a} {b}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: boolean ^ (BitXor) operator — stage 8 (bitwise/int/bool-cast)")
 def test_bool_xor_chain_is_parity() -> None:
     sim = _model(_xor_chain)
     for bits in itertools.product((False, True), repeat=4):
@@ -98,9 +96,6 @@ class _StateWriter:
         return self._absorb(x)
 
 
-@pytest.mark.skip(
-    reason="FIR_PARITY_PENDING: boolean ^ (BitXor) operator in the inlined helper — stage 8 (bitwise/int/bool-cast)"
-)
 def test_inherited_method_call_even_and_odd() -> None:
     even = _model(_ParityUser(False).__call__)
     odd = _model(_ParityUser(True).__call__)

@@ -37,6 +37,7 @@ from holoso._hir import (
     FloatRelational,
     FloatSin,
     FloatToBool,
+    IntType,
     FloatType,
     Hir,
     InPort,
@@ -2188,7 +2189,6 @@ def test_not_of_a_float_is_lowered() -> None:
         assert float(model.run(x)[0]) == (1.0 if not x else 0.0)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: bool() cast of a runtime value — stage 8")
 def test_bool_cast_lowers_to_float_to_bool() -> None:
     def f(x: float, y: float) -> float:
         return 1.0 if bool(x) else y
@@ -2197,7 +2197,6 @@ def test_bool_cast_lowers_to_float_to_bool() -> None:
     assert _op_count(hir, FloatToBool) == 1
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: bool() cast of a runtime value — stage 8")
 def test_bool_of_a_boolean_is_identity() -> None:
     def f(x: float, a: float) -> float:
         return 1.0 if bool(x > a) else 0.0
@@ -2207,25 +2206,22 @@ def test_bool_of_a_boolean_is_identity() -> None:
     assert _op_count(hir, FloatRelational) == 1
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: bool() cast of a runtime value — stage 8")
 def test_bool_cast_rejects_aggregate_argument() -> None:
     def f(x: float, y: float) -> float:
         return 1.0 if bool((x, y)) else 0.0
 
-    with pytest.raises(UnsupportedConstruct, match="scalar"):
+    with pytest.raises(UnsupportedConstruct, match="runtime arguments"):
         lower(f)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: bool() cast of a runtime value — stage 8")
 def test_bool_cast_rejects_multiple_arguments() -> None:
     def f(x: float, y: float) -> float:
         return 1.0 if bool(x, y) else 0.0  # type: ignore[call-arg]
 
-    with pytest.raises(UnsupportedConstruct, match="single scalar"):
+    with pytest.raises(UnsupportedConstruct, match="runtime arguments"):
         lower(f)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: float() cast of a runtime value — stage 8")
 def test_float_cast_of_bool_lowers_to_bool_to_float() -> None:
     def f(x: float) -> float:
         return float(x > 0.0)
@@ -2235,7 +2231,6 @@ def test_float_cast_of_bool_lowers_to_bool_to_float() -> None:
     assert _op_count(hir, FloatRelational) == 1
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: float() cast of a runtime value — stage 8")
 def test_float_cast_of_float_is_identity() -> None:
     def f(x: float) -> float:
         return float(x) + 1.0
@@ -2245,7 +2240,6 @@ def test_float_cast_of_float_is_identity() -> None:
     assert _op_count(hir, FloatAdd) == 1
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: float() cast of a runtime value — stage 8")
 def test_cross_domain_cast_chain_lowers() -> None:
     def f(x: float, k: float) -> float:
         return float(x > 0.0) * k
@@ -2256,12 +2250,11 @@ def test_cross_domain_cast_chain_lowers() -> None:
     assert _op_count(hir, FloatMul) == 1
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: float() cast of a runtime value — stage 8")
 def test_float_cast_rejects_aggregate_argument() -> None:
     def f(x: float, y: float) -> float:
         return float((x, y))[0]  # type: ignore[no-any-return, index, arg-type]
 
-    with pytest.raises(UnsupportedConstruct, match="scalar"):
+    with pytest.raises(UnsupportedConstruct, match="runtime arguments"):
         lower(f)
 
 
@@ -2404,7 +2397,6 @@ def test_statically_false_while_with_a_boolean_condition_is_skipped() -> None:
         assert float(model.run(x)[0]) == x
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: bool() cast of a runtime value — stage 8")
 def test_reachability_folds_through_a_bool_cast_of_a_connective() -> None:
     # ``bool(X or True)`` carries the truthiness of ``X or True`` (= True), so the guard folds and the return is
     # allowed.
@@ -2413,7 +2405,7 @@ def test_reachability_folds_through_a_bool_cast_of_a_connective() -> None:
             return 1.0
         return x
 
-    assert len(lower(f).blocks) == 1
+    assert len(optimize(lower(f)).blocks) == 1  # the folded guard leaves a trivial jump chain that pruning merges
 
 
 def test_ternary_condition_with_equal_arms_folds() -> None:
@@ -2447,7 +2439,6 @@ def test_readonly_scan_stops_at_a_returning_folded_arm() -> None:
     assert lower(K().__call__).state_slots == []
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: float() cast of a runtime value — stage 8")
 def test_float_cast_connective_comparison_condition_folds_without_spurious_state() -> None:
     # Regression (review #2): ``float(X or True) > 0.5`` is the constant True; the guard must fold so the dead else-arm
     # write does NOT become a persistent-state slot (and output port).
@@ -2463,7 +2454,7 @@ def test_float_cast_connective_comparison_condition_folds_without_spurious_state
                 self.z = u  # unreachable
             return self.y
 
-    hir = lower(K().__call__)
+    hir = optimize(lower(K().__call__))
     assert [slot.name for slot in hir.state_slots] == ["y"]
     assert len(hir.blocks) == 1
 
@@ -3678,8 +3669,9 @@ def test_an_integer_the_float_datapath_cannot_hold_never_enters_it() -> None:
 
     reference = WrittenFromAModuleConstant()
     assert [reference.step(v) for v in (1.0, 101.0)] == [1.0, 102.0]  # the integer never equals 2**53 in Python
-    with pytest.raises(UnsupportedConstruct, match="not exactly representable"):
-        lower(WrittenFromAModuleConstant().step)
+    hir = lower(WrittenFromAModuleConstant().step)  # the inexact integer stays a typed integer, never a rounded float
+    selector = next(slot for slot in hir.state_slots if slot.name == "selector")
+    assert isinstance(hir.nodes[selector.live_out].type, IntType)
 
     class HugeReset:
         def __init__(self) -> None:
@@ -3690,8 +3682,9 @@ def test_an_integer_the_float_datapath_cannot_hold_never_enters_it() -> None:
                 self.counter = 0
             return x
 
-    with pytest.raises(UnsupportedConstruct, match="not exactly representable"):
-        lower(HugeReset().step)  # a located rejection, not a bare OverflowError
+    hir = lower(HugeReset().step)  # the huge integer is kept exact as an integer, not overflowed into a float
+    (counter,) = hir.state_slots
+    assert isinstance(hir.nodes[counter.live_out].type, IntType)
 
     class ReadOnlyInexact:
         # An inexact integer attribute in a float-add position is refused: the frontend will not silently round an

@@ -498,7 +498,6 @@ def _float_of_cond(x: float, y: float) -> float:
     return float(x > y) * 10.0 + 1.0
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime float(bool) cast — stage 8 runtime numeric cast")
 def test_float_of_bool_is_exactly_zero_or_one_feeding_arithmetic() -> None:
     sim = _sim(_float_of_cond, "float_cond")
     for x, y in [(3.0, 1.0), (1.0, 3.0), (2.0, 2.0)]:
@@ -513,7 +512,6 @@ def _cross_domain_chain(x: float, y: float) -> float:
     return float(x > y) * (x + y)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime float() cast — stage 8 runtime numeric cast")
 def test_compare_cast_multiply_cross_domain_chain() -> None:
     sim = _sim(_cross_domain_chain, "cross_chain")
     for x, y in [(3.0, 1.0), (1.0, 3.0), (2.0, 2.0), (-1.0, -2.0)]:
@@ -529,7 +527,6 @@ def _bool_of_float(x: float) -> bool:
     return bool(x)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime bool(float) cast — stage 8 runtime numeric cast")
 def test_bool_of_float_truthiness() -> None:
     sim = _sim(_bool_of_float, "bool_float")
     assert sim.run(FloatValue.from_float(FMT, 0.0))[0] is False

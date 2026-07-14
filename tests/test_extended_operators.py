@@ -95,7 +95,7 @@ def _round_ref(value: float, mode: int) -> int:
     return FloatValue.from_float(FMT, float(n)).bits
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: bool() cast of a runtime value — stage 8 (bitwise/int/bool-cast)")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: tuple return — stage 9 aggregate returns")
 def test_float_classification_intrinsics() -> None:
     def kernel(x: float) -> tuple[bool, bool, bool, bool, bool, bool]:
         return (
@@ -573,7 +573,6 @@ def test_log2_matches_model_and_native() -> None:
         assert _bits(sim.run(x)[0]) == _v(x).log2().bits, f"log2 sweep x={x}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime power exponent (2**x) — stage 8 (bitwise/int/bool-cast)")
 def test_pow_two_lowers_to_exp2() -> None:
     def k_int_base(x: float) -> float:
         return 2**x
@@ -934,9 +933,6 @@ def test_sign_values() -> None:
         assert float(sim.run(x)[0]) == want, f"sign({x})"
 
 
-@pytest.mark.skip(
-    reason="FIR_PARITY_PENDING: bool() cast of a runtime value inside the cbrt stub — stage 8 (bitwise/int/bool-cast)"
-)
 def test_cbrt_matches_reference() -> None:
     def kernel(x: float) -> float:
         return math.cbrt(x)
@@ -996,9 +992,7 @@ def test_exp_log_log10_match_references() -> None:
         assert float(out[2]) == pytest.approx(math.log10(x), rel=1e-5, abs=1e-6), f"log10({x})"
 
 
-@pytest.mark.skip(
-    reason="FIR_PARITY_PENDING: bool() cast of a runtime value inside the np.cbrt stub — stage 8 (bitwise/int/bool-cast)"
-)
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: tuple return — stage 9 aggregate returns")
 def test_composite_dispatch_numpy_spellings() -> None:
     def kernel(x: float) -> tuple[float, float, float, float]:
         return (np.cbrt(x), np.tan(x), np.arcsin(x), np.exp(x))

@@ -12,6 +12,8 @@ another:
      exact operator mnemonic, proving nothing integer silently reaches the backend.
 """
 
+from math import floor
+
 import pytest
 
 import holoso
@@ -255,3 +257,137 @@ def test_runtime_integer_rejection_is_reachable_through_public_synthesize() -> N
 
     with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(counter, _ops(), name="int_counter")
+
+
+# ----------------------------------- bitwise, shifts, and the boolean bank -----------------------------------
+
+
+def test_integer_bitwise_and_shift_operators_lower() -> None:
+    def kernel(a: int, b: int) -> int:
+        return ((a & b) | (a ^ b)) + (a << 2) + (a >> 1)
+
+    assert {"IntAnd", "IntOr", "IntXor", "IntShiftLeft", "IntShiftRight"} <= _op_names(_hir(kernel))
+
+
+def test_boolean_bitwise_stays_in_the_boolean_bank() -> None:
+    def kernel(a: bool, b: bool) -> bool:
+        return (a ^ b) & (a | b)
+
+    names = _op_names(_hir(kernel))
+    assert {"BoolXor", "BoolAnd", "BoolOr"} <= names
+    assert not any(name.startswith("Int") for name in names)  # booleans never leak into the integer bank
+
+
+def test_compile_time_negative_shift_count_is_rejected() -> None:
+    def kernel(a: int) -> int:
+        return a << -1  # Python raises; a compile-time-known negative count is a located refusal
+
+    with pytest.raises(UnsupportedConstruct, match="negative shift count"):
+        lower(kernel)
+
+
+def test_boolean_shift_and_mixed_int_bool_bitwise_are_rejected() -> None:
+    def bool_shift(a: bool) -> int:
+        return a << 2  # a boolean shift is not modelled; an explicit cast is required
+
+    def mixed(a: bool, n: int) -> int:
+        return a | n  # bool-as-int promotion is not modelled
+
+    for fn in (bool_shift, mixed):
+        with pytest.raises(UnsupportedConstruct, match="two integers"):
+            lower(fn)
+
+
+def test_a_huge_static_left_shift_does_not_hang_the_compiler() -> None:
+    def zero_shift() -> int:
+        return 0 << (10**9)  # folds to zero regardless of the count
+
+    def one_shift() -> int:
+        return 1 << (10**9)  # defers to a runtime shift rather than materializing an astronomical integer
+
+    assert _int_consts(_hir(zero_shift)) == [0]
+    assert "IntShiftLeft" in _op_names(_hir(one_shift))
+
+
+# ----------------------------------- conversion elisions -----------------------------------
+
+
+def test_float_of_int_truncation_elides_the_integer_round_trip() -> None:
+    def truncate(x: float) -> float:
+        return float(int(x))  # i2f(f2i(x)) canonicalizes to FloatTrunc(x); no integer node survives
+
+    # The integer round-trip is gone -- a pure float truncation remains, so no FloatToInt reaches MIR to reject.
+    assert _op_names(_hir(truncate)) == {"FloatTrunc"}
+
+
+def test_float_of_int_of_an_integer_valued_float_elides_entirely() -> None:
+    def via_floor(x: float) -> float:
+        return float(int(floor(x)))  # floor is already integral, so the integer round trip vanishes
+
+    names = _op_names(_hir(via_floor))
+    assert "FloatFloor" in names and "FloatToInt" not in names and "IntToFloat" not in names
+
+
+# ----------------------------------- runtime power to exp2 -----------------------------------
+
+
+def test_power_of_two_with_a_runtime_exponent_lowers_to_exp2() -> None:
+    def int_base(x: float) -> float:
+        return 2**x
+
+    def float_base(x: float) -> float:
+        return 2.0**x
+
+    for kernel in (int_base, float_base):
+        assert _op_names(_hir(kernel)) == {"FloatExp2"}
+
+
+def test_a_non_two_base_with_a_runtime_exponent_is_rejected() -> None:
+    def ten_base(x: float) -> float:
+        return 10**x
+
+    with pytest.raises(UnsupportedConstruct, match="runtime exponent"):
+        lower(ten_base)
+
+
+# ----------------------------------- integer truthiness and persistent state -----------------------------------
+
+
+def test_integer_truthiness_lowers_to_a_format_agnostic_int_to_bool() -> None:
+    # Regression: an integer in a truthiness position used to emit FloatToBool on an integer value and crash the
+    # builder; it now lowers to IntToBool, contained at the integer boundary.
+    def kernel(x: float) -> float:
+        return 1.0 if int(x) else 2.0
+
+    assert "IntToBool" in _op_names(_hir(kernel))
+
+
+def test_a_known_integer_stored_into_integer_state_stays_typed() -> None:
+    # Regression: a Known integer written to an integer state slot materialized as a float and mismatched the integer
+    # phi, crashing the builder; it now stays a typed integer.
+    class Counter:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def step(self, tick: bool) -> float:
+            if tick:
+                self.n = 1
+            return float(self.n)
+
+    hir = lower(Counter().step)  # emits without a phi-type crash
+    (slot,) = hir.state_slots
+    assert isinstance(hir.nodes[slot.live_out].type, IntType)
+
+
+def test_integer_state_counter_is_a_located_mir_rejection() -> None:
+    class Counter:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def step(self, tick: bool) -> float:
+            if tick:
+                self.n = self.n + 1
+            return float(self.n)
+
+    with pytest.raises(UnsupportedConstruct):
+        holoso.synthesize(Counter().step, _ops(), name="int_state_counter")

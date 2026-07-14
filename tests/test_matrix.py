@@ -397,7 +397,7 @@ def test_state_assignment_flavor_must_match_reset() -> None:
         lower(ListIntoArray(np.array([1.0, 2.0])).step)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: bitwise/modulo operators — stage 8/9")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: array modulo operator — stage 9 aggregate ops")
 def test_unsupported_operator_diagnostic_names_the_operator() -> None:
     # An unsupported operator must be named even when its operands are boolean (its own diagnostic wins over the
     # float-operand check), rather than being misreported as a boolean-operand error.

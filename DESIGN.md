@@ -249,9 +249,10 @@ folding a frozen attribute enjoys -- but never a wrong value. The opposite direc
 against, a write lowering reaches but the scan missed having nowhere to land. The duality is a wart, not a design: see
 DEFERRED.
 
-State lives in the float registers, so an integer reset the format cannot represent exactly is rejected rather than
-silently rounded: it would read back as a different number than the source compares against, and there is no integer
-type to fall back on yet -- see DEFERRED.
+State lives in the float registers by default, but an integer-typed leaf (a counter, a selector) keeps a typed
+integer slot with an exact integer reset -- never rounded. Such a leaf reaches the integer-backend boundary as a
+located rejection until that backend lands; an integer reset forced into a float position promotes explicitly and,
+if binary64 cannot hold it exactly, is rejected rather than silently rounded.
 
 Matrices/vectors are statically shaped and unrolled to scalar operations; arrays never exist as hardware aggregates,
 only as compile-time bookkeeping over scalar registers. That bookkeeping is a front-end value -- either a scalar wire or
@@ -450,12 +451,20 @@ binding-time environment over locals (shapes at least, values where cheap) so th
 and neither the trim nor the assertion is needed; short of that, folding could be confined to bindings both phases
 reconstruct. Either is a redesign of the scan, not a patch to it.
 
-Integer operands: typed int operands/constants/operators sharing the wide register bank when their width matches the
-build. Until then every integer enters the float datapath, so one that binary64 cannot represent exactly is rejected
-rather than silently rounded -- otherwise a stored integer reads back as a different number than the source compares
-against. The check is against binary64, not against the build's own float format: the front end does not know that
-format, and a narrow one rounds every constant, integer or not. An integer attribute in a narrow build can therefore
-still lose its exact value, which typed integers, not a wider check here, are what fix.
+Integers. HIR carries a typed integer vocabulary -- `IntType`/`IntConst` and signed operators (saturating
+add/sub/mul/neg/abs, floor-coupled `//`/`%`, dynamic shifts, bitwise, relational, int-select, and the
+int<->float/int<->bool conversions). All exact integer folding is the front end's (`MetaInt`, arbitrary precision);
+HIR performs no integer constant arithmetic, only the conversion folds and the identity/elision peepholes. Promotion
+into a float position is explicit: an `IntToFloat` sits on every integer edge that feeds a float operation, phi, select,
+state join, or return; `/` and int+float promote to float while `//`/`%` stay integer and floor-couple. Bitwise and
+shift operators are bit-true and require two integers (or two booleans for `&`/`|`/`^`, which stay in the boolean bank);
+a boolean shift or a mixed bool/int operand is rejected, as is a compile-time-known negative shift count, while a runtime
+negative count is the hardware's documented reverse-shift deviation. A base-two power with a runtime float exponent
+lowers to `exp2`. Two conversion round-trips canonicalize in HIR: `f2i(i2f(n)) -> n`, and `i2f(f2i(x)) -> FloatTrunc(x)`
+(collapsing to `x` when `x` is already integer-valued), which keeps a `float(int(x))` truncation inside the float
+datapath. The integer BACKEND (typed MIR views sharing the wide register bank) is a later milestone, so any integer
+node -- operator, constant, input, or state slot -- reaching MIR is a clean located "not yet lowerable" rejection. An
+integer forced into a float position that binary64 cannot represent exactly is rejected rather than silently rounded.
 
 ## MIR
 

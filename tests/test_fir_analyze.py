@@ -223,14 +223,14 @@ def test_member_call_expands_through_dunder_call() -> None:
 
 def test_expansion_origins_point_at_the_user_call_site() -> None:
     def failing_helper(v: float) -> float:
-        return v & 1  # type: ignore[operator]  # an unsupported operator inside the inlined callee
+        return v & 1  # type: ignore[operator]  # a bitwise operator on a float: rejected inside the inlined callee
 
     def kernel(x: float) -> float:
         return failing_helper(x)
 
     with pytest.raises(AnalysisRejection) as info:
         Analyzer(kernel).fixpoint()
-    assert "not supported" in str(info.value)
+    assert "requires integer operands" in str(info.value)
     assert any(frame.function.endswith("kernel") for frame in info.value.origin)  # re-attributed via origin stack
 
 
