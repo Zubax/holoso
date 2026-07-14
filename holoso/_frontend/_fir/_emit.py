@@ -451,11 +451,14 @@ class _Emitter:
             return value_of(binding)
 
         def as_float(binding: BindingId) -> int:
-            if fact_of(binding) == Residual(SemType.INT):
-                return self._builder.operation(IntToFloat(), [value_of(binding)])  # Python promotes int -> float
+            # Dispatch on the actual HIR type, not the analyzer fact: a value can be float-carried (a MixedNumeric, or a
+            # runtime integer already promoted at a state boundary) while its fact still reads integer.
             vid = value_of(binding)
-            if isinstance(self._type_of(vid), FloatType):
+            ty = self._type_of(vid)
+            if isinstance(ty, FloatType):
                 return vid
+            if isinstance(ty, IntType):
+                return self._builder.operation(IntToFloat(), [vid])  # Python promotes int -> float
             raise EmissionRejection("a boolean value reaches a float operation")
 
         def as_int(binding: BindingId) -> int:
@@ -590,16 +593,18 @@ class _Emitter:
                         then_type, else_type = self._type_of(then_vid), self._type_of(else_vid)
                         operator: Operator
                         if isinstance(then_type, BoolType) and isinstance(else_type, BoolType):
-                            operator, sem = BoolSelect(), SemType.BOOL
+                            operator = BoolSelect()
                         elif isinstance(then_type, IntType) and isinstance(else_type, IntType):
-                            operator, sem = IntSelect(), SemType.INT  # integer and/or: IntSelect, then the MIR refusal
+                            operator = IntSelect()  # integer and/or: IntSelect, then the MIR refusal
                         else:  # a mixed int/float select promotes the integer arm to float on its own edge, like a phi
                             if isinstance(then_type, IntType):
                                 then_vid = self._builder.operation(IntToFloat(), [then_vid])
                             if isinstance(else_type, IntType):
                                 else_vid = self._builder.operation(IntToFloat(), [else_vid])
-                            operator, sem = Select(), SemType.FLOAT
-                        env[Local(dst)] = Residual(sem)
+                            operator = Select()
+                        env[Local(dst)] = self._binding_facts()[
+                            dst
+                        ]  # keep the analyzer's fact (a MixedNumeric stays mixed)
                         define(dst, self._builder.operation(operator, [condition, then_vid, else_vid]))
             case BuildTuple(dst=dst, items=items) | BuildList(dst=dst, items=items):
                 from ._analyze import _pack_seq
@@ -654,20 +659,52 @@ class _Emitter:
                 elif id(op) in self._analyzer.conversion_calls():
                     define(dst, self._emit_conversion(fact_of(args[0]), fact, args[0], value_of, as_float, as_int))
                 elif id(op) in self._analyzer.intrinsic_calls():
-                    from .._lib import Intrinsic, resolve
+                    from .._lib import Intrinsic, IntrinsicResultRule, resolve
 
                     callee_fact = fact_of(callee)
                     assert isinstance(callee_fact, Known) and isinstance(callee_fact.value, ObjectRef)
                     match = resolve(callee_fact.value.obj)
                     assert isinstance(match, Intrinsic)
-                    result = self._builder.operation(match.operator, [as_float(arg) for arg in args])
-                    if match.returns_int:  # math.floor/ceil/trunc/round yield a typed integer (int(round(x)))
-                        result = self._builder.operation(FloatToInt(), [result])
+                    arg_vids = [value_of(arg) for arg in args]
+                    first_is_int = isinstance(self._type_of(arg_vids[0]), IntType)
+                    all_int = all(isinstance(self._type_of(vid), IntType) for vid in arg_vids)
+                    rule = match.result_rule
+                    if rule is IntrinsicResultRule.ALWAYS_INT and first_is_int:
+                        result = arg_vids[0]  # rounding an integer is the integer (identity)
+                    elif rule is IntrinsicResultRule.ALWAYS_INT:
+                        rounded = self._builder.operation(match.operator, [as_float(arg) for arg in args])
+                        result = self._builder.operation(FloatToInt(), [rounded])
+                    elif rule is IntrinsicResultRule.PRESERVE and first_is_int:
+                        result = self._integer_intrinsic(match.integer_implementation, arg_vids)
+                    elif rule in (IntrinsicResultRule.NUMPY_PROMOTE, IntrinsicResultRule.SELECT) and all_int:
+                        result = self._integer_intrinsic(match.integer_implementation, arg_vids)
+                    else:  # SIGNATURE, or a float/mixed operand: promote every operand and run the float operator
+                        result = self._builder.operation(match.operator, [as_float(arg) for arg in args])
                     define(dst, result)
                 else:
                     raise AssertionError(f"call {dst} left an unexpected residual value in the graph")
             case _:
                 raise AssertionError(f"operation {type(op).__name__} survived analysis into emission")
+
+    def _integer_intrinsic(self, implementation: object, vids: list[int]) -> int:
+        """
+        The integer-typed HIR for an integer-operand intrinsic (contained at MIR; no integer hardware lowers). min/max
+        use an inclusive comparison so the first operand wins a tie, matching Python's ``min``/``max``.
+        """
+        from .._lib import IntegerImplementation
+
+        match implementation:
+            case IntegerImplementation.IDENTITY:
+                return vids[0]
+            case IntegerImplementation.ABS:
+                return self._builder.operation(IntAbs(), [vids[0]])
+            case IntegerImplementation.MIN:
+                condition = self._builder.operation(IntRelational(RelationalOp.LE), [vids[0], vids[1]])
+                return self._builder.operation(IntSelect(), [condition, vids[0], vids[1]])
+            case IntegerImplementation.MAX:
+                condition = self._builder.operation(IntRelational(RelationalOp.GE), [vids[0], vids[1]])
+                return self._builder.operation(IntSelect(), [condition, vids[0], vids[1]])
+        raise AssertionError(f"no integer implementation for {implementation!r}")
 
     def _handle_of(self, binding: BindingId, fact_of: "FactOf", value_of: "ValueOf") -> _Handle:
         # A per-element handle for a FactSeq: nested layout, a Known scalar (materialize on use), or an HIR value.

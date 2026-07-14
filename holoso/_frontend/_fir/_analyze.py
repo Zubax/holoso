@@ -59,7 +59,7 @@ from ._ir import (
     UnitExit,
 )
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
-from ..._hir import BoolType, FloatAbs, FloatMax, FloatMin
+from ..._hir import BoolType
 from ._value import (
     MetaInt,
     StaticRecord,
@@ -148,10 +148,12 @@ class MixedNumeric:
     the float path stays float, while Holoso has one datapath. A genuine promotion -- ``float()``, ``/``, or arithmetic
     with a definite float operand -- makes every path float and resolves this to ``Residual(FLOAT)``. Integer arithmetic
     on it would round the integer path in the float datapath, so it is a located rejection (real integer support is the
-    integer wiring milestone). ``all_constant`` records whether every integer alternative is a compile-time constant.
+    integer wiring milestone). ``integer_alternatives`` retains the static integer values the value may take, so an
+    exact int/float comparison can require their target-format representability; ``None`` means at least one runtime
+    integer alternative exists (its value is not statically known), which a comparison rejects conservatively.
     """
 
-    all_constant: bool
+    integer_alternatives: "frozenset[MetaInt | NpInt] | None"
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +201,30 @@ def _numeric_sem(fact: "Fact") -> SemType | None:
             return None
 
 
+def _merge_int_alternatives(a: "Fact", b: "Fact") -> "frozenset[MetaInt | NpInt] | None":
+    """
+    The static integer alternatives of a value formed by merging two numeric facts: each Known integer contributes
+    its exact value, a runtime integer (Residual INT) or a mix that already contains one contributes ``None`` (an
+    unknown runtime alternative), and a float contributes nothing. ``None`` dominates the union.
+    """
+
+    def contribution(fact: "Fact") -> "frozenset[MetaInt | NpInt] | None":
+        match fact:
+            case Known(value=(MetaInt() | NpInt()) as value):
+                return frozenset({value})
+            case Residual(type=SemType.INT):
+                return None
+            case MixedNumeric(integer_alternatives=alternatives):
+                return alternatives
+            case _:
+                return frozenset()
+
+    left, right = contribution(a), contribution(b)
+    if left is None or right is None:
+        return None
+    return left | right
+
+
 def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
     if a is b:
         return a
@@ -223,14 +249,10 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
             joined = join_facts(x, y, origin)
             assert isinstance(joined, (Known, Residual, FactSeq, MixedNumeric))
             return MaybeUnbound(joined)
-        case (MixedNumeric() as m, other) | (other, MixedNumeric() as m):
-            if isinstance(other, MixedNumeric):
-                return MixedNumeric(m.all_constant and other.all_constant)
-            sem = _numeric_sem(other)
-            if sem is None:  # BOOL, an aggregate, or a non-numeric merges with a numeric mix: irreconcilable kinds
-                raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
-            runtime_int = sem is SemType.INT and isinstance(other, Residual)
-            return MixedNumeric(m.all_constant and not runtime_int)
+        case (MixedNumeric(), other) | (other, MixedNumeric()):
+            if not isinstance(other, MixedNumeric) and _numeric_sem(other) is None:
+                raise AnalysisRejection("values of irreconcilable kinds merge here", origin)  # bool/aggregate meets mix
+            return MixedNumeric(_merge_int_alternatives(a, b))
         case (Known(value=x), Known(value=y)):
             if same(x, y):
                 return a
@@ -245,22 +267,20 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
             if x_type is not None and x_type == y_type:
                 return Residual(x_type)
             if {x_type, y_type} <= {SemType.FLOAT, SemType.INT}:  # two constants: an int-or-float value, never rounded
-                return MixedNumeric(all_constant=True)
+                return MixedNumeric(_merge_int_alternatives(a, b))
             raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
         case (Known(value=x), Residual(type=t)) | (Residual(type=t), Known(value=x)):
             x_type = _residual_type(x)
             if x_type == t:
                 return Residual(t)
             if x_type is not None and {x_type, t} <= {SemType.FLOAT, SemType.INT}:
-                return MixedNumeric(
-                    all_constant=x_type is SemType.INT
-                )  # constant iff the integer side is the Known one
+                return MixedNumeric(_merge_int_alternatives(a, b))
             raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
         case (Residual(type=x_t), Residual(type=y_t)):
             if x_t == y_t:
                 return a
             if {x_t, y_t} <= {SemType.FLOAT, SemType.INT}:
-                return MixedNumeric(all_constant=False)  # a runtime integer merges with a float
+                return MixedNumeric(_merge_int_alternatives(a, b))  # a runtime integer merges with a float
             raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
         case (FactSeq() as x, FactSeq() as y) if len(x.items) == len(y.items) and x.is_list == y.is_list:
             return _pack_seq(tuple(join_facts(p, q, origin) for p, q in zip(x.items, y.items)), x.is_list)
@@ -1102,7 +1122,8 @@ class Analyzer:
     # ------------------------------------ call expansion ------------------------------------
 
     def _expand_call(self, unit: FunctionUnit, block: Block, index: int, call: PyCall, env: _Env) -> bool:
-        from .._lib import Intrinsic, Library, resolve
+        from .._lib import IntrinsicResultRule, Library, resolve
+        from .._lib import Intrinsic
 
         callee_fact = env.get(Local(call.callee))
         if not (isinstance(callee_fact, Known) and isinstance(callee_fact.value, ObjectRef)):
@@ -1137,25 +1158,42 @@ class Analyzer:
                 arity = match.operator.signature.arity
                 if len(call.args) != arity:
                     raise AnalysisRejection(f"intrinsic expects {arity} argument(s), got {len(call.args)}", call.origin)
-                # abs/min/max are int-polymorphic in Python: on an integer operand (runtime OR a Known integer that can
-                # be the min/max winner) they return an EXACT integer, so promoting to float here would let subsequent
-                # integer arithmetic round (min(2**24, x) + 1 + 1). There is no integer abs/min/max operator yet, so an
-                # integer operand is a located rejection, never a silent float promotion (cast an operand to float first).
-                if isinstance(match.operator, (FloatAbs, FloatMin, FloatMax)) and any(
-                    fact == Residual(SemType.INT)
-                    or (isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)))
-                    for fact in argument_facts
-                ):
-                    raise AnalysisRejection(
-                        f"an integer operand to {match.operator.mnemonic} is not yet lowerable; cast to float first",
-                        call.origin,
-                    )
-                sem = (
-                    SemType.INT
-                    if match.returns_int
-                    else SemType.BOOL if isinstance(match.operator.signature.result_type, BoolType) else SemType.FLOAT
-                )
-                env.set(Local(call.dst), Residual(sem))
+                # The result kind follows the spelling's declared rule (see the library registry): an integer-preserving
+                # spelling keeps an integer operand integer (contained at MIR, never rounded in the float datapath), a
+                # float-forcing spelling promotes it, and a builtin min/max mixing an integer with a float is an exact
+                # Python comparison, deferred, so it is a located rejection.
+                rule = match.result_rule
+                if rule is IntrinsicResultRule.ALWAYS_INT:
+                    result: Fact = Residual(SemType.INT)
+                elif rule is IntrinsicResultRule.SIGNATURE:
+                    signature_result = match.operator.signature.result_type
+                    result = Residual(SemType.BOOL if isinstance(signature_result, BoolType) else SemType.FLOAT)
+                else:
+                    kinds: list[SemType | None] = []  # None marks an int-or-float (MixedNumeric) operand
+                    for fact in argument_facts:
+                        if isinstance(fact, MixedNumeric):
+                            kinds.append(None)
+                            continue
+                        operand_sem = _numeric_sem(fact)
+                        if operand_sem is None:
+                            raise AnalysisRejection("a non-numeric operand reaches a numeric intrinsic", call.origin)
+                        kinds.append(operand_sem)
+                    all_int = all(kind is SemType.INT for kind in kinds)
+                    if rule is IntrinsicResultRule.PRESERVE:
+                        result = argument_facts[0] if kinds[0] is None else Residual(kinds[0])
+                    elif rule is IntrinsicResultRule.NUMPY_PROMOTE:
+                        result = Residual(SemType.INT) if all_int else Residual(SemType.FLOAT)
+                    elif all_int:
+                        result = Residual(SemType.INT)  # SELECT (builtin min/max) of two integers stays integer
+                    elif all(kind is SemType.FLOAT for kind in kinds):
+                        result = Residual(SemType.FLOAT)
+                    else:
+                        raise AnalysisRejection(
+                            f"{match.operator.mnemonic} of an integer and a float returns an int-or-float value; cast "
+                            "an operand to float first (real integer support is the integer wiring milestone)",
+                            call.origin,
+                        )
+                env.set(Local(call.dst), result)
                 self._intrinsic_calls.add(id(call))
                 return False
         if not isinstance(target, (types.FunctionType, types.MethodType)) and not (

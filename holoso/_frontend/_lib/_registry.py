@@ -3,6 +3,7 @@ The library registry: a single `resolve(callee)` dispatch boundary that maps a c
 says how to lower a call to it, or None when it is unregistered.
 """
 
+import enum
 import types
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -10,15 +11,35 @@ from dataclasses import dataclass
 from ..._hir import Operator
 
 
+class IntrinsicResultRule(enum.Enum):
+    """
+    How an intrinsic's result kind depends on its operand kinds -- declarative so the library registry stays free of
+    FIR analysis and target-format knowledge (the analyzer maps these to facts).
+    """
+
+    SIGNATURE = enum.auto()  # the operator's own result type; an integer operand promotes to float (float-forcing)
+    ALWAYS_INT = enum.auto()  # always a typed integer (math.floor/ceil/trunc, one-argument round)
+    PRESERVE = enum.auto()  # integer-in -> integer, float-in -> float, mixed-in -> mixed (abs, np.floor ...)
+    NUMPY_PROMOTE = enum.auto()  # all-integer -> integer, any definite float -> float (np.minimum/maximum)
+    SELECT = enum.auto()  # builtin min/max: the result kind is that of the selected operand (an exact Python compare)
+
+
+class IntegerImplementation(enum.Enum):
+    """The integer-typed HIR an integer-operand intrinsic produces (contained at MIR; no integer hardware here)."""
+
+    IDENTITY = enum.auto()  # the operand itself (np.floor/math.floor of an integer is the integer)
+    ABS = enum.auto()  # IntAbs
+    MIN = enum.auto()  # IntRelational(LE) + IntSelect
+    MAX = enum.auto()  # IntRelational(GE) + IntSelect
+
+
 @dataclass(frozen=True, slots=True)
 class Intrinsic:
-    """A call that lowers to a single HIR float operator, optionally wrapped to an integer result."""
+    """A call that lowers to a single HIR float operator, its result kind governed by ``result_rule``."""
 
     operator: Operator
-    # True for the int-returning spellings (``math.floor``/``ceil``/``trunc``, one-argument ``round``): the operator
-    # runs in float, then the result is a typed integer, so subsequent integer arithmetic stays exact rather than
-    # rounding in the float datapath. The numpy spellings (``np.floor`` ...) return float and keep this False.
-    returns_int: bool = False
+    result_rule: IntrinsicResultRule = IntrinsicResultRule.SIGNATURE
+    integer_implementation: IntegerImplementation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,14 +63,17 @@ def _register(match: Match, keys: Iterable[object]) -> None:
 
 
 def intrinsic[F: Callable[..., object]](
-    operator: Callable[[], Operator], *substituted: object, returns_int: bool = False
+    operator: Callable[[], Operator],
+    *substituted: object,
+    result_rule: IntrinsicResultRule = IntrinsicResultRule.SIGNATURE,
+    integer_implementation: IntegerImplementation | None = None,
 ) -> Callable[[F], F]:
     op = operator()  # instantiated once here, so the registry stores an operator instance rather than a live factory
 
     def register(fn: F) -> F:
         assert isinstance(fn, types.FunctionType)
         assert fn.__code__.co_argcount == op.signature.arity
-        _register(Intrinsic(op, returns_int), (fn, *substituted))
+        _register(Intrinsic(op, result_rule, integer_implementation), (fn, *substituted))
         return fn
 
     return register
