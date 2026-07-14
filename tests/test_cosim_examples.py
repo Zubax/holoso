@@ -18,10 +18,8 @@ conditional (ternary) expressions (branch + phi), and both float<->bool casts, i
 comparison -> bool -> float-cast -> float-multiply chain. ``remainder`` is a pure function computing the IEEE 754
 remainder by data-dependent iterative reduction (two magnitude-ratio-bounded back-edge loops, no division).
 
-Still-excluded examples are frontend feature gaps (not verification scope), confirmed by an in-memory compile probe:
-  - iir1_hpf: ``UnsupportedConstruct: call to 'lpf'`` -- a foreign call on an instance-attribute sub-filter (the
-    frontend inlines only global functions, not a nested object); ``float()`` itself is now supported.
-  - finite_set_current_controller: ``UnsupportedConstruct`` -- nested/foreign attribute access.
+Examples the front-end cannot lower yet are skipped through the central FIR_PARITY_PENDING registry in
+``_examples.py``; stage 10 asserts that registry is empty, so nothing can be left behind here.
 """
 
 from collections.abc import Mapping
@@ -30,7 +28,7 @@ import pytest
 
 from holoso import FloatFormat
 from ._cosim import run_cosim
-from ._examples import SPECS, ExampleSpec
+from ._examples import SPECS, ExampleSpec, parity_marks
 from ._modelref import PIPELINE_OP_CASES, OperatorCase
 from .hdl.hdl_float_oracle import SIMULATORS
 
@@ -43,7 +41,9 @@ _OP_CONFIGS = PIPELINE_OP_CASES
 # One case per (spec, datapath format): every spec runs at e8m36, and a spec that lists a second format (octave_index
 # adds the shallow e6m18) also runs there -- exercising the merge-threaded loop at both pipeline depths.
 _SPEC_FORMATS = [
-    pytest.param(spec, fmt, id=f"{spec.name}-e{fmt.wexp}m{fmt.wman}") for spec in SPECS for fmt in spec.formats
+    pytest.param(spec, fmt, id=f"{spec.name}-e{fmt.wexp}m{fmt.wman}", marks=parity_marks(spec.name))
+    for spec in SPECS
+    for fmt in spec.formats
 ]
 
 

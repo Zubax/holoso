@@ -692,6 +692,9 @@ FIR_PARITY_PENDING: dict[str, str] = {
     "ekf1_stateful": "builder: argument unpacking f(*args)",
     # equal_temperament's runtime 2**note lowers to exp2 now; the tuple return is its remaining blocker.
     "equal_temperament": "stage 9: aggregate/tuple returns",
+    # Off-catalogue examples (no SPECS entry) whose synth targets and eventual suites key off these names too.
+    "imu_frame_transform": "stage 9: jaxtyping ndarray ports + matmul over array parameters",
+    "finite_set_current_controller": "stage 9: records, reductions, array comparison, Index[N] gather",
 }
 
 

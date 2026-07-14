@@ -93,7 +93,9 @@ class SynthTarget:
     target_frequency_MHz: float
     ops: OpConfig
     name: str  # descriptive module/report label; unique per flow
-    example: str | None = None  # the SPECS name this exercises; None for an off-catalogue regression core
+    # The example name this exercises -- a SPECS name where one exists, or the bundled example's own name for an
+    # off-catalogue kernel (imu, polar). Keys the FIR_PARITY_PENDING registry; None for a pure regression core.
+    example: str | None = None
 
     @property
     def label(self) -> str:
@@ -454,6 +456,7 @@ TARGETS: list[SynthTarget] = [
             fmul_ilog2=FMulILog2OperatorFamily(F_e6m18, stage_decode=1),
         ),
         name="imu_frame_transform_e6m18",
+        example="imu_frame_transform",
     ),
     SynthTarget(
         kernel=_imu_frame_transform_kernel,
@@ -461,6 +464,7 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=100,
         ops=op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_input=1)),
         name="imu_frame_transform_e6m18",
+        example="imu_frame_transform",
     ),
     SynthTarget(
         kernel=_imu_frame_transform_kernel,
@@ -472,6 +476,7 @@ TARGETS: list[SynthTarget] = [
             fmul=FMulOperator(F_e6m18, stage_input=1),
         ),
         name="imu_frame_transform_e6m18",
+        example="imu_frame_transform",
     ),
     SynthTarget(
         kernel=_imu_frame_transform_kernel,
@@ -484,6 +489,7 @@ TARGETS: list[SynthTarget] = [
             ffma=FFmaOperator(F_e6m18, stage_product=1, stage_decode=1, stage_normalize=1, stage_pack=1),
         ),
         name="imu_frame_transform_e6m18_fma",
+        example="imu_frame_transform",
     ),
     SynthTarget(
         kernel=_imu_frame_transform_kernel,
@@ -496,6 +502,7 @@ TARGETS: list[SynthTarget] = [
             ffma=FFmaOperator(F_e6m18, stage_normalize=1, stage_pack=1),
         ),
         name="imu_frame_transform_e6m18_fma",
+        example="imu_frame_transform",
     ),
     SynthTarget(
         kernel=_imu_frame_transform_kernel,
@@ -507,6 +514,7 @@ TARGETS: list[SynthTarget] = [
             ffma=FFmaOperator(F_e6m18, stage_product=1, stage_normalize=1),
         ),
         name="imu_frame_transform_e6m18_fma",
+        example="imu_frame_transform",
     ),
     # polar: two off-catalogue 2-vector CORDIC kernels (no scalar-lane SPEC). to_polar fuses atan2+hypot into one
     # CORDIC; from_polar coalesces sin+cos.
@@ -516,6 +524,7 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=100,
         ops=op_config(F_e6m18, fatan2=_TO_POLAR_FATAN2),
         name="to_polar_e6m18",
+        example="polar_to",
     ),
     SynthTarget(
         kernel=_to_polar_kernel,
@@ -523,6 +532,7 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=100,
         ops=op_config(F_e6m18, fatan2=_TO_POLAR_FATAN2),
         name="to_polar_e6m18",
+        example="polar_to",
     ),
     SynthTarget(
         kernel=_to_polar_kernel,
@@ -530,6 +540,7 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=150,
         ops=op_config(F_e6m18, fatan2=_TO_POLAR_FATAN2),
         name="to_polar_e6m18",
+        example="polar_to",
     ),
     SynthTarget(
         kernel=_from_polar_kernel,
@@ -537,6 +548,7 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=100,
         ops=op_config(F_e6m18, fsincos=_FROM_POLAR_FSINCOS),
         name="from_polar_e6m18",
+        example="polar_from",
     ),
     SynthTarget(
         kernel=_from_polar_kernel,
@@ -544,6 +556,7 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=100,
         ops=op_config(F_e6m18, fsincos=_FROM_POLAR_FSINCOS),
         name="from_polar_e6m18",
+        example="polar_from",
     ),
     SynthTarget(
         kernel=_from_polar_kernel,
@@ -551,6 +564,7 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=150,
         ops=op_config(F_e6m18, fmul=FMulOperator(F_e6m18, stage_input=1), fsincos=_FROM_POLAR_FSINCOS),
         name="from_polar_e6m18",
+        example="polar_from",
     ),
     # kepler: fsincos inside a data-dependent Newton back-edge loop -- the only II>1 operator in a loop in the matrix.
     for_example("kepler", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18, fsincos=_KEPLER_FSINCOS)),
