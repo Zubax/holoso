@@ -681,6 +681,14 @@ class Analyzer:
                     isinstance(operand_fact, Residual) and operand_fact.type is SemType.BOOL
                 ):
                     raise AnalysisRejection("arithmetic on a bool requires an explicit conversion", op.origin)
+                if isinstance(operand_fact, MixedNumeric):
+                    # Negating/abs-ing an int-or-float value is integer arithmetic on the integer path (numpy int64
+                    # wraps); it cannot be done faithfully in the float datapath, so it is a located rejection.
+                    raise AnalysisRejection(
+                        "a unary operation on a value that is an integer on one path and a float on another is not yet "
+                        "lowerable; convert to float first",
+                        op.origin,
+                    )
                 if isinstance(operand_fact, Known):
                     folded = static_unop(un_op, operand_fact.value)
                     env.set(
@@ -736,6 +744,13 @@ class Analyzer:
                 env.set(Local(dst), result)
             case BuildTuple(dst=dst, items=items) | BuildList(dst=dst, items=items):
                 facts = tuple(env.get(Local(item)) for item in items)
+                if any(isinstance(fact, MixedNumeric) for fact in facts):
+                    # An aggregate element handle carries no mixed provenance, so extracting it would drop the
+                    # int-or-float value's comparison obligation. A located rejection until aggregates carry it.
+                    raise AnalysisRejection(
+                        "an int-or-float value inside a list or tuple is not yet lowerable; convert to float first",
+                        op.origin,
+                    )
                 result = _pack_seq(facts, is_list=isinstance(op, BuildList))
                 env.set(Local(dst), result)
             case PyLen(dst=dst, obj=obj):
@@ -1158,6 +1173,26 @@ class Analyzer:
                 arity = match.operator.signature.arity
                 if len(call.args) != arity:
                     raise AnalysisRejection(f"intrinsic expects {arity} argument(s), got {len(call.args)}", call.origin)
+                # An int-or-float operand promoted through an intrinsic would lose its integer path (unary/abs int64
+                # semantics, an all-integer numpy min/max, a comparison obligation), so it is a located rejection.
+                if any(isinstance(fact, MixedNumeric) for fact in argument_facts):
+                    raise AnalysisRejection(
+                        f"an int-or-float operand to {match.operator.mnemonic} is not yet lowerable; "
+                        "convert to float first",
+                        call.origin,
+                    )
+                signature_result = match.operator.signature.result_type
+                if isinstance(signature_result, BoolType) and any(
+                    fact == Residual(SemType.INT)
+                    or (isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)))
+                    for fact in argument_facts
+                ):
+                    # A classification (isfinite/isinf/...) treats an integer as the finite integer it is; Holoso would
+                    # promote it to the target format, where a large integer overflows to infinity and misclassifies.
+                    raise AnalysisRejection(
+                        f"an integer operand to {match.operator.mnemonic} is not yet lowerable; convert to float first",
+                        call.origin,
+                    )
                 # The result kind follows the spelling's declared rule (see the library registry): an integer-preserving
                 # spelling keeps an integer operand integer (contained at MIR, never rounded in the float datapath), a
                 # float-forcing spelling promotes it, and a builtin min/max mixing an integer with a float is an exact
@@ -1166,21 +1201,17 @@ class Analyzer:
                 if rule is IntrinsicResultRule.ALWAYS_INT:
                     result: Fact = Residual(SemType.INT)
                 elif rule is IntrinsicResultRule.SIGNATURE:
-                    signature_result = match.operator.signature.result_type
                     result = Residual(SemType.BOOL if isinstance(signature_result, BoolType) else SemType.FLOAT)
                 else:
-                    kinds: list[SemType | None] = []  # None marks an int-or-float (MixedNumeric) operand
+                    kinds = []
                     for fact in argument_facts:
-                        if isinstance(fact, MixedNumeric):
-                            kinds.append(None)
-                            continue
                         operand_sem = _numeric_sem(fact)
                         if operand_sem is None:
                             raise AnalysisRejection("a non-numeric operand reaches a numeric intrinsic", call.origin)
                         kinds.append(operand_sem)
                     all_int = all(kind is SemType.INT for kind in kinds)
                     if rule is IntrinsicResultRule.PRESERVE:
-                        result = argument_facts[0] if kinds[0] is None else Residual(kinds[0])
+                        result = Residual(kinds[0])
                     elif rule is IntrinsicResultRule.NUMPY_PROMOTE:
                         result = Residual(SemType.INT) if all_int else Residual(SemType.FLOAT)
                     elif all_int:

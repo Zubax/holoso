@@ -620,3 +620,29 @@ def test_min_max_of_a_known_integer_operand_stays_integer_and_is_contained() -> 
     assert IntSelect.__name__ in ops and "FloatMax" not in ops  # an integer select, not a rounding float max
     with pytest.raises(UnsupportedConstruct, match="not yet lowerable"):
         lower_to_mir(_hir(kernel), _ops())
+
+
+def test_a_mixed_value_leaks_are_contained_at_every_unhandled_use() -> None:
+    # Regression (review round 4): a MixedNumeric (int-or-float) value silently promoted to float through a unary
+    # operation, an intrinsic, or a list/tuple, dropping its integer path (and its exact-comparison obligation) and
+    # miscompiling. Each unhandled use is now a located rejection; only definite-float arithmetic, a comparison, and a
+    # merge/return still carry it.
+    def unary(flag: bool, x: float) -> float:
+        y = 2**18 + 1 if flag else x
+        return 1.0 if -y == float(2**18) else 0.0  # negating the int-or-float value
+
+    def numpy_min(flag: bool, x: float) -> float:
+        y = 2**18 if flag else x
+        return float(np.minimum(y, 2**18) + 1 + 1)  # np.minimum of a mixed operand and an integer
+
+    def in_abs(flag: bool, x: float) -> float:
+        y = 5 if flag else x
+        return 1.0 if abs(y) > 2.0 else 0.0  # abs of a mixed value (once crashed with a raw KeyError at MIR)
+
+    def in_list(flag: bool, x: float) -> float:
+        y = 2**18 + 1 if flag else x
+        return 1.0 if [y][0] == float(2**18) else 0.0  # a mixed value inside a list
+
+    for kernel in (unary, numpy_min, in_abs, in_list):
+        with pytest.raises(UnsupportedConstruct, match="not yet lowerable"):
+            lower(kernel)
