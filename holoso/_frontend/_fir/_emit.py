@@ -668,7 +668,10 @@ class _Emitter:
                     assert isinstance(callee_fact, Known) and isinstance(callee_fact.value, ObjectRef)
                     match = resolve(callee_fact.value.obj)
                     assert isinstance(match, Intrinsic)
-                    arg_vids = [value_of(arg) for arg in args]
+                    # arm_value, not value_of: a Known integer must materialize as an IntConst so its HIR type agrees
+                    # with the analyzer's INT classification -- value_of would float it via _const, misread it as float,
+                    # and emit a rounding float min/max/identity instead of the contained integer operation.
+                    arg_vids = [arm_value(arg) for arg in args]
                     first_is_int = isinstance(self._type_of(arg_vids[0]), IntType)
                     all_int = all(isinstance(self._type_of(vid), IntType) for vid in arg_vids)
                     rule = match.result_rule

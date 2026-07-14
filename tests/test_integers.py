@@ -42,6 +42,7 @@ from holoso._hir import (
     IntMul,
     IntNeg,
     IntRelational,
+    IntSelect,
     IntSub,
     IntToFloat,
     IntType,
@@ -605,3 +606,17 @@ def test_an_exact_int_float_comparison_requires_target_representability() -> Non
     with pytest.raises(UnsupportedConstruct, match="not exactly representable"):
         lower_to_mir(_hir(non_representable), _ops())
     lower_to_mir(_hir(representable), _ops())  # a small representable integer lowers cleanly
+
+
+def test_min_max_of_a_known_integer_operand_stays_integer_and_is_contained() -> None:
+    # Regression (review round 4): max(int(x), 2**18 + 1) typed the result Residual(INT), but the emitter read the Known
+    # integer constant as float (value_of floats it via _const) and emitted a rounding FloatMax that lowered and
+    # miscompiled (262144.0 vs CPython 262145.0). A Known-integer min/max operand must materialize as an IntConst
+    # (arm_value), keeping the operation an IntSelect that is contained at MIR.
+    def kernel(x: float) -> float:
+        return max(int(x), 2**18 + 1)
+
+    ops = _op_names(_hir(kernel))
+    assert IntSelect.__name__ in ops and "FloatMax" not in ops  # an integer select, not a rounding float max
+    with pytest.raises(UnsupportedConstruct, match="not yet lowerable"):
+        lower_to_mir(_hir(kernel), _ops())
