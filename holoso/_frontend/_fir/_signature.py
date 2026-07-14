@@ -122,9 +122,9 @@ def return_contract(hint: object) -> ReturnContract:
     if origin is tuple:
         if len(args) == 2 and args[1] is Ellipsis:
             return VariadicTupleReturn(return_contract(args[0]))
-        if args:
-            return TupleReturn(tuple(return_contract(arg) for arg in args))
-        raise ContractError("a tuple return annotation must be parameterized (e.g. tuple[float, bool])")
+        if args in ((), ((),)):  # ``tuple[()]``: the canonical empty-tuple annotation (a zero-output bundle)
+            return TupleReturn(())
+        return TupleReturn(tuple(return_contract(arg) for arg in args))
     if origin is list:
         if len(args) == 1:
             return ListReturn(return_contract(args[0]))
