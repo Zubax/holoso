@@ -5,11 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from holoso import SynthesisResult
-
 from .._detect import find_tool
-from .._ooc import build_ooc_wrapper
-from .._synth import CommandSpec, ResourceUse, SourceFile, SynthArtifact, SynthReport, assemble, run_logged
+from .._synth import CommandSpec, OocDesign, ResourceUse, SourceFile, SynthArtifact, SynthReport, run_logged
 from .._flow_id import FlowId
 from ._flow import Flow
 
@@ -35,11 +32,10 @@ class DiamondEcp5Flow(Flow):
             return False
         return (diamond.resolve().parent / "diamond_env").is_file() or find_tool("pnmainc") is not None
 
-    def prepare(self, result: SynthesisResult) -> SynthArtifact:
-        wrapper = build_ooc_wrapper(result)
-        top = wrapper.top
-        src = assemble(result, wrapper)
-        verilog_paths = [sf.path for sf in src if sf.path.suffix == ".v"]
+    def prepare(self, design: OocDesign) -> SynthArtifact:
+        top = design.top
+        src = design.files
+        verilog_paths = [source.path for source in src]
 
         lpf = SourceFile(Path(f"{top}.lpf"), _lpf(self.target_frequency_MHz))
         sty = SourceFile(Path(f"{top}.sty"), _strategy(self.target_frequency_MHz))
@@ -116,9 +112,8 @@ def _ldf(top: str, device: str, verilog_paths: list[Path]) -> str:
     ]
     for path in verilog_paths:
         rel = _xml_attr(path.as_posix())
-        is_top = path.stem == top
         lines.append(f'        <Source name="{rel}" type="Verilog" type_short="Verilog">')
-        lines.append(f'            <Options top_module="{_xml_attr(top)}"/>' if is_top else "            <Options/>")
+        lines.append("            <Options/>")
         lines.append("        </Source>")
     lines += [
         f'        <Source name="{top}.lpf" type="Logic Preference" type_short="LPF">',
@@ -196,6 +191,7 @@ def _parse(flow: DiamondEcp5Flow, directory: Path) -> SynthReport:
             _resource(r"Number of LUT4s:\s+([0-9]+) out of ([0-9]+)", mrp, "LUT4"),
             _resource(r"SLICE\s+([0-9]+)/([0-9]+)", par, "SLICE"),
             _resource(r"PIO \(prelim\)\s+([0-9]+)/([0-9]+)", par, "PIO"),
+            _resource(r"MULT18\s+([0-9]+)/([0-9]+)", par, "MULT18"),
         )
         if use is not None
     }

@@ -12,7 +12,7 @@ from ..._legal import output_header
 
 _logger = logging.getLogger(__name__)
 
-_TEMPLATE_FILE = "holoso_support_template.v"
+_TEMPLATE_FILES = ["holoso_int.v", "holoso_float.v"]
 _INLINE_FILE = "holoso_support_inline.vh"
 _MEGAFILE = "holoso_support.v"
 _SEPARATOR = "// " + "=" * 117
@@ -30,8 +30,11 @@ def _build_megafile() -> str:
     # Public modules sort before internal ones for readability of the assembled file.
     modules = sorted(zkf.get_rtl().items(), key=lambda rc: (rc[0].rsplit("/", 1)[-1].startswith("_"), rc[0]))
     assert modules, "no .v files in the ZKF RTL package"
-    template = resources.files(__package__).joinpath(_TEMPLATE_FILE).read_text(encoding="utf-8").strip()
-    blocks = [_megafile_header(), template]
+    package = resources.files(__package__)
+    blocks = [
+        _megafile_header(),
+        *(package.joinpath(name).read_text(encoding="utf-8").strip() for name in _TEMPLATE_FILES),
+    ]
     for rel, content in modules:
         blocks.append(f"{_SEPARATOR}\n// EMBEDDED FILE BEGIN: {rel}")
         blocks.append(content.strip())

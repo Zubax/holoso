@@ -1,11 +1,12 @@
 import re
+from pathlib import Path
 
 import pytest
 
 from holoso import synthesize, SynthesisResult, FloatFormat
 from holoso import FAddOperator, FCmpOperator, FDivOperator, FMulILog2OperatorFamily, FMulOperator, OpConfig
 
-from synth import SynthReport, build_ooc_wrapper
+from synth import OocDesign, SourceFile, SynthReport, build_compiler_ooc_design, build_ooc_wrapper
 from synth.flows import FlowId
 from synth.flows.diamond import DiamondEcp5Flow
 from synth.flows.vivado import VivadoArtix7Flow
@@ -41,6 +42,27 @@ WIDE: SynthesisResult = synthesize(wide, ops=OPS, name="wide")
 
 requires_diamond = pytest.mark.skipif(not DiamondEcp5Flow().available(), reason="Lattice Diamond not found")
 requires_vivado = pytest.mark.skipif(not VivadoArtix7Flow().available(), reason="Vivado not found")
+
+
+def _artifact_file(design: OocDesign, flow: YosysEcp5Flow | VivadoArtix7Flow, path: str) -> str:
+    artifact = flow.prepare(design)
+    return next(source.content for source in artifact.files if source.path == Path(path))
+
+
+def test_flow_scripts_quote_source_paths() -> None:
+    design = OocDesign("top", [SourceFile(Path("rtl dir/$unit[0].v"), "module top; endmodule\n")])
+    yosys = _artifact_file(design, YosysEcp5Flow(), "synth.ys")
+    vivado = _artifact_file(design, VivadoArtix7Flow(), "run_vivado.tcl")
+    assert 'read_verilog -I . "rtl dir/$unit[0].v"' in yosys
+    assert 'read_verilog [list "rtl dir/\\$unit\\[0\\].v"]' in vivado
+
+
+def test_ooc_design_snapshots_source_files() -> None:
+    source = SourceFile(Path("top.v"), "module top; endmodule\n")
+    files = [source]
+    design = OocDesign("top", files)
+    files.append(SourceFile(Path("late.v"), ""))
+    assert design.files == (source,)
 
 
 def _native_data_bits(result: SynthesisResult) -> int:
@@ -85,7 +107,7 @@ def _assert_sane(report: SynthReport, flow: FlowId) -> None:
 
 def test_yosys_ecp5_end_to_end() -> None:
     wrapper = build_ooc_wrapper(KERN)
-    report = YosysEcp5Flow(target_frequency_MHz=100.0).prepare(KERN).synthesize()
+    report = YosysEcp5Flow(target_frequency_MHz=100.0).prepare(build_compiler_ooc_design(KERN)).synthesize()
     _assert_sane(report, FlowId.YOSYS_ECP5)
     # Out of context: no IO pads, so the bounded primary IO is the only boundary.
     assert report.resources["TRELLIS_IO"].used == 0
@@ -96,14 +118,14 @@ def test_yosys_ecp5_end_to_end() -> None:
 
 def test_yosys_ecp5_wide_selectors_synthesize() -> None:
     # A kernel whose selectors are multi-bit must still elaborate and route.
-    report = YosysEcp5Flow(target_frequency_MHz=100.0).prepare(WIDE).synthesize()
+    report = YosysEcp5Flow(target_frequency_MHz=100.0).prepare(build_compiler_ooc_design(WIDE)).synthesize()
     _assert_sane(report, FlowId.YOSYS_ECP5)
     assert report.resources["TRELLIS_IO"].used == 0
 
 
 @requires_diamond
 def test_diamond_ecp5_end_to_end() -> None:
-    report = DiamondEcp5Flow(target_frequency_MHz=100.0).prepare(KERN).synthesize()
+    report = DiamondEcp5Flow(target_frequency_MHz=100.0).prepare(build_compiler_ooc_design(KERN)).synthesize()
     _assert_sane(report, FlowId.DIAMOND_ECP5)
     # The muxed wrapper bounds the pin count, so Diamond's PIO usage stays small and the design fits real pins.
     pio = report.resources.get("PIO")
@@ -112,7 +134,7 @@ def test_diamond_ecp5_end_to_end() -> None:
 
 @requires_vivado
 def test_vivado_end_to_end() -> None:
-    report = VivadoArtix7Flow(target_frequency_MHz=100.0).prepare(KERN).synthesize()
+    report = VivadoArtix7Flow(target_frequency_MHz=100.0).prepare(build_compiler_ooc_design(KERN)).synthesize()
     _assert_sane(report, FlowId.VIVADO_ARTIX7)
     assert report.resources["Slice LUTs"].used > 0
     assert report.resources["Slice Registers"].used > 0

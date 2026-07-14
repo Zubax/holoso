@@ -1,8 +1,6 @@
 from abc import ABC, abstractmethod
 
-from holoso import SynthesisResult
-
-from .._synth import SynthArtifact
+from .._synth import OocDesign, SynthArtifact
 
 
 class Flow(ABC):
@@ -10,4 +8,4 @@ class Flow(ABC):
     def available(self) -> bool: ...
 
     @abstractmethod
-    def prepare(self, result: SynthesisResult) -> SynthArtifact: ...
+    def prepare(self, design: OocDesign) -> SynthArtifact: ...

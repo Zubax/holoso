@@ -33,6 +33,7 @@ from holoso._frontend import lower  # noqa: E402
 from holoso._hir import optimize  # noqa: E402
 from holoso._lir import build  # noqa: E402
 from holoso._mir import lower as lower_to_mir  # noqa: E402
+from synth import build_compiler_ooc_design  # noqa: E402
 from synth.flows import make_flow  # noqa: E402
 from tests._synth_targets import TARGETS  # noqa: E402
 
@@ -71,7 +72,7 @@ def capture(out_path: str) -> None:
                 result = holoso.synthesize(target.kernel(), target.ops, name=target.name)
                 directory = REPO / "build" / "synth_compare" / target.label
                 shutil.rmtree(directory, ignore_errors=True)
-                report = flow.prepare(result).synthesize(directory)
+                report = flow.prepare(build_compiler_ooc_design(result)).synthesize(directory)
                 row["fmax_MHz"] = report.fmax_MHz
                 row["slack_ns"] = report.slack_ns
                 row["resources"] = {n: {"used": r.used, "available": r.available} for n, r in report.resources.items()}

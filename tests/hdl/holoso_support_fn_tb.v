@@ -4,6 +4,17 @@
 
 `default_nettype none
 
+module holoso_ashiftc_tb #(parameter W = 24) (
+    input  wire signed [W-1:0] x,
+    input  wire signed [W-1:0] shamt,
+    output wire signed [W-1:0] y
+);
+    localparam WEXP = 1;
+    localparam WMAN = W - WEXP;
+    `include "holoso_support_inline.vh"
+    assign y = holoso_ashiftc(x, shamt);
+endmodule
+
 module holoso_fisfinite_tb #(parameter WEXP = 6, parameter WMAN = 18) (
     input  wire [WEXP+WMAN-1:0] x,
     output wire                 y

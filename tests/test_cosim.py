@@ -38,6 +38,7 @@ from ._modelref import (
     overlap_dead_arm_spill_kernel,
     overlap_div_err_kernel,
     overlap_spill_kernel,
+    phi_swap_computed_loop,
 )
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, sources
 
@@ -742,3 +743,15 @@ def test_cosim_tan_pole_latches_no_error(sim: str) -> None:
         {"x": fmt.encode(0.5)},
     ]
     run_cosim(sim, kernel, fmt, "cs_tan_pole", vectors=vectors)
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_phi_swap_computed_arm(sim: str) -> None:
+    # The RTL leg of the computed-arm swap regression (see test_interpret): the DUT replays the same LIR as the model,
+    # so this pins the emitted install words against the bench's bit-exact model across multi-trip loop executions.
+    # Explicit vectors keep the while trip count small; the bench's own sweep would draw huge counts.
+    fmt = FloatFormat(6, 18)
+    vectors: list[Mapping[str, int]] = [
+        {"x": fmt.encode(x), "n": fmt.encode(n)} for x in (1.0, 2.0, -1.5) for n in (1.0, 2.0, 4.0)
+    ]
+    run_cosim(sim, phi_swap_computed_loop, fmt, "cs_phi_swap_computed", vectors=vectors)

@@ -425,6 +425,63 @@ def phi_swap_loop(x: float, n: float) -> float:
     return a * 2.0 + b
 
 
+def phi_swap_computed_loop(x: float, n: float) -> float:
+    """
+    The computed-arm variant of :func:`phi_swap_loop`: one cross-referencing back-edge arm is a value COMPUTED in the
+    body (``a + x``), not another phi. The pure swap cannot catch an install-placement (ordering) regression, because
+    both of its latch installs have phi sources and land on one placement PC, staying parallel however they are placed;
+    here the latch mixes a phi-sourced install with a computed-source install, whose placements are derived differently,
+    so it pins the LIR-level invariant that no tail install may fire after a sibling install has overwritten its source
+    register. The model and the RTL replay the same LIR, so the Python reference (not interp==model) is the oracle.
+    With integer-valued inputs every output is exact in the format.
+    """
+    a = 0.0
+    b = 1.0
+    i = n
+    while i > 0.0:
+        a, b = b, a + x
+        i = i - 1.0
+    return a * 2.0 + b
+
+
+def bool_phi_swap_computed_loop(x: bool, n: float) -> tuple[bool, bool]:
+    """
+    The boolean-bank twin of :func:`phi_swap_computed_loop`: the same cross-referencing loop-header phis with one
+    computed back-edge arm, carried in the 1-bit bank so the latch installs are ``BoolWrite``s rather than
+    ``FloatCopy``s. The two banks derive install placement through the same helpers but emit through separate paths,
+    so each needs its own pin.
+    """
+    a = False
+    b = True
+    i = n
+    while i > 0.0:
+        a, b = b, a or x
+        i = i - 1.0
+    return a, b
+
+
+def branchy_swap_mixed_arm_loop(x: float, d: float, n: float) -> tuple[float, float]:
+    """
+    A loop whose header phis mix arm kinds across a real in-body branch (the unspeculatable division keeps it a
+    branch): one diamond arm carries computed values, the other a phi-sourced pair. Once phi sources are resident, a
+    block's push classification narrows after its computed arm coalesces, and the next allocation round's coalescing
+    holds that arm TRANSIENTLY de-coalesced -- its install past the shortened boundary -- so this kernel pins that the
+    interference residence tolerates the transient (the failure mode is a loud residence assert at build time, not a
+    value divergence). The pin/latch regrowth backstops in the same fixpoint remain analytically motivated with no
+    known witness kernel.
+    """
+    a = 1.0
+    b = 2.0
+    i = n
+    while i > 0.0:
+        if x > 0.0:
+            a, b = a - 1.0, a / d
+        else:
+            a, b = -b, b + a
+        i = i - 1.0
+    return a, b
+
+
 def overlap_drained_passthrough_kernel(x: float, y: float, z: float) -> float:
     """
     A wide chain ``w`` computed in the overlapping entry block spills past the shrunk terminator into a then arm that
