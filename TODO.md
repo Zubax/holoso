@@ -46,17 +46,6 @@ inexact-int element of a module-level numpy array. Each reproduces at HEAD. The 
 surfaces re-expose the comparison variant but do not cause it. Fix: route every compile-time integer→float fold
 (`_static_float` and the ternary/attribute/ndarray-element paths) through the exactness check, closing the family.
 
-Two loop-carried variables that read each other silently miscompile. When a `while` body updates two carried
-variables in one step and one new value reads the other, the result is wrong with no diagnostic: `a, b = b, a + x`
-over three iterations returns 6.0 where Python gives 3.0, and it is already wrong at a single iteration (2.0 vs 1.0).
-A hand-rolled swap through a temporary (`t = b; b = a + x; a = t`) fails the same way, so it is not tuple-assignment
-specific; a lone accumulator (`a = a + x`) is correct. The front-end is sound -- `_loop_carried` reports both names
-and both header phis are built with the right mutually-recursive arms -- so the fault is downstream in how those phis
-are lowered, scheduled, and register-allocated: the two carried updates get ordered so one reads the other's
-already-updated value within the step. The numerical model and the MIR interpreter share the defect, so cosimulation
-cannot see it. This is the most serious of the four: an everyday construct, a silent wrong answer. Worth a dedicated
-look at loop-carried-phi scheduling.
-
 Closure free variables are not consulted, so a captured name resolves to a same-named module global (or to the
 builtin). A kernel reading a closure variable folds in a module-level global sharing its name (`x * gain` takes a
 module `gain`, not the freevar), and a captured rebinding of `range`/`len` is treated as the builtin (a freevar

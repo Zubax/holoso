@@ -9,7 +9,7 @@ from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule, schedule_ops
 from ._build_base import OverlapLayout
-from ._mir_facts import mir_operation, mir_rpo, succ_map
+from ._mir_facts import mir_operation, mir_rpo, pred_count, succ_map
 
 
 def _value_word_and_landing(mir: Mir, vid: ValueId, issue: int, fetch_lag: int) -> tuple[int, int, HardwareOperator]:
@@ -132,10 +132,7 @@ def schedule_with_overlap(
     landing (plus the tail install) and the carries are empty -- identical to an isolated per-block schedule.
     """
     succ = succ_map(mir)
-    pred_count: dict[int, int] = {block.id: 0 for block in mir.blocks}
-    for targets in succ.values():
-        for target in targets:
-            pred_count[target] += 1
+    preds = pred_count(mir)
     blocks_by_id = {block.id: block for block in mir.blocks}
     block_sched: dict[int, Schedule] = {}
     block_makespan: dict[int, int] = {}
@@ -163,7 +160,7 @@ def schedule_with_overlap(
         makespan = install_inclusive_makespan(sched.makespan, install_pushes_makespan)
         block_makespan[bid] = makespan
         targets = succ[bid]
-        overlaps = bool(targets) and not has_install and all(pred_count[target] == 1 for target in targets)
+        overlaps = bool(targets) and not has_install and all(preds[target] == 1 for target in targets)
         # The drained boundary is the latest cycle a value LANDS in this block's frame, taken per op -- a pooled result
         # and an inline result both write the array combinationally and land at the same bank-independent cycle. Three
         # landings are INVISIBLE to the op schedule and are added explicitly: (1) a phi tail install -- one whose source
@@ -173,8 +170,8 @@ def schedule_with_overlap(
         # boundary, paying neither the +1 step nor the later drain; (2) a NON-coalesced state slot's read-first boundary
         # copy lands at ``boundary_step(sched.makespan)`` -- its source is among the op landings, but the copy adds the
         # fetch-pipeline; ``has_state_copy`` flags whether the lone Ret block has one, decided by the coalescing
-        # fixpoint -- a coalesced slot writes its register in place and needs no copy, so the charge clears; (3) the
-        # entry's input loads land on cycle 1.
+        # fixpoint -- a coalesced slot writes its register in place and needs no copy, so the charge usually clears
+        # (the fixpoint may latch it back on); (3) the entry's input loads land on cycle 1.
         work_drain = max(
             (_value_word_and_landing(mir, vid, issue, fetch_lag)[1] for vid, issue in sched.issue_cycle.items()),
             default=0,

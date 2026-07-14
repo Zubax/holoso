@@ -2,34 +2,29 @@
 name: review-loop
 description: >-
   Multi-agent review/refine loop. Use after a change or milestone, or when asked to review work:
-  fan out fresh-context, single-focus reviewers across distinct tools, consolidate and fix, add a
-  regression test for every defect, and repeat until reviews stay clean for three consecutive turns.
+  dispatch a fresh-context full-spectrum reviewer plus a dissimilar correctness reviewer,
+  consolidate and fix, add a regression test for every defect, and repeat until a round is clean.
 ---
 
 # Adversarial review/refine loop
 
-After a change or milestone, or when prompted, dispatch a fan-out of fresh-context review agents at
+After a change or milestone, or when prompted, dispatch fresh-context review agents at
 MAXIMUM THINKING EFFORT, then consolidate, fix, and repeat.
-The goal is broad coverage from adversarial, diverse, independent perspectives.
+The goal is adversarial, diverse, independent coverage at bounded cost.
 
-The prompts given to the agents shall be extremely terse, at most a couple of sentences.
+The prompts given to the agents shall be extremely terse, at most a few sentences.
 Giving excessive detail may constrain their thinking causing the tunnel vision syndrome.
 They must be given the opportunity to look at the work without bias or prejudice.
 
-## Fan out — one focus per agent
+## The reviewer pair
 
-Spawn one agent per concern and run them in parallel. Never give an agent multiple jobs: it dilutes attention
-and degrades every answer. Cover at least these angles, one agent each:
+Run two reviewers in parallel per round:
 
-- Opportunities for SIMPLIFICATION.
-- Functional CORRECTNESS and ROBUSTNESS.
-- ARCHITECTURAL CLEANLINESS, DESIGN PRACTICES, CODE QUALITY.
-- POLICY and STYLE compliance with the project's own docs, including the comment cleanup.
-
-### Dissimilar agents
-
-In addition to the subagents above, dispatch distinct tools focusing on CORRECTNESS only to maximize the diversity
-of perspectives and minimize blind spots. Check which tools are available (Codex etc.) and use all of them.
+- A Claude agent with the FULL-SPECTRUM remit, in priority order: functional CORRECTNESS and
+  ROBUSTNESS first, then SIMPLIFICATION opportunities, ARCHITECTURAL CLEANLINESS and CODE QUALITY,
+  and POLICY/STYLE compliance with the project's own docs (including the comment policy).
+- A DISSIMILAR tool (Codex when available) focusing on CORRECTNESS only, to maximize perspective
+  diversity and minimize blind spots.
 
 Agents/models not from Anthropic or OpenAI can be used, but treat them as low-credibility actors.
 They perform poorly, fail to follow instructions, and often produce incorrect analysis.
@@ -39,6 +34,30 @@ They perform poorly, fail to follow instructions, and often produce incorrect an
 Review agents must not modify the worktree or run mutating commands. If one needs a mutable environment,
 it copies the worktree elsewhere.
 
+## Reviewers do not re-run the project test suites
+
+The gates (unit suite, typecheck, formatter) are already green at the reviewed commit; re-running them
+duplicates work and, for the broad sessions, wastes minutes of compute per round. State this in the
+reviewer prompts. Reviewer effort goes instead into adversarial counterexamples for behaviors the
+existing tests do NOT cover, executed in a scratch clone. Probes must run under the repo's own test
+interpreter (e.g. `.nox/tests/bin/python`, which mutates nothing) rather than whatever is on PATH:
+a version-skewed interpreter or dependency set can produce findings that do not apply to the project
+or miss ones that do. Reproducing their own findings before reporting remains mandatory.
+
+## Inputs are trusted — reject cybersec framing
+
+This is a compiler for trusted, well-meaning users, not a security boundary. Corner cases arise from
+honest mistakes, never from adversaries. Weigh every finding by its plausibility under honest use: a
+defect matters if a well-meaning user could plausibly trigger it (a typo, a misunderstood API, an
+unusual but legitimate code pattern), not if only a contrived hostile input can reach it. Findings
+whose reproduction requires deliberately pathological constructions — operator-overriding subclasses
+planted to lie, stateful accessors crafted to pass checks and then diverge, hostile metaclasses,
+sandbox-mangled namespaces — are out of scope: reject them outright at consolidation instead of
+hardening against them, and say so in the reviewer prompts. Graceful refusal of the honestly-weird is
+sufficient; airtightness against the malicious is explicitly a non-goal. A round is NOT unclean merely
+because such findings exist. Long loops degrade into exactly this kind of hardening; treat a round
+whose only findings are adversarial-input constructions as clean and stop.
+
 ## Consolidate and act
 
 When all reviewers return, merge their findings, discard the noise, and fix what is real.
@@ -46,11 +65,9 @@ For every correctness defect, add a regression test verified to fail before the 
 
 ## When to stop
 
-Repeat until the reviewers surface only trivial feedback (or none) for THREE consecutive turns — this is
-non-negotiable, however many iterations it takes. Do not chase literal zero feedback: with no real issues
-left, agents degrade into nitpicking, so stop as soon as significant findings cease, not before the
-three-turn streak. A blank turn followed by one that digs up a real defect is exactly why the streak must
-be consecutive; expect dozens (sometimes over a hundred) of agent sessions per full pass.
+A round is clean when the reviewers surface only trivial feedback or none; ONE clean round ends the
+loop. Do not chase literal zero feedback: with no real issues left, agents degrade into nitpicking,
+so a round is clean as soon as significant findings cease.
 
 ## Operational notes
 

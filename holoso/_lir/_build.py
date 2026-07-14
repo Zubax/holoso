@@ -3,6 +3,7 @@ Build a finished :class:`Lir` from MIR: the top-level orchestration that schedul
 both register banks (coalescing phi arms), constructs the per-block LIR, and assembles the final program.
 """
 
+import logging
 from dataclasses import replace
 
 from .._errors import UnsupportedConstruct
@@ -20,10 +21,10 @@ from .._mir import (
 from .._operators import PortConditioner
 from .._util import ValueId
 from ._ir import *
-from ._mir_facts import block_has_install, value_resident_at_entry
+from ._mir_facts import block_has_install, pred_count
 from ._portassign import assign_commutative_ports
 from ._schedule import resolve_pool
-from ._bankalloc import actual_install_blocks, layout_and_allocate
+from ._bankalloc import actual_install_blocks, install_source_commit, layout_and_allocate
 from ._build_base import Allocation, PooledConst
 from ._construct import (
     bool_operand,
@@ -37,6 +38,8 @@ from ._construct import (
     tapped_wide_lanes,
 )
 from ._layout import install_inclusive_makespan, layout_blocks
+
+_logger = logging.getLogger(__name__)
 
 
 def build(mir: Mir, module_name: str, fetch_stages: int) -> Lir:
@@ -143,6 +146,15 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int) -> Lir:
                     f"block {mir_block.id} branches on a phi that takes an arm from the same block; the install "
                     f"would overwrite the condition before the branch reads it"
                 )
+    # The phi-residency classification (``value_resident_at_entry``) rests on every phi-bearing block being
+    # multi-predecessor, which is what keeps overlap spills out of phi registers; a future pass emitting a phi into a
+    # single-predecessor block would silently void that argument (the sibling-install tripwire does not read-gate
+    # installs against in-flight landings), so the reliance is machine-checked here.
+    pred_edges = pred_count(mir)
+    for mir_block in mir.blocks:
+        assert (
+            not mir_block.phis or pred_edges[mir_block.id] >= 2
+        ), f"block {mir_block.id} carries phis with {pred_edges[mir_block.id]} predecessor edge(s)"
     pool = resolve_pool(mir.nodes)
     # Schedule every block in reverse-postorder (a block after its forward-edge predecessors) and lay out each block's
     # terminator offset, with cross-block software pipelining: a block whose successors are all single-predecessor
@@ -151,47 +163,81 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int) -> Lir:
     #
     # The install set is computed to a fixpoint. ``block_has_install`` marks a block install-bearing from the CFG shape
     # (any phi arm originates in it), but a block whose every arm COALESCES onto the merged register installs nothing,
-    # so that +1 drain (and overlap-ineligibility) is spurious. So: lay out and allocate with the conservative CFG set,
-    # recompute the install set from the ACTUAL coalesced copies, and re-run until it stops shrinking. Convergence is by
-    # monotonicity -- dropping a block's spurious drain frees registers one step earlier, which only enables more
-    # coalescing, so the install set is non-increasing over a finite block set and reaches a fixpoint (the assert guards
-    # the monotonicity; the loop's iteration bound is derived below). Determinism is preserved: the allocator is
-    # seed-fixed and the install set is rebuilt the same way each pass.
+    # so that +1 drain (and overlap-ineligibility) is spurious. So: lay out and allocate with the conservative CFG
+    # seed, recompute the classification from the ACTUAL coalesced copies, and re-run to a fixed point. The movement is
+    # TWO-SIDED: a classification mostly narrows (dropping a spurious drain), but the shortened boundary feeds a greedy
+    # coalescing that is not monotone in the interference, so a narrowed classification can have to grow back -- and
+    # every regrowth is pinned (see the loop body), so each block moves a bounded number of times and the composition
+    # with the inner per-bank ``coalesce_and_color`` fixpoint (its forbidden-merge set non-decreasing) terminates.
+    # Determinism is preserved: the allocator is seed-fixed and the classification is rebuilt the same way each pass.
     #
-    # This install fixpoint NESTS a second one: each ``layout_and_allocate`` round runs the per-bank phi-coalescing /
-    # coloring fixpoint in ``coalesce_and_color``. Both are bounded and monotone -- the install set non-increasing here,
-    # the inner forbidden-merge set non-decreasing there -- so the composition terminates in a bounded number of outer
-    # rounds (the loop bound below), each a bounded inner fixpoint. The coupling is one-way and cannot deadlock: a
-    # shrinking install set only relieves register pressure, enabling more coalescing, never forbidding a merge the
-    # inner round already made.
-    #
-    # The same fixpoint also sheds the state slot's read-first boundary-copy drain charge once the slot coalesces:
-    # ``has_state_copy`` starts conservative (a state slot needs a copy) and clears as coalescing removes it, monotone
-    # alongside the install set. It is a single bool: the MIR has one Ret, so the charge is op-wide on that block.
+    # The same fixpoint also drives the state slot's read-first boundary-copy drain charge: ``has_state_copy`` starts
+    # conservative (a state slot needs a copy), usually clears as coalescing removes the copy, and latches back on the
+    # regrowth channel noted in the loop. It is a single bool: the MIR has one Ret, so the charge is op-wide there.
     has_install_blocks = block_has_install(mir, float_mir, bool_mir)
     ret_block = mir.ret_block
     # Conservative seed for the state-copy fixpoint -- the pre-allocation form of ``_has_state_copy``: assume every
     # state slot needs a boundary copy.
     has_state_copy = bool(float_mir.state_slots or bool_mir.state_slots)
-    # Iteration bound. All three descending quantities only drop (monotonicity argument at the asserts below): the
-    # install set (<= len(blocks) removals as coalescing frees registers), the per-block push bit (<= len(blocks)
-    # narrowings), and the single-keyed state-copy charge (height 1). Worst case is their SUM plus a confirming round;
-    # the 2*len(blocks)+3 loop bound below leaves a safe margin, with the asserts and the else-clause as loud backstops.
-    for _ in range(2 * len(mir.blocks) + 3):
+    # Iteration bound. Every non-final round makes one of the bounded monotone moves per block -- a push-bit narrowing,
+    # an install-set key removal, or a pin (a pinned block never moves again), at most three over the run -- or moves
+    # the state-copy charge along its drop-then-latch chain (at most two moves). Worst case is their SUM plus a
+    # confirming round; the 3*len(blocks)+4 loop bound below leaves a safe margin, with the else-clause as the loud
+    # backstop.
+    seed_keys = frozenset(has_install_blocks)
+    pinned_push: set[int] = set()
+    state_copy_latched = False
+    for round_index in range(3 * len(mir.blocks) + 4):
         result = layout_and_allocate(mir, float_mir, bool_mir, pool, has_install_blocks, has_state_copy, fetch_lag)
-        actual = actual_install_blocks(result.alloc, float_mir, bool_mir, result.overlap.block_sched)
-        actual_state = _has_state_copy(float_mir, bool_mir, result.alloc, result.const_pool)
-        # The descent is monotone and the fixed point is sound. MONOTONE: a block leaves the install set only by
+        raw = actual_install_blocks(result.alloc, float_mir, bool_mir, result.overlap.block_sched)
+        # The two derivations of install-bearing -- the CFG-shape seed and the post-allocation copies -- must agree on
+        # the key universe: a block outside the seed can never install, so a wider ``raw`` means the derivations
+        # drifted, which must fail loudly rather than be absorbed as a silent permanent pin. On the FIRST round the
+        # bits must agree too: nothing has narrowed yet, so a push the conservative seed missed is the same drift,
+        # not legitimate regrowth.
+        assert raw.keys() <= seed_keys, "post-allocation installs appeared outside the CFG-shape seed"
+        assert round_index > 0 or all(
+            has_install_blocks[b] or not bit for b, bit in raw.items()
+        ), "a first-round push classification exceeded the conservative CFG-shape seed"
+        # A narrowed classification may have to GROW BACK: the shortened boundary feeds the next round's coalescing,
+        # whose greedy merge order is not monotone in the interference, so a computed arm that coalesced under the
+        # longer boundary can come back residual -- its install then needs the +1 drain the narrowing removed, and a
+        # whole dropped KEY can likewise resurface. Any regrowth is PINNED: a pinned block stays install-bearing with a
+        # forced +1 drain for the rest of the run, so the two-sided movement still converges (key removals and pins are
+        # each monotone, bounded by the block count). An intermediate allocation built on a stale narrower boundary is
+        # discarded by the re-run; the converged round has validated every surviving install against a boundary
+        # consistent with its own classification.
+        regrown = {b for b, bit in raw.items() if b not in has_install_blocks or (bit and not has_install_blocks[b])}
+        if regrown - pinned_push:
+            _logger.info("Install fixpoint round %d: pinning regrown block(s) %s", round_index, sorted(regrown))
+        pinned_push |= regrown
+        actual = raw | dict.fromkeys(pinned_push, True)
+        # The state-copy charge has its own regrowth channel (a final pin conflict can force a slot back out of
+        # coalescing onto a copy), so it is a one-way latch rather than a pure descent.
+        raw_state = _has_state_copy(float_mir, bool_mir, result.alloc, result.const_pool)
+        if raw_state and not has_state_copy:
+            if not state_copy_latched:
+                _logger.info("Install fixpoint round %d: latching the state-copy charge", round_index)
+            state_copy_latched = True
+        actual_state = raw_state or state_copy_latched
+        # The moves are monotone and the fixed point is sound. MONOTONE: a block leaves the install set only by
         # coalescing away its phi-arm install, but a phi arm makes its merge successor multi-predecessor, so such a
         # block can never satisfy ``overlaps`` and never spills -- before or after it leaves -- so no block becomes
-        # overlap-eligible across rounds, every schedule is round-invariant, and the push bit and install set only drop.
-        # SOUND: a converged classification (actual == has_install_blocks) is self-consistent, and ``landing <=
-        # term_offset`` then holds by the drain math (not the asserts), so the layout is correct even under -O. The
-        # asserts below pin the narrowing; a never-converging run -- unreachable -- falls to the ``else``, which RAISES.
-        assert actual.keys() <= has_install_blocks.keys(), "install fixpoint must not grow"
-        assert all(has_install_blocks[b] or not copy for b, copy in actual.items()), "install drain must not widen"
-        assert actual_state <= has_state_copy, "state-copy fixpoint must not grow"
+        # overlap-eligible across rounds and every schedule is round-invariant; keys only shrink except through the
+        # growing pin set, and the state latch has height one. SOUND: a converged classification
+        # (actual == has_install_blocks) is self-consistent, and ``landing <= term_offset`` then holds by the drain
+        # math, so the layout is correct even under -O; every widening is legitimized by the unconditional pin/latch
+        # merges above (an assert here would be tautological), and a never-converging run -- unreachable -- falls to
+        # the ``else``, which RAISES.
         if actual == has_install_blocks and actual_state == has_state_copy:
+            _logger.info(
+                "Install fixpoint converged after %d round(s): %d install-bearing block(s), %d pinned, "
+                "state copy %s",
+                round_index + 1,
+                len(actual),
+                len(pinned_push),
+                "charged" if actual_state else "elided",
+            )
             break
         has_install_blocks, has_state_copy = actual, actual_state
     else:
@@ -224,21 +270,21 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int) -> Lir:
             )
         ]
         work_makespan = sched.makespan
-        # ``resident`` records whether the source is available at block entry (a const, input, or state read) -- it
-        # needs no read-first sampling. The placement (``install_issue_cycle``) charges the +1 only when a COMPUTED
-        # source is the block's own last work; a resident or earlier-committing computed source pays none.
+        # A None commit from ``install_source_commit`` is a block-entry-resident source needing no read-first
+        # sampling. The placement (``install_issue_cycle``) charges the +1 only for a computed source committing at
+        # the makespan; a resident or earlier-committing computed source pays none.
         copies = []
         for c in alloc.copies.get(block.id, []):
             fsrc = operand_signed(float_mir, c.source, c.sign, alloc, const_pool)
-            resident = value_resident_at_entry(float_mir.nodes[c.source])
-            iss = install_issue_cycle(work_makespan, resident, sched.commit_or_makespan(c.source))
-            copies.append(FloatCopy(RegRef(c.dst), fsrc, iss, resident))
+            commit = install_source_commit(sched, float_mir.nodes[c.source], c.source)
+            copies.append(FloatCopy(RegRef(c.dst), fsrc, install_issue_cycle(work_makespan, commit), commit is None))
         bool_writes = []
         for w in alloc.bool_writes.get(block.id, []):
             bsrc = bool_operand(bool_mir, w.source, alloc, w.inversion)
-            resident = value_resident_at_entry(bool_mir.nodes[w.source])
-            iss = install_issue_cycle(work_makespan, resident, sched.commit_or_makespan(w.source))
-            bool_writes.append(BoolWrite(BoolRegRef(w.dst), bsrc, iss, resident))
+            commit = install_source_commit(sched, bool_mir.nodes[w.source], w.source)
+            bool_writes.append(
+                BoolWrite(BoolRegRef(w.dst), bsrc, install_issue_cycle(work_makespan, commit), commit is None)
+            )
         # The block makespan carries the install +1 only when some install lands past the work makespan (a computed
         # source that is the block's own last work); ``has_install_blocks`` maps each install-bearing block to that bit.
         block_makespan = install_inclusive_makespan(work_makespan, has_install_blocks.get(block.id, False))
@@ -257,10 +303,21 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int) -> Lir:
         # but a Ret wrap drops it -- a silently dead install. This is the vector-independent structural invariant that a
         # value cosim cannot see (a dead install that does not change outputs passes every value comparison).
         term_offset = overlap.block_term_offset[block.id]
-        install_landings = [c.landing(fetch_lag) for c in copies] + [w.landing(fetch_lag) for w in bool_writes]
+        installs: list[FloatCopy | BoolWrite] = [*copies, *bool_writes]
+        install_landings = [x.landing(fetch_lag) for x in installs]
         assert all(
             landing <= term_offset for landing in install_landings
         ), f"block {block.id}: a phi-arm install lands at {max(install_landings)} past the terminator {term_offset}"
+        # A tail install must read its source register strictly before a sibling install's write to that register
+        # lands (see ``value_resident_at_entry`` for why placement guarantees this): the structural tripwire for a
+        # placement regression, which the value cosim shares with the model and cannot see. Cross-bank pairs are inert
+        # (RegRef never equals BoolRegRef), so one check serves both banks.
+        for writer in installs:
+            for reader in installs:
+                if reader.source.source == writer.dst:
+                    assert reader.fire_step(fetch_lag) < writer.landing(
+                        fetch_lag
+                    ), f"block {block.id}: a tail install reads {writer.dst} after a sibling install's write lands"
         blocks.append(
             LirBlock(
                 block.id,

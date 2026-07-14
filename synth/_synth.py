@@ -1,16 +1,17 @@
 import os
+import re
 import shlex
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from holoso import SynthesisResult
 
 from ._flow_id import FlowId
-from ._ooc import OocWrapper
+from ._ooc import build_ooc_wrapper
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BUILD_ROOT = REPO_ROOT / "build" / "synth"
@@ -80,8 +81,27 @@ class SynthReport:
 
 @dataclass(frozen=True, slots=True)
 class SourceFile:
-    path: Path  # relative to the artifact directory
+    path: Path
     content: str
+
+    def __post_init__(self) -> None:
+        if self.path.is_absolute() or not self.path.parts or ".." in self.path.parts:
+            raise ValueError(f"source path must stay relative to the artifact directory: {self.path}")
+
+
+@dataclass(frozen=True, slots=True)
+class OocDesign:
+    top: str
+    files: Sequence[SourceFile]
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.top) is None:
+            raise ValueError(f"invalid OOC top name: {self.top!r}")
+        files = tuple(self.files)
+        _validate_unique_source_paths(files)
+        if not files or any(source.path.suffix != ".v" for source in files):
+            raise ValueError("OOC designs require at least one Verilog-2005 .v source file")
+        object.__setattr__(self, "files", files)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,14 +115,22 @@ class CommandSpec:
 class SynthArtifact:
     flow: FlowId
     top: str
-    files: list[SourceFile]
+    files: Sequence[SourceFile]
     commands: list[CommandSpec]
     runner: Callable[[Path], SynthReport]
 
+    def __post_init__(self) -> None:
+        files = tuple(self.files)
+        _validate_unique_source_paths(files)
+        object.__setattr__(self, "files", files)
+
     def write(self, directory: Path) -> None:
         directory.mkdir(parents=True, exist_ok=True)
+        root = directory.resolve()
         for source in self.files:
-            target = directory / source.path
+            target = (directory / source.path).resolve()
+            if not target.is_relative_to(root):
+                raise ValueError(f"source path escapes artifact directory: {source.path}")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(source.content, encoding="utf-8")
 
@@ -112,13 +140,21 @@ class SynthArtifact:
         return self.runner(target)
 
 
-def assemble(result: SynthesisResult, wrapper: OocWrapper) -> list[SourceFile]:
+def _validate_unique_source_paths(files: Sequence[SourceFile]) -> None:
+    paths = [source.path for source in files]
+    if len(paths) != len(set(paths)):
+        raise ValueError("OOC source paths must be unique")
+
+
+def build_compiler_ooc_design(result: SynthesisResult) -> OocDesign:
     """
     A generated module instantiates only support-library modules, all of which live inside the single bundled
     ``holoso_support.v``; nothing else is needed. Everything is bundled in memory so a recipe directory is
     self-contained.
     """
-    return [SourceFile(Path(name), content) for name, content in result.verilog_output.support_files.items()] + [
+    wrapper = build_ooc_wrapper(result)
+    files = [SourceFile(Path(name), content) for name, content in result.verilog_output.support_files.items()] + [
         SourceFile(Path(f"{result.module_name}.v"), result.verilog_output.verilog),
         SourceFile(Path(f"{wrapper.top}.v"), wrapper.verilog),
     ]
+    return OocDesign(top=wrapper.top, files=files)

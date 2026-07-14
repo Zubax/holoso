@@ -4,11 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from holoso import SynthesisResult
-
 from .._detect import find_tool, require_tool
-from .._ooc import build_ooc_wrapper
-from .._synth import CommandSpec, ResourceUse, SourceFile, SynthArtifact, SynthReport, assemble, run_logged
+from .._synth import CommandSpec, OocDesign, ResourceUse, SourceFile, SynthArtifact, SynthReport, run_logged
 from .._flow_id import FlowId
 from ._flow import Flow
 
@@ -33,11 +30,10 @@ class VivadoArtix7Flow(Flow):
     def available(self) -> bool:
         return find_tool("vivado") is not None
 
-    def prepare(self, result: SynthesisResult) -> SynthArtifact:
-        wrapper = build_ooc_wrapper(result)
-        top = wrapper.top
-        src = assemble(result, wrapper)
-        verilog_paths = [sf.path for sf in src if sf.path.suffix == ".v"]
+    def prepare(self, design: OocDesign) -> SynthArtifact:
+        top = design.top
+        src = design.files
+        verilog_paths = [source.path for source in src]
 
         period_ns = 1000.0 / self.target_frequency_MHz
         xdc = SourceFile(Path(_XDC), f"create_clock -name clk -period {period_ns:.4f} [get_ports clk]\n")
@@ -61,7 +57,7 @@ class VivadoArtix7Flow(Flow):
 
 
 def _tcl(top: str, part: str, verilog_paths: list[Path]) -> str:
-    read_list = " ".join(path.as_posix() for path in verilog_paths)
+    read_list = " ".join(_tcl_quote(path.as_posix()) for path in verilog_paths)
     return "\n".join(
         [
             f"read_verilog [list {read_list}]",
@@ -76,6 +72,13 @@ def _tcl(top: str, part: str, verilog_paths: list[Path]) -> str:
             "",
         ]
     )
+
+
+def _tcl_quote(value: str) -> str:
+    escaped = (
+        value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("[", "\\[").replace("]", "\\]")
+    )
+    return f'"{escaped}"'
 
 
 def _parse_utilization(text: str) -> dict[str, ResourceUse]:

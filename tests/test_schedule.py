@@ -84,6 +84,7 @@ from ._modelref import (
     PIPELINE_OP_CASES,
     SelectHold,
     branch_boundary_kernel,
+    build_model_and_interpreter,
     const_branch_kernel,
     default_ops,
     diamond_then_loop_kernel,
@@ -2694,3 +2695,80 @@ def _assert_two_firings_at_minimal_ii(lir: Lir, mnemonic: str) -> None:
     # Spacing must be EXACTLY the II: under-spacing drops a transaction, over-spacing means the scheduler failed to
     # pack the second issue at the re-accept boundary -- both are regressions.
     assert firings[1].issue_cycle - firings[0].issue_cycle == operator.initiation_interval
+
+
+def test_forced_install_regrowth_pins_and_stays_correct(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    White-box: no known kernel reaches the install fixpoint's pin backstop (regrowth is analytically motivated by the
+    non-monotone greedy coalescing, with no natural witness), so the first classification round is faked as fully
+    narrowed -- the real recomputation then reads as regrowth against it, driving the pin path -- and the converged
+    build must still match Python and the MIR interpreter. White-box is warranted because a black-box witness does
+    not exist; if one ever appears, it must replace this fake.
+    """
+    from holoso._lir import _build
+    from holoso._lir._bankalloc import actual_install_blocks as real_installs
+
+    def kernel(x: float, n: float) -> float:
+        a = 0.0
+        b = 1.0
+        i = n
+        while i > 0.0:
+            a, b = b, a + x * i  # the fadd is the block's last work, so the b-arm install genuinely pushes
+            i = i - 1.0
+        return a * 2.0 + b
+
+    calls = {"n": 0}
+
+    def fake_installs(*args: object) -> dict[int, bool]:
+        calls["n"] += 1
+        real = real_installs(*args)  # type: ignore[arg-type]
+        return {b: False for b in real} if calls["n"] == 1 else real
+
+    monkeypatch.setattr(_build, "actual_install_blocks", fake_installs)
+    fmt = FloatFormat(6, 18)
+    with caplog.at_level("INFO", logger="holoso._lir._build"):
+        model, interpreter = build_model_and_interpreter(kernel, default_ops(fmt), "forced_pin")
+    assert any("pinning regrown block" in r.message for r in caplog.records), "the faked narrowing did not pin"
+    for x in (1.0, -2.0):
+        for n in (1.0, 3.0):
+            vector = [FloatValue.from_float(fmt, x), FloatValue.from_float(fmt, n)]
+            model_out = model.run(*vector)
+            assert float(model_out[0]) == kernel(x, n), f"model != python at x={x} n={n}"
+            assert model_out == interpreter.run(*vector), f"interp != model at x={x} n={n}"
+
+
+def test_forced_state_copy_regrowth_latches_and_stays_correct(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The state-copy latch twin of the forced-pin test: a chained-copy kernel whose charge is faked away once."""
+    from holoso._lir import _build
+
+    class Delay2:
+        def __init__(self) -> None:
+            self.x0 = 0.0
+            self.x1 = 0.0
+
+        def __call__(self, x: float) -> float:
+            out = self.x1
+            self.x1 = self.x0
+            self.x0 = x
+            return out
+
+    real_state = _build._has_state_copy
+    calls = {"n": 0}
+
+    def fake_state(*args: object) -> bool:
+        calls["n"] += 1
+        return False if calls["n"] == 1 else real_state(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_build, "_has_state_copy", fake_state)
+    fmt = FloatFormat(8, 36)
+    with caplog.at_level("INFO", logger="holoso._lir._build"):
+        model, _interpreter = build_model_and_interpreter(Delay2().__call__, default_ops(fmt), "forced_latch")
+    assert any("latching the state-copy charge" in r.message for r in caplog.records), "the fake did not latch"
+    reference = Delay2()
+    for raw in (1.0, 2.0, 3.0, 4.0, 5.0):
+        x = fmt.decode(fmt.encode(raw))
+        assert float(model.run(x)[0]) == reference(x)

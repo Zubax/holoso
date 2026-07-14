@@ -24,7 +24,7 @@ from pathlib import Path
 
 from holoso import synthesize, FloatFormat, OpConfig
 
-from ._synth import BUILD_ROOT, SynthReport
+from ._synth import BUILD_ROOT, SynthReport, build_compiler_ooc_design
 from .flows import Flow, FlowId, make_flow
 
 
@@ -217,7 +217,7 @@ def _run_flow(
     try:
         result = synthesize(target, ops=ops, name=name)
         result.write(directory / "holoso_result")
-        return flow.prepare(result).synthesize(directory)
+        return flow.prepare(build_compiler_ooc_design(result)).synthesize(directory)
     except Exception as exc:  # one tool's failure must not stop the others
         return _Failure(type(flow).__name__, directory, str(exc))
 
