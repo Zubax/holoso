@@ -79,7 +79,7 @@ def test_report_renders_for_each_example(name: str) -> None:
     assert "class='live'" in html or "live'>" in html
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: signal_window uses runtime bool() cast — stage 8")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: signal_window returns a tuple — stage 9 aggregate returns")
 def test_report_reveals_boolean_operators_and_casts() -> None:
     # signal_window uses boolean connectives (and/or), a chained comparison, and both float<->bool casts -- all of
     # which the schedule must now render (operator legend colors and the per-op chips), not just comparisons.

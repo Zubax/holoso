@@ -1463,7 +1463,6 @@ def test_cfg_write_only_state_slot_is_reserved() -> None:
     assert float(model.run(3.0)[0]) == -6.0 and float(model.run(-2.0)[0]) == 6.0
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime float() cast — stage 8")
 def test_cfg_state_slot_coalesces_onto_its_register() -> None:
     # A control-flow kernel (the float(x>0) cast forces the CFG path) whose state live-out is an operator result that
     # lands after the live-in is fully read coalesces onto the slot register: the producing operator writes it directly,
@@ -2124,7 +2123,6 @@ def test_zero_regalloc_effort_bypasses_annealing(monkeypatch: pytest.MonkeyPatch
     build(_run(sharing_kernel), "sharing", fetch_stages=3)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime float() cast — stage 8")
 def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
     # Regression: a bool->float cast is an inline combinational op written into the array directly, so its WIDE result
     # lands at landing_cycle(commit) = commit + fetch_lag + READ_FIRST_EDGE -- the combinational landing. Landing it any
@@ -2158,7 +2156,7 @@ def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
                 assert read in lir.reg_liveness[operand.source]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime float() cast — stage 8")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: multi-tap tuple return — stage 9 aggregate returns")
 def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
     # Two DIFFERENT relations over the same operand pair tap two distinct output ports of one comparator activation,
     # so they fuse into a single firing: one instance issue, one operand read, two boolean writes -- the multi-output
@@ -2181,7 +2179,7 @@ def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
         assert below == float(a < b) and same == float(a == b), f"a={a} b={b}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime float() cast — stage 8")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: multi-tap tuple return — stage 9 aggregate returns")
 def test_same_port_taps_with_different_inversions_do_not_fuse() -> None:
     # ``a < b`` taps the lt flag plainly and ``a >= b`` taps the SAME flag inverted: one output-port lane writes once
     # per firing, so these must stay two firings, spaced by instance contention. Both values must still be correct.
@@ -2277,7 +2275,6 @@ def test_cross_block_reuse_bound_pins_the_drained_edge_boundary() -> None:
         build(_run(_add, _ops(_OverBoundAdd(FMT))), "over_bound", fetch_stages=3)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime float() cast — stage 8")
 def test_write_timeline_resolves_inline_wide_producers() -> None:
     # Regression (review): the write timeline recorded only pooled firings' wide writes, so a register written by an
     # inline bool->float cast and read by a float operator resolved to NO producer at all -- latest_producer_before
@@ -2300,8 +2297,8 @@ def test_write_timeline_resolves_inline_wide_producers() -> None:
     ), "the cast's wide write must appear in the timeline with its inline producer"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime float() cast — stage 8")
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: multi-tap tuple return — stage 9 aggregate returns")
 def test_commutative_comparator_swap_permutes_output_taps(config: OperatorCase) -> None:
     # The comparator is commutative under the gt/lt flag exchange. Two mirrored comparisons over one operand pair
     # otherwise read (a,b) and (b,a) -- two registers per read port; the port assignment orients one of them swapped,
@@ -2391,7 +2388,7 @@ def test_state_early_install_respects_a_select_reader(config: OperatorCase) -> N
         assert abs(got - want) <= 1e-2 * max(1.0, abs(want)), f"x={x} c={c}: {got} vs {want}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime float() cast — stage 8")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: multi-tap tuple return — stage 9 aggregate returns")
 def test_not_folds_into_every_sink_position() -> None:
     # A semantic NOT never materializes hardware: it becomes a free inversion conditioner at each consumer. The
     # kernel routes one comparison's negation into a logic operand, a bool output, and a bool->float cast; the LIR
@@ -2433,7 +2430,6 @@ def test_not_on_a_branch_condition_swaps_the_targets() -> None:
         assert abs(got - want) <= 1e-2 * max(1.0, abs(want))
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime float() cast — stage 8")
 def test_double_negation_cancels() -> None:
     def f(a: float, b: float) -> float:
         flag = not (not (a > b))
@@ -2448,7 +2444,7 @@ def test_double_negation_cancels() -> None:
     assert float(model.run(2.0, 1.0)[0]) == 1.0 and float(model.run(1.0, 2.0)[0]) == 0.0
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime float() cast — stage 8")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: multi-tap tuple return — stage 9 aggregate returns")
 def test_value_consumed_in_both_polarities_shares_one_producer() -> None:
     # ``x`` and ``not x`` share one comparator tap and one boolean register: the polarity lives on each consumer.
     def f(a: float, b: float) -> list[float]:
@@ -2485,8 +2481,8 @@ def test_bool_state_slot_carries_a_live_out_inversion() -> None:
         assert float(model.run(x)[0]) == reference.step(x)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime float() cast — stage 8")
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: multi-tap tuple return — stage 9 aggregate returns")
 def test_inverted_bool_phi_arm_installs_with_opposite_polarities(config: OperatorCase) -> None:
     # The headline M3 generalization end to end: a bool phi whose two arms reference the SAME base value under
     # opposite inversions (one arm rewrites the flag as its own negation). The two install copies must carry

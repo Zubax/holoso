@@ -81,6 +81,8 @@ _logger = logging.getLogger(__name__)
 _MAX_BLOCKS = 200_000
 _MAX_VISITS = 1_000_000
 
+_BITWISE_OPS = frozenset({BinOp.LSHIFT, BinOp.RSHIFT, BinOp.BITAND, BinOp.BITOR, BinOp.BITXOR})
+
 
 class AnalysisRejection(UnsupportedConstruct):
     """A located refusal discovered during analysis (dynamic structure, recursion, possibly-unbound reads...)."""
@@ -601,6 +603,8 @@ class Analyzer:
                     env.set(Local(dst), concat)
                 elif isinstance(lhs_fact, FactSeq) or isinstance(rhs_fact, FactSeq):
                     raise AnalysisRejection("arithmetic on an aggregate value", op.origin)
+                elif bin_op in _BITWISE_OPS:
+                    env.set(Local(dst), self._fold_bitwise(bin_op, lhs_fact, rhs_fact, op.origin))
                 else:
                     env.set(
                         Local(dst),
@@ -768,6 +772,34 @@ class Analyzer:
         if promotes_to_float or SemType.FLOAT in operand_types:
             return Residual(SemType.FLOAT)
         return Residual(SemType.INT)
+
+    def _fold_bitwise(self, bin_op: BinOp, lhs: Fact, rhs: Fact, origin: OriginStack) -> Fact:
+        # Bit-true operators. ``&``/``|``/``^`` on two booleans is a boolean (logical) result; every other admitted form
+        # is two integers. A float operand, a boolean shift, and mixed bool/int all refuse -- Python's bool-as-int
+        # promotion is not modelled in the datapath, so an explicit cast is required. A compile-time-known negative shift
+        # count refuses (Python raises); a runtime count is the hardware's documented reverse-shift deviation. A
+        # fully-static form folds Python-exact via ``static_binop``. Operand kinds are validated before any diagnostic.
+        is_shift = bin_op in (BinOp.LSHIFT, BinOp.RSHIFT)
+        ltype, rtype = self._operand_type(lhs, origin), self._operand_type(rhs, origin)
+        if SemType.FLOAT in (ltype, rtype):
+            raise AnalysisRejection(f"bitwise/shift operator {bin_op.value} requires integer operands", origin)
+        if is_shift and isinstance(rhs, Known) and isinstance(rhs.value, (MetaInt, NpInt)) and int(rhs.value.value) < 0:
+            raise AnalysisRejection(
+                f"a negative shift count ({int(rhs.value.value)}) is rejected at compile time", origin
+            )
+        if ltype is SemType.BOOL and rtype is SemType.BOOL and not is_shift:
+            result_type = SemType.BOOL  # & | ^ on two booleans stays in the boolean bank
+        elif ltype is SemType.INT and rtype is SemType.INT:
+            result_type = SemType.INT
+        else:
+            raise AnalysisRejection(
+                f"bitwise/shift operator {bin_op.value} requires two integers (or two booleans for & | ^)", origin
+            )
+        if isinstance(lhs, Known) and isinstance(rhs, Known):
+            folded = static_binop(bin_op, lhs.value, rhs.value)
+            if folded is not None:
+                return Known(folded)
+        return Residual(result_type)
 
     def _operand_type(self, fact: Fact, origin: OriginStack) -> SemType:
         match fact:
@@ -1036,6 +1068,19 @@ class Analyzer:
             # doctrine; its runtime-operand form was already routed to an HIR operation above.
             argument_facts = [env.get(Local(arg)) for arg in call.args]
             keyword_facts = [(keyword, env.get(Local(value))) for keyword, value in call.kwargs]
+            # ``bool()`` of a compile-time FLOAT constant must NOT fold on float64 truthiness: the datapath encodes the
+            # constant into the target format first, where a tiny nonzero magnitude underflows to zero (False). Only the
+            # format knows that, so the truth test defers to a runtime FloatToBool. Integer and boolean truth stay exact.
+            if (
+                target is bool
+                and not keyword_facts
+                and len(argument_facts) == 1
+                and isinstance(argument_facts[0], Known)
+                and isinstance(argument_facts[0].value, (StaticFloat, NpFloat))
+            ):
+                env.set(Local(call.dst), Residual(SemType.BOOL))
+                self._conversion_calls.add(id(call))
+                return False
             if not all(isinstance(fact, Known) for fact in argument_facts + [fact for _, fact in keyword_facts]):
                 name = getattr(target, "__name__", repr(target))
                 # ``float()``/``int()``/``bool()`` on a runtime scalar: a same-kind cast is the identity (a documented

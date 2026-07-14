@@ -446,6 +446,8 @@ class _LoweringContext:
                 raise UnsupportedConstruct(f"no MIR lowering rule for HIR constant type {type!r}")
             case InPort(type=type):
                 raise UnsupportedConstruct(f"no MIR lowering rule for HIR input type {type!r}")
+            case StateRead(type=type):
+                raise UnsupportedConstruct(f"no MIR lowering rule for HIR state type {type!r}")
             case Operation(operator=operator):
                 raise UnsupportedConstruct(f"no hardware lowering rule for HIR operator {operator.mnemonic!r}")
 

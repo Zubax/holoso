@@ -20,14 +20,17 @@ from ..._errors import UnsupportedConstruct
 from ..._util import RelationalOp
 from .._ast_support import port_name, state_port_name
 from ..._hir import (
+    BoolAnd,
     BoolConst,
     BoolNot,
+    BoolOr,
     BoolSelect,
     BoolToFloat,
     BoolType,
     FloatAdd,
     FloatConst,
     FloatDiv,
+    FloatExp2,
     FloatMul,
     FloatNeg,
     FloatRelational,
@@ -51,6 +54,7 @@ from ..._hir import (
     IntShiftLeft,
     IntShiftRight,
     IntSub,
+    IntConst,
     IntToBool,
     IntToFloat,
     IntType,
@@ -90,9 +94,13 @@ from ._ir import (
     UnitExit,
 )
 from ._opsem import BinOp, UnOp
-from ._value import MetaInt, NpInt, ObjectRef, SemType, StaticSeq, StaticValue, as_python
+from ._value import MetaInt, NpFloat, NpInt, ObjectRef, SemType, StaticFloat, StaticSeq, StaticValue, as_python
 
 _logger = logging.getLogger(__name__)
+
+# A literal power expands to |exponent|-1 chained multiplies; this bounds that expansion so ``x**(10**9)`` refuses
+# instead of hanging emission, while leaving any realistic exponent (a degree-N monomial) free to expand.
+_MAX_POWER_CHAIN = 1024
 
 type FactOf = Callable[[BindingId], Fact]
 type ValueOf = Callable[[BindingId], int]
@@ -374,13 +382,20 @@ class _Emitter:
     def _state_read(self, leaf: StateLeaf) -> int:
         if leaf not in self._state_reads:
             reset = self._leaf_reset(leaf)
-            self._state_reads[leaf] = self._builder.state_read(
-                self._slot_name(leaf), BoolType() if isinstance(reset, BoolConst) else FloatType()
+            slot_type: Type = (
+                BoolType()
+                if isinstance(reset, BoolConst)
+                else IntType() if isinstance(reset, IntConst) else FloatType()
             )
+            self._state_reads[leaf] = self._builder.state_read(self._slot_name(leaf), slot_type)
             self._state_order.append(leaf)
         return self._state_reads[leaf]
 
-    def _leaf_reset(self, leaf: StateLeaf) -> FloatConst | BoolConst:
+    def _leaf_is_int(self, leaf: StateLeaf) -> bool:
+        """An integer-typed persistent leaf: the analyzer carries a runtime integer across the initiation boundary."""
+        return self._analyzer.state_livein().get(leaf) == Residual(SemType.INT)
+
+    def _leaf_reset(self, leaf: StateLeaf) -> FloatConst | BoolConst | IntConst:
         import numpy as np
 
         current: object = leaf.component
@@ -388,6 +403,10 @@ class _Emitter:
             current = getattr(current, attribute)
         if isinstance(current, bool) or isinstance(current, np.bool_):
             return BoolConst(bool(current))
+        # An integer reset stays integer only when the analyzer typed the leaf as a runtime integer; an int literal
+        # seeding a float accumulator resets to 0.0 like any float, matching the leaf's promoted datapath type.
+        if isinstance(current, (int, np.integer)) and self._leaf_is_int(leaf):
+            return IntConst(int(current))
         if isinstance(current, (int, float, np.integer, np.floating)):
             return FloatConst(_exact_float(current))  # the same exactness guard as a datapath constant
         raise EmissionRejection(
@@ -593,7 +612,15 @@ class _Emitter:
                 leaf = StateLeaf(obj_fact.value.obj, (name,))
                 src_fact = fact_of(src)
                 env[leaf] = src_fact
-                self._write(fir_id, leaf, self._const(src_fact.value) if isinstance(src_fact, Known) else value_of(src))
+                if isinstance(src_fact, Known) and isinstance(src_fact.value, (MetaInt, NpInt)):
+                    stored = self._builder.int_const(
+                        int(src_fact.value.value)
+                    )  # a Known integer keeps an int leaf typed
+                elif isinstance(src_fact, Known):
+                    stored = self._const(src_fact.value)
+                else:
+                    stored = value_of(src)
+                self._write(fir_id, leaf, stored)
                 self._state_read(leaf)  # register the slot even if the entry live-in was never read
             case PyCall(dst=dst, callee=callee, args=args):
                 fact = self._binding_facts()[dst]
@@ -747,6 +774,18 @@ class _Emitter:
             env[Local(dst)] = result_fact
             self._write(fir_id, Local(dst), self._emit_int_binary(bin_op, as_int(lhs), as_int(rhs)))
             return
+        if result_fact == Residual(SemType.BOOL):  # &/|/^ on two booleans lowers to the boolean-bank operators
+            env[Local(dst)] = result_fact
+            operands = [value_of(lhs), value_of(rhs)]
+            match bin_op:
+                case BinOp.BITAND:
+                    result = self._builder.operation(BoolAnd(), operands)
+                case BinOp.BITOR:
+                    result = self._builder.operation(BoolOr(), operands)
+                case _:
+                    result = self._builder.operation(BoolXor(), operands)
+            self._write(fir_id, Local(dst), result)
+            return
         env[Local(dst)] = Residual(SemType.FLOAT)
         if bin_op is BinOp.POW:
             self._write(fir_id, Local(dst), self._emit_power(lhs, rhs, fact_of, as_float, op))
@@ -807,27 +846,51 @@ class _Emitter:
                 return self._builder.operation(IntDivFloor(), [left, right])
             case BinOp.MOD:
                 return self._builder.operation(IntMod(), [left, right])
+            case BinOp.LSHIFT:
+                return self._builder.operation(IntShiftLeft(), [left, right])
+            case BinOp.RSHIFT:
+                return self._builder.operation(IntShiftRight(), [left, right])
+            case BinOp.BITAND:
+                return self._builder.operation(IntAnd(), [left, right])
+            case BinOp.BITOR:
+                return self._builder.operation(IntOr(), [left, right])
+            case BinOp.BITXOR:
+                return self._builder.operation(IntXor(), [left, right])
             case _:
                 raise EmissionRejection(f"integer operator {bin_op.value!r} is not lowerable yet")
 
     def _emit_power(self, base: BindingId, exponent: BindingId, fact_of: "FactOf", as_float: "ValueOf", op: Op) -> int:
-        # A runtime base raised to a COMPILE-TIME integer exponent expands to a multiply chain (x**3 -> x*x*x); a
-        # negative exponent is the reciprocal of the chain, and x**0 is 1.0. A runtime exponent is unsupported.
+        # A runtime base raised to a COMPILE-TIME integer exponent expands to a multiply chain (x**3 -> x*x*x), bounded
+        # like the loop unroller so ``x ** 10**9`` refuses instead of hanging; a negative exponent is the reciprocal of
+        # the chain, and x**0 is 1.0.
         from ._value import MetaInt, NpInt
 
         exp_fact = fact_of(exponent)
-        if not (isinstance(exp_fact, Known) and isinstance(exp_fact.value, (MetaInt, NpInt))):
-            raise EmissionRejection("a power with a runtime exponent is not supported")
-        power = exp_fact.value.value
-        if power == 0:
-            return self._builder.float_const(1.0)
-        source = as_float(base)
-        chain = source
-        for _ in range(abs(power) - 1):
-            chain = self._builder.operation(FloatMul(), [chain, source])
-        if power < 0:
-            return self._builder.operation(FloatDiv(), [self._builder.float_const(1.0), chain])
-        return chain
+        if isinstance(exp_fact, Known) and isinstance(exp_fact.value, (MetaInt, NpInt)):
+            power = int(exp_fact.value.value)
+            if abs(power) > _MAX_POWER_CHAIN:
+                raise EmissionRejection(f"a compile-time power exponent of {power} is too large to expand")
+            if power == 0:
+                return self._builder.float_const(1.0)
+            source = as_float(base)
+            chain = source
+            for _ in range(abs(power) - 1):
+                chain = self._builder.operation(FloatMul(), [chain, source])
+            if power < 0:
+                return self._builder.operation(FloatDiv(), [self._builder.float_const(1.0), chain])
+            return chain
+        # A runtime exponent: only base two lowers, and only when the result is float. ``2.0**i``, ``2**xf`` and
+        # ``2.0**xf`` are float (-> exp2, the integer exponent promoting through as_float); ``2**i`` is int-or-float by
+        # the sign of i (no integer-power operator) and every non-two base grows unbounded, so both refuse.
+        base_fact = fact_of(base)
+        if isinstance(base_fact, Known) and isinstance(base_fact.value, (MetaInt, StaticFloat)):
+            base_is_float = isinstance(base_fact.value, StaticFloat)
+            exp_sem = self._fact_sem(exp_fact)
+            if as_python(base_fact.value) == 2 and (
+                exp_sem is SemType.FLOAT or (base_is_float and exp_sem is SemType.INT)
+            ):
+                return self._builder.operation(FloatExp2(), [as_float(exponent)])
+        raise EmissionRejection("a power with a runtime exponent is not supported")
 
     def _emit_unary(
         self,
@@ -880,8 +943,11 @@ class _Emitter:
 
     def _truth_value(self, operand: BindingId, fact: Fact, value_of: "ValueOf") -> int:
         vid = value_of(operand)
-        if isinstance(self._type_of(vid), BoolType):
+        vtype = self._type_of(vid)
+        if isinstance(vtype, BoolType):
             return vid
+        if isinstance(vtype, IntType):
+            return self._builder.operation(IntToBool(), [vid])  # int truthiness (rejects cleanly at MIR, never floats)
         return self._builder.operation(FloatToBool(), [vid])
 
     def _not(self, condition: int) -> int:

@@ -36,7 +36,7 @@ from ._modelref import default_ops
 # end of the static schedule across all blocks -- so it pins the full schedule even for data-dependent (branch/loop)
 # kernels. A representative cross-section of shapes: straight-line and deep arithmetic, clamp/select, stateful
 # filters, branchy logic, data-dependent loops, and a large kernel.
-# FIR_PARITY_PENDING: signal_window (stage 8 runtime bool cast), majority_voter/uart_rx/uart_tx (stage 8 bitwise
+# FIR_PARITY_PENDING: signal_window (stage 9 tuple return), majority_voter/uart_rx/uart_tx (stage 9 tuple return
 # XOR), cordic_sincos/ekf1_stateless (stage 9 aggregate returns) use features the new front-end does not lower yet,
 # so they are dropped from the freeze until their stage lands. The frozen values for the ten below are unchanged: the
 # new front-end schedules them identically to the old on every field (min II, last PC, blocks, registers, copies).

@@ -42,6 +42,11 @@ class BinOp(enum.Enum):
     MOD = "%"
     POW = "**"
     MATMUL = "@"
+    LSHIFT = "<<"
+    RSHIFT = ">>"
+    BITAND = "&"
+    BITOR = "|"
+    BITXOR = "^"
 
 
 class UnOp(enum.Enum):
@@ -60,6 +65,11 @@ _BINOP_FN: dict[BinOp, Callable[[object, object], object]] = {
     BinOp.MOD: operator.mod,
     BinOp.POW: operator.pow,
     BinOp.MATMUL: operator.matmul,
+    BinOp.LSHIFT: operator.lshift,
+    BinOp.RSHIFT: operator.rshift,
+    BinOp.BITAND: operator.and_,
+    BinOp.BITOR: operator.or_,
+    BinOp.BITXOR: operator.xor,
 }
 
 
@@ -106,6 +116,20 @@ def _pow_is_bounded(left: StaticValue, right: StaticValue) -> bool:
     return exponent <= 0 or max(left.value.bit_length(), 1) * exponent <= _MAX_FOLD_BITS
 
 
+def _shift_is_bounded(left: StaticValue, right: StaticValue) -> bool:
+    """
+    Pre-check before a left shift is computed, mirroring :func:`_pow_is_bounded` (``1 << 10**9`` would exhaust the
+    compiler before :func:`_renumber` bounds the width). Only a bigint (MetaInt) left operand grows without bound; a
+    fixed-width NpInt wraps under numpy semantics and is always safe, and ``0 << n`` is zero regardless of n. A negative
+    count is left to the evaluator, where it raises and defers -- the compile-time-negative rejection lives in the
+    analyzer.
+    """
+    if not isinstance(left, MetaInt) or not isinstance(right, (MetaInt, NpInt)) or left.value == 0:
+        return True
+    count = int(right.value)
+    return count < 0 or left.value.bit_length() + count <= _MAX_FOLD_BITS
+
+
 def static_binop(op: BinOp, left: StaticValue, right: StaticValue) -> StaticValue | None:
     """
     Numeric arithmetic on static scalars, under each operand's own provenance semantics (exact bigint, numpy scalar,
@@ -119,6 +143,8 @@ def static_binop(op: BinOp, left: StaticValue, right: StaticValue) -> StaticValu
     if _too_wide(left, right):
         return None
     if op is BinOp.POW and not _pow_is_bounded(left, right):
+        return None
+    if op is BinOp.LSHIFT and not _shift_is_bounded(left, right):
         return None
     result = _evaluate(lambda: _BINOP_FN[op](as_python(left), as_python(right)))
     return None if result is None else _renumber(result)

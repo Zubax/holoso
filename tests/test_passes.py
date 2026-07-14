@@ -436,7 +436,6 @@ def test_if_conversion_knob_zero_disables_the_pass(monkeypatch: pytest.MonkeyPat
     )
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: return float(flag) is a runtime float() cast — stage 8")
 def test_if_conversion_converts_a_boolean_phi_merge() -> None:
     # Bool-phi if-conversion: a diamond merging a boolean collapses to one block, the merge becoming a bool_select
     # (a float select is the wide dual). Both arms here are dynamic comparisons, so strength reduction keeps the mux.
@@ -453,7 +452,6 @@ def test_if_conversion_converts_a_boolean_phi_merge() -> None:
     assert not any(isinstance(n, Operation) and isinstance(n.operator, Select) for n in hir.nodes.values())
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: return float(flag) is a runtime float() cast — stage 8")
 def test_if_conversion_reduces_constant_armed_boolean_select() -> None:
     # The state-machine merge shape: arms are boolean constants, so the bool_select reduces to and/or/not via strength
     # reduction (no select node survives), exactly the schmitt/pfd collapse to a single straight-line block.
@@ -606,7 +604,6 @@ def test_speculatable_hir_operators_map_to_error_free_hardware() -> None:
     assert FDivOperator(FMT).error_ports and not HirFloatDiv.speculatable
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: if bool(a / b) is a runtime bool() cast — stage 8")
 def test_dead_diamond_frees_its_condition_cone() -> None:
     # Conversion turns control dependence into data dependence: when a diamond's merged results are entirely unused,
     # its condition cone becomes ordinary dead code -- INCLUDING an error-bearing division feeding only the

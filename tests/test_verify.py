@@ -60,7 +60,7 @@ FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: equal_temperament uses a runtime ** exponent — stage 8")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: equal_temperament returns a tuple — stage 9 aggregate returns")
 def test_equal_temperament_default_sweep_has_no_log2_sidebands() -> None:
     # The shipped self-test bench sweeps every input over cocotb's default (-4, 4) range (the _DEFAULT_RANGE template
     # constant in holoso/_backend/cocotb.py) and asserts err_pc == 0, so log2's argument must stay positive across it or
@@ -161,7 +161,7 @@ def test_model_matches_reference_small_kernels() -> None:
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime float()/bool() casts and a tuple return — stage 8/9")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: a tuple return — stage 9 aggregate returns")
 def test_model_matches_reference_dense_boolean_chain() -> None:
     # A boolean-dense chain at the tightest legal scheduling distance: comparisons -> logic (not/and) -> bool->float
     # cast -> float arithmetic -> float->bool cast. The boolean bank's latch-free read lets a logic op issue one cycle
@@ -1476,7 +1476,6 @@ def test_model_boolean_connectives_and_chained_and_ternary_are_exact() -> None:
         assert got == ref, f"x={x}: {got} != {ref}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: bool(x) is a runtime bool() cast — stage 8")
 def test_model_bool_cast_matches_float_nonzero() -> None:
     # bool(x) is the ZKF exponent-nonzero test: true iff the value is nonzero *after* encoding into the format (a
     # magnitude too small to represent rounds to zero, like any ZKF value), including for +0.0 and -0.0.
@@ -1490,7 +1489,7 @@ def test_model_bool_cast_matches_float_nonzero() -> None:
         assert got == ref, f"x={x}: {got} != {ref}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: float(x > 0.0) is a runtime float() cast, and a tuple return — stage 8/9")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: a tuple return — stage 9 aggregate returns")
 def test_model_cross_domain_cast_chain_is_exact() -> None:
     # Regression: a branch-free float->bool->float->float chain (float(x>0)*k) builds via the CFG path even with a
     # single block (it has combinational ops, no branch); the model must take the same path and be bit-exact.
@@ -1506,7 +1505,6 @@ def test_model_cross_domain_cast_chain_is_exact() -> None:
         assert got == ref, f"x={x}: {got} != {ref}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: bool() cast (incl. ZKF constant-underflow semantics) — stage 8")
 def test_model_bool_cast_of_underflowing_constant_is_false() -> None:
     # Regression (Codex): bool(c) of a compile-time constant is the ZKF exponent-nonzero test on the constant *encoded
     # into the format*, not a raw float64 ``c != 0.0``. In FMT(6,18) the tiny magnitude 2**-200 encodes to zero, so the
