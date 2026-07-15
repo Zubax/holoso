@@ -42,6 +42,14 @@ def verilog_digest(kernel: "Callable[..., object]", ops: holoso.OpConfig, name: 
     return hasher.hexdigest()
 
 
+def content_digest(*parts: str) -> str:
+    hasher = hashlib.sha256()
+    for part in parts:
+        hasher.update(part.encode())
+        hasher.update(b"\x00")
+    return hasher.hexdigest()
+
+
 def _row_path(row: str) -> Path:
     return _CACHE_DIR / (hashlib.sha256(row.encode()).hexdigest()[:32] + ".json")
 
