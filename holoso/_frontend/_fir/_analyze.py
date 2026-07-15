@@ -89,6 +89,7 @@ from ._opsem import BinOp, static_binop, static_compare, static_truth, static_un
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
 from ._value import (
     MetaInt,
+    NpBool,
     StaticRecord,
     NpFloat,
     NpInt,
@@ -158,9 +159,12 @@ class _PropertyRead:
 _UNBOUND = Unbound()
 
 
+_ARRAY_ATTRIBUTES = ("T", "shape", "ndim", "size", "real", "imag", "flatten")
+
+
 def _residual_type(value: StaticValue) -> SemType | None:
     match value:
-        case StaticBool():
+        case StaticBool() | NpBool():
             return SemType.BOOL
         case StaticFloat() | NpFloat():
             return SemType.FLOAT
@@ -674,7 +678,7 @@ class Analyzer:
                     )
             case PyUn(dst=dst, op=un_op, operand=operand):
                 operand_fact = env.get(Local(operand))
-                if (isinstance(operand_fact, Known) and isinstance(operand_fact.value, StaticBool)) or (
+                if (isinstance(operand_fact, Known) and isinstance(operand_fact.value, (StaticBool, NpBool))) or (
                     isinstance(operand_fact, Residual) and operand_fact.type is SemType.BOOL
                 ):
                     raise AnalysisRejection("arithmetic on a bool requires an explicit conversion", op.origin)
@@ -880,7 +884,7 @@ class Analyzer:
             folded = static_binop(bin_op, lhs.value, rhs.value)
             if folded is not None:
                 return Known(folded)
-            if isinstance(lhs.value, StaticBool) and isinstance(rhs.value, StaticBool):
+            if isinstance(lhs.value, (StaticBool, NpBool)) and isinstance(rhs.value, (StaticBool, NpBool)):
                 # static_binop covers only numerics; combine two Known booleans here so ``True & False`` folds to a
                 # Known bool and drives edge selection (a dead branch guarded by it is never analyzed).
                 a, b = lhs.value.value, rhs.value.value
@@ -942,13 +946,23 @@ class Analyzer:
                 raise AnalysisRejection(
                     "a 0-dimensional array cannot be indexed; convert it with float() instead", origin
                 )
-            if isinstance(index.value, StaticBool) and (
+            if isinstance(index.value, (StaticBool, NpBool)) and (
                 isinstance(obj.layout, ArrayLayout)
                 or (isinstance(obj.layout, StructuralLayout) and ContainerFlavor.ARRAY in obj.layout.flavors)
             ):
                 # numpy boolean indexing selects by mask (and prepends an axis for a scalar bool); Python's
                 # bool-as-int semantics apply only to tuples/lists, so guessing here would miscompile.
                 raise AnalysisRejection("a boolean index into an array is not supported; use an integer", origin)
+            if isinstance(index.value, NpBool):
+                # numpy 2 removed np.bool_.__index__, so Python itself refuses it as a sequence index; only the
+                # plain Python bool keeps bool-as-int indexing.
+                raise AnalysisRejection(
+                    "an np.bool_ subscript index is a TypeError in Python; use a plain bool", origin
+                )
+            if isinstance(index.value, StaticRecord):
+                # A record key would resolve through a user __index__ running on the reconstruction (an IntEnum
+                # field rebuilds as a plain int), whose semantics the compiler cannot vouch for.
+                raise AnalysisRejection("a record subscript index is not supported", origin)
             try:
                 position = operator.index(as_python(index.value))  # type: ignore[arg-type]  # np ints qualify
             except TypeError:
@@ -960,6 +974,8 @@ class Analyzer:
                         "slicing or multi-axis indexing of a runtime aggregate is not supported yet", origin
                     ) from None
                 return self._concrete_subscript(concrete, index, origin)
+            except Exception as error:  # a raising __index__ (an ObjectRef key's real object): locate, not leak
+                raise AnalysisRejection(f"subscript index fails here: {error}", origin) from None
             arity = outer_arity(obj.layout)
             if not -arity <= position < arity:
                 raise AnalysisRejection("sequence index out of range", origin)
@@ -984,11 +1000,19 @@ class Analyzer:
                 names = [field for field, _ in obj.layout.fields]
                 if name in names:
                     return obj.child(names.index(name))  # record field projection works on runtime leaves too
+                # A non-field attribute (a property, a method) would execute user code on the reconstruction,
+                # whose provenance the compiler cannot fully vouch for (an enum field rebuilds as its base value).
+                raise AnalysisRejection(f"record attribute '{name}' is not supported (only field access)", origin)
             if isinstance(obj.layout, ListLayout):
                 raise AnalysisRejection(
                     f"list method '{name}' is not supported (lists are immutable values here); rebind with + instead",
                     origin,
                 )
+            if isinstance(obj.layout, ArrayLayout) and name not in _ARRAY_ATTRIBUTES:
+                # The admitted array is a private C-contiguous SNAPSHOT: identity- and layout-dependent attributes
+                # (.base, .strides, .flags, .data) observe the snapshot, not the user's object, so only the
+                # value-determined navigation set folds.
+                raise AnalysisRejection(f"array attribute '{name}' is not supported", origin)
             concrete = materialize_static(obj)
             if concrete is None:
                 raise AnalysisRejection(f"attribute '{name}' of a runtime aggregate is not supported yet", origin)
@@ -1259,6 +1283,19 @@ class Analyzer:
             # doctrine; its runtime-operand form was already routed to an HIR operation above.
             argument_facts = [env.get(Local(arg)) for arg in call.args]
             keyword_facts = [(keyword, env.get(Local(value))) for keyword, value in call.kwargs]
+            if target is bool or target is len:
+                # These spellings reach the same user __bool__/__len__ the truth transfer refuses; without the
+                # guard the override would fold on the reconstruction (identity comparisons: an unhashable shadow
+                # must miss cleanly).
+                for fact in argument_facts:
+                    if (
+                        isinstance(fact, AggregateFact)
+                        and isinstance(fact.layout, RecordLayout)
+                        and _has_truth_override(fact.layout.klass)
+                    ):
+                        raise AnalysisRejection(
+                            "the truth of a record with a custom __bool__/__len__ is not supported", call.origin
+                        )
             concrete_args = [_concrete_fact(fact) for fact in argument_facts]
             concrete_kwargs = [(keyword, _concrete_fact(fact)) for keyword, fact in keyword_facts]
             if any(value is None for value in concrete_args) or any(v is None for _, v in concrete_kwargs):
@@ -1536,10 +1573,10 @@ def _concat_seqs(bin_op: BinOp, lhs: Fact, rhs: Fact) -> Fact | None:
     if bin_op is BinOp.MUL:
         seq, count = (lhs, rhs) if _seq_side(lhs) is not None else (rhs, lhs)
         lifted = _seq_side(seq)
-        # No StaticBool count: the tag conflates bool with np.bool_, and only the former is a valid multiplier
-        # (numpy 2 dropped __index__ from np.bool_), so accepting it would bless invalid Python. The count must
-        # also fit Python's ssize_t index range -- beyond it CPython raises OverflowError rather than clamping.
-        if lifted is not None and isinstance(count, Known) and isinstance(count.value, (MetaInt, NpInt)):
+        # A plain-bool count repeats 0/1 times exactly as Python; the np.bool_ spelling falls through to the
+        # arithmetic rejection (numpy 2 dropped its __index__, a Python TypeError). The count must fit Python's
+        # ssize_t index range -- beyond it CPython raises OverflowError rather than clamping.
+        if lifted is not None and isinstance(count, Known) and isinstance(count.value, (MetaInt, NpInt, StaticBool)):
             repetitions = int(count.value.value)
             if -(2**63) <= repetitions <= 1024:
                 children = tuple(lifted.child(i) for i in range(outer_arity(lifted.layout)))

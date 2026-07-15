@@ -21,6 +21,7 @@ from ._value import (
     MetaInt,
     NpFloat,
     NpInt,
+    NpBool,
     StaticBool,
     StaticFloat,
     StaticSeq,
@@ -172,9 +173,9 @@ def static_compare(relation: RelationalOp, left: StaticValue, right: StaticValue
     rejected at lowering, not here). The comparison runs on the domain's own objects, so those semantics apply by
     construction.
     """
-    if isinstance(left, StaticBool) != isinstance(right, StaticBool):
+    if isinstance(left, (StaticBool, NpBool)) != isinstance(right, (StaticBool, NpBool)):
         return None
-    if isinstance(left, StaticBool) and isinstance(right, StaticBool):
+    if isinstance(left, (StaticBool, NpBool)) and isinstance(right, (StaticBool, NpBool)):
         if relation not in (RelationalOp.EQ, RelationalOp.NE):
             return None
         equal = left.value == right.value
@@ -196,7 +197,7 @@ def static_compare(relation: RelationalOp, left: StaticValue, right: StaticValue
 def static_truth(value: StaticValue) -> bool | None:
     """Python truthiness for the value kinds whose truth is defined in the subset; None where it is not static."""
     match value:
-        case StaticBool(value=v):
+        case StaticBool(value=v) | NpBool(value=v):
             return v
         case MetaInt(value=v) | NpInt(value=v):
             return v != 0

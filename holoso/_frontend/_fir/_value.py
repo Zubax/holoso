@@ -35,6 +35,18 @@ class StaticBool:
 
 
 @dataclass(frozen=True, slots=True)
+class NpBool:
+    """
+    A numpy boolean, kept distinct from the Python bool exactly as NpInt/NpFloat keep their provenance: numpy 2
+    stripped np.bool_ of __index__, so a subscript or repeat count spelled np.True_ is a Python TypeError while the
+    plain True is legal, and a reconstruction must reproduce numpy's own arithmetic (np.True_ + np.True_ stays a
+    boolean, never 2).
+    """
+
+    value: bool
+
+
+@dataclass(frozen=True, slots=True)
 class MetaInt:
     """
     An exact arbitrary-precision Python integer: exact while static or integer-typed, rounding only at a typed
@@ -141,6 +153,7 @@ class ObjectRef:
 
 type StaticValue = (
     StaticBool
+    | NpBool
     | MetaInt
     | NpInt
     | StaticFloat
@@ -196,8 +209,10 @@ def _admit_uncached(
     # would leak foreign semantics into folds. Enum members are the sanctioned subclass exception (inputs are
     # trusted: an enum that redefines arithmetic is not an honest mistake worth modeling); they normalize to the
     # base type on admission.
-    if type(obj) is bool or type(obj) is np.bool_:
-        return StaticBool(bool(obj))
+    if type(obj) is bool:
+        return StaticBool(obj)
+    if type(obj) is np.bool_:
+        return NpBool(bool(obj))
     if type(obj) is np.int64:
         return NpInt(int(obj))
     if type(obj) is np.float64:
@@ -332,10 +347,8 @@ def _same(a: StaticValue, b: StaticValue, proven: set[tuple[int, int]]) -> bool:
 def as_python(value: StaticValue) -> object:
     """
     The plain Python object a static value denotes, for concrete evaluation through real Python/numpy. The scalar
-    provenance survives the round trip (an NpInt reconstitutes as np.int64), so evaluating with the host interpreter
-    applies exactly the semantics the variant encodes. The one exception is np.bool_, which admits as a plain
-    StaticBool and reconstitutes as Python bool; sound while no fold evaluates bool arithmetic (static_binop
-    refuses bools), so a consumer that changes that must first split the variant. A node shared within one value
+    provenance survives the round trip (an NpInt reconstitutes as np.int64, an NpBool as np.bool_), so evaluating
+    with the host interpreter applies exactly the semantics the variant encodes. A node shared within one value
     reconstructs once per call (linear cost on a DAG, aliasing preserved within the call).
     """
     return _as_python(value, {})
@@ -349,6 +362,8 @@ def _as_python(value: StaticValue, memo: dict[int, object]) -> object:
     match value:
         case StaticBool(value=v):
             result = v
+        case NpBool(value=v):
+            result = np.bool_(v)
         case MetaInt(value=v):
             result = v
         case NpInt(value=v):

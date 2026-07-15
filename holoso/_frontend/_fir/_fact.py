@@ -28,6 +28,7 @@ from ._value import (
     NpInt,
     SemType,
     StaticArray,
+    NpBool,
     StaticBool,
     StaticFloat,
     StaticRecord,
@@ -348,7 +349,7 @@ def materialize_static(fact: BoundFact) -> StaticValue | None:
 def _concrete_scalar(leaf: AtomicFact) -> object:
     assert isinstance(leaf, Known)
     match leaf.value:
-        case StaticBool(value=value):
+        case StaticBool(value=value) | NpBool(value=value):
             return value
         case MetaInt(value=value) | NpInt(value=value):
             return value

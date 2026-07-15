@@ -181,8 +181,15 @@ at the root (a read of one is a located rejection: Python may raise). Aggregate 
 keeping only flavor-independent behavior; ndarray dtypes promote int64 to float64), then join leaves positionally. An int/float join promotes the integer side to float, C-style (see Integers). Folding
 is Python-exact on Knowns; runtime-typed values never fold (width rule); a Known Bool always drives edge selection.
 Aggregate truth follows Python: tuples/lists fold by arity, arrays (and any join carrying the array flavor) reject
-as ambiguous, and a record is truthy per object semantics -- a class-defined __bool__/__len__ folds concretely on
-an all-Known record and rejects on a record with runtime fields. A 0-dimensional ndarray stays an array (its
+as ambiguous, and a record without a truth override is truthy per object semantics. A record bearing a
+class-dictionary __bool__/__len__ entry (``__bool__ = None`` included) is a rejection through every spelling
+(``if r``, ``bool(r)``, ``len(r)``), as is a record subscript index or a non-field record attribute: the user code
+would run on a reconstruction that is value-faithful but not type-faithful (an enum field rebuilds as its base
+value). Scalar numpy provenance is otherwise preserved end to end -- np.bool_ is a distinct variant from bool, so
+an np.bool_ subscript index or repeat count rejects exactly where numpy 2 raises TypeError while the plain-bool
+spellings keep Python's bool-as-int semantics. Array attribute navigation folds only the value-determined set
+(T, shape, ndim, size, real, imag, flatten); identity- and layout-dependent attributes (.base, .strides, .flags)
+observe the admitted snapshot, not the user's object, and reject. A 0-dimensional ndarray stays an array (its
 static type identity matters to folds); navigating it -- indexing, len(), iteration -- is a rejection, while
 concrete folds (float(z)) work through materialization.
 StaticFor unrolls by cloning the body per trip once the iterable is Known; calls expand on demand by grafting the

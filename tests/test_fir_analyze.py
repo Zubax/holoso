@@ -645,7 +645,7 @@ def test_record_method_calls_are_a_located_rejection() -> None:
         acc = Acc()
         return acc.bumped(x)
 
-    with pytest.raises(AnalysisRejection, match="record value"):
+    with pytest.raises(AnalysisRejection, match="record attribute"):
         Analyzer(kernel).fixpoint()
 
 

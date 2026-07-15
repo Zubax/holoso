@@ -4605,22 +4605,24 @@ def test_concretely_folded_aggregate_subscripts_need_no_cells() -> None:
 
 
 def test_sequence_repeat_counts_follow_python() -> None:
-    # Review rounds 6+7: a negative count yields the empty sequence, exactly as Python. Bool counts were briefly
-    # accepted and then withdrawn: the StaticBool tag conflates bool with np.bool_ (which numpy 2 stripped of
-    # __index__, a Python TypeError), so accepting either would bless invalid Python -- both spellings reject.
-    # A count beyond the ssize_t index range (Python: OverflowError) rejects rather than clamping.
+    # Review rounds 6-8: a negative count yields the empty sequence and a plain-bool count repeats 0/1 times,
+    # exactly as Python -- sound since the NpBool split keeps np.bool_ provenance, so the np spelling (which
+    # numpy 2 stripped of __index__, a Python TypeError) rejects instead of miscompiling. A count beyond the
+    # ssize_t index range (Python: OverflowError) rejects rather than clamping.
     def repeat_negative(x: float) -> float:
         rest = [x] * -1
         return x + float(len(rest))
 
-    model = holoso.synthesize(repeat_negative, default_ops(FloatFormat(11, 52)), name="rep_neg").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == 3.0 == repeat_negative(3.0)
-
-    numpy_true = np.bool_(True)
-
     def repeat_python_bool(x: float) -> float:
         pair = (x,) * True
         return pair[0]
+
+    fmt = FloatFormat(11, 52)
+    for kernel in (repeat_negative, repeat_python_bool):
+        model = holoso.synthesize(kernel, default_ops(fmt), name=kernel.__name__).numerical_model
+        assert float(model.elaborate().run(3.0)[0]) == 3.0 == kernel(3.0)
+
+    numpy_true = np.bool_(True)
 
     def repeat_numpy_bool(x: float) -> float:
         pair = (x,) * numpy_true  # type: ignore[operator]  # numpy 2: TypeError, np.bool_ has no __index__
@@ -4630,7 +4632,7 @@ def test_sequence_repeat_counts_follow_python() -> None:
         rest = (x,) * -(1 << 100)
         return x + float(len(rest))
 
-    for kernel in (repeat_python_bool, repeat_numpy_bool, repeat_beyond_index_range):
+    for kernel in (repeat_numpy_bool, repeat_beyond_index_range):
         with pytest.raises(UnsupportedConstruct, match="arithmetic on an aggregate value"):
             lower(kernel)
 
@@ -4687,3 +4689,150 @@ def test_an_index_able_aggregate_key_projects_like_a_known_integer() -> None:
 
     model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="idx_agg").numerical_model
     assert float(model.elaborate().run(3.0)[0]) == 12.0 == kernel(3.0)
+
+
+# ---------------------------------------- spine review round 8 ----------------------------------------
+
+
+def test_numpy_bool_provenance_survives_admission() -> None:
+    # Review round 8: np.bool_ admitted as a plain StaticBool, so reconstructions and index/repeat semantics
+    # silently took the Python-bool meaning. The NpBool variant keeps provenance exactly like NpInt/NpFloat: the
+    # np spelling of a subscript index rejects (numpy 2 removed __index__) while the plain bool keeps Python's
+    # bool-as-int semantics, and a concrete operator.index(np.True_) surfaces numpy's own TypeError.
+    numpy_true = np.bool_(True)
+
+    def np_key(x: float) -> float:
+        return (x, x + 1.0)[numpy_true]  # type: ignore[call-overload]
+
+    import operator
+
+    index_of = operator.index
+
+    def np_index_call(x: float) -> float:
+        return ((x,) * index_of(numpy_true))[0]  # type: ignore[arg-type,no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="np.bool_ subscript index"):
+        lower(np_key)
+    with pytest.raises(UnsupportedConstruct, match="cannot be interpreted as an integer"):
+        lower(np_index_call)
+
+    def py_key(x: float) -> float:
+        pair = (x, x * 2.0)
+        return pair[True]
+
+    model = holoso.synthesize(py_key, default_ops(FloatFormat(11, 52)), name="py_key").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 6.0 == py_key(3.0)
+
+
+def test_identity_dependent_array_attributes_are_a_located_rejection() -> None:
+    # Review round 8 MISCOMPILE: .base observed the admitted snapshot's storage, not the user's view (returned the
+    # backing array's element). Only the value-determined navigation set folds.
+    backing = np.array([1.0, 2.0, 3.0])
+    view = backing[1:]
+
+    def kernel(x: float) -> float:
+        return x + float(view.base[0])  # type: ignore[index]
+
+    with pytest.raises(UnsupportedConstruct, match="array attribute 'base' is not supported"):
+        lower(kernel)
+
+
+def test_record_dunders_never_run_on_reconstructions() -> None:
+    # Review round 8 MISCOMPILEs: a record __index__ used as a subscript key, bool()/len() of a record with a
+    # truth override, and a non-field record attribute (a property) all executed user code on the reconstruction;
+    # each is a located rejection now.
+    @dataclasses.dataclass(frozen=True)
+    class Key:
+        a: bool
+
+        def __index__(self) -> int:
+            return int(self.a)
+
+    key = Key(True)
+
+    def record_key(x: float) -> float:
+        return (x, -x)[key]
+
+    @dataclasses.dataclass(frozen=True)
+    class Gate:
+        a: bool
+
+        def __bool__(self) -> bool:
+            return self.a
+
+    gate = Gate(True)
+
+    def bool_call(x: float) -> float:
+        return x if bool(gate) else 0.0
+
+    @dataclasses.dataclass(frozen=True)
+    class Sized:
+        def __len__(self) -> int:
+            return 2
+
+    sized = Sized()
+
+    def len_call(x: float) -> float:
+        return x + float(len(sized))
+
+    @dataclasses.dataclass(frozen=True)
+    class WithProperty:
+        raw: float
+
+        @property
+        def doubled(self) -> float:
+            return self.raw * 2.0
+
+    prop = WithProperty(2.0)
+
+    def property_read(x: float) -> float:
+        return x * prop.doubled
+
+    with pytest.raises(UnsupportedConstruct, match="record subscript index"):
+        lower(record_key)
+    for kernel in (bool_call, len_call):
+        with pytest.raises(UnsupportedConstruct, match="custom __bool__"):
+            lower(kernel)
+    with pytest.raises(UnsupportedConstruct, match="record attribute 'doubled'"):
+        lower(property_read)
+
+
+def test_exit_identity_is_depth_bounded_and_catches_nested_merges() -> None:
+    # Review round 8: the recursive dedup identity walked the whole exit DAG -- exponential on shared operands
+    # (repeated squaring) and a RecursionError on x**1024 (an explicitly permitted power chain). The walk is
+    # depth-capped and cycle-guarded, and recursing through phi ARMS dedups nested merges that differ only by
+    # inner phi ids.
+    def power_chain(x: float) -> float:
+        return x**1024
+
+    def repeated_squaring(x: float) -> float:
+        for _ in range(30):
+            x = x * x
+        return x
+
+    for kernel in (power_chain, repeated_squaring):
+        lower(kernel)  # the pin is completion itself (previously RecursionError / effectively non-terminating)
+
+    class Nested:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def step(self, a: bool, b: bool, x: float) -> float:
+            if a:
+                if b:
+                    r = x
+                    self.y = r
+                else:
+                    r = -x
+                    self.y = r
+            else:
+                r = x + x
+                self.y = r
+            return r
+
+    result = holoso.synthesize(Nested().step, default_ops(FloatFormat(11, 52)), name="nested_dedup")
+    assert [p.name for p in result.output_ports] == ["state_y"]
+    elaborated = result.numerical_model.elaborate()
+    assert float(elaborated.run(True, True, 3.0)[0]) == 3.0
+    assert float(elaborated.run(True, False, 3.0)[0]) == -3.0
+    assert float(elaborated.run(False, True, 3.0)[0]) == 6.0

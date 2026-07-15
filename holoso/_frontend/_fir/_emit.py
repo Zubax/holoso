@@ -135,6 +135,7 @@ from ._ir import (
 from ._opsem import BinOp, UnOp
 from ._value import (
     MetaInt,
+    NpBool,
     NpFloat,
     NpInt,
     ObjectRef,
@@ -267,7 +268,7 @@ def _is_bool_fact(fact: Fact | None) -> bool:
         case Residual(type=SemType.BOOL):
             return True
         case Known(value=value):
-            return isinstance(value, StaticBool)
+            return isinstance(value, (StaticBool, NpBool))
         case _:
             return False
 
@@ -523,9 +524,10 @@ class _Emitter:
 
     def _const(self, value: StaticValue) -> int:
         concrete = as_python(value)
-        if isinstance(concrete, bool):
-            return self._builder.bool_const(concrete)
         import numpy as np
+
+        if isinstance(concrete, bool) or isinstance(concrete, np.bool_):
+            return self._builder.bool_const(bool(concrete))
 
         if isinstance(concrete, (int, float, np.integer, np.floating)) and not isinstance(concrete, np.bool_):
             return self._builder.float_const(_carrier_float(concrete))
@@ -566,7 +568,7 @@ class _Emitter:
         stays fact-only: its every use folds at analysis, and it can never become a merge operand (a join keeps it
         Known-same or rejects), so defining its cell would only force a spurious materialization rejection.
         """
-        return isinstance(leaf.value, (StaticBool, MetaInt, NpInt, StaticFloat, NpFloat))
+        return isinstance(leaf.value, (StaticBool, NpBool, MetaInt, NpInt, StaticFloat, NpFloat))
 
     def _copy_leaves(self, block: FirBlockId, source: Place, fact: AggregateFact, target: Place) -> None:
         """
@@ -1054,20 +1056,26 @@ class _Emitter:
         xor = self._builder.operation(BoolXor(), [left, right])
         return xor if rel is RelationalOp.NE else self._builder.operation(BoolNot(), [xor])
 
-    def _exit_identity(self, vid: int) -> object:
+    def _exit_identity(self, vid: int, depth: int = 4, visiting: frozenset[int] = frozenset()) -> object:
         """
         The dedup identity of an exit value: a phi is its (type, arms) structure and a pure operation is its
         operator over its operands' identities, not the value id. The return leaf and a state live-out read
         through DIFFERENT places, so a value that is by dataflow the same merge arrives as two distinct-but-
         identical exit phis -- possibly under coercion wrappers minted separately on each side (a store-side and a
-        return-side IntToFloat live in different blocks, which the per-block interner keeps distinct). Recursion
-        is bounded by the SSA DAG (operands strictly precede their operation).
+        return-side IntToFloat live in different blocks, which the per-block interner keeps distinct), or as
+        nested merges whose inner phis differ only by id. Equal identities imply equal values; the depth cap
+        bounds the walk (exit coercions are shallow, and an unbounded walk of a shared-operand DAG is exponential
+        while a deep chain overflows the stack) -- past it, and through a phi cycle (a loop header's self-arm),
+        the identity degrades to the vid, which only forgoes a dedup.
         """
+        if depth == 0 or vid in visiting:
+            return vid
         node = self._builder.node_of(vid)
+        inner = visiting | {vid}
         if isinstance(node, Phi):
-            return (node.type, node.arms)
+            return (node.type, tuple((pred, self._exit_identity(arm, depth - 1, inner)) for pred, arm in node.arms))
         if isinstance(node, Operation):
-            return (node.operator, tuple(self._exit_identity(operand) for operand in node.operands))
+            return (node.operator, tuple(self._exit_identity(op, depth - 1, inner) for op in node.operands))
         return vid
 
     def _exit_leaf(self, exit_block: FirBlockId, path: LeafPath, ordinal: int, leaf: AtomicFact, kind: SemType) -> int:

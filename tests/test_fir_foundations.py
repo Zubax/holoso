@@ -22,6 +22,7 @@ from holoso._frontend._fir._resolve import (
 )
 from holoso._frontend._fir._value import (
     MetaInt,
+    NpBool,
     NpFloat,
     NpInt,
     ObjectRef,
@@ -153,7 +154,7 @@ def test_resolver_locals_agree_with_symtable_on_own_source() -> None:
 
 def test_admit_keeps_scalar_provenance() -> None:
     assert admit(True) == StaticBool(True)
-    assert admit(np.bool_(False)) == StaticBool(False)
+    assert admit(np.bool_(False)) == NpBool(False)
     assert admit(7) == MetaInt(7)
     assert admit(np.int64(7)) == NpInt(7)
     assert admit(1.5) == StaticFloat(1.5)
