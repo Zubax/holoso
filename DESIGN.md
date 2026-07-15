@@ -183,7 +183,9 @@ never folds, and has no generic escape back into Python -- every place a referen
 namespace or component attribute, an isinstance classinfo, an inert dtype-ish type argument) is an explicit arm,
 and everything else refuses by type. isinstance folds through its resolved classinfo types rather than a generic
 evaluation, since a classinfo is references, not data. References join only with themselves and only when the
-referent is identical; a reference is fact-only in emission (never a datapath cell). Aggregate joins reconcile layouts first
+referent is identical; a reference is fact-only in emission (never a datapath cell). Component and namespace
+attribute reads are snapshot at most once per analysis, so the multi-round fixpoint can never observe the live
+object drifting under it (a PEP 562 module __getattr__ runs exactly once). Aggregate joins reconcile layouts first
 (identical flavors recurse; a tuple arm meeting a list arm of equal arity degrades to the structural flavor set,
 keeping only flavor-independent behavior; ndarray dtypes promote int64 to float64), then join leaves positionally. An int/float join promotes the integer side to float, C-style (see Integers). Folding
 is Python-exact on Knowns; runtime-typed values never fold (width rule); a Known Bool always drives edge selection.

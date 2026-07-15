@@ -5593,3 +5593,31 @@ def test_concrete_evaluation_has_one_admission_door() -> None:
     assert analyze_source.index("admit_call(") < analyze_source.index("concrete = target(")
     assert "_vetted_concrete_target" not in analyze_source
     assert "_vetted_concrete_target" in fold_source
+
+
+def test_namespace_attribute_reads_are_snapshot_once() -> None:
+    # A module-level __getattr__ (PEP 562: lazy imports, deprecation shims) is honest code that executes per
+    # getattr. The analyzer's fixpoint visits a PyAttr transfer many times; without the first-read snapshot each
+    # visit would re-run the hook, observing drift (a fresh object per call breaks reference-identity joins, a
+    # counting hook shows the re-execution directly).
+    module = types.ModuleType("lazy_ns")
+    calls = {"n": 0}
+
+    def module_getattr(name: str) -> float:
+        if name != "gain":
+            raise AttributeError(name)
+        calls["n"] += 1
+        return 2.5
+
+    module.__getattr__ = module_getattr  # type: ignore[method-assign]
+
+    def kernel(x: float) -> float:
+        return module.gain * x  # type: ignore[no-any-return]
+
+    kernel.__globals__["module"] = module
+    try:
+        unit = lower(kernel)
+    finally:
+        kernel.__globals__.pop("module", None)
+    assert calls["n"] == 1, f"the live namespace was read {calls['n']} times; the snapshot admits exactly one read"
+    del unit

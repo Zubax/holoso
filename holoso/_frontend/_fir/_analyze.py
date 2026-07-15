@@ -358,6 +358,7 @@ class Analyzer:
         self._cast_calls: set[int] = set()  # runtime float()/int()/bool() casts (identity or conversion at emission)
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
+        self._component_reads: dict[tuple[int, str], tuple[object, object]] = {}
         self._value_methods: dict[tuple[StaticValue, str], object] = {}
         self._roots: dict[int, tuple[str, ...]] = {}  # root component id -> the empty member path
         self._component_edges: set[tuple[int, str, int]] = set()  # (parent id, attribute, child id) sub-object graph
@@ -410,11 +411,26 @@ class Analyzer:
             _logger.info("state round %d: %d runtime leaves, %d live-in facts", round_index + 1, len(new_w), len(new_d))
         raise AnalysisRejection("state fixpoint failed to stabilize", (Origin(self._root_template.name, 0, 0),))
 
+    def _read_attribute_snapshot(self, owner: object, name: str) -> object:
+        """
+        One live read per (owner, attribute) per analysis: every later consultation -- W/D rounds, reset facts,
+        namespace lookups -- sees the first read's value, so the fixpoint can never observe reset-time state or
+        a namespace drifting under it. The owner reference pins the id against reuse for the memo's lifetime.
+        AttributeError propagates to the caller's located rejection.
+        """
+        key = (id(owner), name)
+        hit = self._component_reads.get(key)
+        if hit is not None and hit[0] is owner:
+            return hit[1]
+        value = getattr(owner, name)
+        self._component_reads[key] = (owner, value)
+        return value
+
     def _snapshot_leaf(self, leaf: StateLeaf) -> Fact:
         current: object = leaf.component
         for attribute in leaf.path:
             try:
-                current = getattr(current, attribute)
+                current = self._read_attribute_snapshot(current, attribute)
             except AttributeError:
                 raise AnalysisRejection(
                     f"state attribute '{'.'.join(leaf.path)}' does not exist on the component at compile time "
@@ -428,7 +444,7 @@ class Analyzer:
         current: object = leaf.component
         for attribute in leaf.path:
             try:
-                current = getattr(current, attribute)
+                current = self._read_attribute_snapshot(current, attribute)
             except AttributeError:
                 raise AnalysisRejection(
                     f"state attribute '{'.'.join(leaf.path)}' does not exist on the component at compile time "
@@ -1052,7 +1068,7 @@ class Analyzer:
                 # A namespace (math, np, a class), not a stateful component: attribute access is a plain lookup,
                 # so math.sqrt/np.floor resolve to the callable the call site then dispatches through the registry.
                 try:
-                    attribute = getattr(component, name)
+                    attribute = self._read_attribute_snapshot(component, name)
                 except AttributeError as error:
                     raise AnalysisRejection(str(error), origin) from None
                 admitted = admit(attribute)
@@ -1088,17 +1104,17 @@ class Analyzer:
                 env.set(leaf, fact)
                 return fact
             try:
-                concrete = getattr(component, name)
+                snapshot = self._read_attribute_snapshot(component, name)
             except AttributeError as error:
                 raise AnalysisRejection(str(error), origin) from None
-            admitted = admit(concrete)
+            admitted = admit(snapshot)
             if admitted is None:
-                # ``concrete`` is a sub-object (a potential child component): record the parent -> child graph edge.
+                # ``snapshot`` is a sub-object (a potential child component): record the parent -> child graph edge.
                 # Canonical member paths are resolved from these edges by a shortest-path fixpoint in ``provenance()``,
                 # so a child's slot name is order-independent even when a lexicographically-smaller alias is discovered
                 # later (the state-leaf cache above would otherwise freeze a stale first-seen path).
-                self._component_edges.add((id(component), name, id(concrete)))
-            fact = normalize_static(admitted) if admitted is not None else Reference(concrete)
+                self._component_edges.add((id(component), name, id(snapshot)))
+            fact = normalize_static(admitted) if admitted is not None else Reference(snapshot)
             env.set(leaf, fact)
             return fact
         if isinstance(obj, Known):
