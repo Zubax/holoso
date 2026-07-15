@@ -132,6 +132,8 @@ def _vetted_concrete_target(target: object) -> bool:
         float,
         int,
         bool,
+        list,
+        tuple,
         len,
         range,
         slice,

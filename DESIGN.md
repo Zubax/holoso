@@ -225,7 +225,10 @@ trust boundary stays where admission drew it: an enum that redefines arithmetic 
 methods folds with base-type semantics (inputs are trusted; adversarial dunder-warping is not modeled). Records also reject at their truth when a __bool__/__len__ entry exists
 (``__bool__ = None`` included), at subscript keys, at non-field attributes, and at iteration; field access is the
 one record consumption. getattr rewrites into the attribute op itself (state reads, residual record fields, and
-the array whitelist behave exactly as the dotted spelling; the default-argument form rejects). Scalar numpy
+the array whitelist behave exactly as the dotted spelling; the default-argument form rejects). list()/tuple()
+over an aggregate is a LAYOUT operation, never an evaluation: the same leaves -- runtime ones included --
+re-aggregate under the requested flavor (a lowered conversion copies the argument's cells onto the result);
+concrete containers still fold through the vetted constructors. Scalar numpy
 provenance is preserved end to end -- np.bool_ is a distinct variant from bool, and
 boolean-producing folds keep it (a comparison or & | ^ with a numpy operand yields np.bool_, exactly as numpy
 does) -- so a STATIC np.bool_ subscript index or repeat count rejects exactly where numpy 2 raises TypeError

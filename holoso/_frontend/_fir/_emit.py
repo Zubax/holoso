@@ -831,6 +831,10 @@ class _Emitter:
                         define(dst, self._emit_cast(fir_id, args[0], dst))
                     case CallLowering.INTRINSIC:
                         define(dst, self._emit_intrinsic(fir_id, plan, list(args)))
+                    case CallLowering.CONVERSION:
+                        conversion_fact = self._fact(dst)
+                        if isinstance(conversion_fact, AggregateFact):
+                            self._copy_leaves(fir_id, Local(args[0]), conversion_fact, Local(dst))
             case _:
                 raise AssertionError(f"operation {type(op).__name__} survived analysis into emission")
 

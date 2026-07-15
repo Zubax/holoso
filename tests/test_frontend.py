@@ -5931,3 +5931,44 @@ def test_void_annotated_object_return_is_named() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="returns an object"):
         lower(kernel)
+
+
+# ------------------------------ aggregate conversion rules (migration phase 6) ------------------------------
+
+
+def test_list_and_tuple_convert_aggregates_as_layout_operations() -> None:
+    # list()/tuple() over an aggregate re-flavors the SAME leaves -- runtime ones included -- without any
+    # evaluation; concrete containers (a range, a string) still fold through the vetted constructor.
+    def runtime_conversion(x: float, y: float) -> float:
+        items = list((x, y))
+        pair = tuple([y, x])
+        return items[0] * 10.0 + pair[0]
+
+    model = holoso.synthesize(runtime_conversion, default_ops(FloatFormat(11, 52)), name="conv").numerical_model
+    assert float(model.elaborate().run(3.0, 4.0)[0]) == runtime_conversion(3.0, 4.0) == 34.0
+
+    def concatenates_after_conversion(x: float) -> float:
+        grown = list((x, 2.0)) + [3.0]
+        return grown[0] + grown[2]
+
+    model = holoso.synthesize(
+        concatenates_after_conversion, default_ops(FloatFormat(11, 52)), name="convcat"
+    ).numerical_model
+    assert float(model.elaborate().run(1.0)[0]) == concatenates_after_conversion(1.0) == 4.0
+
+    def concrete_sources(x: float) -> float:
+        return x * float(list(range(4))[2] + len(tuple("ab")))
+
+    model = holoso.synthesize(concrete_sources, default_ops(FloatFormat(11, 52)), name="convrng").numerical_model
+    assert float(model.elaborate().run(2.0)[0]) == concrete_sources(2.0) == 8.0
+
+    @dataclasses.dataclass
+    class Point:
+        x: float
+        y: float
+
+    def record_conversion(x: float) -> float:
+        return x + list(Point(1.0, 2.0))[0]  # type: ignore[call-overload,no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="a record cannot cross into a concrete call"):
+        lower(record_conversion)

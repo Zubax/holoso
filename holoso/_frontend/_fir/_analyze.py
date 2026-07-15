@@ -324,6 +324,7 @@ class CallLowering(enum.Enum):
     FOLDED = enum.auto()  # a concrete static fold: the destination fact is Known, nothing to emit
     CAST = enum.auto()  # a scalar float()/int()/bool() cast; same-kind-vs-conversion is decided by the FINAL facts
     INTRINSIC = enum.auto()  # a registered hardware intrinsic: ``intrinsic`` carries the resolved registry match
+    CONVERSION = enum.auto()  # list()/tuple() over an aggregate: the argument's leaves re-flavor onto the result
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,6 +368,7 @@ class Analyzer:
         self._concrete_calls: set[int] = set()
         self._intrinsic_calls: set[int] = set()
         self._cast_calls: set[int] = set()  # runtime float()/int()/bool() casts (identity or conversion at emission)
+        self._conversion_calls: set[int] = set()  # list()/tuple() layout conversions over aggregates
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._component_reads: dict[tuple[int, str], tuple[object, object, StaticValue | None]] = {}
@@ -408,7 +410,10 @@ class Analyzer:
                     header = result.unit.blocks[header_id]
                     assert isinstance(header.terminator, StaticFor)
                     header.terminator = Jump(chain_entry, header.terminator.origin)
-                _validate(result, self._concrete_calls | self._intrinsic_calls | self._cast_calls)
+                _validate(
+                    result,
+                    self._concrete_calls | self._intrinsic_calls | self._cast_calls | self._conversion_calls,
+                )
                 self._finalize(result)
                 return result
             self._runtime_state = new_w
@@ -418,6 +423,7 @@ class Analyzer:
             self._concrete_calls = set()
             self._intrinsic_calls = set()
             self._cast_calls = set()
+            self._conversion_calls = set()
             self._unroll_cache = {}
             _logger.info("state round %d: %d runtime leaves, %d live-in facts", round_index + 1, len(new_w), len(new_d))
         raise AnalysisRejection("state fixpoint failed to stabilize", (Origin(self._root_template.name, 0, 0),))
@@ -513,6 +519,8 @@ class Analyzer:
         # Optimistic SCCP may reclassify a cast across revisits (int(y) is an identity while y is still integer and a
         # conversion once the other edge promotes it), so a cast plan deliberately carries no same-kind/cross-kind
         # split: emission decides from the FINAL facts, which only stabilized rounds produce.
+        if id(call) in self._conversion_calls:
+            return CallPlan(CallLowering.CONVERSION)
         if id(call) in self._cast_calls:
             return CallPlan(CallLowering.CAST)
         if id(call) in self._intrinsic_calls:
@@ -1420,6 +1428,19 @@ class Analyzer:
                 if refusal.library_diagnostic:
                     raise LibraryAnalysisRejection(str(refusal), call.origin) from None
                 raise AnalysisRejection(str(refusal), call.origin) from None
+            if (target is list or target is tuple) and not keyword_facts and len(argument_facts) == 1:
+                # A container conversion over an aggregate is a LAYOUT operation, never an evaluation: the same
+                # leaves (runtime ones included) re-aggregate under the requested flavor. Concrete containers
+                # (a range, a string, an all-Known tuple) fall through to the vetted evaluation below.
+                source_fact = argument_facts[0]
+                if isinstance(source_fact, AggregateFact):
+                    # A record never reaches here: the admission walk already refused it as an argument.
+                    if isinstance(source_fact.layout, ArrayLayout) and not source_fact.layout.shape:
+                        raise AnalysisRejection("iteration over a 0-dimensional array is undefined", call.origin)
+                    children = tuple(source_fact.child(i) for i in range(outer_arity(source_fact.layout)))
+                    env.set(Local(call.dst), aggregate_of(children, is_list=target is list))
+                    self._conversion_calls.add(id(call))
+                    return False
             if target is isinstance and not keyword_facts and len(argument_facts) == 2:
                 # isinstance folds through the RESOLVED classinfo types, never through a generic evaluation: the
                 # classinfo's sanctioned carriers (a referenced class, an inline tuple of references) are not
