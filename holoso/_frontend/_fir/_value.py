@@ -213,6 +213,8 @@ def _admit_uncached(
     if type(obj) is np.ndarray:
         if obj.dtype not in (np.dtype(np.int64), np.dtype(np.float64)):
             return None
+        if obj.ndim == 0:
+            return _admit(obj[()], memo, visiting, depth)  # a 0-d array is its scalar element (numpy-faithful folds)
         if obj.size > _MAX_ELEMENTS:
             return None  # the LOGICAL size: a zero-stride view is small in memory yet snapshots at full size
         # A snapshot over an immutable bytes buffer: numpy refuses setflags(write=True) anywhere in the view chain,

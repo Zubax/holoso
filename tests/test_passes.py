@@ -631,3 +631,25 @@ def test_operator_layer_does_not_import_hir() -> None:
     """
     offenders = forbidden_imports("holoso._operators", "holoso._hir")
     assert not offenders, f"the operator layer transitively imports HIR: {offenders}"
+
+
+def test_reduction_minted_constants_fold_to_a_fixpoint() -> None:
+    # A strength reduction can mint a foldable constant (a bool_select self-arm reduction leaves ``first and
+    # False`` behind a one-shot latch), and a single ordered fold/reduce pair shipped it into the datapath as a
+    # live boolean op. The pair iterates to a fixpoint, so the latch live-out is a plain constant.
+    class Primed:
+        def __init__(self) -> None:
+            self.y: float = 0.0
+            self._first: bool = True
+
+        def __call__(self, x: float) -> float:
+            if self._first:
+                self._first = False
+                self.y = x
+            else:
+                self.y = self.y + 0.5 * (x - self.y)
+            return self.y
+
+    hir = optimize(lower(Primed().__call__))
+    first = next(slot for slot in hir.state_slots if slot.name == "_first")
+    assert isinstance(hir.nodes[first.live_out], BoolConst)

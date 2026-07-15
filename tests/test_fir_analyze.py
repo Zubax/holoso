@@ -131,13 +131,15 @@ def test_recursion_is_a_located_rejection() -> None:
 
 
 def test_dynamic_trip_loop_is_a_located_rejection() -> None:
+    # The trip count of a fixed-layout aggregate IS static; the pending gap is per-trip element projection, and
+    # the message says so instead of blaming the trip count.
     def kernel(x: float) -> float:
         acc = 0.0
         for step in (x, x + 1.0):
             acc = acc + step
         return acc
 
-    with pytest.raises(AnalysisRejection, match="not supported yet|not static"):
+    with pytest.raises(AnalysisRejection, match="runtime elements"):
         Analyzer(kernel).fixpoint()
 
 

@@ -198,10 +198,13 @@ whole analyzer/emitter contract: emission never re-derives a fold, never resolve
 replays the transfer function, so the two layers cannot disagree about a value's meaning.
 
 Emission lowers the stabilized residual graph to HIR: executable blocks/edges only, in reverse post-order, with
-value numbering by Braun sealed-block SSA over the scalar LEAF CELLS of Places -- (root place, typed layout path),
-a scalar root being the empty path -- so an aggregate store defines every leaf (a Known leaf as its interned
-constant: the invariant a later per-leaf merge relies on), a join phis only the leaves that differ, and a
-conditional selection emits one typed select per differing leaf. HIR stays entirely scalar. One typed materializer serves every operand position: a Known
+value numbering by Braun sealed-block SSA over the scalar LEAF CELLS of Places -- (root place, ordinal in the
+canonical flat leaf order), a scalar root being ordinal 0. Ordinals are flavor-independent (every admissible join
+preserves arity and leaf count), so a flavor-degrading merge keeps every cell aligned; typed paths serve only the
+port ABI. An aggregate store defines every datapath leaf (a Known leaf as its interned constant: the invariant a
+later per-leaf merge relies on; a non-datapath Known -- a string, a function reference -- stays fact-only, since
+its every use folds and no join can residualize it), a join phis only the leaves that differ, and a conditional
+selection emits one typed select per differing leaf. HIR stays entirely scalar. One typed materializer serves every operand position: a Known
 value becomes a constant of the expected kind (a Known integer stays an IntConst in an integer context and rounds
 into a float constant in a float context), a residual value is its SSA read, coerced only where the coercion is a
 genuine int->float promotion on its own edge (phi arms, select arms, state stores, comparison operands) and a

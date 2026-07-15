@@ -67,6 +67,7 @@ from ._fact import (
     ArrayLayout,
     AtomicFact,
     BoundFact,
+    ContainerFlavor,
     Fact,
     Known,
     LayoutMismatch,
@@ -232,7 +233,7 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
                 layout = join_layouts(x.layout, y.layout)
             except LayoutMismatch as error:
                 raise AnalysisRejection(str(error), origin) from None
-            assert layout is not None and not isinstance(layout, type(None))
+            assert layout is not None
             leaves = tuple(_join_atoms(p, q, origin) for p, q in zip(x.leaves, y.leaves, strict=True))
             return AggregateFact(layout, leaves)
         case ((Known() | Residual()) as p, (Known() | Residual()) as q):
@@ -416,7 +417,7 @@ class Analyzer:
                     (Origin(self._root_template.name, 0, 0),),
                 ) from None
         admitted = admit(current)
-        return Known(admitted) if admitted is not None else Known(ObjectRef(current))
+        return normalize_static(admitted) if admitted is not None else Known(ObjectRef(current))
 
     def _state_reset_fact(self, leaf: StateLeaf) -> Fact:
         current: object = leaf.component
@@ -905,11 +906,16 @@ class Analyzer:
                     raise AnalysisRejection("the truth value of this object is not defined here", origin)
                 return Known(StaticBool(truth)) if truth is not None else Residual(SemType.BOOL)
             case AggregateFact() as aggregate:
-                if isinstance(aggregate.layout, ArrayLayout):
+                layout = aggregate.layout
+                if isinstance(layout, ArrayLayout) or (
+                    isinstance(layout, StructuralLayout) and ContainerFlavor.ARRAY in layout.flavors
+                ):
                     raise AnalysisRejection(
                         "the truth value of an array is ambiguous; use .any() or .all() in plain numpy", origin
                     )
-                return Known(StaticBool(outer_arity(aggregate.layout) != 0))
+                if isinstance(layout, RecordLayout):
+                    return Known(StaticBool(True))  # a record is an object, truthy regardless of field count
+                return Known(StaticBool(outer_arity(layout) != 0))
             case _:
                 return Residual(SemType.BOOL)
 
@@ -921,6 +927,15 @@ class Analyzer:
             if key is not None:
                 index = Known(key)
         if isinstance(obj, AggregateFact) and isinstance(index, Known):
+            if isinstance(obj.layout, RecordLayout):
+                raise AnalysisRejection("a record is not subscriptable; access its fields by name", origin)
+            if isinstance(index.value, StaticBool) and (
+                isinstance(obj.layout, ArrayLayout)
+                or (isinstance(obj.layout, StructuralLayout) and ContainerFlavor.ARRAY in obj.layout.flavors)
+            ):
+                # numpy boolean indexing selects by mask (and prepends an axis for a scalar bool); Python's
+                # bool-as-int semantics apply only to tuples/lists, so guessing here would miscompile.
+                raise AnalysisRejection("a boolean index into an array is not supported; use an integer", origin)
             try:
                 position = operator.index(as_python(index.value))  # type: ignore[arg-type]  # np ints qualify
             except TypeError:
@@ -977,7 +992,7 @@ class Analyzer:
                 except AttributeError as error:
                     raise AnalysisRejection(str(error), origin) from None
                 admitted = admit(attribute)
-                return Known(admitted) if admitted is not None else Known(ObjectRef(attribute))
+                return normalize_static(admitted) if admitted is not None else Known(ObjectRef(attribute))
             _reject_attribute_hooks(type(component), origin)
             class_attribute = _mro_attribute_of(type(component), name)
             if type(class_attribute) is property:  # an exact property (not a subclass) wins over any __dict__ entry
@@ -1019,7 +1034,7 @@ class Analyzer:
                 # so a child's slot name is order-independent even when a lexicographically-smaller alias is discovered
                 # later (the state-leaf cache above would otherwise freeze a stale first-seen path).
                 self._component_edges.add((id(component), name, id(concrete)))
-            fact = Known(admitted) if admitted is not None else Known(ObjectRef(concrete))
+            fact = normalize_static(admitted) if admitted is not None else Known(ObjectRef(concrete))
             env.set(leaf, fact)
             return fact
         if isinstance(obj, Known):
@@ -1040,7 +1055,7 @@ class Analyzer:
                 if value_key not in self._value_methods:
                     self._value_methods[value_key] = concrete
                 return Known(ObjectRef(self._value_methods[value_key]))
-            return Known(admitted) if admitted is not None else Known(ObjectRef(concrete))
+            return normalize_static(admitted) if admitted is not None else Known(ObjectRef(concrete))
         raise AnalysisRejection("attribute access on a runtime value", origin)
 
     # ------------------------------------ terminators ------------------------------------
@@ -1078,8 +1093,14 @@ class Analyzer:
     def _unroll(self, unit: FunctionUnit, header: Block, loop: StaticFor, env: _Env) -> BlockId:
         iterable = env.get(Local(loop.iterable))
         if isinstance(iterable, AggregateFact):
-            materialized = materialize_static(iterable)  # runtime leaves: per-trip projection is a later stage
-            iterable = Known(materialized) if materialized is not None else iterable
+            materialized = materialize_static(iterable)
+            if materialized is None:
+                # The trip count IS static (the layout is fixed); what is missing is per-trip projection of the
+                # runtime elements, which is a later stage.
+                raise AnalysisRejection(
+                    "iteration over a sequence with runtime elements is not lowerable yet", loop.origin
+                )
+            iterable = Known(materialized)
         if not isinstance(iterable, Known):
             raise AnalysisRejection("loop trip count is not static here", loop.origin)
         concrete = as_python(iterable.value)
@@ -1177,8 +1198,8 @@ class Analyzer:
             argument_facts = [env.get(Local(arg)) for arg in call.args] + [
                 env.get(Local(value)) for _, value in call.kwargs
             ]
-            if all(isinstance(fact, Known) for fact in argument_facts):
-                pass  # fully static: fold concretely below through the original callable
+            if all(_concrete_fact(fact) is not None for fact in argument_facts):
+                pass  # fully static (an all-Known aggregate included): fold concretely below through the callable
             else:
                 # A runtime-operand intrinsic (sqrt(x), sin(x)...) becomes an HIR operation at emission; keep the
                 # PyCall in the graph, typed by the operator's result, and let emission resolve the registry match.

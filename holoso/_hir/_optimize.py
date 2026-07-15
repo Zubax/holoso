@@ -4,6 +4,19 @@ from . import _const_fold, _dce, _fuse_chains, _if_convert, _prune_empty, _stren
 from ._ir import Hir
 
 
+def _reduce(hir: Hir) -> Hir:
+    """
+    Const-fold and strength-reduce to a joint fixpoint: a reduction can mint a foldable constant (a bool_select
+    self-arm reduction leaves ``x and False``) and a fold can expose a further reduction, so a single ordered pair
+    of passes ships unfolded constants into the datapath.
+    """
+    while True:
+        reduced = _strength_reduce.run(_const_fold.run(hir))
+        if reduced == hir:
+            return reduced
+        hir = reduced
+
+
 def optimize(hir: Hir) -> Hir:
     """
     Run all hardware-agnostic HIR optimizations. Jump-chain fusion runs first: the front-end emits one block per
@@ -12,7 +25,7 @@ def optimize(hir: Hir) -> Hir:
     If-conversion runs after folding/strength reduction AND a first
     DCE (the constant conditions it must refuse are the ones const-fold materialized -- a condition the frontend
     could prove never emitted a branch at all -- and arm costs are final LIVE costs, not inflated by operands the
-    reductions left dead). Folding and strength reduction then run a SECOND time, to
+    reductions left dead). The fold/reduce fixpoint then runs AGAIN, to
     reduce the muxes if-conversion created: a boolean ``bool_select`` with constant arms collapses to ``and``/``or``/
     ``not``/passthrough, and a ``select`` with identical arms drops out. The re-run also re-interns the nodes the
     splice wrote directly into the graph. Merge threading then eliminates the empty pass-through merge blocks a non-
@@ -24,10 +37,10 @@ def optimize(hir: Hir) -> Hir:
     else reads it and any operands the mux reductions left dead).
     """
     hir = _fuse_chains.run(hir)
-    hir = _strength_reduce.run(_const_fold.run(hir))
+    hir = _reduce(hir)
     hir = _dce.run(hir)  # arm costs must be LIVE costs: strength reduction leaves dead operands that would
     hir = _if_convert.run(hir)  # otherwise inflate an arm past the if-conversion budget and refuse a cheap diamond
-    hir = _strength_reduce.run(_const_fold.run(hir))
+    hir = _reduce(hir)
     hir = _thread_merges.run(hir)
     hir = _trivial_phi.run(hir)
     hir = _prune_empty.run(hir)

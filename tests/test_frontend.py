@@ -4224,3 +4224,248 @@ def test_a_negative_inexact_integer_literal_promotes_and_rounds() -> None:
     assert negative_counter_rounds(float(-(2**53))) == 0.0  # -(2**53+1) != -2.0**53 in Python
     hir = lower(negative_counter_rounds)
     assert float(2**53) in [abs(n.value) for n in hir.nodes.values() if isinstance(n, FloatConst)]
+
+
+# ---------------------------------------- spine review round (round 5) ----------------------------------------
+
+
+def test_a_flavor_degraded_join_computes_per_leaf() -> None:
+    # Review round 5: a tuple-meets-list diamond degrades to a flavor-erased structural layout; the per-leaf SSA
+    # cells must stay aligned across the arms' differing container flavors (crashed: "read of an undefined place").
+    def flat(c: bool, x: float) -> float:
+        if c:
+            pair = (x, 1.0)
+        else:
+            pair = [2.0, x]  # type: ignore[assignment]
+        return pair[0] + pair[1]
+
+    def nested(c: bool, x: float) -> float:
+        if c:
+            v = ((x,), 1.0)
+        else:
+            v = ([2.0], x)  # type: ignore[assignment]
+        return v[0][0] + v[1]
+
+    def looped(x: float) -> float:
+        acc = (x, 0.0)
+        while acc[0] < 10.0:
+            acc = [acc[0] * 2.0, acc[1] + 1.0]  # type: ignore[assignment]
+        return acc[0] + acc[1]
+
+    for kernel, arguments in (
+        (flat, (True, 3.0)),
+        (flat, (False, 3.0)),
+        (nested, (True, 3.0)),
+        (nested, (False, 3.0)),
+        (looped, (0.5,)),
+        (looped, (11.0,)),
+    ):
+        model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name=kernel.__name__)
+        assert float(model.numerical_model.elaborate().run(*arguments)[0]) == kernel(*arguments)
+
+
+def test_a_residual_record_field_projection_computes() -> None:
+    # Review round 5: a record with residual leaves (a select of two records) projects a field through the leaf
+    # cells (crashed: PyAttr emission assumed a component ObjectRef). Nested case: an aggregate-valued field.
+    @dataclasses.dataclass(frozen=True)
+    class Params:
+        gain: float
+        offset: float
+
+    def scalar_field(c: bool, x: float) -> float:
+        p = Params(2.0, 1.0) if c else Params(3.0, -1.0)
+        return x * p.gain + p.offset
+
+    @dataclasses.dataclass(frozen=True)
+    class Gains:
+        pair: tuple[float, float]
+        scale: float
+
+    def aggregate_field(c: bool, x: float) -> float:
+        g = Gains((1.5, 2.0), 3.0) if c else Gains((2.5, 4.0), 5.0)
+        return g.pair[0] * g.scale + g.pair[1] * x
+
+    for kernel in (scalar_field, aggregate_field):
+        model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name=kernel.__name__)
+        elaborated = model.numerical_model.elaborate()
+        for c in (True, False):
+            assert float(elaborated.run(c, 3.0)[0]) == kernel(c, 3.0)
+
+
+def test_a_known_condition_selection_of_aggregates_routes_leaves() -> None:
+    # Review round 5: ``and``/``or`` picking an aggregate under a Known condition must route leaves, not
+    # materialize the aggregate as a scalar (crashed: "an aggregate value reaches a scalar operand position").
+    def kernel(x: float, y: float) -> float:
+        pair = True and (x, 1.0)
+        other = (y, 2.0) or (x, 0.0)
+        return pair[0] + other[0]
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="known_cond_agg").numerical_model
+    assert float(model.elaborate().run(3.0, 4.0)[0]) == 7.0
+
+
+def test_aggregate_static_leaves_outside_the_datapath_fold_at_every_use() -> None:
+    # Review round 5: a str/function leaf inside an aggregate must stay fact-only (its every use folds); eager
+    # materialization rejected kernels whose non-datapath leaves never reach hardware.
+    def tag_guard(x: float) -> float:
+        pair = ("gain", x)
+        return pair[1] if pair[0] == "gain" else 0.0
+
+    def names(x: float) -> float:
+        mode = ("fast", "slow")
+        return x * 2.0 if mode[0] == "fast" else x
+
+    @dataclasses.dataclass(frozen=True)
+    class Named:
+        label: str
+        value: float
+
+    def record_with_str(x: float) -> float:
+        n = Named("boost", 2.0)
+        return x * n.value
+
+    def helper(v: float) -> float:
+        return v + 1.0
+
+    def dispatch(x: float) -> float:
+        table = (helper, helper)
+        return table[0](x)
+
+    for kernel, expected in ((tag_guard, 3.0), (names, 6.0), (record_with_str, 6.0), (dispatch, 4.0)):
+        model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name=kernel.__name__)
+        assert float(model.numerical_model.elaborate().run(3.0)[0]) == expected == kernel(3.0)
+
+
+def test_component_aggregate_attributes_normalize_at_admission() -> None:
+    # Review round 5: attribute-sourced aggregates must enter the fact domain normalized (Known(StaticSeq) is
+    # banned), so concat and selects treat them exactly like locally-built sequences.
+    class Comp:
+        def __init__(self) -> None:
+            self.gains = (1.0, 2.0)
+
+        def __call__(self, c: bool, x: float) -> float:
+            extended = self.gains + (3.0, 4.0)
+            chosen = self.gains if c else (5.0, 6.0)
+            return x * extended[3] + chosen[0]
+
+    model = holoso.synthesize(Comp().__call__, default_ops(FloatFormat(11, 52)), name="attr_agg").numerical_model
+    elaborated = model.elaborate()
+    assert float(elaborated.run(True, 2.0)[0]) == 9.0
+    assert float(elaborated.run(False, 2.0)[0]) == 13.0
+
+
+def test_list_mutation_through_a_component_attribute_is_a_located_rejection() -> None:
+    # Review round 5 MISCOMPILE: ``.append`` on an attribute-sourced list mutated a disposable reconstruction of
+    # the snapshot (returned 4.0 where Python returns 5.0); ``+=`` lost its dedicated in-place message.
+    class Appender:
+        def __init__(self) -> None:
+            self.config = [1.0]
+
+        def __call__(self, x: float) -> float:
+            self.config.append(2.0)
+            return x + float(len(self.config))
+
+    class Augmenter:
+        def __init__(self) -> None:
+            self.buf = [0.0]
+
+        def __call__(self, x: float) -> float:
+            self.buf += [x]
+            return self.buf[0]
+
+    with pytest.raises(UnsupportedConstruct, match="list method 'append'"):
+        lower(Appender().__call__)
+    with pytest.raises(UnsupportedConstruct, match="in-place list mutation"):
+        lower(Augmenter().__call__)
+
+
+def test_record_truth_is_python_object_truth() -> None:
+    # Review round 5 MISCOMPILE: a zero-field record is truthy in Python; arity-based truth chose the else arm.
+    @dataclasses.dataclass(frozen=True)
+    class Marker:
+        pass
+
+    marker = Marker()
+
+    def kernel(x: float) -> float:
+        return x if marker else 0.0
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="record_truth").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 3.0
+
+
+def test_flavor_erased_truth_with_an_array_side_stays_ambiguous() -> None:
+    # Review round 5: a join carrying the ARRAY flavor cannot fold truth by arity (numpy raises on multi-element
+    # truth), so it inherits the array ambiguity rejection.
+    def kernel(c: bool, x: float) -> float:
+        v = np.array([1.0, 2.0]) if c else (1.0, 2.0)
+        return x if v else 0.0
+
+    with pytest.raises(UnsupportedConstruct, match="truth value of an array"):
+        lower(kernel)
+
+
+def test_a_record_is_not_positionally_subscriptable() -> None:
+    # Review round 5 MISCOMPILE: positional subscript of a record projected field 0 where Python raises TypeError.
+    @dataclasses.dataclass(frozen=True)
+    class Params:
+        gain: float
+
+    p = Params(2.0)
+
+    def global_record(x: float) -> float:
+        return x + p[0]  # type: ignore[index,no-any-return]
+
+    def local_record(x: float) -> float:
+        q = Params(3.0)
+        return x + q[0]  # type: ignore[index,no-any-return]
+
+    for kernel in (global_record, local_record):
+        with pytest.raises(UnsupportedConstruct, match="record is not subscriptable"):
+            lower(kernel)
+
+
+def test_a_boolean_index_into_an_array_is_a_located_rejection() -> None:
+    # Review round 5 MISCOMPILE: ``table[True]`` applied operator.index (True == 1) where numpy prepends an axis
+    # (boolean advanced indexing). Python's tuple semantics genuinely accept booleans as indices, so only the
+    # array flavor rejects.
+    table = np.array([10.0, 20.0])
+
+    def array_bool_index(x: float) -> float:
+        return x + table[True]  # type: ignore[no-any-return]
+
+    def tuple_bool_index(x: float) -> float:
+        pair = (x, x * 2.0)
+        return pair[True]
+
+    with pytest.raises(UnsupportedConstruct, match="boolean index"):
+        lower(array_bool_index)
+    model = holoso.synthesize(tuple_bool_index, default_ops(FloatFormat(11, 52)), name="tuple_bool").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 6.0
+
+
+def test_an_all_known_aggregate_folds_through_an_intrinsic() -> None:
+    # Review round 5: an all-Known aggregate operand must fold concretely through an intrinsic exactly as a Known
+    # scalar does (rejected: "a non-numeric operand reaches a numeric intrinsic").
+    def kernel(x: float) -> float:
+        return x + float(np.sqrt((1.0, 4.0))[1])
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="known_agg_fold").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 5.0
+
+
+def test_a_zero_dimensional_array_admits_as_its_scalar() -> None:
+    # Review round 5: a 0-d ndarray crashed structural navigation with a raw IndexError; it now admits as its
+    # scalar element, so folds behave numpy-faithfully and misuse is a located rejection.
+    z = np.array(3.0)
+
+    def scales(x: float) -> float:
+        return x * float(z)
+
+    def subscripted(x: float) -> float:
+        return x * z[0]  # type: ignore[no-any-return]  # numpy raises IndexError: too many indices
+
+    model = holoso.synthesize(scales, default_ops(FloatFormat(11, 52)), name="zero_dim").numerical_model
+    assert float(model.elaborate().run(2.0)[0]) == 6.0
+    with pytest.raises(UnsupportedConstruct, match="subscript fails"):
+        lower(subscripted)
