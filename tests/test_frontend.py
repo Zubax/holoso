@@ -4485,21 +4485,32 @@ def test_a_zero_dimensional_array_folds_and_rejects_navigation() -> None:
 # ---------------------------------------- spine review round 6 ----------------------------------------
 
 
-def test_record_truth_honors_a_custom_bool() -> None:
-    # Review round 6 MISCOMPILE: a record class defining __bool__ folded truthy by default; Python consults the
-    # override. All-Known records fold the concrete truth; a residual-leaf record with an override rejects.
+def test_record_truth_with_a_custom_bool_is_a_located_rejection() -> None:
+    # Review rounds 6+7: a record class defining __bool__ folded truthy by default (round 6 MISCOMPILE); folding
+    # the override concretely was then found unsound too -- it runs on a value-faithful but not TYPE-faithful
+    # reconstruction (np.bool_ admits as plain bool, flipping ``a + b == 2``), so any class-dictionary
+    # __bool__/__len__ entry rejects, ``__bool__ = None`` included (Python raises TypeError on its truth).
     @dataclasses.dataclass(frozen=True)
     class Disabled:
         def __bool__(self) -> bool:
             return False
 
-    disabled = Disabled()
+    @dataclasses.dataclass(frozen=True)
+    class Sized:
+        def __len__(self) -> int:
+            return 0
 
-    def kernel(x: float) -> float:
-        return x if disabled else 0.0
+    @dataclasses.dataclass(frozen=True)
+    class Unbooled:
+        __bool__ = None
 
-    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="rec_bool").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == 0.0 == kernel(3.0)
+    for instance in (Disabled(), Sized(), Unbooled()):
+
+        def kernel(x: float) -> float:
+            return x if instance else 0.0  # noqa: B023
+
+        with pytest.raises(UnsupportedConstruct, match="custom __bool__"):
+            lower(kernel)
 
     @dataclasses.dataclass(frozen=True)
     class Gated:
@@ -4534,24 +4545,43 @@ def test_a_flavor_divergent_return_is_a_contract_rejection() -> None:
 
 
 def test_a_returned_leaf_equal_to_a_public_live_out_rides_the_state_port_across_branches() -> None:
-    # Review round 6: the return leaf and the state live-out are distinct-but-identical exit phis when the value
-    # merges across branches; dedup keys on the phi's structure, so no duplicate out port is emitted.
+    # Review rounds 6+7: the return leaf and the state live-out read through DIFFERENT places, so a value merged
+    # across branches arrives as two distinct-but-identical exit phis (the value must flow through a LOCAL with
+    # per-arm stores -- returning self.y itself shares one phi through the Braun cache and never exercised the
+    # fix). Dedup keys on the phi's structure. Round 7 extended the identity through pure conversion wrappers:
+    # a store-side and a return-side IntToFloat live in different blocks, which the per-block interner keeps
+    # distinct.
     class Latch:
         def __init__(self) -> None:
             self.y = 0.0
 
         def step(self, flag: bool, x: float) -> tuple[float]:
             if flag:
-                self.y = x
+                r = x
+                self.y = r
             else:
-                self.y = -x
-            return (self.y,)
+                r = -x
+                self.y = r
+            return (r,)
 
     result = holoso.synthesize(Latch().step, default_ops(FloatFormat(11, 52)), name="dedup_phi")
     assert [p.name for p in result.output_ports] == ["state_y"]
     elaborated = result.numerical_model.elaborate()
     assert float(elaborated.run(True, 3.0)[0]) == 3.0
     assert float(elaborated.run(False, 5.0)[0]) == -5.0
+
+    class Wrapped:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def step(self, flag: bool) -> float:
+            n = 1 if flag else 2
+            self.y = n
+            return n
+
+    wrapped = holoso.synthesize(Wrapped().step, default_ops(FloatFormat(11, 52)), name="dedup_wrap")
+    assert [p.name for p in wrapped.output_ports] == ["state_y"]
+    assert float(wrapped.numerical_model.elaborate().run(True)[0]) == 1.0
 
 
 def test_concretely_folded_aggregate_subscripts_need_no_cells() -> None:
@@ -4575,20 +4605,34 @@ def test_concretely_folded_aggregate_subscripts_need_no_cells() -> None:
 
 
 def test_sequence_repeat_counts_follow_python() -> None:
-    # Review round 6: a bool count repeats 0/1 times and a negative count yields the empty sequence, exactly as
-    # Python; both previously rejected as "arithmetic on an aggregate value".
-    def repeat_true(x: float) -> float:
-        pair = (x,) * True
-        return pair[0]
-
+    # Review rounds 6+7: a negative count yields the empty sequence, exactly as Python. Bool counts were briefly
+    # accepted and then withdrawn: the StaticBool tag conflates bool with np.bool_ (which numpy 2 stripped of
+    # __index__, a Python TypeError), so accepting either would bless invalid Python -- both spellings reject.
+    # A count beyond the ssize_t index range (Python: OverflowError) rejects rather than clamping.
     def repeat_negative(x: float) -> float:
         rest = [x] * -1
         return x + float(len(rest))
 
-    fmt = FloatFormat(11, 52)
-    for kernel, expected in ((repeat_true, 3.0), (repeat_negative, 3.0)):
-        model = holoso.synthesize(kernel, default_ops(fmt), name=kernel.__name__).numerical_model
-        assert float(model.elaborate().run(3.0)[0]) == expected == kernel(3.0)
+    model = holoso.synthesize(repeat_negative, default_ops(FloatFormat(11, 52)), name="rep_neg").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 3.0 == repeat_negative(3.0)
+
+    numpy_true = np.bool_(True)
+
+    def repeat_python_bool(x: float) -> float:
+        pair = (x,) * True
+        return pair[0]
+
+    def repeat_numpy_bool(x: float) -> float:
+        pair = (x,) * numpy_true  # type: ignore[operator]  # numpy 2: TypeError, np.bool_ has no __index__
+        return pair[0]  # type: ignore[no-any-return]
+
+    def repeat_beyond_index_range(x: float) -> float:
+        rest = (x,) * -(1 << 100)
+        return x + float(len(rest))
+
+    for kernel in (repeat_python_bool, repeat_numpy_bool, repeat_beyond_index_range):
+        with pytest.raises(UnsupportedConstruct, match="arithmetic on an aggregate value"):
+            lower(kernel)
 
 
 def test_a_non_datapath_leaf_under_a_scalar_contract_names_the_leaf() -> None:
@@ -4601,3 +4645,45 @@ def test_a_non_datapath_leaf_under_a_scalar_contract_names_the_leaf() -> None:
         UnsupportedConstruct, match=r"return type mismatch at leaf \[0\]: declared float, returns a str"
     ):
         lower(kernel)
+
+
+# ---------------------------------------- spine review round 7 ----------------------------------------
+
+
+def test_concretely_folded_array_attributes_need_no_cells() -> None:
+    # Review round 7: attribute navigation of an all-Known array (.shape, .T, a 0-d array's .real) folds at
+    # analysis; emission asserted the aggregate source was a record and crashed. Same invariant as the folded
+    # subscript: an all-Known destination needs no cells.
+    zero_d = np.array(3.0)
+    vector = np.array([1.0, 2.0, 3.0])
+    matrix = np.array([[1.0, 2.0], [3.0, 4.0]])
+
+    def real_of_zero_d(x: float) -> float:
+        return x + float(zero_d.real)
+
+    def shape_len(x: float) -> float:
+        return x + float(len(zero_d.shape))
+
+    def shape_element(x: float) -> float:
+        return x + float(vector.shape[0])
+
+    def transposed_element(x: float) -> float:
+        return x + float(matrix.T[0][1])
+
+    fmt = FloatFormat(11, 52)
+    for kernel in (real_of_zero_d, shape_len, shape_element, transposed_element):
+        model = holoso.synthesize(kernel, default_ops(fmt), name=kernel.__name__).numerical_model
+        assert float(model.elaborate().run(2.0)[0]) == kernel(2.0)
+
+
+def test_an_index_able_aggregate_key_projects_like_a_known_integer() -> None:
+    # Review round 7: a 0-d integer array is a valid Python sequence index (operator.index accepts it); the
+    # analyzer projected the child but emission asserted the key fact was Known and crashed on the aggregate.
+    zero_d_index = np.array(0)
+
+    def kernel(x: float) -> float:
+        t = (x, 2.0)
+        return t[zero_d_index] * 4.0
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="idx_agg").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 12.0 == kernel(3.0)

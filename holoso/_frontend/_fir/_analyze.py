@@ -916,20 +916,14 @@ class Analyzer:
                         "the truth value of an array is ambiguous; use .any() or .all() in plain numpy", origin
                     )
                 if isinstance(layout, RecordLayout):
-                    if _truth_override(layout.klass) is None:
-                        return Known(StaticBool(True))  # default object truth, regardless of field count
-                    concrete = materialize_static(aggregate)
-                    if concrete is None:
+                    # A class-dictionary __bool__/__len__ entry (even ``__bool__ = None``) rejects outright: the
+                    # override would run on a value-faithful but not type-faithful reconstruction (np.bool_ admits
+                    # as a plain bool), so folding it can silently diverge from Python.
+                    if _has_truth_override(layout.klass):
                         raise AnalysisRejection(
-                            "the truth of a record with a custom __bool__/__len__ and runtime fields "
-                            "is not supported",
-                            origin,
+                            "the truth of a record with a custom __bool__/__len__ is not supported", origin
                         )
-                    try:
-                        truth = bool(as_python(concrete))
-                    except Exception as error:
-                        raise AnalysisRejection(f"truth fails here: {error}", origin) from None
-                    return Known(StaticBool(truth))
+                    return Known(StaticBool(True))  # default object truth, regardless of field count
                 return Known(StaticBool(outer_arity(layout) != 0))
             case _:
                 return Residual(SemType.BOOL)
@@ -1542,11 +1536,15 @@ def _concat_seqs(bin_op: BinOp, lhs: Fact, rhs: Fact) -> Fact | None:
     if bin_op is BinOp.MUL:
         seq, count = (lhs, rhs) if _seq_side(lhs) is not None else (rhs, lhs)
         lifted = _seq_side(seq)
-        if lifted is not None and isinstance(count, Known) and isinstance(count.value, (MetaInt, NpInt, StaticBool)):
-            repetitions = max(0, int(count.value.value))  # Python: a negative count is empty, a bool is 0/1
-            if repetitions <= 1024:
+        # No StaticBool count: the tag conflates bool with np.bool_, and only the former is a valid multiplier
+        # (numpy 2 dropped __index__ from np.bool_), so accepting it would bless invalid Python. The count must
+        # also fit Python's ssize_t index range -- beyond it CPython raises OverflowError rather than clamping.
+        if lifted is not None and isinstance(count, Known) and isinstance(count.value, (MetaInt, NpInt)):
+            repetitions = int(count.value.value)
+            if -(2**63) <= repetitions <= 1024:
                 children = tuple(lifted.child(i) for i in range(outer_arity(lifted.layout)))
-                return aggregate_of(children * repetitions, is_list=isinstance(lifted.layout, ListLayout))
+                repeated = children * max(0, repetitions)  # Python: a negative count is the empty sequence
+                return aggregate_of(repeated, is_list=isinstance(lifted.layout, ListLayout))
         return None
     if bin_op is not BinOp.ADD:
         return None
@@ -1574,17 +1572,12 @@ def _mro_attribute_of(klass: type, name: str) -> object | None:
     return next((c.__dict__[name] for c in klass.__mro__ if name in c.__dict__), None)
 
 
-def _truth_override(klass: type) -> object | None:
-    """A user-defined __bool__/__len__ governing the class's truth (object's own default __bool__ excluded)."""
-    return next(
-        (
-            c.__dict__[name]
-            for name in ("__bool__", "__len__")
-            for c in klass.__mro__
-            if c is not object and name in c.__dict__
-        ),
-        None,
-    )
+def _has_truth_override(klass: type) -> bool:
+    """
+    Whether a user-defined __bool__/__len__ ENTRY governs the class's truth (object's own default excluded).
+    Membership, not value: ``__bool__ = None`` is a real override (Python raises TypeError on its truth).
+    """
+    return any(name in c.__dict__ for name in ("__bool__", "__len__") for c in klass.__mro__ if c is not object)
 
 
 def _reject_attribute_hooks(klass: type, origin: OriginStack) -> None:

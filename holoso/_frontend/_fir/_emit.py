@@ -62,6 +62,7 @@ from ..._hir import (
     IntToFloat,
     IntType,
     IntXor,
+    Operation,
     Operator,
     Phi,
     Select,
@@ -89,6 +90,7 @@ from ._fact import (
     child_layouts,
     child_slice,
     leaf_paths,
+    materialize_static,
     outer_arity,
 )
 from ._signature import (
@@ -731,7 +733,7 @@ class _Emitter:
                     # select promotes the integer arm on its own edge exactly like a phi. An aggregate never reaches
                     # a residual condition: the condition is the lhs's own truth, which folds (or rejects) for every
                     # aggregate, and a scalar lhs cannot join with an aggregate rhs.
-                    assert not isinstance(result_fact, AggregateFact), "an aggregate select with a residual condition"
+                    assert not isinstance(result_fact, AggregateFact)
                     then_binding, else_binding = (rhs, lhs) if mode is SelectMode.AND else (lhs, rhs)
                     condition = self._materialize(fir_id, cond, SemType.BOOL)
                     sem = self._fact_sem(result_fact)
@@ -754,14 +756,17 @@ class _Emitter:
                     isinstance(dst_fact, AggregateFact) and any(isinstance(leaf, Residual) for leaf in dst_fact.leaves)
                 )
                 if isinstance(obj_fact, AggregateFact) and needs_cells:
-                    # Only a Known integer key reaches here: a residual dst leaf means the analyzer projected a
-                    # positional child (a tuple key or a slice object folds concretely to an all-Known result,
-                    # which needs no cells -- every use folds).
+                    # A residual dst leaf means the analyzer projected a positional child, so the key resolves
+                    # under operator.index -- either a Known directly or an all-Known aggregate (a 0-d integer
+                    # array, an __index__-able record), materialized exactly as the analyzer materialized it.
+                    # A tuple key or slice object folds concretely to an all-Known result and never reaches here.
                     import operator as operator_module
 
                     index_fact = self._fact(index)
-                    assert isinstance(index_fact, Known), index_fact
-                    position = operator_module.index(as_python(index_fact.value))  # type: ignore[arg-type]
+                    assert isinstance(index_fact, (Known, AggregateFact)), index_fact
+                    key = index_fact.value if isinstance(index_fact, Known) else materialize_static(index_fact)
+                    assert key is not None, index_fact
+                    position = operator_module.index(as_python(key))  # type: ignore[arg-type]
                     width = outer_arity(obj_fact.layout)
                     position = position + width if position < 0 else position
                     _, start, _ = child_slice(obj_fact.layout, position)
@@ -773,9 +778,15 @@ class _Emitter:
                 dst_fact = self._fact(dst)
                 if not isinstance(dst_fact, Known):
                     obj_fact = self._fact(obj)
-                    if isinstance(obj_fact, AggregateFact):
+                    needs_cells = isinstance(dst_fact, Residual) or (
+                        isinstance(dst_fact, AggregateFact)
+                        and any(isinstance(leaf, Residual) for leaf in dst_fact.leaves)
+                    )
+                    if isinstance(obj_fact, AggregateFact) and not needs_cells:
+                        pass  # concrete navigation of an all-Known aggregate (.T, .shape, ...): every use folds
+                    elif isinstance(obj_fact, AggregateFact):
                         # A record with residual leaves projects the named field's cell window, exactly as a
-                        # positional subscript projects a child's.
+                        # positional subscript projects a child's (the only residual-producing attribute source).
                         layout = obj_fact.layout
                         assert isinstance(layout, RecordLayout), layout
                         names = [field for field, _ in layout.fields]
@@ -1045,13 +1056,18 @@ class _Emitter:
 
     def _exit_identity(self, vid: int) -> object:
         """
-        The dedup identity of an exit value: a phi is its (type, arms) structure, not its id. The return leaf and a
-        state live-out read through DIFFERENT places, so a value that is by dataflow the same merge arrives as two
-        distinct-but-identical exit phis (duplicate-phi elimination unifies them only after ports are fixed).
+        The dedup identity of an exit value: a phi is its (type, arms) structure and a pure operation is its
+        operator over its operands' identities, not the value id. The return leaf and a state live-out read
+        through DIFFERENT places, so a value that is by dataflow the same merge arrives as two distinct-but-
+        identical exit phis -- possibly under coercion wrappers minted separately on each side (a store-side and a
+        return-side IntToFloat live in different blocks, which the per-block interner keeps distinct). Recursion
+        is bounded by the SSA DAG (operands strictly precede their operation).
         """
         node = self._builder.node_of(vid)
         if isinstance(node, Phi):
             return (node.type, node.arms)
+        if isinstance(node, Operation):
+            return (node.operator, tuple(self._exit_identity(operand) for operand in node.operands))
         return vid
 
     def _exit_leaf(self, exit_block: FirBlockId, path: LeafPath, ordinal: int, leaf: AtomicFact, kind: SemType) -> int:
