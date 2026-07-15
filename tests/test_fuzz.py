@@ -135,11 +135,19 @@ def test_branch_claiming_inner_shapes_survive_compilation() -> None:
 
 
 @pytest.mark.fuzz
-def test_fuzz_campaign() -> None:
+@pytest.mark.parametrize("shard", range(_budget("HOLOSO_FUZZ_SHARDS", 1)))
+def test_fuzz_campaign(shard: int) -> None:
+    """
+    HOLOSO_FUZZ_SHARDS=K splits the kernel budget across K parametrized cases with disjoint derived seeds, so a
+    many-core machine parallelizes the campaign under pytest-xdist (the campaign is embarrassingly parallel by
+    seed). The default of 1 keeps today's exact single-sequence behavior, so CI reproducibility is untouched.
+    """
+    shards = _budget("HOLOSO_FUZZ_SHARDS", 1)
     n_kernels = _budget("HOLOSO_FUZZ_KERNELS", 200)
     n_vectors = _budget("HOLOSO_FUZZ_ITERS", 32)
     seed = _budget("HOLOSO_FUZZ_SEED", 0xF0007A11)
-    _run_and_assert(n_kernels, n_vectors, seed)
+    per_shard = -(-n_kernels // shards)  # ceil: the total meets or slightly exceeds the requested budget
+    _run_and_assert(per_shard, n_vectors, seed ^ (shard * 0x9E3779B9))
 
 
 def test_fuzz_smoke() -> None:
