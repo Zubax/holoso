@@ -5574,3 +5574,22 @@ def test_live_object_protocols_never_run_at_compile_time() -> None:
     ):
         with pytest.raises(UnsupportedConstruct, match=match):
             lower(kernel)
+
+
+# ------------------------------ architecture migration phase 1 ------------------------------
+
+
+def test_concrete_evaluation_has_one_admission_door() -> None:
+    # Phase-1 invariant: the generic concrete-evaluation site in the analyzer sits behind the fold admission
+    # harness, and the vetted set lives only in _fold. A second admission door, or a vetted set re-grown inside
+    # the analyzer, is a regression to distributed guard prose.
+    import holoso._frontend._fir._analyze as analyze_module
+    import holoso._frontend._fir._fold as fold_module
+
+    analyze_source = Path(analyze_module.__file__).read_text()
+    fold_source = Path(fold_module.__file__).read_text()
+    assert analyze_source.count("admit_call(") == 1
+    assert analyze_source.count("concrete = target(") == 1
+    assert analyze_source.index("admit_call(") < analyze_source.index("concrete = target(")
+    assert "_vetted_concrete_target" not in analyze_source
+    assert "_vetted_concrete_target" in fold_source

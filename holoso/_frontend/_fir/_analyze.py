@@ -19,7 +19,7 @@ import logging
 import types
 from typing import TYPE_CHECKING
 from collections.abc import Callable
-from dataclasses import dataclass, field, is_dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from ..._errors import UnsupportedConstruct, UnsupportedLibraryFunction
 from .._ast_support import UNROLL_THRESHOLD
@@ -78,7 +78,6 @@ from ._fact import (
     StructuralLayout,
     TupleLayout,
     Unbound,
-    ValueLayout,
     aggregate_of,
     join_layouts,
     materialize_static,
@@ -86,6 +85,7 @@ from ._fact import (
     outer_arity,
 )
 from ._signature import ScalarParameter
+from ._fold import FoldRefusal, admit_call, contains_record, is_unimplemented_library, range_size
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
 from ._value import (
@@ -136,15 +136,6 @@ class LibraryAnalysisRejection(UnsupportedLibraryFunction):
         super().__init__(f"{frame.function}:{frame.line}:{frame.column}: {message}")
         self.message = message
         self.origin = origin
-
-
-def _is_unimplemented_library(target: object) -> bool:
-    """A numpy ufunc or a ``math`` module member: a recognized library primitive, distinct from an arbitrary call."""
-    import math
-
-    import numpy as np
-
-    return isinstance(target, np.ufunc) or any(target is member for member in vars(math).values())
 
 
 def _datapath_zero(value: object) -> object:
@@ -944,7 +935,7 @@ class Analyzer:
         import operator
 
         if isinstance(index, AggregateFact):
-            if _contains_record(index.layout):  # a record anywhere in the key would run __index__ on a rebuild
+            if contains_record(index.layout):  # a record anywhere in the key would run __index__ on a rebuild
                 raise AnalysisRejection("a record subscript index is not supported", origin)
             key = materialize_static(index)  # a static tuple key (m[1, 0]); runtime keys reject below
             if key is not None:
@@ -1026,7 +1017,7 @@ class Analyzer:
                 # (.base, .strides, .flags, .data) observe the snapshot, not the user's object, so only the
                 # value-determined navigation set folds.
                 raise AnalysisRejection(f"array attribute '{name}' is not supported", origin)
-            if _contains_record(obj.layout):
+            if contains_record(obj.layout):
                 # A bound method of a record-carrying sequence would run Python's protocols over the rebuilt
                 # records; records are consumed by field access only.
                 raise AnalysisRejection(f"attribute '{name}' of a record-carrying sequence is not supported", origin)
@@ -1103,7 +1094,7 @@ class Analyzer:
                 raise AnalysisRejection(str(error), origin) from None
             admitted = admit(concrete)
             if admitted is None and callable(concrete):
-                if isinstance(obj.value, StaticRange) and _range_size(obj.value) > (1 << 20):
+                if isinstance(obj.value, StaticRange) and range_size(obj.value) > (1 << 20):
                     # range.count/.index fall back to linear iteration for non-int arguments.
                     raise AnalysisRejection("a method of an oversized range is not supported", origin)
                 if name.startswith("__"):
@@ -1335,101 +1326,22 @@ class Analyzer:
                     block.ops[index] = PyAttr(call.dst, call.args[0], attr_fact.value.value, call.origin)
                     return True
                 raise AnalysisRejection("getattr requires a static attribute name and no default", call.origin)
-            # Concrete evaluation is a CLOSED WHITELIST, not a blacklist of hazards: six review rounds showed
-            # that every hazard (live-object reads outside the state machinery, folds on type-unfaithful
-            # reconstructions, snapshot layout observation, enum erasure) keeps resurfacing under new spellings
-            # (functools.partial, vars, bound dunders, unbound descriptors, wrapper objects). Only callables
-            # vetted for value-determined evaluation are admitted; everything else is a located rejection.
+            # Concrete evaluation is a CLOSED WHITELIST behind one door: the fold admission harness. The
+            # analyzer contributes only what the harness cannot know -- per-Analyzer minted-method identity and
+            # library-registry resolution -- and locates the refusal at the call origin.
             minted = any(target is method for method in self._value_methods.values())
-            if minted:
-                # A minted value method runs on the domain's reconstruction, but its ARGUMENTS size its work
-                # and its result: "x".ljust(10**12) or int.to_bytes(10**12) would allocate gigabytes at compile
-                # time. The same 2^20 bound that guards static ranges applies to its integer arguments.
-                for fact in [*argument_facts, *(fact for _, fact in keyword_facts)]:
-                    if (
-                        isinstance(fact, Known)
-                        and isinstance(fact.value, (MetaInt, NpInt))
-                        and abs(fact.value.value) > (1 << 20)
-                    ):
-                        raise AnalysisRejection(
-                            "an oversized integer argument to a value method is not supported", call.origin
-                        )
-            if resolve(target) is None and not minted and not _vetted_concrete_target(target):
-                name = getattr(target, "__name__", repr(target))
-                if _is_unimplemented_library(target):
-                    raise LibraryAnalysisRejection(f"library function {name!r} is not implemented yet", call.origin)
-                raise AnalysisRejection(f"call to {name!r} is not supported in a kernel", call.origin)
-            if target is isinstance:
-                # Enum members normalize to their base value at admission (the sanctioned erasure), so an
-                # isinstance query answers wrong whenever erasure can matter: the SUBJECT must not carry an
-                # erasure-capable provenance (a Known Python int or str may be a normalized IntEnum/StrEnum
-                # member -- indistinguishable after admission, and a plain mixin base of an enum makes even an
-                # enum-free classinfo lie), and the classinfo must RESOLVE COMPLETELY to enum-free plain types
-                # whose instance check is type's own (an ABC's register()/__instancecheck__ distinguishes the
-                # live member from its erased value).
-                subject = argument_facts[0] if argument_facts else None
-                if isinstance(subject, Known) and isinstance(subject.value, (MetaInt, StaticStr)):
-                    raise AnalysisRejection(
-                        "isinstance of a static int/str is not decidable (it may be a normalized enum member)",
-                        call.origin,
-                    )
-                classinfo = argument_facts[1] if len(argument_facts) == 2 else None
-                kinds = _classinfo_types(classinfo)
-                if (
-                    kinds is None
-                    or any(issubclass(kind, enum.Enum) for kind in kinds)
-                    or any(type(kind).__instancecheck__ is not type.__instancecheck__ for kind in kinds)
-                ):
-                    raise AnalysisRejection(
-                        "isinstance requires a static, enum-free class or tuple of classes with the plain "
-                        "instance check (enum members normalize to their base value)",
-                        call.origin,
-                    )
-            # Argument admission: a record never crosses into a concrete evaluation (nested inside a tuple/list
-            # included) -- the callable, or even the dataclass-generated __repr__, would run on a reconstruction
-            # that is value-faithful but not type-faithful (an enum field rebuilds as its base value). An object
-            # reference never crosses either, except as isinstance's classinfo: a stateful component's dunder
-            # would read the live reset-time object while the kernel's writes exist only as state facts
-            # (float(self) stepped [1.0, 1.0] where Python steps [3.0, 5.0]). A referenced TYPE is inert.
-            positional_count = len(argument_facts)
-            for position, fact in enumerate([*argument_facts, *(fact for _, fact in keyword_facts)]):
-                if isinstance(fact, AggregateFact) and _contains_record(fact.layout):
-                    raise AnalysisRejection(
-                        "a record cannot cross into a concrete call; access its fields directly", call.origin
-                    )
-                classinfo_position = target is isinstance and position == 1 and position < positional_count
-                if (
-                    isinstance(fact, AggregateFact)
-                    and not classinfo_position
-                    and any(isinstance(leaf, Known) and isinstance(leaf.value, ObjectRef) for leaf in fact.leaves)
-                ):
-                    # sum((self,)) would hand the callable the live object through the rebuilt container; the
-                    # inline classinfo tuple of isinstance is the one sanctioned carrier (resolved member by
-                    # member by _classinfo_types).
-                    raise AnalysisRejection("an object reference cannot cross into a concrete call", call.origin)
-                oversized = (
-                    isinstance(fact, Known)
-                    and isinstance(fact.value, StaticRange)
-                    and _range_size(fact.value) > (1 << 20)
-                ) or (
-                    isinstance(fact, AggregateFact)
-                    and any(
-                        isinstance(leaf, Known)
-                        and isinstance(leaf.value, StaticRange)
-                        and _range_size(leaf.value) > (1 << 20)
-                        for leaf in fact.leaves
-                    )
+            try:
+                admit_call(
+                    target,
+                    argument_facts,
+                    [fact for _, fact in keyword_facts],
+                    minted=minted,
+                    registry_resolved=resolve(target) is not None,
                 )
-                if oversized:
-                    raise AnalysisRejection("a static fold over an oversized range is not supported", call.origin)
-                if isinstance(fact, Known) and isinstance(fact.value, ObjectRef):
-                    if target is isinstance and position == 1 and position < positional_count:
-                        continue
-                    referent = fact.value.obj
-                    inert = any(referent is kind for kind in _inert_type_referents())
-                    if isinstance(referent, type) and inert:
-                        continue  # a dtype-ish builtin type carries no live state
-                    raise AnalysisRejection("an object reference cannot cross into a concrete call", call.origin)
+            except FoldRefusal as refusal:
+                if refusal.library_diagnostic:
+                    raise LibraryAnalysisRejection(str(refusal), call.origin) from None
+                raise AnalysisRejection(str(refusal), call.origin) from None
             concrete_args = [_concrete_fact(fact) for fact in argument_facts]
             concrete_kwargs = [(keyword, _concrete_fact(fact)) for keyword, fact in keyword_facts]
             if any(value is None for value in concrete_args) or any(v is None for _, v in concrete_kwargs):
@@ -1453,7 +1365,7 @@ class Analyzer:
                     env.set(Local(call.dst), Residual(cast_target))
                     self._cast_calls.add(id(call))
                     return False
-                if _is_unimplemented_library(target):
+                if is_unimplemented_library(target):
                     # A recognized math/numpy function with no fast-math hardware equivalent (erf, spacing, a ufunc):
                     # a distinct public error so the user knows it is a missing library primitive, not a bad call.
                     raise LibraryAnalysisRejection(f"library function {name!r} is not implemented yet", call.origin)
@@ -1749,119 +1661,6 @@ def _has_truth_override(klass: type) -> bool:
     Membership, not value: ``__bool__ = None`` is a real override (Python raises TypeError on its truth).
     """
     return any(name in c.__dict__ for name in ("__bool__", "__len__") for c in klass.__mro__ if c is not object)
-
-
-def _range_size(value: StaticRange) -> int:
-    try:
-        return len(range(value.start, value.stop, value.step))
-    except OverflowError:  # astronomically large: oversized by definition
-        return 1 << 62
-
-
-def _inert_type_referents() -> tuple[type, ...]:
-    import numpy as np
-
-    return (float, int, bool, np.float64, np.int64, np.bool_)
-
-
-def _vetted_concrete_target(target: object) -> bool:
-    """
-    The closed set of callables admitted for concrete evaluation beyond the library registry: value casts and
-    constructors whose results depend only on argument VALUES, never on object identity, memory layout, or
-    provenance a reconstruction erases. Bound methods are NOT vetted here: a pre-bound builtin captured from the
-    user's namespace carries a LIVE receiver (a captured list.pop emptied the user's list at compile time), so
-    only the analyzer's own value-method bind site -- which mints methods off the domain's reconstruction under
-    its own guards -- may admit one, by identity.
-    """
-    import operator as operator_module
-
-    import numpy as np
-
-    vetted = (
-        float,
-        int,
-        bool,
-        len,
-        range,
-        slice,
-        sum,
-        divmod,
-        isinstance,
-        operator_module.index,
-        np.array,
-        np.asarray,
-        np.asanyarray,
-        np.bool_,
-        np.int64,
-        np.float64,
-    )
-    if any(target is entry for entry in vetted):
-        return True
-    if isinstance(target, type) and is_dataclass(target):
-        # Record construction is real construction -- but only through the GENERATED machinery (plain field
-        # assignment compiled from synthesized source). A user __init__, __post_init__, __new__, metaclass, or
-        # field default_factory is arbitrary code that would run at compile time, possibly on
-        # erasure-reconstructed arguments (an IntEnum field arrives as its base int) or against live state
-        # (a default_factory popped the user's list once per analysis round).
-        import dataclasses as dataclasses_module
-
-        init = _mro_attribute_of(target, "__init__")
-        generated_init = isinstance(init, types.FunctionType) and init.__code__.co_filename == "<string>"
-        hooked = any(
-            name in c.__dict__ for name in ("__post_init__", "__new__") for c in target.__mro__ if c is not object
-        ) or any(
-            isinstance(member, types.FunctionType) and member.__code__.co_filename != "<string>"
-            for c in target.__mro__
-            if c is not object
-            for name in ("__setattr__", "__delattr__")
-            if (member := c.__dict__.get(name)) is not None
-        )
-        factories = any(
-            field.default_factory is not dataclasses_module.MISSING for field in dataclasses_module.fields(target)
-        )
-        return generated_init and not hooked and not factories and type(target) is type
-    return False
-
-
-def _classinfo_types(fact: "Fact | None") -> list[type] | None:
-    """
-    The plain types an isinstance classinfo resolves to, or None when any member is opaque (a non-type, a typing
-    generic, an unresolvable reference). Tuples and unions unpack recursively, so a precomputed ``(float, Mode)``
-    or ``str | Mode`` is inspected member by member instead of slipping past as one reference.
-    """
-    pending: list[object] = []
-    match fact:
-        case Known(value=ObjectRef(obj=obj)):
-            pending = [obj]
-        case AggregateFact(leaves=leaves):
-            for leaf in leaves:
-                if not (isinstance(leaf, Known) and isinstance(leaf.value, ObjectRef)):
-                    return None
-                pending.append(leaf.value.obj)
-        case _:
-            return None
-    resolved: list[type] = []
-    while pending:
-        entry = pending.pop()
-        if isinstance(entry, tuple):
-            pending.extend(entry)
-        elif isinstance(entry, types.UnionType):
-            pending.extend(entry.__args__)
-        elif isinstance(entry, type):
-            resolved.append(entry)
-        else:
-            return None
-    return resolved
-
-
-def _contains_record(layout: "ValueLayout") -> bool:
-    match layout:
-        case RecordLayout():
-            return True
-        case TupleLayout(items=items) | ListLayout(items=items) | StructuralLayout(items=items):
-            return any(_contains_record(item) for item in items)
-        case _:
-            return False
 
 
 def _reject_attribute_hooks(klass: type, origin: OriginStack) -> None:

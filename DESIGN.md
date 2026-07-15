@@ -182,7 +182,9 @@ keeping only flavor-independent behavior; ndarray dtypes promote int64 to float6
 is Python-exact on Knowns; runtime-typed values never fold (width rule); a Known Bool always drives edge selection.
 Aggregate truth follows Python: tuples/lists fold by arity, arrays (and any join carrying the array flavor) reject
 as ambiguous, and a record without a truth override is truthy per object semantics. Concrete evaluation is a
-CLOSED WHITELIST, not a blacklist of hazards: beyond the library registry, only vetted value-determined callables
+CLOSED WHITELIST, not a blacklist of hazards, and the whole admission decision is one harness (the analyzer's
+single door to host evaluation, so a new admission is a reviewable row there rather than a guard scattered
+through the transfers): beyond the library registry, only vetted value-determined callables
 are admitted (the float/int/bool/len/range/slice/sum/divmod casts and constructors, operator.index, the
 np.array/asarray/asanyarray constructors and numpy scalar types, isinstance whose SUBJECT carries no
 erasure-capable provenance -- a static int/str may be a normalized enum member -- over completely-resolved
