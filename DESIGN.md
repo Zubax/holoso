@@ -156,8 +156,8 @@ construction) with comprehension-only targets carved out via the AST; non-locals
 before builtin, values read at resolve time. Static values form a closed whitelisted domain with provenance as
 identity: exact Python ints (MetaInt) are distinct from numpy 64-bit scalars (NpInt/NpFloat, numpy's own
 mixed-operand semantics; narrower numpy widths are not static); arrays admit as read-only snapshots; sequences keep
-list/tuple flavor; dataclasses admit as records only when reconstructible from fields; containers bound depth and
-refuse cycles. An IntEnum/StrEnum member normalizes to its base value with the MEMBER retained as the scalar's
+list/tuple flavor; slices with integer (or absent) bounds are plain values; dataclasses admit as records only
+when reconstructible from fields; containers bound depth and refuse cycles. An IntEnum/StrEnum member normalizes to its base value with the MEMBER retained as the scalar's
 source (tri-state provenance: a retained member, PLAIN for provably-never-an-enum, or LOST when a join dropped
 the source), so arithmetic folds with base-type semantics while faithful reconstruction returns the original;
 joins of value-equal scalars with differing sources degrade to LOST, monotonically. Fixed-point equality is tagged and bitwise (True is not 1, signed zero distinct, NaN stable). Static
@@ -311,7 +311,9 @@ annotation: `float` scalars are floating-point ports, `bool` are 1-bit boolean p
 whose ports await the ndarray stages. The return annotation is likewise mandatory, parsed into a recursive
 contract -- scalar kinds, `tuple[...]` with per-position contracts, `tuple[X, ...]` variadic over the emitted
 arity, `list[X]`, `tuple[()]` the empty tuple, `None` for a method that returns nothing, and an `X | None` union
-unwrapping its None arm for early-return kernels -- and validated structurally against the emitted value: any
+unwrapping to the X contract in the signature (a LIVE None path is not lowerable, though: a None that merges
+with a value rejects at the join, naming the conditional None) -- and validated structurally against the
+emitted value: any
 arity, flavor, or leaf-kind divergence is a rejection naming the diverging position (emission-side refusals name
 the port/leaf, not a source line). Strictness includes flavor: a container that is a tuple on one path and a list
 on another (a flavor-erased structural join) satisfies neither contract. An aggregate return flattens to one scalar output

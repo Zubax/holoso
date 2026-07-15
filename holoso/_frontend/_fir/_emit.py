@@ -766,14 +766,10 @@ class _Emitter:
                     import operator as operator_module
 
                     index_fact = self._fact(index)
-                    assert isinstance(index_fact, (Known, Reference, AggregateFact)), index_fact
-                    if isinstance(index_fact, Reference):
-                        raw_key = index_fact.obj  # the analyzer already resolved this referent under operator.index
-                    else:
-                        key = index_fact.value if isinstance(index_fact, Known) else materialize_static(index_fact)
-                        assert key is not None, index_fact
-                        raw_key = as_python(key)
-                    position = operator_module.index(raw_key)  # type: ignore[arg-type]
+                    assert isinstance(index_fact, (Known, AggregateFact)), index_fact
+                    key = index_fact.value if isinstance(index_fact, Known) else materialize_static(index_fact)
+                    assert key is not None, index_fact
+                    position = operator_module.index(as_python(key))  # type: ignore[arg-type]
                     width = outer_arity(obj_fact.layout)
                     position = position + width if position < 0 else position
                     _, start, _ = child_slice(obj_fact.layout, position)
@@ -1104,6 +1100,10 @@ class _Emitter:
                 vid = self._builder.int_const(int(leaf.value.value))
             else:
                 vid = self._const(leaf.value)
+        elif isinstance(leaf, Reference):
+            raise EmissionRejection(
+                f"return type mismatch at leaf {_port_path(path)}: declared {kind.value}, returns an object"
+            )
         else:
             vid = self._read(exit_block, _LeafPlace(ReturnPlace(), ordinal))
         if kind is SemType.FLOAT and isinstance(self._type_of(vid), IntType):
@@ -1133,6 +1133,8 @@ class _Emitter:
                     raise EmissionRejection("annotated '-> None' but returns a value")
             case ScalarReturn(kind=kind):
                 if not returns_value:
+                    if isinstance(return_fact, Reference) and return_fact.obj is not None:
+                        raise EmissionRejection(f"return type mismatch: declared {kind.value}, returns an object")
                     raise EmissionRejection(f"return type mismatch: declared {kind.value}, returns nothing")
                 if isinstance(return_fact, AggregateFact):
                     raise EmissionRejection(f"return type mismatch: declared {kind.value}, returns an aggregate")

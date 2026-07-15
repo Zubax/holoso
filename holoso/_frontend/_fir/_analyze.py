@@ -96,6 +96,7 @@ from ._value import (
     StaticRecord,
     NpFloat,
     NpInt,
+    ScalarOrigin,
     SemType,
     StaticBool,
     StaticFloat,
@@ -250,8 +251,12 @@ def _join_atoms(a: AtomicFact, b: AtomicFact, origin: OriginStack) -> AtomicFact
         case (Reference(), Reference()):
             if a.obj is b.obj:
                 return a
+            if a.obj is None or b.obj is None:
+                raise AnalysisRejection("None merges with a value here (a conditional None is not supported)", origin)
             raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
-        case (Reference(), _) | (_, Reference()):
+        case (Reference() as lone, _) | (_, Reference() as lone):
+            if lone.obj is None:
+                raise AnalysisRejection("None merges with a value here (a conditional None is not supported)", origin)
             raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
         case (Known(value=x), Known(value=y)):
             if same(x, y):
@@ -784,6 +789,8 @@ class Analyzer:
                         length = admit(len(concrete))  # type: ignore[arg-type]
                     except TypeError as error:
                         raise AnalysisRejection(str(error), op.origin) from None
+                    except OverflowError:
+                        raise AnalysisRejection("length of an oversized range is not supported", op.origin) from None
                     assert length is not None
                     result = Known(length)
                 else:
@@ -978,33 +985,33 @@ class Analyzer:
             # Rejected for ANY subscriptable (a range or string included): the key would resolve through a user
             # __index__ running on the reconstruction, whose semantics the compiler cannot vouch for.
             raise AnalysisRejection("a record subscript index is not supported", origin)
-        if isinstance(obj, AggregateFact) and isinstance(index, (Known, Reference)):
+        if isinstance(index, Reference):
+            # A referenced key would resolve through the LIVE object's __index__ at compile time (repeatedly:
+            # per analysis visit, in the replay, and again at emission), reading reset-time state the kernel's
+            # writes never touch. The state machinery is the honest path: index with int(self.attr).
+            raise AnalysisRejection("an object subscript index is not supported", origin)
+        if isinstance(obj, AggregateFact) and isinstance(index, Known):
             if isinstance(obj.layout, RecordLayout):
                 raise AnalysisRejection("a record is not subscriptable; access its fields by name", origin)
             if isinstance(obj.layout, ArrayLayout) and not obj.layout.shape:
                 raise AnalysisRejection(
                     "a 0-dimensional array cannot be indexed; convert it with float() instead", origin
                 )
-            if (
-                isinstance(index, Known)
-                and isinstance(index.value, (StaticBool, NpBool))
-                and (
-                    isinstance(obj.layout, ArrayLayout)
-                    or (isinstance(obj.layout, StructuralLayout) and ContainerFlavor.ARRAY in obj.layout.flavors)
-                )
+            if isinstance(index.value, (StaticBool, NpBool)) and (
+                isinstance(obj.layout, ArrayLayout)
+                or (isinstance(obj.layout, StructuralLayout) and ContainerFlavor.ARRAY in obj.layout.flavors)
             ):
                 # numpy boolean indexing selects by mask (and prepends an axis for a scalar bool); Python's
                 # bool-as-int semantics apply only to tuples/lists, so guessing here would miscompile.
                 raise AnalysisRejection("a boolean index into an array is not supported; use an integer", origin)
-            if isinstance(index, Known) and isinstance(index.value, NpBool):
+            if isinstance(index.value, NpBool):
                 # numpy 2 removed np.bool_.__index__, so Python itself refuses it as a sequence index; only the
                 # plain Python bool keeps bool-as-int indexing.
                 raise AnalysisRejection(
                     "an np.bool_ subscript index is a TypeError in Python; use a plain bool", origin
                 )
             try:
-                raw_key = index.obj if isinstance(index, Reference) else as_python(index.value)
-                position = operator.index(raw_key)  # type: ignore[arg-type]  # np ints qualify
+                position = operator.index(as_python(index.value))  # type: ignore[arg-type]  # np ints qualify
             except TypeError:
                 # A non-integer static key (a tuple key ``m[1, 0]``, a slice) applies concretely to an all-Known
                 # aggregate; on a runtime-leaf aggregate it awaits the slicing/multi-axis stages.
@@ -1023,14 +1030,13 @@ class Analyzer:
         if isinstance(obj, Reference):
             # A live object's __getitem__ would read reset-time attribute state outside the state machinery.
             raise AnalysisRejection("subscript of an object is not supported", origin)
-        if isinstance(obj, Known) and isinstance(index, (Known, Reference)):
+        if isinstance(obj, Known) and isinstance(index, Known):
             return self._concrete_subscript(obj.value, index, origin)
         raise AnalysisRejection("subscript of a runtime value is not supported yet", origin)
 
-    def _concrete_subscript(self, value: StaticValue, index: "Known | Reference", origin: OriginStack) -> Fact:
-        key = index.obj if isinstance(index, Reference) else as_python(index.value)
+    def _concrete_subscript(self, value: StaticValue, index: Known, origin: OriginStack) -> Fact:
         try:
-            concrete = as_python(value)[key]  # type: ignore[index]
+            concrete = as_python(value)[as_python(index.value)]  # type: ignore[index]
         except Exception as error:
             raise AnalysisRejection(f"subscript fails here: {error}", origin) from None
         admitted = admit(concrete)
@@ -1132,6 +1138,11 @@ class Analyzer:
             try:
                 concrete = getattr(as_python(receiver), name)
             except AttributeError as error:
+                if isinstance(obj.value, (MetaInt, StaticStr)) and not isinstance(obj.value.source, ScalarOrigin):
+                    raise AnalysisRejection(
+                        f"enum member attribute '{name}' is not supported (the member folds as its base value)",
+                        origin,
+                    ) from None
                 raise AnalysisRejection(str(error), origin) from None
             admitted = admit(concrete)
             if admitted is None and callable(concrete):
@@ -1180,7 +1191,11 @@ class Analyzer:
                     cached_fact, chain_entry = cached
                     if _same_fact(iterable_fact, cached_fact):
                         return [chain_entry]
-                    raise AnalysisRejection("loop iterable is not stable across analysis rounds", terminator.origin)
+                    raise AnalysisRejection(
+                        "the loop iterable's analyzed value changed between visits (a join may have degraded "
+                        "it); this iteration shape is not supported yet",
+                        terminator.origin,
+                    )
                 chain_entry = self._unroll(unit, block, terminator, env)
                 self._unroll_cache[block.id] = (iterable_fact, chain_entry)
                 return [chain_entry]

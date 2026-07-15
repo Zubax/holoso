@@ -5663,5 +5663,121 @@ def test_value_methods_on_enum_members_bind_base_type_only() -> None:
     def custom_method(x: float) -> float:
         return x * float(len(tag.describe()))
 
-    with pytest.raises(UnsupportedConstruct, match="'str' object has no attribute 'describe'"):
+    with pytest.raises(UnsupportedConstruct, match="enum member attribute 'describe' is not supported"):
         lower(custom_method)
+
+
+# ------------------------------ retention review round (Claude ultrathink) ------------------------------
+
+
+def test_cross_enum_value_equal_members_degrade_to_lost_not_one_arms_provenance() -> None:
+    # REGRESSION (miscompile): IntEnum/StrEnum members compare equal ACROSS enums by base value, so a
+    # source-including dataclass __eq__ let a cross-enum join keep the FIRST arm's member and isinstance folded
+    # a constant that was wrong on the other path (compiled 9.0 where Python gives 6.0). Source equality is
+    # identity-keyed now; the join degrades to LOST and the query refuses, soundly, on both paths.
+    import enum
+
+    from holoso._frontend._fir._value import MetaInt, same
+
+    class Marker:
+        pass
+
+    class Mode(Marker, enum.IntEnum):
+        A = 1
+
+    class Other(enum.IntEnum):
+        X = 1
+
+    assert not same(MetaInt(1, source=Mode.A), MetaInt(1, source=Other.X))
+
+    def int_kernel(x: float, p: bool) -> float:
+        m = Mode.A if p else Other.X
+        return x * 2.0 if isinstance(m, Marker) else x * 3.0
+
+    with pytest.raises(UnsupportedConstruct, match="not decidable"):
+        lower(int_kernel)
+
+    class TagMarker:
+        pass
+
+    class Tag(TagMarker, enum.StrEnum):
+        A = "ab"
+
+    class OtherTag(enum.StrEnum):
+        Z = "ab"
+
+    def str_kernel(x: float, p: bool) -> float:
+        t = Tag.A if p else OtherTag.Z
+        return x * 2.0 if isinstance(t, TagMarker) else x * 3.0
+
+    with pytest.raises(UnsupportedConstruct, match="not decidable"):
+        lower(str_kernel)
+
+
+def test_object_subscript_keys_reject_instead_of_running_live_index() -> None:
+    # MISCOMPILE: a referenced key resolved through the LIVE object's __index__ at compile time (per analysis
+    # visit, in the replay, and again at emission), reading reset-time state the kernel's writes never touch:
+    # t[self] selected index 0 (reset g=0.0) where Python selects 1 (g=1.0). Both the aggregate-subject and the
+    # concrete-subject key paths refuse now; slice objects keep working as proper values.
+    class SelfIndexed:
+        def __init__(self) -> None:
+            self.g = 0.0
+
+        def __index__(self) -> int:
+            return int(self.g)
+
+        def step(self, x: float) -> float:
+            self.g = 1.0
+            t = (x, -x)
+            return t[self]
+
+    with pytest.raises(UnsupportedConstruct, match="an object subscript index is not supported"):
+        lower(SelfIndexed().step)
+
+    selector = SelfIndexed()
+
+    def concrete_subject(x: float) -> float:
+        return x * float(range(5)[selector])
+
+    with pytest.raises(UnsupportedConstruct, match="an object subscript index is not supported"):
+        lower(concrete_subject)
+
+
+def test_oversized_range_unpacking_is_a_located_rejection() -> None:
+    # len() of range(10**30) raises OverflowError (past ssize_t), which escaped raw through the builder's
+    # unpacking arity check; it is a located rejection now, like the unroll path's.
+    def kernel(x: float) -> float:
+        a, b = range(10**30)
+        return x * float(a + b)
+
+    with pytest.raises(UnsupportedConstruct, match="oversized range"):
+        lower(kernel)
+
+
+def test_reference_returns_reject_with_named_contracts_not_assertions() -> None:
+    # A reference leaf inside a returned aggregate crashed emission with a raw AssertionError ("read of an
+    # undefined place"); a root object return under a value contract claimed "returns nothing". Both are named
+    # contract mismatches now.
+    def ref_leaf(x: float) -> tuple[float, float]:
+        return (x, math)  # type: ignore[return-value]
+
+    with pytest.raises(UnsupportedConstruct, match="returns an object"):
+        lower(ref_leaf)
+
+    def ref_root(x: float) -> float:
+        return math  # type: ignore[return-value]
+
+    with pytest.raises(UnsupportedConstruct, match="returns an object"):
+        lower(ref_root)
+
+
+def test_conditional_none_names_itself_at_the_join() -> None:
+    # The X | None early-return contract unwraps the annotation, but a LIVE None path is not lowerable; the
+    # join used to reject with the generic "irreconcilable kinds", naming neither None nor the return.
+    def kernel(x: float) -> float | None:
+        if x > 0.0:
+            return None
+        return x
+
+    with pytest.raises(UnsupportedConstruct, match="None merges with a value"):
+        lower(kernel)

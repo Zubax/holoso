@@ -33,7 +33,6 @@ from holoso._frontend._fir._value import (
     StaticSeq,
     admit,
     as_python,
-    is_nan_free,
     same,
 )
 from holoso._util import RelationalOp
@@ -229,12 +228,6 @@ def test_static_unop_and_truth() -> None:
     assert static_truth(StaticFloat(0.0)) is False
     assert static_truth(MetaInt(-1)) is True
     assert static_truth(StaticSeq((), is_list=False)) is False
-
-
-def test_nan_scanning_reaches_leaves() -> None:
-    assert is_nan_free(admit([1.0, (2.0, 3.0)]))  # type: ignore[arg-type]
-    assert not is_nan_free(StaticSeq((StaticFloat(float("nan")),), is_list=True))
-    assert not is_nan_free(admit(np.array([1.0, float("nan")])))  # type: ignore[arg-type]
 
 
 def test_admit_restricts_numpy_scalars_to_default_widths() -> None:
@@ -442,7 +435,7 @@ def test_shared_nodes_admit_linearly() -> None:
         node = (node, node)  # 2**60 paths; only linear-cost traversal can survive this
     wide = admit(node)
     assert isinstance(wide, StaticSeq)
-    assert same(wide, wide) and is_nan_free(wide)
+    assert same(wide, wide)
     assert same(wide, admit(node))  # type: ignore[arg-type]  # distinct-but-equal DAGs compare via the pair memo
 
 

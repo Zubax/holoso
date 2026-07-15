@@ -61,7 +61,7 @@ class NpBool:
     value: bool
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class MetaInt:
     """
     An exact arbitrary-precision Python integer: exact while static or integer-typed, rounding only at a typed
@@ -70,6 +70,16 @@ class MetaInt:
 
     value: int
     source: "ScalarSource" = ScalarOrigin.PLAIN
+
+    def __eq__(self, other: object) -> bool:
+        # Identity on the source, never its own ==: IntEnum members compare equal ACROSS enums by base value,
+        # which would let a cross-enum join keep one member's provenance and fold isinstance to a wrong constant.
+        if not isinstance(other, MetaInt):
+            return NotImplemented
+        return self.value == other.value and self.source is other.source
+
+    def __hash__(self) -> int:
+        return hash((self.value, id(self.source)))
 
     def __repr__(self) -> str:
         return (
@@ -98,10 +108,19 @@ class NpFloat:
     value: float
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class StaticStr:
     value: str
     source: "ScalarSource" = ScalarOrigin.PLAIN
+
+    def __eq__(self, other: object) -> bool:
+        # Identity on the source, exactly as MetaInt: StrEnum members compare equal across enums by base value.
+        if not isinstance(other, StaticStr):
+            return NotImplemented
+        return self.value == other.value and self.source is other.source
+
+    def __hash__(self) -> int:
+        return hash((self.value, id(self.source)))
 
     def __repr__(self) -> str:
         return (
@@ -116,6 +135,15 @@ class StaticRange:
     start: int
     stop: int
     step: int
+
+
+@dataclass(frozen=True, slots=True)
+class StaticSlice:
+    """A slice with integer (or absent) bounds: a pure value, usable as a subscript key like any other Known."""
+
+    start: int | None
+    stop: int | None
+    step: int | None
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -172,6 +200,7 @@ type StaticValue = (
     | NpFloat
     | StaticStr
     | StaticRange
+    | StaticSlice
     | StaticArray
     | StaticSeq
     | StaticRecord
@@ -242,6 +271,11 @@ def _admit_uncached(
         return StaticStr(str(obj), source=obj)
     if type(obj) is range:
         return StaticRange(obj.start, obj.stop, obj.step)
+    if type(obj) is slice:
+        bounds = (obj.start, obj.stop, obj.step)
+        if all(bound is None or type(bound) is int for bound in bounds):
+            return StaticSlice(*bounds)
+        return None  # a non-integer slice never resolves a supported subscript
     if type(obj) is np.ndarray:
         if obj.dtype not in (np.dtype(np.int64), np.dtype(np.float64)):
             return None
@@ -355,9 +389,9 @@ def _same(a: StaticValue, b: StaticValue, proven: set[tuple[int, int]]) -> bool:
 def strip_source(value: StaticValue) -> StaticValue:
     """The same scalar with PLAIN provenance: the receiver spelling for minting base-type value methods."""
     match value:
-        case MetaInt(value=v):
+        case MetaInt(value=v, source=source) if source is not ScalarOrigin.PLAIN:
             return MetaInt(v)
-        case StaticStr(value=v):
+        case StaticStr(value=v, source=source) if source is not ScalarOrigin.PLAIN:
             return StaticStr(v)
     return value
 
@@ -408,6 +442,8 @@ def _as_python(value: StaticValue, memo: dict[int, object]) -> object:
             result = v if isinstance(source, ScalarOrigin) else source
         case StaticRange(start=start, stop=stop, step=step):
             result = range(start, stop, step)
+        case StaticSlice(start=start_bound, stop=stop_bound, step=step_bound):
+            result = slice(start_bound, stop_bound, step_bound)
         case StaticArray(array=array):
             result = array.view()  # metadata isolation: reassigning the view's shape/dtype cannot touch the snapshot
         case StaticSeq(items=items, is_list=is_list):
@@ -416,29 +452,4 @@ def _as_python(value: StaticValue, memo: dict[int, object]) -> object:
         case StaticRecord(klass=klass, field_values=field_values):
             result = _rebuild_record(klass, field_values, memo)
     memo[id(value)] = result
-    return result
-
-
-def is_nan_free(value: StaticValue) -> bool:
-    """ZKF has no NaN, so a NaN constant can never enter the datapath; containers check their leaves once each."""
-    return _is_nan_free(value, set())
-
-
-def _is_nan_free(value: StaticValue, clean: set[int]) -> bool:
-    if id(value) in clean:
-        return True
-    result: bool
-    match value:
-        case StaticFloat(value=v) | NpFloat(value=v):
-            result = not math.isnan(v)
-        case StaticArray(array=array):
-            result = not bool(np.isnan(array).any()) if array.dtype.kind == "f" else True
-        case StaticSeq(items=items):
-            result = all(_is_nan_free(item, clean) for item in items)
-        case StaticRecord(field_values=field_values):
-            result = all(_is_nan_free(item, clean) for _, item in field_values)
-        case _:
-            result = True
-    if result:
-        clean.add(id(value))
     return result
