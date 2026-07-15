@@ -18,6 +18,7 @@ import holoso
 from synth._synth import BUILD_ROOT, build_compiler_ooc_design
 from synth.flows import make_flow
 
+from . import _impact
 from ._examples import parity_marks
 from ._synth_targets import TARGETS, SynthTarget
 
@@ -50,6 +51,13 @@ def test_target_closes_timing(target: SynthTarget) -> None:
     if not flow.available():
         pytest.skip(f"{target.flow.value} tool not available")
 
+    # The label keys the row (example, format, stage knobs, flow, and frequency target all name it), so a matching
+    # Verilog digest under a recorded pass means the identical netlist met the identical bar.
+    row = f"synth:{target.label}"
+    digest = _impact.verilog_digest(target.kernel(), target.ops, target.name) if _impact.enabled() else ""
+    if digest and (head := _impact.cached_pass(row, digest)):
+        pytest.skip(f"impact-cache: Verilog unchanged since {head}")
+
     result = holoso.synthesize(target.kernel(), target.ops, name=target.name)
     directory = BUILD_ROOT / "examples" / target.label
     shutil.rmtree(directory, ignore_errors=True)
@@ -59,3 +67,5 @@ def test_target_closes_timing(target: SynthTarget) -> None:
         f"{target.label}: f_max {report.fmax_MHz:.2f} MHz < target {target.target_frequency_MHz:.2f} MHz "
         f"(slack {report.slack_ns:+.3f} ns); logs in {report.artifact_dir}"
     )
+    if digest:
+        _impact.record_pass(row, digest)

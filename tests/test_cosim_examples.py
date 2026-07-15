@@ -27,6 +27,7 @@ from collections.abc import Mapping
 import pytest
 
 from holoso import FloatFormat
+from . import _impact
 from ._cosim import run_cosim
 from ._examples import SPECS, ExampleSpec, parity_marks
 from ._modelref import PIPELINE_OP_CASES, OperatorCase
@@ -52,5 +53,14 @@ _SPEC_FORMATS = [
 @pytest.mark.parametrize("spec,fmt", _SPEC_FORMATS)
 def test_example_cosim(spec: ExampleSpec, fmt: FloatFormat, config: OperatorCase, sim: str) -> None:
     name = f"{spec.name}_{config.label}_e{fmt.wexp}m{fmt.wman}"
+    # The row id carries the simulator and vector recipe implicitly (both are functions of the parametrization),
+    # so a matching Verilog digest under a recorded pass means the identical RTL already matched the same model
+    # on the same vectors.
+    row = f"cosim:{name}:{sim}"
+    digest = _impact.verilog_digest(spec.make_kernel(), config.make_ops(fmt), spec.name) if _impact.enabled() else ""
+    if digest and (head := _impact.cached_pass(row, digest)):
+        pytest.skip(f"impact-cache: Verilog unchanged since {head}")
     vectors: list[Mapping[str, int]] = list(spec.vectors(fmt))
     run_cosim(sim, spec.make_kernel(), fmt, name, ops=config.make_ops(fmt), vectors=vectors)
+    if digest:
+        _impact.record_pass(row, digest)

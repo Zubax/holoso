@@ -47,3 +47,4 @@ hdr_log
 *.egg-info
 .idea/
 .claude/worktrees
+.impact_cache/
