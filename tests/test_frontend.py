@@ -5373,11 +5373,12 @@ def test_whitelist_members_are_value_determined() -> None:
     assert float(model.elaborate().run(3.0)[0]) == 6.0
 
 
-def test_isinstance_subjects_with_erasure_capable_provenance_reject() -> None:
-    # Review round 12: an enum MIXIN base (plain class + IntEnum) and an ABC register() both distinguish the live
-    # member from its erased base value even under enum-free classinfo; the SUBJECT must therefore carry no
-    # erasure-capable provenance (a static int/str may be a normalized member) and the classinfo's instance check
-    # must be type's own.
+def test_isinstance_subjects_fold_through_retained_members_and_reject_on_lost_provenance() -> None:
+    # Review round 12 established that a mixin base and an ABC register() distinguish a live member from its
+    # erased base value. Admission now RETAINS the member as the scalar's source, so an isinstance subject
+    # reconstructs faithfully: the mixin-base query folds to exactly Python's verdict. The ABC classinfo still
+    # rejects (its instance check is not type's own), and a subject whose source was dropped by a join (the
+    # runtime value may be a member the fact no longer names) still rejects as undecidable.
     import abc
     import enum
 
@@ -5386,6 +5387,7 @@ def test_isinstance_subjects_with_erasure_capable_provenance_reject() -> None:
 
     class Mode(Marker, enum.IntEnum):
         A = 1
+        B = 2
 
     class AbcMarker(abc.ABC):
         pass
@@ -5396,12 +5398,27 @@ def test_isinstance_subjects_with_erasure_capable_provenance_reject() -> None:
     def mixin(x: float) -> float:
         return x if isinstance(mixed, Marker) else -x
 
+    model = holoso.synthesize(mixin, default_ops(FloatFormat(11, 52)), name="mixin").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == mixin(3.0) == 3.0
+
+    def value_query(x: float) -> float:
+        return x if isinstance(mixed, int) and not isinstance(mixed, str) else -x
+
+    model = holoso.synthesize(value_query, default_ops(FloatFormat(11, 52)), name="vq").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == value_query(3.0) == 3.0
+
     def registered(x: float) -> float:
         return x if isinstance(mixed, AbcMarker) else -x
 
-    for kernel in (mixin, registered):
-        with pytest.raises(UnsupportedConstruct, match="not decidable"):
-            lower(kernel)
+    with pytest.raises(UnsupportedConstruct, match="enum-free class"):
+        lower(registered)
+
+    def lost_source(x: float, pick: bool) -> float:
+        y = Mode.A if pick else 1
+        return x if isinstance(y, Marker) else -x
+
+    with pytest.raises(UnsupportedConstruct, match="not decidable"):
+        lower(lost_source)
 
 
 def test_object_references_reject_at_any_nesting_depth() -> None:
@@ -5621,3 +5638,30 @@ def test_namespace_attribute_reads_are_snapshot_once() -> None:
         kernel.__globals__.pop("module", None)
     assert calls["n"] == 1, f"the live namespace was read {calls['n']} times; the snapshot admits exactly one read"
     del unit
+
+
+def test_value_methods_on_enum_members_bind_base_type_only() -> None:
+    # A retained StrEnum member reconstructs faithfully at identity-sensitive queries, but its VALUE METHODS
+    # must come from the base type: an honest custom method on the enum class is still arbitrary user code that
+    # must never run at compile time, so the receiver is stripped to its base value before binding.
+    import enum
+
+    class Tag(enum.StrEnum):
+        A = "ab"
+
+        def describe(self) -> str:
+            raise RuntimeError("user code ran at compile time")
+
+    tag = Tag.A
+
+    def base_method(x: float) -> float:
+        return x * float(len(tag.upper()))
+
+    model = holoso.synthesize(base_method, default_ops(FloatFormat(11, 52)), name="bm").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == base_method(3.0) == 6.0
+
+    def custom_method(x: float) -> float:
+        return x * float(len(tag.describe()))
+
+    with pytest.raises(UnsupportedConstruct, match="'str' object has no attribute 'describe'"):
+        lower(custom_method)

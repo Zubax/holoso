@@ -105,7 +105,9 @@ from ._value import (
     StaticValue,
     admit,
     as_python,
+    join_scalar_sources,
     same,
+    strip_source,
 )
 
 if TYPE_CHECKING:
@@ -254,6 +256,9 @@ def _join_atoms(a: AtomicFact, b: AtomicFact, origin: OriginStack) -> AtomicFact
         case (Known(value=x), Known(value=y)):
             if same(x, y):
                 return a
+            degraded = join_scalar_sources(x, y)
+            if degraded is not None:
+                return Known(degraded)
             x_type, y_type = _residual_type(x), _residual_type(y)
             if {x_type, y_type} == {SemType.FLOAT, SemType.INT}:  # an int/float merge promotes the integer, C-style
                 return _join_atoms(_float_promoted(a, origin), _float_promoted(b, origin), origin)
@@ -1123,8 +1128,9 @@ class Analyzer:
                     f"list method '{name}' is not supported (lists are immutable values here); rebind with + instead",
                     origin,
                 )
+            receiver = strip_source(obj.value)  # a retained enum member must not donate its own methods
             try:
-                concrete = getattr(as_python(obj.value), name)
+                concrete = getattr(as_python(receiver), name)
             except AttributeError as error:
                 raise AnalysisRejection(str(error), origin) from None
             admitted = admit(concrete)
@@ -1145,7 +1151,7 @@ class Analyzer:
                 if isinstance(obj.value, StaticStr) and name in ("format", "format_map"):
                     # format's conversions (!r) observe the repr of erasure-reconstructed arguments.
                     raise AnalysisRejection(f"str.{name} is not supported in a kernel", origin)
-                value_key = (obj.value, name)
+                value_key = (receiver, name)
                 if value_key not in self._value_methods:
                     self._value_methods[value_key] = concrete
                 return Reference(self._value_methods[value_key])

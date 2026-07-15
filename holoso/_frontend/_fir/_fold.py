@@ -29,7 +29,7 @@ from ._fact import (
     TupleLayout,
     ValueLayout,
 )
-from ._value import MetaInt, NpInt, StaticRange, StaticStr
+from ._value import MetaInt, NpInt, ScalarOrigin, StaticRange, StaticStr
 
 
 class FoldRefusal(Exception):
@@ -187,14 +187,18 @@ def admit_call(
             raise FoldRefusal(f"library function {name!r} is not implemented yet", library_diagnostic=True)
         raise FoldRefusal(f"call to {name!r} is not supported in a kernel")
     if target is isinstance:
-        # Enum members normalize to their base value at admission (the sanctioned erasure), so an isinstance
-        # query answers wrong whenever erasure can matter: the SUBJECT must not carry an erasure-capable
-        # provenance (a Known Python int or str may be a normalized IntEnum/StrEnum member -- indistinguishable
-        # after admission, and a plain mixin base of an enum makes even an enum-free classinfo lie), and the
-        # classinfo must RESOLVE COMPLETELY to enum-free plain types whose instance check is type's own (an
-        # ABC's register()/__instancecheck__ distinguishes the live member from its erased value).
+        # Enum members normalize to their base value at admission with the member retained as the scalar's
+        # source, so an isinstance subject reconstructs faithfully (a mixin base of the enum answers exactly as
+        # Python) -- EXCEPT when a join dropped the source: a LOST-provenance int/str may be a member the fact
+        # no longer names, so the query refuses. The classinfo must still RESOLVE COMPLETELY to enum-free plain
+        # types whose instance check is type's own (an ABC's register()/__instancecheck__ distinguishes the
+        # live member from its erased value, and an enum classinfo would compare against the erased side).
         subject = positional[0] if positional else None
-        if isinstance(subject, Known) and isinstance(subject.value, (MetaInt, StaticStr)):
+        if (
+            isinstance(subject, Known)
+            and isinstance(subject.value, (MetaInt, StaticStr))
+            and subject.value.source is ScalarOrigin.LOST
+        ):
             raise FoldRefusal("isinstance of a static int/str is not decidable (it may be a normalized enum member)")
         classinfo = positional[1] if len(positional) == 2 else None
         kinds = classinfo_types(classinfo)

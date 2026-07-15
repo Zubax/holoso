@@ -157,7 +157,10 @@ before builtin, values read at resolve time. Static values form a closed whiteli
 identity: exact Python ints (MetaInt) are distinct from numpy 64-bit scalars (NpInt/NpFloat, numpy's own
 mixed-operand semantics; narrower numpy widths are not static); arrays admit as read-only snapshots; sequences keep
 list/tuple flavor; dataclasses admit as records only when reconstructible from fields; containers bound depth and
-refuse cycles. Fixed-point equality is tagged and bitwise (True is not 1, signed zero distinct, NaN stable). Static
+refuse cycles. An IntEnum/StrEnum member normalizes to its base value with the MEMBER retained as the scalar's
+source (tri-state provenance: a retained member, PLAIN for provably-never-an-enum, or LOST when a join dropped
+the source), so arithmetic folds with base-type semantics while faithful reconstruction returns the original;
+joins of value-equal scalars with differing sources degrade to LOST, monotonically. Fixed-point equality is tagged and bitwise (True is not 1, signed zero distinct, NaN stable). Static
 execution runs real Python/numpy on the domain's own objects; zero-division/invalid defer to runtime, float overflow
 folds to infinity per the charter, numpy wraparound folds faithfully, NaN never folds, and integer powers fold only
 under a result-width bound.
@@ -195,12 +198,14 @@ CLOSED WHITELIST, not a blacklist of hazards, and the whole admission decision i
 single door to host evaluation, so a new admission is a reviewable row there rather than a guard scattered
 through the transfers): beyond the library registry, only vetted value-determined callables
 are admitted (the float/int/bool/len/range/slice/sum/divmod casts and constructors, operator.index, the
-np.array/asarray/asanyarray constructors and numpy scalar types, isinstance whose SUBJECT carries no
-erasure-capable provenance -- a static int/str may be a normalized enum member -- over completely-resolved
-enum-free classinfo with the plain type instance check, dataclass construction through the GENERATED machinery
+np.array/asarray/asanyarray constructors and numpy scalar types, isinstance -- folded through its
+completely-resolved enum-free plain-instance-check classinfo over a faithfully reconstructed subject (a retained
+member answers exactly as Python, mixin bases included), refusing only a LOST-provenance int/str subject (the
+runtime value may be a member the joined fact no longer names) -- dataclass construction through the GENERATED machinery
 only (a user __init__, __post_init__, __new__, metaclass, or field default_factory would run at compile time on
 erasure-reconstructed arguments or against live state), and value methods minted by the analyzer's own bind site
-off the domain's reconstruction -- immutable scalar/str/range receivers with non-dunder, non-format names;
+off the domain's reconstruction -- immutable scalar/str/range receivers with non-dunder, non-format names, the
+receiver stripped to its base value first so a retained enum member never donates its own methods;
 sequence .count/.index are identity-and-equality games a rebuild cannot vouch for, an oversized range receiver
 rejects (its count/index can iterate linearly), and a PRE-BOUND builtin captured from the user's namespace
 carries a live mutable receiver and never folds); every

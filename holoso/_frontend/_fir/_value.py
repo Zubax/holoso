@@ -29,6 +29,21 @@ class SemType(enum.Enum):
     INT = "int"
 
 
+class ScalarOrigin(enum.Enum):
+    """
+    The two source-less provenance states of an int/str scalar. PLAIN means provably never an enum member (a
+    literal, an arithmetic result, an admitted plain int/str), so identity-sensitive queries may fold on the
+    value. LOST means a join dropped a member source, so the runtime value may be an enum member the fact no
+    longer names -- identity-sensitive queries must refuse. A retained member is carried as the member itself.
+    """
+
+    PLAIN = enum.auto()
+    LOST = enum.auto()
+
+
+type ScalarSource = enum.Enum | ScalarOrigin
+
+
 @dataclass(frozen=True, slots=True)
 class StaticBool:
     value: bool
@@ -54,6 +69,14 @@ class MetaInt:
     """
 
     value: int
+    source: "ScalarSource" = ScalarOrigin.PLAIN
+
+    def __repr__(self) -> str:
+        return (
+            f"MetaInt(value={self.value!r})"
+            if self.source is ScalarOrigin.PLAIN
+            else (f"MetaInt(value={self.value!r}, source={self.source!r})")
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +101,14 @@ class NpFloat:
 @dataclass(frozen=True, slots=True)
 class StaticStr:
     value: str
+    source: "ScalarSource" = ScalarOrigin.PLAIN
+
+    def __repr__(self) -> str:
+        return (
+            f"StaticStr(value={self.value!r})"
+            if self.source is ScalarOrigin.PLAIN
+            else (f"StaticStr(value={self.value!r}, source={self.source!r})")
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,8 +219,9 @@ def _admit_uncached(
     # Exact-type checks throughout: a subclass may override operators, and evaluating those inside the compiler
     # would leak foreign semantics into folds. Enum members are the sanctioned subclass exception (inputs are
     # trusted: an enum that redefines arithmetic, shadows its base type's methods, or shadows dataclass fields
-    # with descriptors is not an honest mistake worth modeling); they normalize to the base type on admission,
-    # so such overrides fold with base-type semantics -- a documented trust-boundary deviation, not a guard.
+    # with descriptors is not an honest mistake worth modeling); they normalize to the base type on admission
+    # with the MEMBER retained as the scalar's source, so arithmetic folds with base-type semantics while
+    # identity-sensitive queries (isinstance) consult the faithful original.
     if type(obj) is bool:
         return StaticBool(obj)
     if type(obj) is np.bool_:
@@ -198,12 +230,16 @@ def _admit_uncached(
         return NpInt(int(obj))
     if type(obj) is np.float64:
         return NpFloat(float(obj))
-    if type(obj) is int or isinstance(obj, enum.IntEnum):
+    if type(obj) is int:
         return MetaInt(int(obj))
+    if isinstance(obj, enum.IntEnum):
+        return MetaInt(int(obj), source=obj)
     if type(obj) is float:
         return StaticFloat(float(obj))
-    if type(obj) is str or isinstance(obj, enum.StrEnum):
+    if type(obj) is str:
         return StaticStr(str(obj))
+    if isinstance(obj, enum.StrEnum):
+        return StaticStr(str(obj), source=obj)
     if type(obj) is range:
         return StaticRange(obj.start, obj.stop, obj.step)
     if type(obj) is np.ndarray:
@@ -316,6 +352,30 @@ def _same(a: StaticValue, b: StaticValue, proven: set[tuple[int, int]]) -> bool:
     return result
 
 
+def strip_source(value: StaticValue) -> StaticValue:
+    """The same scalar with PLAIN provenance: the receiver spelling for minting base-type value methods."""
+    match value:
+        case MetaInt(value=v):
+            return MetaInt(v)
+        case StaticStr(value=v):
+            return StaticStr(v)
+    return value
+
+
+def join_scalar_sources(a: StaticValue, b: StaticValue) -> StaticValue | None:
+    """
+    The join of two value-equal int/str scalars whose sources differ: the value with a LOST source (the runtime
+    value may be a member the joined fact no longer names). None when the pair is not such a join -- callers try
+    this only after tagged equality has already failed, so equal sources never reach here.
+    """
+    match a, b:
+        case (MetaInt(value=x), MetaInt(value=y)) if x == y:
+            return MetaInt(x, source=ScalarOrigin.LOST)
+        case (StaticStr(value=x), StaticStr(value=y)) if x == y:
+            return StaticStr(x, source=ScalarOrigin.LOST)
+    return None
+
+
 def as_python(value: StaticValue) -> object:
     """
     The plain Python object a static value denotes, for concrete evaluation through real Python/numpy. The scalar
@@ -336,16 +396,16 @@ def _as_python(value: StaticValue, memo: dict[int, object]) -> object:
             result = v
         case NpBool(value=v):
             result = np.bool_(v)
-        case MetaInt(value=v):
-            result = v
+        case MetaInt(value=v, source=source):
+            result = v if isinstance(source, ScalarOrigin) else source
         case NpInt(value=v):
             result = np.int64(v)
         case StaticFloat(value=v):
             result = v
         case NpFloat(value=v):
             result = np.float64(v)
-        case StaticStr(value=v):
-            result = v
+        case StaticStr(value=v, source=source):
+            result = v if isinstance(source, ScalarOrigin) else source
         case StaticRange(start=start, stop=stop, step=step):
             result = range(start, stop, step)
         case StaticArray(array=array):
