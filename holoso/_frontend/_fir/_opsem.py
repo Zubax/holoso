@@ -166,12 +166,18 @@ def static_unop(op: UnOp, operand: StaticValue) -> StaticValue | None:
     return None if result is None else _renumber(result)
 
 
-def static_compare(relation: RelationalOp, left: StaticValue, right: StaticValue) -> StaticBool | None:
+def _bool_result(value: bool, *operands: StaticValue) -> "StaticBool | NpBool":
+    """numpy yields np.bool_ whenever either operand is a numpy scalar; the result provenance follows suit."""
+    numpy_side = any(isinstance(operand, (NpBool, NpInt, NpFloat)) for operand in operands)
+    return NpBool(value) if numpy_side else StaticBool(value)
+
+
+def static_compare(relation: RelationalOp, left: StaticValue, right: StaticValue) -> "StaticBool | NpBool | None":
     """
     A relational link over static scalars: Python compares a Python int with an int or float exactly, a numpy scalar
     applies numpy's own conversion rules to the whole pair, and booleans admit equality only (ordering booleans is
     rejected at lowering, not here). The comparison runs on the domain's own objects, so those semantics apply by
-    construction.
+    construction, and the result keeps numpy provenance exactly as numpy would produce np.bool_.
     """
     if isinstance(left, (StaticBool, NpBool)) != isinstance(right, (StaticBool, NpBool)):
         return None
@@ -179,7 +185,7 @@ def static_compare(relation: RelationalOp, left: StaticValue, right: StaticValue
         if relation not in (RelationalOp.EQ, RelationalOp.NE):
             return None
         equal = left.value == right.value
-        return StaticBool(equal if relation is RelationalOp.EQ else not equal)
+        return _bool_result(equal if relation is RelationalOp.EQ else not equal, left, right)
     if isinstance(left, StaticStr) and isinstance(right, StaticStr):
         if relation not in (RelationalOp.EQ, RelationalOp.NE):
             return None  # config strings compare for identity of meaning; ordering them is not in the subset
@@ -191,7 +197,7 @@ def static_compare(relation: RelationalOp, left: StaticValue, right: StaticValue
     if result is None:
         return None
     assert isinstance(result, bool)
-    return StaticBool(result)
+    return _bool_result(result, left, right)
 
 
 def static_truth(value: StaticValue) -> bool | None:

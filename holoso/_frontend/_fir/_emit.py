@@ -287,6 +287,7 @@ class _Emitter:
             self._predecessors.setdefault(target, []).append(source)
         self._state_reads: dict[StateLeaf, int] = {}
         self._state_order: list[StateLeaf] = []
+        self._exit_identity_memo: dict[int, object] = {}
         self._slot_names: dict[str, StateLeaf] = {}  # encoded slot name -> its leaf, to catch a rare name collision
 
     def emit(self) -> Hir:
@@ -526,10 +527,9 @@ class _Emitter:
         concrete = as_python(value)
         import numpy as np
 
-        if isinstance(concrete, bool) or isinstance(concrete, np.bool_):
+        if isinstance(concrete, (bool, np.bool_)):
             return self._builder.bool_const(bool(concrete))
-
-        if isinstance(concrete, (int, float, np.integer, np.floating)) and not isinstance(concrete, np.bool_):
+        if isinstance(concrete, (int, float, np.integer, np.floating)):
             return self._builder.float_const(_carrier_float(concrete))
         raise EmissionRejection(f"a {type(concrete).__name__} value cannot materialize in the datapath")
 
@@ -1056,27 +1056,36 @@ class _Emitter:
         xor = self._builder.operation(BoolXor(), [left, right])
         return xor if rel is RelationalOp.NE else self._builder.operation(BoolNot(), [xor])
 
-    def _exit_identity(self, vid: int, depth: int = 4, visiting: frozenset[int] = frozenset()) -> object:
+    def _exit_identity(self, vid: int, depth: int = 64) -> object:
         """
         The dedup identity of an exit value: a phi is its (type, arms) structure and a pure operation is its
         operator over its operands' identities, not the value id. The return leaf and a state live-out read
         through DIFFERENT places, so a value that is by dataflow the same merge arrives as two distinct-but-
         identical exit phis -- possibly under coercion wrappers minted separately on each side (a store-side and a
         return-side IntToFloat live in different blocks, which the per-block interner keeps distinct), or as
-        nested merges whose inner phis differ only by id. Equal identities imply equal values; the depth cap
-        bounds the walk (exit coercions are shallow, and an unbounded walk of a shared-operand DAG is exponential
-        while a deep chain overflows the stack) -- past it, and through a phi cycle (a loop header's self-arm),
-        the identity degrades to the vid, which only forgoes a dedup.
+        nested merges whose inner phis differ only by id. Every truncation of the walk degrades to the value id
+        itself, so equal identities always imply equal values; a truncation only forgoes a dedup. The memo shares
+        the identity of a shared operand (a repeated-squaring DAG stays linear instead of exponential) and breaks
+        phi cycles (a loop header's self-arm resolves to the in-progress marker); the depth cap bounds the
+        recursion on long chains (x**1024 is a 1024-deep multiply chain, past the interpreter limit).
         """
-        if depth == 0 or vid in visiting:
-            return vid
+        memo = self._exit_identity_memo
+        if vid in memo:
+            return memo[vid]
+        if depth == 0:
+            return vid  # not memoized: the same node may be reachable shallower on another path
         node = self._builder.node_of(vid)
-        inner = visiting | {vid}
-        if isinstance(node, Phi):
-            return (node.type, tuple((pred, self._exit_identity(arm, depth - 1, inner)) for pred, arm in node.arms))
-        if isinstance(node, Operation):
-            return (node.operator, tuple(self._exit_identity(op, depth - 1, inner) for op in node.operands))
-        return vid
+        identity: object
+        if isinstance(node, (Phi, Operation)):
+            memo[vid] = vid  # the in-progress marker: a cyclic back-reference resolves to the plain vid
+            if isinstance(node, Phi):
+                identity = (node.type, tuple((pred, self._exit_identity(arm, depth - 1)) for pred, arm in node.arms))
+            else:
+                identity = (node.operator, tuple(self._exit_identity(op, depth - 1) for op in node.operands))
+        else:
+            identity = vid
+        memo[vid] = identity
+        return identity
 
     def _exit_leaf(self, exit_block: FirBlockId, path: LeafPath, ordinal: int, leaf: AtomicFact, kind: SemType) -> int:
         """One returned leaf, coerced onto its declared contract kind exactly like a scalar return."""

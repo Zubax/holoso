@@ -4791,7 +4791,8 @@ def test_record_dunders_never_run_on_reconstructions() -> None:
     with pytest.raises(UnsupportedConstruct, match="record subscript index"):
         lower(record_key)
     for kernel in (bool_call, len_call):
-        with pytest.raises(UnsupportedConstruct, match="custom __bool__"):
+        # Round 9 generalized the callee-keyed bool()/len() guard into the argument-shaped concrete-call guard.
+        with pytest.raises(UnsupportedConstruct, match="user-defined methods or properties"):
             lower(kernel)
     with pytest.raises(UnsupportedConstruct, match="record attribute 'doubled'"):
         lower(property_read)
@@ -4836,3 +4837,162 @@ def test_exit_identity_is_depth_bounded_and_catches_nested_merges() -> None:
     assert float(elaborated.run(True, True, 3.0)[0]) == 3.0
     assert float(elaborated.run(True, False, 3.0)[0]) == -3.0
     assert float(elaborated.run(False, True, 3.0)[0]) == 6.0
+
+
+# ---------------------------------------- spine review round 9 ----------------------------------------
+
+
+def test_derived_numpy_booleans_keep_provenance() -> None:
+    # Review round 9: comparisons, bitops, and numpy classifier folds produced plain StaticBool even with numpy
+    # operands, laundering the provenance the NpBool split introduced -- the derived value then passed the
+    # bool-as-int gates that a spelled np.bool_ fails. Boolean-producing folds now keep numpy provenance.
+    derived_key = np.True_ == np.True_
+    derived_count = np.int64(1) == np.int64(1)
+
+    def np_compare_key(x: float) -> float:
+        return (x, -x)[derived_key]
+
+    def np_compare_count(x: float) -> float:
+        return ((x,) * derived_count)[0]  # type: ignore[no-any-return]
+
+    def np_bitop_count(x: float) -> float:
+        return ((x,) * (np.True_ & np.True_))[0]  # type: ignore[operator,no-any-return]
+
+    def np_classifier_count(x: float) -> float:
+        return ((x,) * np.isfinite(1))[0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="np.bool_ subscript index"):
+        lower(np_compare_key)
+    for kernel in (np_compare_count, np_bitop_count, np_classifier_count):
+        with pytest.raises(UnsupportedConstruct, match="arithmetic on an aggregate value"):
+            lower(kernel)
+
+    def python_compare_key(x: float) -> float:
+        pair = (x, x * 2.0)
+        return pair[1 == 1]
+
+    model = holoso.synthesize(python_compare_key, default_ops(FloatFormat(11, 52)), name="py_cmp").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 6.0 == python_compare_key(3.0)
+
+
+def test_records_with_user_behavior_never_cross_concrete_calls() -> None:
+    # Review round 9 MISCOMPILEs: float(record)/str(record)/operator.index(record) executed user dunders on the
+    # type-unfaithful reconstruction, getattr() reached attributes the direct spelling rejects, range()[record]
+    # bypassed the aggregate-only key guard, and iterating a record drove __len__/__getitem__ on the rebuild
+    # (a demonstrated compiler hang). All are located rejections now.
+    import enum
+
+    class Mode(enum.IntEnum):
+        A = 1
+        B = 2
+
+    @dataclasses.dataclass(frozen=True)
+    class Rec:
+        mode: Mode
+        v: float
+
+        def __float__(self) -> float:
+            return self.v * 2.0 if isinstance(self.mode, Mode) else self.v * 3.0
+
+    rec = Rec(Mode.A, 3.0)
+
+    def float_call(x: float) -> float:
+        return x + float(rec)
+
+    @dataclasses.dataclass(frozen=True)
+    class Key:
+        pick: Mode
+
+        def __index__(self) -> int:
+            return 1 if self.pick is Mode.B else 0
+
+    key = Key(Mode.B)
+
+    def range_key(x: float) -> float:
+        return x + float(range(2)[key])
+
+    @dataclasses.dataclass(frozen=True)
+    class It:
+        a: float
+        b: float
+
+        def __len__(self) -> int:
+            return 2
+
+        def __getitem__(self, i: int) -> float:
+            return (self.a, self.b)[i]
+
+    it_rec = It(1.0, 2.0)
+
+    def iterate(x: float) -> float:
+        acc = x
+        for v in it_rec:  # type: ignore[attr-defined]
+            acc = acc + v
+        return acc
+
+    with pytest.raises(UnsupportedConstruct, match="user-defined methods or properties"):
+        lower(float_call)
+    with pytest.raises(UnsupportedConstruct, match="record subscript index"):
+        lower(range_key)
+    with pytest.raises(UnsupportedConstruct, match="iteration over a record"):
+        lower(iterate)
+
+
+def test_getattr_routes_through_the_attribute_guards() -> None:
+    # Review round 9 MISCOMPILE: getattr(view, "base") reached the generic concrete-call path and observed the
+    # admitted snapshot's storage; it now routes through the attribute transfer, so the whitelist applies.
+    backing = np.array([1.0, 2.0, 3.0])
+    view = backing[1:]
+
+    def bypass(x: float) -> float:
+        return x + float(getattr(view, "base")[0])
+
+    def legitimate(x: float) -> float:
+        return x + float(getattr(view, "ndim"))
+
+    with pytest.raises(UnsupportedConstruct, match="array attribute 'base'"):
+        lower(bypass)
+    model = holoso.synthesize(legitimate, default_ops(FloatFormat(11, 52)), name="getattr_ok").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 4.0 == legitimate(3.0)
+
+
+def test_flatten_is_no_longer_navigable() -> None:
+    # Review round 9: flatten(order="K"/"A") observes the memory layout the C-contiguous snapshot discarded (a
+    # demonstrated wrong value on a Fortran-ordered original), so flatten leaves the whitelist entirely.
+    fortran = np.asfortranarray([[1.0, 2.0], [3.0, 4.0]])
+
+    def kernel(x: float) -> float:
+        return x + float(fortran.flatten(order="K")[1])
+
+    with pytest.raises(UnsupportedConstruct, match="array attribute 'flatten'"):
+        lower(kernel)
+
+
+def test_exit_dedup_handles_deep_and_shared_exit_graphs() -> None:
+    # Review round 9: the depth-4 identity cap missed dedup on deeper per-arm-store nesting; the memoized walk
+    # shares subtree identities (repeated squaring stays linear) and dedups arbitrarily nested merges, while the
+    # depth bound only guards genuinely chain-shaped graphs (x**1024 still lowers).
+    class Deep:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def step(self, a: bool, b: bool, c: bool, x: float) -> float:
+            r = x
+            if a:
+                r = -r
+            self.y = r
+            if b:
+                r = -r
+                self.y = r
+            if c:
+                r = -r
+                self.y = r
+            return r
+
+    result = holoso.synthesize(Deep().step, default_ops(FloatFormat(11, 52)), name="deep_dedup")
+    assert [p.name for p in result.output_ports] == ["state_y"]
+    elaborated = result.numerical_model.elaborate()
+    for a in (True, False):
+        for b in (True, False):
+            for c in (True, False):
+                assert float(elaborated.run(a, b, c, 3.0)[0]) == Deep().step(a, b, c, 3.0)

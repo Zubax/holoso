@@ -219,7 +219,7 @@ def test_static_binop_defers_errors_and_nan_to_runtime() -> None:
 def test_static_compare_is_exact_for_python_ints_and_numpy_for_np_ints() -> None:
     big, big_float = 2**53 + 1, float(2**53)
     assert static_compare(RelationalOp.EQ, MetaInt(big), StaticFloat(big_float)) == StaticBool(False)  # Python exact
-    assert static_compare(RelationalOp.EQ, NpInt(big), StaticFloat(big_float)) == StaticBool(True)  # numpy converts
+    assert static_compare(RelationalOp.EQ, NpInt(big), StaticFloat(big_float)) == NpBool(True)  # numpy converts
     assert static_compare(RelationalOp.LT, StaticBool(False), StaticBool(True)) is None  # bool ordering not static
     assert static_compare(RelationalOp.NE, StaticBool(False), StaticBool(True)) == StaticBool(True)
     assert static_compare(RelationalOp.EQ, StaticBool(True), MetaInt(1)) is None  # never conflated
@@ -251,7 +251,7 @@ def test_admit_restricts_numpy_scalars_to_default_widths() -> None:
 
 def test_np_float_comparisons_follow_numpy_conversion_rules() -> None:
     big = 2**53
-    assert static_compare(RelationalOp.EQ, NpFloat(float(big)), MetaInt(big + 1)) == StaticBool(True)  # numpy converts
+    assert static_compare(RelationalOp.EQ, NpFloat(float(big)), MetaInt(big + 1)) == NpBool(True)  # numpy converts
     assert static_compare(RelationalOp.EQ, StaticFloat(float(big)), MetaInt(big + 1)) == StaticBool(False)  # exact
 
 

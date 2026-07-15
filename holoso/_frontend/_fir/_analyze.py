@@ -98,6 +98,7 @@ from ._value import (
     StaticBool,
     StaticFloat,
     StaticSeq,
+    StaticStr,
     StaticValue,
     admit,
     as_python,
@@ -159,7 +160,7 @@ class _PropertyRead:
 _UNBOUND = Unbound()
 
 
-_ARRAY_ATTRIBUTES = ("T", "shape", "ndim", "size", "real", "imag", "flatten")
+_ARRAY_ATTRIBUTES = ("T", "shape", "ndim", "size", "real", "imag")
 
 
 def _residual_type(value: StaticValue) -> SemType | None:
@@ -886,10 +887,12 @@ class Analyzer:
                 return Known(folded)
             if isinstance(lhs.value, (StaticBool, NpBool)) and isinstance(rhs.value, (StaticBool, NpBool)):
                 # static_binop covers only numerics; combine two Known booleans here so ``True & False`` folds to a
-                # Known bool and drives edge selection (a dead branch guarded by it is never analyzed).
+                # Known bool and drives edge selection (a dead branch guarded by it is never analyzed). numpy wins
+                # the result provenance exactly as np.bool_ & bool yields np.bool_.
                 a, b = lhs.value.value, rhs.value.value
-                combined = a and b if bin_op is BinOp.BITAND else a or b if bin_op is BinOp.BITOR else a != b
-                return Known(StaticBool(bool(combined)))
+                combined = bool(a and b if bin_op is BinOp.BITAND else a or b if bin_op is BinOp.BITOR else a != b)
+                numpy_side = isinstance(lhs.value, NpBool) or isinstance(rhs.value, NpBool)
+                return Known(NpBool(combined) if numpy_side else StaticBool(combined))
         return Residual(result_type)
 
     def _operand_type(self, fact: Fact, origin: OriginStack) -> SemType:
@@ -921,8 +924,8 @@ class Analyzer:
                     )
                 if isinstance(layout, RecordLayout):
                     # A class-dictionary __bool__/__len__ entry (even ``__bool__ = None``) rejects outright: the
-                    # override would run on a value-faithful but not type-faithful reconstruction (np.bool_ admits
-                    # as a plain bool), so folding it can silently diverge from Python.
+                    # override would run on a value-faithful but not type-faithful reconstruction (an enum field
+                    # rebuilds as its base value), so folding it can silently diverge from Python.
                     if _has_truth_override(layout.klass):
                         raise AnalysisRejection(
                             "the truth of a record with a custom __bool__/__len__ is not supported", origin
@@ -939,6 +942,10 @@ class Analyzer:
             key = materialize_static(index)  # a static tuple key (m[1, 0]); runtime keys reject below
             if key is not None:
                 index = Known(key)
+        if isinstance(index, Known) and isinstance(index.value, StaticRecord):
+            # Rejected for ANY subscriptable (a range or string included): the key would resolve through a user
+            # __index__ running on the reconstruction, whose semantics the compiler cannot vouch for.
+            raise AnalysisRejection("a record subscript index is not supported", origin)
         if isinstance(obj, AggregateFact) and isinstance(index, Known):
             if isinstance(obj.layout, RecordLayout):
                 raise AnalysisRejection("a record is not subscriptable; access its fields by name", origin)
@@ -959,10 +966,6 @@ class Analyzer:
                 raise AnalysisRejection(
                     "an np.bool_ subscript index is a TypeError in Python; use a plain bool", origin
                 )
-            if isinstance(index.value, StaticRecord):
-                # A record key would resolve through a user __index__ running on the reconstruction (an IntEnum
-                # field rebuilds as a plain int), whose semantics the compiler cannot vouch for.
-                raise AnalysisRejection("a record subscript index is not supported", origin)
             try:
                 position = operator.index(as_python(index.value))  # type: ignore[arg-type]  # np ints qualify
             except TypeError:
@@ -1130,6 +1133,10 @@ class Analyzer:
     def _unroll(self, unit: FunctionUnit, header: Block, loop: StaticFor, env: _Env) -> BlockId:
         iterable = env.get(Local(loop.iterable))
         if isinstance(iterable, AggregateFact):
+            if isinstance(iterable.layout, RecordLayout):
+                # Materializing would drive Python's iteration protocol (a user __len__/__getitem__/__iter__) on
+                # the reconstruction -- a demonstrated wrong-value and non-termination hazard.
+                raise AnalysisRejection("iteration over a record is not supported", loop.origin)
             materialized = materialize_static(iterable)
             if materialized is None:
                 # The trip count IS static (the layout is fixed); what is missing is per-trip projection of the
@@ -1258,7 +1265,8 @@ class Analyzer:
                     # must extend this fold rather than silently inherit the isfinite/isinf split.
                     assert isinstance(match.operator, (FloatIsFinite, FloatIsInf, FloatIsPosInf, FloatIsNegInf))
                     verdict = isinstance(match.operator, FloatIsFinite)
-                    env.set(Local(call.dst), Known(StaticBool(verdict)))
+                    numpy_spelling = getattr(target, "__module__", "").startswith("numpy")
+                    env.set(Local(call.dst), Known(NpBool(verdict) if numpy_spelling else StaticBool(verdict)))
                     self._concrete_calls.add(id(call))
                     return False
                 # The result kind follows the spelling's declared rule (see the library registry): an all-integer
@@ -1283,19 +1291,38 @@ class Analyzer:
             # doctrine; its runtime-operand form was already routed to an HIR operation above.
             argument_facts = [env.get(Local(arg)) for arg in call.args]
             keyword_facts = [(keyword, env.get(Local(value))) for keyword, value in call.kwargs]
-            if target is bool or target is len:
-                # These spellings reach the same user __bool__/__len__ the truth transfer refuses; without the
-                # guard the override would fold on the reconstruction (identity comparisons: an unhashable shadow
-                # must miss cleanly).
-                for fact in argument_facts:
-                    if (
-                        isinstance(fact, AggregateFact)
-                        and isinstance(fact.layout, RecordLayout)
-                        and _has_truth_override(fact.layout.klass)
-                    ):
-                        raise AnalysisRejection(
-                            "the truth of a record with a custom __bool__/__len__ is not supported", call.origin
-                        )
+            if target is getattr and len(argument_facts) == 2 and not keyword_facts:
+                # getattr is attribute access under a different spelling: route it through the attribute transfer
+                # so every navigation guard (record fields only, the array whitelist) applies. The concrete fold
+                # would otherwise execute arbitrary getattr on the admitted snapshot (.base observing the wrong
+                # storage was a demonstrated miscompile). Identity comparisons throughout: ``target`` may be an
+                # unhashable shadow of a builtin name, which must miss cleanly.
+                attr_fact = argument_facts[1]
+                if isinstance(attr_fact, Known) and isinstance(attr_fact.value, StaticStr):
+                    resolved = self._attribute(env, argument_facts[0], attr_fact.value.value, call.origin)
+                    if isinstance(resolved, _PropertyRead):
+                        raise AnalysisRejection("getattr of a property is not supported; call it directly", call.origin)
+                    env.set(Local(call.dst), resolved)
+                    self._concrete_calls.add(id(call))
+                    return False
+                raise AnalysisRejection("getattr requires a static attribute name and no default", call.origin)
+            if target is setattr or target is delattr or target is hasattr:
+                name = getattr(target, "__name__", repr(target))
+                raise AnalysisRejection(f"{name}() is not supported in kernels", call.origin)
+            # A record whose class carries USER code (a method, a property, a dunder) must never cross into a
+            # concrete evaluation: the callable would run it on a reconstruction that is value-faithful but not
+            # type-faithful (an enum field rebuilds as its base value), which demonstrably flips float(record),
+            # operator.index(record), str(record), and friends.
+            for fact in [*argument_facts, *(fact for _, fact in keyword_facts)]:
+                if (
+                    isinstance(fact, AggregateFact)
+                    and isinstance(fact.layout, RecordLayout)
+                    and _has_user_behavior(fact.layout.klass)
+                ):
+                    raise AnalysisRejection(
+                        "a record with user-defined methods or properties cannot be evaluated concretely",
+                        call.origin,
+                    )
             concrete_args = [_concrete_fact(fact) for fact in argument_facts]
             concrete_kwargs = [(keyword, _concrete_fact(fact)) for keyword, fact in keyword_facts]
             if any(value is None for value in concrete_args) or any(v is None for _, v in concrete_kwargs):
@@ -1615,6 +1642,26 @@ def _has_truth_override(klass: type) -> bool:
     Membership, not value: ``__bool__ = None`` is a real override (Python raises TypeError on its truth).
     """
     return any(name in c.__dict__ for name in ("__bool__", "__len__") for c in klass.__mro__ if c is not object)
+
+
+def _has_user_behavior(klass: type) -> bool:
+    """
+    Whether the class carries any REAL-SOURCE function or property beyond the dataclass-generated set. The
+    generated methods compile from synthesized source (``co_filename == "<string>"``) and are reconstruction-safe
+    by construction; ``__post_init__`` runs only at genuine construction, never on a rebuild, so it is exempt.
+    """
+    for c in klass.__mro__:
+        if c is object:
+            continue
+        for name, member in c.__dict__.items():
+            if name == "__post_init__":
+                continue
+            if isinstance(member, property):
+                return True
+            fn = member.__func__ if isinstance(member, (classmethod, staticmethod)) else member
+            if isinstance(fn, types.FunctionType) and fn.__code__.co_filename != "<string>":
+                return True
+    return False
 
 
 def _reject_attribute_hooks(klass: type, origin: OriginStack) -> None:
