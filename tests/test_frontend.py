@@ -5781,3 +5781,153 @@ def test_conditional_none_names_itself_at_the_join() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="None merges with a value"):
         lower(kernel)
+
+
+# ------------------------------ retention review round (Codex gpt-5.6-sol ultra) ------------------------------
+
+
+def test_identity_preserving_folds_do_not_launder_lost_provenance() -> None:
+    # MISCOMPILE: min() returns its argument BY REFERENCE, so a LOST-provenance value crossed the evaluation
+    # boundary as its base int, came back value-equal, and re-admission marked it PLAIN -- letting isinstance
+    # fold a wrong constant. A fold result that value-equals a LOST input is LOST now.
+    import enum
+
+    class Marker:
+        pass
+
+    class Mode(Marker, enum.IntEnum):
+        A = 1
+
+    def kernel(x: float, p: bool) -> float:
+        value = Mode.A if p else 1
+        winner = min(value, 2)
+        return x if isinstance(winner, Marker) else -x
+
+    with pytest.raises(UnsupportedConstruct, match="not decidable"):
+        lower(kernel)
+
+
+def test_str_member_methods_preserve_identity_semantics() -> None:
+    # MISCOMPILE: partition's no-match head returns the receiver ITSELF, so on a retained StrEnum member Python
+    # yields the member; the mint used to run the method on a source-stripped copy, laundering the identity.
+    # The method now comes from the base type but binds onto the faithful member.
+    import enum
+
+    class Marker:
+        pass
+
+    class Tag(Marker, enum.StrEnum):
+        A = "abc"
+
+    def kernel(x: float) -> float:
+        head = Tag.A.partition("missing")[0]
+        return x if isinstance(head, Marker) else -x
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="pid_head").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == kernel(3.0) == 3.0
+
+
+def test_attribute_snapshot_admits_once_so_referent_mutation_cannot_move_facts() -> None:
+    # MISCOMPILE: the snapshot memo pinned the live LIST OBJECT but re-admitted it per consultation, so a
+    # permitted module hook mutating the list mid-analysis moved the folded constant (compiled 18.0 where
+    # Python computes 2.0). The memo now caches the first read's ADMITTED value.
+    module = types.ModuleType("lazy_mut")
+    module.table = [1.0]  # type: ignore[attr-defined]
+
+    def module_getattr(name: str) -> float:
+        if name != "trigger":
+            raise AttributeError(name)
+        module.table[0] = 9.0
+        return 0.0
+
+    module.__getattr__ = module_getattr  # type: ignore[method-assign]
+
+    def kernel(x: float) -> float:
+        coefficient = module.table[0]
+        ignored = module.trigger
+        return coefficient * x + ignored  # type: ignore[no-any-return]
+
+    kernel.__globals__["module"] = module
+    try:
+        model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="snap_admit").numerical_model
+        assert float(model.elaborate().run(2.0)[0]) == 2.0
+    finally:
+        kernel.__globals__.pop("module", None)
+
+
+def test_emission_resets_come_from_the_analysis_snapshot_not_a_live_read() -> None:
+    # MISCOMPILE: emission re-read state resets with a raw getattr, so a permitted compile-time evaluation that
+    # mutated the component after analysis stabilized moved the RTL reset value (first transaction 11.0 where
+    # Python gives 3.0). Emission consumes the analyzer's snapshot now.
+    module = types.ModuleType("lazy_poke")
+    holder: dict[str, object] = {}
+
+    def module_getattr(name: str) -> float:
+        if name != "trigger":
+            raise AttributeError(name)
+        holder["active"].acc = 9.0  # type: ignore[attr-defined]
+        return 0.0
+
+    module.__getattr__ = module_getattr  # type: ignore[method-assign]
+
+    class Accumulator:
+        def __init__(self) -> None:
+            self.acc = 1.0
+
+        def step(self, x: float) -> float:
+            before = self.acc
+            ignored = module.trigger
+            self.acc = before + x + ignored
+            return self.acc
+
+    instance = Accumulator()
+    holder["active"] = instance
+    Accumulator.step.__globals__["module"] = module
+    try:
+        model = holoso.synthesize(instance.step, default_ops(FloatFormat(11, 52)), name="snap_reset").numerical_model
+        assert float(model.elaborate().run(2.0)[0]) == 3.0
+    finally:
+        Accumulator.step.__globals__.pop("module", None)
+
+
+def test_dataclass_construction_rejects_data_descriptor_fields_before_running_them() -> None:
+    # A field backed by a data descriptor makes the generated __init__ execute the descriptor's __set__ at
+    # compile time (twice: analysis and replay). The construction predicate refuses BEFORE construction now.
+    events: list[object] = []
+
+    class LoggedField:
+        def __get__(self, instance: object, owner: object = None) -> object:
+            return self if instance is None else 0
+
+        def __set__(self, instance: object, value: object) -> None:
+            events.append(value)
+
+    @dataclasses.dataclass
+    class Box:
+        value: int = LoggedField()  # type: ignore[assignment]
+
+    def kernel(x: float) -> float:
+        box = Box(7)
+        return x + float(box.value)
+
+    with pytest.raises(UnsupportedConstruct, match="call to 'Box' is not supported"):
+        lower(kernel)
+    assert events == [], "the descriptor setter must never run at compile time"
+
+
+def test_list_classinfo_never_folds_as_a_tuple() -> None:
+    # Python raises TypeError on a LIST classinfo; folding it as a tuple accepted what Python rejects.
+    def kernel(x: float) -> float:
+        return x if isinstance(1, [int]) else -x  # type: ignore[arg-type]
+
+    with pytest.raises(UnsupportedConstruct, match="enum-free class"):
+        lower(kernel)
+
+
+def test_void_annotated_object_return_is_named() -> None:
+    # A non-None object returned under '-> None' was silently discarded as if the kernel returned nothing.
+    def kernel(x: float) -> None:
+        return math  # type: ignore[return-value]
+
+    with pytest.raises(UnsupportedConstruct, match="returns an object"):
+        lower(kernel)

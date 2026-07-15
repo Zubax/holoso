@@ -72,17 +72,29 @@ def _inert_type_referents() -> tuple[type, ...]:
     return (float, int, bool, np.float64, np.int64, np.bool_)
 
 
+def _tuple_only_layout(layout: object) -> bool:
+    if layout is None:
+        return True
+    if isinstance(layout, TupleLayout):
+        return all(_tuple_only_layout(item) for item in layout.items)
+    return False
+
+
 def classinfo_types(fact: "Fact | None") -> list[type] | None:
     """
     The plain types an isinstance classinfo resolves to, or None when any member is opaque (a non-type, a typing
-    generic, an unresolvable reference). Tuples and unions unpack recursively, so a precomputed ``(float, Mode)``
-    or ``str | Mode`` is inspected member by member instead of slipping past as one reference.
+    generic, an unresolvable reference) or the container is not a tuple (Python raises TypeError on a LIST
+    classinfo, so folding it as if it were a tuple would accept what Python rejects). Tuples and unions unpack
+    recursively, so a precomputed ``(float, Mode)`` or ``str | Mode`` is inspected member by member instead of
+    slipping past as one reference.
     """
     pending: list[object] = []
     match fact:
         case Reference(obj=obj):
             pending = [obj]
-        case AggregateFact(leaves=leaves):
+        case AggregateFact(layout=layout, leaves=leaves):
+            if not _tuple_only_layout(layout):
+                return None
             for leaf in leaves:
                 if not isinstance(leaf, Reference):
                     return None
@@ -154,7 +166,14 @@ def _vetted_concrete_target(target: object) -> bool:
             if (member := c.__dict__.get(name)) is not None
         )
         factories = any(field.default_factory is not MISSING for field in fields(target))
-        return generated_init and not hooked and not factories and type(target) is type
+        descriptor_fields = any(
+            (entry := next((c.__dict__[field.name] for c in target.__mro__ if field.name in c.__dict__), None))
+            is not None
+            and not isinstance(entry, types.MemberDescriptorType)
+            and (hasattr(type(entry), "__set__") or hasattr(type(entry), "__delete__"))
+            for field in fields(target)
+        )
+        return generated_init and not hooked and not factories and not descriptor_fields and type(target) is type
     return False
 
 

@@ -349,6 +349,7 @@ class ResidualUnit:
     store_order: list[StateLeaf] = field(default_factory=list)
     runtime_state: set[StateLeaf] = field(default_factory=set)
     state_livein: dict[StateLeaf, Fact] = field(default_factory=dict)
+    state_resets: dict[StateLeaf, "StaticValue | str"] = field(default_factory=dict)
     provenance: dict[int, tuple[str, ...]] = field(default_factory=dict)
 
 
@@ -368,7 +369,7 @@ class Analyzer:
         self._cast_calls: set[int] = set()  # runtime float()/int()/bool() casts (identity or conversion at emission)
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
-        self._component_reads: dict[tuple[int, str], tuple[object, object]] = {}
+        self._component_reads: dict[tuple[int, str], tuple[object, object, StaticValue | None]] = {}
         self._value_methods: dict[tuple[StaticValue, str], object] = {}
         self._roots: dict[int, tuple[str, ...]] = {}  # root component id -> the empty member path
         self._component_edges: set[tuple[int, str, int]] = set()  # (parent id, attribute, child id) sub-object graph
@@ -421,47 +422,43 @@ class Analyzer:
             _logger.info("state round %d: %d runtime leaves, %d live-in facts", round_index + 1, len(new_w), len(new_d))
         raise AnalysisRejection("state fixpoint failed to stabilize", (Origin(self._root_template.name, 0, 0),))
 
-    def _read_attribute_snapshot(self, owner: object, name: str) -> object:
+    def _read_attribute_snapshot(self, owner: object, name: str) -> tuple[object, StaticValue | None]:
         """
-        One live read per (owner, attribute) per analysis: every later consultation -- W/D rounds, reset facts,
-        namespace lookups -- sees the first read's value, so the fixpoint can never observe reset-time state or
-        a namespace drifting under it. The owner reference pins the id against reuse for the memo's lifetime.
-        AttributeError propagates to the caller's located rejection.
+        One live read AND one admission per (owner, attribute) per analysis: every later consultation -- W/D
+        rounds, reset facts, namespace lookups, the final-plan replay -- sees the first read's ADMITTED value,
+        so neither a drifting live object nor a mutated referent (admission snapshots contents at admit time)
+        can move a fact after it is first formed. The owner reference pins the id against reuse for the memo's
+        lifetime. AttributeError propagates to the caller's located rejection.
         """
         key = (id(owner), name)
         hit = self._component_reads.get(key)
         if hit is not None and hit[0] is owner:
-            return hit[1]
+            return hit[1], hit[2]
         value = getattr(owner, name)
-        self._component_reads[key] = (owner, value)
-        return value
+        admitted = admit(value)
+        self._component_reads[key] = (owner, value, admitted)
+        return value, admitted
 
     def _snapshot_leaf(self, leaf: StateLeaf) -> Fact:
-        current: object = leaf.component
-        for attribute in leaf.path:
-            try:
-                current = self._read_attribute_snapshot(current, attribute)
-            except AttributeError:
-                raise AnalysisRejection(
-                    f"state attribute '{'.'.join(leaf.path)}' does not exist on the component at compile time "
-                    "(assign it in __init__)",
-                    (Origin(self._root_template.name, 0, 0),),
-                ) from None
-        admitted = admit(current)
+        current, admitted = self._walk_snapshot(leaf)
         return normalize_static(admitted) if admitted is not None else Reference(current)
 
-    def _state_reset_fact(self, leaf: StateLeaf) -> Fact:
+    def _walk_snapshot(self, leaf: StateLeaf) -> tuple[object, StaticValue | None]:
         current: object = leaf.component
+        admitted: StaticValue | None = None
         for attribute in leaf.path:
             try:
-                current = self._read_attribute_snapshot(current, attribute)
+                current, admitted = self._read_attribute_snapshot(current, attribute)
             except AttributeError:
                 raise AnalysisRejection(
                     f"state attribute '{'.'.join(leaf.path)}' does not exist on the component at compile time "
                     "(assign it in __init__)",
                     (Origin(self._root_template.name, 0, 0),),
                 ) from None
-        admitted = admit(current)
+        return current, admitted
+
+    def _state_reset_fact(self, leaf: StateLeaf) -> Fact:
+        current, admitted = self._walk_snapshot(leaf)
         if admitted is None:
             return Reference(current)
         sem = _residual_type(admitted)
@@ -507,6 +504,9 @@ class Analyzer:
         result.store_order = sorted(first_store, key=lambda leaf: first_store[leaf])
         result.runtime_state = set(self._runtime_state)
         result.state_livein = dict(self._state_livein)
+        for leaf in {*result.runtime_state, *result.store_order, *result.state_livein}:
+            raw, admitted = self._walk_snapshot(leaf)
+            result.state_resets[leaf] = admitted if admitted is not None else type(raw).__name__
         result.provenance = self._component_provenance()
 
     def _call_plan(self, call: PyCall, env: _Env) -> CallPlan:
@@ -1042,7 +1042,7 @@ class Analyzer:
         admitted = admit(concrete)
         if admitted is None:
             return Reference(concrete)
-        return normalize_static(admitted)
+        return _taint_lost(normalize_static(admitted), _lost_scalar_pools([Known(value)]))
 
     def _attribute(self, env: _Env, obj: Fact, name: str, origin: OriginStack) -> "Fact | _PropertyRead":
         if isinstance(obj, AggregateFact):
@@ -1079,10 +1079,9 @@ class Analyzer:
                 # A namespace (math, np, a class), not a stateful component: attribute access is a plain lookup,
                 # so math.sqrt/np.floor resolve to the callable the call site then dispatches through the registry.
                 try:
-                    attribute = self._read_attribute_snapshot(component, name)
+                    attribute, admitted = self._read_attribute_snapshot(component, name)
                 except AttributeError as error:
                     raise AnalysisRejection(str(error), origin) from None
-                admitted = admit(attribute)
                 return normalize_static(admitted) if admitted is not None else Reference(attribute)
             _reject_attribute_hooks(type(component), origin)
             class_attribute = _mro_attribute_of(type(component), name)
@@ -1115,10 +1114,9 @@ class Analyzer:
                 env.set(leaf, fact)
                 return fact
             try:
-                snapshot = self._read_attribute_snapshot(component, name)
+                snapshot, admitted = self._read_attribute_snapshot(component, name)
             except AttributeError as error:
                 raise AnalysisRejection(str(error), origin) from None
-            admitted = admit(snapshot)
             if admitted is None:
                 # ``snapshot`` is a sub-object (a potential child component): record the parent -> child graph edge.
                 # Canonical member paths are resolved from these edges by a shortest-path fixpoint in ``provenance()``,
@@ -1134,9 +1132,9 @@ class Analyzer:
                     f"list method '{name}' is not supported (lists are immutable values here); rebind with + instead",
                     origin,
                 )
-            receiver = strip_source(obj.value)  # a retained enum member must not donate its own methods
+            base_receiver = as_python(strip_source(obj.value))  # base-type surface: enum attributes never resolve
             try:
-                concrete = getattr(as_python(receiver), name)
+                concrete = getattr(base_receiver, name)
             except AttributeError as error:
                 if isinstance(obj.value, (MetaInt, StaticStr)) and not isinstance(obj.value.source, ScalarOrigin):
                     raise AnalysisRejection(
@@ -1162,9 +1160,17 @@ class Analyzer:
                 if isinstance(obj.value, StaticStr) and name in ("format", "format_map"):
                     # format's conversions (!r) observe the repr of erasure-reconstructed arguments.
                     raise AnalysisRejection(f"str.{name} is not supported in a kernel", origin)
-                value_key = (receiver, name)
+                value_key = (obj.value, name)
                 if value_key not in self._value_methods:
-                    self._value_methods[value_key] = concrete
+                    # The method comes from the BASE TYPE (looked up above, so an enum-defined method never
+                    # resolves) but binds onto the FAITHFUL receiver: an identity-preserving method (partition's
+                    # no-match head returns self) then yields the retained member itself, and re-admission keeps
+                    # it, exactly as Python.
+                    slot = _mro_attribute_of(type(base_receiver), name)
+                    faithful = as_python(obj.value)
+                    getter = getattr(type(slot), "__get__", None)
+                    bound = getter(slot, faithful, type(faithful)) if getter is not None else slot
+                    self._value_methods[value_key] = bound
                 return Reference(self._value_methods[value_key])
             return normalize_static(admitted) if admitted is not None else Reference(concrete)
         raise AnalysisRejection("attribute access on a runtime value", origin)
@@ -1229,6 +1235,10 @@ class Analyzer:
                         "iteration over a sequence with runtime elements is not lowerable yet", loop.origin
                     )
                 per_trip.append(child)
+        elif isinstance(iterable, Known) and isinstance(iterable.value, StaticSeq):
+            trip_count = len(iterable.value.items)
+            if trip_count <= UNROLL_THRESHOLD:
+                per_trip = [Known(item) for item in iterable.value.items]
         elif isinstance(iterable, Known):
             concrete = as_python(iterable.value)
             try:
@@ -1464,7 +1474,14 @@ class Analyzer:
             except Exception as error:
                 raise AnalysisRejection(f"call fails here: {error}", call.origin) from None
             admitted = admit(concrete)
-            env.set(Local(call.dst), normalize_static(admitted) if admitted is not None else Reference(concrete))
+            if admitted is None:
+                env.set(Local(call.dst), Reference(concrete))
+            else:
+                taint_inputs: list[Fact] = [*argument_facts, *(fact for _, fact in keyword_facts)]
+                if minted:
+                    receiver_value = next(k[0] for k, m in self._value_methods.items() if m is target)
+                    taint_inputs.append(Known(receiver_value))
+                env.set(Local(call.dst), _taint_lost(normalize_static(admitted), _lost_scalar_pools(taint_inputs)))
             self._concrete_calls.add(id(call))
             return False
         receiver: object | None = None
@@ -1686,6 +1703,56 @@ def _same_fact(a: Fact, b: Fact) -> bool:
     if isinstance(a, Known) and isinstance(b, Known):
         return same(a.value, b.value)
     return a == b
+
+
+def _lost_scalar_pools(facts: "list[Fact]") -> tuple[set[int], set[str]]:
+    """The base values of every LOST-provenance int/str among the given facts (aggregate leaves included)."""
+    ints: set[int] = set()
+    strs: set[str] = set()
+
+    def visit(value: StaticValue) -> None:
+        match value:
+            case MetaInt(value=v, source=source) if source is ScalarOrigin.LOST:
+                ints.add(v)
+            case StaticStr(value=v, source=source) if source is ScalarOrigin.LOST:
+                strs.add(v)
+
+    for fact in facts:
+        if isinstance(fact, Known):
+            visit(fact.value)
+        elif isinstance(fact, AggregateFact):
+            for leaf in fact.leaves:
+                if isinstance(leaf, Known):
+                    visit(leaf.value)
+    return ints, strs
+
+
+def _taint_lost(fact: BoundFact, pools: tuple[set[int], set[str]]) -> BoundFact:
+    """
+    Downgrade PLAIN int/str scalars of a fold's result to LOST when they value-equal a LOST input: an
+    identity-preserving callable (min returns its argument, sum returns its start) may have returned the very
+    object whose membership the LOST input no longer names, and reconstruction laundered it to a plain value.
+    """
+    ints, strs = pools
+    if not ints and not strs:
+        return fact
+
+    def scalar(value: StaticValue) -> StaticValue:
+        match value:
+            case MetaInt(value=v, source=source) if source is ScalarOrigin.PLAIN and v in ints:
+                return MetaInt(v, source=ScalarOrigin.LOST)
+            case StaticStr(value=v, source=source) if source is ScalarOrigin.PLAIN and v in strs:
+                return StaticStr(v, source=ScalarOrigin.LOST)
+        return value
+
+    match fact:
+        case Known(value=value):
+            return Known(scalar(value))
+        case AggregateFact(layout=layout, leaves=leaves):
+            return AggregateFact(
+                layout, tuple(Known(scalar(leaf.value)) if isinstance(leaf, Known) else leaf for leaf in leaves)
+            )
+    return fact
 
 
 def _crossing_object(value: "StaticValue | Reference") -> object:

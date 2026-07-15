@@ -160,7 +160,9 @@ list/tuple flavor; slices with integer (or absent) bounds are plain values; data
 when reconstructible from fields; containers bound depth and refuse cycles. An IntEnum/StrEnum member normalizes to its base value with the MEMBER retained as the scalar's
 source (tri-state provenance: a retained member, PLAIN for provably-never-an-enum, or LOST when a join dropped
 the source), so arithmetic folds with base-type semantics while faithful reconstruction returns the original;
-joins of value-equal scalars with differing sources degrade to LOST, monotonically. Fixed-point equality is tagged and bitwise (True is not 1, signed zero distinct, NaN stable). Static
+joins of value-equal scalars with differing sources degrade to LOST, monotonically; and identity-preserving
+folds keep the degradation (a fold result that value-equals a LOST input is itself LOST, since min() or a
+subscript may have returned the very object whose membership the fact no longer names). Fixed-point equality is tagged and bitwise (True is not 1, signed zero distinct, NaN stable). Static
 execution runs real Python/numpy on the domain's own objects; zero-division/invalid defer to runtime, float overflow
 folds to infinity per the charter, numpy wraparound folds faithfully, NaN never folds, and integer powers fold only
 under a result-width bound.
@@ -187,8 +189,9 @@ namespace or component attribute, an isinstance classinfo, an inert dtype-ish ty
 and everything else refuses by type. isinstance folds through its resolved classinfo types rather than a generic
 evaluation, since a classinfo is references, not data. References join only with themselves and only when the
 referent is identical; a reference is fact-only in emission (never a datapath cell). Component and namespace
-attribute reads are snapshot at most once per analysis, so the multi-round fixpoint can never observe the live
-object drifting under it (a PEP 562 module __getattr__ runs exactly once). Aggregate joins reconcile layouts first
+attribute reads are snapshot AND admitted at most once per analysis -- the fact forms from the first read and
+is never re-formed, so neither a drifting live object nor a mutated referent can move it (a PEP 562 module
+__getattr__ runs exactly once) -- and emission consumes the same snapshot for state resets, never a live read. Aggregate joins reconcile layouts first
 (identical flavors recurse; a tuple arm meeting a list arm of equal arity degrades to the structural flavor set,
 keeping only flavor-independent behavior; ndarray dtypes promote int64 to float64), then join leaves positionally. An int/float join promotes the integer side to float, C-style (see Integers). Folding
 is Python-exact on Knowns; runtime-typed values never fold (width rule); a Known Bool always drives edge selection.
@@ -205,7 +208,8 @@ runtime value may be a member the joined fact no longer names) -- dataclass cons
 only (a user __init__, __post_init__, __new__, metaclass, or field default_factory would run at compile time on
 erasure-reconstructed arguments or against live state), and value methods minted by the analyzer's own bind site
 off the domain's reconstruction -- immutable scalar/str/range receivers with non-dunder, non-format names, the
-receiver stripped to its base value first so a retained enum member never donates its own methods;
+method resolved on the BASE TYPE but bound onto the faithful receiver, so an enum-defined method never resolves
+while identity-preserving methods (partition's no-match head) return the retained member exactly as Python;
 sequence .count/.index are identity-and-equality games a rebuild cannot vouch for, an oversized range receiver
 rejects (its count/index can iterate linearly), and a PRE-BOUND builtin captured from the user's namespace
 carries a live mutable receiver and never folds); every

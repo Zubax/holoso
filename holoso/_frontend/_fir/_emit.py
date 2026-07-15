@@ -507,9 +507,13 @@ class _Emitter:
     def _leaf_reset(self, leaf: StateLeaf) -> FloatConst | BoolConst | IntConst:
         import numpy as np
 
-        current: object = leaf.component
-        for attribute in leaf.path:
-            current = getattr(current, attribute)
+        # The reset comes from the analyzer's one-read attribute snapshot, never a fresh getattr: a live read
+        # here could observe state a permitted compile-time evaluation mutated after analysis stabilized.
+        snapshot = self._result.state_resets.get(leaf)
+        assert snapshot is not None, f"reset for {leaf} missing from the analysis plan"
+        if isinstance(snapshot, str):
+            raise EmissionRejection(f"state '{'.'.join(leaf.path)}' has a reset of unsupported type {snapshot}")
+        current = as_python(snapshot)
         if isinstance(current, bool) or isinstance(current, np.bool_):
             return BoolConst(bool(current))
         # An integer reset stays integer only when the analyzer typed the leaf as a runtime integer; an int literal
@@ -1131,6 +1135,8 @@ class _Emitter:
             case VoidReturn():
                 if returns_value:
                     raise EmissionRejection("annotated '-> None' but returns a value")
+                if isinstance(return_fact, Reference) and return_fact.obj is not None:
+                    raise EmissionRejection("annotated '-> None' but returns an object")
             case ScalarReturn(kind=kind):
                 if not returns_value:
                     if isinstance(return_fact, Reference) and return_fact.obj is not None:
