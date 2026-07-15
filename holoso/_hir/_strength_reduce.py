@@ -29,14 +29,26 @@ from ._operators import (
 )
 
 
+def _fits_binary64(value: int) -> bool:
+    try:
+        float(value)
+    except OverflowError:
+        return False
+    return True
+
+
 def _const_int_phis_used_only_as_float(hir: Hir) -> frozenset[ValueId]:
-    """Integer phis whose every arm is an IntConst and whose every use is an IntToFloat promotion."""
+    """
+    Integer phis whose every arm is a binary64-convertible IntConst and whose every use is an IntToFloat promotion.
+    An arm beyond the carrier range disqualifies the phi: it stays integer and meets the MIR containment instead of
+    leaking a raw OverflowError out of the rewrite.
+    """
     candidates = {
         vid
         for vid, node in hir.nodes.items()
         if isinstance(node, Phi)
         and isinstance(node.type, IntType)
-        and all(isinstance(hir.nodes[value], IntConst) for _, value in node.arms)
+        and all(isinstance(arm := hir.nodes[value], IntConst) and _fits_binary64(arm.value) for _, value in node.arms)
     }
     if not candidates:
         return frozenset()
@@ -186,8 +198,14 @@ def run(hir: Hir) -> Hir:
             case Operation(operator=FloatToInt(), operands=(a,)):
                 # f2i(i2f(n)) collapses to n per the fastmath charter: int -> float -> int is the identity with the
                 # promotion's precision loss deliberately ignored (an integer wider than the mantissa notwithstanding).
+                # A promoted phi is excluded: its remap is the FLOAT phi, so the collapse would silently retype an
+                # integer expression as float; the conversion stays and meets the integer containment downstream.
                 inner = hir.nodes[a]
-                if isinstance(inner, Operation) and isinstance(inner.operator, IntToFloat):
+                if (
+                    isinstance(inner, Operation)
+                    and isinstance(inner.operator, IntToFloat)
+                    and inner.operands[0] not in promotable_phis
+                ):
                     return remap[inner.operands[0]]
                 return copy_node(builder, node, remap)
             case Operation(

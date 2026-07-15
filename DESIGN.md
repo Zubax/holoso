@@ -180,6 +180,11 @@ at the root (a read of one is a located rejection: Python may raise). Aggregate 
 (identical flavors recurse; a tuple arm meeting a list arm of equal arity degrades to the structural flavor set,
 keeping only flavor-independent behavior; ndarray dtypes promote int64 to float64), then join leaves positionally. An int/float join promotes the integer side to float, C-style (see Integers). Folding
 is Python-exact on Knowns; runtime-typed values never fold (width rule); a Known Bool always drives edge selection.
+Aggregate truth follows Python: tuples/lists fold by arity, arrays (and any join carrying the array flavor) reject
+as ambiguous, and a record is truthy per object semantics -- a class-defined __bool__/__len__ folds concretely on
+an all-Known record and rejects on a record with runtime fields. A 0-dimensional ndarray stays an array (its
+static type identity matters to folds); navigating it -- indexing, len(), iteration -- is a rejection, while
+concrete folds (float(z)) work through materialization.
 StaticFor unrolls by cloning the body per trip once the iterable is Known; calls expand on demand by grafting the
 callee template (defaults/kwargs bound, member __call__ dispatch, recursion rejected by function+receiver ancestry,
 origins re-attributed to the user call site). State: the W/D fixed point -- W accumulates executable
@@ -261,7 +266,9 @@ whose ports await the ndarray stages. The return annotation is likewise mandator
 contract -- scalar kinds, `tuple[...]` with per-position contracts, `tuple[X, ...]` variadic over the emitted
 arity, `list[X]`, `tuple[()]` the empty tuple, `None` for a method that returns nothing, and an `X | None` union
 unwrapping its None arm for early-return kernels -- and validated structurally against the emitted value: any
-arity, flavor, or leaf-kind divergence is a located rejection. An aggregate return flattens to one scalar output
+arity, flavor, or leaf-kind divergence is a rejection naming the diverging position (emission-side refusals name
+the port/leaf, not a source line). Strictness includes flavor: a container that is a tuple on one path and a list
+on another (a flavor-erased structural join) satisfies neither contract. An aggregate return flattens to one scalar output
 port per leaf in canonical order, named by the leaf's path, so the module ABI stays scalar; a leaf that is by
 dataflow a public state live-out is deduped onto that state port exactly as a scalar return is. Contracts bind at
 the root kernel only: a callee's annotations are documentation, never a lowering directive.

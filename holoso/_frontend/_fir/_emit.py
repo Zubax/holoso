@@ -63,6 +63,7 @@ from ..._hir import (
     IntType,
     IntXor,
     Operator,
+    Phi,
     Select,
     Type,
 )
@@ -151,7 +152,11 @@ _MAX_POWER_CHAIN = 1024
 
 
 class EmissionRejection(UnsupportedConstruct):
-    """A located refusal discovered during HIR emission: an unsupported construct that survived analysis."""
+    """
+    A refusal discovered during HIR emission: an unsupported construct that survived analysis. It names the
+    offending port/leaf where one exists but carries no source location (emission has left the AST behind);
+    a rejection that can be decided during analysis belongs there, where the origin stack is at hand.
+    """
 
 
 def lower_fir(kernel: object) -> Hir:
@@ -226,8 +231,12 @@ def _positional_children(layout: "ValueLayout", flavor: ContainerFlavor, spelled
             return child_layouts(layout)
         case ListLayout() if flavor is ContainerFlavor.LIST:
             return child_layouts(layout)
-        case StructuralLayout(flavors=flavors) if flavor in flavors:
-            return child_layouts(layout)  # the declared contract disambiguates a flavor-erased join
+        case StructuralLayout():
+            # Strict contracts refuse a flavor-erased join outright: one path returned the declared container and
+            # another did not, and picking the declared flavor would silently bless the diverging path.
+            raise EmissionRejection(
+                f"return type mismatch: declared a {spelled}, but the container flavor diverges across paths"
+            )
         case None:
             raise EmissionRejection(f"return type mismatch: declared a {spelled}, returns a scalar")
         case _:
@@ -542,24 +551,6 @@ class _Emitter:
             for repetition in range(len(result.leaves) // count if count else 0):
                 self._install(block, Local(dst), repetition * count, seq)
 
-    def _materialize_leaf(self, block: FirBlockId, binding: BindingId, ordinal: int, expected: SemType) -> int:
-        """One leaf of an aggregate-valued binding, coerced onto the joined leaf kind exactly like a scalar arm."""
-        fact = self._fact(binding)
-        assert isinstance(fact, AggregateFact)
-        leaf = fact.leaves[ordinal]
-        if isinstance(leaf, Known):
-            if isinstance(leaf.value, (MetaInt, NpInt)) and expected is not SemType.FLOAT:
-                return self._builder.int_const(int(leaf.value.value))
-            vid = self._const(leaf.value)
-        else:
-            vid = self._read(block, _LeafPlace(Local(binding), ordinal))
-        actual = self._sem_of(self._type_of(vid))
-        if actual is expected:
-            return vid
-        if actual is SemType.INT and expected is SemType.FLOAT:
-            return self._builder.operation(IntToFloat(), [vid])
-        raise EmissionRejection(f"a {actual.value} leaf reaches a {expected.value} selection")
-
     def _atom_vid(self, leaf: Known) -> int:
         """A Known leaf in its own kind (an integer leaf stays an IntConst; interning keeps duplicates free)."""
         if isinstance(leaf.value, (MetaInt, NpInt)):
@@ -737,32 +728,19 @@ class _Emitter:
                         define(dst, self._materialize(fir_id, chosen))
                 else:
                     # The merged fact fixes the selection kind; each arm materializes onto it, so a mixed int/float
-                    # select promotes the integer arm on its own edge exactly like a phi. An aggregate selection
-                    # emits one typed select per differing residual leaf.
+                    # select promotes the integer arm on its own edge exactly like a phi. An aggregate never reaches
+                    # a residual condition: the condition is the lhs's own truth, which folds (or rejects) for every
+                    # aggregate, and a scalar lhs cannot join with an aggregate rhs.
+                    assert not isinstance(result_fact, AggregateFact), "an aggregate select with a residual condition"
                     then_binding, else_binding = (rhs, lhs) if mode is SelectMode.AND else (lhs, rhs)
                     condition = self._materialize(fir_id, cond, SemType.BOOL)
-                    if isinstance(result_fact, AggregateFact):
-                        for ordinal, leaf_fact in enumerate(result_fact.leaves):
-                            if isinstance(leaf_fact, Known):
-                                if self._datapath_known(leaf_fact):
-                                    self._write(fir_id, _LeafPlace(Local(dst), ordinal), self._atom_vid(leaf_fact))
-                                continue
-                            sem = self._fact_sem(leaf_fact)
-                            leaf_operator: Operator = (
-                                BoolSelect() if sem is SemType.BOOL else IntSelect() if sem is SemType.INT else Select()
-                            )
-                            then_vid = self._materialize_leaf(fir_id, then_binding, ordinal, sem)
-                            else_vid = self._materialize_leaf(fir_id, else_binding, ordinal, sem)
-                            selected = self._builder.operation(leaf_operator, [condition, then_vid, else_vid])
-                            self._write(fir_id, _LeafPlace(Local(dst), ordinal), selected)
-                    else:
-                        sem = self._fact_sem(result_fact)
-                        operator: Operator = (
-                            BoolSelect() if sem is SemType.BOOL else IntSelect() if sem is SemType.INT else Select()
-                        )
-                        then_vid = self._materialize(fir_id, then_binding, sem)
-                        else_vid = self._materialize(fir_id, else_binding, sem)
-                        define(dst, self._builder.operation(operator, [condition, then_vid, else_vid]))
+                    sem = self._fact_sem(result_fact)
+                    operator: Operator = (
+                        BoolSelect() if sem is SemType.BOOL else IntSelect() if sem is SemType.INT else Select()
+                    )
+                    then_vid = self._materialize(fir_id, then_binding, sem)
+                    else_vid = self._materialize(fir_id, else_binding, sem)
+                    define(dst, self._builder.operation(operator, [condition, then_vid, else_vid]))
             case BuildTuple(dst=dst, items=items) | BuildList(dst=dst, items=items):
                 fact = self._fact(dst)
                 if isinstance(fact, AggregateFact):
@@ -771,17 +749,24 @@ class _Emitter:
                         self._install(fir_id, Local(dst), start, item)
             case PySubscript(dst=dst, obj=obj, index=index):
                 obj_fact = self._fact(obj)
-                if isinstance(obj_fact, AggregateFact) and not isinstance(self._fact(dst), Known):
+                dst_fact = self._fact(dst)
+                needs_cells = isinstance(dst_fact, Residual) or (
+                    isinstance(dst_fact, AggregateFact) and any(isinstance(leaf, Residual) for leaf in dst_fact.leaves)
+                )
+                if isinstance(obj_fact, AggregateFact) and needs_cells:
+                    # Only a Known integer key reaches here: a residual dst leaf means the analyzer projected a
+                    # positional child (a tuple key or a slice object folds concretely to an all-Known result,
+                    # which needs no cells -- every use folds).
                     import operator as operator_module
 
                     index_fact = self._fact(index)
-                    assert isinstance(index_fact, Known)
+                    assert isinstance(index_fact, Known), index_fact
                     position = operator_module.index(as_python(index_fact.value))  # type: ignore[arg-type]
                     width = outer_arity(obj_fact.layout)
                     position = position + width if position < 0 else position
                     _, start, _ = child_slice(obj_fact.layout, position)
                     self._project(fir_id, Local(obj), start, dst)
-                # else the analyzer folded the subscript concretely: the Known fact materializes at its use sites
+                # else the analyzer folded the subscript concretely: the Known facts materialize at their use sites
             case PyLen():
                 pass  # always folded by the analyzer (static shape)
             case PyAttr(dst=dst, obj=obj, name=name):
@@ -1058,9 +1043,25 @@ class _Emitter:
         xor = self._builder.operation(BoolXor(), [left, right])
         return xor if rel is RelationalOp.NE else self._builder.operation(BoolNot(), [xor])
 
+    def _exit_identity(self, vid: int) -> object:
+        """
+        The dedup identity of an exit value: a phi is its (type, arms) structure, not its id. The return leaf and a
+        state live-out read through DIFFERENT places, so a value that is by dataflow the same merge arrives as two
+        distinct-but-identical exit phis (duplicate-phi elimination unifies them only after ports are fixed).
+        """
+        node = self._builder.node_of(vid)
+        if isinstance(node, Phi):
+            return (node.type, node.arms)
+        return vid
+
     def _exit_leaf(self, exit_block: FirBlockId, path: LeafPath, ordinal: int, leaf: AtomicFact, kind: SemType) -> int:
         """One returned leaf, coerced onto its declared contract kind exactly like a scalar return."""
         if isinstance(leaf, Known):
+            if not self._datapath_known(leaf):
+                got_name = type(as_python(leaf.value)).__name__
+                raise EmissionRejection(
+                    f"return type mismatch at leaf {_port_path(path)}: declared {kind.value}, returns a {got_name}"
+                )
             if isinstance(leaf.value, (MetaInt, NpInt)) and kind is SemType.INT:
                 vid = self._builder.int_const(int(leaf.value.value))
             else:
@@ -1130,16 +1131,16 @@ class _Emitter:
         # happened to touch attributes; a leaf touched only by a read still trails a leaf stored earlier.
         store_order = [leaf for leaf in self._result.store_order if leaf in promoted]
         store_order += [leaf for leaf in self._state_order if leaf in promoted and leaf not in store_order]
-        public_live_outs: set[int] = set()
+        public_live_outs: set[object] = set()
         for leaf in store_order:
             live_out = self._read(unit.exit, leaf)
             self._builder.state_slot(self._slot_name(leaf), self._leaf_reset(leaf), live_out)
             if not leaf.path[-1].startswith("_"):
-                public_live_outs.add(live_out)
-        if return_vid is not None and return_vid not in public_live_outs:
+                public_live_outs.add(self._exit_identity(live_out))
+        if return_vid is not None and self._exit_identity(return_vid) not in public_live_outs:
             self._builder.output(port_name([0]), return_vid)  # a scalar return is leaf 0 of the bundle
         for path, vid in return_leaves:
-            if vid not in public_live_outs:  # a leaf equal to a public state live-out rides that state port
+            if self._exit_identity(vid) not in public_live_outs:  # equal to a public live-out: ride the state port
                 self._builder.output(port_name(_port_path(path)), vid)
         for leaf in store_order:
             if not leaf.path[-1].startswith("_"):

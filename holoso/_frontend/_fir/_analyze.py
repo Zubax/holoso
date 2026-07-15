@@ -742,6 +742,8 @@ class Analyzer:
             case PyLen(dst=dst, obj=obj):
                 obj_fact = env.get(Local(obj))
                 if isinstance(obj_fact, AggregateFact):
+                    if isinstance(obj_fact.layout, ArrayLayout) and not obj_fact.layout.shape:
+                        raise AnalysisRejection("len() of a 0-dimensional array is undefined", op.origin)
                     length = admit(outer_arity(obj_fact.layout))
                     assert length is not None
                     result = Known(length)
@@ -914,7 +916,20 @@ class Analyzer:
                         "the truth value of an array is ambiguous; use .any() or .all() in plain numpy", origin
                     )
                 if isinstance(layout, RecordLayout):
-                    return Known(StaticBool(True))  # a record is an object, truthy regardless of field count
+                    if _truth_override(layout.klass) is None:
+                        return Known(StaticBool(True))  # default object truth, regardless of field count
+                    concrete = materialize_static(aggregate)
+                    if concrete is None:
+                        raise AnalysisRejection(
+                            "the truth of a record with a custom __bool__/__len__ and runtime fields "
+                            "is not supported",
+                            origin,
+                        )
+                    try:
+                        truth = bool(as_python(concrete))
+                    except Exception as error:
+                        raise AnalysisRejection(f"truth fails here: {error}", origin) from None
+                    return Known(StaticBool(truth))
                 return Known(StaticBool(outer_arity(layout) != 0))
             case _:
                 return Residual(SemType.BOOL)
@@ -929,6 +944,10 @@ class Analyzer:
         if isinstance(obj, AggregateFact) and isinstance(index, Known):
             if isinstance(obj.layout, RecordLayout):
                 raise AnalysisRejection("a record is not subscriptable; access its fields by name", origin)
+            if isinstance(obj.layout, ArrayLayout) and not obj.layout.shape:
+                raise AnalysisRejection(
+                    "a 0-dimensional array cannot be indexed; convert it with float() instead", origin
+                )
             if isinstance(index.value, StaticBool) and (
                 isinstance(obj.layout, ArrayLayout)
                 or (isinstance(obj.layout, StructuralLayout) and ContainerFlavor.ARRAY in obj.layout.flavors)
@@ -1523,9 +1542,9 @@ def _concat_seqs(bin_op: BinOp, lhs: Fact, rhs: Fact) -> Fact | None:
     if bin_op is BinOp.MUL:
         seq, count = (lhs, rhs) if _seq_side(lhs) is not None else (rhs, lhs)
         lifted = _seq_side(seq)
-        if lifted is not None and isinstance(count, Known) and isinstance(count.value, (MetaInt, NpInt)):
-            repetitions = count.value.value
-            if 0 <= repetitions <= 1024:
+        if lifted is not None and isinstance(count, Known) and isinstance(count.value, (MetaInt, NpInt, StaticBool)):
+            repetitions = max(0, int(count.value.value))  # Python: a negative count is empty, a bool is 0/1
+            if repetitions <= 1024:
                 children = tuple(lifted.child(i) for i in range(outer_arity(lifted.layout)))
                 return aggregate_of(children * repetitions, is_list=isinstance(lifted.layout, ListLayout))
         return None
@@ -1553,6 +1572,19 @@ def _is_list_fact(fact: Fact) -> bool:
 
 def _mro_attribute_of(klass: type, name: str) -> object | None:
     return next((c.__dict__[name] for c in klass.__mro__ if name in c.__dict__), None)
+
+
+def _truth_override(klass: type) -> object | None:
+    """A user-defined __bool__/__len__ governing the class's truth (object's own default __bool__ excluded)."""
+    return next(
+        (
+            c.__dict__[name]
+            for name in ("__bool__", "__len__")
+            for c in klass.__mro__
+            if c is not object and name in c.__dict__
+        ),
+        None,
+    )
 
 
 def _reject_attribute_hooks(klass: type, origin: OriginStack) -> None:

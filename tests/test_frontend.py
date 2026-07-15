@@ -4454,18 +4454,150 @@ def test_an_all_known_aggregate_folds_through_an_intrinsic() -> None:
     assert float(model.elaborate().run(3.0)[0]) == 5.0
 
 
-def test_a_zero_dimensional_array_admits_as_its_scalar() -> None:
-    # Review round 5: a 0-d ndarray crashed structural navigation with a raw IndexError; it now admits as its
-    # scalar element, so folds behave numpy-faithfully and misuse is a located rejection.
+def test_a_zero_dimensional_array_folds_and_rejects_navigation() -> None:
+    # Review rounds 5+6: a 0-d ndarray crashed structural navigation with a raw IndexError; scalarizing it at
+    # admission was tried and reverted (it broke static type identity: isinstance(z, np.ndarray) folded False).
+    # It stays an array -- concrete folds work through materialization, navigation is a located rejection.
     z = np.array(3.0)
 
     def scales(x: float) -> float:
         return x * float(z)
 
+    def type_sensitive(x: float) -> float:
+        return x if isinstance(z, np.ndarray) else 0.0
+
     def subscripted(x: float) -> float:
         return x * z[0]  # type: ignore[no-any-return]  # numpy raises IndexError: too many indices
 
-    model = holoso.synthesize(scales, default_ops(FloatFormat(11, 52)), name="zero_dim").numerical_model
-    assert float(model.elaborate().run(2.0)[0]) == 6.0
-    with pytest.raises(UnsupportedConstruct, match="subscript fails"):
+    def sized(x: float) -> float:
+        return x + float(len(z))  # numpy raises TypeError: len() of unsized object
+
+    fmt = FloatFormat(11, 52)
+    assert float(holoso.synthesize(scales, default_ops(fmt), name="p").numerical_model.elaborate().run(2.0)[0]) == 6.0
+    model = holoso.synthesize(type_sensitive, default_ops(fmt), name="p").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 3.0
+    with pytest.raises(UnsupportedConstruct, match="0-dimensional array cannot be indexed"):
         lower(subscripted)
+    with pytest.raises(UnsupportedConstruct, match=r"len\(\) of"):  # the concrete fold surfaces numpy's own message
+        lower(sized)
+
+
+# ---------------------------------------- spine review round 6 ----------------------------------------
+
+
+def test_record_truth_honors_a_custom_bool() -> None:
+    # Review round 6 MISCOMPILE: a record class defining __bool__ folded truthy by default; Python consults the
+    # override. All-Known records fold the concrete truth; a residual-leaf record with an override rejects.
+    @dataclasses.dataclass(frozen=True)
+    class Disabled:
+        def __bool__(self) -> bool:
+            return False
+
+    disabled = Disabled()
+
+    def kernel(x: float) -> float:
+        return x if disabled else 0.0
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="rec_bool").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 0.0 == kernel(3.0)
+
+    @dataclasses.dataclass(frozen=True)
+    class Gated:
+        level: float
+
+        def __bool__(self) -> bool:
+            return self.level > 0.0
+
+    def residual(c: bool, x: float) -> float:
+        g = Gated(1.0) if c else Gated(-1.0)
+        return x if g else 0.0
+
+    with pytest.raises(UnsupportedConstruct, match="custom __bool__"):
+        lower(residual)
+
+
+def test_a_flavor_divergent_return_is_a_contract_rejection() -> None:
+    # Review round 6: one arm returns a tuple, the other a list; strict contracts refuse the flavor-erased join
+    # instead of blessing the diverging path with the declared flavor.
+    def diverges(flag: bool, x: float) -> tuple[float, float]:
+        if flag:
+            return x, 1.0
+        return [x, 2.0]  # type: ignore[return-value]
+
+    def joined_local(flag: bool, x: float) -> list[float]:
+        v = (x, 1.0) if flag else [x, 2.0]
+        return v  # type: ignore[return-value]
+
+    for kernel in (diverges, joined_local):
+        with pytest.raises(UnsupportedConstruct, match="container flavor diverges across paths"):
+            lower(kernel)
+
+
+def test_a_returned_leaf_equal_to_a_public_live_out_rides_the_state_port_across_branches() -> None:
+    # Review round 6: the return leaf and the state live-out are distinct-but-identical exit phis when the value
+    # merges across branches; dedup keys on the phi's structure, so no duplicate out port is emitted.
+    class Latch:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def step(self, flag: bool, x: float) -> tuple[float]:
+            if flag:
+                self.y = x
+            else:
+                self.y = -x
+            return (self.y,)
+
+    result = holoso.synthesize(Latch().step, default_ops(FloatFormat(11, 52)), name="dedup_phi")
+    assert [p.name for p in result.output_ports] == ["state_y"]
+    elaborated = result.numerical_model.elaborate()
+    assert float(elaborated.run(True, 3.0)[0]) == 3.0
+    assert float(elaborated.run(False, 5.0)[0]) == -5.0
+
+
+def test_concretely_folded_aggregate_subscripts_need_no_cells() -> None:
+    # Review round 6: a tuple key or a slice OBJECT folds concretely at analysis; emission must not enter the
+    # positional projection with a non-integer key (crashed: AssertionError / TypeError at operator.index).
+    def tuple_key(x: float) -> float:
+        a = np.array([[1.0, 2.0], [3.0, 4.0]])
+        row = a[(1,)]
+        return float(row[1] + x)
+
+    def slice_object(x: float) -> float:
+        t = (1.0, 2.0, 3.0)
+        s = slice(0, 2)
+        u = t[s]
+        return u[0] + u[1] + x  # type: ignore[index,no-any-return]  # mypy picks the int overload for t[s]
+
+    fmt = FloatFormat(11, 52)
+    for kernel, expected in ((tuple_key, 5.0), (slice_object, 4.0)):
+        model = holoso.synthesize(kernel, default_ops(fmt), name=kernel.__name__).numerical_model
+        assert float(model.elaborate().run(1.0)[0]) == expected == kernel(1.0)
+
+
+def test_sequence_repeat_counts_follow_python() -> None:
+    # Review round 6: a bool count repeats 0/1 times and a negative count yields the empty sequence, exactly as
+    # Python; both previously rejected as "arithmetic on an aggregate value".
+    def repeat_true(x: float) -> float:
+        pair = (x,) * True
+        return pair[0]
+
+    def repeat_negative(x: float) -> float:
+        rest = [x] * -1
+        return x + float(len(rest))
+
+    fmt = FloatFormat(11, 52)
+    for kernel, expected in ((repeat_true, 3.0), (repeat_negative, 3.0)):
+        model = holoso.synthesize(kernel, default_ops(fmt), name=kernel.__name__).numerical_model
+        assert float(model.elaborate().run(3.0)[0]) == expected == kernel(3.0)
+
+
+def test_a_non_datapath_leaf_under_a_scalar_contract_names_the_leaf() -> None:
+    # Review round 6: the str leaf hit the generic "cannot materialize" message; the leaf-kind check now runs
+    # first, so the rejection names the diverging leaf and the declared kind.
+    def kernel(x: float) -> tuple[float, float]:
+        return ("tag", x)  # type: ignore[return-value]
+
+    with pytest.raises(
+        UnsupportedConstruct, match=r"return type mismatch at leaf \[0\]: declared float, returns a str"
+    ):
+        lower(kernel)

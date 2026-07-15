@@ -815,3 +815,31 @@ def test_an_inexact_integer_constant_in_a_float_position_rounds() -> None:
 
     hir = _hir(kernel)
     assert float(2**53) in [n.value for n in hir.nodes.values() if isinstance(n, FloatConst)]
+
+
+def test_a_promoted_phi_does_not_leak_into_an_integer_expression() -> None:
+    # Review round 6: the const-int-phi promotion rebuilt the phi as float, and the f2i(i2f(n)) collapse then
+    # returned that FLOAT phi as though it were still integer, so a "-> int" kernel silently synthesized a float
+    # ABI. The collapse now excludes promoted phis; the conversion stays and meets the integer containment.
+    def declared_int(flag: bool) -> int:
+        value = 1 if flag else 2
+        return int(float(value))
+
+    def bool_of_int(flag: bool) -> bool:
+        value = 1 if flag else 2
+        return bool(int(float(value)))
+
+    for kernel in (declared_int, bool_of_int):
+        with pytest.raises(UnsupportedConstruct, match="not yet lowerable"):
+            holoso.synthesize(kernel, _ops(), name="probe")
+
+
+def test_a_phi_arm_beyond_the_carrier_range_disqualifies_promotion() -> None:
+    # Review round 6: promotion called float() on every arm unguarded, leaking a raw OverflowError for 10**400.
+    # Such a phi stays integer and meets the containment rejection instead.
+    def kernel(flag: bool) -> float:
+        value = 10**400 if flag else 0
+        return float(value)
+
+    with pytest.raises(UnsupportedConstruct, match="not yet lowerable"):
+        holoso.synthesize(kernel, _ops(), name="probe")

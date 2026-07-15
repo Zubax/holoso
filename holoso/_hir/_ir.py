@@ -299,6 +299,10 @@ class HirBuilder:
         """The semantic type of a value, used by the frontend when merging environments into phis."""
         return self._type_of(vid)
 
+    def node_of(self, vid: ValueId) -> Node:
+        """The node behind a value id, for structural identity checks (the exit's per-leaf port dedup)."""
+        return self._nodes[vid]
+
     def input(self, name: str, type: Type) -> ValueId:
         # Input ports are never interned: each parameter is a distinct, ordered port.
         vid = self._fresh(InPort(name, type))
