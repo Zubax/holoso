@@ -1100,6 +1100,9 @@ class Analyzer:
                 raise AnalysisRejection(str(error), origin) from None
             admitted = admit(concrete)
             if admitted is None and callable(concrete):
+                if isinstance(obj.value, StaticRange) and _range_size(obj.value) > (1 << 20):
+                    # range.count/.index fall back to linear iteration for non-int arguments.
+                    raise AnalysisRejection("a method of an oversized range is not supported", origin)
                 if name.startswith("__"):
                     # A dunder bound off a value (t.__repr__) is the reconstruction-observation spelling of the
                     # protocol the concrete-call whitelist refuses.
@@ -1375,16 +1378,30 @@ class Analyzer:
                     raise AnalysisRejection(
                         "a record cannot cross into a concrete call; access its fields directly", call.origin
                     )
-                if isinstance(fact, AggregateFact) and any(
-                    isinstance(leaf, Known) and isinstance(leaf.value, ObjectRef) for leaf in fact.leaves
-                ):
-                    # sum((self,)) would hand the callable the live object through the rebuilt container.
-                    raise AnalysisRejection("an object reference cannot cross into a concrete call", call.origin)
+                classinfo_position = target is isinstance and position == 1 and position < positional_count
                 if (
+                    isinstance(fact, AggregateFact)
+                    and not classinfo_position
+                    and any(isinstance(leaf, Known) and isinstance(leaf.value, ObjectRef) for leaf in fact.leaves)
+                ):
+                    # sum((self,)) would hand the callable the live object through the rebuilt container; the
+                    # inline classinfo tuple of isinstance is the one sanctioned carrier (resolved member by
+                    # member by _classinfo_types).
+                    raise AnalysisRejection("an object reference cannot cross into a concrete call", call.origin)
+                oversized = (
                     isinstance(fact, Known)
                     and isinstance(fact.value, StaticRange)
                     and _range_size(fact.value) > (1 << 20)
-                ):
+                ) or (
+                    isinstance(fact, AggregateFact)
+                    and any(
+                        isinstance(leaf, Known)
+                        and isinstance(leaf.value, StaticRange)
+                        and _range_size(leaf.value) > (1 << 20)
+                        for leaf in fact.leaves
+                    )
+                )
+                if oversized:
                     raise AnalysisRejection("a static fold over an oversized range is not supported", call.origin)
                 if isinstance(fact, Known) and isinstance(fact.value, ObjectRef):
                     if target is isinstance and position == 1 and position < positional_count:
@@ -1762,13 +1779,22 @@ def _vetted_concrete_target(target: object) -> bool:
     if any(target is entry for entry in vetted):
         return True
     if isinstance(target, type) and is_dataclass(target):
-        # Record construction is real construction -- but only through the GENERATED __init__ (a plain field
-        # assignment, compiled from synthesized source). A user __init__ or __post_init__ is arbitrary code that
-        # would run on erasure-reconstructed arguments (an IntEnum field arrives as its base int).
+        # Record construction is real construction -- but only through the GENERATED machinery (plain field
+        # assignment compiled from synthesized source). A user __init__, __post_init__, __new__, metaclass, or
+        # field default_factory is arbitrary code that would run at compile time, possibly on
+        # erasure-reconstructed arguments (an IntEnum field arrives as its base int) or against live state
+        # (a default_factory popped the user's list once per analysis round).
+        import dataclasses as dataclasses_module
+
         init = _mro_attribute_of(target, "__init__")
         generated_init = isinstance(init, types.FunctionType) and init.__code__.co_filename == "<string>"
-        has_post_init = any("__post_init__" in c.__dict__ for c in target.__mro__ if c is not object)
-        return generated_init and not has_post_init
+        hooked = any(
+            name in c.__dict__ for name in ("__post_init__", "__new__") for c in target.__mro__ if c is not object
+        )
+        factories = any(
+            field.default_factory is not dataclasses_module.MISSING for field in dataclasses_module.fields(target)
+        )
+        return generated_init and not hooked and not factories and type(target) is type
     return False
 
 

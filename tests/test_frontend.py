@@ -5426,3 +5426,85 @@ def test_object_references_reject_at_any_nesting_depth() -> None:
         lower(RAdd().step)
     with pytest.raises(UnsupportedConstruct, match="oversized range"):
         lower(oversized_range)
+
+
+# ---------------------------------------- spine review round 13 ----------------------------------------
+
+
+def test_dataclass_construction_admits_only_the_generated_machinery() -> None:
+    # Review round 13: a user __new__ and a field default_factory are the remaining compile-time code hooks in
+    # construction -- a factory popped the user's live list once per analysis round and baked the replay's draw
+    # into the emitted model. Construction admits only generated-__init__ classes with no hooks or factories.
+    import enum
+    import itertools
+
+    class Mode(enum.IntEnum):
+        A = 1
+
+    @dataclasses.dataclass
+    class NewBox:
+        mode: Mode
+        scale: float = dataclasses.field(init=False)
+
+        def __new__(cls, mode: Mode) -> "NewBox":
+            obj = super().__new__(cls)
+            obj.scale = 10.0 if isinstance(mode, Mode) else 20.0
+            return obj
+
+    mode = Mode.A
+
+    def dunder_new(x: float) -> float:
+        return x * NewBox(mode).scale
+
+    live = [9.0, 7.0, 5.0]
+
+    @dataclasses.dataclass
+    class FactoryBox:
+        v: float
+        junk: float = dataclasses.field(default_factory=live.pop)
+
+    def factory(x: float) -> float:
+        return x * FactoryBox(2.0).v
+
+    counter = itertools.count(10)
+
+    @dataclasses.dataclass
+    class CounterBox:
+        v: float = dataclasses.field(default_factory=lambda: float(next(counter)))
+
+    def drawing_factory(x: float) -> float:
+        return x + CounterBox().v
+
+    for kernel in (dunder_new, factory, drawing_factory):
+        with pytest.raises(UnsupportedConstruct, match="is not supported in a kernel"):
+            lower(kernel)
+    assert live == [9.0, 7.0, 5.0]  # compilation must never mutate the user's live objects
+
+
+def test_inline_classinfo_tuples_fold() -> None:
+    # Review round 13 REGRESSION (introduced in round 12): the aggregate ObjectRef-leaf guard fired on the inline
+    # isinstance classinfo tuple before the classinfo exemption could apply, so the inline and precomputed
+    # spellings of the same valid Python diverged.
+    gain = 2.0
+
+    def kernel(x: float) -> float:
+        return x * 2.0 if isinstance(gain, (float, str)) else x
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="inline_ci").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 6.0 == kernel(3.0)
+
+
+def test_oversized_ranges_reject_in_every_position() -> None:
+    # Review round 13: the round-12 guard covered only top-level argument facts; a range RECEIVER
+    # (range(10**12).count(0.5) iterates linearly for non-int arguments) and a range nested in an aggregate
+    # argument both burned unbounded compile time.
+    def receiver(x: float) -> float:
+        return x + float(range(10**12).count(0.5))  # type: ignore[arg-type]
+
+    def nested(x: float) -> float:
+        return x + float(np.array([range(10**9)])[0][0])
+
+    with pytest.raises(UnsupportedConstruct, match="oversized range"):
+        lower(receiver)
+    with pytest.raises(UnsupportedConstruct, match="oversized range"):
+        lower(nested)

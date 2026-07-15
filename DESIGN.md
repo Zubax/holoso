@@ -186,19 +186,23 @@ CLOSED WHITELIST, not a blacklist of hazards: beyond the library registry, only 
 are admitted (the float/int/bool/len/range/slice/sum/divmod casts and constructors, operator.index, the
 np.array/asarray/asanyarray constructors and numpy scalar types, isinstance whose SUBJECT carries no
 erasure-capable provenance -- a static int/str may be a normalized enum member -- over completely-resolved
-enum-free classinfo with the plain type instance check, dataclass construction through the GENERATED __init__
-only (a user __init__ or __post_init__ would run on erasure-reconstructed arguments), and value methods minted by
-the analyzer's own bind site off the domain's reconstruction -- immutable str/range receivers with non-dunder,
-non-format names; sequence .count/.index are identity-and-equality games a rebuild cannot vouch for, and a
-PRE-BOUND builtin captured from the user's namespace carries a live mutable receiver and never folds); every
+enum-free classinfo with the plain type instance check, dataclass construction through the GENERATED machinery
+only (a user __init__, __post_init__, __new__, metaclass, or field default_factory would run at compile time on
+erasure-reconstructed arguments or against live state), and value methods minted by the analyzer's own bind site
+off the domain's reconstruction -- immutable scalar/str/range receivers with non-dunder, non-format names;
+sequence .count/.index are identity-and-equality games a rebuild cannot vouch for, an oversized range receiver
+rejects (its count/index can iterate linearly), and a PRE-BOUND builtin captured from the user's namespace
+carries a live mutable receiver and never folds); every
 other callable -- functools.partial wrappers, vars, repr, type, unbound descriptors, attrgetter-style objects,
 unregistered numpy functions -- is a located rejection by construction. Argument admission is equally closed: a
 record never crosses into a concrete call (nested inside a tuple/list included; the reconstruction is
 value-faithful but not type-faithful, which even the dataclass-generated __repr__ observes on an enum field), an
-object reference never crosses at any nesting depth except as isinstance classinfo or one of the inert dtype-ish
-builtin types (a stateful component's dunder would read the live reset-time object while the kernel's writes
-exist only as state facts), and a static fold over an oversized range rejects rather than burning unbounded
-compile time. Records also reject at their truth when a __bool__/__len__ entry exists
+object reference never crosses at any nesting depth except as isinstance classinfo (inline tuples included) or
+one of the inert dtype-ish builtin types (a stateful component's dunder would read the live reset-time object
+while the kernel's writes exist only as state facts), and a static fold over an oversized range -- as an
+argument, nested in one, or as a method receiver -- rejects rather than burning unbounded compile time. The
+trust boundary stays where admission drew it: an enum that redefines arithmetic or shadows its base type's
+methods folds with base-type semantics (inputs are trusted; adversarial dunder-warping is not modeled). Records also reject at their truth when a __bool__/__len__ entry exists
 (``__bool__ = None`` included), at subscript keys, at non-field attributes, and at iteration; field access is the
 one record consumption. getattr rewrites into the attribute op itself (state reads, residual record fields, and
 the array whitelist behave exactly as the dotted spelling; the default-argument form rejects). Scalar numpy

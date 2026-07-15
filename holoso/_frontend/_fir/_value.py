@@ -207,8 +207,9 @@ def _admit_uncached(
         return None
     # Exact-type checks throughout: a subclass may override operators, and evaluating those inside the compiler
     # would leak foreign semantics into folds. Enum members are the sanctioned subclass exception (inputs are
-    # trusted: an enum that redefines arithmetic is not an honest mistake worth modeling); they normalize to the
-    # base type on admission.
+    # trusted: an enum that redefines arithmetic, shadows its base type's methods, or shadows dataclass fields
+    # with descriptors is not an honest mistake worth modeling); they normalize to the base type on admission,
+    # so such overrides fold with base-type semantics -- a documented trust-boundary deviation, not a guard.
     if type(obj) is bool:
         return StaticBool(obj)
     if type(obj) is np.bool_:
