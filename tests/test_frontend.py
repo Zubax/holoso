@@ -1375,7 +1375,7 @@ def test_noncallable_global_shadowing_builtin_is_rejected() -> None:
     # ``None`` shadows too -- it is present-but-non-callable, distinct from an absent global (the _ABSENT sentinel).
     shadows = ((use_abs, {"abs": 5}), (use_abs, {"abs": None}), (use_list, {"list": 5}), (use_tuple, {"tuple": 5}))
     for fn, shadow in shadows:
-        with pytest.raises(UnsupportedConstruct, match=r"not resolvable|runtime argument"):
+        with pytest.raises(UnsupportedConstruct, match=r"not resolvable|runtime argument|is not supported in a kernel"):
             lower(_rebind_globals(fn, **shadow))
 
 
@@ -1396,7 +1396,7 @@ def test_unhashable_global_shadowing_registered_name_is_rejected() -> None:
         return abs(a)
 
     for shadow in (np.zeros(3), (1.0, [2.0]), {1: 2}, {1, 2}):
-        with pytest.raises(UnsupportedConstruct, match=r"not resolvable|runtime argument"):
+        with pytest.raises(UnsupportedConstruct, match=r"not resolvable|runtime argument|is not supported in a kernel"):
             lower(_rebind_globals(use_abs, abs=shadow))
 
 
@@ -5056,7 +5056,7 @@ def test_attrgetter_objects_are_a_located_rejection() -> None:
     def kernel(x: float) -> float:
         return x + float(get_strides(fortran)[0])
 
-    with pytest.raises(UnsupportedConstruct, match="attrgetter objects are not supported"):
+    with pytest.raises(UnsupportedConstruct, match="is not supported in a kernel"):
         lower(kernel)
 
 
@@ -5075,11 +5075,16 @@ def test_a_record_nested_in_an_argument_cannot_cross_a_concrete_call() -> None:
 
     r1 = R1(Mode.A)
 
-    def kernel(x: float) -> float:
+    def nested_in_whitelisted_call(x: float) -> float:
+        return x + float(sum((r1,)))  # type: ignore[arg-type]
+
+    def non_whitelisted_callee(x: float) -> float:
         return x if str((r1,)) == "(R1(mode=1),)" else -x
 
     with pytest.raises(UnsupportedConstruct, match="record cannot cross into a concrete call"):
-        lower(kernel)
+        lower(nested_in_whitelisted_call)
+    with pytest.raises(UnsupportedConstruct, match="is not supported in a kernel"):
+        lower(non_whitelisted_callee)
 
 
 def test_snapshot_observing_spellings_are_located_rejections() -> None:
@@ -5094,10 +5099,9 @@ def test_snapshot_observing_spellings_are_located_rejections() -> None:
     def unregistered_ravel(x: float) -> float:
         return x + float(np.ravel(fortran, order="K")[1])
 
-    with pytest.raises(UnsupportedConstruct, match="unbound method descriptor"):
-        lower(unbound_flatten)
-    with pytest.raises(UnsupportedConstruct, match="cannot run on an admitted array snapshot"):
-        lower(unregistered_ravel)
+    for kernel in (unbound_flatten, unregistered_ravel):
+        with pytest.raises(UnsupportedConstruct, match="is not supported in a kernel"):
+            lower(kernel)
 
     def vetted_array(x: float) -> float:
         m = np.array([[1.0, 2.0], [3.0, 4.0]])
@@ -5150,7 +5154,7 @@ def test_isinstance_against_an_enum_type_is_a_located_rejection() -> None:
         return x if isinstance(mode, (float, Mode)) else -x
 
     for kernel in (direct, tuple_classinfo):
-        with pytest.raises(UnsupportedConstruct, match="isinstance against an enum type"):
+        with pytest.raises(UnsupportedConstruct, match="isinstance requires a static, enum-free class"):
             lower(kernel)
 
     def plain_class(x: float) -> float:
@@ -5158,3 +5162,146 @@ def test_isinstance_against_an_enum_type_is_a_located_rejection() -> None:
 
     model = holoso.synthesize(plain_class, default_ops(FloatFormat(11, 52)), name="plain_isinstance").numerical_model
     assert float(model.elaborate().run(3.0)[0]) == 6.0 == plain_class(3.0)
+
+
+# ---------------------------------------- spine review round 11 ----------------------------------------
+
+
+def test_concrete_evaluation_is_a_closed_whitelist() -> None:
+    # Review round 11: every blacklist guard kept resurfacing under new spellings (functools.partial(getattr),
+    # vars(self), bound tuple dunders, partial(np.ravel), repr/type/issubclass over erased enums). Concrete
+    # evaluation now admits only vetted value-determined callables; everything else is a located rejection.
+    import functools
+
+    wrapped_getattr = functools.partial(getattr)
+
+    class Acc:
+        def __init__(self) -> None:
+            self.g = 1.0
+
+        def step(self, x: float) -> float:
+            self.g = self.g + x
+            return wrapped_getattr(self, "g")  # type: ignore[no-any-return]
+
+    class Vars:
+        def __init__(self) -> None:
+            self.g = 1.0
+
+        def step(self, x: float) -> float:
+            self.g = self.g + x
+            return vars(self)["g"]  # type: ignore[no-any-return]
+
+    fortran = np.asfortranarray([[1.0, 2.0], [3.0, 4.0]])
+    ravel_k = functools.partial(np.ravel, order="K")
+
+    def partial_ravel(x: float) -> float:
+        return x + float(ravel_k(fortran)[1])
+
+    import enum
+
+    class Mode(enum.IntEnum):
+        A = 1
+
+    mode = Mode.A
+    expected = repr(Mode.A)
+
+    def repr_of_enum(x: float) -> float:
+        return x if repr(mode) == expected else -x
+
+    def issubclass_of_type(x: float) -> float:
+        return x if issubclass(type(mode), Mode) else -x
+
+    for kernel in (Acc().step, Vars().step, partial_ravel, repr_of_enum, issubclass_of_type):
+        with pytest.raises(UnsupportedConstruct, match="is not supported in a kernel"):
+            lower(kernel)
+
+
+def test_object_references_never_cross_concrete_calls() -> None:
+    # Review round 11 MISCOMPILE: a stateful component's dunder ran on the live reset-time object while the
+    # kernel's writes existed only as state facts -- float(self) stepped [1.0, 1.0] where Python steps
+    # [3.0, 5.0]; len(self) reached the same hazard through the unpack transfer.
+    class FloatSelf:
+        def __init__(self) -> None:
+            self.g = 1.0
+
+        def __float__(self) -> float:
+            return self.g
+
+        def step(self, x: float) -> float:
+            self.g = self.g + x
+            return float(self)
+
+    class LenSelf:
+        def __init__(self) -> None:
+            self.g = 1.0
+
+        def __len__(self) -> int:
+            return int(self.g)
+
+        def step(self, x: float) -> float:
+            self.g = self.g + x
+            return x + float(len(self))
+
+    for kernel in (FloatSelf().step, LenSelf().step):
+        with pytest.raises(UnsupportedConstruct, match="object reference cannot cross|len\\(\\) of an object"):
+            lower(kernel)
+
+
+def test_isinstance_classinfo_must_resolve_completely() -> None:
+    # Review round 11: a precomputed tuple or union classinfo was one opaque ObjectRef, slipping enum members
+    # past the round-10 guard and folding on the erased value; classinfo must now resolve member by member.
+    import enum
+
+    class Mode(enum.IntEnum):
+        A = 1
+
+    mode = Mode.A
+    tuple_classinfo = (float, Mode)
+    union_classinfo = str | Mode
+
+    def opaque_tuple(x: float) -> float:
+        return x if isinstance(mode, tuple_classinfo) else -x
+
+    def opaque_union(x: float) -> float:
+        return x if isinstance(mode, union_classinfo) else -x
+
+    for kernel in (opaque_tuple, opaque_union):
+        with pytest.raises(UnsupportedConstruct, match="isinstance requires a static, enum-free class"):
+            lower(kernel)
+
+    plain_union = float | int
+
+    def resolvable_union(x: float) -> float:
+        return x * 2.0 if isinstance(1.0, plain_union) else x
+
+    model = holoso.synthesize(resolvable_union, default_ops(FloatFormat(11, 52)), name="iu").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 6.0 == resolvable_union(3.0)
+
+
+def test_bound_dunders_of_values_are_a_located_rejection() -> None:
+    # Review round 11 MISCOMPILE: T.__repr__() bound off a record-carrying tuple ran the generated __repr__ on
+    # the reconstruction (an enum field prints as its base value); dunder binding and record-carrying receivers
+    # both reject, while plain value methods keep folding.
+    import enum
+
+    class Mode(enum.IntEnum):
+        A = 1
+
+    @dataclasses.dataclass(frozen=True)
+    class R:
+        mode: Mode
+
+    record_tuple = (R(Mode.A),)
+    expected = repr(record_tuple)
+
+    def bound_repr(x: float) -> float:
+        return x if record_tuple.__repr__() == expected else -x
+
+    def plain_dunder(x: float) -> float:
+        pair = (2.0, 1.0)
+        return pair.__len__() * x
+
+    with pytest.raises(UnsupportedConstruct, match="record-carrying sequence"):
+        lower(bound_repr)
+    with pytest.raises(UnsupportedConstruct, match="dunder attribute"):
+        lower(plain_dunder)

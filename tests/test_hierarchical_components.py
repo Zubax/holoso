@@ -165,13 +165,25 @@ def test_rebinding_a_component_member_is_a_located_rejection() -> None:
     class Rebinds:
         def __init__(self) -> None:
             self.child = _Sum()
+            self.other = _Sum()
 
         def __call__(self, x: float) -> float:
-            self.child = _Sum()  # a per-transaction topology change
+            self.child = self.other  # a per-transaction topology change
             return self.child(x)
 
     with pytest.raises(UnsupportedConstruct, match="cannot be rebound"):
         holoso.synthesize(Rebinds().__call__, _ops(), name="rebinds")
+
+    class Constructs:
+        def __init__(self) -> None:
+            self.child = _Sum()
+
+        def __call__(self, x: float) -> float:
+            self.child = _Sum()  # in-kernel construction rejects at the call (the concrete-call whitelist)
+            return self.child(x)
+
+    with pytest.raises(UnsupportedConstruct, match="is not supported in a kernel"):
+        holoso.synthesize(Constructs().__call__, _ops(), name="constructs")
 
 
 def test_a_slot_name_collision_is_a_located_rejection() -> None:

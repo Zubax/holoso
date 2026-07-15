@@ -19,7 +19,7 @@ import logging
 import types
 from typing import TYPE_CHECKING
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, is_dataclass, replace
 
 from ..._errors import UnsupportedConstruct, UnsupportedLibraryFunction
 from .._ast_support import UNROLL_THRESHOLD
@@ -754,6 +754,9 @@ class Analyzer:
                     assert length is not None
                     result = Known(length)
                 elif isinstance(obj_fact, Known):
+                    if isinstance(obj_fact.value, ObjectRef):
+                        # len()/unpacking of a live object would run its __len__ outside the state machinery.
+                        raise AnalysisRejection("len() of an object is not supported", op.origin)
                     concrete = as_python(obj_fact.value)
                     try:
                         length = admit(len(concrete))  # type: ignore[arg-type]
@@ -1019,6 +1022,10 @@ class Analyzer:
                 # (.base, .strides, .flags, .data) observe the snapshot, not the user's object, so only the
                 # value-determined navigation set folds.
                 raise AnalysisRejection(f"array attribute '{name}' is not supported", origin)
+            if _contains_record(obj.layout):
+                # A bound method of a record-carrying sequence would run Python's protocols over the rebuilt
+                # records; records are consumed by field access only.
+                raise AnalysisRejection(f"attribute '{name}' of a record-carrying sequence is not supported", origin)
             concrete = materialize_static(obj)
             if concrete is None:
                 raise AnalysisRejection(f"attribute '{name}' of a runtime aggregate is not supported yet", origin)
@@ -1092,6 +1099,10 @@ class Analyzer:
                 raise AnalysisRejection(str(error), origin) from None
             admitted = admit(concrete)
             if admitted is None and callable(concrete):
+                if name.startswith("__"):
+                    # A dunder bound off a value (t.__repr__) is the reconstruction-observation spelling of the
+                    # protocol the concrete-call whitelist refuses.
+                    raise AnalysisRejection(f"dunder attribute '{name}' access on a value is not supported", origin)
                 if isinstance(obj.value, StaticRecord):
                     raise AnalysisRejection(f"method '{name}' on a record value is not supported yet", origin)
                 value_key = (obj.value, name)
@@ -1307,73 +1318,48 @@ class Analyzer:
                     block.ops[index] = PyAttr(call.dst, call.args[0], attr_fact.value.value, call.origin)
                     return True
                 raise AnalysisRejection("getattr requires a static attribute name and no default", call.origin)
-            if target is setattr or target is delattr or target is hasattr:
+            # Concrete evaluation is a CLOSED WHITELIST, not a blacklist of hazards: six review rounds showed
+            # that every hazard (live-object reads outside the state machinery, folds on type-unfaithful
+            # reconstructions, snapshot layout observation, enum erasure) keeps resurfacing under new spellings
+            # (functools.partial, vars, bound dunders, unbound descriptors, wrapper objects). Only callables
+            # vetted for value-determined evaluation are admitted; everything else is a located rejection.
+            if resolve(target) is None and not _vetted_concrete_target(target):
                 name = getattr(target, "__name__", repr(target))
-                raise AnalysisRejection(f"{name}() is not supported in kernels", call.origin)
+                if _is_unimplemented_library(target):
+                    raise LibraryAnalysisRejection(f"library function {name!r} is not implemented yet", call.origin)
+                raise AnalysisRejection(f"call to {name!r} is not supported in a kernel", call.origin)
             if target is isinstance:
                 # Enum members normalize to their base value at admission (the sanctioned erasure), so an
-                # isinstance query against an enum type always answers False on the erased value where Python
-                # sees the member -- a demonstrated wrong-value fold; other class queries stay decidable.
+                # isinstance query against an enum type answers False on the erased value where Python sees the
+                # member. The classinfo must therefore RESOLVE COMPLETELY to enum-free plain types -- an opaque
+                # member (a precomputed tuple or union holding an enum, a typing generic) rejects rather than
+                # folding wrong.
                 classinfo = argument_facts[1] if len(argument_facts) == 2 else None
-                references: list[object] = []
-                if isinstance(classinfo, Known) and isinstance(classinfo.value, ObjectRef):
-                    references = [classinfo.value.obj]
-                elif isinstance(classinfo, AggregateFact):
-                    references = [
-                        leaf.value.obj
-                        for leaf in classinfo.leaves
-                        if isinstance(leaf, Known) and isinstance(leaf.value, ObjectRef)
-                    ]
-                if any(isinstance(ref, type) and issubclass(ref, enum.Enum) for ref in references):
+                kinds = _classinfo_types(classinfo)
+                if kinds is None or any(issubclass(kind, enum.Enum) for kind in kinds):
                     raise AnalysisRejection(
-                        "isinstance against an enum type is not decidable (enum members normalize to their "
-                        "base value)",
+                        "isinstance requires a static, enum-free class or tuple of classes (enum members "
+                        "normalize to their base value)",
                         call.origin,
                     )
-            if isinstance(target, (types.MethodDescriptorType, types.WrapperDescriptorType)):
-                # The unbound spelling (np.ndarray.flatten(a, ...)) reaches the same internals the attribute
-                # transfer guards; the bound spelling goes through those guards instead.
-                descriptor = getattr(target, "__qualname__", repr(target))
-                raise AnalysisRejection(
-                    f"an unbound method descriptor ('{descriptor}') is not supported; call the method on the value",
-                    call.origin,
-                )
-            import numpy as np
-
-            if (
-                getattr(target, "__module__", None) == "numpy"
-                and resolve(target) is None
-                and not any(target is vetted for vetted in (np.array, np.asarray, np.asanyarray))
-                and any(
-                    isinstance(fact, AggregateFact) and _contains_array(fact.layout)
-                    for fact in [*argument_facts, *(f for _, f in keyword_facts)]
-                )
-            ):
-                # A numpy callable outside the library registry (np.ravel and friends) would run on the admitted
-                # C-contiguous snapshot, where layout-observing arguments (order="K") see the wrong thing. The
-                # registry members were vetted for exactly this, scalar-only calls never touch a snapshot, and
-                # the array constructors only build fresh values.
-                name = getattr(target, "__name__", repr(target))
-                raise AnalysisRejection(
-                    f"numpy function '{name}' cannot run on an admitted array snapshot", call.origin
-                )
-            import operator as operator_module
-
-            if isinstance(
-                target, (operator_module.attrgetter, operator_module.itemgetter, operator_module.methodcaller)
-            ):
-                # These reach the same snapshot internals the getattr/subscript transfers guard, through an
-                # opaque callable the guards cannot see into.
-                raise AnalysisRejection(f"{type(target).__name__} objects are not supported in kernels", call.origin)
-            # A record must never cross into a concrete evaluation, nested inside a tuple/list argument included:
-            # the callable (or even the dataclass-generated __repr__) would run on a reconstruction that is
-            # value-faithful but not type-faithful (an enum field rebuilds as its base value), which demonstrably
-            # flips float(record), str((record,)), operator.index(record), and friends.
-            for fact in [*argument_facts, *(fact for _, fact in keyword_facts)]:
+            # Argument admission: a record never crosses into a concrete evaluation (nested inside a tuple/list
+            # included) -- the callable, or even the dataclass-generated __repr__, would run on a reconstruction
+            # that is value-faithful but not type-faithful (an enum field rebuilds as its base value). An object
+            # reference never crosses either, except as isinstance's classinfo: a stateful component's dunder
+            # would read the live reset-time object while the kernel's writes exist only as state facts
+            # (float(self) stepped [1.0, 1.0] where Python steps [3.0, 5.0]). A referenced TYPE is inert.
+            positional_count = len(argument_facts)
+            for position, fact in enumerate([*argument_facts, *(fact for _, fact in keyword_facts)]):
                 if isinstance(fact, AggregateFact) and _contains_record(fact.layout):
                     raise AnalysisRejection(
                         "a record cannot cross into a concrete call; access its fields directly", call.origin
                     )
+                if isinstance(fact, Known) and isinstance(fact.value, ObjectRef):
+                    if isinstance(fact.value.obj, type):
+                        continue
+                    if target is isinstance and position == 1 and position < positional_count:
+                        continue
+                    raise AnalysisRejection("an object reference cannot cross into a concrete call", call.origin)
             concrete_args = [_concrete_fact(fact) for fact in argument_facts]
             concrete_kwargs = [(keyword, _concrete_fact(fact)) for keyword, fact in keyword_facts]
             if any(value is None for value in concrete_args) or any(v is None for _, v in concrete_kwargs):
@@ -1695,16 +1681,73 @@ def _has_truth_override(klass: type) -> bool:
     return any(name in c.__dict__ for name in ("__bool__", "__len__") for c in klass.__mro__ if c is not object)
 
 
-def _contains_array(layout: "ValueLayout") -> bool:
-    match layout:
-        case ArrayLayout():
-            return True
-        case TupleLayout(items=items) | ListLayout(items=items) | StructuralLayout(items=items):
-            return any(_contains_array(item) for item in items)
-        case RecordLayout(fields=fields):
-            return any(_contains_array(item) for _, item in fields)
+def _vetted_concrete_target(target: object) -> bool:
+    """
+    The closed set of callables admitted for concrete evaluation beyond the library registry: value casts and
+    constructors whose results depend only on argument VALUES, never on object identity, memory layout, or
+    provenance a reconstruction erases. A bound method of a plain value (a str, range, tuple, or list receiver;
+    the bind site refuses dunder names and record-carrying receivers) evaluates on the domain's own
+    reconstruction, which is value-faithful for those types.
+    """
+    import operator as operator_module
+
+    import numpy as np
+
+    vetted = (
+        float,
+        int,
+        bool,
+        len,
+        range,
+        slice,
+        sum,
+        divmod,
+        isinstance,
+        operator_module.index,
+        np.array,
+        np.asarray,
+        np.asanyarray,
+        np.bool_,
+        np.int64,
+        np.float64,
+    )
+    if any(target is entry for entry in vetted):
+        return True
+    if isinstance(target, type) and is_dataclass(target):
+        return True  # record construction: real construction, never a reconstruction
+    receiver = getattr(target, "__self__", None)
+    return type(receiver) in (str, range, tuple, list)
+
+
+def _classinfo_types(fact: "Fact | None") -> list[type] | None:
+    """
+    The plain types an isinstance classinfo resolves to, or None when any member is opaque (a non-type, a typing
+    generic, an unresolvable reference). Tuples and unions unpack recursively, so a precomputed ``(float, Mode)``
+    or ``str | Mode`` is inspected member by member instead of slipping past as one reference.
+    """
+    pending: list[object] = []
+    match fact:
+        case Known(value=ObjectRef(obj=obj)):
+            pending = [obj]
+        case AggregateFact(leaves=leaves):
+            for leaf in leaves:
+                if not (isinstance(leaf, Known) and isinstance(leaf.value, ObjectRef)):
+                    return None
+                pending.append(leaf.value.obj)
         case _:
-            return False
+            return None
+    resolved: list[type] = []
+    while pending:
+        entry = pending.pop()
+        if isinstance(entry, tuple):
+            pending.extend(entry)
+        elif isinstance(entry, types.UnionType):
+            pending.extend(entry.__args__)
+        elif isinstance(entry, type):
+            resolved.append(entry)
+        else:
+            return None
+    return resolved
 
 
 def _contains_record(layout: "ValueLayout") -> bool:
