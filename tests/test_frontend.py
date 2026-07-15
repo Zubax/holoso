@@ -5508,3 +5508,69 @@ def test_oversized_ranges_reject_in_every_position() -> None:
         lower(receiver)
     with pytest.raises(UnsupportedConstruct, match="oversized range"):
         lower(nested)
+
+
+# ------------------------------ architecture migration phase 0 ------------------------------
+
+
+def test_live_object_protocols_never_run_at_compile_time() -> None:
+    # Architecture-review probes (honest code): a component's ordinary __getitem__/__iter__ reached host
+    # protocols through the subscript and iteration transfers, reading reset-time state where the kernel's
+    # writes exist only as state facts; an inherited __setattr__ ran during generated dataclass construction on
+    # an erasure-reconstructed argument; an oversized integer argument to a minted value method allocated
+    # gigabytes at compile time. All are located rejections now.
+    import enum
+
+    class GetItem:
+        def __init__(self) -> None:
+            self.g = 1.0
+
+        def __getitem__(self, i: int) -> float:
+            return self.g
+
+        def step(self, x: float) -> float:
+            self.g = self.g + x
+            return self[0]
+
+    class Iter:
+        def __init__(self) -> None:
+            self.g = 1.0
+
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            return iter((self.g,))
+
+        def step(self, x: float) -> float:
+            self.g = self.g + x
+            acc = 0.0
+            for v in self:
+                acc = acc + v
+            return acc
+
+    class Mode(enum.IntEnum):
+        A = 1
+
+    class SetattrBase:
+        def __setattr__(self, name: str, value: object) -> None:
+            scaled = float(int(value)) * 20.0 if isinstance(value, Mode) else value
+            object.__setattr__(self, name, scaled)
+
+    @dataclasses.dataclass
+    class Hooked(SetattrBase):
+        mode: object
+
+    mode = Mode.A
+
+    def inherited_setattr(x: float) -> float:
+        return x * float(Hooked(mode).mode)  # type: ignore[arg-type]
+
+    def oversized_method_argument(x: float) -> float:
+        return x + float(len("x".ljust(10**12)))
+
+    for kernel, match in (
+        (GetItem().step, "subscript of an object"),
+        (Iter().step, "iteration over an object"),
+        (inherited_setattr, "is not supported in a kernel"),
+        (oversized_method_argument, "oversized integer argument"),
+    ):
+        with pytest.raises(UnsupportedConstruct, match=match):
+            lower(kernel)

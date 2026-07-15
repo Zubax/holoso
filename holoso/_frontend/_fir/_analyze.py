@@ -990,6 +990,9 @@ class Analyzer:
             if not -arity <= position < arity:
                 raise AnalysisRejection("sequence index out of range", origin)
             return obj.child(position + arity if position < 0 else position)
+        if isinstance(obj, Known) and isinstance(obj.value, ObjectRef):
+            # A live object's __getitem__ would read reset-time attribute state outside the state machinery.
+            raise AnalysisRejection("subscript of an object is not supported", origin)
         if isinstance(obj, Known) and isinstance(index, Known):
             return self._concrete_subscript(obj.value, index, origin)
         raise AnalysisRejection("subscript of a runtime value is not supported yet", origin)
@@ -1157,6 +1160,9 @@ class Analyzer:
 
     def _unroll(self, unit: FunctionUnit, header: Block, loop: StaticFor, env: _Env) -> BlockId:
         iterable = env.get(Local(loop.iterable))
+        if isinstance(iterable, Known) and isinstance(iterable.value, ObjectRef):
+            # A live object's __iter__/__len__ would run against reset-time state, twice (analysis + replay).
+            raise AnalysisRejection("iteration over an object is not supported", loop.origin)
         if isinstance(iterable, AggregateFact):
             if isinstance(iterable.layout, RecordLayout):
                 # Materializing would drive Python's iteration protocol (a user __len__/__getitem__/__iter__) on
@@ -1335,6 +1341,19 @@ class Analyzer:
             # (functools.partial, vars, bound dunders, unbound descriptors, wrapper objects). Only callables
             # vetted for value-determined evaluation are admitted; everything else is a located rejection.
             minted = any(target is method for method in self._value_methods.values())
+            if minted:
+                # A minted value method runs on the domain's reconstruction, but its ARGUMENTS size its work
+                # and its result: "x".ljust(10**12) or int.to_bytes(10**12) would allocate gigabytes at compile
+                # time. The same 2^20 bound that guards static ranges applies to its integer arguments.
+                for fact in [*argument_facts, *(fact for _, fact in keyword_facts)]:
+                    if (
+                        isinstance(fact, Known)
+                        and isinstance(fact.value, (MetaInt, NpInt))
+                        and abs(fact.value.value) > (1 << 20)
+                    ):
+                        raise AnalysisRejection(
+                            "an oversized integer argument to a value method is not supported", call.origin
+                        )
             if resolve(target) is None and not minted and not _vetted_concrete_target(target):
                 name = getattr(target, "__name__", repr(target))
                 if _is_unimplemented_library(target):
@@ -1790,6 +1809,12 @@ def _vetted_concrete_target(target: object) -> bool:
         generated_init = isinstance(init, types.FunctionType) and init.__code__.co_filename == "<string>"
         hooked = any(
             name in c.__dict__ for name in ("__post_init__", "__new__") for c in target.__mro__ if c is not object
+        ) or any(
+            isinstance(member, types.FunctionType) and member.__code__.co_filename != "<string>"
+            for c in target.__mro__
+            if c is not object
+            for name in ("__setattr__", "__delattr__")
+            if (member := c.__dict__.get(name)) is not None
         )
         factories = any(
             field.default_factory is not dataclasses_module.MISSING for field in dataclasses_module.fields(target)
