@@ -5154,7 +5154,7 @@ def test_isinstance_against_an_enum_type_is_a_located_rejection() -> None:
         return x if isinstance(mode, (float, Mode)) else -x
 
     for kernel in (direct, tuple_classinfo):
-        with pytest.raises(UnsupportedConstruct, match="isinstance requires a static, enum-free class"):
+        with pytest.raises(UnsupportedConstruct, match="not decidable|enum-free class"):
             lower(kernel)
 
     def plain_class(x: float) -> float:
@@ -5266,7 +5266,7 @@ def test_isinstance_classinfo_must_resolve_completely() -> None:
         return x if isinstance(mode, union_classinfo) else -x
 
     for kernel in (opaque_tuple, opaque_union):
-        with pytest.raises(UnsupportedConstruct, match="isinstance requires a static, enum-free class"):
+        with pytest.raises(UnsupportedConstruct, match="not decidable|enum-free class"):
             lower(kernel)
 
     plain_union = float | int
@@ -5305,3 +5305,124 @@ def test_bound_dunders_of_values_are_a_located_rejection() -> None:
         lower(bound_repr)
     with pytest.raises(UnsupportedConstruct, match="dunder attribute"):
         lower(plain_dunder)
+
+
+# ---------------------------------------- spine review round 12 ----------------------------------------
+
+
+def test_whitelist_members_are_value_determined() -> None:
+    # Review round 12: several whitelist members were not value-determined for some argument shape -- a dataclass
+    # __post_init__ observing erased enum provenance, str.format's !r conversion, tuple.count's identity shortcut
+    # (a NaN element matches itself in Python, never after a rebuild), and a PRE-BOUND builtin whose live mutable
+    # receiver was emptied at compile time. Construction now requires the generated __init__ with no
+    # __post_init__; sequence methods and str.format reject; only bind-site-minted value methods are admitted.
+    import enum
+
+    class Mode(enum.IntEnum):
+        A = 1
+
+    @dataclasses.dataclass
+    class Gain:
+        mode: Mode
+        scale: float = 0.0
+
+        def __post_init__(self) -> None:
+            self.scale = 10.0 if isinstance(self.mode, Mode) else 20.0
+
+    mode = Mode.A
+
+    def post_init_construction(x: float) -> float:
+        return x * Gain(mode).scale
+
+    expected = repr(Mode.A)
+
+    def str_format(x: float) -> float:
+        return x if "{!r}".format(mode) == expected else -x
+
+    nan = np.float64(np.nan)
+    nan_tuple = (nan, 1.0)
+
+    def tuple_count(x: float) -> float:
+        return x if nan_tuple.count(nan) == 1 else -x
+
+    live = [9.0, 7.0]
+    captured_pop = live.pop
+
+    def prebound_pop(x: float) -> float:
+        return x + captured_pop()
+
+    for kernel, match in (
+        (post_init_construction, "is not supported in a kernel"),
+        (str_format, "str.format is not supported"),
+        (tuple_count, "sequence method 'count'"),
+        (prebound_pop, "is not supported in a kernel"),
+    ):
+        with pytest.raises(UnsupportedConstruct, match=match):
+            lower(kernel)
+    assert live == [9.0, 7.0]  # compilation must never mutate the user's live objects
+
+    @dataclasses.dataclass(frozen=True)
+    class Plain:
+        v: float
+
+    def generated_init_construction(x: float) -> float:
+        p = Plain(2.0)
+        return x * p.v
+
+    model = holoso.synthesize(generated_init_construction, default_ops(FloatFormat(11, 52)), name="p").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 6.0
+
+
+def test_isinstance_subjects_with_erasure_capable_provenance_reject() -> None:
+    # Review round 12: an enum MIXIN base (plain class + IntEnum) and an ABC register() both distinguish the live
+    # member from its erased base value even under enum-free classinfo; the SUBJECT must therefore carry no
+    # erasure-capable provenance (a static int/str may be a normalized member) and the classinfo's instance check
+    # must be type's own.
+    import abc
+    import enum
+
+    class Marker:
+        pass
+
+    class Mode(Marker, enum.IntEnum):
+        A = 1
+
+    class AbcMarker(abc.ABC):
+        pass
+
+    AbcMarker.register(Mode)
+    mixed = Mode.A
+
+    def mixin(x: float) -> float:
+        return x if isinstance(mixed, Marker) else -x
+
+    def registered(x: float) -> float:
+        return x if isinstance(mixed, AbcMarker) else -x
+
+    for kernel in (mixin, registered):
+        with pytest.raises(UnsupportedConstruct, match="not decidable"):
+            lower(kernel)
+
+
+def test_object_references_reject_at_any_nesting_depth() -> None:
+    # Review round 12 MISCOMPILE: sum((self,), 0.0) handed the callable the live reset-time component through the
+    # rebuilt tuple (stepping [1.0, 1.0] where Python steps [3.0, 5.0]); object-reference leaves now reject
+    # inside aggregate arguments, and an oversized static range rejects instead of burning unbounded compile time.
+    class RAdd:
+        def __init__(self) -> None:
+            self.g = 1.0
+
+        def __radd__(self, other: float) -> float:
+            return other + self.g
+
+        def step(self, x: float) -> float:
+            self.g = self.g + x
+            return sum((self,), 0.0)  # type: ignore[type-var,return-value]
+
+    def oversized_range(x: float) -> float:
+        return x + float(sum(range(10**12)))
+
+    with pytest.raises(UnsupportedConstruct, match="object reference cannot cross"):
+        lower(RAdd().step)
+    with pytest.raises(UnsupportedConstruct, match="oversized range"):
+        lower(oversized_range)

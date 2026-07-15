@@ -678,10 +678,10 @@ SPECS = [
 FIR_PARITY_PENDING: dict[str, str] = {
     "polar_to": "stage 9: np.array construction",
     "polar_from": "stage 9: np.array construction",
-    "ekf1_stateful": "builder: argument unpacking f(*args)",
+    "ekf1_stateful": "builder: argument unpacking f(*args); list(...) conversion (concrete-call whitelist)",
     # Off-catalogue examples (no SPECS entry) whose synth targets and eventual suites key off these names too.
     "imu_frame_transform": "stage 9: jaxtyping ndarray ports + matmul over array parameters",
-    "finite_set_current_controller": "stage 9: records, reductions, array comparison, Index[N] gather",
+    "finite_set_current_controller": "stage 9: records, reductions, array comparison, Index[N] gather; tuple(...) conversion (concrete-call whitelist)",
 }
 
 

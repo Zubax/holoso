@@ -98,6 +98,7 @@ from ._value import (
     SemType,
     StaticBool,
     StaticFloat,
+    StaticRange,
     StaticSeq,
     StaticStr,
     StaticValue,
@@ -1105,6 +1106,13 @@ class Analyzer:
                     raise AnalysisRejection(f"dunder attribute '{name}' access on a value is not supported", origin)
                 if isinstance(obj.value, StaticRecord):
                     raise AnalysisRejection(f"method '{name}' on a record value is not supported yet", origin)
+                if isinstance(obj.value, StaticSeq):
+                    # tuple.count/.index are identity-and-equality games the reconstruction cannot vouch for
+                    # (a NaN element matches by identity in Python, never after a rebuild).
+                    raise AnalysisRejection(f"sequence method '{name}' is not supported", origin)
+                if isinstance(obj.value, StaticStr) and name in ("format", "format_map"):
+                    # format's conversions (!r) observe the repr of erasure-reconstructed arguments.
+                    raise AnalysisRejection(f"str.{name} is not supported in a kernel", origin)
                 value_key = (obj.value, name)
                 if value_key not in self._value_methods:
                     self._value_methods[value_key] = concrete
@@ -1323,23 +1331,36 @@ class Analyzer:
             # reconstructions, snapshot layout observation, enum erasure) keeps resurfacing under new spellings
             # (functools.partial, vars, bound dunders, unbound descriptors, wrapper objects). Only callables
             # vetted for value-determined evaluation are admitted; everything else is a located rejection.
-            if resolve(target) is None and not _vetted_concrete_target(target):
+            minted = any(target is method for method in self._value_methods.values())
+            if resolve(target) is None and not minted and not _vetted_concrete_target(target):
                 name = getattr(target, "__name__", repr(target))
                 if _is_unimplemented_library(target):
                     raise LibraryAnalysisRejection(f"library function {name!r} is not implemented yet", call.origin)
                 raise AnalysisRejection(f"call to {name!r} is not supported in a kernel", call.origin)
             if target is isinstance:
                 # Enum members normalize to their base value at admission (the sanctioned erasure), so an
-                # isinstance query against an enum type answers False on the erased value where Python sees the
-                # member. The classinfo must therefore RESOLVE COMPLETELY to enum-free plain types -- an opaque
-                # member (a precomputed tuple or union holding an enum, a typing generic) rejects rather than
-                # folding wrong.
+                # isinstance query answers wrong whenever erasure can matter: the SUBJECT must not carry an
+                # erasure-capable provenance (a Known Python int or str may be a normalized IntEnum/StrEnum
+                # member -- indistinguishable after admission, and a plain mixin base of an enum makes even an
+                # enum-free classinfo lie), and the classinfo must RESOLVE COMPLETELY to enum-free plain types
+                # whose instance check is type's own (an ABC's register()/__instancecheck__ distinguishes the
+                # live member from its erased value).
+                subject = argument_facts[0] if argument_facts else None
+                if isinstance(subject, Known) and isinstance(subject.value, (MetaInt, StaticStr)):
+                    raise AnalysisRejection(
+                        "isinstance of a static int/str is not decidable (it may be a normalized enum member)",
+                        call.origin,
+                    )
                 classinfo = argument_facts[1] if len(argument_facts) == 2 else None
                 kinds = _classinfo_types(classinfo)
-                if kinds is None or any(issubclass(kind, enum.Enum) for kind in kinds):
+                if (
+                    kinds is None
+                    or any(issubclass(kind, enum.Enum) for kind in kinds)
+                    or any(type(kind).__instancecheck__ is not type.__instancecheck__ for kind in kinds)
+                ):
                     raise AnalysisRejection(
-                        "isinstance requires a static, enum-free class or tuple of classes (enum members "
-                        "normalize to their base value)",
+                        "isinstance requires a static, enum-free class or tuple of classes with the plain "
+                        "instance check (enum members normalize to their base value)",
                         call.origin,
                     )
             # Argument admission: a record never crosses into a concrete evaluation (nested inside a tuple/list
@@ -1354,11 +1375,24 @@ class Analyzer:
                     raise AnalysisRejection(
                         "a record cannot cross into a concrete call; access its fields directly", call.origin
                     )
+                if isinstance(fact, AggregateFact) and any(
+                    isinstance(leaf, Known) and isinstance(leaf.value, ObjectRef) for leaf in fact.leaves
+                ):
+                    # sum((self,)) would hand the callable the live object through the rebuilt container.
+                    raise AnalysisRejection("an object reference cannot cross into a concrete call", call.origin)
+                if (
+                    isinstance(fact, Known)
+                    and isinstance(fact.value, StaticRange)
+                    and _range_size(fact.value) > (1 << 20)
+                ):
+                    raise AnalysisRejection("a static fold over an oversized range is not supported", call.origin)
                 if isinstance(fact, Known) and isinstance(fact.value, ObjectRef):
-                    if isinstance(fact.value.obj, type):
-                        continue
                     if target is isinstance and position == 1 and position < positional_count:
                         continue
+                    referent = fact.value.obj
+                    inert = any(referent is kind for kind in _inert_type_referents())
+                    if isinstance(referent, type) and inert:
+                        continue  # a dtype-ish builtin type carries no live state
                     raise AnalysisRejection("an object reference cannot cross into a concrete call", call.origin)
             concrete_args = [_concrete_fact(fact) for fact in argument_facts]
             concrete_kwargs = [(keyword, _concrete_fact(fact)) for keyword, fact in keyword_facts]
@@ -1681,13 +1715,27 @@ def _has_truth_override(klass: type) -> bool:
     return any(name in c.__dict__ for name in ("__bool__", "__len__") for c in klass.__mro__ if c is not object)
 
 
+def _range_size(value: StaticRange) -> int:
+    try:
+        return len(range(value.start, value.stop, value.step))
+    except OverflowError:  # astronomically large: oversized by definition
+        return 1 << 62
+
+
+def _inert_type_referents() -> tuple[type, ...]:
+    import numpy as np
+
+    return (float, int, bool, np.float64, np.int64, np.bool_)
+
+
 def _vetted_concrete_target(target: object) -> bool:
     """
     The closed set of callables admitted for concrete evaluation beyond the library registry: value casts and
     constructors whose results depend only on argument VALUES, never on object identity, memory layout, or
-    provenance a reconstruction erases. A bound method of a plain value (a str, range, tuple, or list receiver;
-    the bind site refuses dunder names and record-carrying receivers) evaluates on the domain's own
-    reconstruction, which is value-faithful for those types.
+    provenance a reconstruction erases. Bound methods are NOT vetted here: a pre-bound builtin captured from the
+    user's namespace carries a LIVE receiver (a captured list.pop emptied the user's list at compile time), so
+    only the analyzer's own value-method bind site -- which mints methods off the domain's reconstruction under
+    its own guards -- may admit one, by identity.
     """
     import operator as operator_module
 
@@ -1714,9 +1762,14 @@ def _vetted_concrete_target(target: object) -> bool:
     if any(target is entry for entry in vetted):
         return True
     if isinstance(target, type) and is_dataclass(target):
-        return True  # record construction: real construction, never a reconstruction
-    receiver = getattr(target, "__self__", None)
-    return type(receiver) in (str, range, tuple, list)
+        # Record construction is real construction -- but only through the GENERATED __init__ (a plain field
+        # assignment, compiled from synthesized source). A user __init__ or __post_init__ is arbitrary code that
+        # would run on erasure-reconstructed arguments (an IntEnum field arrives as its base int).
+        init = _mro_attribute_of(target, "__init__")
+        generated_init = isinstance(init, types.FunctionType) and init.__code__.co_filename == "<string>"
+        has_post_init = any("__post_init__" in c.__dict__ for c in target.__mro__ if c is not object)
+        return generated_init and not has_post_init
+    return False
 
 
 def _classinfo_types(fact: "Fact | None") -> list[type] | None:

@@ -788,12 +788,14 @@ def test_bound_method_keywords_bind_without_positional_only_underflow() -> None:
 
 
 def test_value_method_identities_join_across_arms() -> None:
+    # str.count keeps the value-method machinery exercised now that sequence .count/.index reject (their
+    # identity-and-equality semantics are not reconstruction-safe); substring counting is value-determined.
     def kernel(x: float) -> float:
-        table = (1.0, 1.0, 2.0)
+        table = "aab"
         if x > 0.0:
-            n = table.count(1.0)  # 2
+            n = table.count("a")  # 2
         else:
-            n = table.count(2.0)  # 1
+            n = table.count("b")  # 1
         return n * 1.0  # the join must reconcile the two method fetches, not reject them
 
     result = Analyzer(kernel).fixpoint()

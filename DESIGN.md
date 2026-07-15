@@ -184,15 +184,21 @@ Aggregate truth follows Python: tuples/lists fold by arity, arrays (and any join
 as ambiguous, and a record without a truth override is truthy per object semantics. Concrete evaluation is a
 CLOSED WHITELIST, not a blacklist of hazards: beyond the library registry, only vetted value-determined callables
 are admitted (the float/int/bool/len/range/slice/sum/divmod casts and constructors, operator.index, the
-np.array/asarray/asanyarray constructors and numpy scalar types, isinstance over completely-resolved enum-free
-classinfo, dataclass construction, and bound methods of plain str/range/tuple/list values with non-dunder names
-and record-free receivers); every other callable -- functools.partial wrappers, vars, repr, type, unbound
-descriptors, attrgetter-style objects, unregistered numpy functions -- is a located rejection by construction.
-Argument admission is equally closed: a record never crosses into a concrete call (nested inside a tuple/list
-included; the reconstruction is value-faithful but not type-faithful, which even the dataclass-generated __repr__
-observes on an enum field), and an object reference never crosses either except as isinstance classinfo or a
-referenced type (a stateful component's dunder would read the live reset-time object while the kernel's writes
-exist only as state facts). Records also reject at their truth when a __bool__/__len__ entry exists
+np.array/asarray/asanyarray constructors and numpy scalar types, isinstance whose SUBJECT carries no
+erasure-capable provenance -- a static int/str may be a normalized enum member -- over completely-resolved
+enum-free classinfo with the plain type instance check, dataclass construction through the GENERATED __init__
+only (a user __init__ or __post_init__ would run on erasure-reconstructed arguments), and value methods minted by
+the analyzer's own bind site off the domain's reconstruction -- immutable str/range receivers with non-dunder,
+non-format names; sequence .count/.index are identity-and-equality games a rebuild cannot vouch for, and a
+PRE-BOUND builtin captured from the user's namespace carries a live mutable receiver and never folds); every
+other callable -- functools.partial wrappers, vars, repr, type, unbound descriptors, attrgetter-style objects,
+unregistered numpy functions -- is a located rejection by construction. Argument admission is equally closed: a
+record never crosses into a concrete call (nested inside a tuple/list included; the reconstruction is
+value-faithful but not type-faithful, which even the dataclass-generated __repr__ observes on an enum field), an
+object reference never crosses at any nesting depth except as isinstance classinfo or one of the inert dtype-ish
+builtin types (a stateful component's dunder would read the live reset-time object while the kernel's writes
+exist only as state facts), and a static fold over an oversized range rejects rather than burning unbounded
+compile time. Records also reject at their truth when a __bool__/__len__ entry exists
 (``__bool__ = None`` included), at subscript keys, at non-field attributes, and at iteration; field access is the
 one record consumption. getattr rewrites into the attribute op itself (state reads, residual record fields, and
 the array whitelist behave exactly as the dotted spelling; the default-argument form rejects). Scalar numpy
