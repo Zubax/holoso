@@ -18,8 +18,18 @@ import enum
 import types
 from dataclasses import MISSING, fields, is_dataclass
 
-from ._fact import AggregateFact, Fact, Known, RecordLayout, ListLayout, StructuralLayout, TupleLayout, ValueLayout
-from ._value import MetaInt, NpInt, ObjectRef, StaticRange, StaticStr
+from ._fact import (
+    AggregateFact,
+    Fact,
+    Known,
+    ListLayout,
+    RecordLayout,
+    Reference,
+    StructuralLayout,
+    TupleLayout,
+    ValueLayout,
+)
+from ._value import MetaInt, NpInt, StaticRange, StaticStr
 
 
 class FoldRefusal(Exception):
@@ -62,7 +72,7 @@ def _inert_type_referents() -> tuple[type, ...]:
     return (float, int, bool, np.float64, np.int64, np.bool_)
 
 
-def _classinfo_types(fact: "Fact | None") -> list[type] | None:
+def classinfo_types(fact: "Fact | None") -> list[type] | None:
     """
     The plain types an isinstance classinfo resolves to, or None when any member is opaque (a non-type, a typing
     generic, an unresolvable reference). Tuples and unions unpack recursively, so a precomputed ``(float, Mode)``
@@ -70,13 +80,13 @@ def _classinfo_types(fact: "Fact | None") -> list[type] | None:
     """
     pending: list[object] = []
     match fact:
-        case Known(value=ObjectRef(obj=obj)):
+        case Reference(obj=obj):
             pending = [obj]
         case AggregateFact(leaves=leaves):
             for leaf in leaves:
-                if not (isinstance(leaf, Known) and isinstance(leaf.value, ObjectRef)):
+                if not isinstance(leaf, Reference):
                     return None
-                pending.append(leaf.value.obj)
+                pending.append(leaf.obj)
         case _:
             return None
     resolved: list[type] = []
@@ -187,7 +197,7 @@ def admit_call(
         if isinstance(subject, Known) and isinstance(subject.value, (MetaInt, StaticStr)):
             raise FoldRefusal("isinstance of a static int/str is not decidable (it may be a normalized enum member)")
         classinfo = positional[1] if len(positional) == 2 else None
-        kinds = _classinfo_types(classinfo)
+        kinds = classinfo_types(classinfo)
         if (
             kinds is None
             or any(issubclass(kind, enum.Enum) for kind in kinds)
@@ -211,7 +221,7 @@ def admit_call(
         if (
             isinstance(fact, AggregateFact)
             and not classinfo_position
-            and any(isinstance(leaf, Known) and isinstance(leaf.value, ObjectRef) for leaf in fact.leaves)
+            and any(isinstance(leaf, Reference) for leaf in fact.leaves)
         ):
             # sum((self,)) would hand the callable the live object through the rebuilt container; the inline
             # classinfo tuple of isinstance is the one sanctioned carrier (resolved member by member).
@@ -227,10 +237,10 @@ def admit_call(
         )
         if oversized:
             raise FoldRefusal("a static fold over an oversized range is not supported")
-        if isinstance(fact, Known) and isinstance(fact.value, ObjectRef):
+        if isinstance(fact, Reference):
             if classinfo_position:
                 continue
-            referent = fact.value.obj
+            referent = fact.obj
             if isinstance(referent, type) and any(referent is kind for kind in _inert_type_referents()):
                 continue  # a dtype-ish builtin type carries no live state
             raise FoldRefusal("an object reference cannot cross into a concrete call")

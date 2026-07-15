@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from ..._util import RelationalOp
 from ._opsem import BinOp, UnOp
 from ._signature import ParameterContract, ReturnContract
-from ._value import ObjectRef, StaticValue
+from ._value import StaticValue
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +59,7 @@ class Local:
 class StateLeaf:
     """
     A persistent state scalar: the owning component by identity plus the attribute path down to the leaf.
-    Equality and hash key on the owner's IDENTITY (the ObjectRef doctrine): the generated value-based forms would
+    Equality and hash key on the owner's IDENTITY (the Reference doctrine): the generated value-based forms would
     conflate equal-valued distinct components and refuse unhashable owners in place-keyed maps.
     """
 
@@ -101,6 +101,18 @@ class SelectMode(enum.Enum):
 class LoadConst:
     dst: BindingId
     value: StaticValue
+    origin: OriginStack
+
+
+@dataclass(slots=True, eq=False)
+class LoadRef:
+    """
+    Bind an identity reference to an object outside the value domain (a callable, module, class, component, or
+    None). ``eq=False``: comparing ops would otherwise run the referent's own ``==`` (foreign semantics).
+    """
+
+    dst: BindingId
+    obj: object
     origin: OriginStack
 
 
@@ -250,6 +262,7 @@ class BuildList:
 
 type Op = (
     LoadConst
+    | LoadRef
     | LoadPlace
     | StorePlace
     | UnbindPlace
@@ -350,7 +363,7 @@ class FunctionUnit:
 
 def _op_reads(op: Op) -> list[BindingId]:
     match op:
-        case LoadConst() | LoadPlace():
+        case LoadConst() | LoadRef() | LoadPlace():
             return []
         case StorePlace(src=src):
             return [src]
@@ -427,19 +440,13 @@ def verify(unit: FunctionUnit) -> None:
                 pass
 
 
-def _format_value(value: StaticValue) -> str:
-    match value:
-        case ObjectRef(obj=obj):
-            label = getattr(obj, "__qualname__", None) or getattr(obj, "__name__", None) or type(obj).__name__
-            return f"ObjectRef({label})"  # address-free: reprs of plain objects would break golden determinism
-        case _:
-            return str(value)
-
-
 def _format_op(op: Op) -> str:
     match op:
         case LoadConst(dst=dst, value=value):
-            return f"{dst} = const {_format_value(value)}"
+            return f"{dst} = const {value}"
+        case LoadRef(dst=dst, obj=obj):
+            label = getattr(obj, "__qualname__", None) or getattr(obj, "__name__", None) or type(obj).__name__
+            return f"{dst} = ref {label}"  # address-free: reprs of plain objects would break golden determinism
         case LoadPlace(dst=dst, place=place):
             return f"{dst} = load {place}"
         case StorePlace(place=place, src=src):

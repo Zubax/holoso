@@ -20,19 +20,18 @@ from holoso._frontend._fir._resolve import (
     UnboundCell,
     comprehension_only_targets,
 )
+from holoso._frontend._fir._fact import Reference
 from holoso._frontend._fir._value import (
     MetaInt,
     NpBool,
     NpFloat,
     NpInt,
-    ObjectRef,
     StaticArray,
     StaticBool,
     StaticFloat,
     StaticRecord,
     StaticSeq,
     admit,
-    admit_ref,
     as_python,
     is_nan_free,
     same,
@@ -178,7 +177,7 @@ def test_admit_refuses_the_open_world() -> None:
     assert admit(Arbitrary()) is None
     assert admit(np.array(["a"])) is None  # non-numeric dtype
     assert admit({1: 2}) is None
-    assert admit_ref(math.sin) == ObjectRef(math.sin)
+    assert admit(math.sin) is None  # a callable is never a value; it references through the fact sort
 
 
 def test_admitted_array_is_frozen_but_the_source_stays_writable() -> None:
@@ -230,7 +229,6 @@ def test_static_unop_and_truth() -> None:
     assert static_truth(StaticFloat(0.0)) is False
     assert static_truth(MetaInt(-1)) is True
     assert static_truth(StaticSeq((), is_list=False)) is False
-    assert static_truth(ObjectRef(math.sin)) is None
 
 
 def test_nan_scanning_reaches_leaves() -> None:
@@ -527,7 +525,7 @@ def test_resolution_equality_and_hash_key_on_payload_identity() -> None:
     table = np.array([1.0, 2.0])
     assert Global("a", table) == Global("a", table)
     assert isinstance(Global("a", table) == Global("a", table), bool)  # never an elementwise ndarray
-    assert Global("a", table) != Global("a", np.array([1.0, 2.0]))  # identity-keyed, like ObjectRef
+    assert Global("a", table) != Global("a", np.array([1.0, 2.0]))  # identity-keyed, like Reference
     assert Global("a", table) != Builtin("a", table)  # the resolution kind is part of the identity
     assert len({Global("a", table), Global("a", table), Free("a", table)}) == 2  # hash is total
 
@@ -538,13 +536,13 @@ def test_float_pow_edges_defer_or_fold_per_provenance() -> None:
     assert static_binop(BinOp.POW, NpFloat(1e308), MetaInt(2)) == NpFloat(math.inf)  # numpy returns inf and folds
 
 
-def test_object_ref_equality_and_hash_key_on_referent_identity() -> None:
+def test_reference_equality_and_hash_key_on_referent_identity() -> None:
     payload = [1.0, 2.0]
-    assert admit_ref(payload) == ObjectRef(payload)  # same referent: equal
-    assert admit_ref([1.0, 2.0]) != admit_ref([1.0, 2.0])  # equal-valued but distinct referents: not equal
-    array_ref = admit_ref(np.array([1.0, 2.0]))
+    assert Reference(payload) == Reference(payload)  # same referent: equal
+    assert Reference([1.0, 2.0]) != Reference([1.0, 2.0])  # equal-valued but distinct referents: not equal
+    array_ref = Reference(np.array([1.0, 2.0]))
     assert isinstance(array_ref == array_ref, bool)  # never an elementwise ndarray
-    assert len({admit_ref(payload), admit_ref(payload), ObjectRef(payload)}) == 1  # hash is total and identity-keyed
+    assert len({Reference(payload), Reference(payload), Reference(payload)}) == 1  # hash is total and identity-keyed
 
 
 def test_record_admission_never_runs_constructors_when_nested() -> None:

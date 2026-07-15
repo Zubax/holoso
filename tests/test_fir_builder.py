@@ -9,6 +9,7 @@ from holoso._frontend._fir._ir import (
     Fail,
     FunctionUnit,
     LoadConst,
+    LoadRef,
     PySelect,
     PyStoreAttr,
     StaticFor,
@@ -171,7 +172,8 @@ def test_module_constants_resolve_to_admitted_values_at_build_time() -> None:
     consts = [op.value for op in _ops(unit) if isinstance(op, LoadConst)]
     rendered = [str(value) for value in consts]
     assert any("2.5" in text for text in rendered)  # the global's value is snapshot into the IR
-    assert any("float" in text.lower() or "ObjectRef" in text for text in rendered)  # the builtin resolves too
+    referents = [op.obj for op in _ops(unit) if isinstance(op, LoadRef)]
+    assert any(obj is float for obj in referents)  # the builtin resolves too, as a reference
 
 
 def test_missing_name_fails_lazily_not_at_build_time() -> None:
@@ -339,7 +341,7 @@ def test_printer_renders_object_refs_address_free() -> None:
 
     printed = pretty(build_unit(fn))
     assert "0x" not in printed  # a memory address would change per process, breaking cross-process golden tests
-    assert "ObjectRef(_helper)" in printed
+    assert "ref _helper" in printed
 
 
 def test_keyword_only_parameters_are_ordinary_parameters() -> None:

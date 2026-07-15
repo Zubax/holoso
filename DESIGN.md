@@ -173,10 +173,17 @@ rejections. A structural verifier and a deterministic printer close the stage.
 
 The analyzer is SCCP-style optimistic executable-edge abstract interpretation over the FIR with flow-sensitive
 per-edge environments (strong updates, joins only over executable in-edges). Facts: Unbound | Known(StaticValue,
-never structural) | Residual(type) | AggregateFact -- one canonical structural value: a typed recursive layout
-(tuple | list | fixed-shape ndarray with dtype | identity-keyed record | structural, the flavor-erased join of
-unlike positional containers) over one flat, canonically ordered tuple of atomic leaves -- | MaybeUnbound, always
-at the root (a read of one is a located rejection: Python may raise). Aggregate joins reconcile layouts first
+never structural) | Residual(type) | Reference | AggregateFact -- one canonical structural value: a typed
+recursive layout (tuple | list | fixed-shape ndarray with dtype | identity-keyed record | structural, the
+flavor-erased join of unlike positional containers) over one flat, canonically ordered tuple of atomic leaves --
+| MaybeUnbound, always at the root (a read of one is a located rejection: Python may raise). References are a
+separate sort from values, not a value variant: a callable, module, class, stateful component, None, or any other
+object outside the value domain is tracked by referent identity (its own LoadRef op in the IR), is never data,
+never folds, and has no generic escape back into Python -- every place a reference may act (a call target, a
+namespace or component attribute, an isinstance classinfo, an inert dtype-ish type argument) is an explicit arm,
+and everything else refuses by type. isinstance folds through its resolved classinfo types rather than a generic
+evaluation, since a classinfo is references, not data. References join only with themselves and only when the
+referent is identical; a reference is fact-only in emission (never a datapath cell). Aggregate joins reconcile layouts first
 (identical flavors recurse; a tuple arm meeting a list arm of equal arity degrades to the structural flavor set,
 keeping only flavor-independent behavior; ndarray dtypes promote int64 to float64), then join leaves positionally. An int/float join promotes the integer side to float, C-style (see Integers). Folding
 is Python-exact on Knowns; runtime-typed values never fold (width rule); a Known Bool always drives edge selection.

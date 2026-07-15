@@ -132,25 +132,6 @@ class StaticRecord:
     field_values: tuple[tuple[str, "StaticValue"], ...]
 
 
-@dataclass(frozen=True, slots=True, eq=False)
-class ObjectRef:
-    """
-    An identity-keyed reference: a callable, module, class, or stateful component object. Equality and hash are
-    hand-written to key on the REFERENT's identity: the dataclass-generated ones would call the referent's own
-    ``==`` (an ndarray poisons enclosing comparisons) and are partial under hashing (an unhashable referent raises).
-    """
-
-    obj: object
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, ObjectRef):
-            return NotImplemented
-        return self.obj is other.obj
-
-    def __hash__(self) -> int:
-        return hash(id(self.obj))
-
-
 type StaticValue = (
     StaticBool
     | NpBool
@@ -163,7 +144,6 @@ type StaticValue = (
     | StaticArray
     | StaticSeq
     | StaticRecord
-    | ObjectRef
 )
 
 
@@ -180,8 +160,8 @@ def admit(obj: object) -> StaticValue | None:
     at the default 64-bit widths (a narrower dtype wraps at its own width, which the domain does not model); numpy
     unsigned values beyond int64 admit not at all. Containers admit only if every element does, cycles and
     beyond-depth nesting are refused rather than overflowed, and a dataclass admits only when reconstructible from
-    its fields alone. Callables, modules, and classes become identity references only via :func:`admit_ref` -- a
-    plain :func:`admit` refuses them so an arbitrary object cannot slip into arithmetic. Aliasing is flattened to
+    its fields alone. Callables, modules, and classes are refused -- references are a separate fact sort, never a
+    value -- so an arbitrary object cannot slip into arithmetic. Aliasing is flattened to
     values -- the kernel subset treats aggregates as immutable, so sharing is unobservable -- but shared nodes are
     admitted once (a DAG costs linear time, not exponential).
     """
@@ -295,15 +275,6 @@ def _rebuild_record(
     return instance
 
 
-def admit_ref(obj: object) -> ObjectRef:
-    """
-    A total identity reference: any object outside the value domain (a callable, module, class, stateful component,
-    or anything else) is tracked by identity. It never enters arithmetic -- only :func:`admit` produces foldable
-    values -- so totality is safe and spares every caller a partiality case.
-    """
-    return ObjectRef(obj)
-
-
 def _float_bits(value: float) -> bytes:
     return struct.pack("<d", value)
 
@@ -312,8 +283,8 @@ def same(a: StaticValue, b: StaticValue) -> bool:
     """
     Tagged structural equality for fixed-point convergence. Distinct tags are never equal (True is not 1); floats
     compare by bit pattern (a signed zero flip or a NaN must read as a change exactly once, not oscillate); arrays
-    compare by dtype, shape, and contents bits; references compare by identity. Shared nodes compare once (linear
-    on a DAG): identical objects are bitwise-equal by construction, and proven-equal pairs are not re-descended.
+    compare by dtype, shape, and contents bits. Shared nodes compare once (linear on a DAG): identical objects
+    are bitwise-equal by construction, and proven-equal pairs are not re-descended.
     """
     return _same(a, b, set())
 
@@ -339,7 +310,7 @@ def _same(a: StaticValue, b: StaticValue, proven: set[tuple[int, int]]) -> bool:
                 and all(nx == ny and _same(p, q, proven) for (nx, p), (ny, q) in zip(x, y))
             )
         case _:
-            result = a == b  # scalars, arrays, and references: their own __eq__ is already the doctrine
+            result = a == b  # scalars and arrays: their own __eq__ is already the doctrine
     if result:
         proven.add(key)
     return result
@@ -384,8 +355,6 @@ def _as_python(value: StaticValue, memo: dict[int, object]) -> object:
             result = elements if is_list else tuple(elements)
         case StaticRecord(klass=klass, field_values=field_values):
             result = _rebuild_record(klass, field_values, memo)
-        case ObjectRef(obj=obj):
-            result = obj
     memo[id(value)] = result
     return result
 

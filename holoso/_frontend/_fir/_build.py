@@ -39,6 +39,7 @@ from ._ir import (
     FunctionUnit,
     Jump,
     LoadConst,
+    LoadRef,
     LoadPlace,
     Local,
     Op,
@@ -75,7 +76,7 @@ from ._resolve import (
     UnboundCell,
     comprehension_only_targets,
 )
-from ._value import admit, admit_ref
+from ._value import admit
 
 _logger = logging.getLogger(__name__)
 
@@ -244,7 +245,7 @@ class _Builder:
             self._statement(statement, exit_block.id)
         if self._current.terminator is None:  # implicit `return None` on fall-off
             none_temp = self._temp()
-            self._emit(LoadConst(none_temp, admit_ref(None), origin))
+            self._emit(LoadRef(none_temp, None, origin))
             self._emit(StorePlace(ReturnPlace(), none_temp, origin))
             self._current.terminator = Jump(exit_block.id, origin)
         unit = FunctionUnit(
@@ -498,7 +499,7 @@ class _Builder:
 
     def _none(self, origin: OriginStack) -> BindingId:
         temp = self._temp()
-        self._emit(LoadConst(temp, admit_ref(None), origin))
+        self._emit(LoadRef(temp, None, origin))
         return temp
 
     def _truth(self, node: ast.expr) -> BindingId:
@@ -515,7 +516,10 @@ class _Builder:
                 if admitted is None and value is not None:
                     raise BuildRejection(f"constant of type {type(value).__name__} is not supported", origin)
                 temp = self._temp()
-                self._emit(LoadConst(temp, admitted if admitted is not None else admit_ref(None), origin))
+                if admitted is not None:
+                    self._emit(LoadConst(temp, admitted, origin))
+                else:
+                    self._emit(LoadRef(temp, None, origin))
                 return temp
             case ast.Name(id=name):
                 return self._load_name(name, origin)
@@ -664,7 +668,10 @@ class _Builder:
             case Free(value=value) | Global(value=value) | Builtin(value=value):
                 admitted = admit(value)
                 temp = self._temp()
-                self._emit(LoadConst(temp, admitted if admitted is not None else admit_ref(value), origin))
+                if admitted is not None:
+                    self._emit(LoadConst(temp, admitted, origin))
+                else:
+                    self._emit(LoadRef(temp, value, origin))
                 return temp
             case Missing(name=runtime_name):
                 # Not a build-time rejection: Python raises only if the read executes, so a dead branch stays dead.

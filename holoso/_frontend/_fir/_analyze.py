@@ -35,6 +35,7 @@ from ._ir import (
     FunctionUnit,
     Jump,
     LoadConst,
+    LoadRef,
     LoadPlace,
     Local,
     Op,
@@ -74,6 +75,7 @@ from ._fact import (
     ListLayout,
     MaybeUnbound,
     RecordLayout,
+    Reference,
     Residual,
     StructuralLayout,
     TupleLayout,
@@ -85,7 +87,7 @@ from ._fact import (
     outer_arity,
 )
 from ._signature import ScalarParameter
-from ._fold import FoldRefusal, admit_call, contains_record, is_unimplemented_library, range_size
+from ._fold import FoldRefusal, admit_call, classinfo_types, contains_record, is_unimplemented_library, range_size
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
 from ._value import (
@@ -94,7 +96,6 @@ from ._value import (
     StaticRecord,
     NpFloat,
     NpInt,
-    ObjectRef,
     SemType,
     StaticBool,
     StaticFloat,
@@ -208,8 +209,8 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
     match a, b:
         case (Unbound(), Unbound()):
             return _UNBOUND
-        case (Unbound(), (Known() | Residual() | AggregateFact()) as bound) | (
-            (Known() | Residual() | AggregateFact()) as bound,
+        case (Unbound(), (Known() | Residual() | Reference() | AggregateFact()) as bound) | (
+            (Known() | Residual() | Reference() | AggregateFact()) as bound,
             Unbound(),
         ):
             return MaybeUnbound(bound)
@@ -217,14 +218,14 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
             return half
         case (MaybeUnbound(inner=x), MaybeUnbound(inner=y)):
             joined = join_facts(x, y, origin)
-            assert isinstance(joined, (Known, Residual, AggregateFact))
+            assert isinstance(joined, (Known, Residual, Reference, AggregateFact))
             return MaybeUnbound(joined)
-        case (MaybeUnbound(inner=x), (Known() | Residual() | AggregateFact()) as y) | (
-            (Known() | Residual() | AggregateFact()) as y,
+        case (MaybeUnbound(inner=x), (Known() | Residual() | Reference() | AggregateFact()) as y) | (
+            (Known() | Residual() | Reference() | AggregateFact()) as y,
             MaybeUnbound(inner=x),
         ):
             joined = join_facts(x, y, origin)
-            assert isinstance(joined, (Known, Residual, AggregateFact))
+            assert isinstance(joined, (Known, Residual, Reference, AggregateFact))
             return MaybeUnbound(joined)
         case (AggregateFact() as x, AggregateFact() as y):
             try:
@@ -234,7 +235,7 @@ def join_facts(a: Fact, b: Fact, origin: OriginStack) -> Fact:
             assert layout is not None
             leaves = tuple(_join_atoms(p, q, origin) for p, q in zip(x.leaves, y.leaves, strict=True))
             return AggregateFact(layout, leaves)
-        case ((Known() | Residual()) as p, (Known() | Residual()) as q):
+        case ((Known() | Residual() | Reference()) as p, (Known() | Residual() | Reference()) as q):
             return _join_atoms(p, q, origin)
     raise AnalysisRejection("values of irreconcilable shapes merge here", origin)
 
@@ -244,6 +245,12 @@ def _join_atoms(a: AtomicFact, b: AtomicFact, origin: OriginStack) -> AtomicFact
     if a is b:
         return a
     match a, b:
+        case (Reference(), Reference()):
+            if a.obj is b.obj:
+                return a
+            raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
+        case (Reference(), _) | (_, Reference()):
+            raise AnalysisRejection("values of irreconcilable kinds merge here", origin)
         case (Known(value=x), Known(value=y)):
             if same(x, y):
                 return a
@@ -415,7 +422,7 @@ class Analyzer:
                     (Origin(self._root_template.name, 0, 0),),
                 ) from None
         admitted = admit(current)
-        return normalize_static(admitted) if admitted is not None else Known(ObjectRef(current))
+        return normalize_static(admitted) if admitted is not None else Reference(current)
 
     def _state_reset_fact(self, leaf: StateLeaf) -> Fact:
         current: object = leaf.component
@@ -430,7 +437,7 @@ class Analyzer:
                 ) from None
         admitted = admit(current)
         if admitted is None:
-            return Known(ObjectRef(current))
+            return Reference(current)
         sem = _residual_type(admitted)
         if sem is None:
             raise AnalysisRejection(
@@ -457,8 +464,8 @@ class Analyzer:
             for index, op in enumerate(block.ops):
                 if isinstance(op, PyStoreAttr):
                     obj_fact = env.get(Local(op.obj))
-                    if isinstance(obj_fact, Known) and isinstance(obj_fact.value, ObjectRef):
-                        leaf = StateLeaf(obj_fact.value.obj, (op.name,))
+                    if isinstance(obj_fact, Reference):
+                        leaf = StateLeaf(obj_fact.obj, (op.name,))
                         position = (op.origin[0].line, op.origin[0].column)
                         if leaf not in first_store or position < first_store[leaf]:
                             first_store[leaf] = position
@@ -486,8 +493,8 @@ class Analyzer:
             from .._lib import Intrinsic, resolve
 
             callee_fact = env.get(Local(call.callee))
-            assert isinstance(callee_fact, Known) and isinstance(callee_fact.value, ObjectRef)
-            match = resolve(callee_fact.value.obj)
+            assert isinstance(callee_fact, Reference)
+            match = resolve(callee_fact.obj)
             assert isinstance(match, Intrinsic)
             return CallPlan(CallLowering.INTRINSIC, match)
         assert id(call) in self._concrete_calls, "an unclassified call survived validation"
@@ -539,7 +546,7 @@ class Analyzer:
             fact = (param_facts or {}).get(param.name, default)
             entry_env.set(Local(param), fact)
         if unit.bound_self is not None and unit.params:
-            entry_env.set(Local(unit.params[0]), Known(ObjectRef(unit.bound_self)))
+            entry_env.set(Local(unit.params[0]), Reference(unit.bound_self))
             self._roots = {id(unit.bound_self): ()}  # the root component anchors the member-path tree
         else:
             self._roots = {}
@@ -620,6 +627,8 @@ class Analyzer:
         match op:
             case LoadConst(dst=dst, value=value):
                 env.set(Local(dst), normalize_static(value))
+            case LoadRef(dst=dst, obj=obj_referent):
+                env.set(Local(dst), Reference(obj_referent))
             case LoadPlace(dst=dst, place=place):
                 fact = env.get(place)
                 if isinstance(fact, (Unbound, MaybeUnbound)) and isinstance(place, Local):
@@ -733,7 +742,7 @@ class Analyzer:
                 children = []
                 for item in items:
                     fact = env.get(Local(item))
-                    if not isinstance(fact, (Known, Residual, AggregateFact)):
+                    if not isinstance(fact, (Known, Residual, Reference, AggregateFact)):
                         raise AnalysisRejection("an unbound value flows into an aggregate literal", op.origin)
                     children.append(fact)
                 env.set(Local(dst), aggregate_of(tuple(children), is_list=isinstance(op, BuildList)))
@@ -745,10 +754,10 @@ class Analyzer:
                     length = admit(outer_arity(obj_fact.layout))
                     assert length is not None
                     result = Known(length)
+                elif isinstance(obj_fact, Reference):
+                    # len()/unpacking of a live object would run its __len__ outside the state machinery.
+                    raise AnalysisRejection("len() of an object is not supported", op.origin)
                 elif isinstance(obj_fact, Known):
-                    if isinstance(obj_fact.value, ObjectRef):
-                        # len()/unpacking of a live object would run its __len__ outside the state machinery.
-                        raise AnalysisRejection("len() of an object is not supported", op.origin)
                     concrete = as_python(obj_fact.value)
                     try:
                         length = admit(len(concrete))  # type: ignore[arg-type]
@@ -770,29 +779,29 @@ class Analyzer:
                     callee = BindingId(f"%p{self._binding_serial}", self._binding_serial)
                     self._binding_serial += 1
                     block.ops[index : index + 1] = [
-                        LoadConst(callee, ObjectRef(attr.getter), op.origin),
+                        LoadRef(callee, attr.getter, op.origin),
                         PyCall(dst, callee, (), (), op.origin),
                     ]
                     return True
                 env.set(Local(dst), attr)
             case PyStoreAttr(obj=obj, name=name, src=src):
                 obj_fact = env.get(Local(obj))
-                if not (isinstance(obj_fact, Known) and isinstance(obj_fact.value, ObjectRef)):
+                if not isinstance(obj_fact, Reference):
                     raise AnalysisRejection("attribute store on a non-component value", op.origin)
-                if isinstance(obj_fact.value.obj, (types.ModuleType, type)):
+                if isinstance(obj_fact.obj, (types.ModuleType, type)):
                     # A module/class is a compile-time namespace, not runtime state: mutating it would make later
                     # reads (which snapshot the live object) disagree with the store. Reject, as production does.
                     raise AnalysisRejection("assignment to a module or class attribute is not supported", op.origin)
-                _reject_attribute_hooks(type(obj_fact.value.obj), op.origin)
-                _reject_descriptor(type(obj_fact.value.obj), name, op.origin)
+                _reject_attribute_hooks(type(obj_fact.obj), op.origin)
+                _reject_descriptor(type(obj_fact.obj), name, op.origin)
                 src_fact = env.get(Local(src))
-                if isinstance(src_fact, Known) and isinstance(src_fact.value, ObjectRef):
+                if isinstance(src_fact, Reference):
                     # Storing a component/sub-object into an attribute would change the component topology per
                     # transaction (a slot's owner is fixed at the initial snapshot); reject it at the store, located.
                     raise AnalysisRejection(
                         f"component member '{name}' cannot be rebound; component topology is fixed", op.origin
                     )
-                leaf = StateLeaf(obj_fact.value.obj, (name,))
+                leaf = StateLeaf(obj_fact.obj, (name,))
                 self._discovered_stores.add((block.id, leaf))
                 if (
                     self._leaf_kind(leaf) is SemType.FLOAT
@@ -900,6 +909,8 @@ class Analyzer:
                 return sem
             case Residual(type=sem):
                 return sem
+            case Reference():
+                raise AnalysisRejection("a non-numeric value reaches a runtime operation", origin)
             case _:
                 raise AnalysisRejection("a runtime operation reads an aggregate or unbound value", origin)
 
@@ -910,6 +921,8 @@ class Analyzer:
                 if truth is None and _residual_type(value) is None:
                     raise AnalysisRejection("the truth value of this object is not defined here", origin)
                 return Known(StaticBool(truth)) if truth is not None else Residual(SemType.BOOL)
+            case Reference():
+                raise AnalysisRejection("the truth value of this object is not defined here", origin)
             case AggregateFact() as aggregate:
                 layout = aggregate.layout
                 if isinstance(layout, ArrayLayout) or (
@@ -944,28 +957,33 @@ class Analyzer:
             # Rejected for ANY subscriptable (a range or string included): the key would resolve through a user
             # __index__ running on the reconstruction, whose semantics the compiler cannot vouch for.
             raise AnalysisRejection("a record subscript index is not supported", origin)
-        if isinstance(obj, AggregateFact) and isinstance(index, Known):
+        if isinstance(obj, AggregateFact) and isinstance(index, (Known, Reference)):
             if isinstance(obj.layout, RecordLayout):
                 raise AnalysisRejection("a record is not subscriptable; access its fields by name", origin)
             if isinstance(obj.layout, ArrayLayout) and not obj.layout.shape:
                 raise AnalysisRejection(
                     "a 0-dimensional array cannot be indexed; convert it with float() instead", origin
                 )
-            if isinstance(index.value, (StaticBool, NpBool)) and (
-                isinstance(obj.layout, ArrayLayout)
-                or (isinstance(obj.layout, StructuralLayout) and ContainerFlavor.ARRAY in obj.layout.flavors)
+            if (
+                isinstance(index, Known)
+                and isinstance(index.value, (StaticBool, NpBool))
+                and (
+                    isinstance(obj.layout, ArrayLayout)
+                    or (isinstance(obj.layout, StructuralLayout) and ContainerFlavor.ARRAY in obj.layout.flavors)
+                )
             ):
                 # numpy boolean indexing selects by mask (and prepends an axis for a scalar bool); Python's
                 # bool-as-int semantics apply only to tuples/lists, so guessing here would miscompile.
                 raise AnalysisRejection("a boolean index into an array is not supported; use an integer", origin)
-            if isinstance(index.value, NpBool):
+            if isinstance(index, Known) and isinstance(index.value, NpBool):
                 # numpy 2 removed np.bool_.__index__, so Python itself refuses it as a sequence index; only the
                 # plain Python bool keeps bool-as-int indexing.
                 raise AnalysisRejection(
                     "an np.bool_ subscript index is a TypeError in Python; use a plain bool", origin
                 )
             try:
-                position = operator.index(as_python(index.value))  # type: ignore[arg-type]  # np ints qualify
+                raw_key = index.obj if isinstance(index, Reference) else as_python(index.value)
+                position = operator.index(raw_key)  # type: ignore[arg-type]  # np ints qualify
             except TypeError:
                 # A non-integer static key (a tuple key ``m[1, 0]``, a slice) applies concretely to an all-Known
                 # aggregate; on a runtime-leaf aggregate it awaits the slicing/multi-axis stages.
@@ -975,27 +993,28 @@ class Analyzer:
                         "slicing or multi-axis indexing of a runtime aggregate is not supported yet", origin
                     ) from None
                 return self._concrete_subscript(concrete, index, origin)
-            except Exception as error:  # a raising __index__ (an ObjectRef key's real object): locate, not leak
+            except Exception as error:  # a raising __index__ (a referenced key's real object): locate, not leak
                 raise AnalysisRejection(f"subscript index fails here: {error}", origin) from None
             arity = outer_arity(obj.layout)
             if not -arity <= position < arity:
                 raise AnalysisRejection("sequence index out of range", origin)
             return obj.child(position + arity if position < 0 else position)
-        if isinstance(obj, Known) and isinstance(obj.value, ObjectRef):
+        if isinstance(obj, Reference):
             # A live object's __getitem__ would read reset-time attribute state outside the state machinery.
             raise AnalysisRejection("subscript of an object is not supported", origin)
-        if isinstance(obj, Known) and isinstance(index, Known):
+        if isinstance(obj, Known) and isinstance(index, (Known, Reference)):
             return self._concrete_subscript(obj.value, index, origin)
         raise AnalysisRejection("subscript of a runtime value is not supported yet", origin)
 
-    def _concrete_subscript(self, value: StaticValue, index: Known, origin: OriginStack) -> Fact:
+    def _concrete_subscript(self, value: StaticValue, index: "Known | Reference", origin: OriginStack) -> Fact:
+        key = index.obj if isinstance(index, Reference) else as_python(index.value)
         try:
-            concrete = as_python(value)[as_python(index.value)]  # type: ignore[index]
+            concrete = as_python(value)[key]  # type: ignore[index]
         except Exception as error:
             raise AnalysisRejection(f"subscript fails here: {error}", origin) from None
         admitted = admit(concrete)
         if admitted is None:
-            return Known(ObjectRef(concrete))
+            return Reference(concrete)
         return normalize_static(admitted)
 
     def _attribute(self, env: _Env, obj: Fact, name: str, origin: OriginStack) -> "Fact | _PropertyRead":
@@ -1027,8 +1046,8 @@ class Analyzer:
             # Static navigation (``.T``, ``.shape``, ``.ndim``, ``.flatten`` on an all-Known array; a value method)
             # folds through the concrete object, exactly as a Known value does.
             obj = Known(concrete)
-        if isinstance(obj, Known) and isinstance(obj.value, ObjectRef):
-            component = obj.value.obj
+        if isinstance(obj, Reference):
+            component = obj.obj
             if isinstance(component, (types.ModuleType, type)):
                 # A namespace (math, np, a class), not a stateful component: attribute access is a plain lookup,
                 # so math.sqrt/np.floor resolve to the callable the call site then dispatches through the registry.
@@ -1037,7 +1056,7 @@ class Analyzer:
                 except AttributeError as error:
                     raise AnalysisRejection(str(error), origin) from None
                 admitted = admit(attribute)
-                return normalize_static(admitted) if admitted is not None else Known(ObjectRef(attribute))
+                return normalize_static(admitted) if admitted is not None else Reference(attribute)
             _reject_attribute_hooks(type(component), origin)
             class_attribute = _mro_attribute_of(type(component), name)
             if type(class_attribute) is property:  # an exact property (not a subclass) wins over any __dict__ entry
@@ -1053,7 +1072,7 @@ class Analyzer:
                 key = (id(component), name)
                 if key not in self._bound_methods:
                     self._bound_methods[key] = getattr(component, name)
-                return Known(ObjectRef(self._bound_methods[key]))
+                return Reference(self._bound_methods[key])
             if (
                 class_attribute is not None
                 and hasattr(type(class_attribute), "__get__")
@@ -1079,7 +1098,7 @@ class Analyzer:
                 # so a child's slot name is order-independent even when a lexicographically-smaller alias is discovered
                 # later (the state-leaf cache above would otherwise freeze a stale first-seen path).
                 self._component_edges.add((id(component), name, id(concrete)))
-            fact = normalize_static(admitted) if admitted is not None else Known(ObjectRef(concrete))
+            fact = normalize_static(admitted) if admitted is not None else Reference(concrete)
             env.set(leaf, fact)
             return fact
         if isinstance(obj, Known):
@@ -1113,8 +1132,8 @@ class Analyzer:
                 value_key = (obj.value, name)
                 if value_key not in self._value_methods:
                     self._value_methods[value_key] = concrete
-                return Known(ObjectRef(self._value_methods[value_key]))
-            return normalize_static(admitted) if admitted is not None else Known(ObjectRef(concrete))
+                return Reference(self._value_methods[value_key])
+            return normalize_static(admitted) if admitted is not None else Reference(concrete)
         raise AnalysisRejection("attribute access on a runtime value", origin)
 
     # ------------------------------------ terminators ------------------------------------
@@ -1151,52 +1170,64 @@ class Analyzer:
 
     def _unroll(self, unit: FunctionUnit, header: Block, loop: StaticFor, env: _Env) -> BlockId:
         iterable = env.get(Local(loop.iterable))
-        if isinstance(iterable, Known) and isinstance(iterable.value, ObjectRef):
+        if isinstance(iterable, Reference):
             # A live object's __iter__/__len__ would run against reset-time state, twice (analysis + replay).
             raise AnalysisRejection("iteration over an object is not supported", loop.origin)
+        per_trip: list[Known | Reference] = []
         if isinstance(iterable, AggregateFact):
             if isinstance(iterable.layout, RecordLayout):
                 # Materializing would drive Python's iteration protocol (a user __len__/__getitem__/__iter__) on
                 # the reconstruction -- a demonstrated wrong-value and non-termination hazard.
                 raise AnalysisRejection("iteration over a record is not supported", loop.origin)
-            materialized = materialize_static(iterable)
-            if materialized is None:
-                # The trip count IS static (the layout is fixed); what is missing is per-trip projection of the
-                # runtime elements, which is a later stage.
+            trip_count = outer_arity(iterable.layout)
+            for position in range(trip_count):
+                child: Fact = iterable.child(position)
+                if isinstance(child, AggregateFact):
+                    materialized = materialize_static(child)
+                    child = Known(materialized) if materialized is not None else child
+                if not isinstance(child, (Known, Reference)):
+                    # The trip count IS static (the layout is fixed); what is missing is per-trip projection of
+                    # the runtime elements, which is a later stage.
+                    raise AnalysisRejection(
+                        "iteration over a sequence with runtime elements is not lowerable yet", loop.origin
+                    )
+                per_trip.append(child)
+        elif isinstance(iterable, Known):
+            concrete = as_python(iterable.value)
+            try:
+                trip_count = len(concrete)  # type: ignore[arg-type]  # sized BEFORE materializing (range(10**9)!)
+            except TypeError:
+                raise AnalysisRejection("loop iterable has no static length", loop.origin) from None
+            except OverflowError:  # len() of an astronomically large range (range(10**38)): far past any threshold
                 raise AnalysisRejection(
-                    "iteration over a sequence with runtime elements is not lowerable yet", loop.origin
-                )
-            iterable = Known(materialized)
-        if not isinstance(iterable, Known):
+                    f"loop trip count exceeds the unroll threshold {UNROLL_THRESHOLD}; a counted back-edge loop is "
+                    "not supported yet",
+                    loop.origin,
+                ) from None
+            if trip_count <= UNROLL_THRESHOLD:
+                for element in list(concrete):  # type: ignore[call-overload]
+                    admitted = admit(element)
+                    assert admitted is not None, "an element of a closed-domain container must re-admit"
+                    per_trip.append(Known(admitted))
+        else:
             raise AnalysisRejection("loop trip count is not static here", loop.origin)
-        concrete = as_python(iterable.value)
-        try:
-            trip_count = len(concrete)  # type: ignore[arg-type]  # sized BEFORE materializing (range(10**9)!)
-        except TypeError:
-            raise AnalysisRejection("loop iterable has no static length", loop.origin) from None
-        except OverflowError:  # len() of an astronomically large range (range(10**38)): far past any threshold
-            raise AnalysisRejection(
-                f"loop trip count exceeds the unroll threshold {UNROLL_THRESHOLD}; a counted back-edge loop is not "
-                "supported yet",
-                loop.origin,
-            ) from None
         if trip_count > UNROLL_THRESHOLD:
             raise AnalysisRejection(
                 f"trip count {trip_count} exceeds the unroll threshold {UNROLL_THRESHOLD}; a counted back-edge loop "
                 "is not supported yet",
                 loop.origin,
             )
-        elements = list(concrete)  # type: ignore[call-overload]
         _logger.info("unrolling %d trip(s) at %s", trip_count, loop.origin[0])
         chain_target = loop.exit_target
-        for element in reversed(elements):
-            admitted = admit(element)
-            value: StaticValue = admitted if admitted is not None else ObjectRef(element)
+        for element_fact in reversed(per_trip):
             body_entry = self._clone_subgraph(unit, loop.body_entry, header.id, chain_target, loop)
             prelude = Block(self._fresh_block_id())
             temp = BindingId(f"%u{self._temp_serial}", self._temp_serial)
             self._temp_serial += 1
-            prelude.ops.append(LoadConst(temp, value, loop.origin))
+            if isinstance(element_fact, Known):
+                prelude.ops.append(LoadConst(temp, element_fact.value, loop.origin))
+            else:
+                prelude.ops.append(LoadRef(temp, element_fact.obj, loop.origin))
             prelude.ops.append(StorePlace(loop.target, temp, loop.origin))
             prelude.terminator = Jump(body_entry, loop.origin)
             unit.blocks[prelude.id] = prelude
@@ -1242,9 +1273,9 @@ class Analyzer:
         from .._lib import Intrinsic
 
         callee_fact = env.get(Local(call.callee))
-        if not (isinstance(callee_fact, Known) and isinstance(callee_fact.value, ObjectRef)):
+        if not isinstance(callee_fact, Reference):
             raise AnalysisRejection("call target is not resolvable here", call.origin)
-        target = callee_fact.value.obj
+        target = callee_fact.obj
         match = resolve(target)
         if isinstance(match, Library):
             import numpy as np
@@ -1342,8 +1373,26 @@ class Analyzer:
                 if refusal.library_diagnostic:
                     raise LibraryAnalysisRejection(str(refusal), call.origin) from None
                 raise AnalysisRejection(str(refusal), call.origin) from None
-            concrete_args = [_concrete_fact(fact) for fact in argument_facts]
-            concrete_kwargs = [(keyword, _concrete_fact(fact)) for keyword, fact in keyword_facts]
+            if target is isinstance and not keyword_facts and len(argument_facts) == 2:
+                # isinstance folds through the RESOLVED classinfo types, never through a generic evaluation: the
+                # classinfo's sanctioned carriers (a referenced class, an inline tuple of references) are not
+                # data and cannot cross the evaluation boundary. Flattening is Python's own equivalence --
+                # isinstance over nested tuples and unions is the disjunction over their members.
+                subject_value = _concrete_fact(argument_facts[0])
+                if subject_value is not None:
+                    kinds = classinfo_types(argument_facts[1])
+                    assert kinds is not None, "admission proved the classinfo resolves"
+                    verdict = isinstance(_datapath_zero(as_python(subject_value)), tuple(kinds))
+                    env.set(Local(call.dst), Known(StaticBool(verdict)))
+                    self._concrete_calls.add(id(call))
+                    return False
+            concrete_args: list[StaticValue | Reference | None] = [
+                fact if isinstance(fact, Reference) else _concrete_fact(fact) for fact in argument_facts
+            ]
+            concrete_kwargs = [
+                (keyword, fact if isinstance(fact, Reference) else _concrete_fact(fact))
+                for keyword, fact in keyword_facts
+            ]
             if any(value is None for value in concrete_args) or any(v is None for _, v in concrete_kwargs):
                 name = getattr(target, "__name__", repr(target))
                 # ``float()``/``int()``/``bool()`` on a runtime scalar: a same-kind cast is the identity (a documented
@@ -1372,17 +1421,13 @@ class Analyzer:
                 raise AnalysisRejection(f"call to {name} with runtime arguments is not supported yet", call.origin)
             try:
                 concrete = target(  # type: ignore[operator]
-                    *[_datapath_zero(as_python(value)) for value in concrete_args if value is not None],
-                    **{
-                        keyword: _datapath_zero(as_python(value))
-                        for keyword, value in concrete_kwargs
-                        if value is not None
-                    },
+                    *[_crossing_object(value) for value in concrete_args if value is not None],
+                    **{keyword: _crossing_object(value) for keyword, value in concrete_kwargs if value is not None},
                 )
             except Exception as error:
                 raise AnalysisRejection(f"call fails here: {error}", call.origin) from None
             admitted = admit(concrete)
-            env.set(Local(call.dst), normalize_static(admitted) if admitted is not None else Known(ObjectRef(concrete)))
+            env.set(Local(call.dst), normalize_static(admitted) if admitted is not None else Reference(concrete))
             self._concrete_calls.add(id(call))
             return False
         receiver: object | None = None
@@ -1459,7 +1504,7 @@ class Analyzer:
         if template.bound_self is not None:
             self_temp = BindingId(f"%s{self._binding_serial}", self._binding_serial)
             self._binding_serial += 1
-            block.ops.append(LoadConst(self_temp, ObjectRef(template.bound_self), call.origin))
+            block.ops.append(LoadRef(self_temp, template.bound_self, call.origin))
             block.ops.append(StorePlace(Local(fresh(params[0])), self_temp, call.origin))
             params = params[1:]
         fn_object = target.__func__ if isinstance(target, types.MethodType) else target
@@ -1484,12 +1529,12 @@ class Analyzer:
                 source = keyword.pop(param.name)
             elif param.name in default_by_name:
                 admitted = admit(default_by_name[param.name])
-                default_value: StaticValue = (
-                    admitted if admitted is not None else ObjectRef(default_by_name[param.name])
-                )
                 default_temp = BindingId(f"%d{self._binding_serial}", self._binding_serial)
                 self._binding_serial += 1
-                block.ops.append(LoadConst(default_temp, default_value, call.origin))
+                if admitted is not None:
+                    block.ops.append(LoadConst(default_temp, admitted, call.origin))
+                else:
+                    block.ops.append(LoadRef(default_temp, default_by_name[param.name], call.origin))
                 source = default_temp
             else:
                 raise AnalysisRejection(f"missing argument '{param.name}'", call.origin)
@@ -1507,7 +1552,7 @@ def _identity_place(place: Place) -> Place:
 
 def _remap_op(op: Op, fresh: Callable[[BindingId], BindingId], remap_place: Callable[[Place], Place]) -> Op:
     match op:
-        case LoadConst():
+        case LoadConst() | LoadRef():
             return replace(op, dst=fresh(op.dst))
         case LoadPlace():
             return replace(op, dst=fresh(op.dst), place=remap_place(op.place))
@@ -1604,6 +1649,17 @@ def _same_fact(a: Fact, b: Fact) -> bool:
     if isinstance(a, Known) and isinstance(b, Known):
         return same(a.value, b.value)
     return a == b
+
+
+def _crossing_object(value: "StaticValue | Reference") -> object:
+    """
+    The Python object an admitted argument denotes at the evaluation boundary: a value reconstructs through
+    as_python; an admitted reference (an inert dtype-ish type, or a classinfo reaching a malformed isinstance
+    spelling) crosses as the referent itself -- identity, not reconstruction, is its meaning.
+    """
+    if isinstance(value, Reference):
+        return value.obj
+    return _datapath_zero(as_python(value))
 
 
 def _concrete_fact(fact: Fact) -> StaticValue | None:

@@ -217,7 +217,29 @@ class Residual:
     type: SemType
 
 
-type AtomicFact = Known | Residual
+@dataclass(frozen=True, slots=True, eq=False)
+class Reference:
+    """
+    An identity-keyed reference fact: a callable, module, class, stateful component, or any other object outside
+    the value domain. References are a separate SORT from values -- never data, never foldable, no generic escape
+    back into Python -- so every place a reference may act (a call target, a namespace lookup, a state receiver,
+    an isinstance classinfo, an inert dtype argument) is an explicit arm, and everything else refuses by type.
+    Equality and hash key on the REFERENT's identity: value-based forms would call the referent's own ``==`` (an
+    ndarray poisons enclosing comparisons) and are partial under hashing (an unhashable referent raises).
+    """
+
+    obj: object
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Reference):
+            return NotImplemented
+        return self.obj is other.obj
+
+    def __hash__(self) -> int:
+        return hash(id(self.obj))
+
+
+type AtomicFact = Known | Residual | Reference
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +258,7 @@ class AggregateFact:
         return AggregateFact(layout, self.leaves[start:stop])
 
 
-type BoundFact = Known | Residual | AggregateFact
+type BoundFact = Known | Residual | Reference | AggregateFact
 
 
 @dataclass(frozen=True, slots=True)

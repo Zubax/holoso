@@ -76,6 +76,7 @@ from ._fact import (
     ContainerFlavor,
     Fact,
     Known,
+    Reference,
     LeafPath,
     ListIndex,
     ListLayout,
@@ -110,6 +111,7 @@ from ._ir import (
     BuildTuple,
     Jump as FirJump,
     LoadConst,
+    LoadRef,
     LoadPlace,
     Local,
     Op,
@@ -138,7 +140,6 @@ from ._value import (
     NpBool,
     NpFloat,
     NpInt,
-    ObjectRef,
     SemType,
     StaticBool,
     StaticFloat,
@@ -580,7 +581,7 @@ class _Emitter:
             if isinstance(leaf, Known):
                 if self._datapath_known(leaf):
                     self._write(block, _LeafPlace(target, ordinal), self._atom_vid(leaf))
-            else:
+            elif not isinstance(leaf, Reference):  # a reference leaf stays fact-only, like a non-datapath Known
                 self._write(block, _LeafPlace(target, ordinal), self._read(block, _LeafPlace(source, ordinal)))
 
     def _project(self, block: FirBlockId, source: Place, start: int, dst: BindingId) -> None:
@@ -591,10 +592,10 @@ class _Emitter:
                 if isinstance(leaf, Known):
                     if self._datapath_known(leaf):
                         self._write(block, _LeafPlace(Local(dst), ordinal), self._atom_vid(leaf))
-                else:
+                elif not isinstance(leaf, Reference):
                     vid = self._read(block, _LeafPlace(source, start + ordinal))
                     self._write(block, _LeafPlace(Local(dst), ordinal), vid)
-        elif not isinstance(dst_fact, Known):
+        elif not isinstance(dst_fact, (Known, Reference)):
             self._write(block, Local(dst), self._read(block, _LeafPlace(source, start)))
 
     def _install(self, block: FirBlockId, target: Place, start: int, item: BindingId) -> None:
@@ -605,13 +606,13 @@ class _Emitter:
                 if isinstance(leaf, Known):
                     if self._datapath_known(leaf):
                         self._write(block, _LeafPlace(target, start + ordinal), self._atom_vid(leaf))
-                else:
+                elif not isinstance(leaf, Reference):
                     vid = self._read(block, _LeafPlace(Local(item), ordinal))
                     self._write(block, _LeafPlace(target, start + ordinal), vid)
         elif isinstance(item_fact, Known):
             if self._datapath_known(item_fact):
                 self._write(block, _LeafPlace(target, start), self._atom_vid(item_fact))
-        else:
+        elif not isinstance(item_fact, Reference):
             self._write(block, _LeafPlace(target, start), self._read(block, Local(item)))
 
     def _fact(self, binding: BindingId) -> Fact:
@@ -675,20 +676,20 @@ class _Emitter:
             self._write(fir_id, Local(dst), vid)
 
         match op:
-            case LoadConst() | UnbindPlace():
+            case LoadConst() | LoadRef() | UnbindPlace():
                 pass  # facts and boundness are the analyzer's; nothing materializes here
             case LoadPlace(dst=dst, place=place):
                 fact = self._fact(dst)
                 if isinstance(fact, AggregateFact):
                     self._copy_leaves(fir_id, place, fact, Local(dst))
-                elif not isinstance(fact, Known):
+                elif not isinstance(fact, (Known, Reference)):
                     define(dst, self._read(fir_id, place))
             case StorePlace(place=place, src=src):
                 fact = self._fact(src)
                 if isinstance(fact, AggregateFact):
                     self._copy_leaves(fir_id, Local(src), fact, place)
-                elif isinstance(fact, Known) and not self._datapath_known(fact):
-                    pass  # a non-datapath Known (a string, a range, an object reference): every use folds
+                elif isinstance(fact, Reference) or (isinstance(fact, Known) and not self._datapath_known(fact)):
+                    pass  # a reference or non-datapath Known (a string, a range): every use folds
                 else:
                     self._write(fir_id, place, self._materialize(fir_id, src))  # in the value's own kind
             case PyBin(dst=dst, op=bin_op, lhs=lhs, rhs=rhs):
@@ -720,8 +721,8 @@ class _Emitter:
                     define(dst, self._truth_value(fir_id, operand))
             case PySelect(dst=dst, mode=mode, cond=cond, lhs=lhs, rhs=rhs):
                 result_fact = self._fact(dst)
-                if isinstance(result_fact, Known):
-                    pass  # the analyzer selected a Known arm or folded a boolean identity (``A or True``)
+                if isinstance(result_fact, (Known, Reference)):
+                    pass  # the analyzer selected a Known/reference arm or folded a boolean identity (``A or True``)
                 elif isinstance(cond_fact := self._fact(cond), Known):
                     taken = as_python(cond_fact.value)
                     assert isinstance(taken, bool)
@@ -765,10 +766,14 @@ class _Emitter:
                     import operator as operator_module
 
                     index_fact = self._fact(index)
-                    assert isinstance(index_fact, (Known, AggregateFact)), index_fact
-                    key = index_fact.value if isinstance(index_fact, Known) else materialize_static(index_fact)
-                    assert key is not None, index_fact
-                    position = operator_module.index(as_python(key))  # type: ignore[arg-type]
+                    assert isinstance(index_fact, (Known, Reference, AggregateFact)), index_fact
+                    if isinstance(index_fact, Reference):
+                        raw_key = index_fact.obj  # the analyzer already resolved this referent under operator.index
+                    else:
+                        key = index_fact.value if isinstance(index_fact, Known) else materialize_static(index_fact)
+                        assert key is not None, index_fact
+                        raw_key = as_python(key)
+                    position = operator_module.index(raw_key)  # type: ignore[arg-type]
                     width = outer_arity(obj_fact.layout)
                     position = position + width if position < 0 else position
                     _, start, _ = child_slice(obj_fact.layout, position)
@@ -778,7 +783,7 @@ class _Emitter:
                 pass  # always folded by the analyzer (static shape)
             case PyAttr(dst=dst, obj=obj, name=name):
                 dst_fact = self._fact(dst)
-                if not isinstance(dst_fact, Known):
+                if not isinstance(dst_fact, (Known, Reference)):
                     obj_fact = self._fact(obj)
                     needs_cells = isinstance(dst_fact, Residual) or (
                         isinstance(dst_fact, AggregateFact)
@@ -803,12 +808,12 @@ class _Emitter:
                                 self._write(fir_id, _LeafPlace(Local(dst), ordinal), self._atom_vid(leaf_fact))
                     else:
                         # Otherwise only a runtime component attribute is residual; it is backed by a state slot.
-                        assert isinstance(obj_fact, Known) and isinstance(obj_fact.value, ObjectRef)
-                        define(dst, self._read(fir_id, StateLeaf(obj_fact.value.obj, (name,))))
+                        assert isinstance(obj_fact, Reference)
+                        define(dst, self._read(fir_id, StateLeaf(obj_fact.obj, (name,))))
             case PyStoreAttr(obj=obj, name=name, src=src):
                 obj_fact = self._fact(obj)
-                assert isinstance(obj_fact, Known) and isinstance(obj_fact.value, ObjectRef)
-                leaf = StateLeaf(obj_fact.value.obj, (name,))
+                assert isinstance(obj_fact, Reference)
+                leaf = StateLeaf(obj_fact.obj, (name,))
                 src_sem = self._fact_sem(self._fact(src))
                 kind = (
                     SemType.INT
@@ -1119,9 +1124,7 @@ class _Emitter:
         return_fact = exit_env.facts.get(ReturnPlace())
         contract = unit.return_contract
         assert contract is not None, "emission runs only on the root unit"
-        returns_value = return_fact is not None and not (
-            isinstance(return_fact, Known) and isinstance(return_fact.value, ObjectRef)
-        )
+        returns_value = return_fact is not None and not isinstance(return_fact, Reference)
         return_vid: int | None = None
         return_leaves: list[tuple[LeafPath, int]] = []
         match contract:
