@@ -166,13 +166,13 @@ def static_unop(op: UnOp, operand: StaticValue) -> StaticValue | None:
     return None if result is None else _renumber(result)
 
 
-def _bool_result(value: bool, *operands: StaticValue) -> "StaticBool | NpBool":
+def _bool_result(value: bool, *operands: StaticValue) -> StaticBool | NpBool:
     """numpy yields np.bool_ whenever either operand is a numpy scalar; the result provenance follows suit."""
     numpy_side = any(isinstance(operand, (NpBool, NpInt, NpFloat)) for operand in operands)
     return NpBool(value) if numpy_side else StaticBool(value)
 
 
-def static_compare(relation: RelationalOp, left: StaticValue, right: StaticValue) -> "StaticBool | NpBool | None":
+def static_compare(relation: RelationalOp, left: StaticValue, right: StaticValue) -> StaticBool | NpBool | None:
     """
     A relational link over static scalars: Python compares a Python int with an int or float exactly, a numpy scalar
     applies numpy's own conversion rules to the whole pair, and booleans admit equality only (ordering booleans is

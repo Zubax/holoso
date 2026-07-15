@@ -4791,8 +4791,10 @@ def test_record_dunders_never_run_on_reconstructions() -> None:
     with pytest.raises(UnsupportedConstruct, match="record subscript index"):
         lower(record_key)
     for kernel in (bool_call, len_call):
-        # Round 9 generalized the callee-keyed bool()/len() guard into the argument-shaped concrete-call guard.
-        with pytest.raises(UnsupportedConstruct, match="user-defined methods or properties"):
+        # Rounds 9-10 generalized the callee-keyed bool()/len() guard into the argument-shaped concrete-call
+        # guard, which round 10 extended to every record (the dataclass-generated __repr__ is itself not
+        # reconstruction-safe: an enum field prints as its base value).
+        with pytest.raises(UnsupportedConstruct, match="record cannot cross into a concrete call"):
             lower(kernel)
     with pytest.raises(UnsupportedConstruct, match="record attribute 'doubled'"):
         lower(property_read)
@@ -4930,7 +4932,7 @@ def test_records_with_user_behavior_never_cross_concrete_calls() -> None:
             acc = acc + v
         return acc
 
-    with pytest.raises(UnsupportedConstruct, match="user-defined methods or properties"):
+    with pytest.raises(UnsupportedConstruct, match="record cannot cross into a concrete call"):
         lower(float_call)
     with pytest.raises(UnsupportedConstruct, match="record subscript index"):
         lower(range_key)
@@ -4996,3 +4998,163 @@ def test_exit_dedup_handles_deep_and_shared_exit_graphs() -> None:
         for b in (True, False):
             for c in (True, False):
                 assert float(elaborated.run(a, b, c, 3.0)[0]) == Deep().step(a, b, c, 3.0)
+
+
+# ---------------------------------------- spine review round 10 ----------------------------------------
+
+
+def test_getattr_is_attribute_access_in_every_admitted_shape() -> None:
+    # Review round 10: getattr rewrites into the attribute op, so state reads, record fields with residual
+    # leaves, and the array whitelist all behave exactly as the dotted spelling (the round-9 routing crashed on
+    # residual results and the 3-argument spelling bypassed interception entirely -- a state read folded to its
+    # reset snapshot, [1.0, 1.0] where Python steps [3.0, 5.0]).
+    class Accumulator:
+        def __init__(self) -> None:
+            self.g = 1.0
+
+        def step(self, x: float) -> float:
+            self.g = self.g + x
+            return getattr(self, "g")  # type: ignore[no-any-return]
+
+    result = holoso.synthesize(Accumulator().step, default_ops(FloatFormat(11, 52)), name="getattr_state")
+    elaborated = result.numerical_model.elaborate()
+    assert [float(elaborated.run(2.0)[0]), float(elaborated.run(2.0)[0])] == [3.0, 5.0]
+
+    @dataclasses.dataclass(frozen=True)
+    class Plain:
+        v: float
+
+    def residual_field(c: bool, x: float) -> float:
+        p = Plain(2.0) if c else Plain(3.0)
+        return x * getattr(p, "v")  # type: ignore[no-any-return]
+
+    model = holoso.synthesize(residual_field, default_ops(FloatFormat(11, 52)), name="getattr_field").numerical_model
+    elaborated = model.elaborate()
+    assert float(elaborated.run(True, 3.0)[0]) == 6.0
+    assert float(elaborated.run(False, 3.0)[0]) == 9.0
+
+    class WithDefault:
+        def __init__(self) -> None:
+            self.g = 1.0
+
+        def step(self, x: float) -> float:
+            self.g = self.g + x
+            return getattr(self, "g", 0.0)
+
+    with pytest.raises(UnsupportedConstruct, match="static attribute name and no default"):
+        lower(WithDefault().step)
+
+
+def test_attrgetter_objects_are_a_located_rejection() -> None:
+    # Review round 10 MISCOMPILE: operator.attrgetter("strides") reached the snapshot's internals through an
+    # opaque callable the attribute guards cannot see into (folded the C-contiguous snapshot's strides).
+    import operator
+
+    get_strides = operator.attrgetter("strides")
+    fortran = np.asfortranarray([[1.0, 2.0], [3.0, 4.0]])
+
+    def kernel(x: float) -> float:
+        return x + float(get_strides(fortran)[0])
+
+    with pytest.raises(UnsupportedConstruct, match="attrgetter objects are not supported"):
+        lower(kernel)
+
+
+def test_a_record_nested_in_an_argument_cannot_cross_a_concrete_call() -> None:
+    # Review round 10 MISCOMPILE: the record guard checked top-level argument facts only, so str((record,))
+    # folded the dataclass-generated __repr__ on the reconstruction -- where an enum field prints as its base
+    # value ("R1(mode=1)" instead of "R1(mode=<Mode.A: 1>)").
+    import enum
+
+    class Mode(enum.IntEnum):
+        A = 1
+
+    @dataclasses.dataclass(frozen=True)
+    class R1:
+        mode: Mode
+
+    r1 = R1(Mode.A)
+
+    def kernel(x: float) -> float:
+        return x if str((r1,)) == "(R1(mode=1),)" else -x
+
+    with pytest.raises(UnsupportedConstruct, match="record cannot cross into a concrete call"):
+        lower(kernel)
+
+
+def test_snapshot_observing_spellings_are_located_rejections() -> None:
+    # Review round 10: the unbound-method spelling (np.ndarray.flatten(a, order="K")) and unregistered numpy
+    # callables (np.ravel) reached the C-contiguous snapshot through the generic concrete path, observing a
+    # memory order the admission discarded; np.array construction stays vetted and folds.
+    fortran = np.asfortranarray([[1.0, 2.0], [3.0, 4.0]])
+
+    def unbound_flatten(x: float) -> float:
+        return x + float(np.ndarray.flatten(fortran, order="K")[1])
+
+    def unregistered_ravel(x: float) -> float:
+        return x + float(np.ravel(fortran, order="K")[1])
+
+    with pytest.raises(UnsupportedConstruct, match="unbound method descriptor"):
+        lower(unbound_flatten)
+    with pytest.raises(UnsupportedConstruct, match="cannot run on an admitted array snapshot"):
+        lower(unregistered_ravel)
+
+    def vetted_array(x: float) -> float:
+        m = np.array([[1.0, 2.0], [3.0, 4.0]])
+        return x + float(m[(1,)][1])
+
+    model = holoso.synthesize(vetted_array, default_ops(FloatFormat(11, 52)), name="np_array").numerical_model
+    assert float(model.elaborate().run(1.0)[0]) == 5.0 == vetted_array(1.0)
+
+
+def test_a_record_nested_in_a_subscript_key_is_a_located_rejection() -> None:
+    # Review round 10 MISCOMPILE: the record-key guard was root-only, so a tuple key containing an __index__
+    # record reached numpy's fancy indexing and ran the dunder on the rebuild (enum field as its base value).
+    import enum
+
+    class Mode(enum.IntEnum):
+        A = 1
+
+    @dataclasses.dataclass(frozen=True)
+    class Key:
+        mode: Mode
+
+        def __index__(self) -> int:
+            return 1 if isinstance(self.mode, Mode) else 0
+
+    table = np.array([10.0, 20.0])
+    key_tuple = (Key(Mode.A),)
+
+    def kernel(x: float) -> float:
+        return x + float(table[key_tuple])
+
+    with pytest.raises(UnsupportedConstruct, match="record subscript index"):
+        lower(kernel)
+
+
+def test_isinstance_against_an_enum_type_is_a_located_rejection() -> None:
+    # Review round 10 MISCOMPILE: enum members normalize to their base value at admission (the sanctioned
+    # erasure), so isinstance(member, EnumType) folded False where Python sees the member -- reachable directly
+    # or through any inlined method reading an enum-typed field. Non-enum class queries stay decidable.
+    import enum
+
+    class Mode(enum.IntEnum):
+        A = 1
+
+    mode = Mode.A
+
+    def direct(x: float) -> float:
+        return x if isinstance(mode, Mode) else -x
+
+    def tuple_classinfo(x: float) -> float:
+        return x if isinstance(mode, (float, Mode)) else -x
+
+    for kernel in (direct, tuple_classinfo):
+        with pytest.raises(UnsupportedConstruct, match="isinstance against an enum type"):
+            lower(kernel)
+
+    def plain_class(x: float) -> float:
+        return x * 2.0 if isinstance(1.0, float) else x
+
+    model = holoso.synthesize(plain_class, default_ops(FloatFormat(11, 52)), name="plain_isinstance").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 6.0 == plain_class(3.0)

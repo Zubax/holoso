@@ -181,13 +181,16 @@ at the root (a read of one is a located rejection: Python may raise). Aggregate 
 keeping only flavor-independent behavior; ndarray dtypes promote int64 to float64), then join leaves positionally. An int/float join promotes the integer side to float, C-style (see Integers). Folding
 is Python-exact on Knowns; runtime-typed values never fold (width rule); a Known Bool always drives edge selection.
 Aggregate truth follows Python: tuples/lists fold by arity, arrays (and any join carrying the array flavor) reject
-as ambiguous, and a record without a truth override is truthy per object semantics. User code never runs on a
-record reconstruction, which is value-faithful but not type-faithful (an enum field rebuilds as its base value):
-a record bearing a class-dictionary __bool__/__len__ entry (``__bool__ = None`` included) rejects at its truth, a
-record subscript index, a non-field record attribute, and record iteration reject outright, and a record whose
-class carries any real-source method or property cannot cross into a concrete call (float(r), str(r),
-operator.index(r), ...); getattr/setattr/hasattr are intercepted, getattr routing through the same attribute
-guards. Scalar numpy provenance is preserved end to end -- np.bool_ is a distinct variant from bool, and
+as ambiguous, and a record without a truth override is truthy per object semantics. Python code never runs on a
+record reconstruction, which is value-faithful but not type-faithful (an enum field rebuilds as its base value,
+which even the dataclass-generated __repr__ observes): a record bearing a class-dictionary __bool__/__len__ entry
+(``__bool__ = None`` included) rejects at its truth, a record subscript index, a non-field record attribute, and
+record iteration reject outright, and NO record -- nested inside a tuple/list argument included -- crosses into a
+concrete call (float(r), str(r), operator.index(r), ...); field access is the one record consumption. getattr
+rewrites into the attribute op itself (state reads, residual record fields, and the array whitelist behave
+exactly as the dotted spelling; the default-argument form rejects), setattr/delattr/hasattr reject, and
+attrgetter/itemgetter/methodcaller objects reject (opaque callables the guards cannot see into). Scalar numpy
+provenance is preserved end to end -- np.bool_ is a distinct variant from bool, and
 boolean-producing folds keep it (a comparison or & | ^ with a numpy operand yields np.bool_, exactly as numpy
 does) -- so a STATIC np.bool_ subscript index or repeat count rejects exactly where numpy 2 raises TypeError
 while the plain-bool spellings keep Python's bool-as-int semantics (a runtime boolean carries no spelling).

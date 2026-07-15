@@ -78,6 +78,7 @@ from ._fact import (
     StructuralLayout,
     TupleLayout,
     Unbound,
+    ValueLayout,
     aggregate_of,
     join_layouts,
     materialize_static,
@@ -939,6 +940,8 @@ class Analyzer:
         import operator
 
         if isinstance(index, AggregateFact):
+            if _contains_record(index.layout):  # a record anywhere in the key would run __index__ on a rebuild
+                raise AnalysisRejection("a record subscript index is not supported", origin)
             key = materialize_static(index)  # a static tuple key (m[1, 0]); runtime keys reject below
             if key is not None:
                 index = Known(key)
@@ -1291,37 +1294,85 @@ class Analyzer:
             # doctrine; its runtime-operand form was already routed to an HIR operation above.
             argument_facts = [env.get(Local(arg)) for arg in call.args]
             keyword_facts = [(keyword, env.get(Local(value))) for keyword, value in call.kwargs]
-            if target is getattr and len(argument_facts) == 2 and not keyword_facts:
-                # getattr is attribute access under a different spelling: route it through the attribute transfer
-                # so every navigation guard (record fields only, the array whitelist) applies. The concrete fold
-                # would otherwise execute arbitrary getattr on the admitted snapshot (.base observing the wrong
-                # storage was a demonstrated miscompile). Identity comparisons throughout: ``target`` may be an
-                # unhashable shadow of a builtin name, which must miss cleanly.
-                attr_fact = argument_facts[1]
-                if isinstance(attr_fact, Known) and isinstance(attr_fact.value, StaticStr):
-                    resolved = self._attribute(env, argument_facts[0], attr_fact.value.value, call.origin)
-                    if isinstance(resolved, _PropertyRead):
-                        raise AnalysisRejection("getattr of a property is not supported; call it directly", call.origin)
-                    env.set(Local(call.dst), resolved)
-                    self._concrete_calls.add(id(call))
-                    return False
+            if target is getattr:
+                # getattr is attribute access under a different spelling: rewrite the call into the PyAttr op so
+                # the WHOLE attribute transfer applies -- navigation guards, state reads, record field projection
+                # (a residual result included). The concrete fold would otherwise execute arbitrary getattr on
+                # the admitted snapshot or the live component (.base observing the wrong storage and a state
+                # read folding to the reset were demonstrated miscompiles). The default-argument spelling has no
+                # attribute-transfer equivalent, so it rejects. Identity comparisons throughout: ``target`` may
+                # be an unhashable shadow of a builtin name, which must miss cleanly.
+                attr_fact = argument_facts[1] if len(argument_facts) == 2 else None
+                if not keyword_facts and isinstance(attr_fact, Known) and isinstance(attr_fact.value, StaticStr):
+                    block.ops[index] = PyAttr(call.dst, call.args[0], attr_fact.value.value, call.origin)
+                    return True
                 raise AnalysisRejection("getattr requires a static attribute name and no default", call.origin)
             if target is setattr or target is delattr or target is hasattr:
                 name = getattr(target, "__name__", repr(target))
                 raise AnalysisRejection(f"{name}() is not supported in kernels", call.origin)
-            # A record whose class carries USER code (a method, a property, a dunder) must never cross into a
-            # concrete evaluation: the callable would run it on a reconstruction that is value-faithful but not
-            # type-faithful (an enum field rebuilds as its base value), which demonstrably flips float(record),
-            # operator.index(record), str(record), and friends.
-            for fact in [*argument_facts, *(fact for _, fact in keyword_facts)]:
-                if (
-                    isinstance(fact, AggregateFact)
-                    and isinstance(fact.layout, RecordLayout)
-                    and _has_user_behavior(fact.layout.klass)
-                ):
+            if target is isinstance:
+                # Enum members normalize to their base value at admission (the sanctioned erasure), so an
+                # isinstance query against an enum type always answers False on the erased value where Python
+                # sees the member -- a demonstrated wrong-value fold; other class queries stay decidable.
+                classinfo = argument_facts[1] if len(argument_facts) == 2 else None
+                references: list[object] = []
+                if isinstance(classinfo, Known) and isinstance(classinfo.value, ObjectRef):
+                    references = [classinfo.value.obj]
+                elif isinstance(classinfo, AggregateFact):
+                    references = [
+                        leaf.value.obj
+                        for leaf in classinfo.leaves
+                        if isinstance(leaf, Known) and isinstance(leaf.value, ObjectRef)
+                    ]
+                if any(isinstance(ref, type) and issubclass(ref, enum.Enum) for ref in references):
                     raise AnalysisRejection(
-                        "a record with user-defined methods or properties cannot be evaluated concretely",
+                        "isinstance against an enum type is not decidable (enum members normalize to their "
+                        "base value)",
                         call.origin,
+                    )
+            if isinstance(target, (types.MethodDescriptorType, types.WrapperDescriptorType)):
+                # The unbound spelling (np.ndarray.flatten(a, ...)) reaches the same internals the attribute
+                # transfer guards; the bound spelling goes through those guards instead.
+                descriptor = getattr(target, "__qualname__", repr(target))
+                raise AnalysisRejection(
+                    f"an unbound method descriptor ('{descriptor}') is not supported; call the method on the value",
+                    call.origin,
+                )
+            import numpy as np
+
+            if (
+                getattr(target, "__module__", None) == "numpy"
+                and resolve(target) is None
+                and not any(target is vetted for vetted in (np.array, np.asarray, np.asanyarray))
+                and any(
+                    isinstance(fact, AggregateFact) and _contains_array(fact.layout)
+                    for fact in [*argument_facts, *(f for _, f in keyword_facts)]
+                )
+            ):
+                # A numpy callable outside the library registry (np.ravel and friends) would run on the admitted
+                # C-contiguous snapshot, where layout-observing arguments (order="K") see the wrong thing. The
+                # registry members were vetted for exactly this, scalar-only calls never touch a snapshot, and
+                # the array constructors only build fresh values.
+                name = getattr(target, "__name__", repr(target))
+                raise AnalysisRejection(
+                    f"numpy function '{name}' cannot run on an admitted array snapshot", call.origin
+                )
+            import operator as operator_module
+
+            if isinstance(
+                target, (operator_module.attrgetter, operator_module.itemgetter, operator_module.methodcaller)
+            ):
+                # These reach the same snapshot internals the getattr/subscript transfers guard, through an
+                # opaque callable the guards cannot see into.
+                raise AnalysisRejection(f"{type(target).__name__} objects are not supported in kernels", call.origin)
+            # A record must never cross into a concrete evaluation, nested inside a tuple/list argument included:
+            # the callable (or even the dataclass-generated __repr__) would run on a reconstruction that is
+            # value-faithful but not type-faithful (an enum field rebuilds as its base value), which demonstrably
+            # flips float(record), str((record,)), operator.index(record), and friends.
+            for fact in [*argument_facts, *(fact for _, fact in keyword_facts)]:
+                if isinstance(fact, AggregateFact) and _contains_record(fact.layout):
+                    raise AnalysisRejection(
+                        "a record cannot cross into a concrete call; access its fields directly", call.origin
                     )
             concrete_args = [_concrete_fact(fact) for fact in argument_facts]
             concrete_kwargs = [(keyword, _concrete_fact(fact)) for keyword, fact in keyword_facts]
@@ -1644,24 +1695,26 @@ def _has_truth_override(klass: type) -> bool:
     return any(name in c.__dict__ for name in ("__bool__", "__len__") for c in klass.__mro__ if c is not object)
 
 
-def _has_user_behavior(klass: type) -> bool:
-    """
-    Whether the class carries any REAL-SOURCE function or property beyond the dataclass-generated set. The
-    generated methods compile from synthesized source (``co_filename == "<string>"``) and are reconstruction-safe
-    by construction; ``__post_init__`` runs only at genuine construction, never on a rebuild, so it is exempt.
-    """
-    for c in klass.__mro__:
-        if c is object:
-            continue
-        for name, member in c.__dict__.items():
-            if name == "__post_init__":
-                continue
-            if isinstance(member, property):
-                return True
-            fn = member.__func__ if isinstance(member, (classmethod, staticmethod)) else member
-            if isinstance(fn, types.FunctionType) and fn.__code__.co_filename != "<string>":
-                return True
-    return False
+def _contains_array(layout: "ValueLayout") -> bool:
+    match layout:
+        case ArrayLayout():
+            return True
+        case TupleLayout(items=items) | ListLayout(items=items) | StructuralLayout(items=items):
+            return any(_contains_array(item) for item in items)
+        case RecordLayout(fields=fields):
+            return any(_contains_array(item) for _, item in fields)
+        case _:
+            return False
+
+
+def _contains_record(layout: "ValueLayout") -> bool:
+    match layout:
+        case RecordLayout():
+            return True
+        case TupleLayout(items=items) | ListLayout(items=items) | StructuralLayout(items=items):
+            return any(_contains_record(item) for item in items)
+        case _:
+            return False
 
 
 def _reject_attribute_hooks(klass: type, origin: OriginStack) -> None:
