@@ -6423,3 +6423,98 @@ def test_record_carrying_sequences_never_rebuild_through_subscript_fallback() ->
 
     with pytest.raises(UnsupportedConstruct, match="record-carrying sequence"):
         lower(hook_free)
+
+
+# ------------------------------ M2 step 3a: slices and starred targets ------------------------------
+
+
+def test_slices_of_positional_containers_are_window_operations() -> None:
+    # Slice syntax desugars to the vetted slice() constructor and the subscript transfer re-aggregates the
+    # SAME children -- runtime leaves included -- so windows, strides, reversals, and open bounds all ride
+    # the aggregate spine with no evaluation.
+    def runtime_window(x: float, y: float) -> float:
+        t = (x, y, x + y, 4.0)
+        mid = t[1:3]
+        return mid[0] * 10.0 + mid[1]
+
+    def negative_step(x: float, y: float) -> float:
+        r = (x, y, 3.0)[::-1]
+        return r[0] + r[2] * 100.0
+
+    def stride_and_tail(x: float) -> float:
+        items = [x, 2.0, x * 3.0, 4.0, 5.0]
+        return items[::2][1] + items[-2:][0]
+
+    def nested_window(x: float) -> float:
+        t = ((x, 1.0), (2.0, x), (3.0, 4.0))
+        pair = t[0:2][1]
+        return pair[0] + pair[1]
+
+    def string_slice(x: float) -> float:
+        return x * 2.0 if "gain"[0:2] == "ga" else x
+
+    for kernel, argsets in (
+        (runtime_window, [(3.0, 4.0)]),
+        (negative_step, [(1.0, 2.0)]),
+        (stride_and_tail, [(2.0,)]),
+        (nested_window, [(7.0,)]),
+        (string_slice, [(3.0,)]),
+    ):
+        model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name=kernel.__name__).numerical_model
+        elaborated = model.elaborate()
+        for argset in argsets:
+            assert float(elaborated.run(*argset)[0]) == kernel(*argset)
+
+    def zero_step(x: float) -> float:
+        return (x, 2.0)[::0][0]  # type: ignore[misc,no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="slice step cannot be zero"):
+        lower(zero_step)
+
+    def runtime_bounds(x: float, n: int) -> float:
+        return (x, 2.0, 3.0)[0:n][0]
+
+    with pytest.raises(UnsupportedConstruct, match="call to slice with runtime arguments"):
+        lower(runtime_bounds)
+
+
+def test_starred_assignment_targets_desugar_to_windows() -> None:
+    # a, *rest, b = v splits into integer projections plus a list()-converted slice window, with the arity
+    # check relaxed to at-least; the star may land anywhere and may absorb zero elements.
+    def star_middle(x: float, y: float) -> float:
+        a, *mid, b = (x, y, x + y, 4.0)
+        return a + mid[0] * 10.0 + mid[1] * 100.0 + b
+
+    def star_first(x: float) -> float:
+        *init, last = (1.0, 2.0, x)
+        return last * 10.0 + init[1]
+
+    def star_empty(x: float) -> float:
+        t: tuple[float, ...] = (x, 2.0)
+        a, *rest, b = t
+        return a + b + len(rest)
+
+    def star_concat(x: float) -> float:
+        t: tuple[float, ...] = (x, 2.0, 3.0)
+        a, *rest = t
+        grown = rest + [4.0]
+        return grown[0] + grown[1]
+
+    for kernel, argsets in (
+        (star_middle, [(1.0, 2.0)]),
+        (star_first, [(7.0,)]),
+        (star_empty, [(3.0,)]),
+        (star_concat, [(1.5,)]),
+    ):
+        model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name=kernel.__name__).numerical_model
+        elaborated = model.elaborate()
+        for argset in argsets:
+            assert float(elaborated.run(*argset)[0]) == kernel(*argset)
+
+    def star_arity_fail(x: float) -> float:
+        t: tuple[float, ...] = (x,)
+        a, b, *rest = t
+        return a + b
+
+    with pytest.raises(UnsupportedConstruct, match="expected at least 2 values"):
+        lower(star_arity_fail)

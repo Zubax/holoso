@@ -90,6 +90,7 @@ from ._fact import (
     ValueLayout,
     child_layouts,
     child_slice,
+    leaf_count,
     leaf_paths,
     materialize_static,
     outer_arity,
@@ -143,6 +144,7 @@ from ._value import (
     SemType,
     StaticBool,
     StaticFloat,
+    StaticSlice,
     StaticValue,
     admit,
     as_python,
@@ -773,11 +775,35 @@ class _Emitter:
                     assert isinstance(index_fact, (Known, AggregateFact)), index_fact
                     key = index_fact.value if isinstance(index_fact, Known) else materialize_static(index_fact)
                     assert key is not None, index_fact
-                    position = operator_module.index(as_python(key))  # type: ignore[arg-type]
-                    width = outer_arity(obj_fact.layout)
-                    position = position + width if position < 0 else position
-                    _, start, _ = child_slice(obj_fact.layout, position)
-                    self._project(fir_id, Local(obj), start, dst)
+                    if isinstance(key, StaticSlice):
+                        # A slice window: each selected source child copies onto the aligned result child,
+                        # Known leaves as constants and residual leaves as aligned cell reads.
+                        window = as_python(key)
+                        assert isinstance(window, slice)
+                        selected = range(*window.indices(outer_arity(obj_fact.layout)))
+                        assert isinstance(dst_fact, AggregateFact) and outer_arity(dst_fact.layout) == len(selected)
+                        for dst_index, src_index in enumerate(selected):
+                            src_child, src_start, _ = child_slice(obj_fact.layout, src_index)
+                            _, dst_start, dst_stop = child_slice(dst_fact.layout, dst_index)
+                            assert leaf_count(src_child) == dst_stop - dst_start, "window misalignment"
+                            for offset in range(dst_stop - dst_start):
+                                window_leaf = dst_fact.leaves[dst_start + offset]
+                                if isinstance(window_leaf, Known):
+                                    if self._datapath_known(window_leaf):
+                                        self._write(
+                                            fir_id,
+                                            _LeafPlace(Local(dst), dst_start + offset),
+                                            self._atom_vid(window_leaf),
+                                        )
+                                elif not isinstance(window_leaf, Reference):
+                                    vid = self._read(fir_id, _LeafPlace(Local(obj), src_start + offset))
+                                    self._write(fir_id, _LeafPlace(Local(dst), dst_start + offset), vid)
+                    else:
+                        position = operator_module.index(as_python(key))  # type: ignore[arg-type]
+                        width = outer_arity(obj_fact.layout)
+                        position = position + width if position < 0 else position
+                        _, start, _ = child_slice(obj_fact.layout, position)
+                        self._project(fir_id, Local(obj), start, dst)
                 # else the analyzer folded the subscript concretely: the Known facts materialize at their use sites
             case PyLen():
                 pass  # always folded by the analyzer (static shape)

@@ -454,35 +454,62 @@ class _Builder:
                 obj_temp = self._expression(obj)
                 self._emit(PyStoreAttr(obj_temp, self._resolver.runtime_spelling(attr), source, origin))
             case ast.Tuple(elts=elts) | ast.List(elts=elts):
-                if any(isinstance(elt, ast.Starred) for elt in elts):
-                    raise BuildRejection("starred unpacking targets are not supported", origin)
+                stars = [position for position, elt in enumerate(elts) if isinstance(elt, ast.Starred)]
+                assert len(stars) <= 1, "multiple starred targets are a SyntaxError before the builder runs"
                 # The arity constraint must be encoded here: downstream, a prefix read is indistinguishable from
-                # an honest too-many-values mistake that Python would refuse with ValueError.
+                # an honest too-many-values mistake that Python would refuse with ValueError. A starred target
+                # relaxes equality to at-least (the star absorbs the surplus, possibly zero elements).
+                fixed = len(elts) - len(stars)
                 length = self._temp()
                 self._emit(PyLen(length, source, origin))
                 expected = self._temp()
-                arity = admit(len(elts))
+                arity = admit(fixed)
                 assert arity is not None
                 self._emit(LoadConst(expected, arity, origin))
                 matches = self._temp()
-                self._emit(PyCompare(matches, RelationalOp.EQ, length, expected, origin))
+                relation = RelationalOp.GE if stars else RelationalOp.EQ
+                self._emit(PyCompare(matches, relation, length, expected, origin))
                 arity_ok = self._temp()
                 self._emit(PyTruth(arity_ok, matches, origin))
                 unpack_block, mismatch = self._new_block(), self._new_block()
                 self._current.terminator = Branch(arity_ok, unpack_block.id, mismatch.id, origin)
-                mismatch.terminator = Fail(f"cannot unpack: expected {len(elts)} values", origin)
+                bound = f"at least {fixed}" if stars else f"{fixed}"
+                mismatch.terminator = Fail(f"cannot unpack: expected {bound} values", origin)
                 self._start_block(unpack_block)
+                star = stars[0] if stars else len(elts)
+                suffix = len(elts) - star - 1 if stars else 0
+
+                def integer_temp(value: int) -> BindingId:
+                    temp = self._temp()
+                    admitted = admit(value)
+                    assert admitted is not None
+                    self._emit(LoadConst(temp, admitted, origin))
+                    return temp
+
                 element_temps = []
-                for index in range(len(elts)):
-                    index_temp = self._temp()
-                    index_value = admit(index)
-                    assert index_value is not None
-                    self._emit(LoadConst(index_temp, index_value, origin))
+                for position, elt in enumerate(elts):
                     element = self._temp()
-                    self._emit(PySubscript(element, source, index_temp, origin))
+                    if position < star:
+                        self._emit(PySubscript(element, source, integer_temp(position), origin))
+                    elif position == star:
+                        # The star takes the middle window as a LIST, exactly as Python: v[star : -suffix or
+                        # None] re-flavored through the vetted list() conversion.
+                        window_key = self._temp()
+                        slice_ref = self._temp()
+                        self._emit(LoadRef(slice_ref, slice, origin))
+                        stop = integer_temp(-suffix) if suffix else self._none(origin)
+                        self._emit(PyCall(window_key, slice_ref, (integer_temp(star), stop), (), origin))
+                        window = self._temp()
+                        self._emit(PySubscript(window, source, window_key, origin))
+                        list_ref = self._temp()
+                        self._emit(LoadRef(list_ref, list, origin))
+                        self._emit(PyCall(element, list_ref, (window,), (), origin))
+                    else:
+                        self._emit(PySubscript(element, source, integer_temp(position - len(elts)), origin))
                     element_temps.append(element)
                 for elt, element in zip(elts, element_temps):  # all reads precede all writes: a, b = b, a swaps
-                    self._assign_target(elt, element, origin)
+                    target_node = elt.value if isinstance(elt, ast.Starred) else elt
+                    self._assign_target(target_node, element, origin)
             case ast.Subscript():
                 raise BuildRejection("assignment to a subscript is not supported (aggregates are immutable)", origin)
             case _:
@@ -615,10 +642,21 @@ class _Builder:
                 self._emit(PyAttr(temp, obj_temp, self._resolver.runtime_spelling(attr), origin))
                 return temp
             case ast.Subscript(value=obj, slice=index):
-                if isinstance(index, ast.Slice):
-                    raise BuildRejection("slicing is not supported", origin)
                 obj_temp = self._expression(obj)
-                index_temp = self._expression(index)
+                if isinstance(index, ast.Slice):
+                    # Slice syntax desugars to the vetted slice() constructor: static bounds fold to a slice
+                    # VALUE (StaticSlice), which the subscript transfer consumes structurally; runtime bounds
+                    # reject at the call exactly like an explicit slice(a, b) spelling would.
+                    slice_ref = self._temp()
+                    self._emit(LoadRef(slice_ref, slice, origin))
+                    bounds = tuple(
+                        self._expression(bound) if bound is not None else self._none(origin)
+                        for bound in (index.lower, index.upper, index.step)
+                    )
+                    index_temp = self._temp()
+                    self._emit(PyCall(index_temp, slice_ref, bounds, (), origin))
+                else:
+                    index_temp = self._expression(index)
                 temp = self._temp()
                 self._emit(PySubscript(temp, obj_temp, index_temp, origin))
                 return temp

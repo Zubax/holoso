@@ -356,9 +356,15 @@ under `-O`, an assert must be side-effect-free.
 ### Deferred: the aggregate contract (tracked by FIR_PARITY_PENDING; stage 10 asserts the registry empty)
 
 The structural spine already carries runtime tuples/lists through locals, diamonds, conditional selections,
-concatenation/repetition, indexing, record field projection, and returns; what remains deferred is the rest of the
+concatenation/repetition, indexing, record field projection, record construction, and returns. Slice syntax
+desugars to the vetted slice() constructor and a static slice of a positional container is a WINDOW operation
+over the same children (runtime leaves included; strides, reversals, and open bounds follow slice.indices
+exactly; runtime bounds and slices of arrays/structural joins stay located rejections); starred assignment
+targets desugar to integer projections plus a list()-converted window with the arity check relaxed to at-least.
+What remains deferred is the rest of the
 BOUNDARY surface -- aggregate parameter ports, aggregate persistent state, runtime-element iteration,
-slicing/starred syntax, and the array/record/reduction/gather semantics below -- and every disabled test carries
+call-argument unpacking (f(*args)), and the array/record/reduction/gather semantics below -- and every disabled
+test carries
 the greppable marker. The contract the remaining stages restore (and extend with records, reductions, and the
 bounded gather):
 

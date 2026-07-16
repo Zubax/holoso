@@ -341,6 +341,8 @@ def admit_call(
             if classinfo_position:
                 continue
             referent = fact.obj
+            if referent is None:
+                continue  # the None singleton is inert: a slice bound, an explicit sentinel
             if isinstance(referent, type) and any(referent is kind for kind in _inert_type_referents()):
                 continue  # a dtype-ish builtin type carries no live state
             raise FoldRefusal("an object reference cannot cross into a concrete call")

@@ -113,6 +113,7 @@ from ._value import (
     StaticFloat,
     StaticRange,
     StaticSeq,
+    StaticSlice,
     StaticStr,
     StaticValue,
     admit,
@@ -1046,6 +1047,24 @@ class Analyzer:
                 raise AnalysisRejection(
                     "an np.bool_ subscript index is a TypeError in Python; use a plain bool", origin
                 )
+            if isinstance(index.value, StaticSlice) and isinstance(obj.layout, (TupleLayout, ListLayout)):
+                # A slice of a positional container is a WINDOW operation over the same children -- runtime
+                # leaves included, exactly like conversion and projection -- so nothing materializes and
+                # nothing crosses. Records still refuse (their consumptions are field access and integer
+                # projection); arrays await the gather stage; a structural flavor cannot truthfully pick a
+                # result container, so it keeps the concrete-fallback rejection below.
+                if contains_record(obj.layout):
+                    raise AnalysisRejection(
+                        "slicing or multi-axis indexing of a record-carrying sequence is not supported", origin
+                    )
+                window = as_python(index.value)
+                assert isinstance(window, slice)
+                try:
+                    selected = range(*window.indices(outer_arity(obj.layout)))
+                except ValueError as error:  # a zero step, exactly as Python raises
+                    raise AnalysisRejection(f"subscript fails here: {error}", origin) from None
+                children = tuple(obj.child(position) for position in selected)
+                return aggregate_of(children, is_list=isinstance(obj.layout, ListLayout))
             try:
                 position = operator.index(as_python(index.value))  # type: ignore[arg-type]  # np ints qualify
             except TypeError:
