@@ -16,6 +16,7 @@ point can rebuild from scratch each outer round.
 
 import enum
 import logging
+import math
 import types
 from typing import TYPE_CHECKING
 from collections.abc import Callable, Mapping
@@ -105,6 +106,7 @@ from ._fold import (
     range_size,
     validate_classinfo,
 )
+from ..._util import RelationalOp
 from ._opsem import BinOp, UnOp, static_binop, static_compare, static_truth, static_unop
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
 from ._value import (
@@ -998,16 +1000,20 @@ class Analyzer:
                 else:
                     env.set(Local(dst), self._residual_of(operand_fact, op.origin))
             case PyCompare(dst=dst, op=rel, lhs=lhs, rhs=rhs):
-                env.set(
-                    Local(dst),
-                    self._fold_binary(
-                        lambda a, b: static_compare(rel, a, b),
-                        env.get(Local(lhs)),
-                        env.get(Local(rhs)),
-                        op.origin,
-                        default=SemType.BOOL,
-                    ),
-                )
+                lhs_fact, rhs_fact = env.get(Local(lhs)), env.get(Local(rhs))
+                if _is_array_fact(lhs_fact) or _is_array_fact(rhs_fact):
+                    env.set(Local(dst), self._elementwise_compare(rel, lhs_fact, rhs_fact, op.origin))
+                else:
+                    env.set(
+                        Local(dst),
+                        self._fold_binary(
+                            lambda a, b: static_compare(rel, a, b),
+                            lhs_fact,
+                            rhs_fact,
+                            op.origin,
+                            default=SemType.BOOL,
+                        ),
+                    )
             case PyNot(dst=dst, operand=operand):
                 truth = self._truth_fact(env.get(Local(operand)), op.origin)
                 if isinstance(truth, Known):
@@ -1082,7 +1088,7 @@ class Analyzer:
                 if (
                     isinstance(receiver_fact, AggregateFact)
                     and isinstance(receiver_fact.layout, ArrayLayout)
-                    and name in ("flatten", "ravel")
+                    and name in ("flatten", "ravel", "reshape")
                 ):
                     method_key = (obj, name)
                     if method_key not in self._array_methods:
@@ -1299,6 +1305,73 @@ class Analyzer:
             leaves.append(leaf)
         return AggregateFact(ArrayLayout(shapes[0], dtype), tuple(leaves))
 
+    def _static_reshape_target(
+        self, shape_args: tuple[BindingId, ...], env: _Env, origin: OriginStack
+    ) -> tuple[int, ...]:
+        """The reshape target as static dimensions: bare integers or one static tuple; -1 inference rejects."""
+        facts = [env.get(Local(arg)) for arg in shape_args]
+        if len(facts) == 1 and isinstance(facts[0], AggregateFact):
+            materialized = materialize_static(facts[0])
+            if materialized is not None:
+                facts = [Known(materialized)]
+        if len(facts) == 1 and isinstance(facts[0], Known) and isinstance(facts[0].value, StaticSeq):
+            items: list[StaticValue] = list(facts[0].value.items)
+        else:
+            checked: list[StaticValue] = []
+            for fact in facts:
+                if not isinstance(fact, Known):
+                    raise AnalysisRejection("reshape() requires a static shape", origin)
+                checked.append(fact.value)
+            items = checked
+        dimensions: list[int] = []
+        for item in items:
+            if not isinstance(item, (MetaInt, NpInt)):
+                raise AnalysisRejection("reshape() requires integer dimensions", origin)
+            dimension = int(item.value)
+            if dimension < 0:
+                raise AnalysisRejection(
+                    "a -1 (inferred) reshape dimension is not supported; spell the shape explicitly", origin
+                )
+            dimensions.append(dimension)
+        return tuple(dimensions)
+
+    def _elementwise_compare(self, rel: RelationalOp, lhs: Fact, rhs: Fact, origin: OriginStack) -> Fact:
+        """
+        An elementwise NUMERIC comparison producing a boolean mask: the same same-shape/scalar pairing as
+        arithmetic, each leaf pair taking the scalar comparison rule (numpy provenance rides the fold).
+        Boolean operands keep the scalar doctrine rather than gaining a blanket array admission.
+        """
+        if _is_array_fact(lhs) and lhs.layout.shape == ():  # type: ignore[union-attr]
+            lhs = lhs.leaves[0]  # type: ignore[union-attr]
+        if _is_array_fact(rhs) and rhs.layout.shape == ():  # type: ignore[union-attr]
+            rhs = rhs.leaves[0]  # type: ignore[union-attr]
+        if not (_is_array_fact(lhs) or _is_array_fact(rhs)):
+            return self._fold_binary(lambda a, b: static_compare(rel, a, b), lhs, rhs, origin, default=SemType.BOOL)
+        for side in (lhs, rhs):
+            if isinstance(side, AggregateFact) and not isinstance(side.layout, ArrayLayout):
+                raise AnalysisRejection(
+                    "elementwise comparison mixes an array with a non-array container; wrap it in np.array(...)",
+                    origin,
+                )
+        if SemType.BOOL in (self._elementwise_side_sem(lhs, origin), self._elementwise_side_sem(rhs, origin)):
+            raise AnalysisRejection("an elementwise comparison requires numeric operands", origin)
+        arrays = [side for side in (lhs, rhs) if isinstance(side, AggregateFact)]
+        shapes = [side.layout.shape for side in arrays if isinstance(side.layout, ArrayLayout)]
+        if len(set(shapes)) > 1:
+            raise AnalysisRejection(
+                f"elementwise comparison on mismatched shapes {shapes[0]} and {shapes[1]} "
+                "(only a scalar broadcasts)",
+                origin,
+            )
+        leaves: list[AtomicFact] = []
+        for ordinal in range(leaf_count(arrays[0].layout)):
+            left = lhs.leaves[ordinal] if isinstance(lhs, AggregateFact) else lhs
+            right = rhs.leaves[ordinal] if isinstance(rhs, AggregateFact) else rhs
+            leaf = self._fold_binary(lambda a, b: static_compare(rel, a, b), left, right, origin, default=SemType.BOOL)
+            assert isinstance(leaf, (Known, Residual)), leaf
+            leaves.append(leaf)
+        return AggregateFact(ArrayLayout(shapes[0], ArrayDType.BOOL), tuple(leaves))
+
     def _elementwise_unary(self, un_op: UnOp, operand: AggregateFact, origin: OriginStack) -> Fact:
         assert isinstance(operand.layout, ArrayLayout)
         if operand.layout.dtype is ArrayDType.BOOL:
@@ -1321,7 +1394,7 @@ class Analyzer:
             return leaves[0]  # numpy: unary +/- on a 0-d array also yields the scalar sort
         return AggregateFact(operand.layout, tuple(leaves))
 
-    def _array_factory(self, source: AggregateFact, origin: OriginStack) -> AggregateFact:
+    def _array_factory(self, source: AggregateFact, origin: OriginStack, force_float: bool = False) -> AggregateFact:
         """
         np.array/asarray/asanyarray over a residual-carrying aggregate: a relayout of the SAME leaves onto the
         rectangular shape the nesting yields, with dtype discovery restricted to the proven subset -- any float
@@ -1347,6 +1420,8 @@ class Analyzer:
         if None in sems:  # a string or range leaf: numpy would build a string/object array, outside the domain
             raise AnalysisRejection("an array literal requires numeric or boolean elements", origin)
         assert sems, "an empty argument cannot carry a residual leaf"
+        if force_float:
+            sems = {SemType.FLOAT}  # the explicit dtype=float casts every leaf; no discovery, no mix question
         if SemType.BOOL in sems and sems != {SemType.BOOL}:
             raise AnalysisRejection(
                 "an array literal mixes booleans with numbers (numpy would widen the bool); convert explicitly",
@@ -2062,29 +2137,49 @@ class Analyzer:
             return True
         if isinstance(callee_fact.obj, _ArrayMethod):
             method = callee_fact.obj
-            if call.args == (method.receiver,) and not call.kwargs:
-                # The canonical explicit-receiver form (installed by the rewrite below): a flatten/ravel is a
-                # pure RELAYOUT of the same leaves onto the flat shape -- the source dtype survives structurally
-                # even with zero elements -- and emission is the ordinary conversion copy.
+            if call.args[:1] == (method.receiver,) and not call.kwargs:
+                # The canonical explicit-receiver form (installed by the rewrite below): flatten/ravel/reshape
+                # are pure RELAYOUTS of the same leaves -- the source dtype survives structurally even with
+                # zero elements -- and emission is the ordinary conversion copy.
                 receiver_fact = env.get(Local(method.receiver))
                 assert isinstance(receiver_fact, AggregateFact) and isinstance(receiver_fact.layout, ArrayLayout)
-                flat_layout = ArrayLayout((leaf_count(receiver_fact.layout),), receiver_fact.layout.dtype)
-                env.set(Local(call.dst), AggregateFact(flat_layout, receiver_fact.leaves))
+                cells = leaf_count(receiver_fact.layout)
+                if method.name == "reshape":
+                    reshaped = self._static_reshape_target(call.args[1:], env, call.origin)
+                    if math.prod(reshaped) != cells:
+                        raise AnalysisRejection(
+                            f"cannot reshape an array of {cells} element(s) into shape "
+                            f"({', '.join(map(str, reshaped))})",
+                            call.origin,
+                        )
+                    relayout = ArrayLayout(reshaped, receiver_fact.layout.dtype)
+                else:
+                    if len(call.args) != 1:
+                        raise AnalysisRejection(
+                            f"{method.name}() accepts no arguments here (only the default C order is " "supported)",
+                            call.origin,
+                        )
+                    relayout = ArrayLayout((cells,), receiver_fact.layout.dtype)
+                env.set(Local(call.dst), AggregateFact(relayout, receiver_fact.leaves))
                 self._conversion_calls.add(id(call))
                 return False
-            if call.args or call.kwargs:
+            if call.kwargs or (method.name != "reshape" and call.args):
                 raise AnalysisRejection(
-                    f"{method.name}() accepts no arguments here (only the default C order is supported)",
+                    (
+                        f"{method.name}() accepts no arguments here (only the default C order is supported)"
+                        if method.name != "reshape"
+                        else "reshape() accepts a static shape only (no keyword arguments)"
+                    ),
                     call.origin,
                 )
-            block.ops[index : index + 1] = [replace(call, args=(method.receiver,))]
+            block.ops[index : index + 1] = [replace(call, args=(method.receiver, *call.args))]
             return True
         target = callee_fact.obj
         match = resolve(target)
         if isinstance(match, Library):
-            if any(target is fn for fn in (np.matmul, np.dot, np.trace, np.outer)):
-                # The linalg stubs are defined over arrays only; a scalar/list/tuple operand must not acquire
-                # matrix semantics through the spelled call any more than through the operator.
+            if any(target is fn for fn in (np.matmul, np.dot, np.trace, np.outer, np.max, np.amax, np.mean)):
+                # The linalg and reduction stubs are defined over arrays only; a scalar/list/tuple operand
+                # must not acquire array semantics through the spelled call any more than through an operator.
                 for arg in call.args:
                     operand_fact = env.get(Local(arg))
                     if not (isinstance(operand_fact, AggregateFact) and isinstance(operand_fact.layout, ArrayLayout)):
@@ -2293,9 +2388,15 @@ class Analyzer:
                 env.set(Local(call.dst), Known(length))
                 self._concrete_calls.add(id(call))
                 return False
+            explicit_float_dtype = (
+                len(keyword_facts) == 1
+                and keyword_facts[0][0] == "dtype"
+                and isinstance(keyword_facts[0][1], Reference)
+                and any(keyword_facts[0][1].obj is kind for kind in (float, np.float64))
+            )
             if (
                 any(target is factory for factory in (np.array, np.asarray, np.asanyarray))
-                and not keyword_facts
+                and (not keyword_facts or explicit_float_dtype)
                 and len(argument_facts) == 1
                 and isinstance(argument_facts[0], AggregateFact)
                 and any(isinstance(leaf, Residual) for leaf in argument_facts[0].leaves)
@@ -2303,8 +2404,12 @@ class Analyzer:
                 # A residual-carrying array construction is the same LAYOUT operation under numpy's discovery
                 # rules, restricted to the proven subset; a fully static argument falls through to the vetted
                 # concrete call below, where numpy itself decides every discovery corner (object promotion,
-                # the uint64 range, bool widening) and the result normalizes back exactly.
-                env.set(Local(call.dst), self._array_factory(argument_facts[0], call.origin))
+                # the uint64 range, bool widening) and the result normalizes back exactly. An explicit
+                # dtype=float IS the conversion the implicit-widening rejections demand: every leaf casts.
+                env.set(
+                    Local(call.dst),
+                    self._array_factory(argument_facts[0], call.origin, force_float=explicit_float_dtype),
+                )
                 self._conversion_calls.add(id(call))
                 return False
             if target is isinstance and not keyword_facts and len(argument_facts) == 2:

@@ -433,8 +433,16 @@ ROUTE PLAN (source ordinal per result cell) the conversion emission consumes -- 
 non-square shapes, and empty and 0-d arrays. The stubs probe ranks through `np.ndim`, folded narrowly by the
 compiler (a numeric scalar is rank 0, an array is its layout rank, containers reject: numpy's own ndim of a
 list observes structure the fact model erases).
-What remains deferred is the record boundary (record parameter/return contracts) and the
-reduction/comparison/reshape/selection semantics below, and every disabled test carries
+Elementwise numeric comparisons produce boolean masks under the same same-shape/scalar pairing as
+arithmetic (boolean operands keep the scalar doctrine). Default-axis `np.max`/`np.mean` are registry stubs
+over nonempty 1-D arrays -- a left fold of the scalar max (one sorter firing per step) and a left-fold sum
+over the static length whose order follows the fastmath doctrine rather than numpy's pairwise summation.
+`reshape` joins flatten/ravel as a static relayout (explicit non-negative dimensions whose product matches;
+`-1` inference rejects), and an EXPLICIT `dtype=float` on the array factories is the sanctioned boolean
+crossing: every leaf casts (bool and integer alike), scoped to the factory so implicit widening keeps
+rejecting everywhere else.
+What remains deferred is the record boundary (record parameter/return contracts) and the bounded selection
+semantics below, and every disabled test carries
 the greppable marker. The contract the remaining stages restore (and extend with records, reductions, and the
 bounded gather):
 

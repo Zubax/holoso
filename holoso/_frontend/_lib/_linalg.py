@@ -72,3 +72,28 @@ def outer_(u: np.ndarray, v: np.ndarray) -> Any:
     if np.ndim(u) != 1 or np.ndim(v) != 1:
         raise ValueError("outer requires 1-D operands")
     return np.array([[u[i] * v[j] for j in range(len(v))] for i in range(len(u))])
+
+
+@lib(np.max, np.amax)
+def max_(a: np.ndarray) -> Any:
+    """Default-axis max over a nonempty 1-D array: a left fold of the scalar max (one sorter firing each)."""
+    if np.ndim(a) != 1:
+        raise ValueError("np.max supports 1-D arrays here")
+    acc = a[0]
+    for k in range(1, len(a)):
+        acc = max(acc, a[k])
+    return acc
+
+
+@lib(np.mean)
+def mean_(a: np.ndarray) -> Any:
+    """
+    Default-axis mean over a nonempty 1-D array: a left-fold sum divided by the static length. The fold order
+    follows Holoso's floating-point doctrine, not numpy's internal pairwise-summation strategy.
+    """
+    if np.ndim(a) != 1:
+        raise ValueError("np.mean supports 1-D arrays here")
+    acc = a[0]
+    for k in range(1, len(a)):
+        acc = acc + a[k]
+    return acc / float(len(a))

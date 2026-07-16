@@ -664,13 +664,24 @@ class _Emitter:
             elif not isinstance(leaf, Reference):
                 assert isinstance(leaf, Residual)
                 # An unchanged leaf copies as carried (the flavor-conversion identity); only a leaf the factory
-                # re-semmed coerces onto its new kind.
-                expected = None if source_fact.leaves[source_ordinal] == leaf else leaf.type
-                vid = self._materialize_atom(
-                    source_fact.leaves[source_ordinal],
-                    lambda: self._read(block, _LeafPlace(Local(source), source_ordinal)),
-                    expected,
-                )
+                # re-semmed coerces onto its new kind. A boolean source under a float destination is the ONE
+                # sanctioned bool crossing -- the user's explicit dtype=float IS the conversion -- scoped here
+                # so the scalar materializer keeps rejecting implicit bool arithmetic everywhere else.
+                source_leaf = source_fact.leaves[source_ordinal]
+                if leaf.type is SemType.FLOAT and source_leaf == Residual(SemType.BOOL):
+                    flag = self._materialize_atom(
+                        source_leaf,
+                        lambda: self._read(block, _LeafPlace(Local(source), source_ordinal)),
+                        SemType.BOOL,
+                    )
+                    vid = self._builder.operation(BoolToFloat(), [flag])
+                else:
+                    expected = None if source_leaf == leaf else leaf.type
+                    vid = self._materialize_atom(
+                        source_leaf,
+                        lambda: self._read(block, _LeafPlace(Local(source), source_ordinal)),
+                        expected,
+                    )
                 self._write(block, _LeafPlace(Local(dst), ordinal), vid)
 
     def _copy_leaves(self, block: FirBlockId, source: Place, fact: AggregateFact, target: Place) -> None:
@@ -809,7 +820,35 @@ class _Emitter:
             case PyUn(dst=dst, op=un_op, operand=operand):
                 self._emit_unary(fir_id, dst, un_op, operand)
             case PyCompare(dst=dst, op=rel, lhs=lhs, rhs=rhs):
-                if not isinstance(self._fact(dst), Known):
+                compare_fact = self._fact(dst)
+                if isinstance(compare_fact, AggregateFact):
+                    # An elementwise numeric comparison: one float relational per residual mask cell, the
+                    # scalar side materialized once (numeric-only by the analyzer's admission).
+                    assert isinstance(compare_fact.layout, ArrayLayout)
+                    lhs_fact, rhs_fact = self._fact(lhs), self._fact(rhs)
+                    mask_broadcast: dict[BindingId, int] = {}
+
+                    def mask_operand(binding: BindingId, fact: Fact, ordinal: int) -> int:
+                        if isinstance(fact, AggregateFact) and not (
+                            isinstance(fact.layout, ArrayLayout) and fact.layout.shape == ()
+                        ):
+                            return self._materialize_atom(
+                                fact.leaves[ordinal],
+                                lambda: self._read(fir_id, _LeafPlace(Local(binding), ordinal)),
+                                SemType.FLOAT,
+                            )
+                        if binding not in mask_broadcast:
+                            mask_broadcast[binding] = self._materialize(fir_id, binding, SemType.FLOAT)
+                        return mask_broadcast[binding]
+
+                    for ordinal, cell in enumerate(compare_fact.leaves):
+                        if not isinstance(cell, Residual):
+                            continue
+                        left = mask_operand(lhs, lhs_fact, ordinal)
+                        right = mask_operand(rhs, rhs_fact, ordinal)
+                        vid = self._builder.operation(FloatRelational(rel), [left, right])
+                        self._write(fir_id, _LeafPlace(Local(dst), ordinal), vid)
+                elif not isinstance(compare_fact, Known):
                     lsem, rsem = self._fact_sem(self._fact(lhs)), self._fact_sem(self._fact(rhs))
                     if lsem is SemType.BOOL or rsem is SemType.BOOL:
                         if lsem is not rsem:

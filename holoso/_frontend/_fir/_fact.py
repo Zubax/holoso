@@ -340,8 +340,7 @@ def numpy_kinded(leaf: Known, dtype: ArrayDType) -> Known:
     concrete = _concrete_scalar(leaf)
     match dtype:
         case ArrayDType.FLOAT:
-            assert not isinstance(concrete, bool)
-            converted: object = np.float64(concrete)  # type: ignore[arg-type]
+            converted: object = np.float64(concrete)  # type: ignore[arg-type]  # a bool casts to 0.0/1.0
         case ArrayDType.INT:
             assert isinstance(concrete, (int, np.integer)) and not isinstance(concrete, bool)
             converted = np.int64(concrete)

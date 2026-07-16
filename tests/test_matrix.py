@@ -1356,6 +1356,99 @@ def test_flatten_order_arguments_are_rejected() -> None:
         lower(fortran)
 
 
+# ---------------------------------------------------------------- comparisons, reductions, reshape (9d-1)
+
+
+def test_array_comparisons_yield_boolean_masks() -> None:
+    def masked(s: float) -> tuple[float, float, float]:
+        mask = (COEFFS * s) >= 0.5  # elementwise comparison with a scalar broadcast
+        return float(mask[0]), float(mask[1]), float(mask[2])
+
+    def paired(s: float) -> float:
+        hits = (COEFFS * s) > (COEFFS * 0.5)  # array-with-array comparison, same shape
+        if hits[1]:
+            return s
+        return -s
+
+    _assert_python_matches_holoso(masked, 2.0)
+    _assert_python_matches_holoso(paired, 1.0)
+
+    def mismatched(s: float) -> float:
+        wrong = (COEFFS * s) > _GATE_CONST  # (3,) vs (2,)
+        return float(wrong[0])
+
+    with pytest.raises(UnsupportedConstruct, match="mismatched shapes"):
+        lower(mismatched)
+
+
+def test_array_reductions_match_numpy() -> None:
+    def peak(s: float) -> float:
+        return float(np.max(COEFFS * s))
+
+    def centered(s: float) -> tuple[float, float, float]:
+        v = COEFFS * s
+        w = v - float(np.mean(v))  # the controller's zero-mean shape
+        return w[0], w[1], w[2]
+
+    # The mean's constant division strength-reduces to a reciprocal multiply under the fastmath doctrine, so
+    # an exactly-zero centered element carries one ulp of reciprocal rounding; the tolerance names that.
+    sorted_ops = dataclasses.replace(default_ops(_FMT), fsort=holoso.FSortOperator(_FMT))
+    for kernel, argument in ((peak, -2.0), (peak, 3.0), (centered, 2.0)):
+        sim = holoso.synthesize(kernel, sorted_ops, name="kernel").numerical_model.elaborate()
+        got = np.array([float(v) for v in sim.run(argument)])
+        assert np.allclose(got, np.asarray(kernel(argument)).flatten(), rtol=1e-12, atol=1e-12)
+
+    def matrix_reduction(s: float) -> float:
+        return float(np.max(GAIN * s))  # only the 1-D form is supported
+
+    with pytest.raises(UnsupportedConstruct, match="1-D"):
+        lower(matrix_reduction)
+
+
+def test_reshape_is_a_static_relayout() -> None:
+    def widen(a: float, b: float, c: float) -> tuple[float, float, float]:
+        column = np.array([a, b, c]).reshape((3, 1))  # the controller's output shape
+        flat = column.reshape(3)  # and the no-op round trip
+        return flat[0], column[1][0], flat[2]
+
+    _assert_python_matches_holoso(widen, 1.5, -2.0, 0.25)
+
+    def wrong_count(s: float) -> float:
+        v = (COEFFS * s).reshape((2, 2))
+        return v[0][0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="cannot reshape"):
+        lower(wrong_count)
+
+    def inferred(s: float) -> float:
+        v = (COEFFS * s).reshape((-1, 1))
+        return v[0][0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="spell the shape"):
+        lower(inferred)
+
+
+def test_dtype_float_casts_leaves_explicitly() -> None:
+    def from_flags(a: float, b: float, c: float) -> tuple[float, float, float]:
+        switches = (a > 0.0, b > 0.0, c > 0.0)
+        v = np.array(switches, dtype=float) * 2.0  # the controller's balance-step shape
+        return v[0], v[1], v[2]
+
+    def from_mixed(a: float) -> tuple[float, float]:
+        v = np.asarray([a > 0.0, 3], dtype=float)  # an explicit dtype IS the conversion
+        return v[0], v[1]
+
+    _assert_python_matches_holoso(from_flags, 1.0, -1.0, 2.0)
+    _assert_python_matches_holoso(from_mixed, -0.5)
+
+    def implicit(a: float) -> float:
+        v = np.array([a > 0.0, 3.0])  # NO dtype: the implicit widening keeps rejecting
+        return v[0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="mixes boolean"):
+        lower(implicit)
+
+
 # ---------------------------------------------------------------- numeric width collapse
 
 
