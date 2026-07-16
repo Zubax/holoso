@@ -441,10 +441,15 @@ over the static length whose order follows the fastmath doctrine rather than num
 `-1` inference rejects), and an EXPLICIT `dtype=float` on the array factories is the sanctioned boolean
 crossing: every leaf casts (bool and integer alike), scoped to the factory so implicit widening keeps
 rejecting everywhere else.
-What remains deferred is the record boundary (record parameter/return contracts) and the bounded selection
-semantics below, and every disabled test carries
-the greppable marker. The contract the remaining stages restore (and extend with records, reductions, and the
-bounded gather):
+Record ports complete the boundary: a dataclass parameter decomposes by field path (kin_pos, g_taps_0) with
+each leaf typed by its own kind (boolean fields get boolean ports), and a dataclass return -- keyed by exact
+class identity, fields validated recursively -- flattens onto out_<field-path> ports through the same leaf
+walk as every other return. Record contracts resolve field annotations through the deferred PEP 649 machinery
+and refuse recursive schemas by name. Data-dependent selection over a finite static set is expressed in
+ordinary Python -- a statically unrolled reverse-order conditional select reproduces first-match semantics
+through per-leaf phis -- rather than through a runtime-index gather primitive the integer-less datapath cannot
+honestly carry. FIR_PARITY_PENDING is EMPTY and pinned empty by a stage-10 test: every bundled example lowers
+through this front end. The restored contract:
 
 Matrices/vectors are statically shaped and unrolled to scalar operations; arrays never exist as hardware
 aggregates, only as compile-time bookkeeping over scalar leaves -- list/tuple literals and comprehensions,

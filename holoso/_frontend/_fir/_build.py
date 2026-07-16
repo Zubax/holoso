@@ -21,6 +21,7 @@ from ..._errors import SourceUnavailable, UnsupportedConstruct
 from ..._util import RelationalOp
 from .._ast_support import UNROLL_THRESHOLD, indexed_names
 from ._signature import (
+    RecordParameter,
     ArrayParameter,
     ContractError,
     ParameterContract,
@@ -115,6 +116,16 @@ _COMPARE_OPS: dict[type[ast.cmpop], RelationalOp] = {
     ast.Gt: RelationalOp.GT,
     ast.GtE: RelationalOp.GE,
 }
+
+
+def _contract_cells(base: str, contract: "ParameterContract") -> list[str]:
+    match contract:
+        case ArrayParameter(shape=shape):
+            return indexed_names(base, shape)
+        case RecordParameter(fields=fields):
+            return [cell for name, sub in fields for cell in _contract_cells(f"{base}_{name}", sub)]
+        case _:
+            return [base]
 
 
 def build_unit(fn: object, root: bool = False) -> FunctionUnit:
@@ -223,8 +234,7 @@ class _Builder:
                 ) from None
             assert spelled is not None
             param_contracts[spelled] = contract
-            cells = indexed_names(spelled, contract.shape) if isinstance(contract, ArrayParameter) else [spelled]
-            for cell in cells:
+            for cell in _contract_cells(spelled, contract):
                 owner = port_claims.setdefault(cell, spelled)
                 if owner != spelled:
                     raise BuildRejection(

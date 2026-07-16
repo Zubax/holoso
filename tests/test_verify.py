@@ -1651,6 +1651,38 @@ def test_aliased_slot_with_phi_live_in_builds(monkeypatch: pytest.MonkeyPatch) -
     build(_run(InputPhi().__call__), "input_phi_alias", fetch_stages=3)  # phi-of-inputs shape must compile
 
 
+def test_finite_set_controller_matches_python_across_transactions() -> None:
+    # The most composite example: record ports on both sides, array ports, reshape/zero-mean algebra, dot
+    # scoring, a max reduction, and the statically unrolled arg-max -- verified against its own plain-Python
+    # execution across state-carrying transactions (the discrete switch decisions must match EXACTLY; the
+    # carried balance tracks within format precision).
+    import finite_set_current_controller as fsc
+
+    fmt = holoso.FloatFormat(8, 36)
+    ops = holoso.OpConfig(
+        holoso.FAddOperator(fmt),
+        holoso.FMulOperator(fmt),
+        holoso.FDivOperator(fmt),
+        holoso.FMulILog2OperatorFamily(fmt),
+        holoso.FCmpOperator(fmt),
+        fsort=holoso.FSortOperator(fmt),
+        fsincos=holoso.FSincosOperator(fmt),
+    )
+    sim = holoso.synthesize(fsc.FiniteSetCurrentController().__call__, ops=ops).numerical_model.elaborate()
+    reference = fsc.FiniteSetCurrentController()
+    rng = np.random.default_rng(0xF1717E)
+    for step in range(6):
+        kin = fsc.Kinematics(pos=float(rng.uniform(-3.0, 3.0)), vel=0.0, accel=0.0)
+        i_ac, di = rng.uniform(-1.0, 1.0, 3), rng.uniform(-100.0, 100.0, 3)
+        u_dc, i_ref = float(rng.uniform(10.0, 50.0)), rng.uniform(-1.0, 1.0, 2)
+        want = reference(kin, i_ac, di, u_dc, i_ref)
+        flat = [float(v) for v in (kin.pos, kin.vel, kin.accel, *i_ac, *di, u_dc, *i_ref)]
+        got = [float(v) for v in sim.run(*flat)]
+        assert got[:3] == [float(b) for b in want.switch_ac], step  # the discrete decisions match exactly
+        balance = np.asarray(want.switch_balance).flatten()
+        assert np.allclose(got[3:], balance, rtol=1e-6, atol=1e-6), step
+
+
 def test_polar_example_round_trip_and_native_reference() -> None:
     # The examples/polar.py vector kernels are off-catalogue (2-vector ports, no scalar SPEC), verified here: each
     # conversion against native math (approximate), and a round trip that must recover the input away from the origin.

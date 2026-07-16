@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
-A complex example of a larger-scale control system for a VSI inverter operating in current control mode.
-TODO FIXME: Currently unsupported.
+A complex example of a larger-scale control system for a VSI inverter operating in current control mode:
+record ports on both sides (a dataclass parameter and a dataclass decision with a boolean switch tuple and a
+column-vector balance report), fixed-shape array ports, reshape/zero-mean array algebra, dot-product scoring,
+a max reduction, and a statically unrolled arg-max selection over the finite switch set.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
+
 import numpy as np
+from jaxtyping import Float64
+
+import holoso
 
 
 @dataclass(frozen=True)
@@ -19,10 +26,10 @@ class Kinematics:
 @dataclass(frozen=True)
 class CurrentControllerDecision:
     switch_ac: tuple[bool, bool, bool]
-    switch_balance: np.ndarray  # TODO: needs some kind of static size annotation, so this one won't work as-is
+    switch_balance: Float64[np.ndarray, "3 1"]
 
 
-def _dq0_to_ac(dq0: np.ndarray, theta: float) -> np.ndarray:  # Inlined at place of invocation; shape annotation needed
+def _dq0_to_ac(dq0: Float64[np.ndarray, "2"], theta: float) -> Float64[np.ndarray, "3 1"]:  # inlined where invoked
     dq0 = dq0.reshape((2, 1))
     d, q = dq0[0, 0], dq0[1, 0]
     ct, st = np.cos(theta), np.sin(theta)  # Assume holoso_sincos is available.
@@ -52,10 +59,10 @@ class FiniteSetCurrentController:
     def __call__(
         self,
         kin: Kinematics,
-        i_ac: np.ndarray,  # these also need static shape annotations instead of np.ndarray
-        di_ac_dt: np.ndarray,
+        i_ac: Float64[np.ndarray, "3"],
+        di_ac_dt: Float64[np.ndarray, "3"],
         u_dc: float,
-        i_dq_ref: np.ndarray,
+        i_dq_ref: Float64[np.ndarray, "2"],
         /,
     ) -> CurrentControllerDecision:
         i_ac_ref = _dq0_to_ac(i_dq_ref, kin.pos)
@@ -76,12 +83,17 @@ class FiniteSetCurrentController:
         # Expanding the finite-state score leaves only the strongest phase of this vector.
         phase_drive = (u_dc * error) - ((4.0 * self._BALANCE_WEIGHT) * self._switch_balance)
         active_drive = np.array([float(phase_drive @ vector) for vector in self._active_switch_vectors])
-        best_drive = float(np.max(active_drive))  # e.g., max() by sequential application of holoso_sort, or similar
-        active = int(np.flatnonzero(active_drive >= best_drive - (1e-12 * max(abs(best_drive), 1.0)))[0])
+        best_drive = float(np.max(active_drive))  # one sorter firing per fold step
         if best_drive <= self._active_drive_threshold:
             return False, False, False
-        # We know the size statically so we can treat it as separate output registers:
-        return self._active_switch_candidates[active]
+        # The arg-max over the finite switch set, statically unrolled: candidates are scanned in REVERSE so
+        # the lowest-index qualifier assigns last, reproducing first-match (flatnonzero[0]) tie behavior.
+        threshold = best_drive - (1e-12 * max(abs(best_drive), 1.0))
+        selected = self._active_switch_candidates[0]
+        for index in range(len(self._active_switch_candidates) - 1, -1, -1):
+            if float(active_drive[index]) >= threshold:
+                selected = self._active_switch_candidates[index]
+        return selected
 
     def _make_active_switch_candidates(self) -> tuple[  # This one doesn't make it to the final Verilog at all
         tuple[tuple[bool, bool, bool], ...],
@@ -114,3 +126,25 @@ class FiniteSetCurrentController:
     def _zero_mean(x: np.ndarray, /) -> np.ndarray:  # As always, we need static shape annotation here
         x = np.asarray(x, dtype=float)
         return x - float(np.mean(x))
+
+
+def main() -> None:
+    controller = FiniteSetCurrentController()
+    fmt = holoso.FloatFormat(wexp=8, wman=36)
+    ops = holoso.OpConfig(
+        holoso.FAddOperator(fmt),
+        holoso.FMulOperator(fmt),
+        holoso.FDivOperator(fmt),
+        holoso.FMulILog2OperatorFamily(fmt),
+        holoso.FCmpOperator(fmt),
+        fsort=holoso.FSortOperator(fmt),
+        fsincos=holoso.FSincosOperator(fmt),
+    )
+    base = Path(__file__).resolve().parent / "build" / Path(__file__).stem
+    result = holoso.synthesize(controller.__call__, ops=ops)
+    for filename, path in result.write(base / f"e{fmt.wexp}m{fmt.wman}").items():
+        print(f"{filename}: {path}")
+
+
+if __name__ == "__main__":
+    main()

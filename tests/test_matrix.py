@@ -1449,6 +1449,69 @@ def test_dtype_float_casts_leaves_explicitly() -> None:
         lower(implicit)
 
 
+# ---------------------------------------------------------------- record ports (9d-2) and stage 10
+
+
+def test_record_ports_decompose_by_field_path() -> None:
+    @dataclasses.dataclass(frozen=True)
+    class Gains:
+        p: float
+        taps: Float64[np.ndarray, "2"]
+        enabled: bool
+
+    @dataclasses.dataclass(frozen=True)
+    class Report:
+        drive: float
+        flags: tuple[bool, bool]
+
+    def kernel(g: Gains, x: float) -> Report:
+        scale = g.p * x if g.enabled else x
+        return Report(drive=scale + float(g.taps[0]) - float(g.taps[1]), flags=(scale > 0.0, g.enabled))
+
+    hir = lower(kernel)
+    assert hir.input_names() == ["g_p", "g_taps_0", "g_taps_1", "g_enabled", "x"]
+    assert [o.name for o in hir.outputs] == ["out_drive", "out_flags_0", "out_flags_1"]
+
+
+def test_record_contract_rejections_are_located() -> None:
+    with pytest.raises(UnsupportedConstruct, match="recursively contains itself"):
+        lower(_recursive_record_kernel)
+
+    @dataclasses.dataclass(frozen=True)
+    class Wide:
+        value: str
+
+    def stringly(v: Wide) -> float:
+        return 1.0
+
+    with pytest.raises(UnsupportedConstruct, match="expected float, bool, int"):
+        lower(stringly)
+
+    @dataclasses.dataclass(frozen=True)
+    class Pair:
+        a: float
+        b: float
+
+    @dataclasses.dataclass(frozen=True)
+    class Other:
+        a: float
+        b: float
+
+    def wrong_record(x: float) -> Pair:
+        return Other(x, x)  # type: ignore[return-value]
+
+    with pytest.raises(UnsupportedConstruct, match="declared record 'Pair'"):
+        lower(wrong_record)
+
+
+def test_parity_registry_is_empty() -> None:
+    # Stage 10: every example the catalogue and the off-catalogue suites know lowers through the new front
+    # end; the registry exists only as the (empty) assertion point.
+    from tests._examples import FIR_PARITY_PENDING
+
+    assert FIR_PARITY_PENDING == {}
+
+
 # ---------------------------------------------------------------- numeric width collapse
 
 
@@ -1632,6 +1695,15 @@ def test_width_collapse_extends_to_type_identity() -> None:
 
     model = holoso.synthesize(kernel, default_ops(_FMT), name="kernel").numerical_model
     assert float(model.elaborate().run(3.0)[0]) == 3.0  # the carrier verdict; plain Python returns -3.0
+
+
+@dataclasses.dataclass(frozen=True)
+class _SelfLoop:
+    inner: _SelfLoop  # noqa: F821  # legal under PEP 649: evaluated lazily, when the name exists
+
+
+def _recursive_record_kernel(v: _SelfLoop) -> float:
+    return 1.0
 
 
 _DURATION_CONST = np.array([3], dtype="timedelta64[ns]")

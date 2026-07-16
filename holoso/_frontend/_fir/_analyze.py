@@ -94,7 +94,14 @@ from ._fact import (
     outer_arity,
     record_of,
 )
-from ._signature import ArrayParameter, ContractError, ScalarParameter, array_shape, is_array_annotation
+from ._signature import (
+    ArrayParameter,
+    ContractError,
+    RecordParameter,
+    ScalarParameter,
+    array_shape,
+    is_array_annotation,
+)
 from ._fold import (
     FieldSchema,
     FoldRefusal,
@@ -811,11 +818,10 @@ class Analyzer:
         for param in unit.params:
             contract = unit.param_contracts.get(param.name)
             default: Fact
-            if isinstance(contract, ArrayParameter):
-                default = AggregateFact(
-                    ArrayLayout(contract.shape, ArrayDType.FLOAT),
-                    (Residual(SemType.FLOAT),) * leaf_count(ArrayLayout(contract.shape, ArrayDType.FLOAT)),
-                )
+            if isinstance(contract, (ArrayParameter, RecordParameter)):
+                port_layout, port_kinds = _contract_structure(contract)
+                assert port_layout is not None
+                default = AggregateFact(port_layout, tuple(Residual(kind) for kind in port_kinds))
             else:
                 assert contract is None or isinstance(contract, ScalarParameter)
                 default = Residual(contract.kind if contract is not None else SemType.FLOAT)
@@ -2805,6 +2811,28 @@ def _is_list_fact(fact: Fact) -> bool:
 
 def _is_array_fact(fact: Fact) -> bool:
     return isinstance(fact, AggregateFact) and isinstance(fact.layout, ArrayLayout)
+
+
+def _contract_structure(
+    contract: "ScalarParameter | ArrayParameter | RecordParameter",
+) -> tuple[ValueLayout, list[SemType]]:
+    """A parameter contract's fact layout plus its leaf kinds in canonical order."""
+    match contract:
+        case ScalarParameter(kind=kind):
+            return None, [kind]
+        case ArrayParameter(shape=shape):
+            return ArrayLayout(shape, ArrayDType.FLOAT), [SemType.FLOAT] * leaf_count(
+                ArrayLayout(shape, ArrayDType.FLOAT)
+            )
+        case RecordParameter(klass=klass, fields=fields):
+            field_layouts: list[tuple[str, ValueLayout]] = []
+            kinds: list[SemType] = []
+            for name, sub in fields:
+                sub_layout, sub_kinds = _contract_structure(sub)
+                field_layouts.append((name, sub_layout))
+                kinds.extend(sub_kinds)
+            return RecordLayout(klass, tuple(field_layouts)), kinds
+    raise AssertionError(contract)
 
 
 def _transpose_routes(shape: tuple[int, ...]) -> tuple[int, ...]:

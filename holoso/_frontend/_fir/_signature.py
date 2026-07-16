@@ -30,7 +30,15 @@ class ArrayParameter:
     shape: tuple[int, ...]
 
 
-type ParameterContract = ScalarParameter | ArrayParameter
+@dataclass(frozen=True, slots=True, eq=False)
+class RecordParameter:
+    """A dataclass parameter, keyed by exact class identity, its fields carrying their own contracts."""
+
+    klass: type
+    fields: tuple[tuple[str, "ParameterContract"], ...]
+
+
+type ParameterContract = ScalarParameter | ArrayParameter | RecordParameter
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +71,17 @@ class ArrayReturn:
     shape: tuple[int, ...]
 
 
-type ReturnContract = VoidReturn | ScalarReturn | TupleReturn | VariadicTupleReturn | ListReturn | ArrayReturn
+@dataclass(frozen=True, slots=True, eq=False)
+class RecordReturn:
+    """A dataclass return, keyed by exact class identity, its fields carrying their own contracts."""
+
+    klass: type
+    fields: tuple[tuple[str, "ReturnContract"], ...]
+
+
+type ReturnContract = (
+    VoidReturn | ScalarReturn | TupleReturn | VariadicTupleReturn | ListReturn | ArrayReturn | RecordReturn
+)
 
 
 def is_array_annotation(annotation: object) -> bool:
@@ -110,13 +128,45 @@ def array_shape(annotation: object) -> tuple[int, ...]:
     return tuple(sizes)
 
 
-def parameter_contract(annotation: object) -> ParameterContract:
+def _record_field_annotations(klass: type) -> list[tuple[str, object]]:
+    """
+    Each dataclass field paired with its annotation, resolved through the deferred PEP 649 machinery (a raw
+    ``field.type`` may be a lazy string on Python 3.14+). The FORWARDREF format never raises on
+    TYPE_CHECKING-only names elsewhere in the class; an unresolved field annotation surfaces as a proxy the
+    contract parsers then reject by name.
+    """
+    import annotationlib
+    import dataclasses
+
+    try:
+        annotations = annotationlib.get_annotations(klass, format=annotationlib.Format.FORWARDREF)
+    except Exception as error:
+        raise ContractError(f"the annotations of record class {klass.__name__!r} fail to evaluate ({error})") from None
+    resolved: list[tuple[str, object]] = []
+    for field in dataclasses.fields(klass):
+        if field.name not in annotations:
+            raise ContractError(f"record field {klass.__name__}.{field.name} carries no resolvable annotation")
+        resolved.append((field.name, annotations[field.name]))
+    return resolved
+
+
+def parameter_contract(annotation: object, active: tuple[type, ...] = ()) -> ParameterContract:
+    import dataclasses
+
     kind = _SCALAR_KINDS.get(annotation)
     if kind is not None:
         return ScalarParameter(kind)
     if is_array_annotation(annotation):
         return ArrayParameter(array_shape(annotation))
-    raise ContractError("expected float, bool, int, or a fixed-shape jaxtyping array")
+    if isinstance(annotation, type) and dataclasses.is_dataclass(annotation):
+        if any(annotation is seen for seen in active):
+            raise ContractError(f"record class {annotation.__name__!r} recursively contains itself")
+        fields = tuple(
+            (name, parameter_contract(field_annotation, (*active, annotation)))
+            for name, field_annotation in _record_field_annotations(annotation)
+        )
+        return RecordParameter(annotation, fields)
+    raise ContractError("expected float, bool, int, a fixed-shape jaxtyping array, or a dataclass of them")
 
 
 def return_contract(hint: object) -> ReturnContract:
@@ -144,4 +194,27 @@ def return_contract(hint: object) -> ReturnContract:
         raise ContractError("a list return annotation must carry exactly one element type (e.g. list[float])")
     if is_array_annotation(hint):
         return ArrayReturn(array_shape(hint))
-    raise ContractError("expected float, bool, int, None, a tuple/list of them, or a fixed-shape jaxtyping array")
+    if isinstance(hint, type) and _is_record_annotation(hint):
+        return _record_return(hint, ())
+    raise ContractError(
+        "expected float, bool, int, None, a tuple/list of them, a fixed-shape jaxtyping array, or a dataclass"
+    )
+
+
+def _is_record_annotation(hint: object) -> bool:
+    import dataclasses
+
+    return isinstance(hint, type) and dataclasses.is_dataclass(hint)
+
+
+def _record_return(klass: type, active: tuple[type, ...]) -> "RecordReturn":
+    if any(klass is seen for seen in active):
+        raise ContractError(f"record class {klass.__name__!r} recursively contains itself")
+    fields: list[tuple[str, "ReturnContract"]] = []
+    for name, field_annotation in _record_field_annotations(klass):
+        if _is_record_annotation(field_annotation):
+            assert isinstance(field_annotation, type)
+            fields.append((name, _record_return(field_annotation, (*active, klass))))
+        else:
+            fields.append((name, return_contract(field_annotation)))
+    return RecordReturn(klass, tuple(fields))

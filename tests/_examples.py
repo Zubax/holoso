@@ -675,10 +675,7 @@ SPECS = [
 # This is the central registry of the front-end parity debt; every SPECS-driven suite skips the examples in it. Each
 # of stages 6-9 removes its own entries as the feature lands, and stage 10 asserts this map is empty. Greppable via
 # the FIR_PARITY_PENDING token.
-FIR_PARITY_PENDING: dict[str, str] = {
-    # Off-catalogue examples (no SPECS entry) whose synth targets and eventual suites key off these names too.
-    "finite_set_current_controller": "stage 9: record ports/returns, reductions, array comparison, Index[N] gather",
-}
+FIR_PARITY_PENDING: dict[str, str] = {}
 
 
 def parity_marks(name: str) -> tuple[pytest.MarkDecorator, ...]:

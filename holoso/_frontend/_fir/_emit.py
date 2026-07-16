@@ -101,6 +101,7 @@ from ._fact import (
 )
 from ._signature import (
     ArrayReturn,
+    RecordReturn,
     ListReturn,
     ReturnContract,
     ScalarReturn,
@@ -231,6 +232,18 @@ def _validate_return_layout(contract: ReturnContract, layout: "ValueLayout") -> 
         case ListReturn(item=item):
             for child in _positional_children(layout, ContainerFlavor.LIST, "list"):
                 _validate_return_layout(item, child)
+        case RecordReturn(klass=klass, fields=record_fields):
+            if not isinstance(layout, RecordLayout):
+                raise EmissionRejection(
+                    f"return type mismatch: declared record {klass.__name__!r}, returns a different value"
+                )
+            if layout.klass is not klass:
+                raise EmissionRejection(
+                    f"return type mismatch: declared record {klass.__name__!r}, returns {layout.klass.__name__!r}"
+                )
+            layout_fields = dict(layout.fields)
+            for field_name, field_contract in record_fields:
+                _validate_return_layout(field_contract, layout_fields[field_name])
         case ArrayReturn(shape=shape):
             # STRICT flavor: the annotation promises the caller an ndarray of that exact shape, and the model
             # reconstructs one; a list of matching geometry is an observable reflavoring, not RTL plumbing
@@ -280,6 +293,8 @@ def _contract_leaf_kind(contract: ReturnContract, path: LeafPath) -> SemType:
                 current = item
             case (ArrayReturn(), ArrayIndex()):
                 return SemType.FLOAT  # every array-annotation leaf is a float port
+            case (RecordReturn(fields=record_fields), RecordField(name=field_name)):
+                current = dict(record_fields)[field_name]
             case _:
                 raise AssertionError(f"contract walk diverged at {segment} under {current}")
     assert isinstance(current, ScalarReturn), current
@@ -328,11 +343,12 @@ class _Emitter:
         for parameter in parameters:
             entry_fact = entry_facts.get(Local(parameter))
             if isinstance(entry_fact, AggregateFact):
-                # A fixed-shape array parameter decomposes into one float input port per leaf, row-major, under
-                # the shared indexed-name convention (the same one decomposed state slots follow).
-                assert isinstance(entry_fact.layout, ArrayLayout)
-                for ordinal, cell in enumerate(indexed_names(parameter.name, entry_fact.layout.shape)):
-                    vid = self._builder.input(cell, FloatType())
+                # An array or record parameter decomposes into one input port per leaf under the shared
+                # path-name convention (array coordinates and record field names alike), each typed by its
+                # own leaf kind so a boolean record field gets a boolean port.
+                for ordinal, path in enumerate(leaf_paths(entry_fact.layout)):
+                    cell = parameter.name + "".join(f"_{key}" for key in _port_path(path))
+                    vid = self._builder.input(cell, self._fact_port_type(entry_fact.leaves[ordinal]))
                     self._write(unit.entry, _LeafPlace(Local(parameter), ordinal), vid)
             else:
                 vid = self._builder.input(parameter.name, self._fact_port_type(entry_fact))
