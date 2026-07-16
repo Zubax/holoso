@@ -14,7 +14,7 @@ following the established port ABI.
 """
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -71,7 +71,9 @@ from ..._hir import (
 from ._analyze import Analyzer, CallLowering, CallPlan, ResidualUnit
 from ._fact import (
     AggregateFact,
+    ArrayDType,
     ArrayIndex,
+    ArrayLayout,
     AtomicFact,
     ContainerFlavor,
     Fact,
@@ -636,13 +638,23 @@ class _Emitter:
         runtime integer promoted at a state boundary is float-carried while its fact still reads integer).
         """
         fact = self._fact(binding)
+        if isinstance(fact, AggregateFact) and isinstance(fact.layout, ArrayLayout) and fact.layout.shape == ():
+            # A 0-d array is scalar-shaped and numpy's own arithmetic on it yields the scalar sort, so its single
+            # leaf IS the value at every scalar operand position.
+            return self._materialize_atom(
+                fact.leaves[0], lambda: self._read(block, _LeafPlace(Local(binding), 0)), expected
+            )
         assert not isinstance(fact, AggregateFact), "an aggregate value reaches a scalar operand position"
+        return self._materialize_atom(fact, lambda: self._read(block, Local(binding)), expected)
+
+    def _materialize_atom(self, fact: Fact, read: Callable[[], int], expected: SemType | None) -> int:
+        """The scalar materializer over one atom: a binding's own cell or a single leaf cell of an aggregate."""
         if isinstance(fact, Known):
             if isinstance(fact.value, (MetaInt, NpInt)) and expected in (SemType.INT, None):
                 return self._builder.int_const(int(fact.value.value))
             vid = self._const(fact.value)
         else:
-            vid = self._read(block, Local(binding))
+            vid = read()
         if expected is None:
             return vid
         actual = self._sem_of(self._type_of(vid))
@@ -938,7 +950,10 @@ class _Emitter:
         if isinstance(result_fact, Known):
             return  # the analyzer folded it (a static fold, a sequence concat/repeat, a bool &/|/^ identity)
         if isinstance(result_fact, AggregateFact):
-            self._emit_concat(block, dst, bin_op, lhs, rhs, result_fact)  # the only aggregate PyBin the analyzer admits
+            if isinstance(result_fact.layout, ArrayLayout):
+                self._emit_elementwise(block, dst, bin_op, lhs, rhs, result_fact)
+            else:
+                self._emit_concat(block, dst, bin_op, lhs, rhs, result_fact)
             return
 
         def define(vid: int) -> None:
@@ -962,15 +977,51 @@ class _Emitter:
                     define(self._builder.operation(BoolXor(), [left, right]))
             return
         left, right = self._materialize(block, lhs, SemType.FLOAT), self._materialize(block, rhs, SemType.FLOAT)
+        define(self._emit_float_binary(bin_op, left, right))
+
+    def _emit_elementwise(
+        self, block: FirBlockId, dst: BindingId, bin_op: BinOp, lhs: BindingId, rhs: BindingId, result: AggregateFact
+    ) -> None:
+        """
+        Elementwise arithmetic over an array: one scalar operation per residual result leaf, each array-side
+        operand read from its aligned leaf cell and a scalar side materialized once and broadcast. Known result
+        leaves (folded pairs) emit nothing, exactly like a folded scalar; Known operand leaves under a residual
+        result materialize as constants of the result kind. A residual integer result never reaches here (the
+        analyzer rejects it: the scalar integer datapath saturates where numpy wraps).
+        """
+        assert isinstance(result.layout, ArrayLayout) and result.layout.dtype is not ArrayDType.BOOL
+        lhs_fact, rhs_fact = self._fact(lhs), self._fact(rhs)
+        broadcast: dict[BindingId, int] = {}
+
+        def operand(binding: BindingId, fact: Fact, ordinal: int) -> int:
+            if isinstance(fact, AggregateFact):
+                return self._materialize_atom(
+                    fact.leaves[ordinal],
+                    lambda: self._read(block, _LeafPlace(Local(binding), ordinal)),
+                    SemType.FLOAT,
+                )
+            if binding not in broadcast:
+                broadcast[binding] = self._materialize(block, binding, SemType.FLOAT)
+            return broadcast[binding]
+
+        for ordinal, leaf in enumerate(result.leaves):
+            if not isinstance(leaf, Residual):
+                continue
+            assert result.layout.dtype is ArrayDType.FLOAT64, "a runtime integer array op escaped analysis"
+            left = operand(lhs, lhs_fact, ordinal)
+            right = operand(rhs, rhs_fact, ordinal)
+            self._write(block, _LeafPlace(Local(dst), ordinal), self._emit_float_binary(bin_op, left, right))
+
+    def _emit_float_binary(self, bin_op: BinOp, left: int, right: int) -> int:
         match bin_op:
             case BinOp.ADD:
-                define(self._builder.operation(FloatAdd(), [left, right]))
+                return self._builder.operation(FloatAdd(), [left, right])
             case BinOp.SUB:
-                define(self._builder.operation(FloatAdd(), [left, self._builder.operation(FloatNeg(), [right])]))
+                return self._builder.operation(FloatAdd(), [left, self._builder.operation(FloatNeg(), [right])])
             case BinOp.MUL:
-                define(self._builder.operation(FloatMul(), [left, right]))
+                return self._builder.operation(FloatMul(), [left, right])
             case BinOp.DIV:
-                define(self._builder.operation(FloatDiv(), [left, right]))
+                return self._builder.operation(FloatDiv(), [left, right])
             case _:
                 raise EmissionRejection(f"operator {bin_op.value} is not lowerable yet")
 
@@ -1084,6 +1135,23 @@ class _Emitter:
         result_fact = self._fact(dst)
         if isinstance(result_fact, Known):
             return  # folded by the analyzer; materializes at its use sites
+        if isinstance(result_fact, AggregateFact):
+            assert isinstance(result_fact.layout, ArrayLayout), "only an array admits elementwise unary arithmetic"
+            operand_fact = self._fact(operand)
+            assert isinstance(operand_fact, AggregateFact)
+            for ordinal, leaf in enumerate(result_fact.leaves):
+                if not isinstance(leaf, Residual):
+                    continue
+                assert result_fact.layout.dtype is ArrayDType.FLOAT64, "a runtime integer array op escaped analysis"
+                source = self._materialize_atom(
+                    operand_fact.leaves[ordinal],
+                    lambda: self._read(block, _LeafPlace(Local(operand), ordinal)),
+                    SemType.FLOAT,
+                )
+                if un_op is not UnOp.POS:
+                    source = self._builder.operation(FloatNeg(), [source])
+                self._write(block, _LeafPlace(Local(dst), ordinal), source)
+            return
         if result_fact == Residual(SemType.INT):  # runtime integer negation stays in the integer datapath
             source = self._materialize(block, operand, SemType.INT)
             result = source if un_op is UnOp.POS else self._builder.operation(IntNeg(), [source])

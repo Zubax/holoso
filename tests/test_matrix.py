@@ -281,13 +281,14 @@ def test_elementwise_arithmetic_and_broadcast() -> None:
         lower(structure_mismatch)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime aggregate (list) arithmetic — stage 9")
-def test_python_list_arithmetic_is_rejected() -> None:
-    # A Python list/tuple is never given numpy semantics: list ``+``/``*`` mean concatenation/repetition (not the
-    # intended elementwise math) and list ``-`` is a TypeError, so arithmetic on a bare list/tuple is rejected rather
-    # than silently reinterpreted. The idiomatic fix is np.array([...]).
+def test_python_list_arithmetic_keeps_python_semantics() -> None:
+    # A Python list/tuple is never given numpy semantics: list ``+`` means concatenation (implemented structurally,
+    # exactly as Python evaluates it), while list ``-`` is a TypeError in Python and list ``*`` by a float count is
+    # too, so both are rejected rather than silently reinterpreted. The idiomatic elementwise fix is np.array([...]).
     def list_add(a: float, b: float, c: float, d: float) -> float:
-        return ([a, b] + [c, d])[0]  # a valid Python list concatenation; Holoso rejects it as list arithmetic
+        return ([a, b] + [c, d])[0]  # a valid Python list concatenation, folded structurally
+
+    _assert_python_matches_holoso(list_add, 1.5, -2.0, 0.25, 3.0)
 
     def list_sub(a: float, b: float, c: float, d: float) -> float:
         return ([a, b] - [c, d])[0]  # type: ignore[operator, no-any-return]
@@ -295,8 +296,8 @@ def test_python_list_arithmetic_is_rejected() -> None:
     def list_scale(a: float, b: float, s: float) -> float:
         return ([a, b] * s)[0]  # type: ignore[operator]
 
-    for kernel in (list_add, list_sub, list_scale):
-        with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
+    for kernel in (list_sub, list_scale):
+        with pytest.raises(UnsupportedConstruct, match="aggregate value"):
             lower(kernel)
 
 
@@ -930,11 +931,196 @@ def _np_matrix() -> np.ndarray:
 
 
 _BOOL_CONST = np.array([True, False])
+_ZERO_D_CONST = np.array(5.0)
+_EMPTY_CONST = np.array([])
 _CUBE_CONST = np.zeros((2, 2, 2))
 _MATRIX_CONST = _np_matrix()
 _GATE_CONST = np.array([0.0, 1.0])
 _GATE_CONST2 = np.array([[0.0, 1.0], [1.0, 0.0]])
 _INDEX_CONST = np.array([2, 0, 1])
+
+
+# ---------------------------------------------------------------- elementwise arithmetic (stage 9a-1)
+# Array parameters await stage 9b, so these kernels source their arrays from module constants and derive
+# runtime-leaf arrays by chaining an elementwise op onto a runtime scalar.
+
+
+def test_module_constant_elementwise_matches_numpy() -> None:
+    def scaled(s: float) -> tuple[float, float, float]:
+        v = COEFFS * s
+        return v[0], v[1], v[2]
+
+    def reflected(s: float) -> tuple[float, float, float]:
+        v = s - COEFFS
+        return v[0], v[1], v[2]
+
+    def chained(s: float, t: float) -> tuple[float, float, float]:
+        v = (COEFFS * s) * t  # the left operand carries runtime leaves, not a constant snapshot
+        return v[0], v[1], v[2]
+
+    def paired(s: float, t: float) -> tuple[float, float, float]:
+        v = (COEFFS * s) + (COEFFS - t)  # array x array with runtime leaves on both sides
+        return v[0], v[1], v[2]
+
+    def divided(s: float) -> tuple[float, float, float, float, float, float]:
+        v = COEFFS / s
+        w = s / COEFFS
+        return v[0], v[1], v[2], w[0], w[1], w[2]
+
+    def matrix(s: float) -> tuple[float, float, float, float]:
+        m = GAIN * s
+        return m[0][0], m[0][1], m[1][0], m[1][1]
+
+    _assert_python_matches_holoso(scaled, 2.5)
+    _assert_python_matches_holoso(reflected, -1.25)
+    _assert_python_matches_holoso(chained, 2.0, -0.5)
+    _assert_python_matches_holoso(paired, 3.0, 0.75)
+    _assert_python_matches_holoso(divided, 4.0)
+    _assert_python_matches_holoso(matrix, -2.0)
+
+
+def test_elementwise_known_operands_fold_statically() -> None:
+    # A fully static elementwise result folds leafwise, so it drives branches exactly like a module constant:
+    # the guarded write below is statically dead and must not become a spurious state slot.
+    @dataclasses.dataclass
+    class Gated:
+        y: float
+
+        def step(self, a: float) -> float:
+            if (COEFFS * 2.0)[1] > 0.0:  # (-1.0) * 2.0: statically false
+                self.y = a  # statically dead
+            return a
+
+    hir = lower(Gated(0.0).step)
+    assert [s.name for s in hir.state_slots] == []
+    assert [o.name for o in hir.outputs] == ["out_0"]
+
+
+def test_integer_elementwise_folds_and_promotes() -> None:
+    # Runtime integer products await the integer sprint (no integer hardware yet), so the runtime-leaf coverage
+    # here is the promoting form: / yields float even on all-integer operands, as in Python and numpy.
+    def scaled_by_known(s: float) -> float:
+        v = INT_TAPS * 2  # all-Known integer leaves fold leafwise, exactly as numpy computes them
+        return s + float(v[2])
+
+    _assert_python_matches_holoso(scaled_by_known, 7.0)
+
+    def true_division(s: float) -> tuple[float, float, float]:
+        v = INT_TAPS / int(s)
+        return v[0], v[1], v[2]
+
+    ops = dataclasses.replace(default_ops(_FMT), fround=holoso.FRoundOperator(_FMT))
+    sim = holoso.synthesize(true_division, ops, name="kernel").numerical_model.elaborate()
+    got = np.array([float(v) for v in sim.run(8.0)])
+    assert np.allclose(got, np.asarray(true_division(8.0)), rtol=1e-12, atol=1e-300)
+
+
+def test_elementwise_unary_matches_numpy() -> None:
+    def negated(s: float) -> tuple[float, float, float]:
+        v = -(COEFFS * s)
+        return v[0], v[1], v[2]
+
+    def positive(s: float) -> tuple[float, float, float]:
+        v = +(COEFFS * s)
+        return v[0], v[1], v[2]
+
+    _assert_python_matches_holoso(negated, 1.5)
+    _assert_python_matches_holoso(positive, -0.25)
+
+
+def test_zero_dimensional_operands_yield_the_scalar_sort() -> None:
+    # numpy arithmetic on a 0-d array returns np.float64/np.int64 (the scalar sort, unary included), never a 0-d
+    # array; the float() below is the observable -- it lowers only if the result is a genuine scalar fact.
+    def scaled(s: float) -> float:
+        return float(_ZERO_D_CONST * s)
+
+    def negated(s: float) -> float:
+        return s + float(-_ZERO_D_CONST)
+
+    def paired(s: float) -> float:
+        return float(_ZERO_D_CONST + _ZERO_D_CONST) * s
+
+    _assert_python_matches_holoso(scaled, 2.5)
+    _assert_python_matches_holoso(negated, -1.0)
+    _assert_python_matches_holoso(paired, 0.5)
+
+
+def test_elementwise_rejections_are_located() -> None:
+    def mismatched(s: float) -> float:
+        v = COEFFS + _GATE_CONST  # (3,) + (2,)
+        return v[0] * s  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="mismatched shapes"):
+        lower(mismatched)
+
+    def mixed_rank(s: float) -> float:
+        v = GAIN + _GATE_CONST  # (2, 2) + (2,): numpy would broadcast; only a scalar broadcasts here
+        return v[0][0] * s  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="mismatched shapes"):
+        lower(mixed_rank)
+
+    def augmented(s: float) -> float:
+        v = COEFFS
+        v = v * s
+        v *= s
+        return v[0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="rebind"):
+        lower(augmented)
+
+    def modulo(s: float) -> float:
+        v = COEFFS % s
+        return v[0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="'%'"):
+        lower(modulo)
+
+    def power(s: float) -> float:
+        v = COEFFS**s
+        return v[0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match=r"'\*\*'"):
+        lower(power)
+
+    def product(s: float) -> float:
+        v = COEFFS @ COEFFS
+        return v * s  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="matrix product"):
+        lower(product)
+
+    def flag_scalar(s: float) -> float:
+        # Boolean ARRAY operands cannot exist yet (bool ndarrays are outside the admitted domain until the
+        # np.array factory lands), so the reachable boolean-rejection corner is the scalar side.
+        v = COEFFS * (s > 0.0)
+        return v[0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="explicit conversion"):
+        lower(flag_scalar)
+
+    def runtime_integer(s: float) -> float:
+        v = INT_TAPS * int(s)  # the scalar integer datapath saturates where numpy int64 wraps
+        return float(v[0])
+
+    with pytest.raises(UnsupportedConstruct, match="cast to float"):
+        lower(runtime_integer)
+
+    def oversized_int_constant(s: float) -> float:
+        v = (COEFFS * s) + 10**400  # numpy raises OverflowError converting the constant, before any element
+        return v[0]  # type: ignore[no-any-return]
+
+    def oversized_on_empty(s: float) -> float:
+        v = _EMPTY_CONST + 10**400  # the conversion is array-wide: numpy raises even with zero elements
+        return s + float(len(v))
+
+    def oversized_for_int64(s: float) -> float:
+        v = INT_TAPS + 2**63  # numpy: "Python int too large to convert to C long"
+        return s + float(v[0])
+
+    for kernel in (oversized_int_constant, oversized_on_empty, oversized_for_int64):
+        with pytest.raises(UnsupportedConstruct, match="OverflowError"):
+            lower(kernel)
 
 
 # ---------------------------------------------------------------- behavior (model vs numpy)

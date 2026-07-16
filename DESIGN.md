@@ -363,9 +363,23 @@ exactly; runtime bounds and slices of arrays/structural joins stay located rejec
 targets desugar to integer projections plus a list()-converted window with the arity check relaxed to at-least;
 call arguments unpack (f(*t)) by flattening the starred container's children into ordinary arguments through
 synthesized projections before any dispatch (static arity required; **kwargs stays rejected).
+Elementwise array arithmetic is live: binary `+ - * /` and unary `+`/`-` over an array pair up leaves in
+canonical order and take the SCALAR fold rule per pair (a fully static pair folds through the numpy-kinded leaf
+values, so element-wise numpy semantics -- promotion, 64-bit wraparound, errstate deferrals -- hold per leaf by
+construction; residual pairs lower to one scalar operation per leaf with a broadcast scalar materialized once).
+The other operand is a same-shape array or a numeric scalar; general broadcasting, mixed array/list operands,
+other operators (`@` awaits the matmul stage), boolean operands, and in-place forms (`v *= s` -- numpy mutates
+through aliases where the subset rebinds) are located rejections. `/` yields float and any float side promotes
+the result dtype, as in Python and numpy. Three guards mirror numpy's ARRAY-WIDE behavior rather than any
+single element's: a Python-int constant outside the result dtype's range is a located rejection exactly where
+numpy raises OverflowError (an empty array included -- the conversion precedes element iteration); 0-d operands
+yield the SCALAR sort (numpy returns `np.float64`/`np.int64`, never a 0-d array, unary included), and a 0-d
+array in any scalar operand position materializes as its single leaf; a runtime-INTEGER result rejects until
+the integer sprint, because the scalar integer datapath saturates where numpy int64 wraps -- all-static integer
+folds are exact and stay admitted.
 What remains deferred is the rest of the
 BOUNDARY surface -- aggregate parameter ports, aggregate persistent state, runtime-element iteration,
-and the array/record/reduction/gather semantics below -- and every disabled
+and the array-factory/record/reduction/gather semantics below -- and every disabled
 test carries
 the greppable marker. The contract the remaining stages restore (and extend with records, reductions, and the
 bounded gather):

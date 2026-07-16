@@ -65,6 +65,7 @@ from ._ir import (
 )
 from ._fact import (
     AggregateFact,
+    ArrayDType,
     ArrayLayout,
     AtomicFact,
     BoundFact,
@@ -82,6 +83,7 @@ from ._fact import (
     Unbound,
     aggregate_of,
     join_layouts,
+    leaf_count,
     materialize_static,
     normalize_static,
     outer_arity,
@@ -99,7 +101,7 @@ from ._fold import (
     range_size,
     validate_classinfo,
 )
-from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
+from ._opsem import BinOp, UnOp, static_binop, static_compare, static_truth, static_unop
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
 from ._value import (
     MetaInt,
@@ -132,6 +134,7 @@ _MAX_BLOCKS = 200_000
 _MAX_VISITS = 1_000_000
 
 _BITWISE_OPS = frozenset({BinOp.LSHIFT, BinOp.RSHIFT, BinOp.BITAND, BinOp.BITOR, BinOp.BITXOR})
+_ELEMENTWISE_OPS = frozenset({BinOp.ADD, BinOp.SUB, BinOp.MUL, BinOp.DIV})
 
 
 class AnalysisRejection(UnsupportedConstruct):
@@ -707,16 +710,27 @@ class Analyzer:
                 env.set(place, _UNBOUND)
             case PyBin(dst=dst, op=bin_op, lhs=lhs, rhs=rhs):
                 lhs_fact, rhs_fact = env.get(Local(lhs)), env.get(Local(rhs))
-                if bin_op is BinOp.MATMUL and _seq_side(lhs_fact) is None and _seq_side(rhs_fact) is None:
+                if (
+                    bin_op is BinOp.MATMUL
+                    and not isinstance(lhs_fact, AggregateFact)
+                    and not isinstance(rhs_fact, AggregateFact)
+                ):
                     raise AnalysisRejection("@ is not defined for scalars", op.origin)
                 if op.inplace and _is_list_fact(lhs_fact):
                     raise AnalysisRejection(
                         "in-place list mutation is not supported (aliases would observe it); rebind instead",
                         op.origin,
                     )
+                if op.inplace and _is_array_fact(lhs_fact):
+                    raise AnalysisRejection(
+                        "in-place array mutation is not supported (aliases would observe it); rebind instead",
+                        op.origin,
+                    )
                 concat = _concat_seqs(bin_op, lhs_fact, rhs_fact)
                 if concat is not None:
                     env.set(Local(dst), concat)
+                elif _is_array_fact(lhs_fact) or _is_array_fact(rhs_fact):
+                    env.set(Local(dst), self._elementwise_binary(bin_op, lhs_fact, rhs_fact, op.origin))
                 elif isinstance(lhs_fact, AggregateFact) or isinstance(rhs_fact, AggregateFact):
                     raise AnalysisRejection("arithmetic on an aggregate value", op.origin)
                 elif bin_op in _BITWISE_OPS:
@@ -748,7 +762,9 @@ class Analyzer:
                     isinstance(operand_fact, Residual) and operand_fact.type is SemType.BOOL
                 ):
                     raise AnalysisRejection("arithmetic on a bool requires an explicit conversion", op.origin)
-                if isinstance(operand_fact, Known):
+                if isinstance(operand_fact, AggregateFact) and isinstance(operand_fact.layout, ArrayLayout):
+                    env.set(Local(dst), self._elementwise_unary(un_op, operand_fact, op.origin))
+                elif isinstance(operand_fact, Known):
                     folded = static_unop(un_op, operand_fact.value)
                     env.set(
                         Local(dst),
@@ -928,6 +944,121 @@ class Analyzer:
         if promotes_to_float or SemType.FLOAT in operand_types:
             return Residual(SemType.FLOAT)
         return Residual(SemType.INT)
+
+    def _elementwise_binary(self, bin_op: BinOp, lhs: Fact, rhs: Fact, origin: OriginStack) -> Fact:
+        """
+        Elementwise ``+ - * /`` with at least one array operand: the other side is a same-shape array (leaves pair
+        in canonical order) or a numeric scalar (broadcast). Each leaf pair takes the SCALAR fold rule, so a fully
+        static pair folds through ``static_binop`` on the domain's own numpy-kinded leaf values -- element-wise
+        numpy semantics (promotion, wraparound, errstate deferrals) hold per leaf by construction, and general
+        broadcasting stays a located rejection rather than a silent alignment. Divergence guards mirror what numpy
+        applies ARRAY-WIDE before touching any element (an empty array included): an out-of-range Python-int
+        constant is a located rejection where numpy raises OverflowError, and 0-d operands yield the SCALAR sort
+        (numpy returns np.float64/np.int64, never a 0-d array). A runtime-integer result rejects until the integer
+        sprint: the scalar integer datapath saturates where numpy wraps, so lowering it would diverge leafwise.
+        """
+        if bin_op is BinOp.MATMUL:
+            raise AnalysisRejection("the matrix product is not lowerable yet", origin)
+        if bin_op not in _ELEMENTWISE_OPS:
+            raise AnalysisRejection(f"operator {bin_op.value!r} is not supported on arrays", origin)
+        for side in (lhs, rhs):
+            if isinstance(side, AggregateFact) and not isinstance(side.layout, ArrayLayout):
+                raise AnalysisRejection(
+                    "elementwise arithmetic mixes an array with a non-array container; wrap it in np.array(...)",
+                    origin,
+                )
+        lhs_sem = self._elementwise_side_sem(lhs, origin)
+        rhs_sem = self._elementwise_side_sem(rhs, origin)
+        if SemType.BOOL in (lhs_sem, rhs_sem):
+            raise AnalysisRejection("arithmetic on a bool requires an explicit conversion", origin)
+        arrays = [side for side in (lhs, rhs) if isinstance(side, AggregateFact)]
+        shapes = [side.layout.shape for side in arrays if isinstance(side.layout, ArrayLayout)]
+        if len(set(shapes)) > 1:
+            raise AnalysisRejection(
+                f"elementwise arithmetic on mismatched shapes {shapes[0]} and {shapes[1]} "
+                "(only a scalar broadcasts)",
+                origin,
+            )
+        promotes = bin_op is BinOp.DIV
+        result_sem = SemType.FLOAT if promotes or SemType.FLOAT in (lhs_sem, rhs_sem) else SemType.INT
+        for side in (lhs, rhs):
+            if isinstance(side, Known) and isinstance(side.value, MetaInt):
+                constant = side.value.value
+                if result_sem is SemType.INT and not -(2**63) <= constant < 2**63:
+                    raise AnalysisRejection(
+                        "an integer constant beyond the signed 64-bit range does not combine with an integer "
+                        "array (numpy raises OverflowError)",
+                        origin,
+                    )
+                if result_sem is SemType.FLOAT and not _fits_float64(constant):
+                    raise AnalysisRejection(
+                        "an integer constant too large for float64 does not combine with an array "
+                        "(numpy raises OverflowError)",
+                        origin,
+                    )
+        if result_sem is SemType.INT and (
+            any(isinstance(side, Residual) for side in (lhs, rhs))
+            or any(isinstance(leaf, Residual) for array in arrays for leaf in array.leaves)
+        ):
+            # The scalar integer datapath saturates (contained at MIR) where numpy int64 wraps; lowering a
+            # runtime-integer array op leafwise onto it would silently diverge the moment integers lower.
+            raise AnalysisRejection(
+                "runtime integer array arithmetic is not lowerable yet; cast to float first", origin
+            )
+
+        def pair(ordinal: int) -> Fact:
+            left = lhs.leaves[ordinal] if isinstance(lhs, AggregateFact) else lhs
+            right = rhs.leaves[ordinal] if isinstance(rhs, AggregateFact) else rhs
+            return self._fold_binary(
+                lambda a, b: static_binop(bin_op, a, b), left, right, origin, promotes_to_float=promotes
+            )
+
+        if shapes[0] == ():
+            return pair(0)  # numpy: 0-d operands yield the scalar sort, never a 0-d array
+        dtype = ArrayDType.FLOAT64 if result_sem is SemType.FLOAT else ArrayDType.INT64
+        leaves: list[AtomicFact] = []
+        for ordinal in range(leaf_count(arrays[0].layout)):
+            leaf = pair(ordinal)
+            assert isinstance(leaf, (Known, Residual)), leaf
+            assert (leaf == Residual(result_sem)) or (
+                isinstance(leaf, Known) and _residual_type(leaf.value) is result_sem
+            ), "an elementwise leaf diverged from the result dtype"
+            leaves.append(leaf)
+        return AggregateFact(ArrayLayout(shapes[0], dtype), tuple(leaves))
+
+    def _elementwise_unary(self, un_op: UnOp, operand: AggregateFact, origin: OriginStack) -> Fact:
+        assert isinstance(operand.layout, ArrayLayout)
+        if operand.layout.dtype is ArrayDType.BOOL:
+            # numpy itself refuses unary +/- on a boolean array (TypeError pointing at ~/logical ops).
+            raise AnalysisRejection("arithmetic on a bool requires an explicit conversion", origin)
+        if operand.layout.dtype is ArrayDType.INT64 and any(isinstance(leaf, Residual) for leaf in operand.leaves):
+            raise AnalysisRejection(
+                "runtime integer array arithmetic is not lowerable yet; cast to float first", origin
+            )
+        leaves: list[AtomicFact] = []
+        for leaf in operand.leaves:
+            folded = static_unop(un_op, leaf.value) if isinstance(leaf, Known) else None
+            if folded is not None:
+                leaves.append(Known(folded))
+            else:
+                residual = self._residual_of(leaf, origin)
+                assert isinstance(residual, Residual), residual
+                leaves.append(residual)
+        if operand.layout.shape == ():
+            return leaves[0]  # numpy: unary +/- on a 0-d array also yields the scalar sort
+        return AggregateFact(operand.layout, tuple(leaves))
+
+    def _elementwise_side_sem(self, side: Fact, origin: OriginStack) -> SemType:
+        if isinstance(side, AggregateFact):
+            assert isinstance(side.layout, ArrayLayout)
+            match side.layout.dtype:
+                case ArrayDType.BOOL:
+                    return SemType.BOOL
+                case ArrayDType.INT64:
+                    return SemType.INT
+                case ArrayDType.FLOAT64:
+                    return SemType.FLOAT
+        return self._operand_type(side, origin)
 
     def _fold_bitwise(self, bin_op: BinOp, lhs: Fact, rhs: Fact, origin: OriginStack) -> Fact:
         # Bit-true operators. ``&``/``|``/``^`` on two booleans is a boolean (logical) result; every other admitted form
@@ -2009,6 +2140,18 @@ def _seq_side(fact: Fact) -> AggregateFact | None:
 
 def _is_list_fact(fact: Fact) -> bool:
     return isinstance(fact, AggregateFact) and isinstance(fact.layout, ListLayout)
+
+
+def _is_array_fact(fact: Fact) -> bool:
+    return isinstance(fact, AggregateFact) and isinstance(fact.layout, ArrayLayout)
+
+
+def _fits_float64(value: int) -> bool:
+    try:
+        float(value)
+    except OverflowError:
+        return False
+    return True
 
 
 def _mro_attribute_of(klass: type, name: str) -> object | None:
