@@ -107,15 +107,15 @@ def test_flavor_mixed_join_degrades_to_structural_and_keeps_arity() -> None:
 
 
 def test_array_joins_promote_dtype_and_reject_shape_or_bool_mixes() -> None:
-    ints = ArrayLayout((2,), ArrayDType.INT64)
-    floats = ArrayLayout((2,), ArrayDType.FLOAT64)
+    ints = ArrayLayout((2,), ArrayDType.INT)
+    floats = ArrayLayout((2,), ArrayDType.FLOAT)
     bools = ArrayLayout((2,), ArrayDType.BOOL)
     assert join_layouts(ints, floats) == floats
     assert join_layouts(bools, bools) == bools
     with pytest.raises(LayoutMismatch, match="boolean"):
         join_layouts(bools, floats)
     with pytest.raises(LayoutMismatch, match="shapes"):
-        join_layouts(floats, ArrayLayout((3,), ArrayDType.FLOAT64))
+        join_layouts(floats, ArrayLayout((3,), ArrayDType.FLOAT))
     vector_join = join_layouts(floats, TupleLayout((None, None)))
     assert isinstance(vector_join, StructuralLayout) and ContainerFlavor.ARRAY in vector_join.flavors
 

@@ -8,7 +8,7 @@ every admission boundary and reconstructs concretely only when every leaf is Kno
 
 A CFG join of two aggregates first reconciles the LAYOUTS (identical flavors recurse; a tuple arm meeting a list
 arm of the same arity degrades to a StructuralLayout carrying the flavor set, keeping only flavor-independent
-behavior; ndarray dtypes promote int64 -> float64 leafwise), then joins the leaves positionally under the one
+behavior; ndarray dtypes promote int -> float leafwise), then joins the leaves positionally under the one
 result layout. Persistent state deliberately does NOT use this relation: a slot's reset container flavor and
 geometry are load-bearing (the next transaction reconstructs that Python object), so state stores demand identical
 layout instead of a structural degrade.
@@ -44,8 +44,8 @@ class LayoutMismatch(ValueError):
 
 class ArrayDType(enum.Enum):
     BOOL = enum.auto()
-    INT64 = enum.auto()
-    FLOAT64 = enum.auto()
+    INT = enum.auto()
+    FLOAT = enum.auto()
 
 
 class ContainerFlavor(enum.Enum):
@@ -277,9 +277,9 @@ def _array_dtype(array: np.ndarray) -> ArrayDType:
     if array.dtype == np.bool_:
         return ArrayDType.BOOL
     if np.issubdtype(array.dtype, np.integer):
-        return ArrayDType.INT64
+        return ArrayDType.INT
     assert np.issubdtype(array.dtype, np.floating)
-    return ArrayDType.FLOAT64
+    return ArrayDType.FLOAT
 
 
 def normalize_static(value: StaticValue) -> BoundFact:
@@ -338,10 +338,10 @@ def numpy_kinded(leaf: Known, dtype: ArrayDType) -> Known:
     """
     concrete = _concrete_scalar(leaf)
     match dtype:
-        case ArrayDType.FLOAT64:
+        case ArrayDType.FLOAT:
             assert not isinstance(concrete, bool)
             converted: object = np.float64(concrete)  # type: ignore[arg-type]
-        case ArrayDType.INT64:
+        case ArrayDType.INT:
             assert isinstance(concrete, (int, np.integer)) and not isinstance(concrete, bool)
             converted = np.int64(concrete)
         case ArrayDType.BOOL:
@@ -378,8 +378,8 @@ def materialize_static(fact: BoundFact) -> StaticValue | None:
                 case ArrayLayout(shape=shape, dtype=dtype):
                     numpy_dtype = {
                         ArrayDType.BOOL: np.bool_,
-                        ArrayDType.INT64: np.int64,
-                        ArrayDType.FLOAT64: np.float64,
+                        ArrayDType.INT: np.int64,
+                        ArrayDType.FLOAT: np.float64,
                     }[dtype]
                     values = [_concrete_scalar(leaf) for leaf in leaves]
                     array: np.ndarray = np.array(values, dtype=numpy_dtype).reshape(shape)
@@ -427,7 +427,7 @@ def join_layouts(a: ValueLayout, b: ValueLayout) -> ValueLayout:
                 raise LayoutMismatch(f"arrays of shapes {sa} and {sb} merge here")
             if ArrayDType.BOOL in (da, db):
                 raise LayoutMismatch("a boolean array merges with a numeric array here")
-            return ArrayLayout(sa, ArrayDType.FLOAT64 if da is not db else da)
+            return ArrayLayout(sa, ArrayDType.FLOAT if da is not db else da)
         case (RecordLayout() as ra, RecordLayout() as rb):
             if ra.klass is not rb.klass:
                 raise LayoutMismatch(

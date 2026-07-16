@@ -1017,7 +1017,7 @@ class Analyzer:
 
         if shapes[0] == ():
             return pair(0)  # numpy: 0-d operands yield the scalar sort, never a 0-d array
-        dtype = ArrayDType.FLOAT64 if result_sem is SemType.FLOAT else ArrayDType.INT64
+        dtype = ArrayDType.FLOAT if result_sem is SemType.FLOAT else ArrayDType.INT
         leaves: list[AtomicFact] = []
         for ordinal in range(leaf_count(arrays[0].layout)):
             leaf = pair(ordinal)
@@ -1033,7 +1033,7 @@ class Analyzer:
         if operand.layout.dtype is ArrayDType.BOOL:
             # numpy itself refuses unary +/- on a boolean array (TypeError pointing at ~/logical ops).
             raise AnalysisRejection("arithmetic on a bool requires an explicit conversion", origin)
-        if operand.layout.dtype is ArrayDType.INT64 and any(isinstance(leaf, Residual) for leaf in operand.leaves):
+        if operand.layout.dtype is ArrayDType.INT and any(isinstance(leaf, Residual) for leaf in operand.leaves):
             raise AnalysisRejection(
                 "runtime integer array arithmetic is not lowerable yet; cast to float first", origin
             )
@@ -1070,7 +1070,7 @@ class Analyzer:
             assert not isinstance(leaf, Reference), "a reference leaf survived the admission walk"
             sems.add(leaf.type if isinstance(leaf, Residual) else _residual_type(leaf.value))
         sems |= {
-            {ArrayDType.BOOL: SemType.BOOL, ArrayDType.INT64: SemType.INT, ArrayDType.FLOAT64: SemType.FLOAT}[dtype]
+            {ArrayDType.BOOL: SemType.BOOL, ArrayDType.INT: SemType.INT, ArrayDType.FLOAT: SemType.FLOAT}[dtype]
             for dtype in _layout_dtypes(source.layout)
         }
         if None in sems:  # a string or range leaf: numpy would build a string/object array, outside the domain
@@ -1092,10 +1092,10 @@ class Analyzer:
         if sems == {SemType.BOOL}:
             dtype = ArrayDType.BOOL
         elif SemType.FLOAT in sems:
-            dtype = ArrayDType.FLOAT64
+            dtype = ArrayDType.FLOAT
         else:
-            dtype = ArrayDType.INT64
-        if dtype is ArrayDType.INT64:
+            dtype = ArrayDType.INT
+        if dtype is ArrayDType.INT:
             # Only residual integers can reach here (a fully static argument took the concrete fold), and the
             # scalar integer datapath saturates where numpy int64 wraps.
             raise AnalysisRejection(
@@ -1107,7 +1107,7 @@ class Analyzer:
                 leaves.append(numpy_kinded(leaf, dtype))
             else:
                 assert isinstance(leaf, Residual)
-                leaves.append(Residual(SemType.FLOAT) if dtype is ArrayDType.FLOAT64 else leaf)
+                leaves.append(Residual(SemType.FLOAT) if dtype is ArrayDType.FLOAT else leaf)
         return AggregateFact(ArrayLayout(shape, dtype), tuple(leaves))
 
     def _elementwise_side_sem(self, side: Fact, origin: OriginStack) -> SemType:
@@ -1116,9 +1116,9 @@ class Analyzer:
             match side.layout.dtype:
                 case ArrayDType.BOOL:
                     return SemType.BOOL
-                case ArrayDType.INT64:
+                case ArrayDType.INT:
                     return SemType.INT
-                case ArrayDType.FLOAT64:
+                case ArrayDType.FLOAT:
                     return SemType.FLOAT
         return self._operand_type(side, origin)
 

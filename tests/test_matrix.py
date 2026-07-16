@@ -1223,6 +1223,61 @@ def test_runtime_array_shape_metadata_folds_statically() -> None:
     assert [o.name for o in hir.outputs] == ["out_0"]
 
 
+# ---------------------------------------------------------------- numeric width collapse
+
+
+def test_narrow_numpy_widths_collapse_to_category_carriers() -> None:
+    # Width is immaterial to the domain: narrow scalars/arrays admit by exact embedding into bool/int64/float64.
+    # The float32 values below are exactly representable, so plain-Python numpy execution agrees bit-for-bit.
+    def f32_array(s: float) -> tuple[float, float, float]:
+        v = _F32_GAINS * s
+        return v[0], v[1], v[2]
+
+    def i16_fold(s: float) -> float:
+        v = _I16_TAPS * 2  # all-Known integer leaves fold exactly through the int64 carrier
+        return s + float(v[1])
+
+    def u64_small(s: float) -> float:
+        return s + float(_U64_SMALL[0])
+
+    def narrow_scalars(s: float) -> float:
+        return float(s * _F32_SCALAR + _I8_SCALAR)
+
+    _assert_python_matches_holoso(f32_array, 2.5)
+    _assert_python_matches_holoso(i16_fold, 7.0)
+    _assert_python_matches_holoso(u64_small, 1.0)
+    _assert_python_matches_holoso(narrow_scalars, -0.5)
+
+    def bool_const_array(s: float) -> float:
+        v = _BOOL_CONST * s  # a bool ndarray constant now admits, and its arithmetic keeps the scalar doctrine
+        return v[0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="explicit conversion"):
+        lower(bool_const_array)
+
+
+def test_unembeddable_numpy_values_stay_non_static() -> None:
+    # No exact 64-bit embedding exists, so these stay outside the value domain (references, rejected at use).
+    def u64_huge(s: float) -> float:
+        return s + float(_U64_HUGE[0])
+
+    def longdouble(s: float) -> float:
+        return s + float(_LONGDOUBLE[0])
+
+    for kernel in (u64_huge, longdouble):
+        with pytest.raises(UnsupportedConstruct, match="subscript of an object"):
+            lower(kernel)
+
+
+_F32_GAINS = np.array([0.5, -0.25, 2.0], dtype=np.float32)
+_I16_TAPS = np.array([3, -2, 5], dtype=np.int16)
+_U64_SMALL = np.array([7, 2], dtype=np.uint64)
+_U64_HUGE = np.array([2**63, 1], dtype=np.uint64)
+_LONGDOUBLE = np.array([1.0], dtype=np.longdouble)
+_F32_SCALAR = np.float32(0.25)
+_I8_SCALAR = np.int8(-3)
+
+
 # ---------------------------------------------------------------- behavior (model vs numpy)
 
 

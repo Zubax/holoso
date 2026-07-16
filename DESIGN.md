@@ -155,7 +155,11 @@ Name classification comes from the live code object (CPython's own; `del`-locali
 construction) with comprehension-only targets carved out via the AST; non-locals resolve closure-cell before global
 before builtin, values read at resolve time. Static values form a closed whitelisted domain with provenance as
 identity: exact Python ints (MetaInt) are distinct from numpy 64-bit scalars (NpInt/NpFloat, numpy's own
-mixed-operand semantics; narrower numpy widths are not static); arrays admit as read-only snapshots; sequences keep
+mixed-operand semantics; numeric WIDTH is immaterial -- narrower numpy scalars and arrays admit by exact value
+embedding into the category carrier (bool/int64/float64), so width-dependent arithmetic artifacts like int8
+wraparound or float32 intermediate rounding are not emulated, consistent with the datapath computing in the
+configured format rather than the source width; a uint64 beyond the signed-64 range and a longdouble have no
+exact embedding and stay non-static); arrays admit as read-only snapshots; sequences keep
 list/tuple flavor; slices with integer (or absent) bounds are plain values; dataclasses admit as records only
 when reconstructible from fields; containers bound depth and refuse cycles. An IntEnum/StrEnum member normalizes to its base value with the MEMBER retained as the scalar's
 source (tri-state provenance: a retained member, PLAIN for provably-never-an-enum, or LOST when a join dropped
@@ -193,7 +197,7 @@ attribute reads are snapshot AND admitted at most once per analysis -- the fact 
 is never re-formed, so neither a drifting live object nor a mutated referent can move it (a PEP 562 module
 __getattr__ runs exactly once) -- and emission consumes the same snapshot for state resets, never a live read. Aggregate joins reconcile layouts first
 (identical flavors recurse; a tuple arm meeting a list arm of equal arity degrades to the structural flavor set,
-keeping only flavor-independent behavior; ndarray dtypes promote int64 to float64), then join leaves positionally. An int/float join promotes the integer side to float, C-style (see Integers). Folding
+keeping only flavor-independent behavior; ndarray dtypes promote int to float), then join leaves positionally. An int/float join promotes the integer side to float, C-style (see Integers). Folding
 is Python-exact on Knowns; runtime-typed values never fold (width rule); a Known Bool always drives edge selection.
 Aggregate truth follows Python: tuples/lists fold by arity, arrays (and any join carrying the array flavor) reject
 as ambiguous, and a record without a truth override is truthy per object semantics. Concrete evaluation is a

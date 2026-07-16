@@ -1,12 +1,15 @@
 """
 The closed static-value domain of the FIR analyzer. Admission is a whitelist: only objects the compiler can evaluate
 with defined semantics become static values, everything else is not static (never an error here -- the caller decides).
-Provenance is part of the domain because it decides semantics: a Python int compares exactly, while numpy's default
-64-bit scalars follow numpy's own conversion rules in mixed comparisons (``np.int64(2**53 + 1) == float(2**53)`` and
-``np.float64(2**53) == 2**53 + 1`` are both True there), so they are distinct variants; narrower numpy dtypes carry
-width-dependent wraparound the domain does not model, so they are simply not static. Fixed-point equality is tagged
-and structural, never Python ``==``: ``True == 1`` and array-valued ndarray comparisons would lie to a convergence
-check, and floats compare by bit pattern so a signed zero or a NaN cannot oscillate.
+Provenance is part of the domain because it decides semantics: a Python int compares exactly, while numpy scalars
+follow numpy's own conversion rules in mixed comparisons (``np.int64(2**53 + 1) == float(2**53)`` and
+``np.float64(2**53) == 2**53 + 1`` are both True there), so they are distinct variants. Numeric WIDTH, by contrast,
+is immaterial: a narrower numpy scalar or array admits by EXACT value embedding into its category's 64-bit carrier
+(bool_/int64/float64), so width-dependent arithmetic artifacts -- int8 wraparound, float32 intermediate rounding --
+are not emulated, consistent with the datapath computing in the configured format rather than the source width;
+a uint64 beyond the signed-64 range and a longdouble have no exact embedding and stay non-static. Fixed-point
+equality is tagged and structural, never Python ``==``: ``True == 1`` and array-valued ndarray comparisons would
+lie to a convergence check, and floats compare by bit pattern so a signed zero or a NaN cannot oscillate.
 """
 
 import enum
@@ -19,6 +22,10 @@ import numpy as np
 
 _MAX_DEPTH = 64
 _MAX_ELEMENTS = 1 << 20
+
+# The exact-type membership keeps the subclass doctrine: a user subclass of a numpy scalar never admits.
+_NP_INTEGER_TYPES = (np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64)
+_NP_FLOAT_TYPES = (np.float16, np.float32, np.float64)  # longdouble has no exact float64 embedding
 
 
 class SemType(enum.Enum):
@@ -255,9 +262,14 @@ def _admit_uncached(
         return StaticBool(obj)
     if type(obj) is np.bool_:
         return NpBool(bool(obj))
-    if type(obj) is np.int64:
-        return NpInt(int(obj))
-    if type(obj) is np.float64:
+    if type(obj) in _NP_INTEGER_TYPES:
+        assert isinstance(obj, np.integer)
+        embedded = int(obj)
+        if not -(2**63) <= embedded < 2**63:
+            return None  # a uint64 beyond the signed carrier has no exact embedding
+        return NpInt(embedded)
+    if type(obj) in _NP_FLOAT_TYPES:
+        assert isinstance(obj, np.floating)
         return NpFloat(float(obj))
     if type(obj) is int:
         return MetaInt(int(obj))
@@ -277,13 +289,23 @@ def _admit_uncached(
             return StaticSlice(*bounds)
         return None  # a non-integer slice never resolves a supported subscript
     if type(obj) is np.ndarray:
-        if obj.dtype not in (np.dtype(np.int64), np.dtype(np.float64)):
-            return None
         if obj.size > _MAX_ELEMENTS:
             return None  # the LOGICAL size: a zero-stride view is small in memory yet snapshots at full size
+        carrier: type[np.generic]
+        if obj.dtype == np.bool_:
+            carrier = np.bool_
+        elif np.issubdtype(obj.dtype, np.integer):
+            if obj.dtype == np.uint64 and obj.size and int(obj.max()) >= 2**63:
+                return None  # beyond the signed carrier: no exact embedding
+            carrier = np.int64
+        elif np.issubdtype(obj.dtype, np.floating) and obj.dtype.itemsize <= 8:
+            carrier = np.float64
+        else:
+            return None
         # A snapshot over an immutable bytes buffer: numpy refuses setflags(write=True) anywhere in the view chain,
         # so no consumer can unfreeze it -- not even through .base -- and later caller mutation cannot move a fold.
-        snapshot = np.frombuffer(obj.tobytes(), dtype=obj.dtype).reshape(obj.shape)
+        # The width collapse happens here, once: the snapshot IS the exact carrier embedding of the source values.
+        snapshot = np.frombuffer(obj.astype(carrier).tobytes(), dtype=carrier).reshape(obj.shape)
         return StaticArray(snapshot)
     if isinstance(obj, (list, tuple)) and type(obj) in (list, tuple):  # the isinstance only narrows for mypy
         if id(obj) in visiting or len(obj) > _MAX_ELEMENTS:

@@ -1031,7 +1031,7 @@ class _Emitter:
         for ordinal, leaf in enumerate(result.leaves):
             if not isinstance(leaf, Residual):
                 continue
-            assert result.layout.dtype is ArrayDType.FLOAT64, "a runtime integer array op escaped analysis"
+            assert result.layout.dtype is ArrayDType.FLOAT, "a runtime integer array op escaped analysis"
             left = operand(lhs, lhs_fact, ordinal)
             right = operand(rhs, rhs_fact, ordinal)
             self._write(block, _LeafPlace(Local(dst), ordinal), self._emit_float_binary(bin_op, left, right))
@@ -1166,7 +1166,7 @@ class _Emitter:
             for ordinal, leaf in enumerate(result_fact.leaves):
                 if not isinstance(leaf, Residual):
                     continue
-                assert result_fact.layout.dtype is ArrayDType.FLOAT64, "a runtime integer array op escaped analysis"
+                assert result_fact.layout.dtype is ArrayDType.FLOAT, "a runtime integer array op escaped analysis"
                 source = self._materialize_atom(
                     operand_fact.leaves[ordinal],
                     lambda: self._read(block, _LeafPlace(Local(operand), ordinal)),

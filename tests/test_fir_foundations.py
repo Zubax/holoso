@@ -230,14 +230,18 @@ def test_static_unop_and_truth() -> None:
     assert static_truth(StaticSeq((), is_list=False)) is False
 
 
-def test_admit_restricts_numpy_scalars_to_default_widths() -> None:
-    # A narrower numpy dtype wraps at its own width (np.int8(100) + np.int8(100) is -56), which the domain does not
-    # model, and a uint64 beyond int64 cannot reconstitute; both are simply not static.
-    assert admit(np.int8(100)) is None
+def test_admit_embeds_narrow_numpy_scalars_into_category_carriers() -> None:
+    # Numeric width is immaterial: a narrower numpy scalar admits by exact value embedding into the 64-bit
+    # category carrier (width-dependent artifacts like int8 wraparound are deliberately not emulated). A uint64
+    # beyond the signed range has no exact embedding and stays non-static.
+    assert admit(np.int8(100)) == NpInt(100)
     assert admit(np.uint64(2**63 + 5)) is None
-    assert admit(np.float32(1.5)) is None
+    assert admit(np.uint64(2**63 - 1)) == NpInt(2**63 - 1)
+    assert admit(np.float32(1.5)) == NpFloat(1.5)
+    assert admit(np.float16(0.25)) == NpFloat(0.25)
     assert admit(np.int64(7)) == NpInt(7)
     assert admit(np.float64(1.5)) == NpFloat(1.5)
+    assert admit(np.longdouble(1.5)) is None
 
 
 def test_np_float_comparisons_follow_numpy_conversion_rules() -> None:
@@ -557,9 +561,17 @@ def test_record_admission_never_runs_constructors_when_nested() -> None:
     assert not runs  # constructor-driven validation was exponential in nesting depth on top of the replay itself
 
 
-def test_admit_restricts_array_dtypes_to_default_widths() -> None:
-    assert admit(np.array([100], dtype=np.int8)) is None
-    assert admit(np.array([2**63 + 5], dtype=np.uint64)) is None
+def test_admit_embeds_narrow_array_dtypes_into_category_carriers() -> None:
+    embedded = admit(np.array([100], dtype=np.int8))
+    assert isinstance(embedded, StaticArray) and embedded.array.dtype == np.int64
+    assert admit(np.array([2**63 + 5], dtype=np.uint64)) is None  # no exact signed-64 embedding
+    small_unsigned = admit(np.array([7], dtype=np.uint64))
+    assert isinstance(small_unsigned, StaticArray) and small_unsigned.array.dtype == np.int64
+    halves = admit(np.array([0.5, -0.25], dtype=np.float32))
+    assert isinstance(halves, StaticArray) and halves.array.dtype == np.float64
+    mask = admit(np.array([True, False]))
+    assert isinstance(mask, StaticArray) and mask.array.dtype == np.bool_
+    assert admit(np.array([1.0], dtype=np.longdouble)) is None
     assert isinstance(admit(np.array([1], dtype=np.int64)), StaticArray)
     assert isinstance(admit(np.array([1.0])), StaticArray)
 
