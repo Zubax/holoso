@@ -226,8 +226,9 @@ while the kernel's writes exist only as state facts), and a static fold over an 
 argument, nested in one, or as a method receiver -- rejects rather than burning unbounded compile time. The
 trust boundary stays where admission drew it: an enum that redefines arithmetic or shadows its base type's
 methods folds with base-type semantics (inputs are trusted; adversarial dunder-warping is not modeled). Records also reject at their truth when a __bool__/__len__ entry exists
-(``__bool__ = None`` included), at subscript keys, at non-field attributes, and at iteration; field access is the
-one record consumption. getattr rewrites into the attribute op itself (state reads, residual record fields, and
+(``__bool__ = None`` included), at subscript keys, at non-field attributes, at iteration, and at non-integer
+subscripts (slices, tuple keys) of a record-carrying sequence, whose concrete fallback would rebuild real
+instances; field access and integer projection are the record consumptions. getattr rewrites into the attribute op itself (state reads, residual record fields, and
 the array whitelist behave exactly as the dotted spelling; the default-argument form rejects). list()/tuple()
 over an aggregate is a LAYOUT operation, never an evaluation: the same leaves -- runtime ones included --
 re-aggregate under the requested flavor (a lowered conversion copies the argument's cells onto the result);

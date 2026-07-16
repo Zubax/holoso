@@ -6385,3 +6385,41 @@ def test_record_defaults_admit_lazily_at_first_omission() -> None:
     model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="lazydef").numerical_model
     lazy_knob.v = 5.0
     assert float(model.elaborate().run(2.0)[0]) == expected
+
+
+def test_record_carrying_sequences_never_rebuild_through_subscript_fallback() -> None:
+    # Review round (Claude ultrathink): a slice/tuple key on a record-CARRYING tuple slipped past the key and
+    # top-level-object guards into the concrete subscript fallback, which rebuilt real instances at compile
+    # time (a user __del__ fired during analysis; hook-free records crossed silently) -- the one record path
+    # that still reached host evaluation. The fallback now refuses before materializing.
+    destroyed: list[object] = []
+
+    @dataclasses.dataclass(frozen=True)
+    class Watched:
+        lo: float
+        hi: float
+
+        def __del__(self) -> None:
+            destroyed.append(self)
+
+    bands = (Watched(1.0, 2.0), Watched(3.0, 4.0))
+
+    def admitted(x: float) -> float:
+        pair = bands[slice(0, 2)]
+        return x + pair[0].lo  # type: ignore[no-any-return,index]
+
+    destroyed.clear()
+    with pytest.raises(UnsupportedConstruct, match="record-carrying sequence"):
+        lower(admitted)
+    assert destroyed == [], "no instance may be rebuilt (and collected) at compile time"
+
+    @dataclasses.dataclass(frozen=True)
+    class Plain:
+        v: float
+
+    def hook_free(x: float) -> float:
+        t = (Plain(1.0), Plain(x))
+        return x + t[slice(0, 2)][0].v  # type: ignore[index,no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="record-carrying sequence"):
+        lower(hook_free)

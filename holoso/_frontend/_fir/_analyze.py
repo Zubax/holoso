@@ -1050,7 +1050,14 @@ class Analyzer:
                 position = operator.index(as_python(index.value))  # type: ignore[arg-type]  # np ints qualify
             except TypeError:
                 # A non-integer static key (a tuple key ``m[1, 0]``, a slice) applies concretely to an all-Known
-                # aggregate; on a runtime-leaf aggregate it awaits the slicing/multi-axis stages.
+                # aggregate; on a runtime-leaf aggregate it awaits the slicing/multi-axis stages. A record
+                # anywhere in the OBJECT refuses first: the concrete fallback rebuilds real instances (a __del__
+                # would fire at compile time), and records never cross into host evaluation -- integer projection
+                # and field access are their consumptions.
+                if contains_record(obj.layout):
+                    raise AnalysisRejection(
+                        "slicing or multi-axis indexing of a record-carrying sequence is not supported", origin
+                    ) from None
                 concrete = materialize_static(obj)
                 if concrete is None:
                     raise AnalysisRejection(
