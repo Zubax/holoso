@@ -1629,7 +1629,6 @@ def test_name_assigned_later_is_local_before_its_assignment() -> None:
         lower(shadows_builtin)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.array-valued state — stage 9")
 def test_matrix_state_decomposes_row_major() -> None:
     @dataclasses.dataclass
     class Filt:
@@ -1644,7 +1643,6 @@ def test_matrix_state_decomposes_row_major() -> None:
     assert [o.name for o in hir.outputs] == ["state_m_0_0", "state_m_0_1", "state_m_1_0", "state_m_1_1"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.array-valued state — stage 9")
 def test_three_dimensional_array_state_is_rejected() -> None:
     @dataclasses.dataclass
     class Filt:
@@ -1657,7 +1655,6 @@ def test_three_dimensional_array_state_is_rejected() -> None:
         lower(Filt(np.zeros((2, 2, 2))).step)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: argument unpacking in calls — stage 9")
 def test_ekf1_stateful_structure() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateful
@@ -1674,7 +1671,6 @@ def test_ekf1_stateful_structure() -> None:
     assert _arith_count(hir, FloatDiv) == 1  # the inlined kernel's single 1/x21
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: vector/array-valued state — stage 9")
 def test_vector_state_decomposes_to_per_element_slots() -> None:
     class Vec:
         def __init__(self) -> None:
@@ -1692,7 +1688,6 @@ def test_vector_state_decomposes_to_per_element_slots() -> None:
     assert [o.name for o in hir.outputs] == ["state_v_0", "state_v_1", "state_v_2"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: vector/array-valued state — stage 9")
 def test_vector_state_shape_mismatch_is_rejected() -> None:
     class Vec:
         def __init__(self) -> None:
@@ -1705,7 +1700,6 @@ def test_vector_state_shape_mismatch_is_rejected() -> None:
         lower(Vec().update)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: vector/array-valued state — stage 9")
 def test_vector_state_nested_shape_is_rejected() -> None:
     # A nested aggregate has the right leaf count (2) but the wrong shape: the slot layout is a flat 2-vector, so the
     # next transaction would reconstruct a flat shape that disagrees with the one written this transaction.

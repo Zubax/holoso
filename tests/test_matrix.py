@@ -381,7 +381,6 @@ def test_mismatched_branch_flavor_merge_rejects_array_ops() -> None:
     assert [o.name for o in lower(structural).outputs] == ["out_0"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: array state assignment — stage 9")
 def test_state_assignment_flavor_must_match_reset() -> None:
     # Regression: the reset snapshot fixes an attribute's read-back flavor, so storing the other flavor (a list into an
     # ndarray-reset slot) is rejected -- otherwise it would round-trip back as an array and diverge from Python.
@@ -618,7 +617,6 @@ def test_array_return_annotation_is_validated() -> None:
         lower(boolean_leaves)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matrix state annotation/assignment — stage 9")
 def test_matrix_state_annotation_and_assignment_validation() -> None:
     @dataclasses.dataclass
     class Declared:
@@ -651,7 +649,6 @@ def test_matrix_state_annotation_and_assignment_validation() -> None:
         lower(Empty(np.zeros(0)).step)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: array state assignment — stage 9")
 def test_state_assignment_element_type_mismatch_is_rejected() -> None:
     # Regression: a bool-leaved value assigned to a float attribute must be rejected, not stored as a float-reset slot
     # whose live-out is a boolean -- which would leave the slot's live-in and live-out at different types.
@@ -861,16 +858,14 @@ def test_ndarray_module_constant_rejections() -> None:
         lower(three_dee)
 
 
-@pytest.mark.skip(
-    reason="FIR_PARITY_PENDING: runtime array/matrix state and its constant-index rejection policy — stage 9"
-)
 def test_ndarray_subclass_constant_and_state_are_rejected() -> None:
     # Regression: an ndarray subclass (np.matrix) redefines operators (``*`` is matmul), so folding it as a plain array
-    # would silently diverge from its own Python semantics; it must be rejected, both as a module constant and a reset.
+    # would silently diverge from its own Python semantics; it must be rejected, both as a module constant (an
+    # unadmitted reference, so its subscript refuses) and as a state reset.
     def constant(a: float) -> float:
         return _MATRIX_CONST[0, 1] + a  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="plain numpy array"):
+    with pytest.raises(UnsupportedConstruct, match="subscript of an object"):
         lower(constant)
 
     @dataclasses.dataclass

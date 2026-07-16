@@ -406,8 +406,16 @@ compiler-issued bound-method TOKEN carried by the Reference sort (call-only by c
 fact, returning or merging it keeps the reference rejections), and the call rewrites onto an explicit-receiver
 form emitted as the ordinary conversion copy. Any argument (a non-C order would observe strides the layout
 deliberately discards) is a located rejection.
+Aggregate persistent state is live: an attribute may persist a FLAT list of scalars or a nonempty 1-D/2-D
+plain ndarray, decomposed into one scalar slot per cell (`x_0`, `m_0_1`; observable ports `state_x_0`, ...) in
+canonical leaf order, with the reset snapshot fixing the schema. Every reachable store validates against that
+schema explicitly at the store site -- container flavor, exact geometry, and per-cell bool/numeric compatibility
+-- rather than through the generic joins (whose flavor degrade and array dtype promotion would accept what the
+next transaction cannot reconstruct); integer cells promote into float slots per cell exactly as scalar stores
+do, and a declared jaxtyping field annotation must agree with the reset shape. 3-D, empty, nested, tuple-valued,
+and ndarray-subclass resets reject by name.
 What remains deferred is the rest of the
-BOUNDARY surface -- aggregate parameter ports, aggregate persistent state, runtime-element iteration,
+BOUNDARY surface -- aggregate parameter ports,
 and the record/reduction/gather semantics below -- and every disabled
 test carries
 the greppable marker. The contract the remaining stages restore (and extend with records, reductions, and the

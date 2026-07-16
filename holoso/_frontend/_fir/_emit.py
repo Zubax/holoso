@@ -71,6 +71,7 @@ from ..._hir import (
 from ._analyze import Analyzer, CallLowering, CallPlan, ResidualUnit
 from ._fact import (
     AggregateFact,
+    AggregateLayout,
     ArrayDType,
     ArrayIndex,
     ArrayLayout,
@@ -95,6 +96,7 @@ from ._fact import (
     leaf_count,
     leaf_paths,
     materialize_static,
+    normalize_static,
     outer_arity,
 )
 from ._signature import (
@@ -290,10 +292,10 @@ class _Emitter:
         self._predecessors: dict[FirBlockId, list[FirBlockId]] = {}
         for source, target in sorted(result.executable_edges, key=lambda e: (e[0].index, e[1].index)):
             self._predecessors.setdefault(target, []).append(source)
-        self._state_reads: dict[StateLeaf, int] = {}
+        self._state_reads: dict[tuple[StateLeaf, int], int] = {}
         self._state_order: list[StateLeaf] = []
         self._exit_identity_memo: dict[int, object] = {}
-        self._slot_names: dict[str, StateLeaf] = {}  # encoded slot name -> its leaf, to catch a rare name collision
+        self._slot_names: dict[str, tuple[StateLeaf, int]] = {}  # rendered slot name -> owning cell (collisions)
 
     def emit(self) -> Hir:
         unit = self._result.unit
@@ -471,15 +473,17 @@ class _Emitter:
             self._fill_phi(block, place, phi)
 
     def _entry_value(self, place: _LeafPlace) -> int:
-        if isinstance(place.root, StateLeaf) and place.ordinal == 0:
-            return self._state_read(place.root)
+        if isinstance(place.root, StateLeaf):
+            return self._state_read(place.root, place.ordinal)
         raise AssertionError(f"read of an undefined place '{place}' escaped analysis")
 
-    def _slot_name(self, leaf: StateLeaf) -> str:
+    def _slot_name(self, leaf: StateLeaf, ordinal: int = 0) -> str:
         # The slot name is the owning component's canonical member path from the root joined to the leaf attribute by a
         # double underscore, so a top-level attribute ``m`` stays the bare ``m`` (the established port ABI) while a
-        # nested child's ``m`` becomes ``child__m``. This is injective except when an attribute name literally spans a
-        # ``__`` boundary (a rare dunder-ish name); that alias is a located collision rejection, never a silent merge.
+        # nested child's ``m`` becomes ``child__m``. An aggregate slot appends its cell's canonical coordinates with
+        # single underscores (``x_0``, ``m_0_1``). This is injective except when an attribute name literally spans a
+        # boundary (a dunder-ish name, or a scalar attribute spelled like another slot's cell); that alias is a
+        # located collision rejection, never a silent merge.
         path = self._result.provenance.get(id(leaf.component))
         if path is None:
             raise EmissionRejection(
@@ -487,28 +491,52 @@ class _Emitter:
                 "hold it as a direct attribute of the synthesized component"
             )
         name = "__".join(path + leaf.path)
-        owner = self._slot_names.setdefault(name, leaf)
-        if owner != leaf:
+        layout = self._reset_layout(leaf)
+        if layout is not None:
+            segments = leaf_paths(layout)[ordinal]
+            for segment in segments:
+                if isinstance(segment, ArrayIndex):
+                    name += "".join(f"_{coordinate}" for coordinate in segment.coordinates)
+                else:
+                    name += f"_{segment.value}"  # type: ignore[union-attr]  # list cells carry an integer index
+        owner = self._slot_names.setdefault(name, (leaf, ordinal))
+        if owner != (leaf, ordinal):
             raise EmissionRejection(f"state slot name collision on '{name}' between distinct component attributes")
         return name
 
-    def _state_read(self, leaf: StateLeaf) -> int:
-        if leaf not in self._state_reads:
-            reset = self._leaf_reset(leaf)
+    def _reset_layout(self, leaf: StateLeaf) -> "AggregateLayout | None":
+        snapshot = self._result.state_resets.get(leaf)
+        assert snapshot is not None, f"reset for {leaf} missing from the analysis plan"
+        if isinstance(snapshot, str):
+            raise EmissionRejection(f"state '{'.'.join(leaf.path)}' has a reset of unsupported type {snapshot}")
+        normalized = normalize_static(snapshot)
+        return normalized.layout if isinstance(normalized, AggregateFact) else None
+
+    def _state_cells(self, leaf: StateLeaf) -> int:
+        layout = self._reset_layout(leaf)
+        return 1 if layout is None else leaf_count(layout)
+
+    def _state_read(self, leaf: StateLeaf, ordinal: int = 0) -> int:
+        if (leaf, ordinal) not in self._state_reads:
+            reset = self._leaf_reset(leaf, ordinal)
             slot_type: Type = (
                 BoolType()
                 if isinstance(reset, BoolConst)
                 else IntType() if isinstance(reset, IntConst) else FloatType()
             )
-            self._state_reads[leaf] = self._builder.state_read(self._slot_name(leaf), slot_type)
-            self._state_order.append(leaf)
-        return self._state_reads[leaf]
+            self._state_reads[(leaf, ordinal)] = self._builder.state_read(self._slot_name(leaf, ordinal), slot_type)
+            if leaf not in self._state_order:
+                self._state_order.append(leaf)
+        return self._state_reads[(leaf, ordinal)]
 
-    def _leaf_is_int(self, leaf: StateLeaf) -> bool:
-        """An integer-typed persistent leaf: the analyzer carries a runtime integer across the initiation boundary."""
-        return self._result.state_livein.get(leaf) == Residual(SemType.INT)
+    def _leaf_is_int(self, leaf: StateLeaf, ordinal: int = 0) -> bool:
+        """An integer-typed persistent cell: the analyzer carries a runtime integer across the initiation boundary."""
+        livein = self._result.state_livein.get(leaf)
+        if isinstance(livein, AggregateFact):
+            return livein.leaves[ordinal] == Residual(SemType.INT)
+        return livein == Residual(SemType.INT)
 
-    def _leaf_reset(self, leaf: StateLeaf) -> FloatConst | BoolConst | IntConst:
+    def _leaf_reset(self, leaf: StateLeaf, ordinal: int = 0) -> FloatConst | BoolConst | IntConst:
         import numpy as np
 
         # The reset comes from the analyzer's one-read attribute snapshot, never a fresh getattr: a live read
@@ -517,12 +545,18 @@ class _Emitter:
         assert snapshot is not None, f"reset for {leaf} missing from the analysis plan"
         if isinstance(snapshot, str):
             raise EmissionRejection(f"state '{'.'.join(leaf.path)}' has a reset of unsupported type {snapshot}")
-        current = as_python(snapshot)
+        normalized = normalize_static(snapshot)
+        if isinstance(normalized, AggregateFact):
+            cell = normalized.leaves[ordinal]
+            assert isinstance(cell, Known), "an aggregate reset cell must be a concrete scalar"
+            current = as_python(cell.value)
+        else:
+            current = as_python(snapshot)
         if isinstance(current, bool) or isinstance(current, np.bool_):
             return BoolConst(bool(current))
-        # An integer reset stays integer only when the analyzer typed the leaf as a runtime integer; an int literal
-        # seeding a float accumulator resets to 0.0 like any float, matching the leaf's promoted datapath type.
-        if isinstance(current, (int, np.integer)) and self._leaf_is_int(leaf):
+        # An integer reset stays integer only when the analyzer typed the cell as a runtime integer; an int literal
+        # seeding a float accumulator resets to 0.0 like any float, matching the cell's promoted datapath type.
+        if isinstance(current, (int, np.integer)) and self._leaf_is_int(leaf, ordinal):
             return IntConst(int(current))
         if isinstance(current, (int, float, np.integer, np.floating)):
             return FloatConst(_carrier_float(current))  # the same carrier policy as a datapath constant
@@ -859,12 +893,17 @@ class _Emitter:
                         _, start, _ = child_slice(layout, names.index(name))
                         self._project(fir_id, Local(obj), start, dst)
                     elif isinstance(dst_fact, AggregateFact):
-                        # A read-only aggregate component attribute: every leaf is its frozen snapshot constant
-                        # (a residual leaf would mean aggregate state, which analysis rejects at the store).
+                        # An aggregate component attribute: a Known leaf is its frozen snapshot constant, and a
+                        # residual leaf is runtime aggregate state backed by its own per-cell slot.
+                        assert isinstance(obj_fact, Reference)
+                        state_root = StateLeaf(obj_fact.obj, (name,))
                         for ordinal, leaf_fact in enumerate(dst_fact.leaves):
-                            assert isinstance(leaf_fact, Known), "aggregate state escaped analysis containment"
-                            if self._datapath_known(leaf_fact):
-                                self._write(fir_id, _LeafPlace(Local(dst), ordinal), self._atom_vid(leaf_fact))
+                            if isinstance(leaf_fact, Known):
+                                if self._datapath_known(leaf_fact):
+                                    self._write(fir_id, _LeafPlace(Local(dst), ordinal), self._atom_vid(leaf_fact))
+                            elif not isinstance(leaf_fact, Reference):
+                                vid = self._read(fir_id, _LeafPlace(state_root, ordinal))
+                                self._write(fir_id, _LeafPlace(Local(dst), ordinal), vid)
                     else:
                         # Otherwise only a runtime component attribute is residual; it is backed by a state slot.
                         assert isinstance(obj_fact, Reference)
@@ -873,14 +912,31 @@ class _Emitter:
                 obj_fact = self._fact(obj)
                 assert isinstance(obj_fact, Reference)
                 leaf = StateLeaf(obj_fact.obj, (name,))
-                src_sem = self._fact_sem(self._fact(src))
-                kind = (
-                    SemType.INT
-                    if self._leaf_is_int(leaf)
-                    else SemType.BOOL if src_sem is SemType.BOOL else SemType.FLOAT
-                )
-                self._write(fir_id, leaf, self._materialize(fir_id, src, kind))
-                self._state_read(leaf)  # register the slot even if the entry live-in was never read
+                src_fact = self._fact(src)
+                if isinstance(src_fact, AggregateFact):
+                    for ordinal, stored in enumerate(src_fact.leaves):
+                        stored_sem = (
+                            stored.type if isinstance(stored, Residual) else self._fact_sem(Known(stored.value))  # type: ignore[union-attr]
+                        )
+                        kind = (
+                            SemType.INT
+                            if self._leaf_is_int(leaf, ordinal)
+                            else SemType.BOOL if stored_sem is SemType.BOOL else SemType.FLOAT
+                        )
+                        vid = self._materialize_atom(
+                            stored, lambda: self._read(fir_id, _LeafPlace(Local(src), ordinal)), kind
+                        )
+                        self._write(fir_id, _LeafPlace(leaf, ordinal), vid)
+                        self._state_read(leaf, ordinal)  # register every cell slot even if never read
+                else:
+                    src_sem = self._fact_sem(src_fact)
+                    kind = (
+                        SemType.INT
+                        if self._leaf_is_int(leaf)
+                        else SemType.BOOL if src_sem is SemType.BOOL else SemType.FLOAT
+                    )
+                    self._write(fir_id, leaf, self._materialize(fir_id, src, kind))
+                    self._state_read(leaf)  # register the slot even if the entry live-in was never read
             case PyCall(dst=dst, args=args):
                 plan = self._result.call_plans[dst]
                 match plan.lowering:
@@ -1310,15 +1366,17 @@ class _Emitter:
                     return_leaves.append((path, self._exit_leaf(unit.exit, path, ordinal, leaf_fact, kind)))
         promoted = self._result.runtime_state
         # Slots and public ports emit in first-STORE source order (matching production), not the order the RPO walk
-        # happened to touch attributes; a leaf touched only by a read still trails a leaf stored earlier.
+        # happened to touch attributes; a leaf touched only by a read still trails a leaf stored earlier. An
+        # aggregate slot expands to its cells in canonical leaf order.
         store_order = [leaf for leaf in self._result.store_order if leaf in promoted]
         store_order += [leaf for leaf in self._state_order if leaf in promoted and leaf not in store_order]
         public_live_outs: set[object] = set()
         for leaf in store_order:
-            live_out = self._read(unit.exit, leaf)
-            self._builder.state_slot(self._slot_name(leaf), self._leaf_reset(leaf), live_out)
-            if not leaf.path[-1].startswith("_"):
-                public_live_outs.add(self._exit_identity(live_out))
+            for ordinal in range(self._state_cells(leaf)):
+                live_out = self._read(unit.exit, _LeafPlace(leaf, ordinal))
+                self._builder.state_slot(self._slot_name(leaf, ordinal), self._leaf_reset(leaf, ordinal), live_out)
+                if not leaf.path[-1].startswith("_"):
+                    public_live_outs.add(self._exit_identity(live_out))
         if return_vid is not None and self._exit_identity(return_vid) not in public_live_outs:
             self._builder.output(port_name([0]), return_vid)  # a scalar return is leaf 0 of the bundle
         for path, vid in return_leaves:
@@ -1326,5 +1384,9 @@ class _Emitter:
                 self._builder.output(port_name(_port_path(path)), vid)
         for leaf in store_order:
             if not leaf.path[-1].startswith("_"):
-                self._builder.output(state_port_name(self._slot_name(leaf)), self._read(unit.exit, leaf))
+                for ordinal in range(self._state_cells(leaf)):
+                    self._builder.output(
+                        state_port_name(self._slot_name(leaf, ordinal)),
+                        self._read(unit.exit, _LeafPlace(leaf, ordinal)),
+                    )
         self._builder.ret()

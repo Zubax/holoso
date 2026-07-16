@@ -82,6 +82,7 @@ from ._fact import (
     TupleLayout,
     Unbound,
     ValueLayout,
+    AggregateLayout,
     aggregate_of,
     child_slice,
     join_layouts,
@@ -92,7 +93,7 @@ from ._fact import (
     outer_arity,
     record_of,
 )
-from ._signature import ScalarParameter
+from ._signature import ContractError, ScalarParameter, array_shape, is_array_annotation
 from ._fold import (
     FieldSchema,
     FoldRefusal,
@@ -516,15 +517,137 @@ class Analyzer:
         current, admitted = self._walk_snapshot(leaf)
         if admitted is None:
             return Reference(current)
+        origin = (Origin(self._root_template.name, 0, 0),)
+        name = ".".join(leaf.path)
+        reset = normalize_static(admitted)
+        if isinstance(reset, AggregateFact):
+            self._validate_state_reset_schema(leaf, reset.layout, origin)
+            cells: list[AtomicFact] = []
+            for cell in reset.leaves:
+                assert isinstance(cell, Known)
+                cell_sem = _residual_type(cell.value)
+                if cell_sem is None:
+                    raise AnalysisRejection(f"state attribute '{name}' has an unsupported reset type", origin)
+                # The scalar reset rule applies per cell: a Known Bool folds exactly, numerics run as residuals.
+                cells.append(cell if cell_sem is SemType.BOOL else Residual(cell_sem))
+            return AggregateFact(reset.layout, tuple(cells))
         sem = _residual_type(admitted)
         if sem is None:
-            raise AnalysisRejection(
-                f"state attribute '{'.'.join(leaf.path)}' has an unsupported reset type",
-                (Origin(self._root_template.name, 0, 0),),
-            )
+            raise AnalysisRejection(f"state attribute '{name}' has an unsupported reset type", origin)
         if sem is SemType.BOOL:
             return Known(admitted)  # a Known Bool folds exactly (no width) and keeps invariant flags folding
         return Residual(sem)
+
+    def _validate_state_reset_schema(self, leaf: StateLeaf, layout: AggregateLayout, origin: OriginStack) -> None:
+        """
+        Persistent aggregate state is a FLAT list of scalars or a nonempty 1-D/2-D plain ndarray: the reset fixes
+        the slot geometry the next transaction reconstructs, cell names come from its leaf paths, and a declared
+        jaxtyping field annotation must agree with it. Everything else (a nested list, a tuple, a 3-D array, an
+        empty aggregate) has no honest per-cell slot decomposition yet and rejects by name.
+        """
+        name = ".".join(leaf.path)
+        match layout:
+            case ListLayout(items=items):
+                if not all(item is None for item in items):
+                    raise AnalysisRejection(
+                        f"state attribute '{name}' must be a flat list of scalars to persist", origin
+                    )
+            case ArrayLayout(shape=shape):
+                if len(shape) > 2:
+                    raise AnalysisRejection(
+                        f"state attribute '{name}' has a {len(shape)}-D array reset; only 1-D and 2-D arrays "
+                        "persist",
+                        origin,
+                    )
+            case _:
+                raise AnalysisRejection(f"state attribute '{name}' has an unsupported reset type", origin)
+        if leaf_count(layout) == 0:
+            raise AnalysisRejection(f"state attribute '{name}' has an empty aggregate reset", origin)
+        import inspect
+
+        annotation = next(
+            (
+                annotations[leaf.path[-1]]
+                for c in type(leaf.component).__mro__
+                if leaf.path[-1] in (annotations := inspect.get_annotations(c))
+            ),
+            None,
+        )
+        if annotation is not None and is_array_annotation(annotation):
+            try:
+                declared = array_shape(annotation)
+            except ContractError as error:
+                raise AnalysisRejection(f"state attribute '{name}': {error}", origin) from None
+            if not (isinstance(layout, ArrayLayout) and layout.shape == declared):
+                raise AnalysisRejection(
+                    f"state attribute '{name}' has a reset diverging from its declared array type "
+                    f"{'x'.join(map(str, declared))}",
+                    origin,
+                )
+
+    def _admit_state_store(self, leaf: StateLeaf, reset: Fact, src: Fact, origin: OriginStack) -> Fact:
+        """
+        An aggregate-flavored store against the reset-derived schema: the reset fixes the container flavor and
+        the exact geometry (the next transaction reconstructs that Python object, so a structural degrade would
+        lie), and each cell's carrier kind comes from the stabilized live-in with the reset as the first-round
+        fallback -- an integer leaf promotes into a float cell exactly as the scalar store does, and a
+        bool/numeric mix is a located rejection rather than a silent reinterpretation.
+        """
+        name = ".".join(leaf.path)
+        if not isinstance(reset, AggregateFact):
+            if isinstance(reset, Reference):
+                raise AnalysisRejection(
+                    f"state attribute '{name}' cannot persist: its reset is not admissible "
+                    "(a plain numpy array or a flat list of scalars is required)",
+                    origin,
+                )
+            raise AnalysisRejection(
+                f"state attribute '{name}' persists a scalar; an aggregate cannot be stored into it", origin
+            )
+        if not isinstance(src, AggregateFact):
+            raise AnalysisRejection(
+                f"state attribute '{name}' persists an aggregate; a scalar cannot be stored into it", origin
+            )
+        assert isinstance(reset.layout, (ListLayout, ArrayLayout))
+        if type(src.layout) is not type(reset.layout):
+            flavor = "numpy array" if isinstance(reset.layout, ArrayLayout) else "list"
+            raise AnalysisRejection(
+                f"state attribute '{name}' persists a {flavor}; store the same container flavor", origin
+            )
+        geometry_matches = (
+            src.layout.shape == reset.layout.shape
+            if isinstance(reset.layout, ArrayLayout) and isinstance(src.layout, ArrayLayout)
+            else src.layout == reset.layout
+        )
+        if not geometry_matches:
+            described = (
+                f"a {'x'.join(map(str, reset.layout.shape))} array"
+                if isinstance(reset.layout, ArrayLayout)
+                else f"a {outer_arity(reset.layout)}-element vector"
+            )
+            raise AnalysisRejection(
+                f"state attribute '{name}' persists {described}; the stored value has an incompatible shape",
+                origin,
+            )
+        livein = self._state_livein.get(leaf)
+        cells: list[AtomicFact] = []
+        for ordinal, stored in enumerate(src.leaves):
+            if isinstance(stored, Reference):
+                raise AnalysisRejection(f"state attribute '{name}' cannot persist an object reference", origin)
+            slot_cell = livein.leaves[ordinal] if isinstance(livein, AggregateFact) else reset.leaves[ordinal]
+            slot_sem = slot_cell.type if isinstance(slot_cell, Residual) else _residual_type(slot_cell.value)  # type: ignore[union-attr]
+            stored_sem = stored.type if isinstance(stored, Residual) else _residual_type(stored.value)
+            if stored_sem is None or (slot_sem is SemType.BOOL) != (stored_sem is SemType.BOOL):
+                raise AnalysisRejection(
+                    f"state attribute '{name}' stores an incompatible type at cell {ordinal}", origin
+                )
+            if slot_sem is SemType.FLOAT and stored_sem is SemType.INT:
+                promoted = _float_promoted(stored, origin)
+                assert isinstance(promoted, (Known, Residual))
+                cells.append(promoted)
+            else:
+                cells.append(stored)
+        return AggregateFact(reset.layout, tuple(cells))
 
     def _finalize(self, result: ResidualUnit) -> None:
         """
@@ -917,7 +1040,22 @@ class Analyzer:
                     )
                 leaf = StateLeaf(obj_fact.obj, (name,))
                 self._discovered_stores.add((block.id, leaf))
-                if (
+                reset_fact = self._state_reset_fact(leaf)
+                if isinstance(reset_fact, AggregateFact) or isinstance(src_fact, AggregateFact):
+                    src_fact = self._admit_state_store(leaf, reset_fact, src_fact, op.origin)
+                elif (
+                    (slot_sem := self._leaf_kind(leaf)) is not None
+                    and isinstance(src_fact, (Known, Residual))
+                    and (
+                        stored_sem := (
+                            src_fact.type if isinstance(src_fact, Residual) else _residual_type(src_fact.value)
+                        )
+                    )
+                    is not None
+                    and (slot_sem is SemType.BOOL) != (stored_sem is SemType.BOOL)
+                ):
+                    raise AnalysisRejection(f"state attribute '{name}' stores an incompatible type", op.origin)
+                elif (
                     self._leaf_kind(leaf) is SemType.FLOAT
                     and isinstance(src_fact, (Known, Residual))
                     and _numeric_sem(src_fact) is SemType.INT
@@ -1190,6 +1328,8 @@ class Analyzer:
         return Residual(result_type)
 
     def _operand_type(self, fact: Fact, origin: OriginStack) -> SemType:
+        import numpy as np
+
         match fact:
             case Known(value=value):
                 sem = _residual_type(value)
@@ -1198,6 +1338,12 @@ class Analyzer:
                 return sem
             case Residual(type=sem):
                 return sem
+            case Reference(obj=referent) if isinstance(referent, np.ndarray):
+                # An ndarray SUBCLASS (np.matrix redefines * as the matrix product) never admits, so it reaches
+                # arithmetic as a live reference; name the actual problem instead of "non-numeric".
+                raise AnalysisRejection(
+                    "an ndarray subclass does not participate in arithmetic; use a plain numpy array", origin
+                )
             case Reference():
                 raise AnalysisRejection("a non-numeric value reaches a runtime operation", origin)
             case _:
