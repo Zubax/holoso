@@ -7,7 +7,8 @@ follow numpy's own conversion rules in mixed comparisons (``np.int64(2**53 + 1) 
 is immaterial: a narrower numpy scalar or array admits by EXACT value embedding into its category's 64-bit carrier
 (bool_/int64/float64), so width-dependent arithmetic artifacts -- int8 wraparound, float32 intermediate rounding --
 are not emulated, consistent with the datapath computing in the configured format rather than the source width;
-a uint64 beyond the signed-64 range and a longdouble have no exact embedding and stay non-static. Fixed-point
+a uint64 beyond the signed-64 range and a longdouble have no exact embedding and stay non-static, and the
+embedding extends to TYPE IDENTITY -- an isinstance query on an embedded scalar answers for the carrier. Fixed-point
 equality is tagged and structural, never Python ``==``: ``True == 1`` and array-valued ndarray comparisons would
 lie to a convergence check, and floats compare by bit pattern so a signed zero or a NaN cannot oscillate.
 """
@@ -24,7 +25,10 @@ _MAX_DEPTH = 64
 _MAX_ELEMENTS = 1 << 20
 
 # The exact-type membership keeps the subclass doctrine: a user subclass of a numpy scalar never admits.
-_NP_INTEGER_TYPES = (np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64)
+# The platform alias types (longlong/ulonglong) are distinct exact types on some builds, same-dtype as int64.
+_NP_INTEGER_TYPES = (
+    np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64, np.longlong, np.ulonglong,
+)  # fmt: skip
 _NP_FLOAT_TYPES = (np.float16, np.float32, np.float64)  # longdouble has no exact float64 embedding
 
 
@@ -292,13 +296,16 @@ def _admit_uncached(
         if obj.size > _MAX_ELEMENTS:
             return None  # the LOGICAL size: a zero-stride view is small in memory yet snapshots at full size
         carrier: type[np.generic]
-        if obj.dtype == np.bool_:
+        # Gates are dtype-KIND based: issubdtype(timedelta64, np.integer) is True yet a duration is not an
+        # integer (scaling one rounds to integral units), and dtype equality misses byte-swapped spellings
+        # (dtype(">u8") != np.uint64), which must still hit the unsigned boundary below.
+        if obj.dtype.kind == "b":
             carrier = np.bool_
-        elif np.issubdtype(obj.dtype, np.integer):
-            if obj.dtype == np.uint64 and obj.size and int(obj.max()) >= 2**63:
+        elif obj.dtype.kind in "iu":
+            if obj.dtype.kind == "u" and obj.dtype.itemsize == 8 and obj.size and int(obj.max()) >= 2**63:
                 return None  # beyond the signed carrier: no exact embedding
             carrier = np.int64
-        elif np.issubdtype(obj.dtype, np.floating) and obj.dtype.itemsize <= 8:
+        elif obj.dtype.kind == "f" and obj.dtype.itemsize <= 8:
             carrier = np.float64
         else:
             return None

@@ -1407,6 +1407,142 @@ _F32_SCALAR = np.float32(0.25)
 _I8_SCALAR = np.int8(-3)
 
 
+# ---------------------------------------------------------------- 9a review-round regressions
+
+
+def test_datetime_dtypes_stay_non_static() -> None:
+    # timedelta64 satisfies np.issubdtype(_, np.integer); admitting it as a plain integer would drop the unit
+    # semantics (numpy rounds a scaled duration to integral nanoseconds where the int carrier keeps fractions).
+    def kernel(scale: float) -> float:
+        return float((_DURATION_CONST * scale)[0])
+
+    with pytest.raises(UnsupportedConstruct, match="dtype timedelta64"):
+        lower(kernel)
+
+
+def test_byte_swapped_unsigned_boundary_holds() -> None:
+    # dtype equality misses the big-endian spelling of uint64, so 2**63 wrapped negative through astype.
+    def oversized(x: float) -> float:
+        return x + float(_BE_U64_HUGE[0])
+
+    with pytest.raises(UnsupportedConstruct, match="subscript of an object"):
+        lower(oversized)
+
+    def in_range(x: float) -> float:
+        return x + float(_BE_U64_SMALL[0])
+
+    _assert_python_matches_holoso(in_range, 1.0)
+
+
+def test_list_subscript_keys_are_advanced_indexing() -> None:
+    # numpy: m[[0]] is FANCY indexing (shape (1, 2)); reading it as the basic m[0] silently changes geometry.
+    def known(s: float) -> float:
+        return s * float(len(GAIN[[0]]))  # all-Known folds concretely through numpy itself: len == 1
+
+    _assert_python_matches_holoso(known, 3.0)
+
+    def runtime(s: float) -> float:
+        v = (GAIN * s)[[0]]
+        return v[0][0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="runtime aggregate"):
+        lower(runtime)
+
+
+def test_type_checking_annotations_do_not_block_state() -> None:
+    # PEP 649 evaluates annotations lazily; a TYPE_CHECKING-only name on ANY class attribute must not crash
+    # aggregate-state analysis (the annotation is typing documentation, not a schema).
+    class Tracker:
+        helper: SomeCheckOnlyType  # type: ignore[name-defined]  # noqa: F821
+
+        def __init__(self) -> None:
+            self.v = [1.0, 2.0]
+
+        def step(self, a: float) -> None:
+            self.v = [self.v[1], a]
+
+    hir = lower(Tracker().step)
+    assert {s.name for s in hir.state_slots} == {"v_0", "v_1"}
+
+
+def test_scalar_reset_still_validates_the_field_contract() -> None:
+    @dataclasses.dataclass
+    class Declared:
+        v: Float64[np.ndarray, "2"]
+
+        def step(self, a: float) -> None:
+            self.v = self.v * a
+
+    with pytest.raises(UnsupportedConstruct, match="declared array type"):
+        lower(Declared(1.0).step)  # type: ignore[arg-type]  # a scalar reset against a declared 2-vector
+
+
+def test_zero_dimensional_array_state_is_rejected() -> None:
+    class Zero:
+        def __init__(self) -> None:
+            self.v = np.array(1.0)
+
+        def step(self, a: float) -> None:
+            self.v = self.v * a
+
+    with pytest.raises(UnsupportedConstruct, match="0-dimensional"):
+        lower(Zero().step)
+
+
+def test_zero_d_operand_broadcasts_with_arrays() -> None:
+    def kernel(s: float) -> tuple[float, float, float]:
+        v = _ZERO_D_CONST * (COEFFS * s)  # numpy broadcasts a 0-d array like a scalar
+        return v[0], v[1], v[2]
+
+    _assert_python_matches_holoso(kernel, 2.0)
+
+
+def test_platform_alias_scalars_admit_like_their_dtypes() -> None:
+    def kernel(s: float) -> float:
+        return s + float(_LONGLONG_CONST)
+
+    _assert_python_matches_holoso(kernel, 1.5)
+
+
+def test_float_store_into_int_reset_array_reads_back_float() -> None:
+    # The stored cells fix the read-back dtype: an int-reset slot holding promoted float cells must not
+    # reject later arithmetic as "runtime integer" (the values already matched Python; the reason was wrong).
+    class Decay:
+        def __init__(self) -> None:
+            self.v = np.array([4, 2])
+
+        def step(self, a: float) -> float:
+            self.v = self.v * a
+            w = self.v * 2  # an INTEGER scalar: a stale int layout would misread this as runtime-int math
+            return w[0]  # type: ignore[no-any-return]
+
+    sim = _sim(Decay().step)
+    reference = Decay()
+    for _ in range(3):
+        want = reference.step(0.5)
+        got = _run(sim, 0.5)
+        assert got[0] == pytest.approx(want)
+        assert np.allclose(got[1:], reference.v.astype(np.float64), rtol=1e-12)
+
+
+def test_width_collapse_extends_to_type_identity() -> None:
+    # SANCTIONED deviation, part of the width collapse: an embedded narrow scalar is OBSERVATIONALLY its
+    # 64-bit carrier, type identity included -- isinstance answers for the carrier (np.float64 IS a float
+    # subclass) where plain numpy would answer for np.float32. Values, arithmetic, and type identity follow
+    # the carrier together; distinguishing them would require width provenance the domain deliberately drops.
+    def kernel(x: float) -> float:
+        return x if isinstance(_F32_GAINS[0], float) else -x
+
+    model = holoso.synthesize(kernel, default_ops(_FMT), name="kernel").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == 3.0  # the carrier verdict; plain Python returns -3.0
+
+
+_DURATION_CONST = np.array([3], dtype="timedelta64[ns]")
+_BE_U64_HUGE = np.array([2**63], dtype=">u8")
+_BE_U64_SMALL = np.array([7], dtype=">u8")
+_LONGLONG_CONST = np.longlong(7)
+
+
 # ---------------------------------------------------------------- behavior (model vs numpy)
 
 

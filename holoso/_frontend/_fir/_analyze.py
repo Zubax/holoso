@@ -18,7 +18,7 @@ import enum
 import logging
 import types
 from typing import TYPE_CHECKING
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import MISSING, dataclass, field, is_dataclass, replace
 
 from ..._errors import UnsupportedConstruct, UnsupportedLibraryFunction
@@ -415,6 +415,7 @@ class Analyzer:
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._array_methods: dict[tuple[BindingId, str], _ArrayMethod] = {}
+        self._class_annotations: dict[int, tuple[type, "Mapping[str, object]"]] = {}
         self._component_reads: dict[tuple[int, str], tuple[object, object, StaticValue | None]] = {}
         self._value_methods: dict[tuple[StaticValue, str], object] = {}
         self._roots: dict[int, tuple[str, ...]] = {}  # root component id -> the empty member path
@@ -520,6 +521,7 @@ class Analyzer:
         origin = (Origin(self._root_template.name, 0, 0),)
         name = ".".join(leaf.path)
         reset = normalize_static(admitted)
+        self._validate_state_annotation(leaf, reset, origin)
         if isinstance(reset, AggregateFact):
             self._validate_state_reset_schema(leaf, reset.layout, origin)
             cells: list[AtomicFact] = []
@@ -553,6 +555,11 @@ class Analyzer:
                         f"state attribute '{name}' must be a flat list of scalars to persist", origin
                     )
             case ArrayLayout(shape=shape):
+                if not shape:
+                    raise AnalysisRejection(
+                        f"state attribute '{name}' has a 0-dimensional array reset; persist a scalar instead",
+                        origin,
+                    )
                 if len(shape) > 2:
                     raise AnalysisRejection(
                         f"state attribute '{name}' has a {len(shape)}-D array reset; only 1-D and 2-D arrays "
@@ -563,27 +570,57 @@ class Analyzer:
                 raise AnalysisRejection(f"state attribute '{name}' has an unsupported reset type", origin)
         if leaf_count(layout) == 0:
             raise AnalysisRejection(f"state attribute '{name}' has an empty aggregate reset", origin)
-        import inspect
 
-        annotation = next(
-            (
-                annotations[leaf.path[-1]]
-                for c in type(leaf.component).__mro__
-                if leaf.path[-1] in (annotations := inspect.get_annotations(c))
-            ),
-            None,
+    def _validate_state_annotation(self, leaf: StateLeaf, reset: Fact, origin: OriginStack) -> None:
+        """
+        A declared jaxtyping FIELD annotation must agree with the reset -- for every reset kind, a scalar
+        included (a declared 2-vector seeded with a float is the honest mistake this catches). Annotations are
+        read in the deferred FORWARDREF format: PEP 649 evaluates them lazily, and a TYPE_CHECKING-only name
+        anywhere on the class (ordinary typing practice) must neither crash the analysis nor block state --
+        an unresolved proxy is simply not an array annotation. A raising annotation body is a located
+        rejection, never a leaked exception.
+        """
+        name = ".".join(leaf.path)
+        annotation: object = None
+        for klass in type(leaf.component).__mro__:
+            annotations = self._class_annotations_of(klass, name, origin)
+            if leaf.path[-1] in annotations:
+                annotation = annotations[leaf.path[-1]]
+                break
+        if annotation is None or not is_array_annotation(annotation):
+            return
+        try:
+            declared = array_shape(annotation)
+        except ContractError as error:
+            raise AnalysisRejection(f"state attribute '{name}': {error}", origin) from None
+        matches = (
+            isinstance(reset, AggregateFact)
+            and isinstance(reset.layout, ArrayLayout)
+            and reset.layout.shape == declared
         )
-        if annotation is not None and is_array_annotation(annotation):
-            try:
-                declared = array_shape(annotation)
-            except ContractError as error:
-                raise AnalysisRejection(f"state attribute '{name}': {error}", origin) from None
-            if not (isinstance(layout, ArrayLayout) and layout.shape == declared):
-                raise AnalysisRejection(
-                    f"state attribute '{name}' has a reset diverging from its declared array type "
-                    f"{'x'.join(map(str, declared))}",
-                    origin,
-                )
+        if not matches:
+            raise AnalysisRejection(
+                f"state attribute '{name}' has a reset diverging from its declared array type "
+                f"{'x'.join(map(str, declared))}",
+                origin,
+            )
+
+    def _class_annotations_of(self, klass: type, state_name: str, origin: OriginStack) -> "Mapping[str, object]":
+        import annotationlib
+
+        hit = self._class_annotations.get(id(klass))
+        if hit is not None and hit[0] is klass:
+            return hit[1]
+        try:
+            annotations = annotationlib.get_annotations(klass, format=annotationlib.Format.FORWARDREF)
+        except Exception as error:
+            raise AnalysisRejection(
+                f"state attribute '{state_name}': the annotations of class {klass.__name__!r} fail to "
+                f"evaluate ({error})",
+                origin,
+            ) from None
+        self._class_annotations[id(klass)] = (klass, annotations)
+        return annotations
 
     def _admit_state_store(self, leaf: StateLeaf, reset: Fact, src: Fact, origin: OriginStack) -> Fact:
         """
@@ -647,7 +684,21 @@ class Analyzer:
                 cells.append(promoted)
             else:
                 cells.append(stored)
-        return AggregateFact(reset.layout, tuple(cells))
+        layout: AggregateLayout = reset.layout
+        if isinstance(reset.layout, ArrayLayout):
+            # The stored cells fix the read-back dtype: an int-reset slot holding promoted float cells reads
+            # back as a float array (the layout carried by the fact must agree with its own cell kinds).
+            sems = set()
+            for cell in cells:
+                assert isinstance(cell, (Known, Residual)), cell
+                sems.add(cell.type if isinstance(cell, Residual) else _residual_type(cell.value))
+            dtype = (
+                ArrayDType.BOOL
+                if sems == {SemType.BOOL}
+                else ArrayDType.FLOAT if SemType.FLOAT in sems else ArrayDType.INT
+            )
+            layout = ArrayLayout(reset.layout.shape, dtype)
+        return AggregateFact(layout, tuple(cells))
 
     def _finalize(self, result: ResidualUnit) -> None:
         """
@@ -1138,6 +1189,16 @@ class Analyzer:
                     "elementwise arithmetic mixes an array with a non-array container; wrap it in np.array(...)",
                     origin,
                 )
+        if _is_array_fact(lhs) and lhs.layout.shape == ():  # type: ignore[union-attr]
+            lhs = lhs.leaves[0]  # type: ignore[union-attr]  # numpy broadcasts a 0-d array like a scalar
+        if _is_array_fact(rhs) and rhs.layout.shape == ():  # type: ignore[union-attr]
+            rhs = rhs.leaves[0]  # type: ignore[union-attr]
+        promotes = bin_op is BinOp.DIV
+        if not (_is_array_fact(lhs) or _is_array_fact(rhs)):
+            # Both operands were 0-d arrays: the result is the scalar sort, exactly as numpy yields it.
+            return self._fold_binary(
+                lambda a, b: static_binop(bin_op, a, b), lhs, rhs, origin, promotes_to_float=promotes
+            )
         lhs_sem = self._elementwise_side_sem(lhs, origin)
         rhs_sem = self._elementwise_side_sem(rhs, origin)
         if SemType.BOOL in (lhs_sem, rhs_sem):
@@ -1150,7 +1211,6 @@ class Analyzer:
                 "(only a scalar broadcasts)",
                 origin,
             )
-        promotes = bin_op is BinOp.DIV
         result_sem = SemType.FLOAT if promotes or SemType.FLOAT in (lhs_sem, rhs_sem) else SemType.INT
         for side in (lhs, rhs):
             if isinstance(side, Known) and isinstance(side.value, MetaInt):
@@ -1184,8 +1244,6 @@ class Analyzer:
                 lambda a, b: static_binop(bin_op, a, b), left, right, origin, promotes_to_float=promotes
             )
 
-        if shapes[0] == ():
-            return pair(0)  # numpy: 0-d operands yield the scalar sort, never a 0-d array
         dtype = ArrayDType.FLOAT if result_sem is SemType.FLOAT else ArrayDType.INT
         leaves: list[AtomicFact] = []
         for ordinal in range(leaf_count(arrays[0].layout)):
@@ -1339,10 +1397,16 @@ class Analyzer:
             case Residual(type=sem):
                 return sem
             case Reference(obj=referent) if isinstance(referent, np.ndarray):
-                # An ndarray SUBCLASS (np.matrix redefines * as the matrix product) never admits, so it reaches
-                # arithmetic as a live reference; name the actual problem instead of "non-numeric".
+                # An unadmitted ndarray reaches arithmetic as a live reference; name the actual problem
+                # instead of "non-numeric" -- a SUBCLASS (np.matrix redefines * as the matrix product) or a
+                # dtype outside the embeddable boolean/integer/float categories (a timedelta64, a huge uint64).
+                if type(referent) is not np.ndarray:
+                    raise AnalysisRejection(
+                        "an ndarray subclass does not participate in arithmetic; use a plain numpy array", origin
+                    )
                 raise AnalysisRejection(
-                    "an ndarray subclass does not participate in arithmetic; use a plain numpy array", origin
+                    f"an array of dtype {referent.dtype} is not admitted " "(only boolean/integer/float dtypes embed)",
+                    origin,
                 )
             case Reference():
                 raise AnalysisRejection("a non-numeric value reaches a runtime operation", origin)
@@ -1441,7 +1505,12 @@ class Analyzer:
                 self._subscript_selections[id(op)] = tuple(ordinals)
                 children = tuple(obj.child(position) for position in selected)
                 return aggregate_of(children, is_list=isinstance(obj.layout, ListLayout))
-            if isinstance(obj.layout, ArrayLayout) and isinstance(index.value, (StaticSlice, StaticSeq)):
+            if isinstance(obj.layout, ArrayLayout) and (
+                isinstance(index.value, StaticSlice) or (isinstance(index.value, StaticSeq) and not index.value.is_list)
+            ):
+                # Only a TUPLE key is basic multi-axis indexing; a LIST key is numpy ADVANCED (fancy) indexing
+                # with entirely different result geometry, so it falls through -- an all-Known object folds it
+                # concretely through numpy itself, a runtime one keeps the located rejection.
                 return self._array_subscript(op, obj, index.value)
             try:
                 position = operator.index(as_python(index.value))  # type: ignore[arg-type]  # np ints qualify

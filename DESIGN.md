@@ -158,8 +158,10 @@ identity: exact Python ints (MetaInt) are distinct from numpy 64-bit scalars (Np
 mixed-operand semantics; numeric WIDTH is immaterial -- narrower numpy scalars and arrays admit by exact value
 embedding into the category carrier (bool/int64/float64), so width-dependent arithmetic artifacts like int8
 wraparound or float32 intermediate rounding are not emulated, consistent with the datapath computing in the
-configured format rather than the source width; a uint64 beyond the signed-64 range and a longdouble have no
-exact embedding and stay non-static); arrays admit as read-only snapshots; sequences keep
+configured format rather than the source width, and the embedding extends to TYPE IDENTITY -- an isinstance
+query on an embedded scalar answers for the carrier; a uint64 beyond the signed-64 range, a longdouble, and
+every non-boolean/integer/float dtype (a timedelta64 is integer-KINDED yet not an integer) have no exact
+embedding and stay non-static); arrays admit as read-only snapshots; sequences keep
 list/tuple flavor; slices with integer (or absent) bounds are plain values; dataclasses admit as records only
 when reconstructible from fields; containers bound depth and refuse cycles. An IntEnum/StrEnum member normalizes to its base value with the MEMBER retained as the scalar's
 source (tri-state provenance: a retained member, PLAIN for provably-never-an-enum, or LOST when a join dropped
@@ -378,7 +380,7 @@ the result dtype, as in Python and numpy. Three guards mirror numpy's ARRAY-WIDE
 single element's: a Python-int constant outside the result dtype's range is a located rejection exactly where
 numpy raises OverflowError (an empty array included -- the conversion precedes element iteration); 0-d operands
 yield the SCALAR sort (numpy returns `np.float64`/`np.int64`, never a 0-d array, unary included), and a 0-d
-array in any scalar operand position materializes as its single leaf; a runtime-INTEGER result rejects until
+array in any operand position -- a scalar slot or one side of an array pair -- broadcasts as its single leaf; a runtime-INTEGER result rejects until
 the integer sprint, because the scalar integer datapath saturates where numpy int64 wraps -- all-static integer
 folds are exact and stay admitted.
 The array factories `np.array`/`asarray`/`asanyarray` build from a residual-carrying aggregate as the same

@@ -1071,12 +1071,16 @@ class _Emitter:
         broadcast: dict[BindingId, int] = {}
 
         def operand(binding: BindingId, fact: Fact, ordinal: int) -> int:
-            if isinstance(fact, AggregateFact):
+            if isinstance(fact, AggregateFact) and not (
+                isinstance(fact.layout, ArrayLayout) and fact.layout.shape == ()
+            ):
                 return self._materialize_atom(
                     fact.leaves[ordinal],
                     lambda: self._read(block, _LeafPlace(Local(binding), ordinal)),
                     SemType.FLOAT,
                 )
+            # A scalar or a 0-d array: one materialization broadcast across every leaf (the 0-d unwrap lives
+            # in the scalar materializer).
             if binding not in broadcast:
                 broadcast[binding] = self._materialize(block, binding, SemType.FLOAT)
             return broadcast[binding]
