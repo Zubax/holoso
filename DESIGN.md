@@ -360,10 +360,12 @@ concatenation/repetition, indexing, record field projection, record construction
 desugars to the vetted slice() constructor and a static slice of a positional container is a WINDOW operation
 over the same children (runtime leaves included; strides, reversals, and open bounds follow slice.indices
 exactly; runtime bounds and slices of arrays/structural joins stay located rejections); starred assignment
-targets desugar to integer projections plus a list()-converted window with the arity check relaxed to at-least.
+targets desugar to integer projections plus a list()-converted window with the arity check relaxed to at-least;
+call arguments unpack (f(*t)) by flattening the starred container's children into ordinary arguments through
+synthesized projections before any dispatch (static arity required; **kwargs stays rejected).
 What remains deferred is the rest of the
 BOUNDARY surface -- aggregate parameter ports, aggregate persistent state, runtime-element iteration,
-call-argument unpacking (f(*args)), and the array/record/reduction/gather semantics below -- and every disabled
+and the array/record/reduction/gather semantics below -- and every disabled
 test carries
 the greppable marker. The contract the remaining stages restore (and extend with records, reductions, and the
 bounded gather):

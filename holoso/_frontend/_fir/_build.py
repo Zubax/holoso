@@ -628,13 +628,14 @@ class _Builder:
                 self._emit(LoadPlace(temp, Local(result), origin))
                 return temp
             case ast.Call(func=func, args=args, keywords=keywords):
-                if any(isinstance(arg, ast.Starred) for arg in args) or any(kw.arg is None for kw in keywords):
-                    raise BuildRejection("argument unpacking in calls is not supported", origin)
+                if any(kw.arg is None for kw in keywords):
+                    raise BuildRejection("dictionary argument unpacking (**kwargs) is not supported", origin)
                 callee = self._expression(func)
-                arg_temps = tuple(self._expression(arg) for arg in args)
+                arg_temps = tuple(self._expression(arg.value if isinstance(arg, ast.Starred) else arg) for arg in args)
+                stars = tuple(isinstance(arg, ast.Starred) for arg in args)
                 kwarg_temps = tuple((kw.arg, self._expression(kw.value)) for kw in keywords if kw.arg is not None)
                 temp = self._temp()
-                self._emit(PyCall(temp, callee, arg_temps, kwarg_temps, origin))
+                self._emit(PyCall(temp, callee, arg_temps, kwarg_temps, origin, starred=stars if any(stars) else ()))
                 return temp
             case ast.Attribute(value=obj, attr=attr):
                 obj_temp = self._expression(obj)

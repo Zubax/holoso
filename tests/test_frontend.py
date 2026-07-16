@@ -6518,3 +6518,44 @@ def test_starred_assignment_targets_desugar_to_windows() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="expected at least 2 values"):
         lower(star_arity_fail)
+
+
+def test_call_argument_unpacking_flattens_static_containers() -> None:
+    # f(*t) flattens before any dispatch: the starred container's children become ordinary arguments through
+    # synthesized projections, so template inlining, vetted folds, and intrinsics all see a plain call. The
+    # star may mix with leading/trailing positionals; a container of runtime values rides its leaves.
+    def helper(a: float, b: float, c: float) -> float:
+        return a + b * 10.0 + c * 100.0
+
+    def star_call(x: float, y: float) -> float:
+        t = (y, x + 1.0)
+        return helper(x, *t)
+
+    def star_leading(x: float) -> float:
+        t = (x, 2.0)
+        return helper(*t, 3.0)
+
+    def star_concrete(x: float) -> float:
+        return x * float(len(*(("ab",))))
+
+    for kernel, argsets in (
+        (star_call, [(1.0, 2.0)]),
+        (star_leading, [(4.0,)]),
+        (star_concrete, [(2.0,)]),
+    ):
+        model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name=kernel.__name__).numerical_model
+        elaborated = model.elaborate()
+        for argset in argsets:
+            assert float(elaborated.run(*argset)[0]) == kernel(*argset)
+
+    def star_scalar(x: float) -> float:
+        return helper(*x, 1.0, 2.0)  # type: ignore[misc,call-arg]
+
+    with pytest.raises(UnsupportedConstruct, match="argument unpacking requires a tuple or list"):
+        lower(star_scalar)
+
+    def double_star(x: float) -> float:
+        return helper(**dict(a=x), b=1.0, c=2.0)
+
+    with pytest.raises(UnsupportedConstruct, match="dictionary argument unpacking"):
+        lower(double_star)

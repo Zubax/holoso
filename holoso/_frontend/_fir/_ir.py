@@ -211,6 +211,7 @@ class PyCall:
     args: tuple[BindingId, ...]
     kwargs: tuple[tuple[str, BindingId], ...]
     origin: OriginStack
+    starred: tuple[bool, ...] = ()  # aligned with args when any position unpacks; empty = none do
 
 
 @dataclass(slots=True)

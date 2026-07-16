@@ -676,9 +676,9 @@ SPECS = [
 # of stages 6-9 removes its own entries as the feature lands, and stage 10 asserts this map is empty. Greppable via
 # the FIR_PARITY_PENDING token.
 FIR_PARITY_PENDING: dict[str, str] = {
+    "ekf1_stateful": "stage 9: element-wise arithmetic on aggregates (unpacking now lowers)",
     "polar_to": "stage 9: np.array construction",
     "polar_from": "stage 9: np.array construction",
-    "ekf1_stateful": "builder: argument unpacking f(*args)",
     # Off-catalogue examples (no SPECS entry) whose synth targets and eventual suites key off these names too.
     "imu_frame_transform": "stage 9: jaxtyping ndarray ports + matmul over array parameters",
     "finite_set_current_controller": "stage 9: record ports/returns, reductions, array comparison, Index[N] gather",

@@ -1436,6 +1436,10 @@ class Analyzer:
         env.set(Local(call.dst), record_of(klass, tuple(children)))
         self._construction_calls[id(call)] = tuple(mapping)
 
+    def _fresh_temp(self) -> BindingId:
+        self._temp_serial += 1
+        return BindingId(f"%c{self._temp_serial}", self._temp_serial)
+
     def _expand_call(self, unit: FunctionUnit, block: Block, index: int, call: PyCall, env: _Env) -> bool:
         from .._lib import IntrinsicResultRule, Library, resolve
         from .._lib import Intrinsic
@@ -1443,6 +1447,32 @@ class Analyzer:
         callee_fact = env.get(Local(call.callee))
         if not isinstance(callee_fact, Reference):
             raise AnalysisRejection("call target is not resolvable here", call.origin)
+        if any(call.starred):
+            # f(*t) flattens BEFORE any dispatch: each starred argument must be a positional container of
+            # static arity, and its children become ordinary arguments through synthesized projections --
+            # the rewritten call (no stars left) then re-enters every path unchanged.
+            replacement: list[Op] = []
+            flattened: list[BindingId] = []
+            for position, arg in enumerate(call.args):
+                if position < len(call.starred) and call.starred[position]:
+                    fact = env.get(Local(arg))
+                    if not (isinstance(fact, AggregateFact) and isinstance(fact.layout, (TupleLayout, ListLayout))):
+                        raise AnalysisRejection(
+                            "argument unpacking requires a tuple or list of static arity here", call.origin
+                        )
+                    for child in range(outer_arity(fact.layout)):
+                        index_temp = self._fresh_temp()
+                        child_key = admit(child)
+                        assert child_key is not None
+                        replacement.append(LoadConst(index_temp, child_key, call.origin))
+                        element = self._fresh_temp()
+                        replacement.append(PySubscript(element, arg, index_temp, call.origin))
+                        flattened.append(element)
+                else:
+                    flattened.append(arg)
+            replacement.append(PyCall(call.dst, call.callee, tuple(flattened), call.kwargs, call.origin))
+            block.ops[index : index + 1] = replacement
+            return True
         target = callee_fact.obj
         match = resolve(target)
         if isinstance(match, Library):
