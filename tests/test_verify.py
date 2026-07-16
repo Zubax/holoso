@@ -1651,7 +1651,6 @@ def test_aliased_slot_with_phi_live_in_builds(monkeypatch: pytest.MonkeyPatch) -
     build(_run(InputPhi().__call__), "input_phi_alias", fetch_stages=3)  # phi-of-inputs shape must compile
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: polar kernels take/return np.array vectors — stage 9")
 def test_polar_example_round_trip_and_native_reference() -> None:
     # The examples/polar.py vector kernels are off-catalogue (2-vector ports, no scalar SPEC), verified here: each
     # conversion against native math (approximate), and a round trip that must recover the input away from the origin.

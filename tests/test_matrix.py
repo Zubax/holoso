@@ -224,7 +224,6 @@ def test_np_matmul_bare_name_import_resolves() -> None:
     _assert_python_matches_holoso(with_bare_name, np.array([[0.5, -1.0], [2.0, 0.25]]), np.array([2.0, 3.0]))
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: augmented assignment to array — stage 9")
 def test_augmented_assignment_to_array_is_rejected() -> None:
     # Regression: numpy '+=' / '@=' mutate in place while the frontend rebinds, so an alias would diverge; the array
     # augmented forms must be rejected in favor of the explicit 'x = x + ...' rebind.
@@ -232,7 +231,7 @@ def test_augmented_assignment_to_array_is_rejected() -> None:
         v += s
         return v
 
-    with pytest.raises(UnsupportedConstruct, match="augmented assignment to a list or array"):
+    with pytest.raises(UnsupportedConstruct, match="rebind instead"):
         lower(name_target)
 
     @dataclasses.dataclass
@@ -242,8 +241,8 @@ def test_augmented_assignment_to_array_is_rejected() -> None:
         def step(self, f: Float64[np.ndarray, "2 2"]) -> None:
             self.P @= f
 
-    with pytest.raises(UnsupportedConstruct, match="augmented assignment to a list or array"):
-        lower(State(np.eye(2)).step)
+    with pytest.raises(UnsupportedConstruct, match="rebind instead"):
+        lower(State(np.eye(2)).step)  # the in-place rejection precedes any matmul question, exactly like *=
 
     def scalar_ok(a: float, s: float) -> float:
         a += s
@@ -261,7 +260,6 @@ def test_unary_minus_on_boolean_aggregate_is_rejected_with_location() -> None:
         lower(f)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: elementwise array arithmetic — stage 9")
 def test_elementwise_arithmetic_and_broadcast() -> None:
     def combos(v: Float64[np.ndarray, "2"], w: Float64[np.ndarray, "2"], s: float) -> Float64[np.ndarray, "2"]:
         return (v + w) * s - w / 2.0 + (s - v) * w  # type: ignore[no-any-return]
@@ -334,18 +332,16 @@ def test_numpy_only_methods_on_a_list_are_rejected() -> None:
         lower(multi_axis)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime aggregate (list) arithmetic — stage 9")
 def test_list_of_array_demotes_to_sequence_for_arithmetic() -> None:
     # list(arr)/tuple(arr) produce Python sequences (as in Python), so arithmetic on the result is rejected even though
     # the argument was an array -- guards against the builtins accidentally keeping array semantics.
     def via_list(v: Float64[np.ndarray, "2"], s: float) -> float:
         return (list(v) * s)[0]  # type: ignore[operator, no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="aggregate value"):
         lower(via_list)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: starred unpacking of aggregate — stage 9")
 def test_star_unpack_remainder_is_a_python_list() -> None:
     # Regression: a starred target binds a plain list even when unpacking an array (PEP 3132), so arithmetic on the
     # remainder must be rejected -- it must not inherit the source array's semantics.
@@ -353,11 +349,9 @@ def test_star_unpack_remainder_is_a_python_list() -> None:
         first, *rest = v
         return (rest + rest)[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
-        lower(spread)
+    _assert_python_matches_holoso(spread, np.array([5.0, 6.0, 7.0]))
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: array/list arithmetic on merged value — stage 9")
 def test_mismatched_branch_flavor_merge_rejects_array_ops() -> None:
     # Regression: a value that is an array in one arm and a list in the other must not silently gain array semantics
     # (that made acceptance depend on arm order). A numpy op on the merged value is rejected; structural use stays fine.
@@ -368,7 +362,7 @@ def test_mismatched_branch_flavor_merge_rejects_array_ops() -> None:
             v = [a, b]  # type: ignore[assignment]
         return v * 2.0
 
-    with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="aggregate value"):
         lower(arithmetic)
 
     def structural(c: bool, a: float, b: float) -> float:
@@ -481,7 +475,6 @@ def test_state_attributes_named_shape_and_ndim_shadow_the_shape_queries() -> Non
         assert (state_shape, state_ndim, state_t) == pytest.approx((reference.shape, reference.ndim, reference.T))
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: array subscript/slice — stage 9")
 def test_numpy_subscripts() -> None:
     def picks(m: Float64[np.ndarray, "2 3"]) -> tuple[float, float, float, float]:
         column = m[:, 2]
@@ -516,7 +509,6 @@ def test_multi_axis_index_on_list_is_rejected() -> None:
     assert [o.name for o in lower(ragged_chained).outputs] == ["out_0"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: shaped array parameter annotations — stage 9")
 def test_shaped_parameter_annotation_rejections() -> None:
     def symbolic(v: Float64[np.ndarray, "n"]) -> float:
         return v[0]  # type: ignore[no-any-return]
@@ -570,7 +562,6 @@ def test_shaped_parameter_annotation_rejections() -> None:
         lower(fake)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: array parameter subscript — stage 9")
 def test_wide_float_dtype_annotation_is_accepted() -> None:
     def f(v: Float[np.ndarray, "2"]) -> float:
         return v[0] + v[1]  # type: ignore[no-any-return]
@@ -578,15 +569,32 @@ def test_wide_float_dtype_annotation_is_accepted() -> None:
     assert lower(f).input_names() == ["v_0", "v_1"]
 
 
+def test_array_annotations_must_be_over_ndarray() -> None:
+    # Float64[list, "2"] carries dims like any jaxtyping form; seeding it as an array would swap LIST
+    # semantics (duplication on *) for elementwise arithmetic.
+    def listy(v: Float64[list[float], "2"], s: float) -> float:
+        return v[0] * s
+
+    with pytest.raises(UnsupportedConstruct, match="over np.ndarray"):
+        lower(listy)
+
+
+def test_array_port_budget_is_enforced() -> None:
+    def huge(v: Float64[np.ndarray, "8192"]) -> float:
+        return v[0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="beyond"):
+        lower(huge)
+
+
 def test_decomposed_parameter_port_collision_is_rejected() -> None:
     def collides(v: Float64[np.ndarray, "2"], v_0: float) -> float:
         return v[1] * v_0  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="collides"):
+    with pytest.raises(UnsupportedConstruct, match="already claims"):
         lower(collides)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: array return values — stage 9")
 def test_array_return_annotation_is_validated() -> None:
     def good(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return v * 2.0
@@ -611,10 +619,18 @@ def test_array_return_annotation_is_validated() -> None:
         lower(scalar_returned)
 
     def boolean_leaves(flag: bool) -> Float64[np.ndarray, "1"]:
-        return [flag]  # type: ignore[return-value]
+        return np.array([flag])
 
-    with pytest.raises(UnsupportedConstruct, match="floating-point"):
+    with pytest.raises(UnsupportedConstruct, match="declared float"):
         lower(boolean_leaves)
+
+    def reflavored(flag: bool) -> Float64[np.ndarray, "1"]:
+        # The annotation promises the caller an ndarray; a LIST of matching geometry is an observable
+        # reflavoring, not RTL plumbing -- np.array([...]) is the explicit conversion.
+        return [1.0]  # type: ignore[return-value]
+
+    with pytest.raises(UnsupportedConstruct, match="shape mismatch"):
+        lower(reflavored)
 
 
 def test_matrix_state_annotation_and_assignment_validation() -> None:
@@ -690,8 +706,9 @@ def test_arithmetic_on_boolean_operands_is_rejected_with_location() -> None:
         lower(aggregate)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matrix carried across loop — stage 9")
-def test_matrix_carried_across_while_loop_is_rejected() -> None:
+def test_matrix_carried_across_while_loop_matches_numpy() -> None:
+    # The per-leaf phi spine carries an aggregate around a runtime back-edge like any scalars; the legacy
+    # engine rejected this, the structural one computes it.
     def f(m: Float64[np.ndarray, "2 2"], n: float) -> Float64[np.ndarray, "2 2"]:
         x = n
         while x > 0.0:
@@ -699,11 +716,9 @@ def test_matrix_carried_across_while_loop_is_rejected() -> None:
             x = x - 1.0
         return m
 
-    with pytest.raises(UnsupportedConstruct, match="aggregate"):
-        lower(f)
+    _assert_python_matches_holoso(f, np.array([[1.0, 2.0], [3.0, 4.0]]), 3.0)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: array parameter subscript — stage 9")
 def test_ndarray_constant_element_folds_in_static_position() -> None:
     # An ndarray-constant element is statically known, so it must fold a branch condition (and serve as a static index)
     # exactly as it folds in value position -- otherwise the branch reads as dynamic and a single-arm return is
@@ -819,7 +834,6 @@ def test_transpose_of_matrix_state_attribute() -> None:
     assert np.allclose(got, np.array([[1.0, 2.0], [3.0, 4.0]]).T * 2.0)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: unary plus on array — stage 9")
 def test_unary_plus_rejects_boolean_but_is_identity_on_floats() -> None:
     # Regression: unary plus skipped the boolean guard the other arithmetic operators apply, silently passing a bool
     # through (Python's +True is int 1, which has no runtime type here).

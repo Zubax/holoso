@@ -2651,10 +2651,9 @@ def test_scalar_returned_but_tuple_declared_is_rejected() -> None:
 _STATIC_PAIR = np.array([1.0, 2.0])
 
 
-def test_shaped_array_ports_are_honest_contract_rejections() -> None:
-    # A fixed-shape jaxtyping parameter or return parses as a real contract and rejects honestly pending the
-    # aggregate stages -- never a silent scalar seed that later surfaces as a nonsense diagnostic ("@ is not
-    # defined for scalars" on a matrix kernel).
+def test_shaped_array_ports_decompose_per_leaf() -> None:
+    # A fixed-shape jaxtyping parameter decomposes into one float input port per leaf, and an array return
+    # flattens onto out_* ports, both row-major under the shared indexed-name convention.
     from jaxtyping import Float64
 
     def array_parameter(v: Float64[np.ndarray, "3"]) -> float:
@@ -2663,10 +2662,8 @@ def test_shaped_array_ports_are_honest_contract_rejections() -> None:
     def array_return(x: float) -> Float64[np.ndarray, "2"]:
         return _STATIC_PAIR
 
-    with pytest.raises(UnsupportedConstruct, match="array ports are not lowerable yet"):
-        lower(array_parameter)
-    with pytest.raises(UnsupportedConstruct, match="array returns are not lowerable yet"):
-        lower(array_return)
+    assert lower(array_parameter).input_names() == ["v_0", "v_1", "v_2"]
+    assert [o.name for o in lower(array_return).outputs] == ["out_0", "out_1"]
 
 
 def test_malformed_list_return_annotation_is_rejected() -> None:

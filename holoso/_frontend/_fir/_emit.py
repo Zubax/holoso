@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from ..._errors import UnsupportedConstruct
 from ..._util import RelationalOp
-from .._ast_support import port_name, state_port_name
+from .._ast_support import indexed_names, port_name, state_port_name
 from ..._hir import (
     BoolAnd,
     BoolConst,
@@ -231,8 +231,22 @@ def _validate_return_layout(contract: ReturnContract, layout: "ValueLayout") -> 
         case ListReturn(item=item):
             for child in _positional_children(layout, ContainerFlavor.LIST, "list"):
                 _validate_return_layout(item, child)
+        case ArrayReturn(shape=shape):
+            # STRICT flavor: the annotation promises the caller an ndarray of that exact shape, and the model
+            # reconstructs one; a list of matching geometry is an observable reflavoring, not RTL plumbing
+            # (np.array([...]) is the explicit conversion). The dtype axis is the leaf-kind check's job.
+            if not isinstance(layout, ArrayLayout):
+                described = "a scalar" if layout is None else "a different container"
+                raise EmissionRejection(
+                    f"return shape mismatch: declared a {'x'.join(map(str, shape))} array, returns {described}"
+                )
+            if layout.shape != shape:
+                raise EmissionRejection(
+                    f"return shape mismatch: declared {'x'.join(map(str, shape))}, "
+                    f"returns {'x'.join(map(str, layout.shape)) or 'a scalar shape'}"
+                )
         case _:
-            raise EmissionRejection("array returns are not lowerable yet")  # ArrayReturn under a nested position
+            raise AssertionError(f"unhandled return contract {contract}")
 
 
 def _positional_children(layout: "ValueLayout", flavor: ContainerFlavor, spelled: str) -> tuple["ValueLayout", ...]:
@@ -264,6 +278,8 @@ def _contract_leaf_kind(contract: ReturnContract, path: LeafPath) -> SemType:
                 current = item
             case (ListReturn(item=item), ListIndex() | StructuralIndex()):
                 current = item
+            case (ArrayReturn(), ArrayIndex()):
+                return SemType.FLOAT  # every array-annotation leaf is a float port
             case _:
                 raise AssertionError(f"contract walk diverged at {segment} under {current}")
     assert isinstance(current, ScalarReturn), current
@@ -310,8 +326,17 @@ class _Emitter:
         parameters = unit.params[1:] if unit.bound_self is not None else unit.params
         entry_facts = self._result.block_in[unit.entry].facts
         for parameter in parameters:
-            vid = self._builder.input(parameter.name, self._fact_port_type(entry_facts.get(Local(parameter))))
-            self._write(unit.entry, Local(parameter), vid)
+            entry_fact = entry_facts.get(Local(parameter))
+            if isinstance(entry_fact, AggregateFact):
+                # A fixed-shape array parameter decomposes into one float input port per leaf, row-major, under
+                # the shared indexed-name convention (the same one decomposed state slots follow).
+                assert isinstance(entry_fact.layout, ArrayLayout)
+                for ordinal, cell in enumerate(indexed_names(parameter.name, entry_fact.layout.shape)):
+                    vid = self._builder.input(cell, FloatType())
+                    self._write(unit.entry, _LeafPlace(Local(parameter), ordinal), vid)
+            else:
+                vid = self._builder.input(parameter.name, self._fact_port_type(entry_fact))
+                self._write(unit.entry, Local(parameter), vid)
         for fir_id in order:
             self._emit_block(fir_id)
             self._emitted.add(fir_id)
@@ -440,6 +465,7 @@ class _Emitter:
 
     @staticmethod
     def _fact_port_type(fact: Fact | None) -> Type:
+        assert not isinstance(fact, AggregateFact), "an aggregate parameter must decompose before port typing"
         if _is_bool_fact(fact):
             return BoolType()
         if fact == Residual(SemType.INT) or (isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt))):
@@ -1357,7 +1383,14 @@ class _Emitter:
                 if got is not kind:
                     raise EmissionRejection(f"return type mismatch: declared {kind.value}, returns {got.value}")
             case ArrayReturn():
-                raise EmissionRejection("array returns are not lowerable yet")  # the ndarray stages
+                if not returns_value:
+                    raise EmissionRejection("declared an array return but returns nothing")
+                if not isinstance(return_fact, AggregateFact):
+                    raise EmissionRejection("return shape mismatch: declared an array, returns a scalar")
+                _validate_return_layout(contract, return_fact.layout)
+                zipped = zip(leaf_paths(return_fact.layout), return_fact.leaves, strict=True)
+                for ordinal, (path, leaf_fact) in enumerate(zipped):
+                    return_leaves.append((path, self._exit_leaf(unit.exit, path, ordinal, leaf_fact, SemType.FLOAT)))
             case _:  # a tuple/list contract: the value must be an aggregate of the declared structure
                 if not returns_value:
                     raise EmissionRejection("declared an aggregate return but returns nothing")

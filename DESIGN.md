@@ -416,10 +416,15 @@ schema explicitly at the store site -- container flavor, exact geometry, and per
 next transaction cannot reconstruct); integer cells promote into float slots per cell exactly as scalar stores
 do, and a declared jaxtyping field annotation must agree with the reset shape. 3-D, empty, nested, tuple-valued,
 and ndarray-subclass resets reject by name.
-What remains deferred is the rest of the
-BOUNDARY surface -- aggregate parameter ports,
-and the record/reduction/gather semantics below -- and every disabled
-test carries
+Array parameter and return ports are live: a fixed-shape 1-D/2-D floating jaxtyping annotation over
+np.ndarray ITSELF (Float64[list, ...] would smuggle list semantics) decomposes row-major into one float input
+port per element under the shared indexed-name convention, with a documented per-annotation port budget and a
+build-time claim check across decomposed and scalar parameter names; an array RETURN annotation is strict --
+the value must be an ndarray of exactly the declared shape (a list of matching geometry is an observable
+reflavoring; np.array([...]) is the explicit conversion) -- flattening onto out_* ports through the same leaf
+validation every other return takes.
+What remains deferred is the record boundary (record parameter/return contracts) and the
+reduction/comparison/reshape/selection semantics below, and every disabled test carries
 the greppable marker. The contract the remaining stages restore (and extend with records, reductions, and the
 bounded gather):
 

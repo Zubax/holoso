@@ -17,6 +17,7 @@ Canonical leaf order: tuple/list/structural element order; ndarray C row-major; 
 """
 
 import enum
+import math
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -167,7 +168,7 @@ def leaf_count(layout: ValueLayout) -> int:
         case TupleLayout(items=items) | ListLayout(items=items) | StructuralLayout(items=items):
             return sum(leaf_count(item) for item in items)
         case ArrayLayout(shape=shape):
-            return int(np.prod(shape, dtype=np.int64)) if shape else 1
+            return math.prod(shape)  # exact for arbitrary Python ints (np.prod would wrap at 64 bits)
         case RecordLayout(fields=fields):
             return sum(leaf_count(item) for _, item in fields)
     raise AssertionError(layout)

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 from ..._errors import SourceUnavailable, UnsupportedConstruct
 from ..._util import RelationalOp
-from .._ast_support import UNROLL_THRESHOLD
+from .._ast_support import UNROLL_THRESHOLD, indexed_names
 from ._signature import (
     ArrayParameter,
     ContractError,
@@ -205,6 +205,7 @@ class _Builder:
         # default). Annotation keys are CPython-mangled just like the param slots (``__enabled`` ->
         # ``_Klass__enabled``), so the hint lookup and the contract entry use the runtime spelling.
         param_contracts: dict[str, ParameterContract] = {}
+        port_claims: dict[str, str] = {}
         for arg in declared[1:] if self._bound_self is not None else declared:
             spelled = self._resolver.runtime_spelling(arg.arg)
             hint = self._hints.get(spelled) if spelled is not None else None
@@ -220,14 +221,17 @@ class _Builder:
                 raise BuildRejection(
                     f"unsupported parameter annotation for {arg.arg!r}: {error}", self._origin(arg)
                 ) from None
-            if isinstance(contract, ArrayParameter):
-                # The contract parses (honest diagnostics, never a silent scalar seed) but its decomposed ports
-                # await the aggregate stages.
-                raise BuildRejection(
-                    f"parameter {arg.arg!r}: fixed-shape array ports are not lowerable yet", self._origin(arg)
-                )
             assert spelled is not None
             param_contracts[spelled] = contract
+            cells = indexed_names(spelled, contract.shape) if isinstance(contract, ArrayParameter) else [spelled]
+            for cell in cells:
+                owner = port_claims.setdefault(cell, spelled)
+                if owner != spelled:
+                    raise BuildRejection(
+                        f"parameter {spelled!r} decomposes onto input port '{cell}', which parameter "
+                        f"{owner!r} already claims (rename one of them)",
+                        self._origin(arg),
+                    )
         params = [self._bind(arg.arg) for arg in declared]
         self._params_bound = True  # any further store to the receiver name is now a rebinding, not the initial bind
         if fndef.returns is None:

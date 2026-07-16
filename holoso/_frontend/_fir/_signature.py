@@ -6,6 +6,7 @@ offending parameter or return annotation. Fulfillment is a separate concern: the
 and aggregate contracts, and until then their ports are honest located rejections rather than silent scalar seeds.
 """
 
+import math
 import types
 import typing
 from dataclasses import dataclass
@@ -70,15 +71,25 @@ def is_array_annotation(annotation: object) -> bool:
     return isinstance(annotation, type) and hasattr(annotation, "dims")
 
 
+# A resource limit distinct from the loop-unrolling threshold: every array-annotation leaf becomes a physical
+# scalar port, so the cap bounds port fan-out, name generation, and per-leaf plan sizes.
+MAX_ARRAY_PORT_LEAVES = 4096
+
+
 def array_shape(annotation: object) -> tuple[int, ...]:
     """
     The fixed shape of a jaxtyping-style array annotation. Everything must be static -- a symbolic, variadic, or
-    broadcastable dimension has no memory to size at run time. The dtype category must be floating-point; the
+    broadcastable dimension has no memory to size at run time. The dtype category must be floating-point, and the
+    annotated carrier must be np.ndarray itself (Float64[list, "2"] would seed LIST semantics as an array); the
     concrete hardware format still comes from the operator configuration, not the annotation.
     """
+    import numpy as np
+
     dims = getattr(annotation, "dims", None)
     if not isinstance(dims, tuple):  # a real jaxtyping type always carries a dims tuple; anything else is not one
         raise ContractError("not a valid fixed-shape array annotation")
+    if getattr(annotation, "array_type", None) is not np.ndarray:
+        raise ContractError('the array annotation must be over np.ndarray (e.g. Float64[np.ndarray, "3"])')
     sizes: list[int] = []
     for dim in dims:
         size = getattr(dim, "size", None)
@@ -89,6 +100,8 @@ def array_shape(annotation: object) -> tuple[int, ...]:
         sizes.append(size)
     if len(sizes) not in (1, 2):
         raise ContractError(f"only 1-D and 2-D arrays are supported, got {len(sizes)}-D")
+    if math.prod(sizes) > MAX_ARRAY_PORT_LEAVES:
+        raise ContractError(f"the array decomposes into {math.prod(sizes)} ports, beyond {MAX_ARRAY_PORT_LEAVES}")
     dtypes = getattr(annotation, "dtypes", None)  # e.g. jaxtyping Shaped carries a non-iterable any-dtype marker
     if not isinstance(dtypes, (tuple, list)) or not all(
         isinstance(name, str) and name.startswith(("float", "bfloat")) for name in dtypes

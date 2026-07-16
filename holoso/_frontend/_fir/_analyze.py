@@ -93,7 +93,7 @@ from ._fact import (
     outer_arity,
     record_of,
 )
-from ._signature import ContractError, ScalarParameter, array_shape, is_array_annotation
+from ._signature import ArrayParameter, ContractError, ScalarParameter, array_shape, is_array_annotation
 from ._fold import (
     FieldSchema,
     FoldRefusal,
@@ -803,8 +803,15 @@ class Analyzer:
         entry_env = block_in[unit.entry]
         for param in unit.params:
             contract = unit.param_contracts.get(param.name)
-            assert contract is None or isinstance(contract, ScalarParameter)  # array ports reject at build for now
-            default = Residual(contract.kind if contract is not None else SemType.FLOAT)
+            default: Fact
+            if isinstance(contract, ArrayParameter):
+                default = AggregateFact(
+                    ArrayLayout(contract.shape, ArrayDType.FLOAT),
+                    (Residual(SemType.FLOAT),) * leaf_count(ArrayLayout(contract.shape, ArrayDType.FLOAT)),
+                )
+            else:
+                assert contract is None or isinstance(contract, ScalarParameter)
+                default = Residual(contract.kind if contract is not None else SemType.FLOAT)
             fact = (param_facts or {}).get(param.name, default)
             entry_env.set(Local(param), fact)
         if unit.bound_self is not None and unit.params:

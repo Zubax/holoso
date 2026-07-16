@@ -53,9 +53,11 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "recip_newton": (15, 32),
     "remainder": (36, 53),
     "cordic_sincos": (104, 104),
-    # Frozen at first activation: ekf1_stateful joins the table the day aggregate state lands (stage 9a-3), so
-    # this is the new front-end's own baseline, not a legacy carry-over.
+    # Frozen at first activation: these rows join the table the day their features land (aggregate state at
+    # stage 9a-3, array ports at 9b), so they are the new front-end's own baselines, not legacy carry-overs.
     "ekf1_stateful": (125, 125),
+    "polar_to": (63, 63),
+    "polar_from": (38, 38),
     # Branchy kernels whose phi-arm installs source block-entry-resident values (boolean/float live-out constants, or
     # an input/state read) on the normal path -- the inline-class timing (no source-sample edge, no +1 step) lands each
     # within the work makespan rather than at the copy-pipeline boundary, shrinking every downstream block base.
