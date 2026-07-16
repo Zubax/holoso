@@ -5891,8 +5891,8 @@ def test_emission_resets_come_from_the_analysis_snapshot_not_a_live_read() -> No
 
 
 def test_dataclass_construction_rejects_data_descriptor_fields_before_running_them() -> None:
-    # A field backed by a data descriptor makes the generated __init__ execute the descriptor's __set__ at
-    # compile time (twice: analysis and replay). The construction predicate refuses BEFORE construction now.
+    # A field backed by a data descriptor would route field assignment (and reads) through user code, which
+    # structural construction cannot reproduce; the schema predicate refuses before anything is modeled.
     events: list[object] = []
 
     class LoggedField:
@@ -5910,7 +5910,7 @@ def test_dataclass_construction_rejects_data_descriptor_fields_before_running_th
         box = Box(7)
         return x + float(box.value)
 
-    with pytest.raises(UnsupportedConstruct, match="call to 'Box' is not supported"):
+    with pytest.raises(UnsupportedConstruct, match="record class 'Box' has a descriptor-backed field"):
         lower(kernel)
     assert events == [], "the descriptor setter must never run at compile time"
 
@@ -5972,3 +5972,259 @@ def test_list_and_tuple_convert_aggregates_as_layout_operations() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="a record cannot cross into a concrete call"):
         lower(record_conversion)
+
+
+# ------------------------------ structural records (migration phase 5) ------------------------------
+
+
+def test_record_construction_with_runtime_arguments_is_structural() -> None:
+    # Phase 5: a record built from runtime values is a layout operation -- argument cells install into
+    # per-field windows -- so construction, projection, and branch joins ride the aggregate spine.
+    @dataclasses.dataclass(frozen=True)
+    class Decision:
+        drive: float
+        ok: bool
+        scale: float = 2.0
+
+    def round_trip(x: float, p: bool) -> float:
+        d = Decision(x + 1.0, p)
+        return d.drive * d.scale if d.ok else -d.drive
+
+    def joined(c: bool, x: float) -> float:
+        d = Decision(x, True) if c else Decision(-x, True, 5.0)
+        return d.drive * d.scale
+
+    for kernel, argsets in ((round_trip, [(3.0, True), (3.0, False)]), (joined, [(True, 3.0), (False, 3.0)])):
+        model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name=kernel.__name__).numerical_model
+        elaborated = model.elaborate()
+        for argset in argsets:
+            assert float(elaborated.run(*argset)[0]) == kernel(*argset)
+
+
+def test_record_construction_keywords_defaults_and_kw_only() -> None:
+    @dataclasses.dataclass(frozen=True)
+    class Gains:
+        a: float
+        b: float = dataclasses.field(default=7.0, kw_only=True)
+        c: float = 1.0
+
+    def kernel(x: float) -> float:
+        full = Gains(x, 3.0, b=5.0)
+        defaulted = Gains(c=x, a=2.0)
+        return full.a + full.b + full.c + defaulted.a * defaulted.b + defaulted.c
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="kwrec").numerical_model
+    assert float(model.elaborate().run(2.0)[0]) == kernel(2.0)
+
+
+def test_record_construction_nests_and_carries_nonvalue_leaves() -> None:
+    # A record field may be another runtime record, and a field may hold what the datapath cannot: an
+    # unadmittable default (None) or an explicit object reference stays a fact-only leaf as in tuples.
+    @dataclasses.dataclass(frozen=True)
+    class Inner:
+        v: float
+        s: float
+
+    @dataclasses.dataclass(frozen=True)
+    class Outer:
+        inner: Inner
+        bias: float
+
+    def nested(x: float) -> float:
+        o = Outer(Inner(x, 4.0), 0.5)
+        return o.inner.v * o.inner.s + o.bias
+
+    @dataclasses.dataclass(frozen=True)
+    class Tagged:
+        v: float
+        tag: object = None
+
+    def reference_leaves(x: float) -> float:
+        own = Tagged(x, math)
+        defaulted = Tagged(x * 2.0)
+        return own.v + defaulted.v
+
+    for kernel, expected in ((nested, 8.5), (reference_leaves, 6.0)):
+        model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name=kernel.__name__).numerical_model
+        assert float(model.elaborate().run(2.0)[0]) == kernel(2.0) == expected
+
+
+def test_record_construction_slots_and_bare_subclass() -> None:
+    # slots=True fields are member descriptors (the fields themselves, not user code); an undecorated subclass
+    # constructs through the parent's generated schema and keeps its OWN class identity in the layout.
+    @dataclasses.dataclass(frozen=True, slots=True)
+    class Slotted:
+        v: float
+        w: float
+
+    @dataclasses.dataclass(frozen=True)
+    class Base:
+        v: float
+
+    class Sub(Base):
+        pass
+
+    def kernel(x: float) -> float:
+        s = Slotted(x, 3.0)
+        u = Sub(x * 2.0)
+        picked = 1.0 if isinstance(u, Sub) else 0.0
+        return s.v * s.w + u.v + picked
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="slotsub").numerical_model
+    assert float(model.elaborate().run(2.0)[0]) == kernel(2.0) == 11.0
+
+
+def test_isinstance_of_a_runtime_record_folds_by_layout() -> None:
+    # The layout's class identity answers isinstance without any reconstruction, so runtime-leaf records
+    # fold where they used to refuse ("a record cannot cross into a concrete call").
+    class Base:
+        pass
+
+    @dataclasses.dataclass(frozen=True)
+    class Tagged(Base):
+        v: float
+
+    def kernel(x: float) -> float:
+        t = Tagged(x * 2.0)
+        a = 1.0 if isinstance(t, Base) else 0.0
+        b = 1.0 if isinstance(t, Tagged) else 0.0
+        c = 1.0 if isinstance(t, (bool, str)) else 0.0
+        return t.v + a * 10.0 + b * 100.0 + c * 1000.0
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="isrec").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == kernel(3.0) == 116.0
+
+
+def test_record_construction_never_runs_hooks_and_names_schema_mismatches() -> None:
+    # Structural construction executes NO class machinery; a class whose construction would run user code
+    # refuses by schema, and the call-to-field mapping errors are located and named.
+    events: list[object] = []
+
+    @dataclasses.dataclass
+    class Hooked:
+        v: float
+
+        def __post_init__(self) -> None:
+            events.append(self.v)
+
+    def hooked(x: float) -> float:
+        return Hooked(x).v
+
+    @dataclasses.dataclass
+    class WithInitVar:
+        v: float
+        tweak: dataclasses.InitVar[float] = 0.0
+
+    def initvar(x: float) -> float:
+        return WithInitVar(x).v
+
+    @dataclasses.dataclass
+    class Reader:
+        v: float
+
+        def __getattribute__(self, name: str) -> object:
+            return object.__getattribute__(self, name)
+
+    def warped_reads(x: float) -> float:
+        return Reader(x).v
+
+    @dataclasses.dataclass(frozen=True)
+    class Plain:
+        drive: float
+        ok: bool
+        scale: float = 2.0
+
+    def missing(x: float) -> float:
+        return Plain(x).drive  # type: ignore[call-arg]
+
+    def excess(x: float) -> float:
+        return Plain(x, True, 1.0, 2.0).drive  # type: ignore[call-arg]
+
+    def unknown(x: float) -> float:
+        return Plain(x, True, nope=1.0).drive  # type: ignore[call-arg]
+
+    def duplicate(x: float) -> float:
+        return Plain(x, drive=2.0, ok=True).drive  # type: ignore[misc]
+
+    for kernel, pattern in (
+        (hooked, "runs user code in construction"),
+        (initvar, "init-only or init=False fields"),
+        (warped_reads, "runs user code in construction"),
+        (missing, "missing the required field 'ok'"),
+        (excess, "takes 3 positional argument"),
+        (unknown, "has no field 'nope'"),
+        (duplicate, "got multiple values for field 'drive'"),
+    ):
+        with pytest.raises(UnsupportedConstruct, match=pattern):
+            lower(kernel)
+    assert events == [], "construction hooks must never run at compile time"
+
+
+def test_record_field_provenance_rides_construction() -> None:
+    # Children of a structural construction are the argument facts THEMSELVES: a retained enum member keeps
+    # answering mixin-base isinstance after a field round trip, and a LOST leaf keeps refusing.
+    import enum
+
+    class Marker:
+        pass
+
+    class Mode(Marker, enum.IntEnum):
+        B = 4
+
+    @dataclasses.dataclass(frozen=True)
+    class WithEnum:
+        mode: Mode
+        gain: float
+
+    def faithful(x: float) -> float:
+        w = WithEnum(Mode.B, x)
+        return w.gain * 2.0 if isinstance(w.mode, Marker) else w.gain
+
+    model = holoso.synthesize(faithful, default_ops(FloatFormat(11, 52)), name="provrec").numerical_model
+    assert float(model.elaborate().run(3.0)[0]) == faithful(3.0) == 6.0
+
+    @dataclasses.dataclass(frozen=True)
+    class Holder:
+        value: int
+
+    def lost(x: float, p: bool) -> float:
+        h = Holder(Mode.B if p else 4)
+        return x if isinstance(h.value, Marker) else -x
+
+    with pytest.raises(UnsupportedConstruct, match="not decidable"):
+        lower(lost)
+
+
+def test_record_default_snapshots_are_admitted_once() -> None:
+    # A mutable field default (an eq=False record is identity-hashable, so dataclasses accepts it) must pin
+    # its FIRST admitted value: a permitted module hook mutating the default mid-analysis must not move the
+    # folded constant between the fixpoint and the emission replay.
+    @dataclasses.dataclass(eq=False)
+    class Knob:
+        v: float
+
+    knob_default = Knob(5.0)
+
+    @dataclasses.dataclass(frozen=True)
+    class Cfg:
+        scale: float
+        knob: Knob = knob_default
+
+    module = types.ModuleType("lazy_default")
+
+    def module_getattr(name: str) -> float:
+        if name != "trigger":
+            raise AttributeError(name)
+        knob_default.v = 9.0
+        return 0.0
+
+    module.__getattr__ = module_getattr  # type: ignore[method-assign]
+
+    def kernel(x: float) -> float:
+        c = Cfg(x)
+        ignored = float(getattr(module, "trigger"))
+        return c.knob.v * x + ignored
+
+    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="defsnap").numerical_model
+    knob_default.v = 5.0
+    assert float(model.elaborate().run(2.0)[0]) == 10.0, "the first admitted default must be the folded one"

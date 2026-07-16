@@ -203,10 +203,10 @@ through the transfers): beyond the library registry, only vetted value-determine
 are admitted (the float/int/bool/len/range/slice/sum/divmod casts and constructors, operator.index, the
 np.array/asarray/asanyarray constructors and numpy scalar types, isinstance -- folded through its
 completely-resolved enum-free plain-instance-check classinfo over a faithfully reconstructed subject (a retained
-member answers exactly as Python, mixin bases included), refusing only a LOST-provenance int/str subject (the
-runtime value may be a member the joined fact no longer names) -- dataclass construction through the GENERATED machinery
-only (a user __init__, __post_init__, __new__, metaclass, or field default_factory would run at compile time on
-erasure-reconstructed arguments or against live state), and value methods minted by the analyzer's own bind site
+member answers exactly as Python, mixin bases included; a record subject answers from its layout's class identity
+alone, runtime leaves and all, through an identity scan of the mro that runs no user code), refusing only a
+LOST-provenance int/str subject (the
+runtime value may be a member the joined fact no longer names) -- and value methods minted by the analyzer's own bind site
 off the domain's reconstruction -- immutable scalar/str/range receivers with non-dunder, non-format names, the
 method resolved on the BASE TYPE but bound onto the faithful receiver, so an enum-defined method never resolves
 while identity-preserving methods (partition's no-match head) return the retained member exactly as Python;
@@ -216,7 +216,9 @@ carries a live mutable receiver and never folds); every
 other callable -- functools.partial wrappers, vars, repr, type, unbound descriptors, attrgetter-style objects,
 unregistered numpy functions -- is a located rejection by construction. Argument admission is equally closed: a
 record never crosses into a concrete call (nested inside a tuple/list included; the reconstruction is
-value-faithful but not type-faithful, which even the dataclass-generated __repr__ observes on an enum field), an
+value-faithful but not type-faithful, which even the dataclass-generated __repr__ observes on an enum field;
+the two-argument isinstance subject is the one sanctioned record position, and it folds from the layout before
+anything could cross), an
 object reference never crosses at any nesting depth except as isinstance classinfo (inline tuples included) or
 one of the inert dtype-ish builtin types (a stateful component's dunder would read the live reset-time object
 while the kernel's writes exist only as state facts), and a static fold over an oversized range -- as an
@@ -228,7 +230,17 @@ one record consumption. getattr rewrites into the attribute op itself (state rea
 the array whitelist behave exactly as the dotted spelling; the default-argument form rejects). list()/tuple()
 over an aggregate is a LAYOUT operation, never an evaluation: the same leaves -- runtime ones included --
 re-aggregate under the requested flavor (a lowered conversion copies the argument's cells onto the result);
-concrete containers still fold through the vetted constructors. Scalar numpy
+concrete containers still fold through the vetted constructors. Record construction is equally structural, for
+all-Known and runtime arguments alike: the layout is the class's validated field schema and the children are the
+argument facts THEMSELVES -- runtime leaves, enum provenance, LOST taint, and reference leaves ride through
+untouched -- so no class machinery ever executes, not even the generated __init__ (emission installs argument
+cells into per-field windows). Eligibility is schema purity: the generated __init__'s parameters must be exactly
+the declared fields, and a custom metaclass or __init__, a __post_init__/__new__/__getattr__/__getattribute__, a
+real-source __setattr__/__delattr__ (frozen/slots classes generate theirs), a default_factory, a
+descriptor-backed field, or an InitVar/init=False field refuses by name at the call site; argument-to-field
+mapping errors (missing, excess, unknown, duplicate) are located rejections. Field defaults are admitted once
+per analysis, like attribute snapshots, so a mutable default cannot move a fact between fixpoint visits or into
+the emission replay; a default outside the value domain rides as a fact-only reference leaf. Scalar numpy
 provenance is preserved end to end -- np.bool_ is a distinct variant from bool, and
 boolean-producing folds keep it (a comparison or & | ^ with a numpy operand yields np.bool_, exactly as numpy
 does) -- so a STATIC np.bool_ subscript index or repeat count rejects exactly where numpy 2 raises TypeError

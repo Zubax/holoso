@@ -324,6 +324,12 @@ def aggregate_of(children: tuple[BoundFact, ...], is_list: bool) -> AggregateFac
     return AggregateFact(layout, tuple(_flat_leaves(children)))
 
 
+def record_of(klass: type, children: tuple[tuple[str, BoundFact], ...]) -> AggregateFact:
+    """A record construction over already-normalized child facts, one per field in declaration order."""
+    layout = RecordLayout(klass, tuple((name, _layout_of(child)) for name, child in children))
+    return AggregateFact(layout, tuple(_flat_leaves(tuple(child for _, child in children))))
+
+
 def materialize_static(fact: BoundFact) -> StaticValue | None:
     """
     The concrete static value of a fully-Known fact, or None when any leaf is residual or the container flavor is

@@ -19,7 +19,7 @@ import logging
 import types
 from typing import TYPE_CHECKING
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import MISSING, Field, dataclass, field, is_dataclass, replace
 
 from ..._errors import UnsupportedConstruct, UnsupportedLibraryFunction
 from .._ast_support import UNROLL_THRESHOLD
@@ -85,9 +85,18 @@ from ._fact import (
     materialize_static,
     normalize_static,
     outer_arity,
+    record_of,
 )
 from ._signature import ScalarParameter
-from ._fold import FoldRefusal, admit_call, classinfo_types, contains_record, is_unimplemented_library, range_size
+from ._fold import (
+    FoldRefusal,
+    admit_call,
+    classinfo_types,
+    construction_schema,
+    contains_record,
+    is_unimplemented_library,
+    range_size,
+)
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
 from ._value import (
@@ -325,12 +334,14 @@ class CallLowering(enum.Enum):
     CAST = enum.auto()  # a scalar float()/int()/bool() cast; same-kind-vs-conversion is decided by the FINAL facts
     INTRINSIC = enum.auto()  # a registered hardware intrinsic: ``intrinsic`` carries the resolved registry match
     CONVERSION = enum.auto()  # list()/tuple() over an aggregate: the argument's leaves re-flavor onto the result
+    CONSTRUCTION = enum.auto()  # a record built structurally: argument cells install into per-field windows
 
 
 @dataclass(frozen=True, slots=True)
 class CallPlan:
     lowering: CallLowering
     intrinsic: "Intrinsic | None" = None  # the resolved registry match for INTRINSIC
+    construction: "tuple[BindingId | None, ...] | None" = None  # per-field source bindings; None = default-filled
 
 
 @dataclass(slots=True)
@@ -369,6 +380,11 @@ class Analyzer:
         self._intrinsic_calls: set[int] = set()
         self._cast_calls: set[int] = set()  # runtime float()/int()/bool() casts (identity or conversion at emission)
         self._conversion_calls: set[int] = set()  # list()/tuple() layout conversions over aggregates
+        self._construction_calls: dict[int, tuple[BindingId | None, ...]] = {}  # record builds: per-field sources
+        # Schema-and-defaults snapshots, one per class per ANALYSIS (never per visit): a mutable field default
+        # (an eq=False record holding a list, say) must not move a fact between fixpoint visits or into the
+        # emission replay. The pinned class reference keeps the id stable for the memo's lifetime.
+        self._construction_schemas: dict[int, tuple[type, tuple[Field[object], ...], dict[str, BoundFact]]] = {}
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._component_reads: dict[tuple[int, str], tuple[object, object, StaticValue | None]] = {}
@@ -412,7 +428,11 @@ class Analyzer:
                     header.terminator = Jump(chain_entry, header.terminator.origin)
                 _validate(
                     result,
-                    self._concrete_calls | self._intrinsic_calls | self._cast_calls | self._conversion_calls,
+                    self._concrete_calls
+                    | self._intrinsic_calls
+                    | self._cast_calls
+                    | self._conversion_calls
+                    | set(self._construction_calls),
                 )
                 self._finalize(result)
                 return result
@@ -424,6 +444,7 @@ class Analyzer:
             self._intrinsic_calls = set()
             self._cast_calls = set()
             self._conversion_calls = set()
+            self._construction_calls = {}
             self._unroll_cache = {}
             _logger.info("state round %d: %d runtime leaves, %d live-in facts", round_index + 1, len(new_w), len(new_d))
         raise AnalysisRejection("state fixpoint failed to stabilize", (Origin(self._root_template.name, 0, 0),))
@@ -521,6 +542,9 @@ class Analyzer:
         # split: emission decides from the FINAL facts, which only stabilized rounds produce.
         if id(call) in self._conversion_calls:
             return CallPlan(CallLowering.CONVERSION)
+        construction = self._construction_calls.get(id(call))
+        if construction is not None:
+            return CallPlan(CallLowering.CONSTRUCTION, construction=construction)
         if id(call) in self._cast_calls:
             return CallPlan(CallLowering.CAST)
         if id(call) in self._intrinsic_calls:
@@ -1323,6 +1347,61 @@ class Analyzer:
 
     # ------------------------------------ call expansion ------------------------------------
 
+    def _construction_schema(self, klass: type) -> tuple[tuple[Field[object], ...], dict[str, BoundFact]]:
+        key = id(klass)
+        hit = self._construction_schemas.get(key)
+        if hit is not None and hit[0] is klass:
+            return hit[1], hit[2]
+        declared = construction_schema(klass)
+        defaults: dict[str, BoundFact] = {}
+        for entry in declared:
+            if entry.default is not MISSING:
+                admitted = admit(entry.default)
+                defaults[entry.name] = normalize_static(admitted) if admitted is not None else Reference(entry.default)
+        self._construction_schemas[key] = (klass, declared, defaults)
+        return declared, defaults
+
+    def _expand_construction(self, klass: type, call: PyCall, env: _Env) -> None:
+        try:
+            declared, defaults = self._construction_schema(klass)
+        except FoldRefusal as refusal:
+            raise AnalysisRejection(str(refusal), call.origin) from None
+        name = klass.__name__
+        positional_names = [entry.name for entry in declared if not entry.kw_only]
+        if len(call.args) > len(positional_names):
+            raise AnalysisRejection(
+                f"record class '{name}' takes {len(positional_names)} positional argument(s), "
+                f"{len(call.args)} given",
+                call.origin,
+            )
+        assignments: dict[str, BindingId] = dict(zip(positional_names, call.args))
+        for keyword, binding in call.kwargs:
+            if keyword not in {entry.name for entry in declared}:
+                raise AnalysisRejection(
+                    f"record class '{name}' has no field '{keyword}' (an unexpected keyword argument)", call.origin
+                )
+            if keyword in assignments:
+                raise AnalysisRejection(f"record class '{name}' got multiple values for field '{keyword}'", call.origin)
+            assignments[keyword] = binding
+        children: list[tuple[str, BoundFact]] = []
+        mapping: list[BindingId | None] = []
+        for entry in declared:
+            source = assignments.get(entry.name)
+            if source is not None:
+                fact = env.get(Local(source))
+                assert isinstance(fact, (Known, Residual, Reference, AggregateFact)), fact
+                children.append((entry.name, fact))
+                mapping.append(source)
+            elif entry.name in defaults:
+                children.append((entry.name, defaults[entry.name]))
+                mapping.append(None)
+            else:
+                raise AnalysisRejection(
+                    f"record class '{name}' is missing the required field '{entry.name}' here", call.origin
+                )
+        env.set(Local(call.dst), record_of(klass, tuple(children)))
+        self._construction_calls[id(call)] = tuple(mapping)
+
     def _expand_call(self, unit: FunctionUnit, block: Block, index: int, call: PyCall, env: _Env) -> bool:
         from .._lib import IntrinsicResultRule, Library, resolve
         from .._lib import Intrinsic
@@ -1412,6 +1491,14 @@ class Analyzer:
                     block.ops[index] = PyAttr(call.dst, call.args[0], attr_fact.value.value, call.origin)
                     return True
                 raise AnalysisRejection("getattr requires a static attribute name and no default", call.origin)
+            if isinstance(target, type) and is_dataclass(target):
+                # Record construction is STRUCTURAL, never an evaluation: the layout is the class's validated
+                # field schema and the children are the argument facts THEMSELVES -- runtime leaves, enum
+                # provenance, LOST taint, and reference leaves all ride through untouched, and no host code
+                # (not even the generated __init__) ever runs. Like the getattr rewrite above, this precedes
+                # the admission harness: there is nothing to admit because nothing crosses.
+                self._expand_construction(target, call, env)
+                return False
             # Concrete evaluation is a CLOSED WHITELIST behind one door: the fold admission harness. The
             # analyzer contributes only what the harness cannot know -- per-Analyzer minted-method identity and
             # library-registry resolution -- and locates the refusal at the call origin.
@@ -1446,7 +1533,19 @@ class Analyzer:
                 # classinfo's sanctioned carriers (a referenced class, an inline tuple of references) are not
                 # data and cannot cross the evaluation boundary. Flattening is Python's own equivalence --
                 # isinstance over nested tuples and unions is the disjunction over their members.
-                subject_value = _concrete_fact(argument_facts[0])
+                subject = argument_facts[0]
+                if isinstance(subject, AggregateFact) and isinstance(subject.layout, RecordLayout):
+                    # A record subject answers from the layout's class identity alone -- runtime leaves and all;
+                    # no reconstruction is consulted. The identity scan over the mro is exactly the plain
+                    # type.__instancecheck__ the admitted classinfo was proven to carry, and it runs no user
+                    # code (a membership test could invoke a metaclass __eq__).
+                    kinds = classinfo_types(argument_facts[1])
+                    assert kinds is not None, "admission proved the classinfo resolves"
+                    verdict = any(entry is kind for kind in kinds for entry in subject.layout.klass.__mro__)
+                    env.set(Local(call.dst), Known(StaticBool(verdict)))
+                    self._concrete_calls.add(id(call))
+                    return False
+                subject_value = _concrete_fact(subject)
                 if subject_value is not None:
                     kinds = classinfo_types(argument_facts[1])
                     assert kinds is not None, "admission proved the classinfo resolves"

@@ -16,7 +16,7 @@ admission classes; the door stays the same.
 
 import enum
 import types
-from dataclasses import MISSING, fields, is_dataclass
+from dataclasses import MISSING, Field, fields
 
 from ._fact import (
     AggregateFact,
@@ -148,35 +148,65 @@ def _vetted_concrete_target(target: object) -> bool:
         np.int64,
         np.float64,
     )
-    if any(target is entry for entry in vetted):
-        return True
-    if isinstance(target, type) and is_dataclass(target):
-        # Record construction is real construction -- but only through the GENERATED machinery (plain field
-        # assignment compiled from synthesized source). A user __init__, __post_init__, __new__, __setattr__,
-        # metaclass, or field default_factory is arbitrary code that would run at compile time, possibly on
-        # erasure-reconstructed arguments (an IntEnum field arrives as its base int) or against live state
-        # (a default_factory popped the user's list once per analysis round).
-        init = next((c.__dict__["__init__"] for c in target.__mro__ if "__init__" in c.__dict__), None)
-        generated_init = isinstance(init, types.FunctionType) and init.__code__.co_filename == "<string>"
-        hooked = any(
-            name in c.__dict__ for name in ("__post_init__", "__new__") for c in target.__mro__ if c is not object
-        ) or any(
-            isinstance(member, types.FunctionType) and member.__code__.co_filename != "<string>"
-            for c in target.__mro__
-            if c is not object
-            for name in ("__setattr__", "__delattr__")
-            if (member := c.__dict__.get(name)) is not None
-        )
-        factories = any(field.default_factory is not MISSING for field in fields(target))
-        descriptor_fields = any(
-            (entry := next((c.__dict__[field.name] for c in target.__mro__ if field.name in c.__dict__), None))
-            is not None
+    return any(target is entry for entry in vetted)
+
+
+def construction_schema(target: type) -> "tuple[Field[object], ...]":
+    """
+    The validated field schema of a structurally constructible record class, in declaration order, or a
+    :class:`FoldRefusal`. Structural construction never executes the class's machinery -- not even the generated
+    ``__init__`` -- so eligibility is exactly the schema-match question: does plain per-field assignment of the
+    call's arguments reproduce what Python's construction would? A custom metaclass, ``__init__``,
+    ``__post_init__``, ``__new__``, a real-source ``__setattr__``/``__delattr__`` (frozen/slots classes GENERATE
+    theirs), or a ``__getattr__``/``__getattribute__`` (which would warp later field reads) makes construction or
+    observation run user code; a ``default_factory`` draws from live state per construction; a data-descriptor
+    field routes assignment through user code (slots member descriptors ARE the fields); an ``InitVar`` or
+    ``init=False`` field makes the ``__init__`` signature diverge from the field schema. The signature check is
+    load-bearing: the generated ``__init__``'s parameters must be exactly the declared fields (positional ones in
+    declaration order, then the kw_only ones), which is what licenses mapping call arguments onto fields directly.
+    """
+    name = target.__name__
+    if type(target) is not type:
+        raise FoldRefusal(f"record class '{name}' has a custom metaclass, which is not supported in a kernel")
+    init = next((c.__dict__["__init__"] for c in target.__mro__ if "__init__" in c.__dict__), None)
+    if not (isinstance(init, types.FunctionType) and init.__code__.co_filename == "<string>"):
+        raise FoldRefusal(f"record class '{name}' defines its own __init__, which is not supported in a kernel")
+    hooked = any(
+        name_ in c.__dict__
+        for name_ in ("__post_init__", "__new__", "__getattr__", "__getattribute__")
+        for c in target.__mro__
+        if c is not object
+    ) or any(
+        isinstance(member, types.FunctionType) and member.__code__.co_filename != "<string>"
+        for c in target.__mro__
+        if c is not object
+        for name_ in ("__setattr__", "__delattr__")
+        if (member := c.__dict__.get(name_)) is not None
+    )
+    if hooked:
+        raise FoldRefusal(f"record class '{name}' runs user code in construction, which is not supported in a kernel")
+    declared = tuple(fields(target))
+    if any(field.default_factory is not MISSING for field in declared):
+        raise FoldRefusal(f"record class '{name}' has a field default_factory, which is not supported in a kernel")
+    for field in declared:
+        entry = next((c.__dict__[field.name] for c in target.__mro__ if field.name in c.__dict__), None)
+        if (
+            entry is not None
             and not isinstance(entry, types.MemberDescriptorType)
             and (hasattr(type(entry), "__set__") or hasattr(type(entry), "__delete__"))
-            for field in fields(target)
+        ):
+            raise FoldRefusal(
+                f"record class '{name}' has a descriptor-backed field, which is not supported in a kernel"
+            )
+    code = init.__code__
+    parameters = code.co_varnames[1 : code.co_argcount + code.co_kwonlyargcount]
+    expected = tuple(f.name for f in declared if not f.kw_only) + tuple(f.name for f in declared if f.kw_only)
+    if any(not field.init for field in declared) or parameters != expected:
+        raise FoldRefusal(
+            f"record class '{name}' constructs through init-only or init=False fields, "
+            "which is not supported in a kernel"
         )
-        return generated_init and not hooked and not factories and not descriptor_fields and type(target) is type
-    return False
+    return declared
 
 
 def admit_call(
@@ -240,12 +270,24 @@ def admit_call(
     # where Python steps [3.0, 5.0]). A referenced dtype-ish builtin TYPE is inert.
     positional_count = len(positional)
     for position, fact in enumerate([*positional, *keywords]):
-        if isinstance(fact, AggregateFact) and contains_record(fact.layout):
+        # A record SUBJECT of a two-argument isinstance is sanctioned: the analyzer answers it from the layout's
+        # class identity alone (before any evaluation), so nothing reconstructs and nothing crosses. Only the
+        # exact foldable shape is exempt; a record nested deeper, a third argument, or a keyword still refuses.
+        record_subject = (
+            target is isinstance
+            and position == 0
+            and positional_count == 2
+            and not keywords
+            and isinstance(fact, AggregateFact)
+            and isinstance(fact.layout, RecordLayout)
+        )
+        if isinstance(fact, AggregateFact) and contains_record(fact.layout) and not record_subject:
             raise FoldRefusal("a record cannot cross into a concrete call; access its fields directly")
         classinfo_position = target is isinstance and position == 1 and position < positional_count
         if (
             isinstance(fact, AggregateFact)
             and not classinfo_position
+            and not record_subject
             and any(isinstance(leaf, Reference) for leaf in fact.leaves)
         ):
             # sum((self,)) would hand the callable the live object through the rebuilt container; the inline

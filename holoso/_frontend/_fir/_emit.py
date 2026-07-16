@@ -835,6 +835,19 @@ class _Emitter:
                         conversion_fact = self._fact(dst)
                         if isinstance(conversion_fact, AggregateFact):
                             self._copy_leaves(fir_id, Local(args[0]), conversion_fact, Local(dst))
+                    case CallLowering.CONSTRUCTION:
+                        record_fact = self._fact(dst)
+                        assert isinstance(record_fact, AggregateFact) and plan.construction is not None
+                        for index, source in enumerate(plan.construction):
+                            _, start, stop = child_slice(record_fact.layout, index)
+                            if source is not None:
+                                self._install(fir_id, Local(dst), start, source)
+                            else:  # a default-filled field: its leaves are the admitted schema constants
+                                for ordinal in range(start, stop):
+                                    filled = record_fact.leaves[ordinal]
+                                    assert isinstance(filled, (Known, Reference)), "a default grew runtime cells"
+                                    if isinstance(filled, Known) and self._datapath_known(filled):
+                                        self._write(fir_id, _LeafPlace(Local(dst), ordinal), self._atom_vid(filled))
             case _:
                 raise AssertionError(f"operation {type(op).__name__} survived analysis into emission")
 
