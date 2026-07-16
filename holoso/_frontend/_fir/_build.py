@@ -529,6 +529,20 @@ class _Builder:
         self._emit(LoadRef(temp, None, origin))
         return temp
 
+    def _slice_value(self, index: ast.Slice, origin: OriginStack) -> BindingId:
+        # Slice syntax desugars to the vetted slice() constructor: static bounds fold to a slice VALUE
+        # (StaticSlice), which the subscript transfer consumes structurally; runtime bounds reject at the
+        # call exactly like an explicit slice(a, b) spelling would.
+        slice_ref = self._temp()
+        self._emit(LoadRef(slice_ref, slice, origin))
+        bounds = tuple(
+            self._expression(bound) if bound is not None else self._none(origin)
+            for bound in (index.lower, index.upper, index.step)
+        )
+        temp = self._temp()
+        self._emit(PyCall(temp, slice_ref, bounds, (), origin))
+        return temp
+
     def _truth(self, node: ast.expr) -> BindingId:
         value = self._expression(node)
         temp = self._temp()
@@ -644,18 +658,17 @@ class _Builder:
                 return temp
             case ast.Subscript(value=obj, slice=index):
                 obj_temp = self._expression(obj)
-                if isinstance(index, ast.Slice):
-                    # Slice syntax desugars to the vetted slice() constructor: static bounds fold to a slice
-                    # VALUE (StaticSlice), which the subscript transfer consumes structurally; runtime bounds
-                    # reject at the call exactly like an explicit slice(a, b) spelling would.
-                    slice_ref = self._temp()
-                    self._emit(LoadRef(slice_ref, slice, origin))
-                    bounds = tuple(
-                        self._expression(bound) if bound is not None else self._none(origin)
-                        for bound in (index.lower, index.upper, index.step)
+                if isinstance(index, ast.Tuple) and any(isinstance(elt, ast.Slice) for elt in index.elts):
+                    # A slice inside a multi-axis key (m[:, 1]) desugars element-wise, so the key becomes an
+                    # ordinary tuple of values the subscript transfer consumes structurally.
+                    items = tuple(
+                        self._slice_value(elt, origin) if isinstance(elt, ast.Slice) else self._expression(elt)
+                        for elt in index.elts
                     )
                     index_temp = self._temp()
-                    self._emit(PyCall(index_temp, slice_ref, bounds, (), origin))
+                    self._emit(BuildTuple(index_temp, items, origin))
+                elif isinstance(index, ast.Slice):
+                    index_temp = self._slice_value(index, origin)
                 else:
                     index_temp = self._expression(index)
                 temp = self._temp()

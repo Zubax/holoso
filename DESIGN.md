@@ -392,6 +392,15 @@ widens the bool), and a runtime-integer result (the integer datapath saturates w
 static argument keeps taking the vetted concrete call, so numpy itself decides every discovery corner and the
 result normalizes back exactly. Shape metadata folds structurally on runtime-leaf arrays -- `len()`, `.ndim`,
 `.shape`, `.size` are layout-determined and consult no element.
+Static basic indexing of arrays is a leaf SELECTION: a slice or a tuple of integers and slices over leading axes
+(an integer collapses its axis, a slice keeps its window, trailing axes stay whole, negative indices and strides
+follow Python) resolves at analysis to the source leaf ordinal feeding each result cell, recorded as a
+per-destination SUBSCRIPT PLAN the emitter consumes verbatim -- the tuple/list slice windows ride the same plan,
+so emission never re-derives a selection. Advanced indexing refuses: a boolean anywhere in the key (numpy would
+reinterpret the whole key), an array or nested sequence as a key element, and more indices than axes are located
+rejections. Starred call arguments unpack arrays exactly like tuples/lists (a 0-d array is not iterable), and a
+for loop over any runtime-element aggregate binds each trip through a synthesized projection prelude -- scalar
+leaves and whole rows alike.
 What remains deferred is the rest of the
 BOUNDARY surface -- aggregate parameter ports, aggregate persistent state, runtime-element iteration,
 and the record/reduction/gather semantics below -- and every disabled

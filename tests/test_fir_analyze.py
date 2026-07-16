@@ -130,17 +130,17 @@ def test_recursion_is_a_located_rejection() -> None:
         Analyzer(kernel).fixpoint()
 
 
-def test_dynamic_trip_loop_is_a_located_rejection() -> None:
-    # The trip count of a fixed-layout aggregate IS static; the pending gap is per-trip element projection, and
-    # the message says so instead of blaming the trip count.
+def test_runtime_element_loop_binds_trips_through_projections() -> None:
+    # The trip count of a fixed-layout aggregate IS static, and each runtime element binds through a
+    # synthesized projection prelude, so the loop unrolls exactly like one over constants.
     def kernel(x: float) -> float:
         acc = 0.0
         for step in (x, x + 1.0):
             acc = acc + step
         return acc
 
-    with pytest.raises(AnalysisRejection, match="runtime elements"):
-        Analyzer(kernel).fixpoint()
+    result = Analyzer(kernel).fixpoint()
+    assert result.binding_facts is not None  # analysis completes; the value itself is pinned in test_matrix
 
 
 def test_assert_is_dropped_wholesale() -> None:

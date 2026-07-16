@@ -801,40 +801,37 @@ class _Emitter:
                     isinstance(dst_fact, AggregateFact) and any(isinstance(leaf, Residual) for leaf in dst_fact.leaves)
                 )
                 if isinstance(obj_fact, AggregateFact) and needs_cells:
-                    # A residual dst leaf means the analyzer projected a positional child, so the key resolves
-                    # under operator.index -- either a Known directly or an all-Known aggregate (a 0-d integer
-                    # array, an __index__-able record), materialized exactly as the analyzer materialized it.
-                    # A tuple key or slice object folds concretely to an all-Known result and never reaches here.
-                    import operator as operator_module
-
-                    index_fact = self._fact(index)
-                    assert isinstance(index_fact, (Known, AggregateFact)), index_fact
-                    key = index_fact.value if isinstance(index_fact, Known) else materialize_static(index_fact)
-                    assert key is not None, index_fact
-                    if isinstance(key, StaticSlice):
-                        # A slice window: each selected source child copies onto the aligned result child,
-                        # Known leaves as constants and residual leaves as aligned cell reads.
-                        window = as_python(key)
-                        assert isinstance(window, slice)
-                        selected = range(*window.indices(outer_arity(obj_fact.layout)))
-                        assert isinstance(dst_fact, AggregateFact) and outer_arity(dst_fact.layout) == len(selected)
-                        for dst_index, src_index in enumerate(selected):
-                            src_child, src_start, _ = child_slice(obj_fact.layout, src_index)
-                            _, dst_start, dst_stop = child_slice(dst_fact.layout, dst_index)
-                            assert leaf_count(src_child) == dst_stop - dst_start, "window misalignment"
-                            for offset in range(dst_stop - dst_start):
-                                window_leaf = dst_fact.leaves[dst_start + offset]
+                    selection = self._result.subscript_plans.get(dst)
+                    if selection is not None:
+                        # A slice window or an array gather: the analyzer's plan names the source leaf ordinal
+                        # feeding each result cell; Known result leaves materialize as their own constants.
+                        if isinstance(dst_fact, AggregateFact):
+                            assert len(selection) == len(dst_fact.leaves), "a selection misaligns its result"
+                            for ordinal, window_leaf in enumerate(dst_fact.leaves):
                                 if isinstance(window_leaf, Known):
                                     if self._datapath_known(window_leaf):
                                         self._write(
                                             fir_id,
-                                            _LeafPlace(Local(dst), dst_start + offset),
+                                            _LeafPlace(Local(dst), ordinal),
                                             self._atom_vid(window_leaf),
                                         )
                                 elif not isinstance(window_leaf, Reference):
-                                    vid = self._read(fir_id, _LeafPlace(Local(obj), src_start + offset))
-                                    self._write(fir_id, _LeafPlace(Local(dst), dst_start + offset), vid)
+                                    vid = self._read(fir_id, _LeafPlace(Local(obj), selection[ordinal]))
+                                    self._write(fir_id, _LeafPlace(Local(dst), ordinal), vid)
+                        else:
+                            assert len(selection) == 1
+                            define(dst, self._read(fir_id, _LeafPlace(Local(obj), selection[0])))
                     else:
+                        # A residual dst leaf without a selection plan means the analyzer projected a positional
+                        # child, so the key resolves under operator.index -- either a Known directly or an
+                        # all-Known aggregate (a 0-d integer array, an __index__-able record), materialized
+                        # exactly as the analyzer materialized it.
+                        import operator as operator_module
+
+                        index_fact = self._fact(index)
+                        assert isinstance(index_fact, (Known, AggregateFact)), index_fact
+                        key = index_fact.value if isinstance(index_fact, Known) else materialize_static(index_fact)
+                        assert key is not None, index_fact
                         position = operator_module.index(as_python(key))  # type: ignore[arg-type]
                         width = outer_arity(obj_fact.layout)
                         position = position + width if position < 0 else position

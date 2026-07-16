@@ -499,7 +499,6 @@ def test_numpy_subscripts() -> None:
         lower(too_many)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime aggregate (list) indexing — stage 9")
 def test_multi_axis_index_on_list_is_rejected() -> None:
     # Multi-axis m[i, j] is a numpy-array operation with no meaning on a Python list (list[i, j] is a tuple key, a
     # TypeError), so it must be rejected as a list operation rather than silently indexed. Chained m[i][j] on the same
@@ -508,7 +507,7 @@ def test_multi_axis_index_on_list_is_rejected() -> None:
         m = [[a, b], [a]]
         return m[0, 1]  # type: ignore[call-overload,no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="multi-axis"):
         lower(list_multi_axis)
 
     def ragged_chained(a: float, b: float) -> float:
@@ -1221,6 +1220,106 @@ def test_runtime_array_shape_metadata_folds_statically() -> None:
     hir = lower(Gated(0.0).step)
     assert [s.name for s in hir.state_slots] == []
     assert [o.name for o in hir.outputs] == ["out_0"]
+
+
+# ---------------------------------------------------------------- gathers, unpacking, iteration (stage 9a-2b)
+
+
+def test_array_slices_and_gathers_match_numpy() -> None:
+    def window(s: float) -> tuple[float, float]:
+        v = (COEFFS * s)[0:2]
+        return v[0], v[1]
+
+    def reversed_view(s: float) -> tuple[float, float, float]:
+        v = (COEFFS * s)[::-1]
+        return v[0], v[1], v[2]
+
+    def column(s: float) -> tuple[float, float]:
+        c = (GAIN * s)[:, 1]
+        return c[0], c[1]
+
+    def tail_rows(s: float) -> float:
+        t = (GAIN * s)[1:, 0]
+        return t[0]  # type: ignore[no-any-return]
+
+    def element(s: float) -> float:
+        return (GAIN * s)[0, 1]  # type: ignore[no-any-return]
+
+    def rows_kept(s: float) -> tuple[float, float]:
+        m = (GAIN * s)[0:1]  # a leading-axis window of a matrix keeps the trailing axis
+        return m[0][0], m[0][1]
+
+    for kernel, args in (
+        (window, (2.5,)),
+        (reversed_view, (-1.5,)),
+        (column, (3.0,)),
+        (tail_rows, (0.5,)),
+        (element, (2.0,)),
+        (rows_kept, (-0.25,)),
+    ):
+        _assert_python_matches_holoso(kernel, *args)
+
+
+def test_array_gather_rejections_are_located() -> None:
+    def too_many(s: float) -> float:
+        return (GAIN * s)[0, 1, 0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="too many indices"):
+        lower(too_many)
+
+    def bool_key(s: float) -> float:
+        # numpy treats a boolean inside a tuple key as ADVANCED indexing, never as m[1, 0].
+        return (GAIN * s)[True, 0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="boolean index"):
+        lower(bool_key)
+
+    def out_of_range(s: float) -> float:
+        return (GAIN * s)[0, 5]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="out of range"):
+        lower(out_of_range)
+
+
+def test_star_unpack_of_arrays() -> None:
+    def helper(a: float, b: float, c: float) -> float:
+        return a * 100.0 + b * 10.0 + c
+
+    def spread(s: float) -> float:
+        return helper(*(COEFFS * s))
+
+    _assert_python_matches_holoso(spread, 2.0)
+
+    def zero_d(s: float) -> float:
+        # NOTE arithmetic on a 0-d array yields the scalar sort, so only the direct constant exercises this.
+        return s + helper(1.0, 2.0, *_ZERO_D_CONST)
+
+    with pytest.raises(UnsupportedConstruct, match="0-dimensional"):
+        lower(zero_d)
+
+
+def test_iteration_over_runtime_aggregates_matches_numpy() -> None:
+    def over_vector(s: float) -> float:
+        acc = 0.0
+        for x in COEFFS * s:
+            acc = acc + x * x
+        return acc
+
+    def over_rows(s: float) -> float:
+        acc = 0.0
+        for row in GAIN * s:
+            acc = acc + row[0] - row[1]
+        return acc
+
+    def over_tuple(a: float, b: float) -> float:
+        acc = 1.0
+        for x in (a * 2.0, b + 1.0, a - b):
+            acc = acc * x
+        return acc
+
+    _assert_python_matches_holoso(over_vector, 1.5)
+    _assert_python_matches_holoso(over_rows, -2.0)
+    _assert_python_matches_holoso(over_tuple, 0.5, 3.0)
 
 
 # ---------------------------------------------------------------- numeric width collapse

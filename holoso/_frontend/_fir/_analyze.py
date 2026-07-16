@@ -83,6 +83,7 @@ from ._fact import (
     Unbound,
     ValueLayout,
     aggregate_of,
+    child_slice,
     join_layouts,
     leaf_count,
     materialize_static,
@@ -366,6 +367,7 @@ class ResidualUnit:
     executable_edges: set[tuple[BlockId, BlockId]]
     binding_facts: dict[BindingId, Fact] = field(default_factory=dict)
     call_plans: dict[BindingId, CallPlan] = field(default_factory=dict)
+    subscript_plans: dict[BindingId, tuple[int, ...]] = field(default_factory=dict)
     store_order: list[StateLeaf] = field(default_factory=list)
     runtime_state: set[StateLeaf] = field(default_factory=set)
     state_livein: dict[StateLeaf, Fact] = field(default_factory=dict)
@@ -388,6 +390,7 @@ class Analyzer:
         self._intrinsic_calls: set[int] = set()
         self._cast_calls: set[int] = set()  # runtime float()/int()/bool() casts (identity or conversion at emission)
         self._conversion_calls: set[int] = set()  # list()/tuple() layout conversions over aggregates
+        self._subscript_selections: dict[int, tuple[int, ...]] = {}  # op id -> source leaf ordinals
         self._construction_calls: dict[int, tuple[BindingId | None, ...]] = {}  # record builds: per-field sources
         # Schema and default snapshots, one per class per ANALYSIS (never per visit): a mutable field default
         # (an eq=False record holding a list, say) must not move a fact between fixpoint visits or into the
@@ -454,6 +457,7 @@ class Analyzer:
             self._intrinsic_calls = set()
             self._cast_calls = set()
             self._conversion_calls = set()
+            self._subscript_selections = {}
             self._construction_calls = {}
             self._unroll_cache = {}
             _logger.info("state round %d: %d runtime leaves, %d live-in facts", round_index + 1, len(new_w), len(new_d))
@@ -532,6 +536,8 @@ class Analyzer:
                 if isinstance(op, PyCall):
                     result.call_plans[op.dst] = self._call_plan(op, env)
                 self._transfer(result.unit, block, index, op, env)
+                if isinstance(op, PySubscript) and id(op) in self._subscript_selections:
+                    result.subscript_plans[op.dst] = self._subscript_selections[id(op)]
                 dst = op_dst(op)
                 if dst is not None:
                     result.binding_facts[dst] = env.get(Local(dst))
@@ -852,7 +858,7 @@ class Analyzer:
                     raise AnalysisRejection("length of a runtime value", op.origin)
                 env.set(Local(dst), result)
             case PySubscript(dst=dst, obj=obj, index=idx):
-                result = self._subscript(env.get(Local(obj)), env.get(Local(idx)), op.origin)
+                result = self._subscript(op, env.get(Local(obj)), env.get(Local(idx)))
                 env.set(Local(dst), result)
             case PyAttr(dst=dst, obj=obj, name=name):
                 attr = self._attribute(env, env.get(Local(obj)), name, op.origin)
@@ -1202,9 +1208,10 @@ class Analyzer:
             case _:
                 return Residual(SemType.BOOL)
 
-    def _subscript(self, obj: Fact, index: Fact, origin: OriginStack) -> Fact:
+    def _subscript(self, op: PySubscript, obj: Fact, index: Fact) -> Fact:
         import operator
 
+        origin = op.origin
         if isinstance(index, AggregateFact):
             if contains_record(index.layout):  # a record anywhere in the key would run __index__ on a rebuild
                 raise AnalysisRejection("a record subscript index is not supported", origin)
@@ -1244,8 +1251,8 @@ class Analyzer:
                 # A slice of a positional container is a WINDOW operation over the same children -- runtime
                 # leaves included, exactly like conversion and projection -- so nothing materializes and
                 # nothing crosses. Records still refuse (their consumptions are field access and integer
-                # projection); arrays await the gather stage; a structural flavor cannot truthfully pick a
-                # result container, so it keeps the concrete-fallback rejection below.
+                # projection); a structural flavor cannot truthfully pick a result container, so it keeps the
+                # concrete-fallback rejection below.
                 if contains_record(obj.layout):
                     raise AnalysisRejection(
                         "slicing or multi-axis indexing of a record-carrying sequence is not supported", origin
@@ -1256,8 +1263,15 @@ class Analyzer:
                     selected = range(*window.indices(outer_arity(obj.layout)))
                 except ValueError as error:  # a zero step, exactly as Python raises
                     raise AnalysisRejection(f"subscript fails here: {error}", origin) from None
+                ordinals: list[int] = []
+                for position in selected:
+                    _, start, stop = child_slice(obj.layout, position)
+                    ordinals.extend(range(start, stop))
+                self._subscript_selections[id(op)] = tuple(ordinals)
                 children = tuple(obj.child(position) for position in selected)
                 return aggregate_of(children, is_list=isinstance(obj.layout, ListLayout))
+            if isinstance(obj.layout, ArrayLayout) and isinstance(index.value, (StaticSlice, StaticSeq)):
+                return self._array_subscript(op, obj, index.value)
             try:
                 position = operator.index(as_python(index.value))  # type: ignore[arg-type]  # np ints qualify
             except TypeError:
@@ -1288,6 +1302,76 @@ class Analyzer:
         if isinstance(obj, Known) and isinstance(index, Known):
             return self._concrete_subscript(obj.value, index, origin)
         raise AnalysisRejection("subscript of a runtime value is not supported yet", origin)
+
+    def _array_subscript(self, op: PySubscript, obj: AggregateFact, key: "StaticSlice | StaticSeq") -> Fact:
+        """
+        numpy basic indexing of an array by a STATIC slice or tuple key: a pure leaf SELECTION over leading
+        axes (an integer collapses its axis, a slice keeps its window, trailing axes stay whole), recorded as
+        the emission plan's source ordinals. Advanced indexing -- a boolean anywhere in the key, an array or
+        nested sequence as a key element -- changes numpy's result geometry entirely, so it refuses rather than
+        being misread as a positional pick; a non-integer scalar key element is numpy's own TypeError.
+        """
+        origin = op.origin
+        assert isinstance(obj.layout, ArrayLayout)
+        shape = obj.layout.shape
+        raw = [key] if isinstance(key, StaticSlice) else list(key.items)
+        if len(raw) > len(shape):
+            raise AnalysisRejection(
+                f"too many indices for a {len(shape)}-dimensional array ({len(raw)} were given)", origin
+            )
+        for item in raw:
+            if isinstance(item, (StaticBool, NpBool)):
+                raise AnalysisRejection("a boolean index into an array is not supported; use an integer", origin)
+        axes: list[list[int]] = []
+        kept: list[int] = []
+        for axis, item in enumerate(raw):
+            dimension = shape[axis]
+            if isinstance(item, StaticSlice):
+                window = as_python(item)
+                assert isinstance(window, slice)
+                try:
+                    selected = list(range(*window.indices(dimension)))
+                except ValueError as error:  # a zero step, exactly as numpy raises
+                    raise AnalysisRejection(f"subscript fails here: {error}", origin) from None
+                axes.append(selected)
+                kept.append(len(selected))
+            elif isinstance(item, (MetaInt, NpInt)):
+                position = int(item.value)
+                if not -dimension <= position < dimension:
+                    raise AnalysisRejection(
+                        f"array index {position} is out of range for axis {axis} of size {dimension}", origin
+                    )
+                axes.append([position + dimension if position < 0 else position])
+            else:
+                raise AnalysisRejection(
+                    "an array subscript key must hold integers and slices (advanced indexing is not supported)",
+                    origin,
+                )
+        for dimension in shape[len(raw) :]:  # unindexed trailing axes stay whole
+            axes.append(list(range(dimension)))
+            kept.append(dimension)
+        strides: list[int] = []
+        span = 1
+        for dimension in reversed(shape):
+            strides.append(span)
+            span *= dimension
+        strides.reverse()
+        ordinals: list[int] = []
+
+        def enumerate_coordinates(axis: int, offset: int) -> None:
+            if axis == len(shape):
+                ordinals.append(offset)
+                return
+            for position in axes[axis]:
+                enumerate_coordinates(axis + 1, offset + position * strides[axis])
+
+        enumerate_coordinates(0, 0)
+        self._subscript_selections[id(op)] = tuple(ordinals)
+        picked = tuple(obj.leaves[ordinal] for ordinal in ordinals)
+        if not kept:  # every axis collapsed by an integer: the element itself, numpy's scalar sort
+            assert len(picked) == 1
+            return picked[0]
+        return AggregateFact(ArrayLayout(tuple(kept), obj.layout.dtype), picked)
 
     def _concrete_subscript(self, value: StaticValue, index: Known, origin: OriginStack) -> Fact:
         try:
@@ -1482,25 +1566,26 @@ class Analyzer:
         if isinstance(iterable, Reference):
             # A live object's __iter__/__len__ would run against reset-time state, twice (analysis + replay).
             raise AnalysisRejection("iteration over an object is not supported", loop.origin)
-        per_trip: list[Known | Reference] = []
+        per_trip: list[Known | Reference | int] = []
         if isinstance(iterable, AggregateFact):
             if isinstance(iterable.layout, RecordLayout):
                 # Materializing would drive Python's iteration protocol (a user __len__/__getitem__/__iter__) on
                 # the reconstruction -- a demonstrated wrong-value and non-termination hazard.
                 raise AnalysisRejection("iteration over a record is not supported", loop.origin)
+            if isinstance(iterable.layout, ArrayLayout) and not iterable.layout.shape:
+                raise AnalysisRejection("iteration over a 0-dimensional array is undefined", loop.origin)
             trip_count = outer_arity(iterable.layout)
             for position in range(trip_count):
                 child: Fact = iterable.child(position)
                 if isinstance(child, AggregateFact):
                     materialized = materialize_static(child)
                     child = Known(materialized) if materialized is not None else child
-                if not isinstance(child, (Known, Reference)):
-                    # The trip count IS static (the layout is fixed); what is missing is per-trip projection of
-                    # the runtime elements, which is a later stage.
-                    raise AnalysisRejection(
-                        "iteration over a sequence with runtime elements is not lowerable yet", loop.origin
-                    )
-                per_trip.append(child)
+                if isinstance(child, (Known, Reference)):
+                    per_trip.append(child)
+                else:
+                    # A runtime element: the trip binds through a synthesized projection prelude, so the child's
+                    # cells (a scalar leaf or a whole row) flow exactly as an explicit v[k] would.
+                    per_trip.append(position)
         elif isinstance(iterable, Known) and isinstance(iterable.value, StaticSeq):
             trip_count = len(iterable.value.items)
             if trip_count <= UNROLL_THRESHOLD:
@@ -1539,8 +1624,15 @@ class Analyzer:
             self._temp_serial += 1
             if isinstance(element_fact, Known):
                 prelude.ops.append(LoadConst(temp, element_fact.value, loop.origin))
-            else:
+            elif isinstance(element_fact, Reference):
                 prelude.ops.append(LoadRef(temp, element_fact.obj, loop.origin))
+            else:
+                index_temp = BindingId(f"%u{self._temp_serial}", self._temp_serial)
+                self._temp_serial += 1
+                position_key = admit(element_fact)
+                assert position_key is not None
+                prelude.ops.append(LoadConst(index_temp, position_key, loop.origin))
+                prelude.ops.append(PySubscript(temp, loop.iterable, index_temp, loop.origin))
             prelude.ops.append(StorePlace(loop.target, temp, loop.origin))
             prelude.terminator = Jump(body_entry, loop.origin)
             unit.blocks[prelude.id] = prelude
@@ -1660,10 +1752,15 @@ class Analyzer:
             for position, arg in enumerate(call.args):
                 if position < len(call.starred) and call.starred[position]:
                     fact = env.get(Local(arg))
-                    if not (isinstance(fact, AggregateFact) and isinstance(fact.layout, (TupleLayout, ListLayout))):
+                    if not (
+                        isinstance(fact, AggregateFact)
+                        and isinstance(fact.layout, (TupleLayout, ListLayout, ArrayLayout))
+                    ):
                         raise AnalysisRejection(
-                            "argument unpacking requires a tuple or list of static arity here", call.origin
+                            "argument unpacking requires a tuple, list, or array of static arity here", call.origin
                         )
+                    if isinstance(fact.layout, ArrayLayout) and not fact.layout.shape:
+                        raise AnalysisRejection("iteration over a 0-dimensional array is undefined", call.origin)
                     for child in range(outer_arity(fact.layout)):
                         index_temp = self._fresh_temp()
                         child_key = admit(child)

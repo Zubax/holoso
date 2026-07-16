@@ -6551,7 +6551,7 @@ def test_call_argument_unpacking_flattens_static_containers() -> None:
     def star_scalar(x: float) -> float:
         return helper(*x, 1.0, 2.0)  # type: ignore[misc,call-arg]
 
-    with pytest.raises(UnsupportedConstruct, match="argument unpacking requires a tuple or list"):
+    with pytest.raises(UnsupportedConstruct, match="argument unpacking requires a tuple, list, or array"):
         lower(star_scalar)
 
     def double_star(x: float) -> float:
