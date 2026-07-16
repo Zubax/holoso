@@ -330,6 +330,28 @@ def record_of(klass: type, children: tuple[tuple[str, BoundFact], ...]) -> Aggre
     return AggregateFact(layout, tuple(_flat_leaves(tuple(child for _, child in children))))
 
 
+def numpy_kinded(leaf: Known, dtype: ArrayDType) -> Known:
+    """
+    A Known scalar re-kinded onto an array dtype's numpy scalar kind, exactly as numpy element extraction
+    would yield it (np.float64/np.int64/np.bool_). The caller guarantees representability: integers fit the
+    signed 64-bit range, and the bool kind receives only booleans -- so the conversion is total.
+    """
+    concrete = _concrete_scalar(leaf)
+    match dtype:
+        case ArrayDType.FLOAT64:
+            assert not isinstance(concrete, bool)
+            converted: object = np.float64(concrete)  # type: ignore[arg-type]
+        case ArrayDType.INT64:
+            assert isinstance(concrete, (int, np.integer)) and not isinstance(concrete, bool)
+            converted = np.int64(concrete)
+        case ArrayDType.BOOL:
+            assert isinstance(concrete, (bool, np.bool_))
+            converted = np.bool_(concrete)
+    admitted = admit(converted)
+    assert admitted is not None and not isinstance(admitted, _STRUCTURAL)
+    return Known(admitted)
+
+
 def materialize_static(fact: BoundFact) -> StaticValue | None:
     """
     The concrete static value of a fully-Known fact, or None when any leaf is residual or the container flavor is

@@ -301,7 +301,6 @@ def test_python_list_arithmetic_keeps_python_semantics() -> None:
             lower(kernel)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.array of runtime list — stage 9")
 def test_np_array_of_ragged_list_is_rejected() -> None:
     # The np.array/asarray/asanyarray factory mirrors numpy, which rejects a ragged array literal.
     def ragged(a: float, b: float) -> float:
@@ -1121,6 +1120,107 @@ def test_elementwise_rejections_are_located() -> None:
     for kernel in (oversized_int_constant, oversized_on_empty, oversized_for_int64):
         with pytest.raises(UnsupportedConstruct, match="OverflowError"):
             lower(kernel)
+
+
+# ---------------------------------------------------------------- array factories (stage 9a-2a)
+
+
+def test_np_array_factory_over_runtime_values_matches_numpy() -> None:
+    def vector(a: float, b: float, s: float) -> tuple[float, float]:
+        v = np.array([a, b]) * s
+        return v[0], v[1]
+
+    def identity(s: float) -> tuple[float, float, float]:
+        v = np.asarray(COEFFS * s)  # asarray over a runtime-leaf array is the identity copy
+        return v[0], v[1], v[2]
+
+    def nested(a: float, b: float) -> tuple[float, float]:
+        m = np.asarray([[a], [b]])  # ListLayout(ListLayout(ATOM)) becomes a (2, 1) array
+        return m[0][0], m[1][0]
+
+    def mixed_flavor(a: float, b: float, c: float, d: float) -> float:
+        m = np.array([(a, b), [c, d]])  # numpy accepts mixed tuple/list nesting as one rectangular block
+        return m[1][0]  # type: ignore[no-any-return]
+
+    def known_int_leaf(a: float) -> tuple[float, float]:
+        v = np.array([a, 1]) * 2.0  # the Known integer leaf becomes np.float64(1.0), as numpy discovers
+        return v[0], v[1]
+
+    _assert_python_matches_holoso(vector, 1.5, -2.0, 3.0)
+    _assert_python_matches_holoso(identity, 0.5)
+    _assert_python_matches_holoso(nested, 2.0, -1.0)
+    _assert_python_matches_holoso(mixed_flavor, 1.0, 2.0, 3.0, 4.0)
+    _assert_python_matches_holoso(known_int_leaf, 2.5)
+
+
+def test_np_array_factory_subset_rejections() -> None:
+    def oversized_known_int(a: float) -> float:
+        v = np.array([a, 10**100])  # numpy would build an OBJECT array here
+        return v[0]  # type: ignore[no-any-return]
+
+    def uint64_range_int(a: float) -> float:
+        v = np.array([a, 2**63])  # numpy would silently promote through uint64 to float64
+        return v[0]  # type: ignore[no-any-return]
+
+    for kernel in (oversized_known_int, uint64_range_int):
+        with pytest.raises(UnsupportedConstruct, match="64-bit"):
+            lower(kernel)
+
+    def runtime_integers(a: float, b: float) -> float:
+        v = np.array([int(a), int(b)])  # an integer array with runtime leaves cannot lower yet
+        return float(v[0])
+
+    with pytest.raises(UnsupportedConstruct, match="cast to float"):
+        lower(runtime_integers)
+
+    def bool_mix(a: float, b: float) -> float:
+        v = np.array([a > 0.0, b])  # numpy would promote the bool; the subset rejects the mix
+        return v[1]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="mixes boolean"):
+        lower(bool_mix)
+
+
+def test_bool_array_construction_and_arithmetic_rejections() -> None:
+    # A boolean-dtype array is constructible from runtime comparisons; its arithmetic keeps the scalar
+    # doctrine's explicit-conversion rejection, unary included (numpy itself refuses unary +/- on bools).
+    def scaled(a: float, b: float) -> float:
+        v = np.array([a > 0.0, b > 0.0]) * 2.0
+        return v[0]  # type: ignore[no-any-return]
+
+    def negated(a: float, b: float) -> float:
+        v = -np.array([a > 0.0, b > 0.0])
+        return float(v[0])
+
+    for kernel in (scaled, negated):
+        with pytest.raises(UnsupportedConstruct, match="explicit conversion"):
+            lower(kernel)
+
+    def truth(a: float, b: float) -> float:
+        if np.array([a > 0.0, b > 0.0]):
+            return a
+        return b
+
+    with pytest.raises(UnsupportedConstruct, match="ambiguous"):
+        lower(truth)
+
+
+def test_runtime_array_shape_metadata_folds_statically() -> None:
+    # .ndim/.shape/.size are layout-determined, so they fold on RUNTIME-leaf arrays exactly as on constants:
+    # the guarded write below is statically dead and must not become a spurious state slot.
+    @dataclasses.dataclass
+    class Gated:
+        y: float
+
+        def step(self, a: float) -> float:
+            g = COEFFS * a
+            if g.ndim != 1 or g.shape[0] != 3 or g.size != 3 or len(g) != 3:  # statically false
+                self.y = a  # statically dead
+            return a * 2.0
+
+    hir = lower(Gated(0.0).step)
+    assert [s.name for s in hir.state_slots] == []
+    assert [o.name for o in hir.outputs] == ["out_0"]
 
 
 # ---------------------------------------------------------------- behavior (model vs numpy)

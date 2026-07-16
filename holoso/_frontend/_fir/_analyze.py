@@ -81,11 +81,13 @@ from ._fact import (
     StructuralLayout,
     TupleLayout,
     Unbound,
+    ValueLayout,
     aggregate_of,
     join_layouts,
     leaf_count,
     materialize_static,
     normalize_static,
+    numpy_kinded,
     outer_arity,
     record_of,
 )
@@ -172,7 +174,7 @@ class _PropertyRead:
 _UNBOUND = Unbound()
 
 
-_ARRAY_ATTRIBUTES = ("T", "shape", "ndim", "size", "real", "imag")
+_ARRAY_ATTRIBUTES = ("T", "real", "imag")  # value navigation, all-Known only; shape metadata folds structurally
 
 
 def _residual_type(value: StaticValue) -> SemType | None:
@@ -1048,6 +1050,66 @@ class Analyzer:
             return leaves[0]  # numpy: unary +/- on a 0-d array also yields the scalar sort
         return AggregateFact(operand.layout, tuple(leaves))
 
+    def _array_factory(self, source: AggregateFact, origin: OriginStack) -> AggregateFact:
+        """
+        np.array/asarray/asanyarray over a residual-carrying aggregate: a relayout of the SAME leaves onto the
+        rectangular shape the nesting yields, with dtype discovery restricted to the proven subset -- any float
+        evidence promotes to FLOAT64 (integer leaves coerce: Knowns re-kind to np.float64 exactly as numpy
+        extraction would yield them, residual integers pick up a runtime conversion at emission), an all-boolean
+        argument builds a BOOL array, and empty array children contribute their dtype as evidence. Outside the
+        subset numpy behaves in ways the domain cannot carry, so the forms reject where numpy would surprise: a
+        Python-int leaf beyond signed 64 bits (numpy builds an object array, or silently promotes the uint64
+        range to float64), a bool/numeric mix (numpy widens the bool), and a runtime-integer result (the integer
+        datapath saturates where numpy wraps).
+        """
+        shape = _rectangular_shape(source.layout)
+        if shape is None:
+            raise AnalysisRejection("an array literal must be rectangular (numpy raises on ragged nesting)", origin)
+        sems: set[SemType | None] = set()
+        for leaf in source.leaves:
+            assert not isinstance(leaf, Reference), "a reference leaf survived the admission walk"
+            sems.add(leaf.type if isinstance(leaf, Residual) else _residual_type(leaf.value))
+        sems |= {
+            {ArrayDType.BOOL: SemType.BOOL, ArrayDType.INT64: SemType.INT, ArrayDType.FLOAT64: SemType.FLOAT}[dtype]
+            for dtype in _layout_dtypes(source.layout)
+        }
+        if None in sems:  # a string or range leaf: numpy would build a string/object array, outside the domain
+            raise AnalysisRejection("an array literal requires numeric or boolean elements", origin)
+        assert sems, "an empty argument cannot carry a residual leaf"
+        if SemType.BOOL in sems and sems != {SemType.BOOL}:
+            raise AnalysisRejection(
+                "an array literal mixes booleans with numbers (numpy would widen the bool); convert explicitly",
+                origin,
+            )
+        for leaf in source.leaves:
+            if isinstance(leaf, Known) and isinstance(leaf.value, MetaInt):
+                if not -(2**63) <= leaf.value.value < 2**63:
+                    raise AnalysisRejection(
+                        "an integer beyond the signed 64-bit range in an array literal is not supported "
+                        "(numpy would build an object array or promote through uint64)",
+                        origin,
+                    )
+        if sems == {SemType.BOOL}:
+            dtype = ArrayDType.BOOL
+        elif SemType.FLOAT in sems:
+            dtype = ArrayDType.FLOAT64
+        else:
+            dtype = ArrayDType.INT64
+        if dtype is ArrayDType.INT64:
+            # Only residual integers can reach here (a fully static argument took the concrete fold), and the
+            # scalar integer datapath saturates where numpy int64 wraps.
+            raise AnalysisRejection(
+                "runtime integer array construction is not lowerable yet; cast to float first", origin
+            )
+        leaves: list[AtomicFact] = []
+        for leaf in source.leaves:
+            if isinstance(leaf, Known):
+                leaves.append(numpy_kinded(leaf, dtype))
+            else:
+                assert isinstance(leaf, Residual)
+                leaves.append(Residual(SemType.FLOAT) if dtype is ArrayDType.FLOAT64 else leaf)
+        return AggregateFact(ArrayLayout(shape, dtype), tuple(leaves))
+
     def _elementwise_side_sem(self, side: Fact, origin: OriginStack) -> SemType:
         if isinstance(side, AggregateFact):
             assert isinstance(side.layout, ArrayLayout)
@@ -1251,6 +1313,17 @@ class Analyzer:
                     f"list method '{name}' is not supported (lists are immutable values here); rebind with + instead",
                     origin,
                 )
+            if isinstance(obj.layout, ArrayLayout) and name in ("ndim", "shape", "size"):
+                # Layout-determined metadata: folds identically on runtime leaves, no element consulted, and
+                # value-identical to the concrete navigation an all-Known snapshot would take.
+                metadata = {
+                    "ndim": len(obj.layout.shape),
+                    "shape": tuple(obj.layout.shape),
+                    "size": leaf_count(obj.layout),
+                }[name]
+                admitted_metadata = admit(metadata)
+                assert admitted_metadata is not None
+                return normalize_static(admitted_metadata)
             if isinstance(obj.layout, ArrayLayout) and name not in _ARRAY_ATTRIBUTES:
                 # The admitted array is a private C-contiguous SNAPSHOT: identity- and layout-dependent attributes
                 # (.base, .strides, .flags, .data) observe the snapshot, not the user's object, so only the
@@ -1751,6 +1824,38 @@ class Analyzer:
                     env.set(Local(call.dst), aggregate_of(children, is_list=target is list))
                     self._conversion_calls.add(id(call))
                     return False
+            if (
+                target is len
+                and not keyword_facts
+                and len(argument_facts) == 1
+                and isinstance(argument_facts[0], AggregateFact)
+            ):
+                # Length is layout-determined: it folds on runtime leaves exactly as the unpacking arity check
+                # (the PyLen op) does, records having been refused by the admission walk already.
+                sized = argument_facts[0]
+                if isinstance(sized.layout, ArrayLayout) and not sized.layout.shape:
+                    raise AnalysisRejection("len() of a 0-dimensional array is undefined", call.origin)
+                length = admit(outer_arity(sized.layout))
+                assert length is not None
+                env.set(Local(call.dst), Known(length))
+                self._concrete_calls.add(id(call))
+                return False
+            import numpy as np
+
+            if (
+                any(target is factory for factory in (np.array, np.asarray, np.asanyarray))
+                and not keyword_facts
+                and len(argument_facts) == 1
+                and isinstance(argument_facts[0], AggregateFact)
+                and any(isinstance(leaf, Residual) for leaf in argument_facts[0].leaves)
+            ):
+                # A residual-carrying array construction is the same LAYOUT operation under numpy's discovery
+                # rules, restricted to the proven subset; a fully static argument falls through to the vetted
+                # concrete call below, where numpy itself decides every discovery corner (object promotion,
+                # the uint64 range, bool widening) and the result normalizes back exactly.
+                env.set(Local(call.dst), self._array_factory(argument_facts[0], call.origin))
+                self._conversion_calls.add(id(call))
+                return False
             if target is isinstance and not keyword_facts and len(argument_facts) == 2:
                 # isinstance folds through the RESOLVED classinfo types, never through a generic evaluation: the
                 # classinfo's sanctioned carriers (a referenced class, an inline tuple of references) are not
@@ -2152,6 +2257,36 @@ def _fits_float64(value: int) -> bool:
     except OverflowError:
         return False
     return True
+
+
+def _rectangular_shape(layout: "ValueLayout") -> tuple[int, ...] | None:
+    """
+    The array shape a layout tree yields under numpy's rectangular nesting rules (container flavor is
+    irrelevant; a 0-d array child acts as a scalar), or None where numpy itself would refuse the ragged form.
+    """
+    if layout is None:
+        return ()
+    match layout:
+        case ArrayLayout(shape=shape):
+            return shape
+        case TupleLayout(items=items) | ListLayout(items=items) | StructuralLayout(items=items):
+            inner = {_rectangular_shape(item) for item in items}
+            if None in inner or len(inner) > 1:
+                return None
+            common = next(iter(inner), ())
+            assert common is not None
+            return (len(items), *common)
+    return None  # a record never reaches an array factory (the admission walk refuses it as an argument)
+
+
+def _layout_dtypes(layout: "ValueLayout") -> set[ArrayDType]:
+    """Embedded array dtypes: the evidence an empty array child contributes to numpy's dtype discovery."""
+    match layout:
+        case ArrayLayout(dtype=dtype):
+            return {dtype}
+        case TupleLayout(items=items) | ListLayout(items=items) | StructuralLayout(items=items):
+            return {dtype for item in items for dtype in _layout_dtypes(item)}
+    return set()
 
 
 def _mro_attribute_of(klass: type, name: str) -> object | None:

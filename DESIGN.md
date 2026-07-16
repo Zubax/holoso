@@ -377,9 +377,20 @@ yield the SCALAR sort (numpy returns `np.float64`/`np.int64`, never a 0-d array,
 array in any scalar operand position materializes as its single leaf; a runtime-INTEGER result rejects until
 the integer sprint, because the scalar integer datapath saturates where numpy int64 wraps -- all-static integer
 folds are exact and stay admitted.
+The array factories `np.array`/`asarray`/`asanyarray` build from a residual-carrying aggregate as the same
+LAYOUT operation under numpy's discovery rules, restricted to a proven subset: the nesting must be rectangular
+(container flavor is irrelevant; empty array children contribute their dtype as evidence), any float evidence
+promotes to FLOAT64 (Known integer leaves re-kind to np.float64 exactly as numpy extraction would yield them,
+residual integers pick up a runtime conversion at emission), and an all-boolean argument builds a BOOL array.
+Where numpy's discovery would surprise, the form rejects instead: a Python-int leaf beyond signed 64 bits
+(numpy builds an object array or silently promotes the uint64 range to float64), a bool/numeric mix (numpy
+widens the bool), and a runtime-integer result (the integer datapath saturates where numpy wraps). A fully
+static argument keeps taking the vetted concrete call, so numpy itself decides every discovery corner and the
+result normalizes back exactly. Shape metadata folds structurally on runtime-leaf arrays -- `len()`, `.ndim`,
+`.shape`, `.size` are layout-determined and consult no element.
 What remains deferred is the rest of the
 BOUNDARY surface -- aggregate parameter ports, aggregate persistent state, runtime-element iteration,
-and the array-factory/record/reduction/gather semantics below -- and every disabled
+and the record/reduction/gather semantics below -- and every disabled
 test carries
 the greppable marker. The contract the remaining stages restore (and extend with records, reductions, and the
 bounded gather):

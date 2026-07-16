@@ -579,6 +579,30 @@ class _Emitter:
         """
         return isinstance(leaf.value, (StaticBool, NpBool, MetaInt, NpInt, StaticFloat, NpFloat))
 
+    def _emit_conversion(self, block: FirBlockId, source: BindingId, dst: BindingId, result: AggregateFact) -> None:
+        """
+        A conversion's leaf copy: identical to :meth:`_copy_leaves` for the flavor conversions (whose result
+        leaves ARE the source facts), plus the kind coercion an array factory introduces -- a residual integer
+        leaf under a float dtype reads its source cell and promotes, exactly as the scalar materializer would.
+        """
+        source_fact = self._fact(source)
+        assert isinstance(source_fact, AggregateFact) and len(source_fact.leaves) == len(result.leaves)
+        for ordinal, leaf in enumerate(result.leaves):
+            if isinstance(leaf, Known):
+                if self._datapath_known(leaf):
+                    self._write(block, _LeafPlace(Local(dst), ordinal), self._atom_vid(leaf))
+            elif not isinstance(leaf, Reference):
+                assert isinstance(leaf, Residual)
+                # An unchanged leaf copies as carried (the flavor-conversion identity); only a leaf the factory
+                # re-semmed coerces onto its new kind.
+                expected = None if source_fact.leaves[ordinal] == leaf else leaf.type
+                vid = self._materialize_atom(
+                    source_fact.leaves[ordinal],
+                    lambda: self._read(block, _LeafPlace(Local(source), ordinal)),
+                    expected,
+                )
+                self._write(block, _LeafPlace(Local(dst), ordinal), vid)
+
     def _copy_leaves(self, block: FirBlockId, source: Place, fact: AggregateFact, target: Place) -> None:
         """
         Define every datapath leaf of ``target``: a Known leaf as its constant, a residual leaf as the source's
@@ -872,7 +896,7 @@ class _Emitter:
                     case CallLowering.CONVERSION:
                         conversion_fact = self._fact(dst)
                         if isinstance(conversion_fact, AggregateFact):
-                            self._copy_leaves(fir_id, Local(args[0]), conversion_fact, Local(dst))
+                            self._emit_conversion(fir_id, args[0], dst, conversion_fact)
                     case CallLowering.CONSTRUCTION:
                         record_fact = self._fact(dst)
                         assert isinstance(record_fact, AggregateFact) and plan.construction is not None
