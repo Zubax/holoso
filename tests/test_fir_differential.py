@@ -9,7 +9,7 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
-from holoso._frontend._fir._analyze import AnalysisRejection
+from holoso._frontend._fir._analysis_support import AnalysisRejection
 from holoso._frontend._fir._emit import EmissionRejection, lower_fir
 from holoso._hir import optimize
 from holoso._mir import MirInterpreter, lower as lower_to_mir

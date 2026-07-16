@@ -8,7 +8,8 @@ from collections.abc import Callable
 
 import pytest
 
-from holoso._frontend._fir._analyze import AnalysisRejection, Analyzer, ResidualUnit
+from holoso._frontend._fir._analysis_support import AnalysisRejection
+from holoso._frontend._fir._analyze import Analyzer, ResidualUnit
 from holoso._frontend._fir._fact import Known, Residual
 from holoso._frontend._fir._value import SemType
 from holoso._frontend._fir._ir import ReturnPlace, StateLeaf
