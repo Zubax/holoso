@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from holoso._frontend._lib import Intrinsic, Library, resolve
-from holoso._frontend._lib._linalg import matmul_, outer_, trace_, transpose_
+from holoso._frontend._lib._linalg import _transpose, matmul_, outer_, trace_
 from holoso._frontend._lib._intrinsics import (
     abs_,
     atan2_,
@@ -68,11 +68,11 @@ def test_registry_resolves_the_expected_externals() -> None:
     library_externals += [pow, math.pow, np.power, np.float_power]
     library_externals += [math.sinh, np.cosh, math.tanh, math.asinh, np.arcsinh, math.acosh, math.atanh]
     library_externals += [math.expm1, np.log1p, math.degrees, np.rad2deg, math.radians, np.deg2rad]
-    library_externals += [np.matmul, np.dot, np.transpose, np.trace, np.outer]
+    library_externals += [np.matmul, np.dot, np.trace, np.outer]  # transpose is structural, not a stub
     for external in library_externals:
         assert isinstance(resolve(external), Library), external
-    # ``@`` and ``.T`` are lowered by resolving these two, so the frontend holds no matrix expansion of its own.
-    assert resolve(np.matmul) == Library(matmul_) and resolve(np.transpose) == Library(transpose_)  # type: ignore[arg-type]
+    # ``@`` resolves the matmul stub; ``.T``/np.transpose lower structurally as a leaf permutation.
+    assert resolve(np.matmul) == Library(matmul_) and resolve(np.transpose) is None  # type: ignore[arg-type]
     assert resolve(np.dot) == resolve(np.matmul)  # identical on the supported 1-D/2-D non-scalar domain
     # An unregistered callable resolves to nothing; an unhashable shadow does not crash the lookup.
     assert resolve(math.erf) is None and resolve(np.zeros(3)) is None
@@ -215,11 +215,9 @@ def test_matmul_matches_numpy_in_every_rank_combination() -> None:
     assert np.ndim(matmul_(u, u)) == 0
 
 
-def test_transpose_matches_numpy() -> None:
-    rng = np.random.default_rng(20260711)
-    m, v = rng.normal(size=(2, 5)), rng.normal(size=3)
-    assert np.allclose(transpose_(m), m.T)
-    assert np.allclose(transpose_(v), v.T)  # numpy leaves a vector alone
+def test_transpose_helper_matches_numpy() -> None:
+    m = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    assert np.allclose(_transpose(m), m.T)  # the matrix product's column-walk helper, 2-D only by contract
 
 
 def test_trace_and_outer_match_numpy() -> None:
@@ -240,10 +238,9 @@ def test_linalg_stubs_reject_the_shapes_they_do_not_support() -> None:
     assert np.allclose(matmul_(matrix, vector), matrix @ vector)  # 2×3 @ 3 agrees, so the mismatch below is genuine
     with pytest.raises(ValueError, match="mismatch"):
         matmul_(matrix, np.arange(2.0))
-    with pytest.raises(ValueError, match="transpose a scalar"):
-        transpose_(scalar)  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="1-D or 2-D|not supported"):
-        transpose_(cube)
+    # Transpose is structural in the compiler now; _transpose here is only the matrix product's plain
+    # column-walk helper, exercised through matmul_ above (its scalar/rank guards live in the caller).
+    assert np.allclose(_transpose(matrix), matrix.T)
     with pytest.raises(ValueError, match="square"):
         trace_(matrix)
     with pytest.raises(ValueError, match="matrix"):

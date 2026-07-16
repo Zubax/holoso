@@ -639,15 +639,25 @@ class _Emitter:
         """
         return isinstance(leaf.value, (StaticBool, NpBool, MetaInt, NpInt, StaticFloat, NpFloat))
 
-    def _emit_conversion(self, block: FirBlockId, source: BindingId, dst: BindingId, result: AggregateFact) -> None:
+    def _emit_conversion(
+        self,
+        block: FirBlockId,
+        source: BindingId,
+        dst: BindingId,
+        result: AggregateFact,
+        route: "tuple[int, ...] | None" = None,
+    ) -> None:
         """
         A conversion's leaf copy: identical to :meth:`_copy_leaves` for the flavor conversions (whose result
         leaves ARE the source facts), plus the kind coercion an array factory introduces -- a residual integer
         leaf under a float dtype reads its source cell and promotes, exactly as the scalar materializer would.
+        A ROUTE plan (a transpose) names the source ordinal feeding each result cell; its absence is the
+        aligned identity.
         """
         source_fact = self._fact(source)
         assert isinstance(source_fact, AggregateFact) and len(source_fact.leaves) == len(result.leaves)
         for ordinal, leaf in enumerate(result.leaves):
+            source_ordinal = route[ordinal] if route is not None else ordinal
             if isinstance(leaf, Known):
                 if self._datapath_known(leaf):
                     self._write(block, _LeafPlace(Local(dst), ordinal), self._atom_vid(leaf))
@@ -655,10 +665,10 @@ class _Emitter:
                 assert isinstance(leaf, Residual)
                 # An unchanged leaf copies as carried (the flavor-conversion identity); only a leaf the factory
                 # re-semmed coerces onto its new kind.
-                expected = None if source_fact.leaves[ordinal] == leaf else leaf.type
+                expected = None if source_fact.leaves[source_ordinal] == leaf else leaf.type
                 vid = self._materialize_atom(
-                    source_fact.leaves[ordinal],
-                    lambda: self._read(block, _LeafPlace(Local(source), ordinal)),
+                    source_fact.leaves[source_ordinal],
+                    lambda: self._read(block, _LeafPlace(Local(source), source_ordinal)),
                     expected,
                 )
                 self._write(block, _LeafPlace(Local(dst), ordinal), vid)
@@ -975,7 +985,8 @@ class _Emitter:
                     case CallLowering.CONVERSION:
                         conversion_fact = self._fact(dst)
                         if isinstance(conversion_fact, AggregateFact):
-                            self._emit_conversion(fir_id, args[0], dst, conversion_fact)
+                            route = self._result.route_plans.get(dst)
+                            self._emit_conversion(fir_id, args[0], dst, conversion_fact, route)
                     case CallLowering.CONSTRUCTION:
                         record_fact = self._fact(dst)
                         assert isinstance(record_fact, AggregateFact) and plan.construction is not None

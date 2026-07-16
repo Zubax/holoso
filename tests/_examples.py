@@ -677,7 +677,6 @@ SPECS = [
 # the FIR_PARITY_PENDING token.
 FIR_PARITY_PENDING: dict[str, str] = {
     # Off-catalogue examples (no SPECS entry) whose synth targets and eventual suites key off these names too.
-    "imu_frame_transform": "stage 9: jaxtyping ndarray ports + matmul over array parameters",
     "finite_set_current_controller": "stage 9: record ports/returns, reductions, array comparison, Index[N] gather",
 }
 

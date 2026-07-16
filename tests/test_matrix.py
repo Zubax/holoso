@@ -93,7 +93,6 @@ def _assert_python_matches_holoso(fn: Callable[..., object], *inputs: np.ndarray
 # ---------------------------------------------------------------- structure
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matmul on array parameters — stage 9")
 def test_matmul_shapes_and_port_layout() -> None:
     def mat_vec(a: Float64[np.ndarray, "2 3"], x: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2"]:
         return a @ x  # type: ignore[no-any-return]
@@ -131,7 +130,6 @@ def test_matmul_shapes_and_port_layout() -> None:
     )
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matmul rejections on array/aggregate operands — stage 9")
 def test_matmul_rejections() -> None:
     def scalar_operand(a: float, x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return a @ x  # type: ignore[operator, unused-ignore]
@@ -150,7 +148,7 @@ def test_matmul_rejections() -> None:
         # before rectangularity is even considered; the ragged literal cannot be wrapped in np.array either.
         return [[a, b], [a]] @ [a, b]  # type: ignore[operator, no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="matrix semantics"):
         lower(ragged)
 
     def three_dee(a: float) -> float:
@@ -162,11 +160,10 @@ def test_matmul_rejections() -> None:
     def boolean(v: Float64[np.ndarray, "2"], flag: bool) -> float:
         return v @ np.array([flag, flag])  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="floating-point"):
-        lower(boolean)
+    with pytest.raises(UnsupportedConstruct, match="explicit conversion"):
+        lower(boolean)  # the dot's first product hits the scalar boolean-arithmetic doctrine
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: dot product on array parameters — stage 9")
 def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
     # The documented reason for the left-fold dot expansion: with ffma configured, an n-element dot must lower to one
     # fmul plus n-1 ffma (each running-sum add fuses the next single-use product). A balanced tree or product reuse
@@ -193,7 +190,6 @@ def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
     _assert_python_matches_holoso(dot, np.array([0.5, -1.0, 2.0]), np.array([2.0, 3.0, -1.0]))
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.matmul on array parameters — stage 9")
 def test_np_matmul_call_is_the_operator() -> None:
     def with_operator(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return a @ x  # type: ignore[no-any-return]
@@ -214,7 +210,6 @@ def test_np_matmul_call_is_the_operator() -> None:
         lower(keywords)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.matmul on array parameters — stage 9")
 def test_np_matmul_bare_name_import_resolves() -> None:
     def with_bare_name(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return _matmul(a, x)  # type: ignore[no-any-return]
@@ -308,20 +303,19 @@ def test_np_array_of_ragged_list_is_rejected() -> None:
         lower(ragged)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: numpy methods on runtime list/array — stage 9")
 def test_numpy_only_methods_on_a_list_are_rejected() -> None:
     # `.T`, `.flatten()`, and multi-axis indexing are numpy-array operations undefined on a Python list, so they are
     # rejected on a list literal; wrapping in np.array([...]) makes them valid.
     def transpose(a: float, b: float) -> float:
         return ([a, b].T)[0]  # type: ignore[attr-defined, no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="transpose"):
+    with pytest.raises(UnsupportedConstruct, match="lists are immutable"):
         lower(transpose)
 
     def flatten(a: float, b: float) -> float:
         return ([[a, b]].flatten())[0]  # type: ignore[attr-defined, no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="flattening"):
+    with pytest.raises(UnsupportedConstruct, match="lists are immutable"):
         lower(flatten)
 
     def multi_axis(a: float, b: float) -> float:
@@ -409,7 +403,6 @@ def test_unsupported_operator_diagnostic_names_the_operator() -> None:
         lower(modulo)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: array transpose (.T) — stage 9")
 def test_transpose_structure() -> None:
     def t(m: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "3 2"]:
         return m.T
@@ -763,7 +756,6 @@ def test_readonly_ndarray_attribute_element_folds_a_branch() -> None:
     assert [o.name for o in hir.outputs] == ["out_0"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: constant slicing/transpose folding — stage 9")
 def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
     # Regression: the static evaluator must fold every constant-array operation the value lowerer supports -- including
     # slicing and transpose -- or a statically-known guard reads as dynamic and creates a spurious state slot.
@@ -816,7 +808,6 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
     assert float(_sim(via_identity).run(3.0)[0]) == 6.0
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matrix state transpose — stage 9")
 def test_transpose_of_matrix_state_attribute() -> None:
     # Coverage: ``self.P.T`` transposes state (the chained case of the ``.T``-vs-``self.T`` resolution), distinct from
     # the ``self.T`` state-read carve-out.
@@ -855,21 +846,20 @@ def test_unary_plus_rejects_boolean_but_is_identity_on_floats() -> None:
     assert [o.name for o in lower(floats).outputs] == ["out_0", "out_1"]
 
 
-@pytest.mark.skip(
-    reason="FIR_PARITY_PENDING: runtime array/matrix state and its constant-index rejection policy — stage 9"
-)
-def test_ndarray_module_constant_rejections() -> None:
+def test_ndarray_module_constant_behavior() -> None:
+    # A boolean constant element is a bool VALUE (the width collapse admits the array); returning it as a
+    # declared float is an honest contract mismatch. A 3-D constant is ordinary bookkeeping: its elements
+    # fold through the rank-N gather exactly as numpy indexes them.
     def boolean(a: float) -> float:
         return _BOOL_CONST[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="real numbers"):
+    with pytest.raises(UnsupportedConstruct, match="returns bool"):
         lower(boolean)
 
     def three_dee(a: float) -> float:
-        return _CUBE_CONST[0, 0, 0]  # type: ignore[no-any-return]
+        return a + float(_CUBE_CONST[0, 0, 0])
 
-    with pytest.raises(UnsupportedConstruct, match="1-D or 2-D"):
-        lower(three_dee)
+    assert float(_sim(three_dee).run(2.0)[0]) == 2.0  # the cube is zeros
 
 
 def test_ndarray_subclass_constant_and_state_are_rejected() -> None:
@@ -1091,10 +1081,10 @@ def test_elementwise_rejections_are_located() -> None:
         lower(power)
 
     def product(s: float) -> float:
-        v = COEFFS @ COEFFS
-        return v * s  # type: ignore[no-any-return]
+        v = COEFFS @ [1.0, 2.0, s]  # a list operand never acquires matrix semantics
+        return float(v * s)
 
-    with pytest.raises(UnsupportedConstruct, match="matrix product"):
+    with pytest.raises(UnsupportedConstruct, match="matrix semantics"):
         lower(product)
 
     def flag_scalar(s: float) -> float:
@@ -1560,7 +1550,6 @@ _LONGLONG_CONST = np.longlong(7)
 # ---------------------------------------------------------------- behavior (model vs numpy)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matmul on array parameters — stage 9")
 def test_matmul_matches_numpy() -> None:
     def transform(a: Float64[np.ndarray, "3 3"], x: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
         return a @ x  # type: ignore[no-any-return]
@@ -1597,7 +1586,6 @@ def test_matmul_matches_numpy() -> None:
         assert np.allclose(got, want, rtol=1e-12, atol=1e-300), fn.__name__
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.array with runtime arguments — stage 9")
 def test_np_array_factory_converts_list_and_matches_numpy() -> None:
     # np.array([...]) converts a Python list/tuple into a numpy array on which arithmetic, the matrix product, and
     # elementwise combination with another array are all defined; the results match numpy executing the same kernel.
@@ -1619,7 +1607,6 @@ def test_np_array_factory_converts_list_and_matches_numpy() -> None:
     assert np.allclose(_run(_sim(mat_minus_rows), m, a, b), np.asarray(mat_minus_rows(m, a, b)).flatten(), rtol=1e-12)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: array slicing/elementwise — stage 9")
 def test_elementwise_and_globals_match_numpy() -> None:
     def kernel(x: Float64[np.ndarray, "2"], s: float) -> Float64[np.ndarray, "2"]:
         y = GAIN @ (x + COEFFS[0:2]) - x / 4.0
@@ -1631,7 +1618,6 @@ def test_elementwise_and_globals_match_numpy() -> None:
     assert np.allclose(got, np.asarray(kernel(x, s)), rtol=1e-12, atol=1e-300)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matmul on array parameters — stage 9")
 def test_integer_dtype_module_constant_folds_to_floats() -> None:
     def kernel(v: Float64[np.ndarray, "3"]) -> float:
         return v @ INT_TAPS  # type: ignore[no-any-return]
@@ -1641,7 +1627,6 @@ def test_integer_dtype_module_constant_folds_to_floats() -> None:
     assert got[0] == float(v @ INT_TAPS)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matmul on array state — stage 9")
 def test_matrix_state_update_matches_numpy_across_transactions() -> None:
     @dataclasses.dataclass
     class Decay:
@@ -1660,7 +1645,6 @@ def test_matrix_state_update_matches_numpy_across_transactions() -> None:
         assert np.allclose(got, reference.P.flatten(), rtol=1e-12, atol=1e-300)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matmul on array parameters — stage 9")
 def test_annotated_local_assignment_matches_numpy() -> None:
     # Locks in the annotated local-assignment statement ``name: T = value`` (both array- and scalar-annotated forms) --
     # the annotation is decorative and the value binds like a plain assignment; a frontend branch no other kernel hits.
@@ -1675,7 +1659,6 @@ def test_annotated_local_assignment_matches_numpy() -> None:
     assert np.allclose(got, np.asarray(kernel(a, x)), rtol=1e-12, atol=1e-300)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: array (vector/matrix) division — stage 9")
 def test_runtime_divisor_division_matches_numpy() -> None:
     # Locks in float division by a RUNTIME divisor -- the strength reducer's fallthrough to a real FloatDiv, the fdiv
     # operator's execution, and the value model's exact divide -- none of which a constant/power-of-two divisor reaches.
@@ -1702,7 +1685,6 @@ def test_runtime_divisor_division_matches_numpy() -> None:
     assert np.allclose(_run(_sim(kalman_gain), P, h, s), (P @ h) / s, rtol=1e-12, atol=1e-300)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matrix feature surface — stage 9")
 def test_stateful_kalman_style_filter_matches_numpy_across_transactions() -> None:
     # Locks in the whole matrix feature surface composed in one stateful kernel across transactions: matrix/vector
     # parameters and carried state, ndarray module constants, ``@`` in every shape with transpose, elementwise scalar
@@ -1723,7 +1705,6 @@ def test_stateful_kalman_style_filter_matches_numpy_across_transactions() -> Non
         assert np.allclose(got, want, rtol=1e-9, atol=1e-12), step
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matmul on array parameters — stage 9")
 def test_imu_frame_transform_example_matches_numpy() -> None:
     # The bundled 3D rigid-body / IMU frame transform example must lower and agree with its own plain-numpy execution,
     # confirming the matmul/transpose/broadcast composition it demonstrates is valid, runnable Python.
@@ -1742,7 +1723,6 @@ def test_imu_frame_transform_example_matches_numpy() -> None:
         )
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matmul on array parameters — stage 9")
 def test_imu_frame_transform_fma_matches_numpy() -> None:
     # The ffma-contracted datapath the synth matrix's FMA rows exercise (each dot-product multiply-accumulate fused into
     # a single-rounded a*b+c) must compute the same transform: FMA changes only the rounding, not the result.
@@ -1762,7 +1742,6 @@ def test_imu_frame_transform_fma_matches_numpy() -> None:
 # ---------------------------------------------------------------- linear algebra library functions
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matmul/transpose on array parameters — stage 9")
 def test_operators_are_the_library_functions() -> None:
     # ``@`` and ``.T`` lower by resolving np.matmul / np.transpose in the registry, so the operator and its spelled
     # call cannot drift apart: identical HIR, not merely identical values.
@@ -1782,7 +1761,6 @@ def test_operators_are_the_library_functions() -> None:
         )
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.dot on array parameters — stage 9")
 def test_np_dot_is_the_matrix_product() -> None:
     def dot_kernel(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return np.dot(a, x)  # type: ignore[no-any-return]
@@ -1798,7 +1776,6 @@ def test_np_dot_is_the_matrix_product() -> None:
         lower(scalar_dot)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.trace/np.outer on array parameters — stage 9")
 def test_np_trace_and_np_outer() -> None:
     def tr(m: Float64[np.ndarray, "3 3"]) -> float:
         return np.trace(m)  # type: ignore[no-any-return]
@@ -1827,14 +1804,13 @@ def test_np_trace_and_np_outer() -> None:
         lower(outer_of_matrix)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.trace on runtime array — stage 9")
 def test_trace_of_a_1x1_boolean_matrix_is_rejected_like_a_larger_one() -> None:
     # The diagonal fold is seeded at 0.0, so even a 1x1 trace contracts through an addition and rejects a boolean
     # diagonal, rather than passing the boolean through where numpy would widen it to an integer.
     def bool_trace(flag: bool) -> bool:
         return np.trace(np.array([[flag]]))  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="floating-point"):
+    with pytest.raises(UnsupportedConstruct, match="explicit conversion"):
         lower(bool_trace)
 
 
@@ -1857,7 +1833,6 @@ def test_library_shape_rejection_is_attributed_to_the_user_call_site() -> None:
         lower(bad_t)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matrix state — stage 9")
 def test_matrix_state_transposed_under_a_shape_guard_across_transactions() -> None:
     # The reset snapshot fixes the shape, so the guard folds identically in the scan and in lowering, while the
     # attribute itself is reassigned every transaction. Compare every port by NAME: the returned leaf is deduped onto
@@ -1886,7 +1861,6 @@ def test_matrix_state_transposed_under_a_shape_guard_across_transactions() -> No
         )
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matmul in comprehension/loop — stage 9")
 def test_matrix_product_inside_a_comprehension_inside_a_loop() -> None:
     # The stub is inlined from inside a comprehension element, itself inside an unrolled loop, and its result feeds
     # persistent state. Exercises the interaction of aggregate iteration, comprehension scoping, and stub inlining.
@@ -1908,7 +1882,6 @@ def test_matrix_product_inside_a_comprehension_inside_a_loop() -> None:
         assert _run(sim, a, v)[0] == pytest.approx(want)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: iteration over an aggregate — stage 9")
 def test_for_over_an_aggregate_inside_a_while_loop() -> None:
     # A target first bound inside the loop is not loop-carried, so aggregate iteration composes with a back-edge loop.
     class SumRows:

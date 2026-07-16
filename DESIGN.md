@@ -423,6 +423,16 @@ build-time claim check across decomposed and scalar parameter names; an array RE
 the value must be an ndarray of exactly the declared shape (a list of matching geometry is an observable
 reflavoring; np.array([...]) is the explicit conversion) -- flattening onto out_* ports through the same leaf
 validation every other return takes.
+Linear algebra is live as ordinary library code: `@` and its spelled forms (`np.matmul`, `np.dot`) rewrite
+onto one registry stub that inlines like a user function -- rows iterate outermost, contractions are left
+folds (enabling FMA contraction), and every operand must be an ARRAY on both sides (a scalar, list, or tuple
+never acquires matrix semantics; np.array is the explicit conversion). `np.trace`/`np.outer` are stubs under
+the same gate; stub raise messages stay literal so rejections surface verbatim. `.T` and `np.transpose` are
+not stubs: transpose is a pure structural relayout -- the same leaves under the reversed shape, recorded as a
+ROUTE PLAN (source ordinal per result cell) the conversion emission consumes -- exact for every rank,
+non-square shapes, and empty and 0-d arrays. The stubs probe ranks through `np.ndim`, folded narrowly by the
+compiler (a numeric scalar is rank 0, an array is its layout rank, containers reject: numpy's own ndim of a
+list observes structure the fact model erases).
 What remains deferred is the record boundary (record parameter/return contracts) and the
 reduction/comparison/reshape/selection semantics below, and every disabled test carries
 the greppable marker. The contract the remaining stages restore (and extend with records, reductions, and the

@@ -189,7 +189,7 @@ class _ArrayMethod:
 _UNBOUND = Unbound()
 
 
-_ARRAY_ATTRIBUTES = ("T", "real", "imag")  # value navigation, all-Known only; shape metadata folds structurally
+_ARRAY_ATTRIBUTES = ("real", "imag")  # value navigation, all-Known only; .T/shape metadata are structural
 
 
 def _residual_type(value: StaticValue) -> SemType | None:
@@ -382,6 +382,7 @@ class ResidualUnit:
     binding_facts: dict[BindingId, Fact] = field(default_factory=dict)
     call_plans: dict[BindingId, CallPlan] = field(default_factory=dict)
     subscript_plans: dict[BindingId, tuple[int, ...]] = field(default_factory=dict)
+    route_plans: dict[BindingId, tuple[int, ...]] = field(default_factory=dict)
     store_order: list[StateLeaf] = field(default_factory=list)
     runtime_state: set[StateLeaf] = field(default_factory=set)
     state_livein: dict[StateLeaf, Fact] = field(default_factory=dict)
@@ -405,6 +406,7 @@ class Analyzer:
         self._cast_calls: set[int] = set()  # runtime float()/int()/bool() casts (identity or conversion at emission)
         self._conversion_calls: set[int] = set()  # list()/tuple() layout conversions over aggregates
         self._subscript_selections: dict[int, tuple[int, ...]] = {}  # op id -> source leaf ordinals
+        self._conversion_routes: dict[int, tuple[int, ...]] = {}  # op id -> permuted source ordinals (transpose)
         self._construction_calls: dict[int, tuple[BindingId | None, ...]] = {}  # record builds: per-field sources
         # Schema and default snapshots, one per class per ANALYSIS (never per visit): a mutable field default
         # (an eq=False record holding a list, say) must not move a fact between fixpoint visits or into the
@@ -474,6 +476,7 @@ class Analyzer:
             self._cast_calls = set()
             self._conversion_calls = set()
             self._subscript_selections = {}
+            self._conversion_routes = {}
             self._construction_calls = {}
             self._unroll_cache = {}
             _logger.info("state round %d: %d runtime leaves, %d live-in facts", round_index + 1, len(new_w), len(new_d))
@@ -726,6 +729,8 @@ class Analyzer:
                 self._transfer(result.unit, block, index, op, env)
                 if isinstance(op, PySubscript) and id(op) in self._subscript_selections:
                     result.subscript_plans[op.dst] = self._subscript_selections[id(op)]
+                if isinstance(op, PyCall) and id(op) in self._conversion_routes:
+                    result.route_plans[op.dst] = self._conversion_routes[id(op)]
                 dst = op_dst(op)
                 if dst is not None:
                     result.binding_facts[dst] = env.get(Local(dst))
@@ -929,6 +934,23 @@ class Analyzer:
                         "in-place array mutation is not supported (aliases would observe it); rebind instead",
                         op.origin,
                     )
+                if bin_op is BinOp.MATMUL:  # both scalar was rejected above; any aggregate side lands here
+                    if not (_is_array_fact(lhs_fact) and _is_array_fact(rhs_fact)):
+                        raise AnalysisRejection(
+                            "the matrix product requires array operands on both sides; a scalar, list, or "
+                            "tuple does not acquire matrix semantics (wrap it in np.array(...))",
+                            op.origin,
+                        )
+                    # ``@`` IS the library function: rewrite onto the spelled np.matmul call so the operator
+                    # and the call cannot drift apart (they inline the same registry stub).
+                    import numpy as np
+
+                    matmul_callee = self._fresh_temp()
+                    block.ops[index : index + 1] = [
+                        LoadRef(matmul_callee, np.matmul, op.origin),
+                        PyCall(dst, matmul_callee, (lhs, rhs), (), op.origin),
+                    ]
+                    return True
                 concat = _concat_seqs(bin_op, lhs_fact, rhs_fact)
                 if concat is not None:
                     env.set(Local(dst), concat)
@@ -1067,6 +1089,21 @@ class Analyzer:
                         self._array_methods[method_key] = _ArrayMethod(obj, name)
                     env.set(Local(dst), Reference(self._array_methods[method_key]))
                     return False
+                if (
+                    isinstance(receiver_fact, AggregateFact)
+                    and isinstance(receiver_fact.layout, ArrayLayout)
+                    and name == "T"
+                ):
+                    # Transpose is a pure structural relayout (a permutation of the same leaves), so ``.T``
+                    # rewrites to the spelled np.transpose call and both spellings share one lowering.
+                    import numpy as np
+
+                    callee = self._fresh_temp()
+                    block.ops[index : index + 1] = [
+                        LoadRef(callee, np.transpose, op.origin),
+                        PyCall(dst, callee, (obj,), (), op.origin),
+                    ]
+                    return True
                 attr = self._attribute(env, receiver_fact, name, op.origin)
                 if isinstance(attr, _PropertyRead):
                     # Desugar the property read into a bound zero-argument call and re-run: the generic call-expansion
@@ -1984,6 +2021,8 @@ class Analyzer:
         return BindingId(f"%c{self._temp_serial}", self._temp_serial)
 
     def _expand_call(self, unit: FunctionUnit, block: Block, index: int, call: PyCall, env: _Env) -> bool:
+        import numpy as np
+
         from .._lib import IntrinsicResultRule, Library, resolve
         from .._lib import Intrinsic
 
@@ -2043,7 +2082,17 @@ class Analyzer:
         target = callee_fact.obj
         match = resolve(target)
         if isinstance(match, Library):
-            import numpy as np
+            if any(target is fn for fn in (np.matmul, np.dot, np.trace, np.outer)):
+                # The linalg stubs are defined over arrays only; a scalar/list/tuple operand must not acquire
+                # matrix semantics through the spelled call any more than through the operator.
+                for arg in call.args:
+                    operand_fact = env.get(Local(arg))
+                    if not (isinstance(operand_fact, AggregateFact) and isinstance(operand_fact.layout, ArrayLayout)):
+                        raise AnalysisRejection(
+                            "the matrix product requires array operands on both sides; a scalar, list, or "
+                            "tuple does not acquire matrix semantics (wrap it in np.array(...))",
+                            call.origin,
+                        )
 
             # np.sign is int-polymorphic like abs (np.sign of an integer is an integer); its float composite would
             # round subsequent integer arithmetic, and there is no integer sign yet, so an integer operand refuses.
@@ -2122,6 +2171,47 @@ class Analyzer:
                     block.ops[index] = PyAttr(call.dst, call.args[0], attr_fact.value.value, call.origin)
                     return True
                 raise AnalysisRejection("getattr requires a static attribute name and no default", call.origin)
+            if (
+                target is np.transpose
+                and not keyword_facts
+                and len(argument_facts) == 1
+                and isinstance(argument_facts[0], AggregateFact)
+                and isinstance(argument_facts[0].layout, ArrayLayout)
+            ):
+                # A pure structural relayout: the same leaves under the reversed shape, recorded as a route
+                # plan (source ordinal per result cell). Precedes admission: nothing crosses.
+                pivoted = argument_facts[0]
+                pivoted_layout = pivoted.layout
+                assert isinstance(pivoted_layout, ArrayLayout)
+                routes = _transpose_routes(pivoted_layout.shape)
+                env.set(
+                    Local(call.dst),
+                    AggregateFact(
+                        ArrayLayout(pivoted_layout.shape[::-1], pivoted_layout.dtype),
+                        tuple(pivoted.leaves[k] for k in routes),
+                    ),
+                )
+                self._conversion_calls.add(id(call))
+                self._conversion_routes[id(call)] = routes
+                return False
+            if target is np.ndim and not keyword_facts and len(argument_facts) == 1:
+                # Deliberately narrow (np.ndim of a LIST would observe structure the fact model erases at
+                # atomic leaves): a numeric scalar is rank 0, an array is its layout rank, everything else
+                # rejects. The linalg stubs probe ranks through this spelling.
+                probed = argument_facts[0]
+                if isinstance(probed, AggregateFact) and isinstance(probed.layout, ArrayLayout):
+                    rank = len(probed.layout.shape)
+                elif isinstance(probed, Residual) or (
+                    isinstance(probed, Known) and _residual_type(probed.value) is not None
+                ):
+                    rank = 0
+                else:
+                    raise AnalysisRejection("np.ndim of this value is not supported here", call.origin)
+                admitted_rank = admit(rank)
+                assert admitted_rank is not None
+                env.set(Local(call.dst), Known(admitted_rank))
+                self._concrete_calls.add(id(call))
+                return False
             if isinstance(target, type) and is_dataclass(target):
                 # Record construction is STRUCTURAL, never an evaluation: the layout is the class's validated
                 # field schema and the children are the argument facts THEMSELVES -- runtime leaves, enum
@@ -2203,8 +2293,6 @@ class Analyzer:
                 env.set(Local(call.dst), Known(length))
                 self._concrete_calls.add(id(call))
                 return False
-            import numpy as np
-
             if (
                 any(target is factory for factory in (np.array, np.asarray, np.asanyarray))
                 and not keyword_facts
@@ -2612,6 +2700,22 @@ def _is_list_fact(fact: Fact) -> bool:
 
 def _is_array_fact(fact: Fact) -> bool:
     return isinstance(fact, AggregateFact) and isinstance(fact.layout, ArrayLayout)
+
+
+def _transpose_routes(shape: tuple[int, ...]) -> tuple[int, ...]:
+    """Source leaf ordinal per result leaf of a full transpose: result (i_n..i_0) reads source (i_0..i_n)."""
+    import itertools
+
+    strides: list[int] = []
+    span = 1
+    for dimension in reversed(shape):
+        strides.append(span)
+        span *= dimension
+    strides.reverse()
+    routes: list[int] = []
+    for coordinates in itertools.product(*(range(dimension) for dimension in reversed(shape))):
+        routes.append(sum(c * strides[axis] for axis, c in enumerate(reversed(coordinates))))
+    return tuple(routes)
 
 
 def _fits_float64(value: int) -> bool:
