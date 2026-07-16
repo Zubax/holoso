@@ -4958,16 +4958,25 @@ def test_getattr_routes_through_the_attribute_guards() -> None:
     assert float(model.elaborate().run(3.0)[0]) == 4.0 == legitimate(3.0)
 
 
-def test_flatten_is_no_longer_navigable() -> None:
-    # Review round 9: flatten(order="K"/"A") observes the memory layout the C-contiguous snapshot discarded (a
-    # demonstrated wrong value on a Fortran-ordered original), so flatten leaves the whitelist entirely.
+def test_flatten_with_an_order_argument_keeps_rejecting() -> None:
+    # Review round 9 established that flatten(order="K"/"A") observes the memory layout the C-contiguous
+    # snapshot discarded (a demonstrated wrong value on a Fortran-ordered original). Flatten is back as a
+    # structural relayout, but ONLY in the default C order, which is layout-independent; any order argument
+    # keeps rejecting.
     fortran = np.asfortranarray([[1.0, 2.0], [3.0, 4.0]])
 
     def kernel(x: float) -> float:
         return x + float(fortran.flatten(order="K")[1])
 
-    with pytest.raises(UnsupportedConstruct, match="array attribute 'flatten'"):
+    with pytest.raises(UnsupportedConstruct, match="default C order"):
         lower(kernel)
+
+    def default_order(x: float) -> float:
+        # C-order flattening is memory-layout-independent, so it is faithful even on a Fortran-ordered original.
+        return x + float(fortran.flatten()[1])
+
+    model = holoso.synthesize(default_order, default_ops(FloatFormat(11, 52)), name="k").numerical_model
+    assert float(model.elaborate().run(1.0)[0]) == default_order(1.0)
 
 
 def test_exit_dedup_handles_deep_and_shared_exit_graphs() -> None:

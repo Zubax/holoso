@@ -1322,6 +1322,41 @@ def test_iteration_over_runtime_aggregates_matches_numpy() -> None:
     _assert_python_matches_holoso(over_tuple, 0.5, 3.0)
 
 
+# ---------------------------------------------------------------- flatten/ravel (stage 9a-2c)
+
+
+def test_flatten_and_ravel_relayout_runtime_arrays() -> None:
+    def flattened(a: float, b: float, c: float) -> tuple[float, float, float]:
+        m = np.asarray([[a], [b], [c]]).flatten()  # the ekf1 shape: (3, 1) -> (3,) in C order
+        return m[0], m[1], m[2]
+
+    def raveled(s: float) -> tuple[float, float, float, float]:
+        m = (GAIN * s).ravel()
+        return m[0], m[1], m[2], m[3]
+
+    def stored_method(s: float) -> float:
+        pick = (COEFFS * s).flatten  # a bound method is a value; calling it later is ordinary Python
+        v = pick()
+        return v[2]  # type: ignore[no-any-return]
+
+    def known_leaves(s: float) -> float:
+        return s + float(GAIN.flatten()[2])  # an all-Known flatten folds leafwise
+
+    _assert_python_matches_holoso(flattened, 1.5, -2.0, 0.25)
+    _assert_python_matches_holoso(raveled, 2.0)
+    _assert_python_matches_holoso(stored_method, -1.0)
+    _assert_python_matches_holoso(known_leaves, 3.0)
+
+
+def test_flatten_order_arguments_are_rejected() -> None:
+    def fortran(s: float) -> float:
+        v = (GAIN * s).flatten("F")  # a non-C order observes strides the layout deliberately discards
+        return v[0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="default C order"):
+        lower(fortran)
+
+
 # ---------------------------------------------------------------- numeric width collapse
 
 

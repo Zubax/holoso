@@ -172,6 +172,19 @@ class _PropertyRead:
     getter: object  # a ``MethodType(fget, component)`` bound to the exact receiver
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class _ArrayMethod:
+    """
+    A compiler-minted bound-method token for an ARRAY-valued receiver: the honest fact for ``v.flatten`` is a
+    bound method object, which the Reference sort carries by identity (never data, call-only -- returning or
+    merging it keeps the established reference rejections). Minted once per (receiver binding, name) so SCCP
+    fact equality is stable across rounds; the call site rewrites onto the canonical explicit-receiver form.
+    """
+
+    receiver: BindingId
+    name: str
+
+
 _UNBOUND = Unbound()
 
 
@@ -400,6 +413,7 @@ class Analyzer:
         self._default_snapshots: dict[tuple[int, str], BoundFact] = {}
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
+        self._array_methods: dict[tuple[BindingId, str], _ArrayMethod] = {}
         self._component_reads: dict[tuple[int, str], tuple[object, object, StaticValue | None]] = {}
         self._value_methods: dict[tuple[StaticValue, str], object] = {}
         self._roots: dict[int, tuple[str, ...]] = {}  # root component id -> the empty member path
@@ -861,7 +875,18 @@ class Analyzer:
                 result = self._subscript(op, env.get(Local(obj)), env.get(Local(idx)))
                 env.set(Local(dst), result)
             case PyAttr(dst=dst, obj=obj, name=name):
-                attr = self._attribute(env, env.get(Local(obj)), name, op.origin)
+                receiver_fact = env.get(Local(obj))
+                if (
+                    isinstance(receiver_fact, AggregateFact)
+                    and isinstance(receiver_fact.layout, ArrayLayout)
+                    and name in ("flatten", "ravel")
+                ):
+                    method_key = (obj, name)
+                    if method_key not in self._array_methods:
+                        self._array_methods[method_key] = _ArrayMethod(obj, name)
+                    env.set(Local(dst), Reference(self._array_methods[method_key]))
+                    return False
+                attr = self._attribute(env, receiver_fact, name, op.origin)
                 if isinstance(attr, _PropertyRead):
                     # Desugar the property read into a bound zero-argument call and re-run: the generic call-expansion
                     # machinery then inlines the getter, remaps its return, and threads state through unchanged.
@@ -1773,6 +1798,25 @@ class Analyzer:
                     flattened.append(arg)
             replacement.append(PyCall(call.dst, call.callee, tuple(flattened), call.kwargs, call.origin))
             block.ops[index : index + 1] = replacement
+            return True
+        if isinstance(callee_fact.obj, _ArrayMethod):
+            method = callee_fact.obj
+            if call.args == (method.receiver,) and not call.kwargs:
+                # The canonical explicit-receiver form (installed by the rewrite below): a flatten/ravel is a
+                # pure RELAYOUT of the same leaves onto the flat shape -- the source dtype survives structurally
+                # even with zero elements -- and emission is the ordinary conversion copy.
+                receiver_fact = env.get(Local(method.receiver))
+                assert isinstance(receiver_fact, AggregateFact) and isinstance(receiver_fact.layout, ArrayLayout)
+                flat_layout = ArrayLayout((leaf_count(receiver_fact.layout),), receiver_fact.layout.dtype)
+                env.set(Local(call.dst), AggregateFact(flat_layout, receiver_fact.leaves))
+                self._conversion_calls.add(id(call))
+                return False
+            if call.args or call.kwargs:
+                raise AnalysisRejection(
+                    f"{method.name}() accepts no arguments here (only the default C order is supported)",
+                    call.origin,
+                )
+            block.ops[index : index + 1] = [replace(call, args=(method.receiver,))]
             return True
         target = callee_fact.obj
         match = resolve(target)

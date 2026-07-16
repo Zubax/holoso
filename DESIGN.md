@@ -400,7 +400,12 @@ so emission never re-derives a selection. Advanced indexing refuses: a boolean a
 reinterpret the whole key), an array or nested sequence as a key element, and more indices than axes are located
 rejections. Starred call arguments unpack arrays exactly like tuples/lists (a 0-d array is not iterable), and a
 for loop over any runtime-element aggregate binds each trip through a synthesized projection prelude -- scalar
-leaves and whole rows alike.
+leaves and whole rows alike. ``v.flatten()``/``v.ravel()`` on an array is a pure RELAYOUT of the same leaves onto
+the flat shape (the source dtype survives structurally, empty arrays included): the attribute read mints a
+compiler-issued bound-method TOKEN carried by the Reference sort (call-only by construction -- storing it is a
+fact, returning or merging it keeps the reference rejections), and the call rewrites onto an explicit-receiver
+form emitted as the ordinary conversion copy. Any argument (a non-C order would observe strides the layout
+deliberately discards) is a located rejection.
 What remains deferred is the rest of the
 BOUNDARY surface -- aggregate parameter ports, aggregate persistent state, runtime-element iteration,
 and the record/reduction/gather semantics below -- and every disabled
