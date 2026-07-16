@@ -19,7 +19,7 @@ import logging
 import types
 from typing import TYPE_CHECKING
 from collections.abc import Callable
-from dataclasses import MISSING, Field, dataclass, field, is_dataclass, replace
+from dataclasses import MISSING, dataclass, field, is_dataclass, replace
 
 from ..._errors import UnsupportedConstruct, UnsupportedLibraryFunction
 from .._ast_support import UNROLL_THRESHOLD
@@ -89,6 +89,7 @@ from ._fact import (
 )
 from ._signature import ScalarParameter
 from ._fold import (
+    FieldSchema,
     FoldRefusal,
     admit_call,
     classinfo_types,
@@ -96,6 +97,7 @@ from ._fold import (
     contains_record,
     is_unimplemented_library,
     range_size,
+    validate_classinfo,
 )
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
@@ -381,10 +383,12 @@ class Analyzer:
         self._cast_calls: set[int] = set()  # runtime float()/int()/bool() casts (identity or conversion at emission)
         self._conversion_calls: set[int] = set()  # list()/tuple() layout conversions over aggregates
         self._construction_calls: dict[int, tuple[BindingId | None, ...]] = {}  # record builds: per-field sources
-        # Schema-and-defaults snapshots, one per class per ANALYSIS (never per visit): a mutable field default
+        # Schema and default snapshots, one per class per ANALYSIS (never per visit): a mutable field default
         # (an eq=False record holding a list, say) must not move a fact between fixpoint visits or into the
-        # emission replay. The pinned class reference keeps the id stable for the memo's lifetime.
-        self._construction_schemas: dict[int, tuple[type, tuple[Field[object], ...], dict[str, BoundFact]]] = {}
+        # emission replay. Defaults are admitted LAZILY at the first construction that actually omits the field
+        # (Python never observes an overridden default). The pinned class reference keeps ids stable.
+        self._construction_schemas: dict[int, tuple[type, tuple[FieldSchema, ...]]] = {}
+        self._default_snapshots: dict[tuple[int, str], BoundFact] = {}
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._component_reads: dict[tuple[int, str], tuple[object, object, StaticValue | None]] = {}
@@ -1347,23 +1351,27 @@ class Analyzer:
 
     # ------------------------------------ call expansion ------------------------------------
 
-    def _construction_schema(self, klass: type) -> tuple[tuple[Field[object], ...], dict[str, BoundFact]]:
+    def _construction_schema(self, klass: type) -> tuple[FieldSchema, ...]:
         key = id(klass)
         hit = self._construction_schemas.get(key)
         if hit is not None and hit[0] is klass:
-            return hit[1], hit[2]
+            return hit[1]
         declared = construction_schema(klass)
-        defaults: dict[str, BoundFact] = {}
-        for entry in declared:
-            if entry.default is not MISSING:
-                admitted = admit(entry.default)
-                defaults[entry.name] = normalize_static(admitted) if admitted is not None else Reference(entry.default)
-        self._construction_schemas[key] = (klass, declared, defaults)
-        return declared, defaults
+        self._construction_schemas[key] = (klass, declared)
+        return declared
+
+    def _default_snapshot(self, klass: type, entry: FieldSchema) -> BoundFact:
+        key = (id(klass), entry.name)
+        hit = self._default_snapshots.get(key)
+        if hit is None:
+            admitted = admit(entry.default)
+            hit = normalize_static(admitted) if admitted is not None else Reference(entry.default)
+            self._default_snapshots[key] = hit
+        return hit
 
     def _expand_construction(self, klass: type, call: PyCall, env: _Env) -> None:
         try:
-            declared, defaults = self._construction_schema(klass)
+            declared = self._construction_schema(klass)
         except FoldRefusal as refusal:
             raise AnalysisRejection(str(refusal), call.origin) from None
         name = klass.__name__
@@ -1392,8 +1400,8 @@ class Analyzer:
                 assert isinstance(fact, (Known, Residual, Reference, AggregateFact)), fact
                 children.append((entry.name, fact))
                 mapping.append(source)
-            elif entry.name in defaults:
-                children.append((entry.name, defaults[entry.name]))
+            elif entry.default is not MISSING:
+                children.append((entry.name, self._default_snapshot(klass, entry)))
                 mapping.append(None)
             else:
                 raise AnalysisRejection(
@@ -1499,6 +1507,34 @@ class Analyzer:
                 # the admission harness: there is nothing to admit because nothing crosses.
                 self._expand_construction(target, call, env)
                 return False
+            if (
+                target is isinstance
+                and not keyword_facts
+                and len(argument_facts) == 2
+                and isinstance(argument_facts[0], AggregateFact)
+                and isinstance(argument_facts[0].layout, RecordLayout)
+            ):
+                # A record subject answers from the layout's class identity alone -- runtime, reference, and
+                # oversized-range leaves included, because no field is consulted -- so like construction this
+                # precedes admission: nothing reconstructs and nothing crosses. Raw type metadata and identity
+                # scans run no user code (an instance-side __class__ override, a metaclass __mro__ hook, or a
+                # metaclass __eq__ under tuple membership could otherwise warp the verdict); a class overriding
+                # __class__ refuses outright, since CPython's check consults the observed __class__ where the
+                # real type misses.
+                klass = argument_facts[0].layout.klass
+                mro = type.__getattribute__(klass, "__mro__")
+                if any("__class__" in c.__dict__ for c in mro if c is not object):
+                    raise AnalysisRejection(
+                        "isinstance of a record whose class overrides __class__ is not supported", call.origin
+                    )
+                try:
+                    record_kinds = validate_classinfo(argument_facts[1])
+                except FoldRefusal as refusal:
+                    raise AnalysisRejection(str(refusal), call.origin) from None
+                verdict = any(entry is kind for kind in record_kinds for entry in mro)
+                env.set(Local(call.dst), Known(StaticBool(verdict)))
+                self._concrete_calls.add(id(call))
+                return False
             # Concrete evaluation is a CLOSED WHITELIST behind one door: the fold admission harness. The
             # analyzer contributes only what the harness cannot know -- per-Analyzer minted-method identity and
             # library-registry resolution -- and locates the refusal at the call origin.
@@ -1533,19 +1569,7 @@ class Analyzer:
                 # classinfo's sanctioned carriers (a referenced class, an inline tuple of references) are not
                 # data and cannot cross the evaluation boundary. Flattening is Python's own equivalence --
                 # isinstance over nested tuples and unions is the disjunction over their members.
-                subject = argument_facts[0]
-                if isinstance(subject, AggregateFact) and isinstance(subject.layout, RecordLayout):
-                    # A record subject answers from the layout's class identity alone -- runtime leaves and all;
-                    # no reconstruction is consulted. The identity scan over the mro is exactly the plain
-                    # type.__instancecheck__ the admitted classinfo was proven to carry, and it runs no user
-                    # code (a membership test could invoke a metaclass __eq__).
-                    kinds = classinfo_types(argument_facts[1])
-                    assert kinds is not None, "admission proved the classinfo resolves"
-                    verdict = any(entry is kind for kind in kinds for entry in subject.layout.klass.__mro__)
-                    env.set(Local(call.dst), Known(StaticBool(verdict)))
-                    self._concrete_calls.add(id(call))
-                    return False
-                subject_value = _concrete_fact(subject)
+                subject_value = _concrete_fact(argument_facts[0])
                 if subject_value is not None:
                     kinds = classinfo_types(argument_facts[1])
                     assert kinds is not None, "admission proved the classinfo resolves"

@@ -838,16 +838,22 @@ class _Emitter:
                     case CallLowering.CONSTRUCTION:
                         record_fact = self._fact(dst)
                         assert isinstance(record_fact, AggregateFact) and plan.construction is not None
-                        for index, source in enumerate(plan.construction):
-                            _, start, stop = child_slice(record_fact.layout, index)
-                            if source is not None:
-                                self._install(fir_id, Local(dst), start, source)
-                            else:  # a default-filled field: its leaves are the admitted schema constants
-                                for ordinal in range(start, stop):
-                                    filled = record_fact.leaves[ordinal]
-                                    assert isinstance(filled, (Known, Reference)), "a default grew runtime cells"
-                                    if isinstance(filled, Known) and self._datapath_known(filled):
-                                        self._write(fir_id, _LeafPlace(Local(dst), ordinal), self._atom_vid(filled))
+                        # A fully static construction emits nothing, exactly like the folded-call era: every use
+                        # folds from the facts, and eager constants would only shift HIR node ordering.
+                        if any(isinstance(leaf, Residual) for leaf in record_fact.leaves):
+                            for index, source in enumerate(plan.construction):
+                                _, start, stop = child_slice(record_fact.layout, index)
+                                if source is not None:
+                                    source_fact = self._fact(source)
+                                    width = len(source_fact.leaves) if isinstance(source_fact, AggregateFact) else 1
+                                    assert width == stop - start, "a construction source misaligns its field window"
+                                    self._install(fir_id, Local(dst), start, source)
+                                else:  # a default-filled field: its leaves are the admitted schema constants
+                                    for ordinal in range(start, stop):
+                                        filled = record_fact.leaves[ordinal]
+                                        assert isinstance(filled, (Known, Reference)), "a default grew runtime cells"
+                                        if isinstance(filled, Known) and self._datapath_known(filled):
+                                            self._write(fir_id, _LeafPlace(Local(dst), ordinal), self._atom_vid(filled))
             case _:
                 raise AssertionError(f"operation {type(op).__name__} survived analysis into emission")
 

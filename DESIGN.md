@@ -204,7 +204,9 @@ are admitted (the float/int/bool/len/range/slice/sum/divmod casts and constructo
 np.array/asarray/asanyarray constructors and numpy scalar types, isinstance -- folded through its
 completely-resolved enum-free plain-instance-check classinfo over a faithfully reconstructed subject (a retained
 member answers exactly as Python, mixin bases included; a record subject answers from its layout's class identity
-alone, runtime leaves and all, through an identity scan of the mro that runs no user code), refusing only a
+alone BEFORE admission -- runtime, reference, and oversized-range leaves included, since no field is consulted --
+through raw type metadata and identity scans that run no user code, refusing a class that overrides __class__
+because CPython's check consults the observed __class__ where the real type misses), refusing only a
 LOST-provenance int/str subject (the
 runtime value may be a member the joined fact no longer names) -- and value methods minted by the analyzer's own bind site
 off the domain's reconstruction -- immutable scalar/str/range receivers with non-dunder, non-format names, the
@@ -217,8 +219,7 @@ other callable -- functools.partial wrappers, vars, repr, type, unbound descript
 unregistered numpy functions -- is a located rejection by construction. Argument admission is equally closed: a
 record never crosses into a concrete call (nested inside a tuple/list included; the reconstruction is
 value-faithful but not type-faithful, which even the dataclass-generated __repr__ observes on an enum field;
-the two-argument isinstance subject is the one sanctioned record position, and it folds from the layout before
-anything could cross), an
+the two-argument isinstance record subject never reaches admission at all -- it folds from the layout first), an
 object reference never crosses at any nesting depth except as isinstance classinfo (inline tuples included) or
 one of the inert dtype-ish builtin types (a stateful component's dunder would read the live reset-time object
 while the kernel's writes exist only as state facts), and a static fold over an oversized range -- as an
@@ -234,13 +235,20 @@ concrete containers still fold through the vetted constructors. Record construct
 all-Known and runtime arguments alike: the layout is the class's validated field schema and the children are the
 argument facts THEMSELVES -- runtime leaves, enum provenance, LOST taint, and reference leaves ride through
 untouched -- so no class machinery ever executes, not even the generated __init__ (emission installs argument
-cells into per-field windows). Eligibility is schema purity: the generated __init__'s parameters must be exactly
-the declared fields, and a custom metaclass or __init__, a __post_init__/__new__/__getattr__/__getattribute__, a
-real-source __setattr__/__delattr__ (frozen/slots classes generate theirs), a default_factory, a
-descriptor-backed field, or an InitVar/init=False field refuses by name at the call site; argument-to-field
-mapping errors (missing, excess, unknown, duplicate) are located rejections. Field defaults are admitted once
-per analysis, like attribute snapshots, so a mutable default cannot move a fact between fixpoint visits or into
-the emission replay; a default outside the value domain rides as a fact-only reference leaf. Scalar numpy
+cells into per-field windows; a fully static construction emits nothing, exactly like the folded-call era).
+Eligibility is certified against the LIVE class, not just decoration-time shape: the generated __init__'s
+parameters must be exactly the declared fields with the matching positional/keyword-only boundary, its live
+defaults must be the field metadata objects themselves (a post-decoration __defaults__ mutation makes Python
+construct with values the schema never saw), and its bytecode must be free of a __post_init__ call (deleting the
+hook after decoration does not remove the call); a custom metaclass or __init__, a
+__post_init__/__new__/__del__/__getattr__/__getattribute__, ANY __setattr__/__delattr__ beyond the
+dataclass-generated ones (callable descriptors and None entries included), a default_factory, a
+descriptor-backed field (a slots field's own member descriptor is the field itself; an alien one is not), or an
+InitVar/init=False field refuses by name at the call site; argument-to-field mapping errors (missing, excess,
+unknown, duplicate) are located rejections. Field defaults are admitted lazily at the FIRST construction that
+actually omits the field (Python never observes an overridden default) and once per analysis, like attribute
+snapshots, so a mutable default cannot move a fact between fixpoint visits or into the emission replay; a
+default outside the value domain rides as a fact-only reference leaf. Scalar numpy
 provenance is preserved end to end -- np.bool_ is a distinct variant from bool, and
 boolean-producing folds keep it (a comparison or & | ^ with a numpy operand yields np.bool_, exactly as numpy
 does) -- so a STATIC np.bool_ subscript index or repeat count rejects exactly where numpy 2 raises TypeError
