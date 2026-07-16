@@ -1206,6 +1206,8 @@ class Analyzer:
         self, shape_args: tuple[BindingId, ...], env: _Env, origin: OriginStack
     ) -> tuple[int, ...]:
         """The reshape target as static dimensions: bare integers or one static tuple; -1 inference rejects."""
+        if not shape_args:
+            raise AnalysisRejection("reshape() requires a shape argument", origin)
         facts = [env.get(Local(arg)) for arg in shape_args]
         if len(facts) == 1 and isinstance(facts[0], AggregateFact):
             materialized = materialize_static(facts[0])
@@ -2341,11 +2343,18 @@ class Analyzer:
                     if target is float
                     else SemType.INT if target is int else SemType.BOOL if target is bool else None
                 )
+                cast_source = argument_facts[0] if argument_facts else None
+                if (
+                    isinstance(cast_source, AggregateFact)
+                    and isinstance(cast_source.layout, ArrayLayout)
+                    and cast_source.layout.shape == ()
+                ):
+                    cast_source = cast_source.leaves[0]  # numpy defines float()/int()/bool() of a 0-d array
                 if (
                     cast_target is not None
                     and not keyword_facts
                     and len(argument_facts) == 1
-                    and isinstance(argument_facts[0], Residual)
+                    and isinstance(cast_source, Residual)
                 ):
                     env.set(Local(call.dst), Residual(cast_target))
                     self._cast_calls.add(id(call))

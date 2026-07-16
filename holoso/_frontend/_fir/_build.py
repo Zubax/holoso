@@ -218,14 +218,14 @@ class _Builder:
         param_contracts: dict[str, ParameterContract] = {}
         port_claims: dict[str, str] = {}
         for arg in declared[1:] if self._bound_self is not None else declared:
+            if not self._root:
+                continue  # a callee's facts flow from its call sites; annotations are documentation, if present
             spelled = self._resolver.runtime_spelling(arg.arg)
             hint = self._hints.get(spelled) if spelled is not None else None
             if hint is None:
                 raise BuildRejection(
                     f"parameter {arg.arg!r} requires an explicit type annotation (float or bool)", self._origin(arg)
                 )
-            if not self._root:
-                continue  # a callee's parameter facts flow from its call sites; the annotation is documentation
             try:
                 contract = parameter_contract(hint)
             except ContractError as error:
@@ -235,19 +235,22 @@ class _Builder:
             assert spelled is not None
             param_contracts[spelled] = contract
             for cell in _contract_cells(spelled, contract):
-                owner = port_claims.setdefault(cell, spelled)
-                if owner != spelled:
+                if cell in port_claims:
+                    # Includes SELF-collisions: the underscore join is not injective (a field 'a_b' beside a
+                    # nested 'a.b' renders the same cell), so an ambiguous record refuses here instead of
+                    # emitting duplicate ports that fail deep in synthesis.
                     raise BuildRejection(
-                        f"parameter {spelled!r} decomposes onto input port '{cell}', which parameter "
-                        f"{owner!r} already claims (rename one of them)",
+                        f"parameter {spelled!r} decomposes onto input port '{cell}', which "
+                        f"{port_claims[cell]!r} already claims (rename one of them)",
                         self._origin(arg),
                     )
+                port_claims[cell] = spelled
         params = [self._bind(arg.arg) for arg in declared]
         self._params_bound = True  # any further store to the receiver name is now a rebinding, not the initial bind
-        if fndef.returns is None:
-            raise BuildRejection("the return type must be explicitly annotated (float or bool)", origin)
         declared_return: ReturnContract | None = None
         if self._root:  # the port boundary; a callee's return remaps to a caller local, its annotation untouched
+            if fndef.returns is None:
+                raise BuildRejection("the return type must be explicitly annotated (float or bool)", origin)
             try:
                 declared_return = return_contract(self._hints.get("return"))
             except ContractError as error:

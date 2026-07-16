@@ -1428,6 +1428,36 @@ def test_reshape_is_a_static_relayout() -> None:
         lower(inferred)
 
 
+def test_reshape_argument_arity_follows_python() -> None:
+    # reshape() with no arguments is a TypeError in Python even for a one-cell array (math.prod(()) == 1
+    # made the size check pass); reshape(()) on a one-cell array is VALID and yields the 0-d scalar sort
+    # on extraction.
+    def no_arguments(s: float) -> float:
+        v = np.array([s]).reshape()  # type: ignore[call-overload]
+        return v[0]  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="requires a shape"):
+        lower(no_arguments)
+
+    def empty_shape(s: float) -> float:
+        v = np.array([s]).reshape(())
+        return float(v)
+
+    _assert_python_matches_holoso(empty_shape, 2.5)
+
+
+def test_helper_annotations_are_documentation() -> None:
+    # Doctrine: a callee's annotations are documentation, never a lowering directive -- an UNANNOTATED
+    # helper must inline from its call-site facts (parameter and return validation is root-only).
+    def bare_helper(v, gain):  # type: ignore[no-untyped-def]
+        return v * gain + 1.0
+
+    def kernel(x: float) -> float:
+        return bare_helper(x, 2.0)  # type: ignore[no-any-return, no-untyped-call]
+
+    _assert_python_matches_holoso(kernel, 3.0)
+
+
 def test_dtype_float_casts_leaves_explicitly() -> None:
     def from_flags(a: float, b: float, c: float) -> tuple[float, float, float]:
         switches = (a > 0.0, b > 0.0, c > 0.0)
@@ -1502,6 +1532,14 @@ def test_record_contract_rejections_are_located() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="declared record 'Pair'"):
         lower(wrong_record)
+
+
+def test_ambiguous_record_port_paths_refuse_at_build() -> None:
+    # The underscore join is not injective: a field 'a_b' beside a nested record field 'a.b' renders the
+    # same cell name. Until the injective path codec lands, the ambiguity is a located refusal, never a
+    # pair of duplicate ports failing deep in synthesis.
+    with pytest.raises(UnsupportedConstruct, match="already claims"):
+        lower(_ambiguous_record_kernel)
 
 
 def test_parity_registry_is_empty() -> None:
@@ -1700,6 +1738,21 @@ def test_width_collapse_extends_to_type_identity() -> None:
 @dataclasses.dataclass(frozen=True)
 class _SelfLoop:
     inner: _SelfLoop  # noqa: F821  # legal under PEP 649: evaluated lazily, when the name exists
+
+
+@dataclasses.dataclass(frozen=True)
+class _AmbiguousInner:
+    b: float
+
+
+@dataclasses.dataclass(frozen=True)
+class _AmbiguousOuter:
+    a: _AmbiguousInner
+    a_b: float
+
+
+def _ambiguous_record_kernel(x: _AmbiguousOuter) -> float:
+    return x.a_b
 
 
 def _recursive_record_kernel(v: _SelfLoop) -> float:
