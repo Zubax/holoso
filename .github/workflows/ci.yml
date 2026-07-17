@@ -27,7 +27,7 @@ jobs:
 
   cosim_examples:
     name: cosim_examples
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-runner]
     container: *fpga_toolchain_container
     steps:
       - *checkout_step
