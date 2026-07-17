@@ -248,6 +248,19 @@ def test_unsupported_pow2_shift_is_rejected() -> None:
         assert False, "expected an unsupported power-of-two shift"
 
 
+def test_pow2_constant_fold_overflow_raises_rather_than_yielding_infinity() -> None:
+    # A constant fold that leaves finite range must fail the build, not quietly become an infinity: the folded value
+    # would then differ from what the datapath computes, and the fastmath licence to reassociate is what created the
+    # overflow here (``x/x`` folds to 1.0, then the power-of-two scale commutes onto 3.0). Plain float64 evaluation of
+    # ``3.0 * 2.0**1023`` yields inf silently; ``math.ldexp`` raises, and that is the behavior being pinned.
+    def f(x: float) -> float:
+        return (x / x) * (2.0**1023) * 3.0
+
+    assert 3.0 * (2.0**1023) == float("inf")  # what a silent degradation would produce
+    with pytest.raises(OverflowError):
+        optimize(lower(f))
+
+
 def test_true_division_stays_fdiv() -> None:
     def f(a: float, b: float) -> float:
         return a / b
