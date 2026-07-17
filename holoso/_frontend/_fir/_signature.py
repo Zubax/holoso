@@ -85,8 +85,16 @@ type ReturnContract = (
 
 
 def is_array_annotation(annotation: object) -> bool:
-    """A jaxtyping-style array annotation: a class carrying ``dims``, detected structurally."""
-    return isinstance(annotation, type) and hasattr(annotation, "dims")
+    """
+    A jaxtyping-style array annotation, detected structurally (jaxtyping stays the user's dependency): a class
+    carrying a ``dims`` tuple together with an ``array_type``. A bare ``dims`` attribute is not enough — a
+    dataclass whose ``dims`` field has a default plants exactly that class attribute.
+    """
+    return (
+        isinstance(annotation, type)
+        and isinstance(getattr(annotation, "dims", None), tuple)
+        and hasattr(annotation, "array_type")
+    )
 
 
 # A resource limit distinct from the loop-unrolling threshold: every array-annotation leaf becomes a physical
@@ -139,7 +147,12 @@ def _record_field_annotations(klass: type) -> list[tuple[str, object]]:
     import dataclasses
 
     try:
-        annotations = annotationlib.get_annotations(klass, format=annotationlib.Format.FORWARDREF)
+        annotations: dict[str, object] = {}
+        # dataclasses.fields includes inherited fields while get_annotations is own-class-only: merge down the
+        # MRO, base first, so a derived class sees every field's annotation and its own overrides win.
+        for base in reversed(klass.__mro__):
+            if base is not object:
+                annotations |= annotationlib.get_annotations(base, format=annotationlib.Format.FORWARDREF)
     except Exception as error:
         raise ContractError(f"the annotations of record class {klass.__name__!r} fail to evaluate ({error})") from None
     resolved: list[tuple[str, object]] = []
@@ -151,14 +164,10 @@ def _record_field_annotations(klass: type) -> list[tuple[str, object]]:
 
 
 def parameter_contract(annotation: object, active: tuple[type, ...] = ()) -> ParameterContract:
-    import dataclasses
-
     kind = _SCALAR_KINDS.get(annotation)
     if kind is not None:
         return ScalarParameter(kind)
-    if is_array_annotation(annotation):
-        return ArrayParameter(array_shape(annotation))
-    if isinstance(annotation, type) and dataclasses.is_dataclass(annotation):
+    if isinstance(annotation, type) and _is_record_annotation(annotation):
         if any(annotation is seen for seen in active):
             raise ContractError(f"record class {annotation.__name__!r} recursively contains itself")
         fields = tuple(
@@ -166,6 +175,8 @@ def parameter_contract(annotation: object, active: tuple[type, ...] = ()) -> Par
             for name, field_annotation in _record_field_annotations(annotation)
         )
         return RecordParameter(annotation, fields)
+    if is_array_annotation(annotation):
+        return ArrayParameter(array_shape(annotation))
     raise ContractError("expected float, bool, int, a fixed-shape jaxtyping array, or a dataclass of them")
 
 
@@ -178,24 +189,31 @@ def return_contract(hint: object) -> ReturnContract:
             hint = remainder[0]
     if hint is None or hint is type(None):
         return VoidReturn()
+    return _component_return(hint, ())
+
+
+def _component_return(hint: object, active: tuple[type, ...]) -> ReturnContract:
+    if hint is None or hint is type(None):
+        # A void contract cannot occupy a component position: there is no port a nested None could describe.
+        raise ContractError("None is only meaningful as the whole return annotation")
     kind = _SCALAR_KINDS.get(hint)
     if kind is not None:
         return ScalarReturn(kind)
     origin, args = typing.get_origin(hint), typing.get_args(hint)
     if origin is tuple:
         if len(args) == 2 and args[1] is Ellipsis:
-            return VariadicTupleReturn(return_contract(args[0]))
+            return VariadicTupleReturn(_component_return(args[0], active))
         if args in ((), ((),)):  # ``tuple[()]``: the canonical empty-tuple annotation (a zero-output bundle)
             return TupleReturn(())
-        return TupleReturn(tuple(return_contract(arg) for arg in args))
+        return TupleReturn(tuple(_component_return(arg, active) for arg in args))
     if origin is list:
         if len(args) == 1:
-            return ListReturn(return_contract(args[0]))
+            return ListReturn(_component_return(args[0], active))
         raise ContractError("a list return annotation must carry exactly one element type (e.g. list[float])")
+    if isinstance(hint, type) and _is_record_annotation(hint):
+        return _record_return(hint, active)
     if is_array_annotation(hint):
         return ArrayReturn(array_shape(hint))
-    if isinstance(hint, type) and _is_record_annotation(hint):
-        return _record_return(hint, ())
     raise ContractError(
         "expected float, bool, int, None, a tuple/list of them, a fixed-shape jaxtyping array, or a dataclass"
     )
@@ -210,11 +228,10 @@ def _is_record_annotation(hint: object) -> bool:
 def _record_return(klass: type, active: tuple[type, ...]) -> "RecordReturn":
     if any(klass is seen for seen in active):
         raise ContractError(f"record class {klass.__name__!r} recursively contains itself")
-    fields: list[tuple[str, "ReturnContract"]] = []
-    for name, field_annotation in _record_field_annotations(klass):
-        if _is_record_annotation(field_annotation):
-            assert isinstance(field_annotation, type)
-            fields.append((name, _record_return(field_annotation, (*active, klass))))
-        else:
-            fields.append((name, return_contract(field_annotation)))
-    return RecordReturn(klass, tuple(fields))
+    # Fields are component positions: the root-only doctrines (a bare None, the X|None early-return unwrap)
+    # must not re-enter through a field, and the active chain must survive container detours.
+    fields = tuple(
+        (name, _component_return(field_annotation, (*active, klass)))
+        for name, field_annotation in _record_field_annotations(klass)
+    )
+    return RecordReturn(klass, fields)

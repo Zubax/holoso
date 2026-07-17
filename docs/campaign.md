@@ -66,6 +66,10 @@ B1 ruling stands as written in HANDOFF.md (fixed storage schema; located rejecti
 ## Non-negotiables (every stage)
 
 - No cybersec framing; findings requiring hostile constructions are rejected at review consolidation.
+- Codex reviews run against a PINNED commit in a detached `git worktree`, never the live checkout: the user-level
+  Codex config forces a danger-full-access sandbox (`-s read-only` does not take), and a live-tree review once
+  reverted a legitimate concurrent amend it mistook for an intruder (recovered via reflog). Corollary: never
+  amend a branch a live-tree reviewer is reading.
 - Codex = co-designer: `codex exec -m gpt-5.6-sol` at ultra effort, stdin from /dev/null, session ids logged;
   a stuck/guardrailed session is RESUMED (`codex resume`), never restarted; transient errors retried.
 - `review-loop` skill after EVERY step (terse unbiased prompts; Claude ultrathink full-spectrum + Codex ultra

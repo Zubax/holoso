@@ -559,13 +559,13 @@ def test_shaped_parameter_annotation_rejections() -> None:
     with pytest.raises(UnsupportedConstruct, match="jaxtyping"):
         lower(shapeless)
 
-    class _FakeArray:  # structurally array-like (has ``dims``) but its dims is not a real jaxtyping tuple
+    class _FakeArray:  # carries a bare ``dims`` attribute: not a jaxtyping annotation, so not an array at all
         dims = None
 
     def fake(v: _FakeArray) -> float:
         return 1.0
 
-    with pytest.raises(UnsupportedConstruct, match="not a valid fixed-shape array annotation"):
+    with pytest.raises(UnsupportedConstruct, match="expected float, bool, int, a fixed-shape jaxtyping array"):
         lower(fake)
 
 

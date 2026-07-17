@@ -401,3 +401,103 @@ def test_receiver_annotation_is_never_evaluated() -> None:
     # whose self-annotation names a missing type must lower exactly as it runs.
     assert _AnnotatedReceiver().kernel(1.0) == 3.0
     assert [o.name for o in lower(_AnnotatedReceiver().kernel).outputs] == ["out_0"]
+
+
+@dataclasses.dataclass
+class _BaseParams:
+    gain: float
+
+
+@dataclasses.dataclass
+class _DerivedParams(_BaseParams):
+    offset: float
+
+
+def test_inherited_record_fields_form_ports() -> None:
+    # Regression (C3): annotation resolution was own-class-only while dataclasses.fields includes inherited
+    # fields, so a derived record parameter rejected at the boundary despite working inside the kernel.
+    def kernel(p: _DerivedParams) -> float:
+        return p.gain + p.offset
+
+    hir = lower(kernel)
+    assert hir.input_names() == ["p_gain", "p_offset"]
+
+
+@dataclasses.dataclass
+class _WithDimsField:
+    v: float
+    dims: float = 2.0
+
+
+def test_a_dataclass_with_a_dims_field_is_a_record_not_an_array() -> None:
+    # Regression (C4): array detection keyed on hasattr(annotation, "dims"), so a defaulted field named dims
+    # (which becomes a class attribute) flipped a working record parameter into a rejected array annotation.
+    def kernel(p: _WithDimsField) -> float:
+        return p.v + p.dims
+
+    assert lower(kernel).input_names() == ["p_v", "p_dims"]
+
+
+def test_nested_none_return_annotation_is_a_located_rejection() -> None:
+    # Regression (D1): a None nested inside a return annotation hit an internal assertion instead of a located
+    # rejection; None is only meaningful as the whole return annotation.
+    def kernel(a: float) -> tuple[float, None]:
+        return a, None
+
+    with pytest.raises(UnsupportedConstruct, match="None is only meaningful"):
+        lower(kernel)
+
+
+@dataclasses.dataclass
+class _RecordWithNoneField:
+    x: float
+    v: None
+
+
+@dataclasses.dataclass
+class _RecordWithOptionalField:
+    x: float
+    v: float | None
+
+
+@dataclasses.dataclass
+class _CycleThroughTuple:
+    t: "tuple[_CycleThroughTuple, float]"
+
+
+_CycleThroughTuple.__annotations__["t"] = tuple[_CycleThroughTuple, float]
+
+
+def test_record_fields_are_component_positions() -> None:
+    # Review round: record fields re-entered the top-level parser, so a None field crashed the internal
+    # assertion, an X|None field silently unwrapped where a tuple component rejects, and a cycle through a
+    # container detour escaped as a raw RecursionError.
+    def none_field(a: float) -> _RecordWithNoneField:
+        return _RecordWithNoneField(a, None)
+
+    with pytest.raises(UnsupportedConstruct, match="None is only meaningful"):
+        lower(none_field)
+
+    def optional_field(a: float) -> _RecordWithOptionalField:
+        return _RecordWithOptionalField(a, a)
+
+    with pytest.raises(UnsupportedConstruct, match="expected float, bool"):
+        lower(optional_field)
+
+    def cyclic(a: float) -> _CycleThroughTuple:
+        return _CycleThroughTuple((_CycleThroughTuple((None, 0.0)), a))  # type: ignore[arg-type]
+
+    with pytest.raises(UnsupportedConstruct, match="recursively contains itself"):
+        lower(cyclic)
+
+
+@dataclasses.dataclass
+class _DerivedReturn(_BaseParams):
+    offset: float
+
+
+def test_inherited_record_fields_flatten_on_return_ports() -> None:
+    def kernel(a: float) -> _DerivedReturn:
+        return _DerivedReturn(a, a + 1.0)
+
+    assert [o.name for o in lower(kernel).outputs] == ["out_gain", "out_offset"]
