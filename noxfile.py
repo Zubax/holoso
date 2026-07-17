@@ -13,6 +13,8 @@ import nox
 
 nox.options.reuse_existing_virtualenvs = True
 
+WORKERS = max(2, int((os.cpu_count() or 4) * 2 / 3))
+
 
 @nox.session(python=False, default=False)
 def clean(session):
@@ -28,6 +30,7 @@ def clean(session):
         "*.tmp",
         ".nox",
         "*.history",
+        "*.lock",
     ]
     for w in pats:
         for f in Path.cwd().glob(w):
@@ -45,7 +48,18 @@ def clean(session):
 def tests(session: nox.Session) -> None:
     """Fast unit tests; the slow cosimulation, fuzzer, and example synthesis matrix live in their own sessions."""
     session.install("-e", ".[test]")
-    session.run("python", "-m", "pytest", "-m", "not cosim and not fuzz and not synth", "tests")
+    session.run(
+        "python",
+        "-m",
+        "pytest",
+        "-p",
+        "no:enabler",
+        "-m",
+        "not cosim and not fuzz and not synth",
+        "-n",
+        str(WORKERS),
+        "tests",
+    )
 
 
 @nox.session
@@ -72,8 +86,7 @@ def synth_examples(session: nox.Session) -> None:
     peak P&R memory on the wide e8m36 rows. pytest-enabler is disabled so it cannot force ``-n auto`` (the full count).
     """
     session.install("-e", ".[test]")
-    workers = max(2, int((os.cpu_count() or 4) * 2 / 3))
-    session.run("python", "-m", "pytest", "-p", "no:enabler", "-s", "-m", "synth", "-n", str(workers), "tests")
+    session.run("python", "-m", "pytest", "-p", "no:enabler", "-s", "-m", "synth", "-n", str(WORKERS), "tests")
 
 
 @nox.session
@@ -88,8 +101,7 @@ def run_examples(session: nox.Session) -> None:
 def synth(session: nox.Session) -> None:
     """Run external FPGA synthesis/place-and-route checks."""
     session.install("-e", ".[test]")
-    workers = max(2, int((os.cpu_count() or 4) * 2 / 3))
-    session.run("python", "-m", "pytest", "-p", "no:enabler", "-s", "-n", str(workers), "synth")
+    session.run("python", "-m", "pytest", "-p", "no:enabler", "-s", "-n", str(WORKERS), "synth")
 
 
 @nox.session

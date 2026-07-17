@@ -10,9 +10,9 @@ env:
 jobs:
   core:
     name: core
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-runner]
     container: &fpga_toolchain_container
-      image: ghcr.io/zubax/zubax-fpga-toolchain:latest
+      image: ghcr.io/zubax/zubax-fpga-toolchain-oss:latest
       options: --user root
     steps:
       - &checkout_step
