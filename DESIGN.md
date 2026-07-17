@@ -303,7 +303,9 @@ float64 evaluation on quantized inputs.
 
 Rejecting from within the subset. Analysis descends only executable edges, so a `raise` it reaches sits on a path
 taken unconditionally (or under a residual guard, which the hardware cannot signal either way): it becomes a
-synthesis error carrying the exception's own message, located at the raising line. A rejection inside an inlined
+synthesis error carrying the exception's own message, located at the raising line. An f-string message renders its
+interpolations from the compile-time values at the raise site (a shape, a counter); an interpolation of a runtime
+value — or one carrying a conversion or format spec — degrades the whole message to a generic raise notice. A rejection inside an inlined
 library stub is re-attributed to the user's call site under the spelling they wrote.
 
 Persistent state. A synthesized method's `self` is not a port: each instance attribute the method writes on an

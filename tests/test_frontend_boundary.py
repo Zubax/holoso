@@ -336,3 +336,68 @@ def test_void_annotated_object_return_is_named() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="returns an object"):
         lower(kernel)
+
+
+class _Indented:
+    """The kernel is a METHOD so its source is indented, which is what the reparse path must survive."""
+
+    def multiline_literal(self, x: float) -> float:
+        table = """
+        123456"""
+        return x + float(len(table))
+
+    def zero_column_docstring(self, x: float) -> float:
+        """A docstring whose continuation sits at
+        column zero, defeating a textual dedent."""
+        return x + 1.0
+
+
+def test_indented_kernel_multiline_literal_survives_reparse() -> None:
+    # Regression (A1): the source was textually dedented before parsing, stripping the common indent from the
+    # INTERIOR of multiline string literals, so len(table) folded to a different constant than Python computes.
+    from holoso._hir import FloatConst
+
+    expected = float(len("\n        123456"))  # the kernel's literal: newline + its 8-space interior indent + digits
+    hir = lower(_Indented().multiline_literal)
+    assert expected in {node.value for node in hir.nodes.values() if isinstance(node, FloatConst)}
+
+
+def test_indented_kernel_with_zero_column_docstring_line_parses() -> None:
+    # Regression (A1): a column-zero line inside the docstring made the textual dedent a no-op, so the still-
+    # indented def reached ast.parse and escaped as a bare IndentationError.
+    assert [o.name for o in lower(_Indented().zero_column_docstring).outputs] == ["out_0"]
+
+
+def test_unresolvable_annotation_is_a_located_rejection() -> None:
+    # Regression (D2): under PEP 649 the fallback read of __annotations__ evaluated the deferred annotation and
+    # let the raw NameError escape as a traceback instead of a located rejection.
+    def typoed(x: flaot) -> float:  # type: ignore[name-defined]  # noqa: F821
+        return x  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="annotation"):
+        lower(typoed)
+
+
+def _helper_with_typoed_annotation(a: float, b: flaot) -> float:  # type: ignore[name-defined]  # noqa: F821
+    return a + b  # type: ignore[no-any-return]
+
+
+def test_callee_annotations_are_documentation_never_evaluated() -> None:
+    # A callee's annotations are documentation, never a lowering directive (and Python never evaluates them
+    # either): a typo'd annotation on an inlined helper must not reject the kernel.
+    def kernel(x: float) -> float:
+        return _helper_with_typoed_annotation(x, 2.0)
+
+    assert [o.name for o in lower(kernel).outputs] == ["out_0"]
+
+
+class _AnnotatedReceiver:
+    def kernel(self: MissingReceiverType, x: float) -> float:  # type: ignore[name-defined]  # noqa: F821
+        return x + 2.0
+
+
+def test_receiver_annotation_is_never_evaluated() -> None:
+    # The receiver is not a port, so its annotation is documentation Python itself never evaluates: a kernel
+    # whose self-annotation names a missing type must lower exactly as it runs.
+    assert _AnnotatedReceiver().kernel(1.0) == 3.0
+    assert [o.name for o in lower(_AnnotatedReceiver().kernel).outputs] == ["out_0"]

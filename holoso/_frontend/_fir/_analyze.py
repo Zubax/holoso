@@ -294,8 +294,6 @@ def _validate(result: ResidualUnit, concrete_calls: set[int]) -> None:
         for op in block.ops:
             assert not isinstance(op, PyCall) or id(op) in concrete_calls, f"{block_id}: unexpanded call survived"
         assert not isinstance(block.terminator, StaticFor), f"{block_id}: loop template survived analysis"
-        if isinstance(block.terminator, Fail):
-            raise AnalysisRejection(block.terminator.message, block.terminator.origin)
 
 
 class Analyzer:
@@ -372,6 +370,7 @@ class Analyzer:
                     header = result.unit.blocks[header_id]
                     assert isinstance(header.terminator, StaticFor)
                     header.terminator = Jump(chain_entry, header.terminator.origin)
+                self._reject_executable_fails(result)
                 _validate(
                     result,
                     self._concrete_calls
@@ -617,6 +616,53 @@ class Analyzer:
             )
             layout = ArrayLayout(reset.layout.shape, dtype)
         return AggregateFact(layout, tuple(cells))
+
+    def _reject_executable_fails(self, result: ResidualUnit) -> None:
+        """
+        An executable Fail terminator sits on a path taken unconditionally (or under a residual guard the
+        hardware cannot signal): a located rejection carrying the raise's own message, with any f-string
+        interpolations rendered from the compile-time facts at the raise site. The walk is a preorder over
+        executable edges (then-arm first), so the raise reported is the first one execution can reach —
+        unroll-clone block indices do not follow iteration order (a reversed range), so index order would
+        misreport which raise fires.
+        """
+        stack = [result.unit.entry]
+        seen: set[BlockId] = set()
+        while stack:
+            block_id = stack.pop()
+            if block_id in seen or block_id not in result.executable_blocks:
+                continue
+            seen.add(block_id)
+            block = result.unit.blocks[block_id]
+            terminator = block.terminator
+            if isinstance(terminator, Fail):
+                env = result.block_in[block_id].copy()
+                for index, op in enumerate(block.ops):
+                    self._transfer(result.unit, block, index, op, env)
+                raise AnalysisRejection(self._render_fail(terminator.parts, env), terminator.origin)
+            successors: list[BlockId] = []
+            match terminator:
+                case Jump(target=target):
+                    successors = [target]
+                case Branch(then_target=then_target, else_target=else_target):
+                    successors = [then_target, else_target]
+                case _:
+                    pass
+            for successor in reversed(successors):
+                if (block_id, successor) in result.executable_edges:
+                    stack.append(successor)
+
+    def _render_fail(self, parts: tuple[str | BindingId, ...], env: _Env) -> str:
+        rendered: list[str] = []
+        for part in parts:
+            if isinstance(part, str):
+                rendered.append(part)
+                continue
+            concrete = _concrete_fact(env.get(Local(part)))
+            if concrete is None:
+                return "raise with a runtime-interpolated message"
+            rendered.append(format(as_python(concrete)))
+        return "".join(rendered)
 
     def _finalize(self, result: ResidualUnit) -> None:
         """

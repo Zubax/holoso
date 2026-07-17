@@ -9,10 +9,10 @@ jump). Non-local name reads resolve at build time through the code object (the s
 becomes a Fail terminator so a dead branch can stay dead. Everything the subset excludes is a located rejection.
 """
 
+import annotationlib
 import ast
 import inspect
 import logging
-import textwrap
 import types
 import typing
 from dataclasses import dataclass
@@ -145,23 +145,41 @@ def build_unit(fn: object, root: bool = False) -> FunctionUnit:
         source_lines, first_line = inspect.getsourcelines(fn.__code__)
     except (OSError, TypeError) as error:
         raise SourceUnavailable(f"could not retrieve source for {fn.__code__.co_qualname}: {error}") from None
-    module = ast.parse(textwrap.dedent("".join(source_lines)))
-    fndef = module.body[0]
+    source = "".join(source_lines)
+    indent = len(source_lines[0]) - len(source_lines[0].lstrip())
+    # An indented kernel (a method) parses inside a synthetic block rather than being textually dedented: dedent
+    # would also strip the interior of multiline string literals, and a column-zero line inside a docstring makes
+    # it a no-op that leaves the def unparseable. The wrapper keeps every literal intact and yields true source
+    # columns, so diagnostics need no column compensation.
+    if indent:
+        module = ast.parse("if 1:\n" + source)
+        ast.increment_lineno(module, -1)
+        wrapper = module.body[0]
+        assert isinstance(wrapper, ast.If)
+        body = wrapper.body
+    else:
+        module = ast.parse(source)
+        body = list(module.body)
+    fndef = body[0]
     if not isinstance(fndef, ast.FunctionDef):
         raise BuildRejection("only plain functions can be kernels", (Origin(fn.__code__.co_qualname, first_line, 0),))
     assert fndef.name == fn.__code__.co_name, "source and code object must describe the same function"
     resolver = NameResolver(fn, comprehension_only=comprehension_only_targets(fndef))
-    indent = len(source_lines[0]) - len(source_lines[0].lstrip())
     # Parameter bool-ness comes from the RESOLVED annotation object (``fn.__annotations__``), not the AST spelling:
-    # ``x: builtins.bool`` and ``x: Alias`` are bool just as ``x: bool`` is. String annotations that fail to resolve
-    # simply fall back to float, which is the safe default.
-    try:
-        hints = typing.get_type_hints(fn)
-    except Exception:
-        hints = {
-            name: value for name, value in getattr(fn, "__annotations__", {}).items() if not isinstance(value, str)
-        }
-    builder = _Builder(fn.__code__.co_qualname, first_line, indent, resolver, bound_self, hints, root)
+    # ``x: builtins.bool`` and ``x: Alias`` are bool just as ``x: bool`` is. Unresolvable STRING annotations are
+    # dropped (the parameter then rejects as unannotated). Only the root kernel's annotations are contracts —
+    # a callee's are documentation (never evaluated by Python either), so hints are not even computed for one.
+    hints: dict[str, object] = {}
+    if root:
+        try:
+            hints = typing.get_type_hints(fn)
+        except Exception:
+            # PEP 649 evaluates annotations only when read, so a typo'd one raises here, not at definition time.
+            # FORWARDREF never raises: the failing names come back as ForwardRef proxies, and only the
+            # annotations the port boundary actually consumes reject — the receiver's stays documentation,
+            # exactly as Python (which never evaluates it either) behaves.
+            hints = dict(annotationlib.get_annotations(fn, format=annotationlib.Format.FORWARDREF))
+    builder = _Builder(fn.__code__.co_qualname, first_line, resolver, bound_self, hints, root)
     return builder.build(fndef)
 
 
@@ -176,7 +194,6 @@ class _Builder:
         self,
         qualname: str,
         first_line: int,
-        indent: int,
         resolver: NameResolver,
         bound_self: object | None,
         hints: dict[str, object],
@@ -184,7 +201,6 @@ class _Builder:
     ) -> None:
         self._qualname = qualname
         self._line_offset = first_line - 1
-        self._column_offset = indent  # ast columns are post-dedent; diagnostics report source-file columns
         self._resolver = resolver
         self._bound_self = bound_self
         self._hints = hints
@@ -226,6 +242,11 @@ class _Builder:
                 raise BuildRejection(
                     f"parameter {arg.arg!r} requires an explicit type annotation (float or bool)", self._origin(arg)
                 )
+            if isinstance(hint, (str, annotationlib.ForwardRef)):
+                unresolved = getattr(hint, "__forward_arg__", hint)
+                raise BuildRejection(
+                    f"the annotation of parameter {arg.arg!r} does not resolve ({unresolved})", self._origin(arg)
+                )
             try:
                 contract = parameter_contract(hint)
             except ContractError as error:
@@ -251,8 +272,12 @@ class _Builder:
         if self._root:  # the port boundary; a callee's return remaps to a caller local, its annotation untouched
             if fndef.returns is None:
                 raise BuildRejection("the return type must be explicitly annotated (float or bool)", origin)
+            return_hint = self._hints.get("return")
+            if isinstance(return_hint, (str, annotationlib.ForwardRef)):
+                unresolved = getattr(return_hint, "__forward_arg__", return_hint)
+                raise BuildRejection(f"the return annotation does not resolve ({unresolved})", origin)
             try:
-                declared_return = return_contract(self._hints.get("return"))
+                declared_return = return_contract(return_hint)
             except ContractError as error:
                 raise BuildRejection(f"unsupported return annotation: {error}", origin)
         entry = self._current.id
@@ -313,8 +338,7 @@ class _Builder:
 
     def _origin(self, node: ast.AST) -> OriginStack:
         line = getattr(node, "lineno", 1) + self._line_offset
-        column = getattr(node, "col_offset", 0) + self._column_offset
-        return (Origin(self._qualname, line, column),)
+        return (Origin(self._qualname, line, getattr(node, "col_offset", 0)),)
 
     def _reject_walrus(self, node: ast.expr, position: str) -> None:
         for sub in ast.walk(node):
@@ -447,7 +471,7 @@ class _Builder:
                         raise BuildRejection("only plain names can be deleted", origin)
                     self._emit(UnbindPlace(Local(self._bind(target.id)), True, origin))
             case ast.Raise(exc=exc):
-                self._current.terminator = Fail(self._raise_message(exc), origin)
+                self._current.terminator = Fail(self._raise_parts(exc), origin)
                 self._start_block(self._new_block())
             case ast.Assert():
                 # Accepted and ignored wholesale: the test is never lowered, mirroring Python under -O. Any effect the
@@ -491,7 +515,7 @@ class _Builder:
                 unpack_block, mismatch = self._new_block(), self._new_block()
                 self._current.terminator = Branch(arity_ok, unpack_block.id, mismatch.id, origin)
                 bound = f"at least {fixed}" if stars else f"{fixed}"
-                mismatch.terminator = Fail(f"cannot unpack: expected {bound} values", origin)
+                mismatch.terminator = Fail((f"cannot unpack: expected {bound} values",), origin)
                 self._start_block(unpack_block)
                 star = stars[0] if stars else len(elts)
                 suffix = len(elts) - star - 1 if stars else 0
@@ -532,12 +556,23 @@ class _Builder:
             case _:
                 raise BuildRejection(f"assignment target {type(target).__name__} is not supported", origin)
 
-    def _raise_message(self, exc: ast.expr | None) -> str:
+    def _raise_parts(self, exc: ast.expr | None) -> tuple[str | BindingId, ...]:
         match exc:
             case ast.Call(args=[ast.Constant(value=str(message)), *_]):
-                return message
+                return (message,)
+            case ast.Call(args=[ast.JoinedStr(values=pieces), *_]):
+                parts: list[str | BindingId] = []
+                for piece in pieces:
+                    match piece:
+                        case ast.Constant(value=str(text)):
+                            parts.append(text)
+                        case ast.FormattedValue(value=value, conversion=-1, format_spec=None):
+                            parts.append(self._expression(value))
+                        case _:
+                            return ("raise",)
+                return tuple(parts)
             case _:
-                return "raise"
+                return ("raise",)
 
     # ---------------------------------------- expressions ----------------------------------------
 
@@ -726,7 +761,7 @@ class _Builder:
         try:
             resolution = self._resolver.resolve(name)
         except UnboundCell:
-            self._current.terminator = Fail(f"cannot access free variable '{name}'", origin)
+            self._current.terminator = Fail((f"cannot access free variable '{name}'",), origin)
             self._start_block(self._new_block())
             return self._none(origin)
         match resolution:
@@ -744,7 +779,7 @@ class _Builder:
                 return temp
             case Missing(name=runtime_name):
                 # Not a build-time rejection: Python raises only if the read executes, so a dead branch stays dead.
-                self._current.terminator = Fail(f"name '{runtime_name}' is not defined", origin)
+                self._current.terminator = Fail((f"name '{runtime_name}' is not defined",), origin)
                 self._start_block(self._new_block())
                 return self._none(origin)
 

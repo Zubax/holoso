@@ -327,8 +327,9 @@ def _remap_terminator(
                 frozenset(remap_block(member) for member in body_blocks),
                 origin,
             )
-        case Fail(message=message, origin=origin):
-            return Fail(message, origin)  # a COPY: grafting re-attributes origins and must never touch templates
+        case Fail(parts=parts, origin=origin):
+            remapped = tuple(part if isinstance(part, str) else fresh(part) for part in parts)
+            return Fail(remapped, origin)  # a COPY: grafting re-attributes origins and must never touch templates
         case UnitExit(origin=origin):
             return UnitExit(origin)
     raise AssertionError(terminator)

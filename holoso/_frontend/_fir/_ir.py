@@ -325,9 +325,13 @@ class StaticFor:
 
 @dataclass(slots=True)
 class Fail:
-    """Control reaches a failure: a raise, or a read that Python would refuse. Never falls through."""
+    """
+    Control reaches a failure: a raise, or a read that Python would refuse. Never falls through. The message is
+    a sequence of parts: literal text plus bindings (an f-string raise's interpolations) whose Known values
+    render at analysis time; a part that never resolves to a Known degrades the whole message.
+    """
 
-    message: str
+    parts: tuple[str | BindingId, ...]
     origin: OriginStack
 
 
@@ -437,6 +441,10 @@ def verify(unit: FunctionUnit) -> None:
                 assert cond in temp_writers, f"{block.id}: branch on unwritten temp {cond}"
             case StaticFor(iterable=iterable) if iterable.is_temp:
                 assert iterable in temp_writers, f"{block.id}: loop over unwritten temp {iterable}"
+            case Fail(parts=parts):
+                for part in parts:
+                    if isinstance(part, BindingId) and part.is_temp:
+                        assert part in temp_writers, f"{block.id}: fail interpolates unwritten temp {part}"
             case _:
                 pass
 
@@ -491,8 +499,9 @@ def _format_terminator(terminator: Terminator) -> str:
             return f"branch {cond} ? {then_target} : {else_target}"
         case StaticFor(target=target, iterable=iterable, body_entry=body_entry, exit_target=exit_target):
             return f"static_for {target} in {iterable} body={body_entry} exit={exit_target}"
-        case Fail(message=message):
-            return f"fail {message!r}"
+        case Fail(parts=parts):
+            rendered = "".join(part if isinstance(part, str) else "{" + str(part) + "}" for part in parts)
+            return f"fail {rendered!r}"
         case UnitExit():
             return "unit_exit"
 

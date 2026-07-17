@@ -934,7 +934,6 @@ def test_branch_depth_restarts_per_inlined_function() -> None:
         lower(static_guard_in_stub)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: blocked by E2 f-string raise messages; enables at S2.3")
 def test_a_raise_message_may_interpolate_a_shape_and_a_counter() -> None:
     from jaxtyping import Float64
 
@@ -945,6 +944,15 @@ def test_a_raise_message_may_interpolate_a_shape_and_a_counter() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="width 3 of a 2-D value is not allowed"):
         lower(guard)
+
+    def whole_shape(m: Float64[np.ndarray, "2 3"]) -> float:
+        if m.ndim == 2:
+            raise ValueError(f"shape {m.shape} is not allowed")
+        return m[0][0]  # type: ignore[no-any-return]
+
+    # A compile-time AGGREGATE interpolates too: the shape tuple renders exactly as Python spells it.
+    with pytest.raises(UnsupportedConstruct, match=r"shape \(2, 3\) is not allowed"):
+        lower(whole_shape)
 
     def dead_elif_chain(v: Float64[np.ndarray, "3"]) -> float:
         if v.ndim == 3:
@@ -1014,3 +1022,16 @@ def test_conditional_none_names_itself_at_the_join() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="None merges with a value"):
         lower(kernel)
+
+
+def test_the_first_reachable_raise_reports_in_execution_order() -> None:
+    # A reversed range makes unroll-clone block indices disagree with iteration order: the reported raise must
+    # be the one execution hits first (trip 2), exactly as Python would.
+    def countdown(x: float) -> float:
+        for i in range(2, 0, -1):
+            if x > 0.0:
+                raise ValueError(f"trip={i}")
+        return x
+
+    with pytest.raises(UnsupportedConstruct, match="trip=2"):
+        lower(countdown)

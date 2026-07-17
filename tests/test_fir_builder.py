@@ -208,7 +208,7 @@ def test_missing_name_fails_lazily_not_at_build_time() -> None:
 
     unit = build_unit(fn)  # builds fine: the dead-branch doctrine
     fails = [t for t in _terminators(unit) if isinstance(t, Fail)]
-    assert len(fails) == 1 and "UNDEFINED_TUNING" in fails[0].message
+    assert len(fails) == 1 and any("UNDEFINED_TUNING" in part for part in fails[0].parts if isinstance(part, str))
 
 
 def test_break_and_continue_target_the_loop_blocks() -> None:
@@ -330,7 +330,9 @@ def test_unpack_arity_is_guarded() -> None:
 
     unit = build_unit(fn)
     fails = [t for t in _terminators(unit) if isinstance(t, Fail)]
-    assert fails and "unpack" in fails[0].message  # the guard folds at analysis and fires exactly when Python would
+    assert fails and any(
+        "unpack" in part for part in fails[0].parts if isinstance(part, str)
+    )  # the guard folds at analysis and fires exactly when Python would
 
 
 def test_later_comprehension_targets_scope_the_whole_comprehension() -> None:
@@ -398,7 +400,7 @@ def test_bare_annotation_evaluates_its_receiver() -> None:
 
     unit = build_unit(fn)
     fails = [t for t in _terminators(unit) if isinstance(t, Fail)]
-    assert fails and "UNBOUND" in fails[0].message
+    assert fails and any("UNBOUND" in part for part in fails[0].parts if isinstance(part, str))
 
 
 def test_unbound_closure_cells_fail_lazily() -> None:
@@ -415,7 +417,7 @@ def test_unbound_closure_cells_fail_lazily() -> None:
 
     unit = build_unit(outer())  # builds: Python only raises if the branch executes
     fails = [t for t in _terminators(unit) if isinstance(t, Fail)]
-    assert fails and "calibration" in fails[0].message
+    assert fails and any("calibration" in part for part in fails[0].parts if isinstance(part, str))
 
 
 def test_augmented_assignment_is_marked_in_place() -> None:
