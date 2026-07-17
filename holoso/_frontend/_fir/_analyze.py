@@ -116,6 +116,7 @@ from ._fold import (
 from ..._util import RelationalOp
 from ._analysis_support import (
     AnalysisRejection,
+    DeferredRejection,
     LibraryAnalysisRejection,
     _concat_seqs,
     _concrete_fact,
@@ -224,19 +225,26 @@ class _Env:
         self.facts[place] = fact
 
     def join_with(self, other: "_Env", origin: OriginStack, default: "Callable[[Place], Fact] | None" = None) -> bool:
+        # Per-place joins are independent, so a rejection defers until every place has joined.
         changed = False
+        deferred = DeferredRejection()
         for place in set(self.facts) | set(other.facts):
             mine, theirs = self.facts.get(place), other.facts.get(place)
             if default is not None and (mine is None or theirs is None):
                 fallback = default(place)
                 mine = fallback if mine is None else mine
                 theirs = fallback if theirs is None else theirs
-            joined = join_facts(
-                mine if mine is not None else _UNBOUND, theirs if theirs is not None else _UNBOUND, origin
-            )
+            try:
+                joined = join_facts(
+                    mine if mine is not None else _UNBOUND, theirs if theirs is not None else _UNBOUND, origin
+                )
+            except AnalysisRejection as error:
+                deferred.offer(error)
+                continue
             if joined != self.facts.get(place, _UNBOUND):
                 self.facts[place] = joined
                 changed = True
+        deferred.raise_if_deferred()
         return changed
 
 
@@ -281,7 +289,7 @@ class ResidualUnit:
 
 
 def _validate(result: ResidualUnit, concrete_calls: set[int]) -> None:
-    for block_id in result.executable_blocks:
+    for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
         block = result.unit.blocks[block_id]
         for op in block.ops:
             assert not isinstance(op, PyCall) or id(op) in concrete_calls, f"{block_id}: unexpanded call survived"
@@ -339,18 +347,25 @@ class Analyzer:
                 if block_id in result.executable_blocks and block_id in reachable:
                     new_w.add(leaf)
             new_d = dict(self._state_livein)
+            deferred = DeferredRejection()
             for leaf in new_w:
-                reset = self._state_reset_fact(leaf)
-                exit_fact = exit_env.get(leaf)
-                incoming = (
-                    reset
-                    if isinstance(exit_fact, Unbound)
-                    else join_facts(reset, exit_fact, (Origin(result.unit.name, 0, 0),))
-                )
-                previous = new_d.get(leaf)
-                new_d[leaf] = (
-                    incoming if previous is None else join_facts(previous, incoming, (Origin(result.unit.name, 0, 0),))
-                )
+                try:
+                    reset = self._state_reset_fact(leaf)
+                    exit_fact = exit_env.get(leaf)
+                    incoming = (
+                        reset
+                        if isinstance(exit_fact, Unbound)
+                        else join_facts(reset, exit_fact, (Origin(result.unit.name, 0, 0),))
+                    )
+                    previous = new_d.get(leaf)
+                    new_d[leaf] = (
+                        incoming
+                        if previous is None
+                        else join_facts(previous, incoming, (Origin(result.unit.name, 0, 0),))
+                    )
+                except AnalysisRejection as error:
+                    deferred.offer(error)
+            deferred.raise_if_deferred()
             if new_w == self._runtime_state and new_d == self._state_livein:
                 _logger.info("state fixpoint stable after %d round(s): %d runtime leaves", round_index + 1, len(new_w))
                 for header_id, (_, chain_entry) in self._unroll_cache.items():

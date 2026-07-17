@@ -25,8 +25,9 @@ paths. This is a compiler problem more than a circuit-design one.
 We encourage departure from IEEE 754 where it makes sense for numerical control/DSP (e.g., drop NaN/subnormals).
 
 Compilation is deterministic and reproducible for fixed inputs and dependency versions: identical input produces
-byte-identical output (except diagnostics and reports, which may carry timestamps and the like), achieved by sorted
-iteration over name-keyed merge points and a fixed seed for every stochastic optimization pass.
+byte-identical output, and identical invalid input produces the identical diagnostic (reports may carry timestamps
+and the like), achieved by sorted iteration over name-keyed merge points, order-independent selection among
+simultaneous rejections, and a fixed seed for every stochastic optimization pass.
 
 ## Pipeline
 

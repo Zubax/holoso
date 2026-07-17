@@ -243,6 +243,25 @@ def _join_atoms(a: AtomicFact, b: AtomicFact, origin: OriginStack) -> AtomicFact
     raise AssertionError((a, b))
 
 
+class DeferredRejection:
+    """
+    Collects rejections raised across an unordered iteration and re-raises the lexicographically least, so the
+    surfaced diagnostic does not depend on the iteration order (place and state-leaf hashes involve binding
+    names and object addresses, so that order is not reproducible across processes).
+    """
+
+    def __init__(self) -> None:
+        self._best: AnalysisRejection | None = None
+
+    def offer(self, error: AnalysisRejection) -> None:
+        if self._best is None or str(error) < str(self._best):
+            self._best = error
+
+    def raise_if_deferred(self) -> None:
+        if self._best is not None:
+            raise self._best
+
+
 def _identity_place(place: Place) -> Place:
     return place
 

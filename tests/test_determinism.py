@@ -16,6 +16,7 @@ and operator configs are ordinary, type-checked Python rather than templated sou
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 
@@ -74,6 +75,71 @@ def emit_coalesce_conflict() -> None:
     sys.stdout.write(result.verilog_output.verilog)
 
 
+def competing_rejections(c: bool, x: float) -> float:
+    """
+    Two places whose facts are BOTH inadmissible at the same branch merge, with DIFFERENT rejection messages:
+    ``a`` merges a float with a bool (irreconcilable kinds) while ``b`` merges a value with None. Which of the
+    two surfaces must not depend on the environment-join iteration order, i.e. on PYTHONHASHSEED.
+    """
+    if c:
+        a = 1.0
+        b = None
+    else:
+        a = True
+        b = 1.0
+    return x
+
+
+def competing_fails(c: bool, x: float) -> float:
+    """Two executable Fail terminators: which raise is reported must not depend on block-set iteration order."""
+    if c:
+        raise ValueError("left arm rejects")
+    else:
+        raise ValueError("right arm rejects")
+    return x
+
+
+def _emit_rejection(kernel: "Callable[..., float]") -> None:
+    from holoso import FloatFormat, SynthesisError, synthesize
+
+    from ._modelref import default_ops
+
+    try:
+        synthesize(kernel, default_ops(FloatFormat(6, 18)))
+    except SynthesisError as error:
+        sys.stdout.write(f"{type(error).__name__}: {error}")
+    else:
+        raise AssertionError("the kernel must reject")
+
+
+def emit_competing_rejection() -> None:
+    _emit_rejection(competing_rejections)
+
+
+def emit_competing_fail() -> None:
+    _emit_rejection(competing_fails)
+
+
+class BadResets:
+    """
+    Two state leaves whose reset joins are BOTH inadmissible, with different messages: the W/D loop iterates a
+    StateLeaf set (address-keyed hashes), so which leaf's rejection surfaces must be made order-independent.
+    """
+
+    def __init__(self) -> None:
+        self.a: object = None
+        self.b: object = object()
+
+    def step(self, x: float) -> float:
+        self.a = x
+        self.b = x
+        return x
+
+
+def emit_competing_reset_rejection() -> None:
+    _emit_rejection(BadResets().step)
+
+
 def emit_cordic() -> None:
     sys.path.insert(0, str(_REPO / "examples"))
     from cordic_sincos import CordicSinCos
@@ -108,7 +174,6 @@ def _entry_output_under_seed(entry: str, seed: str) -> str:
     return proc.stdout
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: emit_cordic synthesizes CordicSinCos, a tuple return — stage 9")
 @pytest.mark.parametrize("other_seed", ["3", "31337"])
 def test_verilog_is_byte_identical_across_hash_seeds(other_seed: str) -> None:
     assert _entry_output_under_seed("emit_cordic", "0") == _entry_output_under_seed("emit_cordic", other_seed)
@@ -120,6 +185,35 @@ def test_phi_coalescing_de_coalescing_is_byte_identical_across_hash_seeds(other_
     # seeds proves its de-coalescing decisions (and the register coloring that follows) are order-independent.
     assert _entry_output_under_seed("emit_coalesce_conflict", "0") == _entry_output_under_seed(
         "emit_coalesce_conflict", other_seed
+    )
+
+
+@pytest.mark.parametrize("other_seed", ["1", "3", "31337"])
+def test_competing_rejections_report_identically_across_hash_seeds(other_seed: str) -> None:
+    # Regression: _Env.join_with iterated an unordered place union (and _finalize iterated block/state-leaf
+    # sets), so which of two simultaneous rejections surfaced depended on PYTHONHASHSEED. Seed 1 is in the
+    # matrix because it was observed to flip the reported message against seed 0 before the fix.
+    assert _entry_output_under_seed("emit_competing_rejection", "0") == _entry_output_under_seed(
+        "emit_competing_rejection", other_seed
+    )
+
+
+@pytest.mark.parametrize("other_seed", ["1", "2", "3", "31337"])
+def test_competing_state_reset_rejections_report_identically_across_hash_seeds(other_seed: str) -> None:
+    # Regression (Codex review): the W/D fixpoint's state-join loop iterated the runtime-leaf set and raised at
+    # the first inadmissible reset, so the reported leaf depended on PYTHONHASHSEED.
+    assert _entry_output_under_seed("emit_competing_reset_rejection", "0") == _entry_output_under_seed(
+        "emit_competing_reset_rejection", other_seed
+    )
+
+
+@pytest.mark.parametrize("other_seed", ["1", "3", "31337"])
+def test_competing_fail_terminators_report_identically_across_hash_seeds(other_seed: str) -> None:
+    # Property lock, not a regression: BlockId hashes on an int (PYTHONHASHSEED-independent), so the pre-sort
+    # iteration happened to be stable. The _validate sort canonicalizes the choice to the lowest block index so
+    # it stays stable if block identity or hashing ever changes.
+    assert _entry_output_under_seed("emit_competing_fail", "0") == _entry_output_under_seed(
+        "emit_competing_fail", other_seed
     )
 
 
