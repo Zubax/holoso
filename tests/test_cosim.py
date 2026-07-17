@@ -62,7 +62,6 @@ def test_cosim_division(sim: str) -> None:
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: stage 9: aggregate/tuple returns")
 def test_cosim_ekf1_stateless(sim: str) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateless
@@ -71,7 +70,6 @@ def test_cosim_ekf1_stateless(sim: str) -> None:
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: builder: argument unpacking f(*args)")
 def test_cosim_ekf1_stateful(sim: str) -> None:
     # The stateful filter inlines the stateless kernel and threads its vector state (x, P_urt) across the random
     # transaction sequence, bit-for-bit against the model -- exercising the aggregates, inlining, and per-element slots.

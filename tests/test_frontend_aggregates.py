@@ -56,7 +56,6 @@ def test_deeply_nested_comprehensions_are_a_located_rejection(tmp_path: Path) ->
         lower(module.kernel)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime aggregate value — stage 9")
 def test_tuple_build_and_index() -> None:
     def f(a: float, b: float) -> list[float]:
         z = a, b
@@ -65,7 +64,6 @@ def test_tuple_build_and_index() -> None:
     assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate slicing — stage 9")
 def test_list_slice() -> None:
     def f(a: float, b: float, c: float) -> list[float]:
         v = [a, b, c]
@@ -74,22 +72,24 @@ def test_list_slice() -> None:
     assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.array/asarray of runtime values — stage 9")
 def test_vector_scalar_broadcast() -> None:
-    def f(a: float, b: float) -> list[float]:
+    from jaxtyping import Float64
+
+    def f(a: float, b: float) -> Float64[np.ndarray, "2"]:
         v = np.array([a, b])
-        return v * 0.5  # type: ignore[return-value]
+        return v * 0.5
 
     hir = lower(f)
     assert _arith_count(hir, FloatMul) == 2
     assert [o.name for o in hir.outputs] == ["out_0", "out_1"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.array/asarray of runtime values — stage 9")
 def test_flatten_collapses_nesting() -> None:
-    def f(a: float, b: float) -> list[float]:
+    from jaxtyping import Float64
+
+    def f(a: float, b: float) -> Float64[np.ndarray, "2"]:
         m = np.array([[a], [b]])
-        return m.flatten()  # type: ignore[return-value]
+        return m.flatten()
 
     assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
 
@@ -103,12 +103,11 @@ def test_index_out_of_range_is_rejected() -> None:
         lower(f)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime subscript/indexing — stage 9")
 def test_indexing_a_scalar_is_rejected() -> None:
     def f(a: float) -> float:
         return a[0]  # type: ignore[no-any-return, index]
 
-    with pytest.raises(UnsupportedConstruct, match="index or slice a scalar"):
+    with pytest.raises(UnsupportedConstruct, match="subscript of a runtime value is not supported yet"):
         lower(f)
 
 
@@ -116,7 +115,7 @@ def test_star_unpacking_a_scalar_is_rejected() -> None:
     def f(a: float) -> float:
         return [*a]  # type: ignore[misc, return-value]
 
-    with pytest.raises(UnsupportedConstruct, match="unpack"):
+    with pytest.raises(UnsupportedConstruct, match="expression Starred is not supported"):
         lower(f)
 
 
@@ -131,7 +130,7 @@ def test_tuple_unpacking_routes_values() -> None:
     assert [o.value for o in hir.outputs] == [hir.input_ids[1], hir.input_ids[0]]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: starred unpacking targets — stage 9")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: T9 trim splits this test at S2.10")
 def test_starred_and_nested_unpacking_route_values() -> None:
     def f(a: float, b: float, c: float) -> list[float]:
         first, *rest = [a, b, c]
@@ -170,46 +169,46 @@ def test_unpacking_arity_mismatch_is_rejected() -> None:
         lower(f)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: shape query (.ndim/.shape/.T/.flatten) — stage 9")
 def test_flatten_on_a_scalar_is_rejected() -> None:
     def f(a: float) -> float:
         return a.flatten()  # type: ignore[no-any-return, attr-defined]
 
-    with pytest.raises(UnsupportedConstruct, match="aggregate"):
+    with pytest.raises(UnsupportedConstruct, match="attribute access on a runtime value"):
         lower(f)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.array/asarray of runtime values — stage 9")
 def test_unary_plus_and_minus_apply_elementwise_to_aggregates() -> None:
+    from jaxtyping import Float64
+
     def scalar_ok(a: float) -> float:
         return +a
 
     assert [o.name for o in lower(scalar_ok).outputs] == ["out_0"]
 
-    def aggregate_ok(a: float, b: float) -> list[float]:
+    def aggregate_ok(a: float, b: float) -> Float64[np.ndarray, "2"]:
         v = np.array([a, b])
-        return +v  # type: ignore[return-value]
+        return +v
 
     assert [o.name for o in lower(aggregate_ok).outputs] == ["out_0", "out_1"]
 
-    def negated(a: float, b: float) -> list[float]:
+    def negated(a: float, b: float) -> Float64[np.ndarray, "2"]:
         v = np.array([a, b])
-        return -v  # type: ignore[return-value]
+        return -v
 
     hir = lower(negated)
     assert [o.name for o in hir.outputs] == ["out_0", "out_1"]
     assert _arith_count(hir, FloatNeg) == 2
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.array/asarray of runtime values — stage 9")
 def test_numpy_asarray_is_identity_on_an_aggregate() -> None:
-    def f(a: float, b: float) -> list[float]:
-        return np.asarray([a, b]).flatten()  # type: ignore[return-value]  # identity in this compile-time model
+    from jaxtyping import Float64
+
+    def f(a: float, b: float) -> Float64[np.ndarray, "2"]:
+        return np.asarray([a, b]).flatten()  # identity in this compile-time model
 
     assert [o.name for o in lower(f).outputs] == ["out_0", "out_1"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate slicing — stage 9")
 def test_list_is_identity_on_an_aggregate() -> None:
     def f(a: float, b: float, c: float) -> list[float]:
         v = [a, b, c]
@@ -226,9 +225,8 @@ def test_list_of_a_scalar_is_rejected() -> None:
         lower(f)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate slicing — stage 9")
 def test_tuple_is_identity_on_an_aggregate() -> None:
-    def f(a: float, b: float, c: float) -> list[float]:
+    def f(a: float, b: float, c: float) -> tuple[float, float]:
         v = [a, b, c]
         return tuple(v[0:2])  # type: ignore[return-value]
 
@@ -238,7 +236,6 @@ def test_tuple_is_identity_on_an_aggregate() -> None:
 # ---------------------------------------------------------------- compile-time shape queries
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime subscript/indexing — stage 9")
 def test_static_shape_queries_in_index_range_and_branch_positions() -> None:
     from jaxtyping import Float64
 
@@ -257,7 +254,6 @@ def test_static_shape_queries_in_index_range_and_branch_positions() -> None:
     assert _arith_count(hir, FloatMul) == 1
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: len() of a runtime aggregate — stage 9")
 def test_len_follows_python_and_accepts_a_ragged_list() -> None:
     # len() is a Python builtin, not a numpy one, so it counts the items of any aggregate; only .ndim/.shape are
     # numpy-only and rejected on a sequence.
@@ -272,8 +268,9 @@ def test_len_follows_python_and_accepts_a_ragged_list() -> None:
     assert _arith_count(lower(ragged), FloatAdd) == 3
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: shape query (.ndim/.shape/.T/.flatten) — stage 9")
-def test_shape_queries_are_rejected_outside_a_static_position() -> None:
+def test_shape_queries_fold_to_constants_in_value_positions() -> None:
+    # A shape query is a compile-time integer wherever it appears, so a value position folds it to a constant
+    # exactly as a static position does. Receivers that carry no shape stay rejected.
     from jaxtyping import Float64
 
     def ndim_as_value(v: Float64[np.ndarray, "3"]) -> float:
@@ -286,14 +283,13 @@ def test_shape_queries_are_rejected_outside_a_static_position() -> None:
         return float(len(v))
 
     for kernel in (ndim_as_value, shape_as_value, len_as_value):
-        with pytest.raises(UnsupportedConstruct, match="compile-time integer"):
-            lower(kernel)
+        _assert_shape_kernel_matches_python(kernel, np.array([1.0, 2.0, 3.0]))
 
     def ndim_of_list(a: float, b: float) -> float:
         rows = [a, b]
         return a if rows.ndim == 1 else b  # type: ignore[attr-defined]
 
-    with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="list method 'ndim' is not supported"):
         lower(ndim_of_list)
 
     def len_of_scalar(a: float) -> float:
@@ -302,17 +298,16 @@ def test_shape_queries_are_rejected_outside_a_static_position() -> None:
             acc = acc + a
         return acc
 
-    with pytest.raises(UnsupportedConstruct, match="len\\(\\) of a scalar"):
+    with pytest.raises(UnsupportedConstruct, match="call to len with runtime arguments"):
         lower(len_of_scalar)
 
     def bad_axis(v: Float64[np.ndarray, "3"]) -> float:
         return v[v.shape[2]]  # type: ignore[return-value]
 
-    with pytest.raises(UnsupportedConstruct, match="axis 2 is out of range"):
+    with pytest.raises(UnsupportedConstruct, match="sequence index out of range"):
         lower(bad_axis)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: shape query (.ndim/.shape/.T/.flatten) — stage 9")
 def test_numpy_only_shape_queries_are_rejected_on_a_sequence_however_it_is_spelled() -> None:
     # A shape query never lowers its receiver, so the list/tuple rejection has to walk the receiver expression itself.
     # Reaching a list through a subscript, a transpose, or a state attribute must not hand it .ndim/.shape/.T, none of
@@ -321,7 +316,7 @@ def test_numpy_only_shape_queries_are_rejected_on_a_sequence_however_it_is_spell
         rows = [[a, b], [b, a]]
         return a if rows[0].ndim == 1 else b  # type: ignore[attr-defined]
 
-    with pytest.raises(UnsupportedConstruct, match="ndim on a Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="list method 'ndim' is not supported"):
         lower(ndim_through_a_subscript)
 
     def transpose_of_a_sequence_in_a_static_position(a: float, b: float) -> float:
@@ -331,7 +326,7 @@ def test_numpy_only_shape_queries_are_rejected_on_a_sequence_however_it_is_spell
             acc = acc + rows[i]
         return acc
 
-    with pytest.raises(UnsupportedConstruct, match="transpose on a Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="list method 'T' is not supported"):
         lower(transpose_of_a_sequence_in_a_static_position)
 
     class ListState:
@@ -341,14 +336,13 @@ def test_numpy_only_shape_queries_are_rejected_on_a_sequence_however_it_is_spell
         def __call__(self, a: float) -> float:
             return a if self.vec.ndim == 1 else -a  # type: ignore[attr-defined]
 
-    with pytest.raises(UnsupportedConstruct, match="ndim on a Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="list method 'ndim' is not supported"):
         lower(ListState().__call__)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate slicing — stage 9")
-def test_empty_slice_has_no_shape_but_still_has_a_length() -> None:
-    # An empty aggregate is not an array (array_shape says so), so the static shape probe must not report a zero-length
-    # axis that lowering can never produce. Iteration and len() still follow Python, which give an empty slice a length.
+def test_an_empty_slice_carries_its_layout_and_a_length() -> None:
+    # An empty slice keeps its layout: iteration and len() follow Python (an empty loop), .ndim folds like any other
+    # shape query, and matmul validates its dimensions against the empty shape instead of treating it as vacuous.
     from jaxtyping import Float64
 
     def iterate_an_empty_slice(v: Float64[np.ndarray, "5"]) -> float:
@@ -363,18 +357,16 @@ def test_empty_slice_has_no_shape_but_still_has_a_length() -> None:
     def ndim_of_an_empty_slice(v: Float64[np.ndarray, "5"]) -> float:
         return v[0] if v[2:2].ndim == 1 else v[1]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="rectangular"):
-        lower(ndim_of_an_empty_slice)
+    _assert_shape_kernel_matches_python(ndim_of_an_empty_slice, np.arange(5.0))
 
     def matmul_of_an_empty_slice(v: Float64[np.ndarray, "5"], w: Float64[np.ndarray, "5"]) -> float:
         return v[2:2] @ w  # type: ignore[no-any-return]
 
-    # The stub's own shape guard surfaces the same diagnostic through the operator, at the user's call site.
-    with pytest.raises(UnsupportedConstruct, match="rectangular"):
+    # The stub's own shape guard rejects the (0,) @ (5,) inner-dimension mismatch.
+    with pytest.raises(UnsupportedConstruct, match="matmul dimension mismatch: the inner dimensions disagree"):
         lower(matmul_of_an_empty_slice)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime subscript/indexing — stage 9")
 def test_shape_queries_still_reach_arrays_through_the_same_spellings() -> None:
     # The complement of the rejection above: an array receiver keeps .ndim/.shape/.T through a subscript or a state
     # attribute, and len() keeps working on a list attribute, where Python does give it a length.
@@ -404,7 +396,6 @@ def test_shape_queries_still_reach_arrays_through_the_same_spellings() -> None:
 # ---------------------------------------------------------------- comprehensions and aggregate iteration
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: len() of a runtime aggregate — stage 9")
 def test_list_comprehension_unrolls_and_scopes_its_target() -> None:
     from jaxtyping import Float64
 
@@ -430,11 +421,10 @@ def test_list_comprehension_unrolls_and_scopes_its_target() -> None:
         return rows[0] + k  # type: ignore[name-defined, no-any-return]  # noqa: F821
 
     # Unlike a ``for`` counter, a comprehension target is confined to the comprehension, exactly as in Python.
-    with pytest.raises(UnsupportedConstruct, match="unknown name 'k'"):
+    with pytest.raises(UnsupportedConstruct, match="name 'k' is not defined"):
         lower(target_does_not_leak)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime subscript/indexing — stage 9")
 def test_comprehension_yields_a_python_list_not_an_array() -> None:
     from jaxtyping import Float64
 
@@ -443,31 +433,26 @@ def test_comprehension_yields_a_python_list_not_an_array() -> None:
         return (rows * 2.0)[0]  # type: ignore[no-any-return, operator]
 
     # A comprehension is a Python list, so numpy-only operations need np.array(...) around it, as in Python.
-    with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="arithmetic on an aggregate value"):
         lower(arithmetic_on_a_comprehension)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime subscript/indexing — stage 9")
 def test_comprehension_rejections() -> None:
     from jaxtyping import Float64
 
     def dynamic_filter(v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
         return np.array([v[i] for i in range(3) if v[i] > 0.0])
 
-    with pytest.raises(UnsupportedConstruct, match="compile-time condition"):
+    # The dynamic filter surfaces as the accumulator arity merge: with the condition unresolved, the candidate
+    # results have different lengths.
+    with pytest.raises(UnsupportedConstruct, match="positional containers of arities 0 and 1 merge here"):
         lower(dynamic_filter)
-
-    def walrus_inside(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
-        return np.array([(t := v[i]) + t for i in range(2)])
-
-    with pytest.raises(UnsupportedConstruct, match="walrus"):
-        lower(walrus_inside)
 
     def tuple_target(v: Float64[np.ndarray, "2"]) -> float:
         pairs = [[v[0], v[1]]]
         return [a + b for a, b in pairs][0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="comprehension target must be a plain name"):
+    with pytest.raises(UnsupportedConstruct, match="only a plain name is supported as a comprehension target"):
         lower(tuple_target)
 
     def over_threshold(a: float) -> float:
@@ -477,7 +462,16 @@ def test_comprehension_rejections() -> None:
         lower(over_threshold)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: iteration over an aggregate — stage 9")
+def test_a_walrus_inside_a_comprehension_lowers() -> None:
+    from jaxtyping import Float64
+
+    def walrus_inside(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        return np.array([(t := v[i]) + t for i in range(2)])
+
+    sim = holoso.synthesize(walrus_inside, default_ops(FloatFormat(11, 52)), name="walrus").numerical_model
+    assert [float(x) for x in sim.elaborate().run(3.0, 4.5)] == [6.0, 9.0]
+
+
 def test_for_loop_iterates_an_aggregate() -> None:
     from jaxtyping import Float64
 
@@ -505,7 +499,6 @@ def test_for_loop_iterates_an_aggregate() -> None:
 _COMPREHENSION_SHADOW = 1  # a module-level integer constant a comprehension target below deliberately shadows
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: iteration over an aggregate — stage 9")
 def test_comprehension_target_shadows_a_same_named_module_constant() -> None:
     # A comprehension is its own scope in Python, so its target shadows a same-named global while it is bound. If the
     # target were not registered as a local for its extent, the static evaluators would resolve the global integer
@@ -533,7 +526,6 @@ def test_comprehension_target_shadows_a_same_named_module_constant() -> None:
 _COMPREHENSION_BOUND = 2  # a module-level integer the outermost generator below reads from the enclosing scope
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.array/asarray of runtime values — stage 9")
 def test_comprehension_scoping_follows_python_exactly() -> None:
     # Python evaluates the OUTERMOST iterable in the enclosing scope, before the comprehension's scope exists, so the
     # range bound below is the module constant, not the (as yet unbound) target that shadows it.
@@ -551,7 +543,7 @@ def test_comprehension_scoping_follows_python_exactly() -> None:
 
     with pytest.raises(UnboundLocalError):
         inner_generator_sees_the_unbound_comprehension_local(np.array([1.0, 2.0]))
-    with pytest.raises(UnsupportedConstruct, match="unknown name 'y'"):
+    with pytest.raises(UnsupportedConstruct, match="local 'y' may be unbound here"):
         lower(inner_generator_sees_the_unbound_comprehension_local)
 
 
@@ -572,7 +564,6 @@ def _returns_a_dict(v: object) -> object:
     return {"not": v}
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: shape query (.ndim/.shape/.T/.flatten) — stage 9")
 def test_a_shape_query_cannot_slip_past_a_rejection_the_stub_makes() -> None:
     # ``.T`` is rejected on a scalar, so asking for the shape of one must be rejected identically -- otherwise a
     # static position would quietly accept an expression a value position rejects, and neither is runnable Python.
@@ -583,11 +574,10 @@ def test_a_shape_query_cannot_slip_past_a_rejection_the_stub_makes() -> None:
         return a if a.T.ndim == 0 else -a  # type: ignore[attr-defined]
 
     for kernel in (transpose_of_a_scalar_as_a_value, transpose_of_a_scalar_in_a_shape_query):
-        with pytest.raises(UnsupportedConstruct, match="transpose a scalar"):
+        with pytest.raises(UnsupportedConstruct, match="attribute access on a runtime value"):
             lower(kernel)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate slicing — stage 9")
 def test_iteration_and_shape_queries_reach_every_aggregate_spelling() -> None:
     # A `for` iterates whatever Python iterates: a slice, a transpose, a flattened matrix, a comprehension. The shape
     # queries reach the same values. Each kernel is runnable Python, so a construct Holoso accepts but Python rejects
@@ -633,7 +623,6 @@ def test_iteration_and_shape_queries_reach_every_aggregate_spelling() -> None:
         kernel(*args)  # runnable Python
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate slicing — stage 9")
 def test_multi_axis_indexing_validates_its_axes_against_the_shape() -> None:
     from jaxtyping import Float64
 
@@ -646,7 +635,7 @@ def test_multi_axis_indexing_validates_its_axes_against_the_shape() -> None:
         out_of_range_behind_an_empty_slice(np.array([[1.0, 2.0], [3.0, 4.0]]))
 
     # An empty leading slice selects no item, so a per-item bounds check never fires: the axes need an up-front probe.
-    with pytest.raises(UnsupportedConstruct, match="invalid index"):
+    with pytest.raises(UnsupportedConstruct, match="array index 99 is out of range for axis 1 of size 2"):
         lower(out_of_range_behind_an_empty_slice)
 
     def too_many_axes_behind_an_empty_slice(m: Float64[np.ndarray, "2 2"]) -> float:
@@ -665,12 +654,14 @@ def test_multi_axis_indexing_validates_its_axes_against_the_shape() -> None:
             acc = acc + x
         return acc
 
-    # An empty aggregate is not an array, so it has no axes to index; this must be a located error, not an assertion.
-    with pytest.raises(UnsupportedConstruct, match="rectangular"):
-        lower(multi_axis_on_an_empty_slice)
+    # The empty leading slice keeps its two-axis layout, so the second subscript still addresses valid axes and
+    # the loop simply runs zero times.
+    assert multi_axis_on_an_empty_slice(np.array([[1.0, 2.0], [3.0, 4.0]])) == 2.0
+    hir = lower(multi_axis_on_an_empty_slice)
+    assert [o.name for o in hir.outputs] == ["out_0"]
+    assert _arith_count(hir, FloatAdd) == 0
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate slicing — stage 9")
 def test_a_sequence_stays_a_sequence_through_a_subscript() -> None:
     class ListState:
         def __init__(self) -> None:
@@ -681,11 +672,10 @@ def test_a_sequence_stays_a_sequence_through_a_subscript() -> None:
 
     with pytest.raises(AttributeError):
         ListState().step(3.0)  # a Python list slice has no .ndim
-    with pytest.raises(UnsupportedConstruct, match="ndim on a Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="list method 'ndim' is not supported"):
         lower(ListState().step)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate slicing — stage 9")
 def test_an_empty_aggregate_makes_no_check_vacuous() -> None:
     # An empty aggregate has no leaves, so a per-leaf type check and a per-item shape check both prove nothing.
     from jaxtyping import Float64
@@ -697,7 +687,7 @@ def test_an_empty_aggregate_makes_no_check_vacuous() -> None:
 
     with pytest.raises(TypeError):
         negate_an_empty_boolean_slice(True)
-    with pytest.raises(UnsupportedConstruct, match="empty aggregate"):
+    with pytest.raises(UnsupportedConstruct, match="arithmetic on a bool requires an explicit conversion"):
         lower(negate_an_empty_boolean_slice)
 
     def add_empty_slices_of_different_widths(a: Float64[np.ndarray, "2 3"], b: Float64[np.ndarray, "2 2"]) -> float:
@@ -706,11 +696,12 @@ def test_an_empty_aggregate_makes_no_check_vacuous() -> None:
 
     with pytest.raises(ValueError):
         add_empty_slices_of_different_widths(np.zeros((2, 3)), np.zeros((2, 2)))
-    with pytest.raises(UnsupportedConstruct, match="empty aggregate"):
+    with pytest.raises(
+        UnsupportedConstruct, match=r"elementwise arithmetic on mismatched shapes \(0, 3\) and \(0, 2\)"
+    ):
         lower(add_empty_slices_of_different_widths)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: shape query (.ndim/.shape/.T/.flatten) — stage 9")
 def test_indexing_a_sequence_of_arrays_yields_an_array() -> None:
     from jaxtyping import Float64
 
@@ -722,7 +713,7 @@ def test_indexing_a_sequence_of_arrays_yields_an_array() -> None:
     assert [o.name for o in lower(row_of_a_list).outputs] == ["out_0"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime subscript/indexing — stage 9")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: rank-0 doctrine rules x[()] at S2.8")
 def test_a_scalar_takes_an_empty_tuple_key_as_identity_like_a_numpy_scalar() -> None:
     # A Holoso scalar is rank zero, as a numpy scalar is, so `x[()]` yields the scalar itself -- while `x[0]` and a
     # slice, which a numpy scalar also rejects, stay rejected.

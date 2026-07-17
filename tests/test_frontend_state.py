@@ -507,7 +507,6 @@ def test_stateful_tuple_assignment_to_attributes() -> None:
     assert "state_x" in {o.name for o in hir.outputs}
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.array-valued state — stage 9")
 def test_numpy_array_state_decomposes_like_a_list() -> None:
     import numpy.typing as npt
 
@@ -523,7 +522,6 @@ def test_numpy_array_state_decomposes_like_a_list() -> None:
     assert [o.name for o in hir.outputs] == ["state_v_0", "state_v_1", "state_v_2"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.array-valued state — stage 9")
 def test_jaxtyping_array_field_lowers_and_is_validated() -> None:
     from jaxtyping import Float64
 
@@ -539,7 +537,6 @@ def test_jaxtyping_array_field_lowers_and_is_validated() -> None:
         lower(Filt(np.array([1.0, 2.0, 3.0, 4.0])).step)  # value shape (4,) violates the declared "3"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.array-valued state — stage 9")
 def test_numpy_integer_array_values_coerce_to_real() -> None:
     @dataclasses.dataclass
     class Filt:
@@ -636,7 +633,6 @@ def test_vector_state_nested_shape_is_rejected() -> None:
         lower(Vec().update)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: vector/array-valued state — stage 9")
 def test_vector_state_slot_name_collision_is_rejected() -> None:
     # The vector ``v`` decomposes into slot ``v_0``, which would alias the distinct scalar attribute ``v_0``.
     class Vec:
@@ -648,7 +644,9 @@ def test_vector_state_slot_name_collision_is_rejected() -> None:
             self.v = [a]
             self.v_0 = a + 1.0
 
-    with pytest.raises(UnsupportedConstruct, match="aliasing collision"):
+    with pytest.raises(
+        UnsupportedConstruct, match="state slot name collision on 'v_0' between distinct component attributes"
+    ):
         lower(Vec().update)
 
 
@@ -852,7 +850,6 @@ def test_read_only_scan_does_not_misfold_a_reassigned_for_counter() -> None:
 # ---------------------------------------------------------------- reachability scan vs lowering
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: len() of a runtime aggregate — stage 9")
 def test_state_write_only_on_a_folded_away_shape_branch_is_not_state() -> None:
     # The scan runs before the body is lowered, so it cannot fold a shape query and descends both arms, registering the
     # write. Lowering folds the branch away and never touches the attribute, which therefore keeps its reset value for
@@ -884,9 +881,9 @@ def test_state_write_only_on_a_folded_away_shape_branch_is_not_state() -> None:
     assert [slot.name for slot in lower(DeadAggregateLoop().step).state_slots] == []
 
     class AlsoRead:
-        # When the attribute is also READ on a live path, lowering must emit the read before it can know the write is
-        # unreachable, so the conservative classification stands and the slot survives as a register that holds its
-        # reset value. Correct -- reads see the reset, as in Python -- at the cost of one register and one port.
+        # When the attribute is also READ on a live path, the read folds to the reset value: the only write sits on
+        # a folded-away branch, so the attribute is a frozen constant -- no slot, no port -- exactly as in Python,
+        # where the instance attribute never changes.
         def __init__(self) -> None:
             self.s = 0.25
 
@@ -896,18 +893,16 @@ def test_state_write_only_on_a_folded_away_shape_branch_is_not_state() -> None:
             return self.s + x[0]  # type: ignore[no-any-return]
 
     hir = lower(AlsoRead().step)
-    assert [slot.name for slot in hir.state_slots] == ["s"]
+    assert [slot.name for slot in hir.state_slots] == []
+    assert [o.name for o in hir.outputs] == ["out_0"]
     sim = holoso.synthesize(AlsoRead().step, default_ops(FloatFormat(11, 52)), name="alsoread").numerical_model
     simulator = sim.elaborate()
     reference = AlsoRead()
     inputs = np.array([1.5, 0.0, 0.0])
     for _ in range(3):
-        returned, state = simulator.run(*inputs.tolist())
-        assert float(returned) == pytest.approx(reference.step(inputs))
-        assert float(state) == pytest.approx(0.25)  # never written, so the register holds its reset forever
+        assert float(simulator.run(*inputs.tolist())[0]) == pytest.approx(reference.step(inputs))
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: iteration over an aggregate — stage 9")
 def test_state_write_under_an_aggregate_for_is_not_dropped_by_a_stale_counter() -> None:
     # ``for i in <aggregate>`` binds a runtime value, so the target's compile-time binding must be demoted in the
     # reachability scan exactly as lowering demotes it. Otherwise the scan folds ``i == 2.0`` on the leaked counter of
@@ -960,7 +955,6 @@ def test_state_write_after_a_raise_does_not_poison_the_read_only_scan() -> None:
     assert [slot.name for slot in hir.state_slots] == ["y"]  # flag stays a read-only constant
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: len() of a runtime aggregate — stage 9")
 def test_an_untouched_state_attribute_is_not_resurrected_by_an_unrelated_branch() -> None:
     # _merge_state must not load the live-in of an attribute NEITHER arm touched: both arms start from the same
     # pre-branch state, so doing so would conjure a register (and a public port) out of a branch that never
@@ -984,7 +978,6 @@ def test_an_untouched_state_attribute_is_not_resurrected_by_an_unrelated_branch(
     assert [o.name for o in hir.outputs] == ["out_0"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: iteration over an aggregate — stage 9")
 def test_a_scan_never_folds_a_shape_query_against_an_environment_lowering_will_not_have() -> None:
     # The loop-carried scan walks a while body BEFORE its phis exist, so the environment it sees is the preheader's.
     # Were it allowed to resolve a name there, it would fold ``i.ndim == 1`` against the scalar ``i`` bound before the
@@ -1045,7 +1038,6 @@ def test_a_state_attribute_read_only_inside_a_while_loop_keeps_its_slot() -> Non
     assert float(sim.elaborate().run(5.0)[0]) == pytest.approx(6.0)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: shape query (.ndim/.shape/.T/.flatten) — stage 9")
 def test_only_a_write_lowering_reaches_is_validated() -> None:
     # The scan walks paths lowering folds away, so it validates nothing: a write it cannot turn into state is passed
     # over, and the rejection happens at the write itself, if and when lowering gets there. A dead branch assigning an
@@ -1073,7 +1065,10 @@ def test_only_a_write_lowering_reaches_is_validated() -> None:
                 self.never_initialized = x
             return x
 
-    with pytest.raises(UnsupportedConstruct, match="assigned but not initialized"):
+    with pytest.raises(
+        UnsupportedConstruct,
+        match="state attribute 'never_initialized' does not exist on the component at compile time",
+    ):
         lower(ReachableWriteToAnUninitializedAttribute().step)
 
 
@@ -1102,7 +1097,6 @@ def test_an_all_integer_state_selector_stays_a_typed_integer_slot() -> None:
     assert isinstance(hir.nodes[slot.live_out].type, IntType)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: vector/array-valued state — stage 9")
 def test_an_integer_vector_state_reset_keeps_exact_per_element_slots() -> None:
     class ExactVector:
         # 2**53 itself round-trips into the float bank exactly, and so does any small integer.
@@ -1118,7 +1112,6 @@ def test_an_integer_vector_state_reset_keeps_exact_per_element_slots() -> None:
     assert [slot.name for slot in lower(ExactVector().step).state_slots] == ["taps_0", "taps_1", "taps_2", "y"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: shape query (.ndim/.shape/.T/.flatten) — stage 9")
 def test_state_slot_names_only_collide_among_the_attributes_lowering_keeps() -> None:
     # The scan over-registers `v_0` from a write lowering folds away, and `v_0` is also the first slot of the vector
     # `v`. Checking for the collision before the prune would reject a kernel whose colliding attribute is dead code.
@@ -1147,11 +1140,12 @@ def test_state_slot_names_only_collide_among_the_attributes_lowering_keeps() -> 
             self.v = self.v + x
             return self.v[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="aliasing collision"):
+    with pytest.raises(
+        UnsupportedConstruct, match="state slot name collision on 'v_0' between distinct component attributes"
+    ):
         lower(LiveCollider().step)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime subscript/indexing — stage 9")
 def test_a_loop_carries_only_attributes_that_are_really_state() -> None:
     # The scan collects self-attribute writes syntactically, so a write it cannot turn into state must not open a
     # loop-header phi for it; otherwise the phi's live-in lookup fails with a bare KeyError.
@@ -1172,7 +1166,6 @@ def test_a_loop_carries_only_attributes_that_are_really_state() -> None:
     assert [slot.name for slot in lower(DeadWriteInLoop().step).state_slots] == []
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: shape query (.ndim/.shape/.T/.flatten) — stage 9")
 def test_a_shape_query_reads_the_reset_value_not_the_state_decomposition() -> None:
     # `.ndim` of a read-only 3-D array attribute is a compile-time integer; only STATE is restricted to 1-D and 2-D.
     from jaxtyping import Float64
@@ -1191,7 +1184,6 @@ def test_a_shape_query_reads_the_reset_value_not_the_state_decomposition() -> No
     assert [o.name for o in lower(Cube().step).outputs] == ["out_0"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime subscript/indexing — stage 9")
 def test_a_write_is_validated_only_where_lowering_reaches_it() -> None:
     # The scan walks paths lowering folds away, so it cannot validate. Each attribute below is unrepresentable as
     # state; a dead write to it is dead code, a reachable one is an error. Both halves must hold, in a loop body too.
@@ -1381,7 +1373,6 @@ def test_read_only_object_attribute_ndim_folds_as_a_constant() -> None:
         assert float(model.run(x)[0]) == -x
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: shape query (.ndim/.shape/.T/.flatten) — stage 9")
 def test_a_scan_never_rejects_an_arm_lowering_folds_away() -> None:
     # The scan descends both arms of a shape-dependent branch, so it must not validate what it finds there.
     from jaxtyping import Float64
@@ -1398,11 +1389,17 @@ def test_a_scan_never_rejects_an_arm_lowering_folds_away() -> None:
             return self.total
 
     assert DeadInvalidShapeQuery().step(np.zeros(2), 1.0) == 0.0
-    # `total` is read on a live path, so it keeps a register holding its reset; the point is that it LOWERS at all.
-    assert [slot.name for slot in lower(DeadInvalidShapeQuery().step).state_slots] == ["total"]
+    # `total` is written only under the folded-away arm, so it is a frozen constant -- no slot, no port -- and the
+    # live read folds to the reset value; the point is that the kernel LOWERS at all.
+    hir = lower(DeadInvalidShapeQuery().step)
+    assert [slot.name for slot in hir.state_slots] == []
+    assert [o.name for o in hir.outputs] == ["out_0"]
+    model = holoso.synthesize(
+        DeadInvalidShapeQuery().step, default_ops(FloatFormat(11, 52)), name="deadq"
+    ).numerical_model
+    assert float(model.elaborate().run(0.0, 0.0, 1.0)[0]) == DeadInvalidShapeQuery().step(np.zeros(2), 1.0) == 0.0
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime subscript/indexing — stage 9")
 def test_a_nested_reset_sequence_is_shaped_like_the_aggregate_it_denotes() -> None:
     # `len(self.nested[0])` is 3 in Python, so the snapshot's shape must describe every axis, not just the outermost.
     from jaxtyping import Float64
@@ -1422,7 +1419,6 @@ def test_a_nested_reset_sequence_is_shaped_like_the_aggregate_it_denotes() -> No
     _assert_shape_kernel_matches_python(NestedRows().step, v)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime subscript/indexing — stage 9")
 def test_a_ragged_or_empty_reset_sequence_still_has_a_length() -> None:
     from jaxtyping import Float64
 
@@ -1439,7 +1435,6 @@ def test_a_ragged_or_empty_reset_sequence_still_has_a_length() -> None:
     _assert_shape_kernel_matches_python(RaggedRows().step, v)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime subscript/indexing — stage 9")
 def test_indexing_a_reset_sequence_of_arrays_yields_an_array() -> None:
     from jaxtyping import Float64
 
@@ -1455,7 +1450,6 @@ def test_indexing_a_reset_sequence_of_arrays_yields_an_array() -> None:
     _assert_shape_kernel_matches_python(ArrayRows().step, v)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: shape query on a list — stage 9")
 def test_a_shape_query_on_a_nested_reset_sequence_element_is_rejected() -> None:
     from jaxtyping import Float64
 
@@ -1466,7 +1460,7 @@ def test_a_shape_query_on_a_nested_reset_sequence_element_is_rejected() -> None:
         def step(self, v: Float64[np.ndarray, "3"]) -> float:
             return v[self.nested[0].ndim]  # type: ignore[attr-defined, return-value]  # a list has no .ndim
 
-    with pytest.raises(UnsupportedConstruct, match="ndim on a Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="list method 'ndim' is not supported"):
         lower(NestedNdim().step)
 
 
@@ -1511,7 +1505,6 @@ def test_a_scan_must_not_fold_a_counter_an_empty_aggregate_never_rebinds() -> No
     assert dict(zip([p.name for p in sim.outputs], [float(x) for x in sim.run(7.0)], strict=True))["state_s"] == 7.0
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: iteration over an aggregate — stage 9")
 def test_a_scan_must_not_fold_a_branch_on_a_counter_the_loop_body_rebinds() -> None:
     # The aggregate loop's first trip rebinds `i` to a runtime value, so lowering takes the else arm on the second
     # trip. A scan that keeps `i == 0` static walks only the then arm and misses `self.s`, whose write then has
@@ -1542,7 +1535,6 @@ def test_a_scan_must_not_fold_a_branch_on_a_counter_the_loop_body_rebinds() -> N
     )
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: iteration over an aggregate — stage 9")
 def test_a_scan_demotes_the_aggregate_target_before_discovering_body_rebinds() -> None:
     # The aggregate loop's target `x` leaks a stale value from an earlier same-named range loop. Discovering what the
     # body rebinds must happen with `x` already demoted, or the fold of `if x != 0` hides the `j = x` rebind, `j` is

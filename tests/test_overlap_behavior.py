@@ -338,7 +338,6 @@ def test_diamond_inside_loop_output_matches_reference() -> None:
 # Unlike the existing typed-port test (which reads metadata from the handle), this reads it from the simulator's view.
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: multi-output tuple return — stage 9 aggregate returns")
 def test_multi_output_mixed_io_metadata_and_values() -> None:
     def multi_io(flag: bool, x: float, y: float) -> tuple[bool, float, float]:
         # A boolean input gating a division branch, a tuple return mixing a bool and two floats: the divisor y*y + 1 is

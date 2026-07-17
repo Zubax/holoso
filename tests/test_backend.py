@@ -276,7 +276,6 @@ def test_ekf1_stateless_elaborates(tmp_path: Path) -> None:
     _elaborate("update_x_P", generate(lir).verilog, tmp_path)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: Ekf1.update uses f(*args) argument unpacking — builder stage")
 @requires_iverilog
 def test_ekf1_stateful_elaborates(tmp_path: Path) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))

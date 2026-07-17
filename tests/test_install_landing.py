@@ -67,7 +67,6 @@ def test_targets_still_exercise_constant_installs(name: str) -> None:
     assert const_installs, f"{name} no longer emits constant phi-arm installs; the kernel shape changed"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: uart_rx returns a tuple — stage 9 aggregate returns")
 def test_resident_register_source_install_is_inline_class() -> None:
     """
     The generalization beyond literal constants: uart_rx installs the rx INPUT directly (b2 <- rx, b4 <- ~rx). A
@@ -126,7 +125,6 @@ class _HoldOrUpdateBool:
         return out, self.s
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: _HoldOrUpdateBool returns a tuple — stage 9 aggregate returns")
 def test_state_read_sourced_install_is_inline_class(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     A phi arm that is a STATE READ is resident at block entry (the slot register holds it from the start), so its tail

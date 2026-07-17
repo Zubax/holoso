@@ -120,12 +120,11 @@ def test_unsupported_library_function_covers_unregistered_ufuncs() -> None:
         lower(f)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: sum() of a runtime aggregate — stage 9")
 def test_non_operator_numpy_call_stays_unsupported() -> None:
     def f(a: float) -> float:
         return np.sum(a)  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="unsupported call to 'sum'"):
+    with pytest.raises(UnsupportedConstruct, match="call to 'sum' is not supported in a kernel"):
         lower(f)
 
 
@@ -153,7 +152,6 @@ def _addmul(p: float, q: float) -> list[float]:
     return [p + q, p * q]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime aggregate value — stage 9")
 def test_inlined_global_function() -> None:
     def f(a: float, b: float) -> list[float]:
         return _addmul(a, b)
@@ -163,7 +161,6 @@ def test_inlined_global_function() -> None:
     assert _arith_count(hir, FloatAdd) == 1 and _arith_count(hir, FloatMul) == 1
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: argument unpacking in calls — stage 9")
 def test_inlined_global_with_star_args() -> None:
     def f(a: float, b: float) -> list[float]:
         v = [a, b]
@@ -202,7 +199,6 @@ def test_local_name_shadows_global_callable() -> None:
         lower(f)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: argument unpacking in calls — stage 9")
 def test_abs_accepts_a_star_unpacked_argument() -> None:
     def f(a: float) -> float:
         v = [a]
@@ -304,11 +300,12 @@ def test_closure_freevar_bound_to_a_library_function_still_dispatches() -> None:
     assert _arith_count(lower(make()), FloatSin) == 1
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: np.array/asarray of runtime values — stage 9")
 def test_call_dispatch_is_by_identity_not_spelling() -> None:
     # Dispatch resolves the callee object, so an aliased import lowers exactly like the canonical spelling -- the numpy
     # array factories and the cast/sequence builtins are matched by identity, not by the name written at the call.
-    def use_asarray(a: float, b: float) -> list[float]:
+    from jaxtyping import Float64
+
+    def use_asarray(a: float, b: float) -> Float64[np.ndarray, "2"]:
         return aa([a, b])  # type: ignore[name-defined, no-any-return]  # noqa: F821 -- 'aa' is np.asarray, injected
 
     assert [o.name for o in lower(_rebind_globals(use_asarray, aa=np.asarray)).outputs] == ["out_0", "out_1"]
@@ -344,7 +341,7 @@ def test_freevar_shadowing_a_global_function_is_not_inlined_as_the_global() -> N
         assert float(model.run(x)[0]) == captured(x)  # the freevar (a*3) is inlined, not the same-named global
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime aggregate value — stage 9")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: blocked by E1 call-site attribution; enables at S2.11")
 def test_library_stub_error_is_attributed_to_the_call_site() -> None:
     def f(a: float) -> float:
         return math.tan((a, a))  # type: ignore[arg-type]

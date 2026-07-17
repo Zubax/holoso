@@ -44,7 +44,7 @@ def test_assert_is_ignored_with_info_message(caplog: pytest.LogCaptureFixture) -
         assert abs(x) > 0.0
         return x + 1.0
 
-    with caplog.at_level(logging.INFO, logger="holoso._frontend._lower"):
+    with caplog.at_level(logging.INFO, logger="holoso._frontend._fir._build"):
         hir = lower(with_assert)
     assert [o.name for o in hir.outputs] == ["out_0"]
     assert _arith_count(hir, FloatRelational) == 0 and _arith_count(hir, FloatAbs) == 0
@@ -309,7 +309,6 @@ def test_range_zero_step_is_rejected() -> None:
         lower(f)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: runtime subscript/indexing — stage 9")
 def test_divergent_loop_counter_as_static_index_is_rejected() -> None:
     # A counter left differing by the two branch arms must not leak as a trusted compile-time index: using it to index
     # a table afterwards is path-dependent and must be rejected, not silently compiled to one arm's value.
@@ -323,7 +322,7 @@ def test_divergent_loop_counter_as_static_index_is_rejected() -> None:
                 pass
         return table[i]
 
-    with pytest.raises(UnsupportedConstruct, match="compile-time integer"):
+    with pytest.raises(UnsupportedConstruct, match="subscript of a runtime value is not supported yet"):
         lower(f)
 
 
@@ -856,7 +855,7 @@ def test_ternary_with_mismatched_scalar_arm_types_is_cleanly_rejected() -> None:
 # ---------------------------------------------------------------- statically reachable raise
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: shape query (.ndim/.shape/.T/.flatten) — stage 9")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: blocked by E2 f-string messages and E1-lite locations; enables at S2.11")
 def test_raise_on_a_statically_taken_path_is_a_located_synthesis_error() -> None:
     from jaxtyping import Float64
 
@@ -935,7 +934,7 @@ def test_branch_depth_restarts_per_inlined_function() -> None:
         lower(static_guard_in_stub)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: shape query (.ndim/.shape/.T/.flatten) — stage 9")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: blocked by E2 f-string raise messages; enables at S2.3")
 def test_a_raise_message_may_interpolate_a_shape_and_a_counter() -> None:
     from jaxtyping import Float64
 

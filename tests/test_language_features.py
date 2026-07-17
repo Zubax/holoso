@@ -580,7 +580,6 @@ class _RunningHalf:
         return before, after
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: @property getters on components + aggregate (tuple) returns — stage 9")
 def test_property_over_written_state_recomputes_each_read() -> None:
     # A property whose getter reads written state must be inlined fresh at each use (not CSE'd across the intervening
     # write), so the two reads in one call see the old and new state; persistent state also carries across calls.

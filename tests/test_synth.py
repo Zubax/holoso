@@ -98,7 +98,6 @@ def test_rejects_nan_constants() -> None:
             holoso.synthesize(fn, ops=_ops())
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns (hidden_by_fast_math) — stage 9")
 def test_infinity_constants_are_allowed() -> None:
     def overflow(a: float) -> float:
         return a + 1e400
@@ -153,7 +152,6 @@ def test_accepts_valid_module_name(tmp_path: Path) -> None:
     }
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate/tuple returns (ekf1_stateless) — stage 9")
 def test_synthesize_ekf1_stateless() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateless

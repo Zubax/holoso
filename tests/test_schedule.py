@@ -1781,7 +1781,6 @@ def test_negative_constant_operand_is_stored_as_magnitude_with_negate() -> None:
     assert operand.sign == FloatSignControl(negate=True)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: argument unpacking f(*args) in ekf1_stateful — stage 9")
 def test_constant_pool_is_canonically_nonnegative() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateful
@@ -1820,7 +1819,6 @@ def test_underflowing_negative_constant_output_stays_canonical_zero() -> None:
     assert wire.tap.sign == FloatSignControl()
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: argument unpacking f(*args) in ekf1_stateful — stage 9")
 def test_stateful_slot_register_gaps_are_reused() -> None:
     # A coalesced state slot's register, dead through the middle of the frame, is reused for temporaries instead of
     # being reserved, shedding registers (the stateful EKF dropped from 45 to ~39).

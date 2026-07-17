@@ -354,7 +354,6 @@ def test_mixed_tuple_io_metadata_and_values() -> None:
                     assert float(got[2]) == diff, f"flag={flag} xy={xy}: {float(got[2])} vs {diff}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: mixed-tuple ports — stage 9 aggregate returns")
 def test_logical_port_is_the_single_public_port_type() -> None:
     """
     W9 unified the two oracle port types into one: ``holoso.LogicalPort`` is the single public port type both oracles
@@ -372,7 +371,6 @@ def _mixed_list_io(flag: bool, x: float) -> list[float]:
     return [x + 1.0, float(flag)]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: list return — stage 9 aggregate returns")
 def test_mixed_list_io_metadata_and_values() -> None:
     sim = _sim(_mixed_list_io, "mixed_list")
     assert [(p.name, p.scalar_type) for p in sim.inputs] == [("flag", BoolType()), ("x", FloatType(FMT))]

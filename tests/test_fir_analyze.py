@@ -205,8 +205,7 @@ def test_state_livein_joins_reset_with_exit_values() -> None:
     result = Analyzer(component.step).fixpoint()
     # The live-in of mode is join(reset 0.0, exit 1.0) = Residual: the first transaction reads 0.0, later ones 1.0.
     assert result.block_in[result.unit.exit].get(StateLeaf(component, ("mode",))) == Known(as_admitted(1.0))
-    facts = [fact for fact in result.block_in[result.unit.entry].facts.values()]
-    assert Residual(SemType.FLOAT) in facts  # the promoted live-in is visible at entry
+    assert result.state_livein[StateLeaf(component, ("mode",))] == Residual(SemType.FLOAT)  # the promoted live-in
 
 
 def test_member_call_expands_through_dunder_call() -> None:

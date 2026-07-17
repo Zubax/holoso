@@ -4,14 +4,19 @@ import numpy as np
 import pytest
 
 from holoso._frontend._fir._build import BuildRejection, build_unit
+from holoso._frontend._fir._value import MetaInt
 from holoso._frontend._fir._ir import (
     Branch,
     Fail,
     FunctionUnit,
     LoadConst,
+    LoadPlace,
     LoadRef,
+    Local,
     PySelect,
+    ReturnPlace,
     PyStoreAttr,
+    PySubscript,
     StaticFor,
     StorePlace,
     UnitExit,
@@ -54,8 +59,27 @@ def test_ordered_stores_leave_the_last_write() -> None:
         return x
 
     unit = build_unit(fn)
-    stores = [op for op in _ops(unit) if isinstance(op, StorePlace)]
-    assert len(stores) >= 2  # both writes are present, in order; the analyzer computes x == arg + 2.0
+    ops = _ops(unit)
+    projections = {op.dst: op for op in ops if isinstance(op, PySubscript)}
+    constants = {op.dst: op.value for op in ops if isinstance(op, LoadConst)}
+    x_stores = [op for op in ops if isinstance(op, StorePlace) and isinstance(op.place, Local)]
+    element_indices: list[int] = []
+    for store in x_stores:
+        index = constants[projections[store.src].index]
+        assert isinstance(index, MetaInt)
+        element_indices.append(index.value)
+    # Both writes land left to right onto ONE binding, and the return reads that same binding — so the surviving
+    # value of x is the tuple's element 1 (x + 2.0), and a builder that mints a second same-named local (leaving
+    # the return on the stale binding) fails here rather than passing on names alone.
+    assert element_indices == [0, 1]
+    assert len({store.place for store in x_stores}) == 1
+    loads = {op.dst: op for op in ops if isinstance(op, LoadPlace)}
+    return_reads = [
+        loads[op.src].place
+        for op in ops
+        if isinstance(op, StorePlace) and isinstance(op.place, ReturnPlace) and op.src in loads
+    ]
+    assert return_reads == [x_stores[0].place]
 
 
 def test_eager_boolean_operators_lower_to_selects() -> None:

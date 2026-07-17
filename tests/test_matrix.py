@@ -384,22 +384,36 @@ def test_state_assignment_flavor_must_match_reset() -> None:
         lower(ListIntoArray(np.array([1.0, 2.0])).step)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: array modulo operator — stage 9 aggregate ops")
-def test_unsupported_operator_diagnostic_names_the_operator() -> None:
-    # An unsupported operator must be named even when its operands are boolean (its own diagnostic wins over the
-    # float-operand check), rather than being misreported as a boolean-operand error.
+def test_boolean_bitwise_operators_lower_in_the_boolean_bank() -> None:
     def bitor(a: bool, b: bool) -> bool:
         return a | b
 
-    with pytest.raises(UnsupportedConstruct, match="unsupported binary operator BitOr"):
-        lower(bitor)
+    def bitand(a: bool, b: bool) -> bool:
+        return a & b
 
-    # Also on the aggregate path: an unsupported operator must be named even when the operands' shapes mismatch, rather
-    # than being masked by the shape-mismatch diagnostic.
+    def bitxor(a: bool, b: bool) -> bool:
+        return a ^ b
+
+    for kernel in (bitor, bitand, bitxor):
+        sim = _sim(kernel)
+        for a in (False, True):
+            for b in (False, True):
+                assert bool(sim.run(a, b)[0]) == kernel(a, b)
+
+    def float_bitor(a: float, b: float) -> float:
+        return a | b  # type: ignore[operator,no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match=r"bitwise/shift operator \| requires integer operands"):
+        lower(float_bitor)
+
+
+def test_unsupported_operator_diagnostic_names_the_operator() -> None:
+    # An unsupported operator must be named even when the operands' shapes mismatch, rather than being masked by the
+    # shape-mismatch diagnostic.
     def modulo(v: Float64[np.ndarray, "2"], w: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2"]:
         return v % w  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="unsupported binary operator Mod"):
+    with pytest.raises(UnsupportedConstruct, match="operator '%' is not supported on arrays"):
         lower(modulo)
 
 
@@ -2032,7 +2046,9 @@ def test_trace_of_a_1x1_boolean_matrix_is_rejected_like_a_larger_one() -> None:
         lower(bool_trace)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: matmul on array parameters — stage 9")
+@pytest.mark.skip(
+    reason="FIR_PARITY_PENDING: blocked by E1 call-site attribution; enables at S2.11 (scalar-.T sub-case rewritten there)"
+)
 def test_library_shape_rejection_is_attributed_to_the_user_call_site() -> None:
     # A stub validates its own operands with a ``raise`` on a statically taken path; the error must name the user's
     # spelling and point at the user's line, never into the stub source.

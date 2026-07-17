@@ -60,7 +60,6 @@ FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: equal_temperament returns a tuple — stage 9 aggregate returns")
 def test_equal_temperament_default_sweep_has_no_log2_sidebands() -> None:
     # The shipped self-test bench sweeps every input over cocotb's default (-4, 4) range (the _DEFAULT_RANGE template
     # constant in holoso/_backend/cocotb.py) and asserts err_pc == 0, so log2's argument must stay positive across it or
@@ -183,7 +182,6 @@ def test_model_matches_reference_dense_boolean_chain() -> None:
             assert [float(g) for g in got] == ref, f"diverged at {inputs}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: list/aggregate return — stage 9")
 def test_tuple_unpacking_matches_python_reference() -> None:
     # The reference runs the kernel as ordinary Python (which unpacks natively), so a bit-faithful hardware model must
     # route the swapped operands identically before the arithmetic.
@@ -451,7 +449,7 @@ def test_model_matches_reference_ekf1_stateless() -> None:
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: aggregate indexing/slicing and list return — stage 9")
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: starred list display becomes the T10 located rejection at S2.10")
 def test_model_matches_reference_aggregates() -> None:
     def f(a: float, b: float, c: float) -> list[float]:
         v = [a, b, c]
@@ -466,7 +464,6 @@ def test_model_matches_reference_aggregates() -> None:
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: Ekf1.update uses f(*args) argument unpacking — builder stage")
 def test_model_matches_reference_ekf1_stateful() -> None:
     rng = np.random.default_rng(54321)
     cov = spd_matrix(rng, 3, 0.5, 2.0)
@@ -790,7 +787,6 @@ def test_model_unrolled_for_loop_newton_reciprocal() -> None:
         assert math.isclose(float(model.run(x)[0]), 1.0 / x, rel_tol=1e-5)
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: CordicSinCos returns a tuple — stage 9 aggregate returns")
 def test_model_unrolled_cordic_sin_cos() -> None:
     model = build_model(build(_run(CordicSinCos().__call__), "cordic", fetch_stages=3))
     cos_index, sin_index = [p.name for p in model.outputs].index("out_0"), [p.name for p in model.outputs].index(
@@ -1498,10 +1494,7 @@ def test_model_cross_domain_cast_chain_is_exact() -> None:
         assert got == ref, f"x={x}: {got} != {ref}"
 
 
-@pytest.mark.skip(
-    reason="FIR_PARITY_PENDING: format-faithful truth of a constant float (bool(2**-200)==False in a narrow format) "
-    "needs a format-aware MIR fold to stay metric-neutral; the frontend folds constant truthiness on float64 for now"
-)
+@pytest.mark.skip(reason="FIR_PARITY_PENDING: H3 fastmath ruling pins the documented True-fold at S2.10")
 def test_model_bool_cast_of_underflowing_constant_is_false() -> None:
     # Regression (Codex): bool(c) of a compile-time constant is the ZKF exponent-nonzero test on the constant *encoded
     # into the format*, not a raw float64 ``c != 0.0``. In FMT(6,18) the tiny magnitude 2**-200 encodes to zero, so the
@@ -1585,7 +1578,6 @@ def test_boolean_identity_fold_lowers_inside_a_nested_connective() -> None:
                 assert float(model.run(a, x)[0]) == float(fn(a, x)), f"{name} a={a} x={x}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: PhaseFrequencyDetector returns a tuple — stage 9 aggregate returns")
 def test_merged_state_slots_preserve_behaviour() -> None:
     # The slot drop must not change behaviour: drive PFD across many transactions and confirm the model still agrees
     # with the schedule-independent MIR interpreter (blind to LIR faults), so the merged state persists correctly.
@@ -1603,7 +1595,6 @@ def test_merged_state_slots_preserve_behaviour() -> None:
     assert_model_equals_interpreter(model, interpreter, vectors, "pfd_merge")
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: kernels return tuples — stage 9 aggregate returns")
 def test_aliased_slot_with_phi_live_in_builds(monkeypatch: pytest.MonkeyPatch) -> None:
     # Regression (review): aliased state slots whose shared live-out is a SURVIVING phi (real branch, if-conversion
     # disabled) must compile. The drop is gated off phi live-outs: an earlier register-pinning merge tripped a
