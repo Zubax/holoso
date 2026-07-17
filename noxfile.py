@@ -66,7 +66,7 @@ def tests(session: nox.Session) -> None:
 def cosim_examples(session: nox.Session) -> None:
     """Long-running end-to-end cocotb cosimulation of the bundled examples across stage configurations."""
     session.install("-e", ".[test]")
-    session.run("python", "-m", "pytest", "-m", "cosim", "tests")
+    session.run("python", "-m", "pytest", "-p", "no:enabler", "-m", "cosim", "-n", str(WORKERS), "tests")
 
 
 @nox.session
