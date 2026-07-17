@@ -77,6 +77,14 @@ B1 ruling stands as written in HANDOFF.md (fixed storage schema; located rejecti
   `ssh user@ci-terry-davis.local` (24 cores/96 GB) for pre-push certification and debugging only.
 - Local gate per step: `HOLOSO_REGALLOC_EFFORT=10 nox -s tests typecheck black` (baseline-bearing tests pin
   their knobs internally; golden suite must pin via the `test_metrics.py:112-126` fixture pattern).
+- Speed discipline (maintainer-directed): two-tier local runs — mid-step iterations run only the frontend-fast
+  corpus (`test_fir_*`, `test_frontend_*`, `test_determinism`, `test_language_features`) at `-n 8` (~1 min; the
+  ⅔-core cap exists to bound P&R memory, which the light suite has none of), and the full 18-min session runs
+  exactly once per step. The full gate launches IN PARALLEL with the review round (reviewers read the diff, not
+  the gate); a reviewer-invalidated gate run is cheap. Exception: steps that can change emitted Verilog (trims,
+  S2.11 port order, S2.12 B1, S2.13 G1) also run `test_latency_freeze` + `test_metrics` in the fast tier —
+  that guard class is what catches RTL-visible hazards pre-commit. Trims delete `match=` pins suite-wide, which
+  the fast tier cannot see; the once-per-step full session retains that authority.
 - Every defect fix / trim: regression test verified to fail before, pass after (observed failure quoted in the
   commit message). DESIGN.md high-level updates ride the same commit. No compatibility shims, clean breaks.
 
@@ -185,6 +193,11 @@ tests/golden/
 - `test_golden.py`: unmarked (light `tests` session + CI core job); autouse regalloc-knob pinning fixture
   copied from `test_metrics.py:112-126`; spec×format parametrization as `test_cosim_examples.py:44-46`;
   mismatch prints diff head + "deliberate change → tools/refreeze_golden.py; commit golden+code+DESIGN together".
+  MANDATORY design constraint (maintainer): the golden suite must SHARE the per-(example, format) syntheses that
+  `test_latency_freeze`/`test_metrics` already perform, not add 25 more — otherwise the light suite permanently
+  ~2×es. Under xdist a session-scoped fixture is per-worker, so naive sharing still duplicates: use an on-disk
+  build memo keyed by (example, format, knob set) with file locking, or `--dist loadgroup` grouping the three
+  suites' cases by example. Settle the mechanism in the Codex X3 consult.
 - Update protocol: goldens change ONLY in the commit carrying the causing code+DESIGN change. During Stage 4 any
   golden diff is prima facie violation except the newly-discovered-defect protocol: pause, land regression+fix+
   golden diff as its own baseline-update commit on dev, rebase branch, resume. CI's unset PYTHONHASHSEED makes
