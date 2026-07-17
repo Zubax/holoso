@@ -77,14 +77,18 @@ B1 ruling stands as written in HANDOFF.md (fixed storage schema; located rejecti
   `ssh user@ci-terry-davis.local` (24 cores/96 GB) for pre-push certification and debugging only.
 - Local gate per step: `HOLOSO_REGALLOC_EFFORT=10 nox -s tests typecheck black` (baseline-bearing tests pin
   their knobs internally; golden suite must pin via the `test_metrics.py:112-126` fixture pattern).
-- Speed discipline (maintainer-directed): two-tier local runs — mid-step iterations run only the frontend-fast
-  corpus (`test_fir_*`, `test_frontend_*`, `test_determinism`, `test_language_features`) at `-n 8` (~1 min; the
-  ⅔-core cap exists to bound P&R memory, which the light suite has none of), and the full 18-min session runs
-  exactly once per step. The full gate launches IN PARALLEL with the review round (reviewers read the diff, not
-  the gate); a reviewer-invalidated gate run is cheap. Exception: steps that can change emitted Verilog (trims,
-  S2.11 port order, S2.12 B1, S2.13 G1) also run `test_latency_freeze` + `test_metrics` in the fast tier —
-  that guard class is what catches RTL-visible hazards pre-commit. Trims delete `match=` pins suite-wide, which
-  the fast tier cannot see; the once-per-step full session retains that authority.
+- Speed discipline (maintainer-directed): two-tier verification — mid-step iterations run only the frontend-fast
+  corpus (`test_fir_*`, `test_frontend_*`, `test_determinism`, `test_language_features`) at `-n 8` locally (~1
+  min; the ⅔-core cap exists to bound P&R memory, which the light suite has none of). The LOCAL full session is
+  retired: for low-risk steps (test-only, docs, message-only diagnostics) the throwaway-branch CI push IS the
+  full verification; for source-touching or RTL-visible steps the once-per-step full session runs on a runner VM
+  over ssh (`user@ci-hans-reiser.local` / `user@ci-terry-davis.local`, 24 cores, ~6-8 min; clone at
+  `~/holoso-gate`, run `nox -s tests typecheck black` at the trial commit) — note the HANDOFF hostnames' `cy-`
+  spelling is a typo. Everything launches IN PARALLEL with the review round; a reviewer-invalidated run is
+  cheap. Exception: steps that can change emitted Verilog (trims, S2.11 port order, S2.12 B1, S2.13 G1) also
+  run `test_latency_freeze` + `test_metrics` in the local fast tier — that guard class catches RTL-visible
+  hazards pre-commit. Trims delete `match=` pins suite-wide, which the fast tier cannot see; the trial-CI core
+  job retains that authority.
 - Every defect fix / trim: regression test verified to fail before, pass after (observed failure quoted in the
   commit message). DESIGN.md high-level updates ride the same commit. No compatibility shims, clean breaks.
 
