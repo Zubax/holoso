@@ -388,6 +388,36 @@ def test_state_store_violation_outranks_its_downstream_secondary_rejection() -> 
     assert "self.count = value" in error.location.line
 
 
+def test_float_slot_stored_an_inexact_int_rejects_at_the_store() -> None:
+    class Acc:
+        def __init__(self) -> None:
+            self.total = 0.0
+
+        def step(self, v: float) -> float:
+            self.total = 2**53 + 1
+            return self.total - v
+
+    error = _reject(Acc().step, "state attribute 'total' is a float; the stored integer is not exactly representable")
+    assert error.location is not None and error.location.line is not None
+    assert "self.total = 2**53 + 1" in error.location.line
+
+
+def test_float_array_slot_stored_an_inexact_int_cell_rejects_at_the_store() -> None:
+    class Vec:
+        def __init__(self) -> None:
+            self.w = np.array([0.0, 0.0])
+
+        def step(self, v: float) -> float:
+            self.w = np.array([1, 2**53 + 1])
+            return float(self.w[1]) - v
+
+    error = _reject(
+        Vec().step, "state attribute 'w' cell 1 is a float; the stored integer is not exactly representable"
+    )
+    assert error.location is not None and error.location.line is not None
+    assert "self.w = np.array" in error.location.line
+
+
 def test_int_slot_kept_integer_stays_an_integer_slot() -> None:
     from holoso._frontend import lower
     from holoso._hir import IntType

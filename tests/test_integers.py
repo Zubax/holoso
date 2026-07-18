@@ -676,10 +676,11 @@ def test_a_promoted_merge_flows_through_every_use_as_a_plain_float() -> None:
     assert _run_model(in_list, True, 0.0) == [1.0]
 
 
-def test_a_known_integer_store_to_a_float_slot_folds_the_rounded_value() -> None:
-    # Review round 1 (Codex): the store into a float slot rounds the integer into the binary64 carrier, so the fact a
-    # read-back sees must be the ROUNDED float -- folding the comparison with the exact 2**53 + 1 would disagree with
-    # the value the datapath actually stored (observed: model returned 0.0 where the RTL stores 2**53).
+def test_an_inexact_integer_store_to_a_float_slot_rejects_and_the_cast_spelling_folds_rounded() -> None:
+    # Review round 1 (Codex) pinned fold/datapath coherence for this store: the fact a read-back sees must match
+    # what the datapath holds. The storage schema now refuses the implicit inexact store outright, so coherence
+    # is preserved by rejection; the explicit float() cast is the spelling that accepts the rounding and must
+    # keep folding the ROUNDED value, never the exact integer.
     class K:
         def __init__(self) -> None:
             self.y = 0.0
@@ -688,12 +689,23 @@ def test_a_known_integer_store_to_a_float_slot_folds_the_rounded_value() -> None
             self.y = 2**53 + 1
             return 1.0 if self.y == float(2**53) else 0.0
 
-    hir = _hir(K().step)
+    with pytest.raises(UnsupportedConstruct, match="not exactly representable"):
+        _hir(K().step)
+
+    class C:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def step(self) -> float:
+            self.y = float(2**53 + 1)
+            return 1.0 if self.y == float(2**53) else 0.0
+
+    hir = _hir(C().step)
     from holoso._hir import FloatConst, Operation
 
     (out,) = [o for o in hir.outputs if o.name == "out_0"]
     result = hir.nodes[out.value]
-    assert isinstance(result, FloatConst) and result.value == 1.0  # folded on the rounded store, matching the datapath
+    assert isinstance(result, FloatConst) and result.value == 1.0  # folded on the rounded cast, matching the datapath
     assert not any(isinstance(n, Operation) for n in hir.nodes.values())
 
 

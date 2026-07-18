@@ -550,13 +550,13 @@ def _admit_rebinding(current: StorageSchema, stored: StorageSchema) -> StorageSc
             return None
 
 
-def _binary64_store_image(fact: AtomicFact, name: str, origin: OriginStack) -> AtomicFact:
+def _binary64_store_image(fact: AtomicFact, subject: str, origin: OriginStack) -> AtomicFact:
     """
-    The float fact an integer becomes on the edge of a store into a float-schema local. Exact-or-reject, unlike
-    the rounding merge promotion: a merge presents the integer in a float position, where fastmath rounding is
-    chartered, but a plain assignment silently changing the stored value would be exactly the spelling-dependent
-    divergence the storage schema exists to kill -- the explicit float(...) cast is the spelling that accepts
-    the rounding.
+    The float fact an integer becomes on the edge of a store into a float-schema variable or state cell.
+    Exact-or-reject, unlike the rounding merge promotion: a merge presents the integer in a float position,
+    where fastmath rounding is chartered, but a plain assignment silently changing the stored value would be
+    exactly the spelling-dependent divergence the storage schema exists to kill -- the explicit float(...)
+    cast is the spelling that accepts the rounding.
     """
     match fact:
         case Known(value=(MetaInt() | NpInt()) as value):
@@ -565,13 +565,13 @@ def _binary64_store_image(fact: AtomicFact, name: str, origin: OriginStack) -> A
             except OverflowError:
                 bits = value.value.bit_length()  # never via str(): the 4300-digit conversion cap
                 raise AnalysisRejection(
-                    f"variable '{name}' is a float; a {bits}-bit integer stored into it is beyond the binary64 "
+                    f"{subject} is a float; a {bits}-bit integer stored into it is beyond the binary64 "
                     "carrier range",
                     origin,
                 ) from None
             if int(image) != value.value:
                 raise AnalysisRejection(
-                    f"variable '{name}' is a float; the stored integer is not exactly representable in the "
+                    f"{subject} is a float; the stored integer is not exactly representable in the "
                     "binary64 carrier (write float(...) to accept the rounding)",
                     origin,
                 )
@@ -606,7 +606,7 @@ def conform_local_store(
         )
     if isinstance(admitted, ScalarSchema) and admitted.kind is SemType.FLOAT and stored_schema.kind is SemType.INT:
         assert isinstance(stored, (Known, Residual))
-        return admitted, _binary64_store_image(stored, name, origin), None
+        return admitted, _binary64_store_image(stored, f"variable '{name}'", origin), None
     return admitted, stored, None
 
 
@@ -623,8 +623,9 @@ def conform_state_store(name: str, reset: Fact, stored: Fact, origin: OriginStac
     """
     The fact a state store leaves in its slot plus the schema violation it commits, if any. The reset fixes the
     slot schema -- container flavor, exact geometry, and per-cell kind -- and a store may only keep it: bool
-    cells accept bool, int cells int, float cells float or int (the integer promotes on the store edge, exactly
-    like the local rule). A violation reports after stabilization, at this store, so the fact carried onward must
+    cells accept bool, int cells int, float cells float or int (the integer converts exact-or-reject on the
+    store edge, exactly like the local rule). A violation reports after stabilization, at this store, so the
+    fact carried onward must
     keep the fixed point stable AND free of misleading secondary rejections: an int slot receiving float (a pure
     numeric widening) carries the stored fact, whose W/D join merely descends; every other violation carries the
     residualized reset, since joining the stored fact would raise a worse-located mismatch first.
@@ -665,9 +666,9 @@ def conform_state_store(name: str, reset: Fact, stored: Fact, origin: OriginStac
             if stored_kind is slot_kind:
                 cells.append(cell)
             elif slot_kind is SemType.FLOAT and stored_kind is SemType.INT:
-                promoted = _float_promoted(cell, origin)
-                assert isinstance(promoted, (Known, Residual))
-                cells.append(promoted)
+                converted = _binary64_store_image(cell, f"state attribute '{name}' cell {ordinal}", origin)
+                assert isinstance(converted, (Known, Residual))
+                cells.append(converted)
             else:
                 if message is None:
                     message = f"state attribute '{name}' stores an incompatible type at cell {ordinal}"
@@ -685,7 +686,7 @@ def conform_state_store(name: str, reset: Fact, stored: Fact, origin: OriginStac
         return stored, None  # a non-datapath value neither establishes nor violates; the W/D join owns it
     assert isinstance(stored, (Known, Residual))
     if slot_kind is SemType.FLOAT and stored_kind is SemType.INT:
-        return _float_promoted(stored, origin), None
+        return _binary64_store_image(stored, f"state attribute '{name}'", origin), None
     message = f"state attribute '{name}' stores an incompatible type"
     return (stored if slot_kind is SemType.INT and stored_kind is SemType.FLOAT else reset), message
 

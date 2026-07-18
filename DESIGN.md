@@ -322,10 +322,10 @@ Storage typing. Variables are strongly typed for the function's lifetime under a
 sees SemType kinds only: a source variable's first definition of a scalar datapath value establishes its kind (a
 root scalar parameter's comes from its annotation contract), and independent first definitions on different paths
 join with the same int->float promotion facts use. Once established, a store may only keep the kind: bool accepts
-bool, int accepts int, float accepts float or an integer that converts on the store edge — for a local the
-conversion is exact-or-reject (an integer the binary64 carrier cannot represent exactly is a located rejection at
-the store; the explicit `float(...)` cast is the spelling that accepts rounding), so an exact integer fact never
-survives inside a float variable. Every other scalar store is a located rejection at the store site; `del` does
+bool, int accepts int, float accepts float or an integer that converts on the store edge — the conversion is
+exact-or-reject for locals and state cells alike (an integer the binary64 carrier cannot represent exactly is a
+located rejection at the store; the explicit `float(...)` cast is the spelling that accepts rounding), so an
+exact integer fact never survives inside a float variable. Every other scalar store is a located rejection at the store site; `del` does
 not erase an established schema (nor the conversion that rides it), and values outside the datapath kinds --
 references, strings, ranges, and whole aggregates -- neither establish nor violate one. Compiler-scoped bindings
 are fresh per execution: a comprehension target's entry reset and each unroll trip's loop-target prelude clear
@@ -660,8 +660,8 @@ integer side on its own edge and yields a plain float -- Python instead keeps ea
 documented C-style deviation, and the same rule covers an int/float comparison, which promotes and compares in float.
 The precision loss is accepted under the fastmath charter: a Known integer materializing in a float position rounds
 into the binary64 carrier (only a value beyond that carrier entirely, e.g. 10**400, is a located rejection), and the
-selected target format then rounds again like any constant. A store into a float VARIABLE is the one stricter edge:
-exact-or-reject, per Storage typing. Static folding remains Python-exact: a fully-Known
+selected target format then rounds again like any constant. A store into a float variable or state slot is the one
+stricter edge: exact-or-reject, per Storage typing. Static folding remains Python-exact: a fully-Known
 int/float comparison folds exactly; only runtime values promote.
 
 Library intrinsics are typed by a three-rule declarative registry: SIGNATURE (the operator's own result; integer
