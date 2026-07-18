@@ -340,9 +340,15 @@ contract, enforces flavor, geometry, and per-cell kinds at its store site (below
 beside the facts, since the store-edge conversion needs it exactly where the store executes, but the verdict is
 never per-visit: optimistic analysis discovers executable predecessors late, so store obligations resolve only
 after the state fixed point, and when several stores violate, the one reported is the first executable store in
-CFG preorder. A pending store violation -- a local rebind, a state-store obligation, or a conversion failure
-alike -- outranks every rejection deferred in the same round, including a user raise, so the causal store
-reports rather than any secondary failure its carried fact provoked.
+CFG preorder. Obligations survive the fixed point's round boundaries: a recorded violation persists, keyed by its
+origin, until a store at that origin conforms again, so no round reset loses the causal store. A pending store
+violation -- a local rebind, a state-store obligation, or a conversion failure alike -- outranks every rejection
+deferred in the same round, including a user raise, so the causal store reports rather than any secondary failure
+its carried fact provoked; the deferral spans every layer a carried fact can reach -- operator transfers,
+missing-library refusals, environment joins at control-flow merges, and the state live-in join alike. A failing
+state live-in join never cuts a round short: the leaf freezes at its last joinable live-in and the failure
+reports only at stabilization, ranked below every recorded obligation, so each verdict -- the exactness ruling
+of a store-edge conversion included -- derives from the stabilized facts, never from a transient early round.
 Widening at merges is untouched:
 phi and select arms, comparison operands, explicit casts, return conversion, and mixed arithmetic promote exactly
 as before (a merge rounds into the carrier; only the store edge is exact), so `x = 0; x = input_float` rejects
@@ -464,7 +470,9 @@ canonical leaf order, with the reset snapshot fixing the schema. Every reachable
 schema explicitly at the store site -- container flavor, exact geometry, and per-cell kind under the storage
 doctrine (bool cells accept bool, int cells int, float cells float or a promoted integer) -- rather than through
 the generic joins (whose flavor degrade and array dtype promotion would accept what the next transaction cannot
-reconstruct); a declared jaxtyping field annotation must agree with the reset shape. 3-D, empty, nested,
+reconstruct); a stored value outside the datapath kinds, the unbound residue of a deferred producer chain
+included, neither establishes nor violates the slot schema (the state join owns it), exactly as for scalar
+slots; a declared jaxtyping field annotation must agree with the reset shape. 3-D, empty, nested,
 tuple-valued, and ndarray-subclass resets reject by name.
 Array parameter and return ports are live: a fixed-shape 1-D/2-D floating jaxtyping annotation over
 np.ndarray ITSELF (Float64[list, ...] would smuggle list semantics) decomposes row-major into one float input

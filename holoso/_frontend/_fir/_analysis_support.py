@@ -240,9 +240,9 @@ class DeferredRejection:
     """
 
     def __init__(self) -> None:
-        self._best: AnalysisRejection | None = None
+        self._best: LocatedRejection | None = None
 
-    def offer(self, error: AnalysisRejection) -> None:
+    def offer(self, error: LocatedRejection) -> None:
         if self._best is None or str(error) < str(self._best):
             self._best = error
 
@@ -633,7 +633,8 @@ def conform_state_store(name: str, reset: Fact, stored: Fact) -> tuple[Fact, str
     stable AND free of misleading secondary rejections: an int slot receiving float (a pure numeric widening)
     carries the stored fact, whose W/D join merely descends; a failed conversion carries its store-edge image;
     every other violation carries the residualized reset, since joining the stored fact would raise a
-    worse-located mismatch first.
+    worse-located mismatch first. A non-datapath stored value (the Unbound left by a deferred producer chain
+    included) neither establishes nor violates, in the scalar and aggregate arms alike; the W/D join owns it.
     """
     if isinstance(reset, Reference):
         return reset, (
@@ -642,6 +643,8 @@ def conform_state_store(name: str, reset: Fact, stored: Fact) -> tuple[Fact, str
         )
     if isinstance(reset, AggregateFact):
         if not isinstance(stored, AggregateFact):
+            if _scalar_sem(stored) is None:
+                return stored, None
             return reset, f"state attribute '{name}' persists an aggregate; a scalar cannot be stored into it"
         assert isinstance(reset.layout, (ListLayout, ArrayLayout)), "the reset schema was validated at its read"
         if type(stored.layout) is not type(reset.layout):

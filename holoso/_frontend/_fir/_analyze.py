@@ -39,6 +39,7 @@ from ._ir import (
     LoadRef,
     LoadPlace,
     Local,
+    LocatedRejection,
     Op,
     Origin,
     OriginStack,
@@ -372,8 +373,13 @@ class Analyzer:
         self._store_origins: dict[StateLeaf, OriginStack] = {}
         self._store_schema_violations: dict[int, tuple[str, OriginStack]] = {}  # op id -> deferred store obligation
         self._local_store_violations: dict[int, tuple[str, OriginStack]] = {}  # op id -> deferred local obligation
+        # Obligations outlive the per-round dicts above: op ids are round-scoped (grafted and cloned ops are fresh
+        # objects every round), so a round boundary folds every still-pending violation into this origin-keyed map
+        # -- origins are re-attributed identically across rounds, the same identity the unroll seeds key on -- and
+        # a store conforming again under any op with that origin supersedes the entry with its fresh verdict.
+        self._carryover_violations: dict[OriginStack, str] = {}
         self._store_facts: dict[int, Fact] = {}  # SOURCE store op id -> its stored fact at the last visit
-        self._transfer_deferrals: dict[int, AnalysisRejection] = {}  # op id -> rejection deferred behind a store
+        self._transfer_deferrals: dict[int, LocatedRejection] = {}  # op id -> rejection deferred behind a store
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._array_methods: dict[tuple[BindingId, str], _ArrayMethod] = {}
         self._class_annotations: dict[int, tuple[type, "Mapping[str, object]"]] = {}
@@ -387,7 +393,11 @@ class Analyzer:
         The outer W/D state fixed point: W (runtime-capable leaves) accumulates store sites that are executable
         AND graph-co-reachable with the canonical exit over executable edges; D (live-in facts) starts at
         Known(reset) and joins executable exit live-outs, descending only. Each round rebuilds the working graph
-        from immutable templates; the final round's facts are computed under stable typing.
+        from immutable templates; the final round's facts are computed under stable typing. A failing state join
+        never aborts a round: the leaf's live-in freezes at its last joinable value (holding W/D descent, so the
+        fixed point still stabilizes) and the failure re-derives each round, reporting only at stabilization --
+        ranked below every recorded store obligation, since the cascade of a violating store can provoke exactly
+        such a merge (an Unbound from a deferred producer joining a carried fact).
         """
         for round_index in range(1_000):
             try:
@@ -422,9 +432,6 @@ class Analyzer:
                     )
                 except AnalysisRejection as error:
                     deferred.offer(error)
-            if deferred.pending():
-                self._check_storage_schemas(result)
-            deferred.raise_if_deferred()
             if new_w == self._runtime_state and new_d == self._state_livein:
                 _logger.info("state fixpoint stable after %d round(s): %d runtime leaves", round_index + 1, len(new_w))
                 for header_id, (_, chain_entry) in self._unroll_cache.items():
@@ -432,6 +439,8 @@ class Analyzer:
                     assert isinstance(header.terminator, StaticFor)
                     header.terminator = Jump(chain_entry, header.terminator.origin)
                 self._check_storage_schemas(result)
+                self._raise_carryover_violations()
+                deferred.raise_if_deferred()
                 self._raise_transfer_deferrals()
                 self._reject_executable_fails(result)
                 _validate(
@@ -462,12 +471,26 @@ class Analyzer:
             self._store_schema_violations,
         )
 
+    def _violations_pending(self) -> bool:
+        return bool(self._store_schema_violations or self._local_store_violations or self._carryover_violations)
+
+    def _raise_carryover_violations(self) -> None:
+        """
+        Obligations carried over from earlier rounds whose stores never conformed again: their blocks fell behind
+        a deferred op or terminator (executability only ever grows across rounds, so nothing else can strand
+        them), leaving no preorder rank in the final graph -- the lexicographically least surfaces instead.
+        """
+        deferred = DeferredRejection()
+        for origin, message in self._carryover_violations.items():
+            deferred.offer(AnalysisRejection(message, origin))
+        deferred.raise_if_deferred()
+
     def _raise_transfer_deferrals(self) -> None:
         """
         Rejections deferred behind a pending store violation whose ops never went clean again. Reached only when
-        the resolution walk found every store clean (the pending violations were transient), so each lingering
-        entry is a real rejection re-derived on the round's stable facts; the lexicographically least surfaces,
-        matching the DeferredRejection convention.
+        the resolution walk, the carryover obligations, and the state-join deferrals all came up clean (the
+        pending violations were transient), so each lingering entry is a real rejection re-derived on the op's
+        stable facts; the lexicographically least surfaces, matching the DeferredRejection convention.
         """
         deferred = DeferredRejection()
         for error in self._transfer_deferrals.values():
@@ -475,6 +498,8 @@ class Analyzer:
         deferred.raise_if_deferred()
 
     def _reset_round(self) -> None:
+        for message, origin in (*self._store_schema_violations.values(), *self._local_store_violations.values()):
+            self._carryover_violations[origin] = message
         self._block_ancestry = {}
         self._discovered_stores = set()
         self._store_origins = {}
@@ -836,13 +861,16 @@ class Analyzer:
                 op = block.ops[index]
                 try:
                     expanded = self._transfer(unit, block, index, op, env)
-                except AnalysisRejection as error:
+                except LocatedRejection as error:
                     # A rejection downstream of a pending store violation is (potentially) provoked by the fact
-                    # the violating store carried, so it defers and the round runs on to stabilization, where
-                    # the resolution walk reports the causal store instead. The op's destination stays unbound;
-                    # anything it feeds defers the same way. A clean revisit clears the entry, so a lingering
-                    # one was re-derived on the op's stable facts.
-                    if not (self._store_schema_violations or self._local_store_violations):
+                    # the violating store carried -- the library sibling refusal alike, since registry matching
+                    # rejects on operand kinds too (callee builds rewrap at the call site and emission runs after
+                    # analysis, so no other located kind can arise mid-transfer) -- so it defers and the round
+                    # runs on to stabilization, where the resolution walk reports the causal store instead. The
+                    # op's destination stays unbound; anything it feeds defers the same way. A clean revisit
+                    # clears the entry, so a lingering one was re-derived on the op's stable facts.
+                    assert isinstance(error, (AnalysisRejection, LibraryAnalysisRejection))
+                    if not self._violations_pending():
                         raise
                     self._transfer_deferrals[id(op)] = error
                     index += 1
@@ -854,10 +882,11 @@ class Analyzer:
                 index += 1
             try:
                 successors = self._resolve_terminator(unit, block, env)
-            except AnalysisRejection as error:
+            except LocatedRejection as error:
                 # The terminator counterpart of the op-level deferral (an unrollable iterable fed by a deferred
                 # op, say): the successors stay unexplored and the walk ranks over the graph reached so far.
-                if not (self._store_schema_violations or self._local_store_violations):
+                assert isinstance(error, (AnalysisRejection, LibraryAnalysisRejection))
+                if not self._violations_pending():
                     raise
                 self._transfer_deferrals[id(block.terminator)] = error
                 continue
@@ -872,13 +901,26 @@ class Analyzer:
                     block_in[successor] = env.copy()
                     executable_edges.add(edge)
                     worklist.append(successor)
-                elif edge not in executable_edges:
-                    executable_edges.add(edge)
-                    if target_env.join_with(env, join_origin, edge_default) or successor not in executable_blocks:
-                        worklist.append(successor)
-                else:
-                    if target_env.join_with(env, join_origin, edge_default):
-                        worklist.append(successor)
+                    continue
+                first_traversal = edge not in executable_edges
+                executable_edges.add(edge)
+                try:
+                    changed = target_env.join_with(env, join_origin, edge_default)
+                except LocatedRejection as error:
+                    # The join counterpart: an irreconcilable merge of a violating store's carried fact defers
+                    # like any provoked rejection, keyed on the terminator whose edges join here (mutually
+                    # exclusive with a terminator deferral within one visit, and the clean pop above re-arms the
+                    # slot; setdefault keeps the first failing edge, then-arm first). The per-place joins that
+                    # did succeed were applied with their change tracking lost, so the successor re-enqueues
+                    # unconditionally; the failing place holds its old fact, which cannot oscillate.
+                    assert isinstance(error, (AnalysisRejection, LibraryAnalysisRejection))
+                    if not self._violations_pending():
+                        raise
+                    self._transfer_deferrals.setdefault(id(block.terminator), error)
+                    worklist.append(successor)
+                    continue
+                if changed or (first_traversal and successor not in executable_blocks):
+                    worklist.append(successor)
         return ResidualUnit(unit, block_in, executable_blocks, executable_edges)
 
     # ------------------------------------ instantiation and grafting ------------------------------------
@@ -922,14 +964,16 @@ class Analyzer:
                 if op.role is StoreRole.SOURCE and isinstance(place, Local):
                     # The verdict belongs to the post-stabilization walk, which re-derives it from the stored
                     # fact recorded here (stable at the last visit); the mid-flight violation record only gates
-                    # the downstream-rejection deferral.
+                    # the downstream-rejection deferral. Conforming again supersedes any carried-over obligation
+                    # recorded under this origin in an earlier round.
                     self._store_facts[id(op)] = stored
+                    self._carryover_violations.pop(op.origin, None)
                     schema, stored, message = conform_local_store(env.schemas.get(place), place.binding.name, stored)
                     if schema is not None:
                         env.schemas[place] = schema
                     if message is not None:
                         self._local_store_violations[id(op)] = (message, op.origin)
-                    elif self._local_store_violations:
+                    else:
                         self._local_store_violations.pop(id(op), None)
                 env.set(place, stored)
             case UnbindPlace(place=place, checked=checked):
@@ -1175,7 +1219,9 @@ class Analyzer:
                     self._store_origins[leaf] = op.origin
                 self._discovered_stores.add((block.id, leaf))
                 # The reset fixes the slot schema; a violating store carries a fixpoint-stable fact onward and
-                # the recorded obligation reports after stabilization, at this store.
+                # the recorded obligation reports after stabilization, at this store. Conforming again supersedes
+                # any carried-over obligation recorded under this origin in an earlier round.
+                self._carryover_violations.pop(op.origin, None)
                 conformed, violation = conform_state_store(name, self._state_reset_fact(leaf), src_fact)
                 if violation is None:
                     self._store_schema_violations.pop(id(op), None)

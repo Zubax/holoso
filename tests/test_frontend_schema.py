@@ -11,6 +11,7 @@ not erase a schema. Persistent state slots instead take their full schema -- fla
 -- from the reset value.
 """
 
+import math
 from collections.abc import Callable
 
 import numpy as np
@@ -684,3 +685,127 @@ def test_float_vector_slot_accepts_int_cells_with_conversion() -> None:
     reference = Vec()
     for a in (2.0, 3.0):
         assert float(model.run(a)[0]) == reference.step(a)
+
+
+# ------------------------------- the deferral net across layers and rounds -------------------------------
+
+
+def test_local_violation_outranks_the_join_rejection_its_carried_fact_provokes() -> None:
+    # The violating store carries its float onward, which meets the established bool at the branch merge; the
+    # join-layer rejection must defer like any provoked failure, so the branchy spelling reports exactly what
+    # the straight-line spelling does.
+    def kernel(x: float) -> float:
+        flag = True
+        if x > 0.0:
+            flag = x  # type: ignore[assignment]
+        return x
+
+    error = _reject(kernel, "variable 'flag' is a bool and cannot be rebound to a float")
+    assert error.location is not None and error.location.line is not None
+    assert "flag = x" in error.location.line
+
+
+def test_state_violation_outranks_the_join_rejection_its_carried_fact_provokes() -> None:
+    class Meter:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def step(self, x: float) -> float:
+            if x > 0.0:
+                t = True
+            else:
+                self.n = x  # type: ignore[assignment]
+                t = self.n  # type: ignore[assignment]
+            return float(t)
+
+    error = _reject(Meter().step, "state attribute 'n' stores an incompatible type")
+    assert error.location is not None and error.location.line is not None
+    assert "self.n = x" in error.location.line
+
+
+def test_local_violation_outranks_a_provoked_library_rejection() -> None:
+    # The library refusal is a sibling of the analysis rejection under the shared located mixin; the net must
+    # hold back both, or the missing-primitive diagnostic masks the causal store.
+    def kernel(x: float) -> float:
+        n = 0
+        n = x  # type: ignore[assignment]
+        return math.gamma(x)
+
+    error = _reject(kernel, "variable 'n' is an int and cannot be rebound to a float")
+    assert error.location is not None and error.location.line is not None
+    assert "n = x" in error.location.line
+
+
+def test_state_join_failure_defers_to_stabilization_instead_of_a_transient_exactness_verdict() -> None:
+    # The sum is a Known integer only in round one (the leaf's live-in stabilizes to a runtime integer), so an
+    # exactness verdict drawn when the unrelated state-merge failure surfaces would be false; the merge failure
+    # must instead ride to stabilization, where both spellings report it identically.
+    class Implicit:
+        def __init__(self) -> None:
+            self.n = 0
+            self.tag = False
+
+        def step(self, x: float) -> float:
+            out = 0.0
+            n = self.n + (2**53 + 1)
+            out = n
+            self.n = 1
+            self.tag = "s"  # type: ignore[assignment]
+            return out
+
+    class Explicit:
+        def __init__(self) -> None:
+            self.n = 0
+            self.tag = False
+
+        def step(self, x: float) -> float:
+            out = 0.0
+            n = self.n + (2**53 + 1)
+            out = float(n)
+            self.n = 1
+            self.tag = "s"  # type: ignore[assignment]
+            return out
+
+    for kernel in (Implicit().step, Explicit().step):
+        error = _reject(kernel, "values of irreconcilable kinds merge here")
+        assert "not exactly representable" not in str(error)
+        assert error.location is not None and error.location.line is not None
+        assert 'self.tag = "s"' in error.location.line
+
+
+def test_state_obligation_survives_the_round_boundary() -> None:
+    # The shift reads the leaf's live-in, so round two rejects it before re-reaching the violating store; the
+    # obligation recorded in round one must survive the round reset, or the induced operator rejection reports.
+    class Counter:
+        def __init__(self) -> None:
+            self.count = 0
+
+        def step(self, value: float) -> float:
+            out = float(self.count << 1)
+            self.count = value  # type: ignore[assignment]
+            return out
+
+    error = _reject(Counter().step, "state attribute 'count' stores an incompatible type")
+    assert error.location is not None and error.location.line is not None
+    assert "self.count = value" in error.location.line
+
+
+def test_cascade_unbound_does_not_violate_an_aggregate_slot() -> None:
+    # The deferred shift leaves its consumer chain unbound; the Unbound reaching the aggregate slot must not
+    # manufacture a scalar-store violation that outranks the causal store in preorder.
+    class Vec:
+        def __init__(self) -> None:
+            self.n = 0
+            self.v = [0.0, 0.0]
+
+        def step(self, x: float) -> float:
+            if x > 0.0:
+                y = x << 1  # type: ignore[operator]
+                self.v = [y, 0.0]
+            else:
+                self.n = x  # type: ignore[assignment]
+            return x
+
+    error = _reject(Vec().step, "state attribute 'n' stores an incompatible type")
+    assert error.location is not None and error.location.line is not None
+    assert "self.n = x" in error.location.line

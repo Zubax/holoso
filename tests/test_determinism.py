@@ -161,6 +161,48 @@ def emit_competing_state_store_violation() -> None:
     _emit_rejection(CompetingStateStores().step)
 
 
+class JoinDeferredStateStore:
+    """
+    A violating state store whose carried float meets the established bool at the branch merge: the join-layer
+    rejection defers behind the pending violation, and the surfaced diagnostic must not depend on the
+    environment-join iteration order.
+    """
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    def step(self, x: float) -> float:
+        if x > 0.0:
+            t = True
+        else:
+            self.n = x  # type: ignore[assignment]
+            t = self.n  # type: ignore[assignment]
+        return float(t)
+
+
+def emit_join_deferred_state_store() -> None:
+    _emit_rejection(JoinDeferredStateStore().step)
+
+
+class CarriedObligation:
+    """
+    The violating store's obligation must survive the W/D round boundary: round two rejects the shift on the
+    leaf's live-in before re-reaching the store, so the report rests on the origin-keyed carryover.
+    """
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def step(self, value: float) -> float:
+        out = float(self.count << 1)
+        self.count = value  # type: ignore[assignment]
+        return out
+
+
+def emit_carried_obligation() -> None:
+    _emit_rejection(CarriedObligation().step)
+
+
 class BadResets:
     """
     Two state leaves whose reset joins are BOTH inadmissible, with different messages: the W/D loop iterates a
@@ -276,6 +318,20 @@ def test_competing_state_violations_on_the_deferral_path_report_identically_acro
     reference = _entry_output_under_seed("emit_competing_state_store_violation", "0")
     assert "'then_count'" in reference
     assert reference == _entry_output_under_seed("emit_competing_state_store_violation", other_seed)
+
+
+@pytest.mark.parametrize("other_seed", ["1", "3", "31337"])
+def test_join_deferred_state_violation_reports_identically_across_hash_seeds(other_seed: str) -> None:
+    reference = _entry_output_under_seed("emit_join_deferred_state_store", "0")
+    assert "state attribute 'n' stores an incompatible type" in reference
+    assert reference == _entry_output_under_seed("emit_join_deferred_state_store", other_seed)
+
+
+@pytest.mark.parametrize("other_seed", ["1", "3", "31337"])
+def test_carried_obligation_reports_identically_across_hash_seeds(other_seed: str) -> None:
+    reference = _entry_output_under_seed("emit_carried_obligation", "0")
+    assert "state attribute 'count' stores an incompatible type" in reference
+    assert reference == _entry_output_under_seed("emit_carried_obligation", other_seed)
 
 
 @pytest.mark.parametrize("other_seed", ["3", "31337"])
