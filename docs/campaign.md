@@ -381,3 +381,10 @@ else clean — byte-identical unpacking, slots shapes match Python, H3 non-vacuo
 it verbatim). The 05e4675 dev-advance poll exhausted on nulls (superseded-run backlog); RESOLUTION: push the
 CURRENT tip as one fresh trial run and gate the whole dev advance (ea3510e -> tip) on that single green, then
 re-run the S2.10 Claude reviewer post-reset. Codex remains available meanwhile.
+
+QUEUED S2.10-round minors (post-S2.11-agent, same files): DESIGN.md transcendental-fold wording at the Fastmath
+section AND ~:598 ("host libm at binary64", not "ideal infinite-precision"); add the __objclass__-in-MRO
+conjunct to the component descriptor exemptions (_analysis_support write guard + _analyze read ladder) so a
+name-matching foreign member descriptor refuses located instead of crashing raw (Python-identical either way);
+single-site the duplicated display-rejection string via the shared starred check. S2.10 round then fully
+consolidated (Codex + Claude halves both clean on correctness).
