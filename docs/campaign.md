@@ -816,3 +816,22 @@ seed-stable; single-error kernels exact; provoked secondaries never outrank an i
 chase perfect causal attribution — three rounds of corner-trading suggest diminishing returns. _analyze.py at
 2631 lines (soft limit exceeded) — split queued. Trial: trial/s2-r6-stack at 1273f7f; round-7 pair follows;
 tag freeze-1 on clean+green.
+
+Round-7, Codex half returned — ADJUDICATION AGAINST the graph-shape proxy, three P1 + one P2: (1) P1 SILENT
+ACCEPTANCE: _expand_call removes the PyCall from the CFG before argument validation; a transient violation
+defers the arity error, last-bound-wins clears the violation, the error is now keyed to a REMOVED op and the
+ownerless-discard drops it — an ordinary extra-argument typo COMPILES with the call absent from hardware; fix:
+argument binding completes BEFORE destructive grafting, and live ownerless entries are never dropped (re-key to
+the call origin). (2) P1: the stale-expiry rule blames the innocent shift in Cascaded — `self.count << 1` is
+VALID per the int reset; only the violation's propagated float breaks it; the documented provocation doctrine
+is violated. (3) P1: the stranded rule resurrects a FALSE transient verdict — the range() rejection is
+INDEPENDENT (depends only on k) and the store line is INNOCENT under stable facts. (4) P2: the new Fail
+renderer changes valid messages and is non-recursively digit-unsafe. RESOLUTION RATIFIED — TAINT tracking, the
+discriminator all seven adjudicated shapes agree on: a violating store taints its carried fact; taint
+propagates through transfer/joins/live-ins; deferred rejections record their taint; at stabilization the
+report is preorder-first among {stable in-graph violations} ∪ {stranded/stale violations with at least one
+taint-victim}; else preorder-first UNTAINTED deferral; else any remaining. Cascaded -> store (tainted shift
+loses); stale-exactness -> range() (untainted independent wins; the transient verdict has no stable support);
+the &-kernel -> store (stranded WITH taint-victims); Y4 -> store; the arity typo -> the untainted arity error.
+The queued best-effort framing is OFF — Codex proved the corners are the serious innocent-line class. One
+batch after Claude's half: taint + pre-graft validation/ownerless re-keying + recursive digit-safe renderer.
