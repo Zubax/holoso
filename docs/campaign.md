@@ -402,3 +402,18 @@ Review pair running on pinned worktree review-s211. NEXT: S2.12 B1 per docs/deci
 7-step order; del keeps schema; non-SemType stores fact-only; side tables only; report order = first executable
 store in CFG preorder; reversal inventory incl. test_frontend_state.py loop-counter rebinds), overlapping the
 S2.11 review round; then S2.13 G1, S2.14 hygiene+exit-grep, S2.15 freeze (X3), S3, S4.
+
+S2.11 round, Claude half returned: NO functional defects; four LOWs ACCEPTED and QUEUED behind the B1 agent
+(shared files): (1) render_rejection strips the trailing underscore from ANY callee name, so an honest user
+helper named `scale_` (PEP8 shadow-avoidance) renders as `in scale():` — strip only for registry stubs
+(discriminate at graft time or by frame file) + regression; (2) TODO.md deferred-gaps heading's
+FIR_PARITY_PENDING parenthetical is false (registry is empty and asserted so) and the aggregate-return
+paragraph is stale — tuple/list returns emit through full Verilog (probe-verified with ports out_0/out_1[/2]);
+(3) SynthesisError.__init__'s location-rendering branch is dead (all four rejection classes set .location
+post-init) and SourceLocation.__str__ prints col+1 while rendered messages use 0-based columns — remove the
+dead branch and unify the column base after checking pins/consumers; (4) the four byte-identical five-line
+rejection __init__ bodies collapse into a shared mixin next to render_rejection. Verified non-findings banked:
+origin grafting never mutates templates; port order is seed-stable and source-ordered incl. same-line call
+sites; the live-out guard is exact on five lookalikes and closes the former -O silent-shadowing hole; both
+__objclass__ ladders intercept cross-class aliases while honest/inherited/nested slots pass. Codex half still
+running; B1 agent still running; trial/s2-e1-lite CI + dev-advance poll running.
