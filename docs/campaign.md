@@ -463,3 +463,21 @@ review-s212. QUEUED for S2.14: test_metrics.py module docstring still claims fin
 "cannot yet lower" (stale; explains its missing frozen guard row). NOTED: B1 double-error corner — a doomed
 kernel with a state-store violation plus a downstream rejection can surface the secondary message first; the
 int-slot<-float carry rule kills the only suite-exercised class. NEXT after round-2 clean + CI green: S2.13 G1.
+
+Round-2, Claude half returned (4 findings, none high): (1) ACCEPTED/code: B1 regresses mixed-kind static
+iterables order-asymmetrically — `for c in (1, 2.5)` rejects ("variable 'c' is an int...") while `(2.5, 1)`
+accepts; unratified (X2's Q4 never answered mixed iterables), untested, and the remedy text is unactionable for
+a loop target. FIX: establishing-JOIN treatment for loop-target trip stores (same binding site joins kinds with
+int->float promotion; both orders accept; c becomes float; bool mixes still reject) — extends the note's
+independent-first-def join to same-site trip stores; ratify in b1-design.md addendum + pin both orders + the
+comprehension spelling. (2) ACCEPTED/doc: DESIGN.md store-edge-conversion sentence over-promises for locals
+(dead `x=1.5; x=2**7000` accepted vs the identical state store rejecting beyond-carrier) — scope the sentence
+to state stores; local behavior is the more Python-faithful and stays. (3) ACCEPTED/simplification: four
+hand-rolled deterministic walkers — then-arm-first preorder in _reject_executable_fails duplicated by
+enforce_storage_schemas (docstring literally pins "matching the Fail walk"), and execution_rank duplicating
+_emit's _reverse_postorder — consolidate to shared helpers so lockstep holds by construction. (4) DECLINED:
+0-based diagnostic columns — established end-to-end convention, all pins encode it, 1-based flip pre-freeze =
+mass churn for a click-through nit; the freeze pins 0-based. Verified-clean list banked (NaN surface closed
+incl. folds/resets/globals; obligation id(op) keying safe; violating carries stabilize; F1/F3/F5/F6/F8 all
+hold; no orphaned deleted names; StoreRole on all 12 sites). Codex half + G1 agent still running; round-2 fix
+batch will go to a side worktree after Codex returns.
