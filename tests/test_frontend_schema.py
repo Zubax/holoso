@@ -1120,3 +1120,95 @@ def test_stranded_clone_messages_fold_earliest_first() -> None:
     error = _reject(Meter().step, "state attribute 'n' persists a scalar; an aggregate cannot be stored into it")
     assert error.location is not None and error.location.line is not None
     assert "self.n = v" in error.location.line
+
+
+def test_stranded_siblings_report_in_source_order() -> None:
+    # Round-7 adjudication: two origins strand in one cascade, and the pick among them is by source position
+    # with the message only a tie-break -- under message-primary ordering the LATER store reported, merely
+    # because "...'n'..." sorts before "...'t'...".
+    class Meter:
+        def __init__(self) -> None:
+            self.t = 3
+            self.n = 3
+
+        def step(self, x: float) -> float:
+            u = self.t & 1
+            v = self.n & 1
+            acc = 0.0
+            for w in [u + v, 1]:
+                acc = acc + float(w)
+            self.t = x  # type: ignore[assignment]
+            self.n = x  # type: ignore[assignment]
+            return acc
+
+    error = _reject(Meter().step, "state attribute 't' stores an incompatible type")
+    assert error.location is not None and error.location.line is not None
+    assert "self.t = x" in error.location.line
+
+
+def test_call_arity_typo_rejects_through_a_transient_store_violation() -> None:
+    # Round-7 P1 regression: the graft used to strip the PyCall from the CFG before validating its arguments,
+    # so the arity rejection -- deferred behind the transient violation the else-arm integer opens -- was keyed
+    # to an op no stabilization walk could find. Once the violation stabilized legal (last-bound-wins), the
+    # entry was discarded as ownerless and the Implicit kernel COMPILED with the invalid call absent from the
+    # hardware, while the Explicit float(...) spelling, whose round runs violation-free, rejected the typo.
+    # Binding now validates before the graft mutates anything, so both spellings reject identically.
+    class Implicit:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def helper(self, a: float, b: float) -> float:
+            return a + b
+
+        def step(self, x: float) -> float:
+            if x > 0.0:
+                v = x
+            else:
+                v = 2**53 + 1
+            self.t = v
+            if x > 1.0:
+                self.helper(x, 1.0, 2.0)  # type: ignore[call-arg]
+            return x
+
+    class Explicit:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def helper(self, a: float, b: float) -> float:
+            return a + b
+
+        def step(self, x: float) -> float:
+            if x > 0.0:
+                v = x
+            else:
+                v = 2**53 + 1
+            self.t = float(v)
+            if x > 1.0:
+                self.helper(x, 1.0, 2.0)  # type: ignore[call-arg]
+            return x
+
+    for kernel in (Implicit().step, Explicit().step):
+        error = _reject(kernel, "too many positional arguments")
+        assert error.location is not None and error.location.line is not None
+        assert "self.helper(x, 1.0, 2.0)" in error.location.line
+
+
+def test_call_arity_typo_rejects_without_any_violation() -> None:
+    # The control pin for the P1 pair above: with no store violation in flight the same typo rejects
+    # immediately from the worklist, before any deferral machinery is involved.
+    class Plain:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def helper(self, a: float, b: float) -> float:
+            return a + b
+
+        def step(self, x: float) -> float:
+            self.t = x
+            if x > 1.0:
+                self.helper(x, 1.0, 2.0)  # type: ignore[call-arg]
+            return x
+
+    error = _reject(Plain().step, "too many positional arguments")
+    assert error.location is not None and error.location.line is not None
+    assert "self.helper(x, 1.0, 2.0)" in error.location.line

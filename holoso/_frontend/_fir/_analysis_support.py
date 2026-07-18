@@ -376,6 +376,48 @@ def _concrete_fact(fact: Fact) -> StaticValue | None:
     return None
 
 
+_MAX_DECIMAL_DIGITS = 4000  # conservatively below CPython's default 4300-digit int-to-decimal conversion cap
+
+
+def _int_spelling(value: int) -> str:
+    # 30103/100000 slightly overestimates log10(2), so the digit bound errs toward hex, never toward the cap.
+    if value.bit_length() * 30103 // 100000 + 1 > _MAX_DECIMAL_DIGITS:
+        return f"{value:#x}"
+    return str(value)
+
+
+def render_interpolation(value: object) -> str:
+    """
+    The f-string spelling of a folded interpolation: format() at the top level and repr() inside containers,
+    exactly as Python nests them, except that an integer wide enough to overflow CPython's int-to-decimal digit
+    cap spells in hex -- folding admits such integers, so the rule applies recursively through every container
+    as_python can produce lest a nested wide element crash the render with the raw conversion ValueError.
+    """
+    return _render_value(value, nested=False)
+
+
+def _render_value(value: object, nested: bool) -> str:
+    match value:
+        case bool():
+            return str(value)
+        case int():
+            return _int_spelling(value)
+        case list():
+            return f"[{', '.join(_render_value(item, nested=True) for item in value)}]"
+        case tuple() if len(value) == 1:
+            return f"({_render_value(value[0], nested=True)},)"
+        case tuple():
+            return f"({', '.join(_render_value(item, nested=True) for item in value)})"
+        case range():
+            bounds = [value.start, value.stop] + ([value.step] if value.step != 1 else [])
+            return f"range({', '.join(_int_spelling(bound) for bound in bounds)})"
+        case slice():
+            parts = (value.start, value.stop, value.step)
+            return f"slice({', '.join(_render_value(part, nested=True) for part in parts)})"
+        case _:
+            return repr(value) if nested else format(value)
+
+
 def _concat_seqs(bin_op: BinOp, lhs: Fact, rhs: Fact) -> Fact | None:
     if bin_op is BinOp.MUL:
         seq, count = (lhs, rhs) if _seq_side(lhs) is not None else (rhs, lhs)
@@ -739,13 +781,13 @@ def enforce_storage_schemas(
     producer cut by the deferral cascade -- is STALE, its entry expires, and the deferral that cut it surfaces
     as the true stable rejection. An origin with no store left in any executable block is STRANDED -- its own
     violation's cascade removed the block, so nothing downstream can testify -- and its entry reports, ranked
-    after every in-graph violation and before any deferred rejection, lexicographically among stranded
-    siblings. Runs strictly after the round stabilizes: SCCP discovers executable predecessors late, so a
-    mid-flight verdict would be order-dependent. A compiler scope reset (an unchecked UnbindPlace: a
-    comprehension entry, an unroll trip's target prelude) clears the binding for a fresh per-execution schema,
-    while a user ``del`` does not: variables stay strongly typed across ``del``. When no store violates, the
-    returned op ids are the local stores whose value converts int->float on the store edge: the emission plan
-    for the store-edge conversion.
+    after every in-graph violation and before any deferred rejection, in source order among stranded siblings
+    with the message only a tie-break. Runs strictly after the round stabilizes: SCCP discovers executable
+    predecessors late, so a mid-flight verdict would be order-dependent. A compiler scope reset (an unchecked
+    UnbindPlace: a comprehension entry, an unroll trip's target prelude) clears the binding for a fresh
+    per-execution schema, while a user ``del`` does not: variables stay strongly typed across ``del``. When no
+    store violates, the returned op ids are the local stores whose value converts int->float on the store edge:
+    the emission plan for the store-edge conversion.
     """
     violations: list[tuple[tuple[int, int], str, OriginStack]] = []
     conversions: set[int] = set()
@@ -790,7 +832,7 @@ def enforce_storage_schemas(
         raise AnalysisRejection(message, origin)
     stranded = [(message, origin) for origin, message in pending_bridge.items() if origin not in surviving_origins]
     if stranded:
-        message, origin = min(stranded, key=lambda entry: (entry[0], source_position(entry[1])))
+        message, origin = min(stranded, key=lambda entry: (source_position(entry[1]), entry[0]))
         raise AnalysisRejection(message, origin)
     return conversions
 

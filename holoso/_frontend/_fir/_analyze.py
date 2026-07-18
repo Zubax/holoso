@@ -151,6 +151,7 @@ from ._analysis_support import (
     enforce_storage_schemas,
     join_facts,
     join_schemas,
+    render_interpolation,
     schema_of_fact,
 )
 from ._opsem import BinOp, UnOp, static_binop, static_compare, static_truth, static_unop
@@ -191,6 +192,14 @@ class _PropertyRead:
     """A component attribute read that resolved to a ``@property`` getter, to be desugared into a bound call."""
 
     getter: object  # a ``MethodType(fget, component)`` bound to the exact receiver
+
+
+@dataclass(frozen=True, slots=True)
+class _DefaultArgument:
+    """A defaulted parameter's value, admitted while binding validates so the graft mutates only a proven call."""
+
+    value: object
+    admitted: StaticValue | None
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -509,7 +518,7 @@ class Analyzer:
         hash-seed-stable -- the worklist order is driven by integer block ids and the deferral walk by the
         preorder -- they just differ from each other; unifying them means deferring every rejection to
         stabilization, which today breaks call-expansion invariants (a deferred graft leaves executable SOURCE
-        stores untransferred) and lets an ownerless deferral silently compile, so it needs its own redesign.
+        stores untransferred), so it needs its own redesign.
         """
         if not self._transfer_deferrals:
             return
@@ -522,9 +531,16 @@ class Analyzer:
             error = self._transfer_deferrals.get(id(block.terminator))
             if error is not None:
                 raise error
-        # An ownerless leftover is stale by construction: a call graft moved its terminator into a continuation
-        # block the stable round never reached, so the rejection was derived on a path that no longer executes.
-        _logger.info("discarding %d ownerless transfer deferral(s)", len(self._transfer_deferrals))
+        # A leftover is discardable only because its op provably sits on a dead path: binding validation
+        # precedes the graft's destructive mutation and the graft re-keys the one op it destroys, so every key
+        # still names an op or terminator in the graph -- necessarily in a block the stable round never
+        # reached, where the rejection was derived on facts that no longer flow (or an executable clone
+        # re-derived it and ranked above). A key absent from the whole graph would be a rejection silently
+        # lost, which this assert makes a loud invariant violation instead.
+        anchored = {id(op) for graph_block in result.unit.blocks.values() for op in graph_block.ops}
+        anchored |= {id(graph_block.terminator) for graph_block in result.unit.blocks.values()}
+        assert anchored >= set(self._transfer_deferrals), "a transfer deferral key left the graph"
+        _logger.info("discarding %d dead-path transfer deferral(s)", len(self._transfer_deferrals))
 
     def _reconcile_bridge(self) -> None:
         # A violating verdict enters (superseding any older entry for its origin, the earliest-recorded message
@@ -740,12 +756,7 @@ class Analyzer:
             concrete = _concrete_fact(env.get(Local(part)))
             if concrete is None:
                 return "raise with a runtime-interpolated message"
-            value = as_python(concrete)
-            if isinstance(value, int) and not isinstance(value, bool) and value.bit_length() > 64:
-                # Folding admits integers far past CPython's int-to-decimal digit cap; hex is uncapped.
-                rendered.append(f"{value:#x}")
-            else:
-                rendered.append(format(value))
+            rendered.append(render_interpolation(as_python(concrete)))
         return "".join(rendered)
 
     def _finalize(self, result: ResidualUnit) -> None:
@@ -2531,6 +2542,45 @@ class Analyzer:
             ) from None
         if len(unit.blocks) > _MAX_BLOCKS:
             raise AnalysisRejection("expansion fuel exhausted", call.origin)
+        # Binding validates COMPLETELY before the graft mutates anything: a rejection raised past the point
+        # where the call op leaves the CFG would be deferred under a key no stabilization walk can find, and an
+        # open deferral net that later stabilizes legal would then silently compile the invalid call away.
+        params = list(template.params)
+        bound_params = params[1:] if template.bound_self is not None else params
+        positional = list(call.args)
+        keyword = dict(call.kwargs)
+        fn_object = target.__func__ if isinstance(target, types.MethodType) else target
+        raw_defaults = fn_object.__defaults__ or ()
+        kw_defaults = fn_object.__kwdefaults__ or {}
+        self_offset = 1 if template.bound_self is not None else 0
+        positional_count = fn_object.__code__.co_argcount - self_offset
+        positional_only = {p.name for p in bound_params[: max(0, fn_object.__code__.co_posonlyargcount - self_offset)]}
+        positional_params = bound_params[:positional_count]
+        default_by_name: dict[str, object] = dict(
+            zip((p.name for p in positional_params[len(positional_params) - len(raw_defaults) :]), raw_defaults)
+        )
+        default_by_name.update(kw_defaults)
+        if len(positional) > len(positional_params):
+            raise AnalysisRejection("too many positional arguments", call.origin)
+        sources: list[BindingId | _DefaultArgument] = []
+        for offset, param in enumerate(bound_params):
+            if offset < len(positional):
+                if param.name in keyword:
+                    raise AnalysisRejection(f"duplicate argument '{param.name}'", call.origin)
+                sources.append(positional[offset])
+            elif param.name in keyword and param.name not in positional_only:
+                sources.append(keyword.pop(param.name))
+            elif param.name in default_by_name:
+                default_value = default_by_name[param.name]
+                if isinstance(default_value, np.ndarray) and default_value.ndim == 0:
+                    raise AnalysisRejection(
+                        "a 0-dimensional array is not supported; use the scalar directly", call.origin
+                    )
+                sources.append(_DefaultArgument(default_value, admit(default_value)))
+            else:
+                raise AnalysisRejection(f"missing argument '{param.name}'", call.origin)
+        if keyword:
+            raise AnalysisRejection(f"unexpected keyword argument '{next(iter(keyword))}'", call.origin)
         binding_map: dict[BindingId, BindingId] = {}
 
         def fresh(binding: BindingId) -> BindingId:
@@ -2578,54 +2628,32 @@ class Analyzer:
             self._block_ancestry[clone.id] = ancestry + (key,)
         # The call site becomes: bind arguments -> jump into the graft; the continuation reads the return local.
         block.ops = block.ops[:index]
-        params = list(template.params)
-        positional = list(call.args)
-        keyword = dict(call.kwargs)
         if template.bound_self is not None:
             self_temp = BindingId(f"%s{self._binding_serial}", self._binding_serial)
             self._binding_serial += 1
             block.ops.append(LoadRef(self_temp, template.bound_self, call.origin))
             block.ops.append(StorePlace(Local(fresh(params[0])), self_temp, call.origin, StoreRole.SOURCE))
-            params = params[1:]
-        fn_object = target.__func__ if isinstance(target, types.MethodType) else target
-        raw_defaults = fn_object.__defaults__ or ()
-        kw_defaults = fn_object.__kwdefaults__ or {}
-        self_offset = 1 if template.bound_self is not None else 0
-        positional_count = fn_object.__code__.co_argcount - self_offset
-        positional_only = {p.name for p in params[: max(0, fn_object.__code__.co_posonlyargcount - self_offset)]}
-        positional_params = params[:positional_count]
-        default_by_name: dict[str, object] = dict(
-            zip((p.name for p in positional_params[len(positional_params) - len(raw_defaults) :]), raw_defaults)
-        )
-        default_by_name.update(kw_defaults)
-        if len(positional) > len(positional_params):
-            raise AnalysisRejection("too many positional arguments", call.origin)
-        for offset, param in enumerate(params):
-            if offset < len(positional):
-                source = positional[offset]
-                if param.name in keyword:
-                    raise AnalysisRejection(f"duplicate argument '{param.name}'", call.origin)
-            elif param.name in keyword and param.name not in positional_only:
-                source = keyword.pop(param.name)
-            elif param.name in default_by_name:
-                default_value = default_by_name[param.name]
-                if isinstance(default_value, np.ndarray) and default_value.ndim == 0:
-                    raise AnalysisRejection(
-                        "a 0-dimensional array is not supported; use the scalar directly", call.origin
-                    )
-                admitted = admit(default_value)
+        for param, source in zip(bound_params, sources, strict=True):
+            if isinstance(source, _DefaultArgument):
                 default_temp = BindingId(f"%d{self._binding_serial}", self._binding_serial)
                 self._binding_serial += 1
-                if admitted is not None:
-                    block.ops.append(LoadConst(default_temp, admitted, call.origin))
+                if source.admitted is not None:
+                    block.ops.append(LoadConst(default_temp, source.admitted, call.origin))
                 else:
-                    block.ops.append(LoadRef(default_temp, default_value, call.origin))
-                source = default_temp
+                    block.ops.append(LoadRef(default_temp, source.value, call.origin))
+                argument = default_temp
             else:
-                raise AnalysisRejection(f"missing argument '{param.name}'", call.origin)
-            block.ops.append(StorePlace(Local(fresh(param)), source, call.origin, StoreRole.SOURCE))
-        if keyword:
-            raise AnalysisRejection(f"unexpected keyword argument '{next(iter(keyword))}'", call.origin)
+                argument = source
+            block.ops.append(StorePlace(Local(fresh(param)), argument, call.origin, StoreRole.SOURCE))
         block.terminator = Jump(block_map[template.entry], call.origin)
         continuation.ops.insert(0, LoadPlace(call.dst, Local(return_local), call.origin))
+        displaced = self._transfer_deferrals.pop(id(call), None)
+        if displaced is not None:
+            # The graft destroys the one op it replaces, so an earlier visit's deferral re-keys to the
+            # continuation's first op (the return read, carrying the call origin) rather than dangling off the
+            # graph: the continuation's own execution then clears or supersedes it exactly as a clean revisit
+            # of the call would have, and a dead continuation leaves it provably on a dead path.
+            anchor = continuation.ops[0]
+            assert id(anchor) not in self._transfer_deferrals
+            self._transfer_deferrals[id(anchor)] = displaced
         return True

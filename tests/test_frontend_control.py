@@ -1030,6 +1030,43 @@ def test_raise_interpolating_a_wide_folded_integer_is_a_located_rejection() -> N
     assert excinfo.value.location is not None and "raise ValueError" in (excinfo.value.location.line or "")
 
 
+def test_raise_interpolating_a_65_bit_integer_stays_decimal() -> None:
+    # Round-7 regression: the hex spelling is for integers past the digit cap only -- a 65-bit constant is a
+    # ~20-digit number the user wrote in decimal, and the round-6 fix was rewriting it as hex.
+    class Probe:
+        def __init__(self) -> None:
+            self.armed = True
+
+        def step(self, advance: bool) -> bool:
+            mask = 2**64 + 1
+            if advance:
+                raise ValueError(f"mask={mask}")
+            return self.armed
+
+    with pytest.raises(UnsupportedConstruct, match=f"mask={2**64 + 1}") as excinfo:
+        lower(Probe().step)
+    assert "0x" not in str(excinfo.value)
+
+
+def test_raise_interpolating_a_container_holding_a_wide_integer_is_located() -> None:
+    # Round-7 regression: the digit-cap safety is recursive. A container interpolation renders its elements
+    # through repr, so a wide element used to crash the render with the raw 4300-digit ValueError.
+    class Probe:
+        def __init__(self) -> None:
+            self.armed = True
+
+        def step(self, advance: bool) -> bool:
+            pair = (3, [(1 << 20000) - 1])
+            if advance:
+                raise ValueError(f"pair={pair}")
+            return self.armed
+
+    with pytest.raises(UnsupportedConstruct, match="pair=") as excinfo:
+        lower(Probe().step)
+    assert f"pair=(3, [{(1 << 20000) - 1:#x}])" in str(excinfo.value)
+    assert excinfo.value.location is not None and "raise ValueError" in (excinfo.value.location.line or "")
+
+
 def _raises_under_a_dynamic_guard(a: float) -> float:
     if a > 0.0:
         raise ValueError("positive")

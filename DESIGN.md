@@ -358,7 +358,7 @@ superseded and the merge-chartered store-edge conversion stays legal in either a
 stabilization the surviving bridge entries split stranded from stale: an origin with no store left in any
 executable block is STRANDED -- its own violation's cascade removed the block, nothing downstream can testify
 -- and reports its bridged message, ranked after every in-graph violation, before any deferred rejection, and
-lexicographically among stranded siblings; an origin whose store survived but executed only unbound is STALE
+in source order among stranded siblings; an origin whose store survived but executed only unbound is STALE
 -- the deferral that cut its value is the true stable rejection -- and its entry expires. A pending store
 violation -- a local rebind, a state-store obligation, or a conversion failure alike -- outranks every
 rejection deferred in the same round, including a user raise, so the causal store reports rather than any
@@ -370,7 +370,10 @@ rejection the worklist encounters (with a min-by-str pick among the places of on
 kernel with several rejections can therefore report a different one depending on whether an unrelated
 transient violation forced the deferral path. Both selections are deterministic and hash-seed-stable;
 unifying them would mean deferring every rejection to stabilization, which today breaks call-expansion
-invariants and can silently compile an ownerless rejection, so it is left to its own redesign.
+invariants, so it is left to its own redesign. A deferred rejection can never vanish with the graph it was
+derived on: call expansion validates argument binding completely before it mutates the working graph and
+re-keys a deferral off the one op the graft destroys, so every deferral key stays anchored in the graph and
+the only entries discarded at stabilization are those provably on paths the stable round never reached.
 A failing state live-in join never cuts a round short: the leaf freezes
 at its last joinable live-in and the failure reports only at stabilization, ranked below every recorded
 obligation, so each verdict -- the exactness ruling of a store-edge conversion included -- derives from the
