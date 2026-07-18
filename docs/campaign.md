@@ -359,17 +359,16 @@ nested regression shapes) · S2.7 cb96369 (T1 getattr trim; 8-spelling probe bat
 058f83e→amended (all three rounds' accepted findings; Codex's classmethod(getattr) corner declined as hostile
 construction).
 
-S2.8 open (T2+T3): T2 sites located — analyzer dispatch :998, _elementwise_compare :1347, emit mask block
-~:838-866, owned test test_matrix.py:1376 → becomes the rejection test; fuzz generator confirmed unable to emit
-array comparisons (X1). T3 plan: single-door creation rejections (builder global load, np.array factory, reshape
-target, state reset) + delete ~13 scalarize/guard sites; rank-0 ruling covers x[()] ("scalars take no subscript,
-() included"); DESIGN.md 0-d and mask passages rewritten. Remaining after: S2.9, S2.10 (+fastmath section),
-S2.11 (E1-lite + port-order tie), S2.12 (B1, Codex X2 first), S2.13 (G1, preserve/hoist guard ops), S2.14
-(hygiene + deferred S2.5 polish rewordings + exit grep), S2.15 (freeze, Codex X3, build-sharing constraint),
-S3 gate (memo→X4→spike SC1-SC4, failure default morph, canonical gate pre-authorized for the emitter swap),
-S4 per ruling.
+S2.8-S2.10 COMMITTED locally (dev-remote at ea3510e; the targeted poll advances dev to 05e4675 on the
+queued run's green, then pushes the trims stack as trial/s2-trims-stack — force the true tip over its 887f7b1
+push): a66e4e8 S2.8 (T2 masks kill A2, T3 0-d doors kill C1, S2.5-Codex consolidation) · f3d7dd3 S2.9 (T4-T8,
+net -543 lines, S2.8-pair consolidation) · 887f7b1 S2.10 (T9-T11, Fastmath policy section, H3 True-fold pin,
+None-__setattr__ presence fix) · 5e1d833 S2.9-round F1 (aliased slot descriptors refuse; both remaining
+corners declined on record). S2.10 pair reviewing at 5e1d833. Remaining skips: the three S2.11-blocked rows
+only. gh API lesson: never `gh run watch` (quota exhaustion); 5-minute single-call polls.
 
-QUEUED S2.8 consolidation (post-S2.9-agent, same-file): grafted-helper-default 0-d door (_analyze.py:2548-2556
-area, T3 message); non-reduction stub kwargs/arity tightening (matmul/dot/outer/trace: reject kwargs, check
-fixed arity; rename outer_ params to numpy's a/b); reword T2 rationale in the comment + DESIGN (utility grounds
-per scope-ruling §5, not "no consumer"). Codex S2.8 verdict pending.
+NEXT: S2.11 (delegated; consolidate its return with the S2.10 pair's): Origin gains file data; primary =
+origin[-1]; SynthesisError.location populated; port-order tie fix (TwoChildren reproducer in task #13);
+EmissionRejection threading; backend shared-live-out assert -> located; enable the three blocked skips.
+Then S2.12 B1 per docs/decisions/b1-design.md (X2 banked), S2.13 G1 (preserve/hoist, budgeted), S2.14 hygiene
+(+ the S2.5-deferred rewordings; exit grep), S2.15 freeze (X3; build-sharing constraint), S3 gate, S4.
