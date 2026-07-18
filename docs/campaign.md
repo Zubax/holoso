@@ -644,3 +644,17 @@ obligations alone); Y4 obligations persist across W/D rounds with per-op clean-r
 pattern); Y5 the aggregate-arm Unbound escape. SEQUENCING: commit the freeze infrastructure when its agent
 returns, cherry-pick Y-batch on top, REGENERATE the capture (one tool run; expected diff = diagnostics corpus
 only), then trial + round-5 + CI + seed matrix + tag freeze-1.
+
+S2.15 FREEZE COMMITTED 557fc69 (160 files, +43575): 35-case GoldenCase catalogue (25 inherited spec-format rows
+derived mechanically; 5 structural-only incl. FSCC/vector-polar/imu/shipped-EKF — shipped vs cosim EKF provably
+distinct artifacts 127/127 vs 125/125; format probe e6m18/e8m24/e8m36/e11m53; one deeply staged config);
+complete schema-versioned HIR serializer with a 14-dataclass field-set completeness guard; tests/golden/ 148
+files 1.88 MB (canonicalized version token; exact 7-metric ABI manifests; 32 immutable rejection modules; 7
+JSONL diagnostic families; bijection-checked index; provenance); test_golden gates it in the light suite; all
+17 frozen-schedule and 18 baseline rows migrated bit-for-bit (nothing vanished — full disposition in the agent
+report); refreeze tool with temp-tree generation + --write + --check-determinism. SEED MATRIX CERTIFIED: 8
+full-corpus seeds + 3 fresh-process repeats + 8 witnesses x seeds 0-63, ALL byte-identical (270 s); regenerated
+tree matches the capture 148/148. Suite 1859/2; mypy 201; black clean. Left-noted: C6/B1-accepting outcomes
+live in their behavior tests (a rejection corpus cannot pin accepts); container_digest null by design. AWAITING
+Y-batch (fixes-r4) -> cherry-pick -> capture REGENERATION (expected diff: diagnostics rows the Y-fixes change)
+-> trial push -> round-5 pair -> CI green -> tag freeze-1.
