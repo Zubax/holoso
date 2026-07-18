@@ -16,8 +16,6 @@ from pathlib import Path
 
 import pytest
 
-from holoso._backend.verilog._support import support_files
-
 from ._golden_cases import (
     CASES,
     DEFAULT_REGALLOC,
@@ -30,7 +28,6 @@ from ._golden_cases import (
     RejectionCase,
     build_artifacts,
     assert_within_ceiling,
-    canonicalize_version,
     capture_rejection,
     diagnostic_families,
     expected_files,
@@ -44,19 +41,21 @@ _REFREEZE_HINT = (
 
 
 @pytest.fixture(autouse=True)
-def _pinned_regalloc_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
+def _pinned_codegen_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
     """
-    Pin every register-allocation tuning knob to its shipped default so the frozen corpus is reproducible
-    regardless of the developer's environment (``HOLOSO_REGALLOC_EFFORT`` speed-ups, write-cap/price
-    experiments). The knobs are env-read-once at import, so the module attributes are patched to the named
-    defaults; ``build_artifacts`` additionally pins per case, but the fixture keeps any future direct
-    measurement in this module honest as well.
+    Pin every codegen tuning knob to its shipped default so the frozen corpus is reproducible regardless of the
+    developer's environment (``HOLOSO_REGALLOC_EFFORT`` speed-ups, write-cap/price experiments, an
+    ``HOLOSO_IFCONV_MAX_OPS`` budget override). The knobs are env-read-once at import, so the module attributes
+    are patched to the named defaults; ``build_artifacts`` additionally pins the regalloc knobs per case, but
+    the fixture keeps any future direct measurement in this module honest as well.
     """
+    import holoso._hir._if_convert as if_convert
     import holoso._lir._regalloc as regalloc
 
     monkeypatch.setattr(regalloc, "_REFINE_MAXITER", DEFAULT_REGALLOC.refine_maxiter)
     monkeypatch.setattr(regalloc, "_REG_REUSE_WRITE_CAP", DEFAULT_REGALLOC.reg_reuse_write_cap)
     monkeypatch.setattr(regalloc, "_REG_PRICE", DEFAULT_REGALLOC.reg_price)
+    monkeypatch.setattr(if_convert, "_IFCONV_MAX_OPS", 8)
 
 
 def _read_artifact(path: Path) -> str:
@@ -84,15 +83,12 @@ def test_case_matches_golden(case: GoldenCase) -> None:
     _assert_matches("Verilog", case.case_id, artifacts.verilog, GOLDEN_ROOT / "verilog" / f"{case.case_id}.v")
     _assert_matches("pre-optimize HIR", case.case_id, artifacts.hir_dump, GOLDEN_ROOT / "hir" / f"{case.case_id}.txt")
     _assert_matches("ABI manifest", case.case_id, artifacts.abi_json, GOLDEN_ROOT / "abi" / f"{case.case_id}.json")
+    # The support map gated here is the one this very generation RETURNED, so a build handing out a corrupt or
+    # incomplete library cannot pass on the strength of a separate, healthy generator call.
+    assert set(artifacts.support_files) == {"holoso_support.v"}, f"{case.case_id}: unexpected support-file set"
+    for name, text in artifacts.support_files.items():
+        _assert_matches("support library", case.case_id, text, GOLDEN_ROOT / "support" / name)
     assert_within_ceiling(case, artifacts.metrics)
-
-
-def test_support_library_matches_golden() -> None:
-    live = {name: canonicalize_version(text) for name, text in support_files().items()}
-    assert set(live) == {"holoso_support.v"}
-    _assert_matches(
-        "support library", "holoso_support.v", live["holoso_support.v"], GOLDEN_ROOT / "support" / "holoso_support.v"
-    )
 
 
 @cache
@@ -122,6 +118,30 @@ def test_rejection_matches_golden(rejection: RejectionCase) -> None:
                 lines.append(f"  {' ' * len(key)}    live {got.get(key)!r}")
         lines.append(_REFREEZE_HINT)
         pytest.fail("\n".join(lines))
+
+
+def test_hir_dump_spells_a_wide_integer_constant() -> None:
+    # Folding admits integers up to 65536 bits while CPython's default int-to-decimal cap is 4300 digits, so the
+    # corpus serializer must never spell a constant through the capped decimal conversion.
+    from holoso._frontend import lower
+    from holoso._hir import IntConst
+
+    from ._hirdump import HIR_DUMP_SCHEMA, dump_hir
+
+    class WideMask:
+        def __init__(self) -> None:
+            self.lfsr = 1
+
+        def step(self, advance: bool) -> bool:
+            if advance:
+                self.lfsr = (self.lfsr << 1) & ((1 << 20000) - 1)
+            return self.lfsr != 0
+
+    hir = lower(WideMask().step)
+    assert any(isinstance(node, IntConst) and node.value.bit_length() == 20000 for node in hir.nodes.values())
+    text = dump_hir(hir)
+    assert text.startswith(HIR_DUMP_SCHEMA)
+    assert f"const int {(1 << 20000) - 1:#x}" in text
 
 
 def test_corpus_bijection() -> None:

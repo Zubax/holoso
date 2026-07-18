@@ -36,7 +36,7 @@ from holoso._hir import BoolType, FloatType, IntType
 from holoso._hir._ir import Block, OutputPort, StateSlot
 from holoso._hir._types import Type
 
-HIR_DUMP_SCHEMA = "holoso-hir-dump/1"
+HIR_DUMP_SCHEMA = "holoso-hir-dump/2"
 
 # Completeness guard: a field added to any serialized dataclass must be spelled here (and the schema bumped),
 # never silently dropped from the dump.
@@ -55,6 +55,12 @@ _SERIALIZED_FIELDS: dict[type, set[str]] = {
     FloatConst: {"value"},
     BoolConst: {"value"},
     IntConst: {"value"},
+    FloatMulPow2: {"k"},
+    FloatRelational: {"op"},
+    IntRelational: {"op"},
+    FloatType: set(),
+    BoolType: set(),
+    IntType: set(),
 }
 for _cls, _expected in _SERIALIZED_FIELDS.items():
     assert {f.name for f in fields(_cls)} == _expected, f"{_cls.__name__} grew fields the HIR dump does not spell"
@@ -77,6 +83,12 @@ def _spell_float(value: float) -> str:
     return f"0x{bits:016x} ({value!r})"
 
 
+def _spell_int(value: int) -> str:
+    # Folding admits integers up to 65536 bits, far past CPython's default int-to-decimal digit cap; wide values
+    # render in hex, which the cap does not govern.
+    return str(value) if value.bit_length() <= 64 else f"{value:#x}"
+
+
 def _spell_const(const: Const) -> str:
     match const:
         case FloatConst(value=value):
@@ -84,7 +96,7 @@ def _spell_const(const: Const) -> str:
         case BoolConst(value=value):
             return f"const bool {'true' if value else 'false'}"
         case IntConst(value=value):
-            return f"const int {value}"
+            return f"const int {_spell_int(value)}"
         case _:
             raise AssertionError(f"constant {type(const).__name__} has no dump spelling")
 

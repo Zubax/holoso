@@ -510,6 +510,18 @@ class ContradictorySchema:
 type StorageSchema = ScalarSchema | ContradictorySchema
 
 
+@dataclass(frozen=True, slots=True)
+class StoreVerdict:
+    """
+    The outcome of one store op's last BOUND execution within the current round; ``message`` None means the
+    store conformed. An Unbound execution (a producer cut by the deferral cascade) records no verdict at all:
+    it is evidence of nothing, neither conformance nor violation.
+    """
+
+    message: str | None
+    origin: OriginStack
+
+
 def schema_of_fact(fact: Fact) -> ScalarSchema | None:
     """
     The storage schema a stored fact establishes for a source variable: its scalar SemType kind. The schema sees
@@ -710,39 +722,56 @@ def enforce_storage_schemas(
     executable_edges: set[tuple[BlockId, BlockId]],
     store_facts: Mapping[int, Fact],
     schemas_in: Mapping[BlockId, Mapping["Place", StorageSchema]],
-    state_violations: Mapping[int, tuple[str, OriginStack]],
+    store_verdicts: Mapping[int, StoreVerdict],
+    pending_bridge: Mapping[OriginStack, str],
 ) -> set[int]:
     """
     The one storage-schema resolution site, over the stabilized executable graph: every block's SOURCE stores
     replay against its stable entry schemas -- the environments the analysis flowed beside the facts
     (establishment, merge joins, the store-edge conversion, and compiler scope resets included) -- with each
     store's stable stored fact re-deriving its verdict, and all violations, local rebindings, store-edge
-    conversion failures, and the recorded state-store obligations alike, report as one located rejection at the
-    first violating store in CFG preorder (then-arm first, matching the Fail walk). Runs strictly after the
-    round stabilizes: SCCP discovers executable predecessors late, so a mid-flight verdict would be
-    order-dependent. A compiler scope reset (an unchecked UnbindPlace: a comprehension entry, an unroll trip's
-    target prelude) clears the binding for a fresh per-execution schema, while a user ``del`` does not:
-    variables stay strongly typed across ``del``. When no store violates, the returned op ids are the local
-    stores whose value converts int->float on the store edge: the emission plan for the store-edge conversion.
+    conversion failures, and the recorded state-store verdicts alike, report as one located rejection at the
+    first violating store in CFG preorder (then-arm first, matching the Fail walk). A store that executed only
+    with an Unbound value this round -- its producer cut by the very cascade its own earlier violation provoked
+    -- has no fresh verdict either way, so its standing obligation from the pending bridge re-attaches at the
+    store's own preorder rank; a store that is dead or conforming under the stable facts contributes nothing,
+    so its bridge entry silently expires. Runs strictly after the round stabilizes: SCCP discovers executable
+    predecessors late, so a mid-flight verdict would be order-dependent. A compiler scope reset (an unchecked
+    UnbindPlace: a comprehension entry, an unroll trip's target prelude) clears the binding for a fresh
+    per-execution schema, while a user ``del`` does not: variables stay strongly typed across ``del``. When no
+    store violates, the returned op ids are the local stores whose value converts int->float on the store edge:
+    the emission plan for the store-edge conversion.
     """
     violations: list[tuple[tuple[int, int], str, OriginStack]] = []
     conversions: set[int] = set()
     order = executable_preorder(unit, executable_blocks, executable_edges)
+
+    def standing_obligation(op: Op) -> str | None:
+        verdict = store_verdicts.get(id(op))
+        if verdict is not None:
+            return verdict.message
+        return pending_bridge.get(op.origin)
+
     for position, block_id in enumerate(order):
         assert block_id in schemas_in, "every executable-reachable block carries a flowed environment"
         env: dict[Place, StorageSchema] = dict(schemas_in[block_id])
         for index, op in enumerate(unit.blocks[block_id].ops):
             match op:
                 case PyStoreAttr():
-                    recorded = state_violations.get(id(op))
-                    if recorded is not None:
-                        violations.append(((position, index), *recorded))
+                    message = standing_obligation(op)
+                    if message is not None:
+                        violations.append(((position, index), message, op.origin))
                 case UnbindPlace(place=place, checked=False):
                     env.pop(place, None)
                 case StorePlace(place=place, role=StoreRole.SOURCE):
                     fact = store_facts.get(id(op))
                     assert fact is not None, "every executable SOURCE store was transferred this round"
                     assert isinstance(place, Local), "a SOURCE store binds a named local"
+                    if isinstance(fact, (Unbound, MaybeUnbound)):
+                        message = standing_obligation(op)
+                        if message is not None:
+                            violations.append(((position, index), message, op.origin))
+                        continue
                     schema, conformed, message = conform_local_store(env.get(place), place.binding.name, fact)
                     if schema is not None:
                         env[place] = schema

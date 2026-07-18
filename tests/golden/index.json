@@ -104,6 +104,23 @@
       }
     },
     {
+      "id": "fma_round_probe-e8m36",
+      "module_name": "fma_round_probe",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/fma_round_probe-e8m36.v",
+        "hir": "hir/fma_round_probe-e8m36.txt",
+        "abi": "abi/fma_round_probe-e8m36.json"
+      }
+    },
+    {
       "id": "format_probe-e11m53",
       "module_name": "format_probe",
       "float_format": "e11m53",

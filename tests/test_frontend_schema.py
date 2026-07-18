@@ -790,6 +790,147 @@ def test_state_obligation_survives_the_round_boundary() -> None:
     assert "self.count = value" in error.location.line
 
 
+def test_state_obligation_stands_when_the_cascade_cuts_the_stores_own_value() -> None:
+    # Round two's deferred shift leaves the store's OWN right-hand side unbound, so the store executes without a
+    # bound verdict; its round-one obligation must still report from the pending bridge instead of letting the
+    # provoked float-call rejection surface.
+    class Counter:
+        def __init__(self) -> None:
+            self.count = 0
+
+        def step(self, value: float) -> float:
+            out = float(self.count << 1)
+            self.count = out  # type: ignore[assignment]
+            return value
+
+    error = _reject(Counter().step, "state attribute 'count' stores an incompatible type")
+    assert error.location is not None and error.location.line is not None
+    assert "self.count = out" in error.location.line
+
+
+def test_state_obligation_stands_when_the_cascade_cuts_a_mixed_store_value() -> None:
+    # Same cascade, but the unbound value also feeds the return: the may-be-unbound rejection it provokes must
+    # defer behind the bridged obligation instead of aborting the round the moment the store goes unbound.
+    class Counter:
+        def __init__(self) -> None:
+            self.count = 0
+
+        def step(self, value: float) -> float:
+            out = float(self.count << 1)
+            self.count = value + out  # type: ignore[assignment]
+            return out
+
+    error = _reject(Counter().step, "state attribute 'count' stores an incompatible type")
+    assert error.location is not None and error.location.line is not None
+    assert "self.count = value + out" in error.location.line
+
+
+def test_stale_transient_exactness_verdict_never_outlives_the_stable_round() -> None:
+    # The store is a Known inexact integer only in round one; the stable facts leave a runtime integer, whose
+    # store-edge conversion is legal, and the store itself falls behind the rejected loop head. The bridged
+    # round-one message is stale and must be discarded, so both spellings report the real stable rejection.
+    class Implicit:
+        def __init__(self) -> None:
+            self.total = 0.0
+            self.k = 0
+
+        def step(self, x: float) -> float:
+            acc = 0.0
+            for _ in range(self.k):
+                acc = acc + x
+            self.total = self.k + (2**53 + 1)
+            self.k = self.k + 1
+            return acc
+
+    class Explicit:
+        def __init__(self) -> None:
+            self.total = 0.0
+            self.k = 0
+
+        def step(self, x: float) -> float:
+            acc = 0.0
+            for _ in range(self.k):
+                acc = acc + x
+            self.total = float(self.k + (2**53 + 1))
+            self.k = self.k + 1
+            return acc
+
+    for kernel in (Implicit().step, Explicit().step):
+        error = _reject(kernel, "call to range with runtime arguments")
+        assert "not exactly representable" not in str(error)
+        assert error.location is not None and error.location.line is not None
+        assert "for _ in range(self.k):" in error.location.line
+
+
+def test_violating_unroll_clone_reports_despite_a_conforming_sibling() -> None:
+    # Unroll clones of one store share an origin: trip 0 conforms while trip 1 violates, and the deferred float
+    # shift leaves ``out`` unbound in round two. The conforming clone must not open a window in the deferral net
+    # for the provoked may-be-unbound rejection; the violating clone's verdict reports at stabilization.
+    class Ternary:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def step(self, x: float) -> float:
+            out = 0.0
+            for v in range(2):
+                out = out + float(self.n << 1)
+                self.n = x if v == 1 else 0  # type: ignore[assignment]
+            return out
+
+    class Subscript:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def step(self, x: float) -> float:
+            out = 0.0
+            for v in range(2):
+                out = out + float(self.n << 1)
+                self.n = (0, x)[v]  # type: ignore[assignment]
+            return out
+
+    for kernel, store_line in (
+        (Ternary().step, "self.n = x if v == 1 else 0"),
+        (Subscript().step, "self.n = (0, x)[v]"),
+    ):
+        error = _reject(kernel, "state attribute 'n' stores an incompatible type")
+        assert error.location is not None and error.location.line is not None
+        assert store_line in error.location.line
+
+
+def test_the_source_earlier_violation_wins_across_the_round_bridge() -> None:
+    # An obligation that survives only on the bridge (its store's value is cut in round two) competes with a
+    # violation re-derived from the stable round: the bridge re-attaches at the store's own preorder rank, so
+    # the source-earlier violation wins in both the state-first and the local-first spelling.
+    class StateFirst:
+        def __init__(self) -> None:
+            self.a = 0
+
+        def step(self, x: float) -> float:
+            out = float(self.a << 1)
+            self.a = out  # type: ignore[assignment]
+            b = 1
+            b = x  # type: ignore[assignment]
+            return b
+
+    error = _reject(StateFirst().step, "state attribute 'a' stores an incompatible type")
+    assert error.location is not None and error.location.line is not None
+    assert "self.a = out" in error.location.line
+
+    class LocalFirst:
+        def __init__(self) -> None:
+            self.k = 0
+
+        def step(self, x: float) -> float:
+            b = True
+            b = self.k << 1  # type: ignore[assignment]
+            self.k = x  # type: ignore[assignment]
+            return x
+
+    error = _reject(LocalFirst().step, "variable 'b' is a bool and cannot be rebound to an int")
+    assert error.location is not None and error.location.line is not None
+    assert "b = self.k << 1" in error.location.line
+
+
 def test_cascade_unbound_does_not_violate_an_aggregate_slot() -> None:
     # The deferred shift leaves its consumer chain unbound; the Unbound reaching the aggregate slot must not
     # manufacture a scalar-store violation that outranks the causal store in preorder.

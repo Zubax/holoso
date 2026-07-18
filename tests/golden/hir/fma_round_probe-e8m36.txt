@@ -1,0 +1,31 @@
+holoso-hir-dump/2
+inputs: v0 v1
+nodes:
+  v0 = input x: float
+  v1 = input y: float
+  v2 = op mul(v0, v1): float
+  v3 = const float 0x3fd0000000000000 (0.25)
+  v4 = op add(v2, v3): float
+  v5 = op round(v4): float
+  v6 = op float_to_int(v5): int
+  v7 = op int_to_float(v6): float
+  v8 = const float 0x3fe0000000000000 (0.5)
+  v9 = op mul(v7, v8): float
+  v10 = op neg(v9): float
+  v11 = op add(v4, v10): float
+  v12 = op floor(v0): float
+  v13 = op float_to_int(v12): int
+  v14 = op int_to_float(v13): float
+  v15 = op add(v11, v14): float
+blocks:
+  block b0:
+    phis:
+    ops: v2 v4 v5 v6 v7 v9 v10 v11 v12 v13 v14 v15
+    term: jump b1
+  block b1:
+    phis:
+    ops:
+    term: ret
+outputs:
+  out_0 = v15
+state_slots:

@@ -22,7 +22,7 @@ line numbers recorded in `diagnostics/*.jsonl` stay true by construction. To ret
 and registry entry together; to change a kernel, add a new case instead.
 
 `provenance.json` records the capturing CPython and key dependency versions. Its `container_digest` field is
-null on local captures by design: CI fills it when a capture is made inside a pinned container, and there is
-no way to carry a comment in JSON, so this file documents the convention instead.
+null and stays null until a pinned-container capture flow exists; no mechanism fills it today. There is no way
+to carry a comment in JSON, so this file documents the convention instead.
 
 All files are UTF-8 with LF line endings. Everything here is generated or immutable input; do not hand-edit.

@@ -345,15 +345,22 @@ contract, enforces flavor, geometry, and per-cell kinds at its store site (below
 beside the facts, since the store-edge conversion needs it exactly where the store executes, but the verdict is
 never per-visit: optimistic analysis discovers executable predecessors late, so store obligations resolve only
 after the state fixed point, and when several stores violate, the one reported is the first executable store in
-CFG preorder. Obligations survive the fixed point's round boundaries: a recorded violation persists, keyed by its
-origin, until a store at that origin conforms again, so no round reset loses the causal store. A pending store
-violation -- a local rebind, a state-store obligation, or a conversion failure alike -- outranks every rejection
-deferred in the same round, including a user raise, so the causal store reports rather than any secondary failure
-its carried fact provoked; the deferral spans every layer a carried fact can reach -- operator transfers,
-missing-library refusals, environment joins at control-flow merges, and the state live-in join alike. A failing
-state live-in join never cuts a round short: the leaf freezes at its last joinable live-in and the failure
-reports only at stabilization, ranked below every recorded obligation, so each verdict -- the exactness ruling
-of a store-edge conversion included -- derives from the stabilized facts, never from a transient early round.
+CFG preorder. Across the fixed point's round boundaries, still-standing violations fold into an origin-keyed
+pending bridge whose sole purpose is keeping the deferral net closed -- it is never popped mid-round and is
+never a verdict source by itself. Verdicts come exclusively from the stable round: each store's last execution
+with a bound value settles it (an Unbound value, the mark of a producer cut by the deferral cascade, is
+evidence of nothing), a store that executed only unbound re-attaches its bridged obligation at its own preorder
+rank, and every other bridge entry expires -- a store gone dead or legal under the stable facts legitimately
+stops reporting, letting the real stable rejection surface. A pending store violation -- a local rebind, a
+state-store obligation, or a conversion failure alike -- outranks every rejection deferred in the same round,
+including a user raise, so the causal store reports rather than any secondary failure its carried fact
+provoked; the deferral spans every layer a carried fact can reach -- operator transfers, missing-library
+refusals, environment joins at control-flow merges, and the state live-in join alike, and when every obligation
+resolves clean, the deferred rejection surfaced is the first in executable preorder, exactly what a
+violation-free run would have raised. A failing state live-in join never cuts a round short: the leaf freezes
+at its last joinable live-in and the failure reports only at stabilization, ranked below every recorded
+obligation, so each verdict -- the exactness ruling of a store-edge conversion included -- derives from the
+stabilized facts, never from a transient early round.
 Widening at merges is untouched:
 phi and select arms, comparison operands, explicit casts, return conversion, and mixed arithmetic promote exactly
 as before (a merge rounds into the carrier; only the store edge is exact), so `x = 0; x = input_float` rejects
@@ -1023,8 +1030,10 @@ configuration, initiation interval, and the exact internal schedule metrics), an
 immutable rejection kernels with their rendered public rejections. The typed case catalogue in
 `tests/_golden_cases.py` is the single source of truth -- the bundled example matrix derives from the shared
 example registry, extended by structural-only cases, a compact format-sensitive probe across datapath widths,
-and a deeply staged operator configuration -- and `tests/test_golden.py` gates every case byte-for-byte,
-including a bijection check that fails on stale artifacts.
+a deeply staged operator configuration, and a probe with fround and ffma configured (round() lowering and FMA
+contraction are configuration-dependent codegen) -- and `tests/test_golden.py` gates every case byte-for-byte,
+the support library as returned by each case's own generation included, with a bijection check that fails on
+stale artifacts.
 
 Goldens change only through `tools/refreeze_golden.py --write`, in the same commit as the causing code and
 DESIGN.md change; the tool validates the regenerated corpus fully and its `--check-determinism` mode certifies

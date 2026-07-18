@@ -122,6 +122,7 @@ from ._analysis_support import (
     DeferredRejection,
     LibraryAnalysisRejection,
     StorageSchema,
+    StoreVerdict,
     _concat_seqs,
     _concrete_fact,
     _contract_structure,
@@ -371,13 +372,15 @@ class Analyzer:
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
         self._unroll_seeds: dict[OriginStack, Fact] = {}  # survives rounds: the joined facts of restarted headers
         self._store_origins: dict[StateLeaf, OriginStack] = {}
-        self._store_schema_violations: dict[int, tuple[str, OriginStack]] = {}  # op id -> deferred store obligation
-        self._local_store_violations: dict[int, tuple[str, OriginStack]] = {}  # op id -> deferred local obligation
-        # Obligations outlive the per-round dicts above: op ids are round-scoped (grafted and cloned ops are fresh
-        # objects every round), so a round boundary folds every still-pending violation into this origin-keyed map
-        # -- origins are re-attributed identically across rounds, the same identity the unroll seeds key on -- and
-        # a store conforming again under any op with that origin supersedes the entry with its fresh verdict.
-        self._carryover_violations: dict[OriginStack, str] = {}
+        self._store_verdicts: dict[int, StoreVerdict] = {}  # op id -> the last bound execution's verdict this round
+        # The pending bridge keeps the deferral net closed across round boundaries and nothing more: op ids are
+        # round-scoped (grafted and cloned ops are fresh objects every round), so each round boundary reconciles
+        # the still-standing verdicts into this origin-keyed map -- origins are re-attributed identically across
+        # rounds, the same identity the unroll seeds key on. It is never popped mid-round (a conforming unroll
+        # clone must not open a window for its violating same-origin sibling) and is never a verdict source by
+        # itself: at stabilization the resolution walk re-attaches an entry only to a store that executed without
+        # any bound verdict, and discards the rest (a store gone dead or legal legitimately stops reporting).
+        self._pending_bridge: dict[OriginStack, str] = {}
         self._store_facts: dict[int, Fact] = {}  # SOURCE store op id -> its stored fact at the last visit
         self._transfer_deferrals: dict[int, LocatedRejection] = {}  # op id -> rejection deferred behind a store
         self._bound_methods: dict[tuple[int, str], object] = {}
@@ -434,15 +437,17 @@ class Analyzer:
                     deferred.offer(error)
             if new_w == self._runtime_state and new_d == self._state_livein:
                 _logger.info("state fixpoint stable after %d round(s): %d runtime leaves", round_index + 1, len(new_w))
+                self._check_storage_schemas(result)
+                deferred.raise_if_deferred()
+                self._raise_transfer_deferrals(result)
+                self._reject_executable_fails(result)
+                # The chain splice runs after the rejection walks, which rank deferrals by the identity of the
+                # ops and terminators they were recorded under; swapping a cached header's StaticFor for the
+                # Jump earlier would orphan a join-layer deferral keyed on the replaced terminator.
                 for header_id, (_, chain_entry) in self._unroll_cache.items():
                     header = result.unit.blocks[header_id]
                     assert isinstance(header.terminator, StaticFor)
                     header.terminator = Jump(chain_entry, header.terminator.origin)
-                self._check_storage_schemas(result)
-                self._raise_carryover_violations()
-                deferred.raise_if_deferred()
-                self._raise_transfer_deferrals()
-                self._reject_executable_fails(result)
                 _validate(
                     result,
                     self._concrete_calls
@@ -468,43 +473,56 @@ class Analyzer:
             result.executable_edges,
             self._store_facts,
             {block_id: env.schemas for block_id, env in result.block_in.items()},
-            self._store_schema_violations,
+            self._store_verdicts,
+            self._pending_bridge,
         )
 
     def _violations_pending(self) -> bool:
-        return bool(self._store_schema_violations or self._local_store_violations or self._carryover_violations)
+        return bool(self._pending_bridge) or any(
+            verdict.message is not None for verdict in self._store_verdicts.values()
+        )
 
-    def _raise_carryover_violations(self) -> None:
-        """
-        Obligations carried over from earlier rounds whose stores never conformed again: their blocks fell behind
-        a deferred op or terminator (executability only ever grows across rounds, so nothing else can strand
-        them), leaving no preorder rank in the final graph -- the lexicographically least surfaces instead.
-        """
-        deferred = DeferredRejection()
-        for origin, message in self._carryover_violations.items():
-            deferred.offer(AnalysisRejection(message, origin))
-        deferred.raise_if_deferred()
-
-    def _raise_transfer_deferrals(self) -> None:
+    def _raise_transfer_deferrals(self, result: ResidualUnit) -> None:
         """
         Rejections deferred behind a pending store violation whose ops never went clean again. Reached only when
-        the resolution walk, the carryover obligations, and the state-join deferrals all came up clean (the
-        pending violations were transient), so each lingering entry is a real rejection re-derived on the op's
-        stable facts; the lexicographically least surfaces, matching the DeferredRejection convention.
+        the resolution walk and the state-join deferrals all came up clean (the pending violations were
+        transient, or their stores fell dead), so each lingering entry is a real rejection re-derived on the
+        op's stable facts. The one surfaced is the first in executable preorder -- the raise a violation-free
+        run would have hit first -- so deferring and immediately raising report the same diagnostic.
         """
-        deferred = DeferredRejection()
-        for error in self._transfer_deferrals.values():
-            deferred.offer(error)
-        deferred.raise_if_deferred()
+        if not self._transfer_deferrals:
+            return
+        for block_id in executable_preorder(result.unit, result.executable_blocks, result.executable_edges):
+            block = result.unit.blocks[block_id]
+            for op in block.ops:
+                error = self._transfer_deferrals.get(id(op))
+                if error is not None:
+                    raise error
+            error = self._transfer_deferrals.get(id(block.terminator))
+            if error is not None:
+                raise error
+        # An ownerless leftover is stale by construction: a call graft moved its terminator into a continuation
+        # block the stable round never reached, so the rejection was derived on a path that no longer executes.
+        _logger.info("discarding %d ownerless transfer deferral(s)", len(self._transfer_deferrals))
 
     def _reset_round(self) -> None:
-        for message, origin in (*self._store_schema_violations.values(), *self._local_store_violations.values()):
-            self._carryover_violations[origin] = message
+        # The bridge reconcile: a violating verdict enters (superseding any older entry for its origin), and an
+        # origin every verdict of which conformed leaves -- its obligation is demonstrably resolved. An origin
+        # with both (unroll clones of one source store) keeps the violating entry.
+        violating: dict[OriginStack, str] = {}
+        conforming: set[OriginStack] = set()
+        for verdict in self._store_verdicts.values():
+            if verdict.message is None:
+                conforming.add(verdict.origin)
+            else:
+                violating[verdict.origin] = verdict.message
+        for origin in conforming - set(violating):
+            self._pending_bridge.pop(origin, None)
+        self._pending_bridge.update(violating)
         self._block_ancestry = {}
         self._discovered_stores = set()
         self._store_origins = {}
-        self._store_schema_violations = {}
-        self._local_store_violations = {}
+        self._store_verdicts = {}
         self._store_facts = {}
         self._transfer_deferrals = {}
         self._concrete_calls = set()
@@ -963,18 +981,16 @@ class Analyzer:
                 stored = env.get(Local(src))
                 if op.role is StoreRole.SOURCE and isinstance(place, Local):
                     # The verdict belongs to the post-stabilization walk, which re-derives it from the stored
-                    # fact recorded here (stable at the last visit); the mid-flight violation record only gates
-                    # the downstream-rejection deferral. Conforming again supersedes any carried-over obligation
-                    # recorded under this origin in an earlier round.
+                    # fact recorded here (stable at the last visit); the mid-flight verdict record only gates
+                    # the downstream-rejection deferral and the round-boundary bridge reconcile. An Unbound
+                    # value is no evidence either way, so it leaves the recorded verdict untouched.
                     self._store_facts[id(op)] = stored
-                    self._carryover_violations.pop(op.origin, None)
+                    bound = not isinstance(stored, (Unbound, MaybeUnbound))
                     schema, stored, message = conform_local_store(env.schemas.get(place), place.binding.name, stored)
                     if schema is not None:
                         env.schemas[place] = schema
-                    if message is not None:
-                        self._local_store_violations[id(op)] = (message, op.origin)
-                    else:
-                        self._local_store_violations.pop(id(op), None)
+                    if bound:
+                        self._store_verdicts[id(op)] = StoreVerdict(message, op.origin)
                 env.set(place, stored)
             case UnbindPlace(place=place, checked=checked):
                 if checked and isinstance(env.get(place), (Unbound, MaybeUnbound)):
@@ -1219,14 +1235,11 @@ class Analyzer:
                     self._store_origins[leaf] = op.origin
                 self._discovered_stores.add((block.id, leaf))
                 # The reset fixes the slot schema; a violating store carries a fixpoint-stable fact onward and
-                # the recorded obligation reports after stabilization, at this store. Conforming again supersedes
-                # any carried-over obligation recorded under this origin in an earlier round.
-                self._carryover_violations.pop(op.origin, None)
+                # the recorded verdict reports after stabilization, at this store. An Unbound value is no
+                # evidence either way, so it leaves the recorded verdict untouched.
                 conformed, violation = conform_state_store(name, self._state_reset_fact(leaf), src_fact)
-                if violation is None:
-                    self._store_schema_violations.pop(id(op), None)
-                else:
-                    self._store_schema_violations[id(op)] = (violation, op.origin)
+                if not isinstance(src_fact, (Unbound, MaybeUnbound)):
+                    self._store_verdicts[id(op)] = StoreVerdict(violation, op.origin)
                 env.set(leaf, conformed)
             case PyCall(dst=dst, callee=callee):
                 return self._expand_call(unit, block, index, op, env)

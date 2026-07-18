@@ -1,4 +1,4 @@
-holoso-hir-dump/1
+holoso-hir-dump/2
 inputs: v0 v1 v2 v3 v4
 nodes:
   v0 = input x: float

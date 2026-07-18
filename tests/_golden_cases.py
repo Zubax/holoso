@@ -19,6 +19,7 @@ in ``tests/golden/diagnostics/<family>.jsonl``.
 
 import importlib.util
 import json
+import math
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -32,9 +33,11 @@ from holoso import (
     FAddOperator,
     FCmpOperator,
     FDivOperator,
+    FFmaOperator,
     FloatFormat,
     FMulILog2OperatorFamily,
     FMulOperator,
+    FRoundOperator,
     FSincosOperator,
     FSortOperator,
     HolosoError,
@@ -190,8 +193,7 @@ def _abi_ports(lir: Lir) -> list[dict[str, Any]]:
     return ports
 
 
-def render_abi(case: GoldenCase, lir: Lir, metrics: ScheduleMetrics) -> str:
-    ops = case.make_ops(case.fmt)
+def render_abi(case: GoldenCase, ops: OpConfig, lir: Lir, metrics: ScheduleMetrics) -> str:
     max_ii = lir.min_initiation_interval if len(lir.blocks) == 1 else None
     manifest = {
         "schema": ABI_SCHEMA,
@@ -228,6 +230,8 @@ def _spell_operator(operator: object | None) -> str | None:
 
 
 def build_artifacts(case: GoldenCase) -> GoldenArtifacts:
+    # make_ops is called exactly once and the instance threads through both the build and the ABI rendering, so
+    # the manifest can never describe a different operator set than the one the frozen RTL was emitted from.
     with pinned_regalloc(case.regalloc):
         kernel = case.make_kernel()
         pre_hir = lower_frontend(kernel)
@@ -242,7 +246,7 @@ def build_artifacts(case: GoldenCase) -> GoldenArtifacts:
         verilog=canonicalize_version(raw),
         verilog_raw=raw,
         hir_dump=dump_hir(pre_hir),
-        abi_json=render_abi(case, lir, metrics),
+        abi_json=render_abi(case, ops, lir, metrics),
         metrics=metrics,
         support_files={name: canonicalize_version(text) for name, text in verilog_output.support_files.items()},
     )
@@ -357,6 +361,28 @@ def format_probe(x: float, y: float) -> float:
     return acc - x
 
 
+def _fma_round_ops(fmt: FloatFormat) -> OpConfig:
+    return OpConfig(
+        FAddOperator(fmt),
+        FMulOperator(fmt),
+        FDivOperator(fmt),
+        FMulILog2OperatorFamily(fmt),
+        FCmpOperator(fmt),
+        fround=FRoundOperator(fmt),
+        ffma=FFmaOperator(fmt),
+    )
+
+
+def fma_round_probe(x: float, y: float) -> float:
+    """
+    The fround+ffma probe: the single-use product contracts into one fused multiply-add exactly when ffma is
+    configured, and round()/math.floor() lower onto the pooled rounding operator's mode immediates -- both are
+    configuration-dependent codegen no other golden case exercises.
+    """
+    acc = x * y + 0.25
+    return acc - round(acc) * 0.5 + math.floor(x)
+
+
 def _inherited_cases() -> list[GoldenCase]:
     cases = []
     for spec in SPECS:
@@ -437,7 +463,14 @@ def _probe_cases() -> list[GoldenCase]:
         make_ops=staged_ops,
         module_name="pid_staged",
     )
-    return [*probes, staged]
+    fma_round = GoldenCase(
+        case_id="fma_round_probe-e8m36",
+        make_kernel=lambda: fma_round_probe,
+        fmt=_F_WIDE,
+        make_ops=_fma_round_ops,
+        module_name="fma_round_probe",
+    )
+    return [*probes, staged, fma_round]
 
 
 CASES: list[GoldenCase] = [*_inherited_cases(), *_structural_cases(), *_probe_cases()]
