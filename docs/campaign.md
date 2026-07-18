@@ -751,3 +751,17 @@ Claude+Codex pair within a round stays, per the review-loop skill) -> consolidat
 No more overlapping the next implementation with an open review round; consults run standalone. Order after
 the in-flight agents return: (1) round-5 integration -> round-6 review -> consolidate -> tag freeze-1;
 (2) spike results -> X5 consult -> ruling -> arch-ruling.md; (3) S4 per ruling, strictly stepwise.
+
+Round-5 batch INTEGRATED: 3767e22 cherry-picked clean as f1f977f (targeted gate 157 green; mypy 201; black
+clean; delta from the batch's fully-verified tree is docs-only). Batch highlights: pending-bridge exactly per
+the ratified design (StoreVerdict per-op, bound executions only; bridge reconciles at round boundaries, never
+popped mid-round, never a verdict source; re-attached at stabilization only to stores that executed without a
+bound verdict, at their own preorder rank); two forced deltas documented (transfer-deferral pick is now
+executable-preorder — the old lexicographic min compared location-prefixed strings; the StaticFor->Jump splice
+moved after the rejection walks to preserve deferral key identity); all five reproducers now report the causal
+diagnostic with fail-befores observed via stash. Freeze hardenings B1-B8 all in; fma_round_probe-e8m36 case
+added (holoso_ffma/holoso_fround instantiated, contraction verified); refreeze diff surgically verified: 35
+hir header-line-only changes + the new case, ZERO drift in verilog/abi/diagnostics/support. Full suite at the
+batch tree 1877/2; heavy seed matrix deferred to the freeze-1 certification run. Trial: trial/s2-r5-stack at
+f1f977f; round-6 pair follows; tag freeze-1 on clean+green. Spike results HELD for X5 until this closes
+(sequential directive).
