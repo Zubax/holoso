@@ -336,11 +336,12 @@ def test_list_of_array_demotes_to_sequence_for_arithmetic() -> None:
         lower(via_list)
 
 
-def test_star_unpack_remainder_is_a_python_list() -> None:
-    # Regression: a starred target binds a plain list even when unpacking an array (PEP 3132), so arithmetic on the
-    # remainder must be rejected -- it must not inherit the source array's semantics.
+def test_list_built_from_array_elements_is_a_python_list() -> None:
+    # A list display over array elements binds a plain list, so + concatenates -- it must not inherit the source
+    # array's semantics. The spelling is deliberate: rest = v[1:] would stay an ndarray and turn + elementwise.
     def spread(v: Float64[np.ndarray, "3"]) -> float:
-        first, *rest = v
+        first = v[0]
+        rest = [v[1], v[2]]
         return (rest + rest)[0]  # type: ignore[no-any-return]
 
     _assert_python_matches_holoso(spread, np.array([5.0, 6.0, 7.0]))

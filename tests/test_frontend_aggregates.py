@@ -115,7 +115,9 @@ def test_star_unpacking_a_scalar_is_rejected() -> None:
     def f(a: float) -> float:
         return [*a]  # type: ignore[misc, return-value]
 
-    with pytest.raises(UnsupportedConstruct, match="expression Starred is not supported"):
+    with pytest.raises(
+        UnsupportedConstruct, match=r":\d+:\d+: a starred element is not supported in a list or tuple display"
+    ):
         lower(f)
 
 
@@ -130,15 +132,31 @@ def test_tuple_unpacking_routes_values() -> None:
     assert [o.value for o in hir.outputs] == [hir.input_ids[1], hir.input_ids[0]]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: T9 trim splits this test at S2.10")
-def test_starred_and_nested_unpacking_route_values() -> None:
+def test_nested_unpacking_routes_values() -> None:
+    def nested_target(a: float, b: float, c: float) -> list[float]:
+        first, (r0, r1) = a, (b, c)
+        return [first, r0, r1]
+
+    def staged(a: float, b: float, c: float) -> list[float]:
+        first, rest = a, [b, c]
+        r0, r1 = rest
+        return [first, r0, r1]
+
+    for kernel in (nested_target, staged):
+        hir = lower(kernel)
+        assert [o.value for o in hir.outputs] == list(hir.input_ids)
+
+
+def test_starred_assignment_target_is_rejected() -> None:
     def f(a: float, b: float, c: float) -> list[float]:
         first, *rest = [a, b, c]
         r0, r1 = rest
         return [first, r0, r1]
 
-    hir = lower(f)
-    assert [o.value for o in hir.outputs] == list(hir.input_ids)
+    with pytest.raises(
+        UnsupportedConstruct, match=r":\d+:\d+: a starred element is not supported in an assignment target"
+    ):
+        lower(f)
 
 
 def test_chained_assignment_binds_every_target() -> None:
@@ -1872,9 +1890,9 @@ def test_slices_of_positional_containers_are_window_operations() -> None:
         lower(runtime_bounds)
 
 
-def test_starred_assignment_targets_desugar_to_windows() -> None:
-    # a, *rest, b = v splits into integer projections plus a list()-converted slice window, with the arity
-    # check relaxed to at-least; the star may land anywhere and may absorb zero elements.
+def test_starred_assignment_targets_are_rejected() -> None:
+    # T9 trim: every star placement -- leading, middle, trailing -- is the same located rejection; spell the
+    # projections explicitly instead (first = v[0]; rest = [v[1], v[2]]).
     def star_middle(x: float, y: float) -> float:
         a, *mid, b = (x, y, x + y, 4.0)
         return a + mid[0] * 10.0 + mid[1] * 100.0 + b
@@ -1883,32 +1901,31 @@ def test_starred_assignment_targets_desugar_to_windows() -> None:
         *init, last = (1.0, 2.0, x)
         return last * 10.0 + init[1]
 
-    def star_empty(x: float) -> float:
-        t: tuple[float, ...] = (x, 2.0)
-        a, *rest, b = t
-        return a + b + len(rest)
-
-    def star_concat(x: float) -> float:
+    def star_last(x: float) -> float:
         t: tuple[float, ...] = (x, 2.0, 3.0)
         a, *rest = t
-        grown = rest + [4.0]
-        return grown[0] + grown[1]
+        return a + rest[0]
 
-    for kernel, argsets in (
-        (star_middle, [(1.0, 2.0)]),
-        (star_first, [(7.0,)]),
-        (star_empty, [(3.0,)]),
-        (star_concat, [(1.5,)]),
-    ):
-        model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name=kernel.__name__).numerical_model
-        elaborated = model.elaborate()
-        for argset in argsets:
-            assert float(elaborated.run(*argset)[0]) == kernel(*argset)
+    for kernel in (star_middle, star_first, star_last):
+        with pytest.raises(
+            UnsupportedConstruct, match=r":\d+:\d+: a starred element is not supported in an assignment target"
+        ):
+            lower(kernel)
 
-    def star_arity_fail(x: float) -> float:
-        t: tuple[float, ...] = (x,)
-        a, b, *rest = t
-        return a + b
 
-    with pytest.raises(UnsupportedConstruct, match="expected at least 2 values"):
-        lower(star_arity_fail)
+@dataclasses.dataclass
+class _NoneSetattr:
+    value: float
+
+
+_NoneSetattr.__setattr__ = None  # type: ignore[assignment, method-assign]
+
+
+def test_a_none_setattr_entry_refuses_construction() -> None:
+    # S2.9 review (Codex): the presence check used `.get(...) is not None`, so a None __setattr__ entry slipped
+    # through and the model computed where Python raises TypeError calling the hook.
+    def kernel(x: float) -> float:
+        return _NoneSetattr(x).value
+
+    with pytest.raises(UnsupportedConstruct, match="runs user code in construction"):
+        lower(kernel)

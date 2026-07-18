@@ -495,62 +495,38 @@ class _Builder:
                 obj_temp = self._expression(obj)
                 self._emit(PyStoreAttr(obj_temp, self._resolver.runtime_spelling(attr), source, origin))
             case ast.Tuple(elts=elts) | ast.List(elts=elts):
-                stars = [position for position, elt in enumerate(elts) if isinstance(elt, ast.Starred)]
-                assert len(stars) <= 1, "multiple starred targets are a SyntaxError before the builder runs"
+                for elt in elts:
+                    if isinstance(elt, ast.Starred):
+                        raise BuildRejection(
+                            "a starred element is not supported in an assignment target", self._origin(elt)
+                        )
                 # The arity constraint must be encoded here: downstream, a prefix read is indistinguishable from
-                # an honest too-many-values mistake that Python would refuse with ValueError. A starred target
-                # relaxes equality to at-least (the star absorbs the surplus, possibly zero elements).
-                fixed = len(elts) - len(stars)
+                # an honest too-many-values mistake that Python would refuse with ValueError.
                 length = self._temp()
                 self._emit(PyLen(length, source, origin))
                 expected = self._temp()
-                arity = admit(fixed)
+                arity = admit(len(elts))
                 assert arity is not None
                 self._emit(LoadConst(expected, arity, origin))
                 matches = self._temp()
-                relation = RelationalOp.GE if stars else RelationalOp.EQ
-                self._emit(PyCompare(matches, relation, length, expected, origin))
+                self._emit(PyCompare(matches, RelationalOp.EQ, length, expected, origin))
                 arity_ok = self._temp()
                 self._emit(PyTruth(arity_ok, matches, origin))
                 unpack_block, mismatch = self._new_block(), self._new_block()
                 self._current.terminator = Branch(arity_ok, unpack_block.id, mismatch.id, origin)
-                bound = f"at least {fixed}" if stars else f"{fixed}"
-                mismatch.terminator = Fail((f"cannot unpack: expected {bound} values",), origin)
+                mismatch.terminator = Fail((f"cannot unpack: expected {len(elts)} values",), origin)
                 self._start_block(unpack_block)
-                star = stars[0] if stars else len(elts)
-                suffix = len(elts) - star - 1 if stars else 0
-
-                def integer_temp(value: int) -> BindingId:
-                    temp = self._temp()
-                    admitted = admit(value)
-                    assert admitted is not None
-                    self._emit(LoadConst(temp, admitted, origin))
-                    return temp
-
                 element_temps = []
-                for position, elt in enumerate(elts):
+                for position in range(len(elts)):
                     element = self._temp()
-                    if position < star:
-                        self._emit(PySubscript(element, source, integer_temp(position), origin))
-                    elif position == star:
-                        # The star takes the middle window as a LIST, exactly as Python: v[star : -suffix or
-                        # None] re-flavored through the vetted list() conversion.
-                        window_key = self._temp()
-                        slice_ref = self._temp()
-                        self._emit(LoadRef(slice_ref, slice, origin))
-                        stop = integer_temp(-suffix) if suffix else self._none(origin)
-                        self._emit(PyCall(window_key, slice_ref, (integer_temp(star), stop), (), origin))
-                        window = self._temp()
-                        self._emit(PySubscript(window, source, window_key, origin))
-                        list_ref = self._temp()
-                        self._emit(LoadRef(list_ref, list, origin))
-                        self._emit(PyCall(element, list_ref, (window,), (), origin))
-                    else:
-                        self._emit(PySubscript(element, source, integer_temp(position - len(elts)), origin))
+                    index = self._temp()
+                    admitted = admit(position)
+                    assert admitted is not None
+                    self._emit(LoadConst(index, admitted, origin))
+                    self._emit(PySubscript(element, source, index, origin))
                     element_temps.append(element)
                 for elt, element in zip(elts, element_temps):  # all reads precede all writes: a, b = b, a swaps
-                    target_node = elt.value if isinstance(elt, ast.Starred) else elt
-                    self._assign_target(target_node, element, origin)
+                    self._assign_target(elt, element, origin)
             case ast.Subscript():
                 raise BuildRejection("assignment to a subscript is not supported (aggregates are immutable)", origin)
             case _:
@@ -727,12 +703,12 @@ class _Builder:
                 self._emit(PySubscript(temp, obj_temp, index_temp, origin))
                 return temp
             case ast.Tuple(elts=elts):
-                items = tuple(self._expression(elt) for elt in elts)
+                items = self._display_items(elts)
                 temp = self._temp()
                 self._emit(BuildTuple(temp, items, origin))
                 return temp
             case ast.List(elts=elts):
-                items = tuple(self._expression(elt) for elt in elts)
+                items = self._display_items(elts)
                 temp = self._temp()
                 self._emit(BuildList(temp, items, origin))
                 return temp
@@ -750,6 +726,12 @@ class _Builder:
         temp = self._temp()
         self._emit(PyUn(temp, op, value, origin))
         return temp
+
+    def _display_items(self, elts: list[ast.expr]) -> tuple[BindingId, ...]:
+        for elt in elts:
+            if isinstance(elt, ast.Starred):
+                raise BuildRejection("a starred element is not supported in a list or tuple display", self._origin(elt))
+        return tuple(self._expression(elt) for elt in elts)
 
     def _load_name(self, name: str, origin: OriginStack) -> BindingId:
         name = self._resolver.runtime_spelling(name)

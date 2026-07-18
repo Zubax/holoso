@@ -370,10 +370,11 @@ The structural spine already carries runtime tuples/lists through locals, diamon
 concatenation/repetition, indexing, record field projection, record construction, and returns. Slice syntax
 desugars to the vetted slice() constructor and a static slice of a positional container is a WINDOW operation
 over the same children (runtime leaves included; strides, reversals, and open bounds follow slice.indices
-exactly; runtime bounds and slices of arrays/structural joins stay located rejections); starred assignment
-targets desugar to integer projections plus a list()-converted window with the arity check relaxed to at-least;
-call arguments unpack (f(*t)) by flattening the starred container's children into ordinary arguments through
-synthesized projections before any dispatch (static arity required; **kwargs stays rejected).
+exactly; runtime bounds and slices of arrays/structural joins stay located rejections); a starred element is
+not supported in an assignment target nor in a list/tuple display -- both are documented located rejections at
+the star, while plain fixed-arity unpacking stays; call arguments unpack (f(*t)) by flattening the starred
+container's children into ordinary arguments through synthesized projections before any dispatch (static arity
+required; **kwargs stays rejected).
 Elementwise array arithmetic is live: binary `+ - * /` and unary `+`/`-` over an array pair up leaves in
 canonical order and take the SCALAR fold rule per pair (a fully static pair folds through the numpy-kinded leaf
 values, so element-wise numpy semantics -- promotion, 64-bit wraparound, errstate deferrals -- hold per leaf by
@@ -471,6 +472,30 @@ structurally so jaxtyping stays a dependency of the user's code only. Aggregate-
 scalar slot per leaf (`attr_0`, ...; matrices row-major `attr_0_0`, ...). Aggregate returns flatten to ordered
 `out_<k>` ports, validated against an arbitrarily nested `tuple[...]`/`list[X]`/array return annotation.
 
+## Fastmath policy
+
+Holoso is a fastmath compiler by charter (see Direction): value semantics may depart from IEEE 754 and from
+bit-exact host behavior wherever that serves numerical control/DSP hardware. Each liberty is documented in the
+section where it acts; this index consolidates them:
+
+- Commutativity and associativity are assumed: expressions reorder, reassociate, and fold freely, and reductions
+  and dot products are left folds rather than numpy's pairwise order (Front-end array notes, HIR optimization).
+- Constant folding is host-precision (binary64): static folds run real Python/numpy on the host double, and the
+  folded constant then rounds into the target format like any other constant (Front-end, Integers under HIR
+  DEFERRED).
+- Constant truthiness is host-precision too: `bool(2.0**-200)` folds True on float64 even where a narrow
+  datapath format would round the value to zero and a runtime cast would read False -- the fold precedes any
+  format choice, so a constant's truth is the host's, not the datapath's (the H3 ruling).
+- Transcendental folds take the ideal infinite-precision result, so a folded constant can differ from the
+  datapath's own value for the same expression (HIR optimization).
+- `x/x` folds to 1 and the other division identities may erase error sidebands: rewriting away an error-bearing
+  operation also removes the error it would have signaled (HIR optimization).
+- FMA contraction changes rounding: a fused `a*b+c` rounds once where the separate multiply and add round twice
+  (MIR; opt-in per Fabric-area exploration).
+- Zero/infinity rewrites act under the no-NaN charter: ZKF has no NaN, NaN constants reject, infinities are
+  ordinary values, and identity/sign/division folds may rewrite zero/infinity special cases or expose a zero
+  sign (HIR optimization).
+
 ## HIR
 
 HIR is a real CFG of basic blocks -- entry first, a single `Ret` exit -- carrying an SSA value DAG. Values are input
@@ -553,6 +578,7 @@ Newton-Raphson reciprocal iterated to a tolerance illustrates this, on its conve
 
 Holoso is intentionally very liberal when it comes to expression optimization.
 Bit-exactness, numerical determinism, or strict IEEE 754 compliance are anti-goals.
+The Fastmath policy section indexes every such liberty across the pipeline.
 
 HIR optimization is hardware-agnostic and ordered so each pass sees final costs: const-fold -> strength reduction
 (trivial fast-math identities, powers of two to shifts, `x/c` to `x*(1/c)`) -> diamond if-conversion (after folding, so

@@ -449,19 +449,18 @@ def test_model_matches_reference_ekf1_stateless() -> None:
     assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: starred list display becomes the T10 located rejection at S2.10")
-def test_model_matches_reference_aggregates() -> None:
+def test_starred_element_in_a_list_display_is_a_located_rejection() -> None:
+    # T10 trim: a starred display element was never supported; the documented rejection, located at the star,
+    # replaces the generic expression fallthrough.
     def f(a: float, b: float, c: float) -> list[float]:
         v = [a, b, c]
         head = v[0:2]
-        return [v[2], *head]  # index, slice, and unpack -> [c, a, b]
+        return [v[2], *head]
 
-    inputs = {"a": 1.0, "b": 2.0, "c": 3.0}
-    model = build_model(build(_run(f), "agg", fetch_stages=3))
-    got = model.run(*[inputs[name] for name in [p.name for p in model.inputs]])
-    ref = evaluate_reference(f, inputs)  # these aggregate ops run identically in plain Python
-    rtol, atol = default_tolerance(FMT, max(len(model._lir.ops), 1), magnitude=3.0)
-    assert all(within(float(g), r, rtol, atol) for g, r in zip(got, ref))
+    with pytest.raises(
+        UnsupportedConstruct, match=r":\d+:\d+: a starred element is not supported in a list or tuple display"
+    ):
+        _run(f)
 
 
 def test_model_matches_reference_ekf1_stateful() -> None:
@@ -1494,19 +1493,18 @@ def test_model_cross_domain_cast_chain_is_exact() -> None:
         assert got == ref, f"x={x}: {got} != {ref}"
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: H3 fastmath ruling pins the documented True-fold at S2.10")
-def test_model_bool_cast_of_underflowing_constant_is_false() -> None:
-    # Regression (Codex): bool(c) of a compile-time constant is the ZKF exponent-nonzero test on the constant *encoded
-    # into the format*, not a raw float64 ``c != 0.0``. In FMT(6,18) the tiny magnitude 2**-200 encodes to zero, so the
-    # cast is False -- the HIR const-folder must not fold it to True.
-    assert FMT.encode(2.0**-200) == 0  # the constant underflows to ZKF zero in this format
+def test_model_bool_cast_of_underflowing_constant_folds_true() -> None:
+    # H3 ruling (DESIGN.md, Fastmath policy): constant truthiness folds at host precision (binary64), before any
+    # datapath format exists, so bool(2.0**-200) is True even though the same constant encodes to ZKF zero in this
+    # format and a runtime cast would read False -- the documented trade-off of host-precision constant folding.
+    assert FMT.encode(2.0**-200) == 0  # the constant underflows to zero in this format, yet the fold is True
 
     def kernel(a: float) -> float:
-        return a if bool(2.0**-200) else -a  # the gate is False -> the model returns -a
+        return a if bool(2.0**-200) else -a  # the gate folds True -> the model returns +a
 
     model = build_model(build(_run(kernel), "tiny_bool", fetch_stages=3))
     for a in (1.0, -2.0, 3.5):
-        assert float(model.run(a)[0]) == -a
+        assert float(model.run(a)[0]) == a
 
 
 def test_connective_branch_does_not_create_a_phantom_state_slot() -> None:

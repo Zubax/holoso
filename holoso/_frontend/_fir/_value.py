@@ -275,12 +275,7 @@ def _admit_uncached(
                 return None
             items.append(admitted)
         return StaticSeq(tuple(items), is_list=type(obj) is list)
-    try:
-        is_record = is_dataclass(obj) and not isinstance(obj, type)  # a framework metaclass can raise even here
-    except Exception:
-        return None
-    if is_record:
-        assert is_dataclass(obj) and not isinstance(obj, type)  # re-narrows for the type checker; proven above
+    if is_dataclass(obj) and not isinstance(obj, type):
         if id(obj) in visiting:
             return None
         inner = visiting | {id(obj)}

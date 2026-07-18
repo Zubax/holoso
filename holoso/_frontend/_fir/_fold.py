@@ -146,11 +146,13 @@ def construction_schema(target: type) -> tuple[FieldSchema, ...]:
         for c in target.__mro__
         if c is not object
     ) or any(
-        not (isinstance(member, types.FunctionType) and member.__code__.co_filename == "<string>")
+        # Presence-based: a None entry (``__setattr__ = None``) is as construction-breaking as a custom hook —
+        # Python raises calling it, so admitting the class would miscompile.
+        not (isinstance(member := c.__dict__[name_], types.FunctionType) and member.__code__.co_filename == "<string>")
         for c in target.__mro__
         if c is not object
         for name_ in ("__setattr__", "__delattr__")
-        if (member := c.__dict__.get(name_)) is not None
+        if name_ in c.__dict__
     )
     if hooked:
         raise FoldRefusal(f"record class '{name}' runs user code in construction, which is not supported in a kernel")
