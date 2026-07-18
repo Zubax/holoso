@@ -1735,18 +1735,6 @@ def test_float_store_into_int_reset_array_reads_back_float() -> None:
         assert np.allclose(got[1:], reference.v.astype(np.float64), rtol=1e-12)
 
 
-def test_width_collapse_extends_to_type_identity() -> None:
-    # SANCTIONED deviation, part of the width collapse: an embedded narrow scalar is OBSERVATIONALLY its
-    # 64-bit carrier, type identity included -- isinstance answers for the carrier (np.float64 IS a float
-    # subclass) where plain numpy would answer for np.float32. Values, arithmetic, and type identity follow
-    # the carrier together; distinguishing them would require width provenance the domain deliberately drops.
-    def kernel(x: float) -> float:
-        return x if isinstance(_F32_GAINS[0], float) else -x
-
-    model = holoso.synthesize(kernel, default_ops(_FMT), name="kernel").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == 3.0  # the carrier verdict; plain Python returns -3.0
-
-
 @dataclasses.dataclass(frozen=True)
 class _SelfLoop:
     inner: _SelfLoop  # noqa: F821  # legal under PEP 649: evaluated lazily, when the name exists

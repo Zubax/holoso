@@ -227,7 +227,7 @@ class Reference:
     An identity-keyed reference fact: a callable, module, class, stateful component, or any other object outside
     the value domain. References are a separate SORT from values -- never data, never foldable, no generic escape
     back into Python -- so every place a reference may act (a call target, a namespace lookup, a state receiver,
-    an isinstance classinfo, an inert dtype argument) is an explicit arm, and everything else refuses by type.
+    an inert dtype argument) is an explicit arm, and everything else refuses by type.
     Equality and hash key on the REFERENT's identity: value-based forms would call the referent's own ``==`` (an
     ndarray poisons enclosing comparisons) and are partial under hashing (an unhashable referent raises).
     """

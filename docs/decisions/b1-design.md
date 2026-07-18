@@ -70,3 +70,26 @@ constructs (masks, 0-d, isinstance, enum provenance, str methods).
    vs list): today's join degrades to StructuralLayout — does the schema adopt the degraded flavor or reject?
 4. Any store-role we missed beyond ifexp sinks, comprehension accumulators, ReturnPlace (walrus targets are
    source variables; unpack projections write source variables; loop counters?).
+
+## Codex X2 record (consulted ahead of schedule; session in the campaign workspace)
+
+Verdict: design sound with amendments. Implementation order adopted (7 steps, each with its regression): (1)
+StoreRole tagging at every constructor; (2) pure schema algebra in _analysis_support; (3) the separate CFG
+schema solver with root-parameter seeding; (4) site-keyed obligations with round reset and deterministic
+resolution; (5) finalized per-store coercion plans, then cut local emission over (facts and SSA cell types must
+not diverge); (6) state schemas derived from the reset, then delete _admit_state_store/_leaf_kind/_leaf_is_int/
+dtype rebuilding; (7) calibration + deletion gate (grep empty, LOC gate).
+
+Decisions resolved (mine, from X2's missing-decision list):
+- del does NOT erase a schema: variables are strongly typed for the function's lifetime, so
+  `x = 0; del x; x = 1.0` still rejects.
+- Non-SemType stores (references, None, strings, ranges, slices) are fact-only: they neither establish nor
+  violate a schema — the schema covers datapath kinds only.
+- No op mutation for plans: side tables reset per round (root instantiation shallow-copies op lists).
+- Obligation/violation report order: the first executable store in CFG preorder (the S2.3 Fail-walk precedent),
+  not lowest block index.
+
+Test-reversal inventory beyond the note (X2): scalar annotation does not override an integer reset
+(test_fir_differential.py:403-420); loop-counter tests deliberately rebinding int counters to floats
+(test_frontend_state.py:1515-1564) need type-preserving rewrites that keep their stale-fact coverage;
+the int-reset-array ← float acceptance at test_matrix.py:1716-1734 inverts.

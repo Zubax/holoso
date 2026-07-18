@@ -1,8 +1,8 @@
 """
-Pure support surface of the analyzer: the located rejection types, fact joins and scalar typing, the
-LOST-provenance taint pools, template remapping, graph reachability, concat/sequence pairing, layout geometry
-queries, and the class-hook guards. Everything here is a free function over immutable inputs -- no analyzer
-state -- so the SCCP orchestration in ``_analyze`` stays the only stateful surface.
+Pure support surface of the analyzer: the located rejection types, fact joins and scalar typing, template
+remapping, graph reachability, concat/sequence pairing, layout geometry queries, and the class-hook guards.
+Everything here is a free function over immutable inputs -- no analyzer state -- so the SCCP orchestration in
+``_analyze`` stays the only stateful surface.
 """
 
 import enum
@@ -20,7 +20,6 @@ from ._fact import (
     ArrayDType,
     ArrayLayout,
     AtomicFact,
-    BoundFact,
     ContainerFlavor,
     Fact,
     Known,
@@ -83,13 +82,10 @@ from ._value import (
     NpBool,
     NpFloat,
     NpInt,
-    ScalarOrigin,
     SemType,
     StaticBool,
     StaticFloat,
-    StaticStr,
     StaticValue,
-    join_scalar_sources,
     same,
 )
 from dataclasses import replace
@@ -223,9 +219,6 @@ def _join_atoms(a: AtomicFact, b: AtomicFact, origin: OriginStack) -> AtomicFact
         case (Known(value=x), Known(value=y)):
             if same(x, y):
                 return a
-            degraded = join_scalar_sources(x, y)
-            if degraded is not None:
-                return Known(degraded)
             x_type, y_type = _residual_type(x), _residual_type(y)
             if {x_type, y_type} == {SemType.FLOAT, SemType.INT}:  # an int/float merge promotes the integer, C-style
                 return _join_atoms(_float_promoted(a, origin), _float_promoted(b, origin), origin)
@@ -363,56 +356,6 @@ def _same_fact(a: Fact, b: Fact) -> bool:
     return a == b
 
 
-def _lost_scalar_pools(facts: "list[Fact]") -> tuple[set[int], set[str]]:
-    """The base values of every LOST-provenance int/str among the given facts (aggregate leaves included)."""
-    ints: set[int] = set()
-    strs: set[str] = set()
-
-    def visit(value: StaticValue) -> None:
-        match value:
-            case MetaInt(value=v, source=source) if source is ScalarOrigin.LOST:
-                ints.add(v)
-            case StaticStr(value=v, source=source) if source is ScalarOrigin.LOST:
-                strs.add(v)
-
-    for fact in facts:
-        if isinstance(fact, Known):
-            visit(fact.value)
-        elif isinstance(fact, AggregateFact):
-            for leaf in fact.leaves:
-                if isinstance(leaf, Known):
-                    visit(leaf.value)
-    return ints, strs
-
-
-def _taint_lost(fact: BoundFact, pools: tuple[set[int], set[str]]) -> BoundFact:
-    """
-    Downgrade PLAIN int/str scalars of a fold's result to LOST when they value-equal a LOST input: an
-    identity-preserving callable (min returns its argument, sum returns its start) may have returned the very
-    object whose membership the LOST input no longer names, and reconstruction laundered it to a plain value.
-    """
-    ints, strs = pools
-    if not ints and not strs:
-        return fact
-
-    def scalar(value: StaticValue) -> StaticValue:
-        match value:
-            case MetaInt(value=v, source=source) if source is ScalarOrigin.PLAIN and v in ints:
-                return MetaInt(v, source=ScalarOrigin.LOST)
-            case StaticStr(value=v, source=source) if source is ScalarOrigin.PLAIN and v in strs:
-                return StaticStr(v, source=ScalarOrigin.LOST)
-        return value
-
-    match fact:
-        case Known(value=value):
-            return Known(scalar(value))
-        case AggregateFact(layout=layout, leaves=leaves):
-            return AggregateFact(
-                layout, tuple(Known(scalar(leaf.value)) if isinstance(leaf, Known) else leaf for leaf in leaves)
-            )
-    return fact
-
-
 def _datapath_zero(value: object) -> object:
     """Normalize a -0.0 fold input to +0.0: the ZKF datapath has no signed zero, so a static fold must not either."""
     return value + 0.0 if isinstance(value, float) and value == 0.0 else value
@@ -421,8 +364,8 @@ def _datapath_zero(value: object) -> object:
 def _crossing_object(value: "StaticValue | Reference") -> object:
     """
     The Python object an admitted argument denotes at the evaluation boundary: a value reconstructs through
-    as_python; an admitted reference (an inert dtype-ish type, or a classinfo reaching a malformed isinstance
-    spelling) crosses as the referent itself -- identity, not reconstruction, is its meaning.
+    as_python; an admitted reference (an inert dtype-ish type) crosses as the referent itself -- identity,
+    not reconstruction, is its meaning.
     """
     if isinstance(value, Reference):
         return value.obj
@@ -566,31 +509,35 @@ def _has_truth_override(klass: type) -> bool:
     return any(name in c.__dict__ for name in ("__bool__", "__len__") for c in klass.__mro__ if c is not object)
 
 
-def _reject_attribute_hooks(klass: type, origin: OriginStack) -> None:
+def _reject_attribute_hooks(klass: type, name: "str | None", origin: OriginStack) -> None:
+    """
+    The one component-attribute refusal: attribute access on a component must be plain instance state, since a
+    hook or accessor would run user code the abstract state model cannot mirror. Refused are a class-wide
+    custom ``__setattr__``/``__getattr__``/``__getattribute__`` and, when ``name`` is given, a data descriptor
+    (``__set__``/``__delete__``) backing that attribute -- a property with or without a setter, a property
+    subclass, or any other data descriptor; a slots member descriptor IS the field, and an exact-property
+    GETTER read is desugared by the caller before its name is checked here. Raw MRO lookups throughout, never
+    getattr, which would run the very accessor being refused.
+    """
     plain_setattr = (_mro_attribute_of(object, "__setattr__"), _mro_attribute_of(type, "__setattr__"))
     plain_getattribute = (
         _mro_attribute_of(object, "__getattribute__"),
         _mro_attribute_of(type, "__getattribute__"),
     )
-    if _mro_attribute_of(klass, "__setattr__") not in plain_setattr:
-        raise AnalysisRejection("components with a custom __setattr__ are not supported", origin)
-    if _mro_attribute_of(klass, "__getattribute__") not in plain_getattribute or (
-        _mro_attribute_of(klass, "__getattr__") is not None
-    ):
-        raise AnalysisRejection("components with custom attribute hooks are not supported", origin)
-
-
-def _reject_descriptor(klass: type, name: str, origin: OriginStack) -> None:
-    # Raw MRO lookup, never getattr (which would run a property getter). A data descriptor (``__set__``/``__delete__``)
-    # -- a property with or without a setter, a property subclass, or any other data descriptor -- cannot back a
-    # writable component attribute, since its accessor would bypass the abstract state. Property GETTER reads are
-    # handled earlier; only stores and unsupported reads reach here.
-    descriptor = _mro_attribute_of(klass, name)
-    if (
+    hooked = (
+        _mro_attribute_of(klass, "__setattr__") not in plain_setattr
+        or _mro_attribute_of(klass, "__getattribute__") not in plain_getattribute
+        or _mro_attribute_of(klass, "__getattr__") is not None
+    )
+    descriptor = _mro_attribute_of(klass, name) if name is not None else None
+    intercepted = (
         descriptor is not None
         and (hasattr(type(descriptor), "__set__") or hasattr(type(descriptor), "__delete__"))
         and not isinstance(descriptor, types.MemberDescriptorType)  # slots ARE the fields, not accessors
-    ):
+    )
+    if hooked or intercepted:
         raise AnalysisRejection(
-            f"descriptor '{name}' on a component is not supported (it would bypass abstract state)", origin
+            "component attributes must be plain values: custom __setattr__/__getattr__/__getattribute__ hooks "
+            "and descriptors are not supported",
+            origin,
         )

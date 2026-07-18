@@ -779,32 +779,38 @@ def test_a_record_nested_in_a_subscript_key_is_a_located_rejection() -> None:
         lower(kernel)
 
 
-def test_isinstance_against_an_enum_type_is_a_located_rejection() -> None:
-    # Review round 10 MISCOMPILE: enum members normalize to their base value at admission (the sanctioned
-    # erasure), so isinstance(member, EnumType) folded False where Python sees the member -- reachable directly
-    # or through any inlined method reading an enum-typed field. Non-enum class queries stay decidable.
-    import enum
-
-    class Mode(enum.IntEnum):
-        A = 1
-
-    mode = Mode.A
-
-    def direct(x: float) -> float:
-        return x if isinstance(mode, Mode) else -x
-
-    def tuple_classinfo(x: float) -> float:
-        return x if isinstance(mode, (float, Mode)) else -x
-
-    for kernel in (direct, tuple_classinfo):
-        with pytest.raises(UnsupportedConstruct, match="not decidable|enum-free class"):
-            lower(kernel)
-
-    def plain_class(x: float) -> float:
+def test_isinstance_is_a_located_rejection() -> None:
+    # Trim T4 (docs/decisions/scope-ruling.md): values are statically typed, so an honest isinstance query
+    # answers itself at authoring time, while a faithful compile-time verdict demanded real machinery (member
+    # provenance, classinfo resolution, record-layout folds) with a demonstrated miscompile history. Every
+    # spelling -- scalar subject, record subject, inline or precomputed tuple classinfo -- refuses at the
+    # dispatch with one located message.
+    def scalar_subject(x: float) -> float:
         return x * 2.0 if isinstance(1.0, float) else x
 
-    model = holoso.synthesize(plain_class, default_ops(FloatFormat(11, 52)), name="plain_isinstance").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == 6.0 == plain_class(3.0)
+    gain = 2.0
+
+    def inline_tuple_classinfo(x: float) -> float:
+        return x * 2.0 if isinstance(gain, (float, str)) else x
+
+    precomputed = (float, int)
+
+    def precomputed_classinfo(x: float) -> float:
+        return x * 2.0 if isinstance(gain, precomputed) else x
+
+    @dataclasses.dataclass(frozen=True)
+    class Tagged:
+        v: float
+
+    def record_subject(x: float) -> float:
+        t = Tagged(x * 2.0)
+        return t.v if isinstance(t, Tagged) else -t.v
+
+    for kernel in (scalar_subject, inline_tuple_classinfo, precomputed_classinfo, record_subject):
+        with pytest.raises(
+            UnsupportedConstruct, match=r":\d+:\d+: isinstance is not supported in a kernel: values are statically"
+        ):
+            lower(kernel)
 
 
 # ---------------------------------------- spine review round 11 ----------------------------------------
@@ -890,37 +896,6 @@ def test_object_references_never_cross_concrete_calls() -> None:
             lower(kernel)
 
 
-def test_isinstance_classinfo_must_resolve_completely() -> None:
-    # Review round 11: a precomputed tuple or union classinfo was one opaque ObjectRef, slipping enum members
-    # past the round-10 guard and folding on the erased value; classinfo must now resolve member by member.
-    import enum
-
-    class Mode(enum.IntEnum):
-        A = 1
-
-    mode = Mode.A
-    tuple_classinfo = (float, Mode)
-    union_classinfo = str | Mode
-
-    def opaque_tuple(x: float) -> float:
-        return x if isinstance(mode, tuple_classinfo) else -x
-
-    def opaque_union(x: float) -> float:
-        return x if isinstance(mode, union_classinfo) else -x
-
-    for kernel in (opaque_tuple, opaque_union):
-        with pytest.raises(UnsupportedConstruct, match="not decidable|enum-free class"):
-            lower(kernel)
-
-    plain_union = float | int
-
-    def resolvable_union(x: float) -> float:
-        return x * 2.0 if isinstance(1.0, plain_union) else x
-
-    model = holoso.synthesize(resolvable_union, default_ops(FloatFormat(11, 52)), name="iu").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == 6.0 == resolvable_union(3.0)
-
-
 def test_bound_dunders_of_values_are_a_located_rejection() -> None:
     # Review round 11 MISCOMPILE: T.__repr__() bound off a record-carrying tuple ran the generated __repr__ on
     # the reconstruction (an enum field prints as its base value); dunder binding and record-carrying receivers
@@ -955,10 +930,10 @@ def test_bound_dunders_of_values_are_a_located_rejection() -> None:
 
 def test_whitelist_members_are_value_determined() -> None:
     # Review round 12: several whitelist members were not value-determined for some argument shape -- a dataclass
-    # __post_init__ observing erased enum provenance, str.format's !r conversion, tuple.count's identity shortcut
-    # (a NaN element matches itself in Python, never after a rebuild), and a PRE-BOUND builtin whose live mutable
-    # receiver was emptied at compile time. Construction now requires the generated __init__ with no
-    # __post_init__; sequence methods and str.format reject; only bind-site-minted value methods are admitted.
+    # __post_init__ running user code at construction, tuple.count's identity shortcut (a NaN element matches
+    # itself in Python, never after a rebuild), and a PRE-BOUND builtin whose live mutable receiver was emptied
+    # at compile time. Construction requires the generated __init__ with no __post_init__; sequence and str
+    # methods reject; only bind-site-minted value methods are admitted.
     import enum
 
     class Mode(enum.IntEnum):
@@ -996,7 +971,7 @@ def test_whitelist_members_are_value_determined() -> None:
 
     for kernel, match in (
         (post_init_construction, "is not supported in a kernel"),
-        (str_format, "str.format is not supported"),
+        (str_format, "str methods are not supported"),
         (tuple_count, "sequence method 'count'"),
         (prebound_pop, "is not supported in a kernel"),
     ):
@@ -1016,52 +991,28 @@ def test_whitelist_members_are_value_determined() -> None:
     assert float(model.elaborate().run(3.0)[0]) == 6.0
 
 
-def test_isinstance_subjects_fold_through_retained_members_and_reject_on_lost_provenance() -> None:
-    # Review round 12 established that a mixin base and an ABC register() distinguish a live member from its
-    # erased base value. Admission now RETAINS the member as the scalar's source, so an isinstance subject
-    # reconstructs faithfully: the mixin-base query folds to exactly Python's verdict. The ABC classinfo still
-    # rejects (its instance check is not type's own), and a subject whose source was dropped by a join (the
-    # runtime value may be a member the fact no longer names) still rejects as undecidable.
-    import abc
-    import enum
+def test_str_methods_are_a_located_rejection() -> None:
+    # Trim T6 (docs/decisions/scope-ruling.md): a str constant stays an inert value (equality, len, and
+    # concatenation all fold), but its methods are host machinery a kernel does not need -- every honest use
+    # precomputes the constant. The refusal is at the attribute fetch, so even the bare bound-method spelling
+    # rejects; minted value methods survive for range and integer receivers.
+    def method_call(x: float) -> float:
+        return x * float(len("ab".upper()))
 
-    class Marker:
-        pass
+    def bound_fetch(x: float) -> float:
+        pad = "ab".ljust
+        return x + float(len(pad(4)))
 
-    class Mode(Marker, enum.IntEnum):
-        A = 1
-        B = 2
+    for kernel in (method_call, bound_fetch):
+        with pytest.raises(UnsupportedConstruct, match=r":\d+:\d+: str methods are not supported in a kernel"):
+            lower(kernel)
 
-    class AbcMarker(abc.ABC):
-        pass
+    def inert_constant(x: float) -> float:
+        tag = "ab" + "c"
+        return x * float(len(tag)) if tag == "abc" else -x
 
-    AbcMarker.register(Mode)
-    mixed = Mode.A
-
-    def mixin(x: float) -> float:
-        return x if isinstance(mixed, Marker) else -x
-
-    model = holoso.synthesize(mixin, default_ops(FloatFormat(11, 52)), name="mixin").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == mixin(3.0) == 3.0
-
-    def value_query(x: float) -> float:
-        return x if isinstance(mixed, int) and not isinstance(mixed, str) else -x
-
-    model = holoso.synthesize(value_query, default_ops(FloatFormat(11, 52)), name="vq").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == value_query(3.0) == 3.0
-
-    def registered(x: float) -> float:
-        return x if isinstance(mixed, AbcMarker) else -x
-
-    with pytest.raises(UnsupportedConstruct, match="enum-free class"):
-        lower(registered)
-
-    def lost_source(x: float, pick: bool) -> float:
-        y = Mode.A if pick else 1
-        return x if isinstance(y, Marker) else -x
-
-    with pytest.raises(UnsupportedConstruct, match="not decidable"):
-        lower(lost_source)
+    model = holoso.synthesize(inert_constant, default_ops(FloatFormat(11, 52)), name="inert_str").numerical_model
+    assert float(model.elaborate().run(2.0)[0]) == inert_constant(2.0) == 6.0
 
 
 def test_object_references_reject_at_any_nesting_depth() -> None:
@@ -1086,19 +1037,6 @@ def test_object_references_reject_at_any_nesting_depth() -> None:
         lower(RAdd().step)
     with pytest.raises(UnsupportedConstruct, match="oversized range"):
         lower(oversized_range)
-
-
-def test_inline_classinfo_tuples_fold() -> None:
-    # Review round 13 REGRESSION (introduced in round 12): the aggregate ObjectRef-leaf guard fired on the inline
-    # isinstance classinfo tuple before the classinfo exemption could apply, so the inline and precomputed
-    # spellings of the same valid Python diverged.
-    gain = 2.0
-
-    def kernel(x: float) -> float:
-        return x * 2.0 if isinstance(gain, (float, str)) else x
-
-    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="inline_ci").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == 6.0 == kernel(3.0)
 
 
 def test_oversized_ranges_reject_in_every_position() -> None:
@@ -1171,7 +1109,7 @@ def test_live_object_protocols_never_run_at_compile_time() -> None:
         return x * float(Hooked(mode).mode)  # type: ignore[arg-type]
 
     def oversized_method_argument(x: float) -> float:
-        return x + float(len("x".ljust(10**12)))
+        return x + float(len((1).to_bytes(10**12)))
 
     for kernel, match in (
         (GetItem().step, "subscript of an object"),
@@ -1230,78 +1168,39 @@ def test_namespace_attribute_reads_are_snapshot_once() -> None:
     del unit
 
 
-def test_value_methods_on_enum_members_bind_base_type_only() -> None:
-    # A retained StrEnum member reconstructs faithfully at identity-sensitive queries, but its VALUE METHODS
-    # must come from the base type: an honest custom method on the enum class is still arbitrary user code that
-    # must never run at compile time, so the receiver is stripped to its base value before binding.
+def test_enum_members_fold_to_their_base_value() -> None:
+    # Trim T5 (docs/decisions/scope-ruling.md): an IntEnum/StrEnum member admits as its plain base value, full
+    # stop -- no member identity survives into the domain. A kernel reading a member global computes with the
+    # int value; member-specific attributes (.value, .name, an enum-defined method) no longer resolve and
+    # reject with Python's own AttributeError text, located.
     import enum
 
-    class Tag(enum.StrEnum):
-        A = "ab"
+    class Mode(enum.IntEnum):
+        FAST = 3
 
         def describe(self) -> str:
             raise RuntimeError("user code ran at compile time")
 
-    tag = Tag.A
+    mode = Mode.FAST
 
-    def base_method(x: float) -> float:
-        return x * float(len(tag.upper()))
+    def computes(x: float) -> float:
+        return x * float(mode)
 
-    model = holoso.synthesize(base_method, default_ops(FloatFormat(11, 52)), name="bm").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == base_method(3.0) == 6.0
+    model = holoso.synthesize(computes, default_ops(FloatFormat(11, 52)), name="enum_base").numerical_model
+    assert float(model.elaborate().run(2.0)[0]) == computes(2.0) == 6.0
 
-    def custom_method(x: float) -> float:
-        return x * float(len(tag.describe()))
+    def member_attribute(x: float) -> float:
+        return x * float(mode.value)
 
-    with pytest.raises(UnsupportedConstruct, match="enum member attribute 'describe' is not supported"):
-        lower(custom_method)
+    def member_method(x: float) -> float:
+        return x * float(len(mode.describe()))
+
+    for kernel, missing in ((member_attribute, "value"), (member_method, "describe")):
+        with pytest.raises(UnsupportedConstruct, match=f"'int' object has no attribute '{missing}'"):
+            lower(kernel)
 
 
 # ------------------------------ retention review round (Claude ultrathink) ------------------------------
-
-
-def test_cross_enum_value_equal_members_degrade_to_lost_not_one_arms_provenance() -> None:
-    # REGRESSION (miscompile): IntEnum/StrEnum members compare equal ACROSS enums by base value, so a
-    # source-including dataclass __eq__ let a cross-enum join keep the FIRST arm's member and isinstance folded
-    # a constant that was wrong on the other path (compiled 9.0 where Python gives 6.0). Source equality is
-    # identity-keyed now; the join degrades to LOST and the query refuses, soundly, on both paths.
-    import enum
-
-    from holoso._frontend._fir._value import MetaInt, same
-
-    class Marker:
-        pass
-
-    class Mode(Marker, enum.IntEnum):
-        A = 1
-
-    class Other(enum.IntEnum):
-        X = 1
-
-    assert not same(MetaInt(1, source=Mode.A), MetaInt(1, source=Other.X))
-
-    def int_kernel(x: float, p: bool) -> float:
-        m = Mode.A if p else Other.X
-        return x * 2.0 if isinstance(m, Marker) else x * 3.0
-
-    with pytest.raises(UnsupportedConstruct, match="not decidable"):
-        lower(int_kernel)
-
-    class TagMarker:
-        pass
-
-    class Tag(TagMarker, enum.StrEnum):
-        A = "ab"
-
-    class OtherTag(enum.StrEnum):
-        Z = "ab"
-
-    def str_kernel(x: float, p: bool) -> float:
-        t = Tag.A if p else OtherTag.Z
-        return x * 2.0 if isinstance(t, TagMarker) else x * 3.0
-
-    with pytest.raises(UnsupportedConstruct, match="not decidable"):
-        lower(str_kernel)
 
 
 def test_object_subscript_keys_reject_instead_of_running_live_index() -> None:
@@ -1336,47 +1235,6 @@ def test_object_subscript_keys_reject_instead_of_running_live_index() -> None:
 # ------------------------------ retention review round (Codex gpt-5.6-sol ultra) ------------------------------
 
 
-def test_identity_preserving_folds_do_not_launder_lost_provenance() -> None:
-    # MISCOMPILE: min() returns its argument BY REFERENCE, so a LOST-provenance value crossed the evaluation
-    # boundary as its base int, came back value-equal, and re-admission marked it PLAIN -- letting isinstance
-    # fold a wrong constant. A fold result that value-equals a LOST input is LOST now.
-    import enum
-
-    class Marker:
-        pass
-
-    class Mode(Marker, enum.IntEnum):
-        A = 1
-
-    def kernel(x: float, p: bool) -> float:
-        value = Mode.A if p else 1
-        winner = min(value, 2)
-        return x if isinstance(winner, Marker) else -x
-
-    with pytest.raises(UnsupportedConstruct, match="not decidable"):
-        lower(kernel)
-
-
-def test_str_member_methods_preserve_identity_semantics() -> None:
-    # MISCOMPILE: partition's no-match head returns the receiver ITSELF, so on a retained StrEnum member Python
-    # yields the member; the mint used to run the method on a source-stripped copy, laundering the identity.
-    # The method now comes from the base type but binds onto the faithful member.
-    import enum
-
-    class Marker:
-        pass
-
-    class Tag(Marker, enum.StrEnum):
-        A = "abc"
-
-    def kernel(x: float) -> float:
-        head = Tag.A.partition("missing")[0]
-        return x if isinstance(head, Marker) else -x
-
-    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="pid_head").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == kernel(3.0) == 3.0
-
-
 def test_attribute_snapshot_admits_once_so_referent_mutation_cannot_move_facts() -> None:
     # MISCOMPILE: the snapshot memo pinned the live LIST OBJECT but re-admitted it per consultation, so a
     # permitted module hook mutating the list mid-analysis moved the folded constant (compiled 18.0 where
@@ -1403,77 +1261,6 @@ def test_attribute_snapshot_admits_once_so_referent_mutation_cannot_move_facts()
         assert float(model.elaborate().run(2.0)[0]) == 2.0
     finally:
         kernel.__globals__.pop("module", None)
-
-
-def test_list_classinfo_never_folds_as_a_tuple() -> None:
-    # Python raises TypeError on a LIST classinfo; folding it as a tuple accepted what Python rejects.
-    def kernel(x: float) -> float:
-        return x if isinstance(1, [int]) else -x  # type: ignore[arg-type]
-
-    with pytest.raises(UnsupportedConstruct, match="enum-free class"):
-        lower(kernel)
-
-
-def test_isinstance_of_a_runtime_record_folds_by_layout() -> None:
-    # The layout's class identity answers isinstance without any reconstruction, so runtime-leaf records
-    # fold where they used to refuse ("a record cannot cross into a concrete call").
-    class Base:
-        pass
-
-    @dataclasses.dataclass(frozen=True)
-    class Tagged(Base):
-        v: float
-
-    def kernel(x: float) -> float:
-        t = Tagged(x * 2.0)
-        a = 1.0 if isinstance(t, Base) else 0.0
-        b = 1.0 if isinstance(t, Tagged) else 0.0
-        c = 1.0 if isinstance(t, (bool, str)) else 0.0
-        return t.v + a * 10.0 + b * 100.0 + c * 1000.0
-
-    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="isrec").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == kernel(3.0) == 116.0
-
-
-def test_record_isinstance_ignores_field_content_entirely() -> None:
-    # Design consult (Codex gpt-5.6-sol ultra): the layout answers isinstance without consulting any field, so
-    # content-oriented admission guards (the oversized-range walk, reference leaves) must not reject the query.
-    @dataclasses.dataclass(frozen=True)
-    class Carrier:
-        window: range
-        tag: object
-        v: float
-
-    def kernel(x: float) -> float:
-        c = Carrier(range(10**13), math, x)
-        return c.v if isinstance(c, Carrier) else -c.v
-
-    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="isrange").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == kernel(3.0) == 3.0
-
-
-def test_record_isinstance_refuses_a_class_override() -> None:
-    # Design consult (Codex gpt-5.6-sol ultra): CPython's plain instance check consults the observed __class__
-    # when the real type misses, so a class-defined __class__ property would make the layout verdict wrong
-    # (Python says True here; the layout's mro says False). The query refuses instead of folding a wrong constant.
-    class Marker:
-        pass
-
-    @dataclasses.dataclass(frozen=True)
-    class Lying:
-        v: float
-
-        @property  # type: ignore[misc]
-        def __class__(self) -> type:
-            return Marker
-
-    def kernel(x: float) -> float:
-        p = Lying(x)
-        return x if isinstance(p, Marker) else -x
-
-    assert kernel(3.0) == 3.0, "Python consults the property"
-    with pytest.raises(UnsupportedConstruct, match="overrides __class__"):
-        lower(kernel)
 
 
 def test_call_argument_unpacking_flattens_static_containers() -> None:
@@ -1533,3 +1320,36 @@ def test_reduction_stub_misuse_names_the_reduction_not_the_matrix_product() -> N
 
     with pytest.raises(UnsupportedConstruct, match="np.mean requires array operands"):
         lower(scalar_operand)
+
+
+_ZERO_D_DEFAULT = np.array(0.5)
+
+
+def _helper_with_zero_d_default(a: float, b: object = _ZERO_D_DEFAULT) -> float:
+    return a + 1.0
+
+
+def test_a_zero_d_helper_default_is_rejected_at_the_binding() -> None:
+    # S2.8 review (both agents): an inlined helper's OMITTED 0-d default bound as a silent reference (or, when
+    # observed, a wrong-reason crossing message); the default binding is a creation door like every other.
+    def kernel(x: float) -> float:
+        return x + _helper_with_zero_d_default(x)
+
+    with pytest.raises(UnsupportedConstruct, match=r":\d+:\d+: a 0-dimensional array is not supported"):
+        lower(kernel)
+
+
+def test_binary_linalg_stubs_take_exact_positional_arguments() -> None:
+    # S2.8 review: matmul kwargs lowered where numpy raises (ufunc positional-only), np.outer kwargs leaked the
+    # stub's internal parameter names, and np.trace(m, offset) drew the array-semantics message for the offset.
+    from jaxtyping import Float64
+
+    def matmul_kwargs(m: Float64[np.ndarray, "2 2"]) -> float:
+        return float(np.matmul(a=m, b=m)[0][0])  # type: ignore[call-overload]
+
+    def trace_offset(m: Float64[np.ndarray, "2 2"]) -> float:
+        return float(np.trace(m, 1))
+
+    for kernel in (matmul_kwargs, trace_offset):
+        with pytest.raises(UnsupportedConstruct, match=r"takes exactly \d positional array argument"):
+            lower(kernel)

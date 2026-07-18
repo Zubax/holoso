@@ -31,6 +31,7 @@ from holoso._frontend._fir._value import (
     StaticFloat,
     StaticRecord,
     StaticSeq,
+    StaticStr,
     admit,
     as_python,
     same,
@@ -295,14 +296,23 @@ def test_records_capture_init_false_fields_and_refuse_cycles() -> None:
     assert admit(cyclic) is None
 
 
-def test_admit_normalizes_scalar_subclasses() -> None:
+def test_admit_normalizes_enum_members_to_plain_base_values() -> None:
+    # Trim T5 (docs/decisions/scope-ruling.md): a member admits as its plain base value, full stop -- no member
+    # identity survives admission, so reconstruction yields the base type, not the member.
     import enum
 
     class Flag(enum.IntEnum):
         A = 3
 
-    admitted = admit(Flag.A)
-    assert isinstance(admitted, MetaInt) and admitted.value == 3 and type(admitted.value) is int
+    class Tag(enum.StrEnum):
+        A = "ab"
+
+    assert admit(Flag.A) == MetaInt(3)
+    assert admit(Tag.A) == StaticStr("ab")
+    rebuilt_int = as_python(MetaInt(3))
+    rebuilt_str = as_python(StaticStr("ab"))
+    assert rebuilt_int == 3 and type(rebuilt_int) is int
+    assert rebuilt_str == "ab" and type(rebuilt_str) is str
 
 
 def test_resolver_pep709_comprehension_only_target_defers_to_enclosing_scope() -> None:
@@ -492,17 +502,6 @@ def test_records_with_convenience_properties_admit() -> None:
     assert admitted == StaticRecord(Params, (("kp", StaticFloat(2.0)), ("ki", StaticFloat(4.0))))
     rebuilt = as_python(admitted)
     assert isinstance(rebuilt, Params) and rebuilt.ratio == 0.5  # field-derived properties survive the rebuild
-
-
-def test_admit_survives_hostile_metaclasses() -> None:
-    class Hostile(type):
-        def __getattr__(cls, name: str) -> object:
-            raise RuntimeError(name)
-
-    class Weird(metaclass=Hostile):
-        pass
-
-    assert admit(Weird()) is None  # refused, not crashed: even is_dataclass() can raise through a metaclass
 
 
 def test_mangling_ignores_forged_qualname_metadata() -> None:

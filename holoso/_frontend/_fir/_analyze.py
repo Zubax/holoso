@@ -106,12 +106,10 @@ from ._fold import (
     FieldSchema,
     FoldRefusal,
     admit_call,
-    classinfo_types,
     construction_schema,
     contains_record,
     is_unimplemented_library,
     range_size,
-    validate_classinfo,
 )
 from ..._util import RelationalOp
 from ._analysis_support import (
@@ -123,7 +121,6 @@ from ._analysis_support import (
     _contract_structure,
     _coreachable,
     _crossing_object,
-    _datapath_zero,
     _fits_float64,
     _float_promoted,
     _has_truth_override,
@@ -132,19 +129,16 @@ from ._analysis_support import (
     _is_list_fact,
     _join_atoms,
     _layout_dtypes,
-    _lost_scalar_pools,
     _mro_attribute_of,
     _numeric_sem,
     _scalar_sem,
     _rectangular_shape,
     _reject_attribute_hooks,
-    _reject_descriptor,
     _remap_op,
     _remap_terminator,
     _residual_type,
     _same_fact,
     _seq_side,
-    _taint_lost,
     _transpose_routes,
     join_facts,
 )
@@ -156,7 +150,6 @@ from ._value import (
     StaticRecord,
     NpFloat,
     NpInt,
-    ScalarOrigin,
     SemType,
     StaticBool,
     StaticFloat,
@@ -167,9 +160,7 @@ from ._value import (
     StaticValue,
     admit,
     as_python,
-    join_scalar_sources,
     same,
-    strip_source,
 )
 
 if TYPE_CHECKING:
@@ -998,8 +989,8 @@ class Analyzer:
             case PyCompare(dst=dst, op=rel, lhs=lhs, rhs=rhs):
                 lhs_fact, rhs_fact = env.get(Local(lhs)), env.get(Local(rhs))
                 if _is_array_fact(lhs_fact) or _is_array_fact(rhs_fact):
-                    # Trimmed (scope ruling T2): a boolean mask is a dead-end value in this subset — nothing
-                    # can consume it — and the machinery lowered integer arrays in float (defect A2).
+                    # Trimmed (scope ruling T2, utility grounds): a mask's only onward use here is scalar extraction —
+                    # no boolean indexing, any/all, or array truth — and the machinery lowered integer arrays in float (A2).
                     raise AnalysisRejection(
                         "elementwise array comparison is not supported; compare the elements explicitly",
                         op.origin,
@@ -1137,8 +1128,7 @@ class Analyzer:
                     # A module/class is a compile-time namespace, not runtime state: mutating it would make later
                     # reads (which snapshot the live object) disagree with the store. Reject, as production does.
                     raise AnalysisRejection("assignment to a module or class attribute is not supported", op.origin)
-                _reject_attribute_hooks(type(obj_fact.obj), op.origin)
-                _reject_descriptor(type(obj_fact.obj), name, op.origin)
+                _reject_attribute_hooks(type(obj_fact.obj), name, op.origin)
                 src_fact = env.get(Local(src))
                 if isinstance(src_fact, Reference):
                     # Storing a component/sub-object into an attribute would change the component topology per
@@ -1705,7 +1695,7 @@ class Analyzer:
         admitted = admit(concrete)
         if admitted is None:
             return Reference(concrete)
-        return _taint_lost(normalize_static(admitted), _lost_scalar_pools([Known(value)]))
+        return normalize_static(admitted)
 
     def _attribute(self, env: _Env, obj: Fact, name: str, origin: OriginStack) -> "Fact | _PropertyRead":
         if isinstance(obj, AggregateFact):
@@ -1714,7 +1704,7 @@ class Analyzer:
                 if name in names:
                     return obj.child(names.index(name))  # record field projection works on runtime leaves too
                 # A non-field attribute (a property, a method) would execute user code on the reconstruction,
-                # whose provenance the compiler cannot fully vouch for (an enum field rebuilds as its base value).
+                # which is not type-faithful (an enum field rebuilds as its base value).
                 raise AnalysisRejection(f"record attribute '{name}' is not supported (only field access)", origin)
             if isinstance(obj.layout, ListLayout):
                 raise AnalysisRejection(
@@ -1757,7 +1747,7 @@ class Analyzer:
                 except AttributeError as error:
                     raise AnalysisRejection(str(error), origin) from None
                 return normalize_static(admitted) if admitted is not None else Reference(attribute)
-            _reject_attribute_hooks(type(component), origin)
+            _reject_attribute_hooks(type(component), None, origin)
             class_attribute = _mro_attribute_of(type(component), name)
             if type(class_attribute) is property:  # an exact property (not a subclass) wins over any __dict__ entry
                 if not isinstance(class_attribute.fget, types.FunctionType):
@@ -1765,7 +1755,7 @@ class Analyzer:
                 # Bind the getter to the exact receiver so its ``self.stored`` reads resolve to the same StateLeaf/Known
                 # a direct read would, and so recursion identity and the ``self`` parameter bind correctly.
                 return _PropertyRead(types.MethodType(class_attribute.fget, component))
-            _reject_descriptor(type(component), name, origin)
+            _reject_attribute_hooks(type(component), name, origin)
             if name not in getattr(component, "__dict__", {}) and isinstance(
                 class_attribute, (types.FunctionType, classmethod, staticmethod)
             ):
@@ -1806,15 +1796,17 @@ class Analyzer:
                     f"list method '{name}' is not supported (lists are immutable values here); rebind with + instead",
                     origin,
                 )
-            base_receiver = as_python(strip_source(obj.value))  # base-type surface: enum attributes never resolve
+            if isinstance(obj.value, StaticStr):
+                # Trimmed (scope ruling T6): a str constant stays an inert value (equality, len, concatenation
+                # all fold), but its methods are host machinery a kernel does not need -- every honest use
+                # precomputes the constant. Refusing the fetch keeps the whole str method surface closed.
+                raise AnalysisRejection(
+                    "str methods are not supported in a kernel; strings are inert constants here", origin
+                )
+            receiver = as_python(obj.value)
             try:
-                concrete = getattr(base_receiver, name)
+                concrete = getattr(receiver, name)
             except AttributeError as error:
-                if isinstance(obj.value, (MetaInt, StaticStr)) and not isinstance(obj.value.source, ScalarOrigin):
-                    raise AnalysisRejection(
-                        f"enum member attribute '{name}' is not supported (the member folds as its base value)",
-                        origin,
-                    ) from None
                 raise AnalysisRejection(str(error), origin) from None
             admitted = admit(concrete)
             if admitted is None and callable(concrete):
@@ -1831,20 +1823,9 @@ class Analyzer:
                     # tuple.count/.index are identity-and-equality games the reconstruction cannot vouch for
                     # (a NaN element matches by identity in Python, never after a rebuild).
                     raise AnalysisRejection(f"sequence method '{name}' is not supported", origin)
-                if isinstance(obj.value, StaticStr) and name in ("format", "format_map"):
-                    # format's conversions (!r) observe the repr of erasure-reconstructed arguments.
-                    raise AnalysisRejection(f"str.{name} is not supported in a kernel", origin)
                 value_key = (obj.value, name)
                 if value_key not in self._value_methods:
-                    # The method comes from the BASE TYPE (looked up above, so an enum-defined method never
-                    # resolves) but binds onto the FAITHFUL receiver: an identity-preserving method (partition's
-                    # no-match head returns self) then yields the retained member itself, and re-admission keeps
-                    # it, exactly as Python.
-                    slot = _mro_attribute_of(type(base_receiver), name)
-                    faithful = as_python(obj.value)
-                    getter = getattr(type(slot), "__get__", None)
-                    bound = getter(slot, faithful, type(faithful)) if getter is not None else slot
-                    self._value_methods[value_key] = bound
+                    self._value_methods[value_key] = concrete
                 return Reference(self._value_methods[value_key])
             return normalize_static(admitted) if admitted is not None else Reference(concrete)
         raise AnalysisRejection("attribute access on a runtime value", origin)
@@ -2145,7 +2126,18 @@ class Analyzer:
                     "argument (reduce the other axis explicitly instead of passing an axis)",
                     call.origin,
                 )
-            if reduction or any(target is fn for fn in (np.matmul, np.dot, np.trace, np.outer)):
+            binary_linalg = any(target is fn for fn in (np.matmul, np.dot, np.outer))
+            if binary_linalg or target is np.trace:
+                # These spell positional ufunc-style calls: numpy itself refuses matmul keywords, and an offset
+                # or axis argument reaches machinery the subset does not model.
+                expected = 2 if binary_linalg else 1
+                if call.kwargs or len(call.args) != expected:
+                    raise AnalysisRejection(
+                        f"np.{getattr(target, '__name__', '?')} takes exactly {expected} positional array "
+                        "argument(s) here",
+                        call.origin,
+                    )
+            if reduction or binary_linalg or target is np.trace:
                 # The linalg and reduction stubs are defined over arrays only; a scalar/list/tuple operand
                 # must not acquire array semantics through the spelled call any more than through an operator.
                 for arg in (*call.args, *(value for _, value in call.kwargs)):
@@ -2237,6 +2229,14 @@ class Analyzer:
                     "getattr is not supported in a kernel; spell the attribute access directly (x.name)",
                     call.origin,
                 )
+            if target is isinstance:
+                # Trimmed (scope ruling T4): values are statically typed here, so an honest query answers itself
+                # at authoring time, while a faithful compile-time verdict demanded real machinery -- member
+                # provenance, complete classinfo resolution, record-layout folds -- with a demonstrated
+                # miscompile history. One refusal at the dispatch covers every spelling.
+                raise AnalysisRejection(
+                    "isinstance is not supported in a kernel: values are statically typed", call.origin
+                )
             if (
                 target is np.transpose
                 and not keyword_facts
@@ -2280,39 +2280,11 @@ class Analyzer:
                 return False
             if isinstance(target, type) and is_dataclass(target):
                 # Record construction is STRUCTURAL, never an evaluation: the layout is the class's validated
-                # field schema and the children are the argument facts THEMSELVES -- runtime leaves, enum
-                # provenance, LOST taint, and reference leaves all ride through untouched, and no host code
-                # (not even the generated __init__) ever runs. Like the transpose relayout above, this precedes
-                # the admission harness: there is nothing to admit because nothing crosses.
+                # field schema and the children are the argument facts THEMSELVES -- runtime leaves and
+                # reference leaves ride through untouched, and no host code (not even the generated __init__)
+                # ever runs. Like the transpose relayout above, this precedes the admission harness: there is
+                # nothing to admit because nothing crosses.
                 self._expand_construction(target, call, env)
-                return False
-            if (
-                target is isinstance
-                and not keyword_facts
-                and len(argument_facts) == 2
-                and isinstance(argument_facts[0], AggregateFact)
-                and isinstance(argument_facts[0].layout, RecordLayout)
-            ):
-                # A record subject answers from the layout's class identity alone -- runtime, reference, and
-                # oversized-range leaves included, because no field is consulted -- so like construction this
-                # precedes admission: nothing reconstructs and nothing crosses. Raw type metadata and identity
-                # scans run no user code (an instance-side __class__ override, a metaclass __mro__ hook, or a
-                # metaclass __eq__ under tuple membership could otherwise warp the verdict); a class overriding
-                # __class__ refuses outright, since CPython's check consults the observed __class__ where the
-                # real type misses.
-                klass = argument_facts[0].layout.klass
-                mro = type.__getattribute__(klass, "__mro__")
-                if any("__class__" in c.__dict__ for c in mro if c is not object):
-                    raise AnalysisRejection(
-                        "isinstance of a record whose class overrides __class__ is not supported", call.origin
-                    )
-                try:
-                    record_kinds = validate_classinfo(argument_facts[1])
-                except FoldRefusal as refusal:
-                    raise AnalysisRejection(str(refusal), call.origin) from None
-                verdict = any(entry is kind for kind in record_kinds for entry in mro)
-                env.set(Local(call.dst), Known(StaticBool(verdict)))
-                self._concrete_calls.add(id(call))
                 return False
             # Concrete evaluation is a CLOSED WHITELIST behind one door: the fold admission harness. The
             # analyzer contributes only what the harness cannot know -- per-Analyzer minted-method identity and
@@ -2379,19 +2351,6 @@ class Analyzer:
                 )
                 self._conversion_calls.add(id(call))
                 return False
-            if target is isinstance and not keyword_facts and len(argument_facts) == 2:
-                # isinstance folds through the RESOLVED classinfo types, never through a generic evaluation: the
-                # classinfo's sanctioned carriers (a referenced class, an inline tuple of references) are not
-                # data and cannot cross the evaluation boundary. Flattening is Python's own equivalence --
-                # isinstance over nested tuples and unions is the disjunction over their members.
-                subject_value = _concrete_fact(argument_facts[0])
-                if subject_value is not None:
-                    kinds = classinfo_types(argument_facts[1])
-                    assert kinds is not None, "admission proved the classinfo resolves"
-                    verdict = isinstance(_datapath_zero(as_python(subject_value)), tuple(kinds))
-                    env.set(Local(call.dst), Known(StaticBool(verdict)))
-                    self._concrete_calls.add(id(call))
-                    return False
             concrete_args: list[StaticValue | Reference | None] = [
                 fact if isinstance(fact, Reference) else _concrete_fact(fact) for fact in argument_facts
             ]
@@ -2441,11 +2400,7 @@ class Analyzer:
                     )
                 env.set(Local(call.dst), Reference(concrete))
             else:
-                taint_inputs: list[Fact] = [*argument_facts, *(fact for _, fact in keyword_facts)]
-                if minted:
-                    receiver_value = next(k[0] for k, m in self._value_methods.items() if m is target)
-                    taint_inputs.append(Known(receiver_value))
-                env.set(Local(call.dst), _taint_lost(normalize_static(admitted), _lost_scalar_pools(taint_inputs)))
+                env.set(Local(call.dst), normalize_static(admitted))
             self._concrete_calls.add(id(call))
             return False
         receiver: object | None = None
@@ -2546,13 +2501,18 @@ class Analyzer:
             elif param.name in keyword and param.name not in positional_only:
                 source = keyword.pop(param.name)
             elif param.name in default_by_name:
-                admitted = admit(default_by_name[param.name])
+                default_value = default_by_name[param.name]
+                if isinstance(default_value, np.ndarray) and default_value.ndim == 0:
+                    raise AnalysisRejection(
+                        "a 0-dimensional array is not supported; use the scalar directly", call.origin
+                    )
+                admitted = admit(default_value)
                 default_temp = BindingId(f"%d{self._binding_serial}", self._binding_serial)
                 self._binding_serial += 1
                 if admitted is not None:
                     block.ops.append(LoadConst(default_temp, admitted, call.origin))
                 else:
-                    block.ops.append(LoadRef(default_temp, default_by_name[param.name], call.origin))
+                    block.ops.append(LoadRef(default_temp, default_value, call.origin))
                 source = default_temp
             else:
                 raise AnalysisRejection(f"missing argument '{param.name}'", call.origin)

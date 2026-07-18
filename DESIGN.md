@@ -159,17 +159,15 @@ identity: exact Python ints (MetaInt) are distinct from numpy 64-bit scalars (Np
 mixed-operand semantics; numeric WIDTH is immaterial -- narrower numpy scalars and arrays admit by exact value
 embedding into the category carrier (bool/int64/float64), so width-dependent arithmetic artifacts like int8
 wraparound or float32 intermediate rounding are not emulated, consistent with the datapath computing in the
-configured format rather than the source width, and the embedding extends to TYPE IDENTITY -- an isinstance
-query on an embedded scalar answers for the carrier; a uint64 beyond the signed-64 range, a longdouble, and
+configured format rather than the source width; a uint64 beyond the signed-64 range, a longdouble, and
 every non-boolean/integer/float dtype (a timedelta64 is integer-KINDED yet not an integer) have no exact
 embedding and stay non-static); arrays admit as read-only snapshots; sequences keep
 list/tuple flavor; slices with integer (or absent) bounds are plain values; dataclasses admit as records only
-when reconstructible from fields; containers bound depth and refuse cycles. An IntEnum/StrEnum member normalizes to its base value with the MEMBER retained as the scalar's
-source (tri-state provenance: a retained member, PLAIN for provably-never-an-enum, or LOST when a join dropped
-the source), so arithmetic folds with base-type semantics while faithful reconstruction returns the original;
-joins of value-equal scalars with differing sources degrade to LOST, monotonically; and identity-preserving
-folds keep the degradation (a fold result that value-equals a LOST input is itself LOST, since min() or a
-subscript may have returned the very object whose membership the fact no longer names). Fixed-point equality is tagged and bitwise (True is not 1, signed zero distinct, NaN stable). Static
+when reconstructible from fields; containers bound depth and refuse cycles. An IntEnum/StrEnum member
+normalizes to its plain base value at admission, full stop: arithmetic folds with base-type semantics, no
+member identity survives into the domain, and member-specific attributes (.value, .name, an enum-defined
+method) simply fail to resolve on the base value.
+Fixed-point equality is tagged and bitwise (True is not 1, signed zero distinct, NaN stable). Static
 execution runs real Python/numpy on the domain's own objects; zero-division/invalid defer to runtime, float overflow
 folds to infinity per the charter, numpy wraparound folds faithfully, NaN never folds, and integer powers fold only
 under a result-width bound.
@@ -192,9 +190,8 @@ flavor-erased join of unlike positional containers) over one flat, canonically o
 separate sort from values, not a value variant: a callable, module, class, stateful component, None, or any other
 object outside the value domain is tracked by referent identity (its own LoadRef op in the IR), is never data,
 never folds, and has no generic escape back into Python -- every place a reference may act (a call target, a
-namespace or component attribute, an isinstance classinfo, an inert dtype-ish type argument) is an explicit arm,
-and everything else refuses by type. isinstance folds through its resolved classinfo types rather than a generic
-evaluation, since a classinfo is references, not data. References join only with themselves and only when the
+namespace or component attribute, an inert dtype-ish type argument) is an explicit arm,
+and everything else refuses by type. References join only with themselves and only when the
 referent is identical; a reference is fact-only in emission (never a datapath cell). Component and namespace
 attribute reads are snapshot AND admitted at most once per analysis -- the fact forms from the first read and
 is never re-formed, so neither a drifting live object nor a mutated referent can move it (a PEP 562 module
@@ -208,26 +205,22 @@ CLOSED WHITELIST, not a blacklist of hazards, and the whole admission decision i
 single door to host evaluation, so a new admission is a reviewable row there rather than a guard scattered
 through the transfers): beyond the library registry, only vetted value-determined callables
 are admitted (the float/int/bool/len/range/slice/sum/divmod casts and constructors, operator.index, the
-np.array/asarray/asanyarray constructors and numpy scalar types, isinstance -- folded through its
-completely-resolved enum-free plain-instance-check classinfo over a faithfully reconstructed subject (a retained
-member answers exactly as Python, mixin bases included; a record subject answers from its layout's class identity
-alone BEFORE admission -- runtime, reference, and oversized-range leaves included, since no field is consulted --
-through raw type metadata and identity scans that run no user code, refusing a class that overrides __class__
-because CPython's check consults the observed __class__ where the real type misses), refusing only a
-LOST-provenance int/str subject (the
-runtime value may be a member the joined fact no longer names) -- and value methods minted by the analyzer's own bind site
-off the domain's reconstruction -- immutable scalar/str/range receivers with non-dunder, non-format names, the
-method resolved on the BASE TYPE but bound onto the faithful receiver, so an enum-defined method never resolves
-while identity-preserving methods (partition's no-match head) return the retained member exactly as Python;
+np.array/asarray/asanyarray constructors and numpy scalar types) plus value methods minted by the analyzer's
+own bind site off the domain's reconstruction -- immutable scalar and range receivers with non-dunder names;
 sequence .count/.index are identity-and-equality games a rebuild cannot vouch for, an oversized range receiver
 rejects (its count/index can iterate linearly), and a PRE-BOUND builtin captured from the user's namespace
-carries a live mutable receiver and never folds); every
+carries a live mutable receiver and never folds; every
 other callable -- functools.partial wrappers, vars, repr, type, unbound descriptors, attrgetter-style objects,
-unregistered numpy functions -- is a located rejection by construction. Argument admission is equally closed: a
+unregistered numpy functions -- is a located rejection by construction. isinstance is not supported (a located
+rejection): values are statically typed, so an honest query answers itself at authoring time, while a faithful
+compile-time verdict demanded real machinery -- member provenance, complete classinfo resolution, record-layout
+folds -- with a demonstrated miscompile history. str methods are likewise not supported (a located rejection at
+the attribute fetch): a str constant stays an inert value whose equality, length, and concatenation fold, but
+every honest method use precomputes the constant, so the whole method surface refuses in one place.
+Argument admission is equally closed: a
 record never crosses into a concrete call (nested inside a tuple/list included; the reconstruction is
-value-faithful but not type-faithful, which even the dataclass-generated __repr__ observes on an enum field;
-the two-argument isinstance record subject never reaches admission at all -- it folds from the layout first), an
-object reference never crosses at any nesting depth except as isinstance classinfo (inline tuples included) or
+value-faithful but not type-faithful, which even the dataclass-generated __repr__ observes on an enum field), an
+object reference never crosses at any nesting depth except as
 one of the inert dtype-ish builtin types (a stateful component's dunder would read the live reset-time object
 while the kernel's writes exist only as state facts), and a static fold over an oversized range -- as an
 argument, nested in one, or as a method receiver -- rejects rather than burning unbounded compile time. The
@@ -242,19 +235,20 @@ over an aggregate is a LAYOUT operation, never an evaluation: the same leaves --
 re-aggregate under the requested flavor (a lowered conversion copies the argument's cells onto the result);
 concrete containers still fold through the vetted constructors. Record construction is equally structural, for
 all-Known and runtime arguments alike: the layout is the class's validated field schema and the children are the
-argument facts THEMSELVES -- runtime leaves, enum provenance, LOST taint, and reference leaves ride through
+argument facts THEMSELVES -- runtime leaves and reference leaves ride through
 untouched -- so no class machinery ever executes, not even the generated __init__ (emission installs argument
 cells into per-field windows; a fully static construction emits nothing, exactly like the folded-call era).
-Eligibility is certified against the LIVE class, not just decoration-time shape: the generated __init__'s
-parameters must be exactly the declared fields with the matching positional/keyword-only boundary, its live
-defaults must be the field metadata objects themselves (a post-decoration __defaults__ mutation makes Python
-construct with values the schema never saw), and its bytecode must be free of a __post_init__ call (deleting the
-hook after decoration does not remove the call); a custom metaclass or __init__, a
+Eligibility is the declared schema: the generated __init__'s
+parameters must be exactly the declared fields with the matching positional/keyword-only boundary; a custom
+metaclass or __init__, a
 __post_init__/__new__/__del__/__getattr__/__getattribute__, ANY __setattr__/__delattr__ beyond the
 dataclass-generated ones (callable descriptors and None entries included), a default_factory, a
 descriptor-backed field (a slots field's own member descriptor is the field itself; an alien one is not), or an
 InitVar/init=False field refuses by name at the call site; argument-to-field mapping errors (missing, excess,
-unknown, duplicate) are located rejections. Field defaults are admitted lazily at the FIRST construction that
+unknown, duplicate) are located rejections. All these checks are by presence on the class and its declared
+fields -- the decoration-vs-live forensics (the __post_init__ bytecode scan, the __defaults__ identity checks)
+are gone, so a class mutated after decoration constructs per its declared schema.
+Field defaults are admitted lazily at the FIRST construction that
 actually omits the field (Python never observes an overridden default) and once per analysis, like attribute
 snapshots, so a mutable default cannot move a fact between fixpoint visits or into the emission replay; a
 default outside the value domain rides as a fact-only reference leaf. Scalar numpy
@@ -320,7 +314,10 @@ the method `self.attr` is an ordinary Place, so reads and writes interleave free
 drive a `state_<attr>` output port, so a method need not return anything (and a returned value that is by dataflow
 a public attribute is deduped onto that state port); underscore-prefixed attributes stay internal. Reassigning
 `self` itself is rejected: attributes resolve against the fixed original instance, so a rebinding would silently
-miscompile.
+miscompile. Component attributes must be plain values: a custom `__setattr__`/`__getattr__`/`__getattribute__`
+hook or a descriptor-backed attribute is one consolidated located refusal on both the read and the write side
+(the accessor would run user code the abstract state model cannot mirror -- dropping the refusal would silently
+miscompile honest validating classes), with the exact-property getter read as the sanctioned exception.
 
 Inlining. A pure function reachable through `__globals__` is inlined -- its body grafted with a fresh activation
 frame, its return remapped to the caller -- so kernels compose. A method call on the synthesized instance
@@ -440,9 +437,9 @@ ROUTE PLAN (source ordinal per result cell) the conversion emission consumes -- 
 non-square shapes, and empty arrays. The stubs probe ranks through `np.ndim`, folded narrowly by the
 compiler (a numeric scalar is rank 0, an array is its layout rank, containers reject: numpy's own ndim of a
 list observes structure the fact model erases).
-Elementwise array comparisons are not supported (a located rejection with guidance): a boolean mask is a
-dead-end value in this subset — no boolean indexing, no any/all, array truth rejects — so the machinery
-carried cost without a consumer. Default-axis `np.max`/`np.mean` are registry stubs
+Elementwise array comparisons are not supported (a located rejection with guidance): a mask's only onward use
+in this subset is scalar extraction — no boolean indexing, no any/all, array truth rejects — so the machinery
+was trimmed on utility grounds. Default-axis `np.max`/`np.mean` are registry stubs
 over nonempty 1-D arrays -- a left fold of the scalar max (one sorter firing per step) and a left-fold sum
 over the static length whose order follows the fastmath doctrine rather than numpy's pairwise summation.
 `reshape` joins flatten/ravel as a static relayout (explicit non-negative dimensions whose product matches;

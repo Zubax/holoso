@@ -368,3 +368,8 @@ S2.11 (E1-lite + port-order tie), S2.12 (B1, Codex X2 first), S2.13 (G1, preserv
 (hygiene + deferred S2.5 polish rewordings + exit grep), S2.15 (freeze, Codex X3, build-sharing constraint),
 S3 gate (memo→X4→spike SC1-SC4, failure default morph, canonical gate pre-authorized for the emitter swap),
 S4 per ruling.
+
+QUEUED S2.8 consolidation (post-S2.9-agent, same-file): grafted-helper-default 0-d door (_analyze.py:2548-2556
+area, T3 message); non-reduction stub kwargs/arity tightening (matmul/dot/outer/trace: reject kwargs, check
+fixed arity; rename outer_ params to numpy's a/b); reword T2 rationale in the comment + DESIGN (utility grounds
+per scope-ruling §5, not "no consumer"). Codex S2.8 verdict pending.

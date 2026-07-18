@@ -771,7 +771,7 @@ def test_custom_setattr_components_are_a_located_rejection() -> None:
             self.gain = 3.0  # Python clamps to 1.0; a direct leaf write would record 3.0
             return self.gain * x
 
-    with pytest.raises(AnalysisRejection, match="custom __setattr__"):
+    with pytest.raises(AnalysisRejection, match="component attributes must be plain values: custom __setattr__"):
         Analyzer(Clamped().step).fixpoint()
 
 
@@ -788,14 +788,14 @@ def test_bound_method_keywords_bind_without_positional_only_underflow() -> None:
 
 
 def test_value_method_identities_join_across_arms() -> None:
-    # str.count keeps the value-method machinery exercised now that sequence .count/.index reject (their
-    # identity-and-equality semantics are not reconstruction-safe); substring counting is value-determined.
+    # range.count keeps the minted value-method machinery exercised now that str receivers refuse (trim T6) and
+    # sequence .count/.index reject; counting over a small range is value-determined.
     def kernel(x: float) -> float:
-        table = "aab"
+        table = range(4)
         if x > 0.0:
-            n = table.count("a")  # 2
+            n = table.count(1)  # 1
         else:
-            n = table.count("b")  # 1
+            n = table.count(9)  # 0
         return n * 1.0  # the join must reconcile the two method fetches, not reject them
 
     result = Analyzer(kernel).fixpoint()
