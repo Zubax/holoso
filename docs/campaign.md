@@ -589,3 +589,16 @@ metrics row omitted honestly (needs fsort/fsincos beyond shared default_ops; doc
 state-only in this commit; the X-batch cherry-pick MUST restore the unqualified wording (its X1 makes it true)
 — expect a DESIGN.md conflict there and resolve accordingly. Remaining in flight: X1-X5 batch (fixes-r3),
 Codex X3 freeze consult. NEXT after X-batch integration + round-4 clean: S2.15 freeze.
+
+Consult X3 returned: five positions, ALL CHANGE-recommended, ALL ADOPTED — ratified in
+docs/decisions/freeze-design.md, which supersedes section F where they differ. Headlines: structured JSONL
+diagnostics (payload incl. location line text + origin frames + competing-error precedence); append-only
+DIRECTORY of immutable per-case rejection modules; ONE typed GoldenCase catalogue absorbing the latency/metrics
+example rows (the (example, format) key alone is WRONG — ekf1 ships two reset variants; xdist sharing becomes
+automatic); seed-MATRIX determinism certification in the refreeze tool (8+ full-corpus seeds, 0-63 targeted,
+same-seed process repeats, abort-before-write); and the missing load-bearing contracts — complete versioned HIR
+serializer, a real block-and-value alpha-canonicalizer for the canonical landing (renumber() compacts blocks
+only) plus independent Python-reference/MIR-interpreter gates there (cosim's model derives from the same LIR),
+exact per-case metrics, structural-only cases for FSCC/vector-polar/imu/shipped-EKF, deliberate format policy,
+full ABI manifest, version-token canonicalization + holoso_support.v freeze, provenance capture, and a
+bijection-checked corpus index. S2.15 implements per that doc. Still in flight: X1-X5 batch (fixes-r3).
