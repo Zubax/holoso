@@ -798,3 +798,21 @@ preorder everywhere if pin flips are few (Claude 3 — min-by-str vs preorder in
 honestly); _render_fail gets the digit-cap-safe spelling (Claude 4); the ifconv pin becomes a named catalogue
 constant shared with refreeze (Claude 5); retry-safe corpus replacement (Codex 5). Round-7 adjudicates BOTH
 reversals (Cascaded; any preorder unification flips). Batch to worktree fixes-r6 at f1f977f.
+
+Round-6 batch INTEGRATED: 5f44e4e cherry-picked clean as 1273f7f (targeted 244 green; mypy 201; black clean;
+batch's own full suite 1889/2; refreeze 151/0/0/0 — zero corpus drift). Batch deltas of note: A4 implemented as
+last-bound-wins + unbound-origin exemption (literal violating-wins PROVABLY collided with the arm-order charter
+— ElseArm would reject where the pinned behavior is compile-with-conversion); A6 took path (b) — the
+always-defer unification experiment was disqualified in kind (2 invariant crashes + 1 silent acceptance among
+4 flips), dual selection paths kept and documented truthfully + a new seed-stability witness. THREE reversals
+flagged for round-7 adjudication: (1) Cascaded now reports the preorder-first PROVOKED SHIFT (not even the
+float() call); (2) the round-5 stale-exactness kernel REVERSED BACK — its store strands behind the dead loop
+head so the transient exactness message resurfaces and the Implicit/Explicit equivalence splits (the
+stranded-vs-stale graph proxy trades this corner for Claude-2's — TAINT/provocation tracking is the true
+discriminator both misses); (3) source-earlier-wins flips where surviving in-graph violations outrank expired
+stale entries. CONSOLIDATION QUESTION queued for after round-7: whether to accept diagnostic selection among
+multiple real errors in doomed kernels as explicitly best-effort (guarantees: some located rejection always;
+seed-stable; single-error kernels exact; provoked secondaries never outrank an in-graph violation) rather than
+chase perfect causal attribution — three rounds of corner-trading suggest diminishing returns. _analyze.py at
+2631 lines (soft limit exceeded) — split queued. Trial: trial/s2-r6-stack at 1273f7f; round-7 pair follows;
+tag freeze-1 on clean+green.
