@@ -49,6 +49,7 @@ WITNESS_ENTRIES = [
     "dump_two_carried_hir",
     "emit_coalesce_conflict",
     "emit_competing_rejection",
+    "emit_competing_transfer_rejection",
     "emit_competing_fail",
     "emit_competing_bad_store",
     "emit_competing_state_store_violation",
@@ -354,6 +355,31 @@ def diff_summary(tree: Path, live: Path) -> bool:
     return bool(added or removed or changed)
 
 
+def swap_tree(tree: Path, live: Path) -> None:
+    """
+    Replace ``live`` with a copy of ``tree``, re-entrantly: at every failure or interruption point at least one
+    complete corpus survives on disk, and a retry after any interruption converges without deleting the last
+    surviving copy. A previous run interrupted between its two renames leaves ``live`` missing and the old
+    corpus displaced to ``.old``; that displaced tree is restored first, before any leftover is deleted, so the
+    cleanup can never remove both recovery trees at once. The old tree is displaced only after the incoming
+    copy is fully materialized next to it.
+    """
+    staged = live.parent / f"{live.name}.new"
+    displaced = live.parent / f"{live.name}.old"
+    if displaced.is_dir() and not live.is_dir():
+        displaced.rename(live)
+    if staged.is_dir():
+        shutil.rmtree(staged)
+    shutil.copytree(tree, staged)
+    if live.is_dir():
+        if displaced.is_dir():
+            shutil.rmtree(displaced)
+        live.rename(displaced)
+    staged.rename(live)
+    if displaced.is_dir():
+        shutil.rmtree(displaced)
+
+
 def replace_corpus(tree: Path, live: Path) -> None:
     from tests._golden_cases import REJECTIONS, rejection_module_path
 
@@ -362,19 +388,7 @@ def replace_corpus(tree: Path, live: Path) -> None:
         copied = tree / "rejections" / f"{rejection.case_id}.py"
         assert copied.is_file() and filecmp.cmp(source, copied, shallow=False), f"input drift on {source.name}"
     assert (tree / "README.md").is_file()
-    # Copy aside, then swap by rename: the incoming tree is fully materialized next to the live one before the
-    # live one is touched, so no failure window can lose both (the worst case leaves .new/.old for inspection).
-    staged = live.parent / f"{live.name}.new"
-    displaced = live.parent / f"{live.name}.old"
-    for leftover in (staged, displaced):
-        if leftover.is_dir():
-            shutil.rmtree(leftover)
-    shutil.copytree(tree, staged)
-    if live.is_dir():
-        live.rename(displaced)
-    staged.rename(live)
-    if displaced.is_dir():
-        shutil.rmtree(displaced)
+    swap_tree(tree, live)
     print(_green(f"💾 Replaced {live.relative_to(REPO)}. Commit it together with the causing code+DESIGN change."))
 
 

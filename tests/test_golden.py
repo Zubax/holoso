@@ -11,6 +11,7 @@ and DESIGN.md change in the same commit.
 
 import difflib
 import json
+from collections.abc import Callable
 from functools import cache
 from pathlib import Path
 
@@ -18,6 +19,7 @@ import pytest
 
 from ._golden_cases import (
     CASES,
+    DEFAULT_IFCONV_MAX_OPS,
     DEFAULT_REGALLOC,
     DIAG_SCHEMA,
     GOLDEN_ROOT,
@@ -46,8 +48,8 @@ def _pinned_codegen_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
     Pin every codegen tuning knob to its shipped default so the frozen corpus is reproducible regardless of the
     developer's environment (``HOLOSO_REGALLOC_EFFORT`` speed-ups, write-cap/price experiments, an
     ``HOLOSO_IFCONV_MAX_OPS`` budget override). The knobs are env-read-once at import, so the module attributes
-    are patched to the named defaults; ``build_artifacts`` additionally pins the regalloc knobs per case, but
-    the fixture keeps any future direct measurement in this module honest as well.
+    are patched to the named defaults; ``build_artifacts`` additionally pins the regalloc and ifconv knobs per
+    case, but the fixture keeps any future direct measurement in this module honest as well.
     """
     import holoso._hir._if_convert as if_convert
     import holoso._lir._regalloc as regalloc
@@ -55,7 +57,7 @@ def _pinned_codegen_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(regalloc, "_REFINE_MAXITER", DEFAULT_REGALLOC.refine_maxiter)
     monkeypatch.setattr(regalloc, "_REG_REUSE_WRITE_CAP", DEFAULT_REGALLOC.reg_reuse_write_cap)
     monkeypatch.setattr(regalloc, "_REG_PRICE", DEFAULT_REGALLOC.reg_price)
-    monkeypatch.setattr(if_convert, "_IFCONV_MAX_OPS", 8)
+    monkeypatch.setattr(if_convert, "_IFCONV_MAX_OPS", DEFAULT_IFCONV_MAX_OPS)
 
 
 def _read_artifact(path: Path) -> str:
@@ -142,6 +144,69 @@ def test_hir_dump_spells_a_wide_integer_constant() -> None:
     text = dump_hir(hir)
     assert text.startswith(HIR_DUMP_SCHEMA)
     assert f"const int {(1 << 20000) - 1:#x}" in text
+
+
+def _swap_tree() -> "Callable[[Path, Path], None]":
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("refreeze_golden", REPO_ROOT / "tools" / "refreeze_golden.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.swap_tree  # type: ignore[no-any-return]
+
+
+def _write_corpus(root: Path, marker: str) -> None:
+    root.mkdir(parents=True)
+    (root / "index.json").write_text(marker, encoding="utf-8")
+
+
+def _inject_copy_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    def failing_copytree(src: object, dst: object, **kwargs: object) -> object:
+        raise OSError("injected copy failure")
+
+    monkeypatch.setattr(shutil, "copytree", failing_copytree)
+
+
+def test_corpus_swap_recovers_an_interrupted_replacement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Round-6 regression (Codex): a previous replacement interrupted between its two renames leaves the live
+    # tree missing with the old corpus displaced to .old and the incoming copy staged at .new; the old cleanup
+    # deleted BOTH recovery trees before the fresh copy landed, so a crash inside the retry lost every corpus
+    # copy on disk. The retry must restore the displaced tree before deleting anything.
+    swap_tree = _swap_tree()
+    source, live = tmp_path / "generated", tmp_path / "golden"
+    _write_corpus(source, "incoming")
+    _write_corpus(live.parent / f"{live.name}.old", "previous")
+    _write_corpus(live.parent / f"{live.name}.new", "staged-by-dead-run")
+
+    with monkeypatch.context() as context:
+        _inject_copy_failure(context)
+        with pytest.raises(OSError, match="injected copy failure"):
+            swap_tree(source, live)
+    assert (live / "index.json").read_text(encoding="utf-8") == "previous", "the displaced corpus must be restored"
+
+    swap_tree(source, live)
+    assert (live / "index.json").read_text(encoding="utf-8") == "incoming"
+    assert not (live.parent / f"{live.name}.old").exists() and not (live.parent / f"{live.name}.new").exists()
+
+
+def test_corpus_swap_keeps_the_live_tree_until_the_copy_lands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    swap_tree = _swap_tree()
+    source, live = tmp_path / "generated", tmp_path / "golden"
+    _write_corpus(source, "incoming")
+    _write_corpus(live, "current")
+
+    with monkeypatch.context() as context:
+        _inject_copy_failure(context)
+        with pytest.raises(OSError, match="injected copy failure"):
+            swap_tree(source, live)
+    assert (live / "index.json").read_text(encoding="utf-8") == "current"
+
+    swap_tree(source, live)
+    assert (live / "index.json").read_text(encoding="utf-8") == "incoming"
+    assert not (live.parent / f"{live.name}.old").exists() and not (live.parent / f"{live.name}.new").exists()
 
 
 def test_corpus_bijection() -> None:

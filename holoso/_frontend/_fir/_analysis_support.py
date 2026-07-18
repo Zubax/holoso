@@ -76,6 +76,7 @@ from ._ir import (
     UnbindPlace,
     LocatedRejection,
     executable_preorder,
+    source_position,
 )
 from ._opsem import BinOp
 from ._signature import ArrayParameter, RecordParameter, ScalarParameter
@@ -514,8 +515,10 @@ type StorageSchema = ScalarSchema | ContradictorySchema
 class StoreVerdict:
     """
     The outcome of one store op's last BOUND execution within the current round; ``message`` None means the
-    store conformed. An Unbound execution (a producer cut by the deferral cascade) records no verdict at all:
-    it is evidence of nothing, neither conformance nor violation.
+    store conformed. The last bound visit runs under the block's converged environment, so this is the fixpoint
+    verdict: an earlier violation drawn on a pre-join transient is superseded. An Unbound execution (a producer
+    cut by the deferral cascade) records no verdict at all -- it is evidence of nothing, neither conformance
+    nor violation -- but marks its origin as executed-unbound, which blocks the bridge pop.
     """
 
     message: str | None
@@ -731,26 +734,27 @@ def enforce_storage_schemas(
     (establishment, merge joins, the store-edge conversion, and compiler scope resets included) -- with each
     store's stable stored fact re-deriving its verdict, and all violations, local rebindings, store-edge
     conversion failures, and the recorded state-store verdicts alike, report as one located rejection at the
-    first violating store in CFG preorder (then-arm first, matching the Fail walk). A store that executed only
-    with an Unbound value this round -- its producer cut by the very cascade its own earlier violation provoked
-    -- has no fresh verdict either way, so its standing obligation from the pending bridge re-attaches at the
-    store's own preorder rank; a store that is dead or conforming under the stable facts contributes nothing,
-    so its bridge entry silently expires. Runs strictly after the round stabilizes: SCCP discovers executable
-    predecessors late, so a mid-flight verdict would be order-dependent. A compiler scope reset (an unchecked
-    UnbindPlace: a comprehension entry, an unroll trip's target prelude) clears the binding for a fresh
-    per-execution schema, while a user ``del`` does not: variables stay strongly typed across ``del``. When no
-    store violates, the returned op ids are the local stores whose value converts int->float on the store edge:
-    the emission plan for the store-edge conversion.
+    first violating store in CFG preorder (then-arm first, matching the Fail walk). The pending bridge is never
+    a verdict source for a store still in the graph: a store that executed only with an Unbound value -- its
+    producer cut by the deferral cascade -- is STALE, its entry expires, and the deferral that cut it surfaces
+    as the true stable rejection. An origin with no store left in any executable block is STRANDED -- its own
+    violation's cascade removed the block, so nothing downstream can testify -- and its entry reports, ranked
+    after every in-graph violation and before any deferred rejection, lexicographically among stranded
+    siblings. Runs strictly after the round stabilizes: SCCP discovers executable predecessors late, so a
+    mid-flight verdict would be order-dependent. A compiler scope reset (an unchecked UnbindPlace: a
+    comprehension entry, an unroll trip's target prelude) clears the binding for a fresh per-execution schema,
+    while a user ``del`` does not: variables stay strongly typed across ``del``. When no store violates, the
+    returned op ids are the local stores whose value converts int->float on the store edge: the emission plan
+    for the store-edge conversion.
     """
     violations: list[tuple[tuple[int, int], str, OriginStack]] = []
     conversions: set[int] = set()
+    surviving_origins: set[OriginStack] = set()
     order = executable_preorder(unit, executable_blocks, executable_edges)
 
     def standing_obligation(op: Op) -> str | None:
         verdict = store_verdicts.get(id(op))
-        if verdict is not None:
-            return verdict.message
-        return pending_bridge.get(op.origin)
+        return verdict.message if verdict is not None else None
 
     for position, block_id in enumerate(order):
         assert block_id in schemas_in, "every executable-reachable block carries a flowed environment"
@@ -758,12 +762,14 @@ def enforce_storage_schemas(
         for index, op in enumerate(unit.blocks[block_id].ops):
             match op:
                 case PyStoreAttr():
+                    surviving_origins.add(op.origin)
                     message = standing_obligation(op)
                     if message is not None:
                         violations.append(((position, index), message, op.origin))
                 case UnbindPlace(place=place, checked=False):
                     env.pop(place, None)
                 case StorePlace(place=place, role=StoreRole.SOURCE):
+                    surviving_origins.add(op.origin)
                     fact = store_facts.get(id(op))
                     assert fact is not None, "every executable SOURCE store was transferred this round"
                     assert isinstance(place, Local), "a SOURCE store binds a named local"
@@ -781,6 +787,10 @@ def enforce_storage_schemas(
                         conversions.add(id(op))
     if violations:
         _, message, origin = min(violations, key=lambda item: item[0])
+        raise AnalysisRejection(message, origin)
+    stranded = [(message, origin) for origin, message in pending_bridge.items() if origin not in surviving_origins]
+    if stranded:
+        message, origin = min(stranded, key=lambda entry: (entry[0], source_position(entry[1])))
         raise AnalysisRejection(message, origin)
     return conversions
 

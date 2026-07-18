@@ -346,18 +346,32 @@ beside the facts, since the store-edge conversion needs it exactly where the sto
 never per-visit: optimistic analysis discovers executable predecessors late, so store obligations resolve only
 after the state fixed point, and when several stores violate, the one reported is the first executable store in
 CFG preorder. Across the fixed point's round boundaries, still-standing violations fold into an origin-keyed
-pending bridge whose sole purpose is keeping the deferral net closed -- it is never popped mid-round and is
-never a verdict source by itself. Verdicts come exclusively from the stable round: each store's last execution
-with a bound value settles it (an Unbound value, the mark of a producer cut by the deferral cascade, is
-evidence of nothing), a store that executed only unbound re-attaches its bridged obligation at its own preorder
-rank, and every other bridge entry expires -- a store gone dead or legal under the stable facts legitimately
-stops reporting, letting the real stable rejection surface. A pending store violation -- a local rebind, a
-state-store obligation, or a conversion failure alike -- outranks every rejection deferred in the same round,
-including a user raise, so the causal store reports rather than any secondary failure its carried fact
-provoked; the deferral spans every layer a carried fact can reach -- operator transfers, missing-library
-refusals, environment joins at control-flow merges, and the state live-in join alike, and when every obligation
-resolves clean, the deferred rejection surfaced is the first in executable preorder, exactly what a
-violation-free run would have raised. A failing state live-in join never cuts a round short: the leaf freezes
+pending bridge whose sole purpose is keeping the deferral net closed -- it is never popped mid-round, carries
+through an unroll restart untouched (a restart is a mid-round event, so only true round boundaries reconcile),
+and is never a verdict source for a store still in the graph. The boundary reconcile folds each origin's
+violating verdicts in earliest-recorded order (clones of one store report the first clone's message) and drops
+an origin only on complete evidence: every execution of its stores was bound and conforming and none was
+unbound -- a clone cut to an Unbound value records no verdict, so its conforming sibling alone must not
+reopen the net for the next round. Verdicts come exclusively from the stable round, each store's last bound
+execution settling it (the converged environment's verdict, so a violation drawn on a pre-join transient is
+superseded and the merge-chartered store-edge conversion stays legal in either arm order), and at
+stabilization the surviving bridge entries split stranded from stale: an origin with no store left in any
+executable block is STRANDED -- its own violation's cascade removed the block, nothing downstream can testify
+-- and reports its bridged message, ranked after every in-graph violation, before any deferred rejection, and
+lexicographically among stranded siblings; an origin whose store survived but executed only unbound is STALE
+-- the deferral that cut its value is the true stable rejection -- and its entry expires. A pending store
+violation -- a local rebind, a state-store obligation, or a conversion failure alike -- outranks every
+rejection deferred in the same round, including a user raise, so the causal store reports rather than any
+secondary failure its carried fact provoked; the deferral spans every layer a carried fact can reach --
+operator transfers, missing-library refusals, environment joins at control-flow merges, and the state live-in
+join alike, and when every obligation resolves clean, the deferred rejection surfaced is the first in
+executable preorder. That selection deliberately differs from a violation-free run, which raises the first
+rejection the worklist encounters (with a min-by-str pick among the places of one failing edge join): a
+kernel with several rejections can therefore report a different one depending on whether an unrelated
+transient violation forced the deferral path. Both selections are deterministic and hash-seed-stable;
+unifying them would mean deferring every rejection to stabilization, which today breaks call-expansion
+invariants and can silently compile an ownerless rejection, so it is left to its own redesign.
+A failing state live-in join never cuts a round short: the leaf freezes
 at its last joinable live-in and the failure reports only at stabilization, ranked below every recorded
 obligation, so each verdict -- the exactness ruling of a store-edge conversion included -- derives from the
 stabilized facts, never from a transient early round.

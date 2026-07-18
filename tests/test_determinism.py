@@ -99,6 +99,19 @@ def competing_fails(c: bool, x: float) -> float:
     return x
 
 
+def competing_transfer_rejections(c: bool, x: float) -> float:
+    """
+    Two mid-round transfer rejections on sibling arms of a violation-free run: the immediate path raises the
+    first one the worklist encounters, a distinct selection from the deferral path's executable preorder (see
+    _raise_transfer_deferrals), and the choice must at least be hash-seed-stable.
+    """
+    if c:
+        a = x << 1  # type: ignore[operator]  # noqa: F841
+    else:
+        b = x & 1  # type: ignore[operator]  # noqa: F841
+    return x
+
+
 def competing_bad_stores(c: bool, x: float) -> float:
     """
     Two schema-violating stores on sibling arms with different messages: storage-schema obligations resolve
@@ -132,6 +145,10 @@ def emit_competing_rejection() -> None:
 
 def emit_competing_fail() -> None:
     _emit_rejection(competing_fails)
+
+
+def emit_competing_transfer_rejection() -> None:
+    _emit_rejection(competing_transfer_rejections)
 
 
 def emit_competing_bad_store() -> None:
@@ -288,6 +305,16 @@ def test_competing_state_reset_rejections_report_identically_across_hash_seeds(o
     assert _entry_output_under_seed("emit_competing_reset_rejection", "0") == _entry_output_under_seed(
         "emit_competing_reset_rejection", other_seed
     )
+
+
+@pytest.mark.parametrize("other_seed", ["1", "3", "31337"])
+def test_competing_transfer_rejections_report_identically_across_hash_seeds(other_seed: str) -> None:
+    # Property lock for the violation-free immediate path: with two rejections on sibling arms, the surfaced
+    # one follows worklist encounter order (integer block ids, else arm first under LIFO) -- a different
+    # selection from the deferral path's executable preorder, but one that must never depend on PYTHONHASHSEED.
+    reference = _entry_output_under_seed("emit_competing_transfer_rejection", "0")
+    assert "bitwise/shift operator" in reference
+    assert reference == _entry_output_under_seed("emit_competing_transfer_rejection", other_seed)
 
 
 @pytest.mark.parametrize("other_seed", ["1", "3", "31337"])

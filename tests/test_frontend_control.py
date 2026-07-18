@@ -1011,6 +1011,25 @@ def test_raise_rejections() -> None:
         lower(runtime_interpolation)
 
 
+def test_raise_interpolating_a_wide_folded_integer_is_a_located_rejection() -> None:
+    # Folding admits integers far past CPython's 4300-digit int-to-decimal cap, so the rendered message must
+    # spell the constant in hex instead of crashing the render with the raw conversion ValueError.
+    class WideMask:
+        def __init__(self) -> None:
+            self.lfsr = 1
+
+        def step(self, advance: bool) -> bool:
+            mask = (1 << 20000) - 1
+            if advance:
+                raise ValueError(f"mask={mask}")
+            return self.lfsr != 0
+
+    with pytest.raises(UnsupportedConstruct, match="mask=0x") as excinfo:
+        lower(WideMask().step)
+    assert f"{(1 << 20000) - 1:#x}" in str(excinfo.value)
+    assert excinfo.value.location is not None and "raise ValueError" in (excinfo.value.location.line or "")
+
+
 def _raises_under_a_dynamic_guard(a: float) -> float:
     if a > 0.0:
         raise ValueError("positive")

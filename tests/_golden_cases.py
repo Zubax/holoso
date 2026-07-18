@@ -93,6 +93,11 @@ class RegallocKnobs:
 
 DEFAULT_REGALLOC = RegallocKnobs()
 
+# The if-conversion op budget pinned for every golden build, mirroring the shipped default (the ``getenv``
+# fallback in ``holoso._hir._if_convert``). Shared by ``build_artifacts`` (so refreeze captures under it) and
+# the gate fixture, so a future change of the shipped default cannot silently diverge the gate from refreeze.
+DEFAULT_IFCONV_MAX_OPS = 8
+
 
 @contextmanager
 def pinned_regalloc(knobs: RegallocKnobs) -> Iterator[None]:
@@ -106,6 +111,18 @@ def pinned_regalloc(knobs: RegallocKnobs) -> Iterator[None]:
         yield
     finally:
         regalloc._REFINE_MAXITER, regalloc._REG_REUSE_WRITE_CAP, regalloc._REG_PRICE = saved
+
+
+@contextmanager
+def pinned_ifconv(max_ops: int) -> Iterator[None]:
+    import holoso._hir._if_convert as if_convert
+
+    saved = if_convert._IFCONV_MAX_OPS
+    if_convert._IFCONV_MAX_OPS = max_ops
+    try:
+        yield
+    finally:
+        if_convert._IFCONV_MAX_OPS = saved
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +249,7 @@ def _spell_operator(operator: object | None) -> str | None:
 def build_artifacts(case: GoldenCase) -> GoldenArtifacts:
     # make_ops is called exactly once and the instance threads through both the build and the ABI rendering, so
     # the manifest can never describe a different operator set than the one the frozen RTL was emitted from.
-    with pinned_regalloc(case.regalloc):
+    with pinned_regalloc(case.regalloc), pinned_ifconv(DEFAULT_IFCONV_MAX_OPS):
         kernel = case.make_kernel()
         pre_hir = lower_frontend(kernel)
         ops = case.make_ops(case.fmt)

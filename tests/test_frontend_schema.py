@@ -790,10 +790,11 @@ def test_state_obligation_survives_the_round_boundary() -> None:
     assert "self.count = value" in error.location.line
 
 
-def test_state_obligation_stands_when_the_cascade_cuts_the_stores_own_value() -> None:
-    # Round two's deferred shift leaves the store's OWN right-hand side unbound, so the store executes without a
-    # bound verdict; its round-one obligation must still report from the pending bridge instead of letting the
-    # provoked float-call rejection surface.
+def test_stale_store_obligation_expires_when_the_cascade_cuts_the_stores_own_value() -> None:
+    # Stranded-vs-stale doctrine (round 6, adjudication in round 7): a bridge origin whose store SURVIVES in a
+    # live block but executed only with an Unbound value is STALE -- the deferral that cut it is the true
+    # stable rejection, so the entry expires and the first deferral in executable preorder surfaces. This
+    # REVERSES the round-4 expectation, which re-attached the bridged obligation and reported the store.
     class Counter:
         def __init__(self) -> None:
             self.count = 0
@@ -803,14 +804,15 @@ def test_state_obligation_stands_when_the_cascade_cuts_the_stores_own_value() ->
             self.count = out  # type: ignore[assignment]
             return value
 
-    error = _reject(Counter().step, "state attribute 'count' stores an incompatible type")
+    error = _reject(Counter().step, "bitwise/shift operator << requires integer operands")
     assert error.location is not None and error.location.line is not None
-    assert "self.count = out" in error.location.line
+    assert "out = float(self.count << 1)" in error.location.line
 
 
-def test_state_obligation_stands_when_the_cascade_cuts_a_mixed_store_value() -> None:
-    # Same cascade, but the unbound value also feeds the return: the may-be-unbound rejection it provokes must
-    # defer behind the bridged obligation instead of aborting the round the moment the store goes unbound.
+def test_stale_store_obligation_expires_when_the_cascade_cuts_a_mixed_store_value() -> None:
+    # Same stale expiry with the unbound value also feeding the return: the provoked may-be-unbound rejection
+    # still defers to stabilization (the round never aborts mid-flight), and the shift deferral that cut the
+    # store outranks it in executable preorder. Reversed from round 4 like the test above; round 7 adjudicates.
     class Counter:
         def __init__(self) -> None:
             self.count = 0
@@ -820,15 +822,19 @@ def test_state_obligation_stands_when_the_cascade_cuts_a_mixed_store_value() -> 
             self.count = value + out  # type: ignore[assignment]
             return out
 
-    error = _reject(Counter().step, "state attribute 'count' stores an incompatible type")
+    error = _reject(Counter().step, "bitwise/shift operator << requires integer operands")
     assert error.location is not None and error.location.line is not None
-    assert "self.count = value + out" in error.location.line
+    assert "out = float(self.count << 1)" in error.location.line
 
 
-def test_stale_transient_exactness_verdict_never_outlives_the_stable_round() -> None:
-    # The store is a Known inexact integer only in round one; the stable facts leave a runtime integer, whose
-    # store-edge conversion is legal, and the store itself falls behind the rejected loop head. The bridged
-    # round-one message is stale and must be discarded, so both spellings report the real stable rejection.
+def test_stranded_transient_exactness_verdict_reports_when_the_loop_head_dies() -> None:
+    # Stranded-vs-stale doctrine (round 6, adjudication in round 7): the Implicit store violates in round one
+    # and its block then falls behind the rejected loop head, leaving the executable graph entirely -- a
+    # STRANDED origin, which reports its bridged message ahead of any deferred rejection (nothing downstream
+    # can testify once the store's own cascade removed the block). This REVERSES the round-5 expectation,
+    # which silently dropped the entry and let the range() deferral surface, and it splits the two spellings:
+    # the Explicit float(...) cast never violates, so its round runs violation-free and the range() rejection
+    # reports directly.
     class Implicit:
         def __init__(self) -> None:
             self.total = 0.0
@@ -841,6 +847,10 @@ def test_stale_transient_exactness_verdict_never_outlives_the_stable_round() -> 
             self.total = self.k + (2**53 + 1)
             self.k = self.k + 1
             return acc
+
+    error = _reject(Implicit().step, "not exactly representable")
+    assert error.location is not None and error.location.line is not None
+    assert "self.total = self.k + (2**53 + 1)" in error.location.line
 
     class Explicit:
         def __init__(self) -> None:
@@ -855,11 +865,10 @@ def test_stale_transient_exactness_verdict_never_outlives_the_stable_round() -> 
             self.k = self.k + 1
             return acc
 
-    for kernel in (Implicit().step, Explicit().step):
-        error = _reject(kernel, "call to range with runtime arguments")
-        assert "not exactly representable" not in str(error)
-        assert error.location is not None and error.location.line is not None
-        assert "for _ in range(self.k):" in error.location.line
+    error = _reject(Explicit().step, "call to range with runtime arguments")
+    assert "not exactly representable" not in str(error)
+    assert error.location is not None and error.location.line is not None
+    assert "for _ in range(self.k):" in error.location.line
 
 
 def test_violating_unroll_clone_reports_despite_a_conforming_sibling() -> None:
@@ -897,10 +906,11 @@ def test_violating_unroll_clone_reports_despite_a_conforming_sibling() -> None:
         assert store_line in error.location.line
 
 
-def test_the_source_earlier_violation_wins_across_the_round_bridge() -> None:
-    # An obligation that survives only on the bridge (its store's value is cut in round two) competes with a
-    # violation re-derived from the stable round: the bridge re-attaches at the store's own preorder rank, so
-    # the source-earlier violation wins in both the state-first and the local-first spelling.
+def test_the_surviving_violation_wins_when_a_stale_sibling_expires() -> None:
+    # Stranded-vs-stale doctrine (round 6, adjudication in round 7): an obligation whose store survives in a
+    # live block but executed only unbound is STALE and expires, so the violation still standing in the stable
+    # graph reports instead, regardless of source order. This REVERSES the round-5 expectation, where the
+    # bridge re-attached the cut store's obligation at its own preorder rank and the source-earlier line won.
     class StateFirst:
         def __init__(self) -> None:
             self.a = 0
@@ -912,9 +922,9 @@ def test_the_source_earlier_violation_wins_across_the_round_bridge() -> None:
             b = x  # type: ignore[assignment]
             return b
 
-    error = _reject(StateFirst().step, "state attribute 'a' stores an incompatible type")
+    error = _reject(StateFirst().step, "variable 'b' is an int and cannot be rebound to a float")
     assert error.location is not None and error.location.line is not None
-    assert "self.a = out" in error.location.line
+    assert "b = x" in error.location.line
 
     class LocalFirst:
         def __init__(self) -> None:
@@ -926,9 +936,9 @@ def test_the_source_earlier_violation_wins_across_the_round_bridge() -> None:
             self.k = x  # type: ignore[assignment]
             return x
 
-    error = _reject(LocalFirst().step, "variable 'b' is a bool and cannot be rebound to an int")
+    error = _reject(LocalFirst().step, "state attribute 'k' stores an incompatible type")
     assert error.location is not None and error.location.line is not None
-    assert "b = self.k << 1" in error.location.line
+    assert "self.k = x" in error.location.line
 
 
 def test_cascade_unbound_does_not_violate_an_aggregate_slot() -> None:
@@ -950,3 +960,163 @@ def test_cascade_unbound_does_not_violate_an_aggregate_slot() -> None:
     error = _reject(Vec().step, "state attribute 'n' stores an incompatible type")
     assert error.location is not None and error.location.line is not None
     assert "self.n = x" in error.location.line
+
+
+def test_stale_store_entry_is_not_self_fulfilling() -> None:
+    # Round-6 regression (Codex): the stale entry's own pendency defers the real stable rejection, keeps its
+    # own store's value Unbound, and the old stabilization re-attach then restored the stale verdict -- the
+    # implicit spelling reported "not exactly representable" where the stable truth is the range() rejection.
+    # Under stranded-vs-stale, the surviving-but-unbound store's entry expires and both spellings agree.
+    class Implicit:
+        def __init__(self) -> None:
+            self.total = 0.0
+            self.k = 0
+
+        def step(self, x: float) -> float:
+            n = len(range(self.k))
+            self.total = n + (2**53 + 1)
+            self.k = self.k + 1
+            return x
+
+    class Explicit:
+        def __init__(self) -> None:
+            self.total = 0.0
+            self.k = 0
+
+        def step(self, x: float) -> float:
+            n = len(range(self.k))
+            self.total = float(n + (2**53 + 1))
+            self.k = self.k + 1
+            return x
+
+    for kernel in (Implicit().step, Explicit().step):
+        error = _reject(kernel, "call to range with runtime arguments")
+        assert "not exactly representable" not in str(error)
+        assert error.location is not None and error.location.line is not None
+        assert "n = len(range(self.k))" in error.location.line
+
+
+def test_stranded_store_obligation_reports_over_the_provoked_cascade() -> None:
+    # Round-6 regression (Claude): the violating store's carried float poisons the live-in, the provoked &
+    # rejection defers, the loop head dies on the unbound list cell, and the post-loop store block leaves the
+    # executable graph. The old silent expiry then reported the innocent `t = self.a & 1` line; a STRANDED
+    # origin must report its own store instead -- nothing in the graph can testify for it.
+    class Meter:
+        def __init__(self) -> None:
+            self.a = 3
+
+        def step(self, x: float) -> float:
+            t = self.a & 1
+            acc = 0.0
+            for v in [t, 1]:
+                acc = acc + float(v)
+            self.a = x  # type: ignore[assignment]
+            return acc
+
+    error = _reject(Meter().step, "state attribute 'a' stores an incompatible type")
+    assert error.location is not None and error.location.line is not None
+    assert "self.a = x" in error.location.line
+
+
+def test_conforming_clone_does_not_pop_the_shared_origin_on_incomplete_evidence() -> None:
+    # Round-6 regression (Claude): trip 0 conforms bound while trip 1 executes with the cut `out`, recording
+    # nothing, and the guarded p-store is discovered only in round two, forcing a third round. The old boundary
+    # reconcile popped the shared origin on trip 0's conforming verdict alone, and round three ran with an open
+    # deferral net, raising the innocent shift mid-round. An origin that also executed unbound is exempt from
+    # the pop, so the obligation survives to stabilization and the stranded store reports.
+    class Meter:
+        def __init__(self) -> None:
+            self.n = 0
+            self.p = 0.0
+            self.q = 0.0
+
+        def step(self, x: float) -> float:
+            out = float(self.n << 1)
+            t = (0.0, x)[int(self.p)]
+            for v in [t, 1]:
+                self.n = out if v == 1 else 0  # type: ignore[assignment]
+            if self.q > 0.0:
+                self.p = x
+            self.q = x
+            return x
+
+    error = _reject(Meter().step, "state attribute 'n' stores an incompatible type")
+    assert error.location is not None and error.location.line is not None
+    assert "self.n = out if v == 1 else 0" in error.location.line
+
+
+def test_unroll_restart_carries_the_bridge_unchanged() -> None:
+    # Round-6 regression (Codex): an _UnrollRestart is a mid-round event, so the partial round's verdicts are
+    # no evidence -- the old restart path reconciled them into the bridge, whose leaked pendency deferred the
+    # loop-head rejection and let the stranded transient exactness verdicts of the first-arm unroll report.
+    # With the bridge carried through unchanged, the reseeded round is violation-free and the loop-head
+    # rejection surfaces directly.
+    class Meter:
+        def __init__(self) -> None:
+            self.total = 0.0
+
+        def step(self, x: float) -> float:
+            if x > 0.0:
+                m = 2
+            else:
+                m = 3
+            for v in range(m):
+                self.total = v + (2**53 + 1)
+            return x
+
+    error = _reject(Meter().step, "loop trip count is not static here")
+    assert "not exactly representable" not in str(error)
+    assert error.location is not None and error.location.line is not None
+    assert "for v in range(m):" in error.location.line
+
+
+def test_a_conforming_visit_of_a_cut_store_op_does_not_settle_its_origin() -> None:
+    # Round-6 regression (Codex): one CFG store op executes bound-and-conforming through the else arm and
+    # unbound through the then arm's join, so the retained conforming verdict used to pop the origin at the
+    # third-round boundary and the reopened net raised the else-arm shift first (worklist encounter order).
+    # With the executed-unbound exemption the net holds, and stabilization surfaces the first deferral in
+    # executable preorder: the then arm.
+    class Meter:
+        def __init__(self) -> None:
+            self.count = 0
+            self.p = 0.0
+            self.q = 0.0
+
+        def step(self, value: float) -> float:
+            if value > 0.0:
+                b = float(self.count << 2)
+                t = b
+            else:
+                b = float(self.count << 1)
+                t = 0
+            self.count = t  # type: ignore[assignment]
+            if self.q > 0.0:
+                self.p = value
+            self.q = value
+            return value
+
+    error = _reject(Meter().step, "runtime operation reads an aggregate or unbound value")
+    assert error.location is not None and error.location.line is not None
+    assert "b = float(self.count << 2)" in error.location.line
+
+
+def test_stranded_clone_messages_fold_earliest_first() -> None:
+    # Round-6 regression (Codex): unroll clones of one store share an origin, and when several violate with
+    # different messages the bridge entry must keep the earliest-recorded one (trip order), not the last
+    # overwrite -- under last-overwrite the trip-1 float message displaced the trip-0 aggregate message once
+    # the origin stranded.
+    class Meter:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def step(self, x: float) -> float:
+            t = self.n & 1
+            acc = 0.0
+            for v in [[0.0, 1.0], t + x]:
+                self.n = v  # type: ignore[assignment]
+                acc = acc + 1.0
+            return acc
+
+    error = _reject(Meter().step, "state attribute 'n' persists a scalar; an aggregate cannot be stored into it")
+    assert error.location is not None and error.location.line is not None
+    assert "self.n = v" in error.location.line

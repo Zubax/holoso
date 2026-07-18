@@ -373,13 +373,16 @@ class Analyzer:
         self._unroll_seeds: dict[OriginStack, Fact] = {}  # survives rounds: the joined facts of restarted headers
         self._store_origins: dict[StateLeaf, OriginStack] = {}
         self._store_verdicts: dict[int, StoreVerdict] = {}  # op id -> the last bound execution's verdict this round
+        self._unbound_store_origins: set[OriginStack] = set()  # origins that executed with an Unbound value
         # The pending bridge keeps the deferral net closed across round boundaries and nothing more: op ids are
-        # round-scoped (grafted and cloned ops are fresh objects every round), so each round boundary reconciles
-        # the still-standing verdicts into this origin-keyed map -- origins are re-attributed identically across
-        # rounds, the same identity the unroll seeds key on. It is never popped mid-round (a conforming unroll
-        # clone must not open a window for its violating same-origin sibling) and is never a verdict source by
-        # itself: at stabilization the resolution walk re-attaches an entry only to a store that executed without
-        # any bound verdict, and discards the rest (a store gone dead or legal legitimately stops reporting).
+        # round-scoped (grafted and cloned ops are fresh objects every round), so each true round boundary
+        # reconciles the still-standing verdicts into this origin-keyed map -- origins are re-attributed
+        # identically across rounds, the same identity the unroll seeds key on. It is never popped mid-round
+        # (a conforming unroll clone must not open a window for its violating same-origin sibling), carries
+        # through an _UnrollRestart untouched (a restart is a mid-round event, so a partial round is evidence
+        # of nothing), and is never a verdict source for a store still in the graph: at stabilization an origin
+        # with no store left in any executable block is stranded -- its own violation's cascade removed the
+        # block -- and reports from here, while an origin whose store survived resolves from the walk alone.
         self._pending_bridge: dict[OriginStack, str] = {}
         self._store_facts: dict[int, Fact] = {}  # SOURCE store op id -> its stored fact at the last visit
         self._transfer_deferrals: dict[int, LocatedRejection] = {}  # op id -> rejection deferred behind a store
@@ -407,7 +410,8 @@ class Analyzer:
                 result = self.analyze(param_facts)
             except _UnrollRestart as restart:
                 # Facts descend monotonically and seeds only join downward, so reseeding terminates within the
-                # round fuel.
+                # round fuel. A restart is a mid-round event: the interrupted round's partial verdicts are
+                # discarded without reconciling the bridge, which carries into the rerun unchanged.
                 self._unroll_seeds[restart.origin] = restart.fact
                 self._reset_round()
                 _logger.info("state round %d: unroll reseeded at %s", round_index + 1, restart.origin[0])
@@ -460,6 +464,7 @@ class Analyzer:
                 return result
             self._runtime_state = new_w
             self._state_livein = new_d
+            self._reconcile_bridge()
             self._reset_round()
             _logger.info("state round %d: %d runtime leaves, %d live-in facts", round_index + 1, len(new_w), len(new_d))
         raise AnalysisRejection(
@@ -482,13 +487,29 @@ class Analyzer:
             verdict.message is not None for verdict in self._store_verdicts.values()
         )
 
+    def _record_store_verdict(self, op: Op, message: str | None) -> None:
+        # Last-bound-wins: the worklist can re-execute one CFG op under several environments, and the last
+        # visit's env is the converged one, so its verdict is the fixpoint verdict -- an earlier violation
+        # drawn on a pre-join transient (a Known integer one arm feeds a merge) is superseded, keeping the
+        # merge-chartered store-edge conversion legal in either arm order. An Unbound execution records
+        # nothing, so a bound verdict never settles an op the cascade also cut: the origin stays exempt from
+        # the bridge pop through _unbound_store_origins.
+        self._store_verdicts[id(op)] = StoreVerdict(message, op.origin)
+
     def _raise_transfer_deferrals(self, result: ResidualUnit) -> None:
         """
         Rejections deferred behind a pending store violation whose ops never went clean again. Reached only when
         the resolution walk and the state-join deferrals all came up clean (the pending violations were
         transient, or their stores fell dead), so each lingering entry is a real rejection re-derived on the
-        op's stable facts. The one surfaced is the first in executable preorder -- the raise a violation-free
-        run would have hit first -- so deferring and immediately raising report the same diagnostic.
+        op's stable facts. The one surfaced is the first in executable preorder. This is deliberately NOT the
+        same selection a violation-free run makes: with nothing pending, the first rejection the worklist
+        encounters raises immediately (LIFO visit order, with a min-by-str pick among the places of one failing
+        edge join), so a kernel with several rejections can report a different one depending on whether an
+        unrelated transient violation forced the deferral path. Both selections are deterministic and
+        hash-seed-stable -- the worklist order is driven by integer block ids and the deferral walk by the
+        preorder -- they just differ from each other; unifying them means deferring every rejection to
+        stabilization, which today breaks call-expansion invariants (a deferred graft leaves executable SOURCE
+        stores untransferred) and lets an ownerless deferral silently compile, so it needs its own redesign.
         """
         if not self._transfer_deferrals:
             return
@@ -505,24 +526,29 @@ class Analyzer:
         # block the stable round never reached, so the rejection was derived on a path that no longer executes.
         _logger.info("discarding %d ownerless transfer deferral(s)", len(self._transfer_deferrals))
 
-    def _reset_round(self) -> None:
-        # The bridge reconcile: a violating verdict enters (superseding any older entry for its origin), and an
-        # origin every verdict of which conformed leaves -- its obligation is demonstrably resolved. An origin
-        # with both (unroll clones of one source store) keeps the violating entry.
+    def _reconcile_bridge(self) -> None:
+        # A violating verdict enters (superseding any older entry for its origin, the earliest-recorded message
+        # winning among same-origin clones), and an origin leaves only on complete evidence: every execution
+        # bound and conforming, none unbound. A clone that executed with an Unbound value recorded nothing, so
+        # its conforming sibling alone must not pop the shared obligation -- the following round would run with
+        # an open deferral net.
         violating: dict[OriginStack, str] = {}
         conforming: set[OriginStack] = set()
         for verdict in self._store_verdicts.values():
             if verdict.message is None:
                 conforming.add(verdict.origin)
             else:
-                violating[verdict.origin] = verdict.message
-        for origin in conforming - set(violating):
+                violating.setdefault(verdict.origin, verdict.message)
+        for origin in conforming - set(violating) - self._unbound_store_origins:
             self._pending_bridge.pop(origin, None)
         self._pending_bridge.update(violating)
+
+    def _reset_round(self) -> None:
         self._block_ancestry = {}
         self._discovered_stores = set()
         self._store_origins = {}
         self._store_verdicts = {}
+        self._unbound_store_origins = set()
         self._store_facts = {}
         self._transfer_deferrals = {}
         self._concrete_calls = set()
@@ -714,7 +740,12 @@ class Analyzer:
             concrete = _concrete_fact(env.get(Local(part)))
             if concrete is None:
                 return "raise with a runtime-interpolated message"
-            rendered.append(format(as_python(concrete)))
+            value = as_python(concrete)
+            if isinstance(value, int) and not isinstance(value, bool) and value.bit_length() > 64:
+                # Folding admits integers far past CPython's int-to-decimal digit cap; hex is uncapped.
+                rendered.append(f"{value:#x}")
+            else:
+                rendered.append(format(value))
         return "".join(rendered)
 
     def _finalize(self, result: ResidualUnit) -> None:
@@ -990,7 +1021,9 @@ class Analyzer:
                     if schema is not None:
                         env.schemas[place] = schema
                     if bound:
-                        self._store_verdicts[id(op)] = StoreVerdict(message, op.origin)
+                        self._record_store_verdict(op, message)
+                    else:
+                        self._unbound_store_origins.add(op.origin)
                 env.set(place, stored)
             case UnbindPlace(place=place, checked=checked):
                 if checked and isinstance(env.get(place), (Unbound, MaybeUnbound)):
@@ -1239,7 +1272,9 @@ class Analyzer:
                 # evidence either way, so it leaves the recorded verdict untouched.
                 conformed, violation = conform_state_store(name, self._state_reset_fact(leaf), src_fact)
                 if not isinstance(src_fact, (Unbound, MaybeUnbound)):
-                    self._store_verdicts[id(op)] = StoreVerdict(violation, op.origin)
+                    self._record_store_verdict(op, violation)
+                else:
+                    self._unbound_store_origins.add(op.origin)
                 env.set(leaf, conformed)
             case PyCall(dst=dst, callee=callee):
                 return self._expand_call(unit, block, index, op, env)
