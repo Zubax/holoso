@@ -501,3 +501,14 @@ def test_inherited_record_fields_flatten_on_return_ports() -> None:
         return _DerivedReturn(a, a + 1.0)
 
     assert [o.name for o in lower(kernel).outputs] == ["out_gain", "out_offset"]
+
+
+def test_return_contract_rejection_is_located_at_the_return_store() -> None:
+    def f(a: float) -> bool:
+        return a + 1.0  # type: ignore[return-value]
+
+    with pytest.raises(UnsupportedConstruct, match=r"f:\d+:\d+: return type mismatch") as excinfo:
+        lower(f)
+    location = excinfo.value.location
+    assert location is not None and location.filename == __file__
+    assert location.line is not None and "return a + 1.0" in location.line

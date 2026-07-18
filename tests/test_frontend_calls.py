@@ -341,7 +341,6 @@ def test_freevar_shadowing_a_global_function_is_not_inlined_as_the_global() -> N
         assert float(model.run(x)[0]) == captured(x)  # the freevar (a*3) is inlined, not the same-named global
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: blocked by E1 call-site attribution; enables at S2.11")
 def test_library_stub_error_is_attributed_to_the_call_site() -> None:
     def f(a: float) -> float:
         return math.tan((a, a))  # type: ignore[arg-type]

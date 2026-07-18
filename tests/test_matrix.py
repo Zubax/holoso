@@ -2033,9 +2033,6 @@ def test_trace_of_a_1x1_boolean_matrix_is_rejected_like_a_larger_one() -> None:
         lower(bool_trace)
 
 
-@pytest.mark.skip(
-    reason="FIR_PARITY_PENDING: blocked by E1 call-site attribution; enables at S2.11 (scalar-.T sub-case rewritten there)"
-)
 def test_library_shape_rejection_is_attributed_to_the_user_call_site() -> None:
     # A stub validates its own operands with a ``raise`` on a statically taken path; the error must name the user's
     # spelling and point at the user's line, never into the stub source.
@@ -2047,11 +2044,15 @@ def test_library_shape_rejection_is_attributed_to_the_user_call_site() -> None:
     assert excinfo.value.location is not None
     assert excinfo.value.location.line is not None and "a @ x" in excinfo.value.location.line
 
+    # A scalar ``.T`` never reaches the transpose stub: attribute reads on a runtime scalar refuse up front, located
+    # at the user's line like any other attribute misuse.
     def bad_t(a: float) -> float:
         return a.T  # type: ignore[attr-defined, no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match=r"in transpose\(\).*transpose a scalar"):
+    with pytest.raises(UnsupportedConstruct, match="attribute access on a runtime value") as excinfo:
         lower(bad_t)
+    assert excinfo.value.location is not None
+    assert excinfo.value.location.line is not None and "a.T" in excinfo.value.location.line
 
 
 def test_matrix_state_transposed_under_a_shape_guard_across_transactions() -> None:

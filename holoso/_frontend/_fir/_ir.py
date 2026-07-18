@@ -8,8 +8,10 @@ Temporaries are write-once by ANF construction; named locals rebind freely (the 
 """
 
 import enum
+import linecache
 from dataclasses import dataclass, field
 
+from ..._errors import SourceLocation
 from ..._util import RelationalOp
 from ._opsem import BinOp, UnOp
 from ._signature import ParameterContract, ReturnContract
@@ -23,9 +25,35 @@ class Origin:
     function: str
     line: int
     column: int
+    file: str
 
 
 type OriginStack = tuple[Origin, ...]
+
+
+def source_position(origin: OriginStack) -> tuple[tuple[int, int], ...]:
+    """
+    The source-order comparison key of an origin stack: the user call site is primary and inner frames break ties,
+    so two expansions of one callee order by their call sites, never by the callee's internal lines.
+    """
+    return tuple((frame.line, frame.column) for frame in reversed(origin))
+
+
+def render_rejection(message: str, origin: OriginStack) -> str:
+    """
+    The user-facing rendering: the ``function:line:column:`` prefix names the PRIMARY frame -- the user call site
+    (outermost) -- and an expansion-borne rejection names the callee it arose in (its registry-convention trailing
+    underscore stripped for display). The full frame chain stays on the exception for programmatic consumers.
+    """
+    primary = origin[-1]
+    context = f"in {origin[0].function.removesuffix('_')}(): " if len(origin) > 1 else ""
+    return f"{primary.function}:{primary.line}:{primary.column}: {context}{message}"
+
+
+def primary_location(origin: OriginStack) -> SourceLocation:
+    primary = origin[-1]
+    text = linecache.getline(primary.file, primary.line)
+    return SourceLocation(primary.file, primary.line, primary.column, text.rstrip() or None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,6 +385,7 @@ class FunctionUnit:
     """One function template: parameters are pre-bound named locals; ``exit`` is the only UnitExit block."""
 
     name: str
+    file: str
     params: list[BindingId]
     blocks: dict[BlockId, Block]
     entry: BlockId

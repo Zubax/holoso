@@ -23,18 +23,14 @@ Empty contractions diverge from numpy in the linalg stubs: `(n, 0) @ (0, m)` and
 Revisit together with the planned trace/outer/dot examples; the stubs' guards otherwise keep the reachable
 domain faithful.
 
-Bare `AssertionError` when two public state slots share a live-out. `assert RegRef(reg) not in write_books, "a
-boundary-install slot must carry no opcode write sources"` (`_backend/verilog/_emit.py`) fires when two public state
-slots end a transaction on the same live-out register -- e.g. two writes to `self.a` followed by `self.b = self.a`
-(a single copy is fine). The front-end, HIR, MIR, and LIR all accept it; only Verilog emission trips. It fails
-loudly with no output, but the message is addressed to a compiler developer, not the user, who deserves a located
-`SynthesisError`.
-
-EmissionRejection messages carry no source location, unlike Build/Analysis rejections (e.g. the aggregate-return
-refusal and the beyond-carrier constant name no `function:line:column`). Thread op origins through the emitter's
-refusal paths so every front-end rejection is located.
-
 ## Deferred capability gaps (tracked in the FIR_PARITY_PENDING registry; stage 10 asserts the registry empty)
+
+Two public state slots sharing a live-out refuse at Verilog emission when the schedule has reused the
+boundary-installing slot's register mid-transaction (e.g. `self.a = x + self.a` twice, then `self.b = self.a`;
+the front-end, HIR, MIR, and LIR all accept it). The refusal is an honest `SynthesisError` naming both slots
+(formerly a bare developer-facing `AssertionError`); lifting it needs an install-copy capability -- an extra
+boundary-adjacent copy step (or a reserved home for a shared live-out) so one value can install into several
+slot registers.
 
 The analyzer has no aggregate story for W-typed state: tuple-valued attributes (the delay-line idiom
 `self.window = (self.window[1], x)`) reject with "unsupported reset type". The W/D fixed point needs elementwise

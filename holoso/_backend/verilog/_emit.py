@@ -18,11 +18,25 @@ from dataclasses import dataclass
 from textwrap import dedent
 from typing import assert_never
 
+from ..._errors import SynthesisError
 from ..._lir import *
 from ..._operators import *
 from ..._legal import output_header
 from ._microcode import *
 from ._support import inline_support, support_files
+
+
+def _shared_live_out_rejection(name: str, partners: list[str]) -> SynthesisError:
+    """
+    Two public state slots end the transaction holding one value, the schedule reused the boundary-installing
+    slot's register mid-transaction, and one register cannot be installed from two histories. The origins are long
+    gone by LIR time, so the refusal is unlocated; it names the attributes instead.
+    """
+    others = " and ".join(repr(p) for p in partners) if partners else "another state slot"
+    return SynthesisError(
+        f"state slots {name!r} and {others} end the transaction holding the same value, which cannot be "
+        f"installed into both state registers; give the attributes distinct final values or fold them into one"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -634,15 +648,22 @@ always @(posedge clk) begin
         arms = load_arm(float_loads, reg)
         if slot.needs_copy and lir.float_state_install_is_boundary(slot):
             # The boundary install is a higher-priority arm than the opcode case, so it must not shadow any opcode
-            # write. It never can: a non-coalesced boundary slot holds its live-in until the read-first boundary read,
-            # so the allocator lands no intermediate write on it -- pinned here so a future scheduler cannot regress it.
-            assert RegRef(reg) not in write_books, "a boundary-install slot must carry no opcode write sources"
+            # write. An opcode write lands here only when this slot's live-out coalesced into ANOTHER slot's register
+            # (a shared live-out) and the allocator reused this slot's own register for an intermediate -- refused,
+            # since emitting both would shadow one of the histories.
+            if RegRef(reg) in write_books:
+                partners = sorted(s.name for s in lir.float_state_slots if s.name != slot.name and s.tap == slot.tap)
+                raise _shared_live_out_rejection(slot.name, partners)
             arms.append(("out_valid && out_ready", _operand_rhs(slot.tap)))
         _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), arms)
     for reg, bslot in sorted(bool_slots.items()):
         arms = load_arm(bool_loads, reg)
         if bslot.needs_copy:
-            assert BoolRegRef(reg) not in write_books, "a boundary-install bool slot must carry no opcode write sources"
+            if BoolRegRef(reg) in write_books:
+                partners = sorted(
+                    s.name for s in lir.bool_state_slots if s.name != bslot.name and s.live_out == bslot.live_out
+                )
+                raise _shared_live_out_rejection(bslot.name, partners)
             arms.append(("out_valid && out_ready", _operand_rhs(bslot.live_out)))
         _emit_reg_write(w, f"bregs[{reg}]", BoolRegRef(reg), write_books.get(BoolRegRef(reg)), arms)
     w.pop()

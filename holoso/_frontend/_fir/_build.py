@@ -64,6 +64,8 @@ from ._ir import (
     StorePlace,
     UnbindPlace,
     UnitExit,
+    primary_location,
+    render_rejection,
     verify,
 )
 from ._opsem import BinOp, UnOp
@@ -86,10 +88,10 @@ class BuildRejection(UnsupportedConstruct):
     """A located refusal: the construct is outside the supported subset (or plainly wrong Python)."""
 
     def __init__(self, message: str, origin: OriginStack) -> None:
-        frame = origin[0]
-        super().__init__(f"{frame.function}:{frame.line}:{frame.column}: {message}")
+        super().__init__(render_rejection(message, origin))
         self.message = message
         self.origin = origin
+        self.location = primary_location(origin)
 
 
 _BIN_OPS: dict[type[ast.operator], BinOp] = {
@@ -162,7 +164,10 @@ def build_unit(fn: object, root: bool = False) -> FunctionUnit:
         body = list(module.body)
     fndef = body[0]
     if not isinstance(fndef, ast.FunctionDef):
-        raise BuildRejection("only plain functions can be kernels", (Origin(fn.__code__.co_qualname, first_line, 0),))
+        raise BuildRejection(
+            "only plain functions can be kernels",
+            (Origin(fn.__code__.co_qualname, first_line, 0, fn.__code__.co_filename),),
+        )
     assert fndef.name == fn.__code__.co_name, "source and code object must describe the same function"
     resolver = NameResolver(fn, comprehension_only=comprehension_only_targets(fndef))
     # Parameter bool-ness comes from the RESOLVED annotation object (``fn.__annotations__``), not the AST spelling:
@@ -179,7 +184,7 @@ def build_unit(fn: object, root: bool = False) -> FunctionUnit:
             # annotations the port boundary actually consumes reject — the receiver's stays documentation,
             # exactly as Python (which never evaluates it either) behaves.
             hints = dict(annotationlib.get_annotations(fn, format=annotationlib.Format.FORWARDREF))
-    builder = _Builder(fn.__code__.co_qualname, first_line, resolver, bound_self, hints, root)
+    builder = _Builder(fn.__code__.co_qualname, fn.__code__.co_filename, first_line, resolver, bound_self, hints, root)
     return builder.build(fndef)
 
 
@@ -193,6 +198,7 @@ class _Builder:
     def __init__(
         self,
         qualname: str,
+        file: str,
         first_line: int,
         resolver: NameResolver,
         bound_self: object | None,
@@ -200,6 +206,7 @@ class _Builder:
         root: bool,
     ) -> None:
         self._qualname = qualname
+        self._file = file
         self._line_offset = first_line - 1
         self._resolver = resolver
         self._bound_self = bound_self
@@ -292,6 +299,7 @@ class _Builder:
             self._current.terminator = Jump(exit_block.id, origin)
         unit = FunctionUnit(
             name=self._qualname,
+            file=self._file,
             params=params,
             blocks=self._blocks,
             entry=entry,
@@ -338,7 +346,7 @@ class _Builder:
 
     def _origin(self, node: ast.AST) -> OriginStack:
         line = getattr(node, "lineno", 1) + self._line_offset
-        return (Origin(self._qualname, line, getattr(node, "col_offset", 0)),)
+        return (Origin(self._qualname, line, getattr(node, "col_offset", 0), self._file),)
 
     def _reject_walrus(self, node: ast.expr, position: str) -> None:
         for sub in ast.walk(node):

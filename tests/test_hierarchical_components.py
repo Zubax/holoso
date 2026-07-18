@@ -235,3 +235,34 @@ def test_child_slot_name_is_canonical_regardless_of_discovery_order() -> None:
         sim = _sim(cls().__call__, cls.__name__.lower())
         slots = {p.name for p in sim.outputs if p.name.startswith("state_")}
         assert slots == {"state_aaa__leaf__m"}, f"{cls.__name__}: {slots}"
+
+
+def test_state_port_order_follows_call_site_order_when_one_setter_inlines_twice() -> None:
+    # Both stores originate from the SAME setter line, so the innermost origin frames tie and only the user call
+    # sites can order the ports: first (the then-arm) must precede second (the else-arm) in the port ABI.
+    class Child:
+        def __init__(self) -> None:
+            self.value = 0.0
+
+        def set(self, v: float) -> None:
+            self.value = v
+
+    class TwoChildren:
+        def __init__(self) -> None:
+            self.first = Child()
+            self.second = Child()
+
+        def step(self, c: bool, x: float) -> float:
+            if c:
+                self.first.set(x)
+            else:
+                self.second.set(x)
+            return self.first.value + self.second.value
+
+    sim = _sim(TwoChildren().step, "two_children")
+    assert [p.name for p in sim.outputs] == ["out_0", "state_first__value", "state_second__value"]
+    reference = TwoChildren()
+    for c, x in ((True, 1.0), (False, 2.0), (True, -3.0), (False, 0.5)):
+        got = float(sim.run(c, x)[0])
+        want = float(reference.step(c, x))
+        assert got == want, f"step({c}, {x}): {got} vs {want}"

@@ -63,6 +63,7 @@ from ._ir import (
     UnbindPlace,
     UnitExit,
     op_dst,
+    source_position,
 )
 from ._fact import (
     AggregateFact,
@@ -293,6 +294,7 @@ class ResidualUnit:
     state_livein: dict[StateLeaf, Fact] = field(default_factory=dict)
     state_resets: dict[StateLeaf, "StaticValue | str"] = field(default_factory=dict)
     provenance: dict[int, tuple[str, ...]] = field(default_factory=dict)
+    store_origins: dict[StateLeaf, OriginStack] = field(default_factory=dict)
 
 
 def _validate(result: ResidualUnit, concrete_calls: set[int]) -> None:
@@ -400,7 +402,9 @@ class Analyzer:
             self._state_livein = new_d
             self._reset_round()
             _logger.info("state round %d: %d runtime leaves, %d live-in facts", round_index + 1, len(new_w), len(new_d))
-        raise AnalysisRejection("state fixpoint failed to stabilize", (Origin(self._root_template.name, 0, 0),))
+        raise AnalysisRejection(
+            "state fixpoint failed to stabilize", (Origin(self._root_template.name, 0, 0, self._root_template.file),)
+        )
 
     def _reset_round(self) -> None:
         self._block_ancestry = {}
@@ -445,7 +449,7 @@ class Analyzer:
         State rejections locate at the leaf's first store: __init__ is never analyzed, so the store that
         promoted the leaf is the line the user can act on.
         """
-        return self._store_origins.get(leaf, (Origin(self._root_template.name, 0, 0),))
+        return self._store_origins.get(leaf, (Origin(self._root_template.name, 0, 0, self._root_template.file),))
 
     def _snapshot_leaf(self, leaf: StateLeaf) -> Fact:
         current, admitted = self._walk_snapshot(leaf)
@@ -698,12 +702,13 @@ class Analyzer:
         One replay of the transfer over the stabilized graph fills the emission plan: the authoritative fact per
         binding (temporaries are write-once, so one pass records each), a typed plan per surviving call (keyed by
         the call's destination binding, never by op identity), and state leaves in first-store SOURCE order (the
-        order key is the storing op's origin -- a store nested in a branch has a higher block id than a later
-        top-level store yet comes first in the source text). The replay does not mutate the graph: every call is
-        already expanded, folded, or classified. Emission consumes only this plan.
+        order key is the storing op's origin with the user call site primary, so a store nested in a branch has a
+        higher block id than a later top-level store yet comes first in the source text, and two call sites
+        inlining one setter order by the call sites, tie-broken by the callee frames). The replay does not mutate
+        the graph: every call is already expanded, folded, or classified. Emission consumes only this plan.
         """
-        first_store: dict[StateLeaf, tuple[int, int]] = {}
-        for block_id in result.executable_blocks:
+        first_store: dict[StateLeaf, tuple[tuple[int, int], ...]] = {}
+        for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
             block = result.unit.blocks[block_id]
             env = result.block_in[block_id].copy()
             for index, op in enumerate(block.ops):
@@ -711,9 +716,10 @@ class Analyzer:
                     obj_fact = env.get(Local(op.obj))
                     if isinstance(obj_fact, Reference):
                         leaf = StateLeaf(obj_fact.obj, (op.name,))
-                        position = (op.origin[0].line, op.origin[0].column)
+                        position = source_position(op.origin)
                         if leaf not in first_store or position < first_store[leaf]:
                             first_store[leaf] = position
+                            result.store_origins[leaf] = op.origin
                 if isinstance(op, PyCall):
                     result.call_plans[op.dst] = self._call_plan(op, env)
                 self._transfer(result.unit, block, index, op, env)
@@ -793,7 +799,7 @@ class Analyzer:
 
     def analyze(self, param_facts: dict[str, Fact] | None = None) -> ResidualUnit:
         unit = self._instantiate_root()
-        origin = (Origin(unit.name, 0, 0),)
+        origin = (Origin(unit.name, 0, 0, unit.file),)
         block_in: dict[BlockId, _Env] = {unit.entry: _Env()}
         entry_env = block_in[unit.entry]
         for param in unit.params:
@@ -1138,10 +1144,7 @@ class Analyzer:
                     )
                 leaf = StateLeaf(obj_fact.obj, (name,))
                 recorded = self._store_origins.get(leaf)
-                if recorded is None or (op.origin[0].line, op.origin[0].column) < (
-                    recorded[0].line,
-                    recorded[0].column,
-                ):
+                if recorded is None or source_position(op.origin) < source_position(recorded):
                     self._store_origins[leaf] = op.origin
                 self._discovered_stores.add((block.id, leaf))
                 reset_fact = self._state_reset_fact(leaf)
@@ -1767,7 +1770,11 @@ class Analyzer:
                 class_attribute is not None
                 and hasattr(type(class_attribute), "__get__")
                 and not isinstance(class_attribute, (types.FunctionType, classmethod, staticmethod))
-                and not (isinstance(class_attribute, types.MemberDescriptorType) and class_attribute.__name__ == name)
+                and not (
+                    isinstance(class_attribute, types.MemberDescriptorType)
+                    and class_attribute.__name__ == name
+                    and getattr(class_attribute, "__objclass__", None) in type(component).__mro__
+                )
             ):
                 raise AnalysisRejection(f"descriptor attribute '{name}' on a component is not supported", origin)
             leaf = StateLeaf(component, (name,))

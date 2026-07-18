@@ -73,6 +73,8 @@ from ._ir import (
     StorePlace,
     Terminator,
     UnbindPlace,
+    primary_location,
+    render_rejection,
 )
 from ._opsem import BinOp
 from ._signature import ArrayParameter, RecordParameter, ScalarParameter
@@ -97,20 +99,20 @@ class AnalysisRejection(UnsupportedConstruct):
     """A located refusal discovered during analysis (dynamic structure, recursion, possibly-unbound reads...)."""
 
     def __init__(self, message: str, origin: OriginStack) -> None:
-        frame = origin[0]
-        super().__init__(f"{frame.function}:{frame.line}:{frame.column}: {message}")
+        super().__init__(render_rejection(message, origin))
         self.message = message
         self.origin = origin
+        self.location = primary_location(origin)
 
 
 class LibraryAnalysisRejection(UnsupportedLibraryFunction):
     """A recognized math/numpy library function that has no hardware implementation yet -- a sibling refusal."""
 
     def __init__(self, message: str, origin: OriginStack) -> None:
-        frame = origin[0]
-        super().__init__(f"{frame.function}:{frame.line}:{frame.column}: {message}")
+        super().__init__(render_rejection(message, origin))
         self.message = message
         self.origin = origin
+        self.location = primary_location(origin)
 
 
 def _residual_type(value: StaticValue) -> SemType | None:
@@ -535,7 +537,11 @@ def _reject_attribute_hooks(klass: type, name: "str | None", origin: OriginStack
         and (hasattr(type(descriptor), "__set__") or hasattr(type(descriptor), "__delete__"))
         # A slot IS its own field, but only under its own name: an ALIAS to another slot's member descriptor
         # (``alias = Base.value``) intercepts a different storage location and would miscompile as a fresh slot.
-        and not (isinstance(descriptor, types.MemberDescriptorType) and descriptor.__name__ == name)
+        and not (
+            isinstance(descriptor, types.MemberDescriptorType)
+            and descriptor.__name__ == name
+            and getattr(descriptor, "__objclass__", None) in klass.__mro__
+        )
     )
     if hooked or intercepted:
         raise AnalysisRejection(

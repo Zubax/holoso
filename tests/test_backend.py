@@ -19,6 +19,7 @@ from holoso import (
     FMulOperator,
     FSortOperator,
     OpConfig,
+    SynthesisError,
     UnsupportedConstruct,
 )
 from holoso._backend.verilog import generate
@@ -435,3 +436,23 @@ def test_unused_register_bank_is_omitted(tmp_path: Path) -> None:
     float_v = generate(float_lir).verilog
     assert "bregs" not in float_v and "NBREG" not in float_v and "[0:-1]" not in float_v
     _elaborate("madd_only", float_v, tmp_path)
+
+
+def test_two_state_slots_sharing_a_live_out_refuse_naming_both_slots() -> None:
+    # The read-modify-write pair frees slot a's home register mid-transaction, the allocator reuses it, and the
+    # shared final value then cannot boundary-install into both slot registers. This must surface as a located
+    # refusal naming both attributes, not as the emitter's internal invariant (a bare AssertionError before).
+    class Shared:
+        def __init__(self) -> None:
+            self.a = 0.0
+            self.b = 1.0
+
+        def step(self, x: float) -> float:
+            self.a = x + self.a
+            self.a = x + self.a
+            self.b = self.a
+            return self.b
+
+    fmt = FloatFormat(6, 18)
+    with pytest.raises(SynthesisError, match=r"state slots 'a' and 'b'"):
+        generate(build(_run(Shared().step, _ops(fmt)), "shared_live_out", fetch_stages=3))

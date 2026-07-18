@@ -445,3 +445,15 @@ def test_comprehension_targets_clear_on_each_scope_entry() -> None:
     unit = build_unit(fn)
     clears = [op for op in _ops(unit) if isinstance(op, UnbindPlace) and not op.checked]
     assert clears and any("v." in str(op.place) for op in clears)  # each execution starts its targets unbound
+
+
+def test_build_rejection_carries_a_source_location() -> None:
+    def f(a: float) -> float:
+        x, *rest = (a, a, a)
+        return x
+
+    with pytest.raises(BuildRejection, match="starred") as excinfo:
+        build_unit(f)
+    location = excinfo.value.location
+    assert location is not None and location.filename == __file__
+    assert location.line is not None and "*rest" in location.line

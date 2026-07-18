@@ -133,12 +133,16 @@ from ._ir import (
     PySubscript,
     PyTruth,
     PyUn,
+    OriginStack,
     ReturnPlace,
     SelectMode,
     StateLeaf,
     StorePlace,
     UnbindPlace,
     UnitExit,
+    primary_location,
+    render_rejection,
+    source_position,
 )
 from ._opsem import BinOp, UnOp
 from ._value import (
@@ -164,10 +168,16 @@ _MAX_POWER_CHAIN = 1024
 
 class EmissionRejection(UnsupportedConstruct):
     """
-    A refusal discovered during HIR emission: an unsupported construct that survived analysis. It names the
-    offending port/leaf where one exists but carries no source location (emission has left the AST behind);
-    a rejection that can be decided during analysis belongs there, where the origin stack is at hand.
+    A located refusal discovered during HIR emission: an unsupported construct that survived analysis. A rejection
+    that can be decided during analysis belongs there; emission attributes each refusal to the op, state store, or
+    return store it was lowering.
     """
+
+    def __init__(self, message: str, origin: OriginStack) -> None:
+        super().__init__(render_rejection(message, origin))
+        self.message = message
+        self.origin = origin
+        self.location = primary_location(origin)
 
 
 def lower_fir(kernel: object) -> Hir:
@@ -175,14 +185,14 @@ def lower_fir(kernel: object) -> Hir:
     return _Emitter(Analyzer(kernel).fixpoint()).emit()
 
 
-def _carrier_float(value: object) -> float:
+def _carrier_float(value: object, origin: OriginStack) -> float:
     # A finite inexact integer (2**53 + 1) rounds into the binary64 carrier -- accepted C-style precision loss under
     # the fastmath charter. Only a value beyond the carrier range entirely (10**400) is a located rejection.
     try:
         return float(value)  # type: ignore[arg-type]
     except OverflowError:
         bits = int(value).bit_length()  # type: ignore[call-overload]  # never via str(): 4300-digit conversion cap
-        raise EmissionRejection(f"a {bits}-bit integer constant is beyond the binary64 carrier range") from None
+        raise EmissionRejection(f"a {bits}-bit integer constant is beyond the binary64 carrier range", origin) from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,38 +222,39 @@ def _port_path(path: LeafPath) -> list[int | str]:
     return keys
 
 
-def _validate_return_layout(contract: ReturnContract, layout: "ValueLayout") -> None:
+def _validate_return_layout(contract: ReturnContract, layout: "ValueLayout", origin: OriginStack) -> None:
     """The declared return structure against the emitted layout; any shape/arity/flavor divergence rejects."""
     match contract:
         case ScalarReturn():
             if layout is not None:
-                raise EmissionRejection("return type mismatch: declared a scalar, returns an aggregate")
+                raise EmissionRejection("return type mismatch: declared a scalar, returns an aggregate", origin)
         case TupleReturn(items=items):
-            children = _positional_children(layout, ContainerFlavor.TUPLE, "tuple")
+            children = _positional_children(layout, ContainerFlavor.TUPLE, "tuple", origin)
             if len(children) != len(items):
                 raise EmissionRejection(
-                    f"return arity mismatch: declared a {len(items)}-tuple, returns {len(children)} values"
+                    f"return arity mismatch: declared a {len(items)}-tuple, returns {len(children)} values", origin
                 )
             for item, child in zip(items, children):
-                _validate_return_layout(item, child)
+                _validate_return_layout(item, child, origin)
         case VariadicTupleReturn(item=item):
-            for child in _positional_children(layout, ContainerFlavor.TUPLE, "tuple"):
-                _validate_return_layout(item, child)
+            for child in _positional_children(layout, ContainerFlavor.TUPLE, "tuple", origin):
+                _validate_return_layout(item, child, origin)
         case ListReturn(item=item):
-            for child in _positional_children(layout, ContainerFlavor.LIST, "list"):
-                _validate_return_layout(item, child)
+            for child in _positional_children(layout, ContainerFlavor.LIST, "list", origin):
+                _validate_return_layout(item, child, origin)
         case RecordReturn(klass=klass, fields=record_fields):
             if not isinstance(layout, RecordLayout):
                 raise EmissionRejection(
-                    f"return type mismatch: declared record {klass.__name__!r}, returns a different value"
+                    f"return type mismatch: declared record {klass.__name__!r}, returns a different value", origin
                 )
             if layout.klass is not klass:
                 raise EmissionRejection(
-                    f"return type mismatch: declared record {klass.__name__!r}, returns {layout.klass.__name__!r}"
+                    f"return type mismatch: declared record {klass.__name__!r}, returns {layout.klass.__name__!r}",
+                    origin,
                 )
             layout_fields = dict(layout.fields)
             for field_name, field_contract in record_fields:
-                _validate_return_layout(field_contract, layout_fields[field_name])
+                _validate_return_layout(field_contract, layout_fields[field_name], origin)
         case ArrayReturn(shape=shape):
             # STRICT flavor: the annotation promises the caller an ndarray of that exact shape, and the model
             # reconstructs one; a list of matching geometry is an observable reflavoring, not RTL plumbing
@@ -251,18 +262,21 @@ def _validate_return_layout(contract: ReturnContract, layout: "ValueLayout") -> 
             if not isinstance(layout, ArrayLayout):
                 described = "a scalar" if layout is None else "a different container"
                 raise EmissionRejection(
-                    f"return shape mismatch: declared a {'x'.join(map(str, shape))} array, returns {described}"
+                    f"return shape mismatch: declared a {'x'.join(map(str, shape))} array, returns {described}", origin
                 )
             if layout.shape != shape:
                 raise EmissionRejection(
                     f"return shape mismatch: declared {'x'.join(map(str, shape))}, "
-                    f"returns {'x'.join(map(str, layout.shape)) or 'a scalar shape'}"
+                    f"returns {'x'.join(map(str, layout.shape)) or 'a scalar shape'}",
+                    origin,
                 )
         case _:
             raise AssertionError(f"unhandled return contract {contract}")
 
 
-def _positional_children(layout: "ValueLayout", flavor: ContainerFlavor, spelled: str) -> tuple["ValueLayout", ...]:
+def _positional_children(
+    layout: "ValueLayout", flavor: ContainerFlavor, spelled: str, origin: OriginStack
+) -> tuple["ValueLayout", ...]:
     match layout:
         case TupleLayout() if flavor is ContainerFlavor.TUPLE:
             return child_layouts(layout)
@@ -272,12 +286,14 @@ def _positional_children(layout: "ValueLayout", flavor: ContainerFlavor, spelled
             # Strict contracts refuse a flavor-erased join outright: one path returned the declared container and
             # another did not, and picking the declared flavor would silently bless the diverging path.
             raise EmissionRejection(
-                f"return type mismatch: declared a {spelled}, but the container flavor diverges across paths"
+                f"return type mismatch: declared a {spelled}, but the container flavor diverges across paths", origin
             )
         case None:
-            raise EmissionRejection(f"return type mismatch: declared a {spelled}, returns a scalar")
+            raise EmissionRejection(f"return type mismatch: declared a {spelled}, returns a scalar", origin)
         case _:
-            raise EmissionRejection(f"return type mismatch: declared a {spelled}, returns a different container")
+            raise EmissionRejection(
+                f"return type mismatch: declared a {spelled}, returns a different container", origin
+            )
 
 
 def _contract_leaf_kind(contract: ReturnContract, path: LeafPath) -> SemType:
@@ -314,6 +330,13 @@ def _is_bool_fact(fact: Fact | None) -> bool:
 class _Emitter:
     def __init__(self, result: ResidualUnit) -> None:
         self._result = result
+        exit_terminator = result.unit.blocks[result.unit.exit].terminator
+        assert isinstance(exit_terminator, UnitExit)
+        # The refusal attribution cursor: the origin of whatever emission is currently lowering -- each op as it is
+        # visited, the branch condition at a terminator, the earliest return store during exit processing -- so the
+        # deep shared helpers (materializer, constant carrier) locate their rejections without threading an origin
+        # through every signature. State-leaf refusals bypass it for the leaf's own first-store origin.
+        self._origin: OriginStack = exit_terminator.origin
         self._builder = HirBuilder()
         self._fir_to_hir: dict[FirBlockId, int] = {}
         self._definitions: dict[tuple[FirBlockId, _LeafPlace], int] = {}
@@ -334,7 +357,7 @@ class _Emitter:
         if unit.exit not in order:
             # No path reaches the canonical exit (e.g. an unconditional `while True` with no break): the kernel
             # produces no output, so there is nothing to synthesize. A located refusal, not a downstream crash.
-            raise EmissionRejection("the function never returns on any path")
+            raise EmissionRejection("the function never returns on any path", self._origin)
         for fir_id in order:
             self._fir_to_hir[fir_id] = self._builder.block()
         self._builder.position_at(self._fir_to_hir[unit.entry])
@@ -530,7 +553,8 @@ class _Emitter:
         if path is None:
             raise EmissionRejection(
                 "a stateful component reached only through an unanchored reference is not supported; "
-                "hold it as a direct attribute of the synthesized component"
+                "hold it as a direct attribute of the synthesized component",
+                self._leaf_origin(leaf),
             )
         name = "__".join(path + leaf.path)
         layout = self._reset_layout(leaf)
@@ -543,14 +567,21 @@ class _Emitter:
                     name += f"_{segment.value}"  # type: ignore[union-attr]  # list cells carry an integer index
         owner = self._slot_names.setdefault(name, (leaf, ordinal))
         if owner != (leaf, ordinal):
-            raise EmissionRejection(f"state slot name collision on '{name}' between distinct component attributes")
+            raise EmissionRejection(
+                f"state slot name collision on '{name}' between distinct component attributes", self._leaf_origin(leaf)
+            )
         return name
+
+    def _leaf_origin(self, leaf: StateLeaf) -> OriginStack:
+        return self._result.store_origins.get(leaf, self._origin)
 
     def _reset_layout(self, leaf: StateLeaf) -> "AggregateLayout | None":
         snapshot = self._result.state_resets.get(leaf)
         assert snapshot is not None, f"reset for {leaf} missing from the analysis plan"
         if isinstance(snapshot, str):
-            raise EmissionRejection(f"state '{'.'.join(leaf.path)}' has a reset of unsupported type {snapshot}")
+            raise EmissionRejection(
+                f"state '{'.'.join(leaf.path)}' has a reset of unsupported type {snapshot}", self._leaf_origin(leaf)
+            )
         normalized = normalize_static(snapshot)
         return normalized.layout if isinstance(normalized, AggregateFact) else None
 
@@ -586,7 +617,9 @@ class _Emitter:
         snapshot = self._result.state_resets.get(leaf)
         assert snapshot is not None, f"reset for {leaf} missing from the analysis plan"
         if isinstance(snapshot, str):
-            raise EmissionRejection(f"state '{'.'.join(leaf.path)}' has a reset of unsupported type {snapshot}")
+            raise EmissionRejection(
+                f"state '{'.'.join(leaf.path)}' has a reset of unsupported type {snapshot}", self._leaf_origin(leaf)
+            )
         normalized = normalize_static(snapshot)
         if isinstance(normalized, AggregateFact):
             cell = normalized.leaves[ordinal]
@@ -601,9 +634,11 @@ class _Emitter:
         if isinstance(current, (int, np.integer)) and self._leaf_is_int(leaf, ordinal):
             return IntConst(int(current))
         if isinstance(current, (int, float, np.integer, np.floating)):
-            return FloatConst(_carrier_float(current))  # the same carrier policy as a datapath constant
+            # The same carrier policy as a datapath constant.
+            return FloatConst(_carrier_float(current, self._leaf_origin(leaf)))
         raise EmissionRejection(
-            f"state '{'.'.join(leaf.path)}' has a reset of unsupported type {type(current).__name__}"
+            f"state '{'.'.join(leaf.path)}' has a reset of unsupported type {type(current).__name__}",
+            self._leaf_origin(leaf),
         )
 
     # ---------------------------------------- values and ops ----------------------------------------
@@ -615,8 +650,8 @@ class _Emitter:
         if isinstance(concrete, (bool, np.bool_)):
             return self._builder.bool_const(bool(concrete))
         if isinstance(concrete, (int, float, np.integer, np.floating)):
-            return self._builder.float_const(_carrier_float(concrete))
-        raise EmissionRejection(f"a {type(concrete).__name__} value cannot materialize in the datapath")
+            return self._builder.float_const(_carrier_float(concrete, self._origin))
+        raise EmissionRejection(f"a {type(concrete).__name__} value cannot materialize in the datapath", self._origin)
 
     def _emit_concat(
         self, block: FirBlockId, dst: BindingId, bin_op: BinOp, lhs: BindingId, rhs: BindingId, result: AggregateFact
@@ -778,10 +813,10 @@ class _Emitter:
         if actual is SemType.INT and expected is SemType.FLOAT:
             return self._builder.operation(IntToFloat(), [vid])  # Python promotes int -> float
         if expected is SemType.FLOAT:
-            raise EmissionRejection("a boolean value reaches a float operation")
+            raise EmissionRejection("a boolean value reaches a float operation", self._origin)
         if expected is SemType.INT:
-            raise EmissionRejection("a non-integer value reaches an integer operation")
-        raise EmissionRejection("a non-boolean value reaches a boolean operation")
+            raise EmissionRejection("a non-integer value reaches an integer operation", self._origin)
+        raise EmissionRejection("a non-boolean value reaches a boolean operation", self._origin)
 
     def _emit_block(self, fir_id: FirBlockId) -> None:
         self._builder.position_at(self._fir_to_hir[fir_id])
@@ -792,11 +827,12 @@ class _Emitter:
             case FirJump(target=target):
                 if target in self._result.executable_blocks:
                     self._builder.jump(self._fir_to_hir[target])
-            case FirBranch(cond=cond, then_target=then_target, else_target=else_target):
+            case FirBranch(cond=cond, then_target=then_target, else_target=else_target, origin=origin):
                 live = [t for t in (then_target, else_target) if (fir_id, t) in self._result.executable_edges]
                 if len(live) == 1:
                     self._builder.jump(self._fir_to_hir[live[0]])
                 else:
+                    self._origin = origin
                     condition = self._materialize(fir_id, cond, SemType.BOOL)
                     self._builder.branch(condition, self._fir_to_hir[then_target], self._fir_to_hir[else_target])
             case UnitExit():
@@ -805,6 +841,8 @@ class _Emitter:
                 raise AssertionError(f"terminator {type(other).__name__} survived analysis into emission")
 
     def _emit_op(self, fir_id: FirBlockId, op: Op) -> None:
+        self._origin = op.origin
+
         def define(dst: BindingId, vid: int) -> None:
             self._write(fir_id, Local(dst), vid)
 
@@ -836,7 +874,9 @@ class _Emitter:
                     lsem, rsem = self._fact_sem(self._fact(lhs)), self._fact_sem(self._fact(rhs))
                     if lsem is SemType.BOOL or rsem is SemType.BOOL:
                         if lsem is not rsem:
-                            raise EmissionRejection("a comparison mixes a boolean and a non-boolean without a cast")
+                            raise EmissionRejection(
+                                "a comparison mixes a boolean and a non-boolean without a cast", self._origin
+                            )
                         left = self._materialize(fir_id, lhs, SemType.BOOL)
                         right = self._materialize(fir_id, rhs, SemType.BOOL)
                         define(dst, self._bool_compare(rel, left, right))  # bool ==/!= is XNOR/XOR
@@ -1161,7 +1201,7 @@ class _Emitter:
             case BinOp.DIV:
                 return self._builder.operation(FloatDiv(), [left, right])
             case _:
-                raise EmissionRejection(f"operator {bin_op.value} is not lowerable yet")
+                raise EmissionRejection(f"operator {bin_op.value} is not lowerable yet", self._origin)
 
     def _emit_cast(self, block: FirBlockId, arg: BindingId, dst: BindingId) -> int:
         # A runtime scalar float()/int()/bool() cast, kinded by the FINAL facts (the analyzer's optimistic revisits
@@ -1184,7 +1224,7 @@ class _Emitter:
             case (SemType.INT, SemType.BOOL):
                 return self._builder.operation(IntToBool(), [self._materialize(block, arg, SemType.INT)])
             case _:
-                raise EmissionRejection(f"conversion from {src.value} to {target.value} is not supported")
+                raise EmissionRejection(f"conversion from {src.value} to {target.value} is not supported", self._origin)
 
     def _emit_int_binary(self, bin_op: BinOp, left: int, right: int) -> int:
         # Signed-integer arithmetic in the integer datapath. Floor-division and modulo are floor-coupled (one hardware
@@ -1211,7 +1251,7 @@ class _Emitter:
             case BinOp.BITXOR:
                 return self._builder.operation(IntXor(), [left, right])
             case _:
-                raise EmissionRejection(f"integer operator {bin_op.value!r} is not lowerable yet")
+                raise EmissionRejection(f"integer operator {bin_op.value!r} is not lowerable yet", self._origin)
 
     def _emit_power(self, block: FirBlockId, base: BindingId, exponent: BindingId) -> int:
         # A base raised to a COMPILE-TIME integer exponent expands to a multiply chain (x**3 -> x*x*x) in the base's
@@ -1227,12 +1267,16 @@ class _Emitter:
             assert isinstance(exp_fact, Known) and isinstance(exp_fact.value, (MetaInt, NpInt))
             power = int(exp_fact.value.value)
             if abs(power) > _MAX_POWER_CHAIN:
-                raise EmissionRejection(f"a compile-time power exponent of {power} is too large to expand")
+                raise EmissionRejection(
+                    f"a compile-time power exponent of {power} is too large to expand", self._origin
+                )
         elif isinstance(exp_fact, Known) and isinstance(exp_fact.value, (StaticFloat, NpFloat)):
             exact = float(exp_fact.value.value)
             if exact.is_integer():  # only a FRACTIONAL float exponent falls to the exp2/log2 path below
                 if abs(exact) > _MAX_POWER_CHAIN:
-                    raise EmissionRejection(f"a compile-time power exponent of {exact:.0f} is too large to expand")
+                    raise EmissionRejection(
+                        f"a compile-time power exponent of {exact:.0f} is too large to expand", self._origin
+                    )
                 power = int(exact)
         if power is not None:
             if exponent_is_int and self._fact_sem(self._fact(base)) is SemType.INT and power >= 0:
@@ -1265,7 +1309,9 @@ class _Emitter:
             if base_value == 2:
                 return self._builder.operation(FloatExp2(), [exponent_vid])
             if not base_value > 0:
-                raise EmissionRejection("a power with a runtime exponent requires a positive base (log2 domain)")
+                raise EmissionRejection(
+                    "a power with a runtime exponent requires a positive base (log2 domain)", self._origin
+                )
         log_base = self._builder.operation(FloatLog2(), [self._materialize(block, base, SemType.FLOAT)])
         return self._builder.operation(FloatExp2(), [self._builder.operation(FloatMul(), [exponent_vid, log_base])])
 
@@ -1312,7 +1358,7 @@ class _Emitter:
 
     def _bool_compare(self, rel: RelationalOp, left: int, right: int) -> int:
         if rel not in (RelationalOp.EQ, RelationalOp.NE):
-            raise EmissionRejection("only == and != are defined between boolean values")
+            raise EmissionRejection("only == and != are defined between boolean values", self._origin)
         xor = self._builder.operation(BoolXor(), [left, right])
         return xor if rel is RelationalOp.NE else self._builder.operation(BoolNot(), [xor])
 
@@ -1353,7 +1399,8 @@ class _Emitter:
             if not self._datapath_known(leaf):
                 got_name = type(as_python(leaf.value)).__name__
                 raise EmissionRejection(
-                    f"return type mismatch at leaf {_port_path(path)}: declared {kind.value}, returns a {got_name}"
+                    f"return type mismatch at leaf {_port_path(path)}: declared {kind.value}, returns a {got_name}",
+                    self._origin,
                 )
             if isinstance(leaf.value, (MetaInt, NpInt)) and kind is SemType.INT:
                 vid = self._builder.int_const(int(leaf.value.value))
@@ -1361,7 +1408,8 @@ class _Emitter:
                 vid = self._const(leaf.value)
         elif isinstance(leaf, Reference):
             raise EmissionRejection(
-                f"return type mismatch at leaf {_port_path(path)}: declared {kind.value}, returns an object"
+                f"return type mismatch at leaf {_port_path(path)}: declared {kind.value}, returns an object",
+                self._origin,
             )
         else:
             vid = self._read(exit_block, _LeafPlace(ReturnPlace(), ordinal))
@@ -1370,14 +1418,31 @@ class _Emitter:
         got = self._sem_of(self._type_of(vid))
         if got is not kind:
             raise EmissionRejection(
-                f"return type mismatch at leaf {_port_path(path)}: declared {kind.value}, returns {got.value}"
+                f"return type mismatch at leaf {_port_path(path)}: declared {kind.value}, returns {got.value}",
+                self._origin,
             )
         return vid
 
     # ---------------------------------------- exit ----------------------------------------
 
+    def _return_origin(self) -> OriginStack:
+        """
+        The primary attribution of the exit's contract checks: the earliest return store in source order (the
+        implicit fall-off ``return None`` included). The unit-level origin only when no path stores a return.
+        """
+        stores = [
+            op.origin
+            for block_id in sorted(self._result.executable_blocks, key=lambda block_id: block_id.index)
+            for op in self._result.unit.blocks[block_id].ops
+            if isinstance(op, StorePlace) and isinstance(op.place, ReturnPlace)
+        ]
+        if not stores:
+            return self._origin
+        return min(stores, key=source_position)
+
     def _finish_exit(self) -> None:
         unit = self._result.unit
+        self._origin = self._return_origin()
         exit_env = self._result.block_in[unit.exit]
         self._builder.position_at(self._fir_to_hir[unit.exit])
         return_fact = exit_env.facts.get(ReturnPlace())
@@ -1389,16 +1454,22 @@ class _Emitter:
         match contract:
             case VoidReturn():
                 if returns_value:
-                    raise EmissionRejection("annotated '-> None' but returns a value")
+                    raise EmissionRejection("annotated '-> None' but returns a value", self._origin)
                 if isinstance(return_fact, Reference) and return_fact.obj is not None:
-                    raise EmissionRejection("annotated '-> None' but returns an object")
+                    raise EmissionRejection("annotated '-> None' but returns an object", self._origin)
             case ScalarReturn(kind=kind):
                 if not returns_value:
                     if isinstance(return_fact, Reference) and return_fact.obj is not None:
-                        raise EmissionRejection(f"return type mismatch: declared {kind.value}, returns an object")
-                    raise EmissionRejection(f"return type mismatch: declared {kind.value}, returns nothing")
+                        raise EmissionRejection(
+                            f"return type mismatch: declared {kind.value}, returns an object", self._origin
+                        )
+                    raise EmissionRejection(
+                        f"return type mismatch: declared {kind.value}, returns nothing", self._origin
+                    )
                 if isinstance(return_fact, AggregateFact):
-                    raise EmissionRejection(f"return type mismatch: declared {kind.value}, returns an aggregate")
+                    raise EmissionRejection(
+                        f"return type mismatch: declared {kind.value}, returns an aggregate", self._origin
+                    )
                 if isinstance(return_fact, Known) and isinstance(return_fact.value, (MetaInt, NpInt)):
                     if kind is SemType.INT:
                         return_vid = self._builder.int_const(int(return_fact.value.value))  # an integer port
@@ -1412,22 +1483,24 @@ class _Emitter:
                     return_vid = self._builder.operation(IntToFloat(), [return_vid])  # int returned as declared float
                 got = self._sem_of(self._type_of(return_vid))
                 if got is not kind:
-                    raise EmissionRejection(f"return type mismatch: declared {kind.value}, returns {got.value}")
+                    raise EmissionRejection(
+                        f"return type mismatch: declared {kind.value}, returns {got.value}", self._origin
+                    )
             case ArrayReturn():
                 if not returns_value:
-                    raise EmissionRejection("declared an array return but returns nothing")
+                    raise EmissionRejection("declared an array return but returns nothing", self._origin)
                 if not isinstance(return_fact, AggregateFact):
-                    raise EmissionRejection("return shape mismatch: declared an array, returns a scalar")
-                _validate_return_layout(contract, return_fact.layout)
+                    raise EmissionRejection("return shape mismatch: declared an array, returns a scalar", self._origin)
+                _validate_return_layout(contract, return_fact.layout, self._origin)
                 zipped = zip(leaf_paths(return_fact.layout), return_fact.leaves, strict=True)
                 for ordinal, (path, leaf_fact) in enumerate(zipped):
                     return_leaves.append((path, self._exit_leaf(unit.exit, path, ordinal, leaf_fact, SemType.FLOAT)))
             case _:  # a tuple/list contract: the value must be an aggregate of the declared structure
                 if not returns_value:
-                    raise EmissionRejection("declared an aggregate return but returns nothing")
+                    raise EmissionRejection("declared an aggregate return but returns nothing", self._origin)
                 if not isinstance(return_fact, AggregateFact):
-                    raise EmissionRejection("declared an aggregate return but returns a scalar")
-                _validate_return_layout(contract, return_fact.layout)
+                    raise EmissionRejection("declared an aggregate return but returns a scalar", self._origin)
+                _validate_return_layout(contract, return_fact.layout, self._origin)
                 zipped = zip(leaf_paths(return_fact.layout), return_fact.leaves, strict=True)
                 for ordinal, (path, leaf_fact) in enumerate(zipped):
                     kind = _contract_leaf_kind(contract, path)

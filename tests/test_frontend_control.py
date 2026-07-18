@@ -855,7 +855,6 @@ def test_ternary_with_mismatched_scalar_arm_types_is_cleanly_rejected() -> None:
 # ---------------------------------------------------------------- statically reachable raise
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: blocked by E2 f-string messages and E1-lite locations; enables at S2.11")
 def test_raise_on_a_statically_taken_path_is_a_located_synthesis_error() -> None:
     from jaxtyping import Float64
 
