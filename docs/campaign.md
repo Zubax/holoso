@@ -339,3 +339,32 @@ side tables :304-310, dispatch :1997-2498) · `_emit.py` (C2 :871, B1 deletions 
 `tests/_examples.py` (registry deletion) · `tests/test_determinism.py` · `tests/test_metrics.py` ·
 `tests/test_latency_freeze.py` · new: `tests/golden/`, `tests/test_golden.py`, `tests/_hirdump.py`,
 `tools/refreeze_golden.py`, `docs/campaign.md`, `docs/decisions/`.
+
+## Progress log (live; update at every step boundary)
+
+STANDING DIRECTIVE (maintainer): drive the plan to completion without stopping; consult Codex
+(gpt-5.6-sol, ultra, resume-not-restart, pinned-worktree reviews) whenever stuck.
+
+Landed on dev, CI-certified: S0 7af064b (bootstrap) · S1 c4e310f (scope ruling + X1) · S2.1 0c4afb6
+(deterministic rejections; 2 witnessed fixes + property lock) · S2.2 574c7bf (84-skip triage: 46+2 enabled, 28
+re-pinned, 8 relabeled; 4 hollow tests repaired) · S2.3 6badaf9 (A1 wrap-parse, D2 consumption-site annotation
+resolution, E2 Fail message parts; 2 review rounds) · S2.4 ea3510e (C3 MRO merge, C4 structural detection, D1
+component-position contracts; incident: live-tree Codex reverted an amend → reviews now run on PINNED worktrees).
+
+In flight as a 4-commit stack on trial/s27-getattr-trim awaiting its trial + S2.5's Codex verdict, then dev
+advances: S2.5 c91dd33 (E3 store-located state rejections, E4 per-stub gate + reduction arity, F1 threshold
+hoist ~29s→0.07s, C2 residual-compare rejections located, A3 flat+reshape matmul, C5 int trace) · S2.6 7bdc727
+(C6: unroll reseed; origin-keyed after both reviewers convergently found the block-id livelock; inlined +
+nested regression shapes) · S2.7 cb96369 (T1 getattr trim; 8-spelling probe battery clean) · consolidation
+058f83e→amended (all three rounds' accepted findings; Codex's classmethod(getattr) corner declined as hostile
+construction).
+
+S2.8 open (T2+T3): T2 sites located — analyzer dispatch :998, _elementwise_compare :1347, emit mask block
+~:838-866, owned test test_matrix.py:1376 → becomes the rejection test; fuzz generator confirmed unable to emit
+array comparisons (X1). T3 plan: single-door creation rejections (builder global load, np.array factory, reshape
+target, state reset) + delete ~13 scalarize/guard sites; rank-0 ruling covers x[()] ("scalars take no subscript,
+() included"); DESIGN.md 0-d and mask passages rewritten. Remaining after: S2.9, S2.10 (+fastmath section),
+S2.11 (E1-lite + port-order tie), S2.12 (B1, Codex X2 first), S2.13 (G1, preserve/hoist guard ops), S2.14
+(hygiene + deferred S2.5 polish rewordings + exit grep), S2.15 (freeze, Codex X3, build-sharing constraint),
+S3 gate (memo→X4→spike SC1-SC4, failure default morph, canonical gate pre-authorized for the emitter swap),
+S4 per ruling.
