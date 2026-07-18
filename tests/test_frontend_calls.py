@@ -666,32 +666,10 @@ def test_records_with_user_behavior_never_cross_concrete_calls() -> None:
         lower(iterate)
 
 
-def test_getattr_routes_through_the_attribute_guards() -> None:
-    # Review round 9 MISCOMPILE: getattr(view, "base") reached the generic concrete-call path and observed the
-    # admitted snapshot's storage; it now routes through the attribute transfer, so the whitelist applies.
-    backing = np.array([1.0, 2.0, 3.0])
-    view = backing[1:]
-
-    def bypass(x: float) -> float:
-        return x + float(getattr(view, "base")[0])
-
-    def legitimate(x: float) -> float:
-        return x + float(getattr(view, "ndim"))
-
-    with pytest.raises(UnsupportedConstruct, match="array attribute 'base'"):
-        lower(bypass)
-    model = holoso.synthesize(legitimate, default_ops(FloatFormat(11, 52)), name="getattr_ok").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == 4.0 == legitimate(3.0)
-
-
-# ---------------------------------------- spine review round 10 ----------------------------------------
-
-
-def test_getattr_is_attribute_access_in_every_admitted_shape() -> None:
-    # Review round 10: getattr rewrites into the attribute op, so state reads, record fields with residual
-    # leaves, and the array whitelist all behave exactly as the dotted spelling (the round-9 routing crashed on
-    # residual results and the 3-argument spelling bypassed interception entirely -- a state read folded to its
-    # reset snapshot, [1.0, 1.0] where Python steps [3.0, 5.0]).
+def test_getattr_is_a_located_rejection() -> None:
+    # Trim T1 (docs/decisions/scope-ruling.md): getattr's static-name requirement made it pure spelling
+    # redundancy over the dotted access, and its concrete-path history was a recurring miscompile habitat
+    # (review rounds 9-10). Every admitted shape now rejects with guidance, located at the call.
     class Accumulator:
         def __init__(self) -> None:
             self.g = 1.0
@@ -700,33 +678,14 @@ def test_getattr_is_attribute_access_in_every_admitted_shape() -> None:
             self.g = self.g + x
             return getattr(self, "g")  # type: ignore[no-any-return]
 
-    result = holoso.synthesize(Accumulator().step, default_ops(FloatFormat(11, 52)), name="getattr_state")
-    elaborated = result.numerical_model.elaborate()
-    assert [float(elaborated.run(2.0)[0]), float(elaborated.run(2.0)[0])] == [3.0, 5.0]
+    with pytest.raises(UnsupportedConstruct, match=r"step:\d+:\d+: getattr is not supported in a kernel"):
+        lower(Accumulator().step)
 
-    @dataclasses.dataclass(frozen=True)
-    class Plain:
-        v: float
+    def with_default(x: float) -> float:
+        return getattr(x, "real", 0.0)
 
-    def residual_field(c: bool, x: float) -> float:
-        p = Plain(2.0) if c else Plain(3.0)
-        return x * getattr(p, "v")  # type: ignore[no-any-return]
-
-    model = holoso.synthesize(residual_field, default_ops(FloatFormat(11, 52)), name="getattr_field").numerical_model
-    elaborated = model.elaborate()
-    assert float(elaborated.run(True, 3.0)[0]) == 6.0
-    assert float(elaborated.run(False, 3.0)[0]) == 9.0
-
-    class WithDefault:
-        def __init__(self) -> None:
-            self.g = 1.0
-
-        def step(self, x: float) -> float:
-            self.g = self.g + x
-            return getattr(self, "g", 0.0)
-
-    with pytest.raises(UnsupportedConstruct, match="static attribute name and no default"):
-        lower(WithDefault().step)
+    with pytest.raises(UnsupportedConstruct, match="spell the attribute access directly"):
+        lower(with_default)
 
 
 def test_attrgetter_objects_are_a_located_rejection() -> None:

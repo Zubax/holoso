@@ -2277,18 +2277,15 @@ class Analyzer:
             argument_facts = [env.get(Local(arg)) for arg in call.args]
             keyword_facts = [(keyword, env.get(Local(value))) for keyword, value in call.kwargs]
             if target is getattr:
-                # getattr is attribute access under a different spelling: rewrite the call into the PyAttr op so
-                # the WHOLE attribute transfer applies -- navigation guards, state reads, record field projection
-                # (a residual result included). The concrete fold would otherwise execute arbitrary getattr on
-                # the admitted snapshot or the live component (.base observing the wrong storage and a state
-                # read folding to the reset were demonstrated miscompiles). The default-argument spelling has no
-                # attribute-transfer equivalent, so it rejects. Identity comparisons throughout: ``target`` may
-                # be an unhashable shadow of a builtin name, which must miss cleanly.
-                attr_fact = argument_facts[1] if len(argument_facts) == 2 else None
-                if not keyword_facts and isinstance(attr_fact, Known) and isinstance(attr_fact.value, StaticStr):
-                    block.ops[index] = PyAttr(call.dst, call.args[0], attr_fact.value.value, call.origin)
-                    return True
-                raise AnalysisRejection("getattr requires a static attribute name and no default", call.origin)
+                # Trimmed (scope ruling T1): the static name getattr would require anyway makes it pure spelling
+                # redundancy over the dotted access, and letting it near the concrete path was a demonstrated
+                # miscompile habitat. The arm stays as the refusal site so the guidance is specific. Identity
+                # comparisons throughout: ``target`` may be an unhashable shadow of a builtin name, which must
+                # miss cleanly.
+                raise AnalysisRejection(
+                    "getattr is not supported in a kernel; spell the attribute access directly (x.name)",
+                    call.origin,
+                )
             if (
                 target is np.transpose
                 and not keyword_facts

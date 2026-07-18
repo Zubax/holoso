@@ -1679,7 +1679,7 @@ def test_record_default_snapshots_are_admitted_once() -> None:
 
     def kernel(x: float) -> float:
         c = Cfg(x)
-        ignored = float(getattr(module, "trigger"))
+        ignored = float(module.trigger)
         return c.knob.v * x + ignored
 
     model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="defsnap").numerical_model
@@ -1791,7 +1791,7 @@ def test_record_defaults_admit_lazily_at_first_omission() -> None:
 
     def kernel(x: float) -> float:
         overridden = Cfg(x, Knob(1.0))
-        ignored = float(getattr(module, "trigger"))
+        ignored = float(module.trigger)
         defaulted = Cfg(x)
         return defaulted.knob.v * x + overridden.knob.v + ignored
 
