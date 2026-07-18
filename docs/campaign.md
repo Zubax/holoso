@@ -714,3 +714,20 @@ append-only evidence ledger as a spike artifact (schema growth, backchannel audi
 classification, canonicalizer cost, LOC by role, replay counts, diagnostic parity, runtime, provenance).
 Doc agent dispatched: memo corrections + DESIGN overclaim fix + docs/decisions/arch-spike.md (the amended
 spike spec); spike launches on its worktree branch after that lands. Codex round-5 half still running.
+
+Round-5, Codex half returned (8) — consolidated with Claude's 7: ANALYZER CLUSTER (Codex 1-4 + Claude 1, one
+family): the Y4 carryover pops on Unbound "stores" (vs the neither-establish-nor-violate doctrine), raises
+stale round-one messages un-revalidated on the stable branch (dual of Y3), collides unroll clones (convergent
+with Claude's MEDIUM), and lets current-round violations outrank source-earlier carried ones (checked before,
+rank-less). REDESIGN RATIFIED — carryover as PENDING-BRIDGE ONLY: per-op violation statuses fold into the
+bridge at ROUND BOUNDARIES (never popped mid-round; Unbound execution is not conforming); the bridge only
+keeps the deferral net closed; verdicts come EXCLUSIVELY from the stable round (walk re-derivation + obligations
+re-recorded by stores actually executing in the stable graph); carried entries are DISCARDED at stabilization
+(dead/obsolete violations vanish legitimately; the deferred secondary then surfaces). All five reproducers
+become regressions. FREEZE HARDENINGS: gate compares the RETURNED verilog_output.support_files (not a separate
+generator call); build_artifacts calls make_ops() ONCE (ABI/RTL identity split); _hirdump formats big IntConst
+digit-limit-safe (hex) + adds the 6 missing classes to the completeness guard (serializer schema version
+bumps -> all HIR dumps regenerate, one refreeze run); GoldenCase/gate pins HOLOSO_IFCONV_MAX_OPS alongside the
+regalloc knobs (Codex demonstrated different RTL hashes under budget 8 vs 0 with identical identity); fround/
+ffma probe case added; replace_corpus becomes copy-aside-and-rename; Y-batch witnesses appended to
+WITNESS_ENTRIES; README provenance promise aligned. Batch dispatched to side worktree fixes-r5 at 793a82b.
