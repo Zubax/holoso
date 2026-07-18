@@ -332,6 +332,7 @@ class ResidualUnit:
     state_resets: dict[StateLeaf, "StaticValue | str"] = field(default_factory=dict)
     provenance: dict[int, tuple[str, ...]] = field(default_factory=dict)
     store_origins: dict[StateLeaf, OriginStack] = field(default_factory=dict)
+    store_conversions: set[int] = field(default_factory=set)  # SOURCE store op ids converting int->float
 
 
 def _validate(result: ResidualUnit, concrete_calls: set[int]) -> None:
@@ -370,6 +371,9 @@ class Analyzer:
         self._unroll_seeds: dict[OriginStack, Fact] = {}  # survives rounds: the joined facts of restarted headers
         self._store_origins: dict[StateLeaf, OriginStack] = {}
         self._store_schema_violations: dict[int, tuple[str, OriginStack]] = {}  # op id -> deferred store obligation
+        self._local_store_violations: dict[int, tuple[str, OriginStack]] = {}  # op id -> deferred local obligation
+        self._store_facts: dict[int, Fact] = {}  # SOURCE store op id -> its stored fact at the last visit
+        self._transfer_deferrals: dict[int, AnalysisRejection] = {}  # op id -> rejection deferred behind a store
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._array_methods: dict[tuple[BindingId, str], _ArrayMethod] = {}
         self._class_annotations: dict[int, tuple[type, "Mapping[str, object]"]] = {}
@@ -419,7 +423,7 @@ class Analyzer:
                 except AnalysisRejection as error:
                     deferred.offer(error)
             if deferred.pending():
-                self._raise_pending_store_violation(result.unit, result.executable_blocks, result.executable_edges)
+                self._check_storage_schemas(result)
             deferred.raise_if_deferred()
             if new_w == self._runtime_state and new_d == self._state_livein:
                 _logger.info("state fixpoint stable after %d round(s): %d runtime leaves", round_index + 1, len(new_w))
@@ -427,6 +431,8 @@ class Analyzer:
                     header = result.unit.blocks[header_id]
                     assert isinstance(header.terminator, StaticFor)
                     header.terminator = Jump(chain_entry, header.terminator.origin)
+                self._check_storage_schemas(result)
+                self._raise_transfer_deferrals()
                 self._reject_executable_fails(result)
                 _validate(
                     result,
@@ -437,7 +443,6 @@ class Analyzer:
                     | set(self._construction_calls),
                 )
                 self._finalize(result)
-                self._check_storage_schemas(result)
                 return result
             self._runtime_state = new_w
             self._state_livein = new_d
@@ -448,40 +453,35 @@ class Analyzer:
         )
 
     def _check_storage_schemas(self, result: ResidualUnit) -> None:
-        enforce_storage_schemas(
+        result.store_conversions = enforce_storage_schemas(
             result.unit,
             result.executable_blocks,
             result.executable_edges,
-            result.binding_facts,
+            self._store_facts,
             {block_id: env.schemas for block_id, env in result.block_in.items()},
             self._store_schema_violations,
         )
 
-    def _raise_pending_store_violation(
-        self, unit: FunctionUnit, executable_blocks: set[BlockId], executable_edges: set[tuple[BlockId, BlockId]]
-    ) -> None:
+    def _raise_transfer_deferrals(self) -> None:
         """
-        A recorded store-schema obligation is the CAUSE of any downstream rejection its carried fact provokes,
-        so a round that is about to abort with a different rejection reports the first pending violation in CFG
-        preorder instead. A pending record is never stale within a round: facts descend and slot schemas are
-        fixed by the reset, so a store only ever moves from clean to violating.
+        Rejections deferred behind a pending store violation whose ops never went clean again. Reached only when
+        the resolution walk found every store clean (the pending violations were transient), so each lingering
+        entry is a real rejection re-derived on the round's stable facts; the lexicographically least surfaces,
+        matching the DeferredRejection convention.
         """
-        if not self._store_schema_violations:
-            return
-        best: tuple[tuple[int, int], str, OriginStack] | None = None
-        for position, block_id in enumerate(executable_preorder(unit, executable_blocks, executable_edges)):
-            for index, op in enumerate(unit.blocks[block_id].ops):
-                recorded = self._store_schema_violations.get(id(op))
-                if recorded is not None and (best is None or (position, index) < best[0]):
-                    best = ((position, index), *recorded)
-        if best is not None:
-            raise AnalysisRejection(best[1], best[2])
+        deferred = DeferredRejection()
+        for error in self._transfer_deferrals.values():
+            deferred.offer(error)
+        deferred.raise_if_deferred()
 
     def _reset_round(self) -> None:
         self._block_ancestry = {}
         self._discovered_stores = set()
         self._store_origins = {}
         self._store_schema_violations = {}
+        self._local_store_violations = {}
+        self._store_facts = {}
+        self._transfer_deferrals = {}
         self._concrete_calls = set()
         self._intrinsic_calls = set()
         self._cast_calls = set()
@@ -823,42 +823,62 @@ class Analyzer:
 
         worklist: list[BlockId] = [unit.entry]
         visits = 0
-        try:
-            while worklist:
-                visits += 1
-                if visits > _MAX_VISITS:
-                    raise AnalysisRejection("analysis fuel exhausted", origin)
-                block_id = worklist.pop()
-                executable_blocks.add(block_id)
-                env = block_in[block_id].copy()
-                block = unit.blocks[block_id]
-                index = 0
-                while index < len(block.ops):
-                    op = block.ops[index]
+        while worklist:
+            visits += 1
+            if visits > _MAX_VISITS:
+                raise AnalysisRejection("analysis fuel exhausted", origin)
+            block_id = worklist.pop()
+            executable_blocks.add(block_id)
+            env = block_in[block_id].copy()
+            block = unit.blocks[block_id]
+            index = 0
+            while index < len(block.ops):
+                op = block.ops[index]
+                try:
                     expanded = self._transfer(unit, block, index, op, env)
-                    if expanded:
-                        continue  # the graph changed under us: re-run this op slot (now a different op)
+                except AnalysisRejection as error:
+                    # A rejection downstream of a pending store violation is (potentially) provoked by the fact
+                    # the violating store carried, so it defers and the round runs on to stabilization, where
+                    # the resolution walk reports the causal store instead. The op's destination stays unbound;
+                    # anything it feeds defers the same way. A clean revisit clears the entry, so a lingering
+                    # one was re-derived on the op's stable facts.
+                    if not (self._store_schema_violations or self._local_store_violations):
+                        raise
+                    self._transfer_deferrals[id(op)] = error
                     index += 1
+                    continue
+                if self._transfer_deferrals:
+                    self._transfer_deferrals.pop(id(op), None)
+                if expanded:
+                    continue  # the graph changed under us: re-run this op slot (now a different op)
+                index += 1
+            try:
                 successors = self._resolve_terminator(unit, block, env)
-                assert block.terminator is not None
-                join_origin = block.terminator.origin
-                for successor in successors:
-                    edge = (block.id, successor)
-                    target_env = block_in.get(successor)
-                    if target_env is None:
-                        block_in[successor] = env.copy()
-                        executable_edges.add(edge)
+            except AnalysisRejection as error:
+                # The terminator counterpart of the op-level deferral (an unrollable iterable fed by a deferred
+                # op, say): the successors stay unexplored and the walk ranks over the graph reached so far.
+                if not (self._store_schema_violations or self._local_store_violations):
+                    raise
+                self._transfer_deferrals[id(block.terminator)] = error
+                continue
+            if self._transfer_deferrals:
+                self._transfer_deferrals.pop(id(block.terminator), None)
+            assert block.terminator is not None
+            join_origin = block.terminator.origin
+            for successor in successors:
+                edge = (block.id, successor)
+                target_env = block_in.get(successor)
+                if target_env is None:
+                    block_in[successor] = env.copy()
+                    executable_edges.add(edge)
+                    worklist.append(successor)
+                elif edge not in executable_edges:
+                    executable_edges.add(edge)
+                    if target_env.join_with(env, join_origin, edge_default) or successor not in executable_blocks:
                         worklist.append(successor)
-                    elif edge not in executable_edges:
-                        executable_edges.add(edge)
-                        if target_env.join_with(env, join_origin, edge_default) or successor not in executable_blocks:
-                            worklist.append(successor)
-                    else:
-                        if target_env.join_with(env, join_origin, edge_default):
-                            worklist.append(successor)
-        except AnalysisRejection:
-            self._raise_pending_store_violation(unit, executable_blocks, executable_edges)
-            raise
+                else:
+                    if target_env.join_with(env, join_origin, edge_default):
+                        worklist.append(successor)
         return ResidualUnit(unit, block_in, executable_blocks, executable_edges)
 
     # ------------------------------------ instantiation and grafting ------------------------------------
@@ -900,12 +920,17 @@ class Analyzer:
             case StorePlace(place=place, src=src):
                 stored = env.get(Local(src))
                 if op.role is StoreRole.SOURCE and isinstance(place, Local):
-                    # The violation message is discarded here: the verdict belongs to the post-stabilization walk.
-                    schema, stored, _ = conform_local_store(
-                        env.schemas.get(place), place.binding.name, stored, op.origin
-                    )
+                    # The verdict belongs to the post-stabilization walk, which re-derives it from the stored
+                    # fact recorded here (stable at the last visit); the mid-flight violation record only gates
+                    # the downstream-rejection deferral.
+                    self._store_facts[id(op)] = stored
+                    schema, stored, message = conform_local_store(env.schemas.get(place), place.binding.name, stored)
                     if schema is not None:
                         env.schemas[place] = schema
+                    if message is not None:
+                        self._local_store_violations[id(op)] = (message, op.origin)
+                    elif self._local_store_violations:
+                        self._local_store_violations.pop(id(op), None)
                 env.set(place, stored)
             case UnbindPlace(place=place, checked=checked):
                 if checked and isinstance(env.get(place), (Unbound, MaybeUnbound)):
@@ -1149,9 +1174,9 @@ class Analyzer:
                 if recorded is None or source_position(op.origin) < source_position(recorded):
                     self._store_origins[leaf] = op.origin
                 self._discovered_stores.add((block.id, leaf))
-                # The reset fixes the slot schema; a violating store carries the residualized reset onward so the
-                # fixed point stabilizes, and the recorded obligation reports after stabilization, at this store.
-                conformed, violation = conform_state_store(name, self._state_reset_fact(leaf), src_fact, op.origin)
+                # The reset fixes the slot schema; a violating store carries a fixpoint-stable fact onward and
+                # the recorded obligation reports after stabilization, at this store.
+                conformed, violation = conform_state_store(name, self._state_reset_fact(leaf), src_fact)
                 if violation is None:
                     self._store_schema_violations.pop(id(op), None)
                 else:

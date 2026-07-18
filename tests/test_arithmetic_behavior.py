@@ -218,6 +218,27 @@ def test_nan_producing_constant_fold_defers_to_the_hardware() -> None:
     assert out.bits == reference.bits == 0
 
 
+def _inf_div_inf(x: float) -> float:
+    return math.inf / math.inf
+
+
+def _zero_div_zero(x: float) -> float:
+    return 0.0 / 0.0
+
+
+def test_self_division_of_a_seen_zero_or_infinity_defers_to_the_hardware() -> None:
+    # Constant interning makes both operands of the deferred inf/inf (and 0.0/0.0) the SAME node, so the x/x
+    # identity used to fold them to 1.0 while the runtime divider's ZKF answer is 0.0. The identity must not
+    # fire when the compiler can see the shared operand is zero or non-finite; the runtime result wins.
+    zkf_inf = FloatValue.from_float(FMT, math.inf)
+    zkf_zero = FloatValue.from_float(FMT, 0.0)
+    assert (zkf_inf / zkf_inf).bits == (zkf_zero / zkf_zero).bits == 0  # the ZKF divider's own answer
+    for name, kernel in (("inf_div_inf", _inf_div_inf), ("zero_div_zero", _zero_div_zero)):
+        out = _sim(kernel, name).run(_val(0))[0]
+        assert isinstance(out, FloatValue)
+        assert out.bits == 0, f"{name}: bits=0x{out.bits:x} ({float(out)})"
+
+
 def _div(a: float, b: float) -> float:
     return a / b
 

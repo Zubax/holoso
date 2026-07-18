@@ -2,8 +2,10 @@
 Frontend tests: the fixed storage schema (B1). A variable is strongly typed for the function's lifetime: its
 first definition establishes the schema (independent first definitions on different paths join, int promoting
 to float), and once established a store may only keep the kind -- bool accepts bool, int accepts int, float
-accepts float or int (the integer converts on the store edge). Every other store is a located rejection at the
-store site. The schema sees SemType kinds only: aggregate-valued stores to locals are fact-only (a reshape or
+accepts float or int (the integer converts on the store edge: a statically Known one exact-or-reject, a runtime
+one with the hardware conversion's rounding). Every other store is a located rejection at the store site,
+resolved over the stabilized graph in CFG preorder, outranking any downstream rejection the carried fact
+provokes. The schema sees SemType kinds only: aggregate-valued stores to locals are fact-only (a reshape or
 reflavor is a representation change, not a type change), as are references, strings, and ranges; ``del`` does
 not erase a schema. Persistent state slots instead take their full schema -- flavor, geometry, per-cell kinds
 -- from the reset value.
@@ -202,6 +204,55 @@ def test_dead_oversized_int_store_into_a_float_variable_rejects() -> None:
     _reject(kernel, "beyond the binary64 carrier range")
 
 
+def test_store_edge_conversion_verdict_is_arm_order_independent() -> None:
+    # The exactness verdict is derived from the STABILIZED facts, never from a transient pre-join Known: the
+    # inexact constant sits in one branch arm, the other arm holds 0, and both spellings must agree -- each is
+    # a legal runtime integer store that converts on the store edge with the merge's float promotion.
+    def else_arm(x: float) -> float:
+        acc = 0.0
+        n = 0 if x > 0.0 else 2**53 + 1
+        acc = n
+        return acc * 0.5
+
+    def then_arm(x: float) -> float:
+        acc = 0.0
+        n = (2**53 + 1) if x > 0.0 else 0
+        acc = n
+        return acc * 0.5
+
+    rounded_half = float(2**53 + 1) * 0.5
+    else_model = _synthesize(else_arm, "conv_else_arm").numerical_model.elaborate()
+    then_model = _synthesize(then_arm, "conv_then_arm").numerical_model.elaborate()
+    assert float(else_model.run(1.0)[0]) == 0.0 and float(else_model.run(-1.0)[0]) == rounded_half
+    assert float(then_model.run(1.0)[0]) == rounded_half and float(then_model.run(-1.0)[0]) == 0.0
+
+
+def test_state_store_edge_conversion_verdict_is_arm_order_independent() -> None:
+    class ElseArm:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def step(self, x: float) -> float:
+            n = 0 if x > 0.0 else 2**53 + 1
+            self.y = n
+            return self.y
+
+    class ThenArm:
+        def __init__(self) -> None:
+            self.y = 0.0
+
+        def step(self, x: float) -> float:
+            n = (2**53 + 1) if x > 0.0 else 0
+            self.y = n
+            return self.y
+
+    rounded = float(2**53 + 1)
+    else_model = _synthesize(ElseArm().step, "state_conv_else").numerical_model.elaborate()
+    then_model = _synthesize(ThenArm().step, "state_conv_then").numerical_model.elaborate()
+    assert float(else_model.run(1.0)[0]) == 0.0 and float(else_model.run(-1.0)[0]) == rounded
+    assert float(then_model.run(1.0)[0]) == rounded and float(then_model.run(-1.0)[0]) == 0.0
+
+
 def test_the_conversion_survives_del_like_the_schema_does() -> None:
     def kernel(value: float) -> float:
         x = 1.5
@@ -210,6 +261,73 @@ def test_the_conversion_survives_del_like_the_schema_does() -> None:
         return x - 2**53
 
     _reject(kernel, "not exactly representable in the binary64 carrier")
+
+
+def _fround_ops() -> holoso.OpConfig:
+    import dataclasses
+
+    fmt = FloatFormat(11, 52)
+    return dataclasses.replace(default_ops(fmt), fround=holoso.FRoundOperator(fmt))
+
+
+def test_runtime_int_store_into_a_float_local_emits_the_conversion() -> None:
+    # The analyzer converts the FACT on the store edge; the datapath must convert too, or downstream consumers
+    # read an integer cell under a float fact (the truth test picked IntToBool and the dangling float_to_int
+    # rejected at MIR). Both spellings must synthesize and agree with Python.
+    def implicit(value: float) -> float:
+        current = value
+        current = int(value)
+        return 1.0 if current else 0.0
+
+    def explicit(value: float) -> float:
+        current = value
+        current = float(int(value))
+        return 1.0 if current else 0.0
+
+    for name, kernel in (("store_conv_implicit", implicit), ("store_conv_explicit", explicit)):
+        model = holoso.synthesize(kernel, _fround_ops(), name=name).numerical_model.elaborate()
+        for value in (-2.5, -1.0, -0.5, 0.0, 0.5, 1.0, 2.5):
+            assert float(model.run(value)[0]) == kernel(value), f"{name}({value})"
+
+
+def test_runtime_int_store_into_a_float_slot_emits_the_conversion() -> None:
+    class Acc:
+        def __init__(self) -> None:
+            self.acc = 0.0
+
+        def step(self, value: float) -> float:
+            self.acc = int(value)
+            return 1.0 if self.acc else 0.0
+
+    model = holoso.synthesize(Acc().step, _fround_ops(), name="state_store_conv").numerical_model.elaborate()
+    reference = Acc()
+    for value in (-2.5, -0.5, 0.0, 0.5, 2.5):
+        assert float(model.run(value)[0]) == reference.step(value), f"step({value})"
+
+
+def test_all_integer_phi_store_converts_at_runtime_like_the_explicit_spelling() -> None:
+    # A genuinely runtime integer (an all-constant int phi included) converts AT RUNTIME with the hardware
+    # conversion's round-to-nearest; only a statically Known stored value is exact-or-reject. Any constant
+    # folding of that conversion must match the runtime operator bit-for-bit, so the phi spelling and the
+    # explicit float() spelling must produce identical outputs on both paths.
+    def phi(flag: bool) -> float:
+        x = (2**53 + 1) if flag else 1
+        y = 0.0
+        y = x
+        return y
+
+    def explicit(flag: bool) -> float:
+        x = (2**53 + 1) if flag else 1
+        y = 0.0
+        y = float(x)
+        return y
+
+    phi_model = _synthesize(phi, "phi_store_conv").numerical_model.elaborate()
+    explicit_model = _synthesize(explicit, "explicit_store_conv").numerical_model.elaborate()
+    for flag in (True, False):
+        phi_out = phi_model.run(flag)[0]
+        explicit_out = explicit_model.run(flag)[0]
+        assert float(phi_out) == float(explicit_out) == float(2**53 + 1 if flag else 1), f"flag={flag}"
 
 
 # ---------------------------------------- per-execution-scope freshness ----------------------------------------
@@ -270,6 +388,34 @@ def test_literal_float_store_into_an_int_variable_still_rejects() -> None:
         return v
 
     _reject(kernel, "variables are strongly typed")
+
+
+def test_local_store_violation_outranks_its_downstream_secondary_rejection() -> None:
+    # The violating store carries its float fact onward, making the downstream shift ill-typed; the causal
+    # store rejection must be the one reported, never the secondary operator rejection it provoked.
+    def kernel(x: float) -> float:
+        count = 0
+        count = x  # type: ignore[assignment]
+        return float(count << 1)
+
+    error = _reject(kernel, "variable 'count' is an int and cannot be rebound")
+    assert error.location is not None and error.location.line is not None
+    assert "count = x" in error.location.line
+
+
+def test_the_first_violating_store_in_preorder_wins_over_a_later_conversion_failure() -> None:
+    # A mid-flight raise at the binary64 store would preempt the earlier rebinding; the resolution walk ranks
+    # every violation kind uniformly, so the first store in CFG preorder reports.
+    def kernel(x: float) -> float:
+        flag = True
+        flag = x  # type: ignore[assignment]  # noqa: F841
+        acc = 0.0
+        acc = 2**53 + 1
+        return acc - 2**53
+
+    error = _reject(kernel, "variable 'flag' is a bool and cannot be rebound")
+    assert error.location is not None and error.location.line is not None
+    assert "flag = x" in error.location.line
 
 
 # ---------------------------------------- calibration: what stays legal ----------------------------------------
@@ -386,6 +532,77 @@ def test_state_store_violation_outranks_its_downstream_secondary_rejection() -> 
     error = _reject(Counter().step, "state attribute 'count' stores an incompatible type")
     assert error.location is not None and error.location.line is not None
     assert "self.count = value" in error.location.line
+
+
+def test_competing_state_violations_report_the_then_arm_first() -> None:
+    # Two independent violations in opposite branch arms rank in CFG preorder (then-arm first) regardless of
+    # the order the worklist happened to discover the arms, and regardless of whether a downstream secondary
+    # rejection forces the deferral path: both shapes must report then_count.
+    class Counter:
+        def __init__(self) -> None:
+            self.then_count = 0
+            self.else_count = 0
+
+        def step(self, v: float) -> float:
+            if v > 0.0:
+                self.then_count = v  # type: ignore[assignment]
+            else:
+                self.else_count = v  # type: ignore[assignment]
+            return v
+
+    class CounterShift:
+        def __init__(self) -> None:
+            self.then_count = 0
+            self.else_count = 0
+
+        def step(self, v: float) -> float:
+            if v > 0.0:
+                self.then_count = v  # type: ignore[assignment]
+            else:
+                self.else_count = v  # type: ignore[assignment]
+            return float(self.else_count << 1)
+
+    for kernel in (Counter().step, CounterShift().step):
+        error = _reject(kernel, "state attribute 'then_count' stores an incompatible type")
+        assert error.location is not None and error.location.line is not None
+        assert "self.then_count = v" in error.location.line
+
+
+def test_competing_state_conversion_failures_report_the_then_arm_first() -> None:
+    class TwoStores:
+        def __init__(self) -> None:
+            self.a = 0.0
+            self.b = 0.0
+
+        def step(self, v: float) -> float:
+            if v > 0.0:
+                self.a = 2**53 + 1
+            else:
+                self.b = 2**53 + 1
+            return v
+
+    error = _reject(TwoStores().step, "state attribute 'a' is a float; the stored integer is not exactly")
+    assert error.location is not None and error.location.line is not None
+    assert "self.a = 2**53 + 1" in error.location.line
+
+
+def test_state_store_violation_outranks_a_provoked_loop_rejection() -> None:
+    # The carried float defers the range() call, which leaves the loop iterable unresolved at the TERMINATOR;
+    # the causal store must still outrank that provoked failure, exactly as it outranks a provoked op failure.
+    class LoopBound:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def step(self, v: float) -> float:
+            self.n = v  # type: ignore[assignment]
+            acc = 0.0
+            for _ in range(self.n):
+                acc = acc + 1.0
+            return acc
+
+    error = _reject(LoopBound().step, "state attribute 'n' stores an incompatible type")
+    assert error.location is not None and error.location.line is not None
+    assert "self.n = v" in error.location.line
 
 
 def test_float_slot_stored_an_inexact_int_rejects_at_the_store() -> None:

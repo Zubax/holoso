@@ -114,17 +114,31 @@ def run(hir: Hir) -> Hir:
         neg_of[new_id] = value
         return new_id
 
+    def defers_to_runtime(vid: ValueId, keep_zero: bool = False) -> bool:
+        """
+        Whether an identity rewrite over this operand must yield to the runtime operator: the compiler can see
+        the operand is non-finite (or zero, where zero breaks the identity), so the fold's answer could differ
+        from the ZKF one. An unknown runtime operand keeps the chartered fast-math fold.
+        """
+        constant = cval.get(vid)
+        if constant is None:
+            return False
+        return not math.isfinite(constant) or (not keep_zero and constant == 0.0)
+
     def reduce_add(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
         if is_zero(a):
             return b
         if is_zero(b):
             return a
-        if neg_of.get(a) == b or neg_of.get(b) == a:
+        cancelled = b if neg_of.get(a) == b else a if neg_of.get(b) == a else None
+        if cancelled is not None and not defers_to_runtime(cancelled, keep_zero=True):
             return emit_float_const(builder, 0.0)
         return emit_float_operation(builder, FloatAdd(), [a, b])
 
     def reduce_mul(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
         if is_zero(a) or is_zero(b):
+            # Needs no runtime-divergence guard: ZKF zero kills unconditionally (0 x inf is 0.0, there is no
+            # NaN), so this fold matches the hardware for every other operand.
             return emit_float_const(builder, 0.0)
         if is_one(a):
             return b
@@ -142,10 +156,15 @@ def run(hir: Hir) -> Hir:
         return emit_float_operation(builder, FloatMul(), [a, b])
 
     def reduce_div(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
-        if a == b:
-            return emit_float_const(builder, 1.0)  # Fast-math fold: intentionally ignores div0 for 0.0 / 0.0.
+        # x/x folds to 1.0 for a runtime operand under the charter, but a shared operand the compiler can see is
+        # zero or non-finite (constant interning makes both sides of a deferred 0/0 or inf/inf the same node)
+        # defers to the runtime divider, whose ZKF answer is 0.0, not 1.0.
+        if a == b and not defers_to_runtime(a):
+            return emit_float_const(builder, 1.0)
         if is_zero(a):
-            return emit_float_const(builder, 0.0)  # Fast-math fold: intentionally drops the fdiv error sideband.
+            # 0/y is the ZKF quotient for every y (zero kills; 0/0 and 0/inf are 0.0 in hardware too), so the
+            # fold never diverges from the runtime; it does drop the fdiv error sideband for a zero divisor.
+            return emit_float_const(builder, 0.0)
         if is_one(b):
             return a
         if is_neg_one(b):

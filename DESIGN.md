@@ -300,11 +300,12 @@ preserves arity and leaf count), so a flavor-degrading merge keeps every cell al
 port ABI. An aggregate store defines every datapath leaf (a Known leaf as its interned constant: the invariant a
 later per-leaf merge relies on; a non-datapath Known -- a string, a function reference -- stays fact-only, since
 its every use folds and no join can residualize it), a join phis only the leaves that differ, and a conditional
-selection emits one typed select per differing leaf. HIR stays entirely scalar. One typed materializer serves every operand position: a Known
-value becomes a constant of the expected kind (a Known integer stays an IntConst in an integer context and rounds
-into a float constant in a float context), a residual value is its SSA read, coerced only where the coercion is a
-genuine int->float promotion on its own edge (phi arms, select arms, state stores, comparison operands) and a
-located rejection otherwise. Folded branches lower to jumps; a loop header reads its init arm by recursing through
+selection emits one typed select per differing leaf. HIR stays entirely scalar. One typed materializer serves
+every operand position: a Known value becomes a constant of the expected kind (a Known integer stays an IntConst
+in an integer context and rounds into a float constant in a float context), a residual value is its SSA read,
+coerced only where the coercion is a genuine int->float promotion on its own edge (phi arms, select arms, state
+stores, the schema store edge of a local, comparison operands) and a located rejection otherwise. Folded branches
+lower to jumps; a loop header reads its init arm by recursing through
 already-emitted predecessors and closes its latch arm at sealing (phi insertion saves/restores the builder
 position; a write-once temp never needs a phi). Module and class attribute access is a plain namespace lookup, not
 component state. State slots carry the reset snapshot and canonical-exit live-out; out ports, public `state_<slot>`
@@ -322,11 +323,14 @@ Storage typing. Variables are strongly typed for the function's lifetime under a
 sees SemType kinds only: a source variable's first definition of a scalar datapath value establishes its kind (a
 root scalar parameter's comes from its annotation contract), and independent first definitions on different paths
 join with the same int->float promotion facts use. Once established, a store may only keep the kind: bool accepts
-bool, int accepts int, float accepts float or an integer that converts on the store edge — the conversion is
-exact-or-reject for locals and state cells alike (an integer the binary64 carrier cannot represent exactly is a
-located rejection at the store; the explicit `float(...)` cast is the spelling that accepts rounding), so an
-exact integer fact never survives inside a float variable. Every other scalar store is a located rejection at the store site; `del` does
-not erase an established schema (nor the conversion that rides it), and values outside the datapath kinds --
+bool, int accepts int, float accepts float or an integer that converts on the store edge — for a statically Known
+integer the conversion is exact-or-reject, for locals and state cells alike (an integer the binary64 carrier
+cannot represent exactly is a located rejection at the store; the explicit `float(...)` cast is the spelling that
+accepts rounding), so an exact integer fact never survives inside a float variable. A genuinely runtime integer
+(an all-constant integer phi included) instead converts at runtime with the hardware conversion's round-to-nearest
+— the same static-refuses/runtime-defers boundary NaN handling draws — and any constant folding of that
+conversion matches the runtime operator. Every other scalar store is a located rejection at the store site; `del`
+does not erase an established schema (nor the conversion that rides it), and values outside the datapath kinds --
 references, strings, ranges, and whole aggregates -- neither establish nor violate one. Compiler-scoped bindings
 are fresh per execution: a comprehension target's entry reset and each unroll trip's loop-target prelude clear
 the schema, so trip 1 of `for c in (1, 2.5)` sees an int and trip 2 a float, exactly as Python does. A local
@@ -533,7 +537,9 @@ section where it acts; this index consolidates them:
   rounded), so a folded constant can differ from the datapath's own value for the same expression (HIR
   optimization).
 - `x/x` folds to 1 and the other division identities may erase error sidebands: rewriting away an error-bearing
-  operation also removes the error it would have signaled (HIR optimization).
+  operation also removes the error it would have signaled (HIR optimization). The identities yield to the runtime
+  operator when the compiler can see the answer would differ: an operand that is a known zero or non-finite
+  constant (a deferred `inf/inf` interns both sides onto one node) keeps the operation, whose ZKF result wins.
 - FMA contraction changes rounding: a fused `a*b+c` rounds once where the separate multiply and add round twice
   (MIR; opt-in per Fabric-area exploration).
 - Zero/infinity rewrites act under the no-NaN charter: ZKF has no NaN, NaN constants reject, infinities are
@@ -641,6 +647,9 @@ back-edge arm) keeps its real branch -- deferred (see LIR DEFERRED).
 FP math is non-associative, so some of these optimizations may produce non-bit-exact results -- accepted, analogous to
 fast-math in C/C++ compilers. Division identities may also rewrite zero/infinity special cases and drop sidebands when
 they remove an error-bearing op; sign/identity folds may preserve or expose a zero sign through raw sign conditioning.
+An identity whose operand is a KNOWN zero or non-finite constant does not fire where its algebraic answer would differ
+from the operator's ZKF one (`inf/inf` and `0.0/0.0` stay for the divider, a known-infinite cancellation stays for the
+adder): the runtime result wins whenever the compiler can see the divergence.
 NaN constants are rejected because ZKF has no NaN; a fold whose float64 result would be NaN (inf + -inf, 0 × inf,
 inf / inf) instead stays unfolded for the hardware operator, whose ZKF answer is the format's own NaN-free one --
 the same deferral the frontend's static folds apply. Infinities are ordinary float values. The transcendental folds
@@ -666,9 +675,9 @@ integer side on its own edge and yields a plain float -- Python instead keeps ea
 documented C-style deviation, and the same rule covers an int/float comparison, which promotes and compares in float.
 The precision loss is accepted under the fastmath charter: a Known integer materializing in a float position rounds
 into the binary64 carrier (only a value beyond that carrier entirely, e.g. 10**400, is a located rejection), and the
-selected target format then rounds again like any constant. A store into a float variable or state slot is the one
-stricter edge: exact-or-reject, per Storage typing. Static folding remains Python-exact: a fully-Known
-int/float comparison folds exactly; only runtime values promote.
+selected target format then rounds again like any constant. A statically Known integer stored into a float variable
+or state slot is the one stricter edge: exact-or-reject, per Storage typing. Static folding remains Python-exact:
+a fully-Known int/float comparison folds exactly; only runtime values promote.
 
 Library intrinsics are typed by a three-rule declarative registry: SIGNATURE (the operator's own result; integer
 operands promote -- `math.fabs`/`np.fabs`, `np.rint`, the transcendentals), ALWAYS_INT (the int-returning

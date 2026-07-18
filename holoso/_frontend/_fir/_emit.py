@@ -837,7 +837,11 @@ class _Emitter:
                 elif isinstance(fact, Reference) or (isinstance(fact, Known) and not self._datapath_known(fact)):
                     pass  # a reference or non-datapath Known (a string, a range): every use folds
                 else:
-                    self._write(fir_id, place, self._materialize(fir_id, src))  # in the value's own kind
+                    # The analyzer's resolution walk marked the stores whose value converts int->float on the
+                    # store edge (a runtime int into a float-schema local); the cell must carry the converted
+                    # kind the flowed facts promise, exactly as the explicit float(...) spelling would.
+                    expected = SemType.FLOAT if id(op) in self._result.store_conversions else None
+                    self._write(fir_id, place, self._materialize(fir_id, src, expected))
             case PyBin(dst=dst, op=bin_op, lhs=lhs, rhs=rhs):
                 self._emit_binary(fir_id, dst, bin_op, lhs, rhs)
             case PyUn(dst=dst, op=un_op, operand=operand):

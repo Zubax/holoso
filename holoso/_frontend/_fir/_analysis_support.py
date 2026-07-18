@@ -550,13 +550,17 @@ def _admit_rebinding(current: StorageSchema, stored: StorageSchema) -> StorageSc
             return None
 
 
-def _binary64_store_image(fact: AtomicFact, subject: str, origin: OriginStack) -> AtomicFact:
+def _binary64_store_image(fact: AtomicFact, subject: str) -> tuple[AtomicFact, str | None]:
     """
-    The float fact an integer becomes on the edge of a store into a float-schema variable or state cell.
-    Exact-or-reject, unlike the rounding merge promotion: a merge presents the integer in a float position,
-    where fastmath rounding is chartered, but a plain assignment silently changing the stored value would be
-    exactly the spelling-dependent divergence the storage schema exists to kill -- the explicit float(...)
-    cast is the spelling that accepts the rounding.
+    The float fact an integer becomes on the edge of a store into a float-schema variable or state cell, plus
+    the exactness violation it commits, if any. A statically Known integer is exact-or-reject, unlike the
+    rounding merge promotion: a merge presents the integer in a float position, where fastmath rounding is
+    chartered, but a plain assignment silently changing the stored value would be exactly the spelling-dependent
+    divergence the storage schema exists to kill -- the explicit float(...) cast is the spelling that accepts
+    the rounding. A genuinely runtime integer instead converts at runtime with the hardware conversion's
+    round-to-nearest, the same static-refuses/runtime-defers boundary NaN handling uses. Never raises: the
+    verdict belongs to the post-stabilization walk, so the carried image (the rounded float, or a float
+    residual past the carrier) keeps the fixed point stable even when the fact is a transient pre-join one.
     """
     match fact:
         case Known(value=(MetaInt() | NpInt()) as value):
@@ -564,32 +568,31 @@ def _binary64_store_image(fact: AtomicFact, subject: str, origin: OriginStack) -
                 image = float(value.value)
             except OverflowError:
                 bits = value.value.bit_length()  # never via str(): the 4300-digit conversion cap
-                raise AnalysisRejection(
-                    f"{subject} is a float; a {bits}-bit integer stored into it is beyond the binary64 "
-                    "carrier range",
-                    origin,
-                ) from None
-            if int(image) != value.value:
-                raise AnalysisRejection(
-                    f"{subject} is a float; the stored integer is not exactly representable in the "
-                    "binary64 carrier (write float(...) to accept the rounding)",
-                    origin,
+                return Residual(SemType.FLOAT), (
+                    f"{subject} is a float; a {bits}-bit integer stored into it is beyond the binary64 carrier range"
                 )
-            return Known(NpFloat(image) if isinstance(value, NpInt) else StaticFloat(image))
+            converted = Known(NpFloat(image) if isinstance(value, NpInt) else StaticFloat(image))
+            if int(image) != value.value:
+                return converted, (
+                    f"{subject} is a float; the stored integer is not exactly representable in the "
+                    "binary64 carrier (write float(...) to accept the rounding)"
+                )
+            return converted, None
         case Residual(type=SemType.INT):
-            return Residual(SemType.FLOAT)
+            return Residual(SemType.FLOAT), None
     raise AssertionError(fact)
 
 
 def conform_local_store(
-    current: StorageSchema | None, name: str, stored: Fact, origin: OriginStack
+    current: StorageSchema | None, name: str, stored: Fact
 ) -> tuple[StorageSchema | None, Fact, str | None]:
     """
     The schema a SOURCE store leaves on its local, the fact it stores, and the violation it commits, if any.
     A scalar datapath store establishes an absent schema and must keep an established one; an integer admitted
     into a float schema converts through the binary64 store edge, so an exact integer fact never survives inside
-    a float variable. On a violation the schema and the fact pass through unchanged: the verdict belongs to the
-    post-stabilization walk, which reports the first violating store in CFG preorder.
+    a float variable. On a rebinding violation the schema and the fact pass through unchanged; on a conversion
+    violation the fact carries the store-edge image. Never raises: the verdict belongs to the post-stabilization
+    walk, which reports the first violating store in CFG preorder.
     """
     stored_schema = schema_of_fact(stored)
     if stored_schema is None:
@@ -606,7 +609,8 @@ def conform_local_store(
         )
     if isinstance(admitted, ScalarSchema) and admitted.kind is SemType.FLOAT and stored_schema.kind is SemType.INT:
         assert isinstance(stored, (Known, Residual))
-        return admitted, _binary64_store_image(stored, f"variable '{name}'", origin), None
+        image, message = _binary64_store_image(stored, f"variable '{name}'")
+        return admitted, image, message
     return admitted, stored, None
 
 
@@ -619,16 +623,17 @@ def describe_schema(schema: StorageSchema) -> str:
     raise AssertionError(schema)
 
 
-def conform_state_store(name: str, reset: Fact, stored: Fact, origin: OriginStack) -> tuple[Fact, str | None]:
+def conform_state_store(name: str, reset: Fact, stored: Fact) -> tuple[Fact, str | None]:
     """
     The fact a state store leaves in its slot plus the schema violation it commits, if any. The reset fixes the
     slot schema -- container flavor, exact geometry, and per-cell kind -- and a store may only keep it: bool
-    cells accept bool, int cells int, float cells float or int (the integer converts exact-or-reject on the
-    store edge, exactly like the local rule). A violation reports after stabilization, at this store, so the
-    fact carried onward must
-    keep the fixed point stable AND free of misleading secondary rejections: an int slot receiving float (a pure
-    numeric widening) carries the stored fact, whose W/D join merely descends; every other violation carries the
-    residualized reset, since joining the stored fact would raise a worse-located mismatch first.
+    cells accept bool, int cells int, float cells float or int (the integer converts through the binary64 store
+    edge, exactly like the local rule: a Known is exact-or-reject, a runtime integer converts at runtime). A
+    violation reports after stabilization, at this store, so the fact carried onward must keep the fixed point
+    stable AND free of misleading secondary rejections: an int slot receiving float (a pure numeric widening)
+    carries the stored fact, whose W/D join merely descends; a failed conversion carries its store-edge image;
+    every other violation carries the residualized reset, since joining the stored fact would raise a
+    worse-located mismatch first.
     """
     if isinstance(reset, Reference):
         return reset, (
@@ -656,6 +661,7 @@ def conform_state_store(name: str, reset: Fact, stored: Fact, origin: OriginStac
             return reset, f"state attribute '{name}' persists {described}; the stored value has an incompatible shape"
         cells: list[AtomicFact] = []
         message: str | None = None
+        kind_mismatch = False
         widening_only = True
         for ordinal, cell in enumerate(stored.leaves):
             if isinstance(cell, Reference):
@@ -666,17 +672,21 @@ def conform_state_store(name: str, reset: Fact, stored: Fact, origin: OriginStac
             if stored_kind is slot_kind:
                 cells.append(cell)
             elif slot_kind is SemType.FLOAT and stored_kind is SemType.INT:
-                converted = _binary64_store_image(cell, f"state attribute '{name}' cell {ordinal}", origin)
+                converted, cell_message = _binary64_store_image(cell, f"state attribute '{name}' cell {ordinal}")
                 assert isinstance(converted, (Known, Residual))
                 cells.append(converted)
+                if cell_message is not None and message is None:
+                    message = cell_message
             else:
+                kind_mismatch = True
                 if message is None:
                     message = f"state attribute '{name}' stores an incompatible type at cell {ordinal}"
                 if not (slot_kind is SemType.INT and stored_kind is SemType.FLOAT):
                     widening_only = False
-        if message is not None:
+        if kind_mismatch:
+            assert message is not None
             return (stored if widening_only else reset), message
-        return AggregateFact(reset.layout, tuple(cells)), None
+        return AggregateFact(reset.layout, tuple(cells)), message
     slot_kind = _scalar_sem(reset)
     assert slot_kind is not None, "a scalar reset fact is a Known bool or a numeric residual"
     if isinstance(stored, AggregateFact):
@@ -686,7 +696,7 @@ def conform_state_store(name: str, reset: Fact, stored: Fact, origin: OriginStac
         return stored, None  # a non-datapath value neither establishes nor violates; the W/D join owns it
     assert isinstance(stored, (Known, Residual))
     if slot_kind is SemType.FLOAT and stored_kind is SemType.INT:
-        return _binary64_store_image(stored, f"state attribute '{name}'", origin), None
+        return _binary64_store_image(stored, f"state attribute '{name}'")
     message = f"state attribute '{name}' stores an incompatible type"
     return (stored if slot_kind is SemType.INT and stored_kind is SemType.FLOAT else reset), message
 
@@ -695,21 +705,25 @@ def enforce_storage_schemas(
     unit: FunctionUnit,
     executable_blocks: set[BlockId],
     executable_edges: set[tuple[BlockId, BlockId]],
-    binding_facts: Mapping[BindingId, Fact],
+    store_facts: Mapping[int, Fact],
     schemas_in: Mapping[BlockId, Mapping["Place", StorageSchema]],
     state_violations: Mapping[int, tuple[str, OriginStack]],
-) -> None:
+) -> set[int]:
     """
-    The storage-schema verdict over the stabilized executable graph: every block's stores replay against its
-    stable entry schemas -- the environments the analysis flowed beside the facts (establishment, merge joins,
-    the store-edge conversion, and compiler scope resets included) -- and all violations, local rebindings and
-    the recorded state-store obligations alike, report as one located rejection at the first violating store in
-    CFG preorder (then-arm first, matching the Fail walk). Runs strictly after W/D stabilization: SCCP discovers
-    executable predecessors late, so a mid-flight verdict would be order-dependent. A compiler scope reset
-    (an unchecked UnbindPlace: a comprehension entry, an unroll trip's target prelude) clears the binding for a
-    fresh per-execution schema, while a user ``del`` does not: variables stay strongly typed across ``del``.
+    The one storage-schema resolution site, over the stabilized executable graph: every block's SOURCE stores
+    replay against its stable entry schemas -- the environments the analysis flowed beside the facts
+    (establishment, merge joins, the store-edge conversion, and compiler scope resets included) -- with each
+    store's stable stored fact re-deriving its verdict, and all violations, local rebindings, store-edge
+    conversion failures, and the recorded state-store obligations alike, report as one located rejection at the
+    first violating store in CFG preorder (then-arm first, matching the Fail walk). Runs strictly after the
+    round stabilizes: SCCP discovers executable predecessors late, so a mid-flight verdict would be
+    order-dependent. A compiler scope reset (an unchecked UnbindPlace: a comprehension entry, an unroll trip's
+    target prelude) clears the binding for a fresh per-execution schema, while a user ``del`` does not:
+    variables stay strongly typed across ``del``. When no store violates, the returned op ids are the local
+    stores whose value converts int->float on the store edge: the emission plan for the store-edge conversion.
     """
     violations: list[tuple[tuple[int, int], str, OriginStack]] = []
+    conversions: set[int] = set()
     order = executable_preorder(unit, executable_blocks, executable_edges)
     for position, block_id in enumerate(order):
         assert block_id in schemas_in, "every executable-reachable block carries a flowed environment"
@@ -723,18 +737,20 @@ def enforce_storage_schemas(
                 case UnbindPlace(place=place, checked=False):
                     env.pop(place, None)
                 case StorePlace(place=place, role=StoreRole.SOURCE):
-                    fact = binding_facts.get(op.src)
-                    if fact is None:
-                        continue
+                    fact = store_facts.get(id(op))
+                    assert fact is not None, "every executable SOURCE store was transferred this round"
                     assert isinstance(place, Local), "a SOURCE store binds a named local"
-                    schema, _, message = conform_local_store(env.get(place), place.binding.name, fact, op.origin)
+                    schema, conformed, message = conform_local_store(env.get(place), place.binding.name, fact)
                     if schema is not None:
                         env[place] = schema
                     if message is not None:
                         violations.append(((position, index), message, op.origin))
+                    elif _scalar_sem(fact) is SemType.INT and _scalar_sem(conformed) is SemType.FLOAT:
+                        conversions.add(id(op))
     if violations:
         _, message, origin = min(violations, key=lambda item: item[0])
         raise AnalysisRejection(message, origin)
+    return conversions
 
 
 def _mro_attribute_of(klass: type, name: str) -> object | None:

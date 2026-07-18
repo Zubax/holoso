@@ -137,6 +137,29 @@ def emit_competing_bad_store() -> None:
     _emit_rejection(competing_bad_stores)
 
 
+class CompetingStateStores:
+    """
+    Two violating state stores on sibling arms plus a downstream secondary rejection the carried fact provokes:
+    the round runs through the deferral path to stabilization, and the resolution walk must still surface the
+    then-arm store regardless of any set iteration order.
+    """
+
+    def __init__(self) -> None:
+        self.then_count = 0
+        self.else_count = 0
+
+    def step(self, v: float) -> float:
+        if v > 0.0:
+            self.then_count = v  # type: ignore[assignment]
+        else:
+            self.else_count = v  # type: ignore[assignment]
+        return float(self.else_count << 1)
+
+
+def emit_competing_state_store_violation() -> None:
+    _emit_rejection(CompetingStateStores().step)
+
+
 class BadResets:
     """
     Two state leaves whose reset joins are BOTH inadmissible, with different messages: the W/D loop iterates a
@@ -241,6 +264,17 @@ def test_competing_schema_violations_report_identically_across_hash_seeds(other_
     reference = _entry_output_under_seed("emit_competing_bad_store", "0")
     assert "strongly typed" in reference and "'a'" in reference  # the then-arm store wins the preorder
     assert reference == _entry_output_under_seed("emit_competing_bad_store", other_seed)
+
+
+@pytest.mark.parametrize("other_seed", ["1", "3", "31337"])
+def test_competing_state_violations_on_the_deferral_path_report_identically_across_hash_seeds(
+    other_seed: str,
+) -> None:
+    # Property lock for the round-3 rework: with a provoked secondary rejection deferred behind the pending
+    # violations, the resolution walk over the stabilized graph reports the then-arm store on every seed.
+    reference = _entry_output_under_seed("emit_competing_state_store_violation", "0")
+    assert "'then_count'" in reference
+    assert reference == _entry_output_under_seed("emit_competing_state_store_violation", other_seed)
 
 
 @pytest.mark.parametrize("other_seed", ["3", "31337"])
