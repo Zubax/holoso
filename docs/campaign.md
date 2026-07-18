@@ -512,3 +512,17 @@ bypass equality), so the plan's "deliberate row updates" would have been fabrica
 made. Full light suite 1797/3 green; mypy/black clean. NOTED for S2.15 re-freeze: pre-existing baseline ceiling
 slack (e.g. madd min_ii measured 14 vs frozen 15) exists identically at acf1ba8 — owned by the freeze step, not
 G1. G1's review round merges into the next stack round (G1 + round-2 batch) once fixes-r2 returns.
+
+Round-2 batch INTEGRATED: 76d7837 cherry-picked clean as 2bcd878 onto G1. Deviations adjudicated: (a) R4's
+model-NaN pin is impossible — the numerical model is ZKF-bit-faithful and ZKF has no NaN (inf + -inf yields
+bits 0x0); the regression pins the ZKF-defined result instead, fold-deferral as mandated. (b) R1's exact-or-
+reject for locals exposed the state edge still silently ROUNDING (conform_state_store via _float_promoted;
+docstring falsely claimed "exactly like the local rule") — RESOLVED toward symmetry as my own integration
+commit 5c3d3c5: both scalar slots and aggregate cells now convert exact-or-reject through subject-parameterized
+_binary64_store_image; the rounding promotion is merge-only; fail-before observed (both probes ACCEPTED with
+9007199254740992.0); the round-1 fold-coherence pin inverts honestly with rounded-fold coverage kept via the
+float() spelling. (c) b1-design amended: the schema lattice rides the SCCP env (conversion needs it at the
+store) while verdicts stay post-stabilization — ratified. Left-noted: mid-flow non-schema rejections can still
+preempt purely LOCAL schema violations (state obligations have causal priority; locals would need non-monotone
+mid-flow recording — acceptable, documented). Full light suite over the stack (6207eb7+2bcd878+5c3d3c5) running
+in background; on green: trial/s2-g1-stack push at 5c3d3c5, poll, round-3 pair on pinned worktree review-s213.
