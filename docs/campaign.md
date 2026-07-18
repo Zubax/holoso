@@ -503,3 +503,12 @@ NaN; zero blast radius — previously such kernels crashed). (C5) np.dot misuse 
 graft rebrand uses per-Library display_name; thread the SPELLED alias per call ("in dot():"). Batch R1-R7
 (these five + walker consolidation + DESIGN truth-up post-R1) dispatched to side worktree fixes-r2 at 722d2fa;
 0-based columns decline stands.
+
+S2.13 COMMITTED 6207eb7 (G1: guard blocks fuse via the shared speculatable-within-budget criterion; ops hoist
+into the predecessor ahead of band(A,B); bypass-equality/faulting/budget refusals hold; nested spelling now
+bit-identical to the hand-written `and`). Frozen rows: ZERO changes VERIFIED by corpus-wide A/B stash
+measurement — the corpus contains no fusible natural nested guard (uart_tx reconverges late, uart_rx fails
+bypass equality), so the plan's "deliberate row updates" would have been fabrication and were correctly not
+made. Full light suite 1797/3 green; mypy/black clean. NOTED for S2.15 re-freeze: pre-existing baseline ceiling
+slack (e.g. madd min_ii measured 14 vs frozen 15) exists identically at acf1ba8 — owned by the freeze step, not
+G1. G1's review round merges into the next stack round (G1 + round-2 batch) once fixes-r2 returns.
