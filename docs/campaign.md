@@ -742,3 +742,12 @@ emitter), schema frozen as the first commit, evidence ledger append-only, SC1-SC
 iir1_lpf first; the adapter can reach only the MORPH rows of the table — transplant would need the optional
 independent residualizer. In flight: spike + the round-5 fix batch (fixes-r5; carryover pending-bridge redesign
 + 8 freeze hardenings + capture regen). Tag freeze-1 after round-5 lands and round-6 is clean.
+
+WORKFLOW DIRECTIVE (maintainer, 2026-07-18): no longer time-constrained — prefer SEQUENTIAL execution over
+parallel tracks to reduce management complexity. Effective immediately: the two in-flight agents (round-5 fix
+batch on fixes-r5; the S3.3 spike on spike/resolved-ir) run to completion, but no new work launches alongside
+them. From here on, one thing at a time: implement -> integrate -> verify -> trial -> review round (the
+Claude+Codex pair within a round stays, per the review-loop skill) -> consolidate -> only then the next step.
+No more overlapping the next implementation with an open review round; consults run standalone. Order after
+the in-flight agents return: (1) round-5 integration -> round-6 review -> consolidate -> tag freeze-1;
+(2) spike results -> X5 consult -> ruling -> arch-ruling.md; (3) S4 per ruling, strictly stepwise.
