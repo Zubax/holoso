@@ -783,3 +783,18 @@ non-re-derivable entries expire and the deferred rejection surfaces preorder-fir
 Cascaded expectation honestly REVERSES (producer rejection reports first — sequential error reporting; the
 store violation surfaces after the user fixes the producer) — flagged for the round-7 pair. Claude half still
 running; one consolidated batch after it returns.
+
+Round-6, Claude half returned (5) — consolidation of both halves complete, REFINED RULE replacing the earlier
+logged direction: at stabilization, a bridge origin ABSENT from every executable block's stores (STRANDED —
+its own violation's cascade removed the block) REPORTS (ranked after in-graph violations, before deferrals,
+lexicographic among themselves); an origin whose store executed ONLY-UNBOUND in a live block EXPIRES (the
+deferral that caused unboundness is the true stable rejection); bound executions re-derive normally. This
+separates Codex-1 (stale, expire -> range()) from Claude-2 (stranded, report the store — the parent behavior).
+Full batch: boundary reconcile pops an origin only if every execution was bound-and-conforming AND none was
+unbound (Claude 1/Codex 3 — unbound executions block the pop; violating-wins-within-op for same-op
+multi-execution); _UnrollRestart carries the bridge UNCHANGED (only true round boundaries reconcile — Codex 4);
+stranded-entry messages fold earliest-first (Codex 2); round-end rejection selection UNIFIES to executable
+preorder everywhere if pin flips are few (Claude 3 — min-by-str vs preorder inconsistency; else document
+honestly); _render_fail gets the digit-cap-safe spelling (Claude 4); the ifconv pin becomes a named catalogue
+constant shared with refreeze (Claude 5); retry-safe corpus replacement (Codex 5). Round-7 adjudicates BOTH
+reversals (Cascaded; any preorder unification flips). Batch to worktree fixes-r6 at f1f977f.
