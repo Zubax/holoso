@@ -101,3 +101,15 @@ aggregate-valued stores are fact-only: full local aggregate enforcement rejected
 the exact idiom the in-place-mutation diagnostic recommends). Consistent with the note's "the schema sees
 SemType kinds only". Every rejection mandated by the outcome matrix and the X2 reversal inventory is scalar or
 state and survives unchanged.
+
+Ratification (round-2 review): the open mixed-iterable question resolves as per-execution-scope freshness.
+A compiler-scoped binding is fresh per execution -- the builder's comprehension-entry scope reset and each
+unroll trip's loop-target prelude clear the schema (an unchecked UnbindPlace; per-instantiation helper
+parameter binds already had this property through fresh BindingIds) -- so trip 1 of `for c in (1, 2.5)` sees an
+int c and trip 2 a float c, Python-faithfully, and a comprehension target's kind never leaks between separate
+executions. User `del` remains a non-clearing operation: `x = 0; del x; x = 1.0` still rejects. Two further
+amendments from the same round: the float<-int acceptance clause converts the stored fact on the store edge for
+locals too, exact-or-reject against the binary64 carrier (the rounding merge promotion is unchanged; the
+explicit float(...) cast is the spelling that accepts rounding -- so `x = 1.5; x = 2**7000` now rejects instead
+of dying silently as a dead int fact), and a pending store-schema violation outranks any downstream rejection
+its carried fact provokes within the same analysis round, so the causal store reports first.

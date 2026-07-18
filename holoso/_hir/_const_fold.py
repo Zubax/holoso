@@ -1,5 +1,6 @@
 """HIR constant folding."""
 
+from .._errors import UnsupportedConstruct
 from ._const import Const
 from ._copy import copy_node, rebuild
 from .._util import ValueId
@@ -44,7 +45,13 @@ def run(hir: Hir) -> Hir:
                 new_operands = [remap[op] for op in operands]
                 operand_consts = [cval.get(op) for op in new_operands]
                 if all(const is not None for const in operand_consts):
-                    folded = operator.fold_constants([const for const in operand_consts if const is not None])
+                    try:
+                        folded = operator.fold_constants([const for const in operand_consts if const is not None])
+                    except UnsupportedConstruct:
+                        # A NaN result (inf + -inf, 0 * inf, inf / inf): a legal runtime VALUE with no constant
+                        # representation under the no-NaN charter, so the operation stays for the hardware to
+                        # evaluate -- the frontend's own folds defer such results identically.
+                        folded = None
                 elif (absorbing := operator.absorbing()) is not None and absorbing in operand_consts:
                     folded = absorbing  # an absorbing operand fixes the result regardless of the others
                 else:

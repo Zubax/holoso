@@ -43,9 +43,9 @@ def render_rejection(message: str, origin: OriginStack) -> str:
     """
     The user-facing rendering: the ``function:line:column:`` prefix names the PRIMARY frame -- the user call site
     (outermost) -- and an expansion-borne rejection names the callee it arose in, spelled exactly as the innermost
-    frame records it (a registry stub grafts under its public spelling, so ``matmul_`` displays as ``matmul``
-    while a user helper's own trailing underscore survives). The full frame chain stays on the exception for
-    programmatic consumers.
+    frame records it (a registry stub grafts under the callee the user spelled, so ``np.dot`` displays as ``dot``
+    even though ``matmul_`` implements it, while a user helper's own trailing underscore survives). The full frame
+    chain stays on the exception for programmatic consumers.
     """
     primary = origin[-1]
     context = f"in {origin[0].function}(): " if len(origin) > 1 else ""
@@ -461,6 +461,74 @@ def op_dst(op: Op) -> BindingId | None:
             return None
         case _:
             return op.dst
+
+
+def executable_preorder(
+    unit: FunctionUnit,
+    executable_blocks: set[BlockId],
+    executable_edges: set[tuple[BlockId, BlockId]],
+) -> list[BlockId]:
+    """
+    Depth-first preorder over executable edges, then-arm first -- the deterministic "first store/raise execution
+    can reach" walk shared by the Fail report, the storage-schema verdict, and the pending-obligation resolver.
+    Block-id order would misreport: the unroller hands out clone ids in reverse trip order. A terminator that
+    encodes no static successor order (a mid-round StaticFor already resolved to its unrolled chain) contributes
+    its executable successors in block-id order.
+    """
+    edge_successors: dict[BlockId, list[BlockId]] = {}
+    for source, target in sorted(executable_edges, key=lambda edge: (edge[0].index, edge[1].index)):
+        edge_successors.setdefault(source, []).append(target)
+    order: list[BlockId] = []
+    seen: set[BlockId] = set()
+    stack = [unit.entry]
+    while stack:
+        block_id = stack.pop()
+        if block_id in seen or block_id not in executable_blocks:
+            continue
+        seen.add(block_id)
+        order.append(block_id)
+        successors: list[BlockId]
+        match unit.blocks[block_id].terminator:
+            case Jump(target=target):
+                successors = [target]
+            case Branch(then_target=then_target, else_target=else_target):
+                successors = [then_target, else_target]
+            case _:
+                successors = edge_successors.get(block_id, [])
+        for successor in reversed(successors):
+            if (block_id, successor) in executable_edges:
+                stack.append(successor)
+    return order
+
+
+def executable_rpo(entry: BlockId, executable_edges: set[tuple[BlockId, BlockId]]) -> list[BlockId]:
+    """
+    Reverse postorder over executable edges, successors explored in block-id order -- the deterministic
+    execution-order key shared by the analyzer's state-store ranking and the emitter's block schedule. It exists
+    because unroll clones get their block ids in reverse trip order, so id order inverts execution order exactly
+    where clone origins collide. Iterative: a large static unroll (thousands of blocks, within the analyzer's
+    trip budget) would overflow a recursive DFS.
+    """
+    successors: dict[BlockId, list[BlockId]] = {}
+    for source, target in sorted(executable_edges, key=lambda edge: (edge[0].index, edge[1].index)):
+        successors.setdefault(source, []).append(target)
+    seen = {entry}
+    order: list[BlockId] = []
+    stack: list[tuple[BlockId, list[BlockId]]] = [(entry, list(successors.get(entry, [])))]
+    while stack:
+        block_id, pending = stack[-1]
+        while pending:
+            successor = pending.pop(0)
+            if successor not in seen:
+                seen.add(successor)
+                stack.append((successor, list(successors.get(successor, []))))
+                break
+        else:
+            order.append(block_id)
+            stack.pop()
+    order.reverse()
+    assert order and order[0] == entry
+    return order
 
 
 def verify(unit: FunctionUnit) -> None:

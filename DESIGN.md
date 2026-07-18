@@ -322,19 +322,27 @@ Storage typing. Variables are strongly typed for the function's lifetime under a
 sees SemType kinds only: a source variable's first definition of a scalar datapath value establishes its kind (a
 root scalar parameter's comes from its annotation contract), and independent first definitions on different paths
 join with the same int->float promotion facts use. Once established, a store may only keep the kind: bool accepts
-bool, int accepts int, float accepts float or an integer that converts on the store edge. Every other scalar store
-is a located rejection at the store site; `del` does not erase an established schema, and values outside the
-datapath kinds -- references, strings, ranges, and whole aggregates -- neither establish nor violate one. A local
+bool, int accepts int, float accepts float or an integer that converts on the store edge — for a local the
+conversion is exact-or-reject (an integer the binary64 carrier cannot represent exactly is a located rejection at
+the store; the explicit `float(...)` cast is the spelling that accepts rounding), so an exact integer fact never
+survives inside a float variable. Every other scalar store is a located rejection at the store site; `del` does
+not erase an established schema (nor the conversion that rides it), and values outside the datapath kinds --
+references, strings, ranges, and whole aggregates -- neither establish nor violate one. Compiler-scoped bindings
+are fresh per execution: a comprehension target's entry reset and each unroll trip's loop-target prelude clear
+the schema, so trip 1 of `for c in (1, 2.5)` sees an int and trip 2 a float, exactly as Python does. A local
 aggregate is value dataflow whose representation may be rebound freely (a reshape, a reflavor, growing a list by
 rebinding), its leaf kinds governed by the fact flow; only persistent state, whose reset fixes a reconstruction
-contract, enforces flavor, geometry, and per-cell kinds at its store site (below). The schema check
-is a separate monotone flow over the stabilized graph, never a per-visit fact check: optimistic analysis discovers
-executable predecessors late, so store obligations resolve only after the state fixed point, and when several
-stores violate, the one reported is the first executable store in CFG preorder. Widening at merges is untouched:
+contract, enforces flavor, geometry, and per-cell kinds at its store site (below). The schema lattice flows
+beside the facts, since the store-edge conversion needs it exactly where the store executes, but the verdict is
+never per-visit: optimistic analysis discovers executable predecessors late, so store obligations resolve only
+after the state fixed point, and when several stores violate, the one reported is the first executable store in
+CFG preorder. A pending store violation also outranks any downstream rejection its carried fact provokes in the
+same round, so the causal store reports rather than the secondary failure. Widening at merges is untouched:
 phi and select arms, comparison operands, explicit casts, return conversion, and mixed arithmetic promote exactly
-as before, so `x = 0; x = input_float` rejects while `x = int(v) if c else v` remains a legal float phi. Only
-genuine variable bindings face the schema: the builder tags each store with its role, and conditional-expression
-merge sinks, comprehension accumulators, and the return place (validated by the return contract) are exempt.
+as before (a merge rounds into the carrier; only the store edge is exact), so `x = 0; x = input_float` rejects
+while `x = int(v) if c else v` remains a legal float phi. Only genuine variable bindings face the schema: the
+builder tags each store with its role, and conditional-expression merge sinks, comprehension accumulators, and
+the return place (validated by the return contract) are exempt.
 
 Persistent state. A synthesized method's `self` is not a port: each instance attribute the method writes on an
 executable exit-co-reachable path becomes a persistent register (a loop-carried value, the back-edge of the
@@ -524,7 +532,8 @@ section where it acts; this index consolidates them:
   (MIR; opt-in per Fabric-area exploration).
 - Zero/infinity rewrites act under the no-NaN charter: ZKF has no NaN, NaN constants reject, infinities are
   ordinary values, and identity/sign/division folds may rewrite zero/infinity special cases or expose a zero
-  sign (HIR optimization).
+  sign (HIR optimization). A fold whose result would be NaN is deferred to the runtime operator -- frontend
+  static folds and the HIR folder alike -- since NaN is a legal runtime value with no constant representation.
 
 ## HIR
 
@@ -626,9 +635,10 @@ back-edge arm) keeps its real branch -- deferred (see LIR DEFERRED).
 FP math is non-associative, so some of these optimizations may produce non-bit-exact results -- accepted, analogous to
 fast-math in C/C++ compilers. Division identities may also rewrite zero/infinity special cases and drop sidebands when
 they remove an error-bearing op; sign/identity folds may preserve or expose a zero sign through raw sign conditioning.
-NaN constants are rejected because ZKF has no NaN, including float64 constant folds of ZKF-defined infinity cases;
-infinities are ordinary float values. The transcendental folds likewise run the host libm at binary64, so
-a folded constant can differ from the datapath's own value.
+NaN constants are rejected because ZKF has no NaN; a fold whose float64 result would be NaN (inf + -inf, 0 × inf,
+inf / inf) instead stays unfolded for the hardware operator, whose ZKF answer is the format's own NaN-free one --
+the same deferral the frontend's static folds apply. Infinities are ordinary float values. The transcendental folds
+likewise run the host libm at binary64, so a folded constant can differ from the datapath's own value.
 
 ### DEFERRED
 
@@ -650,7 +660,8 @@ integer side on its own edge and yields a plain float -- Python instead keeps ea
 documented C-style deviation, and the same rule covers an int/float comparison, which promotes and compares in float.
 The precision loss is accepted under the fastmath charter: a Known integer materializing in a float position rounds
 into the binary64 carrier (only a value beyond that carrier entirely, e.g. 10**400, is a located rejection), and the
-selected target format then rounds again like any constant. Static folding remains Python-exact: a fully-Known
+selected target format then rounds again like any constant. A store into a float VARIABLE is the one stricter edge:
+exact-or-reject, per Storage typing. Static folding remains Python-exact: a fully-Known
 int/float comparison folds exactly; only runtime values promote.
 
 Library intrinsics are typed by a three-rule declarative registry: SIGNATURE (the operator's own result; integer

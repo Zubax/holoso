@@ -158,6 +158,120 @@ def test_non_datapath_values_neither_establish_nor_violate() -> None:
     assert float(model.run(3.25)[0]) == 3.25
 
 
+# ---------------------------------------- the store-edge conversion ----------------------------------------
+
+
+def test_int_store_into_a_float_variable_converts_on_the_store_edge() -> None:
+    def kernel(value: float) -> float:
+        x = value
+        x = 3
+        return x / 2
+
+    model = _synthesize(kernel, "store_edge_exact").numerical_model.elaborate()
+    assert float(model.run(0.0)[0]) == 1.5
+
+
+def test_inexact_int_store_into_a_float_variable_rejects_on_the_carrier_rule() -> None:
+    # Without the conversion the int fact survived inside the float variable and the subtraction folded as EXACT
+    # integer arithmetic, returning 1.0 where the explicit float() spelling returns 0.0 -- a silent value
+    # divergence between equivalent spellings.
+    def implicit(value: float) -> float:
+        current = value
+        current = 2**53 + 1
+        return current - 2**53
+
+    error = _reject(implicit, "not exactly representable in the binary64 carrier")
+    assert error.location is not None and error.location.line is not None
+    assert "current = 2**53 + 1" in error.location.line
+
+    def explicit(value: float) -> float:
+        current = value
+        current = float(2**53 + 1)
+        return current - 2**53
+
+    model = _synthesize(explicit, "store_edge_spelled_rounding").numerical_model.elaborate()
+    assert float(model.run(0.0)[0]) == 0.0
+
+
+def test_dead_oversized_int_store_into_a_float_variable_rejects() -> None:
+    def kernel(value: float) -> float:
+        x = 1.5
+        x = 2**7000  # noqa: F841
+        return value
+
+    _reject(kernel, "beyond the binary64 carrier range")
+
+
+def test_the_conversion_survives_del_like_the_schema_does() -> None:
+    def kernel(value: float) -> float:
+        x = 1.5
+        del x
+        x = 2**53 + 1
+        return x - 2**53
+
+    _reject(kernel, "not exactly representable in the binary64 carrier")
+
+
+# ---------------------------------------- per-execution-scope freshness ----------------------------------------
+
+
+def test_comprehension_target_schema_is_fresh_per_execution() -> None:
+    def int_first(v: float) -> float:
+        acc = 0.0
+        for sequence in ((1,), (2.0,)):
+            converted = [float(item) for item in sequence]
+            acc = acc + converted[0] * v
+        return acc
+
+    def float_first(v: float) -> float:
+        acc = 0.0
+        for sequence in ((2.0,), (1,)):
+            converted = [float(item) for item in sequence]
+            acc = acc + converted[0] * v
+        return acc
+
+    for name, kernel in (("comp_int_first", int_first), ("comp_float_first", float_first)):
+        model = _synthesize(kernel, name).numerical_model.elaborate()
+        assert float(model.run(2.0)[0]) == kernel(2.0) == 6.0
+
+
+def test_unrolled_loop_target_kind_is_python_faithful_per_trip() -> None:
+    def int_first(v: float) -> float:
+        acc = 0.0
+        for c in (1, 2.5):
+            acc = acc + c * v
+        return acc
+
+    def float_first(v: float) -> float:
+        acc = 0.0
+        for c in (2.5, 1):
+            acc = acc + c * v
+        return acc
+
+    for name, kernel in (("loop_int_first", int_first), ("loop_float_first", float_first)):
+        model = _synthesize(kernel, name).numerical_model.elaborate()
+        assert float(model.run(2.0)[0]) == kernel(2.0) == 7.0
+
+
+def test_loop_target_remains_usable_after_the_loop() -> None:
+    def kernel(v: float) -> float:
+        for c in (1, 2.5):
+            pass
+        return c * v  # the last trip's binding survives the loop, as in Python
+
+    model = _synthesize(kernel, "post_loop_target").numerical_model.elaborate()
+    assert float(model.run(2.0)[0]) == 5.0
+
+
+def test_literal_float_store_into_an_int_variable_still_rejects() -> None:
+    def kernel(v: float) -> float:
+        x = 0
+        x = 1.5  # type: ignore[assignment]  # noqa: F841
+        return v
+
+    _reject(kernel, "variables are strongly typed")
+
+
 # ---------------------------------------- calibration: what stays legal ----------------------------------------
 
 
@@ -256,6 +370,22 @@ def test_int_reset_array_slot_stored_float_cells_rejects() -> None:
             return float(self.v[0])
 
     _reject(Decay().step, "stores an incompatible type at cell")
+
+
+def test_state_store_violation_outranks_its_downstream_secondary_rejection() -> None:
+    # The violating store carries its float fact onward, making the downstream shift ill-typed; the causal store
+    # rejection must be the one reported, never the secondary operator rejection it provoked.
+    class Counter:
+        def __init__(self) -> None:
+            self.count = 0
+
+        def step(self, value: float) -> float:
+            self.count = value  # type: ignore[assignment]
+            return float(self.count << 1)
+
+    error = _reject(Counter().step, "state attribute 'count' stores an incompatible type")
+    assert error.location is not None and error.location.line is not None
+    assert "self.count = value" in error.location.line
 
 
 def test_int_slot_kept_integer_stays_an_integer_slot() -> None:

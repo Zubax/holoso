@@ -75,6 +75,7 @@ from ._ir import (
     Terminator,
     UnbindPlace,
     LocatedRejection,
+    executable_preorder,
 )
 from ._opsem import BinOp
 from ._signature import ArrayParameter, RecordParameter, ScalarParameter
@@ -245,6 +246,9 @@ class DeferredRejection:
         if self._best is None or str(error) < str(self._best):
             self._best = error
 
+    def pending(self) -> bool:
+        return self._best is not None
+
     def raise_if_deferred(self) -> None:
         if self._best is not None:
             raise self._best
@@ -321,33 +325,6 @@ def _remap_terminator(
         case UnitExit(origin=origin):
             return UnitExit(origin)
     raise AssertionError(terminator)
-
-
-def execution_rank(entry: BlockId, executable_edges: set[tuple[BlockId, BlockId]]) -> dict[BlockId, int]:
-    """
-    Reverse-postorder position of every executable block from the entry -- the execution-order key. Successors
-    explore in block-id order, so the rank is deterministic; it exists because unroll clones get their block ids
-    in reverse trip order, so id order inverts execution order exactly where clone origins collide.
-    """
-    successors: dict[BlockId, list[BlockId]] = {}
-    for source, target in sorted(executable_edges, key=lambda edge: (edge[0].index, edge[1].index)):
-        successors.setdefault(source, []).append(target)
-    seen = {entry}
-    order: list[BlockId] = []
-    stack: list[tuple[BlockId, list[BlockId]]] = [(entry, list(successors.get(entry, [])))]
-    while stack:
-        block_id, pending = stack[-1]
-        while pending:
-            successor = pending.pop(0)
-            if successor not in seen:
-                seen.add(successor)
-                stack.append((successor, list(successors.get(successor, []))))
-                break
-        else:
-            order.append(block_id)
-            stack.pop()
-    order.reverse()
-    return {block_id: position for position, block_id in enumerate(order)}
 
 
 def _coreachable(
@@ -533,7 +510,7 @@ class ContradictorySchema:
 type StorageSchema = ScalarSchema | ContradictorySchema
 
 
-def schema_of_fact(fact: Fact) -> StorageSchema | None:
+def schema_of_fact(fact: Fact) -> ScalarSchema | None:
     """
     The storage schema a stored fact establishes for a source variable: its scalar SemType kind. The schema sees
     SemType kinds only -- an aggregate-valued store is fact-only, like a reference or a string: local aggregates
@@ -571,6 +548,66 @@ def _admit_rebinding(current: StorageSchema, stored: StorageSchema) -> StorageSc
             return None
         case _:
             return None
+
+
+def _binary64_store_image(fact: AtomicFact, name: str, origin: OriginStack) -> AtomicFact:
+    """
+    The float fact an integer becomes on the edge of a store into a float-schema local. Exact-or-reject, unlike
+    the rounding merge promotion: a merge presents the integer in a float position, where fastmath rounding is
+    chartered, but a plain assignment silently changing the stored value would be exactly the spelling-dependent
+    divergence the storage schema exists to kill -- the explicit float(...) cast is the spelling that accepts
+    the rounding.
+    """
+    match fact:
+        case Known(value=(MetaInt() | NpInt()) as value):
+            try:
+                image = float(value.value)
+            except OverflowError:
+                bits = value.value.bit_length()  # never via str(): the 4300-digit conversion cap
+                raise AnalysisRejection(
+                    f"variable '{name}' is a float; a {bits}-bit integer stored into it is beyond the binary64 "
+                    "carrier range",
+                    origin,
+                ) from None
+            if int(image) != value.value:
+                raise AnalysisRejection(
+                    f"variable '{name}' is a float; the stored integer is not exactly representable in the "
+                    "binary64 carrier (write float(...) to accept the rounding)",
+                    origin,
+                )
+            return Known(NpFloat(image) if isinstance(value, NpInt) else StaticFloat(image))
+        case Residual(type=SemType.INT):
+            return Residual(SemType.FLOAT)
+    raise AssertionError(fact)
+
+
+def conform_local_store(
+    current: StorageSchema | None, name: str, stored: Fact, origin: OriginStack
+) -> tuple[StorageSchema | None, Fact, str | None]:
+    """
+    The schema a SOURCE store leaves on its local, the fact it stores, and the violation it commits, if any.
+    A scalar datapath store establishes an absent schema and must keep an established one; an integer admitted
+    into a float schema converts through the binary64 store edge, so an exact integer fact never survives inside
+    a float variable. On a violation the schema and the fact pass through unchanged: the verdict belongs to the
+    post-stabilization walk, which reports the first violating store in CFG preorder.
+    """
+    stored_schema = schema_of_fact(stored)
+    if stored_schema is None:
+        return current, stored, None
+    if current is None:
+        return stored_schema, stored, None
+    admitted = _admit_rebinding(current, stored_schema)
+    if admitted is None:
+        return (
+            current,
+            stored,
+            f"variable '{name}' is {describe_schema(current)} and cannot be rebound to "
+            f"{describe_schema(stored_schema)}; variables are strongly typed (bind a new name instead)",
+        )
+    if isinstance(admitted, ScalarSchema) and admitted.kind is SemType.FLOAT and stored_schema.kind is SemType.INT:
+        assert isinstance(stored, (Known, Residual))
+        return admitted, _binary64_store_image(stored, name, origin), None
+    return admitted, stored, None
 
 
 def describe_schema(schema: StorageSchema) -> str:
@@ -658,102 +695,42 @@ def enforce_storage_schemas(
     executable_blocks: set[BlockId],
     executable_edges: set[tuple[BlockId, BlockId]],
     binding_facts: Mapping[BindingId, Fact],
-    entry_schemas: dict["Place", StorageSchema],
+    schemas_in: Mapping[BlockId, Mapping["Place", StorageSchema]],
     state_violations: Mapping[int, tuple[str, OriginStack]],
 ) -> None:
     """
-    The storage-schema flow over the stabilized executable graph: a SOURCE store of a scalar datapath value to an
-    unestablished place establishes its kind, independent first definitions join at merges, and a rebinding must
-    keep the schema. Runs strictly after W/D stabilization (SCCP discovers executable predecessors late, so a
-    mid-flight verdict would be order-dependent); a rebinding check consults only the stable per-block schema
-    environments. All violations -- local rebindings and the recorded state-store obligations alike -- report as
-    one located rejection at the first violating store in CFG preorder (then-arm first, matching the Fail walk).
+    The storage-schema verdict over the stabilized executable graph: every block's stores replay against its
+    stable entry schemas -- the environments the analysis flowed beside the facts (establishment, merge joins,
+    the store-edge conversion, and compiler scope resets included) -- and all violations, local rebindings and
+    the recorded state-store obligations alike, report as one located rejection at the first violating store in
+    CFG preorder (then-arm first, matching the Fail walk). Runs strictly after W/D stabilization: SCCP discovers
+    executable predecessors late, so a mid-flight verdict would be order-dependent. A compiler scope reset
+    (an unchecked UnbindPlace: a comprehension entry, an unroll trip's target prelude) clears the binding for a
+    fresh per-execution schema, while a user ``del`` does not: variables stay strongly typed across ``del``.
     """
-
-    def successors(block: Block) -> list[BlockId]:
-        match block.terminator:
-            case Jump(target=target):
-                return [target]
-            case Branch(then_target=then_target, else_target=else_target):
-                return [then_target, else_target]
-            case _:
-                return []
-
-    def walk(
-        env: dict["Place", StorageSchema], block: Block, report: Callable[[int, str, OriginStack], None]
-    ) -> dict["Place", StorageSchema]:
-        for index, op in enumerate(block.ops):
-            if isinstance(op, PyStoreAttr):
-                recorded = state_violations.get(id(op))
-                if recorded is not None:
-                    report(index, *recorded)
-                continue
-            if not isinstance(op, StorePlace) or op.role is not StoreRole.SOURCE:
-                continue
-            fact = binding_facts.get(op.src)
-            stored = schema_of_fact(fact) if fact is not None else None
-            if stored is None:
-                continue
-            assert isinstance(op.place, Local), "a SOURCE store binds a named local"
-            current = env.get(op.place)
-            if current is None:
-                env[op.place] = stored
-            elif (refined := _admit_rebinding(current, stored)) is not None:
-                env[op.place] = refined
-            else:
-                report(
-                    index,
-                    f"variable '{op.place.binding.name}' is {describe_schema(current)} and cannot be rebound to "
-                    f"{describe_schema(stored)}; variables are strongly typed (bind a new name instead)",
-                    op.origin,
-                )
-        return env
-
-    def ignore(index: int, message: str, origin: OriginStack) -> None:
-        pass
-
-    block_in: dict[BlockId, dict["Place", StorageSchema]] = {unit.entry: dict(entry_schemas)}
-    pending = [unit.entry]
-    while pending:
-        block_id = pending.pop()
-        out_env = walk(dict(block_in[block_id]), unit.blocks[block_id], ignore)
-        for successor in successors(unit.blocks[block_id]):
-            if (block_id, successor) not in executable_edges:
-                continue
-            target = block_in.get(successor)
-            if target is None:
-                block_in[successor] = dict(out_env)
-                pending.append(successor)
-                continue
-            changed = False
-            for place, schema in out_env.items():
-                joined = join_schemas(target[place], schema) if place in target else schema
-                if target.get(place) != joined:
-                    target[place] = joined
-                    changed = True
-            if changed:
-                pending.append(successor)
-
-    preorder: dict[BlockId, int] = {}
-    stack = [unit.entry]
-    while stack:
-        block_id = stack.pop()
-        if block_id in preorder or block_id not in executable_blocks:
-            continue
-        preorder[block_id] = len(preorder)
-        for successor in reversed(successors(unit.blocks[block_id])):
-            if (block_id, successor) in executable_edges:
-                stack.append(successor)
-
     violations: list[tuple[tuple[int, int], str, OriginStack]] = []
-    for block_id, env_in in block_in.items():
-        position = preorder.get(block_id)
-        assert position is not None, "every flowed block is executable-reachable from the entry"
-
-        def collect(index: int, message: str, origin: OriginStack, position: int = position) -> None:
-            violations.append(((position, index), message, origin))
-
-        walk(dict(env_in), unit.blocks[block_id], collect)
+    order = executable_preorder(unit, executable_blocks, executable_edges)
+    for position, block_id in enumerate(order):
+        assert block_id in schemas_in, "every executable-reachable block carries a flowed environment"
+        env: dict[Place, StorageSchema] = dict(schemas_in[block_id])
+        for index, op in enumerate(unit.blocks[block_id].ops):
+            match op:
+                case PyStoreAttr():
+                    recorded = state_violations.get(id(op))
+                    if recorded is not None:
+                        violations.append(((position, index), *recorded))
+                case UnbindPlace(place=place, checked=False):
+                    env.pop(place, None)
+                case StorePlace(place=place, role=StoreRole.SOURCE):
+                    fact = binding_facts.get(op.src)
+                    if fact is None:
+                        continue
+                    assert isinstance(place, Local), "a SOURCE store binds a named local"
+                    schema, _, message = conform_local_store(env.get(place), place.binding.name, fact, op.origin)
+                    if schema is not None:
+                        env[place] = schema
+                    if message is not None:
+                        violations.append(((position, index), message, op.origin))
     if violations:
         _, message, origin = min(violations, key=lambda item: item[0])
         raise AnalysisRejection(message, origin)

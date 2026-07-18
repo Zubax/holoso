@@ -203,6 +203,21 @@ def test_overflow_to_inf_and_stays_inf() -> None:
     assert math.isinf(float(out)) and float(out) > 0.0, f"overflow chain not +inf: {float(out)} (bits 0x{out.bits:x})"
 
 
+def _inf_minus_inf(x: float) -> float:
+    return math.inf + -math.inf
+
+
+def test_nan_producing_constant_fold_defers_to_the_hardware() -> None:
+    # A fold whose RESULT is NaN must not manufacture a NaN constant (previously the raw unlocated "cannot
+    # represent a NaN constant" crash): the addition stays for the runtime operator, and the ZKF adder's own
+    # NaN-free answer for inf + -inf is the format's zero.
+    sim = _sim(_inf_minus_inf, "nan_fold_deferred")
+    out = sim.run(_val(0))[0]
+    assert isinstance(out, FloatValue)
+    reference = FloatValue.from_float(FMT, math.inf) + FloatValue.from_float(FMT, -math.inf)
+    assert out.bits == reference.bits == 0
+
+
 def _div(a: float, b: float) -> float:
     return a / b
 

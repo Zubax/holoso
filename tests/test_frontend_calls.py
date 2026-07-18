@@ -353,6 +353,26 @@ def test_library_stub_error_is_attributed_to_the_call_site() -> None:
     assert location.line is not None and "math.tan((a, a))" in location.line
 
 
+def test_spelled_alias_attribution_names_the_callee_the_user_wrote() -> None:
+    # np.dot and np.matmul share one stub; the rejection context must name the SPELLED alias, not the stub's own
+    # display name (previously np.dot misuse read "in matmul():" and np.amax "in max():").
+    def bad_dot(a: float) -> float:
+        left = np.array([[a, a]])
+        right = np.array([[a, a]])
+        return float(np.dot(left, right)[0, 0])
+
+    with pytest.raises(UnsupportedConstruct, match=r"in dot\(\): .*inner dimensions disagree") as excinfo:
+        lower(bad_dot)
+    assert excinfo.value.location is not None
+    assert "np.dot" in (excinfo.value.location.line or "")
+
+    def bad_amax(a: float) -> float:
+        return float(np.amax(np.array([[a, a], [a, a]])))
+
+    with pytest.raises(UnsupportedConstruct, match=r"in amax\(\): "):
+        lower(bad_amax)
+
+
 def test_stub_calling_an_unimplemented_library_function_is_reattributed(monkeypatch: pytest.MonkeyPatch) -> None:
     # A stub body can itself call an unimplemented library function, raising UnsupportedLibraryFunction -- a sibling of
     # UnsupportedConstruct under SynthesisError. Re-attribution must catch it too (not just UnsupportedConstruct), so

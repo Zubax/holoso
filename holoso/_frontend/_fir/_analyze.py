@@ -63,6 +63,8 @@ from ._ir import (
     Terminator,
     UnbindPlace,
     UnitExit,
+    executable_preorder,
+    executable_rpo,
     op_dst,
     source_position,
 )
@@ -142,10 +144,11 @@ from ._analysis_support import (
     _same_fact,
     _seq_side,
     _transpose_routes,
+    conform_local_store,
     conform_state_store,
     enforce_storage_schemas,
-    execution_rank,
     join_facts,
+    join_schemas,
     schema_of_fact,
 )
 from ._opsem import BinOp, UnOp, static_binop, static_compare, static_truth, static_unop
@@ -209,12 +212,18 @@ _ARRAY_ATTRIBUTES = ("real", "imag")  # value navigation, all-Known only; .T/sha
 
 @dataclass(slots=True)
 class _Env:
-    """One abstract environment: Place -> Fact, absent meaning unbound-never-touched."""
+    """
+    One abstract environment: Place -> Fact, absent meaning unbound-never-touched, beside Place -> established
+    storage schema. The schema lattice rides the same worklist as the facts so a SOURCE store sees the schema
+    exactly where it stores (the store-edge int->float conversion needs it); the schema VERDICT still resolves
+    only after stabilization, over these flowed environments.
+    """
 
     facts: dict[Place, Fact] = field(default_factory=dict)
+    schemas: dict[Place, StorageSchema] = field(default_factory=dict)
 
     def copy(self) -> "_Env":
-        return _Env(dict(self.facts))
+        return _Env(dict(self.facts), dict(self.schemas))
 
     def get(self, place: Place) -> Fact:
         return self.facts.get(place, _UNBOUND)
@@ -223,8 +232,15 @@ class _Env:
         self.facts[place] = fact
 
     def join_with(self, other: "_Env", origin: OriginStack, default: "Callable[[Place], Fact] | None" = None) -> bool:
-        # Per-place joins are independent, so a rejection defers until every place has joined.
         changed = False
+        for place in set(self.schemas) | set(other.schemas):
+            ours, others = self.schemas.get(place), other.schemas.get(place)
+            joined_schema = join_schemas(ours, others) if ours is not None and others is not None else (ours or others)
+            assert joined_schema is not None
+            if joined_schema != self.schemas.get(place):
+                self.schemas[place] = joined_schema
+                changed = True
+        # Per-place fact joins are independent, so a rejection defers until every place has joined.
         deferred = DeferredRejection()
         for place in set(self.facts) | set(other.facts):
             mine, theirs = self.facts.get(place), other.facts.get(place)
@@ -393,6 +409,8 @@ class Analyzer:
                     )
                 except AnalysisRejection as error:
                     deferred.offer(error)
+            if deferred.pending():
+                self._raise_pending_store_violation(result.unit, result.executable_blocks, result.executable_edges)
             deferred.raise_if_deferred()
             if new_w == self._runtime_state and new_d == self._state_livein:
                 _logger.info("state fixpoint stable after %d round(s): %d runtime leaves", round_index + 1, len(new_w))
@@ -421,20 +439,34 @@ class Analyzer:
         )
 
     def _check_storage_schemas(self, result: ResidualUnit) -> None:
-        entry_env = result.block_in[result.unit.entry]
-        seeds: dict[Place, StorageSchema] = {}
-        for param in result.unit.params:
-            schema = schema_of_fact(entry_env.get(Local(param)))
-            if schema is not None:
-                seeds[Local(param)] = schema
         enforce_storage_schemas(
             result.unit,
             result.executable_blocks,
             result.executable_edges,
             result.binding_facts,
-            seeds,
+            {block_id: env.schemas for block_id, env in result.block_in.items()},
             self._store_schema_violations,
         )
+
+    def _raise_pending_store_violation(
+        self, unit: FunctionUnit, executable_blocks: set[BlockId], executable_edges: set[tuple[BlockId, BlockId]]
+    ) -> None:
+        """
+        A recorded store-schema obligation is the CAUSE of any downstream rejection its carried fact provokes,
+        so a round that is about to abort with a different rejection reports the first pending violation in CFG
+        preorder instead. A pending record is never stale within a round: facts descend and slot schemas are
+        fixed by the reset, so a store only ever moves from clean to violating.
+        """
+        if not self._store_schema_violations:
+            return
+        best: tuple[tuple[int, int], str, OriginStack] | None = None
+        for position, block_id in enumerate(executable_preorder(unit, executable_blocks, executable_edges)):
+            for index, op in enumerate(unit.blocks[block_id].ops):
+                recorded = self._store_schema_violations.get(id(op))
+                if recorded is not None and (best is None or (position, index) < best[0]):
+                    best = ((position, index), *recorded)
+        if best is not None:
+            raise AnalysisRejection(best[1], best[2])
 
     def _reset_round(self) -> None:
         self._block_ancestry = {}
@@ -612,13 +644,7 @@ class Analyzer:
         unroll-clone block indices do not follow iteration order (a reversed range), so index order would
         misreport which raise fires.
         """
-        stack = [result.unit.entry]
-        seen: set[BlockId] = set()
-        while stack:
-            block_id = stack.pop()
-            if block_id in seen or block_id not in result.executable_blocks:
-                continue
-            seen.add(block_id)
+        for block_id in executable_preorder(result.unit, result.executable_blocks, result.executable_edges):
             block = result.unit.blocks[block_id]
             terminator = block.terminator
             if isinstance(terminator, Fail):
@@ -626,17 +652,6 @@ class Analyzer:
                 for index, op in enumerate(block.ops):
                     self._transfer(result.unit, block, index, op, env)
                 raise AnalysisRejection(self._render_fail(terminator.parts, env), terminator.origin)
-            successors: list[BlockId] = []
-            match terminator:
-                case Jump(target=target):
-                    successors = [target]
-                case Branch(then_target=then_target, else_target=else_target):
-                    successors = [then_target, else_target]
-                case _:
-                    pass
-            for successor in reversed(successors):
-                if (block_id, successor) in result.executable_edges:
-                    stack.append(successor)
 
     def _render_fail(self, parts: tuple[str | BindingId, ...], env: _Env) -> str:
         rendered: list[str] = []
@@ -663,7 +678,10 @@ class Analyzer:
         id, which the unroller hands out in reverse trip order. The replay does not mutate the graph: every call
         is already expanded, folded, or classified. Emission consumes only this plan.
         """
-        rank = execution_rank(result.unit.entry, result.executable_edges)
+        rank = {
+            block_id: position
+            for position, block_id in enumerate(executable_rpo(result.unit.entry, result.executable_edges))
+        }
         first_store: dict[StateLeaf, tuple[tuple[tuple[int, int], ...], int]] = {}
         for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
             block = result.unit.blocks[block_id]
@@ -776,6 +794,10 @@ class Analyzer:
             self._roots = {id(unit.bound_self): ()}  # the root component anchors the member-path tree
         else:
             self._roots = {}
+        for param in unit.params:
+            seed = schema_of_fact(entry_env.get(Local(param)))
+            if seed is not None:  # a root scalar parameter's annotation contract establishes its schema
+                entry_env.schemas[Local(param)] = seed
         self._component_edges = set()
         executable_edges: set[tuple[BlockId, BlockId]] = set()
         executable_blocks: set[BlockId] = set()
@@ -792,38 +814,42 @@ class Analyzer:
 
         worklist: list[BlockId] = [unit.entry]
         visits = 0
-        while worklist:
-            visits += 1
-            if visits > _MAX_VISITS:
-                raise AnalysisRejection("analysis fuel exhausted", origin)
-            block_id = worklist.pop()
-            executable_blocks.add(block_id)
-            env = block_in[block_id].copy()
-            block = unit.blocks[block_id]
-            index = 0
-            while index < len(block.ops):
-                op = block.ops[index]
-                expanded = self._transfer(unit, block, index, op, env)
-                if expanded:
-                    continue  # the graph changed under us: re-run this op slot (now a different op)
-                index += 1
-            successors = self._resolve_terminator(unit, block, env)
-            assert block.terminator is not None
-            join_origin = block.terminator.origin
-            for successor in successors:
-                edge = (block.id, successor)
-                target_env = block_in.get(successor)
-                if target_env is None:
-                    block_in[successor] = env.copy()
-                    executable_edges.add(edge)
-                    worklist.append(successor)
-                elif edge not in executable_edges:
-                    executable_edges.add(edge)
-                    if target_env.join_with(env, join_origin, edge_default) or successor not in executable_blocks:
+        try:
+            while worklist:
+                visits += 1
+                if visits > _MAX_VISITS:
+                    raise AnalysisRejection("analysis fuel exhausted", origin)
+                block_id = worklist.pop()
+                executable_blocks.add(block_id)
+                env = block_in[block_id].copy()
+                block = unit.blocks[block_id]
+                index = 0
+                while index < len(block.ops):
+                    op = block.ops[index]
+                    expanded = self._transfer(unit, block, index, op, env)
+                    if expanded:
+                        continue  # the graph changed under us: re-run this op slot (now a different op)
+                    index += 1
+                successors = self._resolve_terminator(unit, block, env)
+                assert block.terminator is not None
+                join_origin = block.terminator.origin
+                for successor in successors:
+                    edge = (block.id, successor)
+                    target_env = block_in.get(successor)
+                    if target_env is None:
+                        block_in[successor] = env.copy()
+                        executable_edges.add(edge)
                         worklist.append(successor)
-                else:
-                    if target_env.join_with(env, join_origin, edge_default):
-                        worklist.append(successor)
+                    elif edge not in executable_edges:
+                        executable_edges.add(edge)
+                        if target_env.join_with(env, join_origin, edge_default) or successor not in executable_blocks:
+                            worklist.append(successor)
+                    else:
+                        if target_env.join_with(env, join_origin, edge_default):
+                            worklist.append(successor)
+        except AnalysisRejection:
+            self._raise_pending_store_violation(unit, executable_blocks, executable_edges)
+            raise
         return ResidualUnit(unit, block_in, executable_blocks, executable_edges)
 
     # ------------------------------------ instantiation and grafting ------------------------------------
@@ -863,10 +889,20 @@ class Analyzer:
                     )
                 env.set(Local(dst), fact)
             case StorePlace(place=place, src=src):
-                env.set(place, env.get(Local(src)))
+                stored = env.get(Local(src))
+                if op.role is StoreRole.SOURCE and isinstance(place, Local):
+                    # The violation message is discarded here: the verdict belongs to the post-stabilization walk.
+                    schema, stored, _ = conform_local_store(
+                        env.schemas.get(place), place.binding.name, stored, op.origin
+                    )
+                    if schema is not None:
+                        env.schemas[place] = schema
+                env.set(place, stored)
             case UnbindPlace(place=place, checked=checked):
                 if checked and isinstance(env.get(place), (Unbound, MaybeUnbound)):
                     raise AnalysisRejection(f"'{place}' may be unbound at this del (Python would raise)", op.origin)
+                if not checked:  # a compiler scope reset opens a fresh per-execution schema; user del does not
+                    env.schemas.pop(place, None)
                 env.set(place, _UNBOUND)
             case PyBin(dst=dst, op=bin_op, lhs=lhs, rhs=rhs):
                 lhs_fact, rhs_fact = env.get(Local(lhs)), env.get(Local(rhs))
@@ -1858,6 +1894,10 @@ class Analyzer:
         for element_fact in reversed(per_trip):
             body_entry = self._clone_subgraph(unit, loop.body_entry, header.id, chain_target, loop)
             prelude = Block(self._fresh_block_id())
+            # A fresh per-trip scope for the target, exactly like the builder's comprehension-entry reset: the
+            # schema flow clears at the unchecked unbind, so each trip's bind establishes its own Python-faithful
+            # kind (trip 1 of ``(1, 2.5)`` sees an int, trip 2 a float) instead of a cross-trip rebinding.
+            prelude.ops.append(UnbindPlace(loop.target, False, loop.origin))
             temp = BindingId(f"%u{self._temp_serial}", self._temp_serial)
             self._temp_serial += 1
             if isinstance(element_fact, Known):
@@ -2102,8 +2142,11 @@ class Analyzer:
                 raise AnalysisRejection(
                     "an integer operand to np.sign is not yet lowerable; cast to float first", call.origin
                 )
-            target = match.stub  # a composite library stub inlines exactly like a user function
-            stub_display = match.display_name  # ...but its grafted frames display the public spelling
+            # A composite library stub inlines exactly like a user function, but its grafted frames display the
+            # SPELLED callee the user resolved (np.dot reads "in dot():" even though matmul_ implements it); the
+            # stub's own stripped name is the fallback for a callee with no __name__.
+            stub_display = getattr(target, "__name__", None) or match.display_name
+            target = match.stub
         elif isinstance(match, Intrinsic):
             argument_facts = [env.get(Local(arg)) for arg in call.args] + [
                 env.get(Local(value)) for _, value in call.kwargs

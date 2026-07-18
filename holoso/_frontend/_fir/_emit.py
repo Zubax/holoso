@@ -116,6 +116,7 @@ from ._ir import (
     Branch as FirBranch,
     BuildList,
     BuildTuple,
+    executable_rpo,
     Jump as FirJump,
     LoadConst,
     LoadRef,
@@ -353,7 +354,7 @@ class _Emitter:
 
     def emit(self) -> Hir:
         unit = self._result.unit
-        order = self._reverse_postorder()
+        order = executable_rpo(unit.entry, self._result.executable_edges)
         if unit.exit not in order:
             # No path reaches the canonical exit (e.g. an unconditional `while True` with no break): the kernel
             # produces no output, so there is nothing to synthesize. A located refusal, not a downstream crash --
@@ -388,34 +389,6 @@ class _Emitter:
                     self._seal(successor)
         self._finish_exit()
         return self._builder.finish()
-
-    def _reverse_postorder(self) -> list[FirBlockId]:
-        # Iterative post-order: a large static unroll (thousands of blocks, within the analyzer's trip budget) would
-        # overflow a recursive DFS, so the traversal keeps its own explicit stack.
-        seen: set[FirBlockId] = {self._result.unit.entry}
-        order: list[FirBlockId] = []
-        stack: list[tuple[FirBlockId, list[FirBlockId]]] = [
-            (self._result.unit.entry, sorted(self._successors(self._result.unit.entry), key=lambda b: b.index))
-        ]
-        while stack:
-            block_id, pending = stack[-1]
-            advanced = False
-            while pending:
-                successor = pending.pop(0)
-                if successor in self._result.executable_blocks and successor not in seen:
-                    seen.add(successor)
-                    stack.append((successor, sorted(self._successors(successor), key=lambda b: b.index)))
-                    advanced = True
-                    break
-            if not advanced:
-                order.append(block_id)
-                stack.pop()
-        order.reverse()
-        assert order and order[0] == self._result.unit.entry
-        return order
-
-    def _successors(self, block_id: FirBlockId) -> list[FirBlockId]:
-        return [t for (s, t) in self._result.executable_edges if s == block_id]
 
     # ---------------------------------------- SSA over Places ----------------------------------------
 
