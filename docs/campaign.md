@@ -835,3 +835,20 @@ loses); stale-exactness -> range() (untainted independent wins; the transient ve
 the &-kernel -> store (stranded WITH taint-victims); Y4 -> store; the arity typo -> the untainted arity error.
 The queued best-effort framing is OFF — Codex proved the corners are the serious innocent-line class. One
 batch after Claude's half: taint + pre-graft validation/ownerless re-keying + recursive digit-safe renderer.
+
+Round-7, Claude half returned — ADJUDICATION SPLIT RESOLVED IN CLAUDE'S FAVOR; the taint ratification in the
+previous entry is SUPERSEDED (no taint machinery). Claude's standard: "innocent" is judged against
+REFERENCE-EXECUTION reality — and under it both disputed shapes are truthful: Cascaded's shift line is where
+plain Python dies on transaction 2 (0.0 << 1 -> TypeError at that exact line; the message names the poisoned
+attribute); the stale-exactness store carries a REAL transaction-1 precision loss at k=0 and the two reports
+form a principled two-step staircase (fix exactness -> surface the range refusal). All three reversals
+ACCEPTED; the epistemic ladder (fresh stable testimony > bridged-only-where-no-fresh-possible > provoked
+deferrals) stands; the misleading-line class is empty under six-direction adversarial probing; remaining warts
+are seed-stable selection among true errors, witness-locked. SURVIVING WORK (one batch, fixes-r7 at 1273f7f):
+F1 (Codex P1, REAL — a mechanism Claude's stranding probe could not reach): _expand_call validates arguments
+BEFORE destructive grafting and live ownerless deferrals are never dropped (re-key to the call origin) — the
+extra-arg typo must reject in both spellings (fail-before: implicit ACCEPTED, call absent from hardware).
+F2 (Codex P2): _render_fail must not alter messages that format fine (decimal when possible, hex only above
+the digit cap) and must be digit-safe RECURSIVELY (nested containers). F3 (Claude, pre-freeze): the
+stranded-sibling sort key flips to (source_position, message) — the sole position-non-primary rule; corpus not
+yet frozen so now is the moment. Round-8 after; tag freeze-1 on clean+green.
