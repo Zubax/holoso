@@ -671,3 +671,20 @@ byte-identical 148/148 — the Y-fixes change only multi-error shapes absent fro
 regeneration commit needed. Full light suite over the integrated tree running; on green: trial/s2-freeze-stack
 push at 793a82b, poll, round-5 pair (focus: freeze infrastructure code + Y-batch, not generated corpus bytes),
 CI green -> tag freeze-1 -> Stage 2 CLOSED -> S3 architecture gate opens.
+
+Round-5, Claude half returned (7): (1) MEDIUM analyzer — Y4's origin-keyed carryover pops on ANY store at the
+origin, so a conforming unroll clone erases a violating sibling's obligation mid-round and a provoked rejection
+lands in the window (`for v in range(2): self.n = x if v == 1 else 0` + a provoked shift → reports the shift;
+single-clone/violate-first/no-provocation controls all correct; stably wrong across seeds); fix at the round
+boundary (drop a carryover only if its origin saw NO still-pending violation across the whole round) +
+regression. (2) LOW-MED freeze — the serializer completeness guard omits FloatMulPow2/Float+IntRelational and
+the three Type classes (a future field on them vanishes silently, contradicting the guard's promise); add all
+six to _SERIALIZED_FIELDS. (3) LOW-MED freeze — fround/ffma configured in NO golden case (null in all 35 ABIs);
+FMA contraction and round() lowering are config-dependent codegen with zero byte coverage; add one probe case
+with both configured. (4) LOW — HOLOSO_IFCONV_MAX_OPS unpinned by the gate (false-fail only; refreeze children
+scrub it); pin it alongside the regalloc knobs. (5) LOW — replace_corpus is rmtree-then-copytree (a mid-copy
+failure can lose both trees); copy-aside-and-rename. (6) LOW — the two new Y-batch determinism witnesses are
+absent from the refreeze WITNESS_ENTRIES 64-seed sweep; append. (7) LOW — README promises CI fills
+container_digest but no fill mechanism exists; align. Corpus verified clean otherwise (rows bit-for-bit;
+recompute byte-identical; EKF pair materially distinct; identity/bijection guards hold). Codex half still
+running; consolidated fix batch after it returns.
