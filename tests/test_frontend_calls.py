@@ -404,7 +404,7 @@ def test_numpy_alias_shadowed_by_a_local_is_not_numpy() -> None:
 
     # The shadowing local is a list, so the read is the (unsupported) list attribute -- a more specific message
     # than the generic runtime-attribute rejection, but the same refusal.
-    with pytest.raises(UnsupportedConstruct, match="list method 'asarray'"):
+    with pytest.raises(UnsupportedConstruct, match="a list has no attribute 'asarray'"):
         lower(f)
 
 

@@ -3,7 +3,7 @@
 ## Integer support adjacent (the integer wiring milestone)
 
 Scalar-family policy: `PortConditioner` is a closed `FloatSignControl | BoolInversion` union enforced on every
-MIR port (`_operators.py:86`); add an int conditioner (likely identity/no-op) + a scalar-family table owning
+MIR port (`_operators.py`); add an int conditioner (likely identity/no-op) + a scalar-family table owning
 conditioner/bank/coercion/reset/lowering hooks.
 
 The oracles store wide values as `FloatValue` (`numerical.py`, `_mir/_interpret.py`); introduce a
@@ -23,23 +23,21 @@ Empty contractions diverge from numpy in the linalg stubs: `(n, 0) @ (0, m)` and
 Revisit together with the planned trace/outer/dot examples; the stubs' guards otherwise keep the reachable
 domain faithful.
 
-## Deferred capability gaps (tracked here; the FIR_PARITY_PENDING registry is empty and tests pin it empty)
+## Deferred capability gaps
 
 Two public state slots sharing a live-out refuse at Verilog emission when the schedule has reused the
 boundary-installing slot's register mid-transaction (e.g. `self.a = x + self.a` twice, then `self.b = self.a`;
-the front-end, HIR, MIR, and LIR all accept it). The refusal is an honest `SynthesisError` naming both slots
-(formerly a bare developer-facing `AssertionError`); lifting it needs an install-copy capability -- an extra
-boundary-adjacent copy step (or a reserved home for a shared live-out) so one value can install into several
-slot registers.
+the front-end, HIR, MIR, and LIR all accept it). The refusal is an honest `SynthesisError` naming both slots;
+lifting it needs an install-copy capability -- an extra boundary-adjacent copy step (or a reserved home for a
+shared live-out) so one value can install into several slot registers.
 
-The analyzer has no aggregate story for W-typed state: tuple-valued attributes (the delay-line idiom
-`self.window = (self.window[1], x)`) reject with "unsupported reset type". The W/D fixed point needs elementwise
-per-leaf live-ins (the aggregate stages).
+Tuple-valued state attributes reject at the reset ("state attribute ... has an unsupported reset type"):
+aggregate persistent state covers flat lists of scalars and nonempty 1-D/2-D plain ndarrays only, so the
+delay-line idiom must be spelled with a list -- `self.window = [self.window[1], x]` lowers where the tuple
+spelling refuses.
 
-Iteration/indexing over a static-LENGTH runtime-element aggregate (`for v in (x, y, x+y)`; `[x]*3` then indexed)
-needs the aggregate layout to thread through named-local stores and the loop unroller -- same stage family as the
-per-leaf state live-ins above.
+## Test-coverage debt
 
-The old front-end conservatively rejected a few valid corner kernels (arithmetic on an empty aggregate slice, an
-empty-aggregate loop nested in a `while` demoting the outer counter, a comprehension target named `self`); re-triage
-these against the FIR front-end when the aggregate stages land, and record the surviving ones here with FIR evidence.
+The differential fuzzer sums multiple result lanes into one float return even though tuple returns lower;
+restoring tuple-return lanes would perturb the tuned campaign seed streams, so it is queued as separate
+coverage work together with re-tuning the seeds.

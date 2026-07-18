@@ -19,7 +19,6 @@ from holoso._hir import optimize
 from holoso._lir import build, RegRef
 from holoso._mir import lower as lower_to_mir
 from ._modelref import default_ops, overlap_spill_kernel
-from ._examples import parity_marks
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -60,7 +59,7 @@ def _report(name: str) -> str:
     return generate_report(lir, generate_verilog(lir)).html
 
 
-@pytest.mark.parametrize("name", [pytest.param(n, marks=parity_marks(n)) for n in _EXAMPLES])
+@pytest.mark.parametrize("name", list(_EXAMPLES))
 def test_report_renders_for_each_example(name: str) -> None:
     lir = build(lower_to_mir(optimize(lower(_EXAMPLES[name]())), default_ops(_FMT)), name, fetch_stages=3)
     html = generate_report(lir, generate_verilog(lir)).html

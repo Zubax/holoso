@@ -284,8 +284,8 @@ Fuel bounds cover visits and blocks; exhaustion is a located rejection, never a 
 
 On stabilization the analyzer finalizes its result into the emission plan: the authoritative fact per binding
 (temporaries are write-once, so one replay of the transfer records each), a typed plan per surviving call --
-folded | cast (same-kind-vs-conversion decided at emission from the final facts) | intrinsic, keyed by the call's
-destination binding -- and the state leaves in
+folded | cast (same-kind-vs-conversion decided at emission from the final facts) | intrinsic | aggregate
+re-flavoring conversion | record construction, keyed by the call's destination binding -- and the state leaves in
 first-store source order (the established port ABI orders ports by source text, not CFG shape; the order key is
 the store's origin stack with the user call site primary, so two call sites inlining one setter order by the call
 sites rather than tying on the setter's own line, and clones of one store -- an unrolled loop's trips -- share the
@@ -336,8 +336,10 @@ contract, enforces flavor, geometry, and per-cell kinds at its store site (below
 beside the facts, since the store-edge conversion needs it exactly where the store executes, but the verdict is
 never per-visit: optimistic analysis discovers executable predecessors late, so store obligations resolve only
 after the state fixed point, and when several stores violate, the one reported is the first executable store in
-CFG preorder. A pending store violation also outranks any downstream rejection its carried fact provokes in the
-same round, so the causal store reports rather than the secondary failure. Widening at merges is untouched:
+CFG preorder. A pending state-store violation also outranks any downstream rejection its carried fact provokes
+in the same round, so the causal store reports rather than the secondary failure; a purely local violation
+reports only at the post-stabilization verdict, so an unrelated mid-flow rejection may surface ahead of it.
+Widening at merges is untouched:
 phi and select arms, comparison operands, explicit casts, return conversion, and mixed arithmetic promote exactly
 as before (a merge rounds into the carrier; only the store edge is exact), so `x = 0; x = input_float` rejects
 while `x = int(v) if c else v` remains a legal float phi. Only genuine variable bindings face the schema: the
@@ -383,8 +385,9 @@ reference, and a rejection inside one is re-attributed to the user's call site.
 
 Parameters and return. Positional and keyword-only parameters become input ports and require an explicit
 annotation: `float` scalars are floating-point ports, `bool` are 1-bit boolean ports, `int` are typed integer ports
-(contained at MIR until the integer backend); fixed-shape jaxtyping array annotations parse into array contracts
-whose ports await the ndarray stages. The return annotation is likewise mandatory, parsed into a recursive
+(contained at MIR until the integer backend); a fixed-shape jaxtyping array annotation decomposes row-major into one
+float port per element and a dataclass annotation into one port per field path, per the aggregate contract
+below. The return annotation is likewise mandatory, parsed into a recursive
 contract -- scalar kinds, `tuple[...]` with per-position contracts, `tuple[X, ...]` variadic over the emitted
 arity, `list[X]`, `tuple[()]` the empty tuple, `None` for a method that returns nothing, and an `X | None` union
 unwrapping to the X contract in the signature (a LIVE None path is not lowerable, though: a None that merges
@@ -401,9 +404,9 @@ An `assert` statement is accepted and ignored wholesale: its test is never lower
 an assertion has no hardware effect. Any effect the test would have had when executed is dropped along with it; as
 under `-O`, an assert must be side-effect-free.
 
-### Deferred: the aggregate contract (tracked by FIR_PARITY_PENDING; stage 10 asserts the registry empty)
+### The aggregate contract
 
-The structural spine already carries runtime tuples/lists through locals, diamonds, conditional selections,
+The structural spine carries runtime tuples/lists through locals, diamonds, conditional selections,
 concatenation/repetition, indexing, record field projection, record construction, and returns. Slice syntax
 desugars to the vetted slice() constructor and a static slice of a positional container is a WINDOW operation
 over the same children (runtime leaves included; strides, reversals, and open bounds follow slice.indices
@@ -417,9 +420,10 @@ canonical order and take the SCALAR fold rule per pair (a fully static pair fold
 values, so element-wise numpy semantics -- promotion, 64-bit wraparound, errstate deferrals -- hold per leaf by
 construction; residual pairs lower to one scalar operation per leaf with a broadcast scalar materialized once).
 The other operand is a same-shape array or a numeric scalar; general broadcasting, mixed array/list operands,
-other operators (`@` awaits the matmul stage), boolean operands, and in-place forms (`v *= s` -- numpy mutates
-through aliases where the subset rebinds) are located rejections. `/` yields float and any float side promotes
-the result dtype, as in Python and numpy. Two guards mirror numpy's ARRAY-WIDE behavior rather than any
+other elementwise operators (`@` instead lowers through the linear-algebra library below), boolean operands, and
+in-place forms (`v *= s` -- numpy mutates through aliases where the subset rebinds) are located rejections.
+`/` yields float and any float side promotes the result dtype, as in Python and numpy. Two guards mirror
+numpy's ARRAY-WIDE behavior rather than any
 single element's: a Python-int constant outside the result dtype's range is a located rejection exactly where
 numpy raises OverflowError (an empty array included -- the conversion precedes element iteration), and a
 runtime-INTEGER result rejects until the integer sprint, because the scalar integer datapath saturates where
@@ -468,7 +472,9 @@ validation every other return takes.
 Linear algebra is live as ordinary library code: `@` and its spelled forms (`np.matmul`, `np.dot`) rewrite
 onto one registry stub that inlines like a user function -- rows iterate outermost, contractions are left
 folds (enabling FMA contraction), and every operand must be an ARRAY on both sides (a scalar, list, or tuple
-never acquires matrix semantics; np.array is the explicit conversion). `np.trace`/`np.outer` are stubs under
+never acquires matrix semantics; np.array is the explicit conversion). Operands may be in-kernel arrays or
+decomposed array parameters alike -- the imu frame transform's products over its array ports illustrate the
+port-fed form end to end. `np.trace`/`np.outer` are stubs under
 the same gate; stub raise messages stay literal so rejections surface verbatim. `.T` and `np.transpose` are
 not stubs: transpose is a pure structural relayout -- the same leaves under the reversed shape, recorded as a
 ROUTE PLAN (source ordinal per result cell) the conversion emission consumes -- exact for every rank,
@@ -491,8 +497,7 @@ walk as every other return. Record contracts resolve field annotations through t
 and refuse recursive schemas by name. Data-dependent selection over a finite static set is expressed in
 ordinary Python -- a statically unrolled reverse-order conditional select reproduces first-match semantics
 through per-leaf phis -- rather than through a runtime-index gather primitive the integer-less datapath cannot
-honestly carry. FIR_PARITY_PENDING is EMPTY and pinned empty by a stage-10 test: every bundled example lowers
-through this front end. The restored contract:
+honestly carry. Every bundled example lowers through this front end. In sum:
 
 Matrices/vectors are statically shaped and unrolled to scalar operations; arrays never exist as hardware
 aggregates, only as compile-time bookkeeping over scalar leaves -- list/tuple literals and comprehensions,
@@ -507,7 +512,8 @@ bounded by the unroll threshold. A jaxtyping array annotation with fixed 1-D/2-D
 decomposes row-major into one float port per element (`name_0, name_1, ...`; matrices `name_0_0, ...`), detected
 structurally so jaxtyping stays a dependency of the user's code only. Aggregate-valued state decomposes into one
 scalar slot per leaf (`attr_0`, ...; matrices row-major `attr_0_0`, ...). Aggregate returns flatten to ordered
-`out_<k>` ports, validated against an arbitrarily nested `tuple[...]`/`list[X]`/array return annotation.
+`out_*` ports named by leaf path, validated against an arbitrarily nested `tuple[...]`/`list[X]`/array return
+annotation.
 
 ## Fastmath policy
 

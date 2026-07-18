@@ -872,8 +872,9 @@ def _emit_return(em: _Emitter, produced: list[_Fragment]) -> Mode:
     if len(live) == 1:
         em.return_line = f"return {live[0]}"
         return Mode.EXACT
-    # FIR_PARITY_PENDING: tuple (multi-output) returns are stage 9. Until then multiple lanes are summed to one float;
-    # the RNG draw that used to pick tuple-vs-sum is kept so the tuned campaign seeds see an unperturbed kernel stream.
+    # Multiple lanes are summed to one float even though the frontend lowers tuple returns: restoring tuple-return
+    # lanes is queued coverage work (TODO.md), because changing the emitted shape (and the RNG draw below, which used
+    # to pick tuple-vs-sum) would perturb the tuned campaign seed streams.
     em.chance(0.5)
     em.return_line = f"return {' + '.join(live)}"
     return Mode.CONTINUOUS
@@ -1015,9 +1016,9 @@ class CampaignStats:
     # a sound bound on continuous ZKF arithmetic). A large count would hint at a too-tight tolerance or a real bug.
     continuous_drift: int = 0
     dead_arm_forced: int = 0  # ARMED dead-arm-only kernels run (the overlap-hazard guarantee; see run_campaign)
-    # FIR_PARITY_PENDING: kernels the generator built from a construct the new frontend still defers (bitwise ``^`` and
-    # ``float()``/``bool()`` casts -> stage 8; tuple returns -> stage 9). They are counted and skipped, not compiled;
-    # the count drops to zero as those stages land. Shape totals above still include them (recorded before lowering).
+    # Kernels dropped because the frontend refused a generated construct (counted once, never compiled). Every
+    # construct the current generator emits lowers, so a nonzero count flags generator/frontend drift. Shape totals
+    # above still include them (recorded before lowering).
     deferred_skipped: int = 0
     shape_counts: dict[Shape, int] = field(default_factory=lambda: {shape: 0 for shape in Shape})
     divergences: list[Divergence] = field(default_factory=list)
@@ -1567,10 +1568,9 @@ def _run_campaign_kernel(
         try:
             divergence = run_kernel(kernel, op_label, make_ops(fmt), fmt, effort, n_vectors, stats, expect_armed)
         except UnsupportedConstruct:
-            # FIR_PARITY_PENDING: the generator emitted a construct the new frontend still defers (bitwise ``^`` and
-            # ``float()``/``bool()`` casts -> stage 8; tuple returns -> stage 9). Rejection is frontend-only, so it is
-            # identical across op-configs -- record once and drop the kernel. Genuine miscompiles still surface as
-            # divergences on the kernels that DO lower; when the stages land these kernels compile and are checked.
+            # The frontend refused a generated construct. Rejection is frontend-only, so it is identical across
+            # op-configs -- record once and drop the kernel. Expected never to fire (every emitted construct lowers);
+            # the catch keeps generator/frontend drift a visible counter rather than a crashed campaign.
             stats.deferred_skipped += 1
             return
         if divergence is not None:

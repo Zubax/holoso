@@ -309,13 +309,13 @@ def test_numpy_only_methods_on_a_list_are_rejected() -> None:
     def transpose(a: float, b: float) -> float:
         return ([a, b].T)[0]  # type: ignore[attr-defined, no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="lists are immutable"):
+    with pytest.raises(UnsupportedConstruct, match="a list has no attribute 'T'"):
         lower(transpose)
 
     def flatten(a: float, b: float) -> float:
         return ([[a, b]].flatten())[0]  # type: ignore[attr-defined, no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="lists are immutable"):
+    with pytest.raises(UnsupportedConstruct, match="a list has no attribute 'flatten'"):
         lower(flatten)
 
     def multi_axis(a: float, b: float) -> float:
@@ -1552,14 +1552,6 @@ def test_ambiguous_record_port_paths_refuse_at_build() -> None:
     # pair of duplicate ports failing deep in synthesis.
     with pytest.raises(UnsupportedConstruct, match="already claims"):
         lower(_ambiguous_record_kernel)
-
-
-def test_parity_registry_is_empty() -> None:
-    # Stage 10: every example the catalogue and the off-catalogue suites know lowers through the new front
-    # end; the registry exists only as the (empty) assertion point.
-    from tests._examples import FIR_PARITY_PENDING
-
-    assert FIR_PARITY_PENDING == {}
 
 
 # ---------------------------------------------------------------- numeric width collapse

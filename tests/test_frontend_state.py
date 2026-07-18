@@ -1464,7 +1464,7 @@ def test_a_shape_query_on_a_nested_reset_sequence_element_is_rejected() -> None:
         def step(self, v: Float64[np.ndarray, "3"]) -> float:
             return v[self.nested[0].ndim]  # type: ignore[attr-defined, return-value]  # a list has no .ndim
 
-    with pytest.raises(UnsupportedConstruct, match="list method 'ndim' is not supported"):
+    with pytest.raises(UnsupportedConstruct, match="a list has no attribute 'ndim'"):
         lower(NestedNdim().step)
 
 

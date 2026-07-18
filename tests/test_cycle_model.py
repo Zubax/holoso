@@ -23,7 +23,6 @@ from holoso._lir import Lir, build
 from holoso._mir import lower as lower_to_mir
 
 from ._modelref import default_ops
-from ._examples import parity_marks
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -78,9 +77,7 @@ def test_tick_and_call_agree(name: str, factory: Callable[[], Callable[..., obje
         assert [v.bits for v in ticked_out] == [v.bits for v in called_out]  # type: ignore[union-attr]
 
 
-@pytest.mark.parametrize(
-    "name", [pytest.param(n, marks=parity_marks(n)) for n in ("madd", "poly3", "cordic_sincos", "ekf1_stateless")]
-)
+@pytest.mark.parametrize("name", ["madd", "poly3", "cordic_sincos", "ekf1_stateless"])
 def test_single_path_latency_is_the_static_initiation_interval(name: str) -> None:
     # A kernel with one forward path takes exactly ``initiation_interval - 1`` cycles from the accept edge (pc==1) to
     # out_valid (pc==LASTPC) -- the cycle count a caller recovers by counting ticks, here the static lower bound.
@@ -173,7 +170,7 @@ _WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[l
 }
 
 
-@pytest.mark.parametrize("name", [pytest.param(n, marks=parity_marks(n)) for n in _WORST_CASE_LATENCY])
+@pytest.mark.parametrize("name", list(_WORST_CASE_LATENCY))
 def test_realized_worst_case_latency_does_not_regress(name: str) -> None:
     # The realized per-transaction latency (the cosim bench's ``waited``) over a fixed adversarial input set must not
     # exceed its frozen worst case. This is the teeth behind the latency-reduction work: a per-block drain regression

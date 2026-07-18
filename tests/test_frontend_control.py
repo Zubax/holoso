@@ -322,7 +322,7 @@ def test_divergent_loop_counter_as_static_index_is_rejected() -> None:
                 pass
         return table[i]
 
-    with pytest.raises(UnsupportedConstruct, match="subscript of a runtime value is not supported yet"):
+    with pytest.raises(UnsupportedConstruct, match="subscript with a runtime index is not supported yet"):
         lower(f)
 
 

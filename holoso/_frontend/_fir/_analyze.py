@@ -210,6 +210,15 @@ _UNBOUND = Unbound()
 _ARRAY_ATTRIBUTES = ("real", "imag")  # value navigation, all-Known only; .T/shape metadata are structural
 
 
+def _list_attribute_rejection(name: str, origin: OriginStack) -> AnalysisRejection:
+    """The mutator guidance fits only names Python actually gives a list; array-ish spellings point at np.array."""
+    if hasattr([], name):
+        return AnalysisRejection(
+            f"list method '{name}' is not supported (lists are immutable values here); rebind with + instead", origin
+        )
+    return AnalysisRejection(f"a list has no attribute '{name}'; convert with np.array to use array attributes", origin)
+
+
 @dataclass(slots=True)
 class _Env:
     """
@@ -1583,7 +1592,9 @@ class Analyzer:
             raise AnalysisRejection("subscript of an object is not supported", origin)
         if isinstance(obj, Known) and isinstance(index, Known):
             return self._concrete_subscript(obj.value, index, origin)
-        raise AnalysisRejection("subscript of a runtime value is not supported yet", origin)
+        if isinstance(obj, (Known, AggregateFact)):
+            raise AnalysisRejection("subscript with a runtime index is not supported yet", origin)
+        raise AnalysisRejection("subscript of a runtime scalar is not supported", origin)
 
     def _array_subscript(self, op: PySubscript, obj: AggregateFact, key: "StaticSlice | StaticSeq") -> Fact:
         """
@@ -1675,10 +1686,7 @@ class Analyzer:
                 # which is not type-faithful (an enum field rebuilds as its base value).
                 raise AnalysisRejection(f"record attribute '{name}' is not supported (only field access)", origin)
             if isinstance(obj.layout, ListLayout):
-                raise AnalysisRejection(
-                    f"list method '{name}' is not supported (lists are immutable values here); rebind with + instead",
-                    origin,
-                )
+                raise _list_attribute_rejection(name, origin)
             if isinstance(obj.layout, ArrayLayout) and name in ("ndim", "shape", "size"):
                 # Layout-determined metadata: folds identically on runtime leaves, no element consulted, and
                 # value-identical to the concrete navigation an all-Known snapshot would take.
@@ -1763,11 +1771,6 @@ class Analyzer:
             env.set(leaf, fact)
             return fact
         if isinstance(obj, Known):
-            if _is_list_fact(obj):
-                raise AnalysisRejection(
-                    f"list method '{name}' is not supported (lists are immutable values here); rebind with + instead",
-                    origin,
-                )
             if isinstance(obj.value, StaticStr):
                 # Trimmed (scope ruling T6): a str constant stays an inert value (equality, len, concatenation
                 # all fold), but its methods are host machinery a kernel does not need -- every honest use

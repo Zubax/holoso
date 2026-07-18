@@ -9,7 +9,6 @@ import math
 import os
 import sys
 
-import pytest
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -669,16 +668,3 @@ SPECS = [
         edge_values=_EKF_EDGES,  # only dt reaches the divisor, and the folded R_diag keeps it anchored
     ),
 ]
-
-
-# FIR_PARITY_PENDING: examples the new (FIR) front-end cannot lower yet, name -> the feature/stage that unblocks it.
-# This is the central registry of the front-end parity debt; every SPECS-driven suite skips the examples in it. Each
-# of stages 6-9 removes its own entries as the feature lands, and stage 10 asserts this map is empty. Greppable via
-# the FIR_PARITY_PENDING token.
-FIR_PARITY_PENDING: dict[str, str] = {}
-
-
-def parity_marks(name: str) -> tuple[pytest.MarkDecorator, ...]:
-    """Pytest marks that skip an example still awaiting front-end parity, or an empty tuple when it is supported."""
-    reason = FIR_PARITY_PENDING.get(name)
-    return (pytest.mark.skip(reason=f"FIR_PARITY_PENDING: {reason}"),) if reason is not None else ()

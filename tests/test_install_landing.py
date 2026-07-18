@@ -19,7 +19,7 @@ from holoso._hir import optimize
 from holoso._lir import BoolWrite, FloatCopy, InlineScheduledOp, Lir, LirBlock, PooledScheduledOp, build
 from holoso._mir import lower as lower_to_mir
 
-from ._examples import SPECS, ExampleSpec, parity_marks
+from ._examples import SPECS, ExampleSpec
 from ._modelref import Vector, assert_model_equals_interpreter, build_model_and_interpreter, default_ops
 
 
@@ -39,7 +39,7 @@ def _block_ops(block: LirBlock) -> list[PooledScheduledOp | InlineScheduledOp]:
     return [*block.ops, *block.inline_ops]
 
 
-@pytest.mark.parametrize("spec", [pytest.param(s, marks=parity_marks(s.name)) for s in SPECS], ids=lambda s: s.name)
+@pytest.mark.parametrize("spec", SPECS, ids=lambda s: s.name)
 def test_phi_arm_installs_land_within_their_block(spec: ExampleSpec) -> None:
     lir = _build(spec)
     for block in lir.blocks:

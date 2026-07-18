@@ -55,7 +55,6 @@ def capture(out_path: str) -> None:
         row: dict[str, Any] = {
             "label": target.label,
             "name": target.name,
-            "example": target.example,
             "flow": target.flow.value,
             "target_MHz": target.target_frequency_MHz,
             "ops": repr(target.ops),
@@ -188,7 +187,7 @@ def render(before_path: str, after_path: str, out_path: str) -> None:
         )
         retune_tag = " <span class='retune'>retuned</span>" if retuned else ""
         cells = [
-            f"<td class='name'>{a.get('example') or a['name']}{retune_tag}<br><span class='flow'>{a['flow']}"
+            f"<td class='name'>{a['name']}{retune_tag}<br><span class='flow'>{a['flow']}"
             f" @ {a['target_MHz']:.0f} MHz</span></td>",
             _delta_cell(ii_b, ii_a, lower_is_better=True, fmt="{:.0f}"),
             _delta_cell(b.get("last_pc"), a.get("last_pc"), lower_is_better=True, fmt="{:.0f}"),

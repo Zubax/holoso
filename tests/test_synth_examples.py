@@ -19,7 +19,6 @@ from synth._synth import BUILD_ROOT, build_compiler_ooc_design
 from synth.flows import make_flow
 
 from . import _impact
-from ._examples import parity_marks
 from ._synth_targets import TARGETS, SynthTarget
 
 pytestmark = pytest.mark.synth
@@ -36,13 +35,8 @@ def test_some_target_flow_is_available() -> None:
 
 
 # Heaviest-first so xdist starts the long wide-datapath rows immediately instead of scheduling them last and tailing.
-# A row whose example awaits front-end parity skips through the central FIR_PARITY_PENDING registry; its frozen
-# frequency target and stage knobs stay untouched, so the closure bar is unchanged when the row returns.
 _BY_COST = sorted(TARGETS, key=lambda t: t.ops.float_format.wman, reverse=True)
-_TARGET_PARAMS = [
-    pytest.param(target, id=target.label, marks=parity_marks(target.example) if target.example else ())
-    for target in _BY_COST
-]
+_TARGET_PARAMS = [pytest.param(target, id=target.label) for target in _BY_COST]
 
 
 @pytest.mark.parametrize("target", _TARGET_PARAMS)

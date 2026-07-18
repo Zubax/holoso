@@ -107,7 +107,7 @@ def test_indexing_a_scalar_is_rejected() -> None:
     def f(a: float) -> float:
         return a[0]  # type: ignore[no-any-return, index]
 
-    with pytest.raises(UnsupportedConstruct, match="subscript of a runtime value is not supported yet"):
+    with pytest.raises(UnsupportedConstruct, match="subscript of a runtime scalar is not supported"):
         lower(f)
 
 
@@ -307,7 +307,7 @@ def test_shape_queries_fold_to_constants_in_value_positions() -> None:
         rows = [a, b]
         return a if rows.ndim == 1 else b  # type: ignore[attr-defined]
 
-    with pytest.raises(UnsupportedConstruct, match="list method 'ndim' is not supported"):
+    with pytest.raises(UnsupportedConstruct, match="a list has no attribute 'ndim'"):
         lower(ndim_of_list)
 
     def len_of_scalar(a: float) -> float:
@@ -334,7 +334,7 @@ def test_numpy_only_shape_queries_are_rejected_on_a_sequence_however_it_is_spell
         rows = [[a, b], [b, a]]
         return a if rows[0].ndim == 1 else b  # type: ignore[attr-defined]
 
-    with pytest.raises(UnsupportedConstruct, match="list method 'ndim' is not supported"):
+    with pytest.raises(UnsupportedConstruct, match="a list has no attribute 'ndim'"):
         lower(ndim_through_a_subscript)
 
     def transpose_of_a_sequence_in_a_static_position(a: float, b: float) -> float:
@@ -344,7 +344,7 @@ def test_numpy_only_shape_queries_are_rejected_on_a_sequence_however_it_is_spell
             acc = acc + rows[i]
         return acc
 
-    with pytest.raises(UnsupportedConstruct, match="list method 'T' is not supported"):
+    with pytest.raises(UnsupportedConstruct, match="a list has no attribute 'T'"):
         lower(transpose_of_a_sequence_in_a_static_position)
 
     class ListState:
@@ -354,7 +354,7 @@ def test_numpy_only_shape_queries_are_rejected_on_a_sequence_however_it_is_spell
         def __call__(self, a: float) -> float:
             return a if self.vec.ndim == 1 else -a  # type: ignore[attr-defined]
 
-    with pytest.raises(UnsupportedConstruct, match="list method 'ndim' is not supported"):
+    with pytest.raises(UnsupportedConstruct, match="a list has no attribute 'ndim'"):
         lower(ListState().__call__)
 
 
@@ -690,7 +690,7 @@ def test_a_sequence_stays_a_sequence_through_a_subscript() -> None:
 
     with pytest.raises(AttributeError):
         ListState().step(3.0)  # a Python list slice has no .ndim
-    with pytest.raises(UnsupportedConstruct, match="list method 'ndim' is not supported"):
+    with pytest.raises(UnsupportedConstruct, match="a list has no attribute 'ndim'"):
         lower(ListState().step)
 
 
@@ -744,7 +744,7 @@ def test_rank_zero_subscripts_are_rejected() -> None:
         return v[0][0]  # type: ignore[no-any-return]  # numpy: IndexError, too many indices for a scalar
 
     for kernel in (scalar_empty_key, scalar_int_key):
-        with pytest.raises(UnsupportedConstruct, match=r":\d+:\d+: subscript of a runtime value is not supported"):
+        with pytest.raises(UnsupportedConstruct, match=r":\d+:\d+: subscript of a runtime scalar is not supported"):
             lower(kernel)
 
     def zero_d_empty_key(x: float) -> float:

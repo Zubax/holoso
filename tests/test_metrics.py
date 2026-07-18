@@ -1,15 +1,17 @@
 """
 Steering/area non-regression gate for the LIR build.
 
-Every currently-synthesizing example (all except ``iir1_hpf`` and ``finite_set_current_controller``, which the
-frontend cannot yet lower) is built to LIR and measured on the metrics that bound the synthesized fabric (here
+A representative cross-section of the bundled examples (the ``_EXAMPLES`` table, all built under the shared default
+operator configuration at the wide e8m36 datapath) is measured on the metrics that bound the synthesized fabric (here
 "straight-line" means the pure-float flat path: single block, no boolean fabric -- an if-converted kernel can be
 single-block without being straight-line in this sense): the wide and
 boolean register counts, the per-port read-mux fan-in and per-register write-select fan-in (the steering cost that
 dominates the LUTs), and the statically-known latency lower bound. The baseline below was re-frozen on the converged
 build with the bank-independent read/landing model, at the default register-allocation effort. Value numbering is
 seed-independent (``tests/test_determinism.py`` proves byte-identical Verilog across ``PYTHONHASHSEED`` values), so
-these figures hold in any process without pinning the hash seed.
+these figures hold in any process without pinning the hash seed. ``finite_set_current_controller`` lowers and builds
+but needs operators outside the shared configuration (``fsort`` for its max reduction, ``fsincos``), so it carries
+no row here.
 
 The contract: NO example may regress past its frozen baseline on any metric. A single-block (straight-line) kernel is
 expected to hit equality -- the unified allocator subsumes the former straight-line path. The control-flow rows
@@ -35,7 +37,6 @@ from holoso._hir import optimize
 from holoso._lir import Lir, build
 from holoso._mir import lower as lower_to_mir
 from ._modelref import default_ops
-from ._examples import parity_marks
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -228,15 +229,7 @@ BASELINE: dict[str, Metrics] = {
 }
 
 
-def _metric_marks(name: str) -> tuple[pytest.MarkDecorator, ...]:
-    # imu_frame_transform is off-catalogue (no SPEC), so it is absent from the shared FIR_PARITY_PENDING registry; the
-    # new front-end does not lower its matrix ``@`` yet, so mark it here alongside the registry-driven skips.
-    if name == "imu_frame_transform":
-        return (pytest.mark.skip(reason="FIR_PARITY_PENDING: matrix @ (matmul) not lowered yet — stage 9"),)
-    return parity_marks(name)
-
-
-@pytest.mark.parametrize("name", [pytest.param(n, marks=_metric_marks(n)) for n in _EXAMPLES])
+@pytest.mark.parametrize("name", list(_EXAMPLES))
 def test_metrics_do_not_regress(name: str) -> None:
     base = BASELINE[name]
     got = _measure(name)
