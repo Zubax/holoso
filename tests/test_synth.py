@@ -86,16 +86,19 @@ def test_synthesize_threads_pipeline_stages() -> None:
     assert ".LATENCY(5)" in staged.verilog_output.verilog and ".LATENCY(3)" in staged.verilog_output.verilog
 
 
-def test_rejects_nan_constants() -> None:
+def test_rejects_nan_constant_data_but_defers_nan_producing_folds() -> None:
+    # Literal NaN DATA cannot exist in the (NaN-free) target format and refuses up front; an expression whose
+    # fold WOULD be NaN instead stays a runtime operation with the hardware's own NaN-free answer.
     def nan_global(a: float) -> float:
         return a + _NAN
+
+    with pytest.raises(holoso.UnsupportedConstruct):
+        holoso.synthesize(nan_global, ops=_ops())
 
     def folds_to_nan(a: float) -> float:
         return a + (1e400 - 1e400)
 
-    for fn in (nan_global, folds_to_nan):
-        with pytest.raises(holoso.UnsupportedConstruct):
-            holoso.synthesize(fn, ops=_ops())
+    holoso.synthesize(folds_to_nan, ops=_ops())
 
 
 def test_infinity_constants_are_allowed() -> None:

@@ -513,12 +513,11 @@ def test_min_max_infinity_constants_fold() -> None:
         assert _bits(sim.run(x)[0]) == ref.bits, f"x={x}"
 
 
-def test_min_max_nan_constant_is_rejected() -> None:
+def test_min_max_nan_producing_fold_defers_to_the_hardware() -> None:
     def max_selects_finite(x: float) -> float:
         return x + max(2.0, 1e400 - 1e400)
 
-    with pytest.raises(UnsupportedConstruct):
-        holoso.synthesize(max_selects_finite, _ops(), name="max_selects_finite")
+    holoso.synthesize(max_selects_finite, _ops(), name="max_selects_finite")
 
 
 def _ulp32(value: float) -> float:
