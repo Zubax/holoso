@@ -552,3 +552,26 @@ resolves ALL schema violations (local rebinds + state obligations + conversion f
 outranking every deferred rejection — DESIGN's unqualified claims become true rather than scoped down. P4s
 queued: dedupe the two first-violation scans into one helper; the 136-col DESIGN line. Codex half still
 running; fix batch goes to a side worktree at ea83691 after it returns (S2.14 agent owns the live tree).
+
+Round-3, Codex half returned (5: four P1 + one P2): (K1/P1) the local int->float store-edge conversion is
+analyzed but NOT emitted — `current = int(value)` into a float-schema local keeps the int cell kind, downstream
+truth selects IntToBool and rejects "integer operator 'float_to_int' is not yet lowerable" while the explicit
+float() spelling synthesizes; the emitter must insert the real conversion op at the store edge (state twin to be
+checked). (K2/P1) an all-integer phi bypasses exact-or-reject: `2**53+1 if flag else 1` joins to Residual(INT),
+stores into float schema unchecked, and strength reduction rounds the constant arms -> silent 9007199254740992.0;
+RULING: the boundary is static-vs-runtime — statically Known stores are exact-or-reject, genuinely-runtime ints
+convert with hardware round-to-nearest semantics (the NaN precedent: static refuses, runtime defers); DESIGN
+documents the boundary, pins cover both spellings, and K1's emitted conversion makes the runtime path real.
+(K3/P1) = Claude's P1 (transient-fact mid-transfer raise; swapped-arm flip; else-arm-first state errors) —
+convergent. (K4/P1) strength reduction's x/x->1.0 rewrite undoes the NaN-fold deferral for CONSTANT inf/inf
+(interning makes operands identical): constant kernel returns 1.0, runtime divider returns ZKF 0.0; guard the
+identity rewrites against zero/non-finite constant operands (0.0/0.0 same class). (K5/P2) causal-priority
+ranking at a mid-round abort walks the INCOMPLETE graph (LIFO discovers else first): with a secondary shift the
+else store reports, without it the then store — ranking must wait for the stabilized graph. UNIFIED FIX BATCH
+(X1-X5) dispatched to side worktree fixes-r3 at ea83691: X1 full verdict deferral (no store-edge raises in
+_transfer; inexact carries rounded Known, overflow carries Residual(FLOAT); schema-provoked secondaries defer;
+rounds stabilize; ONE post-stabilization first-in-preorder resolution over locals+state+conversions outranking
+deferred rejections; seed-stable) covering Claude 1/3 + K3/K5; X2 emitted store-edge conversions (K1, locals +
+state); X3 the static/runtime boundary docs + pins (K2); X4 identity-rewrite guards (K4); X5 the P4s (dedupe
+first-violation scans; 136-col DESIGN line). S2.14 agent still owns the live tree; cherry-pick order decided on
+returns.
