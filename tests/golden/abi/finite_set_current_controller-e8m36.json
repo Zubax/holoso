@@ -1,0 +1,225 @@
+{
+  "schema": "holoso-golden-abi/1",
+  "case": "finite_set_current_controller-e8m36",
+  "module_name": "finite_set_current_controller",
+  "float_format": "e8m36",
+  "fetch_stages": 3,
+  "regalloc": {
+    "refine_maxiter": 5000,
+    "reg_reuse_write_cap": 2,
+    "reg_price": 2.0
+  },
+  "ops": {
+    "fadd": "FAddOperator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_decode=0, stage_align=0, stage_normalize=0, stage_pack=0, stage_output=0)",
+    "fmul": "FMulOperator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_product=0, stage_pack=0, stage_output=0)",
+    "fdiv": "FDivOperator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_pack=0, stage_output=0)",
+    "fmul_ilog2": "FMulILog2OperatorFamily(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_decode=0)",
+    "fcmp": "FCmpOperator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0)",
+    "fround": null,
+    "ffma": null,
+    "fsort": "FSortOperator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0)",
+    "fexp2": null,
+    "flog2": null,
+    "fsincos": "FSincosOperator(fmt=FloatFormat(wexp=8, wman=36), unroll100=100, stage_input=0, stage_product=0, stage_normalize=0, stage_pack=0, stage_output=0)",
+    "fatan2": null
+  },
+  "initiation_interval": {
+    "min": 160,
+    "max": null
+  },
+  "ports": [
+    {
+      "direction": "in",
+      "name": "clk",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "rst",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "in_valid",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "out",
+      "name": "in_ready",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "out",
+      "name": "out_valid",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "out_ready",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "in_kin_pos",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_kin_vel",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_kin_accel",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_i_ac_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_i_ac_1",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_i_ac_2",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_di_ac_dt_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_di_ac_dt_1",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_di_ac_dt_2",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_u_dc",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_i_dq_ref_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_i_dq_ref_1",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "out_switch_ac_0",
+      "width": 1,
+      "role": "data",
+      "scalar_kind": "bool"
+    },
+    {
+      "direction": "out",
+      "name": "out_switch_ac_1",
+      "width": 1,
+      "role": "data",
+      "scalar_kind": "bool"
+    },
+    {
+      "direction": "out",
+      "name": "out_switch_ac_2",
+      "width": 1,
+      "role": "data",
+      "scalar_kind": "bool"
+    },
+    {
+      "direction": "out",
+      "name": "out_switch_balance_0_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "out_switch_balance_1_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "out_switch_balance_2_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "err_pc",
+      "width": 8,
+      "role": "diagnostic"
+    }
+  ],
+  "metrics": {
+    "straight_line": false,
+    "nreg": 23,
+    "bnreg": 4,
+    "steering": 69,
+    "copies": 3,
+    "min_ii": 160,
+    "last_pc": 180,
+    "max_block_span": 108
+  }
+}

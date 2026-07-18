@@ -1,0 +1,300 @@
+{
+  "schema": "holoso-golden-abi/1",
+  "case": "imu_frame_transform-e8m36",
+  "module_name": "imu_frame_transform",
+  "float_format": "e8m36",
+  "fetch_stages": 3,
+  "regalloc": {
+    "refine_maxiter": 5000,
+    "reg_reuse_write_cap": 2,
+    "reg_price": 2.0
+  },
+  "ops": {
+    "fadd": "FAddOperator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_decode=0, stage_align=0, stage_normalize=0, stage_pack=0, stage_output=0)",
+    "fmul": "FMulOperator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_product=0, stage_pack=0, stage_output=0)",
+    "fdiv": "FDivOperator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_pack=0, stage_output=0)",
+    "fmul_ilog2": "FMulILog2OperatorFamily(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_decode=0)",
+    "fcmp": "FCmpOperator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0)",
+    "fround": null,
+    "ffma": null,
+    "fsort": null,
+    "fexp2": "FExp2Operator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_reduce=0, stage_product=0, stage_pack=0, stage_output=0)",
+    "flog2": "FLog2Operator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_decode=0, stage_product=0, stage_product_final=0, stage_normalize=0, stage_normalize_output=0, stage_pack=0, stage_output=0)",
+    "fsincos": "FSincosOperator(fmt=FloatFormat(wexp=8, wman=36), unroll100=100, stage_input=0, stage_product=0, stage_normalize=0, stage_pack=0, stage_output=0)",
+    "fatan2": "FAtan2Operator(fmt=FloatFormat(wexp=8, wman=36), unroll100=100, stage_input=0, stage_product=0, stage_normalize=0, stage_pack=0, stage_output=0)"
+  },
+  "initiation_interval": {
+    "min": 42,
+    "max": 42
+  },
+  "ports": [
+    {
+      "direction": "in",
+      "name": "clk",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "rst",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "in_valid",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "out",
+      "name": "in_ready",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "out",
+      "name": "out_valid",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "out_ready",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "in_R_0_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_R_0_1",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_R_0_2",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_R_1_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_R_1_1",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_R_1_2",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_R_2_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_R_2_1",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_R_2_2",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_t_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_t_1",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_t_2",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_a_meas_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_a_meas_1",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_a_meas_2",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_p_sensor_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_p_sensor_1",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "in",
+      "name": "in_p_sensor_2",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "out_0_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "out_0_1",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "out_0_2",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "out_1_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "out_1_1",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "out_1_2",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "out_2_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "out_2_1",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "out_2_2",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "err_pc",
+      "width": 6,
+      "role": "diagnostic"
+    }
+  ],
+  "metrics": {
+    "straight_line": true,
+    "nreg": 20,
+    "bnreg": 0,
+    "steering": 35,
+    "copies": 0,
+    "min_ii": 42,
+    "last_pc": 42,
+    "max_block_span": 42
+  }
+}

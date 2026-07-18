@@ -1,0 +1,120 @@
+{
+  "schema": "holoso-golden-abi/1",
+  "case": "uart_rx-e4m8",
+  "module_name": "uart_rx",
+  "float_format": "e4m8",
+  "fetch_stages": 3,
+  "regalloc": {
+    "refine_maxiter": 5000,
+    "reg_reuse_write_cap": 2,
+    "reg_price": 2.0
+  },
+  "ops": {
+    "fadd": "FAddOperator(fmt=FloatFormat(wexp=4, wman=8), stage_input=0, stage_decode=0, stage_align=0, stage_normalize=0, stage_pack=0, stage_output=0)",
+    "fmul": "FMulOperator(fmt=FloatFormat(wexp=4, wman=8), stage_input=0, stage_product=0, stage_pack=0, stage_output=0)",
+    "fdiv": "FDivOperator(fmt=FloatFormat(wexp=4, wman=8), stage_input=0, stage_pack=0, stage_output=0)",
+    "fmul_ilog2": "FMulILog2OperatorFamily(fmt=FloatFormat(wexp=4, wman=8), stage_input=0, stage_decode=0)",
+    "fcmp": "FCmpOperator(fmt=FloatFormat(wexp=4, wman=8), stage_input=0)",
+    "fround": null,
+    "ffma": null,
+    "fsort": null,
+    "fexp2": "FExp2Operator(fmt=FloatFormat(wexp=4, wman=8), stage_input=0, stage_reduce=0, stage_product=0, stage_pack=0, stage_output=0)",
+    "flog2": null,
+    "fsincos": null,
+    "fatan2": null
+  },
+  "initiation_interval": {
+    "min": 6,
+    "max": null
+  },
+  "ports": [
+    {
+      "direction": "in",
+      "name": "clk",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "rst",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "in_valid",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "out",
+      "name": "in_ready",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "out",
+      "name": "out_valid",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "out_ready",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "in_rx",
+      "width": 1,
+      "role": "data",
+      "scalar_kind": "bool"
+    },
+    {
+      "direction": "out",
+      "name": "out_0",
+      "width": 1,
+      "role": "data",
+      "scalar_kind": "bool"
+    },
+    {
+      "direction": "out",
+      "name": "out_1",
+      "width": 12,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e4m8"
+    },
+    {
+      "direction": "out",
+      "name": "out_2",
+      "width": 1,
+      "role": "data",
+      "scalar_kind": "bool"
+    },
+    {
+      "direction": "out",
+      "name": "out_3",
+      "width": 1,
+      "role": "data",
+      "scalar_kind": "bool"
+    },
+    {
+      "direction": "out",
+      "name": "err_pc",
+      "width": 7,
+      "role": "diagnostic"
+    }
+  ],
+  "metrics": {
+    "straight_line": false,
+    "nreg": 8,
+    "bnreg": 6,
+    "steering": 46,
+    "copies": 21,
+    "min_ii": 6,
+    "last_pc": 120,
+    "max_block_span": 62
+  }
+}

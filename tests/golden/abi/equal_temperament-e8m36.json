@@ -1,0 +1,108 @@
+{
+  "schema": "holoso-golden-abi/1",
+  "case": "equal_temperament-e8m36",
+  "module_name": "equal_temperament",
+  "float_format": "e8m36",
+  "fetch_stages": 3,
+  "regalloc": {
+    "refine_maxiter": 5000,
+    "reg_reuse_write_cap": 2,
+    "reg_price": 2.0
+  },
+  "ops": {
+    "fadd": "FAddOperator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_decode=0, stage_align=0, stage_normalize=0, stage_pack=0, stage_output=0)",
+    "fmul": "FMulOperator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_product=0, stage_pack=0, stage_output=0)",
+    "fdiv": "FDivOperator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_pack=0, stage_output=0)",
+    "fmul_ilog2": "FMulILog2OperatorFamily(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_decode=0)",
+    "fcmp": "FCmpOperator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0)",
+    "fround": null,
+    "ffma": null,
+    "fsort": null,
+    "fexp2": "FExp2Operator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_reduce=0, stage_product=0, stage_pack=0, stage_output=0)",
+    "flog2": "FLog2Operator(fmt=FloatFormat(wexp=8, wman=36), stage_input=0, stage_decode=0, stage_product=0, stage_product_final=0, stage_normalize=0, stage_normalize_output=0, stage_pack=0, stage_output=0)",
+    "fsincos": "FSincosOperator(fmt=FloatFormat(wexp=8, wman=36), unroll100=100, stage_input=0, stage_product=0, stage_normalize=0, stage_pack=0, stage_output=0)",
+    "fatan2": "FAtan2Operator(fmt=FloatFormat(wexp=8, wman=36), unroll100=100, stage_input=0, stage_product=0, stage_normalize=0, stage_pack=0, stage_output=0)"
+  },
+  "initiation_interval": {
+    "min": 43,
+    "max": 43
+  },
+  "ports": [
+    {
+      "direction": "in",
+      "name": "clk",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "rst",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "in_valid",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "out",
+      "name": "in_ready",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "out",
+      "name": "out_valid",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "out_ready",
+      "width": 1,
+      "role": "control"
+    },
+    {
+      "direction": "in",
+      "name": "in_note",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "out_0",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "out_1",
+      "width": 44,
+      "role": "data",
+      "scalar_kind": "float",
+      "float_format": "e8m36"
+    },
+    {
+      "direction": "out",
+      "name": "err_pc",
+      "width": 6,
+      "role": "diagnostic"
+    }
+  ],
+  "metrics": {
+    "straight_line": true,
+    "nreg": 3,
+    "bnreg": 0,
+    "steering": 5,
+    "copies": 0,
+    "min_ii": 43,
+    "last_pc": 43,
+    "max_block_span": 43
+  }
+}

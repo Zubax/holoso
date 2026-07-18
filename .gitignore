@@ -48,3 +48,4 @@ hdr_log
 .idea/
 .claude/worktrees
 .impact_cache/
+!tests/golden/**

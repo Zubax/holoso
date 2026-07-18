@@ -1,0 +1,169 @@
+holoso-hir-dump/1
+inputs: v0 v1
+nodes:
+  v0 = input x: float
+  v1 = input y: float
+  v2 = op abs(v0): float
+  v3 = op abs(v1): float
+  v4 = phi [b1: v3, b26: v53]: float
+  v5 = const float 0x4000000000000000 (2.0)
+  v6 = op mul(v4, v5): float
+  v7 = phi [b1: v2, b26: v7]: float
+  v8 = op frelational[le](v6, v7): bool
+  v9 = const bool false
+  v10 = phi [b3: v4, b25: v46]: float
+  v11 = phi [b3: v47, b25: v11]: float
+  v12 = op frelational[gt](v10, v11): bool
+  v13 = phi [b3: v7, b25: v49]: float
+  v14 = op frelational[ge](v13, v11): bool
+  v15 = op neg(v11): float
+  v16 = op add(v13, v15): float
+  v17 = const bool true
+  v18 = phi [b7: v16, b6: v13]: float
+  v19 = op mul(v18, v5): float
+  v20 = phi [b7: v11, b6: v11]: float
+  v21 = op frelational[gt](v19, v11): bool
+  v22 = op frelational[eq](v19, v11): bool
+  v23 = phi [b7: v17, b6: v24]: bool
+  v24 = phi [b3: v9, b25: v24]: bool
+  v25 = op neg(v11): float
+  v26 = op add(v18, v25): float
+  v27 = op neg(v11): float
+  v28 = op add(v18, v27): float
+  v29 = phi [b16: v31, b15: v31]: float
+  v30 = phi [b7: v31, b6: v31]: float
+  v31 = phi [b3: v51, b25: v31]: float
+  v32 = phi [b10: v31, b14: v31]: float
+  v33 = phi [b13: v31, b12: v31]: float
+  v34 = const float 0x0000000000000000 (0.0)
+  v35 = op frelational[lt](v31, v34): bool
+  v36 = phi [b16: v28, b15: v37]: float
+  v37 = phi [b10: v18, b14: v38]: float
+  v38 = phi [b13: v26, b12: v18]: float
+  v39 = op neg(v36): float
+  v40 = phi [b19: v39, b18: v36]: float
+  v41 = op frelational[ge](v13, v10): bool
+  v42 = op neg(v10): float
+  v43 = op add(v13, v42): float
+  v44 = phi [b24: v10, b23: v10]: float
+  v45 = const float 0x3fe0000000000000 (0.5)
+  v46 = op mul(v10, v45): float
+  v47 = phi [b1: v3, b26: v47]: float
+  v48 = phi [b24: v11, b23: v11]: float
+  v49 = phi [b24: v43, b23: v13]: float
+  v50 = phi [b24: v24, b23: v24]: bool
+  v51 = phi [b1: v0, b26: v51]: float
+  v52 = phi [b24: v31, b23: v31]: float
+  v53 = op add(v4, v4): float
+blocks:
+  block b0:
+    phis:
+    ops: v2 v3
+    term: jump b1
+  block b1:
+    phis:
+    ops:
+    term: jump b2
+  block b2:
+    phis: v4 v7 v47 v51
+    ops: v6 v8
+    term: branch v8 ? b26 : b3
+  block b3:
+    phis:
+    ops:
+    term: jump b4
+  block b4:
+    phis: v10 v11 v13 v24 v31
+    ops: v12
+    term: branch v12 ? b22 : b5
+  block b5:
+    phis:
+    ops: v14
+    term: branch v14 ? b7 : b6
+  block b6:
+    phis:
+    ops:
+    term: jump b8
+  block b7:
+    phis:
+    ops: v15 v16
+    term: jump b8
+  block b8:
+    phis: v18 v20 v23 v30
+    ops: v19 v21
+    term: branch v21 ? b16 : b9
+  block b9:
+    phis:
+    ops: v22
+    term: branch v22 ? b11 : b10
+  block b10:
+    phis:
+    ops:
+    term: jump b15
+  block b11:
+    phis:
+    ops:
+    term: branch v23 ? b13 : b12
+  block b12:
+    phis:
+    ops:
+    term: jump b14
+  block b13:
+    phis:
+    ops: v25 v26
+    term: jump b14
+  block b14:
+    phis: v33 v38
+    ops:
+    term: jump b15
+  block b15:
+    phis: v32 v37
+    ops:
+    term: jump b17
+  block b16:
+    phis:
+    ops: v27 v28
+    term: jump b17
+  block b17:
+    phis: v29 v36
+    ops: v35
+    term: branch v35 ? b19 : b18
+  block b18:
+    phis:
+    ops:
+    term: jump b20
+  block b19:
+    phis:
+    ops: v39
+    term: jump b20
+  block b20:
+    phis: v40
+    ops:
+    term: jump b21
+  block b21:
+    phis:
+    ops:
+    term: ret
+  block b22:
+    phis:
+    ops: v41
+    term: branch v41 ? b24 : b23
+  block b23:
+    phis:
+    ops:
+    term: jump b25
+  block b24:
+    phis:
+    ops: v42 v43
+    term: jump b25
+  block b25:
+    phis: v44 v48 v49 v50 v52
+    ops: v46
+    term: jump b4
+  block b26:
+    phis:
+    ops: v53
+    term: jump b2
+outputs:
+  out_0 = v40
+state_slots:

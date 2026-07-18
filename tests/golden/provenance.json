@@ -1,0 +1,11 @@
+{
+  "schema": "holoso-golden-provenance/1",
+  "cpython": "3.14.5",
+  "dependencies": {
+    "holoso": "0.1.13",
+    "zkf": "0.3.1",
+    "numpy": "2.5.1",
+    "scipy": "1.18.0"
+  },
+  "container_digest": null
+}

@@ -1,0 +1,66 @@
+holoso-hir-dump/1
+inputs: v0 v1 v2
+nodes:
+  v0 = input x: float
+  v1 = input lo: float
+  v2 = input hi: float
+  v3 = op frelational[gt](v0, v2): bool
+  v4 = op frelational[lt](v0, v1): bool
+  v5 = phi [b3: v1, b2: v0]: float
+  v6 = phi [b5: v2, b4: v5]: float
+  v7 = phi [b5: v1, b4: v1]: float
+  v8 = phi [b3: v1, b2: v1]: float
+  v9 = phi [b5: v0, b4: v0]: float
+  v10 = phi [b3: v0, b2: v0]: float
+  v11 = phi [b5: v2, b4: v2]: float
+  v12 = phi [b3: v2, b2: v2]: float
+  v13 = op frelational[lt](v1, v0): bool
+  v14 = op frelational[lt](v0, v2): bool
+  v15 = op bool_select(v13, v14, v13): bool
+  v16 = op frelational[le](v0, v1): bool
+  v17 = op frelational[ge](v0, v2): bool
+  v18 = op bool_select(v16, v16, v17): bool
+  v19 = op float_to_bool(v0): bool
+  v20 = op bool_select(v19, v15, v19): bool
+  v21 = op bool_to_float(v15): float
+  v22 = op mul(v21, v0): float
+blocks:
+  block b0:
+    phis:
+    ops: v3
+    term: branch v3 ? b5 : b1
+  block b1:
+    phis:
+    ops: v4
+    term: branch v4 ? b3 : b2
+  block b2:
+    phis:
+    ops:
+    term: jump b4
+  block b3:
+    phis:
+    ops:
+    term: jump b4
+  block b4:
+    phis: v5 v8 v10 v12
+    ops:
+    term: jump b6
+  block b5:
+    phis:
+    ops:
+    term: jump b6
+  block b6:
+    phis: v6 v7 v9 v11
+    ops: v13 v14 v15 v16 v17 v18 v19 v20 v21 v22
+    term: jump b7
+  block b7:
+    phis:
+    ops:
+    term: ret
+outputs:
+  out_0 = v6
+  out_1 = v15
+  out_2 = v18
+  out_3 = v20
+  out_4 = v22
+state_slots:

@@ -1,0 +1,101 @@
+holoso-hir-dump/1
+inputs: v0 v1 v2 v3 v4 v5
+nodes:
+  v0 = input enabled: bool
+  v1 = input a: bool
+  v2 = input b: bool
+  v3 = input c: bool
+  v4 = input d: bool
+  v5 = input e: bool
+  v6 = op bool_select(v1, v2, v1): bool
+  v7 = op bool_select(v6, v3, v6): bool
+  v8 = op bool_select(v6, v4, v6): bool
+  v9 = op bool_select(v7, v7, v8): bool
+  v10 = op bool_select(v6, v5, v6): bool
+  v11 = op bool_select(v9, v9, v10): bool
+  v12 = op bool_select(v1, v3, v1): bool
+  v13 = op bool_select(v12, v4, v12): bool
+  v14 = op bool_select(v11, v11, v13): bool
+  v15 = op bool_select(v12, v5, v12): bool
+  v16 = op bool_select(v14, v14, v15): bool
+  v17 = op bool_select(v1, v4, v1): bool
+  v18 = op bool_select(v17, v5, v17): bool
+  v19 = op bool_select(v16, v16, v18): bool
+  v20 = op bool_select(v2, v3, v2): bool
+  v21 = op bool_select(v20, v4, v20): bool
+  v22 = op bool_select(v19, v19, v21): bool
+  v23 = op bool_select(v20, v5, v20): bool
+  v24 = op bool_select(v22, v22, v23): bool
+  v25 = op bool_select(v2, v4, v2): bool
+  v26 = op bool_select(v25, v5, v25): bool
+  v27 = op bool_select(v24, v24, v26): bool
+  v28 = op bool_select(v3, v4, v3): bool
+  v29 = op bool_select(v28, v5, v28): bool
+  v30 = op bool_select(v27, v27, v29): bool
+  v31 = state_read _fault_a: bool
+  v32 = op bxor(v1, v30): bool
+  v33 = op bool_select(v31, v31, v32): bool
+  v34 = state_read _fault_b: bool
+  v35 = op bxor(v2, v30): bool
+  v36 = op bool_select(v34, v34, v35): bool
+  v37 = state_read _fault_c: bool
+  v38 = op bxor(v3, v30): bool
+  v39 = op bool_select(v37, v37, v38): bool
+  v40 = state_read _fault_d: bool
+  v41 = op bxor(v4, v30): bool
+  v42 = op bool_select(v40, v40, v41): bool
+  v43 = state_read _fault_e: bool
+  v44 = op bxor(v5, v30): bool
+  v45 = op bool_select(v43, v43, v44): bool
+  v46 = phi [b5: v30, b4: v30]: bool
+  v47 = phi [b5: v33, b4: v31]: bool
+  v48 = phi [b5: v36, b4: v34]: bool
+  v49 = phi [b5: v39, b4: v37]: bool
+  v50 = phi [b5: v42, b4: v40]: bool
+  v51 = phi [b5: v45, b4: v43]: bool
+blocks:
+  block b0:
+    phis:
+    ops:
+    term: jump b1
+  block b1:
+    phis:
+    ops: v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24 v25 v26 v27 v28 v29 v30
+    term: jump b2
+  block b2:
+    phis:
+    ops:
+    term: jump b3
+  block b3:
+    phis:
+    ops:
+    term: branch v0 ? b5 : b4
+  block b4:
+    phis:
+    ops:
+    term: jump b6
+  block b5:
+    phis:
+    ops: v32 v33 v35 v36 v38 v39 v41 v42 v44 v45
+    term: jump b6
+  block b6:
+    phis: v46 v47 v48 v49 v50 v51
+    ops:
+    term: jump b7
+  block b7:
+    phis:
+    ops:
+    term: ret
+outputs:
+  out_0 = v30
+  out_1 = v47
+  out_2 = v48
+  out_3 = v49
+  out_4 = v50
+  out_5 = v51
+state_slots:
+  _fault_a = v47 reset const bool false
+  _fault_b = v48 reset const bool false
+  _fault_c = v49 reset const bool false
+  _fault_d = v50 reset const bool false
+  _fault_e = v51 reset const bool false

@@ -58,7 +58,8 @@ def test_targets_still_exercise_constant_installs(name: str) -> None:
     parity/frame error) and other arms install literal constants with no source to sample, so they fire inline-class and
     land one cycle earlier than a computed-source copy. Pin that these kernels still emit constant phi-arm installs, so
     a kernel-shape change cannot quietly make the recovered-cycle freezes meaningless. The inline-class timing itself is
-    pinned end-to-end -- by those frozen lengths (uart_rx 127, uart_tx 108 in test_latency_freeze), by the
+    pinned end-to-end -- by the frozen schedule lengths in the golden corpus (the uart ABI manifests under
+    ``tests/golden/abi/``), by the
     landing <= terminator structural invariant above, and by RTL cosim -- not by re-deriving the install's own helpers.
     """
     spec = next(s for s in SPECS if s.name == name)

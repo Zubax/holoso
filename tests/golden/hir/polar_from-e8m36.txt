@@ -1,0 +1,38 @@
+holoso-hir-dump/1
+inputs: v0 v1
+nodes:
+  v0 = input magnitude: float
+  v1 = input angle: float
+  v2 = op cos(v1): float
+  v3 = op mul(v0, v2): float
+  v4 = op sin(v1): float
+  v5 = op mul(v0, v4): float
+blocks:
+  block b0:
+    phis:
+    ops:
+    term: jump b1
+  block b1:
+    phis:
+    ops:
+    term: jump b2
+  block b2:
+    phis:
+    ops: v2 v3 v4 v5
+    term: jump b3
+  block b3:
+    phis:
+    ops:
+    term: jump b4
+  block b4:
+    phis:
+    ops:
+    term: jump b5
+  block b5:
+    phis:
+    ops:
+    term: ret
+outputs:
+  out_0 = v3
+  out_1 = v5
+state_slots:

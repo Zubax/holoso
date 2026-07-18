@@ -6,8 +6,9 @@ The compiler had two hash-order-sensitive value-numbering points, both in the fr
 ids, hence every vid-keyed tie-break downstream) and the carried-state live-in materialization in while-loop headers
 (StateRead creation order). Both now iterate sorted. Since the hash seed is fixed per interpreter at startup, this
 suite spawns SUBPROCESSES under explicitly different seeds and checks the property end to end: byte-identical Verilog
-for a branch-heavy kernel, and an identical HIR node table for the loop-carried-state shape (whose vid permutation is
-masked downstream on small kernels, so RTL bytes alone would under-test the numbering claim).
+for a branch-heavy kernel, and an identical complete HIR dump (via ``tests/_hirdump.py``, the corpus serializer)
+for the loop-carried-state shape (whose vid permutation is masked downstream on small kernels, so RTL bytes alone
+would under-test the numbering claim).
 
 The subprocess entry points are the plain functions below (imported from this module by the child), so the kernels
 and operator configs are ordinary, type-checked Python rather than templated source strings.
@@ -195,9 +196,9 @@ def emit_cordic() -> None:
 def dump_two_carried_hir() -> None:
     from holoso._frontend import lower
 
-    hir = lower(TwoCarried().step)
-    for vid in sorted(hir.nodes):
-        print(vid, repr(hir.nodes[vid]))
+    from ._hirdump import dump_hir
+
+    sys.stdout.write(dump_hir(lower(TwoCarried().step)))
 
 
 @lru_cache(maxsize=None)

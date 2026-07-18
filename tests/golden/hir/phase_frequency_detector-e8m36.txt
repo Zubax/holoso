@@ -1,0 +1,91 @@
+holoso-hir-dump/1
+inputs: v0 v1 v2
+nodes:
+  v0 = input ref_edge: bool
+  v1 = input fb_edge: bool
+  v2 = input clear: bool
+  v3 = const bool true
+  v4 = state_read _ref_pending: bool
+  v5 = phi [b3: v1, b2: v1]: bool
+  v6 = state_read _fb_pending: bool
+  v7 = phi [b6: v8, b5: v8]: bool
+  v8 = phi [b3: v3, b2: v4]: bool
+  v9 = phi [b6: v3, b5: v6]: bool
+  v10 = phi [b3: v6, b2: v6]: bool
+  v11 = op bool_select(v8, v9, v8): bool
+  v12 = state_read up: bool
+  v13 = state_read down: bool
+  v14 = const bool false
+  v15 = phi [b11: v14, b10: v16]: bool
+  v16 = phi [b9: v14, b8: v8]: bool
+  v17 = phi [b11: v14, b10: v18]: bool
+  v18 = phi [b9: v14, b8: v9]: bool
+  v19 = phi [b11: v14, b10: v20]: bool
+  v20 = phi [b9: v14, b8: v8]: bool
+  v21 = phi [b11: v14, b10: v22]: bool
+  v22 = phi [b9: v14, b8: v9]: bool
+blocks:
+  block b0:
+    phis:
+    ops:
+    term: branch v2 ? b11 : b1
+  block b1:
+    phis:
+    ops:
+    term: branch v0 ? b3 : b2
+  block b2:
+    phis:
+    ops:
+    term: jump b4
+  block b3:
+    phis:
+    ops:
+    term: jump b4
+  block b4:
+    phis: v5 v8 v10
+    ops:
+    term: branch v1 ? b6 : b5
+  block b5:
+    phis:
+    ops:
+    term: jump b7
+  block b6:
+    phis:
+    ops:
+    term: jump b7
+  block b7:
+    phis: v7 v9
+    ops: v11
+    term: branch v11 ? b9 : b8
+  block b8:
+    phis:
+    ops:
+    term: jump b10
+  block b9:
+    phis:
+    ops:
+    term: jump b10
+  block b10:
+    phis: v16 v18 v20 v22
+    ops:
+    term: jump b12
+  block b11:
+    phis:
+    ops:
+    term: jump b12
+  block b12:
+    phis: v15 v17 v19 v21
+    ops:
+    term: jump b13
+  block b13:
+    phis:
+    ops:
+    term: ret
+outputs:
+  state_up = v15
+  state_down = v17
+state_slots:
+  _ref_pending = v19 reset const bool false
+  _fb_pending = v21 reset const bool false
+  up = v15 reset const bool false
+  down = v17 reset const bool false

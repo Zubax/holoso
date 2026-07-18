@@ -1,0 +1,994 @@
+holoso-hir-dump/1
+inputs: v0 v1
+nodes:
+  v0 = input start: bool
+  v1 = input char: float
+  v2 = state_read _busy: bool
+  v3 = op bnot(v2): bool
+  v4 = state_read _index: float
+  v5 = const float 0x0000000000000000 (0.0)
+  v6 = op frelational[le](v4, v5): bool
+  v7 = const float 0x4020000000000000 (8.0)
+  v8 = op frelational[le](v4, v7): bool
+  v9 = const float 0x4022000000000000 (9.0)
+  v10 = op frelational[le](v4, v9): bool
+  v11 = const bool true
+  v12 = state_read _parity: bool
+  v13 = state_read _shift: float
+  v14 = const float 0x4060000000000000 (128.0)
+  v15 = op frelational[ge](v13, v14): bool
+  v16 = const bool false
+  v17 = phi [b11: v18, b10: v18]: float
+  v18 = state_read _phase: float
+  v19 = phi [b9: v18, b8: v18]: float
+  v20 = phi [b4: v18, b7: v18]: float
+  v21 = op frelational[le](v18, v5): bool
+  v22 = const float 0x3ff0000000000000 (1.0)
+  v23 = op neg(v22): float
+  v24 = op add(v18, v23): float
+  v25 = phi [b11: v4, b10: v4]: float
+  v26 = phi [b9: v4, b8: v4]: float
+  v27 = phi [b4: v4, b7: v4]: float
+  v28 = op frelational[ge](v4, v22): bool
+  v29 = op frelational[le](v4, v7): bool
+  v30 = op bool_select(v28, v29, v28): bool
+  v31 = phi [b11: v13, b10: v13]: float
+  v32 = phi [b9: v13, b8: v13]: float
+  v33 = phi [b4: v13, b7: v13]: float
+  v34 = op frelational[ge](v13, v14): bool
+  v35 = op neg(v14): float
+  v36 = op add(v13, v35): float
+  v37 = phi [b18: v36, b17: v13]: float
+  v38 = const float 0x4000000000000000 (2.0)
+  v39 = op mul(v37, v38): float
+  v40 = phi [b15: v4, b19: v4]: float
+  v41 = phi [b18: v4, b17: v4]: float
+  v42 = const int 10
+  v43 = const float 0x4024000000000000 (10.0)
+  v44 = op frelational[ge](v4, v43): bool
+  v45 = op add(v4, v22): float
+  v46 = const float 0x402e000000000000 (15.0)
+  v47 = const int 0
+  v48 = op frelational[ge](v1, v14): bool
+  v49 = op neg(v14): float
+  v50 = op add(v1, v49): float
+  v51 = phi [b38: v50, b37: v1]: float
+  v52 = op mul(v51, v38): float
+  v53 = phi [b38: v48, b37: v48]: bool
+  v54 = const int 128
+  v55 = phi [b41: v47, b40: v54]: int
+  v56 = op int_to_float(v55): float
+  v57 = op add(v5, v56): float
+  v58 = const int 1
+  v59 = phi [b41: v52, b40: v52]: float
+  v60 = op frelational[ge](v52, v14): bool
+  v61 = op neg(v14): float
+  v62 = op add(v52, v61): float
+  v63 = phi [b46: v62, b45: v52]: float
+  v64 = op mul(v63, v38): float
+  v65 = phi [b46: v57, b45: v57]: float
+  v66 = op div(v57, v38): float
+  v67 = phi [b46: v60, b45: v60]: bool
+  v68 = phi [b49: v47, b48: v54]: int
+  v69 = phi [b49: v66, b48: v66]: float
+  v70 = op int_to_float(v68): float
+  v71 = op add(v66, v70): float
+  v72 = const int 2
+  v73 = phi [b49: v64, b48: v64]: float
+  v74 = op frelational[ge](v64, v14): bool
+  v75 = op neg(v14): float
+  v76 = op add(v64, v75): float
+  v77 = phi [b54: v76, b53: v64]: float
+  v78 = op mul(v77, v38): float
+  v79 = phi [b54: v71, b53: v71]: float
+  v80 = op div(v71, v38): float
+  v81 = phi [b54: v74, b53: v74]: bool
+  v82 = phi [b57: v47, b56: v54]: int
+  v83 = phi [b57: v80, b56: v80]: float
+  v84 = op int_to_float(v82): float
+  v85 = op add(v80, v84): float
+  v86 = const int 3
+  v87 = phi [b57: v78, b56: v78]: float
+  v88 = op frelational[ge](v78, v14): bool
+  v89 = op neg(v14): float
+  v90 = op add(v78, v89): float
+  v91 = phi [b62: v90, b61: v78]: float
+  v92 = op mul(v91, v38): float
+  v93 = phi [b62: v85, b61: v85]: float
+  v94 = op div(v85, v38): float
+  v95 = phi [b62: v88, b61: v88]: bool
+  v96 = phi [b65: v47, b64: v54]: int
+  v97 = phi [b65: v94, b64: v94]: float
+  v98 = op int_to_float(v96): float
+  v99 = op add(v94, v98): float
+  v100 = const int 4
+  v101 = phi [b65: v92, b64: v92]: float
+  v102 = op frelational[ge](v92, v14): bool
+  v103 = op neg(v14): float
+  v104 = op add(v92, v103): float
+  v105 = phi [b70: v104, b69: v92]: float
+  v106 = op mul(v105, v38): float
+  v107 = phi [b70: v99, b69: v99]: float
+  v108 = op div(v99, v38): float
+  v109 = phi [b70: v102, b69: v102]: bool
+  v110 = phi [b73: v47, b72: v54]: int
+  v111 = phi [b73: v108, b72: v108]: float
+  v112 = op int_to_float(v110): float
+  v113 = op add(v108, v112): float
+  v114 = const int 5
+  v115 = phi [b73: v106, b72: v106]: float
+  v116 = op frelational[ge](v106, v14): bool
+  v117 = op neg(v14): float
+  v118 = op add(v106, v117): float
+  v119 = phi [b78: v118, b77: v106]: float
+  v120 = op mul(v119, v38): float
+  v121 = phi [b78: v113, b77: v113]: float
+  v122 = op div(v113, v38): float
+  v123 = phi [b78: v116, b77: v116]: bool
+  v124 = phi [b81: v47, b80: v54]: int
+  v125 = phi [b81: v122, b80: v122]: float
+  v126 = op int_to_float(v124): float
+  v127 = op add(v122, v126): float
+  v128 = const int 6
+  v129 = phi [b81: v120, b80: v120]: float
+  v130 = op frelational[ge](v120, v14): bool
+  v131 = op neg(v14): float
+  v132 = op add(v120, v131): float
+  v133 = phi [b86: v132, b85: v120]: float
+  v134 = op mul(v133, v38): float
+  v135 = phi [b86: v127, b85: v127]: float
+  v136 = op div(v127, v38): float
+  v137 = phi [b86: v130, b85: v130]: bool
+  v138 = phi [b89: v47, b88: v54]: int
+  v139 = phi [b89: v136, b88: v136]: float
+  v140 = op int_to_float(v138): float
+  v141 = op add(v136, v140): float
+  v142 = const int 7
+  v143 = phi [b89: v134, b88: v134]: float
+  v144 = op frelational[ge](v134, v14): bool
+  v145 = op neg(v14): float
+  v146 = op add(v134, v145): float
+  v147 = phi [b94: v146, b93: v134]: float
+  v148 = op mul(v147, v38): float
+  v149 = phi [b94: v141, b93: v141]: float
+  v150 = op div(v141, v38): float
+  v151 = phi [b94: v144, b93: v144]: bool
+  v152 = phi [b97: v47, b96: v54]: int
+  v153 = phi [b97: v150, b96: v150]: float
+  v154 = op int_to_float(v152): float
+  v155 = op add(v150, v154): float
+  v156 = phi [b97: v1, b96: v1]: float
+  v157 = phi [b94: v1, b93: v1]: float
+  v158 = phi [b89: v1, b88: v1]: float
+  v159 = phi [b86: v1, b85: v1]: float
+  v160 = phi [b81: v1, b80: v1]: float
+  v161 = phi [b78: v1, b77: v1]: float
+  v162 = phi [b73: v1, b72: v1]: float
+  v163 = phi [b70: v1, b69: v1]: float
+  v164 = phi [b65: v1, b64: v1]: float
+  v165 = phi [b62: v1, b61: v1]: float
+  v166 = phi [b57: v1, b56: v1]: float
+  v167 = phi [b54: v1, b53: v1]: float
+  v168 = phi [b49: v1, b48: v1]: float
+  v169 = phi [b46: v1, b45: v1]: float
+  v170 = phi [b41: v1, b40: v1]: float
+  v171 = phi [b38: v1, b37: v1]: float
+  v172 = op frelational[ge](v1, v14): bool
+  v173 = op neg(v14): float
+  v174 = op add(v1, v173): float
+  v175 = phi [b107: v174, b106: v1]: float
+  v176 = op mul(v175, v38): float
+  v177 = phi [b107: v172, b106: v172]: bool
+  v178 = op bxor(v16, v172): bool
+  v179 = op frelational[ge](v176, v14): bool
+  v180 = op neg(v14): float
+  v181 = op add(v176, v180): float
+  v182 = phi [b112: v181, b111: v176]: float
+  v183 = op mul(v182, v38): float
+  v184 = phi [b112: v178, b111: v178]: bool
+  v185 = phi [b112: v179, b111: v179]: bool
+  v186 = op bxor(v178, v179): bool
+  v187 = op frelational[ge](v183, v14): bool
+  v188 = op neg(v14): float
+  v189 = op add(v183, v188): float
+  v190 = phi [b117: v189, b116: v183]: float
+  v191 = op mul(v190, v38): float
+  v192 = phi [b117: v186, b116: v186]: bool
+  v193 = phi [b117: v187, b116: v187]: bool
+  v194 = op bxor(v186, v187): bool
+  v195 = op frelational[ge](v191, v14): bool
+  v196 = op neg(v14): float
+  v197 = op add(v191, v196): float
+  v198 = phi [b122: v197, b121: v191]: float
+  v199 = op mul(v198, v38): float
+  v200 = phi [b122: v194, b121: v194]: bool
+  v201 = phi [b122: v195, b121: v195]: bool
+  v202 = op bxor(v194, v195): bool
+  v203 = op frelational[ge](v199, v14): bool
+  v204 = op neg(v14): float
+  v205 = op add(v199, v204): float
+  v206 = phi [b127: v205, b126: v199]: float
+  v207 = op mul(v206, v38): float
+  v208 = phi [b127: v202, b126: v202]: bool
+  v209 = phi [b127: v203, b126: v203]: bool
+  v210 = op bxor(v202, v203): bool
+  v211 = op frelational[ge](v207, v14): bool
+  v212 = op neg(v14): float
+  v213 = op add(v207, v212): float
+  v214 = phi [b132: v213, b131: v207]: float
+  v215 = op mul(v214, v38): float
+  v216 = phi [b132: v210, b131: v210]: bool
+  v217 = phi [b132: v211, b131: v211]: bool
+  v218 = op bxor(v210, v211): bool
+  v219 = op frelational[ge](v215, v14): bool
+  v220 = op neg(v14): float
+  v221 = op add(v215, v220): float
+  v222 = phi [b137: v221, b136: v215]: float
+  v223 = op mul(v222, v38): float
+  v224 = phi [b137: v218, b136: v218]: bool
+  v225 = phi [b137: v219, b136: v219]: bool
+  v226 = op bxor(v218, v219): bool
+  v227 = op frelational[ge](v223, v14): bool
+  v228 = op neg(v14): float
+  v229 = op add(v223, v228): float
+  v230 = phi [b142: v229, b141: v223]: float
+  v231 = op mul(v230, v38): float
+  v232 = phi [b142: v226, b141: v226]: bool
+  v233 = phi [b142: v227, b141: v227]: bool
+  v234 = op bxor(v226, v227): bool
+  v235 = phi [b147: v11, b29: v262]: bool
+  v236 = phi [b31: v11, b146: v11]: bool
+  v237 = phi [b142: v11, b141: v11]: bool
+  v238 = phi [b137: v11, b136: v11]: bool
+  v239 = phi [b132: v11, b131: v11]: bool
+  v240 = phi [b127: v11, b126: v11]: bool
+  v241 = phi [b122: v11, b121: v11]: bool
+  v242 = phi [b117: v11, b116: v11]: bool
+  v243 = phi [b112: v11, b111: v11]: bool
+  v244 = phi [b107: v11, b106: v11]: bool
+  v245 = phi [b97: v11, b96: v11]: bool
+  v246 = phi [b94: v11, b93: v11]: bool
+  v247 = phi [b89: v11, b88: v11]: bool
+  v248 = phi [b86: v11, b85: v11]: bool
+  v249 = phi [b81: v11, b80: v11]: bool
+  v250 = phi [b78: v11, b77: v11]: bool
+  v251 = phi [b73: v11, b72: v11]: bool
+  v252 = phi [b70: v11, b69: v11]: bool
+  v253 = phi [b65: v11, b64: v11]: bool
+  v254 = phi [b62: v11, b61: v11]: bool
+  v255 = phi [b57: v11, b56: v11]: bool
+  v256 = phi [b54: v11, b53: v11]: bool
+  v257 = phi [b49: v11, b48: v11]: bool
+  v258 = phi [b46: v11, b45: v11]: bool
+  v259 = phi [b41: v11, b40: v11]: bool
+  v260 = phi [b38: v11, b37: v11]: bool
+  v261 = phi [b13: v262, b28: v262]: bool
+  v262 = phi [b11: v16, b10: v263]: bool
+  v263 = phi [b9: v15, b8: v264]: bool
+  v264 = phi [b4: v11, b7: v12]: bool
+  v265 = phi [b27: v262, b26: v262]: bool
+  v266 = phi [b15: v262, b19: v262]: bool
+  v267 = phi [b18: v262, b17: v262]: bool
+  v268 = phi [b147: v269, b29: v294]: bool
+  v269 = phi [b31: v2, b146: v11]: bool
+  v270 = phi [b142: v11, b141: v11]: bool
+  v271 = phi [b137: v11, b136: v11]: bool
+  v272 = phi [b132: v11, b131: v11]: bool
+  v273 = phi [b127: v11, b126: v11]: bool
+  v274 = phi [b122: v11, b121: v11]: bool
+  v275 = phi [b117: v11, b116: v11]: bool
+  v276 = phi [b112: v11, b111: v11]: bool
+  v277 = phi [b107: v11, b106: v11]: bool
+  v278 = phi [b97: v11, b96: v11]: bool
+  v279 = phi [b94: v11, b93: v11]: bool
+  v280 = phi [b89: v11, b88: v11]: bool
+  v281 = phi [b86: v11, b85: v11]: bool
+  v282 = phi [b81: v11, b80: v11]: bool
+  v283 = phi [b78: v11, b77: v11]: bool
+  v284 = phi [b73: v11, b72: v11]: bool
+  v285 = phi [b70: v11, b69: v11]: bool
+  v286 = phi [b65: v11, b64: v11]: bool
+  v287 = phi [b62: v11, b61: v11]: bool
+  v288 = phi [b57: v11, b56: v11]: bool
+  v289 = phi [b54: v11, b53: v11]: bool
+  v290 = phi [b49: v11, b48: v11]: bool
+  v291 = phi [b46: v11, b45: v11]: bool
+  v292 = phi [b41: v11, b40: v11]: bool
+  v293 = phi [b38: v11, b37: v11]: bool
+  v294 = phi [b13: v2, b28: v298]: bool
+  v295 = phi [b11: v2, b10: v2]: bool
+  v296 = phi [b9: v2, b8: v2]: bool
+  v297 = phi [b4: v2, b7: v2]: bool
+  v298 = phi [b27: v16, b26: v2]: bool
+  v299 = phi [b15: v2, b19: v2]: bool
+  v300 = phi [b18: v2, b17: v2]: bool
+  v301 = phi [b147: v302, b29: v327]: float
+  v302 = phi [b31: v18, b146: v46]: float
+  v303 = phi [b142: v46, b141: v46]: float
+  v304 = phi [b137: v46, b136: v46]: float
+  v305 = phi [b132: v46, b131: v46]: float
+  v306 = phi [b127: v46, b126: v46]: float
+  v307 = phi [b122: v46, b121: v46]: float
+  v308 = phi [b117: v46, b116: v46]: float
+  v309 = phi [b112: v46, b111: v46]: float
+  v310 = phi [b107: v46, b106: v46]: float
+  v311 = phi [b97: v46, b96: v46]: float
+  v312 = phi [b94: v46, b93: v46]: float
+  v313 = phi [b89: v46, b88: v46]: float
+  v314 = phi [b86: v46, b85: v46]: float
+  v315 = phi [b81: v46, b80: v46]: float
+  v316 = phi [b78: v46, b77: v46]: float
+  v317 = phi [b73: v46, b72: v46]: float
+  v318 = phi [b70: v46, b69: v46]: float
+  v319 = phi [b65: v46, b64: v46]: float
+  v320 = phi [b62: v46, b61: v46]: float
+  v321 = phi [b57: v46, b56: v46]: float
+  v322 = phi [b54: v46, b53: v46]: float
+  v323 = phi [b49: v46, b48: v46]: float
+  v324 = phi [b46: v46, b45: v46]: float
+  v325 = phi [b41: v46, b40: v46]: float
+  v326 = phi [b38: v46, b37: v46]: float
+  v327 = phi [b13: v24, b28: v328]: float
+  v328 = phi [b27: v18, b26: v46]: float
+  v329 = phi [b15: v18, b19: v18]: float
+  v330 = phi [b18: v18, b17: v18]: float
+  v331 = phi [b147: v332, b29: v357]: float
+  v332 = phi [b31: v4, b146: v5]: float
+  v333 = phi [b142: v5, b141: v5]: float
+  v334 = phi [b137: v5, b136: v5]: float
+  v335 = phi [b132: v5, b131: v5]: float
+  v336 = phi [b127: v5, b126: v5]: float
+  v337 = phi [b122: v5, b121: v5]: float
+  v338 = phi [b117: v5, b116: v5]: float
+  v339 = phi [b112: v5, b111: v5]: float
+  v340 = phi [b107: v5, b106: v5]: float
+  v341 = phi [b97: v5, b96: v5]: float
+  v342 = phi [b94: v5, b93: v5]: float
+  v343 = phi [b89: v5, b88: v5]: float
+  v344 = phi [b86: v5, b85: v5]: float
+  v345 = phi [b81: v5, b80: v5]: float
+  v346 = phi [b78: v5, b77: v5]: float
+  v347 = phi [b73: v5, b72: v5]: float
+  v348 = phi [b70: v5, b69: v5]: float
+  v349 = phi [b65: v5, b64: v5]: float
+  v350 = phi [b62: v5, b61: v5]: float
+  v351 = phi [b57: v5, b56: v5]: float
+  v352 = phi [b54: v5, b53: v5]: float
+  v353 = phi [b49: v5, b48: v5]: float
+  v354 = phi [b46: v5, b45: v5]: float
+  v355 = phi [b41: v5, b40: v5]: float
+  v356 = phi [b38: v5, b37: v5]: float
+  v357 = phi [b13: v4, b28: v358]: float
+  v358 = phi [b27: v4, b26: v45]: float
+  v359 = phi [b147: v360, b29: v369]: float
+  v360 = phi [b31: v13, b146: v155]: float
+  v361 = phi [b142: v155, b141: v155]: float
+  v362 = phi [b137: v155, b136: v155]: float
+  v363 = phi [b132: v155, b131: v155]: float
+  v364 = phi [b127: v155, b126: v155]: float
+  v365 = phi [b122: v155, b121: v155]: float
+  v366 = phi [b117: v155, b116: v155]: float
+  v367 = phi [b112: v155, b111: v155]: float
+  v368 = phi [b107: v155, b106: v155]: float
+  v369 = phi [b13: v13, b28: v371]: float
+  v370 = phi [b27: v371, b26: v371]: float
+  v371 = phi [b15: v13, b19: v39]: float
+  v372 = phi [b147: v373, b29: v12]: bool
+  v373 = phi [b31: v12, b146: v234]: bool
+  v374 = phi [b13: v12, b28: v12]: bool
+  v375 = phi [b11: v12, b10: v12]: bool
+  v376 = phi [b9: v12, b8: v12]: bool
+  v377 = phi [b4: v12, b7: v12]: bool
+  v378 = phi [b27: v12, b26: v12]: bool
+  v379 = phi [b15: v12, b19: v12]: bool
+  v380 = phi [b18: v12, b17: v12]: bool
+blocks:
+  block b0:
+    phis:
+    ops: v3
+    term: branch v3 ? b30 : b1
+  block b1:
+    phis:
+    ops: v6
+    term: branch v6 ? b11 : b2
+  block b2:
+    phis:
+    ops: v8
+    term: branch v8 ? b9 : b3
+  block b3:
+    phis:
+    ops: v10
+    term: branch v10 ? b5 : b4
+  block b4:
+    phis:
+    ops:
+    term: jump b8
+  block b5:
+    phis:
+    ops:
+    term: jump b6
+  block b6:
+    phis:
+    ops:
+    term: jump b7
+  block b7:
+    phis:
+    ops:
+    term: jump b8
+  block b8:
+    phis: v20 v27 v33 v264 v297 v377
+    ops:
+    term: jump b10
+  block b9:
+    phis:
+    ops: v15
+    term: jump b10
+  block b10:
+    phis: v19 v26 v32 v263 v296 v376
+    ops:
+    term: jump b12
+  block b11:
+    phis:
+    ops:
+    term: jump b12
+  block b12:
+    phis: v17 v25 v31 v262 v295 v375
+    ops: v21
+    term: branch v21 ? b14 : b13
+  block b13:
+    phis:
+    ops: v23 v24
+    term: jump b29
+  block b14:
+    phis:
+    ops: v28 v29 v30
+    term: branch v30 ? b16 : b15
+  block b15:
+    phis:
+    ops:
+    term: jump b20
+  block b16:
+    phis:
+    ops: v34
+    term: branch v34 ? b18 : b17
+  block b17:
+    phis:
+    ops:
+    term: jump b19
+  block b18:
+    phis:
+    ops: v35 v36
+    term: jump b19
+  block b19:
+    phis: v37 v41 v267 v300 v330 v380
+    ops: v39
+    term: jump b20
+  block b20:
+    phis: v40 v266 v299 v329 v371 v379
+    ops:
+    term: jump b21
+  block b21:
+    phis:
+    ops:
+    term: jump b22
+  block b22:
+    phis:
+    ops:
+    term: jump b23
+  block b23:
+    phis:
+    ops:
+    term: jump b24
+  block b24:
+    phis:
+    ops:
+    term: jump b25
+  block b25:
+    phis:
+    ops: v44
+    term: branch v44 ? b27 : b26
+  block b26:
+    phis:
+    ops: v45
+    term: jump b28
+  block b27:
+    phis:
+    ops:
+    term: jump b28
+  block b28:
+    phis: v265 v298 v328 v358 v370 v378
+    ops:
+    term: jump b29
+  block b29:
+    phis: v261 v294 v327 v357 v369 v374
+    ops:
+    term: jump b148
+  block b30:
+    phis:
+    ops:
+    term: branch v0 ? b32 : b31
+  block b31:
+    phis:
+    ops:
+    term: jump b147
+  block b32:
+    phis:
+    ops:
+    term: jump b33
+  block b33:
+    phis:
+    ops:
+    term: jump b34
+  block b34:
+    phis:
+    ops:
+    term: jump b35
+  block b35:
+    phis:
+    ops:
+    term: jump b36
+  block b36:
+    phis:
+    ops: v48
+    term: branch v48 ? b38 : b37
+  block b37:
+    phis:
+    ops:
+    term: jump b39
+  block b38:
+    phis:
+    ops: v49 v50
+    term: jump b39
+  block b39:
+    phis: v51 v53 v171 v260 v293 v326 v356
+    ops: v52
+    term: branch v48 ? b40 : b41
+  block b40:
+    phis:
+    ops:
+    term: jump b42
+  block b41:
+    phis:
+    ops:
+    term: jump b42
+  block b42:
+    phis: v55 v59 v170 v259 v292 v325 v355
+    ops: v56 v57
+    term: jump b43
+  block b43:
+    phis:
+    ops:
+    term: jump b44
+  block b44:
+    phis:
+    ops: v60
+    term: branch v60 ? b46 : b45
+  block b45:
+    phis:
+    ops:
+    term: jump b47
+  block b46:
+    phis:
+    ops: v61 v62
+    term: jump b47
+  block b47:
+    phis: v63 v65 v67 v169 v258 v291 v324 v354
+    ops: v64 v66
+    term: branch v60 ? b48 : b49
+  block b48:
+    phis:
+    ops:
+    term: jump b50
+  block b49:
+    phis:
+    ops:
+    term: jump b50
+  block b50:
+    phis: v68 v69 v73 v168 v257 v290 v323 v353
+    ops: v70 v71
+    term: jump b51
+  block b51:
+    phis:
+    ops:
+    term: jump b52
+  block b52:
+    phis:
+    ops: v74
+    term: branch v74 ? b54 : b53
+  block b53:
+    phis:
+    ops:
+    term: jump b55
+  block b54:
+    phis:
+    ops: v75 v76
+    term: jump b55
+  block b55:
+    phis: v77 v79 v81 v167 v256 v289 v322 v352
+    ops: v78 v80
+    term: branch v74 ? b56 : b57
+  block b56:
+    phis:
+    ops:
+    term: jump b58
+  block b57:
+    phis:
+    ops:
+    term: jump b58
+  block b58:
+    phis: v82 v83 v87 v166 v255 v288 v321 v351
+    ops: v84 v85
+    term: jump b59
+  block b59:
+    phis:
+    ops:
+    term: jump b60
+  block b60:
+    phis:
+    ops: v88
+    term: branch v88 ? b62 : b61
+  block b61:
+    phis:
+    ops:
+    term: jump b63
+  block b62:
+    phis:
+    ops: v89 v90
+    term: jump b63
+  block b63:
+    phis: v91 v93 v95 v165 v254 v287 v320 v350
+    ops: v92 v94
+    term: branch v88 ? b64 : b65
+  block b64:
+    phis:
+    ops:
+    term: jump b66
+  block b65:
+    phis:
+    ops:
+    term: jump b66
+  block b66:
+    phis: v96 v97 v101 v164 v253 v286 v319 v349
+    ops: v98 v99
+    term: jump b67
+  block b67:
+    phis:
+    ops:
+    term: jump b68
+  block b68:
+    phis:
+    ops: v102
+    term: branch v102 ? b70 : b69
+  block b69:
+    phis:
+    ops:
+    term: jump b71
+  block b70:
+    phis:
+    ops: v103 v104
+    term: jump b71
+  block b71:
+    phis: v105 v107 v109 v163 v252 v285 v318 v348
+    ops: v106 v108
+    term: branch v102 ? b72 : b73
+  block b72:
+    phis:
+    ops:
+    term: jump b74
+  block b73:
+    phis:
+    ops:
+    term: jump b74
+  block b74:
+    phis: v110 v111 v115 v162 v251 v284 v317 v347
+    ops: v112 v113
+    term: jump b75
+  block b75:
+    phis:
+    ops:
+    term: jump b76
+  block b76:
+    phis:
+    ops: v116
+    term: branch v116 ? b78 : b77
+  block b77:
+    phis:
+    ops:
+    term: jump b79
+  block b78:
+    phis:
+    ops: v117 v118
+    term: jump b79
+  block b79:
+    phis: v119 v121 v123 v161 v250 v283 v316 v346
+    ops: v120 v122
+    term: branch v116 ? b80 : b81
+  block b80:
+    phis:
+    ops:
+    term: jump b82
+  block b81:
+    phis:
+    ops:
+    term: jump b82
+  block b82:
+    phis: v124 v125 v129 v160 v249 v282 v315 v345
+    ops: v126 v127
+    term: jump b83
+  block b83:
+    phis:
+    ops:
+    term: jump b84
+  block b84:
+    phis:
+    ops: v130
+    term: branch v130 ? b86 : b85
+  block b85:
+    phis:
+    ops:
+    term: jump b87
+  block b86:
+    phis:
+    ops: v131 v132
+    term: jump b87
+  block b87:
+    phis: v133 v135 v137 v159 v248 v281 v314 v344
+    ops: v134 v136
+    term: branch v130 ? b88 : b89
+  block b88:
+    phis:
+    ops:
+    term: jump b90
+  block b89:
+    phis:
+    ops:
+    term: jump b90
+  block b90:
+    phis: v138 v139 v143 v158 v247 v280 v313 v343
+    ops: v140 v141
+    term: jump b91
+  block b91:
+    phis:
+    ops:
+    term: jump b92
+  block b92:
+    phis:
+    ops: v144
+    term: branch v144 ? b94 : b93
+  block b93:
+    phis:
+    ops:
+    term: jump b95
+  block b94:
+    phis:
+    ops: v145 v146
+    term: jump b95
+  block b95:
+    phis: v147 v149 v151 v157 v246 v279 v312 v342
+    ops: v148 v150
+    term: branch v144 ? b96 : b97
+  block b96:
+    phis:
+    ops:
+    term: jump b98
+  block b97:
+    phis:
+    ops:
+    term: jump b98
+  block b98:
+    phis: v152 v153 v156 v245 v278 v311 v341
+    ops: v154 v155
+    term: jump b99
+  block b99:
+    phis:
+    ops:
+    term: jump b100
+  block b100:
+    phis:
+    ops:
+    term: jump b101
+  block b101:
+    phis:
+    ops:
+    term: jump b102
+  block b102:
+    phis:
+    ops:
+    term: jump b103
+  block b103:
+    phis:
+    ops:
+    term: jump b104
+  block b104:
+    phis:
+    ops:
+    term: jump b105
+  block b105:
+    phis:
+    ops: v172
+    term: branch v172 ? b107 : b106
+  block b106:
+    phis:
+    ops:
+    term: jump b108
+  block b107:
+    phis:
+    ops: v173 v174
+    term: jump b108
+  block b108:
+    phis: v175 v177 v244 v277 v310 v340 v368
+    ops: v176 v178
+    term: jump b109
+  block b109:
+    phis:
+    ops:
+    term: jump b110
+  block b110:
+    phis:
+    ops: v179
+    term: branch v179 ? b112 : b111
+  block b111:
+    phis:
+    ops:
+    term: jump b113
+  block b112:
+    phis:
+    ops: v180 v181
+    term: jump b113
+  block b113:
+    phis: v182 v184 v185 v243 v276 v309 v339 v367
+    ops: v183 v186
+    term: jump b114
+  block b114:
+    phis:
+    ops:
+    term: jump b115
+  block b115:
+    phis:
+    ops: v187
+    term: branch v187 ? b117 : b116
+  block b116:
+    phis:
+    ops:
+    term: jump b118
+  block b117:
+    phis:
+    ops: v188 v189
+    term: jump b118
+  block b118:
+    phis: v190 v192 v193 v242 v275 v308 v338 v366
+    ops: v191 v194
+    term: jump b119
+  block b119:
+    phis:
+    ops:
+    term: jump b120
+  block b120:
+    phis:
+    ops: v195
+    term: branch v195 ? b122 : b121
+  block b121:
+    phis:
+    ops:
+    term: jump b123
+  block b122:
+    phis:
+    ops: v196 v197
+    term: jump b123
+  block b123:
+    phis: v198 v200 v201 v241 v274 v307 v337 v365
+    ops: v199 v202
+    term: jump b124
+  block b124:
+    phis:
+    ops:
+    term: jump b125
+  block b125:
+    phis:
+    ops: v203
+    term: branch v203 ? b127 : b126
+  block b126:
+    phis:
+    ops:
+    term: jump b128
+  block b127:
+    phis:
+    ops: v204 v205
+    term: jump b128
+  block b128:
+    phis: v206 v208 v209 v240 v273 v306 v336 v364
+    ops: v207 v210
+    term: jump b129
+  block b129:
+    phis:
+    ops:
+    term: jump b130
+  block b130:
+    phis:
+    ops: v211
+    term: branch v211 ? b132 : b131
+  block b131:
+    phis:
+    ops:
+    term: jump b133
+  block b132:
+    phis:
+    ops: v212 v213
+    term: jump b133
+  block b133:
+    phis: v214 v216 v217 v239 v272 v305 v335 v363
+    ops: v215 v218
+    term: jump b134
+  block b134:
+    phis:
+    ops:
+    term: jump b135
+  block b135:
+    phis:
+    ops: v219
+    term: branch v219 ? b137 : b136
+  block b136:
+    phis:
+    ops:
+    term: jump b138
+  block b137:
+    phis:
+    ops: v220 v221
+    term: jump b138
+  block b138:
+    phis: v222 v224 v225 v238 v271 v304 v334 v362
+    ops: v223 v226
+    term: jump b139
+  block b139:
+    phis:
+    ops:
+    term: jump b140
+  block b140:
+    phis:
+    ops: v227
+    term: branch v227 ? b142 : b141
+  block b141:
+    phis:
+    ops:
+    term: jump b143
+  block b142:
+    phis:
+    ops: v228 v229
+    term: jump b143
+  block b143:
+    phis: v230 v232 v233 v237 v270 v303 v333 v361
+    ops: v231 v234
+    term: jump b144
+  block b144:
+    phis:
+    ops:
+    term: jump b145
+  block b145:
+    phis:
+    ops:
+    term: jump b146
+  block b146:
+    phis:
+    ops:
+    term: jump b147
+  block b147:
+    phis: v236 v269 v302 v332 v360 v373
+    ops:
+    term: jump b148
+  block b148:
+    phis: v235 v268 v301 v331 v359 v372
+    ops:
+    term: jump b149
+  block b149:
+    phis:
+    ops:
+    term: ret
+outputs:
+  out_0 = v235
+  out_1 = v268
+state_slots:
+  _busy = v268 reset const bool false
+  _phase = v301 reset const float 0x0000000000000000 (0.0)
+  _index = v331 reset const float 0x0000000000000000 (0.0)
+  _shift = v359 reset const float 0x0000000000000000 (0.0)
+  _parity = v372 reset const bool false

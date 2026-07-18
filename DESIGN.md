@@ -1001,6 +1001,24 @@ Latency-for-area trades (set aside -- latency is a real cost and the area gain d
 - Shared read bus / vertical microcode (one operator per cycle, two shared operand buses): a modest total-LUT saving for
   a large latency cost, f_max-safe -- not pursued.
 
+## Golden corpus
+
+The complete observable output of the compiler is frozen in `tests/golden/`: the emitted Verilog
+(version-token canonicalized) and the shared support library, the pre-optimize frontend HIR dumps through a
+versioned complete serializer (`tests/_hirdump.py`), per-case ABI manifests (ordered ports, operator
+configuration, initiation interval, and the exact internal schedule metrics), and a diagnostic corpus of
+immutable rejection kernels with their rendered public rejections. The typed case catalogue in
+`tests/_golden_cases.py` is the single source of truth -- the bundled example matrix derives from the shared
+example registry, extended by structural-only cases, a compact format-sensitive probe across datapath widths,
+and a deeply staged operator configuration -- and `tests/test_golden.py` gates every case byte-for-byte,
+including a bijection check that fails on stale artifacts.
+
+Goldens change only through `tools/refreeze_golden.py --write`, in the same commit as the causing code and
+DESIGN.md change; the tool validates the regenerated corpus fully and its `--check-determinism` mode certifies
+seed independence (a PYTHONHASHSEED matrix plus fresh-process repeats, all byte-compared) before anything is
+written. Rejection kernels are append-only immutable modules, so recorded diagnostic line numbers stay true by
+construction. The ratified design and its rationale live in `docs/decisions/freeze-design.md`.
+
 ## References
 
 - L. Chen, J. Cong. Register Binding and Port Assignment for Multiplexer Optimization. ASP-DAC 2004. Basis for the

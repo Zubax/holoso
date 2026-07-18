@@ -1,0 +1,1207 @@
+holoso-hir-dump/1
+inputs: v0 v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11
+nodes:
+  v0 = input kin_pos: float
+  v1 = input kin_vel: float
+  v2 = input kin_accel: float
+  v3 = input i_ac_0: float
+  v4 = input i_ac_1: float
+  v5 = input i_ac_2: float
+  v6 = input di_ac_dt_0: float
+  v7 = input di_ac_dt_1: float
+  v8 = input di_ac_dt_2: float
+  v9 = input u_dc: float
+  v10 = input i_dq_ref_0: float
+  v11 = input i_dq_ref_1: float
+  v12 = const int 2
+  v13 = const int 1
+  v14 = const int 0
+  v15 = op cos(v0): float
+  v16 = op sin(v0): float
+  v17 = op mul(v10, v15): float
+  v18 = op mul(v11, v16): float
+  v19 = op neg(v18): float
+  v20 = op add(v17, v19): float
+  v21 = op mul(v10, v16): float
+  v22 = op mul(v11, v15): float
+  v23 = op add(v21, v22): float
+  v24 = const float 0xbfe0000000000000 (-0.5)
+  v25 = op mul(v24, v20): float
+  v26 = const float 0x3febb67ae8584caa (0.8660254037844386)
+  v27 = op mul(v26, v23): float
+  v28 = op add(v25, v27): float
+  v29 = op neg(v27): float
+  v30 = op add(v25, v29): float
+  v31 = const float 0x3ed0c6f7a0b5ed8d (4e-06)
+  v32 = op mul(v31, v6): float
+  v33 = op mul(v31, v7): float
+  v34 = op mul(v31, v8): float
+  v35 = op add(v3, v32): float
+  v36 = op add(v4, v33): float
+  v37 = op add(v5, v34): float
+  v38 = op neg(v35): float
+  v39 = op add(v20, v38): float
+  v40 = op neg(v36): float
+  v41 = op add(v28, v40): float
+  v42 = op neg(v37): float
+  v43 = op add(v30, v42): float
+  v44 = op add(v39, v41): float
+  v45 = op add(v44, v43): float
+  v46 = const float 0x4008000000000000 (3.0)
+  v47 = op div(v45, v46): float
+  v48 = op neg(v47): float
+  v49 = op add(v39, v48): float
+  v50 = op add(v41, v48): float
+  v51 = op add(v43, v48): float
+  v52 = op mul(v9, v49): float
+  v53 = op mul(v9, v50): float
+  v54 = op mul(v9, v51): float
+  v55 = state_read _switch_balance_0: float
+  v56 = state_read _switch_balance_1: float
+  v57 = state_read _switch_balance_2: float
+  v58 = const float 0x4030000000000000 (16.0)
+  v59 = op mul(v58, v55): float
+  v60 = op mul(v58, v56): float
+  v61 = op mul(v58, v57): float
+  v62 = op neg(v59): float
+  v63 = op add(v52, v62): float
+  v64 = op neg(v60): float
+  v65 = op add(v53, v64): float
+  v66 = op neg(v61): float
+  v67 = op add(v54, v66): float
+  v68 = const float 0x3fe5555555555556 (0.6666666666666667)
+  v69 = const float 0xbfd5555555555555 (-0.3333333333333333)
+  v70 = const float 0x3fd5555555555556 (0.33333333333333337)
+  v71 = const float 0xbfe5555555555555 (-0.6666666666666666)
+  v72 = op mul(v63, v68): float
+  v73 = op mul(v65, v69): float
+  v74 = op add(v72, v73): float
+  v75 = op mul(v67, v69): float
+  v76 = op add(v74, v75): float
+  v77 = op mul(v63, v69): float
+  v78 = op mul(v65, v68): float
+  v79 = op add(v77, v78): float
+  v80 = op mul(v67, v69): float
+  v81 = op add(v79, v80): float
+  v82 = op mul(v63, v70): float
+  v83 = op mul(v65, v70): float
+  v84 = op add(v82, v83): float
+  v85 = op mul(v67, v71): float
+  v86 = op add(v84, v85): float
+  v87 = op mul(v63, v69): float
+  v88 = op mul(v65, v69): float
+  v89 = op add(v87, v88): float
+  v90 = op mul(v67, v68): float
+  v91 = op add(v89, v90): float
+  v92 = op mul(v63, v70): float
+  v93 = op mul(v65, v71): float
+  v94 = op add(v92, v93): float
+  v95 = op mul(v67, v70): float
+  v96 = op add(v94, v95): float
+  v97 = op mul(v63, v71): float
+  v98 = op mul(v65, v70): float
+  v99 = op add(v97, v98): float
+  v100 = op mul(v67, v70): float
+  v101 = op add(v99, v100): float
+  v102 = op max(v76, v81): float
+  v103 = op max(v102, v86): float
+  v104 = const int 3
+  v105 = op max(v103, v91): float
+  v106 = const int 4
+  v107 = op max(v105, v96): float
+  v108 = const int 5
+  v109 = op max(v107, v101): float
+  v110 = const float 0x4025555555555556 (10.666666666666668)
+  v111 = op frelational[le](v109, v110): bool
+  v112 = op abs(v109): float
+  v113 = const float 0x3ff0000000000000 (1.0)
+  v114 = op max(v112, v113): float
+  v115 = const float 0x3d719799812dea11 (1e-12)
+  v116 = op mul(v115, v114): float
+  v117 = op neg(v116): float
+  v118 = op add(v109, v117): float
+  v119 = const bool true
+  v120 = const bool false
+  v121 = op frelational[ge](v101, v118): bool
+  v122 = phi [b178: v76, b177: v76]: float
+  v123 = phi [b178: v81, b177: v81]: float
+  v124 = phi [b178: v86, b177: v86]: float
+  v125 = phi [b178: v91, b177: v91]: float
+  v126 = phi [b178: v96, b177: v96]: float
+  v127 = phi [b178: v101, b177: v101]: float
+  v128 = phi [b178: v118, b177: v118]: float
+  v129 = op frelational[ge](v96, v118): bool
+  v130 = phi [b183: v76, b182: v76]: float
+  v131 = phi [b183: v81, b182: v81]: float
+  v132 = phi [b183: v86, b182: v86]: float
+  v133 = phi [b183: v91, b182: v91]: float
+  v134 = phi [b183: v96, b182: v96]: float
+  v135 = phi [b183: v101, b182: v101]: float
+  v136 = phi [b183: v118, b182: v118]: float
+  v137 = op frelational[ge](v91, v118): bool
+  v138 = phi [b188: v76, b187: v76]: float
+  v139 = phi [b188: v81, b187: v81]: float
+  v140 = phi [b188: v86, b187: v86]: float
+  v141 = phi [b188: v91, b187: v91]: float
+  v142 = phi [b188: v96, b187: v96]: float
+  v143 = phi [b188: v101, b187: v101]: float
+  v144 = phi [b188: v118, b187: v118]: float
+  v145 = op frelational[ge](v86, v118): bool
+  v146 = phi [b193: v76, b192: v76]: float
+  v147 = phi [b193: v81, b192: v81]: float
+  v148 = phi [b193: v86, b192: v86]: float
+  v149 = phi [b193: v91, b192: v91]: float
+  v150 = phi [b193: v96, b192: v96]: float
+  v151 = phi [b193: v101, b192: v101]: float
+  v152 = phi [b193: v118, b192: v118]: float
+  v153 = op frelational[ge](v81, v118): bool
+  v154 = phi [b198: v76, b197: v76]: float
+  v155 = phi [b198: v81, b197: v81]: float
+  v156 = phi [b198: v86, b197: v86]: float
+  v157 = phi [b198: v91, b197: v91]: float
+  v158 = phi [b198: v96, b197: v96]: float
+  v159 = phi [b198: v101, b197: v101]: float
+  v160 = phi [b198: v118, b197: v118]: float
+  v161 = op frelational[ge](v76, v118): bool
+  v162 = phi [b203: v119, b202: v163]: bool
+  v163 = phi [b198: v120, b197: v164]: bool
+  v164 = phi [b193: v119, b192: v165]: bool
+  v165 = phi [b188: v120, b187: v166]: bool
+  v166 = phi [b183: v119, b182: v167]: bool
+  v167 = phi [b178: v120, b177: v119]: bool
+  v168 = phi [b203: v120, b202: v169]: bool
+  v169 = phi [b198: v119, b197: v170]: bool
+  v170 = phi [b193: v119, b192: v171]: bool
+  v171 = phi [b188: v120, b187: v172]: bool
+  v172 = phi [b183: v120, b182: v173]: bool
+  v173 = phi [b178: v119, b177: v120]: bool
+  v174 = phi [b203: v120, b202: v175]: bool
+  v175 = phi [b198: v120, b197: v176]: bool
+  v176 = phi [b193: v120, b192: v177]: bool
+  v177 = phi [b188: v119, b187: v178]: bool
+  v178 = phi [b183: v119, b182: v179]: bool
+  v179 = phi [b178: v119, b177: v120]: bool
+  v180 = phi [b206: v120, b205: v162]: bool
+  v181 = phi [b206: v120, b205: v168]: bool
+  v182 = phi [b206: v120, b205: v174]: bool
+  v183 = phi [b206: v55, b205: v55]: float
+  v184 = phi [b203: v55, b202: v55]: float
+  v185 = phi [b198: v55, b197: v55]: float
+  v186 = phi [b193: v55, b192: v55]: float
+  v187 = phi [b188: v55, b187: v55]: float
+  v188 = phi [b183: v55, b182: v55]: float
+  v189 = phi [b178: v55, b177: v55]: float
+  v190 = phi [b206: v56, b205: v56]: float
+  v191 = phi [b203: v56, b202: v56]: float
+  v192 = phi [b198: v56, b197: v56]: float
+  v193 = phi [b193: v56, b192: v56]: float
+  v194 = phi [b188: v56, b187: v56]: float
+  v195 = phi [b183: v56, b182: v56]: float
+  v196 = phi [b178: v56, b177: v56]: float
+  v197 = phi [b206: v57, b205: v57]: float
+  v198 = phi [b203: v57, b202: v57]: float
+  v199 = phi [b198: v57, b197: v57]: float
+  v200 = phi [b193: v57, b192: v57]: float
+  v201 = phi [b188: v57, b187: v57]: float
+  v202 = phi [b183: v57, b182: v57]: float
+  v203 = phi [b178: v57, b177: v57]: float
+  v204 = op bool_to_float(v180): float
+  v205 = op bool_to_float(v181): float
+  v206 = op bool_to_float(v182): float
+  v207 = op add(v204, v205): float
+  v208 = op add(v207, v206): float
+  v209 = op div(v208, v46): float
+  v210 = op neg(v209): float
+  v211 = op add(v204, v210): float
+  v212 = op add(v205, v210): float
+  v213 = op add(v206, v210): float
+  v214 = const float 0x4000000000000000 (2.0)
+  v215 = op mul(v214, v211): float
+  v216 = op mul(v214, v212): float
+  v217 = op mul(v214, v213): float
+  v218 = op add(v55, v215): float
+  v219 = op add(v56, v216): float
+  v220 = op add(v57, v217): float
+  v221 = op add(v218, v219): float
+  v222 = op add(v221, v220): float
+  v223 = op div(v222, v46): float
+  v224 = op neg(v223): float
+  v225 = op add(v218, v224): float
+  v226 = op add(v219, v224): float
+  v227 = op add(v220, v224): float
+blocks:
+  block b0:
+    phis:
+    ops:
+    term: jump b1
+  block b1:
+    phis:
+    ops:
+    term: jump b2
+  block b2:
+    phis:
+    ops: v15 v16
+    term: jump b3
+  block b3:
+    phis:
+    ops: v17 v18 v19 v20 v21 v22 v23 v25 v27 v28 v29 v30
+    term: jump b4
+  block b4:
+    phis:
+    ops:
+    term: jump b5
+  block b5:
+    phis:
+    ops:
+    term: jump b6
+  block b6:
+    phis:
+    ops: v32 v33 v34 v35 v36 v37 v38 v39 v40 v41 v42 v43
+    term: jump b7
+  block b7:
+    phis:
+    ops:
+    term: jump b8
+  block b8:
+    phis:
+    ops:
+    term: jump b9
+  block b9:
+    phis:
+    ops:
+    term: jump b10
+  block b10:
+    phis:
+    ops:
+    term: jump b11
+  block b11:
+    phis:
+    ops:
+    term: jump b12
+  block b12:
+    phis:
+    ops:
+    term: jump b13
+  block b13:
+    phis:
+    ops: v44
+    term: jump b14
+  block b14:
+    phis:
+    ops:
+    term: jump b15
+  block b15:
+    phis:
+    ops: v45
+    term: jump b16
+  block b16:
+    phis:
+    ops: v47
+    term: jump b17
+  block b17:
+    phis:
+    ops:
+    term: jump b18
+  block b18:
+    phis:
+    ops: v48 v49 v50 v51
+    term: jump b19
+  block b19:
+    phis:
+    ops:
+    term: jump b20
+  block b20:
+    phis:
+    ops: v52 v53 v54 v59 v60 v61 v62 v63 v64 v65 v66 v67
+    term: jump b21
+  block b21:
+    phis:
+    ops:
+    term: jump b22
+  block b22:
+    phis:
+    ops:
+    term: jump b23
+  block b23:
+    phis:
+    ops:
+    term: jump b24
+  block b24:
+    phis:
+    ops:
+    term: jump b25
+  block b25:
+    phis:
+    ops:
+    term: jump b26
+  block b26:
+    phis:
+    ops:
+    term: jump b27
+  block b27:
+    phis:
+    ops:
+    term: jump b28
+  block b28:
+    phis:
+    ops:
+    term: jump b29
+  block b29:
+    phis:
+    ops:
+    term: jump b30
+  block b30:
+    phis:
+    ops:
+    term: jump b31
+  block b31:
+    phis:
+    ops:
+    term: jump b32
+  block b32:
+    phis:
+    ops:
+    term: jump b33
+  block b33:
+    phis:
+    ops: v72
+    term: jump b34
+  block b34:
+    phis:
+    ops:
+    term: jump b35
+  block b35:
+    phis:
+    ops:
+    term: jump b36
+  block b36:
+    phis:
+    ops: v73 v74
+    term: jump b37
+  block b37:
+    phis:
+    ops:
+    term: jump b38
+  block b38:
+    phis:
+    ops: v75 v76
+    term: jump b39
+  block b39:
+    phis:
+    ops:
+    term: jump b40
+  block b40:
+    phis:
+    ops:
+    term: jump b41
+  block b41:
+    phis:
+    ops:
+    term: jump b42
+  block b42:
+    phis:
+    ops:
+    term: jump b43
+  block b43:
+    phis:
+    ops:
+    term: jump b44
+  block b44:
+    phis:
+    ops:
+    term: jump b45
+  block b45:
+    phis:
+    ops:
+    term: jump b46
+  block b46:
+    phis:
+    ops:
+    term: jump b47
+  block b47:
+    phis:
+    ops:
+    term: jump b48
+  block b48:
+    phis:
+    ops:
+    term: jump b49
+  block b49:
+    phis:
+    ops:
+    term: jump b50
+  block b50:
+    phis:
+    ops:
+    term: jump b51
+  block b51:
+    phis:
+    ops:
+    term: jump b52
+  block b52:
+    phis:
+    ops:
+    term: jump b53
+  block b53:
+    phis:
+    ops:
+    term: jump b54
+  block b54:
+    phis:
+    ops:
+    term: jump b55
+  block b55:
+    phis:
+    ops: v77
+    term: jump b56
+  block b56:
+    phis:
+    ops:
+    term: jump b57
+  block b57:
+    phis:
+    ops:
+    term: jump b58
+  block b58:
+    phis:
+    ops: v78 v79
+    term: jump b59
+  block b59:
+    phis:
+    ops:
+    term: jump b60
+  block b60:
+    phis:
+    ops: v80 v81
+    term: jump b61
+  block b61:
+    phis:
+    ops:
+    term: jump b62
+  block b62:
+    phis:
+    ops:
+    term: jump b63
+  block b63:
+    phis:
+    ops:
+    term: jump b64
+  block b64:
+    phis:
+    ops:
+    term: jump b65
+  block b65:
+    phis:
+    ops:
+    term: jump b66
+  block b66:
+    phis:
+    ops:
+    term: jump b67
+  block b67:
+    phis:
+    ops:
+    term: jump b68
+  block b68:
+    phis:
+    ops:
+    term: jump b69
+  block b69:
+    phis:
+    ops:
+    term: jump b70
+  block b70:
+    phis:
+    ops:
+    term: jump b71
+  block b71:
+    phis:
+    ops:
+    term: jump b72
+  block b72:
+    phis:
+    ops:
+    term: jump b73
+  block b73:
+    phis:
+    ops:
+    term: jump b74
+  block b74:
+    phis:
+    ops:
+    term: jump b75
+  block b75:
+    phis:
+    ops:
+    term: jump b76
+  block b76:
+    phis:
+    ops:
+    term: jump b77
+  block b77:
+    phis:
+    ops: v82
+    term: jump b78
+  block b78:
+    phis:
+    ops:
+    term: jump b79
+  block b79:
+    phis:
+    ops:
+    term: jump b80
+  block b80:
+    phis:
+    ops: v83 v84
+    term: jump b81
+  block b81:
+    phis:
+    ops:
+    term: jump b82
+  block b82:
+    phis:
+    ops: v85 v86
+    term: jump b83
+  block b83:
+    phis:
+    ops:
+    term: jump b84
+  block b84:
+    phis:
+    ops:
+    term: jump b85
+  block b85:
+    phis:
+    ops:
+    term: jump b86
+  block b86:
+    phis:
+    ops:
+    term: jump b87
+  block b87:
+    phis:
+    ops:
+    term: jump b88
+  block b88:
+    phis:
+    ops:
+    term: jump b89
+  block b89:
+    phis:
+    ops:
+    term: jump b90
+  block b90:
+    phis:
+    ops:
+    term: jump b91
+  block b91:
+    phis:
+    ops:
+    term: jump b92
+  block b92:
+    phis:
+    ops:
+    term: jump b93
+  block b93:
+    phis:
+    ops:
+    term: jump b94
+  block b94:
+    phis:
+    ops:
+    term: jump b95
+  block b95:
+    phis:
+    ops:
+    term: jump b96
+  block b96:
+    phis:
+    ops:
+    term: jump b97
+  block b97:
+    phis:
+    ops:
+    term: jump b98
+  block b98:
+    phis:
+    ops:
+    term: jump b99
+  block b99:
+    phis:
+    ops: v87
+    term: jump b100
+  block b100:
+    phis:
+    ops:
+    term: jump b101
+  block b101:
+    phis:
+    ops:
+    term: jump b102
+  block b102:
+    phis:
+    ops: v88 v89
+    term: jump b103
+  block b103:
+    phis:
+    ops:
+    term: jump b104
+  block b104:
+    phis:
+    ops: v90 v91
+    term: jump b105
+  block b105:
+    phis:
+    ops:
+    term: jump b106
+  block b106:
+    phis:
+    ops:
+    term: jump b107
+  block b107:
+    phis:
+    ops:
+    term: jump b108
+  block b108:
+    phis:
+    ops:
+    term: jump b109
+  block b109:
+    phis:
+    ops:
+    term: jump b110
+  block b110:
+    phis:
+    ops:
+    term: jump b111
+  block b111:
+    phis:
+    ops:
+    term: jump b112
+  block b112:
+    phis:
+    ops:
+    term: jump b113
+  block b113:
+    phis:
+    ops:
+    term: jump b114
+  block b114:
+    phis:
+    ops:
+    term: jump b115
+  block b115:
+    phis:
+    ops:
+    term: jump b116
+  block b116:
+    phis:
+    ops:
+    term: jump b117
+  block b117:
+    phis:
+    ops:
+    term: jump b118
+  block b118:
+    phis:
+    ops:
+    term: jump b119
+  block b119:
+    phis:
+    ops:
+    term: jump b120
+  block b120:
+    phis:
+    ops:
+    term: jump b121
+  block b121:
+    phis:
+    ops: v92
+    term: jump b122
+  block b122:
+    phis:
+    ops:
+    term: jump b123
+  block b123:
+    phis:
+    ops:
+    term: jump b124
+  block b124:
+    phis:
+    ops: v93 v94
+    term: jump b125
+  block b125:
+    phis:
+    ops:
+    term: jump b126
+  block b126:
+    phis:
+    ops: v95 v96
+    term: jump b127
+  block b127:
+    phis:
+    ops:
+    term: jump b128
+  block b128:
+    phis:
+    ops:
+    term: jump b129
+  block b129:
+    phis:
+    ops:
+    term: jump b130
+  block b130:
+    phis:
+    ops:
+    term: jump b131
+  block b131:
+    phis:
+    ops:
+    term: jump b132
+  block b132:
+    phis:
+    ops:
+    term: jump b133
+  block b133:
+    phis:
+    ops:
+    term: jump b134
+  block b134:
+    phis:
+    ops:
+    term: jump b135
+  block b135:
+    phis:
+    ops:
+    term: jump b136
+  block b136:
+    phis:
+    ops:
+    term: jump b137
+  block b137:
+    phis:
+    ops:
+    term: jump b138
+  block b138:
+    phis:
+    ops:
+    term: jump b139
+  block b139:
+    phis:
+    ops:
+    term: jump b140
+  block b140:
+    phis:
+    ops:
+    term: jump b141
+  block b141:
+    phis:
+    ops:
+    term: jump b142
+  block b142:
+    phis:
+    ops:
+    term: jump b143
+  block b143:
+    phis:
+    ops: v97
+    term: jump b144
+  block b144:
+    phis:
+    ops:
+    term: jump b145
+  block b145:
+    phis:
+    ops:
+    term: jump b146
+  block b146:
+    phis:
+    ops: v98 v99
+    term: jump b147
+  block b147:
+    phis:
+    ops:
+    term: jump b148
+  block b148:
+    phis:
+    ops: v100 v101
+    term: jump b149
+  block b149:
+    phis:
+    ops:
+    term: jump b150
+  block b150:
+    phis:
+    ops:
+    term: jump b151
+  block b151:
+    phis:
+    ops:
+    term: jump b152
+  block b152:
+    phis:
+    ops:
+    term: jump b153
+  block b153:
+    phis:
+    ops:
+    term: jump b154
+  block b154:
+    phis:
+    ops:
+    term: jump b155
+  block b155:
+    phis:
+    ops:
+    term: jump b156
+  block b156:
+    phis:
+    ops:
+    term: jump b157
+  block b157:
+    phis:
+    ops:
+    term: jump b158
+  block b158:
+    phis:
+    ops:
+    term: jump b159
+  block b159:
+    phis:
+    ops:
+    term: jump b160
+  block b160:
+    phis:
+    ops: v102
+    term: jump b161
+  block b161:
+    phis:
+    ops:
+    term: jump b162
+  block b162:
+    phis:
+    ops: v103
+    term: jump b163
+  block b163:
+    phis:
+    ops:
+    term: jump b164
+  block b164:
+    phis:
+    ops: v105
+    term: jump b165
+  block b165:
+    phis:
+    ops:
+    term: jump b166
+  block b166:
+    phis:
+    ops: v107
+    term: jump b167
+  block b167:
+    phis:
+    ops:
+    term: jump b168
+  block b168:
+    phis:
+    ops: v109
+    term: jump b169
+  block b169:
+    phis:
+    ops:
+    term: jump b170
+  block b170:
+    phis:
+    ops:
+    term: jump b171
+  block b171:
+    phis:
+    ops: v111
+    term: branch v111 ? b206 : b172
+  block b172:
+    phis:
+    ops:
+    term: jump b173
+  block b173:
+    phis:
+    ops: v112 v114 v116 v117 v118
+    term: jump b174
+  block b174:
+    phis:
+    ops:
+    term: jump b175
+  block b175:
+    phis:
+    ops:
+    term: jump b176
+  block b176:
+    phis:
+    ops: v121
+    term: branch v121 ? b178 : b177
+  block b177:
+    phis:
+    ops:
+    term: jump b179
+  block b178:
+    phis:
+    ops:
+    term: jump b179
+  block b179:
+    phis: v122 v123 v124 v125 v126 v127 v128 v167 v173 v179 v189 v196 v203
+    ops:
+    term: jump b180
+  block b180:
+    phis:
+    ops:
+    term: jump b181
+  block b181:
+    phis:
+    ops: v129
+    term: branch v129 ? b183 : b182
+  block b182:
+    phis:
+    ops:
+    term: jump b184
+  block b183:
+    phis:
+    ops:
+    term: jump b184
+  block b184:
+    phis: v130 v131 v132 v133 v134 v135 v136 v166 v172 v178 v188 v195 v202
+    ops:
+    term: jump b185
+  block b185:
+    phis:
+    ops:
+    term: jump b186
+  block b186:
+    phis:
+    ops: v137
+    term: branch v137 ? b188 : b187
+  block b187:
+    phis:
+    ops:
+    term: jump b189
+  block b188:
+    phis:
+    ops:
+    term: jump b189
+  block b189:
+    phis: v138 v139 v140 v141 v142 v143 v144 v165 v171 v177 v187 v194 v201
+    ops:
+    term: jump b190
+  block b190:
+    phis:
+    ops:
+    term: jump b191
+  block b191:
+    phis:
+    ops: v145
+    term: branch v145 ? b193 : b192
+  block b192:
+    phis:
+    ops:
+    term: jump b194
+  block b193:
+    phis:
+    ops:
+    term: jump b194
+  block b194:
+    phis: v146 v147 v148 v149 v150 v151 v152 v164 v170 v176 v186 v193 v200
+    ops:
+    term: jump b195
+  block b195:
+    phis:
+    ops:
+    term: jump b196
+  block b196:
+    phis:
+    ops: v153
+    term: branch v153 ? b198 : b197
+  block b197:
+    phis:
+    ops:
+    term: jump b199
+  block b198:
+    phis:
+    ops:
+    term: jump b199
+  block b199:
+    phis: v154 v155 v156 v157 v158 v159 v160 v163 v169 v175 v185 v192 v199
+    ops:
+    term: jump b200
+  block b200:
+    phis:
+    ops:
+    term: jump b201
+  block b201:
+    phis:
+    ops: v161
+    term: branch v161 ? b203 : b202
+  block b202:
+    phis:
+    ops:
+    term: jump b204
+  block b203:
+    phis:
+    ops:
+    term: jump b204
+  block b204:
+    phis: v162 v168 v174 v184 v191 v198
+    ops:
+    term: jump b205
+  block b205:
+    phis:
+    ops:
+    term: jump b207
+  block b206:
+    phis:
+    ops:
+    term: jump b207
+  block b207:
+    phis: v180 v181 v182 v183 v190 v197
+    ops:
+    term: jump b208
+  block b208:
+    phis:
+    ops:
+    term: jump b209
+  block b209:
+    phis:
+    ops: v204 v205 v206
+    term: jump b210
+  block b210:
+    phis:
+    ops:
+    term: jump b211
+  block b211:
+    phis:
+    ops:
+    term: jump b212
+  block b212:
+    phis:
+    ops:
+    term: jump b213
+  block b213:
+    phis:
+    ops:
+    term: jump b214
+  block b214:
+    phis:
+    ops:
+    term: jump b215
+  block b215:
+    phis:
+    ops:
+    term: jump b216
+  block b216:
+    phis:
+    ops: v207
+    term: jump b217
+  block b217:
+    phis:
+    ops:
+    term: jump b218
+  block b218:
+    phis:
+    ops: v208
+    term: jump b219
+  block b219:
+    phis:
+    ops: v209
+    term: jump b220
+  block b220:
+    phis:
+    ops:
+    term: jump b221
+  block b221:
+    phis:
+    ops: v210 v211 v212 v213
+    term: jump b222
+  block b222:
+    phis:
+    ops:
+    term: jump b223
+  block b223:
+    phis:
+    ops: v215 v216 v217
+    term: jump b224
+  block b224:
+    phis:
+    ops:
+    term: jump b225
+  block b225:
+    phis:
+    ops: v218 v219 v220
+    term: jump b226
+  block b226:
+    phis:
+    ops:
+    term: jump b227
+  block b227:
+    phis:
+    ops:
+    term: jump b228
+  block b228:
+    phis:
+    ops:
+    term: jump b229
+  block b229:
+    phis:
+    ops:
+    term: jump b230
+  block b230:
+    phis:
+    ops:
+    term: jump b231
+  block b231:
+    phis:
+    ops:
+    term: jump b232
+  block b232:
+    phis:
+    ops: v221
+    term: jump b233
+  block b233:
+    phis:
+    ops:
+    term: jump b234
+  block b234:
+    phis:
+    ops: v222
+    term: jump b235
+  block b235:
+    phis:
+    ops: v223
+    term: jump b236
+  block b236:
+    phis:
+    ops:
+    term: jump b237
+  block b237:
+    phis:
+    ops: v224 v225 v226 v227
+    term: jump b238
+  block b238:
+    phis:
+    ops:
+    term: jump b239
+  block b239:
+    phis:
+    ops:
+    term: jump b240
+  block b240:
+    phis:
+    ops:
+    term: ret
+outputs:
+  out_switch_ac_0 = v180
+  out_switch_ac_1 = v181
+  out_switch_ac_2 = v182
+  out_switch_balance_0_0 = v225
+  out_switch_balance_1_0 = v226
+  out_switch_balance_2_0 = v227
+state_slots:
+  _switch_balance_0 = v225 reset const float 0x0000000000000000 (0.0)
+  _switch_balance_1 = v226 reset const float 0x0000000000000000 (0.0)
+  _switch_balance_2 = v227 reset const float 0x0000000000000000 (0.0)

@@ -1,0 +1,47 @@
+holoso-hir-dump/1
+inputs: v0
+nodes:
+  v0 = input x: float
+  v1 = const float 0x3fe0000000000000 (0.5)
+  v2 = op mul(v1, v0): float
+  v3 = const float 0x3ff8000000000000 (1.5)
+  v4 = op neg(v2): float
+  v5 = op add(v3, v4): float
+  v6 = const float 0x3ff0000000000000 (1.0)
+  v7 = phi [b0: v6, b4: v19]: float
+  v8 = op abs(v7): float
+  v9 = const float 0x3f30000000000000 (0.000244140625)
+  v10 = op frelational[gt](v8, v9): bool
+  v11 = phi [b0: v5, b4: v17]: float
+  v12 = phi [b0: v0, b4: v12]: float
+  v13 = op mul(v12, v11): float
+  v14 = const float 0x4000000000000000 (2.0)
+  v15 = op neg(v13): float
+  v16 = op add(v14, v15): float
+  v17 = op mul(v11, v16): float
+  v18 = op neg(v11): float
+  v19 = op add(v17, v18): float
+blocks:
+  block b0:
+    phis:
+    ops: v2 v4 v5
+    term: jump b1
+  block b1:
+    phis: v7 v11 v12
+    ops: v8 v10
+    term: branch v10 ? b4 : b2
+  block b2:
+    phis:
+    ops:
+    term: jump b3
+  block b3:
+    phis:
+    ops:
+    term: ret
+  block b4:
+    phis:
+    ops: v13 v15 v16 v17 v18 v19
+    term: jump b1
+outputs:
+  out_0 = v11
+state_slots:

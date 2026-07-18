@@ -1,0 +1,797 @@
+{
+  "schema": "holoso-golden-index/1",
+  "cases": [
+    {
+      "id": "cordic_sincos-e8m36",
+      "module_name": "cordic_sincos",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/cordic_sincos-e8m36.v",
+        "hir": "hir/cordic_sincos-e8m36.txt",
+        "abi": "abi/cordic_sincos-e8m36.json"
+      }
+    },
+    {
+      "id": "ekf1_stateful-e8m36",
+      "module_name": "ekf1_stateful",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/ekf1_stateful-e8m36.v",
+        "hir": "hir/ekf1_stateful-e8m36.txt",
+        "abi": "abi/ekf1_stateful-e8m36.json"
+      }
+    },
+    {
+      "id": "ekf1_stateful_shipped-e8m36",
+      "module_name": "ekf1_stateful_shipped",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/ekf1_stateful_shipped-e8m36.v",
+        "hir": "hir/ekf1_stateful_shipped-e8m36.txt",
+        "abi": "abi/ekf1_stateful_shipped-e8m36.json"
+      }
+    },
+    {
+      "id": "ekf1_stateless-e8m36",
+      "module_name": "ekf1_stateless",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/ekf1_stateless-e8m36.v",
+        "hir": "hir/ekf1_stateless-e8m36.txt",
+        "abi": "abi/ekf1_stateless-e8m36.json"
+      }
+    },
+    {
+      "id": "equal_temperament-e8m36",
+      "module_name": "equal_temperament",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/equal_temperament-e8m36.v",
+        "hir": "hir/equal_temperament-e8m36.txt",
+        "abi": "abi/equal_temperament-e8m36.json"
+      }
+    },
+    {
+      "id": "finite_set_current_controller-e8m36",
+      "module_name": "finite_set_current_controller",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/finite_set_current_controller-e8m36.v",
+        "hir": "hir/finite_set_current_controller-e8m36.txt",
+        "abi": "abi/finite_set_current_controller-e8m36.json"
+      }
+    },
+    {
+      "id": "format_probe-e11m53",
+      "module_name": "format_probe",
+      "float_format": "e11m53",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/format_probe-e11m53.v",
+        "hir": "hir/format_probe-e11m53.txt",
+        "abi": "abi/format_probe-e11m53.json"
+      }
+    },
+    {
+      "id": "format_probe-e6m18",
+      "module_name": "format_probe",
+      "float_format": "e6m18",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/format_probe-e6m18.v",
+        "hir": "hir/format_probe-e6m18.txt",
+        "abi": "abi/format_probe-e6m18.json"
+      }
+    },
+    {
+      "id": "format_probe-e8m24",
+      "module_name": "format_probe",
+      "float_format": "e8m24",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/format_probe-e8m24.v",
+        "hir": "hir/format_probe-e8m24.txt",
+        "abi": "abi/format_probe-e8m24.json"
+      }
+    },
+    {
+      "id": "format_probe-e8m36",
+      "module_name": "format_probe",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/format_probe-e8m36.v",
+        "hir": "hir/format_probe-e8m36.txt",
+        "abi": "abi/format_probe-e8m36.json"
+      }
+    },
+    {
+      "id": "from_polar-e8m36",
+      "module_name": "from_polar",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/from_polar-e8m36.v",
+        "hir": "hir/from_polar-e8m36.txt",
+        "abi": "abi/from_polar-e8m36.json"
+      }
+    },
+    {
+      "id": "iir1_hpf-e8m36",
+      "module_name": "iir1_hpf",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/iir1_hpf-e8m36.v",
+        "hir": "hir/iir1_hpf-e8m36.txt",
+        "abi": "abi/iir1_hpf-e8m36.json"
+      }
+    },
+    {
+      "id": "iir1_lpf-e8m36",
+      "module_name": "iir1_lpf",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/iir1_lpf-e8m36.v",
+        "hir": "hir/iir1_lpf-e8m36.txt",
+        "abi": "abi/iir1_lpf-e8m36.json"
+      }
+    },
+    {
+      "id": "imu_frame_transform-e8m36",
+      "module_name": "imu_frame_transform",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/imu_frame_transform-e8m36.v",
+        "hir": "hir/imu_frame_transform-e8m36.txt",
+        "abi": "abi/imu_frame_transform-e8m36.json"
+      }
+    },
+    {
+      "id": "integrator-e8m36",
+      "module_name": "integrator",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/integrator-e8m36.v",
+        "hir": "hir/integrator-e8m36.txt",
+        "abi": "abi/integrator-e8m36.json"
+      }
+    },
+    {
+      "id": "kepler-e8m36",
+      "module_name": "kepler",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/kepler-e8m36.v",
+        "hir": "hir/kepler-e8m36.txt",
+        "abi": "abi/kepler-e8m36.json"
+      }
+    },
+    {
+      "id": "latching_fault_register-e8m36",
+      "module_name": "latching_fault_register",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/latching_fault_register-e8m36.v",
+        "hir": "hir/latching_fault_register-e8m36.txt",
+        "abi": "abi/latching_fault_register-e8m36.json"
+      }
+    },
+    {
+      "id": "madd-e8m36",
+      "module_name": "madd",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/madd-e8m36.v",
+        "hir": "hir/madd-e8m36.txt",
+        "abi": "abi/madd-e8m36.json"
+      }
+    },
+    {
+      "id": "majority_voter-e8m36",
+      "module_name": "majority_voter",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/majority_voter-e8m36.v",
+        "hir": "hir/majority_voter-e8m36.txt",
+        "abi": "abi/majority_voter-e8m36.json"
+      }
+    },
+    {
+      "id": "octave_index-e6m18",
+      "module_name": "octave_index",
+      "float_format": "e6m18",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/octave_index-e6m18.v",
+        "hir": "hir/octave_index-e6m18.txt",
+        "abi": "abi/octave_index-e6m18.json"
+      }
+    },
+    {
+      "id": "octave_index-e8m36",
+      "module_name": "octave_index",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/octave_index-e8m36.v",
+        "hir": "hir/octave_index-e8m36.txt",
+        "abi": "abi/octave_index-e8m36.json"
+      }
+    },
+    {
+      "id": "phase_frequency_detector-e8m36",
+      "module_name": "phase_frequency_detector",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/phase_frequency_detector-e8m36.v",
+        "hir": "hir/phase_frequency_detector-e8m36.txt",
+        "abi": "abi/phase_frequency_detector-e8m36.json"
+      }
+    },
+    {
+      "id": "pid-e6m18-staged",
+      "module_name": "pid_staged",
+      "float_format": "e6m18",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/pid-e6m18-staged.v",
+        "hir": "hir/pid-e6m18-staged.txt",
+        "abi": "abi/pid-e6m18-staged.json"
+      }
+    },
+    {
+      "id": "pid-e8m36",
+      "module_name": "pid",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/pid-e8m36.v",
+        "hir": "hir/pid-e8m36.txt",
+        "abi": "abi/pid-e8m36.json"
+      }
+    },
+    {
+      "id": "polar_from-e8m36",
+      "module_name": "polar_from",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/polar_from-e8m36.v",
+        "hir": "hir/polar_from-e8m36.txt",
+        "abi": "abi/polar_from-e8m36.json"
+      }
+    },
+    {
+      "id": "polar_to-e8m36",
+      "module_name": "polar_to",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/polar_to-e8m36.v",
+        "hir": "hir/polar_to-e8m36.txt",
+        "abi": "abi/polar_to-e8m36.json"
+      }
+    },
+    {
+      "id": "poly3-e8m36",
+      "module_name": "poly3",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/poly3-e8m36.v",
+        "hir": "hir/poly3-e8m36.txt",
+        "abi": "abi/poly3-e8m36.json"
+      }
+    },
+    {
+      "id": "quadrature_encoder-e8m36",
+      "module_name": "quadrature_encoder",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/quadrature_encoder-e8m36.v",
+        "hir": "hir/quadrature_encoder-e8m36.txt",
+        "abi": "abi/quadrature_encoder-e8m36.json"
+      }
+    },
+    {
+      "id": "recip_newton-e8m36",
+      "module_name": "recip_newton",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/recip_newton-e8m36.v",
+        "hir": "hir/recip_newton-e8m36.txt",
+        "abi": "abi/recip_newton-e8m36.json"
+      }
+    },
+    {
+      "id": "remainder-e8m36",
+      "module_name": "remainder",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/remainder-e8m36.v",
+        "hir": "hir/remainder-e8m36.txt",
+        "abi": "abi/remainder-e8m36.json"
+      }
+    },
+    {
+      "id": "schmitt_trigger-e8m36",
+      "module_name": "schmitt_trigger",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/schmitt_trigger-e8m36.v",
+        "hir": "hir/schmitt_trigger-e8m36.txt",
+        "abi": "abi/schmitt_trigger-e8m36.json"
+      }
+    },
+    {
+      "id": "signal_window-e8m36",
+      "module_name": "signal_window",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": true,
+      "artifacts": {
+        "verilog": "verilog/signal_window-e8m36.v",
+        "hir": "hir/signal_window-e8m36.txt",
+        "abi": "abi/signal_window-e8m36.json"
+      }
+    },
+    {
+      "id": "to_polar-e8m36",
+      "module_name": "to_polar",
+      "float_format": "e8m36",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/to_polar-e8m36.v",
+        "hir": "hir/to_polar-e8m36.txt",
+        "abi": "abi/to_polar-e8m36.json"
+      }
+    },
+    {
+      "id": "uart_rx-e4m8",
+      "module_name": "uart_rx",
+      "float_format": "e4m8",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/uart_rx-e4m8.v",
+        "hir": "hir/uart_rx-e4m8.txt",
+        "abi": "abi/uart_rx-e4m8.json"
+      }
+    },
+    {
+      "id": "uart_tx-e4m8",
+      "module_name": "uart_tx",
+      "float_format": "e4m8",
+      "fetch_stages": 3,
+      "regalloc": {
+        "refine_maxiter": 5000,
+        "reg_reuse_write_cap": 2,
+        "reg_price": 2.0
+      },
+      "has_ceiling": false,
+      "artifacts": {
+        "verilog": "verilog/uart_tx-e4m8.v",
+        "hir": "hir/uart_tx-e4m8.txt",
+        "abi": "abi/uart_tx-e4m8.json"
+      }
+    }
+  ],
+  "rejections": [
+    {
+      "id": "b1_competing_stores_preorder",
+      "family": "b1",
+      "module": "rejections/b1_competing_stores_preorder.py",
+      "diagnostics": "diagnostics/b1.jsonl"
+    },
+    {
+      "id": "b1_local_float_rebound_to_bool",
+      "family": "b1",
+      "module": "rejections/b1_local_float_rebound_to_bool.py",
+      "diagnostics": "diagnostics/b1.jsonl"
+    },
+    {
+      "id": "b1_local_int_rebound_to_float",
+      "family": "b1",
+      "module": "rejections/b1_local_int_rebound_to_float.py",
+      "diagnostics": "diagnostics/b1.jsonl"
+    },
+    {
+      "id": "b1_state_bool_slot_stored_float",
+      "family": "b1",
+      "module": "rejections/b1_state_bool_slot_stored_float.py",
+      "diagnostics": "diagnostics/b1.jsonl"
+    },
+    {
+      "id": "b1_state_int_slot_stored_float",
+      "family": "b1",
+      "module": "rejections/b1_state_int_slot_stored_float.py",
+      "diagnostics": "diagnostics/b1.jsonl"
+    },
+    {
+      "id": "c2_bool_float_comparison",
+      "family": "analysis",
+      "module": "rejections/c2_bool_float_comparison.py",
+      "diagnostics": "diagnostics/analysis.jsonl"
+    },
+    {
+      "id": "c3_inherited_unresolvable_annotation",
+      "family": "signature",
+      "module": "rejections/c3_inherited_unresolvable_annotation.py",
+      "diagnostics": "diagnostics/signature.jsonl"
+    },
+    {
+      "id": "c4_fake_dims_attribute",
+      "family": "signature",
+      "module": "rejections/c4_fake_dims_attribute.py",
+      "diagnostics": "diagnostics/signature.jsonl"
+    },
+    {
+      "id": "d1_nested_none_annotation",
+      "family": "signature",
+      "module": "rejections/d1_nested_none_annotation.py",
+      "diagnostics": "diagnostics/signature.jsonl"
+    },
+    {
+      "id": "d2_unresolvable_annotation",
+      "family": "signature",
+      "module": "rejections/d2_unresolvable_annotation.py",
+      "diagnostics": "diagnostics/signature.jsonl"
+    },
+    {
+      "id": "e2_fstring_raise",
+      "family": "build",
+      "module": "rejections/e2_fstring_raise.py",
+      "diagnostics": "diagnostics/build.jsonl"
+    },
+    {
+      "id": "f1_unroll_threshold",
+      "family": "analysis",
+      "module": "rejections/f1_unroll_threshold.py",
+      "diagnostics": "diagnostics/analysis.jsonl"
+    },
+    {
+      "id": "legacy_beyond_carrier_constant",
+      "family": "legacy",
+      "module": "rejections/legacy_beyond_carrier_constant.py",
+      "diagnostics": "diagnostics/legacy.jsonl"
+    },
+    {
+      "id": "legacy_never_returns",
+      "family": "legacy",
+      "module": "rejections/legacy_never_returns.py",
+      "diagnostics": "diagnostics/legacy.jsonl"
+    },
+    {
+      "id": "legacy_power_chain",
+      "family": "legacy",
+      "module": "rejections/legacy_power_chain.py",
+      "diagnostics": "diagnostics/legacy.jsonl"
+    },
+    {
+      "id": "legacy_record_iteration",
+      "family": "legacy",
+      "module": "rejections/legacy_record_iteration.py",
+      "diagnostics": "diagnostics/legacy.jsonl"
+    },
+    {
+      "id": "legacy_recursion",
+      "family": "legacy",
+      "module": "rejections/legacy_recursion.py",
+      "diagnostics": "diagnostics/legacy.jsonl"
+    },
+    {
+      "id": "legacy_shared_live_out",
+      "family": "legacy",
+      "module": "rejections/legacy_shared_live_out.py",
+      "diagnostics": "diagnostics/legacy.jsonl"
+    },
+    {
+      "id": "legacy_stub_shape_mismatch",
+      "family": "legacy",
+      "module": "rejections/legacy_stub_shape_mismatch.py",
+      "diagnostics": "diagnostics/legacy.jsonl"
+    },
+    {
+      "id": "store_edge_inexact_int",
+      "family": "store_edge",
+      "module": "rejections/store_edge_inexact_int.py",
+      "diagnostics": "diagnostics/store_edge.jsonl"
+    },
+    {
+      "id": "store_edge_oversized_int",
+      "family": "store_edge",
+      "module": "rejections/store_edge_oversized_int.py",
+      "diagnostics": "diagnostics/store_edge.jsonl"
+    },
+    {
+      "id": "store_edge_state_inexact_int",
+      "family": "store_edge",
+      "module": "rejections/store_edge_state_inexact_int.py",
+      "diagnostics": "diagnostics/store_edge.jsonl"
+    },
+    {
+      "id": "trim_array_mask",
+      "family": "trims",
+      "module": "rejections/trim_array_mask.py",
+      "diagnostics": "diagnostics/trims.jsonl"
+    },
+    {
+      "id": "trim_component_setattr",
+      "family": "trims",
+      "module": "rejections/trim_component_setattr.py",
+      "diagnostics": "diagnostics/trims.jsonl"
+    },
+    {
+      "id": "trim_dataclass_post_init",
+      "family": "trims",
+      "module": "rejections/trim_dataclass_post_init.py",
+      "diagnostics": "diagnostics/trims.jsonl"
+    },
+    {
+      "id": "trim_enum_member_attribute",
+      "family": "trims",
+      "module": "rejections/trim_enum_member_attribute.py",
+      "diagnostics": "diagnostics/trims.jsonl"
+    },
+    {
+      "id": "trim_getattr",
+      "family": "trims",
+      "module": "rejections/trim_getattr.py",
+      "diagnostics": "diagnostics/trims.jsonl"
+    },
+    {
+      "id": "trim_isinstance",
+      "family": "trims",
+      "module": "rejections/trim_isinstance.py",
+      "diagnostics": "diagnostics/trims.jsonl"
+    },
+    {
+      "id": "trim_starred_display",
+      "family": "trims",
+      "module": "rejections/trim_starred_display.py",
+      "diagnostics": "diagnostics/trims.jsonl"
+    },
+    {
+      "id": "trim_starred_target",
+      "family": "trims",
+      "module": "rejections/trim_starred_target.py",
+      "diagnostics": "diagnostics/trims.jsonl"
+    },
+    {
+      "id": "trim_str_method",
+      "family": "trims",
+      "module": "rejections/trim_str_method.py",
+      "diagnostics": "diagnostics/trims.jsonl"
+    },
+    {
+      "id": "trim_zero_d_array",
+      "family": "trims",
+      "module": "rejections/trim_zero_d_array.py",
+      "diagnostics": "diagnostics/trims.jsonl"
+    }
+  ],
+  "support": [
+    "support/holoso_support.v"
+  ]
+}

@@ -2,7 +2,7 @@
 End-to-end out-of-context synthesis of the example matrix: every ``SynthTarget`` is synthesized in-process and its
 achieved f_max is asserted to meet the target frequency on its tool. This is the timing-closure regression guard for
 RTL-generation changes -- the functional guarantee (RTL == model) lives in the cosimulation suite, and the
-deterministic scheduling guard in ``test_latency_freeze``; this layer owns the physical timing only.
+deterministic scheduling guard in the golden corpus (``test_golden``); this layer owns the physical timing only.
 
 The whole module is ``synth``-marked (it needs an FPGA toolchain): ``nox -s synth_examples`` runs it and the normal
 suite skips it. A target whose flow's tool is absent skips individually, so a Yosys-only CI still exercises every Yosys

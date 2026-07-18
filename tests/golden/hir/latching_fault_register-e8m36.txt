@@ -1,0 +1,32 @@
+holoso-hir-dump/1
+inputs: v0 v1 v2
+nodes:
+  v0 = input overcurrent: bool
+  v1 = input overvoltage: bool
+  v2 = input overtemp: bool
+  v3 = state_read _overcurrent: bool
+  v4 = op bool_select(v3, v3, v0): bool
+  v5 = state_read _overvoltage: bool
+  v6 = op bool_select(v5, v5, v1): bool
+  v7 = state_read _overtemp: bool
+  v8 = op bool_select(v7, v7, v2): bool
+  v9 = op bool_select(v4, v4, v6): bool
+  v10 = op bool_select(v9, v9, v8): bool
+blocks:
+  block b0:
+    phis:
+    ops: v4 v6 v8 v9 v10
+    term: jump b1
+  block b1:
+    phis:
+    ops:
+    term: ret
+outputs:
+  out_0 = v10
+  out_1 = v4
+  out_2 = v6
+  out_3 = v8
+state_slots:
+  _overcurrent = v4 reset const bool false
+  _overvoltage = v6 reset const bool false
+  _overtemp = v8 reset const bool false

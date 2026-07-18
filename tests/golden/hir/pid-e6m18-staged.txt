@@ -1,0 +1,95 @@
+holoso-hir-dump/1
+inputs: v0 v1 v2
+nodes:
+  v0 = input setpoint: float
+  v1 = input measurement: float
+  v2 = input dt: float
+  v3 = op neg(v1): float
+  v4 = op add(v0, v3): float
+  v5 = state_read integral: float
+  v6 = const float 0x3fb0000000000000 (0.0625)
+  v7 = op mul(v6, v4): float
+  v8 = op mul(v7, v2): float
+  v9 = op add(v5, v8): float
+  v10 = state_read _started: bool
+  v11 = const float 0x0000000000000000 (0.0)
+  v12 = state_read prev_error: float
+  v13 = op neg(v12): float
+  v14 = op add(v4, v13): float
+  v15 = const float 0x3fd0000000000000 (0.25)
+  v16 = op mul(v15, v14): float
+  v17 = op div(v16, v2): float
+  v18 = phi [b2: v4, b1: v4]: float
+  v19 = const bool true
+  v20 = const float 0x3fe0000000000000 (0.5)
+  v21 = op mul(v20, v4): float
+  v22 = phi [b2: v9, b1: v9]: float
+  v23 = op add(v21, v9): float
+  v24 = phi [b2: v17, b1: v11]: float
+  v25 = op add(v23, v24): float
+  v26 = const float 0x4010000000000000 (4.0)
+  v27 = op frelational[gt](v25, v26): bool
+  v28 = const float 0xc010000000000000 (-4.0)
+  v29 = op frelational[lt](v25, v28): bool
+  v30 = phi [b8: v26, b7: v31]: float
+  v31 = phi [b6: v28, b5: v25]: float
+  v32 = phi [b8: v4, b7: v4]: float
+  v33 = phi [b6: v4, b5: v4]: float
+  v34 = phi [b8: v19, b7: v19]: bool
+  v35 = phi [b6: v19, b5: v19]: bool
+  v36 = phi [b8: v5, b7: v38]: float
+  v37 = phi [b2: v5, b1: v5]: float
+  v38 = phi [b6: v5, b5: v9]: float
+blocks:
+  block b0:
+    phis:
+    ops: v3 v4 v7 v8 v9
+    term: branch v10 ? b2 : b1
+  block b1:
+    phis:
+    ops:
+    term: jump b3
+  block b2:
+    phis:
+    ops: v13 v14 v16 v17
+    term: jump b3
+  block b3:
+    phis: v18 v22 v24 v37
+    ops: v21 v23 v25 v27
+    term: branch v27 ? b8 : b4
+  block b4:
+    phis:
+    ops: v29
+    term: branch v29 ? b6 : b5
+  block b5:
+    phis:
+    ops:
+    term: jump b7
+  block b6:
+    phis:
+    ops:
+    term: jump b7
+  block b7:
+    phis: v31 v33 v35 v38
+    ops:
+    term: jump b9
+  block b8:
+    phis:
+    ops:
+    term: jump b9
+  block b9:
+    phis: v30 v32 v34 v36
+    ops:
+    term: jump b10
+  block b10:
+    phis:
+    ops:
+    term: ret
+outputs:
+  out_0 = v30
+  state_prev_error = v4
+  state_integral = v36
+state_slots:
+  prev_error = v4 reset const float 0x0000000000000000 (0.0)
+  _started = v19 reset const bool false
+  integral = v36 reset const float 0x0000000000000000 (0.0)

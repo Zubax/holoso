@@ -1,0 +1,50 @@
+holoso-hir-dump/1
+inputs: v0
+nodes:
+  v0 = input x: float
+  v1 = const float 0x3ff0000000000000 (1.0)
+  v2 = op frelational[gt](v0, v1): bool
+  v3 = const float 0xbff0000000000000 (-1.0)
+  v4 = op frelational[lt](v0, v3): bool
+  v5 = const bool false
+  v6 = state_read y: bool
+  v7 = const bool true
+  v8 = phi [b5: v7, b4: v9]: bool
+  v9 = phi [b3: v5, b2: v6]: bool
+blocks:
+  block b0:
+    phis:
+    ops: v2
+    term: branch v2 ? b5 : b1
+  block b1:
+    phis:
+    ops: v4
+    term: branch v4 ? b3 : b2
+  block b2:
+    phis:
+    ops:
+    term: jump b4
+  block b3:
+    phis:
+    ops:
+    term: jump b4
+  block b4:
+    phis: v9
+    ops:
+    term: jump b6
+  block b5:
+    phis:
+    ops:
+    term: jump b6
+  block b6:
+    phis: v8
+    ops:
+    term: jump b7
+  block b7:
+    phis:
+    ops:
+    term: ret
+outputs:
+  state_y = v8
+state_slots:
+  y = v8 reset const bool false
