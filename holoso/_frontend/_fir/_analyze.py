@@ -144,6 +144,7 @@ from ._analysis_support import (
     _transpose_routes,
     conform_state_store,
     enforce_storage_schemas,
+    execution_rank,
     join_facts,
     schema_of_fact,
 )
@@ -243,6 +244,13 @@ class _Env:
                 changed = True
         deferred.raise_if_deferred()
         return changed
+
+
+def _stub_frames(origin: OriginStack, display: str | None) -> OriginStack:
+    """A registry stub's template frames rebrand to its public spelling; a user callee's pass through untouched."""
+    if display is None:
+        return origin
+    return tuple(replace(frame, function=display) for frame in origin)
 
 
 class _UnrollRestart(Exception):
@@ -649,10 +657,14 @@ class Analyzer:
         the call's destination binding, never by op identity), and state leaves in first-store SOURCE order (the
         order key is the storing op's origin with the user call site primary, so a store nested in a branch has a
         higher block id than a later top-level store yet comes first in the source text, and two call sites
-        inlining one setter order by the call sites, tie-broken by the callee frames). The replay does not mutate
-        the graph: every call is already expanded, folded, or classified. Emission consumes only this plan.
+        inlining one setter order by the call sites, tie-broken by the callee frames). Clones of ONE store op
+        (unroll trips of a loop over components) share the whole origin chain, so equal origin keys tie-break by
+        the storing block's execution rank -- trip order, the source order of the iterable -- never by raw block
+        id, which the unroller hands out in reverse trip order. The replay does not mutate the graph: every call
+        is already expanded, folded, or classified. Emission consumes only this plan.
         """
-        first_store: dict[StateLeaf, tuple[tuple[int, int], ...]] = {}
+        rank = execution_rank(result.unit.entry, result.executable_edges)
+        first_store: dict[StateLeaf, tuple[tuple[tuple[int, int], ...], int]] = {}
         for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
             block = result.unit.blocks[block_id]
             env = result.block_in[block_id].copy()
@@ -661,7 +673,7 @@ class Analyzer:
                     obj_fact = env.get(Local(op.obj))
                     if isinstance(obj_fact, Reference):
                         leaf = StateLeaf(obj_fact.obj, (op.name,))
-                        position = source_position(op.origin)
+                        position = (source_position(op.origin), rank[block_id])
                         if leaf not in first_store or position < first_store[leaf]:
                             first_store[leaf] = position
                             result.store_origins[leaf] = op.origin
@@ -2041,6 +2053,7 @@ class Analyzer:
             return True
         target = callee_fact.obj
         match = resolve(target)
+        stub_display: str | None = None
         if isinstance(match, Library):
             reduction = any(target is fn for fn in (np.max, np.amax, np.mean))
             sole_keyword_operand = not call.args and [keyword for keyword, _ in call.kwargs] == ["a"]
@@ -2090,6 +2103,7 @@ class Analyzer:
                     "an integer operand to np.sign is not yet lowerable; cast to float first", call.origin
                 )
             target = match.stub  # a composite library stub inlines exactly like a user function
+            stub_display = match.display_name  # ...but its grafted frames display the public spelling
         elif isinstance(match, Intrinsic):
             argument_facts = [env.get(Local(arg)) for arg in call.args] + [
                 env.get(Local(value)) for _, value in call.kwargs
@@ -2347,7 +2361,9 @@ class Analyzer:
         try:
             template = self._template(target)
         except BuildRejection as rejection:
-            raise AnalysisRejection(rejection.message, rejection.origin + call.origin) from None
+            raise AnalysisRejection(
+                rejection.message, _stub_frames(rejection.origin, stub_display) + call.origin
+            ) from None
         if len(unit.blocks) > _MAX_BLOCKS:
             raise AnalysisRejection("expansion fuel exhausted", call.origin)
         binding_map: dict[BindingId, BindingId] = {}
@@ -2381,7 +2397,9 @@ class Analyzer:
             clone = Block(block_map[template_block.id])
             for op in template_block.ops:
                 remapped = _remap_op(op, fresh, graft_place)
-                remapped.origin = remapped.origin + call.origin  # diagnostics point back at the user call site
+                # Diagnostics point back at the user call site; a registry stub's own frames graft under the
+                # public spelling so the context reads "in matmul():", never the shadow-avoidance "matmul_".
+                remapped.origin = _stub_frames(remapped.origin, stub_display) + call.origin
                 clone.ops.append(remapped)
             assert template_block.terminator is not None
             if isinstance(template_block.terminator, UnitExit):
@@ -2390,7 +2408,7 @@ class Analyzer:
                 clone.terminator = _remap_terminator(
                     template_block.terminator, lambda b: block_map[b], fresh, graft_place
                 )
-                clone.terminator.origin = clone.terminator.origin + call.origin
+                clone.terminator.origin = _stub_frames(clone.terminator.origin, stub_display) + call.origin
             unit.blocks[clone.id] = clone
             self._block_ancestry[clone.id] = ancestry + (key,)
         # The call site becomes: bind arguments -> jump into the graft; the continuation reads the return local.

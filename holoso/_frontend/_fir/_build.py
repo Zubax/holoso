@@ -65,8 +65,7 @@ from ._ir import (
     StoreRole,
     UnbindPlace,
     UnitExit,
-    primary_location,
-    render_rejection,
+    LocatedRejection,
     verify,
 )
 from ._opsem import BinOp, UnOp
@@ -85,14 +84,8 @@ from ._value import admit
 _logger = logging.getLogger(__name__)
 
 
-class BuildRejection(UnsupportedConstruct):
+class BuildRejection(LocatedRejection, UnsupportedConstruct):
     """A located refusal: the construct is outside the supported subset (or plainly wrong Python)."""
-
-    def __init__(self, message: str, origin: OriginStack) -> None:
-        super().__init__(render_rejection(message, origin))
-        self.message = message
-        self.origin = origin
-        self.location = primary_location(origin)
 
 
 _BIN_OPS: dict[type[ast.operator], BinOp] = {

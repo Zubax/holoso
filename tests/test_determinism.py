@@ -52,8 +52,7 @@ def coalesce_conflict(x: float, b: float, cc: float) -> float:
     so the soundness fixpoint must de-coalesce. The fixpoint's de-coalescing is set-driven, so this exercises that its
     iteration order -- and the resulting register assignment -- is seed-independent. The division keeps the diamond a
     real branch (un-if-converted), which is what creates the phi merge. The three merged values are summed into one
-    scalar output (the new front-end does not emit aggregate returns yet) -- all three phis stay live, so the coalescing
-    conflict is preserved.
+    scalar output -- all three phis stay live, so the coalescing conflict is preserved.
     """
     if b < cc:
         a = x
@@ -251,3 +250,43 @@ def test_loop_carried_state_numbering_is_identical_across_hash_seeds(other_seed:
     # or more persistent attributes.
     reference = _entry_output_under_seed("dump_two_carried_hir", "0")
     assert reference == _entry_output_under_seed("dump_two_carried_hir", other_seed)
+
+
+class FanoutChannel:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+
+class FanoutBank:
+    """
+    A helper storing to two sub-components from one unrolled loop: every trip clones the same store op with the
+    same origin chain, so the state-port order rests entirely on the analyzer's execution-rank tie-break.
+    """
+
+    def __init__(self) -> None:
+        self.first = FanoutChannel()
+        self.second = FanoutChannel()
+
+    def update_all(self, x: float) -> None:
+        for channel in (self.first, self.second):
+            channel.value = x
+
+    def step(self, x: float) -> float:
+        self.update_all(x)
+        return x
+
+
+def emit_unrolled_fanout_ports() -> None:
+    from holoso import FloatFormat, synthesize
+
+    from ._modelref import default_ops
+
+    result = synthesize(FanoutBank().step, default_ops(FloatFormat(6, 18)))
+    print([port.name for port in result.output_ports])
+
+
+@pytest.mark.parametrize("other_seed", ["42", "31337"])
+def test_unrolled_fanout_port_order_is_source_faithful_across_hash_seeds(other_seed: str) -> None:
+    reference = _entry_output_under_seed("emit_unrolled_fanout_ports", "0")
+    assert reference == "['state_first__value', 'state_second__value']\n"
+    assert reference == _entry_output_under_seed("emit_unrolled_fanout_ports", other_seed)

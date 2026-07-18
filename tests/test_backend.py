@@ -456,3 +456,32 @@ def test_two_state_slots_sharing_a_live_out_refuse_naming_both_slots() -> None:
     fmt = FloatFormat(6, 18)
     with pytest.raises(SynthesisError, match=r"state slots 'a' and 'b'"):
         generate(build(_run(Shared().step, _ops(fmt)), "shared_live_out", fetch_stages=3))
+
+
+def test_shared_live_out_refusal_names_only_boundary_sharers() -> None:
+    # S2.11 review: the partner list grouped state slots by final-tap register identity alone, so a slot whose
+    # EARLY install had read a former tenant of that register (here _c installs t = x + x mid-transaction, a
+    # different value from the final a/b share) was falsely blamed alongside the true sharers.
+    class Probe:
+        def __init__(self) -> None:
+            self.a = 4.0
+            self.b = 1.0
+            self._c = 2.0
+
+        def step(self, x: float) -> float:
+            old = self._c
+            t = x + x
+            self._c = t
+            a1 = t + self.a
+            self.a = a1 + old
+            self.a = x + self.a
+            self.b = self.a
+            return self.b
+
+    lir = build(_run(Probe().step, _ops(FloatFormat(6, 18))), "early_tenant", fetch_stages=3)
+    slots = {slot.name: slot for slot in lir.float_state_slots}
+    assert slots["_c"].tap == slots["a"].tap, "the probe premise needs _c to share the tap register"
+    assert not lir.float_state_install_is_boundary(slots["_c"]), "the probe premise needs _c to install early"
+    with pytest.raises(SynthesisError, match=r"state slots 'a' and 'b' end the transaction") as excinfo:
+        generate(lir)
+    assert "'_c'" not in str(excinfo.value)

@@ -1352,3 +1352,38 @@ def test_binary_linalg_stubs_take_exact_positional_arguments() -> None:
     for kernel in (matmul_kwargs, trace_offset):
         with pytest.raises(UnsupportedConstruct, match=r"takes exactly \d positional array argument"):
             lower(kernel)
+
+
+def scale_(v: float) -> float:
+    """A user helper legitimately named with a trailing underscore (PEP 8 shadow avoidance)."""
+    return getattr(v, "real")  # type: ignore[no-any-return]  # the located rejection under test
+
+
+class Power:
+    def __call__(self, x: float) -> float:
+        return getattr(x, "real")  # type: ignore[no-any-return]  # the located rejection under test
+
+
+def test_user_helper_trailing_underscore_renders_unstripped() -> None:
+    # S2.11 review: render_rejection stripped a trailing underscore from ANY innermost callee, so an honest user
+    # helper named scale_ displayed as "in scale():". Only registry stubs graft under a stripped public spelling.
+    def kernel(x: float) -> float:
+        return scale_(x)
+
+    with pytest.raises(UnsupportedConstruct, match=r"in scale_\(\): ") as excinfo:
+        lower(kernel)
+    assert excinfo.value.location is not None
+    assert "scale_(x)" in (excinfo.value.location.line or "")
+
+
+def test_component_dunder_call_context_renders_unmangled() -> None:
+    # S2.11 review: the same strip mangled a component __call__ context into "in Power.__call_():".
+    power = Power()
+
+    def kernel(x: float) -> float:
+        return power(x)
+
+    with pytest.raises(UnsupportedConstruct, match=r"in Power\.__call__\(\): ") as excinfo:
+        lower(kernel)
+    assert excinfo.value.location is not None
+    assert "power(x)" in (excinfo.value.location.line or "")

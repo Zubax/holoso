@@ -1765,3 +1765,46 @@ def test_an_aliased_slot_descriptor_refuses_instead_of_forking_state() -> None:
     assert Aliased().step(3.0) == 3.0  # runnable Python: one storage location
     with pytest.raises(UnsupportedConstruct, match="descriptors are not supported|descriptor attribute"):
         lower(Aliased().step)
+
+
+def test_unrolled_component_fanout_keeps_source_state_port_order() -> None:
+    # S2.11 review: every trip of a statically unrolled loop shares the storing op's whole origin chain, so the
+    # first-store keys tie exactly; the tie then fell back to block-id order, which the unroller hands out in
+    # reverse trip order, reversing the state ports against the source text of the iterable.
+    class Channel:
+        def __init__(self) -> None:
+            self.value = 0.0
+
+    class Bank:
+        def __init__(self) -> None:
+            self.first = Channel()
+            self.second = Channel()
+
+        def update_all(self, x: float) -> None:
+            for channel in (self.first, self.second):
+                channel.value = x
+
+        def step(self, x: float) -> float:
+            self.update_all(x)
+            return x
+
+    result = holoso.synthesize(Bank().step, default_ops(FloatFormat(6, 18)), name="fanout_order")
+    assert [p.name for p in result.output_ports] == ["state_first__value", "state_second__value"]
+
+
+def test_nan_state_reset_is_a_located_rejection() -> None:
+    # S2.11 review: a NaN reset snapshot used to surface as the HIR constant domain's raw UnsupportedConstruct
+    # with no location and no rendered prefix; it must refuse at emission, located at the leaf's first store.
+    class NanReset:
+        def __init__(self) -> None:
+            self.gain = float("nan")
+
+        def step(self, x: float) -> float:
+            self.gain = self.gain * 0.5
+            return x * self.gain
+
+    with pytest.raises(UnsupportedConstruct, match=r"step:\d+:\d+: .*NaN constant") as excinfo:
+        lower(NanReset().step)
+    location = excinfo.value.location
+    assert location is not None and location.filename == __file__
+    assert location.line is not None and "self.gain = self.gain * 0.5" in location.line

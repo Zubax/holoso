@@ -691,3 +691,21 @@ def test_non_returning_kernel_is_a_located_rejection() -> None:
 
     with pytest.raises(EmissionRejection, match="never returns"):
         lower_fir(kernel)
+
+
+def _spin_forever(v: float) -> float:
+    while True:
+        v = v + 1.0
+
+
+def test_never_returning_inlined_helper_blames_its_call_site() -> None:
+    # S2.11 review: with the helper inlined, the root exit is unreachable and the refusal fell back to the root's
+    # def-line origin. The deepest reachable terminator lives inside the helper's loop, so the rejection now names
+    # the helper and points at the user's call of it.
+    def kernel(value: float) -> float:
+        return _spin_forever(value)
+
+    with pytest.raises(EmissionRejection, match=r"in _spin_forever\(\): .*never returns") as excinfo:
+        lower_fir(kernel)
+    assert excinfo.value.location is not None
+    assert "_spin_forever(value)" in (excinfo.value.location.line or "")

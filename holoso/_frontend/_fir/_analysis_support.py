@@ -74,8 +74,7 @@ from ._ir import (
     StoreRole,
     Terminator,
     UnbindPlace,
-    primary_location,
-    render_rejection,
+    LocatedRejection,
 )
 from ._opsem import BinOp
 from ._signature import ArrayParameter, RecordParameter, ScalarParameter
@@ -96,24 +95,12 @@ from dataclasses import dataclass, replace
 _UNBOUND = Unbound()
 
 
-class AnalysisRejection(UnsupportedConstruct):
+class AnalysisRejection(LocatedRejection, UnsupportedConstruct):
     """A located refusal discovered during analysis (dynamic structure, recursion, possibly-unbound reads...)."""
 
-    def __init__(self, message: str, origin: OriginStack) -> None:
-        super().__init__(render_rejection(message, origin))
-        self.message = message
-        self.origin = origin
-        self.location = primary_location(origin)
 
-
-class LibraryAnalysisRejection(UnsupportedLibraryFunction):
+class LibraryAnalysisRejection(LocatedRejection, UnsupportedLibraryFunction):
     """A recognized math/numpy library function that has no hardware implementation yet -- a sibling refusal."""
-
-    def __init__(self, message: str, origin: OriginStack) -> None:
-        super().__init__(render_rejection(message, origin))
-        self.message = message
-        self.origin = origin
-        self.location = primary_location(origin)
 
 
 def _residual_type(value: StaticValue) -> SemType | None:
@@ -334,6 +321,33 @@ def _remap_terminator(
         case UnitExit(origin=origin):
             return UnitExit(origin)
     raise AssertionError(terminator)
+
+
+def execution_rank(entry: BlockId, executable_edges: set[tuple[BlockId, BlockId]]) -> dict[BlockId, int]:
+    """
+    Reverse-postorder position of every executable block from the entry -- the execution-order key. Successors
+    explore in block-id order, so the rank is deterministic; it exists because unroll clones get their block ids
+    in reverse trip order, so id order inverts execution order exactly where clone origins collide.
+    """
+    successors: dict[BlockId, list[BlockId]] = {}
+    for source, target in sorted(executable_edges, key=lambda edge: (edge[0].index, edge[1].index)):
+        successors.setdefault(source, []).append(target)
+    seen = {entry}
+    order: list[BlockId] = []
+    stack: list[tuple[BlockId, list[BlockId]]] = [(entry, list(successors.get(entry, [])))]
+    while stack:
+        block_id, pending = stack[-1]
+        while pending:
+            successor = pending.pop(0)
+            if successor not in seen:
+                seen.add(successor)
+                stack.append((successor, list(successors.get(successor, []))))
+                break
+        else:
+            order.append(block_id)
+            stack.pop()
+    order.reverse()
+    return {block_id: position for position, block_id in enumerate(order)}
 
 
 def _coreachable(

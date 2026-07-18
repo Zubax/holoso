@@ -11,7 +11,7 @@ import enum
 import linecache
 from dataclasses import dataclass, field
 
-from ..._errors import SourceLocation
+from ..._errors import SourceLocation, SynthesisError
 from ..._util import RelationalOp
 from ._opsem import BinOp, UnOp
 from ._signature import ParameterContract, ReturnContract
@@ -42,11 +42,13 @@ def source_position(origin: OriginStack) -> tuple[tuple[int, int], ...]:
 def render_rejection(message: str, origin: OriginStack) -> str:
     """
     The user-facing rendering: the ``function:line:column:`` prefix names the PRIMARY frame -- the user call site
-    (outermost) -- and an expansion-borne rejection names the callee it arose in (its registry-convention trailing
-    underscore stripped for display). The full frame chain stays on the exception for programmatic consumers.
+    (outermost) -- and an expansion-borne rejection names the callee it arose in, spelled exactly as the innermost
+    frame records it (a registry stub grafts under its public spelling, so ``matmul_`` displays as ``matmul``
+    while a user helper's own trailing underscore survives). The full frame chain stays on the exception for
+    programmatic consumers.
     """
     primary = origin[-1]
-    context = f"in {origin[0].function.removesuffix('_')}(): " if len(origin) > 1 else ""
+    context = f"in {origin[0].function}(): " if len(origin) > 1 else ""
     return f"{primary.function}:{primary.line}:{primary.column}: {context}{message}"
 
 
@@ -54,6 +56,21 @@ def primary_location(origin: OriginStack) -> SourceLocation:
     primary = origin[-1]
     text = linecache.getline(primary.file, primary.line)
     return SourceLocation(primary.file, primary.line, primary.column, text.rstrip() or None)
+
+
+class LocatedRejection(SynthesisError):
+    """
+    The shared body of every located refusal: str(exception) is the rendered message, while the raw message, the
+    origin stack, and the primary location stay on the instance for programmatic consumers. Concrete rejection
+    classes mix this with their public base (UnsupportedConstruct or UnsupportedLibraryFunction), which is what
+    users catch; the cooperative ``super().__init__`` walks through that base.
+    """
+
+    def __init__(self, message: str, origin: OriginStack) -> None:
+        super().__init__(render_rejection(message, origin))
+        self.message = message
+        self.origin = origin
+        self.location = primary_location(origin)
 
 
 @dataclass(frozen=True, slots=True)

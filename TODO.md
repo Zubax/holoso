@@ -23,7 +23,7 @@ Empty contractions diverge from numpy in the linalg stubs: `(n, 0) @ (0, m)` and
 Revisit together with the planned trace/outer/dot examples; the stubs' guards otherwise keep the reachable
 domain faithful.
 
-## Deferred capability gaps (tracked in the FIR_PARITY_PENDING registry; stage 10 asserts the registry empty)
+## Deferred capability gaps (tracked here; the FIR_PARITY_PENDING registry is empty and tests pin it empty)
 
 Two public state slots sharing a live-out refuse at Verilog emission when the schedule has reused the
 boundary-installing slot's register mid-transaction (e.g. `self.a = x + self.a` twice, then `self.b = self.a`;
@@ -36,12 +36,9 @@ The analyzer has no aggregate story for W-typed state: tuple-valued attributes (
 `self.window = (self.window[1], x)`) reject with "unsupported reset type". The W/D fixed point needs elementwise
 per-leaf live-ins (the aggregate stages).
 
-The emitter does not yet emit aggregate (tuple/list) returns or multi-leaf return places; such kernels get a
-located EmissionRejection. The per-leaf decomposition of aggregate-valued Places (locals, state, the return place)
-lands with the structural-spine stage. The differential harness covers scalar-returning kernels only until then.
-
 Iteration/indexing over a static-LENGTH runtime-element aggregate (`for v in (x, y, x+y)`; `[x]*3` then indexed)
-needs the aggregate layout to thread through named-local stores and the loop unroller -- same stage family.
+needs the aggregate layout to thread through named-local stores and the loop unroller -- same stage family as the
+per-leaf state live-ins above.
 
 The old front-end conservatively rejected a few valid corner kernels (arithmetic on an empty aggregate slice, an
 empty-aggregate loop nested in a `while` demoting the outer counter, a comprehension target named `self`); re-triage

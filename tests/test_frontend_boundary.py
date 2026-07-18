@@ -512,3 +512,16 @@ def test_return_contract_rejection_is_located_at_the_return_store() -> None:
     location = excinfo.value.location
     assert location is not None and location.filename == __file__
     assert location.line is not None and "return a + 1.0" in location.line
+
+
+def test_nan_constant_is_a_located_rejection() -> None:
+    # S2.11 review: a NaN reaching constant materialization used to raise the HIR constant domain's raw
+    # UnsupportedConstruct with no location; the refusal now lands at emission with the op's own origin.
+    def f(a: float) -> float:
+        return float("nan")
+
+    with pytest.raises(UnsupportedConstruct, match=r"f:\d+:\d+: .*NaN constant") as excinfo:
+        lower(f)
+    location = excinfo.value.location
+    assert location is not None and location.filename == __file__
+    assert location.line is not None and 'return float("nan")' in location.line

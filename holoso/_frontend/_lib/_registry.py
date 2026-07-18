@@ -46,6 +46,11 @@ class Library:
 
     stub: types.FunctionType
 
+    @property
+    def display_name(self) -> str:
+        """The public spelling: a stub carries a trailing underscore only to avoid shadowing what it implements."""
+        return self.stub.__name__.removesuffix("_")
+
 
 type Match = Intrinsic | Library
 

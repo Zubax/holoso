@@ -14,6 +14,7 @@ following the established port ABI.
 """
 
 import logging
+import math
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -140,8 +141,7 @@ from ._ir import (
     StorePlace,
     UnbindPlace,
     UnitExit,
-    primary_location,
-    render_rejection,
+    LocatedRejection,
     source_position,
 )
 from ._opsem import BinOp, UnOp
@@ -166,18 +166,12 @@ _logger = logging.getLogger(__name__)
 _MAX_POWER_CHAIN = 1024
 
 
-class EmissionRejection(UnsupportedConstruct):
+class EmissionRejection(LocatedRejection, UnsupportedConstruct):
     """
     A located refusal discovered during HIR emission: an unsupported construct that survived analysis. A rejection
     that can be decided during analysis belongs there; emission attributes each refusal to the op, state store, or
     return store it was lowering.
     """
-
-    def __init__(self, message: str, origin: OriginStack) -> None:
-        super().__init__(render_rejection(message, origin))
-        self.message = message
-        self.origin = origin
-        self.location = primary_location(origin)
 
 
 def lower_fir(kernel: object) -> Hir:
@@ -187,12 +181,18 @@ def lower_fir(kernel: object) -> Hir:
 
 def _carrier_float(value: object, origin: OriginStack) -> float:
     # A finite inexact integer (2**53 + 1) rounds into the binary64 carrier -- accepted C-style precision loss under
-    # the fastmath charter. Only a value beyond the carrier range entirely (10**400) is a located rejection.
+    # the fastmath charter. A value beyond the carrier range entirely (10**400) is a located rejection, and so is a
+    # NaN, which the HIR constant domain would otherwise refuse unlocated deeper down.
     try:
-        return float(value)  # type: ignore[arg-type]
+        result = float(value)  # type: ignore[arg-type]
     except OverflowError:
         bits = int(value).bit_length()  # type: ignore[call-overload]  # never via str(): 4300-digit conversion cap
         raise EmissionRejection(f"a {bits}-bit integer constant is beyond the binary64 carrier range", origin) from None
+    if math.isnan(result):
+        raise EmissionRejection(
+            "Holoso cannot represent a NaN constant. Only [in]finite numbers are supported.", origin
+        )
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,8 +356,12 @@ class _Emitter:
         order = self._reverse_postorder()
         if unit.exit not in order:
             # No path reaches the canonical exit (e.g. an unconditional `while True` with no break): the kernel
-            # produces no output, so there is nothing to synthesize. A located refusal, not a downstream crash.
-            raise EmissionRejection("the function never returns on any path", self._origin)
+            # produces no output, so there is nothing to synthesize. A located refusal, not a downstream crash --
+            # attributed to the deepest reachable terminator, which lives inside the non-returning region, so a
+            # helper that never returns blames its call site with the callee context rather than the root's def line.
+            deepest = self._result.unit.blocks[order[-1]].terminator
+            assert deepest is not None
+            raise EmissionRejection("the function never returns on any path", deepest.origin)
         for fir_id in order:
             self._fir_to_hir[fir_id] = self._builder.block()
         self._builder.position_at(self._fir_to_hir[unit.entry])

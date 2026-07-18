@@ -288,7 +288,8 @@ folded | cast (same-kind-vs-conversion decided at emission from the final facts)
 destination binding -- and the state leaves in
 first-store source order (the established port ABI orders ports by source text, not CFG shape; the order key is
 the store's origin stack with the user call site primary, so two call sites inlining one setter order by the call
-sites rather than tying on the setter's own line). This plan is the
+sites rather than tying on the setter's own line, and clones of one store -- an unrolled loop's trips -- share the
+whole chain and tie-break by execution order, which is the iterable's source order). This plan is the
 whole analyzer/emitter contract: emission never re-derives a fold, never resolves the library registry, and never
 replays the transfer function, so the two layers cannot disagree about a value's meaning.
 

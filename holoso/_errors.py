@@ -13,7 +13,7 @@ class SourceLocation:
     line: str | None = None
 
     def __str__(self) -> str:
-        where = f"{self.filename}:{self.lineno}:{self.col + 1}"
+        where = f"{self.filename}:{self.lineno}:{self.col}"  # 0-based column, matching the rendered rejection prefix
         if self.line is None:
             return where
         return f"{where}\n    {self.line.strip()}"
@@ -23,10 +23,10 @@ class HolosoError(Exception): ...
 
 
 class SynthesisError(HolosoError):
-    def __init__(self, message: str, location: SourceLocation | None = None) -> None:
+    def __init__(self, message: str) -> None:
         self.message = message
-        self.location = location
-        super().__init__(message if location is None else f"{message}\n  at {location}")
+        self.location: SourceLocation | None = None
+        super().__init__(message)
 
 
 class UnsupportedConstruct(SynthesisError):

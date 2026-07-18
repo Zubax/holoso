@@ -650,9 +650,17 @@ always @(posedge clk) begin
             # The boundary install is a higher-priority arm than the opcode case, so it must not shadow any opcode
             # write. An opcode write lands here only when this slot's live-out coalesced into ANOTHER slot's register
             # (a shared live-out) and the allocator reused this slot's own register for an intermediate -- refused,
-            # since emitting both would shadow one of the histories.
+            # since emitting both would shadow one of the histories. A genuine partner samples the tap register at
+            # the same boundary instant (or resides in it, coalesced); an early-installing slot with the same tap
+            # register copied an EARLIER tenant of that register -- a different value -- and must not be blamed.
             if RegRef(reg) in write_books:
-                partners = sorted(s.name for s in lir.float_state_slots if s.name != slot.name and s.tap == slot.tap)
+                partners = sorted(
+                    s.name
+                    for s in lir.float_state_slots
+                    if s.name != slot.name
+                    and s.tap == slot.tap
+                    and (not s.needs_copy or lir.float_state_install_is_boundary(s))
+                )
                 raise _shared_live_out_rejection(slot.name, partners)
             arms.append(("out_valid && out_ready", _operand_rhs(slot.tap)))
         _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), arms)
