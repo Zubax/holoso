@@ -252,12 +252,15 @@ class _Env:
 class _UnrollRestart(Exception):
     """
     A loop header's iterable fact descended past the already-unrolled shape mid-round: the round must rerun
-    with the joined fact seeded at the header, so the next unroll builds the stable shape in one pass.
+    with the joined fact seeded at the header, so the next unroll builds the stable shape in one pass. Seeds
+    key the loop's ORIGIN STACK, not its block id: grafted and cloned headers get fresh block ids every round,
+    while origins are re-attributed identically, so the origin is the round-stable identity. Clones of one
+    source loop (an outer unroll's trips) share a seed, which only widens their join — still sound.
     """
 
-    def __init__(self, header: BlockId, fact: Fact) -> None:
-        super().__init__(header)
-        self.header = header
+    def __init__(self, origin: OriginStack, fact: Fact) -> None:
+        super().__init__(origin)
+        self.origin = origin
         self.fact = fact
 
 
@@ -334,7 +337,7 @@ class Analyzer:
         self._construction_schemas: dict[int, tuple[type, tuple[FieldSchema, ...]]] = {}
         self._default_snapshots: dict[tuple[int, str], BoundFact] = {}
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
-        self._unroll_seeds: dict[BlockId, Fact] = {}  # survives rounds: the joined facts of restarted headers
+        self._unroll_seeds: dict[OriginStack, Fact] = {}  # survives rounds: the joined facts of restarted headers
         self._store_origins: dict[StateLeaf, OriginStack] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._array_methods: dict[tuple[BindingId, str], _ArrayMethod] = {}
@@ -355,11 +358,11 @@ class Analyzer:
             try:
                 result = self.analyze(param_facts)
             except _UnrollRestart as restart:
-                # Seeds key root-template block ids, which the per-round instantiation preserves; facts descend
-                # monotonically, so reseeding terminates within the round fuel.
-                self._unroll_seeds[restart.header] = restart.fact
+                # Facts descend monotonically and seeds only join downward, so reseeding terminates within the
+                # round fuel.
+                self._unroll_seeds[restart.origin] = restart.fact
                 self._reset_round()
-                _logger.info("state round %d: unroll reseeded at %s", round_index + 1, restart.header)
+                _logger.info("state round %d: unroll reseeded at %s", round_index + 1, restart.origin[0])
                 continue
             exit_env = result.block_in.get(result.unit.exit, _Env())
             reachable = _coreachable(result.unit, result.unit.exit, result.executable_edges)
@@ -1907,7 +1910,7 @@ class Analyzer:
                 return [then_target, else_target]
             case StaticFor():
                 iterable_fact = env.get(Local(terminator.iterable))
-                seed = self._unroll_seeds.get(block.id)
+                seed = self._unroll_seeds.get(terminator.origin)
                 if seed is not None:
                     iterable_fact = join_facts(seed, iterable_fact, terminator.origin)
                 cached = self._unroll_cache.get(block.id)
@@ -1915,7 +1918,7 @@ class Analyzer:
                     cached_fact, chain_entry = cached
                     if _same_fact(iterable_fact, cached_fact):
                         return [chain_entry]
-                    raise _UnrollRestart(block.id, join_facts(cached_fact, iterable_fact, terminator.origin))
+                    raise _UnrollRestart(terminator.origin, join_facts(cached_fact, iterable_fact, terminator.origin))
                 chain_entry = self._unroll(unit, block, terminator, iterable_fact)
                 self._unroll_cache[block.id] = (iterable_fact, chain_entry)
                 return [chain_entry]
@@ -1938,23 +1941,18 @@ class Analyzer:
             if isinstance(iterable.layout, ArrayLayout) and not iterable.layout.shape:
                 raise AnalysisRejection("iteration over a 0-dimensional array is undefined", loop.origin)
             trip_count = outer_arity(iterable.layout)
-            if trip_count > UNROLL_THRESHOLD:  # sized before materializing: a 32k table must reject instantly
-                raise AnalysisRejection(
-                    f"trip count {trip_count} exceeds the unroll threshold {UNROLL_THRESHOLD}; a counted "
-                    "back-edge loop is not supported yet",
-                    loop.origin,
-                )
-            for position in range(trip_count):
-                child: Fact = iterable.child(position)
-                if isinstance(child, AggregateFact):
-                    materialized = materialize_static(child)
-                    child = Known(materialized) if materialized is not None else child
-                if isinstance(child, (Known, Reference)):
-                    per_trip.append(child)
-                else:
-                    # A runtime element: the trip binds through a synthesized projection prelude, so the child's
-                    # cells (a scalar leaf or a whole row) flow exactly as an explicit v[k] would.
-                    per_trip.append(position)
+            if trip_count <= UNROLL_THRESHOLD:  # sized before materializing: a 32k table must reject instantly
+                for position in range(trip_count):
+                    child: Fact = iterable.child(position)
+                    if isinstance(child, AggregateFact):
+                        materialized = materialize_static(child)
+                        child = Known(materialized) if materialized is not None else child
+                    if isinstance(child, (Known, Reference)):
+                        per_trip.append(child)
+                    else:
+                        # A runtime element: the trip binds through a synthesized projection prelude, so the
+                        # child's cells (a scalar leaf or a whole row) flow exactly as an explicit v[k] would.
+                        per_trip.append(position)
         elif isinstance(iterable, Known) and isinstance(iterable.value, StaticSeq):
             trip_count = len(iterable.value.items)
             if trip_count <= UNROLL_THRESHOLD:
@@ -2331,7 +2329,7 @@ class Analyzer:
                 # Record construction is STRUCTURAL, never an evaluation: the layout is the class's validated
                 # field schema and the children are the argument facts THEMSELVES -- runtime leaves, enum
                 # provenance, LOST taint, and reference leaves all ride through untouched, and no host code
-                # (not even the generated __init__) ever runs. Like the getattr rewrite above, this precedes
+                # (not even the generated __init__) ever runs. Like the transpose relayout above, this precedes
                 # the admission harness: there is nothing to admit because nothing crosses.
                 self._expand_construction(target, call, env)
                 return False

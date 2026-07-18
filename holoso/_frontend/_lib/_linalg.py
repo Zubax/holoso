@@ -62,8 +62,10 @@ def trace_(a: np.ndarray) -> Any:
         raise ValueError("trace requires a matrix")
     if len(a) != len(a[0]):
         raise ValueError("trace requires a square matrix")
-    acc = 0
-    for i in range(len(a)):
+    if len(a) == 0:
+        return 0
+    acc = a[0][0] + 0  # the +0 keeps a 1x1 boolean matrix inside the arithmetic doctrine; it folds away otherwise
+    for i in range(1, len(a)):
         acc = acc + a[i][i]
     return acc
 

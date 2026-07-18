@@ -1060,10 +1060,21 @@ def test_mixed_bool_comparison_rejects_located_at_analysis() -> None:
     # Regression (C2): analysis admitted the residual bool/non-bool comparison and emission refused it without a
     # location; the refusal must carry the comparison's own line.
     def mixed(flag: bool) -> bool:
-        return flag == 1  # noqa: E712
+        return flag == 1
 
     with pytest.raises(UnsupportedConstruct, match=r"mixed:\d+:\d+: .*mixes a boolean and a non-boolean"):
         lower(mixed)
+
+
+def _rebound_iterable_helper(x: float) -> float:
+    table = (1.0, 2.0)
+    n = 0.0
+    while n < 2.0:
+        for v in table:
+            x = x + v
+        table = (3.0, 4.0)
+        n = n + 1.0
+    return x
 
 
 def test_conditionally_rebound_loop_iterable_unrolls() -> None:
@@ -1082,3 +1093,26 @@ def test_conditionally_rebound_loop_iterable_unrolls() -> None:
 
     machine = holoso.synthesize(kernel, default_ops(FloatFormat(8, 36))).numerical_model.elaborate()
     assert float(machine.run(0.5)[0]) == kernel(0.5) == 10.5
+
+    def wrapper(x: float) -> float:
+        return _rebound_iterable_helper(x)
+
+    # Codex review: the header lives in an INLINED callee, whose blocks get fresh ids every round — the seed
+    # must key the loop's origin, or reseeding never lands and the fixpoint burns its fuel and falsely rejects.
+    inlined = holoso.synthesize(wrapper, default_ops(FloatFormat(8, 36))).numerical_model.elaborate()
+    assert float(inlined.run(0.5)[0]) == wrapper(0.5) == 10.5
+
+    def nested(x: float) -> float:
+        rows = ((1.0, 2.0), (3.0, 4.0))
+        n = 0.0
+        while n < 2.0:
+            for row in rows:
+                for v in row:
+                    x = x + v
+            rows = ((5.0, 6.0), (7.0, 8.0))
+            n = n + 1.0
+        return x
+
+    # The inner header lives in the OUTER unroll's clones: all trips share the origin-keyed seed, which joins.
+    nested_machine = holoso.synthesize(nested, default_ops(FloatFormat(8, 36))).numerical_model.elaborate()
+    assert float(nested_machine.run(0.5)[0]) == nested(0.5) == 36.5

@@ -267,7 +267,9 @@ and layout-dependent attributes (.base, .strides, .flags, and flatten, whose ord
 layout) see the admitted snapshot, not the user's object, and reject. A 0-dimensional ndarray stays an array
 (its static type identity matters to folds); navigating it -- indexing, len(), iteration -- is a rejection,
 while concrete folds (float(z)) work through materialization.
-StaticFor unrolls by cloning the body per trip once the iterable is Known; calls expand on demand by grafting the
+StaticFor unrolls by cloning the body per trip once the iterable is Known (an iterable whose fact descends after
+the unroll — a rebind joined across a while iteration — reseeds the loop by its origin and reruns the round, so
+ordinary rebinding unrolls the joined shape instead of rejecting); calls expand on demand by grafting the
 callee template (defaults/kwargs bound, member __call__ dispatch, recursion rejected by function+receiver ancestry,
 origins re-attributed to the user call site). State: the W/D fixed point -- W accumulates executable
 exit-co-reachable store leaves (typing by reset value), D live-ins start at Known(reset) and join executable exit

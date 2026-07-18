@@ -1,6 +1,7 @@
 """Frontend tests: component state -- slots, resets, stores, read-only folding, provenance, and state ports."""
 
 import dataclasses
+import re
 import sys
 import types
 from pathlib import Path
@@ -1737,5 +1738,4 @@ def test_inadmissible_state_reset_is_located_at_the_store() -> None:
 
     with pytest.raises(UnsupportedConstruct) as excinfo:
         lower(BadReset().step)
-    assert ":0:0" not in str(excinfo.value)
-    assert "self.h = x" not in str(excinfo.value)  # the message locates the line, not the source text
+    assert re.search(r"step:[1-9]\d*:", str(excinfo.value)), str(excinfo.value)

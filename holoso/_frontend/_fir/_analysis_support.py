@@ -142,14 +142,8 @@ def _scalar_sem(fact: "Fact") -> SemType | None:
 
 def _numeric_sem(fact: "Fact") -> SemType | None:
     """FLOAT or INT for a numeric fact (a Known number or a Residual FLOAT/INT); None for bool, aggregate, or unbound."""
-    match fact:
-        case Known(value=value):
-            sem = _residual_type(value)
-            return sem if sem in (SemType.FLOAT, SemType.INT) else None
-        case Residual(type=t) if t in (SemType.FLOAT, SemType.INT):
-            return t
-        case _:
-            return None
+    sem = _scalar_sem(fact)
+    return sem if sem in (SemType.FLOAT, SemType.INT) else None
 
 
 def _float_promoted(fact: AtomicFact, origin: OriginStack) -> AtomicFact:
