@@ -451,3 +451,15 @@ F8 LocatedRejection MI base in _ir (library rejections stay non-UnsupportedConst
 exec-compiled kernels fail lower() with SourceUnavailable — randomized searches must use real files.
 INTEGRATION PLAN unchanged: B1 verify+commit first, cherry-pick 8772297, combined gate, one trial push, round-2
 pair over the stack, dev advance on green.
+
+S2.12 COMMITTED 4bc6863 (B1 fixed storage schema per the design note; ONE ratified deviation recorded in the
+note's addendum: aggregate schemas enforce on persistent state only, locals stay scalar-kind + fact-only for
+aggregates — full local enforcement rejected the examples contract. _analyze.py 2531->2448. Full light suite
+1781/3 green pre-integration; latency/metrics rows unchanged x3). S2.11-round fixes CHERRY-PICKED as 722d2fa
+(one trivial import-list conflict). Combined gate at 722d2fa: 577/1 green over the 12-file union incl.
+latency/metrics; mypy 197 files clean; black clean. Trial: trial/s2-b1-stack at 722d2fa; poll advances dev on
+green. Round-2 pair (S2.11 round 2 + B1 round 1 merged) reviewing 61077f7..722d2fa on pinned worktree
+review-s212. QUEUED for S2.14: test_metrics.py module docstring still claims finite_set_current_controller
+"cannot yet lower" (stale; explains its missing frozen guard row). NOTED: B1 double-error corner — a doomed
+kernel with a state-store violation plus a downstream rejection can surface the secondary message first; the
+int-slot<-float carry rule kills the only suite-exercised class. NEXT after round-2 clean + CI green: S2.13 G1.
