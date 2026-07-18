@@ -372,3 +372,12 @@ origin[-1]; SynthesisError.location populated; port-order tie fix (TwoChildren r
 EmissionRejection threading; backend shared-live-out assert -> located; enable the three blocked skips.
 Then S2.12 B1 per docs/decisions/b1-design.md (X2 banked), S2.13 G1 (preserve/hoist, budgeted), S2.14 hygiene
 (+ the S2.5-deferred rewordings; exit grep), S2.15 freeze (X3; build-sharing constraint), S3 gate, S4.
+
+SESSION-LIMIT CHECKPOINT (resets 6:50am Europe/Tallinn): Claude subagents terminated mid-flight — the S2.10
+Claude reviewer (Codex half COMPLETED: one finding, starred-inside-subscript-tuple `v[*[0], :]` draws the
+generic message instead of T10's; safe+located; queued small fix in _build's multi-axis subscript arm; all
+else clean — byte-identical unpacking, slots shapes match Python, H3 non-vacuous) and the S2.11 implementer
+(NO edits made; the full seven-item brief lives in the session task #13 + this file's NEXT paragraph — re-run
+it verbatim). The 05e4675 dev-advance poll exhausted on nulls (superseded-run backlog); RESOLUTION: push the
+CURRENT tip as one fresh trial run and gate the whole dev advance (ea3510e -> tip) on that single green, then
+re-run the S2.10 Claude reviewer post-reset. Codex remains available meanwhile.
