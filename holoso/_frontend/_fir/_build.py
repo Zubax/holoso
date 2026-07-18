@@ -62,6 +62,7 @@ from ._ir import (
     SelectMode,
     StaticFor,
     StorePlace,
+    StoreRole,
     UnbindPlace,
     UnitExit,
     primary_location,
@@ -295,7 +296,7 @@ class _Builder:
         if self._current.terminator is None:  # implicit `return None` on fall-off
             none_temp = self._temp()
             self._emit(LoadRef(none_temp, None, origin))
-            self._emit(StorePlace(ReturnPlace(), none_temp, origin))
+            self._emit(StorePlace(ReturnPlace(), none_temp, origin, StoreRole.RETURN))
             self._current.terminator = Jump(exit_block.id, origin)
         unit = FunctionUnit(
             name=self._qualname,
@@ -386,7 +387,7 @@ class _Builder:
                         operand = self._expression(value)
                         result = self._temp()
                         self._emit(PyBin(result, bin_op, current, operand, True, origin))
-                        self._emit(StorePlace(Local(binding), result, origin))
+                        self._emit(StorePlace(Local(binding), result, origin, StoreRole.SOURCE))
                     case ast.Attribute(value=obj, attr=attr):
                         obj_temp = self._expression(obj)  # evaluated once, exactly as Python does
                         spelled = self._resolver.runtime_spelling(attr)
@@ -402,7 +403,7 @@ class _Builder:
                         )
             case ast.Return(value=value):
                 result = self._expression(value) if value is not None else self._none(origin)
-                self._emit(StorePlace(ReturnPlace(), result, origin))
+                self._emit(StorePlace(ReturnPlace(), result, origin, StoreRole.RETURN))
                 self._current.terminator = Jump(exit_target, origin)
                 self._start_block(self._new_block())
             case ast.If(test=test, body=body, orelse=orelse):
@@ -498,7 +499,7 @@ class _Builder:
     def _assign_target(self, target: ast.expr, source: BindingId, origin: OriginStack) -> None:
         match target:
             case ast.Name(id=name):
-                self._emit(StorePlace(Local(self._bind(name)), source, origin))
+                self._emit(StorePlace(Local(self._bind(name)), source, origin, StoreRole.SOURCE))
             case ast.Attribute(value=obj, attr=attr):
                 obj_temp = self._expression(obj)
                 self._emit(PyStoreAttr(obj_temp, self._resolver.runtime_spelling(attr), source, origin))
@@ -602,7 +603,7 @@ class _Builder:
                 return self._load_name(name, origin)
             case ast.NamedExpr(target=ast.Name(id=name), value=value):
                 result = self._expression(value)
-                self._emit(StorePlace(Local(self._bind(name)), result, origin))
+                self._emit(StorePlace(Local(self._bind(name)), result, origin, StoreRole.SOURCE))
                 return result
             case ast.BinOp(left=left, op=op, right=right):
                 bin_op = _BIN_OPS.get(type(op))
@@ -667,11 +668,11 @@ class _Builder:
                 self._current.terminator = Branch(condition, then_block.id, else_block.id, origin)
                 self._start_block(then_block)
                 then_value = self._expression(body)
-                self._emit(StorePlace(Local(result), then_value, origin))
+                self._emit(StorePlace(Local(result), then_value, origin, StoreRole.MERGE))
                 self._current.terminator = Jump(join.id, origin)
                 self._start_block(else_block)
                 else_value = self._expression(orelse)
-                self._emit(StorePlace(Local(result), else_value, origin))
+                self._emit(StorePlace(Local(result), else_value, origin, StoreRole.MERGE))
                 self._current.terminator = Jump(join.id, origin)
                 self._start_block(join)
                 temp = self._temp()
@@ -797,7 +798,7 @@ class _Builder:
         self._serial += 1
         empty = self._temp()
         self._emit(BuildList(empty, (), origin))
-        self._emit(StorePlace(Local(accumulator), empty, origin))
+        self._emit(StorePlace(Local(accumulator), empty, origin, StoreRole.ACCUMULATOR))
         frame: dict[str, BindingId] = {}
         for generator in generators:
             if not isinstance(generator.target, ast.Name):
@@ -829,7 +830,7 @@ class _Builder:
             self._emit(LoadPlace(previous, Local(accumulator), origin))
             extended = self._temp()
             self._emit(PyBin(extended, BinOp.ADD, previous, single, False, origin))
-            self._emit(StorePlace(Local(accumulator), extended, origin))
+            self._emit(StorePlace(Local(accumulator), extended, origin, StoreRole.ACCUMULATOR))
             return
         generator = generators[level]
         if generator.is_async:

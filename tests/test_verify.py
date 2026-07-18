@@ -198,13 +198,14 @@ def test_tuple_unpacking_matches_python_reference() -> None:
 
 
 def test_for_counter_reassigned_to_runtime_clears_static_binding() -> None:
-    # Regression: a static ``for`` counter later reassigned to a RUNTIME value must lose its compile-time-integer
+    # Regression: a static ``for`` counter later reassigned to a RUNTIME value must lose its compile-time
     # binding, so a subsequent branch on that name is a real runtime branch -- not folded with the stale counter value.
-    # With the defect, the loop-counter's static-int binding survived the reassignment and ``1.0 >= i`` was folded as
-    # ``1.0 >= 0`` (the counter), silently taking the wrong arm and miscompiling the output for any ``i`` above 1.
+    # With the defect, the loop-counter's static binding survived the reassignment and ``1.0 >= i`` was folded as
+    # ``1.0 >= 0.0`` (the counter), silently taking the wrong arm and miscompiling the output for any ``i`` above 1.
+    # The counter iterates a FLOAT so the runtime rebind keeps the storage schema (B1).
     def f(a: float) -> float:
-        for i in range(1):
-            i = a  # type: ignore[assignment]  # reassign the loop variable to a runtime value (single-trip body)
+        for i in (0.0,):
+            i = a  # noqa: PLW2901  # reassign the loop variable to a runtime value (single-trip body)
         if 1.0 >= i:
             r = 100.0
         else:
@@ -218,13 +219,14 @@ def test_for_counter_reassigned_to_runtime_clears_static_binding() -> None:
 
 def test_for_counter_reassigned_after_loop_clears_static_binding() -> None:
     # The same hazard when the counter (leaked after the loop) is reassigned to a runtime value past the loop: the
-    # stale static-int binding must not fold a later branch. Without the fix, ``1.0 >= i`` folds with the counter's
-    # final value (2) and the conditional state update is dropped on every call.
+    # stale static binding must not fold a later branch. Without the fix, ``1.0 >= i`` folds with the counter's
+    # final value (2.0) and the conditional state update is dropped on every call. The counter iterates FLOATS so
+    # the runtime rebind keeps the storage schema (B1).
     def f(a: float) -> float:
         acc = 0.0
-        for i in range(3):
+        for i in (0.0, 1.0, 2.0):
             acc = acc + 1.0
-        i = a  # type: ignore[assignment]
+        i = a
         if 1.0 >= i:
             acc = acc + 50.0
         return acc
@@ -261,10 +263,10 @@ def test_for_counter_reassign_keeps_scan_and_lowering_in_lockstep() -> None:
             self.s = 4.0
 
         def step(self, a: float) -> float:
-            for t in range(1):
-                t = a  # type: ignore[assignment]  # reassign the counter to a runtime value -> a dynamic branch
+            for t in (0.0,):  # a FLOAT counter, so the runtime rebind keeps the storage schema (B1)
+                t = a  # noqa: PLW2901  # reassign the counter to a runtime value -> a dynamic branch
             # Both sides are otherwise compile-time (the counter and a literal), so if the scan failed to demote the
-            # reassigned counter it would fold ``0 < 1.0`` to True and never scan the else arm. With the counter
+            # reassigned counter it would fold ``0.0 < 1.0`` to True and never scan the else arm. With the counter
             # correctly demoted, this is a real runtime branch and the else arm's ``self.s`` write is reachable.
             if t < 1.0:
                 pass
@@ -296,9 +298,9 @@ def test_walrus_counter_demotion_keeps_scan_and_lowering_in_lockstep() -> None:
             self.s = 4.0
 
         def step(self, a: float) -> float:
-            for t in range(1):  # leaks t == 0 (a compile-time integer) into the enclosing scope
+            for t in (0.0,):  # leaks t == 0.0 (a compile-time float, so the walrus rebind keeps the schema)
                 pass
-            if (t := a) < 1.0:  # type: ignore[assignment]  # the walrus rebinds t to a runtime value, not a fold
+            if (t := a) < 1.0:  # the walrus rebinds t to a runtime value, not a fold
                 pass
             else:
                 c = 2.0
@@ -323,14 +325,14 @@ def test_for_counter_reassigned_inside_while_is_demoted_after_the_loop() -> None
     # comparison ``if i < 0.0`` was then folded against the stale counter (0) instead of the runtime value -- a SILENT
     # miscompile that took the wrong arm. The post-loop fold must follow the runtime value, matching plain Python.
     def kernel(a: float) -> float:
-        for i in range(1):  # leaks i == 0 (a compile-time integer) into the enclosing scope
+        for i in (0.0,):  # leaks i == 0.0 (a compile-time float, so the while-body rebind keeps the schema)
             pass
         w = 0.0
         while w < 1.0:
-            i = a  # type: ignore[assignment]  # demote the counter to a runtime value INSIDE the while body
+            i = a  # demote the counter to a runtime value INSIDE the while body
             w = w + 1.0
         r = 0.0
-        if i < 0.0:  # must be a real runtime branch on the reassigned value, not a fold on the stale counter (0)
+        if i < 0.0:  # must be a real runtime branch on the reassigned value, not a fold on the stale counter (0.0)
             r = 100.0
         else:
             r = 200.0
@@ -349,14 +351,14 @@ def test_for_counter_reassigned_inside_while_demotes_to_a_runtime_exponent() -> 
     # general runtime-exponent path (exp2(i * log2(3))), so an exp2 operation -- not a folded constant -- is the proof
     # that the stale fold did not happen.
     def kernel(a: float) -> float:
-        for i in range(2):
+        for i in (0.0, 1.0):  # a FLOAT counter, so the while-body rebind keeps the storage schema (B1)
             pass
         w = 0.0
         while w < 1.0:
-            # runtime reassignment inside the loop -> i is no longer a compile-time integer afterwards
-            i = a  # type: ignore[assignment]
+            # runtime reassignment inside the loop -> i is no longer a compile-time value afterwards
+            i = a
             w = w + 1.0
-        return a * 3.0**i
+        return a * 3.0**i  # type: ignore[no-any-return]
 
     from holoso._hir import Operation
 
@@ -1232,7 +1234,7 @@ def test_model_attr_written_under_counter_gated_branch_in_while() -> None:
             self._s2 = 2.0
 
         def step(self, a: float) -> float:
-            for i in range(3):
+            for i in (0.0, 1.0, 2.0):  # a FLOAT counter, so the while-body rebind keeps the storage schema (B1)
                 pass
             w = 2.0
             while w > 0.0:
@@ -1240,7 +1242,7 @@ def test_model_attr_written_under_counter_gated_branch_in_while() -> None:
                     self.s1 = a
                 else:
                     self._s2 = a
-                i = a  # type: ignore[assignment]
+                i = a
                 w = w - 1.0
             return self._s2
 

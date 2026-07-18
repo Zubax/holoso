@@ -829,7 +829,7 @@ def test_scalar_matmul_is_a_located_rejection() -> None:
         Analyzer(kernel).fixpoint()
 
 
-def test_bool_state_joining_with_float_is_a_located_rejection() -> None:
+def test_bool_state_stored_a_float_is_a_located_rejection() -> None:
     class Flagged:
         def __init__(self) -> None:
             self.mode = False
@@ -839,5 +839,7 @@ def test_bool_state_joining_with_float_is_a_located_rejection() -> None:
                 self.mode = 1.0  # type: ignore[assignment]  # honest type drift: bool state must not enter the float bank
             return 1.0 if self.mode else 0.0
 
-    with pytest.raises(AnalysisRejection, match="irreconcilable"):
+    with pytest.raises(AnalysisRejection, match="state attribute 'mode' stores an incompatible type") as excinfo:
         Analyzer(Flagged().step).fixpoint()
+    assert excinfo.value.location is not None and excinfo.value.location.line is not None
+    assert "self.mode = 1.0" in excinfo.value.location.line

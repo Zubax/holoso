@@ -1715,25 +1715,22 @@ def test_platform_alias_scalars_admit_like_their_dtypes() -> None:
     _assert_python_matches_holoso(kernel, 1.5)
 
 
-def test_float_store_into_int_reset_array_reads_back_float() -> None:
-    # The stored cells fix the read-back dtype: an int-reset slot holding promoted float cells must not
-    # reject later arithmetic as "runtime integer" (the values already matched Python; the reason was wrong).
+def test_float_store_into_int_reset_array_rejects_at_the_store() -> None:
+    # The reset fixes the slot schema per cell (B1): an integer-reset array slot cannot take float cells, and the
+    # refusal locates at the store rather than silently re-typing the slot for the next transaction.
     class Decay:
         def __init__(self) -> None:
             self.v = np.array([4, 2])
 
         def step(self, a: float) -> float:
             self.v = self.v * a
-            w = self.v * 2  # an INTEGER scalar: a stale int layout would misread this as runtime-int math
+            w = self.v * 2
             return w[0]  # type: ignore[no-any-return]
 
-    sim = _sim(Decay().step)
-    reference = Decay()
-    for _ in range(3):
-        want = reference.step(0.5)
-        got = _run(sim, 0.5)
-        assert got[0] == pytest.approx(want)
-        assert np.allclose(got[1:], reference.v.astype(np.float64), rtol=1e-12)
+    with pytest.raises(UnsupportedConstruct, match="stores an incompatible type at cell") as excinfo:
+        lower(Decay().step)
+    assert excinfo.value.location is not None and excinfo.value.location.line is not None
+    assert "self.v = self.v * a" in excinfo.value.location.line
 
 
 @dataclasses.dataclass(frozen=True)

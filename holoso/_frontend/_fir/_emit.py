@@ -602,12 +602,12 @@ class _Emitter:
                 self._state_order.append(leaf)
         return self._state_reads[(leaf, ordinal)]
 
-    def _leaf_is_int(self, leaf: StateLeaf, ordinal: int = 0) -> bool:
-        """An integer-typed persistent cell: the analyzer carries a runtime integer across the initiation boundary."""
-        livein = self._result.state_livein.get(leaf)
-        if isinstance(livein, AggregateFact):
-            return livein.leaves[ordinal] == Residual(SemType.INT)
-        return livein == Residual(SemType.INT)
+    def _slot_kind(self, leaf: StateLeaf, ordinal: int = 0) -> SemType:
+        """The slot's fixed kind, straight from the reset snapshot (the storage schema pins every store to it)."""
+        reset = self._leaf_reset(leaf, ordinal)
+        if isinstance(reset, BoolConst):
+            return SemType.BOOL
+        return SemType.INT if isinstance(reset, IntConst) else SemType.FLOAT
 
     def _leaf_reset(self, leaf: StateLeaf, ordinal: int = 0) -> FloatConst | BoolConst | IntConst:
         import numpy as np
@@ -629,9 +629,7 @@ class _Emitter:
             current = as_python(snapshot)
         if isinstance(current, bool) or isinstance(current, np.bool_):
             return BoolConst(bool(current))
-        # An integer reset stays integer only when the analyzer typed the cell as a runtime integer; an int literal
-        # seeding a float accumulator resets to 0.0 like any float, matching the cell's promoted datapath type.
-        if isinstance(current, (int, np.integer)) and self._leaf_is_int(leaf, ordinal):
+        if isinstance(current, (int, np.integer)):
             return IntConst(int(current))
         if isinstance(current, (int, float, np.integer, np.floating)):
             # The same carrier policy as a datapath constant.
@@ -1014,27 +1012,15 @@ class _Emitter:
                 src_fact = self._fact(src)
                 if isinstance(src_fact, AggregateFact):
                     for ordinal, stored in enumerate(src_fact.leaves):
-                        stored_sem = (
-                            stored.type if isinstance(stored, Residual) else self._fact_sem(Known(stored.value))  # type: ignore[union-attr]
-                        )
-                        kind = (
-                            SemType.INT
-                            if self._leaf_is_int(leaf, ordinal)
-                            else SemType.BOOL if stored_sem is SemType.BOOL else SemType.FLOAT
-                        )
                         vid = self._materialize_atom(
-                            stored, lambda: self._read(fir_id, _LeafPlace(Local(src), ordinal)), kind
+                            stored,
+                            lambda: self._read(fir_id, _LeafPlace(Local(src), ordinal)),
+                            self._slot_kind(leaf, ordinal),
                         )
                         self._write(fir_id, _LeafPlace(leaf, ordinal), vid)
                         self._state_read(leaf, ordinal)  # register every cell slot even if never read
                 else:
-                    src_sem = self._fact_sem(src_fact)
-                    kind = (
-                        SemType.INT
-                        if self._leaf_is_int(leaf)
-                        else SemType.BOOL if src_sem is SemType.BOOL else SemType.FLOAT
-                    )
-                    self._write(fir_id, leaf, self._materialize(fir_id, src, kind))
+                    self._write(fir_id, leaf, self._materialize(fir_id, src, self._slot_kind(leaf)))
                     self._state_read(leaf)  # register the slot even if the entry live-in was never read
             case PyCall(dst=dst, args=args):
                 plan = self._result.call_plans[dst]

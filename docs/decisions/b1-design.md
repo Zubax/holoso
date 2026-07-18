@@ -93,3 +93,11 @@ Test-reversal inventory beyond the note (X2): scalar annotation does not overrid
 (test_fir_differential.py:403-420); loop-counter tests deliberately rebinding int counters to floats
 (test_frontend_state.py:1515-1564) need type-preserving rewrites that keep their stale-fact coverage;
 the int-reset-array ← float acceptance at test_matrix.py:1716-1734 inverts.
+
+Implementation addendum (S2.12, ratified at consolidation): the aggregate schema clause ("flavor + geometry +
+per-leaf kinds") is enforced for persistent state only. For locals the schema tracks scalar SemType kinds and
+aggregate-valued stores are fact-only: full local aggregate enforcement rejected the examples contract itself
+(finite_set_current_controller's dq0 = dq0.reshape((2, 1)) rebind, the deliberate tuple->list loop kernel, and
+the exact idiom the in-place-mutation diagnostic recommends). Consistent with the note's "the schema sees
+SemType kinds only". Every rejection mandated by the outcome matrix and the X2 reversal inventory is scalar or
+state and survives unchanged.

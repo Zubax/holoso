@@ -317,6 +317,24 @@ interpolations from the compile-time values at the raise site (a shape, a counte
 value — or one carrying a conversion or format spec — degrades the whole message to a generic raise notice. A rejection inside an inlined
 library stub is re-attributed to the user's call site under the spelling they wrote.
 
+Storage typing. Variables are strongly typed for the function's lifetime under a fixed storage schema. The schema
+sees SemType kinds only: a source variable's first definition of a scalar datapath value establishes its kind (a
+root scalar parameter's comes from its annotation contract), and independent first definitions on different paths
+join with the same int->float promotion facts use. Once established, a store may only keep the kind: bool accepts
+bool, int accepts int, float accepts float or an integer that converts on the store edge. Every other scalar store
+is a located rejection at the store site; `del` does not erase an established schema, and values outside the
+datapath kinds -- references, strings, ranges, and whole aggregates -- neither establish nor violate one. A local
+aggregate is value dataflow whose representation may be rebound freely (a reshape, a reflavor, growing a list by
+rebinding), its leaf kinds governed by the fact flow; only persistent state, whose reset fixes a reconstruction
+contract, enforces flavor, geometry, and per-cell kinds at its store site (below). The schema check
+is a separate monotone flow over the stabilized graph, never a per-visit fact check: optimistic analysis discovers
+executable predecessors late, so store obligations resolve only after the state fixed point, and when several
+stores violate, the one reported is the first executable store in CFG preorder. Widening at merges is untouched:
+phi and select arms, comparison operands, explicit casts, return conversion, and mixed arithmetic promote exactly
+as before, so `x = 0; x = input_float` rejects while `x = int(v) if c else v` remains a legal float phi. Only
+genuine variable bindings face the schema: the builder tags each store with its role, and conditional-expression
+merge sinks, comprehension accumulators, and the return place (validated by the return contract) are exempt.
+
 Persistent state. A synthesized method's `self` is not a port: each instance attribute the method writes on an
 executable exit-co-reachable path becomes a persistent register (a loop-carried value, the back-edge of the
 initiation loop), and each attribute it only reads is a frozen constant folded from the `__init__` snapshot. Within
@@ -426,11 +444,11 @@ deliberately discards) is a located rejection.
 Aggregate persistent state is live: an attribute may persist a FLAT list of scalars or a nonempty 1-D/2-D
 plain ndarray, decomposed into one scalar slot per cell (`x_0`, `m_0_1`; observable ports `state_x_0`, ...) in
 canonical leaf order, with the reset snapshot fixing the schema. Every reachable store validates against that
-schema explicitly at the store site -- container flavor, exact geometry, and per-cell bool/numeric compatibility
--- rather than through the generic joins (whose flavor degrade and array dtype promotion would accept what the
-next transaction cannot reconstruct); integer cells promote into float slots per cell exactly as scalar stores
-do, and a declared jaxtyping field annotation must agree with the reset shape. 3-D, empty, nested, tuple-valued,
-and ndarray-subclass resets reject by name.
+schema explicitly at the store site -- container flavor, exact geometry, and per-cell kind under the storage
+doctrine (bool cells accept bool, int cells int, float cells float or a promoted integer) -- rather than through
+the generic joins (whose flavor degrade and array dtype promotion would accept what the next transaction cannot
+reconstruct); a declared jaxtyping field annotation must agree with the reset shape. 3-D, empty, nested,
+tuple-valued, and ndarray-subclass resets reject by name.
 Array parameter and return ports are live: a fixed-shape 1-D/2-D floating jaxtyping annotation over
 np.ndarray ITSELF (Float64[list, ...] would smuggle list semantics) decomposes row-major into one float input
 port per element under the shared indexed-name convention, with a documented per-annotation port budget and a
@@ -624,7 +642,7 @@ MIR is a clean "not yet lowerable" rejection (not yet source-located; the intege
 
 Everything mixed promotes to float, C-style. An `IntToFloat` sits on each integer edge feeding a float operation, a
 `return`, or a state store into a float slot; `/` and int+float promote while `//`/`%` stay integer and floor-couple.
-A control-flow merge (phi, conditional select, state-leaf join) of an integer path with a float path promotes the
+A control-flow merge (phi, conditional select) of an integer path with a float path promotes the
 integer side on its own edge and yields a plain float -- Python instead keeps each path's runtime kind, which is the
 documented C-style deviation, and the same rule covers an int/float comparison, which promotes and compares in float.
 The precision loss is accepted under the fastmath charter: a Known integer materializing in a float position rounds

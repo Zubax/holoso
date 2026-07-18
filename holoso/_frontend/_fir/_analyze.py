@@ -59,6 +59,7 @@ from ._ir import (
     StateLeaf,
     StaticFor,
     StorePlace,
+    StoreRole,
     Terminator,
     UnbindPlace,
     UnitExit,
@@ -117,13 +118,13 @@ from ._analysis_support import (
     AnalysisRejection,
     DeferredRejection,
     LibraryAnalysisRejection,
+    StorageSchema,
     _concat_seqs,
     _concrete_fact,
     _contract_structure,
     _coreachable,
     _crossing_object,
     _fits_float64,
-    _float_promoted,
     _has_truth_override,
     _identity_place,
     _is_array_fact,
@@ -141,7 +142,10 @@ from ._analysis_support import (
     _same_fact,
     _seq_side,
     _transpose_routes,
+    conform_state_store,
+    enforce_storage_schemas,
     join_facts,
+    schema_of_fact,
 )
 from ._opsem import BinOp, UnOp, static_binop, static_compare, static_truth, static_unop
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
@@ -332,6 +336,7 @@ class Analyzer:
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
         self._unroll_seeds: dict[OriginStack, Fact] = {}  # survives rounds: the joined facts of restarted headers
         self._store_origins: dict[StateLeaf, OriginStack] = {}
+        self._store_schema_violations: dict[int, tuple[str, OriginStack]] = {}  # op id -> deferred store obligation
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._array_methods: dict[tuple[BindingId, str], _ArrayMethod] = {}
         self._class_annotations: dict[int, tuple[type, "Mapping[str, object]"]] = {}
@@ -397,6 +402,7 @@ class Analyzer:
                     | set(self._construction_calls),
                 )
                 self._finalize(result)
+                self._check_storage_schemas(result)
                 return result
             self._runtime_state = new_w
             self._state_livein = new_d
@@ -406,10 +412,27 @@ class Analyzer:
             "state fixpoint failed to stabilize", (Origin(self._root_template.name, 0, 0, self._root_template.file),)
         )
 
+    def _check_storage_schemas(self, result: ResidualUnit) -> None:
+        entry_env = result.block_in[result.unit.entry]
+        seeds: dict[Place, StorageSchema] = {}
+        for param in result.unit.params:
+            schema = schema_of_fact(entry_env.get(Local(param)))
+            if schema is not None:
+                seeds[Local(param)] = schema
+        enforce_storage_schemas(
+            result.unit,
+            result.executable_blocks,
+            result.executable_edges,
+            result.binding_facts,
+            seeds,
+            self._store_schema_violations,
+        )
+
     def _reset_round(self) -> None:
         self._block_ancestry = {}
         self._discovered_stores = set()
         self._store_origins = {}
+        self._store_schema_violations = {}
         self._concrete_calls = set()
         self._intrinsic_calls = set()
         self._cast_calls = set()
@@ -571,84 +594,6 @@ class Analyzer:
             ) from None
         self._class_annotations[id(klass)] = (klass, annotations)
         return annotations
-
-    def _admit_state_store(self, leaf: StateLeaf, reset: Fact, src: Fact, origin: OriginStack) -> Fact:
-        """
-        An aggregate-flavored store against the reset-derived schema: the reset fixes the container flavor and
-        the exact geometry (the next transaction reconstructs that Python object, so a structural degrade would
-        lie), and each cell's carrier kind comes from the stabilized live-in with the reset as the first-round
-        fallback -- an integer leaf promotes into a float cell exactly as the scalar store does, and a
-        bool/numeric mix is a located rejection rather than a silent reinterpretation.
-        """
-        name = ".".join(leaf.path)
-        if not isinstance(reset, AggregateFact):
-            if isinstance(reset, Reference):
-                raise AnalysisRejection(
-                    f"state attribute '{name}' cannot persist: its reset is not admissible "
-                    "(a plain numpy array or a flat list of scalars is required)",
-                    origin,
-                )
-            raise AnalysisRejection(
-                f"state attribute '{name}' persists a scalar; an aggregate cannot be stored into it", origin
-            )
-        if not isinstance(src, AggregateFact):
-            raise AnalysisRejection(
-                f"state attribute '{name}' persists an aggregate; a scalar cannot be stored into it", origin
-            )
-        assert isinstance(reset.layout, (ListLayout, ArrayLayout))
-        if type(src.layout) is not type(reset.layout):
-            flavor = "numpy array" if isinstance(reset.layout, ArrayLayout) else "list"
-            raise AnalysisRejection(
-                f"state attribute '{name}' persists a {flavor}; store the same container flavor", origin
-            )
-        geometry_matches = (
-            src.layout.shape == reset.layout.shape
-            if isinstance(reset.layout, ArrayLayout) and isinstance(src.layout, ArrayLayout)
-            else src.layout == reset.layout
-        )
-        if not geometry_matches:
-            described = (
-                f"a {'x'.join(map(str, reset.layout.shape))} array"
-                if isinstance(reset.layout, ArrayLayout)
-                else f"a {outer_arity(reset.layout)}-element vector"
-            )
-            raise AnalysisRejection(
-                f"state attribute '{name}' persists {described}; the stored value has an incompatible shape",
-                origin,
-            )
-        livein = self._state_livein.get(leaf)
-        cells: list[AtomicFact] = []
-        for ordinal, stored in enumerate(src.leaves):
-            if isinstance(stored, Reference):
-                raise AnalysisRejection(f"state attribute '{name}' cannot persist an object reference", origin)
-            slot_cell = livein.leaves[ordinal] if isinstance(livein, AggregateFact) else reset.leaves[ordinal]
-            slot_sem = slot_cell.type if isinstance(slot_cell, Residual) else _residual_type(slot_cell.value)  # type: ignore[union-attr]
-            stored_sem = stored.type if isinstance(stored, Residual) else _residual_type(stored.value)
-            if stored_sem is None or (slot_sem is SemType.BOOL) != (stored_sem is SemType.BOOL):
-                raise AnalysisRejection(
-                    f"state attribute '{name}' stores an incompatible type at cell {ordinal}", origin
-                )
-            if slot_sem is SemType.FLOAT and stored_sem is SemType.INT:
-                promoted = _float_promoted(stored, origin)
-                assert isinstance(promoted, (Known, Residual))
-                cells.append(promoted)
-            else:
-                cells.append(stored)
-        layout: AggregateLayout = reset.layout
-        if isinstance(reset.layout, ArrayLayout):
-            # The stored cells fix the read-back dtype: an int-reset slot holding promoted float cells reads
-            # back as a float array (the layout carried by the fact must agree with its own cell kinds).
-            sems = set()
-            for cell in cells:
-                assert isinstance(cell, (Known, Residual)), cell
-                sems.add(cell.type if isinstance(cell, Residual) else _residual_type(cell.value))
-            dtype = (
-                ArrayDType.BOOL
-                if sems == {SemType.BOOL}
-                else ArrayDType.FLOAT if SemType.FLOAT in sems else ArrayDType.INT
-            )
-            layout = ArrayLayout(reset.layout.shape, dtype)
-        return AggregateFact(layout, tuple(cells))
 
     def _reject_executable_fails(self, result: ResidualUnit) -> None:
         """
@@ -1147,45 +1092,17 @@ class Analyzer:
                 if recorded is None or source_position(op.origin) < source_position(recorded):
                     self._store_origins[leaf] = op.origin
                 self._discovered_stores.add((block.id, leaf))
-                reset_fact = self._state_reset_fact(leaf)
-                if isinstance(reset_fact, AggregateFact) or isinstance(src_fact, AggregateFact):
-                    src_fact = self._admit_state_store(leaf, reset_fact, src_fact, op.origin)
-                elif (
-                    (slot_sem := self._leaf_kind(leaf)) is not None
-                    and isinstance(src_fact, (Known, Residual))
-                    and (
-                        stored_sem := (
-                            src_fact.type if isinstance(src_fact, Residual) else _residual_type(src_fact.value)
-                        )
-                    )
-                    is not None
-                    and (slot_sem is SemType.BOOL) != (stored_sem is SemType.BOOL)
-                ):
-                    raise AnalysisRejection(f"state attribute '{name}' stores an incompatible type", op.origin)
-                elif (
-                    self._leaf_kind(leaf) is SemType.FLOAT
-                    and isinstance(src_fact, (Known, Residual))
-                    and _numeric_sem(src_fact) is SemType.INT
-                ):
-                    # The datapath store rounds the integer into the float slot, so the fact a read-back sees must be
-                    # the promoted (rounded) float -- an exact-integer fact here would fold against a value the slot
-                    # does not hold. On the first W/D round the slot kind falls back to the reset's; the fixed point
-                    # then converges with the same descending joins as the live-in itself.
-                    src_fact = _float_promoted(src_fact, op.origin)
-                env.set(leaf, src_fact)
+                # The reset fixes the slot schema; a violating store carries the residualized reset onward so the
+                # fixed point stabilizes, and the recorded obligation reports after stabilization, at this store.
+                conformed, violation = conform_state_store(name, self._state_reset_fact(leaf), src_fact, op.origin)
+                if violation is None:
+                    self._store_schema_violations.pop(id(op), None)
+                else:
+                    self._store_schema_violations[id(op)] = (violation, op.origin)
+                env.set(leaf, conformed)
             case PyCall(dst=dst, callee=callee):
                 return self._expand_call(unit, block, index, op, env)
         return False
-
-    def _leaf_kind(self, leaf: StateLeaf) -> SemType | None:
-        """The numeric kind the slot stores at: the current live-in's, else the reset's; None when unresolvable."""
-        fact = self._state_livein.get(leaf)
-        if fact is None:
-            try:
-                fact = self._state_reset_fact(leaf)
-            except AnalysisRejection:
-                return None
-        return _numeric_sem(fact)
 
     def _residual_of(self, fact: Fact, origin: OriginStack) -> Fact:
         match fact:
@@ -1942,7 +1859,7 @@ class Analyzer:
                 assert position_key is not None
                 prelude.ops.append(LoadConst(index_temp, position_key, loop.origin))
                 prelude.ops.append(PySubscript(temp, loop.iterable, index_temp, loop.origin))
-            prelude.ops.append(StorePlace(loop.target, temp, loop.origin))
+            prelude.ops.append(StorePlace(loop.target, temp, loop.origin, StoreRole.SOURCE))
             prelude.terminator = Jump(body_entry, loop.origin)
             unit.blocks[prelude.id] = prelude
             chain_target = prelude.id
@@ -2485,7 +2402,7 @@ class Analyzer:
             self_temp = BindingId(f"%s{self._binding_serial}", self._binding_serial)
             self._binding_serial += 1
             block.ops.append(LoadRef(self_temp, template.bound_self, call.origin))
-            block.ops.append(StorePlace(Local(fresh(params[0])), self_temp, call.origin))
+            block.ops.append(StorePlace(Local(fresh(params[0])), self_temp, call.origin, StoreRole.SOURCE))
             params = params[1:]
         fn_object = target.__func__ if isinstance(target, types.MethodType) else target
         raw_defaults = fn_object.__defaults__ or ()
@@ -2523,7 +2440,7 @@ class Analyzer:
                 source = default_temp
             else:
                 raise AnalysisRejection(f"missing argument '{param.name}'", call.origin)
-            block.ops.append(StorePlace(Local(fresh(param)), source, call.origin))
+            block.ops.append(StorePlace(Local(fresh(param)), source, call.origin, StoreRole.SOURCE))
         if keyword:
             raise AnalysisRejection(f"unexpected keyword argument '{next(iter(keyword))}'", call.origin)
         block.terminator = Jump(block_map[template.entry], call.origin)

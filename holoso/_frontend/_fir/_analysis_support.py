@@ -9,7 +9,7 @@ import enum
 import itertools
 import math
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import numpy as np
 
@@ -71,6 +71,7 @@ from ._ir import (
     PyUn,
     StaticFor,
     StorePlace,
+    StoreRole,
     Terminator,
     UnbindPlace,
     primary_location,
@@ -90,7 +91,7 @@ from ._value import (
     StaticValue,
     same,
 )
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 _UNBOUND = Unbound()
 
@@ -497,6 +498,251 @@ def _layout_dtypes(layout: "ValueLayout") -> set[ArrayDType]:
         case TupleLayout(items=items) | ListLayout(items=items) | StructuralLayout(items=items):
             return {dtype for item in items for dtype in _layout_dtypes(item)}
     return set()
+
+
+# ---------------------------------------- the fixed storage schema (B1) ----------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ScalarSchema:
+    kind: SemType
+
+
+@dataclass(frozen=True, slots=True)
+class ContradictorySchema:
+    """
+    Paths established irreconcilable schemas for one place without any single store being a rebinding (possible
+    only through ``del`` corners, since a live fact merge of such paths rejects first). No store satisfies it.
+    """
+
+
+type StorageSchema = ScalarSchema | ContradictorySchema
+
+
+def schema_of_fact(fact: Fact) -> StorageSchema | None:
+    """
+    The storage schema a stored fact establishes for a source variable: its scalar SemType kind. The schema sees
+    SemType kinds only -- an aggregate-valued store is fact-only, like a reference or a string: local aggregates
+    are value dataflow whose shape may be re-represented freely (``v = v.reshape(...)``, the accumulator idiom
+    the in-place-mutation rejection recommends), and their leaf kinds ride the fact flow. Only persistent state,
+    whose reset fixes a reconstruction contract, enforces flavor, geometry, and per-cell kinds (at its own door).
+    """
+    match fact:
+        case Known() | Residual():
+            kind = _scalar_sem(fact)
+            return ScalarSchema(kind) if kind is not None else None
+        case _:
+            return None
+
+
+def join_schemas(a: StorageSchema, b: StorageSchema) -> StorageSchema:
+    """The establishing join of independent first definitions: int promotes to float, like the fact join."""
+    if a == b:
+        return a
+    match a, b:
+        case (ScalarSchema(kind=x), ScalarSchema(kind=y)):
+            if {x, y} == {SemType.INT, SemType.FLOAT}:
+                return ScalarSchema(SemType.FLOAT)
+            return ContradictorySchema()
+        case _:
+            return ContradictorySchema()
+
+
+def _admit_rebinding(current: StorageSchema, stored: StorageSchema) -> StorageSchema | None:
+    """The schema after an acceptable rebinding store (bool<-bool, int<-int, float<-float|int), else None."""
+    match current, stored:
+        case (ScalarSchema(kind=s), ScalarSchema(kind=k)):
+            if s is k or (s is SemType.FLOAT and k is SemType.INT):
+                return current
+            return None
+        case _:
+            return None
+
+
+def describe_schema(schema: StorageSchema) -> str:
+    match schema:
+        case ScalarSchema(kind=kind):
+            return {SemType.BOOL: "a bool", SemType.INT: "an int", SemType.FLOAT: "a float"}[kind]
+        case ContradictorySchema():
+            return "of no single established type"
+    raise AssertionError(schema)
+
+
+def conform_state_store(name: str, reset: Fact, stored: Fact, origin: OriginStack) -> tuple[Fact, str | None]:
+    """
+    The fact a state store leaves in its slot plus the schema violation it commits, if any. The reset fixes the
+    slot schema -- container flavor, exact geometry, and per-cell kind -- and a store may only keep it: bool
+    cells accept bool, int cells int, float cells float or int (the integer promotes on the store edge, exactly
+    like the local rule). A violation reports after stabilization, at this store, so the fact carried onward must
+    keep the fixed point stable AND free of misleading secondary rejections: an int slot receiving float (a pure
+    numeric widening) carries the stored fact, whose W/D join merely descends; every other violation carries the
+    residualized reset, since joining the stored fact would raise a worse-located mismatch first.
+    """
+    if isinstance(reset, Reference):
+        return reset, (
+            f"state attribute '{name}' cannot persist: its reset is not admissible "
+            "(a plain numpy array or a flat list of scalars is required)"
+        )
+    if isinstance(reset, AggregateFact):
+        if not isinstance(stored, AggregateFact):
+            return reset, f"state attribute '{name}' persists an aggregate; a scalar cannot be stored into it"
+        assert isinstance(reset.layout, (ListLayout, ArrayLayout)), "the reset schema was validated at its read"
+        if type(stored.layout) is not type(reset.layout):
+            flavor = "numpy array" if isinstance(reset.layout, ArrayLayout) else "list"
+            return reset, f"state attribute '{name}' persists a {flavor}; store the same container flavor"
+        geometry_matches = (
+            stored.layout.shape == reset.layout.shape
+            if isinstance(reset.layout, ArrayLayout) and isinstance(stored.layout, ArrayLayout)
+            else stored.layout == reset.layout
+        )
+        if not geometry_matches:
+            described = (
+                f"a {'x'.join(map(str, reset.layout.shape))} array"
+                if isinstance(reset.layout, ArrayLayout)
+                else f"a {outer_arity(reset.layout)}-element vector"
+            )
+            return reset, f"state attribute '{name}' persists {described}; the stored value has an incompatible shape"
+        cells: list[AtomicFact] = []
+        message: str | None = None
+        widening_only = True
+        for ordinal, cell in enumerate(stored.leaves):
+            if isinstance(cell, Reference):
+                return reset, f"state attribute '{name}' cannot persist an object reference"
+            slot_kind = _scalar_sem(reset.leaves[ordinal])
+            assert slot_kind is not None, "the reset schema admits datapath cells only"
+            stored_kind = _scalar_sem(cell)
+            if stored_kind is slot_kind:
+                cells.append(cell)
+            elif slot_kind is SemType.FLOAT and stored_kind is SemType.INT:
+                promoted = _float_promoted(cell, origin)
+                assert isinstance(promoted, (Known, Residual))
+                cells.append(promoted)
+            else:
+                if message is None:
+                    message = f"state attribute '{name}' stores an incompatible type at cell {ordinal}"
+                if not (slot_kind is SemType.INT and stored_kind is SemType.FLOAT):
+                    widening_only = False
+        if message is not None:
+            return (stored if widening_only else reset), message
+        return AggregateFact(reset.layout, tuple(cells)), None
+    slot_kind = _scalar_sem(reset)
+    assert slot_kind is not None, "a scalar reset fact is a Known bool or a numeric residual"
+    if isinstance(stored, AggregateFact):
+        return reset, f"state attribute '{name}' persists a scalar; an aggregate cannot be stored into it"
+    stored_kind = _scalar_sem(stored)
+    if stored_kind is None or stored_kind is slot_kind:
+        return stored, None  # a non-datapath value neither establishes nor violates; the W/D join owns it
+    assert isinstance(stored, (Known, Residual))
+    if slot_kind is SemType.FLOAT and stored_kind is SemType.INT:
+        return _float_promoted(stored, origin), None
+    message = f"state attribute '{name}' stores an incompatible type"
+    return (stored if slot_kind is SemType.INT and stored_kind is SemType.FLOAT else reset), message
+
+
+def enforce_storage_schemas(
+    unit: FunctionUnit,
+    executable_blocks: set[BlockId],
+    executable_edges: set[tuple[BlockId, BlockId]],
+    binding_facts: Mapping[BindingId, Fact],
+    entry_schemas: dict["Place", StorageSchema],
+    state_violations: Mapping[int, tuple[str, OriginStack]],
+) -> None:
+    """
+    The storage-schema flow over the stabilized executable graph: a SOURCE store of a scalar datapath value to an
+    unestablished place establishes its kind, independent first definitions join at merges, and a rebinding must
+    keep the schema. Runs strictly after W/D stabilization (SCCP discovers executable predecessors late, so a
+    mid-flight verdict would be order-dependent); a rebinding check consults only the stable per-block schema
+    environments. All violations -- local rebindings and the recorded state-store obligations alike -- report as
+    one located rejection at the first violating store in CFG preorder (then-arm first, matching the Fail walk).
+    """
+
+    def successors(block: Block) -> list[BlockId]:
+        match block.terminator:
+            case Jump(target=target):
+                return [target]
+            case Branch(then_target=then_target, else_target=else_target):
+                return [then_target, else_target]
+            case _:
+                return []
+
+    def walk(
+        env: dict["Place", StorageSchema], block: Block, report: Callable[[int, str, OriginStack], None]
+    ) -> dict["Place", StorageSchema]:
+        for index, op in enumerate(block.ops):
+            if isinstance(op, PyStoreAttr):
+                recorded = state_violations.get(id(op))
+                if recorded is not None:
+                    report(index, *recorded)
+                continue
+            if not isinstance(op, StorePlace) or op.role is not StoreRole.SOURCE:
+                continue
+            fact = binding_facts.get(op.src)
+            stored = schema_of_fact(fact) if fact is not None else None
+            if stored is None:
+                continue
+            assert isinstance(op.place, Local), "a SOURCE store binds a named local"
+            current = env.get(op.place)
+            if current is None:
+                env[op.place] = stored
+            elif (refined := _admit_rebinding(current, stored)) is not None:
+                env[op.place] = refined
+            else:
+                report(
+                    index,
+                    f"variable '{op.place.binding.name}' is {describe_schema(current)} and cannot be rebound to "
+                    f"{describe_schema(stored)}; variables are strongly typed (bind a new name instead)",
+                    op.origin,
+                )
+        return env
+
+    def ignore(index: int, message: str, origin: OriginStack) -> None:
+        pass
+
+    block_in: dict[BlockId, dict["Place", StorageSchema]] = {unit.entry: dict(entry_schemas)}
+    pending = [unit.entry]
+    while pending:
+        block_id = pending.pop()
+        out_env = walk(dict(block_in[block_id]), unit.blocks[block_id], ignore)
+        for successor in successors(unit.blocks[block_id]):
+            if (block_id, successor) not in executable_edges:
+                continue
+            target = block_in.get(successor)
+            if target is None:
+                block_in[successor] = dict(out_env)
+                pending.append(successor)
+                continue
+            changed = False
+            for place, schema in out_env.items():
+                joined = join_schemas(target[place], schema) if place in target else schema
+                if target.get(place) != joined:
+                    target[place] = joined
+                    changed = True
+            if changed:
+                pending.append(successor)
+
+    preorder: dict[BlockId, int] = {}
+    stack = [unit.entry]
+    while stack:
+        block_id = stack.pop()
+        if block_id in preorder or block_id not in executable_blocks:
+            continue
+        preorder[block_id] = len(preorder)
+        for successor in reversed(successors(unit.blocks[block_id])):
+            if (block_id, successor) in executable_edges:
+                stack.append(successor)
+
+    violations: list[tuple[tuple[int, int], str, OriginStack]] = []
+    for block_id, env_in in block_in.items():
+        position = preorder.get(block_id)
+        assert position is not None, "every flowed block is executable-reachable from the entry"
+
+        def collect(index: int, message: str, origin: OriginStack, position: int = position) -> None:
+            violations.append(((position, index), message, origin))
+
+        walk(dict(env_in), unit.blocks[block_id], collect)
+    if violations:
+        _, message, origin = min(violations, key=lambda item: item[0])
+        raise AnalysisRejection(message, origin)
 
 
 def _mro_attribute_of(klass: type, name: str) -> object | None:

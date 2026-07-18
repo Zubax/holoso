@@ -99,6 +99,20 @@ def competing_fails(c: bool, x: float) -> float:
     return x
 
 
+def competing_bad_stores(c: bool, x: float) -> float:
+    """
+    Two schema-violating stores on sibling arms with different messages: storage-schema obligations resolve
+    after stabilization in CFG preorder, so the surfaced store must not depend on any set iteration order.
+    """
+    if c:
+        a = 1
+        a = x  # type: ignore[assignment]  # noqa: F841
+    else:
+        b = True
+        b = x  # type: ignore[assignment]  # noqa: F841
+    return x
+
+
 def _emit_rejection(kernel: "Callable[..., float]") -> None:
     from holoso import FloatFormat, SynthesisError, synthesize
 
@@ -118,6 +132,10 @@ def emit_competing_rejection() -> None:
 
 def emit_competing_fail() -> None:
     _emit_rejection(competing_fails)
+
+
+def emit_competing_bad_store() -> None:
+    _emit_rejection(competing_bad_stores)
 
 
 class BadResets:
@@ -215,6 +233,15 @@ def test_competing_fail_terminators_report_identically_across_hash_seeds(other_s
     assert _entry_output_under_seed("emit_competing_fail", "0") == _entry_output_under_seed(
         "emit_competing_fail", other_seed
     )
+
+
+@pytest.mark.parametrize("other_seed", ["1", "3", "31337"])
+def test_competing_schema_violations_report_identically_across_hash_seeds(other_seed: str) -> None:
+    # Property lock for B1: storage-schema obligations resolve in CFG preorder (then-arm first), never in the
+    # iteration order of any environment or violation set.
+    reference = _entry_output_under_seed("emit_competing_bad_store", "0")
+    assert "strongly typed" in reference and "'a'" in reference  # the then-arm store wins the preorder
+    assert reference == _entry_output_under_seed("emit_competing_bad_store", other_seed)
 
 
 @pytest.mark.parametrize("other_seed", ["3", "31337"])

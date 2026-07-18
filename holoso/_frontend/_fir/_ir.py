@@ -151,11 +151,26 @@ class LoadPlace:
     origin: OriginStack
 
 
+class StoreRole(enum.Enum):
+    """
+    Why a store exists, fixed at construction. Only SOURCE stores rebind a user-visible variable, so only they
+    face the storage-schema flow; the others are compiler-internal sinks whose successive stores are not
+    rebindings: a conditional-expression merge writes alternatives, a comprehension accumulator grows its
+    aggregate per trip by construction, and the return place is validated by the return contract instead.
+    """
+
+    SOURCE = enum.auto()
+    MERGE = enum.auto()
+    ACCUMULATOR = enum.auto()
+    RETURN = enum.auto()
+
+
 @dataclass(slots=True)
 class StorePlace:
     place: Place
     src: BindingId
     origin: OriginStack
+    role: StoreRole
 
 
 @dataclass(slots=True)

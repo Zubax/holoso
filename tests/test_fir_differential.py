@@ -402,11 +402,9 @@ def test_intrinsic_arity_mismatch_is_a_located_rejection() -> None:
 
 
 @pytest.mark.parametrize("reset", [2**53 + 1, np.int64(2**53 + 1)], ids=["python_int", "np_int64"])
-def test_inexact_integer_state_reset_promotes_and_rounds(reset: object) -> None:
-    # An integer reset feeding a float accumulator promotes the slot to float; a reset binary64 cannot hold exactly
-    # rounds onto 2**53 under fastmath instead of rejecting (both the Python-int and the np.int64 spellings).
-    from holoso._hir import FloatConst, FloatType
-
+def test_integer_state_reset_fixes_an_integer_slot_regardless_of_annotation(reset: object) -> None:
+    # The reset establishes the slot schema (B1): an integer reset makes an integer slot even under a `float`
+    # annotation (annotations are documentation), so the float accumulation is a located rejection at the store.
     class Counter:
         def __init__(self) -> None:
             self.value: float = reset  # type: ignore[assignment]
@@ -415,10 +413,10 @@ def test_inexact_integer_state_reset_promotes_and_rounds(reset: object) -> None:
             self.value = self.value + x
             return self.value
 
-    hir = lower_fir(Counter().step)
-    (slot,) = hir.state_slots
-    assert isinstance(hir.nodes[slot.live_out].type, FloatType)
-    assert isinstance(slot.reset_value, FloatConst) and slot.reset_value.value == float(2**53)
+    with pytest.raises(AnalysisRejection, match="state attribute 'value' stores an incompatible type") as excinfo:
+        lower_fir(Counter().step)
+    assert excinfo.value.location is not None and excinfo.value.location.line is not None
+    assert "self.value = self.value + x" in excinfo.value.location.line
 
 
 def test_mutable_dataclass_component_lowers() -> None:

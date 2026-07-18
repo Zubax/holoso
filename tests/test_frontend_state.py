@@ -538,7 +538,8 @@ def test_jaxtyping_array_field_lowers_and_is_validated() -> None:
         lower(Filt(np.array([1.0, 2.0, 3.0, 4.0])).step)  # value shape (4,) violates the declared "3"
 
 
-def test_numpy_integer_array_values_coerce_to_real() -> None:
+def test_numpy_integer_array_state_does_not_coerce_to_real() -> None:
+    # The reset fixes the slot schema per cell (B1): an integer-reset array slot cannot take float cells.
     @dataclasses.dataclass
     class Filt:
         v: np.ndarray
@@ -546,7 +547,8 @@ def test_numpy_integer_array_values_coerce_to_real() -> None:
         def step(self, a: float) -> None:
             self.v = self.v * a
 
-    assert {s.name for s in lower(Filt(np.array([2, 3])).step).state_slots} == {"v_0", "v_1"}
+    with pytest.raises(UnsupportedConstruct, match="stores an incompatible type at cell"):
+        lower(Filt(np.array([2, 3])).step)
 
 
 def test_matrix_state_decomposes_row_major() -> None:
@@ -826,7 +828,8 @@ def test_read_only_scan_does_not_misfold_a_reassigned_for_counter() -> None:
     # Regression (review, miscompile): the read-only scan must not bind a static ``for`` counter and then fold a
     # counter-dependent condition against a STALE value -- which would drop ``_flag`` from the assigned set, wrongly
     # treat it as read-only, and fold the later ``if self._flag:`` to a fixed arm, diverging from lowering. The scan
-    # leaves the counter unbound (conservative), so the body's writes are recorded and ``_flag`` stays state.
+    # leaves the counter unbound (conservative), so the body's writes are recorded and ``_flag`` stays state. The
+    # marker loop iterates a FLOAT so the runtime rebind keeps the storage schema (B1).
     class K:
         def __init__(self) -> None:
             self._flag = False
@@ -834,8 +837,8 @@ def test_read_only_scan_does_not_misfold_a_reassigned_for_counter() -> None:
             self.z = 0.0
 
         def __call__(self, u: float) -> float:
-            for i in range(1):
-                i = u  # type: ignore[assignment]  # the loop counter is reassigned to a runtime value
+            for i in (0.0,):
+                i = u  # noqa: PLW2901  # the loop counter is reassigned to a runtime value
                 if i > 0.0:
                     self._flag = True
             if self._flag:
@@ -907,8 +910,8 @@ def test_state_write_only_on_a_folded_away_shape_branch_is_not_state() -> None:
 def test_state_write_under_an_aggregate_for_is_not_dropped_by_a_stale_counter() -> None:
     # ``for i in <aggregate>`` binds a runtime value, so the target's compile-time binding must be demoted in the
     # reachability scan exactly as lowering demotes it. Otherwise the scan folds ``i == 2.0`` on the leaked counter of
-    # the preceding range loop, walks only one arm, misses the write, and the state slot silently disappears -- the
-    # module would return the reset constant forever. ``_assign_attr`` now asserts against that direction outright.
+    # the preceding marker loop (a FLOAT, keeping the storage schema across the rebind), walks only one arm, misses
+    # the write, and the state slot silently disappears -- the module would return the reset constant forever.
     from jaxtyping import Float64
 
     class StaleCounter:
@@ -916,9 +919,9 @@ def test_state_write_under_an_aggregate_for_is_not_dropped_by_a_stale_counter() 
             self.s = 0.0
 
         def step(self, x: Float64[np.ndarray, "2"]) -> float:
-            for i in range(3):
+            for i in (0.0, 1.0, 2.0):
                 pass
-            for i in x:  # i is demoted here; the scan must not keep the leaked value 2
+            for i in x:  # i is demoted here; the scan must not keep the leaked value 2.0
                 if i == 2.0:
                     pass
                 else:
@@ -1509,7 +1512,7 @@ def test_a_scan_must_not_fold_a_counter_an_empty_aggregate_never_rebinds() -> No
 def test_a_scan_must_not_fold_a_branch_on_a_counter_the_loop_body_rebinds() -> None:
     # The aggregate loop's first trip rebinds `i` to a runtime value, so lowering takes the else arm on the second
     # trip. A scan that keeps `i == 0` static walks only the then arm and misses `self.s`, whose write then has
-    # nowhere to land.
+    # nowhere to land. The marker loop leaks a FLOAT `i` so the runtime rebind keeps the storage schema (B1).
     from jaxtyping import Float64
 
     class RebindingCounter:
@@ -1517,7 +1520,7 @@ def test_a_scan_must_not_fold_a_branch_on_a_counter_the_loop_body_rebinds() -> N
             self.s = 0.0
 
         def step(self, v: Float64[np.ndarray, "2"]) -> float:
-            for i in range(1):
+            for i in (0.0,):
                 pass
             for x in v:
                 if i == 0:
@@ -1537,19 +1540,20 @@ def test_a_scan_must_not_fold_a_branch_on_a_counter_the_loop_body_rebinds() -> N
 
 
 def test_a_scan_demotes_the_aggregate_target_before_discovering_body_rebinds() -> None:
-    # The aggregate loop's target `x` leaks a stale value from an earlier same-named range loop. Discovering what the
+    # The aggregate loop's target `x` leaks a stale value from an earlier same-named loop. Discovering what the
     # body rebinds must happen with `x` already demoted, or the fold of `if x != 0` hides the `j = x` rebind, `j` is
-    # restored stale, and the guarded state write is missed -- tripping `assert attr in self._state_order`.
+    # restored stale, and the guarded state write is missed -- tripping `assert attr in self._state_order`. The
+    # marker loops leak FLOAT zeros so the runtime rebinds keep the storage schema (B1).
     class LeakedAggregateTarget:
         def __init__(self) -> None:
             self.s = 0.0
 
         def step(self, a: float) -> float:
-            for x in range(1):  # noqa: B007  # leaks x == 0
+            for x in (0.0,):  # noqa: B007  # leaks x == 0.0
                 pass
-            for j in range(1):  # noqa: B007  # leaks j == 0
+            for j in (0.0,):  # noqa: B007  # leaks j == 0.0
                 pass
-            for x in [a]:  # type: ignore[assignment]  # noqa: B007  # aggregate: target demoted, body rebinds j
+            for x in [a]:  # noqa: B007  # aggregate: target demoted, body rebinds j
                 if x != 0:
                     j = x  # noqa: PLW2901
             if j != 0:
