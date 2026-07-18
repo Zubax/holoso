@@ -602,3 +602,15 @@ only) plus independent Python-reference/MIR-interpreter gates there (cosim's mod
 exact per-case metrics, structural-only cases for FSCC/vector-polar/imu/shipped-EKF, deliberate format policy,
 full ABI manifest, version-token canonicalization + holoso_support.v freeze, provenance capture, and a
 bijection-checked corpus index. S2.15 implements per that doc. Still in flight: X1-X5 batch (fixes-r3).
+
+X-batch INTEGRATED: 96eac73 cherry-picked clean as 19639f5 onto S2.14; the flagged DESIGN semantic conflict
+materialized exactly as predicted (S2.14's scoped causal-priority sentence survived textually) and is unified
+as 8c60797 — the unqualified claim now covers local rebinds, state obligations, and conversion failures alike,
+outranking every deferred rejection including user raises (the X-batch's justified extension; schema walk runs
+before the Fail walk). X-batch highlights banked: terminator-level deferral (adversarial probe: range()
+trip-count rejection was preempting the causal store); X2's state twin did NOT reproduce (state stores already
+coerce via _slot_kind) — pinned anyway; X4 audit proved x*0 and 0/y ZKF-identical (zero kills unconditionally,
+keep folding) while x/x and neg-cancellation defer on known zero/non-finite operands. Combined full light suite
+at 8c60797: 1825/2 green (pipefail-armed), mypy 197 clean, black clean. Trial: trial/s2-prefreeze-stack at
+8c60797; poll advances dev on green; round-4 pair on pinned worktree review-s214 over 6b4a421+19639f5+8c60797.
+A clean round 4 opens S2.15 per docs/decisions/freeze-design.md.
