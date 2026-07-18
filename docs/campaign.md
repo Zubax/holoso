@@ -481,3 +481,25 @@ mass churn for a click-through nit; the freeze pins 0-based. Verified-clean list
 incl. folds/resets/globals; obligation id(op) keying safe; violating carries stabilize; F1/F3/F5/F6/F8 all
 hold; no orphaned deleted names; StoreRole on all 12 sites). Codex half + G1 agent still running; round-2 fix
 batch will go to a side worktree after Codex returns.
+
+Round-2, Codex half returned (5 findings) — round NOT clean; TWO logged stances CORRECTED: (C1, HIGHEST)
+float<-int LOCAL stores are admitted with NO store-edge conversion — `current = value; current = 2**53+1;
+return current - 2**53` yields 1.0 while the float() spelling yields 0.0 (silent divergence); OVERTURNS the
+Claude-half stance "local behavior stays" — the ratified spec demands conversion; fix mirrors
+conform_state_store exactly (exact ints convert, non-representable reject on the carrier rule; dead
+`x=1.5; x=2**7000` flips to reject — consistent with state). (C2) comprehension-target schemas leak across
+separate executions (the schema walk ignores compiler-generated scope-reset UnbindPlace at _build.py:840):
+`[float(item) for item in s]` inside an unrolled loop over ((1,),(2.0,)) rejects order-asymmetrically;
+UNIFIES with Claude finding 1 (mixed static iterables) under per-execution-scope freshness — schema clears at
+unchecked UnbindPlace and loop-target trip stores get per-trip freshness (per-instantiation helper-param
+precedent; more Python-faithful than the previously logged establishing-join, which is SUPERSEDED); user del
+retention (X2) must be preserved via the checked/unchecked discrimination (verify the flag exists). (C3) an
+illegal int-slot<-float store propagates the violating float fact and a downstream secondary rejection
+("<< requires integer operands") preempts the causal store diagnostic — schema violations must take causal
+priority at resolution (seed-stable, CFG-preorder-first); the B1 agent's noted corner, now live. (C4) HIR
+constant folding manufactures FloatConst(NaN) from `math.inf + -math.inf` — raw unlocated crash; fix: the HIR
+fold defers NaN-producing folds to runtime (fastmath-doctrine-consistent; RTL adder legitimately yields runtime
+NaN; zero blast radius — previously such kernels crashed). (C5) np.dot misuse renders "in matmul():" — the
+graft rebrand uses per-Library display_name; thread the SPELLED alias per call ("in dot():"). Batch R1-R7
+(these five + walker consolidation + DESIGN truth-up post-R1) dispatched to side worktree fixes-r2 at 722d2fa;
+0-based columns decline stands.
