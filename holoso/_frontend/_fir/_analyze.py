@@ -1767,7 +1767,7 @@ class Analyzer:
                 class_attribute is not None
                 and hasattr(type(class_attribute), "__get__")
                 and not isinstance(class_attribute, (types.FunctionType, classmethod, staticmethod))
-                and not isinstance(class_attribute, types.MemberDescriptorType)
+                and not (isinstance(class_attribute, types.MemberDescriptorType) and class_attribute.__name__ == name)
             ):
                 raise AnalysisRejection(f"descriptor attribute '{name}' on a component is not supported", origin)
             leaf = StateLeaf(component, (name,))

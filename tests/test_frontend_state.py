@@ -1739,3 +1739,25 @@ def test_inadmissible_state_reset_is_located_at_the_store() -> None:
     with pytest.raises(UnsupportedConstruct) as excinfo:
         lower(BadReset().step)
     assert re.search(r"step:[1-9]\d*:", str(excinfo.value)), str(excinfo.value)
+
+
+def test_an_aliased_slot_descriptor_refuses_instead_of_forking_state() -> None:
+    # S2.9 review (pre-existing miscompile): an alias to ANOTHER slot's member descriptor passed the blanket
+    # slots exemption, so the alias and its target lowered as independent state where Python shares one storage
+    # location (step(3.0) computed 1.0 against Python's 3.0).
+    class Base:
+        __slots__ = ("value",)
+
+        def __init__(self) -> None:
+            self.value = 1.0
+
+    class Aliased(Base):
+        alias = Base.value  # type: ignore[misc]
+
+        def step(self, x: float) -> float:
+            self.alias = x
+            return self.value
+
+    assert Aliased().step(3.0) == 3.0  # runnable Python: one storage location
+    with pytest.raises(UnsupportedConstruct, match="descriptors are not supported|descriptor attribute"):
+        lower(Aliased().step)

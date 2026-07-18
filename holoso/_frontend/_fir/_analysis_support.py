@@ -533,7 +533,9 @@ def _reject_attribute_hooks(klass: type, name: "str | None", origin: OriginStack
     intercepted = (
         descriptor is not None
         and (hasattr(type(descriptor), "__set__") or hasattr(type(descriptor), "__delete__"))
-        and not isinstance(descriptor, types.MemberDescriptorType)  # slots ARE the fields, not accessors
+        # A slot IS its own field, but only under its own name: an ALIAS to another slot's member descriptor
+        # (``alias = Base.value``) intercepts a different storage location and would miscompile as a fresh slot.
+        and not (isinstance(descriptor, types.MemberDescriptorType) and descriptor.__name__ == name)
     )
     if hooked or intercepted:
         raise AnalysisRejection(
