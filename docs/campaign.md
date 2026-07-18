@@ -575,3 +575,17 @@ deferred rejections; seed-stable) covering Claude 1/3 + K3/K5; X2 emitted store-
 state); X3 the static/runtime boundary docs + pins (K2); X4 identity-rewrite guards (K4); X5 the P4s (dedupe
 first-violation scans; 136-col DESIGN line). S2.14 agent still owns the live tree; cherry-pick order decided on
 returns.
+
+S2.14 COMMITTED 6b4a421 (hygiene closeout; exit grep ZERO). MAJOR DISCOVERY, probe-proven: the
+matmul-on-array-parameter-ports gap NO LONGER EXISTS — imu lowers, LIR matches its frozen metrics row
+byte-for-byte, synthesizes 19279 B at II=42, model matches numpy; the imu skip is DELETED and its BASELINE row
+ENFORCED; DESIGN affirms the capability (the plan's mandated "open gap" wording would have been false). Guard
+table re-keyed per (name, format): 15 rows value-unchanged (uart at true e4m8), octave_index pinned e6m18=(14,38)
+AND new-measured e8m36=(14,47) — the only new frozen value. H1 machinery fully deleted (registry, parity_marks,
+vacuous test, 9 consumers, SynthTarget.example + tools/synth_compare.py, all token sites). S2.5-deferred
+rewordings landed with pins (list numpy-isms -> np.array guidance; runtime-subscript split index/scalar). FSCC
+metrics row omitted honestly (needs fsort/fsincos beyond shared default_ops; docstring records it). Suite
+1811/2, mypy 197, black clean. INTEGRATION NOTE: DESIGN's causal-priority sentence is deliberately scoped to
+state-only in this commit; the X-batch cherry-pick MUST restore the unqualified wording (its X1 makes it true)
+— expect a DESIGN.md conflict there and resolve accordingly. Remaining in flight: X1-X5 batch (fixes-r3),
+Codex X3 freeze consult. NEXT after X-batch integration + round-4 clean: S2.15 freeze.
