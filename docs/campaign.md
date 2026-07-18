@@ -388,3 +388,17 @@ conjunct to the component descriptor exemptions (_analysis_support write guard +
 name-matching foreign member descriptor refuses located instead of crashing raw (Python-identical either way);
 single-site the duplicated display-rejection string via the shared starred check. S2.10 round then fully
 consolidated (Codex + Claude halves both clean on correctness).
+
+S2.11 COMMITTED 97eeca6 (E1-lite complete; the queued S2.10-round minors landed in the same commit — S2.10
+round now fully consolidated, string-dedup declined as cosmetic). All seven items in: Origin carries the file;
+origin[-1] primary attribution with "in callee():" context via shared render_rejection; .location populated on
+all four rejection classes (linecache source line); all 41 EmissionRejection sites located (state slots via
+ResidualUnit.store_origins, return contracts via earliest return store); deterministic state-port order keyed
+by (line,column) over the reversed origin stack (TwoChildren fail-before observed: state_second before
+state_first; 3-seed stable; zero frozen/metric row changes); backend shared-live-out bare assert is now a
+SynthesisError naming both slots; the three blocked skips enabled. Full light suite 1757/3 green, mypy/black
+clean, zero pin flips of 388 surveyed. Trial: trial/s2-e1-lite at 97eeca6; survivor poll advances dev on green.
+Review pair running on pinned worktree review-s211. NEXT: S2.12 B1 per docs/decisions/b1-design.md (X2 banked:
+7-step order; del keeps schema; non-SemType stores fact-only; side tables only; report order = first executable
+store in CFG preorder; reversal inventory incl. test_frontend_state.py loop-counter rebinds), overlapping the
+S2.11 review round; then S2.13 G1, S2.14 hygiene+exit-grep, S2.15 freeze (X3), S3, S4.
