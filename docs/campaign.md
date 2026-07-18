@@ -434,3 +434,20 @@ returns on any path" to the root def line instead of the actionable site — bet
 Fix development dispatched to a separate detached worktree (fixes-s211) at 97eeca6 to overlap the B1 agent;
 sequencing: B1 verifies+commits first, then the round-fix commit cherry-picks on top, then one combined trial
 run + round-2 review pair over the stack.
+
+S2.11-round fixes COMPLETE in worktree fixes-s211: commit 8772297 (parent 97eeca6), 16 files +298/-64, all 8
+accepted findings fixed with 9 fail-before-observed regressions; latency/metrics ZERO row changes; mypy/black
+clean; targeted batches 311+463 green. Key mechanics: F1 first-store key gains (source_position,
+execution_rank[block]) with execution_rank = reverse postorder over executable edges (pure, in
+_analysis_support) — only genuine ties can move; F2 NaN refused located inside _carrier_float (both const and
+state-reset paths); F3 live-out partnership now requires boundary sampling (not s.needs_copy or
+float_state_install_is_boundary), reproducer premise self-asserted; F4 graft rebrands registry-stub frames to
+Library.display_name (strip gone from render_rejection; scale_/__call__ render verbatim; .origin now carries
+"matmul" not "matmul_" — nothing pinned the raw form); F5 never-returns uses deepest reachable terminator
+origin (root-level while True now attributes to the back-edge line — no pin flips); F6 TODO heading honest +
+false aggregate-returns paragraph deleted (probe: tuple/list returns emit ~11 kB RTL); F7
+SynthesisError.__init__ message-only + SourceLocation.__str__ unified 0-based (no consumers pinned the old);
+F8 LocatedRejection MI base in _ir (library rejections stay non-UnsupportedConstruct). DISCOVERY (recorded):
+exec-compiled kernels fail lower() with SourceUnavailable — randomized searches must use real files.
+INTEGRATION PLAN unchanged: B1 verify+commit first, cherry-pick 8772297, combined gate, one trial push, round-2
+pair over the stack, dev advance on green.
