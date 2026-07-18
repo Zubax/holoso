@@ -1723,3 +1723,19 @@ def test_emission_resets_come_from_the_analysis_snapshot_not_a_live_read() -> No
         assert float(model.elaborate().run(2.0)[0]) == 3.0
     finally:
         Accumulator.step.__globals__.pop("module", None)
+
+
+def test_inadmissible_state_reset_is_located_at_the_store() -> None:
+    # Regression (E3): the reset/join rejection carried a synthetic 0:0 origin; it must name the store site.
+    class BadReset:
+        def __init__(self) -> None:
+            self.h: object = object()
+
+        def step(self, x: float) -> float:
+            self.h = x
+            return x
+
+    with pytest.raises(UnsupportedConstruct) as excinfo:
+        lower(BadReset().step)
+    assert ":0:0" not in str(excinfo.value)
+    assert "self.h = x" not in str(excinfo.value)  # the message locates the line, not the source text

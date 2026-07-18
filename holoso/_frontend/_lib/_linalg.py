@@ -52,7 +52,8 @@ def matmul_(a: np.ndarray, b: np.ndarray) -> Any:
     bt = _transpose(b)  # the columns of b, so every output element is the dot product of two rows
     if np.ndim(a) == 1:
         return np.array([_dot(a, bt[j]) for j in range(len(bt))])
-    return np.array([[_dot(a[i], bt[j]) for j in range(len(bt))] for i in range(len(a))])
+    flat = np.array([_dot(a[i], bt[j]) for i in range(len(a)) for j in range(len(bt))])
+    return flat.reshape(len(a), len(bt))  # reshape keeps an EMPTY outer/inner dimension a 2-D (0, n)/(n, 0) result
 
 
 @lib(np.trace)
@@ -61,7 +62,7 @@ def trace_(a: np.ndarray) -> Any:
         raise ValueError("trace requires a matrix")
     if len(a) != len(a[0]):
         raise ValueError("trace requires a square matrix")
-    acc = 0.0
+    acc = 0
     for i in range(len(a)):
         acc = acc + a[i][i]
     return acc

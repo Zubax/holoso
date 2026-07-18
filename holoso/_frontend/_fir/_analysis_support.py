@@ -129,6 +129,17 @@ def _residual_type(value: StaticValue) -> SemType | None:
             return None
 
 
+def _scalar_sem(fact: "Fact") -> SemType | None:
+    """The scalar kind of a fact, BOOL included; None for aggregates, references, and unbound."""
+    match fact:
+        case Known(value=value):
+            return _residual_type(value)
+        case Residual(type=t):
+            return t
+        case _:
+            return None
+
+
 def _numeric_sem(fact: "Fact") -> SemType | None:
     """FLOAT or INT for a numeric fact (a Known number or a Residual FLOAT/INT); None for bool, aggregate, or unbound."""
     match fact:

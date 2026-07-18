@@ -1556,3 +1556,21 @@ def test_call_argument_unpacking_flattens_static_containers() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="dictionary argument unpacking"):
         lower(double_star)
+
+
+def test_reduction_stub_misuse_names_the_reduction_not_the_matrix_product() -> None:
+    # Regression (E4): np.max(m, axis) reported the matrix-product diagnostic from the shared operand gate.
+    from jaxtyping import Float64
+
+    def with_axis(m: Float64[np.ndarray, "2 3"]) -> float:
+        return float(np.max(m, 0))
+
+    with pytest.raises(UnsupportedConstruct, match="default axis") as excinfo:
+        lower(with_axis)
+    assert "matrix product" not in str(excinfo.value)
+
+    def scalar_operand(x: float) -> float:
+        return float(np.mean(x))
+
+    with pytest.raises(UnsupportedConstruct, match="np.mean requires array operands"):
+        lower(scalar_operand)

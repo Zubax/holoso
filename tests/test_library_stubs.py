@@ -247,3 +247,26 @@ def test_linalg_stubs_reject_the_shapes_they_do_not_support() -> None:
         trace_(vector)
     with pytest.raises(ValueError, match="1-D"):
         outer_(matrix, vector)
+
+
+def test_empty_matrix_product_keeps_its_trailing_dimension() -> None:
+    # Regression (A3): the 2-D x 2-D product of an empty-outer operand collapsed to shape (0,), so folded
+    # shape queries lied about the rank. The stub must match numpy's shape exactly.
+    from holoso._frontend._lib._linalg import matmul_
+
+    empty = np.zeros((0, 3))
+    other = np.zeros((3, 2))
+    assert matmul_(empty, other).shape == np.matmul(empty, other).shape == (0, 2)
+    assert matmul_(other.T, empty.T).shape == np.matmul(other.T, empty.T).shape == (2, 0)
+
+
+def test_integer_trace_stays_integer() -> None:
+    # Regression (C5): the trace accumulator started at 0.0, folding an integer matrix to float and breaking
+    # range(np.trace(M)).
+    from holoso._frontend._lib._linalg import trace_
+
+    m = np.array([[1, 2], [3, 4]])
+    result = trace_(m)
+    assert result == np.trace(m) == 5
+    assert not isinstance(result, float) and isinstance(int(result), int)
+    assert isinstance(result, (int, np.integer))

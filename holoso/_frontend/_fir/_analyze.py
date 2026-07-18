@@ -135,6 +135,7 @@ from ._analysis_support import (
     _lost_scalar_pools,
     _mro_attribute_of,
     _numeric_sem,
+    _scalar_sem,
     _rectangular_shape,
     _reject_attribute_hooks,
     _reject_descriptor,
@@ -321,6 +322,7 @@ class Analyzer:
         self._construction_schemas: dict[int, tuple[type, tuple[FieldSchema, ...]]] = {}
         self._default_snapshots: dict[tuple[int, str], BoundFact] = {}
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
+        self._store_origins: dict[StateLeaf, OriginStack] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._array_methods: dict[tuple[BindingId, str], _ArrayMethod] = {}
         self._class_annotations: dict[int, tuple[type, "Mapping[str, object]"]] = {}
@@ -353,13 +355,11 @@ class Analyzer:
                     incoming = (
                         reset
                         if isinstance(exit_fact, Unbound)
-                        else join_facts(reset, exit_fact, (Origin(result.unit.name, 0, 0),))
+                        else join_facts(reset, exit_fact, self._state_origin(leaf))
                     )
                     previous = new_d.get(leaf)
                     new_d[leaf] = (
-                        incoming
-                        if previous is None
-                        else join_facts(previous, incoming, (Origin(result.unit.name, 0, 0),))
+                        incoming if previous is None else join_facts(previous, incoming, self._state_origin(leaf))
                     )
                 except AnalysisRejection as error:
                     deferred.offer(error)
@@ -385,6 +385,7 @@ class Analyzer:
             self._state_livein = new_d
             self._block_ancestry = {}
             self._discovered_stores = set()
+            self._store_origins = {}
             self._concrete_calls = set()
             self._intrinsic_calls = set()
             self._cast_calls = set()
@@ -413,6 +414,13 @@ class Analyzer:
         self._component_reads[key] = (owner, value, admitted)
         return value, admitted
 
+    def _state_origin(self, leaf: StateLeaf) -> OriginStack:
+        """
+        State rejections locate at the leaf's first store: __init__ is never analyzed, so the store that
+        promoted the leaf is the line the user can act on.
+        """
+        return self._store_origins.get(leaf, (Origin(self._root_template.name, 0, 0),))
+
     def _snapshot_leaf(self, leaf: StateLeaf) -> Fact:
         current, admitted = self._walk_snapshot(leaf)
         return normalize_static(admitted) if admitted is not None else Reference(current)
@@ -427,7 +435,7 @@ class Analyzer:
                 raise AnalysisRejection(
                     f"state attribute '{'.'.join(leaf.path)}' does not exist on the component at compile time "
                     "(assign it in __init__)",
-                    (Origin(self._root_template.name, 0, 0),),
+                    self._state_origin(leaf),
                 ) from None
         return current, admitted
 
@@ -435,7 +443,7 @@ class Analyzer:
         current, admitted = self._walk_snapshot(leaf)
         if admitted is None:
             return Reference(current)
-        origin = (Origin(self._root_template.name, 0, 0),)
+        origin = self._state_origin(leaf)
         name = ".".join(leaf.path)
         reset = normalize_static(admitted)
         self._validate_state_annotation(leaf, reset, origin)
@@ -962,16 +970,24 @@ class Analyzer:
                 if _is_array_fact(lhs_fact) or _is_array_fact(rhs_fact):
                     env.set(Local(dst), self._elementwise_compare(rel, lhs_fact, rhs_fact, op.origin))
                 else:
-                    env.set(
-                        Local(dst),
-                        self._fold_binary(
-                            lambda a, b: static_compare(rel, a, b),
-                            lhs_fact,
-                            rhs_fact,
-                            op.origin,
-                            default=SemType.BOOL,
-                        ),
+                    compared = self._fold_binary(
+                        lambda a, b: static_compare(rel, a, b),
+                        lhs_fact,
+                        rhs_fact,
+                        op.origin,
+                        default=SemType.BOOL,
                     )
+                    if isinstance(compared, Residual):
+                        # A residual comparison reaches the datapath, where bool never converts implicitly;
+                        # a fully static one already folded Python-exactly above.
+                        sems = {_scalar_sem(lhs_fact), _scalar_sem(rhs_fact)}
+                        if SemType.BOOL in sems and len(sems) > 1:
+                            raise AnalysisRejection(
+                                "a comparison mixes a boolean and a non-boolean without a cast", op.origin
+                            )
+                        if sems == {SemType.BOOL} and rel not in (RelationalOp.EQ, RelationalOp.NE):
+                            raise AnalysisRejection("only == and != are defined between boolean values", op.origin)
+                    env.set(Local(dst), compared)
             case PyNot(dst=dst, operand=operand):
                 truth = self._truth_fact(env.get(Local(operand)), op.origin)
                 if isinstance(truth, Known):
@@ -1098,6 +1114,12 @@ class Analyzer:
                         f"component member '{name}' cannot be rebound; component topology is fixed", op.origin
                     )
                 leaf = StateLeaf(obj_fact.obj, (name,))
+                recorded = self._store_origins.get(leaf)
+                if recorded is None or (op.origin[0].line, op.origin[0].column) < (
+                    recorded[0].line,
+                    recorded[0].column,
+                ):
+                    self._store_origins[leaf] = op.origin
                 self._discovered_stores.add((block.id, leaf))
                 reset_fact = self._state_reset_fact(leaf)
                 if isinstance(reset_fact, AggregateFact) or isinstance(src_fact, AggregateFact):
@@ -1894,6 +1916,12 @@ class Analyzer:
             if isinstance(iterable.layout, ArrayLayout) and not iterable.layout.shape:
                 raise AnalysisRejection("iteration over a 0-dimensional array is undefined", loop.origin)
             trip_count = outer_arity(iterable.layout)
+            if trip_count > UNROLL_THRESHOLD:  # sized before materializing: a 32k table must reject instantly
+                raise AnalysisRejection(
+                    f"trip count {trip_count} exceeds the unroll threshold {UNROLL_THRESHOLD}; a counted "
+                    "back-edge loop is not supported yet",
+                    loop.origin,
+                )
             for position in range(trip_count):
                 child: Fact = iterable.child(position)
                 if isinstance(child, AggregateFact):
@@ -2137,15 +2165,28 @@ class Analyzer:
         target = callee_fact.obj
         match = resolve(target)
         if isinstance(match, Library):
-            if any(target is fn for fn in (np.matmul, np.dot, np.trace, np.outer, np.max, np.amax, np.mean)):
+            reduction = any(target is fn for fn in (np.max, np.amax, np.mean))
+            if reduction and (len(call.args) != 1 or call.kwargs):
+                raise AnalysisRejection(
+                    f"np.{getattr(target, '__name__', '?')} supports only the default axis: exactly one array "
+                    "argument (reduce the other axis explicitly instead of passing an axis)",
+                    call.origin,
+                )
+            if reduction or any(target is fn for fn in (np.matmul, np.dot, np.trace, np.outer)):
                 # The linalg and reduction stubs are defined over arrays only; a scalar/list/tuple operand
                 # must not acquire array semantics through the spelled call any more than through an operator.
                 for arg in call.args:
                     operand_fact = env.get(Local(arg))
                     if not (isinstance(operand_fact, AggregateFact) and isinstance(operand_fact.layout, ArrayLayout)):
+                        if any(target is fn for fn in (np.matmul, np.dot)):
+                            raise AnalysisRejection(
+                                "the matrix product requires array operands on both sides; a scalar, list, or "
+                                "tuple does not acquire matrix semantics (wrap it in np.array(...))",
+                                call.origin,
+                            )
                         raise AnalysisRejection(
-                            "the matrix product requires array operands on both sides; a scalar, list, or "
-                            "tuple does not acquire matrix semantics (wrap it in np.array(...))",
+                            f"np.{getattr(target, '__name__', '?')} requires array operands; a scalar, list, or "
+                            "tuple does not acquire array semantics (wrap it in np.array(...))",
                             call.origin,
                         )
 

@@ -1035,3 +1035,32 @@ def test_the_first_reachable_raise_reports_in_execution_order() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="trip=2"):
         lower(countdown)
+
+
+def test_over_threshold_aggregate_iteration_rejects_before_materializing() -> None:
+    # Regression (F1): the unroller materialized every trip child before the threshold check, so a large honest
+    # table paid quadratic work just to be refused. The rejection must arrive without materialization.
+    import time
+
+    table = tuple(float(i) for i in range(32768))
+
+    def big(x: float) -> float:
+        acc = x
+        for v in _BIG_TABLE:  # type: ignore[name-defined]  # noqa: F821  # injected via _rebind_globals
+            acc = acc + v
+        return acc
+
+    start = time.monotonic()
+    with pytest.raises(UnsupportedConstruct, match="unroll threshold"):
+        lower(_rebind_globals(big, _BIG_TABLE=table))
+    assert time.monotonic() - start < 5.0  # pre-fix this took tens of seconds on the 32k table
+
+
+def test_mixed_bool_comparison_rejects_located_at_analysis() -> None:
+    # Regression (C2): analysis admitted the residual bool/non-bool comparison and emission refused it without a
+    # location; the refusal must carry the comparison's own line.
+    def mixed(flag: bool) -> bool:
+        return flag == 1  # noqa: E712
+
+    with pytest.raises(UnsupportedConstruct, match=r"mixed:\d+:\d+: .*mixes a boolean and a non-boolean"):
+        lower(mixed)
