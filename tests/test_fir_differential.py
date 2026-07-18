@@ -9,6 +9,7 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
+from holoso import UnsupportedConstruct
 from holoso._frontend._fir._analysis_support import AnalysisRejection
 from holoso._frontend._fir._emit import EmissionRejection, lower_fir
 from holoso._hir import optimize
@@ -561,7 +562,7 @@ def test_mixed_bool_float_comparison_is_a_located_rejection() -> None:
         hit = flag == x  # a bool compared directly against a float
         return 1.0 if hit else 0.0
 
-    with pytest.raises(EmissionRejection, match="mixes a boolean and a non-boolean"):
+    with pytest.raises(UnsupportedConstruct, match="mixes a boolean and a non-boolean"):
         lower_fir(kernel)
 
 
