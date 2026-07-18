@@ -614,3 +614,17 @@ keep folding) while x/x and neg-cancellation defer on known zero/non-finite oper
 at 8c60797: 1825/2 green (pipefail-armed), mypy 197 clean, black clean. Trial: trial/s2-prefreeze-stack at
 8c60797; poll advances dev on green; round-4 pair on pinned worktree review-s214 over 6b4a421+19639f5+8c60797.
 A clean round 4 opens S2.15 per docs/decisions/freeze-design.md.
+
+Round-4, Codex half returned (4 findings, all deferral-net refinement gaps in 19639f5): (1) successor-env JOIN
+rejections escape the deferral handlers — "irreconcilable kinds merge here" preempts a pending state-store
+violation (the pre-X-batch worklist-wide handler got this right); (2) the net catches AnalysisRejection only —
+LibraryAnalysisRejection is a SIBLING via the MI mixin, so a math.gamma() rejection preempts the causal store;
+catch the shared LocatedRejection mixin (Build/Emission variants cannot fire there); (3) the verdict walk
+re-derives local exactness from TRANSIENT round-one facts at the W/D-abort path — a Known-int that stabilizes
+to runtime falsely rejects; stable-fact re-derivation only on stabilized rounds, abort paths rank recorded
+obligations alone; (4) state obligations are wholesale-cleared between W/D rounds, losing the causal store to a
+round-two induced shift error — persist per-op with clean-revisit clearing (the C6/S2.11 pattern). Doctrine to
+hold in the fix: verdicts from stable facts only; recorded violations outrank provoked errors from ANY layer
+(op, terminator, join, library); obligations persist across rounds; seed-stable. Claude half still running;
+consolidated round-4 fix batch goes to a side worktree at 8c60797 (the S2.15 agent owns the live tree; the
+freeze capture regenerates after these fixes land — one tool run).
