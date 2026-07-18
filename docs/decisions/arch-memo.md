@@ -1,11 +1,14 @@
 # S3.1 — Architecture evaluation memo: the resolved-plan boundary and the Stage-4 gate
 
-Status: Stage-3 deliverable per `docs/campaign.md` (S3.1). Consolidates the pre-campaign evaluation (two
-adversarial design agents plus code-level verification; recorded in `docs/campaign.md` and `HANDOFF.md`),
-refreshed against the post-stabilization tree at dev = e3d5f18. The freeze corpus is committed (S2.15, 557fc69)
-and refreeze-verified byte-identical at e3d5f18; the `freeze-1` tag rides the in-flight CI certification. Codex
-consult X4 (S3.2) reviews this memo; the maintainer approves the spike criteria before S3.3 begins. Line numbers
-refer to e3d5f18.
+Status: Stage-3 deliverable per `docs/campaign.md` (S3.1), amended per Codex consult X4 (S3.2, all positions
+adopted; see the campaign log). Consolidates the pre-campaign evaluation (two adversarial design agents plus
+code-level verification; recorded in `docs/campaign.md` and `HANDOFF.md`), refreshed against the
+post-stabilization tree at dev = e3d5f18. Freeze provenance, precisely: the freeze corpus is committed (S2.15)
+and seed-matrix-certified at the freeze commit 557fc69; the post-Y tip e3d5f18 has passed only the
+byte-identical 148/148 refreeze check (the seed matrix has not been rerun there), and CI certification with the
+`freeze-1` tag is still pending — the tip is not seed-matrix-certified. The X4-amended executable spike
+specification is `docs/decisions/arch-spike.md`; it supersedes section 4 where they differ. Line numbers refer
+to e3d5f18.
 
 ## 1. The question, and what the evaluation established
 
@@ -53,13 +56,16 @@ Already moved:
 - S2.11: `ResidualUnit.store_origins` threads every state leaf's first-store origin to emission
   (recorded `_analyze.py:724-731`, consumed `_emit.py:552-553`), and every emission refusal is located:
   EmissionRejection mixes LocatedRejection (`_emit.py:170`), the emitter keeps an attribution cursor
-  (`_emit.py:337-340`, advanced per op at `:819`), and all 43 sites raise located (was: 41, all unlocated).
-- S2.12/B1 killed the fact-kind/cell-kind incoherence: stores are schema-checked. StoreRole is fixed at build
-  time (`_ir.py:171-190`); the schema algebra lives in `_analysis_support.py` (ScalarSchema/ContradictorySchema
-  `:497-511`, `join_schemas` `:529`, `conform_local_store` `:586`, `conform_state_store` `:626`, and the one
-  resolution site `enforce_storage_schemas` `:707-758`). The emitter kind towers are gone — `_leaf_kind`,
-  `_leaf_is_int`, `_admit_state_store`, and the live-in state typing / stored-value dtype rebuild are all
-  grep-absent — and `_slot_kind` (`_emit.py:582-587`) reads the reset snapshot whose kind the schema pinned.
+  (`_emit.py:337-340`, advanced per op at `:819`), and all 42 raise sites raise located (was: 41, all
+  unlocated; grep counts 43 `EmissionRejection` hits — the 43rd is the class declaration at `:170`).
+- S2.12/B1 killed the fact-kind/cell-kind incoherence: stores are schema-checked. StoreRole is fixed at
+  construction (`_ir.py:171-190`) — construction, not build: the analyzer's call grafting also constructs
+  SOURCE stores (`_analyze.py:2540`, `:2578`); the schema algebra lives in `_analysis_support.py`
+  (ScalarSchema/ContradictorySchema `:497-511`, `join_schemas` `:529`, `conform_local_store` `:586`,
+  `conform_state_store` `:626`, and the one resolution site `enforce_storage_schemas` `:707-758`). The emitter
+  kind towers are gone — `_leaf_kind`, `_leaf_is_int`, `_admit_state_store`, and the live-in state typing /
+  stored-value dtype rebuild are all grep-absent — and `_slot_kind` (`_emit.py:582-587`) reads the reset
+  snapshot whose kind the schema pinned.
 - The X-batch's store_conversions is a working example of exactly the target pattern: the post-stabilization
   schema walk returns a typed plan — the set of store ops whose value converts int→float on the store edge
   (`_analysis_support.py:707-758`) — and the emitter consumes it blind (`_emit.py:840-844`). One decision, made
@@ -75,13 +81,13 @@ Already moved:
 
 Still emission-owned — the remaining decision-carrying surfaces, with current extents:
 
-- The five copy routines plus inline clones: `_emit_concat` `:631-666`, `_emit_conversion` `:668-711`,
+- The five copy routines plus inline clones: `_emit_concat` `:631-651`, `_emit_conversion` `:668-711`,
   `_copy_leaves` `:713-724`, `_project` `:726-738`, `_install` `:740-755`; the same leaf-walk skeleton recurs
   inline in the PySubscript window walk (`:920-935`), the PyAttr state-aggregate arm (`:973-984`), and the
   CONSTRUCTION default fill (`:1026-1038`).
-- Routing re-derivations: `_emit_concat` re-walks layouts to compute cell offsets (`:634-651`); the PySubscript
-  fallback re-runs `operator.index` and `child_slice` (`:936-951`); the PyAttr record projection re-derives the
-  field's cell window (`:963-972`). `subscript_plans`/`route_plans` cover only slice/gather selections and
+- Routing re-derivations: `_emit_concat` re-walks layouts to compute cell offsets (`:631-651`); the PySubscript
+  fallback re-runs `operator.index` and `child_slice` (`:941-951`); the PyAttr record projection re-derives the
+  field's cell window (`:968-972`). `subscript_plans`/`route_plans` cover only slice/gather selections and
   transposes; positional projections and concats are re-derived at emission. Analyzer-side, the routing evidence
   still lives in id-keyed side tables reset each round (`_analyze.py:358-364`, reset `:500-517`) and is
   re-collected by `_finalize`'s one replay of `_transfer` over the stabilized graph (`:702-752`) — non-mutating,
@@ -95,7 +101,8 @@ Still emission-owned — the remaining decision-carrying surfaces, with current 
   operand facts (`:1042-1059`); `_emit_power` owns the whole power policy, including two refusal classes
   (`:1223-1283`); the return-contract tower enforces at exit (`:226-318`, `:1363-1391`, `:1410-1500`);
   `_slot_name` collision/unanchored-provenance refusals (`:522-550`); `_carrier_float` NaN/overflow policy
-  (`:183-196`). In total 43 EmissionRejection sites — located now, but still emission-decided (M5's target).
+  (`:183-196`). In total 42 EmissionRejection raise sites — located now, but still emission-decided (M5's
+  target).
 - Open-coded dispatch in the analyzer, the M3/R0 row-table target: `_expand_call` `_analyze.py:2091-2583`
   (~490 lines, ~14 identity-dispatch arms, of which two are now trim-refusal arms: getattr `:2277`, isinstance
   `:2287`), and the attribute ladder `_attribute` `_analyze.py:1750-1880` (~130 lines).
@@ -107,7 +114,7 @@ Honest assessment. The analyzer-side half of totality is done: the schema flow, 
 priority, located origins end to end, and a typed plan that already carries stores (conversions), calls
 (classification), state (resets, origins, order), and selections/routes. The emitter-side consumption discipline
 is not: emission still derives kinds from Facts at every operand, re-derives positional routing, owns
-cast/intrinsic/power lowering policy and contract enforcement, and raises 43 refusals. Grep-checked today, the
+cast/intrinsic/power lowering policy and contract enforcement, and raises 42 refusals. Grep-checked today, the
 live emitter fails SC2 outright — it imports Fact, Known, Residual, AggregateFact, the Py* ops, and reaches into
 `_lib` for Intrinsic. That is precisely the gap Stage 4 closes under either shape; nothing found in the refresh
 weakens the evaluation's verdict, and B1's precondition (no resolved plan can be typed until stores are
@@ -141,15 +148,19 @@ verifier; a printer.
 
 The skeptic's cost accounting (as recorded in the campaign): materializing the IR buys little the totalized
 tables would not; the transplant pays for a new differential harness, an analyzer-skeleton rebuild, and a
-divergence tail; and raw byte-identity cannot survive the one landing that swaps the emitter — HIR node-id
-assignment order is byte-visible downstream (`_mir/_lower.py:370` lowers constants and state reads in sorted
-node-id order) — so the swap landing needs the maintainer's pre-authorized canonical gate. The morph keeps every
-landing raw-byte-gated on dev and retains M7 as the materialization option once schemas are learned from contact.
+divergence tail; and raw byte-identity is not guaranteed across the one landing that swaps the emitter — HIR
+value-id assignment order is byte-visible downstream (`_mir/_lower.py:366-372` lowers constants and state reads
+in sorted value-id order), so bytes hold only if the new emitter reproduces the old allocation order exactly:
+achievable, since the dependence runs through id order alone, but not free — which is why the swap landing keeps
+the maintainer's pre-authorized canonical gate available. The morph keeps every landing raw-byte-gated on dev
+and retains M7 as the materialization option once schemas are learned from contact.
 
 ## 4. The spike (S3.3): plan, criteria, decision table
 
-Verbatim from the maintainer-approved campaign plan (`docs/campaign.md` S3.3), restated for the record and for
-re-confirmation at X4/S3.2. The criteria are pre-agreed; goalposts do not move mid-spike.
+Restated from the maintainer-approved campaign plan (`docs/campaign.md` S3.3) for the record. The criteria are
+pre-agreed; goalposts do not move mid-spike. As adopted at X4/S3.2, the executable spike specification —
+amended witness set, executable SC1-SC4, input-topology-aware decision table, and the evidence ledger — is
+`docs/decisions/arch-spike.md`; it supersedes this section where they differ.
 
 Plan: spike on worktree branch `spike/resolved-ir` (throwaway pushes for CI verdicts). Timebox: 1 session, hard
 cap 2. Content: `_rir.py` schema as real dataclasses + prototype residualizer for the hard-construct subset
@@ -158,8 +169,9 @@ return-onto-state-port-dedup case} + the complete mechanical emitter.
 
 Criteria (pre-agreed):
 
-- SC1: Verilog+HIR byte-identical to `freeze-1` for the subset (fallback: HIR canonical-identical after renumber
-  + schedule metrics equal).
+- SC1: Verilog+HIR byte-identical to `freeze-1` for the subset (fallback per the X3 amendment below: HIR
+  alpha-canonical under the real block-and-value canonicalizer, with the independent semantic gates green and
+  schedule metrics equal — `renumber()` alone does not qualify).
 - SC2: emitter imports no Fact/registry/Py* (grep-checked).
 - SC3: zero escapes from the closed op set (boundary-table additions allowed, decision-carrying node kinds not).
 - SC4: residualizer ≤ ~1,200 LOC for the subset (extrapolation ≤ ~1,800).
@@ -170,8 +182,9 @@ blown, or timebox expiry → MORPH (default).
 
 The comparison baseline the criteria reference now exists: the freeze corpus (S2.15, commit 557fc69) — 35 golden
 cases with full RTL, schema-versioned pre-optimize HIR dumps, ABI manifests, exact schedule metrics, structured
-JSONL diagnostics, and immutable rejection modules — refreeze-verified byte-identical at e3d5f18 under the seed
-matrix; the `freeze-1` tag lands with the in-flight CI certification. X3 amendment
+JSONL diagnostics, and immutable rejection modules — seed-matrix-certified at the freeze commit 557fc69. The
+post-Y tip e3d5f18 has passed only the byte-identical 148/148 refreeze check; the seed matrix has not been rerun
+there, and CI certification with the `freeze-1` tag is still pending. X3 amendment
 (`docs/decisions/freeze-design.md`, adopted): the canonical landing additionally requires a real block-and-value
 alpha-canonicalizer — `renumber()` compacts block ids only — itself tested on deliberately permuted equivalent
 HIRs, plus the independent semantic gates (the Python-reference differential and the MIR-interpreter oracle),

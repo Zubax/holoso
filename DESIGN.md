@@ -149,8 +149,11 @@ Each operator declares a per-instance initiation interval; most operators have I
 
 The front-end is the FIR pipeline under `holoso/_frontend/_fir/`: build (AST -> FIR) -> analyze (facts + plan) ->
 emit (FIR -> HIR). The layering exists because a single-pass lowerer forces a reachability scan to run before the
-folds it must agree with -- the scan/lowering duality that plagued the previous front-end; here every semantic
-decision is the analyzer's, made once, over the same graph the emitter walks.
+folds it must agree with -- the scan/lowering duality that plagued the previous front-end. The analyzer decides
+storage typing, call plans, selection/transpose routing, and store conversions once, over the same graph the
+emitter walks; the emitter still owns cast/intrinsic/power and return-contract policy, several positional-routing
+re-derivations, and per-operand kind classification. Closing that residual emitter-side gap is the goal of the
+restructuring campaign's Stage 4 (`docs/campaign.md`).
 
 Name classification comes from the live code object (CPython's own; `del`-locality and PEP 709 targets correct by
 construction) with comprehension-only targets carved out via the AST; non-locals resolve closure-cell before global
@@ -289,9 +292,11 @@ re-flavoring conversion | record construction, keyed by the call's destination b
 first-store source order (the established port ABI orders ports by source text, not CFG shape; the order key is
 the store's origin stack with the user call site primary, so two call sites inlining one setter order by the call
 sites rather than tying on the setter's own line, and clones of one store -- an unrolled loop's trips -- share the
-whole chain and tie-break by execution order, which is the iterable's source order). This plan is the
-whole analyzer/emitter contract: emission never re-derives a fold, never resolves the library registry, and never
-replays the transfer function, so the two layers cannot disagree about a value's meaning.
+whole chain and tie-break by execution order, which is the iterable's source order). The plan carries every
+decision the analyzer owns: emission never re-derives a fold, never resolves the library registry, and never
+replays the transfer function. It is not yet the whole contract: emission still decides cast, intrinsic, power,
+and return-contract policy from the final facts, re-derives concat/positional/record-projection routing, and
+classifies operand kinds -- decisions the Stage-4 restructuring moves analyzer-side.
 
 Emission lowers the stabilized residual graph to HIR: executable blocks/edges only, in reverse post-order, with
 value numbering by Braun sealed-block SSA over the scalar LEAF CELLS of Places -- (root place, ordinal in the
