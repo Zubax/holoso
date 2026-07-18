@@ -536,3 +536,19 @@ NaN data keeps refusing; fold expressions synthesize; runtime semantics pinned b
 round 3: 6207eb7 (G1) + 2bcd878 (round-2 batch R1-R6) + 5c3d3c5 (state-edge symmetry) + ea83691 (NaN pin
 reversals). Trial: trial/s2-g1-stack at ea83691; poll advances dev on green; round-3 pair on pinned worktree
 review-s213.
+
+Round-3, Claude half returned: ONE P1 + two P2s, all one root cause, stack otherwise clean (guard fusion
+adversarially verified incl. state-write/leak refusals and a fused-vs-unfused bit-differential; the suspected
+1-ulp fusion bug was the ZKF adder's own chartered rounding). (1) P1: _binary64_store_image raises MID-TRANSFER
+on transient pre-join facts — swapped branch arms flip accept/reject for `n = 0 / n = 2**53+1; acc = n`
+(local AND state twins reproduce); contradicts DESIGN "the verdict is never per-visit", the
+enforce_storage_schemas docstring, and the adjacent code comment. (2) P2: DESIGN's causal-priority sentence is
+unqualified but implemented for state obligations only — the local twin of R3 reports the secondary shift
+error. (3) P2: the mid-flight raise also preempts an earlier-in-preorder violation, breaking the
+first-in-preorder contract (control probe confirms the collected path orders correctly). UNIFIED FIX RATIFIED:
+binary64 conversion failures never raise in _transfer — they record obligations (inexact carries the rounded
+Known image, beyond-carrier carries Residual(FLOAT); both fixpoint-stable) and the post-stabilization walk
+resolves ALL schema violations (local rebinds + state obligations + conversion failures) first-in-CFG-preorder,
+outranking every deferred rejection — DESIGN's unqualified claims become true rather than scoped down. P4s
+queued: dedupe the two first-violation scans into one helper; the 136-col DESIGN line. Codex half still
+running; fix batch goes to a side worktree at ea83691 after it returns (S2.14 agent owns the live tree).
