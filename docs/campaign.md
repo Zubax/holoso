@@ -417,3 +417,20 @@ origin grafting never mutates templates; port order is seed-stable and source-or
 sites; the live-out guard is exact on five lookalikes and closes the former -O silent-shadowing hole; both
 __objclass__ ladders intercept cross-class aliases while honest/inherited/nested slots pass. Codex half still
 running; B1 agent still running; trial/s2-e1-lite CI + dev-advance poll running.
+
+S2.11 round, Codex half returned (6 findings) — round NOT clean: (1) SIGNIFICANT/ABI: tied origin keys fall
+back to block-id order and the unroller allocates clones in reverse iterable order, so `for child in
+(self.first, self.second): child.value = x` inside an inlined helper yields [state_second, state_first]
+(_analyze.py ~:711) — fix the tie-break (CFG-preorder-like, not raw block id) + regression; this is the
+TwoChildren fix's remaining hole. (2) NaN constants and NaN state resets reach _hir/_const.py:24 via frontend
+_emit.py :653/:638 and raise a raw UNLOCATED UnsupportedConstruct — wrap located at emission + regression.
+(3) backend shared-live-out SynthesisError unlocated — DECLINED as designed: origins are gone by LIR, the
+message names both slots, homed in TODO.md with the install-copy gap. (4) the live-out guard groups slots by
+final-tap register identity, so time-multiplexed reuse falsely blames an innocent slot (probe: _c ends 5, a/b
+end 20, all RegRef(3); message names all three) — discriminate by install step/value identity + regression.
+(5) the trailing-underscore strip corrupts `__call__` into "in Power.__call_():" — converges with Claude (1);
+one fix covering scale_/__call__/matmul_. (6) a never-returning inlined helper attributes "the function never
+returns on any path" to the root def line instead of the actionable site — better origin + regression.
+Fix development dispatched to a separate detached worktree (fixes-s211) at 97eeca6 to overlap the B1 agent;
+sequencing: B1 verifies+commits first, then the round-fix commit cherry-picks on top, then one combined trial
+run + round-2 review pair over the stack.
