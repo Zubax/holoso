@@ -713,25 +713,27 @@ def test_indexing_a_sequence_of_arrays_yields_an_array() -> None:
     assert [o.name for o in lower(row_of_a_list).outputs] == ["out_0"]
 
 
-@pytest.mark.skip(reason="FIR_PARITY_PENDING: rank-0 doctrine rules x[()] at S2.8")
-def test_a_scalar_takes_an_empty_tuple_key_as_identity_like_a_numpy_scalar() -> None:
-    # A Holoso scalar is rank zero, as a numpy scalar is, so `x[()]` yields the scalar itself -- while `x[0]` and a
-    # slice, which a numpy scalar also rejects, stay rejected.
+def test_rank_zero_subscripts_are_rejected() -> None:
+    # Rank-0 doctrine (scope ruling T3): scalars take no subscript, ``()`` included -- numpy's 0-d identity
+    # ``x[()]`` has no counterpart here because the 0-d sort itself is out of the subset. Every rank-0 subscript
+    # is a located rejection, and a 0-d spelling is refused at its creation door before any key applies.
     from jaxtyping import Float64
 
-    def element_full_index(v: Float64[np.ndarray, "3"]) -> float:
+    def scalar_empty_key(v: Float64[np.ndarray, "3"]) -> float:
         return v[0][()]  # type: ignore[no-any-return]  # numpy: v[0], a 0-D identity
 
-    assert element_full_index(np.array([2.0, 4.0, 6.0])) == 2.0
-    _assert_shape_kernel_matches_python(element_full_index, np.array([2.0, 4.0, 6.0]))
-
-    def index_a_scalar(v: Float64[np.ndarray, "3"]) -> float:
+    def scalar_int_key(v: Float64[np.ndarray, "3"]) -> float:
         return v[0][0]  # type: ignore[no-any-return]  # numpy: IndexError, too many indices for a scalar
 
-    with pytest.raises(IndexError):
-        index_a_scalar(np.array([2.0, 4.0, 6.0]))
-    with pytest.raises(UnsupportedConstruct, match="cannot index or slice a scalar"):
-        lower(index_a_scalar)
+    for kernel in (scalar_empty_key, scalar_int_key):
+        with pytest.raises(UnsupportedConstruct, match=r":\d+:\d+: subscript of a runtime value is not supported"):
+            lower(kernel)
+
+    def zero_d_empty_key(x: float) -> float:
+        return x + float(np.array(2.0)[()])
+
+    with pytest.raises(UnsupportedConstruct, match=r":\d+:\d+: a 0-dimensional array is not supported"):
+        lower(zero_d_empty_key)
 
 
 def test_a_runtime_aggregate_local_lowers_and_computes() -> None:
@@ -1034,14 +1036,14 @@ def test_a_boolean_index_into_an_array_is_a_located_rejection() -> None:
     assert float(model.elaborate().run(3.0)[0]) == 6.0
 
 
-def test_a_zero_dimensional_array_folds_and_rejects_navigation() -> None:
-    # Review rounds 5+6: a 0-d ndarray crashed structural navigation with a raw IndexError; scalarizing it at
-    # admission was tried and reverted (it broke static type identity: isinstance(z, np.ndarray) folded False).
-    # It stays an array -- concrete folds work through materialization, navigation is a located rejection.
+def test_a_zero_dimensional_array_is_rejected_at_creation() -> None:
+    # Scope ruling T3 (supersedes review rounds 5+6): a 0-d ndarray is refused at its creation door -- here the
+    # closure load -- so no downstream spelling (a concrete fold, type identity, navigation, len) ever sees one;
+    # the scalar is the idiom. The rejection is located and names the remedy.
     z = np.array(3.0)
 
     def scales(x: float) -> float:
-        return x * float(z)
+        return x * float(z)  # valid numpy: the concrete fold no longer papers over the 0-d constant
 
     def type_sensitive(x: float) -> float:
         return x if isinstance(z, np.ndarray) else 0.0
@@ -1052,14 +1054,9 @@ def test_a_zero_dimensional_array_folds_and_rejects_navigation() -> None:
     def sized(x: float) -> float:
         return x + float(len(z))  # numpy raises TypeError: len() of unsized object
 
-    fmt = FloatFormat(11, 52)
-    assert float(holoso.synthesize(scales, default_ops(fmt), name="p").numerical_model.elaborate().run(2.0)[0]) == 6.0
-    model = holoso.synthesize(type_sensitive, default_ops(fmt), name="p").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == 3.0
-    with pytest.raises(UnsupportedConstruct, match="0-dimensional array cannot be indexed"):
-        lower(subscripted)
-    with pytest.raises(UnsupportedConstruct, match=r"len\(\) of"):  # the concrete fold surfaces numpy's own message
-        lower(sized)
+    for kernel in (scales, type_sensitive, subscripted, sized):
+        with pytest.raises(UnsupportedConstruct, match=r":\d+:\d+: a 0-dimensional array is not supported"):
+            lower(kernel)
 
 
 # ---------------------------------------- spine review round 6 ----------------------------------------
@@ -1181,18 +1178,15 @@ def test_sequence_repeat_counts_follow_python() -> None:
 
 
 def test_concretely_folded_array_attributes_need_no_cells() -> None:
-    # Review round 7: attribute navigation of an all-Known array (.shape, .T, a 0-d array's .real) folds at
-    # analysis; emission asserted the aggregate source was a record and crashed. Same invariant as the folded
-    # subscript: an all-Known destination needs no cells.
-    zero_d = np.array(3.0)
+    # Review round 7: attribute navigation of an all-Known array (.shape, .T) folds at analysis; emission
+    # asserted the aggregate source was a record and crashed. Same invariant as the folded subscript: an
+    # all-Known destination needs no cells. The 0-d ``.real`` spelling this test once folded now rejects at
+    # the creation door instead (scope ruling T3), so its ``shape_len`` probe reads the matrix's shape.
     vector = np.array([1.0, 2.0, 3.0])
     matrix = np.array([[1.0, 2.0], [3.0, 4.0]])
 
-    def real_of_zero_d(x: float) -> float:
-        return x + float(zero_d.real)
-
     def shape_len(x: float) -> float:
-        return x + float(len(zero_d.shape))
+        return x + float(len(matrix.shape))
 
     def shape_element(x: float) -> float:
         return x + float(vector.shape[0])
@@ -1201,22 +1195,30 @@ def test_concretely_folded_array_attributes_need_no_cells() -> None:
         return x + float(matrix.T[0][1])
 
     fmt = FloatFormat(11, 52)
-    for kernel in (real_of_zero_d, shape_len, shape_element, transposed_element):
+    for kernel in (shape_len, shape_element, transposed_element):
         model = holoso.synthesize(kernel, default_ops(fmt), name=kernel.__name__).numerical_model
         assert float(model.elaborate().run(2.0)[0]) == kernel(2.0)
 
+    zero_d = np.array(3.0)
 
-def test_an_index_able_aggregate_key_projects_like_a_known_integer() -> None:
-    # Review round 7: a 0-d integer array is a valid Python sequence index (operator.index accepts it); the
-    # analyzer projected the child but emission asserted the key fact was Known and crashed on the aggregate.
+    def real_of_zero_d(x: float) -> float:
+        return x + float(zero_d.real)
+
+    with pytest.raises(UnsupportedConstruct, match=r"a 0-dimensional array is not supported"):
+        lower(real_of_zero_d)
+
+
+def test_a_zero_dimensional_index_key_is_rejected_at_creation() -> None:
+    # Review round 7 taught the projection to take a 0-d integer key (operator.index accepts one); scope ruling
+    # T3 retracts the support: the key's 0-d array is refused at its creation door before any projection.
     zero_d_index = np.array(0)
 
     def kernel(x: float) -> float:
         t = (x, 2.0)
         return t[zero_d_index] * 4.0
 
-    model = holoso.synthesize(kernel, default_ops(FloatFormat(11, 52)), name="idx_agg").numerical_model
-    assert float(model.elaborate().run(3.0)[0]) == 12.0 == kernel(3.0)
+    with pytest.raises(UnsupportedConstruct, match=r":\d+:\d+: a 0-dimensional array is not supported"):
+        lower(kernel)
 
 
 # ---------------------------------------- spine review round 8 ----------------------------------------

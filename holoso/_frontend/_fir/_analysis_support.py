@@ -527,7 +527,7 @@ def _fits_float64(value: int) -> bool:
 def _rectangular_shape(layout: "ValueLayout") -> tuple[int, ...] | None:
     """
     The array shape a layout tree yields under numpy's rectangular nesting rules (container flavor is
-    irrelevant; a 0-d array child acts as a scalar), or None where numpy itself would refuse the ragged form.
+    irrelevant), or None where numpy itself would refuse the ragged form.
     """
     if layout is None:
         return ()

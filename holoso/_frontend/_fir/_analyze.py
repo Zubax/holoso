@@ -424,19 +424,27 @@ class Analyzer:
         self._construction_calls = {}
         self._unroll_cache = {}
 
-    def _read_attribute_snapshot(self, owner: object, name: str) -> tuple[object, StaticValue | None]:
+    def _read_attribute_snapshot(
+        self, owner: object, name: str, origin: OriginStack
+    ) -> tuple[object, StaticValue | None]:
         """
         One live read AND one admission per (owner, attribute) per analysis: every later consultation -- W/D
         rounds, reset facts, namespace lookups, the final-plan replay -- sees the first read's ADMITTED value,
         so neither a drifting live object nor a mutated referent (admission snapshots contents at admit time)
         can move a fact after it is first formed. The owner reference pins the id against reuse for the memo's
-        lifetime. AttributeError propagates to the caller's located rejection.
+        lifetime. AttributeError propagates to the caller's located rejection. A 0-d ndarray refuses right here,
+        never entering the memo: this read is its creation door (scope ruling T3) for state resets, component
+        reads, and namespace lookups alike, mirroring the builder's global-load door.
         """
+        import numpy as np
+
         key = (id(owner), name)
         hit = self._component_reads.get(key)
         if hit is not None and hit[0] is owner:
             return hit[1], hit[2]
         value = getattr(owner, name)
+        if type(value) is np.ndarray and value.ndim == 0:
+            raise AnalysisRejection("a 0-dimensional array is not supported; use the scalar directly", origin)
         admitted = admit(value)
         self._component_reads[key] = (owner, value, admitted)
         return value, admitted
@@ -457,7 +465,7 @@ class Analyzer:
         admitted: StaticValue | None = None
         for attribute in leaf.path:
             try:
-                current, admitted = self._read_attribute_snapshot(current, attribute)
+                current, admitted = self._read_attribute_snapshot(current, attribute, self._state_origin(leaf))
             except AttributeError:
                 raise AnalysisRejection(
                     f"state attribute '{'.'.join(leaf.path)}' does not exist on the component at compile time "
@@ -507,11 +515,6 @@ class Analyzer:
                         f"state attribute '{name}' must be a flat list of scalars to persist", origin
                     )
             case ArrayLayout(shape=shape):
-                if not shape:
-                    raise AnalysisRejection(
-                        f"state attribute '{name}' has a 0-dimensional array reset; persist a scalar instead",
-                        origin,
-                    )
                 if len(shape) > 2:
                     raise AnalysisRejection(
                         f"state attribute '{name}' has a {len(shape)}-D array reset; only 1-D and 2-D arrays "
@@ -995,7 +998,12 @@ class Analyzer:
             case PyCompare(dst=dst, op=rel, lhs=lhs, rhs=rhs):
                 lhs_fact, rhs_fact = env.get(Local(lhs)), env.get(Local(rhs))
                 if _is_array_fact(lhs_fact) or _is_array_fact(rhs_fact):
-                    env.set(Local(dst), self._elementwise_compare(rel, lhs_fact, rhs_fact, op.origin))
+                    # Trimmed (scope ruling T2): a boolean mask is a dead-end value in this subset — nothing
+                    # can consume it — and the machinery lowered integer arrays in float (defect A2).
+                    raise AnalysisRejection(
+                        "elementwise array comparison is not supported; compare the elements explicitly",
+                        op.origin,
+                    )
                 else:
                     compared = self._fold_binary(
                         lambda a, b: static_compare(rel, a, b),
@@ -1060,8 +1068,6 @@ class Analyzer:
             case PyLen(dst=dst, obj=obj):
                 obj_fact = env.get(Local(obj))
                 if isinstance(obj_fact, AggregateFact):
-                    if isinstance(obj_fact.layout, ArrayLayout) and not obj_fact.layout.shape:
-                        raise AnalysisRejection("len() of a 0-dimensional array is undefined", op.origin)
                     length = admit(outer_arity(obj_fact.layout))
                     assert length is not None
                     result = Known(length)
@@ -1232,9 +1238,9 @@ class Analyzer:
         numpy semantics (promotion, wraparound, errstate deferrals) hold per leaf by construction, and general
         broadcasting stays a located rejection rather than a silent alignment. Divergence guards mirror what numpy
         applies ARRAY-WIDE before touching any element (an empty array included): an out-of-range Python-int
-        constant is a located rejection where numpy raises OverflowError, and 0-d operands yield the SCALAR sort
-        (numpy returns np.float64/np.int64, never a 0-d array). A runtime-integer result rejects until the integer
-        sprint: the scalar integer datapath saturates where numpy wraps, so lowering it would diverge leafwise.
+        constant is a located rejection where numpy raises OverflowError. A runtime-integer result rejects until
+        the integer sprint: the scalar integer datapath saturates where numpy wraps, so lowering it would diverge
+        leafwise.
         """
         if bin_op is BinOp.MATMUL:
             raise AnalysisRejection("the matrix product is not lowerable yet", origin)
@@ -1246,16 +1252,7 @@ class Analyzer:
                     "elementwise arithmetic mixes an array with a non-array container; wrap it in np.array(...)",
                     origin,
                 )
-        if _is_array_fact(lhs) and lhs.layout.shape == ():  # type: ignore[union-attr]
-            lhs = lhs.leaves[0]  # type: ignore[union-attr]  # numpy broadcasts a 0-d array like a scalar
-        if _is_array_fact(rhs) and rhs.layout.shape == ():  # type: ignore[union-attr]
-            rhs = rhs.leaves[0]  # type: ignore[union-attr]
         promotes = bin_op is BinOp.DIV
-        if not (_is_array_fact(lhs) or _is_array_fact(rhs)):
-            # Both operands were 0-d arrays: the result is the scalar sort, exactly as numpy yields it.
-            return self._fold_binary(
-                lambda a, b: static_binop(bin_op, a, b), lhs, rhs, origin, promotes_to_float=promotes
-            )
         lhs_sem = self._elementwise_side_sem(lhs, origin)
         rhs_sem = self._elementwise_side_sem(rhs, origin)
         if SemType.BOOL in (lhs_sem, rhs_sem):
@@ -1342,44 +1339,9 @@ class Analyzer:
                     "a -1 (inferred) reshape dimension is not supported; spell the shape explicitly", origin
                 )
             dimensions.append(dimension)
+        if not dimensions:
+            raise AnalysisRejection("a 0-dimensional array is not supported; use the scalar directly", origin)
         return tuple(dimensions)
-
-    def _elementwise_compare(self, rel: RelationalOp, lhs: Fact, rhs: Fact, origin: OriginStack) -> Fact:
-        """
-        An elementwise NUMERIC comparison producing a boolean mask: the same same-shape/scalar pairing as
-        arithmetic, each leaf pair taking the scalar comparison rule (numpy provenance rides the fold).
-        Boolean operands keep the scalar doctrine rather than gaining a blanket array admission.
-        """
-        if _is_array_fact(lhs) and lhs.layout.shape == ():  # type: ignore[union-attr]
-            lhs = lhs.leaves[0]  # type: ignore[union-attr]
-        if _is_array_fact(rhs) and rhs.layout.shape == ():  # type: ignore[union-attr]
-            rhs = rhs.leaves[0]  # type: ignore[union-attr]
-        if not (_is_array_fact(lhs) or _is_array_fact(rhs)):
-            return self._fold_binary(lambda a, b: static_compare(rel, a, b), lhs, rhs, origin, default=SemType.BOOL)
-        for side in (lhs, rhs):
-            if isinstance(side, AggregateFact) and not isinstance(side.layout, ArrayLayout):
-                raise AnalysisRejection(
-                    "elementwise comparison mixes an array with a non-array container; wrap it in np.array(...)",
-                    origin,
-                )
-        if SemType.BOOL in (self._elementwise_side_sem(lhs, origin), self._elementwise_side_sem(rhs, origin)):
-            raise AnalysisRejection("an elementwise comparison requires numeric operands", origin)
-        arrays = [side for side in (lhs, rhs) if isinstance(side, AggregateFact)]
-        shapes = [side.layout.shape for side in arrays if isinstance(side.layout, ArrayLayout)]
-        if len(set(shapes)) > 1:
-            raise AnalysisRejection(
-                f"elementwise comparison on mismatched shapes {shapes[0]} and {shapes[1]} "
-                "(only a scalar broadcasts)",
-                origin,
-            )
-        leaves: list[AtomicFact] = []
-        for ordinal in range(leaf_count(arrays[0].layout)):
-            left = lhs.leaves[ordinal] if isinstance(lhs, AggregateFact) else lhs
-            right = rhs.leaves[ordinal] if isinstance(rhs, AggregateFact) else rhs
-            leaf = self._fold_binary(lambda a, b: static_compare(rel, a, b), left, right, origin, default=SemType.BOOL)
-            assert isinstance(leaf, (Known, Residual)), leaf
-            leaves.append(leaf)
-        return AggregateFact(ArrayLayout(shapes[0], ArrayDType.BOOL), tuple(leaves))
 
     def _elementwise_unary(self, un_op: UnOp, operand: AggregateFact, origin: OriginStack) -> Fact:
         assert isinstance(operand.layout, ArrayLayout)
@@ -1399,8 +1361,6 @@ class Analyzer:
                 residual = self._residual_of(leaf, origin)
                 assert isinstance(residual, Residual), residual
                 leaves.append(residual)
-        if operand.layout.shape == ():
-            return leaves[0]  # numpy: unary +/- on a 0-d array also yields the scalar sort
         return AggregateFact(operand.layout, tuple(leaves))
 
     def _array_factory(self, source: AggregateFact, origin: OriginStack, force_float: bool = False) -> AggregateFact:
@@ -1593,10 +1553,6 @@ class Analyzer:
         if isinstance(obj, AggregateFact) and isinstance(index, Known):
             if isinstance(obj.layout, RecordLayout):
                 raise AnalysisRejection("a record is not subscriptable; access its fields by name", origin)
-            if isinstance(obj.layout, ArrayLayout) and not obj.layout.shape:
-                raise AnalysisRejection(
-                    "a 0-dimensional array cannot be indexed; convert it with float() instead", origin
-                )
             if isinstance(index.value, (StaticBool, NpBool)) and (
                 isinstance(obj.layout, ArrayLayout)
                 or (isinstance(obj.layout, StructuralLayout) and ContainerFlavor.ARRAY in obj.layout.flavors)
@@ -1797,7 +1753,7 @@ class Analyzer:
                 # A namespace (math, np, a class), not a stateful component: attribute access is a plain lookup,
                 # so math.sqrt/np.floor resolve to the callable the call site then dispatches through the registry.
                 try:
-                    attribute, admitted = self._read_attribute_snapshot(component, name)
+                    attribute, admitted = self._read_attribute_snapshot(component, name, origin)
                 except AttributeError as error:
                     raise AnalysisRejection(str(error), origin) from None
                 return normalize_static(admitted) if admitted is not None else Reference(attribute)
@@ -1832,7 +1788,7 @@ class Analyzer:
                 env.set(leaf, fact)
                 return fact
             try:
-                snapshot, admitted = self._read_attribute_snapshot(component, name)
+                snapshot, admitted = self._read_attribute_snapshot(component, name, origin)
             except AttributeError as error:
                 raise AnalysisRejection(str(error), origin) from None
             if admitted is None:
@@ -1938,8 +1894,6 @@ class Analyzer:
                 # Materializing would drive Python's iteration protocol (a user __len__/__getitem__/__iter__) on
                 # the reconstruction -- a demonstrated wrong-value and non-termination hazard.
                 raise AnalysisRejection("iteration over a record is not supported", loop.origin)
-            if isinstance(iterable.layout, ArrayLayout) and not iterable.layout.shape:
-                raise AnalysisRejection("iteration over a 0-dimensional array is undefined", loop.origin)
             trip_count = outer_arity(iterable.layout)
             if trip_count <= UNROLL_THRESHOLD:  # sized before materializing: a 32k table must reject instantly
                 for position in range(trip_count):
@@ -2128,8 +2082,6 @@ class Analyzer:
                         raise AnalysisRejection(
                             "argument unpacking requires a tuple, list, or array of static arity here", call.origin
                         )
-                    if isinstance(fact.layout, ArrayLayout) and not fact.layout.shape:
-                        raise AnalysisRejection("iteration over a 0-dimensional array is undefined", call.origin)
                     for child in range(outer_arity(fact.layout)):
                         index_temp = self._fresh_temp()
                         child_key = admit(child)
@@ -2186,7 +2138,8 @@ class Analyzer:
         match = resolve(target)
         if isinstance(match, Library):
             reduction = any(target is fn for fn in (np.max, np.amax, np.mean))
-            if reduction and (len(call.args) != 1 or call.kwargs):
+            sole_keyword_operand = not call.args and [keyword for keyword, _ in call.kwargs] == ["a"]
+            if reduction and not (len(call.args) == 1 and not call.kwargs) and not sole_keyword_operand:
                 raise AnalysisRejection(
                     f"np.{getattr(target, '__name__', '?')} supports only the default axis: exactly one array "
                     "argument (reduce the other axis explicitly instead of passing an axis)",
@@ -2195,7 +2148,7 @@ class Analyzer:
             if reduction or any(target is fn for fn in (np.matmul, np.dot, np.trace, np.outer)):
                 # The linalg and reduction stubs are defined over arrays only; a scalar/list/tuple operand
                 # must not acquire array semantics through the spelled call any more than through an operator.
-                for arg in call.args:
+                for arg in (*call.args, *(value for _, value in call.kwargs)):
                     operand_fact = env.get(Local(arg))
                     if not (isinstance(operand_fact, AggregateFact) and isinstance(operand_fact.layout, ArrayLayout)):
                         if any(target is fn for fn in (np.matmul, np.dot)):
@@ -2384,8 +2337,6 @@ class Analyzer:
                 source_fact = argument_facts[0]
                 if isinstance(source_fact, AggregateFact):
                     # A record never reaches here: the admission walk already refused it as an argument.
-                    if isinstance(source_fact.layout, ArrayLayout) and not source_fact.layout.shape:
-                        raise AnalysisRejection("iteration over a 0-dimensional array is undefined", call.origin)
                     children = tuple(source_fact.child(i) for i in range(outer_arity(source_fact.layout)))
                     env.set(Local(call.dst), aggregate_of(children, is_list=target is list))
                     self._conversion_calls.add(id(call))
@@ -2399,8 +2350,6 @@ class Analyzer:
                 # Length is layout-determined: it folds on runtime leaves exactly as the unpacking arity check
                 # (the PyLen op) does, records having been refused by the admission walk already.
                 sized = argument_facts[0]
-                if isinstance(sized.layout, ArrayLayout) and not sized.layout.shape:
-                    raise AnalysisRejection("len() of a 0-dimensional array is undefined", call.origin)
                 length = admit(outer_arity(sized.layout))
                 assert length is not None
                 env.set(Local(call.dst), Known(length))
@@ -2464,12 +2413,6 @@ class Analyzer:
                 )
                 cast_source = argument_facts[0] if argument_facts else None
                 if (
-                    isinstance(cast_source, AggregateFact)
-                    and isinstance(cast_source.layout, ArrayLayout)
-                    and cast_source.layout.shape == ()
-                ):
-                    cast_source = cast_source.leaves[0]  # numpy defines float()/int()/bool() of a 0-d array
-                if (
                     cast_target is not None
                     and not keyword_facts
                     and len(argument_facts) == 1
@@ -2492,6 +2435,10 @@ class Analyzer:
                 raise AnalysisRejection(f"call fails here: {error}", call.origin) from None
             admitted = admit(concrete)
             if admitted is None:
+                if isinstance(concrete, np.ndarray) and concrete.ndim == 0:
+                    raise AnalysisRejection(
+                        "a 0-dimensional array is not supported; use the scalar directly", call.origin
+                    )
                 env.set(Local(call.dst), Reference(concrete))
             else:
                 taint_inputs: list[Fact] = [*argument_facts, *(fact for _, fact in keyword_facts)]

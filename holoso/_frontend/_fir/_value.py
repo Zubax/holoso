@@ -293,6 +293,8 @@ def _admit_uncached(
             return StaticSlice(*bounds)
         return None  # a non-integer slice never resolves a supported subscript
     if type(obj) is np.ndarray:
+        if obj.ndim == 0:
+            return None  # trimmed (scope ruling T3): a 0-d array is an accident, not an idiom; the scalar is
         if obj.size > _MAX_ELEMENTS:
             return None  # the LOGICAL size: a zero-stride view is small in memory yet snapshots at full size
         carrier: type[np.generic]

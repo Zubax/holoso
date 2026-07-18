@@ -18,6 +18,11 @@ integer `np.power` overload, and give `np.sign` an integer lowering in place of 
 
 ## Known defects needing resolution
 
+Empty contractions diverge from numpy in the linalg stubs: `(n, 0) @ (0, m)` and an empty vector dot reject
+(stub-internal index error) where numpy returns zeros, and an empty product's dtype collapses to float64.
+Revisit together with the planned trace/outer/dot examples; the stubs' guards otherwise keep the reachable
+domain faithful.
+
 Bare `AssertionError` when two public state slots share a live-out. `assert RegRef(reg) not in write_books, "a
 boundary-install slot must carry no opcode write sources"` (`_backend/verilog/_emit.py`) fires when two public state
 slots end a transaction on the same live-out register -- e.g. two writes to `self.a` followed by `self.b = self.a`

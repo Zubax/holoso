@@ -264,9 +264,11 @@ does) -- so a STATIC np.bool_ subscript index or repeat count rejects exactly wh
 while the plain-bool spellings keep Python's bool-as-int semantics (a runtime boolean carries no spelling).
 Array attribute navigation folds only the value-determined set (T, shape, ndim, size, real, imag); identity-
 and layout-dependent attributes (.base, .strides, .flags, and flatten, whose order argument observes memory
-layout) see the admitted snapshot, not the user's object, and reject. A 0-dimensional ndarray stays an array
-(its static type identity matters to folds); navigating it -- indexing, len(), iteration -- is a rejection,
-while concrete folds (float(z)) work through materialization.
+layout) see the admitted snapshot, not the user's object, and reject. 0-d arrays are not supported anywhere:
+every creation door -- admission, the array factories, reshape, module-global and attribute loads -- refuses
+one with a located rejection whose guidance is to use the scalar directly, so no later stage ever meets a
+rank-0 array fact; and scalars take no subscript, `()` included (numpy's 0-d identity `x[()]` has no
+counterpart because the 0-d sort itself is out).
 StaticFor unrolls by cloning the body per trip once the iterable is Known (an iterable whose fact descends after
 the unroll — a rebind joined across a while iteration — reseeds the loop by its origin and reruns the round, so
 ordinary rebinding unrolls the joined shape instead of rejecting); calls expand on demand by grafting the
@@ -382,13 +384,12 @@ construction; residual pairs lower to one scalar operation per leaf with a broad
 The other operand is a same-shape array or a numeric scalar; general broadcasting, mixed array/list operands,
 other operators (`@` awaits the matmul stage), boolean operands, and in-place forms (`v *= s` -- numpy mutates
 through aliases where the subset rebinds) are located rejections. `/` yields float and any float side promotes
-the result dtype, as in Python and numpy. Three guards mirror numpy's ARRAY-WIDE behavior rather than any
+the result dtype, as in Python and numpy. Two guards mirror numpy's ARRAY-WIDE behavior rather than any
 single element's: a Python-int constant outside the result dtype's range is a located rejection exactly where
-numpy raises OverflowError (an empty array included -- the conversion precedes element iteration); 0-d operands
-yield the SCALAR sort (numpy returns `np.float64`/`np.int64`, never a 0-d array, unary included), and a 0-d
-array in any operand position -- a scalar slot or one side of an array pair -- broadcasts as its single leaf; a runtime-INTEGER result rejects until
-the integer sprint, because the scalar integer datapath saturates where numpy int64 wraps -- all-static integer
-folds are exact and stay admitted.
+numpy raises OverflowError (an empty array included -- the conversion precedes element iteration), and a
+runtime-INTEGER result rejects until the integer sprint, because the scalar integer datapath saturates where
+numpy int64 wraps -- all-static integer folds are exact and stay admitted. A 0-d operand cannot arise in any
+position: 0-d arrays are rejected at every creation door.
 The array factories `np.array`/`asarray`/`asanyarray` build from a residual-carrying aggregate as the same
 LAYOUT operation under numpy's discovery rules, restricted to a proven subset: the nesting must be rectangular
 (container flavor is irrelevant; empty array children contribute their dtype as evidence), any float evidence
@@ -406,7 +407,7 @@ follow Python) resolves at analysis to the source leaf ordinal feeding each resu
 per-destination SUBSCRIPT PLAN the emitter consumes verbatim -- the tuple/list slice windows ride the same plan,
 so emission never re-derives a selection. Advanced indexing refuses: a boolean anywhere in the key (numpy would
 reinterpret the whole key), an array or nested sequence as a key element, and more indices than axes are located
-rejections. Starred call arguments unpack arrays exactly like tuples/lists (a 0-d array is not iterable), and a
+rejections. Starred call arguments unpack arrays exactly like tuples/lists, and a
 for loop over any runtime-element aggregate binds each trip through a synthesized projection prelude -- scalar
 leaves and whole rows alike. ``v.flatten()``/``v.ravel()`` on an array is a pure RELAYOUT of the same leaves onto
 the flat shape (the source dtype survives structurally, empty arrays included): the attribute read mints a
@@ -436,11 +437,12 @@ never acquires matrix semantics; np.array is the explicit conversion). `np.trace
 the same gate; stub raise messages stay literal so rejections surface verbatim. `.T` and `np.transpose` are
 not stubs: transpose is a pure structural relayout -- the same leaves under the reversed shape, recorded as a
 ROUTE PLAN (source ordinal per result cell) the conversion emission consumes -- exact for every rank,
-non-square shapes, and empty and 0-d arrays. The stubs probe ranks through `np.ndim`, folded narrowly by the
+non-square shapes, and empty arrays. The stubs probe ranks through `np.ndim`, folded narrowly by the
 compiler (a numeric scalar is rank 0, an array is its layout rank, containers reject: numpy's own ndim of a
 list observes structure the fact model erases).
-Elementwise numeric comparisons produce boolean masks under the same same-shape/scalar pairing as
-arithmetic (boolean operands keep the scalar doctrine). Default-axis `np.max`/`np.mean` are registry stubs
+Elementwise array comparisons are not supported (a located rejection with guidance): a boolean mask is a
+dead-end value in this subset — no boolean indexing, no any/all, array truth rejects — so the machinery
+carried cost without a consumer. Default-axis `np.max`/`np.mean` are registry stubs
 over nonempty 1-D arrays -- a left fold of the scalar max (one sorter firing per step) and a left-fold sum
 over the static length whose order follows the fastmath doctrine rather than numpy's pairwise summation.
 `reshape` joins flatten/ravel as a static relayout (explicit non-negative dimensions whose product matches;

@@ -1039,9 +1039,9 @@ def test_elementwise_unary_matches_numpy() -> None:
     _assert_python_matches_holoso(positive, -0.25)
 
 
-def test_zero_dimensional_operands_yield_the_scalar_sort() -> None:
-    # numpy arithmetic on a 0-d array returns np.float64/np.int64 (the scalar sort, unary included), never a 0-d
-    # array; the float() below is the observable -- it lowers only if the result is a genuine scalar fact.
+def test_zero_dimensional_operands_are_rejected_at_creation() -> None:
+    # Scope ruling T3: the 0-d module constant is refused at its load in every operand position (binary side,
+    # unary, both sides) -- numpy's 0-d-to-scalar-sort arithmetic is out of the subset; spell the scalar.
     def scaled(s: float) -> float:
         return float(_ZERO_D_CONST * s)
 
@@ -1051,9 +1051,9 @@ def test_zero_dimensional_operands_yield_the_scalar_sort() -> None:
     def paired(s: float) -> float:
         return float(_ZERO_D_CONST + _ZERO_D_CONST) * s
 
-    _assert_python_matches_holoso(scaled, 2.5)
-    _assert_python_matches_holoso(negated, -1.0)
-    _assert_python_matches_holoso(paired, 0.5)
+    for kernel in (scaled, negated, paired):
+        with pytest.raises(UnsupportedConstruct, match=r":\d+:\d+: a 0-dimensional array is not supported"):
+            lower(kernel)
 
 
 def test_elementwise_rejections_are_located() -> None:
@@ -1304,10 +1304,9 @@ def test_star_unpack_of_arrays() -> None:
     _assert_python_matches_holoso(spread, 2.0)
 
     def zero_d(s: float) -> float:
-        # NOTE arithmetic on a 0-d array yields the scalar sort, so only the direct constant exercises this.
-        return s + helper(1.0, 2.0, *_ZERO_D_CONST)
+        return s + helper(1.0, 2.0, *_ZERO_D_CONST)  # the 0-d constant is refused at its load (scope ruling T3)
 
-    with pytest.raises(UnsupportedConstruct, match="0-dimensional"):
+    with pytest.raises(UnsupportedConstruct, match="a 0-dimensional array is not supported"):
         lower(zero_d)
 
 
@@ -1373,26 +1372,23 @@ def test_flatten_order_arguments_are_rejected() -> None:
 # ---------------------------------------------------------------- comparisons, reductions, reshape (9d-1)
 
 
-def test_array_comparisons_yield_boolean_masks() -> None:
+def test_array_comparisons_are_a_located_rejection() -> None:
+    # Trim T2 (docs/decisions/scope-ruling.md): a boolean mask is a dead-end value in this subset — nothing can
+    # consume it — and the machinery lowered integer arrays in float (defect A2). Every spelling now rejects
+    # with guidance, located at the comparison.
     def masked(s: float) -> tuple[float, float, float]:
-        mask = (COEFFS * s) >= 0.5  # elementwise comparison with a scalar broadcast
+        mask = (COEFFS * s) >= 0.5
         return float(mask[0]), float(mask[1]), float(mask[2])
 
     def paired(s: float) -> float:
-        hits = (COEFFS * s) > (COEFFS * 0.5)  # array-with-array comparison, same shape
+        hits = (COEFFS * s) > (COEFFS * 0.5)
         if hits[1]:
             return s
         return -s
 
-    _assert_python_matches_holoso(masked, 2.0)
-    _assert_python_matches_holoso(paired, 1.0)
-
-    def mismatched(s: float) -> float:
-        wrong = (COEFFS * s) > _GATE_CONST  # (3,) vs (2,)
-        return float(wrong[0])
-
-    with pytest.raises(UnsupportedConstruct, match="mismatched shapes"):
-        lower(mismatched)
+    for kernel in (masked, paired):
+        with pytest.raises(UnsupportedConstruct, match=r":\d+:\d+: elementwise array comparison is not supported"):
+            lower(kernel)
 
 
 def test_array_reductions_match_numpy() -> None:
@@ -1444,8 +1440,8 @@ def test_reshape_is_a_static_relayout() -> None:
 
 def test_reshape_argument_arity_follows_python() -> None:
     # reshape() with no arguments is a TypeError in Python even for a one-cell array (math.prod(()) == 1
-    # made the size check pass); reshape(()) on a one-cell array is VALID and yields the 0-d scalar sort
-    # on extraction.
+    # made the size check pass); reshape(()) is valid numpy (a 0-d result) but that result is out of the
+    # subset, so the empty target refuses at this creation door (scope ruling T3).
     def no_arguments(s: float) -> float:
         v = np.array([s]).reshape()  # type: ignore[call-overload]
         return v[0]  # type: ignore[no-any-return]
@@ -1457,7 +1453,8 @@ def test_reshape_argument_arity_follows_python() -> None:
         v = np.array([s]).reshape(())
         return float(v)
 
-    _assert_python_matches_holoso(empty_shape, 2.5)
+    with pytest.raises(UnsupportedConstruct, match=r"a 0-dimensional array is not supported"):
+        lower(empty_shape)
 
 
 def test_helper_annotations_are_documentation() -> None:
@@ -1697,16 +1694,17 @@ def test_zero_dimensional_array_state_is_rejected() -> None:
         def step(self, a: float) -> None:
             self.v = self.v * a
 
-    with pytest.raises(UnsupportedConstruct, match="0-dimensional"):
+    with pytest.raises(UnsupportedConstruct, match=r":\d+:\d+: a 0-dimensional array is not supported"):
         lower(Zero().step)
 
 
-def test_zero_d_operand_broadcasts_with_arrays() -> None:
+def test_zero_d_operand_with_arrays_is_rejected_at_creation() -> None:
     def kernel(s: float) -> tuple[float, float, float]:
-        v = _ZERO_D_CONST * (COEFFS * s)  # numpy broadcasts a 0-d array like a scalar
+        v = _ZERO_D_CONST * (COEFFS * s)  # numpy would broadcast the 0-d like a scalar; the trim refuses it
         return v[0], v[1], v[2]
 
-    _assert_python_matches_holoso(kernel, 2.0)
+    with pytest.raises(UnsupportedConstruct, match=r"a 0-dimensional array is not supported"):
+        lower(kernel)
 
 
 def test_platform_alias_scalars_admit_like_their_dtypes() -> None:

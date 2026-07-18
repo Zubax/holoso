@@ -70,6 +70,9 @@ class ArrayLayout:
     shape: tuple[int, ...]
     dtype: ArrayDType
 
+    def __post_init__(self) -> None:
+        assert self.shape != (), "0-d arrays reject at every creation door (scope ruling T3)"
+
 
 @dataclass(frozen=True, slots=True, eq=False)
 class RecordLayout:

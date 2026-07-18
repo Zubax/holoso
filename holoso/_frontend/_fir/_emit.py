@@ -759,12 +759,6 @@ class _Emitter:
         runtime integer promoted at a state boundary is float-carried while its fact still reads integer).
         """
         fact = self._fact(binding)
-        if isinstance(fact, AggregateFact) and isinstance(fact.layout, ArrayLayout) and fact.layout.shape == ():
-            # A 0-d array is scalar-shaped and numpy's own arithmetic on it yields the scalar sort, so its single
-            # leaf IS the value at every scalar operand position.
-            return self._materialize_atom(
-                fact.leaves[0], lambda: self._read(block, _LeafPlace(Local(binding), 0)), expected
-            )
         assert not isinstance(fact, AggregateFact), "an aggregate value reaches a scalar operand position"
         return self._materialize_atom(fact, lambda: self._read(block, Local(binding)), expected)
 
@@ -837,34 +831,8 @@ class _Emitter:
                 self._emit_unary(fir_id, dst, un_op, operand)
             case PyCompare(dst=dst, op=rel, lhs=lhs, rhs=rhs):
                 compare_fact = self._fact(dst)
-                if isinstance(compare_fact, AggregateFact):
-                    # An elementwise numeric comparison: one float relational per residual mask cell, the
-                    # scalar side materialized once (numeric-only by the analyzer's admission).
-                    assert isinstance(compare_fact.layout, ArrayLayout)
-                    lhs_fact, rhs_fact = self._fact(lhs), self._fact(rhs)
-                    mask_broadcast: dict[BindingId, int] = {}
-
-                    def mask_operand(binding: BindingId, fact: Fact, ordinal: int) -> int:
-                        if isinstance(fact, AggregateFact) and not (
-                            isinstance(fact.layout, ArrayLayout) and fact.layout.shape == ()
-                        ):
-                            return self._materialize_atom(
-                                fact.leaves[ordinal],
-                                lambda: self._read(fir_id, _LeafPlace(Local(binding), ordinal)),
-                                SemType.FLOAT,
-                            )
-                        if binding not in mask_broadcast:
-                            mask_broadcast[binding] = self._materialize(fir_id, binding, SemType.FLOAT)
-                        return mask_broadcast[binding]
-
-                    for ordinal, cell in enumerate(compare_fact.leaves):
-                        if not isinstance(cell, Residual):
-                            continue
-                        left = mask_operand(lhs, lhs_fact, ordinal)
-                        right = mask_operand(rhs, rhs_fact, ordinal)
-                        vid = self._builder.operation(FloatRelational(rel), [left, right])
-                        self._write(fir_id, _LeafPlace(Local(dst), ordinal), vid)
-                elif not isinstance(compare_fact, Known):
+                assert not isinstance(compare_fact, AggregateFact), "elementwise comparisons reject at analysis"
+                if not isinstance(compare_fact, Known):
                     lsem, rsem = self._fact_sem(self._fact(lhs)), self._fact_sem(self._fact(rhs))
                     if lsem is SemType.BOOL or rsem is SemType.BOOL:
                         if lsem is not rsem:
@@ -949,8 +917,8 @@ class _Emitter:
                     else:
                         # A residual dst leaf without a selection plan means the analyzer projected a positional
                         # child, so the key resolves under operator.index -- either a Known directly or an
-                        # all-Known aggregate (a 0-d integer array, an __index__-able record), materialized
-                        # exactly as the analyzer materialized it.
+                        # all-Known aggregate (an __index__-able record), materialized exactly as the analyzer
+                        # materialized it.
                         import operator as operator_module
 
                         index_fact = self._fact(index)
@@ -1163,16 +1131,13 @@ class _Emitter:
         broadcast: dict[BindingId, int] = {}
 
         def operand(binding: BindingId, fact: Fact, ordinal: int) -> int:
-            if isinstance(fact, AggregateFact) and not (
-                isinstance(fact.layout, ArrayLayout) and fact.layout.shape == ()
-            ):
+            if isinstance(fact, AggregateFact):
                 return self._materialize_atom(
                     fact.leaves[ordinal],
                     lambda: self._read(block, _LeafPlace(Local(binding), ordinal)),
                     SemType.FLOAT,
                 )
-            # A scalar or a 0-d array: one materialization broadcast across every leaf (the 0-d unwrap lives
-            # in the scalar materializer).
+            # A scalar side: one materialization broadcast across every leaf.
             if binding not in broadcast:
                 broadcast[binding] = self._materialize(block, binding, SemType.FLOAT)
             return broadcast[binding]

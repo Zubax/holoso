@@ -770,6 +770,9 @@ class _Builder:
                 self._emit(LoadPlace(temp, Local(self._bind(runtime_name)), origin))
                 return temp
             case Free(value=value) | Global(value=value) | Builtin(value=value):
+                if type(value).__name__ == "ndarray" and getattr(value, "ndim", None) == 0:
+                    # Detected structurally (numpy stays out of the builder), matching the admission refusal.
+                    raise BuildRejection("a 0-dimensional array is not supported; use the scalar directly", origin)
                 admitted = admit(value)
                 temp = self._temp()
                 if admitted is not None:
