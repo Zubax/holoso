@@ -340,9 +340,9 @@ contract, enforces flavor, geometry, and per-cell kinds at its store site (below
 beside the facts, since the store-edge conversion needs it exactly where the store executes, but the verdict is
 never per-visit: optimistic analysis discovers executable predecessors late, so store obligations resolve only
 after the state fixed point, and when several stores violate, the one reported is the first executable store in
-CFG preorder. A pending state-store violation also outranks any downstream rejection its carried fact provokes
-in the same round, so the causal store reports rather than the secondary failure; a purely local violation
-reports only at the post-stabilization verdict, so an unrelated mid-flow rejection may surface ahead of it.
+CFG preorder. A pending store violation -- a local rebind, a state-store obligation, or a conversion failure
+alike -- outranks every rejection deferred in the same round, including a user raise, so the causal store
+reports rather than any secondary failure its carried fact provoked.
 Widening at merges is untouched:
 phi and select arms, comparison operands, explicit casts, return conversion, and mixed arithmetic promote exactly
 as before (a merge rounds into the carrier; only the store edge is exact), so `x = 0; x = input_float` rejects
