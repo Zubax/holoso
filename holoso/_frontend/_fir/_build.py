@@ -689,6 +689,11 @@ class _Builder:
                 if isinstance(index, ast.Tuple) and any(isinstance(elt, ast.Slice) for elt in index.elts):
                     # A slice inside a multi-axis key (m[:, 1]) desugars element-wise, so the key becomes an
                     # ordinary tuple of values the subscript transfer consumes structurally.
+                    for elt in index.elts:
+                        if isinstance(elt, ast.Starred):
+                            raise BuildRejection(
+                                "a starred element is not supported in a list or tuple display", self._origin(elt)
+                            )
                     items = tuple(
                         self._slice_value(elt, origin) if isinstance(elt, ast.Slice) else self._expression(elt)
                         for elt in index.elts

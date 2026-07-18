@@ -1929,3 +1929,15 @@ def test_a_none_setattr_entry_refuses_construction() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="runs user code in construction"):
         lower(kernel)
+
+
+def test_a_starred_element_in_a_subscript_key_tuple_is_the_display_rejection() -> None:
+    # S2.10 review (Codex): the multi-axis subscript arm desugared its key tuple itself, so a starred element
+    # there drew the generic message instead of the documented display rejection.
+    from jaxtyping import Float64
+
+    def kernel(v: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2"]:
+        return v[*[0], :]  # type: ignore[arg-type]
+
+    with pytest.raises(UnsupportedConstruct, match=r":\d+:\d+: a starred element is not supported in a list or"):
+        lower(kernel)
