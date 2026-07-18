@@ -21,16 +21,19 @@ is neither float nor boolean (none exist today) is left as a real branch. A bool
 re-runs after if-conversion.
 
 Guarded-region predication runs FIRST each iteration: a nested guard ``if A: if B: <effect>`` (no else) lowers to a
-two-branch region ``P: A?G:F0`` / ``G: B?T:F1`` (``G`` phi- and operation-free, so ``B`` is already available at
-``P`` and nothing is newly speculated) whose inner merge ``I`` and the outer bypass ``F0`` reconverge at ``O``. When
-every value ``O`` observes on the inner-false path equals the value on the outer-false path -- so the two bypasses are
-interchangeable -- the region is exactly ``(A and B) ? effect : bypass``. It is rewritten to the single diamond
-``P: band(A,B) ? T : F0`` reconverging at ``O``, which the ordinary splicer then collapses. This recovers the tight
-``select(A and B, ...)`` the region means, rather than the nested ``select(A, select(B, ...))`` a bottom-up diamond
-collapse leaves. It must precede diamond conversion and any merge/empty-block cleanup, which would erase the
-two-merge evidence. It combines existing boolean SSA values only, so eager-``and`` evaluation semantics are unchanged;
-a walrus or state write on the inner path makes some inner-false value differ from its outer-false peer, failing the
-equality test, and a faulting or stateful operation inside ``G`` leaves it non-empty, so neither is fused.
+two-branch region ``P: A?G:F0`` / ``G: B?T:F1`` (``G`` phi-free; its operations -- typically the cone computing ``B``
+-- are hoisted into ``P`` by the fusion, so like a diamond arm they must all be speculatable and fit the op budget)
+whose inner merge ``I`` and the outer bypass ``F0`` reconverge at ``O``. When every value ``O`` observes on the
+inner-false path equals the value on the outer-false path -- so the two bypasses are interchangeable -- the region is
+exactly ``(A and B) ? effect : bypass``. It is rewritten to the single diamond ``P: band(A,B) ? T : F0`` reconverging
+at ``O``, which the ordinary splicer then collapses. This recovers the tight ``select(A and B, ...)`` the region
+means, rather than the nested ``select(A, select(B, ...))`` a bottom-up diamond collapse leaves. It must precede
+diamond conversion and any merge/empty-block cleanup, which would erase the two-merge evidence. Hoisting evaluates
+``B``'s cone eagerly, matching the eager ``and`` the frontend emits for the hand-written spelling; that is
+unobservable for speculatable operations, while a faulting one (division) refuses the fusion. Any ``G``-defined value
+observed at ``O`` can never equal its outer-false peer (it does not dominate ``F0``), so the equality test confines
+the hoisted values to the branch condition and the true path; a walrus or state write on the inner path likewise
+makes some inner-false value differ from its outer-false peer, failing the same test.
 """
 
 import logging
@@ -47,18 +50,23 @@ _IFCONV_MAX_OPS = int(os.getenv("HOLOSO_IFCONV_MAX_OPS", "8"))
 _logger = logging.getLogger(__name__)
 
 
-def _arm_convertible(hir: Hir, preds: dict[BlockId, set[BlockId]], arm: Block, pred: BlockId) -> bool:
-    """A convertible arm: single-pred from ``pred``, phi-free, all-speculatable ops within budget, one Jump out."""
-    if preds[arm.id] != {pred} or arm.phis or not isinstance(arm.terminator, Jump):
+def _speculatable_within_budget(hir: Hir, block: Block) -> bool:
+    """Whether every operation of ``block`` may run on a not-taken path: all speculatable, within the op budget."""
+    if len(block.operations) > _IFCONV_MAX_OPS:
         return False
-    if len(arm.operations) > _IFCONV_MAX_OPS:
-        return False
-    for vid in arm.operations:
+    for vid in block.operations:
         node = hir.nodes[vid]
         assert isinstance(node, Operation)
         if not node.operator.speculatable:
             return False
     return True
+
+
+def _arm_convertible(hir: Hir, preds: dict[BlockId, set[BlockId]], arm: Block, pred: BlockId) -> bool:
+    """A convertible arm: single-pred from ``pred``, phi-free, all-speculatable ops within budget, one Jump out."""
+    if preds[arm.id] != {pred} or arm.phis or not isinstance(arm.terminator, Jump):
+        return False
+    return _speculatable_within_budget(hir, arm)
 
 
 def _find_diamond(hir: Hir, preds: dict[BlockId, set[BlockId]]) -> tuple[Block, Block, Block, Block] | None:
@@ -150,16 +158,19 @@ def _inner_phis_consumed_only_as_outer_arm(hir: Hir, inner: set[ValueId], inner_
 
 def _find_guarded_region(hir: Hir, preds: dict[BlockId, set[BlockId]]) -> tuple[Block, Block, Block, Block] | None:
     """
-    The first fusible nested guard ``(P, G, T, F0)``, or None. ``P: A?G:F0``; ``G: B?T:F1`` is phi- and
-    operation-free; ``T``/``F1`` reconverge at an operation-free inner merge ``I`` that meets the outer bypass ``F0``
-    at ``O``; and every value ``O`` observes on the inner-false path equals its outer-false peer.
+    The first fusible nested guard ``(P, G, T, F0)``, or None. ``P: A?G:F0``; ``G: B?T:F1`` is phi-free with
+    speculatable ops within budget (the fusion hoists them into ``P``); ``T``/``F1`` reconverge at an operation-free
+    inner merge ``I`` that meets the outer bypass ``F0`` at ``O``; and every value ``O`` observes on the inner-false
+    path equals its outer-false peer.
     """
     by = {block.id: block for block in hir.blocks}
     for p in hir.blocks:
         if not isinstance(p.terminator, Branch) or p.terminator.if_true == p.terminator.if_false:
             continue
         g, f0 = by[p.terminator.if_true], by[p.terminator.if_false]
-        if preds[g.id] != {p.id} or g.phis or g.operations or not isinstance(g.terminator, Branch):
+        if preds[g.id] != {p.id} or g.phis or not isinstance(g.terminator, Branch):
+            continue
+        if not _speculatable_within_budget(hir, g):
             continue
         if g.terminator.if_true == g.terminator.if_false:
             continue
@@ -190,7 +201,11 @@ def _find_guarded_region(hir: Hir, preds: dict[BlockId, set[BlockId]]) -> tuple[
 
 
 def _fuse_guard(hir: Hir, region: tuple[Block, Block, Block, Block]) -> Hir:
-    """Rewrite the guard into a single diamond ``P: band(A,B)?T:F0`` -> ``O``; the splicer then collapses it."""
+    """
+    Rewrite the guard into a single diamond ``P: band(A,B)?T:F0`` -> ``O``; the splicer then collapses it. ``G``'s
+    operations are hoisted into ``P`` ahead of the combined condition, preserving them (and the cone of ``B``) while
+    keeping every def above its uses in ``T`` and in the rewritten outer phis.
+    """
     p, g, t, f0 = region
     assert isinstance(p.terminator, Branch) and isinstance(g.terminator, Branch)
     inner = {block.id: block for block in hir.blocks}[t.terminator.target]  # type: ignore[union-attr]
@@ -219,7 +234,7 @@ def _fuse_guard(hir: Hir, region: tuple[Block, Block, Block, Block]) -> Hir:
         if block.id in dissolved:
             continue
         if block.id == p.id:
-            blocks.append(Block(p.id, p.phis, p.operations + (combined,), Branch(combined, t.id, f0.id)))
+            blocks.append(Block(p.id, p.phis, p.operations + g.operations + (combined,), Branch(combined, t.id, f0.id)))
         elif block.id == t.id:
             blocks.append(Block(t.id, t.phis, t.operations, Jump(outer_id)))
         else:

@@ -518,6 +518,113 @@ def test_nested_if_fold_is_suppressed_when_the_inner_test_has_a_walrus() -> None
     assert _branch_count(lower(f)) == 2
 
 
+def test_nested_guard_with_computed_inner_condition_fuses_to_one_mux() -> None:
+    # G1 regression: the natural nested spelling computes the inner comparison INSIDE the guard block; predication
+    # restricted to operation-free guard blocks misses it, leaving the chained ``select(A, select(B, ...))``. Fusion
+    # must hoist the guard block's cone and fire, producing the same single ``select(A and B, ...)`` as the
+    # hand-written conjunction -- with every hoisted operation preserved.
+    def nested(x: float, lo: float, hi: float) -> float:
+        r = 0.0
+        if x > lo:
+            if x < hi:
+                r = (x - lo) * 2.0
+        return r
+
+    hir = optimize(lower(nested))
+    assert len(hir.blocks) == 1
+    selects = [n for n in hir.nodes.values() if isinstance(n, Operation) and isinstance(n.operator, Select)]
+    assert len(selects) == 1
+    (mux,) = selects
+    band = hir.nodes[mux.operands[0]]
+    assert isinstance(band, Operation) and isinstance(band.operator, BoolAnd)
+    assert all(
+        isinstance(cmp, Operation) and isinstance(cmp.operator, FloatRelational)
+        for cmp in (hir.nodes[operand] for operand in band.operands)
+    )
+    assert _op_count(hir, FloatRelational) == 2  # the hoisted inner comparison survives alongside the outer one
+    assert _op_count(hir, FloatAdd) == 1  # the guarded body's arithmetic survives the rewrite
+
+    model = holoso.synthesize(nested, default_ops(FloatFormat(11, 52)), name="ngc").numerical_model.elaborate()
+    for x, lo, hi in ((1.0, 0.0, 2.0), (5.0, 0.0, 2.0), (-1.0, 0.0, 2.0), (2.0, 0.0, 2.0), (0.0, 0.0, 2.0)):
+        assert float(model.run(x, lo, hi)[0]) == nested(x, lo, hi)
+
+
+def test_triple_nested_guard_with_computed_conditions_fuses_to_one_mux() -> None:
+    # Each guard block computes its own condition; iterative inside-out fusion must still collapse the whole ladder
+    # into one mux under a conjunction tree, keeping all three comparisons.
+    def f(x: float, lo: float, hi: float) -> float:
+        r = 0.0
+        if x > lo:
+            if x < hi:
+                if x != 1.0:
+                    r = x * 4.0
+        return r
+
+    hir = optimize(lower(f))
+    assert len(hir.blocks) == 1
+    assert sum(1 for n in hir.nodes.values() if isinstance(n, Operation) and isinstance(n.operator, Select)) == 1
+    assert _op_count(hir, BoolAnd) == 2
+    assert _op_count(hir, FloatRelational) == 3
+
+    model = holoso.synthesize(f, default_ops(FloatFormat(11, 52)), name="tng").numerical_model.elaborate()
+    for x, lo, hi in ((1.5, 0.0, 2.0), (1.0, 0.0, 2.0), (5.0, 0.0, 2.0), (-1.0, 0.0, 2.0), (0.0, 0.0, 2.0)):
+        assert float(model.run(x, lo, hi)[0]) == f(x, lo, hi)
+
+
+def test_nested_guard_selecting_a_guard_computed_value_fuses_and_keeps_it() -> None:
+    # The selected value itself is computed in the guard block (the walrus): fusion must hoist it above the mux and
+    # select it only when both conditions hold, while both false paths keep the untouched bypass value.
+    def f(x: float) -> float:
+        r = 1.0
+        if x > 0.0:
+            if (t := x * 3.0) < 6.0:
+                r = t
+        return r
+
+    hir = optimize(lower(f))
+    assert len(hir.blocks) == 1
+    assert _op_count(hir, BoolAnd) == 1
+
+    model = holoso.synthesize(f, default_ops(FloatFormat(11, 52)), name="gsel").numerical_model.elaborate()
+    for x in (1.0, 3.0, 0.0, -1.0):
+        assert float(model.run(x)[0]) == f(x)
+
+
+def test_nested_guard_walrus_leak_keeps_exact_python_binding_semantics() -> None:
+    # The inner test's walrus rebinds ``t`` whenever the OUTER guard holds -- also on the inner-false path -- so the
+    # bypasses are not interchangeable: fusing to ``band(A,B) ? body : outer-bypass`` would resurrect the stale ``t``
+    # on the A-and-not-B path. The pass's bypass-equality test must refuse, and the compiled values must match Python
+    # exactly on all three path classes.
+    def f(x: float) -> float:
+        t = 1.0
+        r = 0.0
+        if x > 0.0:
+            if (t := x * 3.0) < 6.0:
+                r = t + 1.0
+        return t + r
+
+    model = holoso.synthesize(f, default_ops(FloatFormat(11, 52)), name="wleak").numerical_model.elaborate()
+    for x in (1.0, 3.0, 2.0, 0.0, -2.0):
+        assert float(model.run(x)[0]) == f(x)
+
+
+def test_nested_guard_with_outer_else_keeps_exact_python_semantics() -> None:
+    # ``if A: (if B: S) else: T`` is not ``if (A and B): S else: T``: on A-and-not-B Python runs neither arm. The
+    # bypass-equality test must keep the fusion off and the values exact.
+    def f(x: float, lo: float, hi: float) -> float:
+        r = 0.0
+        if x > lo:
+            if x < hi:
+                r = 1.0
+        else:
+            r = 2.0
+        return r
+
+    model = holoso.synthesize(f, default_ops(FloatFormat(11, 52)), name="goe").numerical_model.elaborate()
+    for x, lo, hi in ((1.0, 0.0, 2.0), (5.0, 0.0, 2.0), (-1.0, 0.0, 2.0), (0.0, 0.0, 2.0)):
+        assert float(model.run(x, lo, hi)[0]) == f(x, lo, hi)
+
+
 def test_walrus_in_conditional_expression_arm_is_rejected() -> None:
     # A ternary arm is evaluated only when selected; a walrus binding there cannot leak across arms, so it is rejected.
     def f(x: float) -> float:

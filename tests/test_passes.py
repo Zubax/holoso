@@ -37,7 +37,7 @@ from holoso._hir import (
     Type,
     optimize,
 )
-from holoso._hir import BoolSelect, FloatDiv as HirFloatDiv, Phi, Select
+from holoso._hir import BoolSelect, Branch, FloatDiv as HirFloatDiv, Phi, Select
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir._const_fold import run as fold_constants
 from holoso._lir import build
@@ -430,6 +430,40 @@ def test_if_conversion_respects_the_arm_size_budget(monkeypatch: pytest.MonkeyPa
 
     hir = _hir_of(f)
     assert len(hir.blocks) == 4
+
+
+def test_guard_fusion_refuses_a_faulting_guard_block() -> None:
+    # Fusing hoists the guard block's operations past the outer branch, running them unconditionally; a division there
+    # must not be speculated (a div-by-zero on the not-taken path would assert the module error flag). The division
+    # must stay out of the entry block, still guarded by a surviving real branch -- and must not be dropped.
+    def f(x: float, y: float) -> float:
+        r = 0.0
+        if x != 0.0:
+            if y / x > 1.0:
+                r = 1.0
+        return r
+
+    hir = _hir_of(f)
+    assert not any(isinstance(n, Operation) and isinstance(n.operator, BoolAnd) for n in hir.nodes.values())
+    assert any(isinstance(block.terminator, Branch) for block in hir.blocks)
+    entry_ops = [hir.nodes[vid] for vid in hir.blocks[0].operations]
+    assert not any(isinstance(n, Operation) and isinstance(n.operator, HirFloatDiv) for n in entry_ops)
+    assert any(isinstance(n, Operation) and isinstance(n.operator, HirFloatDiv) for n in hir.nodes.values())
+
+
+def test_guard_fusion_respects_the_guard_block_hoist_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 1)
+
+    def f(x: float, lo: float) -> float:
+        r = 0.0
+        if x > lo:
+            if (x + lo) * x + lo < 8.0:  # four operations: over the one-op hoist budget
+                r = 1.0
+        return r
+
+    hir = _hir_of(f)
+    assert any(isinstance(block.terminator, Branch) for block in hir.blocks)
+    assert not any(isinstance(n, Operation) and isinstance(n.operator, BoolAnd) for n in hir.nodes.values())
 
 
 def test_if_conversion_knob_zero_disables_the_pass(monkeypatch: pytest.MonkeyPatch) -> None:

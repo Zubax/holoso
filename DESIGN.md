@@ -585,12 +585,14 @@ dropped along with it; as under `-O`, an assert must be side-effect-free.
 
 A nested `if` with no `else` (`if A: if B: S`) is predicated to a single combined-`and` branch by guarded-region
 if-conversion in HIR: the two-branch region reconverging at one merge collapses to `select(A and B, ...)`, emitting one
-mux instead of the nested pair a bottom-up diamond collapse would leave. It fires only when every value the merge
-observes on the inner-false path equals its outer-false peer, so the two bypasses are interchangeable -- an assignment,
-walrus, or state write on the inner path makes some value differ and disables it, as does a faulting or stateful
-operation in the guard block (which leaves it non-empty) or an `else` on either level. It combines existing boolean SSA
-values only, so eager-`and` evaluation is unchanged; the guard `B` must already dominate the outer branch, so nothing
-is newly speculated.
+mux instead of the nested pair a bottom-up diamond collapse would leave. The guard block's operations -- typically the
+cone computing the inner condition `B` -- are hoisted above the combined branch, so the fusion speculates them exactly
+as diamond conversion speculates an arm: every one must be speculatable (a division there refuses the fusion, since a
+speculated div-by-zero would raise the error flag for a path never taken) and fit the same op budget. Hoisting
+evaluates `B` eagerly, matching the eager `and` the frontend emits for the hand-written spelling. The fusion fires
+only when every value the merge observes on the inner-false path equals its outer-false peer, so the two bypasses are
+interchangeable -- an assignment, walrus, or state write on the inner path makes some value differ and disables it,
+as does an `else` on either level.
 
 Loops. A `for` over a static trip count fully unrolls below the unroll threshold: the counter is a compile-time integer,
 so each trip lowers the body once with the counter bound. Reassigning the counter to a runtime value demotes it,
