@@ -628,3 +628,19 @@ hold in the fix: verdicts from stable facts only; recorded violations outrank pr
 (op, terminator, join, library); obligations persist across rounds; seed-stable. Claude half still running;
 consolidated round-4 fix batch goes to a side worktree at 8c60797 (the S2.15 agent owns the live tree; the
 freeze capture regenerates after these fixes land — one tool run).
+
+Round-4, Claude half returned (2): (1) NEW — conform_state_store's AGGREGATE arm classifies a
+deferral-cascade Unbound as "a scalar" ("persists an aggregate; a scalar cannot be stored into it" on innocent
+code), a false verdict that then outranks the genuine causal violation; the scalar arm has the correct
+neither-establish-nor-violate escape, the aggregate arm lacks it. (2) CONVERGES with Codex (1): successor-env
+join rejections escape the net; with Codex's evidence that the pre-batch handler prioritized correctly, the fix
+is DEFER THE JOIN (DESIGN stays unqualified), not a re-scope. Clean list banked: X4 bit-exact vs ZKF across
+inf-inf/0*inf/(-inf)/(-inf)/x-x arms (the add-cancellation guard is load-bearing for SUB-as-add+neg); 2**70 phi
+arm converts bit-exact; 10**400 phi arm rejects gracefully; _UnrollRestart not swallowed; id(op) keying stable;
+6b4a421 hygiene verified through and through. CONSOLIDATED ROUND-4 BATCH (Y1-Y5) to side worktree fixes-r4 at
+8c60797: Y1 joins enter the deferral net; Y2 the net catches the LocatedRejection mixin (sibling
+LibraryAnalysisRejection escaped); Y3 verdict re-derivation from stable facts only (abort paths rank recorded
+obligations alone); Y4 obligations persist across W/D rounds with per-op clean-revisit clearing (the C6
+pattern); Y5 the aggregate-arm Unbound escape. SEQUENCING: commit the freeze infrastructure when its agent
+returns, cherry-pick Y-batch on top, REGENERATE the capture (one tool run; expected diff = diagnostics corpus
+only), then trial + round-5 + CI + seed matrix + tag freeze-1.
