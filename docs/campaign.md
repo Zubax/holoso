@@ -765,3 +765,21 @@ hir header-line-only changes + the new case, ZERO drift in verilog/abi/diagnosti
 batch tree 1877/2; heavy seed matrix deferred to the freeze-1 certification run. Trial: trial/s2-r5-stack at
 f1f977f; round-6 pair follows; tag freeze-1 on clean+green. Spike results HELD for X5 until this closes
 (sequential directive).
+
+Round-6, Codex half returned (5): (1) a stale bridge verdict is SELF-FULFILLING — its pendency defers the real
+stable rejection, keeps its own store Unbound, then the stabilization re-attach restores the stale verdict
+(implicit reports "not exactly representable" where the stable truth is the range() rejection); (2) same-origin
+clone verdicts collapse into one message reattached at the first clone's rank (aggregate-arm message overwrites
+the earlier float-to-int one); (3) "last BOUND execution" per CFG op hides a later violating execution of the
+SAME op in a while loop (conforming first visit retains StoreVerdict(None)); (4) _UnrollRestart reconciles a
+PARTIAL round — a conformed clone clears the shared bridge before its violating sibling re-records, and the
+restarted round reports the secondary shift; (5) refreeze replace retry deletes BOTH recovery trees before the
+new copy lands (interrupted-retry leaves no corpus at all). RESOLUTION DIRECTION (to round-7 for
+adjudication): drop re-attach entirely — the bridge becomes a mid-flight net-keeper only (populated by bound
+violating executions; reconciled at TRUE round boundaries, restarts carry it unchanged; never a verdict
+source); the stabilization walk re-derives STATE-store verdicts from stable envs exactly as it does locals
+(state-store sites evaluated on the fixpoint env fact — joins make same-op multi-execution deterministic);
+non-re-derivable entries expire and the deferred rejection surfaces preorder-first. CONSEQUENCE: the round-4
+Cascaded expectation honestly REVERSES (producer rejection reports first — sequential error reporting; the
+store violation surfaces after the user fixes the producer) — flagged for the round-7 pair. Claude half still
+running; one consolidated batch after it returns.
