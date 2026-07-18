@@ -249,6 +249,18 @@ class _Env:
         return changed
 
 
+class _UnrollRestart(Exception):
+    """
+    A loop header's iterable fact descended past the already-unrolled shape mid-round: the round must rerun
+    with the joined fact seeded at the header, so the next unroll builds the stable shape in one pass.
+    """
+
+    def __init__(self, header: BlockId, fact: Fact) -> None:
+        super().__init__(header)
+        self.header = header
+        self.fact = fact
+
+
 class CallLowering(enum.Enum):
     """How a PyCall surviving in the residual graph lowers; expanded calls no longer exist as calls."""
 
@@ -322,6 +334,7 @@ class Analyzer:
         self._construction_schemas: dict[int, tuple[type, tuple[FieldSchema, ...]]] = {}
         self._default_snapshots: dict[tuple[int, str], BoundFact] = {}
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
+        self._unroll_seeds: dict[BlockId, Fact] = {}  # survives rounds: the joined facts of restarted headers
         self._store_origins: dict[StateLeaf, OriginStack] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._array_methods: dict[tuple[BindingId, str], _ArrayMethod] = {}
@@ -339,7 +352,15 @@ class Analyzer:
         from immutable templates; the final round's facts are computed under stable typing.
         """
         for round_index in range(1_000):
-            result = self.analyze(param_facts)
+            try:
+                result = self.analyze(param_facts)
+            except _UnrollRestart as restart:
+                # Seeds key root-template block ids, which the per-round instantiation preserves; facts descend
+                # monotonically, so reseeding terminates within the round fuel.
+                self._unroll_seeds[restart.header] = restart.fact
+                self._reset_round()
+                _logger.info("state round %d: unroll reseeded at %s", round_index + 1, restart.header)
+                continue
             exit_env = result.block_in.get(result.unit.exit, _Env())
             reachable = _coreachable(result.unit, result.unit.exit, result.executable_edges)
             new_w = set(self._runtime_state)
@@ -383,19 +404,22 @@ class Analyzer:
                 return result
             self._runtime_state = new_w
             self._state_livein = new_d
-            self._block_ancestry = {}
-            self._discovered_stores = set()
-            self._store_origins = {}
-            self._concrete_calls = set()
-            self._intrinsic_calls = set()
-            self._cast_calls = set()
-            self._conversion_calls = set()
-            self._subscript_selections = {}
-            self._conversion_routes = {}
-            self._construction_calls = {}
-            self._unroll_cache = {}
+            self._reset_round()
             _logger.info("state round %d: %d runtime leaves, %d live-in facts", round_index + 1, len(new_w), len(new_d))
         raise AnalysisRejection("state fixpoint failed to stabilize", (Origin(self._root_template.name, 0, 0),))
+
+    def _reset_round(self) -> None:
+        self._block_ancestry = {}
+        self._discovered_stores = set()
+        self._store_origins = {}
+        self._concrete_calls = set()
+        self._intrinsic_calls = set()
+        self._cast_calls = set()
+        self._conversion_calls = set()
+        self._subscript_selections = {}
+        self._conversion_routes = {}
+        self._construction_calls = {}
+        self._unroll_cache = {}
 
     def _read_attribute_snapshot(self, owner: object, name: str) -> tuple[object, StaticValue | None]:
         """
@@ -1883,17 +1907,16 @@ class Analyzer:
                 return [then_target, else_target]
             case StaticFor():
                 iterable_fact = env.get(Local(terminator.iterable))
+                seed = self._unroll_seeds.get(block.id)
+                if seed is not None:
+                    iterable_fact = join_facts(seed, iterable_fact, terminator.origin)
                 cached = self._unroll_cache.get(block.id)
                 if cached is not None:
                     cached_fact, chain_entry = cached
                     if _same_fact(iterable_fact, cached_fact):
                         return [chain_entry]
-                    raise AnalysisRejection(
-                        "the loop iterable's analyzed value changed between visits (a join may have degraded "
-                        "it); this iteration shape is not supported yet",
-                        terminator.origin,
-                    )
-                chain_entry = self._unroll(unit, block, terminator, env)
+                    raise _UnrollRestart(block.id, join_facts(cached_fact, iterable_fact, terminator.origin))
+                chain_entry = self._unroll(unit, block, terminator, iterable_fact)
                 self._unroll_cache[block.id] = (iterable_fact, chain_entry)
                 return [chain_entry]
             case Fail() | UnitExit():
@@ -1902,8 +1925,7 @@ class Analyzer:
 
     # ------------------------------------ StaticFor unrolling ------------------------------------
 
-    def _unroll(self, unit: FunctionUnit, header: Block, loop: StaticFor, env: _Env) -> BlockId:
-        iterable = env.get(Local(loop.iterable))
+    def _unroll(self, unit: FunctionUnit, header: Block, loop: StaticFor, iterable: Fact) -> BlockId:
         if isinstance(iterable, Reference):
             # A live object's __iter__/__len__ would run against reset-time state, twice (analysis + replay).
             raise AnalysisRejection("iteration over an object is not supported", loop.origin)

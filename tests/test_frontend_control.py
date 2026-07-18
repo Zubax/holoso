@@ -1064,3 +1064,21 @@ def test_mixed_bool_comparison_rejects_located_at_analysis() -> None:
 
     with pytest.raises(UnsupportedConstruct, match=r"mixed:\d+:\d+: .*mixes a boolean and a non-boolean"):
         lower(mixed)
+
+
+def test_conditionally_rebound_loop_iterable_unrolls() -> None:
+    # Regression (C6): the unroll cache froze the first-visit iterable fact and rejected when a later round or
+    # edge joined it — refusing ordinary Python. A while-carried rebind makes the for header's fact change.
+    def kernel(x: float) -> float:
+        table = (1.0, 2.0)
+        acc = x
+        n = 0.0
+        while n < 2.0:
+            for v in table:
+                acc = acc + v
+            table = (3.0, 4.0)
+            n = n + 1.0
+        return acc
+
+    machine = holoso.synthesize(kernel, default_ops(FloatFormat(8, 36))).numerical_model.elaborate()
+    assert float(machine.run(0.5)[0]) == kernel(0.5) == 10.5
