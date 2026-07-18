@@ -526,3 +526,13 @@ store) while verdicts stay post-stabilization — ratified. Left-noted: mid-flow
 preempt purely LOCAL schema violations (state obligations have causal priority; locals would need non-monotone
 mid-flow recording — acceptable, documented). Full light suite over the stack (6207eb7+2bcd878+5c3d3c5) running
 in background; on green: trial/s2-g1-stack push at 5c3d3c5, poll, round-3 pair on pinned worktree review-s213.
+
+G1+round-2 stack VERIFIED whole: full light suite 1810/3 green (pipefail-armed rerun after the pipe trap bit a
+THIRD time — my own `pytest | tail` chain masked 2 failures AND truncated the failure list; recovered the
+second failure's identity from pytest's lastfailed cache; rule hardened: pipefail or file-redirect on every
+gate chain). The 2 failures were honest R4 fallout — two old pins asserting rejection of `1e400 - 1e400` fold
+EXPRESSIONS, whose "rejection" was the raw unlocated HIR-fold crash R4 removed; reversed as ea83691 (literal
+NaN data keeps refusing; fold expressions synthesize; runtime semantics pinned by the R4 regression). Stack for
+round 3: 6207eb7 (G1) + 2bcd878 (round-2 batch R1-R6) + 5c3d3c5 (state-edge symmetry) + ea83691 (NaN pin
+reversals). Trial: trial/s2-g1-stack at ea83691; poll advances dev on green; round-3 pair on pinned worktree
+review-s213.
