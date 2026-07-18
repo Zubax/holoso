@@ -731,3 +731,14 @@ bumps -> all HIR dumps regenerate, one refreeze run); GoldenCase/gate pins HOLOS
 regalloc knobs (Codex demonstrated different RTL hashes under budget 8 vs 0 with identical identity); fround/
 ffma probe case added; replace_corpus becomes copy-aside-and-rename; Y-batch witnesses appended to
 WITNESS_ENTRIES; README provenance promise aligned. Batch dispatched to side worktree fixes-r5 at 793a82b.
+
+S3.2 COMMITTED 4f1dd4c (memo amended per X4 — counts/extents/byte-identity/SC1/provenance; DESIGN overclaims
+reworded; docs/decisions/arch-spike.md carries the executable spec with the frozen-vocabulary draft — every
+emitter decision family homed or excluded, every ResidualUnit field dispositioned; deviations recorded incl.
+exact ids, the both-prototypes precedence sentence, and pre-baselined microkernels for the arms the corpus
+cannot pin). Amended HTML delivered to the maintainer. SPIKE LAUNCHED (S3.3) on branch spike/resolved-ir at
+4f1dd4c in its own worktree: primary adapter-shape prototype (ResidualUnit -> materialized RIR -> mechanical
+emitter), schema frozen as the first commit, evidence ledger append-only, SC1-SC4 executable, witness order
+iir1_lpf first; the adapter can reach only the MORPH rows of the table — transplant would need the optional
+independent residualizer. In flight: spike + the round-5 fix batch (fixes-r5; carryover pending-bridge redesign
++ 8 freeze hardenings + capture regen). Tag freeze-1 after round-5 lands and round-6 is clean.
