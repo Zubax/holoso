@@ -658,3 +658,16 @@ tree matches the capture 148/148. Suite 1859/2; mypy 201; black clean. Left-note
 live in their behavior tests (a rejection corpus cannot pin accepts); container_digest null by design. AWAITING
 Y-batch (fixes-r4) -> cherry-pick -> capture REGENERATION (expected diff: diagnostics rows the Y-fixes change)
 -> trial push -> round-5 pair -> CI green -> tag freeze-1.
+
+Y-batch INTEGRATED: cbd1ec0 cherry-picked clean as 793a82b onto the freeze. Y-batch highlights: Y3 resolved by
+ELIMINATING pre-stabilization aborts (a failing state join freezes that leaf's live-in at its last joinable
+value; rounds always stabilize; the failure reports DeferredRejection-least on the stable branch after the
+resolution walk) — the only shape keeping "verdicts from stable facts only" AND the unqualified causal-priority
+sentence; Y4 two-layer keying (per-op-id within a round, origin-keyed across boundaries — clones of one store
+share an origin, so pure origin keying would let a clean trip erase a sibling's violation); Y2 catches the
+LocatedRejection mixin with the callee-BuildRejection-rewraps understanding asserted; six schema regressions +
+two seed-parametrized determinism locks, all fail-before-observed. REFREEZE VERIFIED: regenerated corpus
+byte-identical 148/148 — the Y-fixes change only multi-error shapes absent from the corpus kernels; no
+regeneration commit needed. Full light suite over the integrated tree running; on green: trial/s2-freeze-stack
+push at 793a82b, poll, round-5 pair (focus: freeze infrastructure code + Y-batch, not generated corpus bytes),
+CI green -> tag freeze-1 -> Stage 2 CLOSED -> S3 architecture gate opens.
