@@ -287,7 +287,7 @@ re-freezes in the same commit. Newly-discovered-defect protocol per §F. review-
 - R1-R5 Milestones by construct family (scalar straight-line → branches/loops/unroll → state+W/D →
   aggregates/records → arrays/linalg/ports), each gated differential-green for its example subset + frontend
   unit tests via fixture switch.
-- R6 Full-corpus differential: 25 golden cases + rejection corpus + extended fuzz A/B on the runner VMs.
+- R6 Full-corpus differential: 35 golden cases + rejection corpus + extended fuzz A/B on the runner VMs.
 - R7 Cutover: flip `holoso/_frontend/__init__.py`, DELETE `_fir` in the same commit (clean break); canonical
   gate + re-freeze; merge to dev; tag `restructure-done`. Branch abandonable at zero cost to dev until R7.
 - dev merges into the branch after every baseline-update commit; adjudication: old-frontend-wrong → baseline-
@@ -688,3 +688,29 @@ absent from the refreeze WITNESS_ENTRIES 64-seed sweep; append. (7) LOW — READ
 container_digest but no fill mechanism exists; align. Corpus verified clean otherwise (rows bit-for-bit;
 recompute byte-identical; EKF pair materially distinct; identity/bijection guards hold). Codex half still
 running; consolidated fix batch after it returns.
+
+Consult X4 returned (6 positions: 5 CHANGE + 1 AGREE-with-refinement) — ALL ADOPTED: (1) memo factual
+corrections (42 not 43 raise sites; StoreRole fixed at CONSTRUCTION incl. analyzer grafts; corrected routing
+extents :631-651/:941-951/:968-972; "byte identity is NOT GUARANTEED" not "cannot survive"; the memo's SC1
+line still said after-renumber contradicting its own X3 amendment; e3d5f18 is NOT seed-matrix-certified — the
+matrix belongs to 557fc69, post-Y has only the 148/148 refreeze; DESIGN :150-153/:285-294 overclaim
+analyzer-owned decisions; R6 case count fixed 25->35 in this commit). (2) VERDICT REFINED: morph the stabilized
+analyzer but make the resolved spine MATERIAL — materialized-RIR boundary MORE justified, analyzer transplant
+LESS (B1/store_conversions prove in-place migration works); the spike's substantive question is whether the
+spine closes without Fact backchannels. (3) exact witness identities (ekf1_stateful-e8m36 [+shipped optional],
+finite_set_current_controller-e8m36, iir1_hpf-e8m36, format_probe-e8m36 for branch/merge, iir1_lpf-e8m36 for
+return-onto-state-port dedup) + a transpose-routing witness (imu-e8m36 or routed-diamond microkernel) + an
+accepted store-conversion witness + a NEGATIVE policy packet (legacy_power_chain, legacy_beyond_carrier,
+legacy_shared_live_out, one return-contract mismatch — success-only subsets cannot prove refusals moved
+upstream) + a witness-to-surface matrix. (4) executable SC1-SC4 (SC1 both-entry-point golden comparisons +
+real block-and-value canonicalizer with permutation tests + independent gates wired to the PROTOTYPE path;
+SC2 transitive dependency closure; SC3 vocabulary frozen BEFORE the timer + recursive closure verifier + any
+new decision-bearing variant = objective fail; SC4 manifest-based nonblank LOC + prelisted inventory +
+declared formula). (5) input-topology-aware EXHAUSTIVE decision table, MORPH default: adapter-over-ResidualUnit
+passing -> MORPH with MANDATORY materialized spine (M7 mandatory; M0 import ban becomes a ratcheting
+allowlist); independent-residualizer passing byte -> TRANSPLANT byte; independent passing
+canonical+independent-semantics -> TRANSPLANT canonical; anything else/expiry -> MORPH. (6) mandatory
+append-only evidence ledger as a spike artifact (schema growth, backchannel audit, coverage matrix, mismatch
+classification, canonicalizer cost, LOC by role, replay counts, diagnostic parity, runtime, provenance).
+Doc agent dispatched: memo corrections + DESIGN overclaim fix + docs/decisions/arch-spike.md (the amended
+spike spec); spike launches on its worktree branch after that lands. Codex round-5 half still running.
