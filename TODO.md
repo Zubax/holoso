@@ -27,21 +27,39 @@ Graftable-call deferral can falsely reject a synthesizable kernel (the analyzer'
 meets destructive mid-round call grafting). When a graftable call (a linalg composite like `np.dot`/`np.matmul`,
 or an inlined user callable) cannot resolve on a visit because a store-schema violation is transiently pending
 in scope -- typically an int/float merge into a float state slot whose Known-int arm is momentarily inexact
-before the fixpoint promotes it -- the block's terminator still publishes out-edges, so the call's
-not-yet-computed result reaches the successors as `Unbound`. The graft-time retraction that unwinds those edges
-reaches only one edge deep, so a transitive successor keeps the phantom-unbound environment and a later join
-reports `local '...' may be unbound here` at an innocent line.
+before the fixpoint promotes it -- the call's result is momentarily `Unbound` while the fixpoint continues
+around it. Two distinct mechanisms then leak that transient state into the stable result:
 
-The class is bounded to false rejections: the reviewers established that no kernel which should reject is
-silently accepted (`Unbound` biases joins toward rejection, never toward a spurious bind), that the analysis
-does not deadlock, and that emission never sees a phantom path. It is never a miscompile.
+- The block's terminator still publishes out-edges, so the unbound result reaches the successors. The
+  graft-time retraction that unwinds those edges reaches only one edge deep, so a transitive successor keeps
+  the phantom-unbound environment and a later join reports `local '...' may be unbound here`.
+- `_truth_fact` maps an unbound operand to a runtime bool rather than deferring, so a condition computed from
+  the pending result marks BOTH arms executable. Executable blocks and edges are add-only, and when the
+  condition later folds to a known constant the marking is never retracted -- the condition's fact ascends
+  `Residual -> Known` across visits, which is the lattice direction optimistic SCCP's never-un-mark rule
+  depends on not happening.
 
-Three witness shapes are pinned executably in `tests/test_frontend_state.py`
-(`test_graftable_call_deferral_false_rejection_witnesses`): a single graftable call whose result is read on both
-arms of a following branch; two graftable calls where a later one grafts while the first is still deferred; and
-starred call arguments, whose validation refuses before the call can graft. They live in code rather than in
-prose here because prose transcriptions of them rotted -- dropping the both-arms read or the wide-int feed makes
-a shape silently vanish, which is exactly what happened to two of the four kernels this section used to carry.
+The observed manifestations are wider than false rejections alone, and the second mechanism is why:
+
+- located false rejections in several message shapes, not only `may be unbound here` -- a dead arm's `raise`,
+  its int-state store, its store to an attribute that does not exist, or any unsupported construct on it are
+  all reported as though the arm were live;
+- hardware emitted for a statically dead arm: a spurious divider, an unrolled loop, and -- ABI-visibly -- an
+  extra public state port for an attribute the kernel never assigns;
+- a raw `RuntimeError` escaping HIR emission unlocated (`phi ... has arms for predecessors []`) when the
+  pending call has a side effect on state that a following branch tests, so the refusal is not even always a
+  graceful located one.
+
+What IS established, by differential sweeps in both review halves: no VALUE divergence from native Python was
+found in any accepted kernel, including across persisted state -- the spurious register holds its reset value
+and the dead arm's stores never fire. The bound is on values, not on the shape of the module or on the
+graceful-refusal property.
+
+Witness shapes are pinned executably in `tests/test_frontend_state.py`
+(`test_graftable_call_deferral_false_rejection_witnesses` and its siblings), covering all three manifestations.
+They live in code rather than in prose here because prose transcriptions of them rotted -- dropping the
+both-arms read or the wide-int feed makes a shape silently vanish, which is exactly what happened to two of the
+four kernels this section used to carry.
 
 Patching the seam in place has been tried and abandoned. Rounds 6-11 (`docs/campaign.md`) each traded one corner
 for another, and the round-10 attempt -- withholding a deferred graftable call's terminator edges -- regressed
@@ -51,8 +69,11 @@ the class is now uniformly open with no regression against it; the starvation ke
 acceptance test (`test_deferred_graftable_call_does_not_starve_the_state_fixpoint`) so the trap cannot be
 re-entered. The class is the one the post-stabilization resolution-totality restructure
 (`docs/decisions/arch-memo.md`, the resolved-IR spike) dissolves by making residualization a total pass after the
-fixpoint rather than interleaving it with the fixpoint; when that lands, the witness test flips to asserting
-synthesis and is gated byte-for-byte against `freeze-1`.
+fixpoint rather than interleaving it with the fixpoint; when that lands, the witness tests flip to asserting
+synthesis and are gated byte-for-byte against `freeze-1`. That restructure must be checked against BOTH
+mechanisms above: residualizing after the fixpoint removes the phantom-unbound environments directly, but
+retracting executable markings derived from transiently degraded facts is a separate obligation, and a spine
+built over a stale executable-block set would inherit the dead-arm manifestations unchanged.
 
 ## Deferred capability gaps
 

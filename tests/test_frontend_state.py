@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 import holoso
-from holoso import FloatFormat, SourceUnavailable, UnsupportedConstruct
+from holoso import FloatFormat, SourceUnavailable, SynthesisError, UnsupportedConstruct
 from holoso._frontend import lower
 from holoso._hir import Branch, FloatAdd, FloatConst, FloatDiv, IntType, Operation, optimize, Phi, Select, StateRead
 
@@ -583,14 +583,116 @@ def test_graftable_call_deferral_false_rejection_witnesses() -> None:
             return y + 2.0
 
     ops = default_ops(FloatFormat(8, 23))
-    for label, kernel in (
-        ("both_arms", BothArms().step),
-        ("two_graftable_calls", TwoGraftableCalls().step),
-        ("starred_arguments", StarredArguments().step),
+    for label, kernel, blamed in (
+        ("both_arms", BothArms().step, "return y + 2.0"),
+        ("two_graftable_calls", TwoGraftableCalls().step, "return y + z + 1.0"),
+        ("starred_arguments", StarredArguments().step, "return y + 2.0"),
     ):
         with pytest.raises(UnsupportedConstruct, match="may be unbound here") as witness:
             holoso.synthesize(kernel, ops, name=f"graft_defer_{label}")
-        assert witness.value.location is not None, label  # located, never a bare crash
+        # Pin the SITE too: a future change that rejects at a different, also-wrong line would otherwise keep
+        # this green. All three currently blame the fall-through return of the branch that reads the result.
+        location = witness.value.location
+        assert location is not None, label
+        assert (location.line or "").strip().startswith(blamed), label
+
+
+def test_graftable_call_deferral_emits_a_statically_dead_arm() -> None:
+    # EXECUTABLE RECORD of an OPEN defect (see TODO.md), NOT desired behavior. The second mechanism of the
+    # graft-deferral class: a condition computed from the still-pending call result is read as a runtime bool
+    # instead of deferring, so both arms are marked executable. Executable markings are add-only, so when the
+    # condition later folds to a constant the dead arm stays marked -- and is analyzed and emitted. Here the
+    # dead arm's store manufactures a PUBLIC STATE PORT for an attribute the kernel never assigns, which is
+    # ABI-visible in the generated module. The control differs only in the two constants that arm the deferral.
+    # Note the graftable call here is np.array itself: nothing reads a deferred result, so this isolates the
+    # executable-marking mechanism from the phantom-unbound-environment one.
+    class Probe:
+        def __init__(self) -> None:
+            self.t = 0.0
+            self.s = 0.0
+
+        def step(self, x: float, flag: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2**53 + 1
+                q = 2**64
+            self.t = u
+            a = np.array([q, x])
+            if a.shape[0] > 5:  # statically false -- the array has two elements
+                self.s = 7.0
+                r = 1.0
+            else:
+                r = 2.0
+            return x + r + self.s
+
+    class Control:  # identical but for the constants, so the deferral never opens
+        def __init__(self) -> None:
+            self.t = 0.0
+            self.s = 0.0
+
+        def step(self, x: float, flag: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2.0
+                q = 3.0
+            self.t = u
+            a = np.array([q, x])
+            if a.shape[0] > 5:
+                self.s = 7.0
+                r = 1.0
+            else:
+                r = 2.0
+            return x + r + self.s
+
+    ops = default_ops(FloatFormat(8, 23))
+    probe = holoso.synthesize(Probe().step, ops, name="graft_defer_dead_arm")
+    control = holoso.synthesize(Control().step, ops, name="graft_defer_dead_arm_ctrl")
+    probe_ports = [port.name for port in probe.ports]
+    control_ports = [port.name for port in control.ports]
+    assert "state_s" not in control_ports  # the dead arm is correctly pruned without the deferral
+    assert "state_s" in probe_ports  # the defect: a port for a store Python never executes
+
+
+def test_graftable_call_deferral_side_effect_branch_crashes_unlocated() -> None:
+    # EXECUTABLE RECORD of an OPEN defect (see TODO.md), NOT desired behavior. The most severe manifestation:
+    # when the pending call has a state side effect that a following branch tests, the stale executable marking
+    # leaves a phi with no live predecessor and a RAW RuntimeError escapes HIR emission -- not a SynthesisError,
+    # not located. The kernel is honest Python returning 10.0. Pinned so the restructure's closure is detectable:
+    # when this stops crashing it must become a located refusal or, better, synthesis.
+    class Probe:
+        def __init__(self) -> None:
+            self.t = 0.0
+            self.gate = False
+
+        def helper(self, a: float, b: float) -> float:
+            self.gate = True
+            return a * b
+
+        def step(self, x: float, flag: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2**53 + 1
+                q = 2**64
+            self.t = u
+            args = np.array([q, x])
+            self.helper(*args)
+            if self.gate:
+                z = 10.0
+            else:
+                z = 20.0
+            return z
+
+    assert Probe().step(2.0, False) == 10.0  # the kernel is well-defined Python
+    ops = default_ops(FloatFormat(8, 23))
+    with pytest.raises(RuntimeError, match=r"has arms for predecessors") as witness:
+        holoso.synthesize(Probe().step, ops, name="graft_defer_side_effect")
+    assert not isinstance(witness.value, SynthesisError)  # the defect: unlocated, not a graceful refusal
 
 
 def test_mixed_return_dedupes_public_alias_keeps_distinct_leaf() -> None:

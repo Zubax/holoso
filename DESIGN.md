@@ -380,10 +380,16 @@ successor thereby left with no in-edge, so the continuation re-establishes that 
 joining a stale one. That retraction is only one edge deep, and it is a mitigation rather than a closed
 solution: a block whose graftable call deferred behind a pending violation still publishes out-edges carrying
 the call's unbound result, so a transitive successor of the graft block can retain the phantom-unbound
-environment and falsely reject an innocent downstream read. This false-rejection class in the deferral/graft
-seam is documented in TODO.md, pinned by executable witnesses in the frontend state tests, and is the
-motivating case for the resolution-totality restructure, which dissolves it by residualizing as a total
-post-stabilization pass rather than grafting mid-fixpoint. Closing it inside the fixpoint has been tried:
+environment and falsely reject an innocent downstream read. A pending result reaching a CONDITION leaks
+further: it is read as a runtime bool rather than deferred, both arms are marked executable, and since
+executable blocks and edges are add-only that marking survives the condition later folding to a constant --
+so a statically dead arm can be analyzed and emitted, and its own refusals reported. The resulting class is
+documented in TODO.md and pinned by executable witnesses in the frontend state tests; its manifestations are
+bounded on VALUES (no divergence from native Python was found) but not on module shape or on the
+graceful-refusal property. It is the motivating case for the resolution-totality restructure, which dissolves
+the phantom-environment half by residualizing as a total post-stabilization pass rather than grafting
+mid-fixpoint, and must separately account for executable-marking staleness. Closing it inside the fixpoint has
+been tried:
 withholding a deferred call's terminator edges removes the phantom path but starves the outer fixed point
 whenever the withheld edge is a loop body's sole successor, refusing valid kernels, so that trade was reverted
 and is guarded by an acceptance test.

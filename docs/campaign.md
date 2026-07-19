@@ -1101,6 +1101,33 @@ to Stage 4 intact. TODO.md and DESIGN.md rewritten to the post-revert truth (no 
 edge deep; the starvation trade recorded as tried-and-reverted). Gate: fast tier + latency/metrics/golden 394
 green; refreeze 151/151 BYTE-IDENTICAL (corpus-neutral, as predicted); mypy 201 clean; black clean.
 
+REVERT ROUND 1 (both halves returned; NOT clean, one convergent root): the revert itself was verified exact by
+both reviewers -- `_analyze.py` byte-identical to 82f9834 but for the intended comment, F2 blob-identical, no
+orphaned imports or state, both new tests genuinely distinguishing the withholding tree, witness kernels honest
+Python, and no value divergence in either half's differential sweeps. What FAILED review was a sentence I wrote
+into TODO.md: "emission never sees a phantom path ... never a miscompile". BOTH halves refuted it independently,
+and the class is wider than I had characterized. Claude: a statically dead arm is analyzed AND EMITTED -- a
+spurious divider, an unrolled loop, and an ABI-visible public `state_s` port for a store Python never executes;
+plus four false rejections OUTSIDE the pinned "may be unbound" signature (dead-arm raise / int-state store /
+missing-attribute store / unsupported construct). Codex: worse still, a raw UNLOCATED `RuntimeError: phi ... has
+arms for predecessors []` escapes HIR emission when the pending call has a state side effect a following branch
+tests -- so the class is not even always a graceful located refusal. ROOT (Claude traced it): `_truth_fact` maps
+an unbound operand to a runtime bool instead of deferring, so a condition over the pending result marks BOTH arms
+executable; executable blocks/edges are add-only, so when the condition later folds Known the marking is never
+retracted -- the fact ascends Residual -> Known, the lattice direction optimistic SCCP's never-un-mark rule
+depends on not happening. This is a SECOND mechanism alongside the one-edge-deep phantom-environment one.
+I reproduced every manifestation myself and confirmed all are byte-for-byte IDENTICAL at 8336387 and 82f9834 --
+pre-existing, untouched by the revert; and no bundled example carries the wide-int trigger, so the frozen corpus
+does not bake any of it in. DECISION: DOCUMENT, DO NOT PATCH -- these findings are further evidence FOR the
+maintainer's round-11 stop-rule, not against it; a targeted `_truth_fact` fix is exactly the sixth corner-trade
+that rule exists to prevent. Fixes landed: TODO.md and DESIGN.md rewritten to the true bound (values only -- no
+divergence found; NOT module shape, NOT graceful refusal), both mechanisms described, and an explicit obligation
+recorded that Stage 4 must be checked against executable-marking staleness and not only phantom environments,
+since a spine built over a stale executable-block set inherits the dead-arm manifestations unchanged; two new
+executable witnesses (dead-arm emission asserting the spurious port, side-effect branch asserting the raw
+RuntimeError is not a SynthesisError); rejection SITES now pinned by source-line text, closing the last rot
+channel. Round-1 LOWs on test quality accepted with them.
+
 FINAL PRE-COMPACTION ENTRY (2026-07-19): the maintainer set the STANDING DIRECTIVE (see the RESUME BRIEF at the
 top of this file, now the single source of truth): proceed AUTONOMOUSLY to completion, maintainer UNAVAILABLE,
 consult Codex (not the user) on any obstacle, never stop. Chosen path = option A: rebuild .nox, revert round-10
