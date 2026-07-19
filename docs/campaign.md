@@ -15,24 +15,26 @@ maintainer manual review" wording in the log below is SUPERSEDED by this directi
 
 WHERE WE ARE: Stage 2 (semantic stabilization) is landed and the FREEZE INFRASTRUCTURE is built, but `freeze-1`
 is NOT tagged. The review loop (rounds 6-11) surfaced one OPEN defect class: false rejections in the analyzer's
-deferral x mid-round-graft seam, fully documented in `TODO.md` "Known defects" with four minimal reproducer
-kernels. It is NOT closeable by in-place patching (5 rounds, and the round-10 attempt regressed a valid kernel);
-it is the class the Stage-4 resolved-IR restructure dissolves. Stage 3's architecture spike ran → verdict MORPH
-(SC1-SC3 passed; SC4 missed by 75 LOC; branch `spike/resolved-ir` @ dc76fbf; ledger `docs/decisions/spike-ledger.md`).
-The Stage-3 ruling and Stage 4 are pending. `dev` code tip that is CI-green: 8336387 (round-10); commits after
-it are docs-only.
+deferral x mid-round-graft seam, documented in `TODO.md` "Known defects" and pinned by executable witnesses in
+`tests/test_frontend_state.py`. It is NOT closeable by in-place patching (5 rounds, and the round-10 attempt
+regressed a valid kernel); it is the class the Stage-4 resolved-IR restructure dissolves. Stage 3's architecture
+spike ran → verdict MORPH (SC1-SC3 passed; SC4 missed by 75 LOC; branch `spike/resolved-ir` @ dc76fbf; ledger
+`docs/decisions/spike-ledger.md`). The Stage-3 ruling and Stage 4 are pending.
+
+STEP 1-2 DONE (this session): `.nox` rebuilt; round-10 edge-withholding REVERTED, so the freeze baseline carries
+no regression. Note for anyone re-deriving the defect class: TWO of the four TODO reproducer kernels did NOT
+reproduce as transcribed (the starred-argument shape had lost its load-bearing both-arms read, and the
+unroll-starvation shape used integer state so it never synthesized at any commit — it only `lower()`ed). The
+originals were recovered from the round-11 Codex session rollout on disk, and the class is now pinned in code
+instead of prose for exactly that reason. The true regression witness is a `while`-loop kernel that synthesizes
+to 11,181 B at 8336387^ and falsely rejects at 8336387; it is now a passing acceptance test.
 
 THE PLAN FROM HERE — execute in order, autonomously (this is option A, the maintainer's chosen recommendation:
 freeze first, then restructure, because freeze-1 is the byte-gate the morph is verified against — doing Stage 4
 first would strip the regression-detection safety net):
 
-1. REBUILD ENVS FIRST. `.nox` was removed; recreate it (`nox`) before any local gate. `.venv` is stale py3.13,
-   unusable.
-2. CHOOSE THE FREEZE BASELINE. The graft-deferral class is deferred to Stage 4. Round-10 (8336387) edge-withholding
-   introduced a regression (the `UnrollStarve` TODO kernel) and round-11 proved it net-lateral, so REVERT round-10's
-   edge-withholding so the baseline has NO regression and the class is uniformly open+documented. Verify with the
-   four TODO kernels + the full suite before/after, and confirm the golden corpus stays byte-identical (round-10 was
-   corpus-neutral, so the revert is corpus-safe). If the revert is entangled, consult Codex.
+1. ~~REBUILD ENVS FIRST~~ DONE — `.nox` rebuilt with `nox --install-only` (33 s). `.venv` is stale py3.13, unusable.
+2. ~~CHOOSE THE FREEZE BASELINE~~ DONE — round-10 edge-withholding reverted; see the step log at the bottom.
 3. TAG freeze-1 on that baseline: full CI green on all five jobs + `tools/refreeze_golden.py --check-determinism`
    seed matrix + the `test_golden` gate. The graft-deferral class is an EXPLICIT DOCUMENTED EXCEPTION — the four
    TODO kernels are known false-rejections, deliberately NOT frozen as correct behavior.
@@ -1075,6 +1077,29 @@ LOC, 42 refusal sites) deleted. Backchannel audit: zero transfer replays / host 
 the residualizer (evidence-atomic). Held for consult X5 -> docs/decisions/arch-ruling.md (the ruling is
 table-mechanical: SC4-blown => MORPH). DO NOT delete branch spike/resolved-ir until arch-ruling.md consolidates
 the ledger.
+
+FREEZE-BASELINE REVERT (autonomous session, step 2): round-10's F1 edge-withholding reverted; F2 (the
+dataclass-render fidelity half of the same commit) KEPT — the two are independent and only F1 is implicated.
+Reverted surface: `_graftable_calls` (declaration, per-unit reset, and the `_expand_call` marking), the
+`terminator_before`/`deferred_call` withholding guard in the worklist, and the graft-site comment (restored to
+the round-8 wording plus an explicit note that the retraction is one edge deep). EVIDENCE DISCIPLINE: before
+touching anything I measured all four TODO reproducers at HEAD and at 8336387^ — and two of them did not
+reproduce as written. The starred-argument kernel had lost the both-arms read that makes the shape fire (it
+ACCEPTS as transcribed, at both commits), and `UnrollStarve` uses integer state, so it rejects at every commit
+with "integer values are not yet lowerable" and never synthesized at all; the round-11 finding had used
+`lower()`, which stops at the frontend. Codex's originals were recovered from its session rollout
+(`~/.codex/sessions/2026/07/19/rollout-…-019f79c9-…jsonl`, which names the probe paths under `/tmp`, all still
+present). The REAL regression witness is `probe_loop_withholding.py`: a `while`-loop kernel that synthesizes to
+11,181 B at 8336387^ and falsely rejects "state attribute 't' … not exactly representable" at 8336387 — a
+genuine end-to-end regression, so the maintainer's premise held even though its documentation did not.
+Post-revert the probes match 8336387^ exactly (11181/11183 B; the lower()-only kernel lowers again). Tests: the
+two round-10 F1 acceptance tests are deleted (their kernels reject again by design); the starvation kernel
+becomes a PASSING acceptance test (fail-before observed at 8336387: "state attribute 't' is a float; the stored
+integer is not exactly representable"), and the three surviving false-rejection shapes become an EXECUTABLE
+witness test asserting they reject located — prose transcriptions demonstrably rot, and this class must survive
+to Stage 4 intact. TODO.md and DESIGN.md rewritten to the post-revert truth (no withholding; retraction is one
+edge deep; the starvation trade recorded as tried-and-reverted). Gate: fast tier + latency/metrics/golden 394
+green; refreeze 151/151 BYTE-IDENTICAL (corpus-neutral, as predicted); mypy 201 clean; black clean.
 
 FINAL PRE-COMPACTION ENTRY (2026-07-19): the maintainer set the STANDING DIRECTIVE (see the RESUME BRIEF at the
 top of this file, now the single source of truth): proceed AUTONOMOUSLY to completion, maintainer UNAVAILABLE,

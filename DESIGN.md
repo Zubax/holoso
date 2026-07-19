@@ -375,22 +375,18 @@ derived on: call expansion validates argument binding completely before it mutat
 it grafts it simply drops the deferral of the one op it destroys -- the continuation re-derives or clears any
 residual exactly as a clean revisit would -- so every surviving deferral key stays anchored in the graph and
 the only entries discarded at stabilization are those provably on paths the stable round never reached.
-A block whose graftable call cannot resolve this visit -- it deferred behind a pending violation, leaving its
-result unbound -- withholds its terminator's out-edges until the call resolves, so the eventual graft
-never seeds its transitive successors from that unbound result (a later bound revisit would otherwise join into
-those envs as maybe-unbound and reject an innocent downstream read); the block re-flows when a predecessor
-promotes its operands, the same signal that lets the call graft. A revisit graft still retracts the recorded
-out-edges of the terminator it replaces and drops the environment of any successor thereby left with no
-in-edge, so the continuation re-establishes that env from scratch rather than joining a stale one -- this now
-covers only a call that resolved in place on an earlier visit (folded on all-Known operands) and grafts once a
-later join makes an operand residual, where the stale successor facts are bound and merely outdated. These edge
-rules are a partial mitigation, not a closed solution: the withholding is keyed to a single deferred graftable
-call per block, so two graftable calls in one block (an earlier one deferring while a later one grafts) and
-starred-argument calls still leak the unbound result and falsely reject a following read, and withholding a
-block's sole out-edge can starve a downstream static-loop unroll into a false store-schema rejection. This
-false-rejection class in the deferral/graft seam is documented in TODO.md with reproducers, is why `freeze-1`
-is not yet tagged, and is the motivating case for the resolution-totality restructure, which dissolves it by
-residualizing as a total post-stabilization pass rather than grafting mid-fixpoint.
+A revisit graft retracts the recorded out-edges of the terminator it replaces and drops the environment of any
+successor thereby left with no in-edge, so the continuation re-establishes that env from scratch rather than
+joining a stale one. That retraction is only one edge deep, and it is a mitigation rather than a closed
+solution: a block whose graftable call deferred behind a pending violation still publishes out-edges carrying
+the call's unbound result, so a transitive successor of the graft block can retain the phantom-unbound
+environment and falsely reject an innocent downstream read. This false-rejection class in the deferral/graft
+seam is documented in TODO.md, pinned by executable witnesses in the frontend state tests, and is the
+motivating case for the resolution-totality restructure, which dissolves it by residualizing as a total
+post-stabilization pass rather than grafting mid-fixpoint. Closing it inside the fixpoint has been tried:
+withholding a deferred call's terminator edges removes the phantom path but starves the outer fixed point
+whenever the withheld edge is a loop body's sole successor, refusing valid kernels, so that trade was reverted
+and is guarded by an acceptance test.
 A failing state live-in join never cuts a round short: the leaf freezes
 at its last joinable live-in and the failure reports only at stabilization, ranked below every recorded
 obligation, so each verdict -- the exactness ruling of a store-edge conversion included -- derives from the

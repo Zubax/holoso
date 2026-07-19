@@ -26,6 +26,11 @@ from ._frontend_common import (
 from ._modelref import arith_count as _arith_count, default_ops
 
 
+def _multiply(a: float, b: float) -> float:
+    """A module-level callable, so a call to it takes the inlining graft path a nested def would too."""
+    return a * b
+
+
 def test_dead_arm_attr_write_does_not_block_readonly_fold() -> None:
     # Regression (Codex): a write to a read-only boolean attribute inside a statically-dead `if False:` arm must not
     # mark it as assigned -- otherwise the attribute is wrongly treated as runtime and a later guard on it is not
@@ -466,16 +471,60 @@ def test_deferred_call_graft_retracts_stale_edges_with_branch() -> None:
     assert str(probe.value) == str(control.value)
 
 
-def test_deferred_call_graft_both_arms_sibling_accepts() -> None:
-    # R10-F1 freeze-blocker: a synthesizable kernel whose deferred-then-grafted call is followed by a branch whose
-    # fall-through arm is a TRANSITIVE successor of the graft block (reached through the empty else-landing). The
-    # pre-graft terminator's phantom out-edges seeded that transitive block with the call result unbound; the
-    # graft's one-edge-deep orphan-drop cleaned the direct successors but left the transitive one standing, and the
-    # continuation's later join turned its bound value maybe-unbound -- a nonsense "local 'y' may be unbound" at the
-    # fall-through return. The control (single return, no branch after the call) proves the whole feed synthesizes;
-    # the probe must synthesize too, not reject. Withholding a deferred call's terminator edges keeps the phantom
-    # path -- and its poison -- out of the graph entirely.
+def test_deferred_graftable_call_does_not_starve_the_state_fixpoint() -> None:
+    # The graft-deferral seam admits false rejections (see the open-defect witnesses below and TODO.md), but a fix
+    # for them must not cost accepts that already work. Withholding a deferred graftable call's terminator edges --
+    # the round-10 attempt at closing the seam -- starved this kernel's outer state fixpoint: the withheld edge is
+    # the loop body's only successor, so the loop never re-flowed, the transiently-inexact `self.t` store never saw
+    # its operand promote to runtime float, and a valid kernel that synthesizes to real Verilog was refused with
+    # "state attribute 't' ... not exactly representable". Both spellings must keep synthesizing; the control
+    # differs only by dropping the graftable call, isolating the call as the trigger.
     class Probe:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def step(self, x: float, run: bool) -> float:
+            first = True
+            while run:
+                self.t = (2**53 + 1) if first else x
+                a = np.array([(2**64) if first else x, x])
+                np.dot(a, a)
+                first = False
+                run = False
+            return x + self.t
+
+    class Control:  # differs only by dropping the graftable call
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def step(self, x: float, run: bool) -> float:
+            first = True
+            while run:
+                self.t = (2**53 + 1) if first else x
+                np.array([(2**64) if first else x, x])
+                first = False
+                run = False
+            return x + self.t
+
+    ops = default_ops(FloatFormat(8, 23))
+    probe = holoso.synthesize(Probe().step, ops, name="graft_defer_no_starve")
+    control = holoso.synthesize(Control().step, ops, name="graft_defer_no_starve_ctrl")
+    assert len(probe.verilog_output.verilog) > 0
+    assert len(control.verilog_output.verilog) > 0
+
+
+def test_graftable_call_deferral_false_rejection_witnesses() -> None:
+    # EXECUTABLE RECORD of an OPEN defect class -- these outcomes are documented defects, not desired behavior.
+    # Each kernel below is honest Python that a correct compiler would synthesize; the analyzer refuses it because
+    # a graftable call deferred behind a transiently-pending store violation publishes out-edges carrying its
+    # not-yet-computed result, and a downstream read of that result joins to maybe-unbound. The class is scoped to
+    # false rejections only (no kernel that should reject is accepted), is documented in TODO.md, and is the class
+    # the Stage-4 resolved-IR restructure dissolves by residualizing after the fixpoint instead of during it.
+    #
+    # The kernels live here rather than only in prose because prose transcriptions of them have silently rotted:
+    # dropping the both-arms read or the wide-int feed makes a shape vanish. When the restructure lands these stop
+    # rejecting -- that is the intended outcome, and this test must then flip to asserting synthesis.
+    class BothArms:  # a single graftable call whose result is read on BOTH arms of a following branch
         def __init__(self) -> None:
             self.t = 0.0
 
@@ -493,38 +542,12 @@ def test_deferred_call_graft_both_arms_sibling_accepts() -> None:
                 return y + 1.0  # type: ignore[no-any-return]
             return y + 2.0  # type: ignore[no-any-return]
 
-    class Control:  # differs only by the branch-after-call: a single return
+    class TwoGraftableCalls:  # a second graftable call grafts while the first is still deferred
         def __init__(self) -> None:
             self.t = 0.0
 
-        def step(self, x: float, flag: bool) -> float:
-            if flag:
-                u = 1.0
-                q = 1.0
-            else:
-                u = 2**53 + 1
-                q = 2**64
-            self.t = u
-            a = np.array([q, x])
-            y = np.dot(a, a)
-            return y + 1.0  # type: ignore[no-any-return]
-
-    ops = default_ops(FloatFormat(8, 23))
-    probe = holoso.synthesize(Probe().step, ops, name="graft_both_arms_probe")
-    control = holoso.synthesize(Control().step, ops, name="graft_both_arms_ctrl")
-    assert len(probe.verilog_output.verilog) > 0
-    assert len(control.verilog_output.verilog) > 0
-
-
-def test_deferred_call_graft_post_diamond_merge_accepts() -> None:
-    # R10-F1 transitive-depth lock: the same deferred-then-grafted call, now with a full diamond after it whose two
-    # arms both assign a local and RECONVERGE at a merge block that reads it. The merge is two edges downstream of
-    # the graft block; a one-edge-deep orphan-drop cannot reach it, so the phantom-unbound env survived there and
-    # the merge's read spuriously rejected ("local 'z' may be unbound"). Edge withholding is depth-agnostic: the
-    # phantom successors are never seeded, so the diamond and its merge analyze cleanly.
-    class ProbeMerge:
-        def __init__(self) -> None:
-            self.t = 0.0
+        def helper(self, x: float) -> float:
+            return x
 
         def step(self, x: float, flag: bool, pick: bool) -> float:
             if flag:
@@ -536,15 +559,38 @@ def test_deferred_call_graft_post_diamond_merge_accepts() -> None:
             self.t = u
             a = np.array([q, x])
             y = np.dot(a, a)
+            z = self.helper(x)
             if pick:
-                z = y + 1.0
+                return y + z  # type: ignore[no-any-return]
+            return y + z + 1.0  # type: ignore[no-any-return]
+
+    class StarredArguments:  # starred-argument validation refuses before the user call can graft
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def step(self, x: float, flag: bool, pick: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
             else:
-                z = y + 2.0
-            return z + 3.0  # type: ignore[no-any-return]
+                u = 2**53 + 1
+                q = 2**64
+            self.t = u
+            args = np.array([q, x])
+            y = _multiply(*args)
+            if pick:
+                return y + 1.0
+            return y + 2.0
 
     ops = default_ops(FloatFormat(8, 23))
-    result = holoso.synthesize(ProbeMerge().step, ops, name="graft_post_diamond_merge")
-    assert len(result.verilog_output.verilog) > 0
+    for label, kernel in (
+        ("both_arms", BothArms().step),
+        ("two_graftable_calls", TwoGraftableCalls().step),
+        ("starred_arguments", StarredArguments().step),
+    ):
+        with pytest.raises(UnsupportedConstruct, match="may be unbound here") as witness:
+            holoso.synthesize(kernel, ops, name=f"graft_defer_{label}")
+        assert witness.value.location is not None, label  # located, never a bare crash
 
 
 def test_mixed_return_dedupes_public_alias_keeps_distinct_leaf() -> None:
