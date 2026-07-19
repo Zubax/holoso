@@ -879,3 +879,19 @@ threshold from sys.get_int_max_str_digits() (a runtime-lowered cap resurfaces th
 the observationally-inert nine-line re-key block for a bare pop (the caller's pop already guarantees the
 claimed property; the anchored assert stays). After the batch: one light round-9 pair on the small diff,
 then tag freeze-1 on clean+green.
+
+Round-8 batch INTEGRATED: 81fc51b cherry-picked as ebd6721, AMENDED with a test-only mypy fix (4
+np.dot-returns-Any no-any-return errors in the new R8-2 regression kernels — the agent ran `mypy holoso` (70
+files) and missed the tests scope; the full 201-file typecheck caught them; fixed with the file's existing
+`# type: ignore[no-any-return]` convention, kernel bodies untouched). Full local gate: targeted 403 green +
+83 in the touched file, FULL mypy 201 clean, black clean; batch's own full suite 1898/2; refreeze 151/0/0/0.
+R8-1 dataclass-record renderer arm; R8-2 graft-time out-edge retraction + orphaned-env drop (instance-held
+executable_edges/blocks/block_in; DESIGN deferral paragraph updated) — both the straight-line and diverging-
+branch probes now match their controls ("integer values are not yet lowerable"); R8-3 runtime-cap-derived
+threshold min(4000, get_int_max_str_digits()-16); R8-4 the inert re-key block reduced to a bare pop.
+KNOWN PRE-EXISTING CORNER (documented, NOT a regression — fails at unfixed HEAD; out of edge-retraction
+scope): a deferred-then-grafted nested call whose result is read on BOTH arms of a following branch hits a
+deeper deferral/convergence race ("local 'y' may be unbound") — flagged for round-9 severity adjudication
+(reachable-misleading vs deep-corner) before it is either fixed or homed in TODO.md. Trial: trial/s2-r8-stack
+at ebd6721; round-9 pair (with the both-arms adjudication ask) follows; freeze-1 tag HELD for the maintainer's
+manual review after round-9 closes.
