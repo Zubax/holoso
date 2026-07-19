@@ -852,3 +852,15 @@ F2 (Codex P2): _render_fail must not alter messages that format fine (decimal wh
 the digit cap) and must be digit-safe RECURSIVELY (nested containers). F3 (Claude, pre-freeze): the
 stranded-sibling sort key flips to (source_position, message) — the sole position-non-primary rule; corpus not
 yet frozen so now is the moment. Round-8 after; tag freeze-1 on clean+green.
+
+Round-7 batch INTEGRATED: c3d92ea cherry-picked clean as 45ea961 (targeted 318 green; mypy 201; black clean;
+batch's own full suite 1894/2; refreeze 151/0/0/0 twice). F1 restructures _expand_call to validate the full
+binding BEFORE any CFG mutation (per-param source plan consumed by the graft; serial/op allocation preserved —
+accepted kernels byte-identical), re-keys graft-destroyed deferrals to the continuation, and replaces the blind
+ownerless discard with a graph-anchored assert; fail-before: the extra-arg typo COMPILED (10255 B of Verilog,
+call absent) behind "discarding 1 ownerless transfer deferral(s)". F2 render_interpolation: decimal up to a
+conservative 4000-digit bound (bit-length estimate erring toward hex), hex above, recursive through
+lists/tuples/ranges/slices; 65-bit stays decimal, nested wide ints locate instead of crashing. F3 stranded
+siblings report in source order (the sole position-non-primary rule is gone); no existing pin needed flipping
+(only docstring+DESIGN stated the old order). r6 stack certified on CI meanwhile (dev at b21da6f). Trial:
+trial/s2-r7-stack at 45ea961; round-8 pair follows; tag freeze-1 on clean+green.
