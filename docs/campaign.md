@@ -951,3 +951,22 @@ fabrication only when a cap-tripping wide int is recursively reachable, else nat
 (Python-byte-identical — nested __qualname__, custom __repr__/__format__ preserved); wide-field test still
 hex-located. Trial: trial/s2-r10-stack at 8336387; round-11 pair follows (the closing round if clean); tag
 freeze-1 HELD for the maintainer's manual review after the loop closes.
+
+Round-11, Claude half returned — NOT CLEAN, one Medium (freeze-blocker CLASS persists, pre-existing): the
+round-10 ROOT fix is INCOMPLETE. Guard `if deferred_call and block.terminator is terminator_before: continue`
+(_analyze.py ~:970, flag ~:952) is BYPASSED when a block has TWO graftable calls and a LATER one grafts this
+visit (terminator replaced, so `is terminator_before` false) while an EARLIER one is still deferred unbound —
+the resolved terminator's edges seed the continuation with the earlier call's unbound result. Repro is ORDINARY
+numeric code (two np.dot summed, `y + z`; Python oracle 13.0 / 3.4e38 — well-defined), falsely rejects "local
+'y' may be unbound"; single-dot accepts, clean-dot-first accepts, no-wide-int accepts. Generalizes to matmul /
+user fns / loops / three dots. PRE-EXISTING (parent 82f9834 rejects identically — NOT a regression) but refutes
+the "root fix closes the family" claim. Strong NEGATIVES: (d) NO silent-accepts (Unbound biases joins toward
+rejection, never spurious-bound; withheld state never final); (a) NO deadlock (withholding only `continue`s, W
+grows / D descends, ~40 kernels exit clean); (b) diagnostic selection STRICTLY IMPROVED for single-graftable
+doomed kernels; (c) unroll improved; F2 crash-safe + faithful. Never worse than pre-fix (shadow-tree compared).
+This is the 5TH corner in the deferral-net x mid-round-graft seam. Awaiting Codex half; then ONE targeted
+round-12 attempt (withhold on deferred_call regardless of terminator identity, OR stop intra-block processing
+at the first deferred graftable call — TwoDots the decisive gate). DECISION RULE for the maintainer pause: if
+round-12 converges clean, durable clean state; if it opens corner #6, STOP patching — document the residual in
+TODO.md as closed-by-Stage-4-resolved-IR and reach durable state by document-not-patch. Either way pause after
+with a clear recommendation. This seam's corner history IS the architectural evidence for the Stage-3 direction.
