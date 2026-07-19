@@ -895,3 +895,20 @@ deeper deferral/convergence race ("local 'y' may be unbound") — flagged for ro
 (reachable-misleading vs deep-corner) before it is either fixed or homed in TODO.md. Trial: trial/s2-r8-stack
 at ebd6721; round-9 pair (with the both-arms adjudication ask) follows; freeze-1 tag HELD for the maintainer's
 manual review after round-9 closes.
+
+Round-9, Codex half returned — NOT CLEAN, one FREEZE-BLOCKER: (P1) R8-2's edge retraction is ONLY ONE-EDGE-DEEP
+— dropping the immediate orphaned successor's env leaves stale Unbound contributions in SHARED successors and
+TRANSITIVE DESCENDANTS that monotone joins can never subtract; and the both-arms corner is now proven a real
+bug, not a doomed corner: Codex's CONTROL (no transient violation) ACCEPTS and completes FULL Verilog
+synthesis (stable facts float-only, no runtime int) while the PROBE (transient violation that stabilizes away)
+FALSELY rejects "local 'y' may be unbound" — an accept/reject divergence on an honestly-writable synthesizable
+kernel. ADJUDICATION: FREEZE-BLOCKER (supersedes the round-8 "pre-existing doomed corner" framing). (P2) R8-1
+regressed NARROW dataclass rendering — the new arm fabricates ClassName(fields) bypassing Python's
+format()/nested repr() and uses __name__ not __qualname__, so custom __format__/__repr__ and qualified names
+are lost for values that never needed intercepting (parent rendered them correctly). R8-3/R8-4 clean; no
+_UnrollRestart regression. DIRECTION for round-10: (P1) the deferred-call-graft model is leaky — a block whose
+PyCall will graft should NOT propagate out-edges/successor envs from its pre-graft terminator at all (don't
+run past a deferring call), rather than recording phantom edges and retracting them one level deep; evaluate
+that vs deep transitive env invalidation and pick the sound+simpler one. (P2) intercept ONLY when a wide int
+is actually present in the value; narrow values fall through to native format()/repr() unchanged. Loop
+CONTINUES — durable state not yet reached (a clean round is the bar). Awaiting Claude half for consolidation.
