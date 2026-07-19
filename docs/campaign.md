@@ -1,5 +1,73 @@
 # Holoso frontend campaign: trim → stabilize+freeze → architecture gate → restructure
 
+## ⛳ RESUME BRIEF — READ FIRST (state at the pre-compaction pause, 2026-07-19)
+
+This section is the single source of truth for a resumed agent; the chronological progress log at the bottom is
+the deep record. `campaign.md` is authoritative; `HANDOFF.md` is historical (superseded by this log).
+
+STANDING DIRECTIVE (maintainer, final and overriding): proceed autonomously to completion. The maintainer is
+UNAVAILABLE and will NOT return to the loop. Do not stop, do not wait for the user, do not ask the user, do not
+pause "for review". When you hit an obstacle or a judgment call, CONSULT CODEX (the co-designer), never the
+user, and keep going. Codex: `codex exec -m gpt-5.6-sol -c model_reasoning_effort=ultra "<prompt>" </dev/null`;
+`codex resume` to continue a session, never restart. Run the `review-loop` skill after every step. Sequential
+workflow (one thing at a time; the maintainer dropped parallel tracks to cut complexity). Any earlier "HELD for
+maintainer manual review" wording in the log below is SUPERSEDED by this directive.
+
+WHERE WE ARE: Stage 2 (semantic stabilization) is landed and the FREEZE INFRASTRUCTURE is built, but `freeze-1`
+is NOT tagged. The review loop (rounds 6-11) surfaced one OPEN defect class: false rejections in the analyzer's
+deferral x mid-round-graft seam, fully documented in `TODO.md` "Known defects" with four minimal reproducer
+kernels. It is NOT closeable by in-place patching (5 rounds, and the round-10 attempt regressed a valid kernel);
+it is the class the Stage-4 resolved-IR restructure dissolves. Stage 3's architecture spike ran → verdict MORPH
+(SC1-SC3 passed; SC4 missed by 75 LOC; branch `spike/resolved-ir` @ dc76fbf; ledger `docs/decisions/spike-ledger.md`).
+The Stage-3 ruling and Stage 4 are pending. `dev` code tip that is CI-green: 8336387 (round-10); commits after
+it are docs-only.
+
+THE PLAN FROM HERE — execute in order, autonomously (this is option A, the maintainer's chosen recommendation:
+freeze first, then restructure, because freeze-1 is the byte-gate the morph is verified against — doing Stage 4
+first would strip the regression-detection safety net):
+
+1. REBUILD ENVS FIRST. `.nox` was removed; recreate it (`nox`) before any local gate. `.venv` is stale py3.13,
+   unusable.
+2. CHOOSE THE FREEZE BASELINE. The graft-deferral class is deferred to Stage 4. Round-10 (8336387) edge-withholding
+   introduced a regression (the `UnrollStarve` TODO kernel) and round-11 proved it net-lateral, so REVERT round-10's
+   edge-withholding so the baseline has NO regression and the class is uniformly open+documented. Verify with the
+   four TODO kernels + the full suite before/after, and confirm the golden corpus stays byte-identical (round-10 was
+   corpus-neutral, so the revert is corpus-safe). If the revert is entangled, consult Codex.
+3. TAG freeze-1 on that baseline: full CI green on all five jobs + `tools/refreeze_golden.py --check-determinism`
+   seed matrix + the `test_golden` gate. The graft-deferral class is an EXPLICIT DOCUMENTED EXCEPTION — the four
+   TODO kernels are known false-rejections, deliberately NOT frozen as correct behavior.
+4. STAGE-3 RULING (table-mechanical, no maintainer needed): Codex consult X5 on the spike diff + ledger; the
+   pre-agreed decision table yields MORPH-with-mandatory-materialized-spine. Record `docs/decisions/arch-ruling.md`
+   (question, spike SHA dc76fbf, Codex position, ruling). Then delete the spike branch (SHA already recorded).
+5. STAGE 4 = MORPH (M0-M7, see "Variant MORPH" in the plan below). Every landing byte-identical vs freeze-1 except
+   the one pre-authorized canonical-gate landing (which re-freezes in the same commit). The resolved-IR boundary
+   closes the graft-deferral class — the four TODO kernels become passing acceptance tests (all synthesize), gated
+   against freeze-1. `docs/decisions/arch-memo.md` + `arch-spike.md` + `spike-ledger.md` carry the design.
+
+OPERATIONAL SURVIVAL KIT (each trap below has actually bitten this campaign — heed them):
+- ALWAYS `set -o pipefail` on any `cmd | tail`/`| grep` gate chain, or redirect to a file and read it; a bare pipe
+  swallows the exit code and has masked real failures 3+ times.
+- Run the FULL mypy scope: `.nox/typecheck/bin/mypy` with NO args (201 files incl. tests). `mypy holoso` alone is
+  70 files and let a real test-scope error through this session. Read the TEXT, not the exit code.
+- Local run: `HOLOSO_REGALLOC_EFFORT=10 .nox/tests/bin/python -m pytest -p no:enabler -n 8 --tb=line -q
+  -m "not cosim and not fuzz and not synth" <files>`; format `.nox/black/bin/python -m black -q holoso tests tools`.
+- Reviewers/fixers work in PINNED DETACHED WORKTREES (`git worktree add --detach <scratch> <sha>`), never the live
+  tree — a live-tree Codex once reset dev (recovered via reflog). Never amend a branch a live-tree reviewer reads.
+- CI verification: push `HEAD:refs/heads/trial/<name>`, then a nohup survivor-poll of 5-minute single `gh api`
+  calls (NEVER `gh run watch` — it exhausts rate limits); advance dev only when all five jobs are green. Prune
+  `trial/*` when done, origin included. md-only commits fire no CI (previous green carries).
+- Subagents passively wait on their own monitors instead of polling long background runs — spawn them with "poll
+  your own run to completion, do not passively wait," and resume a stalled one the same way. Retry limit/transient
+  failures by RESUMING (SendMessage), not restarting.
+- One step = one commit + push + CI-green. review-loop every step (Claude ultrathink full-spectrum + Codex ultra
+  correctness-only, both read-only in pinned worktrees, no suite re-runs); first clean round ends it; reject
+  findings that need adversarial/hostile constructions.
+
+DONE — do not redo: all 18 register defects (A1-G1) + the full trim program; B1 storage schema, G1 predication,
+E1-lite diagnostics; the hygiene closeout (exit grep clean); the freeze infrastructure (35 GoldenCases, the
+32-kernel rejection corpus, the complete HIR serializer `tests/_hirdump.py`, the `test_golden` gate, the
+`tools/refreeze_golden.py` refreeze tool); the architecture spike (MORPH).
+
 ## Context
 
 The `main..dev` frontend rewrite (FIR pipeline: `_build.py` AST→FIR 832 LOC, `_analyze.py` SCCP/W-D abstract
@@ -989,3 +1057,33 @@ Stage-3 evaluation predicted. Per my logged stop-rule (regression = stop), I did
 tag freeze-1, did NOT revert (a scope call for the maintainer). Documented the whole class in TODO.md "Known
 defects". DURABLE STATE: dev CI-green at the round-10 integration (4566a03), all residuals documented, nothing
 half-done. ESCALATED to the maintainer: the freeze-vs-restructure sequencing fork (see the pause summary).
+
+S3.3 SPIKE OUTCOME (durable capture on dev, so it survives deletion of branch spike/resolved-ir @ dc76fbf;
+ledger docs/decisions/spike-ledger.md lives on that branch): VERDICT = MORPH (default). SC1 8/8 witnesses
+byte-identical (pre-opt HIR + Verilog + ABI + exact schedule metrics through both entry points; alpha-canonical
+fallback never needed, canonicalizer 0 LOC). SC2 PASS (mechanical emitter's transitive import closure has no
+Fact/registry/Py*/callback/rejection; AST-checked). SC3 PASS (RIR schema byte-identical at spike start vs end —
+ZERO post-freeze growth; 11 judgement calls resolved at the freeze commit, nothing added after). Negative packet
+5/5 (refusals fire in the residualizer/backend, never in the mechanical emitter). SC4 FAILED: residualizer 1275
+LOC > the 1200 subset bound (by 75 lines), after three behavior-preserving size passes; emitter 351, verifier+
+printer 232, harness 437, canonicalizer 0; extrapolation 1403 <= 1800. The adapter prototype could reach only
+the MORPH rows (transplant rows need the un-built independent residualizer). KEY M7 EVIDENCE: the materialized
+resolved spine CLOSED — every semantic decision across all 8 witnesses fit the frozen one-Def/three-RHS/Route
+vocabulary with zero schema growth, and a 351-line mechanical emitter reproduced production HIR/Verilog
+byte-for-byte from resolved data alone; projected net production change ~ +358 LOC gross with _emit.py (1500
+LOC, 42 refusal sites) deleted. Backchannel audit: zero transfer replays / host reads / registry resolutions in
+the residualizer (evidence-atomic). Held for consult X5 -> docs/decisions/arch-ruling.md (the ruling is
+table-mechanical: SC4-blown => MORPH). DO NOT delete branch spike/resolved-ir until arch-ruling.md consolidates
+the ledger.
+
+FINAL PRE-COMPACTION ENTRY (2026-07-19): the maintainer set the STANDING DIRECTIVE (see the RESUME BRIEF at the
+top of this file, now the single source of truth): proceed AUTONOMOUSLY to completion, maintainer UNAVAILABLE,
+consult Codex (not the user) on any obstacle, never stop. Chosen path = option A: rebuild .nox, revert round-10
+edge-withholding (removes its unroll-starvation regression; corpus-neutral), TAG freeze-1 on that clean baseline
+with the graft-deferral class an explicit documented exception, then X5 -> arch-ruling.md (MORPH), then Stage 4
+MORPH M0-M7 (which closes the graft-deferral class; the four TODO kernels become byte-gated acceptance tests).
+Housekeeping done: the four graft-deferral reproducers folded into TODO.md (2cb2470); all 16 origin trial/*
+branches pruned; an independent fresh-context doc-audit ran and confirmed the four doc surfaces trustworthy with
+two HIGH fixes, both now applied -- DESIGN.md 373-391 caveated (the seam is a partial mitigation with open
+false-rejections + an unroll regression, not sound/complete), and this durable spike-outcome capture. dev docs
+tip is ahead of the CI-green code tip 8336387 by docs-only commits.
