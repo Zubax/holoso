@@ -864,3 +864,18 @@ lists/tuples/ranges/slices; 65-bit stays decimal, nested wide ints locate instea
 siblings report in source order (the sole position-non-primary rule is gone); no existing pin needed flipping
 (only docstring+DESIGN stated the old order). r6 stack certified on CI meanwhile (dev at b21da6f). Trial:
 trial/s2-r7-stack at 45ea961; round-8 pair follows; tag freeze-1 on clean+green.
+
+Round-8 returned (both halves) — F1's restructure VERIFIED CLEAN (14-kernel battery outcome- and
+location-identical vs a validated parent replica; accepted-kernel dumps byte-identical; every key-destruction
+path of the anchored assert covered). Four corner items consolidate into the final hardening batch (fixes-r8
+at 45ea961): (1) P2 convergent — the dataclass-record renderer arm (as_python reconstructs records; format()
+falls through to the generated repr and the raw digit-cap ValueError escapes) + regression; (2) P2 Claude,
+PRE-EXISTING but now a supported flow — a deferred-then-grafted call leaves the OLD terminator's edges in
+executable_edges (phantom edge into the stable result): accepted kernel crashes emission ("read of an
+undefined place ... escaped analysis") or surfaces a nonsense located rejection at an innocent line, and the
+no-violation control REJECTS while the violation variant accepts-then-crashes — retract the grafted block's
+stale out-edges at graft time + both probe kernels as regressions + a DESIGN note; (3) P3 — derive the decimal
+threshold from sys.get_int_max_str_digits() (a runtime-lowered cap resurfaces the ValueError); (4) P4 — delete
+the observationally-inert nine-line re-key block for a bare pop (the caller's pop already guarantees the
+claimed property; the anchored assert stays). After the batch: one light round-9 pair on the small diff,
+then tag freeze-1 on clean+green.
