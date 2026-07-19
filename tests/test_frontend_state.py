@@ -359,6 +359,113 @@ def test_returned_public_state_alias_is_deduped() -> None:
     assert [o.name for o in hir.outputs] == ["state_y"]
 
 
+def test_deferred_call_graft_retracts_stale_edges_straight_line() -> None:
+    # R8-2 round-8, case (a): a library call (np.dot on the cut operand) defers behind a transient store
+    # violation (self.t = u, whose else-arm value overflows the float carrier) and a transiently-rejecting feed
+    # (w = 3 << s, whose else-arm shift count is negative), then grafts on a revisit. The graft replaces the
+    # block's terminator, but the pre-graft terminator's recorded out-edge used to survive as a phantom edge to
+    # the old successor and reach emission, which read the return place undefined and crashed with a bare
+    # "escaped analysis" AssertionError. With the stale edge retracted the kernel analyzes cleanly and refuses
+    # for the honest reason -- the runtime integer shift -- exactly as its violation-free control does.
+    class Probe:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def step(self, flag: bool) -> float:
+            if flag:
+                u = 1.0
+                s = 1
+            else:
+                u = 2**53 + 1
+                s = -1
+            self.t = u
+            w = 3 << s
+            v = w * 0.5
+            a = np.array([v, v])
+            y = np.dot(a, a)
+            return y + self.t  # type: ignore[no-any-return]
+
+    class Control:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def step(self, flag: bool) -> float:
+            if flag:
+                u = 1.0
+                s = 1
+            else:
+                u = 2.0
+                s = 2
+            self.t = u
+            w = 3 << s
+            v = w * 0.5
+            a = np.array([v, v])
+            y = np.dot(a, a)
+            return y + self.t  # type: ignore[no-any-return]
+
+    ops = default_ops(FloatFormat(8, 23))
+    with pytest.raises(UnsupportedConstruct, match="integer values are not yet lowerable") as probe:
+        holoso.synthesize(Probe().step, ops, name="graft_edge_straight")
+    with pytest.raises(UnsupportedConstruct, match="integer values are not yet lowerable") as control:
+        holoso.synthesize(Control().step, ops, name="graft_edge_straight_ctrl")
+    assert str(probe.value) == str(control.value)
+
+
+def test_deferred_call_graft_retracts_stale_edges_with_branch() -> None:
+    # R8-2 round-8, case (b): the same deferral, now with a branch after the call. The stale out-edge left a
+    # phantom successor whose env was derived on the graft-skipping path with the call result unbound; the
+    # continuation then joined into that stale env (a bound value joining an unbound one yields maybe-unbound),
+    # surfacing a nonsense "local ... may be unbound" rejection at an innocent return line. Retracting the edge
+    # and dropping the orphaned env lets the branch analyze cleanly and refuse for the same honest reason as the
+    # violation-free control.
+    class Probe:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def step(self, flag: bool, pick: bool) -> float:
+            if flag:
+                u = 1.0
+                s = 1
+            else:
+                u = 2**53 + 1
+                s = -1
+            self.t = u
+            w = 3 << s
+            v = w * 0.5
+            a = np.array([v, v])
+            y = np.dot(a, a)
+            if pick:
+                return y + 1.0  # type: ignore[no-any-return]
+            return self.t
+
+    class Control:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def step(self, flag: bool, pick: bool) -> float:
+            if flag:
+                u = 1.0
+                s = 1
+            else:
+                u = 2.0
+                s = 2
+            self.t = u
+            w = 3 << s
+            v = w * 0.5
+            a = np.array([v, v])
+            y = np.dot(a, a)
+            if pick:
+                return y + 1.0  # type: ignore[no-any-return]
+            return self.t
+
+    ops = default_ops(FloatFormat(8, 23))
+    with pytest.raises(UnsupportedConstruct, match="integer values are not yet lowerable") as probe:
+        holoso.synthesize(Probe().step, ops, name="graft_edge_branch")
+    with pytest.raises(UnsupportedConstruct, match="integer values are not yet lowerable") as control:
+        holoso.synthesize(Control().step, ops, name="graft_edge_branch_ctrl")
+    assert str(probe.value) == str(control.value)
+
+
 def test_mixed_return_dedupes_public_alias_keeps_distinct_leaf() -> None:
     class Mixed:
         def __init__(self) -> None:

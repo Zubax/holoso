@@ -2,6 +2,7 @@
 
 import logging
 import math
+import sys
 
 import numpy as np
 import pytest
@@ -1065,6 +1066,48 @@ def test_raise_interpolating_a_container_holding_a_wide_integer_is_located() -> 
         lower(Probe().step)
     assert f"pair=(3, [{(1 << 20000) - 1:#x}])" in str(excinfo.value)
     assert excinfo.value.location is not None and "raise ValueError" in (excinfo.value.location.line or "")
+
+
+def test_raise_interpolating_a_dataclass_with_a_wide_field_is_located() -> None:
+    # R8-2 round-8 (R8-1): a folded dataclass record reconstructs the user's dataclass, whose generated repr
+    # decimalizes every field. A wide int field used to crash the render with the raw 4300-digit ValueError
+    # leaking out of the fallback repr(); the record must render field-by-field through the digit-safe path.
+    from dataclasses import dataclass
+
+    @dataclass
+    class Cfg:
+        mask: int
+
+    class Probe:
+        def __init__(self) -> None:
+            self.armed = True
+
+        def step(self, advance: bool) -> bool:
+            cfg = Cfg((1 << 20000) - 1)
+            if advance:
+                raise ValueError(f"cfg={cfg}")
+            return self.armed
+
+    with pytest.raises(UnsupportedConstruct, match=r"cfg=Cfg\(mask=0x") as excinfo:
+        lower(Probe().step)
+    assert f"cfg=Cfg(mask={(1 << 20000) - 1:#x})" in str(excinfo.value)
+    assert excinfo.value.location is not None and "raise ValueError" in (excinfo.value.location.line or "")
+
+
+def test_wide_integer_render_honors_a_runtime_lowered_digit_cap() -> None:
+    # R8-2 round-8 (R8-3): the decimal-digit ceiling is checked against CPython's cap read AT CALL TIME, not the
+    # import-time default. A runtime-lowered cap (sys.set_int_max_str_digits) must push an integer between the
+    # lowered cap and our own ceiling into the hex spelling instead of resurfacing the raw conversion ValueError.
+    from holoso._frontend._fir._analysis_support import render_interpolation
+
+    value = (1 << 10000) - 1  # ~3010 decimal digits: under the 4300 default cap, over a 640 runtime cap
+    saved = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(640)
+        rendered = render_interpolation(value)
+    finally:
+        sys.set_int_max_str_digits(saved)
+    assert rendered == f"{value:#x}"
 
 
 def _raises_under_a_dynamic_guard(a: float) -> float:

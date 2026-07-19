@@ -395,6 +395,12 @@ class Analyzer:
         self._pending_bridge: dict[OriginStack, str] = {}
         self._store_facts: dict[int, Fact] = {}  # SOURCE store op id -> its stored fact at the last visit
         self._transfer_deferrals: dict[int, LocatedRejection] = {}  # op id -> rejection deferred behind a store
+        # The live worklist state, instance-held so a mid-round graft can reconcile it with the CFG it mutates: a
+        # graft that replaces a block's terminator retracts the recorded out-edges of the replaced terminator and
+        # drops any successor thereby left with no in-edge, so its stale env is re-derived by the continuation.
+        self._executable_edges: set[tuple[BlockId, BlockId]] = set()
+        self._executable_blocks: set[BlockId] = set()
+        self._block_in: dict[BlockId, _Env] = {}
         self._bound_methods: dict[tuple[int, str], object] = {}
         self._array_methods: dict[tuple[BindingId, str], _ArrayMethod] = {}
         self._class_annotations: dict[int, tuple[type, "Mapping[str, object]"]] = {}
@@ -869,7 +875,8 @@ class Analyzer:
     def analyze(self, param_facts: dict[str, Fact] | None = None) -> ResidualUnit:
         unit = self._instantiate_root()
         origin = (Origin(unit.name, 0, 0, unit.file),)
-        block_in: dict[BlockId, _Env] = {unit.entry: _Env()}
+        self._block_in = {unit.entry: _Env()}
+        block_in = self._block_in
         entry_env = block_in[unit.entry]
         for param in unit.params:
             contract = unit.param_contracts.get(param.name)
@@ -893,8 +900,9 @@ class Analyzer:
             if seed is not None:  # a root scalar parameter's annotation contract establishes its schema
                 entry_env.schemas[Local(param)] = seed
         self._component_edges = set()
-        executable_edges: set[tuple[BlockId, BlockId]] = set()
-        executable_blocks: set[BlockId] = set()
+        self._executable_edges = set()
+        self._executable_blocks = set()
+        executable_blocks = self._executable_blocks
 
         def edge_default(place: Place) -> Fact:
             if isinstance(place, StateLeaf):
@@ -913,6 +921,8 @@ class Analyzer:
             if visits > _MAX_VISITS:
                 raise AnalysisRejection("analysis fuel exhausted", origin)
             block_id = worklist.pop()
+            if block_id not in block_in:
+                continue  # orphaned by a graft that retracted its only in-edge; a live edge re-enqueues it
             executable_blocks.add(block_id)
             env = block_in[block_id].copy()
             block = unit.blocks[block_id]
@@ -959,11 +969,11 @@ class Analyzer:
                 target_env = block_in.get(successor)
                 if target_env is None:
                     block_in[successor] = env.copy()
-                    executable_edges.add(edge)
+                    self._executable_edges.add(edge)
                     worklist.append(successor)
                     continue
-                first_traversal = edge not in executable_edges
-                executable_edges.add(edge)
+                first_traversal = edge not in self._executable_edges
+                self._executable_edges.add(edge)
                 try:
                     changed = target_env.join_with(env, join_origin, edge_default)
                 except LocatedRejection as error:
@@ -981,7 +991,7 @@ class Analyzer:
                     continue
                 if changed or (first_traversal and successor not in executable_blocks):
                     worklist.append(successor)
-        return ResidualUnit(unit, block_in, executable_blocks, executable_edges)
+        return ResidualUnit(unit, block_in, executable_blocks, self._executable_edges)
 
     # ------------------------------------ instantiation and grafting ------------------------------------
 
@@ -2645,15 +2655,25 @@ class Analyzer:
             else:
                 argument = source
             block.ops.append(StorePlace(Local(fresh(param)), argument, call.origin, StoreRole.SOURCE))
+        # A revisit graft replaces a terminator an earlier visit may have already resolved (the call deferred
+        # behind a pending violation, so the visit ran past it): the edges recorded for the replaced terminator
+        # -- every recorded out-edge of this block, since out-edges are recorded only at ITS terminator's
+        # resolution -- would otherwise survive as phantom edges from this block to the continuation's
+        # successors, leaking a path that skips the graft into the stable graph. Retract them, and drop the env
+        # of any successor thereby left with no in-edge: it was derived on the phantom path with the call result
+        # unbound, and leaving it standing would poison the continuation's later join into that same successor
+        # (bound-joins-unbound = maybe-unbound) instead of a clean replace. The displaced terminator re-records
+        # its edges -- and re-establishes those successors' envs -- from the continuation when that executes.
+        retracted = {edge for edge in self._executable_edges if edge[0] == block.id}
+        self._executable_edges -= retracted
+        for _, orphan in retracted:
+            if not any(edge[1] == orphan for edge in self._executable_edges):
+                self._block_in.pop(orphan, None)
+                self._executable_blocks.discard(orphan)
         block.terminator = Jump(block_map[template.entry], call.origin)
         continuation.ops.insert(0, LoadPlace(call.dst, Local(return_local), call.origin))
-        displaced = self._transfer_deferrals.pop(id(call), None)
-        if displaced is not None:
-            # The graft destroys the one op it replaces, so an earlier visit's deferral re-keys to the
-            # continuation's first op (the return read, carrying the call origin) rather than dangling off the
-            # graph: the continuation's own execution then clears or supersedes it exactly as a clean revisit
-            # of the call would have, and a dead continuation leaves it provably on a dead path.
-            anchor = continuation.ops[0]
-            assert id(anchor) not in self._transfer_deferrals
-            self._transfer_deferrals[id(anchor)] = displaced
+        # The graft destroys the call op, so an earlier visit's deferral keyed on it must not dangle off the
+        # graph (the graph-anchored assert in _raise_transfer_deferrals). Dropping it is enough: the continuation
+        # re-derives or clears any residual exactly as a clean revisit of the call would have.
+        self._transfer_deferrals.pop(id(call), None)
         return True

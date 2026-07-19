@@ -8,6 +8,7 @@ Everything here is a free function over immutable inputs -- no analyzer state --
 import enum
 import itertools
 import math
+import sys
 import types
 from collections.abc import Callable, Mapping
 
@@ -92,7 +93,7 @@ from ._value import (
     StaticValue,
     same,
 )
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 
 _UNBOUND = Unbound()
 
@@ -376,12 +377,24 @@ def _concrete_fact(fact: Fact) -> StaticValue | None:
     return None
 
 
-_MAX_DECIMAL_DIGITS = 4000  # conservatively below CPython's default 4300-digit int-to-decimal conversion cap
+_MAX_DECIMAL_DIGITS = 4000  # our own ceiling, conservatively below CPython's default 4300-digit conversion cap
+_DECIMAL_DIGIT_MARGIN = 16  # headroom below a runtime-lowered cap so the digit overestimate never lands on it
+
+
+def _decimal_digit_ceiling() -> int:
+    # Read the int-to-decimal cap at CALL time: it is mutable at runtime (sys.set_int_max_str_digits,
+    # PYTHONINTMAXSTRDIGITS), so a snapshot at import would miss a later lowering and resurface the raw
+    # ValueError for values between the lowered cap and our own ceiling. A returned 0 means the cap is disabled
+    # (unbounded), in which case only our own ceiling constrains the decimal spelling.
+    runtime = sys.get_int_max_str_digits()
+    if runtime <= 0:
+        return _MAX_DECIMAL_DIGITS
+    return min(_MAX_DECIMAL_DIGITS, runtime - _DECIMAL_DIGIT_MARGIN)
 
 
 def _int_spelling(value: int) -> str:
     # 30103/100000 slightly overestimates log10(2), so the digit bound errs toward hex, never toward the cap.
-    if value.bit_length() * 30103 // 100000 + 1 > _MAX_DECIMAL_DIGITS:
+    if value.bit_length() * 30103 // 100000 + 1 > _decimal_digit_ceiling():
         return f"{value:#x}"
     return str(value)
 
@@ -414,6 +427,14 @@ def _render_value(value: object, nested: bool) -> str:
         case slice():
             parts = (value.start, value.stop, value.step)
             return f"slice({', '.join(_render_value(part, nested=True) for part in parts)})"
+        case _ if is_dataclass(value) and not isinstance(value, type):
+            # A folded StaticRecord reconstructs the user's dataclass; its generated repr decimalizes every field,
+            # so a wide int field would crash on the conversion cap. Spell it as the dataclass repr does -- only
+            # repr=True fields, in declaration order -- but route each value back through the digit-safe renderer.
+            body = ", ".join(
+                f"{f.name}={_render_value(getattr(value, f.name), nested=True)}" for f in fields(value) if f.repr
+            )
+            return f"{type(value).__name__}({body})"
         case _:
             return repr(value) if nested else format(value)
 

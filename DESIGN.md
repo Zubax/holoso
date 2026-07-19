@@ -371,9 +371,14 @@ kernel with several rejections can therefore report a different one depending on
 transient violation forced the deferral path. Both selections are deterministic and hash-seed-stable;
 unifying them would mean deferring every rejection to stabilization, which today breaks call-expansion
 invariants, so it is left to its own redesign. A deferred rejection can never vanish with the graph it was
-derived on: call expansion validates argument binding completely before it mutates the working graph and
-re-keys a deferral off the one op the graft destroys, so every deferral key stays anchored in the graph and
+derived on: call expansion validates argument binding completely before it mutates the working graph, and when
+it grafts it simply drops the deferral of the one op it destroys -- the continuation re-derives or clears any
+residual exactly as a clean revisit would -- so every surviving deferral key stays anchored in the graph and
 the only entries discarded at stabilization are those provably on paths the stable round never reached.
+A revisit graft also retracts the recorded out-edges of the terminator it replaces, and drops the environment
+of any successor thereby left with no in-edge, so the continuation re-establishes that successor's env from
+scratch rather than joining the stale one the deferred visit derived with the call result unbound; this keeps
+the stabilized edge set and per-block environments consistent with the mutated CFG.
 A failing state live-in join never cuts a round short: the leaf freezes
 at its last joinable live-in and the failure reports only at stabilization, ranked below every recorded
 obligation, so each verdict -- the exactness ruling of a store-edge conversion included -- derives from the
