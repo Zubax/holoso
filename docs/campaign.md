@@ -970,3 +970,22 @@ at the first deferred graftable call — TwoDots the decisive gate). DECISION RU
 round-12 converges clean, durable clean state; if it opens corner #6, STOP patching — document the residual in
 TODO.md as closed-by-Stage-4-resolved-IR and reach durable state by document-not-patch. Either way pause after
 with a clear recommendation. This seam's corner history IS the architectural evidence for the Stage-3 direction.
+
+Round-11, Codex half returned (4: 3 P1 + 1 P2) — CONSOLIDATED with Claude, DECISION: STOP PATCHING, ESCALATE.
+Codex-1 [P1, REGRESSION not incompleteness]: edge-withholding STARVES a downstream StaticFor unroll fixed
+point when the withheld edge is the block's SOLE successor -> a valid kernel that LOWERED at 8336387^ now
+falsely rejects "state attribute 't' not exactly representable"; adding a bypass path synthesizes. This is the
+round-10 fix REGRESSING valid code, not just failing to close a corner. Codex-2 [P1] = Claude-1 convergent
+(two graftable calls, terminator-identity guard bypassed). Codex-3 [P1]: starred-arg validation (~:2188-2216)
+precedes the deferred_call mark (~:2263) -> transiently-unbound *args publishes phantom edges before the user
+call grafts (native 3.5, lowering rejects) -- a clean safe mark-ordering fix exists but does not make the round
+clean. Codex-4 [P2]: F2 render -- (i) a custom __repr__ deriving a wide int from narrow fields raw-ValueErrors
+(ADVERSARIAL construction, out of scope per review-loop rules); (ii) @dataclass(repr=False) uses object.__repr__
+-> process-dependent address (but Python itself prints the address there, so holoso is FAITHFUL; not in the
+frozen corpus; low priority). ASSESSMENT: round-10 edge-withholding is NET-LATERAL -- it trades the round-9
+both-arms false-rejection for an unroll-starvation false-rejection AND leaves two-graftable + starred open. Five
+rounds in this seam, now with a regression: the class is NOT closeable by in-place patching, exactly as the
+Stage-3 evaluation predicted. Per my logged stop-rule (regression = stop), I did NOT dispatch round 12, did NOT
+tag freeze-1, did NOT revert (a scope call for the maintainer). Documented the whole class in TODO.md "Known
+defects". DURABLE STATE: dev CI-green at the round-10 integration (4566a03), all residuals documented, nothing
+half-done. ESCALATED to the maintainer: the freeze-vs-restructure sequencing fork (see the pause summary).

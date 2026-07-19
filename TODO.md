@@ -23,6 +23,23 @@ Empty contractions diverge from numpy in the linalg stubs: `(n, 0) @ (0, m)` and
 Revisit together with the planned trace/outer/dot examples; the stubs' guards otherwise keep the reachable
 domain faithful.
 
+Graftable-call deferral can falsely reject a synthesizable kernel (the analyzer's optimistic-SCCP fixpoint
+meets destructive mid-round call grafting). When a graftable call (a linalg composite like `np.dot`/`np.matmul`,
+or an inlined user callable) cannot resolve on a visit because a store-schema violation is transiently pending
+in scope -- typically an int/float merge into a float state slot whose Known-int arm is momentarily inexact
+before the fixpoint promotes it -- the call's not-yet-computed result can reach a following branch as `Unbound`
+and a later join reports `local '...' may be unbound here` at an innocent line. The single-call/both-arms shape
+is addressed by edge withholding; two open shapes remain: a block with two graftable calls where the first
+defers and a later one grafts (the terminator-identity guard treats the later graft as resolution), and starred
+call arguments whose validation precedes the graftability mark. Edge withholding also has a soundness cost: it
+can starve a downstream `StaticFor` unroll fixed point when the withheld edge is the block's only successor,
+turning a valid kernel into a false store-schema rejection. This whole class lives in the deferral-net x
+grafting seam and resists in-place patching (each fix has traded or added a corner); it is the class the
+post-stabilization resolution-totality restructure (docs/decisions/arch-memo.md, the resolved-IR spike) is
+designed to dissolve by making residualization a total pass rather than interleaving it with the fixpoint.
+Reproducers: `y = np.dot(a,a); z = np.dot(b,b); return y+z` behind a conditional inexact int/float state store;
+the single-call variant with a branch after the call; a graftable call whose sole successor is a static loop.
+
 ## Deferred capability gaps
 
 Two public state slots sharing a live-out refuse at Verilog emission when the schedule has reused the
