@@ -912,3 +912,26 @@ run past a deferring call), rather than recording phantom edges and retracting t
 that vs deep transitive env invalidation and pick the sound+simpler one. (P2) intercept ONLY when a wide int
 is actually present in the value; narrow values fall through to native format()/repr() unchanged. Loop
 CONTINUES — durable state not yet reached (a clean round is the bar). Awaiting Claude half for consolidation.
+
+Round-9 ADJUDICATED EMPIRICALLY (maintainer's manual review pending): the two halves split (Codex
+freeze-blocker, Claude known-limitation); I reproduced Codex's exact probe/control myself under the worktree
+interpreter — CONTROL synthesizes to 12332 bytes of real Verilog, PROBE (identical but for reading y on BOTH
+arms of the following branch) falsely rejects "local 'y' may be unbound". The feed (np.dot of a promoted-float
+array) is CLEAN — the control proves it — so Claude's premise ("trigger is always a compile-time-Known doomed
+feed") is REFUTED by a kernel outside Claude's tested set. VERDICT: FREEZE-BLOCKER (Codex correct). The
+transient trigger is self.t = u where u is momentarily the inexact int 2**53+1 before the SCCP fixpoint
+promotes it to residual float (pending-bridge class, stabilizes away); the graft's orphan-drop is one-edge-deep
+so a TRANSITIVE successor keeps the phantom-unbound env. Round 9 NOT clean; loop continues. Also confirmed
+Codex P2 over Claude on R8-1: the render arm diverges from Python for NESTED dataclasses (__name__ vs
+__qualname__) and custom __repr__/__format__ — Claude's battery only tested top-level plain dataclasses.
+ROUND-10 BATCH (fixes-r10 at c9ed055): (F1, freeze-blocker) fix the graft phantom-edge at the ROOT if
+tractable in one batch — a block whose PyCall defers-and-will-graft must NOT propagate out-edges/successor
+envs from its pre-graft terminator (re-queue, record edges only at graft/reject resolution), eliminating
+phantom edges by construction; fall back to TRANSITIVE orphan-drop (recurse: dropped orphan's out-edges
+retracted, further orphans dropped, shared-in-edge guard + visited set) only if the root fix is too invasive.
+Decisive gate: Codex's probe AND control both ACCEPT identically (12332-byte Verilog), full suite green, corpus
+BYTE-IDENTICAL. (F2) R8-1 intercepts ONLY when a wide int is actually present (recursive check); else native
+format()/repr() so nested-qualname/custom-repr/custom-format are Python-faithful; regressions for nested +
+custom-repr dataclasses matching Python, wide-int still hex. Then round 11. NOTE for the maintainer review:
+this is the 4th consecutive corner in the deferral-net x mid-round-graft seam — the root fix aims to close the
+family; if it resists, the cleaner dissolution is the Stage-3 resolved-IR boundary (the spike showed it closes).
