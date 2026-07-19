@@ -935,3 +935,19 @@ format()/repr() so nested-qualname/custom-repr/custom-format are Python-faithful
 custom-repr dataclasses matching Python, wide-int still hex. Then round 11. NOTE for the maintainer review:
 this is the 4th consecutive corner in the deferral-net x mid-round-graft seam — the root fix aims to close the
 family; if it resists, the cleaner dissolution is the Stage-3 resolved-IR boundary (the spike showed it closes).
+
+Round-10 batch INTEGRATED: 56c4f93 cherry-picked clean as 8336387 (targeted 338 green; FULL mypy 201 clean;
+black clean; corpus BYTE-IDENTICAL 151/0/0/0; batch's own full suite 1902/2). F1 = the ROOT fix, not the
+fallback: a graft-capable call that cannot resolve this visit WITHHOLDS its terminator's out-edges until the
+call resolves, so the pre-graft phantom path never enters the graph by construction — depth-agnostic, closes
+the whole deferral-net x mid-round-graft corner family (the transitive post-diamond variant fixed for free).
+Critical honest narrowing: the trigger is genuinely GRAFT-CAPABLE calls only (library composites / user
+callables), recorded in _expand_call before operand-driven rejection can defer — a broad "any deferred PyCall"
+trigger regressed 3 deferral-selection tests (casts/conversions/reductions/intrinsics never graft, so their
+deferral report-selection must stay unperturbed). Decisive gate MET: Codex's Probe ACCEPT 12867 B, Control
+ACCEPT 12329 B, transitive post-diamond variant ACCEPT 13121 B; round-8 diverging-arm graft tests green; ZERO
+accept/reject suite deltas after the narrowing. F2: the folded-dataclass render arm enters digit-safe
+fabrication only when a cap-tripping wide int is recursively reachable, else native repr()/format()
+(Python-byte-identical — nested __qualname__, custom __repr__/__format__ preserved); wide-field test still
+hex-located. Trial: trial/s2-r10-stack at 8336387; round-11 pair follows (the closing round if clean); tag
+freeze-1 HELD for the maintainer's manual review after the loop closes.
