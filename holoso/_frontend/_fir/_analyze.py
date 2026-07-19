@@ -369,6 +369,7 @@ class Analyzer:
         self._intrinsic_calls: set[int] = set()
         self._cast_calls: set[int] = set()  # runtime float()/int()/bool() casts (identity or conversion at emission)
         self._conversion_calls: set[int] = set()  # list()/tuple() layout conversions over aggregates
+        self._graftable_calls: set[int] = set()  # op ids that would reach the graft path (library composite/user fn)
         self._subscript_selections: dict[int, tuple[int, ...]] = {}  # op id -> source leaf ordinals
         self._conversion_routes: dict[int, tuple[int, ...]] = {}  # op id -> permuted source ordinals (transpose)
         self._construction_calls: dict[int, tuple[BindingId | None, ...]] = {}  # record builds: per-field sources
@@ -397,7 +398,9 @@ class Analyzer:
         self._transfer_deferrals: dict[int, LocatedRejection] = {}  # op id -> rejection deferred behind a store
         # The live worklist state, instance-held so a mid-round graft can reconcile it with the CFG it mutates: a
         # graft that replaces a block's terminator retracts the recorded out-edges of the replaced terminator and
-        # drops any successor thereby left with no in-edge, so its stale env is re-derived by the continuation.
+        # drops any successor thereby left with no in-edge, so its stale env is re-derived by the continuation. A
+        # block with an unresolved (deferred) call withholds its terminator's edges until the call resolves, so a
+        # graft never has to unwind a phantom path carrying the call's unbound result.
         self._executable_edges: set[tuple[BlockId, BlockId]] = set()
         self._executable_blocks: set[BlockId] = set()
         self._block_in: dict[BlockId, _Env] = {}
@@ -577,6 +580,7 @@ class Analyzer:
         self._intrinsic_calls = set()
         self._cast_calls = set()
         self._conversion_calls = set()
+        self._graftable_calls = set()
         self._subscript_selections = {}
         self._conversion_routes = {}
         self._construction_calls = {}
@@ -927,6 +931,8 @@ class Analyzer:
             env = block_in[block_id].copy()
             block = unit.blocks[block_id]
             index = 0
+            terminator_before = block.terminator  # a graft replaces it; edge withholding keys on this staying put
+            deferred_call = False
             while index < len(block.ops):
                 op = block.ops[index]
                 try:
@@ -943,6 +949,7 @@ class Analyzer:
                     if not self._violations_pending():
                         raise
                     self._transfer_deferrals[id(op)] = error
+                    deferred_call = deferred_call or id(op) in self._graftable_calls
                     index += 1
                     continue
                 if self._transfer_deferrals:
@@ -950,6 +957,18 @@ class Analyzer:
                 if expanded:
                     continue  # the graph changed under us: re-run this op slot (now a different op)
                 index += 1
+            # A deferred GRAFTABLE call (deferred_call is set only for those -- a cast or conversion never grafts and
+            # must keep resolving its terminator so the deferral-net report selection is unperturbed) may graft on a
+            # later revisit once its operands promote, displacing this block's terminator. Recording the pre-graft
+            # terminator's edges now would seed the eventual graft's transitive successors with envs derived on the
+            # unbound call result; a bound revisit then joins into them as maybe-unbound -- a phantom rejection at an
+            # innocent downstream read. Withhold the edges entirely while the call is unresolved: the block
+            # re-enqueues when a predecessor re-flows (the very signal that promotes the operands), and its
+            # terminator records edges then -- from the graft continuation, or in place if the call ends up folding
+            # or genuinely rejecting. A call that already grafted this visit leaves the terminator replaced, so let
+            # that jump resolve normally.
+            if deferred_call and block.terminator is terminator_before:
+                continue
             try:
                 successors = self._resolve_terminator(unit, block, env)
             except LocatedRejection as error:
@@ -2236,6 +2255,19 @@ class Analyzer:
             return True
         target = callee_fact.obj
         match = resolve(target)
+        # Mark graftability BEFORE any operand-driven rejection can defer this call: a library composite inlines its
+        # stub, and a user function/method/callable inlines its body -- both reach the graft path below, whose graft
+        # displaces this block's terminator. The worklist withholds a block's terminator edges only for a DEFERRED
+        # graftable call; a cast, conversion, reduction, or intrinsic never grafts, so its deferral leaves the
+        # terminator in place and must keep recording edges (the deferral-net report selection depends on it).
+        if isinstance(match, Library) or (
+            not isinstance(match, Intrinsic)
+            and (
+                isinstance(target, (types.FunctionType, types.MethodType))
+                or isinstance(getattr(type(target), "__call__", None), types.FunctionType)
+            )
+        ):
+            self._graftable_calls.add(id(call))
         stub_display: str | None = None
         if isinstance(match, Library):
             reduction = any(target is fn for fn in (np.max, np.amax, np.mean))
@@ -2655,15 +2687,15 @@ class Analyzer:
             else:
                 argument = source
             block.ops.append(StorePlace(Local(fresh(param)), argument, call.origin, StoreRole.SOURCE))
-        # A revisit graft replaces a terminator an earlier visit may have already resolved (the call deferred
-        # behind a pending violation, so the visit ran past it): the edges recorded for the replaced terminator
-        # -- every recorded out-edge of this block, since out-edges are recorded only at ITS terminator's
-        # resolution -- would otherwise survive as phantom edges from this block to the continuation's
-        # successors, leaking a path that skips the graft into the stable graph. Retract them, and drop the env
-        # of any successor thereby left with no in-edge: it was derived on the phantom path with the call result
-        # unbound, and leaving it standing would poison the continuation's later join into that same successor
-        # (bound-joins-unbound = maybe-unbound) instead of a clean replace. The displaced terminator re-records
-        # its edges -- and re-establishes those successors' envs -- from the continuation when that executes.
+        # A revisit graft replaces a terminator an earlier visit resolved in place (the call folded on an all-Known
+        # operand set, then a later join promoted an operand to residual and it grafts): the edges recorded for the
+        # replaced terminator would otherwise survive as phantom edges from this block to the continuation's
+        # successors, leaking a path that skips the graft into the stable graph. Retract them, and drop the env of
+        # any successor thereby left with no in-edge so the continuation re-establishes it by clean replace rather
+        # than joining into a stale fact. (A call that DEFERRED never recorded these edges -- edge withholding for
+        # an unresolved call keeps the pre-graft terminator's phantom path, and its unbound-result poison, out of
+        # the graph by construction -- so this handles only the resolve-in-place-then-graft case, where the stale
+        # successor facts are bound and merely outdated.)
         retracted = {edge for edge in self._executable_edges if edge[0] == block.id}
         self._executable_edges -= retracted
         for _, orphan in retracted:

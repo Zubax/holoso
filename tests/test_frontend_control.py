@@ -1094,6 +1094,65 @@ def test_raise_interpolating_a_dataclass_with_a_wide_field_is_located() -> None:
     assert excinfo.value.location is not None and "raise ValueError" in (excinfo.value.location.line or "")
 
 
+def test_raise_interpolating_a_narrow_nested_dataclass_matches_python_qualname() -> None:
+    # R10-F2: the digit-safe field-by-field fabrication is reserved for records that actually carry a cap-tripping
+    # wide int. A NARROW record must render byte-identically to Python's f-string, which spells the dataclass by
+    # its __qualname__ (Outer.Cfg), not the bare __name__ (Cfg) the unconditional fabrication emitted.
+    from dataclasses import dataclass
+
+    class Outer:
+        @dataclass
+        class Cfg:
+            mask: int
+
+    expected = f"cfg={Outer.Cfg(7)}"  # Python's own spelling, qualname-qualified
+
+    class Probe:
+        def __init__(self) -> None:
+            self.armed = True
+
+        def step(self, advance: bool) -> bool:
+            cfg = Outer.Cfg(7)
+            if advance:
+                raise ValueError(f"cfg={cfg}")
+            return self.armed
+
+    with pytest.raises(UnsupportedConstruct) as excinfo:
+        lower(Probe().step)
+    assert expected in str(excinfo.value)
+    assert ".Outer.Cfg(mask=7)" in str(excinfo.value)  # qualified, not the bare 'Cfg(mask=7)' fabrication
+
+
+def test_raise_interpolating_a_narrow_custom_repr_dataclass_uses_its_repr() -> None:
+    # R10-F2: a narrow dataclass with a custom __repr__ must render through that repr, not the synthetic field
+    # list the unconditional fabrication produced. Only a reachable wide int forces the digit-safe fabrication.
+    from dataclasses import dataclass
+
+    @dataclass
+    class Sized:
+        v: int
+
+        def __repr__(self) -> str:
+            return f"<Sized {self.v:#x}>"
+
+    expected = f"s={Sized(255)}"  # '<Sized 0xff>', not the fabricated 'Sized(v=255)'
+
+    class Probe:
+        def __init__(self) -> None:
+            self.armed = True
+
+        def step(self, advance: bool) -> bool:
+            s = Sized(255)
+            if advance:
+                raise ValueError(f"s={s}")
+            return self.armed
+
+    with pytest.raises(UnsupportedConstruct) as excinfo:
+        lower(Probe().step)
+    assert expected in str(excinfo.value)
+    assert "Sized(v=" not in str(excinfo.value)  # the synthetic field list must not leak
+
+
 def test_wide_integer_render_honors_a_runtime_lowered_digit_cap() -> None:
     # R8-2 round-8 (R8-3): the decimal-digit ceiling is checked against CPython's cap read AT CALL TIME, not the
     # import-time default. A runtime-lowered cap (sys.set_int_max_str_digits) must push an integer between the

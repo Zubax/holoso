@@ -466,6 +466,87 @@ def test_deferred_call_graft_retracts_stale_edges_with_branch() -> None:
     assert str(probe.value) == str(control.value)
 
 
+def test_deferred_call_graft_both_arms_sibling_accepts() -> None:
+    # R10-F1 freeze-blocker: a synthesizable kernel whose deferred-then-grafted call is followed by a branch whose
+    # fall-through arm is a TRANSITIVE successor of the graft block (reached through the empty else-landing). The
+    # pre-graft terminator's phantom out-edges seeded that transitive block with the call result unbound; the
+    # graft's one-edge-deep orphan-drop cleaned the direct successors but left the transitive one standing, and the
+    # continuation's later join turned its bound value maybe-unbound -- a nonsense "local 'y' may be unbound" at the
+    # fall-through return. The control (single return, no branch after the call) proves the whole feed synthesizes;
+    # the probe must synthesize too, not reject. Withholding a deferred call's terminator edges keeps the phantom
+    # path -- and its poison -- out of the graph entirely.
+    class Probe:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def step(self, x: float, flag: bool, pick: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2**53 + 1
+                q = 2**64
+            self.t = u
+            a = np.array([q, x])
+            y = np.dot(a, a)
+            if pick:
+                return y + 1.0  # type: ignore[no-any-return]
+            return y + 2.0  # type: ignore[no-any-return]
+
+    class Control:  # differs only by the branch-after-call: a single return
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def step(self, x: float, flag: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2**53 + 1
+                q = 2**64
+            self.t = u
+            a = np.array([q, x])
+            y = np.dot(a, a)
+            return y + 1.0  # type: ignore[no-any-return]
+
+    ops = default_ops(FloatFormat(8, 23))
+    probe = holoso.synthesize(Probe().step, ops, name="graft_both_arms_probe")
+    control = holoso.synthesize(Control().step, ops, name="graft_both_arms_ctrl")
+    assert len(probe.verilog_output.verilog) > 0
+    assert len(control.verilog_output.verilog) > 0
+
+
+def test_deferred_call_graft_post_diamond_merge_accepts() -> None:
+    # R10-F1 transitive-depth lock: the same deferred-then-grafted call, now with a full diamond after it whose two
+    # arms both assign a local and RECONVERGE at a merge block that reads it. The merge is two edges downstream of
+    # the graft block; a one-edge-deep orphan-drop cannot reach it, so the phantom-unbound env survived there and
+    # the merge's read spuriously rejected ("local 'z' may be unbound"). Edge withholding is depth-agnostic: the
+    # phantom successors are never seeded, so the diamond and its merge analyze cleanly.
+    class ProbeMerge:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def step(self, x: float, flag: bool, pick: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2**53 + 1
+                q = 2**64
+            self.t = u
+            a = np.array([q, x])
+            y = np.dot(a, a)
+            if pick:
+                z = y + 1.0
+            else:
+                z = y + 2.0
+            return z + 3.0  # type: ignore[no-any-return]
+
+    ops = default_ops(FloatFormat(8, 23))
+    result = holoso.synthesize(ProbeMerge().step, ops, name="graft_post_diamond_merge")
+    assert len(result.verilog_output.verilog) > 0
+
+
 def test_mixed_return_dedupes_public_alias_keeps_distinct_leaf() -> None:
     class Mixed:
         def __init__(self) -> None:

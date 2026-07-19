@@ -392,11 +392,36 @@ def _decimal_digit_ceiling() -> int:
     return min(_MAX_DECIMAL_DIGITS, runtime - _DECIMAL_DIGIT_MARGIN)
 
 
-def _int_spelling(value: int) -> str:
+def _is_wide_int(value: int) -> bool:
     # 30103/100000 slightly overestimates log10(2), so the digit bound errs toward hex, never toward the cap.
-    if value.bit_length() * 30103 // 100000 + 1 > _decimal_digit_ceiling():
-        return f"{value:#x}"
-    return str(value)
+    return value.bit_length() * 30103 // 100000 + 1 > _decimal_digit_ceiling()
+
+
+def _int_spelling(value: int) -> str:
+    return f"{value:#x}" if _is_wide_int(value) else str(value)
+
+
+def _contains_wide_int(value: object) -> bool:
+    """
+    Whether any integer reachable through the value's standard structure would trip the digit cap. A dataclass
+    is probed through EVERY field, not only its repr=True ones: a custom __repr__/__format__ may decimalize a
+    field the generated repr would hide, so the crash-avoidance must not assume the generated traversal.
+    """
+    match value:
+        case bool():
+            return False
+        case int():
+            return _is_wide_int(value)
+        case list() | tuple():
+            return any(_contains_wide_int(item) for item in value)
+        case range():
+            return any(_is_wide_int(bound) for bound in (value.start, value.stop, value.step))
+        case slice():
+            return any(_contains_wide_int(part) for part in (value.start, value.stop, value.step))
+        case _ if is_dataclass(value) and not isinstance(value, type):
+            return any(_contains_wide_int(getattr(value, f.name)) for f in fields(value))
+        case _:
+            return False
 
 
 def render_interpolation(value: object) -> str:
@@ -428,13 +453,17 @@ def _render_value(value: object, nested: bool) -> str:
             parts = (value.start, value.stop, value.step)
             return f"slice({', '.join(_render_value(part, nested=True) for part in parts)})"
         case _ if is_dataclass(value) and not isinstance(value, type):
-            # A folded StaticRecord reconstructs the user's dataclass; its generated repr decimalizes every field,
-            # so a wide int field would crash on the conversion cap. Spell it as the dataclass repr does -- only
-            # repr=True fields, in declaration order -- but route each value back through the digit-safe renderer.
-            body = ", ".join(
-                f"{f.name}={_render_value(getattr(value, f.name), nested=True)}" for f in fields(value) if f.repr
-            )
-            return f"{type(value).__name__}({body})"
+            # A folded StaticRecord reconstructs the user's dataclass. Only INTERCEPT when a wide int is actually
+            # reachable: the generated repr would then decimalize it and crash on the conversion cap, so spell the
+            # record field-by-field through the digit-safe renderer (repr=True fields, declaration order). With no
+            # wide int present, native repr/format is byte-identical to Python's f-string -- nested qualname, a
+            # custom __repr__, a custom __format__ all preserved -- which the synthetic field list would discard.
+            if _contains_wide_int(value):
+                body = ", ".join(
+                    f"{f.name}={_render_value(getattr(value, f.name), nested=True)}" for f in fields(value) if f.repr
+                )
+                return f"{type(value).__name__}({body})"
+            return repr(value) if nested else format(value)
         case _:
             return repr(value) if nested else format(value)
 
