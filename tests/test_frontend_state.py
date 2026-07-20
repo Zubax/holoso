@@ -658,10 +658,11 @@ def test_speculated_dead_arm_that_stores_is_refused() -> None:
     assert "state_s" not in [port.name for port in control.ports]  # no deferral, so the dead arm is pruned
 
 
-def test_speculated_dead_arm_without_a_store_still_compiles() -> None:
-    # The refusal above is scoped to the harm. An arm that stores nothing cannot promote an attribute to runtime
-    # state, and emitting it produces hardware byte-identical to the same kernel with the guard deleted, so
-    # refusing it would cost accepts for nothing. Both spellings must synthesize and agree with Python.
+def test_speculated_dead_arm_without_a_store_is_refused_too() -> None:
+    # The refusal is deliberately unconditional, and this kernel is why it cannot be narrowed to arms that
+    # store. An inert arm looks harmless and is not: it poisons the phi at the merge, which keeps a DOWNSTREAM
+    # guard residual so that guard's store does the promoting. Refusing here costs an accept that would have
+    # been correct; admitting it cost a silent miscompile. See TODO.md for the measured trade.
     class Inert:
         def __init__(self) -> None:
             self.t = 0.0
@@ -679,14 +680,15 @@ def test_speculated_dead_arm_without_a_store_still_compiles() -> None:
                 pass
             return x + 1.0
 
-    result = holoso.synthesize(Inert().step, default_ops(FloatFormat(8, 23)), name="defer_dead_arm_inert")
-    assert float(result.numerical_model.elaborate().run(2.0, False)[0]) == Inert().step(2.0, False)
+    with pytest.raises(UnsupportedConstruct, match="prove unreachable"):
+        holoso.synthesize(Inert().step, default_ops(FloatFormat(8, 23)), name="defer_dead_arm_inert")
 
 
-def test_store_after_an_inert_speculated_arm_still_compiles() -> None:
-    # The store test is scoped to the region reachable ONLY through the speculated arm. A branch reconverges, so
-    # a store after the merge runs on the taken path regardless and promotes nothing the speculation is
-    # responsible for; counting it refused any kernel that merely stores after an inert guard.
+def test_store_after_an_inert_speculated_arm_is_refused_too() -> None:
+    # Also refused, and this is the cost side of the unconditional rule: the store here really does run on the
+    # taken path regardless. Scoping the check to the arm's exclusive region to spare exactly this shape was
+    # tried and silently disabled the whole check inside a loop, where the back-edge puts the dead arm within
+    # the live arm's reach and the exclusive region is always empty. The accept is not worth that.
     class MergeStore:
         def __init__(self) -> None:
             self.t = 0.0
@@ -706,10 +708,8 @@ def test_store_after_an_inert_speculated_arm_still_compiles() -> None:
             self.s = x * 2.0  # on the live path, reached from both arms
             return self.s
 
-    result = holoso.synthesize(MergeStore().step, default_ops(FloatFormat(8, 23)), name="defer_merge_store")
-    # `s` is returned, so the exit dedups it onto its own state port rather than emitting a separate out_0.
-    outputs = dict(zip([port.name for port in result.output_ports], result.numerical_model.elaborate().run(3.0, False)))
-    assert float(outputs["state_s"]) == MergeStore().step(3.0, False)
+    with pytest.raises(UnsupportedConstruct, match="prove unreachable"):
+        holoso.synthesize(MergeStore().step, default_ops(FloatFormat(8, 23)), name="defer_merge_store")
 
 
 def test_speculated_dead_store_does_not_silently_miscompile() -> None:
@@ -777,6 +777,72 @@ def test_speculated_dead_arm_store_does_not_strand_the_rank_walk() -> None:
     with pytest.raises(UnsupportedConstruct) as refusal:
         holoso.synthesize(Probe().step, default_ops(FloatFormat(8, 23)), name="dead_arm_rank_walk")
     assert refusal.value.location is not None  # a diagnostic, where a bare KeyError used to escape
+
+
+def test_speculated_dead_store_inside_a_loop_is_refused() -> None:
+    # The miscompile witness with its guard moved inside a `while`. A narrowing that tested only the region
+    # reachable EXCLUSIVELY through the speculated arm silently stopped checking anything here: the back-edge
+    # puts the dead arm within the live arm's reach, so the difference is empty for every branch in a loop body
+    # and the kernel returned 20.0 against Python's 10.0. The check is unconditional so this cannot recur.
+    class LoopDeadStore:
+        def __init__(self) -> None:
+            self.t = 0.0
+            self.s = 1 + 2**-30
+
+        def step(self, x: float, flag: bool, run: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2**53 + 1
+                q = 2**64
+            while run:
+                self.t = u
+                a = np.array([q, x])
+                if a.shape[0] > 5:  # statically false; its store must never reach hardware
+                    self.s = 7.0
+                run = False
+            if self.s > 1:
+                return 10.0
+            return 20.0
+
+    assert LoopDeadStore().step(2.0, False, True) == 10.0
+    with pytest.raises(UnsupportedConstruct, match="prove unreachable"):
+        holoso.synthesize(LoopDeadStore().step, default_ops(FloatFormat(8, 23)), name="loop_dead_store")
+
+
+def test_inert_speculated_arm_poisoning_a_later_guard_is_refused() -> None:
+    # Why the refusal cannot be scoped to arms that store. NEITHER arm here stores; they only assign a local.
+    # But the merge phi over them stays residual because the branch was speculated, so the LATER guard on `g`
+    # never folds and its store is emitted -- promoting `s` to runtime state, whose reset rounds in the carrier.
+    # Narrowing the check to storing arms admitted this and returned 20.0 against Python's 10.0.
+    class PhiPoison:
+        def __init__(self) -> None:
+            self.t = 0.0
+            self.s = 1 + 2**-30
+
+        def step(self, x: float, flag: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2**53 + 1
+                q = 2**64
+            self.t = u
+            a = np.array([q, x])
+            if a.shape[0] > 5:  # statically false, and stores nothing
+                g = True
+            else:
+                g = False
+            if g:  # the phi stays residual, so this store is emitted
+                self.s = 7.0
+            if self.s > 1:
+                return 10.0
+            return 20.0
+
+    assert PhiPoison().step(2.0, False) == 10.0
+    with pytest.raises(UnsupportedConstruct, match="prove unreachable"):
+        holoso.synthesize(PhiPoison().step, default_ops(FloatFormat(8, 23)), name="phi_poison")
 
 
 def test_phantom_environment_miscompile_is_still_open() -> None:

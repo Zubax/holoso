@@ -865,37 +865,16 @@ class Analyzer:
                 self._block_origin(result.unit, unreached[0]),
             )
 
-    def _reachable(self, result: ResidualUnit, entry: BlockId) -> set[BlockId]:
-        successors: dict[BlockId, list[BlockId]] = {}
-        for source, target in result.executable_edges:
-            successors.setdefault(source, []).append(target)
-        seen = {entry}
-        pending = [entry]
-        while pending:
-            for target in successors.get(pending.pop(), ()):
-                if target not in seen:
-                    seen.add(target)
-                    pending.append(target)
-        return seen
-
-    def _stores_state(self, result: ResidualUnit, dead: BlockId, live: BlockId) -> bool:
-        """
-        Whether the region reachable ONLY through ``dead`` writes a component attribute.
-
-        Blocks the live arm also reaches are excluded: the branch reconverges, so a store there executes on the
-        taken path regardless and promotes nothing that the speculation is responsible for. Counting it would
-        refuse any kernel that merely stores after an inert guard.
-        """
-        exclusive = self._reachable(result, dead) - self._reachable(result, live)
-        return any(isinstance(op, PyStoreAttr) for block_id in exclusive for op in result.unit.blocks[block_id].ops)
-
     def _check_branch_settled(self, result: ResidualUnit, block_id: BlockId, env: _Env) -> None:
         """
         Companion of ``_check_reachability_settled``, run with the env the replay has carried to the terminator.
 
-        Scoped to the harm: a speculated arm matters only if it STORES, because the miscompile is the promotion
-        of an attribute from a folded constant to a runtime slot. An inert arm emits hardware byte-identical to
-        the same kernel with the guard deleted, so refusing it would cost accepts for nothing.
+        Deliberately unconditional. Two narrowings were tried, each meant to spare kernels whose speculated arm
+        looked harmless, and each reintroduced a silent miscompile: testing only arms that store misses an inert
+        arm that poisons the merge phi, keeping a DOWNSTREAM guard residual so ITS store does the promoting, and
+        scoping that test to the arm's exclusive region silently disables it altogether inside a loop, where the
+        back-edge puts the dead arm within the live arm's reach. Judging which speculated arm is harmless needs
+        the very reachability this gate exists because the analyzer got wrong, so it does not try.
         """
         terminator = result.unit.blocks[block_id].terminator
         if not isinstance(terminator, Branch) or terminator.then_target == terminator.else_target:
@@ -905,12 +884,10 @@ class Analyzer:
         if settled is None:
             return
         dead = terminator.else_target if settled else terminator.then_target
-        live = terminator.then_target if settled else terminator.else_target
-        if (block_id, dead) in result.executable_edges and self._stores_state(result, dead, live):
+        if (block_id, dead) in result.executable_edges:
             raise AnalysisRejection(
-                "analysis explored the branch arm that the stabilized facts prove unreachable, and it stores to "
-                "the component, so the emitted logic would not match this source; simplify the condition or the "
-                "value feeding it",
+                "analysis explored the branch arm that the stabilized facts prove unreachable, so the emitted "
+                "logic would not match this source; simplify the condition or the value feeding it",
                 terminator.origin,
             )
 

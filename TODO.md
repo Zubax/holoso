@@ -67,28 +67,35 @@ re-flowing at all. That is the same failure round-10's edge withholding produced
 and it is why `tools/deferral_seam_sweep.py` exists: the seam cannot be judged by argument, only by moving
 counts. What it reports, and NEITHER design dominates:
 
-| family | pre-gate | producer fix | gate (shipped) |
-| --- | --- | --- | --- |
-| dead_arm (54) | 42 accept, 8 raw crashes | 54 accept, 0 crashes | 36 accept, 0 crashes |
-| loop (30) | 21 accept | 21 accept | 21 accept |
-| loop_inner (6) | 5 accept | 4 accept | 5 accept |
+| family | pre-gate | producer fix | narrowed gate | gate (shipped) |
+| --- | --- | --- | --- | --- |
+| dead_arm (54) | 42 accept, 8 crashes | 54 accept, 0 | 36 accept, 0 | 28 accept, 0 |
+| loop (30) | 21 accept | 21 accept | 21 accept | 21 accept |
+| loop_inner (6) | 5 accept | 4 accept | 5 accept | 5 accept |
+| value oracle (3) | all miscompile | all correct | 2 MISCOMPILE | all refused |
 
-The producer fix compiles 18 more dead-arm kernels, and compiles them CORRECTLY rather than refusing them --
-it prunes the dead arm instead of detecting it afterwards, which is the better outcome wherever it applies. It
-was rejected anyway because its one loss is a starved fixed point: a kernel that lowered before it stops
-lowering, and a regression of previously-working code is a worse thing to carry into a freeze than a refusal,
-which is the same reasoning that reverted round-10. The `loop_inner` family exists because the plain `loop`
-family cannot see that difference at all -- it puts the deferring call before the loop, where withholding an
-edge costs nothing -- and a family whose numbers cannot move under the regression it guards is not evidence.
+The producer fix compiles 26 more dead-arm kernels than the shipped gate, and compiles them CORRECTLY rather
+than refusing them -- it prunes the dead arm instead of detecting it afterwards, which is the better outcome
+wherever it applies. It was rejected because its one loss is a starved fixed point: a kernel that lowered
+before it stops lowering, and a regression of working code is worse to carry into a freeze than a refusal,
+the same reasoning that reverted round-10. The narrowed gate bought back 8 accepts and paid with two silent
+miscompiles, which is why the shipped rule is unconditional.
+
+Two families exist because the obvious corpus could not see either regression. `loop_inner` puts the deferring
+call INSIDE the loop, where withholding an edge actually costs something; the plain `loop` family reports
+identical numbers for the producer fix and the baseline. The value oracle compares accepts against Python,
+because the accept/refuse/crash alphabet tallies a wrong answer as a good accept -- which is exactly how both
+narrowing regressions passed a green sweep.
 Retracting the stale mark is not local either:
 destructive environment joins mean removing an edge requires recomputing downstream environments, schemas,
-reachability, W/D discoveries, and phis. The gate costs accepts too, and the refusal is scoped to limit that:
-a speculated arm is refused only if the region reachable EXCLUSIVELY through it stores to the component,
-because the promotion of an attribute to a runtime slot is the harm. The exclusion matters as much as the store
-test -- a branch reconverges, so a walk that does not subtract the live arm's reachable set runs through the
-merge into the rest of the function and refuses any kernel that merely stores after an inert guard. The scoping
-is still conservative rather than exact: a store into an ALREADY-runtime slot promotes nothing yet is refused,
-so some refused kernels were being compiled correctly.
+reachability, W/D discoveries, and phis. The gate costs accepts, and the refusal is deliberately
+UNCONDITIONAL anyway: any settled branch contradicting its own recorded edges refuses, with no attempt to
+judge the speculated arm harmless. Two narrowings were tried to recover those accepts and BOTH reintroduced
+silent miscompiles. Testing only arms that store misses an inert arm which poisons the merge phi, keeping a
+DOWNSTREAM guard residual so that guard's store does the promoting. Scoping the test to the arm's exclusive
+region additionally disables the check outright inside a loop, where the back-edge puts the dead arm within
+the live arm's reach and the difference is always empty. Deciding which arm is harmless needs exactly the
+reachability this gate exists because the analyzer got wrong, so it does not try. Both witnesses are pinned.
 
 A SILENT MISCOMPILE NEVERTHELESS REMAINS, by a route the gate structurally cannot see, and it is the most
 serious open defect in the compiler. When the phantom environment keeps a stale state fact alive, the condition
@@ -98,10 +105,11 @@ facts, and nothing for the gate to detect. That arm's store still promotes the a
 the reset still rounds in the carrier. `test_phantom_environment_miscompile_is_still_open` pins a witness
 returning 12.0 in Python and 22.0 in E8M23 hardware, correct in E11M52.
 
-The gate closes the route where the condition DOES settle, which is where the majority of observed cases and
-both raw-crash modes lived. It does not close the class. Detecting the remaining route locally is not possible
-in principle: the analyzer cannot know that a fact "should" have been more precise without the correct
-environment, which is exactly what the phantom edge denies it.
+The gate closes the routes where the recorded reachability visibly contradicts the settled facts, which is
+where the majority of observed cases and both raw-crash modes lived. It does not close the class: on the
+surviving route the condition settles too, but as a RUNTIME bool, so there is no contradiction to see.
+Detecting that locally is not possible in principle -- the analyzer cannot know a fact "should" have been more
+precise without the correct environment, which is exactly what the phantom edge denies it.
 
 Besides that, what remains is FALSE REJECTIONS in two flavours: the phantom-environment ones
 (`may be unbound here`), and the ones the gate itself produces on kernels whose speculated arm it cannot prove

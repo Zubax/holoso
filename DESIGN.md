@@ -388,13 +388,14 @@ carrier, so a guard reading it flips and the module silently disagrees with Pyth
 left exactly as it is -- it is what lets the W/D fixpoint discover runtime state, and both attempts to withhold
 it that were built starved loops, since a `Branch` inside a loop body precedes the body's own back-edge.
 Instead a POST-STABILIZATION GATE refuses whenever recorded reachability contradicts the settled facts: a
-branch whose condition disagrees with its own recorded out-edges AND whose dead arm stores to the component, a
+branch whose condition disagrees with its own recorded out-edges, a
 block marked executable that no edge chain reaches, or an execution path out of a region left unreachable. Each
-becomes a located refusal rather than a wrong answer or a bare crash. The store condition scopes the cost to
-the harm -- an inert speculated arm emits hardware byte-identical to the same kernel with the guard deleted, so
-refusing it would buy nothing -- and it is tested over the region reachable EXCLUSIVELY through the dead arm,
-since a branch reconverges and a store past the merge runs on the taken path regardless. The scoping stays
-conservative, as a store into an already-runtime slot promotes nothing yet is refused too. Retracting a
+becomes a located refusal rather than a wrong answer or a bare crash. The branch rule is UNCONDITIONAL: it
+makes no attempt to spare a speculated arm that looks harmless, because two such narrowings were built and
+both reintroduced silent miscompiles -- an inert arm can poison the merge phi so a DOWNSTREAM guard stays
+residual and ITS store promotes, and restricting the test to the arm's exclusive region disables it entirely
+inside a loop, where the back-edge puts the dead arm within the live arm's reach. Judging harmlessness needs
+the reachability this gate exists because the analyzer got wrong. Retracting a
 stale mark instead is deliberately not attempted -- destructive environment joins mean removing an edge
 requires recomputing downstream environments, schemas, reachability, W/D discoveries, and phis. The gate is a
 narrowing, NOT a closure: where the phantom environment keeps a stale state fact alive the condition settles as

@@ -93,6 +93,98 @@ _LOOP = {
 }
 
 
+# Kernels whose accept must be checked against Python, not merely counted. The outcome alphabet alone cannot
+# see a miscompile -- a wrong answer tallies as a good accept, which is exactly how two of them shipped. These
+# carry a reset that is inexact in the target carrier, so if a speculated arm promotes it to runtime state the
+# reset re-materializes narrower and a guard reading it flips. Each entry is (source, args, expected).
+_VALUE_ORACLE = {
+    "dead_store": (
+        """import numpy as np
+
+
+class K:
+    def __init__(self) -> None:
+        self.t = 0.0
+        self.s = 1 + 2**-30
+
+    def step(self, x: float, flag: bool) -> float:
+        if flag:
+            u = 1.0
+            q = 1.0
+        else:
+            u = 2**53 + 1
+            q = 2**64
+        self.t = u
+        a = np.array([q, x])
+        if a.shape[0] > 5:
+            self.s = 7.0
+        if self.s > 1:
+            return 10.0
+        return 20.0
+""",
+        (2.0, False),
+    ),
+    "dead_store_in_loop": (
+        """import numpy as np
+
+
+class K:
+    def __init__(self) -> None:
+        self.t = 0.0
+        self.s = 1 + 2**-30
+
+    def step(self, x: float, flag: bool, run: bool) -> float:
+        if flag:
+            u = 1.0
+            q = 1.0
+        else:
+            u = 2**53 + 1
+            q = 2**64
+        while run:
+            self.t = u
+            a = np.array([q, x])
+            if a.shape[0] > 5:
+                self.s = 7.0
+            run = False
+        if self.s > 1:
+            return 10.0
+        return 20.0
+""",
+        (2.0, False, True),
+    ),
+    "inert_arm_poisons_later_guard": (
+        """import numpy as np
+
+
+class K:
+    def __init__(self) -> None:
+        self.t = 0.0
+        self.s = 1 + 2**-30
+
+    def step(self, x: float, flag: bool) -> float:
+        if flag:
+            u = 1.0
+            q = 1.0
+        else:
+            u = 2**53 + 1
+            q = 2**64
+        self.t = u
+        a = np.array([q, x])
+        if a.shape[0] > 5:
+            g = True
+        else:
+            g = False
+        if g:
+            self.s = 7.0
+        if self.s > 1:
+            return 10.0
+        return 20.0
+""",
+        (2.0, False),
+    ),
+}
+
+
 # The loop family above puts the trigger and the call BEFORE the loop, which cannot exhibit the starvation that
 # disqualified both rejected fixes: those fail only when the deferring call is INSIDE the body, so the branch
 # they hold back precedes the body's own back-edge. These kernels are whole templates for that reason -- a
@@ -180,7 +272,29 @@ def main() -> int:
     print(f"bound: {bound}")
     ops = default_ops(FloatFormat(8, 23))
     totals: dict[str, dict[str, int]] = {}
+    miscompiles = 0
     with tempfile.TemporaryDirectory() as scratch:
+        for label, (source, arguments) in _VALUE_ORACLE.items():
+            path = pathlib.Path(scratch) / f"k_oracle_{label}.py"
+            path.write_text(source)
+            spec = importlib.util.spec_from_file_location(path.stem, path)
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            expected = module.K().step(*arguments)
+            try:
+                built = holoso.synthesize(module.K().step, ops, name=path.stem)
+            except holoso.HolosoError:
+                print(f"  oracle {label:32s} refused (safe)")
+                continue
+            except Exception as error:  # noqa: BLE001
+                print(f"  oracle {label:32s} CRASH:{type(error).__name__}")
+                miscompiles += 1
+                continue
+            actual = float(built.numerical_model.elaborate().run(*arguments)[0])
+            verdict = "OK" if actual == expected else "*** MISCOMPILE ***"
+            miscompiles += actual != expected
+            print(f"  oracle {label:32s} accepted python={expected} hardware={actual}  {verdict}")
         tally: dict[str, int] = {}
         for label, template in _LOOP_INNER.items():
             for feed_name, (wide, wider) in {"wide": ("2**53 + 1", "2**64"), "narrow": ("2.0", "3.0")}.items():
@@ -227,7 +341,10 @@ def main() -> int:
         size = sum(tally.values())
         summary = "  ".join(f"{name}={count}" for name, count in sorted(tally.items()))
         print(f"{family:9s} ({size:3d} kernels)  {summary}")
-    return 1 if any(name.startswith("CRASH") for tally in totals.values() for name in tally) else 0
+    if miscompiles:
+        print(f"{miscompiles} value oracle kernel(s) diverged from Python -- a wrong answer, not a refusal")
+    crashed = any(name.startswith("CRASH") for tally in totals.values() for name in tally)
+    return 1 if (miscompiles or crashed) else 0
 
 
 if __name__ == "__main__":
