@@ -39,6 +39,15 @@ def source_position(origin: OriginStack) -> tuple[tuple[int, int], ...]:
     return tuple((frame.line, frame.column) for frame in reversed(origin))
 
 
+def origin_order(origin: OriginStack) -> tuple[tuple[int, int, str, str], ...]:
+    """
+    A TOTAL order over origin stacks, for deciding which of several equally valid diagnostics to report.
+    Source position leads so the choice reads as source order; the frame identities behind it separate stores
+    that share a line and column in different files, which position alone would leave to set iteration.
+    """
+    return tuple((frame.line, frame.column, frame.file, frame.function) for frame in reversed(origin))
+
+
 def render_rejection(message: str, origin: OriginStack) -> str:
     """
     The user-facing rendering: the ``function:line:column:`` prefix names the PRIMARY frame -- the user call site

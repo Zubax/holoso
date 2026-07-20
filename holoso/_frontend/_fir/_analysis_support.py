@@ -234,6 +234,11 @@ def _join_atoms(a: AtomicFact, b: AtomicFact, origin: OriginStack) -> AtomicFact
     raise AssertionError((a, b))
 
 
+def _deferral_key(error: LocatedRejection) -> tuple[str, tuple[tuple[str, str, int, int], ...]]:
+    """Rendered text first, so the historical selection is preserved, then the origin the text cannot show."""
+    return str(error), tuple((f.file, f.function, f.line, f.column) for f in reversed(error.origin))
+
+
 class DeferredRejection:
     """
     Collects rejections raised across an unordered iteration and re-raises the lexicographically least, so the
@@ -245,7 +250,9 @@ class DeferredRejection:
         self._best: LocatedRejection | None = None
 
     def offer(self, error: LocatedRejection) -> None:
-        if self._best is None or str(error) < str(self._best):
+        # The rendered text alone is not a total order: two leaves can differ only in which file their store
+        # sits in, which the message never names, and then set iteration would decide the public origin.
+        if self._best is None or _deferral_key(error) < _deferral_key(self._best):
             self._best = error
 
     def pending(self) -> bool:

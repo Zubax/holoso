@@ -49,10 +49,13 @@ DO NOT ADD A FIFTH GATE CHECK. The post-stabilization gate grew from one check t
 and every addition was followed by a new route through a dimension it did not model — or, twice, by an evasion
 costing one line of ordinary Python. Two narrowings I made were themselves unsound and had to be reverted.
 `tools/deferral_seam_sweep.py` is the standing check: it carries a VALUE ORACLE (without which a miscompile
-tallies as a good accept, which is how both narrowings passed a green sweep) with one entry per open route, and
-it FAILS on any outcome change to a recorded route — computing the right answer and refusing alike, since both
-mean the record no longer describes the code. It does NOT baseline the per-family accept/refuse tallies; those
-are compared by hand against the table in TODO.md. Untested surfaces, named: `_unroll_seeds`, `_pending_bridge`.
+tallies as a good accept, which is how both narrowings passed a green sweep) with one entry per open route,
+recording the WHOLE observed pair (python, hardware), and it FAILS on any change to either half — the right
+answer, a different wrong answer, a moved Python reference, or a refusal alike, since each means the record no
+longer describes the code. SCOPE, stated because three review rounds each falsified a broader claim about this
+tool: the observable is the kernel's `out_0`, so a divergence confined to a state port is not gated, and the
+per-family accept/refuse tallies are printed rather than baselined — those are compared by hand against the
+table in TODO.md. Untested surfaces, named: `_unroll_seeds`, `_pending_bridge`.
 
 This is the campaign's strongest argument for Stage 4, and a stronger one than the spike made: not "decisions
 should be made once" but "this seam emits wrong hardware and post-hoc gating provably cannot see at least one
@@ -1306,8 +1309,9 @@ the value oracle could not see the phantom-environment or self-assignment miscom
 route that started REFUSING exited 0 (the mirror case, a route that starts computing the right answer, did
 fail). Both fixed: one oracle entry per open route, each reproducing its documented divergence (10→30, 12→22,
 10→20), and any outcome change on a recorded route now fails. Verified by declaring a currently-refusing route
-open and observing exit 1. The brief's "gates on CHANGE" sentence is now true, and its overclaim about family
-tallies -- which are printed, never baselined -- is corrected rather than implemented.
+open and observing exit 1. Its overclaim about family tallies -- which are printed, never baselined -- is
+corrected rather than implemented. (The "gates on CHANGE" sentence was still not true after this round: see
+round 3, where the recorded value turned out to pin only the hardware half.)
 
 ALSO CORRECTED, each verified before acceptance: the ruling's "substantive half holds" for SC2 was FALSE. The
 spike emitter inserts `IntToFloat` by inspecting the type of the HIR node it just generated, with zero explicit
@@ -1323,3 +1327,34 @@ five packet refusals" rather than "every emitter-owned refusal". The spike ledge
 "the branch does not survive" was false when written -- dc76fbf survived in the reflog, and reading it produced
 three of these corrections. It is unreachable from any ref now, so the in-tree copy is what makes it durable
 rather than any claim about reachability.
+
+REVIEW ROUND 3 -- the Claude half found NO serious defect (five comment-accuracy items); the Codex half found
+five, and for the THIRD CONSECUTIVE ROUND falsified a claim I had written about the sweep in the round that
+was supposed to have fixed it. Round 1 claimed it measured all three open routes when it held one. Round 2
+claimed it gated on change when a wrong answer could become a different wrong answer. Round 3: it pinned only
+the HARDWARE half, so the kernel's own Python reference could drift -- Codex changed a witness's Python branch
+from 10.0 to 11.0, hardware stayed 30.0, and the tool printed "KNOWN-OPEN miscompile" and exited 0. Now the
+record is the WHOLE pair and either half moving fails; the exact probe that exited 0 exits 1. The scope is
+also written down rather than left to be inferred: the observable is `out_0`, so a divergence confined to a
+state port is not gated, and family tallies are printed rather than baselined. THE PATTERN IS THE LESSON: each
+round I wrote a claim one dimension broader than what I had actually tested, and the next reviewer found the
+dimension. The fix that finally holds is stating the scope in the same sentence as the claim.
+
+TWO REAL NONDETERMINISM SOURCES, one of them created by the previous round's fix. (a) Promotion-origin
+selection compared `source_position` only, over a SET of discovered stores, so two identically-named helpers in
+different files storing one leaf at the same coordinates alternated across hash seeds -- the later sort key
+could not repair an origin already chosen nondeterministically. Both selections now share one total
+`origin_order` (position first, so it still reads as source order, frame identities behind it). (b) My
+`_state_origin` fallback EXPOSED a second one: `DeferredRejection` broke ties on `str(error)` alone, and two
+leaves can render byte-identically while their origins name different files -- before the fallback both fell
+back to the same root origin, so the tie was invisible. Fixed with a full-origin key behind the rendered text.
+I could NOT reproduce Codex's black-box witness for (b) even at the parent across six seeds, so the regression
+is a unit test on the selection itself, which does fail deterministically before the fix; recorded here because
+an unreproduced witness is weaker evidence than a reproduced one and the next reader should know which it is.
+
+ALSO: `_state_origin` preferred the unfiltered per-round store map over the promotion origin, so a store behind
+a `raise` outranked the real promoter for cross-round verdicts -- the priority is reversed, and the comment
+that claimed the per-round map is always empty there is corrected, since it is not. Comment accuracy per the
+Claude half: the promotion origin is latched at the first promoting round (monotone, so it stays true) rather
+than being a per-analysis minimum, and the stale-leaf key is honestly described as tying for unroll clones of
+one store over two components -- harmlessly, since the message names only the path and the shared origin.

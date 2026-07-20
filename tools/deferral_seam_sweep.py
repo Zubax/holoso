@@ -2,7 +2,8 @@
 Sweep the analyzer's deferral/grafting seam and report accept/refuse/crash counts per kernel family.
 
 The seam is a known-defective area (TODO.md "Known defects"): a call deferred behind a transiently pending
-store violation leaves stale reachability behind, which costs accepts and, on one surviving route, miscompiles.
+store violation leaves stale reachability behind, which costs accepts and, on three surviving routes,
+silently miscompiles.
 Every change near it has to be judged on whether it moves those counts, and prose claims about "the loop family"
 or "the dead-arm family" are unfalsifiable without the corpus that produced them. This generates both families
 into real files -- exec-compiled kernels cannot lower, they raise SourceUnavailable -- and tallies outcomes.
@@ -100,15 +101,16 @@ _LOOP = {
 # carry a reset that is inexact in the target carrier, so if a speculated arm promotes it to runtime state the
 # reset re-materializes narrower and a guard reading it flips. Each entry is (source, args, expected).
 # Routes documented as OPEN in TODO.md, one entry per open route -- an oracle carrying only some of them cannot
-# support a claim about the seam as a whole. The value is the WRONG answer the hardware currently returns, not
-# merely the fact that it is wrong: recording only "diverges" would let one wrong answer silently become a
-# different wrong answer. They miscompile today, so the tool reports them without failing, and fails on ANY
-# change of outcome -- a different wrong value, the right value, or a refusal alike -- because each means the
-# record has stopped describing the code, which is how this seam's earlier claims decayed.
+# support a claim about the seam as a whole. Each records the WHOLE observed pair, (python, hardware): recording
+# only "diverges" would let one wrong answer become a different wrong answer, and recording only the hardware
+# side would let the kernel's own Python result drift while the divergence still "matches". They miscompile
+# today, so the tool reports them without failing, and fails on ANY change to either half of the pair -- the
+# right answer, a different wrong answer, a moved reference, or a refusal alike -- because each means the record
+# has stopped describing the code, which is how this seam's earlier claims decayed.
 _KNOWN_OPEN = {
-    "live_in_poisoned_across_rounds": 30.0,
-    "phantom_environment_keeps_a_stale_gate": 22.0,
-    "self_assignment_defeats_the_runtime_state_check": 20.0,
+    "live_in_poisoned_across_rounds": (10.0, 30.0),
+    "phantom_environment_keeps_a_stale_gate": (12.0, 22.0),
+    "self_assignment_defeats_the_runtime_state_check": (10.0, 20.0),
 }
 
 _VALUE_ORACLE = {
@@ -485,7 +487,7 @@ def main() -> int:
                 print(f"  oracle {label:32s} CRASH:{type(error).__name__}: {str(error)[:60]}")
                 continue
             diverged = actual != expected
-            if diverged and label in _KNOWN_OPEN and actual == _KNOWN_OPEN[label]:
+            if diverged and label in _KNOWN_OPEN and (expected, actual) == _KNOWN_OPEN[label]:
                 # A documented open route (TODO.md), returning exactly the wrong value on record. Reported, but
                 # it does not fail the run: the tool gates on CHANGE, so a known miscompile does not mask a new
                 # one while still leaving room for the routes that are known to be open.

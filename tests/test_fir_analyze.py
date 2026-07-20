@@ -843,3 +843,27 @@ def test_bool_state_stored_a_float_is_a_located_rejection() -> None:
         Analyzer(Flagged().step).fixpoint()
     assert excinfo.value.location is not None and excinfo.value.location.line is not None
     assert "self.mode = 1.0" in excinfo.value.location.line
+
+
+def test_deferred_rejection_selection_is_total_over_equal_messages() -> None:
+    # Two leaves can produce diagnostics whose rendered text is byte-identical while their origins name
+    # different files -- identically-named helper classes in two modules, reached from one call site. Selecting
+    # on the text alone leaves the public origin to whichever the caller happened to offer first, so the winner
+    # must not depend on offer order.
+    from holoso._frontend._fir._analysis_support import DeferredRejection
+    from holoso._frontend._fir._ir import Origin
+
+    def rejection(file: str) -> AnalysisRejection:
+        return AnalysisRejection("state attribute 's' does not exist", (Origin("Comp.setter", 5, 8, file),))
+
+    first, second = rejection("helper_a.py"), rejection("helper_b.py")
+    assert str(first) == str(second)
+    chosen = []
+    for order in ((first, second), (second, first)):
+        deferred = DeferredRejection()
+        for error in order:
+            deferred.offer(error)
+        with pytest.raises(AnalysisRejection) as raised:
+            deferred.raise_if_deferred()
+        chosen.append(raised.value.origin)
+    assert chosen[0] == chosen[1] == first.origin
