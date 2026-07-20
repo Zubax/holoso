@@ -22,6 +22,7 @@ def transitive_holoso_imports(root_module: str) -> set[str]:
     if _source_and_anchor(root_module)[0] is None:
         raise ValueError(f"import-guard root {root_module!r} did not resolve to a .py module")
     seen: set[str] = set()
+    modules: set[str] = set()
     pending = [root_module]
     while pending:
         module = pending.pop()
@@ -30,11 +31,12 @@ def transitive_holoso_imports(root_module: str) -> set[str]:
         seen.add(module)
         source, anchor = _source_and_anchor(module)
         if source is None:
-            continue
+            continue  # `from pkg import Name` also yields `pkg.Name`, which resolves to nothing and is not a module
+        modules.add(module)
         for imported in _imported_modules(ast.parse(source.read_text(encoding="utf-8")), anchor):
             if imported.startswith("holoso") and imported not in seen:
                 pending.append(imported)
-    return seen - {root_module}
+    return modules - {root_module}
 
 
 def forbidden_imports(root_module: str, forbidden_prefix: str) -> list[str]:

@@ -322,6 +322,27 @@ class CallPlan:
     construction: "tuple[BindingId | None, ...] | None" = None  # per-field source bindings; None = default-filled
 
 
+def verify_plan_totality(result: ResidualUnit) -> None:
+    """
+    Every op emission will consult a plan for HAS one, checked before the walk instead of during it.
+
+    The restructure's whole direction is emission consuming a closed typed plan surface, so a plan that is
+    missing is an analyzer bug, not an emission accident -- but the emitter reaches its tables with a bare
+    subscript, which turns that bug into a KeyError from deep inside a walk with no indication of which op or
+    which block. Failing here names both. This is a scaffold: it grows a row per table as the tables become
+    total (docs/campaign.md, Stage 4 M0).
+    """
+    missing = [
+        (block_id, op)
+        for block_id in result.executable_blocks
+        for op in result.unit.blocks[block_id].ops
+        if isinstance(op, PyCall) and op.dst not in result.call_plans
+    ]
+    assert not missing, "; ".join(
+        f"block {block_id} op {op.__class__.__name__} at {op.origin[0]} has no call plan" for block_id, op in missing
+    )
+
+
 @dataclass(slots=True)
 class ResidualUnit:
     """

@@ -69,7 +69,7 @@ from ..._hir import (
     Select,
     Type,
 )
-from ._analyze import Analyzer, CallLowering, CallPlan, ResidualUnit
+from ._analyze import Analyzer, CallLowering, CallPlan, ResidualUnit, verify_plan_totality
 from ._fact import (
     AggregateFact,
     AggregateLayout,
@@ -177,7 +177,9 @@ class EmissionRejection(LocatedRejection, UnsupportedConstruct):
 
 def lower_fir(kernel: object) -> Hir:
     """The front-end pipeline: build, analyze to the W/D fixed point, emit HIR from the analysis plan."""
-    return _Emitter(Analyzer(kernel).fixpoint()).emit()
+    result = Analyzer(kernel).fixpoint()
+    verify_plan_totality(result)
+    return _Emitter(result).emit()
 
 
 def _carrier_float(value: object, origin: OriginStack) -> float:

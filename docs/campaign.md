@@ -1527,3 +1527,20 @@ is pinned against a silent ABI flip; and the standing sweep measures all three o
 seven over-broad claims of mine were found and corrected, two of my own changes were reverted on reviewer
 evidence, and two of my tests were found vacuous or drift-prone and rebuilt. The three silent miscompiles are
 untouched and pinned, as intended -- they are Stage 4's acceptance criteria, not this step's work.
+
+
+STAGE 4 OPENS: M0 LANDED. Two guards, both written to what the X5 ruling actually established rather than to
+the criterion the spike failed. The import guard is a RATCHET, not a ban: emission today reaches sixteen
+frontend decision modules, that set is recorded as DEBT, and the test fails in BOTH directions -- an addition
+is a regression, a removal must be spent in the commit that earns it. It is deliberately not a transitive
+`holoso._errors` ban, which nothing that emits HIR can satisfy (`_hir._const` constructs `UnsupportedConstruct`
+for NaN), and which is how the spike's SC2 failed. A companion guard caps EmissionRejection sites at today's
+42, the debt M5 retires. Found and fixed on the way: `tests/_importguard.py` counted `from pkg import Name` as
+a module, so the closure read 217 frontend "modules" where 16 exist -- prefix verdicts were unaffected, but a
+ratchet reporting inflated numbers is a ratchet nobody will trust; a guard now asserts the closure contains
+only real modules.
+
+The plan-totality validator runs BEFORE emission walks: every `PyCall` in an executable block must have a call
+plan, and the failure names the block and the origin. Emission reaches that table with a bare subscript, so
+without it an analyzer bug surfaces as a `KeyError` from deep inside a walk that names neither. Verified by
+deleting a plan the analyzer did record. Corpus BYTE-IDENTICAL (151/151); 881 passed; mypy 205; black clean.
