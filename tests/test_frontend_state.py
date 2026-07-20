@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 import holoso
-from holoso import FloatFormat, SourceUnavailable, SynthesisError, UnsupportedConstruct
+from holoso import FloatFormat, SourceUnavailable, UnsupportedConstruct
 from holoso._frontend import lower
 from holoso._hir import Branch, FloatAdd, FloatConst, FloatDiv, IntType, Operation, optimize, Phi, Select, StateRead
 
@@ -517,9 +517,11 @@ def test_graftable_call_deferral_false_rejection_witnesses() -> None:
     # EXECUTABLE RECORD of an OPEN defect class -- these outcomes are documented defects, not desired behavior.
     # Each kernel below is honest Python that a correct compiler would synthesize; the analyzer refuses it because
     # a graftable call deferred behind a transiently-pending store violation publishes out-edges carrying its
-    # not-yet-computed result, and a downstream read of that result joins to maybe-unbound. The class is scoped to
-    # false rejections only (no kernel that should reject is accepted), is documented in TODO.md, and is the class
-    # the Stage-4 resolved-IR restructure dissolves by residualizing after the fixpoint instead of during it.
+    # not-yet-computed result, and a downstream read of that result joins to maybe-unbound. These are the residue
+    # of the PHANTOM-ENVIRONMENT mechanism, the half the one-edge-deep graft retraction cannot reach; the
+    # executable-marking half is fixed (see the sibling tests above). Documented in TODO.md; the class is the one
+    # the Stage-4 restructure dissolves by residualizing after the fixpoint instead of during it. Their residue is
+    # false rejections and, in the state-condition shape below, a raw crash -- never a silently wrong value.
     #
     # The kernels live here rather than only in prose because prose transcriptions of them have silently rotted:
     # dropping the both-arms read or the wide-int feed makes a shape vanish. When the restructure lands these stop
@@ -597,15 +599,15 @@ def test_graftable_call_deferral_false_rejection_witnesses() -> None:
         assert (location.line or "").strip().startswith(blamed), label
 
 
-def test_graftable_call_deferral_emits_a_statically_dead_arm() -> None:
-    # EXECUTABLE RECORD of an OPEN defect (see TODO.md), NOT desired behavior. The second mechanism of the
-    # graft-deferral class: a condition computed from the still-pending call result is read as a runtime bool
-    # instead of deferring, so both arms are marked executable. Executable markings are add-only, so when the
-    # condition later folds to a constant the dead arm stays marked -- and is analyzed and emitted. Here the
-    # dead arm's store manufactures a PUBLIC STATE PORT for an attribute the kernel never assigns, which is
-    # ABI-visible in the generated module. The control differs only in the two constants that arm the deferral.
-    # Note the graftable call here is np.array itself: nothing reads a deferred result, so this isolates the
-    # executable-marking mechanism from the phantom-unbound-environment one.
+def test_speculated_dead_arm_is_pruned_not_emitted() -> None:
+    # A condition whose operand is still unavailable must not be read as a runtime bool: doing so opened BOTH
+    # arms, and because marks are add-only the arm the stabilized facts later prove dead stayed open and was
+    # emitted. This kernel used to ship a public `state_s` port whose register carried the dead arm's store as
+    # its only functional driver, inert solely because the sequencer's selector was hard-loaded to zero. Both
+    # spellings must now synthesize with no such port; they differ only in the two constants that arm the
+    # deferral. Nothing here reads a deferred result, which isolates the executable-marking mechanism from the
+    # phantom-unbound-environment one -- and note np.array is a CONVERSION, never grafted, so this mechanism
+    # needs only a deferred call, not a graftable one.
     class Probe:
         def __init__(self) -> None:
             self.t = 0.0
@@ -649,20 +651,139 @@ def test_graftable_call_deferral_emits_a_statically_dead_arm() -> None:
             return x + r + self.s
 
     ops = default_ops(FloatFormat(8, 23))
-    probe = holoso.synthesize(Probe().step, ops, name="graft_defer_dead_arm")
-    control = holoso.synthesize(Control().step, ops, name="graft_defer_dead_arm_ctrl")
-    probe_ports = [port.name for port in probe.ports]
-    control_ports = [port.name for port in control.ports]
-    assert "state_s" not in control_ports  # the dead arm is correctly pruned without the deferral
-    assert "state_s" in probe_ports  # the defect: a port for a store Python never executes
+    with pytest.raises(UnsupportedConstruct, match="prove unreachable") as refusal:
+        holoso.synthesize(Probe().step, ops, name="defer_dead_arm")
+    assert refusal.value.location is not None  # located, so the implicated branch is visible
+    control = holoso.synthesize(Control().step, ops, name="defer_dead_arm_ctrl")
+    assert "state_s" not in [port.name for port in control.ports]  # no deferral, so the dead arm is pruned
 
 
-def test_graftable_call_deferral_side_effect_branch_crashes_unlocated() -> None:
-    # EXECUTABLE RECORD of an OPEN defect (see TODO.md), NOT desired behavior. The most severe manifestation:
-    # when the pending call has a state side effect that a following branch tests, the stale executable marking
-    # leaves a phi with no live predecessor and a RAW RuntimeError escapes HIR emission -- not a SynthesisError,
-    # not located. The kernel is honest Python returning 10.0. Pinned so the restructure's closure is detectable:
-    # when this stops crashing it must become a located refusal or, better, synthesis.
+def test_speculated_dead_store_does_not_silently_miscompile() -> None:
+    # Why emitting a speculated-then-dead arm is unsound rather than merely wasteful, and the sharpest available
+    # witness for it. A store on the dead arm promotes `s` from a read-only constant -- folded at binary64, where
+    # 1 + 2**-30 is greater than 1 -- into a runtime state slot whose RESET is materialized in the E8M23 carrier,
+    # where it rounds to exactly 1.0. The guard `self.s > 1` therefore flipped, and a kernel returning 10.0 in
+    # Python returned 20.0 in hardware with no error raised. The same hazard is guarded for arms dead by
+    # `if False:` and by a static comparison; this is the third kind, dead by fold-after-marking. Note the
+    # divergence is format-dependent -- E11M52 was correct throughout -- so the assertion below must run in a
+    # carrier narrower than the reset's binary64 value.
+    class Miscompiled:
+        def __init__(self) -> None:
+            self.t = 0.0
+            self.s = 1 + 2**-30
+
+        def step(self, x: float, flag: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2**53 + 1
+                q = 2**64
+            self.t = u
+            a = np.array([q, x])
+            if a.shape[0] > 5:  # statically false; its store must never reach hardware
+                self.s = 7.0
+            if self.s > 1:
+                return 10.0
+            return 20.0
+
+    assert Miscompiled().step(2.0, False) == 10.0  # the Python answer the hardware contradicted with 20.0
+    with pytest.raises(UnsupportedConstruct, match="prove unreachable") as refusal:
+        holoso.synthesize(Miscompiled().step, default_ops(FloatFormat(8, 23)), name="dead_store_miscompile")
+    assert refusal.value.location is not None
+
+
+def test_speculated_dead_arm_store_does_not_strand_the_rank_walk() -> None:
+    # The same speculated-arm mechanism reached the plan replay as a bare KeyError rather than a diagnostic:
+    # `rank` is built from the blocks an executable edge chain REACHES, while the replay iterates the add-only
+    # MARKED set, so a marked-but-unreachable block carrying a store indexed `rank` and died with no message,
+    # no location, and no exception type a user could act on. Two arms are needed to strand the block.
+    class Probe:
+        def __init__(self) -> None:
+            self.t = 0.0
+            self.s = 0.0
+
+        def step(self, x: float, flag: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2**53 + 1
+                q = 2**64
+            self.t = u
+            a = np.array([q, x])
+            y = np.dot(a, a)  # noqa: F841 -- the deferred call is the trigger; its result is deliberately unused
+            if a.shape[0] > 5:  # statically false
+                if flag:
+                    self.s = 7.0
+                else:
+                    self.s = 8.0
+            return x + self.s
+
+    with pytest.raises(UnsupportedConstruct) as refusal:
+        holoso.synthesize(Probe().step, default_ops(FloatFormat(8, 23)), name="dead_arm_rank_walk")
+    assert refusal.value.location is not None  # a diagnostic, where a bare KeyError used to escape
+
+
+def test_phantom_environment_miscompile_is_still_open() -> None:
+    # EXECUTABLE RECORD of an OPEN defect (TODO.md), NOT desired behavior, and the most serious one left: a
+    # SILENT WRONG ANSWER. The deferred inlined helper sets `self.gate`, but the phantom environment left by the
+    # graft keeps the stale `False` alive, so `self.gate` settles as a RUNTIME bool instead of Known(True). The
+    # else arm is therefore genuinely live as far as the analyzer can tell -- there is no contradiction between
+    # recorded reachability and the settled facts, so the post-stabilization gate cannot see this one. Its
+    # `self.s = 7.0` promotes `s` to runtime state, the reset 1 + 2**-30 rounds to 1.0 in E8M23, and the guard
+    # flips. Closing this is a first-class acceptance criterion for the resolution-totality restructure.
+    class OneDiamond:
+        def __init__(self) -> None:
+            self.t = 0.0
+            self.gate = False
+            self.s = 1 + 2**-30
+
+        def helper(self, a: float, b: float) -> float:
+            self.gate = True
+            return a * b
+
+        def step(self, x: float, flag: bool, pick: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2**53 + 1
+                q = 2**64
+            self.t = u
+            args = np.array([q, x])
+            self.helper(*args)
+            if pick:
+                pad = 1.0
+            else:
+                pad = 2.0
+            if self.gate:
+                marker = 0.0
+            else:
+                self.s = 7.0
+                marker = 100.0
+            if self.s > 1:
+                return 10.0 + pad + marker
+            return 20.0 + pad + marker
+
+    arguments = (3.0, False, False)
+    expected = OneDiamond().step(*arguments)
+    assert expected == 12.0  # plain Python: the helper runs, so gate is True and s keeps its exact reset
+    narrow = holoso.synthesize(OneDiamond().step, default_ops(FloatFormat(8, 23)), name="phantom_miscompile")
+    assert "state_s" in [port.name for port in narrow.ports]  # the defect: the dead arm's store becomes state
+    assert float(narrow.numerical_model.elaborate().run(*arguments)[0]) == 22.0  # WRONG; must become 12.0
+    # In a carrier that represents the reset exactly the same structure is value-correct, which isolates the
+    # divergence to reset materialization rather than to the datapath.
+    wide = holoso.synthesize(OneDiamond().step, default_ops(FloatFormat(11, 52)), name="phantom_miscompile_wide")
+    assert float(wide.numerical_model.elaborate().run(*arguments)[0]) == expected
+
+
+def test_deferred_side_effect_branch_is_refused_not_crashed() -> None:
+    # When the deferred call has a state side effect that a following branch tests, a graft leaves the orphaned
+    # source block's out-edges standing, so the successor keeps a predecessor that never runs and its phi has no
+    # arm for it. A raw RuntimeError used to escape HIR emission here -- not a SynthesisError, not located. The
+    # kernel is honest Python returning 10.0, so this refusal is still a defect (TODO.md); pinning it keeps the
+    # failure a diagnostic, and when the restructure closes the class this must become synthesis.
     class Probe:
         def __init__(self) -> None:
             self.t = 0.0
@@ -690,9 +811,9 @@ def test_graftable_call_deferral_side_effect_branch_crashes_unlocated() -> None:
 
     assert Probe().step(2.0, False) == 10.0  # the kernel is well-defined Python
     ops = default_ops(FloatFormat(8, 23))
-    with pytest.raises(RuntimeError, match=r"has arms for predecessors") as witness:
-        holoso.synthesize(Probe().step, ops, name="graft_defer_side_effect")
-    assert not isinstance(witness.value, SynthesisError)  # the defect: unlocated, not a graceful refusal
+    with pytest.raises(UnsupportedConstruct, match="edge out of a block") as refusal:
+        holoso.synthesize(Probe().step, ops, name="defer_side_effect_state_condition")
+    assert refusal.value.location is not None  # a diagnostic, where a raw RuntimeError used to escape emission
 
 
 def test_mixed_return_dedupes_public_alias_keeps_distinct_leaf() -> None:

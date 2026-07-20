@@ -23,57 +23,98 @@ Empty contractions diverge from numpy in the linalg stubs: `(n, 0) @ (0, m)` and
 Revisit together with the planned trace/outer/dot examples; the stubs' guards otherwise keep the reachable
 domain faithful.
 
-Graftable-call deferral can falsely reject a synthesizable kernel (the analyzer's optimistic-SCCP fixpoint
-meets destructive mid-round call grafting). When a graftable call (a linalg composite like `np.dot`/`np.matmul`,
-or an inlined user callable) cannot resolve on a visit because a store-schema violation is transiently pending
-in scope -- typically an int/float merge into a float state slot whose Known-int arm is momentarily inexact
-before the fixpoint promotes it -- the call's result is momentarily `Unbound` while the fixpoint continues
-around it. Two distinct mechanisms then leak that transient state into the stable result:
+Call deferral can falsely reject a synthesizable kernel (the analyzer's optimistic-SCCP fixpoint meets
+destructive mid-round call grafting). When a call cannot resolve on a visit because a store-schema violation is
+transiently pending in scope -- typically an int/float merge into a float state slot whose Known-int arm is
+momentarily inexact before the fixpoint promotes it -- its result is momentarily `Unbound` while the fixpoint
+continues around it. The block's terminator still publishes out-edges, so the unbound result reaches the
+successors; the graft-time retraction that unwinds those edges reaches only one edge deep, so a transitive
+successor keeps the phantom-unbound environment and a later join reports `local '...' may be unbound here` at
+an innocent line. This half is specific to GRAFTABLE calls -- linalg composites like `np.dot`/`np.matmul`, and
+inlined user callables -- because only a graft displaces the terminator whose edges are then retracted.
 
-- The block's terminator still publishes out-edges, so the unbound result reaches the successors. The
-  graft-time retraction that unwinds those edges reaches only one edge deep, so a transitive successor keeps
-  the phantom-unbound environment and a later join reports `local '...' may be unbound here`.
-- `_truth_fact` maps an unbound operand to a runtime bool rather than deferring, so a condition computed from
-  the pending result marks BOTH arms executable. Executable blocks and edges are add-only, and when the
-  condition later folds to a known constant the marking is never retracted -- the condition's fact ascends
-  `Residual -> Known` across visits, which is the lattice direction optimistic SCCP's never-un-mark rule
-  depends on not happening.
+A second mechanism was fixed rather than documented, because its residue included a SILENT MISCOMPILE. A
+condition is evaluated on a fact that later becomes more precise, so BOTH arms are marked executable; marks are
+add-only, so the arm the stabilized facts later prove dead stays open and is emitted. It has (at least) TWO
+producers, which is why no check on the condition's operand can close it: `_truth_fact` mapping an unbound
+operand to a runtime bool, and -- with every fact legitimately bound throughout -- a state read whose live-in
+join ascends `Residual -> Known` across visits. The first accounts for the large majority of observed cases and
+for the miscompile; the second is invisible to any unbound-operand guard. A store on that arm promotes an
+attribute from a read-only constant -- folded at binary64 -- into a runtime state slot whose reset is
+materialized in the narrower target carrier, so a guard
+reading it can flip: a kernel returning 10.0 in Python returned 20.0 in hardware, no error raised, and only in
+formats narrower than the reset value. The same staleness reached the plan replay as a bare `KeyError` (`rank`
+is built from edge-REACHABLE blocks while the replay iterates the add-only MARKED set) and HIR emission as a
+raw `RuntimeError`. Note this mechanism needed only a DEFERRED call, not a graftable one: `np.array` is a
+conversion and never grafts, yet drives the witnesses.
 
-The observed manifestations are wider than false rejections alone, and the second mechanism is why:
+The fix is a POST-STABILIZATION GATE and nothing else: the fixpoint's speculation is left exactly as it was,
+and the unsound RESULT of it is refused once the facts are stable. Three contradictions between recorded
+reachability and the stabilized facts are checked -- a branch whose settled condition disagrees with its own
+recorded out-edges, a block marked executable that no executable edge chain reaches, and an edge out of a block
+left unexecutable. Each becomes a located refusal instead of a wrong answer or a bare crash. Checking the
+RESULT rather than any producer is what makes it complete: it catches the state-live-in producer above, which
+an operand-level guard cannot see.
 
-- located false rejections in several message shapes, not only `may be unbound here` -- a dead arm's `raise`,
-  its int-state store, its store to an attribute that does not exist, or any unsupported construct on it are
-  all reported as though the arm were live;
-- hardware emitted for a statically dead arm: a spurious divider, an unrolled loop, and -- ABI-visibly -- an
-  extra public state port for an attribute the kernel never assigns;
-- a raw `RuntimeError` escaping HIR emission unlocated (`phi ... has arms for predecessors []`) when the
-  pending call has a side effect on state that a following branch tests, so the refusal is not even always a
-  graceful located one.
+Two more invasive fixes were built and measured, and BOTH were rejected on evidence. Refusing at the producer
+(the truth of an unavailable value defers, and an unbound `Branch` opens no edge) fixes the miscompile and
+prunes the dead arm properly -- the strictly better outcome where it applies -- but it starves the fixed point:
+a `Branch` inside a loop body sits BEFORE the body's trailing back-edge `Jump`, so deferring it stops the loop
+re-flowing at all, and a 72-kernel loop sweep drops from 33 accepts to 18. That is the same failure round-10's
+edge withholding produced, reached by a different route. Retracting the stale mark is not local either:
+destructive environment joins mean removing an edge requires recomputing downstream environments, schemas,
+reachability, W/D discoveries, and phis. The gate costs accepts too -- the same sweep of dead-arm kernels drops
+from 32 to 22 -- but every kernel it newly refuses is one the compiler was previously compiling unsoundly, and
+it holds the loop family at exact parity with the pre-fix baseline.
 
-What IS established, by differential sweeps in both review halves: no VALUE divergence from native Python was
-found in any accepted kernel, including across persisted state -- the spurious register holds its reset value
-and the dead arm's stores never fire. The bound is on values, not on the shape of the module or on the
-graceful-refusal property.
+A SILENT MISCOMPILE NEVERTHELESS REMAINS, by a route the gate structurally cannot see, and it is the most
+serious open defect in the compiler. When the phantom environment keeps a stale state fact alive, the condition
+that reads it settles as a RUNTIME bool rather than a constant, so the arm that is dead in Python is genuinely
+live as far as the analyzer can tell: there is no contradiction between recorded reachability and the settled
+facts, and nothing for the gate to detect. That arm's store still promotes the attribute to runtime state, and
+the reset still rounds in the carrier. `test_phantom_environment_miscompile_is_still_open` pins a witness
+returning 12.0 in Python and 22.0 in E8M23 hardware, correct in E11M52.
+
+The gate closes the route where the condition DOES settle, which is where the majority of observed cases and
+both raw-crash modes lived. It does not close the class. Detecting the remaining route locally is not possible
+in principle: the analyzer cannot know that a fact "should" have been more precise without the correct
+environment, which is exactly what the phantom edge denies it.
+
+Besides that, what remains is FALSE REJECTIONS in two flavours: the phantom-environment ones
+(`may be unbound here`), and the ones the gate itself produces on kernels whose speculated arm it cannot prove
+harmless. Those are honest located diagnostics.
 
 Witness shapes are pinned executably in `tests/test_frontend_state.py`
-(`test_graftable_call_deferral_false_rejection_witnesses` and its siblings), covering all three manifestations.
-They live in code rather than in prose here because prose transcriptions of them rotted -- dropping the
-both-arms read or the wide-int feed makes a shape silently vanish, which is exactly what happened to two of the
-four kernels this section used to carry.
+(`test_graftable_call_deferral_false_rejection_witnesses` and its siblings), covering the open shapes and the
+gate's refusals -- the miscompile, the rank-walk shape that used to raise a bare `KeyError`, and the
+side-effect shape that used to raise a raw `RuntimeError` out of HIR emission. They live in code rather than in
+prose here because prose transcriptions of them rotted --
+dropping the both-arms read or the wide-int feed makes a shape silently vanish, which is exactly what happened
+to two of the four kernels this section used to carry.
 
 Patching the seam in place has been tried and abandoned. Rounds 6-11 (`docs/campaign.md`) each traded one corner
 for another, and the round-10 attempt -- withholding a deferred graftable call's terminator edges -- regressed
 valid code: it starved the outer state fixed point when the withheld edge was a loop body's only successor,
-turning a kernel that synthesizes into a false "not exactly representable" refusal. That attempt was reverted, so
-the class is now uniformly open with no regression against it; the starvation kernel is pinned as a passing
-acceptance test (`test_deferred_graftable_call_does_not_starve_the_state_fixpoint`) so the trap cannot be
-re-entered. The class is the one the post-stabilization resolution-totality restructure
-(`docs/decisions/arch-memo.md`, the resolved-IR spike) dissolves by making residualization a total pass after the
-fixpoint rather than interleaving it with the fixpoint; when that lands, the witness tests flip to asserting
-synthesis and are gated byte-for-byte against `freeze-1`. That restructure must be checked against BOTH
-mechanisms above: residualizing after the fixpoint removes the phantom-unbound environments directly, but
-retracting executable markings derived from transiently degraded facts is a separate obligation, and a spine
-built over a stale executable-block set would inherit the dead-arm manifestations unchanged.
+turning a kernel that synthesizes into a false "not exactly representable" refusal. That attempt was reverted,
+so the baseline is regression-free relative to the state before it; the starvation kernel is pinned as a
+passing acceptance test (`test_deferred_graftable_call_does_not_starve_the_state_fixpoint`) so the trap cannot
+be re-entered. The gate above is the deliberate exception to that stop-rule: a silent wrong answer is a
+different category from a false rejection and could not be left standing. It earns the exception by changing
+NOTHING about the fixpoint -- it only refuses an already-computed result whose reachability contradicts its own
+facts -- which is why it cannot starve anything. The two fixes that did touch the fixpoint were both built,
+measured, and rejected; that history is above, and it is the reason this one deliberately does not.
+
+The class is the one the post-stabilization resolution-totality restructure (`docs/decisions/arch-memo.md`, the
+resolved-IR spike) dissolves by making residualization a total pass after the fixpoint rather than interleaving
+it with the fixpoint; when that lands, the witness tests flip to asserting synthesis and are gated
+byte-for-byte against `freeze-1`. THE SURVIVING MISCOMPILE IS A FIRST-CLASS ACCEPTANCE CRITERION FOR THAT WORK:
+the restructure is not done while `test_phantom_environment_miscompile_is_still_open` still reports 22.0.
+Two further obligations on it, both load-bearing: it must be checked
+against BOTH mechanisms, since residualizing after the fixpoint removes phantom-unbound environments directly
+while stale executable marks are a separate concern; and its resolved spine must RECOMPUTE stable reachability
+and typing from the stabilized facts rather than inherit today's executable sets and `block_in`, because a
+spine built over a stale executable set would reintroduce the dead-arm behavior -- including the live register
+write into a public port -- underneath a gate that is checking the old representation.
 
 ## Deferred capability gaps
 

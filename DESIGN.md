@@ -380,16 +380,28 @@ successor thereby left with no in-edge, so the continuation re-establishes that 
 joining a stale one. That retraction is only one edge deep, and it is a mitigation rather than a closed
 solution: a block whose graftable call deferred behind a pending violation still publishes out-edges carrying
 the call's unbound result, so a transitive successor of the graft block can retain the phantom-unbound
-environment and falsely reject an innocent downstream read. A pending result reaching a CONDITION leaks
-further: it is read as a runtime bool rather than deferred, both arms are marked executable, and since
-executable blocks and edges are add-only that marking survives the condition later folding to a constant --
-so a statically dead arm can be analyzed and emitted, and its own refusals reported. The resulting class is
-documented in TODO.md and pinned by executable witnesses in the frontend state tests; its manifestations are
-bounded on VALUES (no divergence from native Python was found) but not on module shape or on the
-graceful-refusal property. It is the motivating case for the resolution-totality restructure, which dissolves
-the phantom-environment half by residualizing as a total post-stabilization pass rather than grafting
-mid-fixpoint, and must separately account for executable-marking staleness. Closing it inside the fixpoint has
-been tried:
+environment and falsely reject an innocent downstream read. A condition computed from a pending result is read
+as a runtime bool, so BOTH arms are marked executable; because marks are add-only, the arm the stabilized facts
+later prove dead stays open. Emitting it is unsound rather than merely wasteful: a store on that arm promotes
+an attribute from a constant folded at binary64 into a runtime slot whose reset is materialized in the target
+carrier, so a guard reading it flips and the module silently disagrees with Python. Speculation is nonetheless
+left exactly as it is -- it is what lets the W/D fixpoint discover runtime state, and every attempt to withhold
+it starves some loop, since a `Branch` inside a loop body precedes the body's own back-edge. Instead a
+POST-STABILIZATION GATE refuses whenever recorded reachability contradicts the settled facts: a branch whose
+condition disagrees with its own recorded out-edges, a block marked executable that no edge chain reaches, or
+an edge out of a block left unexecutable. Each becomes a located refusal rather than a wrong answer or a bare
+crash, at the cost of refusing kernels whose speculated arm the analyzer cannot prove harmless. Retracting a
+stale mark instead is deliberately not attempted -- destructive environment joins mean removing an edge
+requires recomputing downstream environments, schemas, reachability, W/D discoveries, and phis. The gate is a
+narrowing, NOT a closure: where the phantom environment keeps a stale state fact alive the condition settles as
+a runtime bool, so the Python-dead arm is genuinely live to the analyzer, no contradiction exists, and the
+miscompile survives. Detecting that locally is impossible in principle -- the analyzer cannot know a fact
+should have been more precise without the environment the phantom edge denies it. The residual class,
+including that surviving miscompile, is documented in TODO.md and pinned by executable witnesses in the
+frontend state tests. It is the
+motivating case for the resolution-totality restructure, which dissolves it by residualizing as a total
+post-stabilization pass rather than grafting mid-fixpoint, and whose resolved spine must recompute reachability
+from the stable facts rather than inherit these sets. Closing it inside the fixpoint has been tried:
 withholding a deferred call's terminator edges removes the phantom path but starves the outer fixed point
 whenever the withheld edge is a loop body's sole successor, refusing valid kernels, so that trade was reverted
 and is guarded by an acceptance test.

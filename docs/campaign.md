@@ -14,12 +14,14 @@ workflow (one thing at a time; the maintainer dropped parallel tracks to cut com
 maintainer manual review" wording in the log below is SUPERSEDED by this directive.
 
 WHERE WE ARE: Stage 2 (semantic stabilization) is landed and the FREEZE INFRASTRUCTURE is built, but `freeze-1`
-is NOT tagged. The review loop (rounds 6-11) surfaced one OPEN defect class: false rejections in the analyzer's
-deferral x mid-round-graft seam, documented in `TODO.md` "Known defects" and pinned by executable witnesses in
-`tests/test_frontend_state.py`. It is NOT closeable by in-place patching (5 rounds, and the round-10 attempt
-regressed a valid kernel); it is the class the Stage-4 resolved-IR restructure dissolves. Stage 3's architecture
-spike ran → verdict MORPH (SC1-SC3 passed; SC4 missed by 75 LOC; branch `spike/resolved-ir` @ dc76fbf; ledger
-`docs/decisions/spike-ledger.md`). The Stage-3 ruling and Stage 4 are pending.
+is NOT tagged. The deferral x grafting seam had TWO mechanisms, not one. The executable-marking half turned out
+to include a SILENT MISCOMPILE and two raw crashes, and is now FIXED at the producer (an unavailable value no
+longer becomes a runtime bool; only `Branch` defers, never `Jump`, so nothing starves). The phantom-environment
+half remains open -- false rejections plus one raw `RuntimeError` on a state-condition shape -- documented in
+`TODO.md` "Known defects" and pinned by executable witnesses in `tests/test_frontend_state.py`. That half is the
+class the Stage-4 resolved-IR restructure dissolves. Stage 3's architecture spike ran → verdict MORPH (SC1-SC3
+passed; SC4 missed by 75 LOC; branch `spike/resolved-ir` @ dc76fbf; ledger `docs/decisions/spike-ledger.md`).
+The Stage-3 ruling and Stage 4 are pending.
 
 STEP 1-2 DONE (this session): `.nox` rebuilt; round-10 edge-withholding REVERTED, so the freeze baseline carries
 no regression. Note for anyone re-deriving the defect class: TWO of the four TODO reproducer kernels did NOT
@@ -1127,6 +1129,64 @@ since a spine built over a stale executable-block set inherits the dead-arm mani
 executable witnesses (dead-arm emission asserting the spurious port, side-effect branch asserting the raw
 RuntimeError is not a SynthesisError); rejection SITES now pinned by source-line text, closing the last rot
 channel. Round-1 LOWs on test quality accepted with them.
+
+REVERT ROUND 2 -- THE SEAM'S SECOND MECHANISM, AND A SILENT MISCOMPILE. Codex's half constructed a VALUE
+MISCOMPILE and Claude's half reproduced it independently: `self.s = 1 + 2**-30`; the usual wide-int prologue
+arms the deferral net; a statically-false arm holds `self.s = 7.0`; `if self.s > 1` then returns 10.0 in Python
+and 20.0 in hardware, silently, in E8M23 but NOT in E11M52. The dead store promotes `s` from a read-only
+constant folded at binary64 into a runtime state slot whose reset is materialized in the narrow carrier, where
+it rounds to 1.0 and the guard flips. This refuted the "false rejections only, never a miscompile" premise the
+whole stop-rule rested on. METHOD NOTE, recorded because it nearly cost the finding: my first cross-commit pass
+was INVALID -- `PYTHONPATH` does not override the `.nox` editable install, so several comparisons silently ran
+the live tree twice, and I wrongly concluded Codex's regression claim did not reproduce. Redone by injecting
+each tree at `sys.path[0]` before importing holoso; Codex was right on both counts.
+Consult (`codex exec`, ultra) ruled: contain, do not revive withholding, build on the reverted baseline -- and
+asserted it had TESTED the producer fix and that it reproduces loop starvation. Claude's half then BUILT AND
+MEASURED the producer fix and reported no starvation. I ADJUDICATED FOR CLAUDE AND WAS WRONG. Round 3 caught
+it: deferring a `Branch` starves the fixed point whenever the branch sits INSIDE a loop body, because it
+precedes the body's own trailing back-edge `Jump` -- my "only `Branch` defers, never `Jump`, so the loop shape
+is untouched BY CONSTRUCTION" argument was simply false, and neither Claude's corpus nor my 42-kernel one put a
+branch inside a loop. A 72-kernel loop sweep: parent 33 accepts, producer fix 18. Codex was right, for the
+reason it gave, and the lesson is that two independent measurements agreeing means nothing if both sample the
+same blind spot. FINAL DESIGN, after measuring all three candidates: the POST-STABILIZATION GATE ALONE.
+It changes nothing about the fixpoint, so it cannot starve; it refuses three contradictions between recorded
+reachability and settled facts (branch-vs-own-edges, marked-but-unreachable block, edge out of an unexecutable
+block -- the third added from round 3, which converts the last raw `RuntimeError` into a located refusal).
+Loop sweep 33 = parent parity; dead-arm sweep 32 -> 22 accepts, but every newly refused kernel was one being
+compiled unsoundly; zero crashes; miscompile refused; corpus BYTE-IDENTICAL 151/151. The `_truth_fact` refusal
+was MEASURED to be inert once the gate exists (identical results with and without) and was dropped for
+simplicity -- and round 2's own late addendum proved it could never have sufficed anyway: the stale marking has
+a SECOND producer, a state read whose live-in join ascends `Residual -> Known` with every fact legitimately
+bound throughout, which no operand-level guard can see. Checking the RESULT rather than any producer is what
+makes the gate complete. Also corrected from the
+round: the class was mis-scoped to GRAFTABLE calls (`np.array` is a conversion and never grafts, yet drives the
+witnesses -- the marking half needed only a DEFERRED call); `Residual -> Known` is a lattice DESCENT and the
+unsoundness is the add-only marking, not the fact direction; the "spurious divider" claim was unreproducible as
+emitted hardware (optimize removes it) and is gone; "stores never fire" understated the RTL, where the dead
+store is the only functional driver of the public register and is inert solely because the sequencer's selector
+is hard-loaded; a stale "false rejections only" comment survived in the witness test and an inert
+`assert not isinstance(..., SynthesisError)` (disjoint hierarchies) both fixed. Open residue is now the
+phantom-environment half alone.
+
+REVERT ROUND 3 -- THE GATE IS A NARROWING, NOT A CLOSURE. Both halves attacked the gate-only design. Claude
+found the Branch-deferral starvation that overturned my round-2 adjudication (recorded above). Codex found the
+one that matters most: A SILENT MISCOMPILE SURVIVES THE GATE. Reproduced by me -- a deferred inlined helper
+sets `self.gate`, the phantom environment keeps the stale `False` alive, so the condition settles as a RUNTIME
+bool rather than Known(True); the Python-dead arm is therefore genuinely live to the analyzer, there is NO
+contradiction between recorded reachability and settled facts, and the gate has nothing to detect. Its
+`self.s = 7.0` promotes `s` to runtime state, the reset 1 + 2**-30 rounds in E8M23, and the kernel returns 22.0
+where Python returns 12.0 (correct at E11M52). This is not fixable locally in principle: the analyzer cannot
+know a fact should have been more precise without the environment the phantom edge denies it. So the honest
+accounting of the gate is: it closes the route where the condition SETTLES -- the majority of observed cases,
+the dead-arm emission, and BOTH raw-crash modes (bare `KeyError`, raw `RuntimeError`) become located refusals
+-- and it does not close the class. Pinned as `test_phantom_environment_miscompile_is_still_open`, asserting
+the wrong value it currently produces, and made a FIRST-CLASS STAGE-4 ACCEPTANCE CRITERION: the restructure is
+not done while that test reports 22.0. Codex's P2 (gate falsely rejecting a `while not self.gate` shape) did
+NOT reproduce on the final tree -- those refusals are the pre-existing phantom-environment ones. THREE ROUNDS,
+THREE INVALIDATED CLAIMS OF MINE ("emission never sees a phantom path", "bounded on VALUES", "no silent wrong
+value survives"). That pattern IS the architectural evidence: every local patch reaches a corner the next round
+exposes, and Codex's original consult position -- the real fix is Stage 4, whose spine must RECOMPUTE
+reachability rather than inherit these sets -- has held up better than my attempts to improve on it.
 
 FINAL PRE-COMPACTION ENTRY (2026-07-19): the maintainer set the STANDING DIRECTIVE (see the RESUME BRIEF at the
 top of this file, now the single source of truth): proceed AUTONOMOUSLY to completion, maintainer UNAVAILABLE,

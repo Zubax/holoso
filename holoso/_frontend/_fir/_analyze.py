@@ -785,6 +785,7 @@ class Analyzer:
         first_store: dict[StateLeaf, tuple[tuple[tuple[int, int], ...], int]] = {}
         for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
             block = result.unit.blocks[block_id]
+            self._check_speculation_settled(result, block_id, rank)
             env = result.block_in[block_id].copy()
             for index, op in enumerate(block.ops):
                 if isinstance(op, PyStoreAttr):
@@ -805,6 +806,7 @@ class Analyzer:
                 dst = op_dst(op)
                 if dst is not None:
                     result.binding_facts[dst] = env.get(Local(dst))
+            self._check_branch_settled(result, block_id, env)
         entry_env = result.block_in[result.unit.entry]
         for param in result.unit.params:
             result.binding_facts.setdefault(param, entry_env.get(Local(param)))
@@ -815,6 +817,74 @@ class Analyzer:
             raw, admitted = self._walk_snapshot(leaf)
             result.state_resets[leaf] = admitted if admitted is not None else type(raw).__name__
         result.provenance = self._component_provenance()
+
+    def _check_speculation_settled(self, result: ResidualUnit, block_id: BlockId, rank: dict[BlockId, int]) -> None:
+        """
+        Refuse when the recorded reachability disagrees with the stabilized facts. Two disagreements are possible:
+        a block marked executable that no executable edge chain reaches (checked here), and a branch whose settled
+        condition contradicts its own recorded out-edges (``_check_branch_settled``, once the replay reaches it).
+
+        Optimistic traversal explores an arm on the strength of a condition that is not yet Known -- which is what
+        lets W/D discover runtime state at all -- but a condition whose operand is momentarily Unbound is read as a
+        runtime bool rather than deferred, so BOTH arms get marked. Marks are add-only, so when the operand later
+        promotes and the condition folds, the arm that the stable facts prove dead stays marked, and is then
+        analyzed, emitted, and counted by the read-only-attribute scan. That last effect is a MISCOMPILE and not
+        merely wasted logic: a store on the dead arm promotes an attribute from a constant folded at binary64 into
+        a runtime slot whose reset is materialized in the target carrier, so a guard reading it can flip.
+
+        Retracting the stale mark is not available here -- environments are joined destructively, so removing an
+        edge would mean recomputing downstream environments, schemas, reachability, W/D discoveries, and phis --
+        and refusing the condition instead starves the outer fixed point (a measured regression). Until
+        residualization becomes a total post-stabilization pass that recomputes reachability from the stable facts
+        rather than inheriting these sets, this gate converts the unsound acceptance into an honest refusal.
+        """
+        # An edge out of a block the stable facts leave unexecutable: a graft dropped the source's mark and env
+        # but left its out-edges standing, so the target keeps a predecessor that never runs and its phi has no
+        # arm for it. Ordered by block index so the first report is stable across hash seeds.
+        stale = sorted(
+            (edge for edge in result.executable_edges if edge[0] not in result.executable_blocks),
+            key=lambda edge: (edge[0].index, edge[1].index),
+        )
+        if stale:
+            source, target = stale[0]
+            terminator = result.unit.blocks[source].terminator
+            raise AnalysisRejection(
+                "analysis recorded an edge out of a block the stabilized facts leave unexecutable, so the "
+                f"successor {target.index} would read a value no path defines; the result cannot be trusted",
+                (
+                    terminator.origin
+                    if terminator is not None
+                    else (Origin(self._root_template.name, 0, 0, self._root_template.file),)
+                ),
+            )
+        if block_id not in rank:  # marked executable, yet no executable edge chain reaches it from the entry
+            terminator = result.unit.blocks[block_id].terminator
+            raise AnalysisRejection(
+                "analysis explored this block speculatively and the stabilized facts leave it unreachable; "
+                "the result cannot be trusted",
+                (
+                    terminator.origin
+                    if terminator is not None
+                    else (Origin(self._root_template.name, 0, 0, self._root_template.file),)
+                ),
+            )
+
+    def _check_branch_settled(self, result: ResidualUnit, block_id: BlockId, env: _Env) -> None:
+        """Companion of ``_check_speculation_settled``, run with the env the replay has carried to the terminator."""
+        terminator = result.unit.blocks[block_id].terminator
+        if not isinstance(terminator, Branch) or terminator.then_target == terminator.else_target:
+            return
+        truth = env.get(Local(terminator.cond))
+        settled = static_truth(truth.value) if isinstance(truth, Known) else None
+        if settled is None:
+            return
+        dead = terminator.else_target if settled else terminator.then_target
+        if (block_id, dead) in result.executable_edges:
+            raise AnalysisRejection(
+                "analysis explored the branch arm that the stabilized facts prove unreachable, so the emitted "
+                "logic would not match this source; simplify the condition or the value feeding it",
+                terminator.origin,
+            )
 
     def _call_plan(self, call: PyCall, env: _Env) -> CallPlan:
         # Optimistic SCCP may reclassify a cast across revisits (int(y) is an identity while y is still integer and a
@@ -1959,6 +2029,12 @@ class Analyzer:
                     taken = as_python(fact.value)
                     assert isinstance(taken, bool)
                     return [then_target if taken else else_target]
+                # An unavailable condition still opens both arms. Holding the block back instead looks safer and
+                # is not: a Branch inside a loop body sits BEFORE the body's trailing back-edge Jump, so deferring
+                # it stops the loop re-flowing at all, the transiently-inexact store never sees its operand
+                # promote, and valid kernels are refused -- measured, and the same shape round-10's edge
+                # withholding regressed. Speculation is therefore left intact and the unsound RESULT of it is
+                # caught after stabilization instead, by _check_branch_settled.
                 return [then_target, else_target]
             case StaticFor():
                 iterable_fact = env.get(Local(terminator.iterable))
