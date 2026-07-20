@@ -112,9 +112,14 @@ guard then reads the poisoned live-in and takes a branch Python never takes. Mir
 close it: `W` staleness leaves a residue to detect, while the poisoned `D` at stabilization is byte-identical to
 what the final round would derive fresh. Pinned as `test_live_in_poisoning_miscompile_is_still_open`.
 
+The check for route (3) is WEAKER THAN IT LOOKS: it requires every retained runtime leaf to have a store in the
+final executable graph, and a trivial `self.s = self.s` satisfies that. Delete the self-assignment and the
+kernel is refused; keep it and the same miscompile goes through. So (3) is closed only in the spelling where no
+store survives, and the route is open in general -- pinned as `test_self_assignment_defeats_the_runtime_state_check`.
+
 FOUR ROUTES, FOUND BY FOUR DIFFERENT ATTACK ANGLES, EACH NEW ANGLE FINDING ONE. That is the honest prior: the
 defect density here is bounded by the attacks tried, not by the code, and no claim of soundness should be made
-about this seam. Two routes are refused, TWO REMAIN OPEN AND SILENTLY MISCOMPILE -- the phantom-environment one
+about this seam. Only ONE route is fully refused (the settled-branch one); the rest REMAIN OPEN AND SILENTLY MISCOMPILE -- the phantom-environment one
 and this one. Both are pinned as tests asserting the wrong value they currently produce. Two review halves
 agreeing has repeatedly meant less than it appeared to, each time because they shared an attack surface: the
 within-round fuzz could not express the cross-round route at all. Named untested surfaces, for whoever comes

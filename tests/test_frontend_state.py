@@ -906,6 +906,41 @@ def test_runtime_state_discovered_on_a_dead_round_is_refused() -> None:
         holoso.synthesize(CrossRound().step, default_ops(FloatFormat(8, 23)), name="cross_round_stale")
 
 
+def test_self_assignment_defeats_the_runtime_state_check() -> None:
+    # EXECUTABLE RECORD of an OPEN defect (TODO.md), NOT desired behavior. The runtime-state check requires every
+    # retained leaf to have a store in the final executable graph, which a trivial `self.s = self.s` satisfies --
+    # so the check closes only the spelling where NO store survives. Delete that one line and this kernel is
+    # correctly refused; keep it and the dead-arm store's promotion of `s` goes through and the guard flips.
+    # Pinned rather than fixed: adding a check that reasons about which stores are meaningful is the same move
+    # that has failed four times in this seam.
+    class SelfAssign:
+        def __init__(self) -> None:
+            self.mode = True
+            self.t = 0.0
+            self.s = 1 + 2**-30
+
+        def step(self, x: float, new_mode: bool) -> float:
+            if self.mode:
+                u: float = 2**53 + 1
+                q: float = 2**64
+            else:
+                u = x
+                q = x
+            self.t = u
+            a = np.array([q, x])
+            if a.shape[0] > 5:
+                self.s = 7.0  # Python never runs this
+            self.s = self.s  # keeps `s` stored in the final graph, so the runtime-state check finds nothing
+            self.mode = new_mode
+            return 10.0 if self.s > 1.0 else 20.0
+
+    expected = SelfAssign().step(2.0, False)
+    assert expected == 10.0
+    built = holoso.synthesize(SelfAssign().step, default_ops(FloatFormat(8, 23)), name="self_assign_stale")
+    outputs = dict(zip((port.name for port in built.output_ports), built.numerical_model.elaborate().run(2.0, False)))
+    assert float(outputs["out_0"]) == 20.0  # WRONG; must become 10.0 when the restructure lands
+
+
 def test_live_in_poisoning_miscompile_is_still_open() -> None:
     # EXECUTABLE RECORD of an OPEN defect (TODO.md), NOT desired behavior: a SILENT WRONG ANSWER. The W/D
     # accumulator has two halves and only W is guarded. A round-1 speculated arm drives D[mode] down to a
