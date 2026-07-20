@@ -1406,9 +1406,9 @@ one-dimension-too-broad claim of mine in this area is the defect. Round 4 revert
 map-first so verdicts would stop anchoring on a store the stabilized facts prove dead, and pinned it with a
 regression. The regression passes only because in ITS shape the speculated arm is gone by the stable round.
 Reproduced by the reviewer and then by me on the sweep's own dead-arm shape: when a verdict is raised
-on the round that first promotes THAT LEAF its latch entry is still absent -- the map is per leaf and survives
-round resets, so which round that is depends on when the leaf appears, not on it being round one -- and the
-location then comes from whatever
+before its leaf has a promotion-latch entry -- the latch is per leaf and survives round resets, so this covers
+every round up to the one that would fill it, and all rounds when a verdict aborts the analysis first -- the
+location comes from whatever
 stores the worklist has reached -- speculated arms included -- and the dead arm takes the anchor. A
 tuple-reset kernel names
 `self.s = 7.0`, a line Python never runs; delete the dead arm and the anchor moves to the live store. BOTH
@@ -1490,7 +1490,8 @@ components reached from one unrolled call site emit `state_z__s, state_a__s` by 
 those ties by frame identity renames the ports by filename with the whole suite green. Pinned now.
 
 Corrections to what the log itself claimed. Only ONE of the two reverted round-4 selections is pinned: flipping
-`_discovered_store_origins` back leaves 761 frontend tests green, and neither reviewer could construct a witness
+`_discovered_store_origins` back leaves the whole fast suite green, and neither reviewer could construct a
+witness
 -- call expansion puts each inlined store in its own block, so a same-block position tie looks unreachable, and
 the promotion pick re-orders by `origin_order` downstream anyway. The revert is defensible but UNWITNESSED, and
 saying "pinned" of both was wrong. The "first-executed store" principle governs the per-round map path only:
@@ -1500,3 +1501,29 @@ was misnamed -- both sources are populated and disagreeing there, which is not t
 docstring describes -- and is now `test_a_verdict_prefers_a_raise_guarded_store_over_the_promoter`. Also noted
 rather than fixed: the `_same` test pins the predicate, not its call sites, so inlining `==` at the two use
 sites would still pass.
+
+
+ROUND 8 -- CLEAN, and the loop closes. The Codex half: "No significant findings. The diff is sound," with every
+mutant it built killed by the hardened tests. The Claude half: "substantively sound ... there is no behavior
+change in this diff to be wrong," with four items all in the claims-and-tests class, applied here. Two are
+worth keeping in the record. The round-7 scoping correction had been applied in three registers and MISSED THE
+FOURTH -- the test's own comment, which is the register this campaign calls the durable one -- and the
+corrected wording had swung from too broad to TOO NARROW: the pinned witness never promotes its leaf at all,
+because the analysis aborts first, so "the round that first promotes that leaf" describes nothing. The
+condition that covers the witness and the general case alike is simply BEFORE THE LEAF HAS A LATCH ENTRY, now
+used in all four registers. And the new port-order test lacked the fixture invariant its sibling had gained in
+the same commit: drift plus the mutant it exists to catch, and it passed. One shared check now guards both,
+verified by drifting a helper and watching both go red. Also: the append-without-rewrapping mistake recurred a
+THIRD time (a 149-column comment, which black does not catch because it does not rewrap comments), and the
+"761 frontend tests" figure was not reproducible and is replaced with a claim that can be checked.
+
+STEP CLOSED. What began as "re-tag freeze-1" ran eight review rounds and eleven CI-green commits, because the
+retag's own annotation was false and each correction exposed the next. Net effect on the compiler: cross-round
+state verdicts are LOCATED instead of rendering line 0 column 0 -- structurally impossible where the lookup
+was; blame lands on stores that actually promoted the leaf rather than on the source-earliest store anywhere;
+the selections deciding which diagnostic surfaces are TOTAL wherever a set is being ordered; state-port order
+is pinned against a silent ABI flip; and the standing sweep measures all three open routes against recorded
+(python, hardware) pairs by value identity, with its scope written beside its claim. Net effect on the record:
+seven over-broad claims of mine were found and corrected, two of my own changes were reverted on reviewer
+evidence, and two of my tests were found vacuous or drift-prone and rebuilt. The three silent miscompiles are
+untouched and pinned, as intended -- they are Stage 4's acceptance criteria, not this step's work.

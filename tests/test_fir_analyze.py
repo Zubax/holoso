@@ -899,7 +899,7 @@ def test_seam_sweep_value_identity_separates_what_equality_conflates() -> None:
     sweep = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(sweep)
 
-    # Distinct objects throughout: pooled literals would let an identity comparison masquerade as this one.
+    # Distinct objects for the float pairs: pooled literals would let an identity comparison pass as this one.
     left_value, right_value = float("1.25"), float("1.25")
     left_nan, right_nan = float("nan"), float("nan")
     left_zero, right_zero = float("-0.0"), float("-0.0")

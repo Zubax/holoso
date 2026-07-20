@@ -983,12 +983,28 @@ def test_cross_round_state_verdicts_are_located_at_their_store() -> None:
     assert (location.line or "").strip().startswith("self.s = 7.0")
 
 
+def _assert_store_helpers_tie() -> None:
+    """
+    Both store-selection tests below only discriminate while `_store_alpha.put` and `_store_beta.put` sit at
+    the SAME source position -- a property of the fixture files, not of the code under test. A one-line drift
+    in either helper would make them pass for the wrong reason, so it is asserted rather than trusted.
+    """
+    from tests import _store_alpha, _store_beta
+
+    alpha_source, alpha_line = inspect.getsourcelines(_store_alpha.put)
+    beta_source, beta_line = inspect.getsourcelines(_store_beta.put)
+    assert alpha_line == beta_line
+    assert [line.rstrip() for line in alpha_source] == [line.rstrip() for line in beta_source]
+
+
 def test_state_port_order_follows_execution_rank_not_frame_identity() -> None:
     # `first_store` keys (source_position, rank), and the execution rank is load-bearing ABI: two components
     # whose stores are reached from ONE unrolled call site tie on source position, and the rank is what puts
     # them in the order they execute. Ordering those ties by frame identity instead silently renames the module
     # ports by filename -- a public ABI change, which nothing else in the suite would notice.
     from tests import _store_alpha, _store_beta
+
+    _assert_store_helpers_tie()
 
     class Zed:
         def __init__(self) -> None:
@@ -1024,13 +1040,7 @@ def test_a_store_diagnostic_names_the_first_executed_of_two_tied_stores() -> Non
     # alpha. The two paths differ on purpose, and neither is a general "first-executed" guarantee.
     from tests import _store_alpha, _store_beta
 
-    # The tie this test is about only exists while the two stores sit at the SAME position, which is a property
-    # of the fixture files rather than of the code under test; assert it rather than trusting the layout, since
-    # a one-line drift in either helper would make the test pass for the wrong reason.
-    alpha_source, alpha_line = inspect.getsourcelines(_store_alpha.put)
-    beta_source, beta_line = inspect.getsourcelines(_store_beta.put)
-    assert alpha_line == beta_line
-    assert [line.rstrip() for line in alpha_source] == [line.rstrip() for line in beta_source]
+    _assert_store_helpers_tie()
 
     class Tied:
         def __init__(self) -> None:
@@ -1067,7 +1077,8 @@ def test_a_verdict_prefers_a_raise_guarded_store_over_the_promoter() -> None:
     # populated here and they DISAGREE -- this is not the map-empty fallback case. The per-round store map
     # leads, and it holds every store the round transferred, including one in a block the exit cannot be
     # reached from -- here the store before the `raise`, which is source-earlier than the live one and takes
-    # the anchor, while the latch holds the live store. Preferring the promotion latch instead names the live store on THIS shape and a dead store on
+    # the anchor, while the latch holds the live store. Preferring the promotion latch instead names the live
+    # store on THIS shape and a dead store on
     # the shape the neighbouring test pins, which is why neither order is a fix and this one is not "safer".
     # Both witnesses exist so that a future round cannot make either half worse against a green suite.
     class RaiseGuarded:
@@ -1101,8 +1112,9 @@ def test_a_verdict_prefers_a_raise_guarded_store_over_the_promoter() -> None:
 def test_a_mid_round_verdict_still_anchors_on_a_speculated_store() -> None:
     # EXECUTABLE RECORD of an OPEN residual of the deferral seam, NOT desired behavior. The refusal itself is
     # correct -- a tuple reset is genuinely unsupported -- but the LINE it names is one Python never runs.
-    # A verdict raised mid-round finds the promotion latch still empty, so the location comes from whatever
-    # stores the worklist has reached, speculated arms included, and the dead arm wins on source order. Both
+    # The verdict is raised before `s` has a promotion-latch entry -- here the analysis aborts before any
+    # end-of-round pass could fill one -- so the location comes from whatever stores the worklist has reached,
+    # speculated arms included, and the dead arm wins on source order. Both
     # lookup orders behave identically here, which is why the priority is not a fix for this: measured by
     # swapping them and re-running. Deleting the dead arm moves the anchor to `self.s = self.s`.
     class MidRound:

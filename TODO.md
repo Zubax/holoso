@@ -144,8 +144,8 @@ facts, and nothing for the gate to detect. That arm's store still promotes the a
 the reset still rounds in the carrier. `test_phantom_environment_miscompile_is_still_open` pins a witness
 returning 12.0 in Python and 22.0 in E8M23 hardware, correct in E11M52.
 
-A MILDER RESIDUAL OF THE SAME SEAM, wrong LINE rather than wrong value: a state verdict raised on the round
-that first promotes its leaf takes the location from whatever stores the worklist has reached, speculated arms
+A MILDER RESIDUAL OF THE SAME SEAM, wrong LINE rather than wrong value: a state verdict raised before its leaf
+has a promotion-latch entry takes the location from whatever stores the worklist has reached, speculated arms
 included, so a refusal that is itself correct can name a line Python never runs.
 `test_a_mid_round_verdict_still_anchors_on_a_speculated_store` pins one, and on THAT shape the choice between
 the two provenance sources does not govern the outcome -- both behave identically, measured by swapping them.
