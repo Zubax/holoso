@@ -13,19 +13,25 @@ user, and keep going. Codex: `codex exec -m gpt-5.6-sol -c model_reasoning_effor
 workflow (one thing at a time; the maintainer dropped parallel tracks to cut complexity). Any earlier "HELD for
 maintainer manual review" wording in the log below is SUPERSEDED by this directive.
 
-WHERE WE ARE: Stage 2 (semantic stabilization) is landed and the FREEZE INFRASTRUCTURE is built, but `freeze-1`
-is NOT tagged. The deferral x grafting seam admits a SILENT MISCOMPILE -- a dead branch arm gets emitted, its
-store promotes an attribute from a binary64-folded constant to a runtime slot, the reset re-materializes in the
-narrower carrier, and a guard flips. A POST-STABILIZATION GATE now refuses the routes where the contradiction
-is detectable (a settled branch disagreeing with its own edges, a marked-but-unreachable region, an execution
-path out of an unreachable region), which also converts two former raw crashes into located diagnostics. The
-fixpoint itself is UNCHANGED: every attempt to fix this inside it was measured and rejected for starving loops.
-ONE MISCOMPILE ROUTE SURVIVES and is not locally fixable -- when a phantom environment keeps a stale state fact
-alive the condition settles as a runtime bool, so the Python-dead arm is genuinely live to the analyzer and no
-contradiction exists to detect. It is pinned by `test_phantom_environment_miscompile_is_still_open` (returns
-22.0, must become 12.0) and is a FIRST-CLASS ACCEPTANCE CRITERION for Stage 4. False rejections also remain.
-All of it is documented in `TODO.md` "Known defects" and pinned by witnesses in `tests/test_frontend_state.py`.
-Stage 3's architecture spike ran → verdict MORPH (SC1-SC3 passed; SC4 missed by 75 LOC; branch
+WHERE WE ARE: Stage 2 is landed, the FREEZE INFRASTRUCTURE is built, `freeze-1` is NOT tagged, and the
+deferral x grafting seam turned out to admit SILENT MISCOMPILES rather than only false rejections -- which is
+the premise the maintainer's whole defer-to-Stage-4 plan rested on. FOUR routes have been found, each by a
+different attack angle: (1) a settled branch whose speculated arm stays marked, (2) narrowings of the check for
+(1) that readmitted it, (3) runtime state accumulated across W/D rounds whose store a later round proves
+unreachable, (4) the live-in map poisoned the same way. A post-stabilization GATE refuses (1) and (3) and turned
+two former raw crashes into located diagnostics; (2) is closed by keeping the rule unconditional; (4) IS OPEN
+AND SILENTLY MISCOMPILES, as does the older phantom-environment route. All four are pinned as executable
+witnesses, the open ones asserting the wrong value they currently produce.
+
+DO NOT ADD A FIFTH GATE CHECK. The gate grew from one check to four, three of them reactive, and every addition
+was followed by a new route through a dimension it did not model. Route (4) additionally cannot be caught by
+mirroring the check for (3): W staleness leaves a residue, D staleness is byte-identical to what the final round
+derives. TODO.md carries this as a standing instruction; `tools/deferral_seam_sweep.py` is the standing check and
+gates on CHANGE against the recorded state. Untested surfaces, named: `_unroll_seeds`, `_pending_bridge`.
+
+This is now the campaign's strongest argument for Stage 4, and a stronger one than the spike made: not
+"decisions should be made once" but "this seam produces wrong hardware and post-hoc gating provably cannot see
+at least one route". Stage 3's spike verdict was MORPH (SC1-SC3 passed; SC4 missed by 75 LOC; branch
 `spike/resolved-ir` @ dc76fbf; ledger `docs/decisions/spike-ledger.md`). The Stage-3 ruling and Stage 4 pend.
 
 STEP 1-2 DONE (this session): `.nox` rebuilt; round-10 edge-withholding REVERTED, so the freeze baseline carries
@@ -1192,6 +1198,30 @@ THREE INVALIDATED CLAIMS OF MINE ("emission never sees a phantom path", "bounded
 value survives"). That pattern IS the architectural evidence: every local patch reaches a corner the next round
 exposes, and Codex's original consult position -- the real fix is Stage 4, whose spine must RECOMPUTE
 reachability rather than inherit these sets -- has held up better than my attempts to improve on it.
+
+ROUNDS 4-8 (autonomous session, the freeze-baseline step): the step expanded from a corpus-neutral revert into
+the discovery that this seam MISCOMPILES. Sequence, with my own errors kept in because they are the useful part:
+round 4 found the gate over-refusing and I narrowed it; round 5 found the narrowing crossed the branch merge and
+I narrowed it again; ROUND 6 PROVED BOTH NARROWINGS READMITTED SILENT MISCOMPILES and I reverted to the
+unconditional rule that had shipped three commits earlier. Round 7 found a raw AssertionError pre-empting the
+gate (fixed by ordering) and then, via cross-round accumulation, a third miscompile route the 12,000-kernel
+within-round fuzz could not express -- fixed with the check it proposed. Round 8 found a FOURTH route through
+the other half of the same accumulator, which is NOT fixable by the mirror check and is now pinned open.
+
+FOUR ERRORS OF MINE, recorded so they are not repeated: (a) I shipped two unsound narrowings believing they were
+improvements, trading soundness for accepts in a seam Stage 4 dissolves anyway; (b) I twice declared the gate
+sound and was twice refuted by the next attack angle; (c) my own sweep tool was blind to the defect it existed
+to catch on three separate occasions, each time because I built the corpus from shapes I had already imagined --
+it now carries a VALUE ORACLE, without which a miscompile tallies as a good accept; (d) I over-trusted two
+reviewers agreeing, twice, when they shared an attack surface rather than independently confirming.
+
+Also corrected along the way: PYTHONPATH does NOT fail to override an editable install -- it precedes the
+editable finder, and what shadowed it in my cross-commit probes was the script directory (or cwd under -c). The
+sys.path[0] discipline is right; my stated reason for it was wrong, and one comparison silently tested the same
+tree twice before I caught it.
+
+Net: two routes refused, two open and pinned, corpus BYTE-IDENTICAL across all twelve commits, suite 1914/2, CI
+green on every code commit. The step is in a defensible terminal state and `freeze-1` can be tagged on it.
 
 FINAL PRE-COMPACTION ENTRY (2026-07-19): the maintainer set the STANDING DIRECTIVE (see the RESUME BRIEF at the
 top of this file, now the single source of truth): proceed AUTONOMOUSLY to completion, maintainer UNAVAILABLE,
