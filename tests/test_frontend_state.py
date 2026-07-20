@@ -906,6 +906,51 @@ def test_runtime_state_discovered_on_a_dead_round_is_refused() -> None:
         holoso.synthesize(CrossRound().step, default_ops(FloatFormat(8, 23)), name="cross_round_stale")
 
 
+def test_live_in_poisoning_miscompile_is_still_open() -> None:
+    # EXECUTABLE RECORD of an OPEN defect (TODO.md), NOT desired behavior: a SILENT WRONG ANSWER. The W/D
+    # accumulator has two halves and only W is guarded. A round-1 speculated arm drives D[mode] down to a
+    # residual live-in; round 2 prunes that arm, so no check on the stable graph sees anything wrong, and the
+    # trailing store keeps `mode` in first_store so the runtime-state check passes too. The guard on `mode` then
+    # reads the poisoned live-in and takes a branch Python never takes. Mirroring the W check does not help:
+    # W staleness leaves a residue to detect, D staleness is byte-identical to what the final round derives.
+    class DPoison:
+        def __init__(self) -> None:
+            self.mode = True  # Python: always True -- reset True, and the only executed store writes True
+            self.t = 0.0
+            self.s = 1 + 2**-30  # rounds to 1.0 in E8M23, exact in E11M52
+
+        def step(self, x: float, flag: bool) -> float:
+            if self.mode:  # Known(True) on round 1, so u is a Known inexact int and the array call defers
+                u: float = 2**53 + 1
+                q: float = 2**64
+            else:
+                u = x
+                q = x
+            self.t = u
+            a = np.array([q, x])
+            if a.shape[0] > 5:  # speculated on round 1, statically false and pruned on round 2
+                self.mode = False  # its only effect is to drive D[mode] residual
+            if self.mode:
+                r = 10.0
+            else:
+                self.s = 7.0  # Python never runs this; the analyzer emits it
+                r = 20.0
+            if flag:
+                self.mode = True  # keeps `mode` stored, so the runtime-state check finds nothing stale
+            return r if self.s > 1.0 else 30.0
+
+    expected = DPoison().step(2.0, False)
+    assert expected == 10.0
+    narrow = holoso.synthesize(DPoison().step, default_ops(FloatFormat(8, 23)), name="d_poison")
+    outputs = dict(zip((port.name for port in narrow.output_ports), narrow.numerical_model.elaborate().run(2.0, False)))
+    assert float(outputs["out_0"]) == 30.0  # WRONG; must become 10.0 when the restructure lands
+    wide = holoso.synthesize(DPoison().step, default_ops(FloatFormat(11, 52)), name="d_poison_wide")
+    wide_outputs = dict(
+        zip((port.name for port in wide.output_ports), wide.numerical_model.elaborate().run(2.0, False))
+    )
+    assert float(wide_outputs["out_0"]) == expected  # correct where the reset is exact, isolating the channel
+
+
 def test_phantom_environment_miscompile_is_still_open() -> None:
     # EXECUTABLE RECORD of an OPEN defect (TODO.md), NOT desired behavior, and the most serious one left: a
     # SILENT WRONG ANSWER. The deferred inlined helper sets `self.gate`, but the phantom environment left by the

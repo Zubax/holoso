@@ -99,6 +99,10 @@ _LOOP = {
 # see a miscompile -- a wrong answer tallies as a good accept, which is exactly how two of them shipped. These
 # carry a reset that is inexact in the target carrier, so if a speculated arm promotes it to runtime state the
 # reset re-materializes narrower and a guard reading it flips. Each entry is (source, args, expected).
+# Routes documented as OPEN in TODO.md. They miscompile today, so the tool reports them without failing --
+# and fails if one of them starts passing, since that means the documentation is stale.
+_KNOWN_OPEN = frozenset({"live_in_poisoned_across_rounds"})
+
 _VALUE_ORACLE = {
     "dead_store": (
         """import numpy as np
@@ -206,6 +210,40 @@ class K:
             self.s = 7.0
         self.mode = new_mode
         return 10.0 if self.s > 1.0 else 20.0
+""",
+        (2.0, False),
+    ),
+    # The other half of the W/D accumulator: a round-1 speculated arm poisons the live-in map, round 2 prunes
+    # that arm, and a trailing store keeps the leaf in first_store so the runtime-state check passes too. OPEN.
+    "live_in_poisoned_across_rounds": (
+        """import numpy as np
+
+
+class K:
+    def __init__(self) -> None:
+        self.mode = True
+        self.t = 0.0
+        self.s = 1 + 2**-30
+
+    def step(self, x: float, flag: bool) -> float:
+        if self.mode:
+            u: float = 2**53 + 1
+            q: float = 2**64
+        else:
+            u = x
+            q = x
+        self.t = u
+        a = np.array([q, x])
+        if a.shape[0] > 5:
+            self.mode = False
+        if self.mode:
+            r = 10.0
+        else:
+            self.s = 7.0
+            r = 20.0
+        if flag:
+            self.mode = True
+        return r if self.s > 1.0 else 30.0
 """,
         (2.0, False),
     ),
@@ -356,9 +394,19 @@ def main() -> int:
                 miscompiles += 1
                 print(f"  oracle {label:32s} CRASH:{type(error).__name__}: {str(error)[:60]}")
                 continue
-            verdict = "OK" if actual == expected else "*** MISCOMPILE ***"
-            miscompiles += actual != expected
-            print(f"  oracle {label:32s} accepted python={expected} hardware={actual}  {verdict}")
+            diverged = actual != expected
+            if diverged and label in _KNOWN_OPEN:
+                # A documented open route (TODO.md). Reported, but it does not fail the run: the tool gates on
+                # CHANGE against the recorded state, so a known miscompile does not mask a new one.
+                print(f"  oracle {label:32s} accepted python={expected} hardware={actual}  KNOWN-OPEN miscompile")
+            elif diverged:
+                miscompiles += 1
+                print(f"  oracle {label:32s} accepted python={expected} hardware={actual}  *** MISCOMPILE ***")
+            elif label in _KNOWN_OPEN:
+                miscompiles += 1  # a documented route stopped miscompiling: the record is stale, not the code
+                print(f"  oracle {label:32s} accepted python={expected} hardware={actual}  FIXED -- update TODO.md")
+            else:
+                print(f"  oracle {label:32s} accepted python={expected} hardware={actual}  OK")
         tally: dict[str, int] = {}
         for label, template in _LOOP_INNER.items():
             for feed_name, (wide, wider) in {"wide": ("2**53 + 1", "2**64"), "narrow": ("2.0", "3.0")}.items():
