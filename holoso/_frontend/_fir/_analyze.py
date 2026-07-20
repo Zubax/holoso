@@ -330,6 +330,12 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
     Emission reaches `call_plans` and `block_in` with a bare subscript, so a gap in either arrives as a KeyError
     from inside a walk that names neither the op nor the block. This names both.
 
+    SCOPE, because a scaffold that reads as complete is worse than none: `subscript_plans` and `route_plans`
+    are consumed with `.get()`, where absence legitimately means "positional projection" and "identity route",
+    so their omissions are indistinguishable from intent and CANNOT be checked here -- dropping a real transpose
+    route silently changes emitted HIR, and dropping a real subscript plan reaches a raw TypeError. Verifying
+    those needs the typed explicit variants M2 introduces.
+
     The block set is deliberately EMISSION's -- reverse postorder over the executable edges, exactly what
     `_Emitter` iterates -- and not the recorder's `executable_blocks`. Deriving the check from the same set the
     recorder used would make it agree with the recorder by construction and prove nothing; the two sets are

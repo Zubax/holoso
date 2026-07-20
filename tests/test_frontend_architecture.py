@@ -13,8 +13,9 @@ from ._importguard import transitive_holoso_imports
 
 _EMITTER = "holoso._frontend._fir._emit"
 
-# The frontend decision modules `_emit.py` imports DIRECTLY. The restructure empties this set: emission is to
-# consume a closed typed plan surface, deciding nothing. It is a RATCHET -- every entry is a debt, the set may
+# The frontend decision modules `_emit.py` imports DIRECTLY. The restructure drives this set toward empty; an
+# empty set is NECESSARY for "emission decides nothing" and nowhere near sufficient, since a decision can also
+# arrive through the plan (see the blind spot below). It is a RATCHET -- every entry is a debt, the set may
 # only shrink, and the test fails in both directions so a removal is spent in the commit that earns it.
 #
 # DIRECT imports, not the transitive closure, and the difference is the whole value of the meter. The emitter's
@@ -108,7 +109,12 @@ def test_emission_rejection_sites_only_shrink() -> None:
         for node in ast.walk(source)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "EmissionRejection"
     ]
-    assert len(built) <= 42, f"emission gained refusal sites ({len(built)} > 42); M5 moves them upstream"
+    # EXACT, not a ceiling: `<= 42` would let the count fall to 41 and grow back to 42 unnoticed, which is the
+    # regrowth a ratchet exists to prevent. A reduction is progress and updates this number in its own commit.
+    assert len(built) == 42, (
+        f"emission constructs {len(built)} refusals, recorded 42: fewer means M5 progress, so update the number "
+        "here in the same commit; more means a refusal was added where the restructure removes them"
+    )
 
 
 def _module_source(module: str) -> str:

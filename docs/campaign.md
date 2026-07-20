@@ -1578,3 +1578,16 @@ nodes -- is NOT implemented. Production `_emit.py` does the J6 thing in four liv
 also reach the emitter through the PLAN rather than an import (`CallPlan.intrinsic` hands over a live registry
 `Intrinsic` and `_emit_intrinsic` branches on its result rule), which no import guard can see. That blind spot
 is now named in the guard itself. Closing it is M2/M3 work and is OUTSTANDING.
+
+
+M0 ROUND, CODEX HALF -- converged on the closure blind spot and added two refinements, both applied. (a) The
+`EmissionRejection` guard counted literal `raise EmissionRejection(...)`, so `error = EmissionRejection(...);
+raise error` raised the site count 42 -> 43 and passed; and `<= 42` would have let the count fall to 41 and
+regrow to 42 unnoticed, which is exactly the regrowth a ratchet exists to prevent. It is an EXACT count now,
+verified against Codex's own spoof. (b) The guard's header still said an empty set means emission decides
+nothing -- false, since an empty module set is necessary and nowhere near sufficient; reworded. (c) Recorded in
+the verifier itself: `subscript_plans` and `route_plans` are read with `.get()`, where absence legitimately
+means positional projection and identity route, so their omissions are indistinguishable from intent and cannot
+be checked until M2 gives them typed explicit variants -- Codex measured both, dropping a real transpose route
+silently changes six emitted HIR operations and dropping a real subscript plan reaches a raw TypeError. Both
+reviewers independently confirmed the helper fix changes neither pre-existing verdict.
