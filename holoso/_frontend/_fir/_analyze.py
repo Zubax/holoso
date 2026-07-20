@@ -324,23 +324,28 @@ class CallPlan:
 
 def verify_plan_totality(result: "ResidualUnit") -> None:
     """
-    Check, before emission walks, that every table emission subscripts bare is total over the blocks emission
-    will actually visit.
+    Read back the recorder's postcondition before emission walks: every op emission subscripts a table for has
+    an entry, over the blocks emission will visit.
 
-    Emission reaches `call_plans` and `block_in` with a bare subscript, so a gap in either arrives as a KeyError
-    from inside a walk that names neither the op nor the block. This names both.
+    HONEST SCOPE, because the first two versions of this claimed more than they checked. This CANNOT FAIL for
+    any `ResidualUnit` the analyzer can produce today, and it is not a general totality check:
 
-    SCOPE, because a scaffold that reads as complete is worse than none: `subscript_plans` and `route_plans`
-    are consumed with `.get()`, where absence legitimately means "positional projection" and "identity route",
-    so their omissions are indistinguishable from intent and CANNOT be checked here -- dropping a real transpose
-    route silently changes emitted HIR, and dropping a real subscript plan reaches a raw TypeError. Verifying
-    those needs the typed explicit variants M2 introduces.
+    - the block sets cannot diverge. `_check_reachability_settled` runs BEFORE `_finalize` over the same
+      `executable_rpo` walk and refuses both directions, so `set(walked) == executable_blocks` always holds on
+      exit, and were that to break it would report first, located, rather than as an assert here;
+    - `block_in` coverage is already implied -- `_finalize` bare-subscripts it for every executable block --
+      so this arm restates a property that would have raised earlier in the same call;
+    - `subscript_plans` and `route_plans` are read with `.get()`, where absence legitimately means positional
+      projection and identity route, so their omissions are indistinguishable from intent and are NOT checked;
+      verifying those needs the typed explicit variants M2 introduces;
+    - the J6 obligation the ruling assigned to this function by name -- every kind promotion consumed from an
+      explicit plan row rather than derived by inspecting emitted nodes -- is NOT implemented here, and
+      production emission still does it (`docs/decisions/arch-ruling.md`, outstanding M2/M3 work).
 
-    The block set is deliberately EMISSION's -- reverse postorder over the executable edges, exactly what
-    `_Emitter` iterates -- and not the recorder's `executable_blocks`. Deriving the check from the same set the
-    recorder used would make it agree with the recorder by construction and prove nothing; the two sets are
-    equal today on every bundled example, and this is what will notice if they stop being. Under `-O` the
-    asserts vanish and the KeyError comes back, which is the ordinary house contract for invariant checks.
+    What it is FOR is M1, which rewrites recording to be evidence-atomic: a recorder that stops writing a plan
+    for a `PyCall` inside a block emission still visits is precisely the regression this catches, and it is the
+    one shape the upstream gate does not already cover. Kept deliberately as a postcondition read-back placed
+    before the change that can break it.
     """
     walked = executable_rpo(result.unit.entry, result.executable_edges)
     missing_env = [block_id for block_id in walked if block_id not in result.block_in]

@@ -1591,3 +1591,31 @@ means positional projection and identity route, so their omissions are indisting
 be checked until M2 gives them typed explicit variants -- Codex measured both, dropping a real transpose route
 silently changes six emitted HIR operations and dropping a real subscript plan reaches a raw TypeError. Both
 reviewers independently confirmed the helper fix changes neither pre-existing verdict.
+
+
+M0 ROUND 2 -- THE REBUILT GUARDS WERE STILL WRONG, and the round found it in all three. Rebuilt again.
+
+(1) The direct-MODULE ratchet was blind to the imports that matter. `_opsem`, `_lib` and `_analyze` are listed,
+so `static_binop`, `resolve` and any analyzer symbol enter the emitter without moving it -- and TWO OF THE
+THREE PROBES I had cited as the rebuild's justification pass under it. Rebuilt again at SYMBOL level: 101 names
+recorded per module, so a new decision symbol from an already-listed module lands immediately. Verified on all
+four probes; three now fail, the fourth (re-importing an already-recorded symbol under an alias) correctly does
+not, and a genuinely new analyzer symbol does.
+
+(2) My private `_direct_imports` REINTRODUCED THE EXACT DEFECT the ruling told M0 to avoid: it discarded
+`alias.name`, so `from .._lib import _registry` was invisible -- the spike's own walker gap, which
+arch-ruling.md records and explicitly says to avoid by building on `tests/_importguard.py`. Deleted; the shared
+helper gained a `direct_imports` that resolves the submodule spelling correctly.
+
+(3) `verify_plan_totality` was STILL tautological and I had claimed otherwise. `_check_reachability_settled`
+runs BEFORE `_finalize` over the same `executable_rpo` walk and refuses both directions, so the two block sets
+are forced equal upstream -- the divergence my docstring said it would notice is a state the analyzer cannot
+produce, and would be reported located and earlier if it were. The `block_in` arm is dominated too, since
+`_finalize` already bare-subscripts it. The docstring now says all of this plainly, names the one shape it does
+catch (an M1 recorder that skips a `PyCall` inside a covered block), and admits it cannot fail today. Since
+deleting the call still failed no test, THE CALL SITE IS NOW PINNED.
+
+(4) Recovered from the Codex half, which died on a provider guardrail before reporting -- the survival kit says
+to mine a guardrailed reviewer's transcript, and this is the second time that has paid. Its probe: a helper
+that constructs internally lets a NEW refusal be added while the construction count stays at 42 (measured: 42
+constructions, 41 direct raises). Both numbers are pinned exactly now, and its mutant fails.

@@ -39,6 +39,19 @@ def transitive_holoso_imports(root_module: str) -> set[str]:
     return modules - {root_module}
 
 
+def direct_imports(module: str) -> set[str]:
+    """
+    What ``module`` itself names in an import statement, resolved to absolute names, INCLUDING the
+    ``from package import submodule`` spelling -- the gap that made the architecture spike's own closure walker
+    read smaller than it was (docs/decisions/arch-ruling.md). Symbols that are not modules are returned too:
+    a guard that wants to see `from x import decide` needs the symbol, not just `x`.
+    """
+    source, anchor = _source_and_anchor(module)
+    if source is None:
+        raise ValueError(f"import-guard root {module!r} did not resolve to a .py module")
+    return {name for name in _imported_modules(ast.parse(source.read_text(encoding="utf-8")), anchor)}
+
+
 def forbidden_imports(root_module: str, forbidden_prefix: str) -> list[str]:
     return sorted(
         module
