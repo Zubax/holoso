@@ -29,9 +29,15 @@ import tempfile
 def _same(left: float, right: float) -> bool:
     """
     Value identity for the oracle, not numeric equality: 10 == 10.0 and -0.0 == 0.0, yet a reference that
-    changes type or sign is a real change in what the kernel computes and must not read as unchanged.
+    changes type or sign is a real change in what the kernel computes and must not read as unchanged. NaN is
+    identical to itself here, unlike under `==`, so a NaN-valued route can be recorded and compared like any
+    other rather than being permanently unrecordable.
     """
-    if type(left) is not type(right) or left != right:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, float) and math.isnan(left):
+        return math.isnan(right)
+    if left != right:
         return False
     return not (isinstance(left, float) and left == 0.0) or math.copysign(1.0, left) == math.copysign(1.0, right)
 

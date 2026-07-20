@@ -980,6 +980,41 @@ def test_cross_round_state_verdicts_are_located_at_their_store() -> None:
     assert (location.line or "").strip().startswith("self.s = 7.0")
 
 
+def test_a_cross_round_verdict_prefers_a_raise_guarded_store() -> None:
+    # EXECUTABLE RECORD of the OTHER half of the `_state_origin` trade, NOT desired behavior. The per-round
+    # store map leads, and it holds every store the round transferred, including one in a block the exit cannot
+    # be reached from -- here the store before the `raise`, which is source-earlier than the live one and takes
+    # the anchor. Preferring the promotion latch instead names the live store on THIS shape and a dead store on
+    # the shape the neighbouring test pins, which is why neither order is a fix and this one is not "safer".
+    # Both witnesses exist so that a future round cannot make either half worse against a green suite.
+    class RaiseGuarded:
+        def __init__(self) -> None:
+            self.mode = True
+            self.t = 0.0
+
+        def step(self, x: float, boom: bool) -> float:
+            if self.mode:
+                u: float = 2**53 + 1
+                q: float = 2**64
+            else:
+                u = x
+                q = x
+            self.t = u
+            span = np.array([q, x])
+            if boom:
+                self.zz = 3.0  # never reached past the raise, yet it is the line the message names
+                raise ValueError("stop")
+            self.zz = 1.0
+            self.mode = False
+            return x
+
+    with pytest.raises(UnsupportedConstruct, match="does not exist on the component") as refusal:
+        holoso.synthesize(RaiseGuarded().step, default_ops(FloatFormat(8, 23)), name="raise_guarded_anchor")
+    location = refusal.value.location
+    assert location is not None
+    assert (location.line or "").strip().startswith("self.zz = 3.0")  # the trade; the live store is self.zz = 1.0
+
+
 def test_a_mid_round_verdict_still_anchors_on_a_speculated_store() -> None:
     # EXECUTABLE RECORD of an OPEN residual of the deferral seam, NOT desired behavior. The refusal itself is
     # correct -- a tuple reset is genuinely unsupported -- but the LINE it names is one Python never runs.

@@ -54,8 +54,9 @@ recording the WHOLE observed pair (python, hardware), and it FAILS on any change
 answer, a different wrong answer, a moved Python reference, or a refusal alike, since each means the record no
 longer describes the code. SCOPE, stated because three review rounds each falsified a broader claim about this
 tool: the observable is the kernel's `out_0` compared by VALUE IDENTITY rather than numeric equality -- same
-type, same value, same zero sign, since `10 == 10.0` and `-0.0 == 0.0` -- so a divergence confined to a state
-port is not gated; the
+value, same zero sign, NaN identical to itself, and same type on the PYTHON side (the hardware half is
+normalized to `float` before comparison, so a type change there cannot be seen) -- and a divergence confined to
+a state port is not gated; the
 per-family accept/refuse tallies are printed rather than baselined, and are compared by hand against the table
 in TODO.md; and the 54 generated dead-arm accepts are never value-checked at all, which is the same regime the
 oracle exists to escape — a round-4 reviewer checked all 54 against Python by hand and found no live
@@ -1419,10 +1420,37 @@ three recorded routes while the other five kernels would have accepted a Python 
 10 -- and `-0.0` versus `0.0` was invisible everywhere. Comparison is now value identity (type, value, zero
 sign) for every oracle kernel, and the scope sentence says so. A garbled sentence in the round-4 entry, which
 had lost the subject naming WHICH selections were converted to `origin_order`, is repaired -- in a log whose
-purpose is auditability that is a defect, not a typo. Left deliberately on `source_position`, with the reasons recorded: `_finalize`'s `first_store` keys
+purpose is auditability that is a defect, not a typo.
+
+THREE SELECTIONS STAY ON `source_position`, each for its own reason. `_finalize`'s `first_store` keys
 `(source_position, rank)`, where the execution rank is a load-bearing S2.11 tie-break that must outrank frame
-identity; and the two per-store selections converted in round 4 are reverted here, because the Codex half
-demonstrated the conversion CHANGING a public diagnostic -- two same-position helpers reached through
-`for put in (put_b, put_a)` reported `in put_b()` before and `in put_a()` after, trading the first-executed
-store for the lexically-first filename. `origin_order` is kept exactly where a SET is being ordered and no
+identity. The per-leaf `_store_origins` and per-(block, leaf) `_discovered_store_origins` minima, converted in
+round 4, are REVERTED here: the Codex half demonstrated the conversion changing a public diagnostic -- two
+same-position helpers reached through `for put in (put_b, put_a)` reported `in put_b()` before and `in put_a()`
+after, trading the first-executed store for the lexically-first filename -- while buying no determinism, since
+those ties are broken by the deterministic order stores are transferred in. Two further sites,
+`_analysis_support.py`'s stranded-bridge pick and `_emit.py`'s return-origin minimum, were never converted and
+are named here so the enumeration can be checked rather than trusted.
+
+`origin_order` is kept exactly where a SET is being ordered and no
 deterministic order exists to inherit: the promotion pick, the stale-leaf sort, and the deferral key.
+
+
+REVIEW ROUND 6 -- not clean, and one finding is that I repaired a garbling defect and reintroduced it one
+clause later, on a 153-column line, by the same append-without-rewrapping mechanism. Fixed, and the
+enumeration it garbled is now explicit and checkable: THREE selections stay on `source_position`, and the two
+further sites nobody had converted are named so the list can be audited rather than trusted.
+
+The substantive finding: "each order is better than the other on a witness the seam already has" was not true
+of any TEST. Swapping `_state_origin` to latch-first fails exactly one test out of 103, so nothing pinned the
+map half at all -- its counter-witness lived only in prose in this log, which is precisely the rot channel this
+campaign keeps closing. My first attempt to reproduce it FAILED (a runtime-flagged raise arm anchors on the
+live store either way); the shape that reproduces is the cross-round missing-reset one, where map-first names
+the raise-guarded `self.zz = 3.0` and latch-first names the live `self.zz = 1.0`. Both halves are now pinned,
+so neither can be made worse against a green suite. Also corrected: the `_runtime_state_origins` field comment
+still carried the superseded "no other diagnostic should prefer it" framing 270 lines above the docstring that
+now says the opposite; `_same` reported NaN as unequal to itself, which would have made a NaN-valued route
+permanently unrecordable in `_KNOWN_OPEN`; the scope sentence claimed a type comparison on both halves when
+the hardware half is normalized to `float` first; and the mid-round anchor was "pinned alongside the seam's
+other open records" everywhere except TODO.md, which is the register the tests and the sweep both cite -- it
+is there now.

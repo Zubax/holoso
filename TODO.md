@@ -144,6 +144,15 @@ facts, and nothing for the gate to detect. That arm's store still promotes the a
 the reset still rounds in the carrier. `test_phantom_environment_miscompile_is_still_open` pins a witness
 returning 12.0 in Python and 22.0 in E8M23 hardware, correct in E11M52.
 
+A MILDER RESIDUAL OF THE SAME SEAM, wrong LINE rather than wrong value: a state verdict raised mid-round takes
+its location from whatever stores the worklist has reached, speculated arms included, so a refusal that is
+itself correct can name a line Python never runs. `test_a_mid_round_verdict_still_anchors_on_a_speculated_store`
+pins one. The choice between the two provenance sources does not govern it -- both behave identically there,
+measured by swapping them -- and the sources trade against each other elsewhere, each losing on a shape the
+other wins: `test_a_cross_round_verdict_prefers_a_raise_guarded_store` and
+`test_state_verdicts_do_not_anchor_on_a_store_proved_dead` pin the two halves. Not patched, for the same reason
+as the rest of this class.
+
 The gate closes the routes where the recorded reachability visibly contradicts the settled facts, which is
 where the majority of observed cases and all three raw-crash modes lived -- a bare `KeyError` out of the plan
 replay, a bare `AssertionError` (which, vanishing under `-O`, crashed the debug build where the optimized one

@@ -367,8 +367,9 @@ class Analyzer:
         # Where each runtime-state leaf came from: the source-earliest store that promoted it, latched on the
         # ROUND that first promoted it. Monotonicity keeps the LEAF in the set, not that store in the graph, so
         # the latched store may well be one a later round proves unreachable -- which is exactly what the
-        # stale-leaf refusal is about, and exactly why no other diagnostic should prefer it. Its provenance
-        # cannot live in the per-round store map, which is empty for it once that store stops executing.
+        # stale-leaf refusal is about. Whether any OTHER diagnostic should prefer it is a genuine trade, not a
+        # settled question; `_state_origin` weighs it. Its provenance cannot live in the per-round store map,
+        # which is empty for it once that store stops executing.
         self._runtime_state_origins: dict[StateLeaf, OriginStack] = {}
         self._state_livein: dict[StateLeaf, Fact] = {}
         self._discovered_stores: set[tuple[BlockId, StateLeaf]] = set()
