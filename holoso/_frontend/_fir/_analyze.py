@@ -812,6 +812,23 @@ class Analyzer:
         for param in result.unit.params:
             result.binding_facts.setdefault(param, entry_env.get(Local(param)))
         result.store_order = sorted(first_store, key=lambda leaf: first_store[leaf])
+        # A leaf enters W when a store to it is discovered, and W only ever grows: a store that a LATER round
+        # proves unreachable leaves its leaf behind as runtime state anyway. That is unsound rather than merely
+        # untidy, because the slot's reset then materializes in the target carrier instead of folding at
+        # binary64, so a guard reading it can flip -- the same harm the branch rule refuses, arriving across
+        # rounds rather than within one, where every per-round check passes on the stable graph.
+        stale_leaves = sorted(
+            (leaf for leaf in self._runtime_state if leaf not in first_store),
+            key=lambda leaf: (leaf.obj_id if hasattr(leaf, "obj_id") else 0, leaf.path),
+        )
+        if stale_leaves:
+            leaf = stale_leaves[0]
+            raise AnalysisRejection(
+                f"state attribute {'.'.join(leaf.path)!r} was discovered as runtime state on an earlier "
+                "analysis round whose store the stabilized facts leave unreachable, so its reset would be "
+                "materialized as if it were written; the result cannot be trusted",
+                self._state_origin(leaf),
+            )
         result.runtime_state = set(self._runtime_state)
         result.state_livein = dict(self._state_livein)
         for leaf in {*result.runtime_state, *result.store_order, *result.state_livein}:

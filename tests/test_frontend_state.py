@@ -875,6 +875,37 @@ def test_inert_speculated_arm_poisoning_a_later_guard_is_refused() -> None:
         holoso.synthesize(PhiPoison().step, default_ops(FloatFormat(8, 23)), name="phi_poison")
 
 
+def test_runtime_state_discovered_on_a_dead_round_is_refused() -> None:
+    # The third miscompile route, and the only one that is not visible on the final graph at all. W grows
+    # monotonically: round 1 speculates through `self.mode` being Known-True and discovers a store to `s`, round 2
+    # proves the shape guard false so that store is unreachable, and every per-round check then passes -- but `s`
+    # stays in the runtime-state set, so its reset materializes in the carrier instead of folding at binary64 and
+    # the guard flips. Accepted, no error, 20.0 against Python's 10.0, with a spurious public state_s port.
+    class CrossRound:
+        def __init__(self) -> None:
+            self.mode = True
+            self.t = 0.0
+            self.s = 1 + 2**-30
+
+        def step(self, x: float, new_mode: bool) -> float:
+            if self.mode:
+                u: float = 2**53 + 1
+                q: float = 2**64
+            else:
+                u = x
+                q = x
+            self.t = u
+            a = np.array([q, x])
+            if a.shape[0] > 5:
+                self.s = 7.0
+            self.mode = new_mode
+            return 10.0 if self.s > 1.0 else 20.0
+
+    assert CrossRound().step(2.0, False) == 10.0
+    with pytest.raises(UnsupportedConstruct, match="earlier analysis round"):
+        holoso.synthesize(CrossRound().step, default_ops(FloatFormat(8, 23)), name="cross_round_stale")
+
+
 def test_phantom_environment_miscompile_is_still_open() -> None:
     # EXECUTABLE RECORD of an OPEN defect (TODO.md), NOT desired behavior, and the most serious one left: a
     # SILENT WRONG ANSWER. The deferred inlined helper sets `self.gate`, but the phantom environment left by the

@@ -183,6 +183,32 @@ class K:
 """,
         (2.0, False),
     ),
+    # Discovered as runtime state on a round whose store a later round proves unreachable. Invisible to every
+    # check on the final graph, because the final graph is correct -- only the accumulated W set is stale.
+    "runtime_state_from_a_dead_round": (
+        """import numpy as np
+
+
+class K:
+    def __init__(self) -> None:
+        self.mode = True
+        self.t = 0.0
+        self.s = 1 + 2**-30
+
+    def step(self, x: float, new_mode: bool) -> float:
+        if self.mode:
+            u, q = 2**53 + 1, 2**64
+        else:
+            u, q = x, x
+        self.t = u
+        a = np.array([q, x])
+        if a.shape[0] > 5:
+            self.s = 7.0
+        self.mode = new_mode
+        return 10.0 if self.s > 1.0 else 20.0
+""",
+        (2.0, False),
+    ),
     "inert_arm_poisons_later_guard": (
         """import numpy as np
 
