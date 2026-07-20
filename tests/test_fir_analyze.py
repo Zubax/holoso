@@ -4,6 +4,8 @@ kernel in real Python must produce exactly that value. Structural assertions are
 (executability, promotion, rejection); everything else is behavioral.
 """
 
+import math
+import pathlib
 from collections.abc import Callable
 
 import pytest
@@ -883,3 +885,22 @@ def test_origin_order_agrees_with_source_position_wherever_it_decides() -> None:
     right = (Origin("setter", 5, 8, "helper_b.py"),)
     assert source_position(left) == source_position(right)
     assert origin_order(left) < origin_order(right)
+
+
+def test_seam_sweep_value_identity_separates_what_equality_conflates() -> None:
+    # The sweep's oracle decides "unchanged" with this predicate, so a plain `==` here would silently readmit
+    # the drifts the recorded pairs exist to catch: 10 == 10.0 and -0.0 == 0.0, while NaN != NaN would make a
+    # NaN-valued route impossible to record at all.
+    import importlib.util
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("_seam_sweep", repo_root / "tools" / "deferral_seam_sweep.py")
+    assert spec is not None and spec.loader is not None
+    sweep = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sweep)
+
+    assert sweep._same(1.0, 1.0) and sweep._same(10, 10) and sweep._same(-0.0, -0.0)
+    assert not sweep._same(10, 10.0) and not sweep._same(10.0, 10)  # equal under ==, different computations
+    assert not sweep._same(0.0, -0.0) and not sweep._same(-0.0, 0.0)  # equal under ==, different zeros
+    assert sweep._same(math.nan, math.nan)  # unequal under ==, yet recordable
+    assert not sweep._same(math.nan, 1.0) and not sweep._same(math.inf, -math.inf)

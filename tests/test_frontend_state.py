@@ -13,6 +13,7 @@ import pytest
 import holoso
 from holoso import FloatFormat, SourceUnavailable, UnsupportedConstruct
 from holoso._frontend import lower
+from holoso._frontend._fir._ir import LocatedRejection
 from holoso._hir import Branch, FloatAdd, FloatConst, FloatDiv, IntType, Operation, optimize, Phi, Select, StateRead
 
 from ._frontend_common import (
@@ -978,6 +979,44 @@ def test_cross_round_state_verdicts_are_located_at_their_store() -> None:
     location = refusal.value.location
     assert location is not None
     assert (location.line or "").strip().startswith("self.s = 7.0")
+
+
+def test_a_store_diagnostic_names_the_first_executed_of_two_tied_stores() -> None:
+    # Two stores at IDENTICAL source positions in different files, reached through one unrolled call site, tie
+    # on source position and can only be separated by something outside it. The per-store selection deliberately
+    # keeps `source_position` and therefore first-wins in transfer order, which is execution order: the loop
+    # runs beta first, so beta is named. Ordering those ties by frame identity instead would name alpha here,
+    # purely because its filename sorts earlier -- a worse answer, and the reason that conversion was reverted.
+    from tests import _store_alpha, _store_beta
+
+    class Tied:
+        def __init__(self) -> None:
+            self.mode = True
+            self.t = 0.0
+            self.s = (1.0, 2.0)  # an unsupported reset, so a store to `s` draws the verdict
+
+        def step(self, x: float, flag: bool) -> float:
+            # The wide-int prologue defers the first store's verdict, so BOTH stores are recorded before the
+            # selection runs -- without it the verdict fires at the first store and the tie never arises.
+            if self.mode:
+                u: float = 2**53 + 1
+                q: float = 2**64
+            else:
+                u = x
+                q = x
+            self.t = u
+            span = np.array([q, x])
+            for put in (_store_beta.put, _store_alpha.put):
+                put(self, x + span.shape[0])
+            self.mode = flag
+            return x
+
+    with pytest.raises(UnsupportedConstruct, match="unsupported reset type") as refusal:
+        holoso.synthesize(Tied().step, default_ops(FloatFormat(8, 23)), name="tied_stores")
+    assert "in put():" in str(refusal.value)  # both helpers render identically; only the file separates them
+    located = refusal.value
+    assert isinstance(located, LocatedRejection)
+    assert located.origin[0].file.endswith("_store_beta.py")
 
 
 def test_a_cross_round_verdict_prefers_a_raise_guarded_store() -> None:

@@ -58,7 +58,7 @@ value, same zero sign, NaN identical to itself, and same type on the PYTHON side
 normalized to `float` before comparison, so a type change there cannot be seen) -- and a divergence confined to
 a state port is not gated; the
 per-family accept/refuse tallies are printed rather than baselined, and are compared by hand against the table
-in TODO.md; and the 54 generated dead-arm accepts are never value-checked at all, which is the same regime the
+in TODO.md; and the generated families' 54 accepted kernels are never value-checked at all, which is the same regime the
 oracle exists to escape — a round-4 reviewer checked all 54 against Python by hand and found no live
 miscompile, so the hole is latent rather than open. Untested surfaces, named: `_unroll_seeds`, `_pending_bridge`.
 
@@ -1395,8 +1395,9 @@ two remaining `source_position` selections over discovered stores -- the per-lea
 the per-(block, leaf) `_discovered_store_origins` minimum -- became `origin_order` too. (Round 5 REVERTED that
 pair: their ties are already broken by the deterministic order stores are transferred in, so the change bought
 no determinism and swapped execution order for lexical filename order in a public diagnostic.) And the
-reviewer VALUE-CHECKED all 54 accepted dead-arm kernels against Python by hand -- no live miscompile, the 8
-apparent mismatches being the documented out_0-dedup shape (6) and ordinary binary32 rounding (2). That is the
+reviewer VALUE-CHECKED by hand every kernel the sweep ACCEPTS -- 54 of them, being 28 of the 54 generated
+dead-arm kernels plus 21 loop and 5 loop_inner -- against Python: no live miscompile, the 8 apparent mismatches
+being the documented out_0-dedup shape (6, dead-arm) and ordinary binary32 rounding (2, loop_inner). That is the
 largest hole in the sweep's coverage measured rather than argued, and it is recorded in the scope statement.
 
 
@@ -1405,8 +1406,10 @@ one-dimension-too-broad claim of mine in this area is the defect. Round 4 revert
 map-first so verdicts would stop anchoring on a store the stabilized facts prove dead, and pinned it with a
 regression. The regression passes only because in ITS shape the speculated arm is gone by the stable round.
 Reproduced by the reviewer and then by me on the sweep's own dead-arm shape: when a verdict is raised
-MID-ROUND the promotion latch is still empty, so the location comes from whatever stores the worklist has
-reached -- speculated arms included -- and the dead arm takes the anchor. A tuple-reset kernel names
+on its FIRST round the promotion latch is still empty -- it survives round resets, so from the second round
+on it is populated, and the pinned witness is a first-round one -- and the location then comes from whatever
+stores the worklist has reached -- speculated arms included -- and the dead arm takes the anchor. A
+tuple-reset kernel names
 `self.s = 7.0`, a line Python never runs; delete the dead arm and the anchor moves to the live store. BOTH
 lookup orders behave identically here, verified by swapping them, so the priority is ORTHOGONAL to the
 pathology rather than a fix for it, and the docstring sentence claiming map-first "loses the less badly" was
@@ -1454,3 +1457,18 @@ permanently unrecordable in `_KNOWN_OPEN`; the scope sentence claimed a type com
 the hardware half is normalized to `float` first; and the mid-round anchor was "pinned alongside the seam's
 other open records" everywhere except TODO.md, which is the register the tests and the sweep both cite -- it
 is there now.
+
+
+ROUND 6, CODEX HALF -- four more, and one is the over-broad-claim pattern AGAIN, in the sentence this very
+round wrote to replace the last over-broad claim. `_runtime_state_origins` SURVIVES round resets, so "a verdict
+raised mid-round finds the latch empty" is true only on the FIRST round; from the second it is populated. The
+pinned witness happens to be a first-round one, which is why the sentence read as general. Corrected in both
+the docstring and here. Three fixes that were real and unpinned are pinned now: `_same` had no test at all (a
+plain `==` in its place still let the sweep exit 0), the restored first-executed-store attribution had none
+either, and neither would have failed anything if silently reverted. The attribution test took two attempts --
+my first version was VACUOUS, passing under the bad ordering because the reset verdict fires at the first store
+before a second candidate is ever recorded, exactly as the reviewer warned; the wide-int prologue defers that
+verdict so both stores are recorded and the tie actually arises. Also corrected: the "54" figure was
+misattributed -- 54 is the number of kernels the sweep ACCEPTS across all three families (28 dead-arm of 54
+generated, 21 loop, 5 loop_inner), not 54 accepted dead-arm kernels, and the 8 benign mismatches split 6
+dead-arm dedups and 2 loop_inner roundings.
