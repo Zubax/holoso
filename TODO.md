@@ -74,6 +74,11 @@ counts. What it reports, and NEITHER design dominates:
 | loop_inner (6) | 5 accept | 4 accept | 5 accept | 5 accept |
 | value oracle (5) | all miscompile | all correct | 2 MISCOMPILE | all refused |
 
+The oracle has since grown to EIGHT kernels, one per open route plus the five above; the row's first three
+columns stay scoped to the five they were actually measured on, because the three added kernels were never run
+against designs that no longer exist. Under the shipped gate the eight split five refused, three accepted and
+miscompiling -- the three open routes, each reproducing the divergence recorded below.
+
 The producer fix compiles 26 more dead-arm kernels than the shipped gate, and compiles them CORRECTLY rather
 than refusing them -- it prunes the dead arm instead of detecting it afterwards, which is the better outcome
 wherever it applies. It was rejected because its one loss is a starved fixed point: a kernel that lowered
@@ -174,14 +179,19 @@ measured, and rejected; that history is above, and it is the reason this one del
 The class is the one the post-stabilization resolution-totality restructure (`docs/decisions/arch-memo.md`, the
 resolved-IR spike) dissolves by making residualization a total pass after the fixpoint rather than interleaving
 it with the fixpoint; when that lands, the witness tests flip to asserting synthesis and are gated
-byte-for-byte against `freeze-1`. THE SURVIVING MISCOMPILE IS A FIRST-CLASS ACCEPTANCE CRITERION FOR THAT WORK:
-the restructure is not done while `test_phantom_environment_miscompile_is_still_open` still reports 22.0.
-Two further obligations on it, both load-bearing: it must be checked
-against BOTH mechanisms, since residualizing after the fixpoint removes phantom-unbound environments directly
-while stale executable marks are a separate concern; and its resolved spine must RECOMPUTE stable reachability
-and typing from the stabilized facts rather than inherit today's executable sets and `block_in`, because a
-spine built over a stale executable set would reintroduce the dead-arm behavior -- including the live register
-write into a public port -- underneath a gate that is checking the old representation.
+byte-for-byte against `freeze-1`. ALL THREE SURVIVING MISCOMPILES ARE FIRST-CLASS ACCEPTANCE CRITERIA FOR THAT
+WORK, not the phantom-environment one alone: the restructure is not done while
+`test_phantom_environment_miscompile_is_still_open` reports 22.0, `test_live_in_poisoning_miscompile_is_still_open`
+reports 30.0, or `test_self_assignment_defeats_the_runtime_state_check` reports 20.0. Two further obligations,
+both load-bearing. It must be checked against EVERY mechanism, not just the phantom-unbound environments that
+residualizing after the fixpoint removes directly: stale executable marks are a separate concern, and the two
+accumulator routes are a third and fourth, invisible on a final graph that is entirely correct. And its
+resolved spine must RECOMPUTE stable reachability and typing from the stabilized facts rather than inherit
+today's structures -- ALL FOUR of them, `executable_blocks`/`executable_edges`, `block_in`, `runtime_state`,
+and `state_livein`, since the residualizer consumes every one. A spine built over a stale executable set would
+reintroduce the dead-arm behavior, including the live register write into a public port, underneath a gate
+checking the old representation; a spine built over a stale accumulator would reintroduce the other two with
+nothing visibly wrong in the graph at all.
 
 ## Deferred capability gaps
 

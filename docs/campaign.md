@@ -14,14 +14,20 @@ Run the `review-loop` skill after every step. Sequential: one thing at a time.
 WHERE WE ARE. Stage 2 is closed and `freeze-1` IS RE-TAGGED on the corrected baseline, with an annotation that
 leads with the miscompiles and states the honest refused count (one). Stage 3 is CLOSED: consult X5 ruled PLAIN
 MORPH with M7 optional and gate-deferred, the ruling is recorded in `docs/decisions/arch-ruling.md`, and branch
-`spike/resolved-ir` (dc76fbf) is deleted with its ledger summarized into that record. Every code commit in the
-stack has been CI-green on all five jobs; the golden corpus stayed BYTE-IDENTICAL (151/151) throughout, which
-is what makes the baseline safe to freeze. Suite 1915/2, mypy 202, black clean.
+`spike/resolved-ir` (dc76fbf) is deleted, its ledger preserved verbatim at `docs/decisions/spike-ledger.md`.
+Every code commit in the stack has been CI-green on all five jobs; the golden corpus stayed BYTE-IDENTICAL
+(151/151) throughout, which is what makes the baseline safe to freeze. mypy 202, black clean. (Suite counts are
+deliberately not quoted here: every added test makes the number stale, and it went stale twice in one session.
+CI at the tag is authoritative.)
 
 NEXT IS STAGE 4 MORPH, M0 first. M0's import ban must be written to the property SC2 actually established --
 no Fact, no registry, no `Py*`, no callbacks, no frontend decision module in the emitter's transitive closure,
 and no raise sites in the emitter itself -- and NOT to a transitive `holoso._errors` ban, which nothing that
-emits HIR can satisfy (`_hir._const` constructs `UnsupportedConstruct`). Build on `tests/_importguard.py`,
+emits HIR can satisfy (`_hir._const` constructs `UnsupportedConstruct`, for NaN). An import-and-raise ban is
+NECESSARY BUT NOT SUFFICIENT: the spike emitter chose an `IntToFloat` promotion by inspecting the type of the
+HIR node it had just generated, which reaches no banned module and no raise, so M0's plan-totality validator
+must additionally require every kind promotion to come from an explicit plan row rather than from emitted
+nodes. Build on `tests/_importguard.py`,
 which resolves `from . import x` correctly; the spike's own copy did not.
 
 THE FINDING THAT RESHAPED THIS STEP. The deferral x grafting seam does NOT merely produce false rejections, as
@@ -1266,7 +1272,7 @@ registry, no Py*, no callbacks, no frontend decision module, zero raises in the 
 M0 must be written to THAT property. (2) the prototype's closure walker dropped `from . import x` submodules,
 hiding 8 HIR passes (11 modules measured, 19 corrected) -- verdict unmoved, closure smaller than it looked;
 the production `tests/_importguard.py` does NOT share the gap, so M0 builds on it. (3) SC1's byte identity is
-established against spike base 4f1dd4c, NOT against the tag 38 commits later -- immaterial to a ruling that
+established against spike base 4f1dd4c, NOT against the tag many commits later -- immaterial to a ruling that
 SC4 and SC2 both drive to the default, but any future M7 must re-establish it against `freeze-1`. The ruling
 is therefore OVER-DETERMINED: SC4 and SC2 fire the same row independently. Recorded in
 docs/decisions/arch-ruling.md, with the spike's evidence ledger preserved verbatim beside it at
@@ -1289,8 +1295,11 @@ placeholder. The check could never have produced a real location as written. Fix
 store's origin when a leaf ENTERS the runtime-state set, mirroring that set's own cross-round monotonicity. The
 same three lines carried a dead tie-break (`leaf.obj_id if hasattr(leaf, "obj_id") else 0` -- StateLeaf has
 `component`/`path`, so the hasattr is always False and ties fell back to identity-hashed set iteration); it
-becomes source position, so two components sharing an attribute path report the source-earlier store. Fail-before
-observed: `assert '' == 'self.a.s = 7.0'`. Corpus-neutral -- no pin or frozen diagnostic carried the old output.
+becomes source position, so two components sharing an attribute path report the source-earlier store.
+Fail-before observed: `assert '' == 'self.a.s = 7.0'`. That failure is the LOCATION half; the ordering half
+cannot have a deterministic fail-before, because before the fix the two leaves tie completely and the winner
+comes from set iteration -- measured at four of six fresh processes picking one and two the other, which is
+the defect rather than a weak test. Corpus-neutral: no pin or frozen diagnostic carried the old output.
 
 THE STANDING SWEEP DID NOT MEASURE WHAT THE BRIEF CLAIMED. `_KNOWN_OPEN` held ONE of the three open routes, so
 the value oracle could not see the phantom-environment or self-assignment miscompiles at all, and a recorded
@@ -1307,9 +1316,10 @@ literally. This carries a direct consequence for M0 that is now recorded: an imp
 that class, because inserting a conversion node reaches no banned module, so the plan-totality validator must
 require every promotion to come from an explicit plan row. The ruling also named the wrong corrupted set --
 `runtime_state` and `state_livein` are corrupted too, and the residualizer consumes all four structures, the
-last two on graphs with nothing visibly wrong. Numbers fixed: 38 commits not 35, +539 LOC under the ledger's own
+last two on graphs with nothing visibly wrong. Numbers fixed: +539 LOC under the ledger's own
 counting rule (the ledger's +358 subtracted physical lines from rule-counted terms), 36 GoldenCases not 35,
 three raw-crash modes converted not two, `_hir._const` refuses NaN rather than beyond-carrier constants, "all
 five packet refusals" rather than "every emitter-owned refusal". The spike ledger is preserved on dev because
-"the branch does not survive" was false -- dc76fbf remains reachable, and reading it is what produced three of
-these corrections.
+"the branch does not survive" was false when written -- dc76fbf survived in the reflog, and reading it produced
+three of these corrections. It is unreachable from any ref now, so the in-tree copy is what makes it durable
+rather than any claim about reachability.

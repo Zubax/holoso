@@ -137,7 +137,7 @@ datatypes (Codex X6b on the schema first) plus an A/B differential harness — n
 `test_fir_differential.py` is a value oracle, not this — with transfer-function bodies lifted near-verbatim and
 the analyzer skeleton rebuilt around evidence-atomic recording and dispatch rows from day one; R1-R5 milestones
 by construct family (scalar straight-line → branches/loops/unroll → state+W/D → aggregates/records →
-arrays/linalg/ports), each gated differential-green; R6 full-corpus differential (35 golden cases + rejection
+arrays/linalg/ports), each gated differential-green; R6 full-corpus differential (36 golden cases + rejection
 corpus + extended A/B fuzz); R7 cutover — flip the frontend, delete `_fir` in the same commit, canonical gate +
 re-freeze. The branch is abandonable at zero cost to dev until R7.
 

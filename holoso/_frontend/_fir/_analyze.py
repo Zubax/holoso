@@ -363,12 +363,14 @@ class Analyzer:
         self._binding_serial = 1_000_000
         self._block_serial = 1_000_000
         self._runtime_state: set[StateLeaf] = set()
-        # The store that promoted each leaf into the runtime-state set. That set grows across rounds and is never
-        # cleared, so its provenance cannot live in the per-round store map: the stale-leaf refusal fires exactly
-        # when the promoting store is gone from the final round, which is when the per-round map has nothing.
+        # Where each runtime-state leaf came from: the source-earliest store that actually promoted it. The set
+        # grows across rounds and is never cleared, so its provenance cannot live in the per-round store map --
+        # the stale-leaf refusal fires exactly when that store is gone from the final round, which is when the
+        # per-round map has nothing left to locate it by.
         self._runtime_state_origins: dict[StateLeaf, OriginStack] = {}
         self._state_livein: dict[StateLeaf, Fact] = {}
         self._discovered_stores: set[tuple[BlockId, StateLeaf]] = set()
+        self._discovered_store_origins: dict[tuple[BlockId, StateLeaf], OriginStack] = {}
         self._concrete_calls: set[int] = set()
         self._intrinsic_calls: set[int] = set()
         self._cast_calls: set[int] = set()  # runtime float()/int()/bool() casts (identity or conversion at emission)
@@ -438,11 +440,19 @@ class Analyzer:
             exit_env = result.block_in.get(result.unit.exit, _Env())
             reachable = _coreachable(result.unit, result.unit.exit, result.executable_edges)
             new_w = set(self._runtime_state)
+            # Only a store that is executable AND co-reachable with the exit promotes its leaf, so provenance is
+            # taken from those blocks alone: the per-leaf minimum over the whole round would happily blame a
+            # store standing in a block the exit cannot be reached from.
+            promoting: dict[StateLeaf, OriginStack] = {}
             for block_id, leaf in self._discovered_stores:
                 if block_id in result.executable_blocks and block_id in reachable:
-                    if leaf not in new_w:
-                        self._runtime_state_origins[leaf] = self._store_origins[leaf]
-                    new_w.add(leaf)
+                    origin = self._discovered_store_origins[(block_id, leaf)]
+                    earliest = promoting.get(leaf)
+                    if earliest is None or source_position(origin) < source_position(earliest):
+                        promoting[leaf] = origin
+            new_w |= promoting.keys()
+            for leaf, origin in promoting.items():
+                self._runtime_state_origins.setdefault(leaf, origin)
             new_d = dict(self._state_livein)
             deferred = DeferredRejection()
             for leaf in new_w:
@@ -579,6 +589,7 @@ class Analyzer:
     def _reset_round(self) -> None:
         self._block_ancestry = {}
         self._discovered_stores = set()
+        self._discovered_store_origins = {}
         self._store_origins = {}
         self._store_verdicts = {}
         self._unbound_store_origins = set()
@@ -621,9 +632,13 @@ class Analyzer:
     def _state_origin(self, leaf: StateLeaf) -> OriginStack:
         """
         State rejections locate at the leaf's first store: __init__ is never analyzed, so the store that
-        promoted the leaf is the line the user can act on.
+        promoted the leaf is the line the user can act on. The per-round map is empty for a leaf whose store
+        does not execute this round, which is the ordinary case for every cross-round state verdict, so the
+        promotion origin stands behind it; only a leaf that never entered the runtime-state set at all falls
+        through to the root, and then there is no store to name.
         """
-        return self._store_origins.get(leaf, (Origin(self._root_template.name, 0, 0, self._root_template.file),))
+        recorded = self._store_origins.get(leaf) or self._runtime_state_origins.get(leaf)
+        return recorded or (Origin(self._root_template.name, 0, 0, self._root_template.file),)
 
     def _snapshot_leaf(self, leaf: StateLeaf) -> Fact:
         current, admitted = self._walk_snapshot(leaf)
@@ -825,7 +840,13 @@ class Analyzer:
         # rounds rather than within one, where every per-round check passes on the stable graph.
         stale_leaves = sorted(
             (leaf for leaf in self._runtime_state if leaf not in first_store),
-            key=lambda leaf: (source_position(self._runtime_state_origins[leaf]), leaf.path),
+            # Position alone is not a total order: two components defined in different files can carry stores at
+            # the very same line and column, and the frames' identities are what separate them.
+            key=lambda leaf: (
+                source_position(self._runtime_state_origins[leaf]),
+                tuple((frame.file, frame.function) for frame in reversed(self._runtime_state_origins[leaf])),
+                leaf.path,
+            ),
         )
         if stale_leaves:
             leaf = stale_leaves[0]
@@ -1393,6 +1414,9 @@ class Analyzer:
                 if recorded is None or source_position(op.origin) < source_position(recorded):
                     self._store_origins[leaf] = op.origin
                 self._discovered_stores.add((block.id, leaf))
+                here = self._discovered_store_origins.get((block.id, leaf))
+                if here is None or source_position(op.origin) < source_position(here):
+                    self._discovered_store_origins[(block.id, leaf)] = op.origin
                 # The reset fixes the slot schema; a violating store carries a fixpoint-stable fact onward and
                 # the recorded verdict reports after stabilization, at this store. An Unbound value is no
                 # evidence either way, so it leaves the recorded verdict untouched.

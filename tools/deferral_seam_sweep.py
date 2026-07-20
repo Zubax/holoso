@@ -100,16 +100,16 @@ _LOOP = {
 # carry a reset that is inexact in the target carrier, so if a speculated arm promotes it to runtime state the
 # reset re-materializes narrower and a guard reading it flips. Each entry is (source, args, expected).
 # Routes documented as OPEN in TODO.md, one entry per open route -- an oracle carrying only some of them cannot
-# support a claim about the seam as a whole. They miscompile today, so the tool reports them without failing,
-# and fails on ANY change of outcome: computing the right answer and refusing alike mean the recorded state is
-# stale, and a record that quietly stops matching the code is how this seam's earlier claims decayed.
-_KNOWN_OPEN = frozenset(
-    {
-        "live_in_poisoned_across_rounds",
-        "phantom_environment_keeps_a_stale_gate",
-        "self_assignment_defeats_the_runtime_state_check",
-    }
-)
+# support a claim about the seam as a whole. The value is the WRONG answer the hardware currently returns, not
+# merely the fact that it is wrong: recording only "diverges" would let one wrong answer silently become a
+# different wrong answer. They miscompile today, so the tool reports them without failing, and fails on ANY
+# change of outcome -- a different wrong value, the right value, or a refusal alike -- because each means the
+# record has stopped describing the code, which is how this seam's earlier claims decayed.
+_KNOWN_OPEN = {
+    "live_in_poisoned_across_rounds": 30.0,
+    "phantom_environment_keeps_a_stale_gate": 22.0,
+    "self_assignment_defeats_the_runtime_state_check": 20.0,
+}
 
 _VALUE_ORACLE = {
     "dead_store": (
@@ -357,6 +357,10 @@ class K:
     ),
 }
 
+# A name in _KNOWN_OPEN that no oracle kernel answers to would measure nothing while reading as coverage --
+# the same silent decay the recorded state exists to prevent.
+assert _KNOWN_OPEN.keys() <= _VALUE_ORACLE.keys()
+
 
 # The loop family above puts the trigger and the call BEFORE the loop, which cannot exhibit the starvation that
 # disqualified both rejected fixes: those fail only when the deferring call is INSIDE the body, so the branch
@@ -446,6 +450,7 @@ def main() -> int:
     ops = default_ops(FloatFormat(8, 23))
     totals: dict[str, dict[str, int]] = {}
     miscompiles = 0
+    stale_record = 0
     refused = 0
     with tempfile.TemporaryDirectory() as scratch:
         for label, (source, arguments) in _VALUE_ORACLE.items():
@@ -470,7 +475,7 @@ def main() -> int:
                     # Safer than the recorded miscompile, but the record now describes behavior the code no
                     # longer has. Failing is the same rule as the FIXED arm below: any outcome change on a
                     # documented route gets reconciled with TODO.md rather than silently absorbed.
-                    miscompiles += 1
+                    stale_record += 1
                     print(f"  oracle {label:32s} REFUSED but recorded as an open miscompile -- update TODO.md")
                 else:
                     print(f"  oracle {label:32s} refused (safe, but proves nothing about values)")
@@ -480,15 +485,22 @@ def main() -> int:
                 print(f"  oracle {label:32s} CRASH:{type(error).__name__}: {str(error)[:60]}")
                 continue
             diverged = actual != expected
-            if diverged and label in _KNOWN_OPEN:
-                # A documented open route (TODO.md). Reported, but it does not fail the run: the tool gates on
-                # CHANGE against the recorded state, so a known miscompile does not mask a new one.
+            if diverged and label in _KNOWN_OPEN and actual == _KNOWN_OPEN[label]:
+                # A documented open route (TODO.md), returning exactly the wrong value on record. Reported, but
+                # it does not fail the run: the tool gates on CHANGE, so a known miscompile does not mask a new
+                # one while still leaving room for the routes that are known to be open.
                 print(f"  oracle {label:32s} accepted python={expected} hardware={actual}  KNOWN-OPEN miscompile")
+            elif diverged and label in _KNOWN_OPEN:
+                stale_record += 1
+                print(
+                    f"  oracle {label:32s} accepted python={expected} hardware={actual}  "
+                    f"CHANGED from the recorded {_KNOWN_OPEN[label]} -- update TODO.md"
+                )
             elif diverged:
                 miscompiles += 1
                 print(f"  oracle {label:32s} accepted python={expected} hardware={actual}  *** MISCOMPILE ***")
             elif label in _KNOWN_OPEN:
-                miscompiles += 1  # a documented route stopped miscompiling: the record is stale, not the code
+                stale_record += 1  # a documented route stopped miscompiling: the record is stale, not the code
                 print(f"  oracle {label:32s} accepted python={expected} hardware={actual}  FIXED -- update TODO.md")
             else:
                 print(f"  oracle {label:32s} accepted python={expected} hardware={actual}  OK")
@@ -540,12 +552,14 @@ def main() -> int:
         print(f"{family:9s} ({size:3d} kernels)  {summary}")
     if miscompiles:
         print(f"{miscompiles} value oracle kernel(s) diverged from Python -- a wrong answer, not a refusal")
+    if stale_record:
+        print(f"{stale_record} recorded open route(s) changed outcome -- the record no longer describes the code")
     if refused:
         # Said out loud because a refusal is not evidence of value correctness: the oracle contributes signal
         # only where the kernel is accepted, and a gate that refuses everything would score a clean run.
         print(f"{refused} of {len(_VALUE_ORACLE)} value oracle kernel(s) were refused, so their values are unproven")
     crashed = any(name.startswith("CRASH") for tally in totals.values() for name in tally)
-    return 1 if (miscompiles or crashed) else 0
+    return 1 if (miscompiles or crashed or stale_record) else 0
 
 
 if __name__ == "__main__":

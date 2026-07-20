@@ -950,6 +950,70 @@ def test_stale_runtime_state_reports_the_source_earliest_store() -> None:
     assert (location.line or "").strip() == "self.a.s = 7.0"
 
 
+def test_cross_round_state_verdicts_are_located_at_their_store() -> None:
+    # Not just the stale-leaf refusal: EVERY state verdict drawn after the promoting round has an empty
+    # per-round store map to look in, so reset diagnostics rendered at line 0 too. The promotion origin is what
+    # they all fall back on.
+    class MissingReset:
+        def __init__(self) -> None:
+            self.mode = True
+            self.t = 0.0
+
+        def step(self, x: float, new_mode: bool) -> float:
+            if self.mode:
+                u: float = 2**53 + 1
+                q: float = 2**64
+            else:
+                u = x
+                q = x
+            self.t = u
+            span = np.array([q, x])
+            if span.shape[0] > 4:
+                self.s = 7.0  # never initialized in __init__, so there is no reset to reconstruct
+            self.mode = new_mode
+            return x
+
+    with pytest.raises(UnsupportedConstruct, match="does not exist on the component") as refusal:
+        holoso.synthesize(MissingReset().step, default_ops(FloatFormat(8, 23)), name="missing_reset")
+    location = refusal.value.location
+    assert location is not None
+    assert (location.line or "").strip().startswith("self.s = 7.0")
+
+
+def test_stale_runtime_state_blames_a_store_that_actually_promoted() -> None:
+    # An earlier store standing in a block the exit cannot be reached from promotes nothing, so it must not be
+    # named: the leaf's provenance comes from the stores that put it in the runtime-state set, not from the
+    # source-earliest store anywhere in the round.
+    class DeadEarlier:
+        def __init__(self) -> None:
+            self.mode = True
+            self.t = 0.0
+            self.s = 1 + 2**-30
+
+        def step(self, x: float, new_mode: bool) -> float:
+            if self.mode:
+                u: float = 2**53 + 1
+                q: float = 2**64
+            else:
+                u = x
+                q = x
+            self.t = u
+            span = np.array([q, x])
+            if span.shape[0] > 5:
+                self.s = 3.0
+                raise RuntimeError("never reached")
+            if span.shape[0] > 4:
+                self.s = 7.0
+            self.mode = new_mode
+            return 10.0 if self.s > 1.0 else 20.0
+
+    with pytest.raises(UnsupportedConstruct, match="earlier analysis round") as refusal:
+        holoso.synthesize(DeadEarlier().step, default_ops(FloatFormat(8, 23)), name="dead_earlier_store")
+    location = refusal.value.location
+    assert location is not None
+    assert (location.line or "").strip() == "self.s = 7.0"
+
+
 def test_self_assignment_defeats_the_runtime_state_check() -> None:
     # EXECUTABLE RECORD of an OPEN defect (TODO.md), NOT desired behavior. The runtime-state check requires every
     # retained leaf to have a store in the final executable graph, which a trivial `self.s = self.s` satisfies --

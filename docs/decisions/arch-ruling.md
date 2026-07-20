@@ -57,12 +57,13 @@ The ruling is over-determined: SC2's failure below fires the same default row in
 
 ## Corrections to the ledger's own claims
 
-Recorded here because the ledger cannot be rewritten and its branch does not survive. All three were raised by
-the X5 consult and reproduced independently before being accepted.
+Recorded here rather than in the ledger, which is append-only and preserved verbatim. The first three were
+raised by the X5 consult; the rest came from the review round on this document. All were reproduced
+independently before being accepted.
 
 SC2 FAILS as literally specified, and the ledger's PASS is wrong. The criterion bans user-facing rejection
 construction from the emitter's TRANSITIVE dependency closure. That closure contains `holoso._errors`, reached
-through `holoso._hir` → `_hir._const`, which constructs `UnsupportedConstruct` for a beyond-carrier constant.
+through `holoso._hir` → `_hir._const`, which constructs `UnsupportedConstruct` for a NaN constant.
 The prototype's check missed it because its banned set enumerated frontend modules and omitted `_errors`.
 Verified by recomputing the closure directly.
 
@@ -79,9 +80,10 @@ emitted nodes is exactly the re-deciding the boundary exists to abolish.
 
 So the properties that DO hold are narrower than a "substantive half": the emitter's closure reaches no Fact,
 no registry, no `Py*` op, no callback, and no frontend decision module; its own source contains zero `raise`
-statements and zero lambdas; and all five refusals in the negative packet fire upstream with diagnostic
-parity. That last is the packet's five, not "every refusal" — the ledger's own coverage matrix lists unforced
-refusal sub-arms.
+statements and zero lambdas; and all five refusals in the negative packet fire OUTSIDE the mechanical emitter
+with diagnostic parity — four upstream in the residualizer, and `legacy_shared_live_out` downstream in the
+Verilog backend, which is outside it in the other direction. That last is the packet's five, not "every
+refusal" — the ledger's own coverage matrix lists unforced refusal sub-arms.
 
 Two consequences for Stage 4. M0's guard must be written to the frontend-decision-layer property rather than
 to a transitive `_errors` ban that nothing can satisfy. And an import-and-raise guard is NOT sufficient on its
@@ -95,10 +97,12 @@ does not move, but the closure was smaller than it looked. The production helper
 NOT share this gap — it resolves `from package import submodule` correctly — so M0 builds on it rather than on
 the prototype's copy.
 
-SC1's byte identity is established against the spike's base `4f1dd4c`, NOT against `freeze-1`, which is 38
-commits later and carries material analyzer changes and a bumped HIR serializer schema. E1 recorded the tag
-certification as pending and the claim was never re-established afterwards. The ruling does not depend on it —
-SC1 passing more strongly would not change a table row that SC4 and SC2 both drive to the default — but any
+SC1's byte identity is established against the spike's base `4f1dd4c`, NOT against `freeze-1`, which is many
+commits later and carries material analyzer changes and a bumped HIR serializer schema. (An exact count is
+deliberately not quoted: it goes stale every time the tag moves, and quoting it once already produced two
+wrong numbers in consecutive commits. `git rev-list --count 4f1dd4c..freeze-1` answers it truthfully.) E1
+recorded the tag certification as pending and the claim was never re-established afterwards. The ruling does
+not depend on it — SC1 passing more strongly would not change a row SC4 and SC2 both drive to the default — but any
 future M7 must re-establish byte identity against the tag rather than inherit this result.
 
 SC3's historical zero-growth claim is sound; its executable fingerprint is not complete, pinning field names
