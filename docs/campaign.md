@@ -1,87 +1,86 @@
 # Holoso frontend campaign: trim → stabilize+freeze → architecture gate → restructure
 
-## ⛳ RESUME BRIEF — READ FIRST (state at the pre-compaction pause, 2026-07-19)
+## ⛳ RESUME BRIEF — READ FIRST (state at 2026-07-20, end of the autonomous freeze session)
 
-This section is the single source of truth for a resumed agent; the chronological progress log at the bottom is
-the deep record. `campaign.md` is authoritative; `HANDOFF.md` is historical (superseded by this log).
+`campaign.md` is authoritative; `HANDOFF.md` is historical. This section is the single source of truth.
 
 STANDING DIRECTIVE (maintainer, final and overriding): proceed autonomously to completion. The maintainer is
-UNAVAILABLE and will NOT return to the loop. Do not stop, do not wait for the user, do not ask the user, do not
-pause "for review". When you hit an obstacle or a judgment call, CONSULT CODEX (the co-designer), never the
-user, and keep going. Codex: `codex exec -m gpt-5.6-sol -c model_reasoning_effort=ultra "<prompt>" </dev/null`;
-`codex resume` to continue a session, never restart. Run the `review-loop` skill after every step. Sequential
-workflow (one thing at a time; the maintainer dropped parallel tracks to cut complexity). Any earlier "HELD for
-maintainer manual review" wording in the log below is SUPERSEDED by this directive.
+UNAVAILABLE. Do not stop, wait, or ask. On an obstacle or judgment call, CONSULT CODEX, never the user.
+Codex: `codex exec -m gpt-5.6-sol -c model_reasoning_effort=ultra "<prompt>" </dev/null`. To resume a session,
+OPTIONS MUST PRECEDE THE SESSION ID: `codex exec resume -m ... -c ... <uuid> "<prompt>" </dev/null` — with the
+id last, the prompt is not parsed and Codex falls back to stdin and dies with "stdin is not a terminal".
+Run the `review-loop` skill after every step. Sequential: one thing at a time.
 
-WHERE WE ARE: Stage 2 is landed, the FREEZE INFRASTRUCTURE is built, `freeze-1` is NOT tagged, and the
-deferral x grafting seam turned out to admit SILENT MISCOMPILES rather than only false rejections -- which is
-the premise the maintainer's whole defer-to-Stage-4 plan rested on. FOUR routes have been found, each by a
-different attack angle: (1) a settled branch whose speculated arm stays marked, (2) narrowings of the check for
-(1) that readmitted it, (3) runtime state accumulated across W/D rounds whose store a later round proves
-unreachable, (4) the live-in map poisoned the same way. A post-stabilization GATE refuses (1) and (3) and turned
-two former raw crashes into located diagnostics; (2) is closed by keeping the rule unconditional; (4) IS OPEN
-AND SILENTLY MISCOMPILES, as does the older phantom-environment route. All four are pinned as executable
-witnesses, the open ones asserting the wrong value they currently produce.
+WHERE WE ARE. Stage 2 is closed and `freeze-1` IS TAGGED (at e1b6758). `dev` is at e1b6758; the branch
+`trial/revert-r10-withholding` carries the newer work and is at e2d3ca7. Every code commit in the stack has
+been CI-green on all five jobs; the golden corpus stayed BYTE-IDENTICAL (151/151) across all fourteen commits,
+which is what makes the baseline safe to freeze. Suite 1915/2, mypy 202, black clean.
 
-DO NOT ADD A FIFTH GATE CHECK. The gate grew from one check to four, three of them reactive, and every addition
-was followed by a new route through a dimension it did not model. Route (4) additionally cannot be caught by
-mirroring the check for (3): W staleness leaves a residue, D staleness is byte-identical to what the final round
-derives. TODO.md carries this as a standing instruction; `tools/deferral_seam_sweep.py` is the standing check and
-gates on CHANGE against the recorded state. Untested surfaces, named: `_unroll_seeds`, `_pending_bridge`.
+THE FINDING THAT RESHAPED THIS STEP. The deferral x grafting seam does NOT merely produce false rejections, as
+the maintainer's plan assumed when deferring it to Stage 4. IT SILENTLY MISCOMPILES: honest numeric kernels are
+accepted and emit hardware returning a different value from Python, format-dependently (wrong in E8M23, correct
+in E11M52), because a dead branch arm's store promotes an attribute from a binary64-folded constant into a
+runtime slot whose reset re-materializes in the narrower carrier and a guard flips.
 
-This is now the campaign's strongest argument for Stage 4, and a stronger one than the spike made: not
-"decisions should be made once" but "this seam produces wrong hardware and post-hoc gating provably cannot see
-at least one route". Stage 3's spike verdict was MORPH (SC1-SC3 passed; SC4 missed by 75 LOC; branch
-`spike/resolved-ir` @ dc76fbf; ledger `docs/decisions/spike-ledger.md`). The Stage-3 ruling and Stage 4 pend.
+FIVE ROUTES ARE KNOWN, each found by a different attack angle. ONE is refused (the settled-branch one). FOUR
+REMAIN OPEN AND SILENTLY MISCOMPILE: phantom environments; live-in (D) poisoning across W/D rounds; and the
+runtime-state (W) route in the spelling where a trivial `self.s = self.s` keeps the leaf stored, which defeats
+the check written for it. All five are pinned as executable witnesses in `tests/test_frontend_state.py`, the
+open ones asserting the WRONG VALUES they currently produce, so Stage 4 has concrete acceptance criteria.
 
-STEP 1-2 DONE (this session): `.nox` rebuilt; round-10 edge-withholding REVERTED, so the freeze baseline carries
-no regression. Note for anyone re-deriving the defect class: TWO of the four TODO reproducer kernels did NOT
-reproduce as transcribed (the starred-argument shape had lost its load-bearing both-arms read, and the
-unroll-starvation shape used integer state so it never synthesized at any commit — it only `lower()`ed). The
-originals were recovered from the round-11 Codex session rollout on disk, and the class is now pinned in code
-instead of prose for exactly that reason. The true regression witness is a `while`-loop kernel that synthesizes
-to 11,181 B at 8336387^ and falsely rejects at 8336387; it is now a passing acceptance test.
+DO NOT ADD A FIFTH GATE CHECK. The post-stabilization gate grew from one check to four, three of them reactive,
+and every addition was followed by a new route through a dimension it did not model — or, twice, by an evasion
+costing one line of ordinary Python. Two narrowings I made were themselves unsound and had to be reverted.
+`tools/deferral_seam_sweep.py` is the standing check: it carries a VALUE ORACLE (without which a miscompile
+tallies as a good accept, which is how both narrowings passed a green sweep) and gates on CHANGE against the
+recorded state. Untested surfaces, named: `_unroll_seeds`, `_pending_bridge`.
 
-THE PLAN FROM HERE — execute in order, autonomously (this is option A, the maintainer's chosen recommendation:
-freeze first, then restructure, because freeze-1 is the byte-gate the morph is verified against — doing Stage 4
-first would strip the regression-detection safety net):
+This is the campaign's strongest argument for Stage 4, and a stronger one than the spike made: not "decisions
+should be made once" but "this seam emits wrong hardware and post-hoc gating provably cannot see at least one
+route". Stage 4's resolved spine must RECOMPUTE reachability and typing from the stabilized facts rather than
+inherit today's executable sets and W/D accumulators.
 
-1. ~~REBUILD ENVS FIRST~~ DONE — `.nox` rebuilt with `nox --install-only` (33 s). `.venv` is stale py3.13, unusable.
-2. ~~CHOOSE THE FREEZE BASELINE~~ DONE — round-10 edge-withholding reverted; see the step log at the bottom.
-3. TAG freeze-1 on that baseline: full CI green on all five jobs + `tools/refreeze_golden.py --check-determinism`
-   seed matrix + the `test_golden` gate. The graft-deferral class is an EXPLICIT DOCUMENTED EXCEPTION — the four
-   TODO kernels are known false-rejections, deliberately NOT frozen as correct behavior.
-4. STAGE-3 RULING (table-mechanical, no maintainer needed): Codex consult X5 on the spike diff + ledger; the
-   pre-agreed decision table yields MORPH-with-mandatory-materialized-spine. Record `docs/decisions/arch-ruling.md`
-   (question, spike SHA dc76fbf, Codex position, ruling). Then delete the spike branch (SHA already recorded).
-5. STAGE 4 = MORPH (M0-M7, see "Variant MORPH" in the plan below). Every landing byte-identical vs freeze-1 except
-   the one pre-authorized canonical-gate landing (which re-freezes in the same commit). The resolved-IR boundary
-   closes the graft-deferral class — the four TODO kernels become passing acceptance tests (all synthesize), gated
-   against freeze-1. `docs/decisions/arch-memo.md` + `arch-spike.md` + `spike-ledger.md` carry the design.
+NEXT STEPS, in order:
 
-OPERATIONAL SURVIVAL KIT (each trap below has actually bitten this campaign — heed them):
-- ALWAYS `set -o pipefail` on any `cmd | tail`/`| grep` gate chain, or redirect to a file and read it; a bare pipe
-  swallows the exit code and has masked real failures 3+ times.
-- Run the FULL mypy scope: `.nox/typecheck/bin/mypy` with NO args (201 files incl. tests). `mypy holoso` alone is
-  70 files and let a real test-scope error through this session. Read the TEXT, not the exit code.
+1. RE-TAG `freeze-1`. Its current annotation says the gate "refuses two" routes; the self-assignment evasion
+   (e2d3ca7) makes that false — only one is refused. Wait for CI green on e2d3ca7 (run 29740704779), advance
+   `dev` to it, then `git tag -f -a freeze-1 -F <corrected message>` and `git push -f origin freeze-1`. The
+   corrected message must lead with the miscompiles and state the honest count. Nothing depends on the tag yet.
+2. STAGE-3 RULING (X5). Codex consult on the spike diff + ledger (branch `spike/resolved-ir` @ dc76fbf, ledger
+   `docs/decisions/spike-ledger.md`). OPEN QUESTION THE BRIEF AND THE TABLE DISAGREE ON: the table awards
+   "MORPH with MANDATORY materialized spine" only when the adapter passes ALL criteria, and SC4 FAILED by 75
+   LOC (1275 vs 1200), which routes to plain MORPH with M7 gate-deferred. Counter-argument: ~330 of those LOC
+   are duplication forced by the spike's module boundary and would MOVE in a real morph. Re-reading a failed
+   criterion after seeing the result is the goalpost drift the risk register warns about — PUT IT TO CODEX, do
+   not decide it alone. A drafted prompt is in the session scratchpad as `x5-prompt.md`; rewrite if lost.
+   Record `docs/decisions/arch-ruling.md`, then delete branch `spike/resolved-ir` (SHA recorded here).
+3. STAGE 4 = MORPH (M0-M7, see "Variant MORPH" below). Every landing byte-identical vs `freeze-1` except the
+   one pre-authorized canonical-gate landing. Closing the four open miscompile routes is a FIRST-CLASS
+   acceptance criterion, not a side effect: the restructure is not done while those witnesses report wrong
+   values.
+
+OPERATIONAL SURVIVAL KIT (each has bitten this campaign):
+- NEVER `pkill`/`killall` by name pattern. `pkill -f codex` killed the maintainer's unrelated session in
+  another project. Kill only PIDs you captured yourself.
+- `PYTHONPATH` DOES precede the editable-install finder; what shadows it is the script's directory (or cwd
+  under `-c`). To bind a worktree, insert it at `sys.path[0]` BEFORE importing holoso and assert
+  `holoso.__file__` is under it. A cross-commit comparison of mine silently tested the same tree twice.
+- ALWAYS `set -o pipefail` on any `cmd | tail` gate chain, or redirect to a file.
+- Run the FULL mypy scope: `.nox/typecheck/bin/mypy` with NO args (202 files incl. tests).
 - Local run: `HOLOSO_REGALLOC_EFFORT=10 .nox/tests/bin/python -m pytest -p no:enabler -n 8 --tb=line -q
   -m "not cosim and not fuzz and not synth" <files>`; format `.nox/black/bin/python -m black -q holoso tests tools`.
-- Reviewers/fixers work in PINNED DETACHED WORKTREES (`git worktree add --detach <scratch> <sha>`), never the live
-  tree — a live-tree Codex once reset dev (recovered via reflog). Never amend a branch a live-tree reviewer reads.
-- CI verification: push `HEAD:refs/heads/trial/<name>`, then a nohup survivor-poll of 5-minute single `gh api`
-  calls (NEVER `gh run watch` — it exhausts rate limits); advance dev only when all five jobs are green. Prune
-  `trial/*` when done, origin included. md-only commits fire no CI (previous green carries).
-- Subagents passively wait on their own monitors instead of polling long background runs — spawn them with "poll
-  your own run to completion, do not passively wait," and resume a stalled one the same way. Retry limit/transient
-  failures by RESUMING (SendMessage), not restarting.
-- One step = one commit + push + CI-green. review-loop every step (Claude ultrathink full-spectrum + Codex ultra
-  correctness-only, both read-only in pinned worktrees, no suite re-runs); first clean round ends it; reject
-  findings that need adversarial/hostile constructions.
+- CI: push `HEAD:refs/heads/trial/<name>`, poll with single `gh api` calls every 5 min (NEVER `gh run watch`).
+  md-only commits fire no CI; the previous green carries.
+- Reviewers work in PINNED DETACHED WORKTREES, never the live tree.
+- Two reviewers agreeing means little when they share an attack surface. It misled me twice. Ask each for the
+  attack surfaces it probed and could NOT break — a named negative result is as useful as a finding.
+- A reviewer that dies on a provider guardrail may still have a probe in flight worth recovering from its
+  transcript; that is how the fifth route was found.
 
 DONE — do not redo: all 18 register defects (A1-G1) + the full trim program; B1 storage schema, G1 predication,
-E1-lite diagnostics; the hygiene closeout (exit grep clean); the freeze infrastructure (35 GoldenCases, the
-32-kernel rejection corpus, the complete HIR serializer `tests/_hirdump.py`, the `test_golden` gate, the
-`tools/refreeze_golden.py` refreeze tool); the architecture spike (MORPH).
+E1-lite diagnostics; the hygiene closeout; the freeze infrastructure (35 GoldenCases, 32-kernel rejection
+corpus, `tests/_hirdump.py`, `test_golden`, `tools/refreeze_golden.py`); the architecture spike (MORPH);
+`freeze-1` tagged; the seam's miscompile characterization and its five pinned witnesses.
 
 ## Context
 
