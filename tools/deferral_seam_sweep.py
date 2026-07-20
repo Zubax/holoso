@@ -63,6 +63,11 @@ _DEAD_ARM = {
     "int_state": "        if a.shape[0] > 5:\n            self.n = 1\n        return x + self.n",
     "loop": "        if a.shape[0] > 5:\n            for k in range(3):\n                self.s = float(k)\n        return x + self.s",
     "live_else": "        if a.shape[0] > 1:\n            r = 1.0\n        else:\n            r = 2.0\n        return x + r",
+    # A store AFTER the guard, on the path both arms reconverge onto. It promotes nothing the speculation is
+    # responsible for, so it must not be refused -- and a corpus without it cannot see a check that walks past
+    # the merge, which is exactly how one such over-refusal shipped.
+    "inert_then_store": "        if a.shape[0] > 5:\n            pass\n        self.s = x * 2.0\n        return self.s",
+    "settles_true_then_store": "        if a.shape[0] > 1:\n            pass\n        self.s = x * 2.0\n        return self.s",
 }
 
 # Loop family: the same trigger with the branch INSIDE a loop body, where withholding an edge starves the

@@ -683,6 +683,35 @@ def test_speculated_dead_arm_without_a_store_still_compiles() -> None:
     assert float(result.numerical_model.elaborate().run(2.0, False)[0]) == Inert().step(2.0, False)
 
 
+def test_store_after_an_inert_speculated_arm_still_compiles() -> None:
+    # The store test is scoped to the region reachable ONLY through the speculated arm. A branch reconverges, so
+    # a store after the merge runs on the taken path regardless and promotes nothing the speculation is
+    # responsible for; counting it refused any kernel that merely stores after an inert guard.
+    class MergeStore:
+        def __init__(self) -> None:
+            self.t = 0.0
+            self.s = 0.0
+
+        def step(self, x: float, flag: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2**53 + 1
+                q = 2**64
+            self.t = u
+            a = np.array([q, x])
+            if a.shape[0] > 5:  # statically false and inert
+                pass
+            self.s = x * 2.0  # on the live path, reached from both arms
+            return self.s
+
+    result = holoso.synthesize(MergeStore().step, default_ops(FloatFormat(8, 23)), name="defer_merge_store")
+    # `s` is returned, so the exit dedups it onto its own state port rather than emitting a separate out_0.
+    outputs = dict(zip([port.name for port in result.output_ports], result.numerical_model.elaborate().run(3.0, False)))
+    assert float(outputs["state_s"]) == MergeStore().step(3.0, False)
+
+
 def test_speculated_dead_store_does_not_silently_miscompile() -> None:
     # Why emitting a speculated-then-dead arm is unsound rather than merely wasteful, and the sharpest available
     # witness for it. A store on the dead arm promotes `s` from a read-only constant -- folded at binary64, where

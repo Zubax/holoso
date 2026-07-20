@@ -70,10 +70,12 @@ crashes to 26 accepts with none, and the loop family unchanged at 21 accepts -- 
 property every candidate fix has to keep. Retracting the stale mark is not local either:
 destructive environment joins mean removing an edge requires recomputing downstream environments, schemas,
 reachability, W/D discoveries, and phis. The gate costs accepts too, and the refusal is scoped to limit that:
-a speculated arm is only refused if it STORES to the component, because the promotion of an attribute to a
-runtime slot is the harm. An inert arm compiles, and emits hardware byte-identical to the same kernel with the
-guard deleted. The scoping is still conservative rather than exact -- a store into an ALREADY-runtime slot
-promotes nothing yet is refused anyway -- so some refused kernels were being compiled correctly.
+a speculated arm is refused only if the region reachable EXCLUSIVELY through it stores to the component,
+because the promotion of an attribute to a runtime slot is the harm. The exclusion matters as much as the store
+test -- a branch reconverges, so a walk that does not subtract the live arm's reachable set runs through the
+merge into the rest of the function and refuses any kernel that merely stores after an inert guard. The scoping
+is still conservative rather than exact: a store into an ALREADY-runtime slot promotes nothing yet is refused,
+so some refused kernels were being compiled correctly.
 
 A SILENT MISCOMPILE NEVERTHELESS REMAINS, by a route the gate structurally cannot see, and it is the most
 serious open defect in the compiler. When the phantom environment keeps a stale state fact alive, the condition

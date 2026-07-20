@@ -865,19 +865,29 @@ class Analyzer:
                 self._block_origin(result.unit, unreached[0]),
             )
 
-    def _stores_state(self, result: ResidualUnit, entry: BlockId) -> bool:
-        """Whether any executable block reachable from ``entry`` writes a component attribute."""
+    def _reachable(self, result: ResidualUnit, entry: BlockId) -> set[BlockId]:
+        successors: dict[BlockId, list[BlockId]] = {}
+        for source, target in result.executable_edges:
+            successors.setdefault(source, []).append(target)
         seen = {entry}
         pending = [entry]
         while pending:
-            block_id = pending.pop()
-            if any(isinstance(op, PyStoreAttr) for op in result.unit.blocks[block_id].ops):
-                return True
-            for source, target in result.executable_edges:
-                if source == block_id and target not in seen:
+            for target in successors.get(pending.pop(), ()):
+                if target not in seen:
                     seen.add(target)
                     pending.append(target)
-        return False
+        return seen
+
+    def _stores_state(self, result: ResidualUnit, dead: BlockId, live: BlockId) -> bool:
+        """
+        Whether the region reachable ONLY through ``dead`` writes a component attribute.
+
+        Blocks the live arm also reaches are excluded: the branch reconverges, so a store there executes on the
+        taken path regardless and promotes nothing that the speculation is responsible for. Counting it would
+        refuse any kernel that merely stores after an inert guard.
+        """
+        exclusive = self._reachable(result, dead) - self._reachable(result, live)
+        return any(isinstance(op, PyStoreAttr) for block_id in exclusive for op in result.unit.blocks[block_id].ops)
 
     def _check_branch_settled(self, result: ResidualUnit, block_id: BlockId, env: _Env) -> None:
         """
@@ -895,7 +905,8 @@ class Analyzer:
         if settled is None:
             return
         dead = terminator.else_target if settled else terminator.then_target
-        if (block_id, dead) in result.executable_edges and self._stores_state(result, dead):
+        live = terminator.then_target if settled else terminator.else_target
+        if (block_id, dead) in result.executable_edges and self._stores_state(result, dead, live):
             raise AnalysisRejection(
                 "analysis explored the branch arm that the stabilized facts prove unreachable, and it stores to "
                 "the component, so the emitted logic would not match this source; simplify the condition or the "

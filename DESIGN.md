@@ -392,8 +392,9 @@ branch whose condition disagrees with its own recorded out-edges AND whose dead 
 block marked executable that no edge chain reaches, or an execution path out of a region left unreachable. Each
 becomes a located refusal rather than a wrong answer or a bare crash. The store condition scopes the cost to
 the harm -- an inert speculated arm emits hardware byte-identical to the same kernel with the guard deleted, so
-refusing it would buy nothing -- though the scoping stays conservative, since a store into an already-runtime
-slot promotes nothing yet is refused too. Retracting a
+refusing it would buy nothing -- and it is tested over the region reachable EXCLUSIVELY through the dead arm,
+since a branch reconverges and a store past the merge runs on the taken path regardless. The scoping stays
+conservative, as a store into an already-runtime slot promotes nothing yet is refused too. Retracting a
 stale mark instead is deliberately not attempted -- destructive environment joins mean removing an edge
 requires recomputing downstream environments, schemas, reachability, W/D discoveries, and phis. The gate is a
 narrowing, NOT a closure: where the phantom environment keeps a stale state fact alive the condition settles as
