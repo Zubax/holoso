@@ -1161,7 +1161,7 @@ Loop sweep 33 = parent parity; dead-arm sweep 32 -> 22 accepts, but every newly 
 compiled unsoundly; zero crashes; miscompile refused; corpus BYTE-IDENTICAL 151/151. The `_truth_fact` refusal
 was MEASURED to be inert once the gate exists (identical results with and without) and was dropped for
 simplicity -- and round 2's own late addendum proved it could never have sufficed anyway: the stale marking has
-a SECOND producer, a state read whose live-in join ascends `Residual -> Known` with every fact legitimately
+a SECOND producer, a state read whose live-in join settles `Residual -> Known` with every fact legitimately
 bound throughout, which no operand-level guard can see. Checking the RESULT rather than any producer is what
 makes the gate complete. Also corrected from the
 round: the class was mis-scoped to GRAFTABLE calls (`np.array` is a conversion and never grafts, yet drives the

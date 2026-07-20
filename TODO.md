@@ -39,7 +39,7 @@ condition is evaluated on a fact that later becomes more precise, so BOTH arms a
 add-only, so the arm the stabilized facts later prove dead stays open and is emitted. It has (at least) TWO
 producers, which is why no check on the condition's operand can close it: `_truth_fact` mapping an unbound
 operand to a runtime bool, and -- with every fact legitimately bound throughout -- a state read whose live-in
-join ascends `Residual -> Known` across visits. The first accounts for the large majority of observed cases and
+join settles `Residual -> Known` across visits. The first accounts for the large majority of observed cases and
 for the miscompile; the second is invisible to any unbound-operand guard. A store on that arm promotes an
 attribute from a read-only constant -- folded at binary64 -- into a runtime state slot whose reset is
 materialized in the narrower target carrier, so a guard
@@ -64,10 +64,23 @@ Two more invasive fixes were built and measured, and BOTH were rejected on evide
 prunes the dead arm properly -- the strictly better outcome where it applies -- but it starves the fixed point:
 a `Branch` inside a loop body sits BEFORE the body's trailing back-edge `Jump`, so deferring it stops the loop
 re-flowing at all. That is the same failure round-10's edge withholding produced, reached by a different route,
-and it is why `tools/deferral_seam_sweep.py` exists: the seam cannot be judged by argument, only by moving those
-counts. Against the pre-gate baseline that sweep reports the dead-arm family going from 32 accepts with 6 raw
-crashes to 26 accepts with none, and the loop family unchanged at 21 accepts -- exact parity, which is the
-property every candidate fix has to keep. Retracting the stale mark is not local either:
+and it is why `tools/deferral_seam_sweep.py` exists: the seam cannot be judged by argument, only by moving
+counts. What it reports, and NEITHER design dominates:
+
+| family | pre-gate | producer fix | gate (shipped) |
+| --- | --- | --- | --- |
+| dead_arm (54) | 42 accept, 8 raw crashes | 54 accept, 0 crashes | 36 accept, 0 crashes |
+| loop (30) | 21 accept | 21 accept | 21 accept |
+| loop_inner (6) | 5 accept | 4 accept | 5 accept |
+
+The producer fix compiles 18 more dead-arm kernels, and compiles them CORRECTLY rather than refusing them --
+it prunes the dead arm instead of detecting it afterwards, which is the better outcome wherever it applies. It
+was rejected anyway because its one loss is a starved fixed point: a kernel that lowered before it stops
+lowering, and a regression of previously-working code is a worse thing to carry into a freeze than a refusal,
+which is the same reasoning that reverted round-10. The `loop_inner` family exists because the plain `loop`
+family cannot see that difference at all -- it puts the deferring call before the loop, where withholding an
+edge costs nothing -- and a family whose numbers cannot move under the regression it guards is not evidence.
+Retracting the stale mark is not local either:
 destructive environment joins mean removing an edge requires recomputing downstream environments, schemas,
 reachability, W/D discoveries, and phis. The gate costs accepts too, and the refusal is scoped to limit that:
 a speculated arm is refused only if the region reachable EXCLUSIVELY through it stores to the component,

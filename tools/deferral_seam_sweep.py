@@ -93,6 +93,71 @@ _LOOP = {
 }
 
 
+# The loop family above puts the trigger and the call BEFORE the loop, which cannot exhibit the starvation that
+# disqualified both rejected fixes: those fail only when the deferring call is INSIDE the body, so the branch
+# they hold back precedes the body's own back-edge. These kernels are whole templates for that reason -- a
+# family whose numbers cannot move under the regression it exists to guard is not evidence.
+_LOOP_INNER = {
+    "while_call_inside": """import numpy as np
+
+
+class K:
+    def __init__(self) -> None:
+        self.t = 0.0
+        self.s = 0.0
+
+    def step(self, x: float, run: bool) -> float:
+        first = True
+        while run:
+            self.t = ({wide}) if first else x
+            a = np.array([({wider}) if first else x, x])
+            np.dot(a, a)
+            first = False
+            run = False
+        return x + self.t
+""",
+    "while_call_inside_branch": """import numpy as np
+
+
+class K:
+    def __init__(self) -> None:
+        self.t = 0.0
+        self.s = 0.0
+
+    def step(self, x: float, run: bool) -> float:
+        first = True
+        acc = 0.0
+        while run:
+            self.t = ({wide}) if first else x
+            a = np.array([({wider}) if first else x, x])
+            y = np.dot(a, a)
+            if y > 0.0:
+                acc = acc + 1.0
+            first = False
+            run = False
+        return x + self.t + acc
+""",
+    "for_call_inside": """import numpy as np
+
+
+class K:
+    def __init__(self) -> None:
+        self.t = 0.0
+        self.s = 0.0
+
+    def step(self, x: float, flag: bool) -> float:
+        acc = 0.0
+        for i in range(2):
+            self.t = ({wide}) if i == 0 else x
+            a = np.array([({wider}) if i == 0 else x, x])
+            y = np.dot(a, a)
+            if y > 0.0:
+                acc = acc + 1.0
+        return x + self.t + acc
+""",
+}
+
+
 def _families() -> dict[str, dict[str, str]]:
     return {"dead_arm": _DEAD_ARM, "loop": _LOOP}
 
@@ -116,8 +181,28 @@ def main() -> int:
     ops = default_ops(FloatFormat(8, 23))
     totals: dict[str, dict[str, int]] = {}
     with tempfile.TemporaryDirectory() as scratch:
+        tally: dict[str, int] = {}
+        for label, template in _LOOP_INNER.items():
+            for feed_name, (wide, wider) in {"wide": ("2**53 + 1", "2**64"), "narrow": ("2.0", "3.0")}.items():
+                path = pathlib.Path(scratch) / f"k_loop_inner_{feed_name}_{label}.py"
+                path.write_text(template.format(wide=wide, wider=wider))
+                spec = importlib.util.spec_from_file_location(path.stem, path)
+                assert spec is not None and spec.loader is not None
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                try:
+                    holoso.synthesize(module.K().step, ops, name=path.stem)
+                    outcome = "accept"
+                except holoso.HolosoError:
+                    outcome = "refuse"
+                except Exception as error:  # noqa: BLE001
+                    outcome = f"CRASH:{type(error).__name__}"
+                tally[outcome] = tally.get(outcome, 0) + 1
+                if args.verbose:
+                    print(f"  loop_inner {feed_name}_{label:26s} {outcome}")
+        totals["loop_inner"] = tally
         for family, bodies in _families().items():
-            tally: dict[str, int] = {}
+            tally = {}
             product = itertools.product(_FEEDS.items(), _CALLS.items(), bodies.items())
             for (feed_name, feed), (call_name, call), (body_name, body) in product:
                 label = f"{feed_name}_{call_name}_{body_name}"
