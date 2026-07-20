@@ -77,6 +77,8 @@ from ._ir import (
     UnbindPlace,
     LocatedRejection,
     executable_preorder,
+    OriginOrder,
+    origin_order,
     source_position,
 )
 from ._opsem import BinOp
@@ -234,9 +236,9 @@ def _join_atoms(a: AtomicFact, b: AtomicFact, origin: OriginStack) -> AtomicFact
     raise AssertionError((a, b))
 
 
-def _deferral_key(error: LocatedRejection) -> tuple[str, tuple[tuple[str, str, int, int], ...]]:
+def _deferral_key(error: LocatedRejection) -> tuple[str, OriginOrder]:
     """Rendered text first, so the historical selection is preserved, then the origin the text cannot show."""
-    return str(error), tuple((f.file, f.function, f.line, f.column) for f in reversed(error.origin))
+    return str(error), origin_order(error.origin)
 
 
 class DeferredRejection:

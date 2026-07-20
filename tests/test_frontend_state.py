@@ -980,6 +980,39 @@ def test_cross_round_state_verdicts_are_located_at_their_store() -> None:
     assert (location.line or "").strip().startswith("self.s = 7.0")
 
 
+def test_state_verdicts_do_not_anchor_on_a_store_proved_dead() -> None:
+    # The leaf's PROMOTION origin is latched at the round that first promoted it, and the state set's
+    # monotonicity keeps the leaf, not that store's reachability -- on this shape the latched store sits in the
+    # arm the stabilized facts prove dead. A verdict that preferred it would point the user at a line that never
+    # runs, so the per-round store map leads and the promotion origin only stands in when that map is empty.
+    class TupleReset:
+        def __init__(self) -> None:
+            self.mode = True
+            self.t = 0.0
+            self.s = (1.0, 2.0)  # an unsupported reset type, so every round draws a verdict about `s`
+
+        def step(self, x: float, new_mode: bool) -> float:
+            if self.mode:
+                u: float = 2**53 + 1
+                q: float = 2**64
+            else:
+                u = x
+                q = x
+            self.t = u
+            span = np.array([q, x])
+            if span.shape[0] > 5:
+                self.s = 7.0  # type: ignore[assignment]  # Python never runs this; the facts prove it dead
+            self.s = self.s
+            self.mode = new_mode
+            return x
+
+    with pytest.raises(UnsupportedConstruct) as refusal:
+        holoso.synthesize(TupleReset().step, default_ops(FloatFormat(8, 23)), name="tuple_reset")
+    location = refusal.value.location
+    assert location is not None
+    assert (location.line or "").strip() == "self.s = self.s"
+
+
 def test_stale_runtime_state_blames_a_store_that_actually_promoted() -> None:
     # An earlier store standing in a block the exit cannot be reached from promotes nothing, so it must not be
     # named: the leaf's provenance comes from the stores that put it in the runtime-state set, not from the

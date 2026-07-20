@@ -487,7 +487,11 @@ def main() -> int:
                 print(f"  oracle {label:32s} CRASH:{type(error).__name__}: {str(error)[:60]}")
                 continue
             diverged = actual != expected
-            if diverged and label in _KNOWN_OPEN and (expected, actual) == _KNOWN_OPEN[label]:
+            recorded = _KNOWN_OPEN.get(label)
+            # `type(...) is` beside the comparison because 10 == 10.0: a reference that changes from float to
+            # int is a real change in what the kernel computes, and numeric equality alone would wave it past.
+            unchanged = recorded is not None and (expected, actual) == recorded and type(expected) is type(recorded[0])
+            if diverged and unchanged:
                 # A documented open route (TODO.md), returning exactly the wrong value on record. Reported, but
                 # it does not fail the run: the tool gates on CHANGE, so a known miscompile does not mask a new
                 # one while still leaving room for the routes that are known to be open.

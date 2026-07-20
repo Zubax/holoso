@@ -8,11 +8,11 @@ from collections.abc import Callable
 
 import pytest
 
-from holoso._frontend._fir._analysis_support import AnalysisRejection
+from holoso._frontend._fir._analysis_support import AnalysisRejection, DeferredRejection
 from holoso._frontend._fir._analyze import Analyzer, ResidualUnit
 from holoso._frontend._fir._fact import Known, Residual
 from holoso._frontend._fir._value import SemType
-from holoso._frontend._fir._ir import ReturnPlace, StateLeaf
+from holoso._frontend._fir._ir import Origin, ReturnPlace, StateLeaf
 from holoso._frontend._fir._value import StaticValue, as_python
 
 _GAINS = (1.0, 2.0, 4.0)
@@ -850,9 +850,6 @@ def test_deferred_rejection_selection_is_total_over_equal_messages() -> None:
     # different files -- identically-named helper classes in two modules, reached from one call site. Selecting
     # on the text alone leaves the public origin to whichever the caller happened to offer first, so the winner
     # must not depend on offer order.
-    from holoso._frontend._fir._analysis_support import DeferredRejection
-    from holoso._frontend._fir._ir import Origin
-
     def rejection(file: str) -> AnalysisRejection:
         return AnalysisRejection("state attribute 's' does not exist", (Origin("Comp.setter", 5, 8, file),))
 
@@ -867,3 +864,22 @@ def test_deferred_rejection_selection_is_total_over_equal_messages() -> None:
             deferred.raise_if_deferred()
         chosen.append(raised.value.origin)
     assert chosen[0] == chosen[1] == first.origin
+
+
+def test_origin_order_agrees_with_source_position_wherever_it_decides() -> None:
+    # The identity suffix exists only to separate stacks that positions cannot tell apart. Interleaving the two
+    # per frame would let a shallow frame's FILENAME outrank a deeper frame's LINE, so two helpers reached from
+    # one call site would report in filename order rather than source order.
+    from holoso._frontend._fir._ir import origin_order, source_position
+
+    call_site = Origin("step", 30, 12, "root.py")
+    earlier = (Origin("set_b", 2, 8, "later_b.py"), Origin("update", 11, 4, "later_b.py"), call_site)
+    later = (Origin("set_a", 23, 8, "earlier_a.py"), Origin("update", 11, 4, "earlier_a.py"), call_site)
+    assert source_position(earlier) < source_position(later)
+    assert origin_order(earlier) < origin_order(later)
+
+    # Same positions throughout, different files: here the identities are what decide, and they must.
+    left = (Origin("setter", 5, 8, "helper_a.py"),)
+    right = (Origin("setter", 5, 8, "helper_b.py"),)
+    assert source_position(left) == source_position(right)
+    assert origin_order(left) < origin_order(right)

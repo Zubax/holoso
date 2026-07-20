@@ -29,6 +29,7 @@ class Origin:
 
 
 type OriginStack = tuple[Origin, ...]
+type OriginOrder = tuple[tuple[tuple[int, int], ...], tuple[tuple[str, str], ...]]
 
 
 def source_position(origin: OriginStack) -> tuple[tuple[int, int], ...]:
@@ -39,13 +40,15 @@ def source_position(origin: OriginStack) -> tuple[tuple[int, int], ...]:
     return tuple((frame.line, frame.column) for frame in reversed(origin))
 
 
-def origin_order(origin: OriginStack) -> tuple[tuple[int, int, str, str], ...]:
+def origin_order(origin: OriginStack) -> OriginOrder:
     """
     A TOTAL order over origin stacks, for deciding which of several equally valid diagnostics to report.
-    Source position leads so the choice reads as source order; the frame identities behind it separate stores
-    that share a line and column in different files, which position alone would leave to set iteration.
+    The COMPLETE source position leads, so the choice reads as source order and agrees with ``source_position``
+    wherever that already decides; the frame identities are a suffix, separating only stacks that positions
+    cannot tell apart -- which position alone would leave to set iteration. Interleaving the two per frame
+    would let a shallow frame's filename outrank a deeper frame's line.
     """
-    return tuple((frame.line, frame.column, frame.file, frame.function) for frame in reversed(origin))
+    return source_position(origin), tuple((frame.file, frame.function) for frame in reversed(origin))
 
 
 def render_rejection(message: str, origin: OriginStack) -> str:

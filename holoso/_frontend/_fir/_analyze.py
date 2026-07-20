@@ -365,9 +365,10 @@ class Analyzer:
         self._block_serial = 1_000_000
         self._runtime_state: set[StateLeaf] = set()
         # Where each runtime-state leaf came from: the source-earliest store that promoted it, latched on the
-        # ROUND that first promoted it (the set is monotone, so a later round cannot un-promote and the first
-        # answer stays true). Its provenance cannot live in the per-round store map -- the stale-leaf refusal
-        # fires exactly when that store is gone from the final round, which is when the per-round map is empty.
+        # ROUND that first promoted it. Monotonicity keeps the LEAF in the set, not that store in the graph, so
+        # the latched store may well be one a later round proves unreachable -- which is exactly what the
+        # stale-leaf refusal is about, and exactly why no other diagnostic should prefer it. Its provenance
+        # cannot live in the per-round store map, which is empty for it once that store stops executing.
         self._runtime_state_origins: dict[StateLeaf, OriginStack] = {}
         self._state_livein: dict[StateLeaf, Fact] = {}
         self._discovered_stores: set[tuple[BlockId, StateLeaf]] = set()
@@ -632,14 +633,18 @@ class Analyzer:
 
     def _state_origin(self, leaf: StateLeaf) -> OriginStack:
         """
-        State rejections locate at the store that PROMOTED the leaf: __init__ is never analyzed, so that store
-        is the line the user can act on, and it is the one store known to have put the leaf into the state set.
-        The per-round map is consulted only for a leaf that never got there -- it holds every store discovered
-        this round including ones in blocks the exit cannot be reached from, so preferring it would let a store
-        behind a raise outrank the real promoter.
+        State rejections locate at a store to the leaf: __init__ is never analyzed, so a store is the line the
+        user can act on. THE PER-ROUND MAP LEADS, and the promotion origin only stands behind it, because
+        neither source is reliably better and this order loses the less badly. The per-round map can name a
+        store in a block the exit cannot be reached from -- one behind a `raise`, say, which at least executes
+        up to that point. The promotion origin is latched at the round that first promoted the leaf, and W's
+        monotonicity keeps the LEAF, not that store's reachability: on the seam's own witnesses the latched
+        store sits in the arm the stabilized facts later prove dead, so preferring it anchors the message on a
+        line that never runs. What the fallback is genuinely for is the cross-round case where the map is empty
+        and the alternative is no location at all.
         """
-        promoted = self._runtime_state_origins.get(leaf)
-        recorded = promoted if promoted is not None else self._store_origins.get(leaf)
+        stored = self._store_origins.get(leaf)
+        recorded = stored if stored is not None else self._runtime_state_origins.get(leaf)
         return recorded if recorded is not None else (Origin(self._root_template.name, 0, 0, self._root_template.file),)
 
     def _snapshot_leaf(self, leaf: StateLeaf) -> Fact:
@@ -1411,11 +1416,11 @@ class Analyzer:
                     )
                 leaf = StateLeaf(obj_fact.obj, (name,))
                 recorded = self._store_origins.get(leaf)
-                if recorded is None or source_position(op.origin) < source_position(recorded):
+                if recorded is None or origin_order(op.origin) < origin_order(recorded):
                     self._store_origins[leaf] = op.origin
                 self._discovered_stores.add((block.id, leaf))
                 here = self._discovered_store_origins.get((block.id, leaf))
-                if here is None or source_position(op.origin) < source_position(here):
+                if here is None or origin_order(op.origin) < origin_order(here):
                     self._discovered_store_origins[(block.id, leaf)] = op.origin
                 # The reset fixes the slot schema; a violating store carries a fixpoint-stable fact onward and
                 # the recorded verdict reports after stabilization, at this store. An Unbound value is no

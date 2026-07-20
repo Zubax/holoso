@@ -53,9 +53,12 @@ tallies as a good accept, which is how both narrowings passed a green sweep) wit
 recording the WHOLE observed pair (python, hardware), and it FAILS on any change to either half — the right
 answer, a different wrong answer, a moved Python reference, or a refusal alike, since each means the record no
 longer describes the code. SCOPE, stated because three review rounds each falsified a broader claim about this
-tool: the observable is the kernel's `out_0`, so a divergence confined to a state port is not gated, and the
-per-family accept/refuse tallies are printed rather than baselined — those are compared by hand against the
-table in TODO.md. Untested surfaces, named: `_unroll_seeds`, `_pending_bridge`.
+tool: the observable is the kernel's `out_0` as a scalar number (its Python type is compared too, since
+`10 == 10.0`), so a divergence confined to a state port is not gated; the
+per-family accept/refuse tallies are printed rather than baselined, and are compared by hand against the table
+in TODO.md; and the 54 generated dead-arm accepts are never value-checked at all, which is the same regime the
+oracle exists to escape — a round-4 reviewer checked all 54 against Python by hand and found no live
+miscompile, so the hole is latent rather than open. Untested surfaces, named: `_unroll_seeds`, `_pending_bridge`.
 
 This is the campaign's strongest argument for Stage 4, and a stronger one than the spike made: not "decisions
 should be made once" but "this seam emits wrong hardware and post-hoc gating provably cannot see at least one
@@ -1353,8 +1356,41 @@ is a unit test on the selection itself, which does fail deterministically before
 an unreproduced witness is weaker evidence than a reproduced one and the next reader should know which it is.
 
 ALSO: `_state_origin` preferred the unfiltered per-round store map over the promotion origin, so a store behind
-a `raise` outranked the real promoter for cross-round verdicts -- the priority is reversed, and the comment
-that claimed the per-round map is always empty there is corrected, since it is not. Comment accuracy per the
+a `raise` outranked the real promoter for cross-round verdicts. I reversed the priority -- and round 4 showed
+that was the WORSE half of a trade, so it is reversed back; see that round's entry. The comment claiming the
+per-round map is always empty there is corrected either way, since it is not. Comment accuracy per the
 Claude half: the promotion origin is latched at the first promoting round (monotone, so it stays true) rather
 than being a per-analysis minimum, and the stale-leaf key is honestly described as tying for unroll clones of
 one store over two components -- harmlessly, since the message names only the path and the shared origin.
+
+
+REVIEW ROUND 4 -- the sweep finally survived a round (four mutations tried, all caught), and the falsified
+claim was in the compiler instead, in the fix I had just made. Round 3 had me reverse `_state_origin` so the
+PROMOTION origin outranks the per-round store map, on the strength of a probe where a store behind a `raise`
+outranked the real promoter. Round 4 showed the reverse direction is worse and is reachable on THE SEAM'S OWN
+WITNESSES: the promotion origin is latched at the round that first promoted the leaf, and the state set's
+monotonicity keeps the LEAF, not that store's reachability -- so on both recorded miscompile kernels the
+latched store sits in the phantom arm, the arm the stabilized facts prove dead. A tuple-reset variant anchors
+its verdict on `self.s = 7.0`, a line Python never runs, where the parent named the live `self.s = self.s`.
+Anchoring a diagnostic on a line the compiler has itself just proved dead is precisely the pathology the gate
+exists to refuse. REVERTED to store-map-first, with the fallback kept for the cross-round case where the map is
+empty and the alternative is no location at all, and pinned by a regression. The honest statement, which
+neither the docstring nor the campaign made before, is that NEITHER source is reliably better: the map can name
+a store behind a `raise`, which at least executes up to that point; the latch can name a store that never
+executes. This order loses less badly. My comment "the first answer stays true" was the same
+one-dimension-too-broad claim this log keeps recording -- monotonicity of the set does not transfer to the
+store.
+
+Also from the round: `_deferral_key` had re-invented `origin_order` with a different field order (identity
+before position), so equal-text rejections picked the alphabetically-first file rather than the source-earliest
+origin -- it now uses the shared helper. And `origin_order` ITSELF contradicted its own docstring, as the Codex
+half proved: it interleaved position and identity PER FRAME, so a shallow frame's filename outranked a deeper
+frame's line, and two helpers reached through one unrolled call site reported in filename order rather than
+source order. The complete position key now leads and the identities are a suffix, which is what the docstring
+always claimed. The sweep's pair check also gained a type comparison, since `10 == 10.0` let a Python reference
+change from float to int slip through as unchanged -- the fourth dimension of that claim to need
+fencing.
+became `origin_order` too, so their ties are source-ordered rather than decided by worklist arrival. And the
+reviewer VALUE-CHECKED all 54 accepted dead-arm kernels against Python by hand -- no live miscompile, the 8
+apparent mismatches being the documented out_0-dedup shape (6) and ordinary binary32 rounding (2). That is the
+largest hole in the sweep's coverage measured rather than argued, and it is recorded in the scope statement.
