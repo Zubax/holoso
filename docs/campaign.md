@@ -11,14 +11,14 @@ OPTIONS MUST PRECEDE THE SESSION ID: `codex exec resume -m ... -c ... <uuid> "<p
 id last, the prompt is not parsed and Codex falls back to stdin and dies with "stdin is not a terminal".
 Run the `review-loop` skill after every step. Sequential: one thing at a time.
 
-WHERE WE ARE. Stage 2 is closed and `freeze-1` IS RE-TAGGED on the corrected baseline, with an annotation that
-leads with the miscompiles and states the honest refused count (one). Stage 3 is CLOSED: consult X5 ruled PLAIN
-MORPH with M7 optional and gate-deferred, the ruling is recorded in `docs/decisions/arch-ruling.md`, and branch
-`spike/resolved-ir` (dc76fbf) is deleted, its ledger preserved verbatim at `docs/decisions/spike-ledger.md`.
-Every code commit in the stack has been CI-green on all five jobs; the golden corpus stayed BYTE-IDENTICAL
-(151/151) throughout, which is what makes the baseline safe to freeze. mypy 202, black clean. (Suite counts are
-deliberately not quoted here: every added test makes the number stale, and it went stale twice in one session.
-CI at the tag is authoritative.)
+WHERE WE ARE. Stage 2 is closed and `freeze-1` IS TAGGED at a96782d, on an annotation that survived eight
+review rounds: four routes by mechanism, ONE fully refused, three open with their exact divergences, plus the
+milder wrong-line residual. Stage 3 is CLOSED: consult X5 ruled PLAIN MORPH with M7 optional and gate-deferred,
+recorded in `docs/decisions/arch-ruling.md`, with branch `spike/resolved-ir` (dc76fbf) deleted and its ledger
+preserved verbatim at `docs/decisions/spike-ledger.md`. Every code commit is CI-green on all five jobs; the
+golden corpus stayed BYTE-IDENTICAL (151/151) throughout and its determinism matrix is certified AT THE TAG.
+(Counts of tests, files and commits are deliberately not quoted in prose: several went stale within a single
+session, twice inside the commit that corrected them. Run the command; CI at the tag is authoritative.)
 
 NEXT IS STAGE 4 MORPH, M0 first. M0's import ban must be written to the property SC2 actually established --
 no Fact, no registry, no `Py*`, no callbacks, no frontend decision module in the emitter's transitive closure,
