@@ -1406,8 +1406,9 @@ one-dimension-too-broad claim of mine in this area is the defect. Round 4 revert
 map-first so verdicts would stop anchoring on a store the stabilized facts prove dead, and pinned it with a
 regression. The regression passes only because in ITS shape the speculated arm is gone by the stable round.
 Reproduced by the reviewer and then by me on the sweep's own dead-arm shape: when a verdict is raised
-on its FIRST round the promotion latch is still empty -- it survives round resets, so from the second round
-on it is populated, and the pinned witness is a first-round one -- and the location then comes from whatever
+on the round that first promotes THAT LEAF its latch entry is still absent -- the map is per leaf and survives
+round resets, so which round that is depends on when the leaf appears, not on it being round one -- and the
+location then comes from whatever
 stores the worklist has reached -- speculated arms included -- and the dead arm takes the anchor. A
 tuple-reset kernel names
 `self.s = 7.0`, a line Python never runs; delete the dead arm and the anchor moves to the live store. BOTH
@@ -1472,3 +1473,30 @@ verdict so both stores are recorded and the tie actually arises. Also corrected:
 misattributed -- 54 is the number of kernels the sweep ACCEPTS across all three families (28 dead-arm of 54
 generated, 21 loop, 5 loop_inner), not 54 accepted dead-arm kernels, and the 8 benign mismatches split 6
 dead-arm dedups and 2 loop_inner roundings.
+
+
+ROUND 7 -- both halves, and between them SEVEN items, every one about my tests or my claims rather than about
+the compiler. The Codex half caught the over-broad pattern for the seventh time in the very sentence written to
+fix the sixth: the promotion latch is PER LEAF, so "empty on the first round" is wrong too -- it is empty on the
+round that first promotes THAT leaf, which may be any round. Scoped in the docstring, TODO.md and here.
+
+Three of my own tests were weaker than they read. The `_same` test used pooled literals and passed the same
+`math.nan` object twice, so an object-identity mutant passed the whole thing; it now builds distinct objects and
+asserts `is not` first. The tied-stores test rested on a fixture invariant stated only in prose -- one blank
+line in a helper made it pass for the wrong reason, and the bad mutant passed with it -- so it now asserts the
+two helpers' line numbers and normalized bodies match, verified by drifting one and watching it go red. And the
+documented rank-before-identity rule in `_finalize` was unpinned while flipping it CHANGES A PUBLIC ABI: two
+components reached from one unrolled call site emit `state_z__s, state_a__s` by execution rank, and ordering
+those ties by frame identity renames the ports by filename with the whole suite green. Pinned now.
+
+Corrections to what the log itself claimed. Only ONE of the two reverted round-4 selections is pinned: flipping
+`_discovered_store_origins` back leaves 761 frontend tests green, and neither reviewer could construct a witness
+-- call expansion puts each inlined store in its own block, so a same-block position tie looks unreachable, and
+the promotion pick re-orders by `origin_order` downstream anyway. The revert is defensible but UNWITNESSED, and
+saying "pinned" of both was wrong. The "first-executed store" principle governs the per-round map path only:
+the promotion pick orders a SET and must be total, so it breaks the identical tie by filename, and the same
+helper pair reached on that path names alpha. The two paths differ on purpose. `test_a_cross_round_verdict_...`
+was misnamed -- both sources are populated and disagreeing there, which is not the map-empty fallback the
+docstring describes -- and is now `test_a_verdict_prefers_a_raise_guarded_store_over_the_promoter`. Also noted
+rather than fixed: the `_same` test pins the predicate, not its call sites, so inlining `==` at the two use
+sites would still pass.

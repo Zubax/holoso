@@ -7,6 +7,8 @@ import types
 from pathlib import Path
 from typing import cast
 
+import inspect
+
 import numpy as np
 import pytest
 
@@ -981,13 +983,54 @@ def test_cross_round_state_verdicts_are_located_at_their_store() -> None:
     assert (location.line or "").strip().startswith("self.s = 7.0")
 
 
+def test_state_port_order_follows_execution_rank_not_frame_identity() -> None:
+    # `first_store` keys (source_position, rank), and the execution rank is load-bearing ABI: two components
+    # whose stores are reached from ONE unrolled call site tie on source position, and the rank is what puts
+    # them in the order they execute. Ordering those ties by frame identity instead silently renames the module
+    # ports by filename -- a public ABI change, which nothing else in the suite would notice.
+    from tests import _store_alpha, _store_beta
+
+    class Zed:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+    class Aye:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+    class Pair:
+        def __init__(self) -> None:
+            self.z = Zed()
+            self.a = Aye()
+
+        def step(self, x: float) -> float:
+            for stage in ((_store_beta.put, self.z), (_store_alpha.put, self.a)):
+                stage[0](stage[1], x)
+            return x
+
+    built = holoso.synthesize(Pair().step, default_ops(FloatFormat(8, 23)), name="pair_ports")
+    state_ports = [port.name for port in built.ports if port.name.startswith("state_")]
+    assert state_ports == ["state_z__s", "state_a__s"]  # beta executes first; alpha's filename sorts first
+
+
 def test_a_store_diagnostic_names_the_first_executed_of_two_tied_stores() -> None:
     # Two stores at IDENTICAL source positions in different files, reached through one unrolled call site, tie
     # on source position and can only be separated by something outside it. The per-store selection deliberately
     # keeps `source_position` and therefore first-wins in transfer order, which is execution order: the loop
     # runs beta first, so beta is named. Ordering those ties by frame identity instead would name alpha here,
     # purely because its filename sorts earlier -- a worse answer, and the reason that conversion was reverted.
+    # This governs the per-round store map only. The promotion pick orders a SET and so must be total, which
+    # means it does break the identical tie by filename; the same helper pair reached on the latch path names
+    # alpha. The two paths differ on purpose, and neither is a general "first-executed" guarantee.
     from tests import _store_alpha, _store_beta
+
+    # The tie this test is about only exists while the two stores sit at the SAME position, which is a property
+    # of the fixture files rather than of the code under test; assert it rather than trusting the layout, since
+    # a one-line drift in either helper would make the test pass for the wrong reason.
+    alpha_source, alpha_line = inspect.getsourcelines(_store_alpha.put)
+    beta_source, beta_line = inspect.getsourcelines(_store_beta.put)
+    assert alpha_line == beta_line
+    assert [line.rstrip() for line in alpha_source] == [line.rstrip() for line in beta_source]
 
     class Tied:
         def __init__(self) -> None:
@@ -1019,11 +1062,12 @@ def test_a_store_diagnostic_names_the_first_executed_of_two_tied_stores() -> Non
     assert located.origin[0].file.endswith("_store_beta.py")
 
 
-def test_a_cross_round_verdict_prefers_a_raise_guarded_store() -> None:
-    # EXECUTABLE RECORD of the OTHER half of the `_state_origin` trade, NOT desired behavior. The per-round
-    # store map leads, and it holds every store the round transferred, including one in a block the exit cannot
-    # be reached from -- here the store before the `raise`, which is source-earlier than the live one and takes
-    # the anchor. Preferring the promotion latch instead names the live store on THIS shape and a dead store on
+def test_a_verdict_prefers_a_raise_guarded_store_over_the_promoter() -> None:
+    # EXECUTABLE RECORD of the OTHER half of the `_state_origin` trade, NOT desired behavior. Both sources are
+    # populated here and they DISAGREE -- this is not the map-empty fallback case. The per-round store map
+    # leads, and it holds every store the round transferred, including one in a block the exit cannot be
+    # reached from -- here the store before the `raise`, which is source-earlier than the live one and takes
+    # the anchor, while the latch holds the live store. Preferring the promotion latch instead names the live store on THIS shape and a dead store on
     # the shape the neighbouring test pins, which is why neither order is a fix and this one is not "safer".
     # Both witnesses exist so that a future round cannot make either half worse against a green suite.
     class RaiseGuarded:

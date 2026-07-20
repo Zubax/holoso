@@ -899,8 +899,16 @@ def test_seam_sweep_value_identity_separates_what_equality_conflates() -> None:
     sweep = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(sweep)
 
-    assert sweep._same(1.0, 1.0) and sweep._same(10, 10) and sweep._same(-0.0, -0.0)
+    # Distinct objects throughout: pooled literals would let an identity comparison masquerade as this one.
+    left_value, right_value = float("1.25"), float("1.25")
+    left_nan, right_nan = float("nan"), float("nan")
+    left_zero, right_zero = float("-0.0"), float("-0.0")
+    assert left_value is not right_value and left_nan is not right_nan and left_zero is not right_zero
+
+    assert sweep._same(left_value, right_value)
+    assert sweep._same(left_nan, right_nan)  # unequal under ==, yet must be recordable
+    assert sweep._same(left_zero, right_zero)
+    assert sweep._same(10, 10)
     assert not sweep._same(10, 10.0) and not sweep._same(10.0, 10)  # equal under ==, different computations
-    assert not sweep._same(0.0, -0.0) and not sweep._same(-0.0, 0.0)  # equal under ==, different zeros
-    assert sweep._same(math.nan, math.nan)  # unequal under ==, yet recordable
-    assert not sweep._same(math.nan, 1.0) and not sweep._same(math.inf, -math.inf)
+    assert not sweep._same(0.0, right_zero) and not sweep._same(left_zero, 0.0)  # equal under ==, different zeros
+    assert not sweep._same(left_nan, 1.0) and not sweep._same(math.inf, -math.inf)

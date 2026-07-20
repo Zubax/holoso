@@ -144,12 +144,13 @@ facts, and nothing for the gate to detect. That arm's store still promotes the a
 the reset still rounds in the carrier. `test_phantom_environment_miscompile_is_still_open` pins a witness
 returning 12.0 in Python and 22.0 in E8M23 hardware, correct in E11M52.
 
-A MILDER RESIDUAL OF THE SAME SEAM, wrong LINE rather than wrong value: a state verdict raised mid-round takes
-its location from whatever stores the worklist has reached, speculated arms included, so a refusal that is
-itself correct can name a line Python never runs. `test_a_mid_round_verdict_still_anchors_on_a_speculated_store`
-pins one. The choice between the two provenance sources does not govern it -- both behave identically there,
-measured by swapping them -- and the sources trade against each other elsewhere, each losing on a shape the
-other wins: `test_a_cross_round_verdict_prefers_a_raise_guarded_store` and
+A MILDER RESIDUAL OF THE SAME SEAM, wrong LINE rather than wrong value: a state verdict raised on the round
+that first promotes its leaf takes the location from whatever stores the worklist has reached, speculated arms
+included, so a refusal that is itself correct can name a line Python never runs.
+`test_a_mid_round_verdict_still_anchors_on_a_speculated_store` pins one, and on THAT shape the choice between
+the two provenance sources does not govern the outcome -- both behave identically, measured by swapping them.
+On later rounds the sources are both populated and can disagree, trading against each other with each losing on
+a shape the other wins: `test_a_verdict_prefers_a_raise_guarded_store_over_the_promoter` and
 `test_state_verdicts_do_not_anchor_on_a_store_proved_dead` pin the two halves. Not patched, for the same reason
 as the rest of this class.
 

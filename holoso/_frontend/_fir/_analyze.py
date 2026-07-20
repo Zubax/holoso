@@ -641,10 +641,11 @@ class Analyzer:
         the map can name a store in a block the exit cannot be reached from, the latch can name one the
         stabilized facts later prove dead (it is fixed at the round that first promoted the leaf, and the state
         set's monotonicity keeps the LEAF, not that store's reachability), and each order is better than the
-        other on a witness the seam already has, and both are pinned. Worse, a verdict raised on the FIRST
-        round finds the latch still empty -- it survives round resets, so from the second round on it is
-        populated -- and then both orders name whatever store the worklist has reached, speculated
-        arms included, so a dead arm can take the anchor under either. That residual belongs to the
+        other on a witness the seam already has, and both are pinned. Worse, a verdict raised on the round
+        that first promotes THAT LEAF finds its latch entry still absent -- the map is per leaf and survives
+        round resets, so which round that is depends on when the leaf appears, not on being round one -- and
+        then both orders name whatever store the worklist has reached, speculated arms included, so a dead arm
+        can take the anchor under either. That residual belongs to the
         deferral seam's documented class and is pinned as a witness rather than patched here.
         """
         stored = self._store_origins.get(leaf)
