@@ -20,9 +20,21 @@ running from inside another checkout silently binds that one instead.
 import argparse
 import importlib.util
 import itertools
+import math
 import pathlib
 import sys
 import tempfile
+
+
+def _same(left: float, right: float) -> bool:
+    """
+    Value identity for the oracle, not numeric equality: 10 == 10.0 and -0.0 == 0.0, yet a reference that
+    changes type or sign is a real change in what the kernel computes and must not read as unchanged.
+    """
+    if type(left) is not type(right) or left != right:
+        return False
+    return not (isinstance(left, float) and left == 0.0) or math.copysign(1.0, left) == math.copysign(1.0, right)
+
 
 _PROLOGUE = """import numpy as np
 
@@ -486,11 +498,9 @@ def main() -> int:
                 miscompiles += 1
                 print(f"  oracle {label:32s} CRASH:{type(error).__name__}: {str(error)[:60]}")
                 continue
-            diverged = actual != expected
+            diverged = not _same(actual, expected)
             recorded = _KNOWN_OPEN.get(label)
-            # `type(...) is` beside the comparison because 10 == 10.0: a reference that changes from float to
-            # int is a real change in what the kernel computes, and numeric equality alone would wave it past.
-            unchanged = recorded is not None and (expected, actual) == recorded and type(expected) is type(recorded[0])
+            unchanged = recorded is not None and _same(expected, recorded[0]) and _same(actual, recorded[1])
             if diverged and unchanged:
                 # A documented open route (TODO.md), returning exactly the wrong value on record. Reported, but
                 # it does not fail the run: the tool gates on CHANGE, so a known miscompile does not mask a new

@@ -53,8 +53,9 @@ tallies as a good accept, which is how both narrowings passed a green sweep) wit
 recording the WHOLE observed pair (python, hardware), and it FAILS on any change to either half — the right
 answer, a different wrong answer, a moved Python reference, or a refusal alike, since each means the record no
 longer describes the code. SCOPE, stated because three review rounds each falsified a broader claim about this
-tool: the observable is the kernel's `out_0` as a scalar number (its Python type is compared too, since
-`10 == 10.0`), so a divergence confined to a state port is not gated; the
+tool: the observable is the kernel's `out_0` compared by VALUE IDENTITY rather than numeric equality -- same
+type, same value, same zero sign, since `10 == 10.0` and `-0.0 == 0.0` -- so a divergence confined to a state
+port is not gated; the
 per-family accept/refuse tallies are printed rather than baselined, and are compared by hand against the table
 in TODO.md; and the 54 generated dead-arm accepts are never value-checked at all, which is the same regime the
 oracle exists to escape — a round-4 reviewer checked all 54 against Python by hand and found no live
@@ -1388,9 +1389,40 @@ half proved: it interleaved position and identity PER FRAME, so a shallow frame'
 frame's line, and two helpers reached through one unrolled call site reported in filename order rather than
 source order. The complete position key now leads and the identities are a suffix, which is what the docstring
 always claimed. The sweep's pair check also gained a type comparison, since `10 == 10.0` let a Python reference
-change from float to int slip through as unchanged -- the fourth dimension of that claim to need
-fencing.
-became `origin_order` too, so their ties are source-ordered rather than decided by worklist arrival. And the
+change from float to int slip through as unchanged -- the fourth dimension of that claim to need fencing. The
+two remaining `source_position` selections over discovered stores -- the per-leaf `_store_origins` minimum and
+the per-(block, leaf) `_discovered_store_origins` minimum -- became `origin_order` too. (Round 5 REVERTED that
+pair: their ties are already broken by the deterministic order stores are transferred in, so the change bought
+no determinism and swapped execution order for lexical filename order in a public diagnostic.) And the
 reviewer VALUE-CHECKED all 54 accepted dead-arm kernels against Python by hand -- no live miscompile, the 8
 apparent mismatches being the documented out_0-dedup shape (6) and ordinary binary32 rounding (2). That is the
 largest hole in the sweep's coverage measured rather than argued, and it is recorded in the scope statement.
+
+
+REVIEW ROUND 5 -- THE ROUND'S OWN HEADLINE CLAIM WAS FALSE, and this is the fifth consecutive round in which a
+one-dimension-too-broad claim of mine in this area is the defect. Round 4 reverted `_state_origin` to
+map-first so verdicts would stop anchoring on a store the stabilized facts prove dead, and pinned it with a
+regression. The regression passes only because in ITS shape the speculated arm is gone by the stable round.
+Reproduced by the reviewer and then by me on the sweep's own dead-arm shape: when a verdict is raised
+MID-ROUND the promotion latch is still empty, so the location comes from whatever stores the worklist has
+reached -- speculated arms included -- and the dead arm takes the anchor. A tuple-reset kernel names
+`self.s = 7.0`, a line Python never runs; delete the dead arm and the anchor moves to the live store. BOTH
+lookup orders behave identically here, verified by swapping them, so the priority is ORTHOGONAL to the
+pathology rather than a fix for it, and the docstring sentence claiming map-first "loses the less badly" was
+simply wrong -- the map's worst case is the latch's worst case. Corrected in the docstring and here; the
+residual is PINNED as an executable witness asserting the wrong line it currently names, alongside the seam's
+other open records, and NOT patched: another local fix in this seam is the move the stop-rule exists to
+prevent, and the reviewer's evidence is that the order I would be adjusting does not govern the outcome.
+
+Also from the round: the oracle compared values with `!=`, so the type check added last round covered only the
+three recorded routes while the other five kernels would have accepted a Python reference moving from 10.0 to
+10 -- and `-0.0` versus `0.0` was invisible everywhere. Comparison is now value identity (type, value, zero
+sign) for every oracle kernel, and the scope sentence says so. A garbled sentence in the round-4 entry, which
+had lost the subject naming WHICH selections were converted to `origin_order`, is repaired -- in a log whose
+purpose is auditability that is a defect, not a typo. Left deliberately on `source_position`, with the reasons recorded: `_finalize`'s `first_store` keys
+`(source_position, rank)`, where the execution rank is a load-bearing S2.11 tie-break that must outrank frame
+identity; and the two per-store selections converted in round 4 are reverted here, because the Codex half
+demonstrated the conversion CHANGING a public diagnostic -- two same-position helpers reached through
+`for put in (put_b, put_a)` reported `in put_b()` before and `in put_a()` after, trading the first-executed
+store for the lexically-first filename. `origin_order` is kept exactly where a SET is being ordered and no
+deterministic order exists to inherit: the promotion pick, the stale-leaf sort, and the deferral key.

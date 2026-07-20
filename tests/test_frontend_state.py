@@ -980,6 +980,39 @@ def test_cross_round_state_verdicts_are_located_at_their_store() -> None:
     assert (location.line or "").strip().startswith("self.s = 7.0")
 
 
+def test_a_mid_round_verdict_still_anchors_on_a_speculated_store() -> None:
+    # EXECUTABLE RECORD of an OPEN residual of the deferral seam, NOT desired behavior. The refusal itself is
+    # correct -- a tuple reset is genuinely unsupported -- but the LINE it names is one Python never runs.
+    # A verdict raised mid-round finds the promotion latch still empty, so the location comes from whatever
+    # stores the worklist has reached, speculated arms included, and the dead arm wins on source order. Both
+    # lookup orders behave identically here, which is why the priority is not a fix for this: measured by
+    # swapping them and re-running. Deleting the dead arm moves the anchor to `self.s = self.s`.
+    class MidRound:
+        def __init__(self) -> None:
+            self.t = 0.0
+            self.s = (1.0, 2.0)
+
+        def step(self, x: float, flag: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2**53 + 1
+                q = 2**64
+            self.t = u
+            span = np.array([q, x])
+            if span.shape[0] > 5:
+                self.s = 7.0  # type: ignore[assignment]  # statically false arm; Python never runs it
+            self.s = self.s
+            return x + 1.0
+
+    with pytest.raises(UnsupportedConstruct, match="unsupported reset type") as refusal:
+        holoso.synthesize(MidRound().step, default_ops(FloatFormat(8, 23)), name="mid_round_anchor")
+    location = refusal.value.location
+    assert location is not None
+    assert (location.line or "").strip().startswith("self.s = 7.0")  # WRONG line; must become self.s = self.s
+
+
 def test_state_verdicts_do_not_anchor_on_a_store_proved_dead() -> None:
     # The leaf's PROMOTION origin is latched at the round that first promoted it, and the state set's
     # monotonicity keeps the leaf, not that store's reachability -- on this shape the latched store sits in the

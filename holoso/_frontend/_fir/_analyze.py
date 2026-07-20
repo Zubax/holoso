@@ -634,14 +634,16 @@ class Analyzer:
     def _state_origin(self, leaf: StateLeaf) -> OriginStack:
         """
         State rejections locate at a store to the leaf: __init__ is never analyzed, so a store is the line the
-        user can act on. THE PER-ROUND MAP LEADS, and the promotion origin only stands behind it, because
-        neither source is reliably better and this order loses the less badly. The per-round map can name a
-        store in a block the exit cannot be reached from -- one behind a `raise`, say, which at least executes
-        up to that point. The promotion origin is latched at the round that first promoted the leaf, and W's
-        monotonicity keeps the LEAF, not that store's reachability: on the seam's own witnesses the latched
-        store sits in the arm the stabilized facts later prove dead, so preferring it anchors the message on a
-        line that never runs. What the fallback is genuinely for is the cross-round case where the map is empty
-        and the alternative is no location at all.
+        user can act on. THE PER-ROUND MAP LEADS and the promotion origin stands behind it, which is the
+        historical order; the fallback exists for the cross-round case, where the map is empty and the
+        alternative is no location at all. NEITHER SOURCE DOMINATES, and the order is not a fix for anything:
+        the map can name a store in a block the exit cannot be reached from, the latch can name one the
+        stabilized facts later prove dead (it is fixed at the round that first promoted the leaf, and the state
+        set's monotonicity keeps the LEAF, not that store's reachability), and each order is better than the
+        other on a witness the seam already has. Worse, when a verdict is raised MID-ROUND the latch is still
+        empty, so both orders name whatever store the worklist has reached -- speculated arms included -- and a
+        dead arm can take the anchor under either. That residual belongs to the deferral seam's documented
+        class and is pinned as a witness rather than patched here.
         """
         stored = self._store_origins.get(leaf)
         recorded = stored if stored is not None else self._runtime_state_origins.get(leaf)
@@ -1416,11 +1418,14 @@ class Analyzer:
                     )
                 leaf = StateLeaf(obj_fact.obj, (name,))
                 recorded = self._store_origins.get(leaf)
-                if recorded is None or origin_order(op.origin) < origin_order(recorded):
+                # Deliberately source_position, not the total origin_order used for set-ordered selections:
+                # ties here are already broken by the deterministic order stores are transferred in, which is
+                # execution order, and that attributes better than the lexically-first filename would.
+                if recorded is None or source_position(op.origin) < source_position(recorded):
                     self._store_origins[leaf] = op.origin
                 self._discovered_stores.add((block.id, leaf))
                 here = self._discovered_store_origins.get((block.id, leaf))
-                if here is None or origin_order(op.origin) < origin_order(here):
+                if here is None or source_position(op.origin) < source_position(here):
                     self._discovered_store_origins[(block.id, leaf)] = op.origin
                 # The reset fixes the slot schema; a violating store carries a fixpoint-stable fact onward and
                 # the recorded verdict reports after stabilization, at this store. An Unbound value is no
