@@ -363,6 +363,10 @@ class Analyzer:
         self._binding_serial = 1_000_000
         self._block_serial = 1_000_000
         self._runtime_state: set[StateLeaf] = set()
+        # The store that promoted each leaf into the runtime-state set. That set grows across rounds and is never
+        # cleared, so its provenance cannot live in the per-round store map: the stale-leaf refusal fires exactly
+        # when the promoting store is gone from the final round, which is when the per-round map has nothing.
+        self._runtime_state_origins: dict[StateLeaf, OriginStack] = {}
         self._state_livein: dict[StateLeaf, Fact] = {}
         self._discovered_stores: set[tuple[BlockId, StateLeaf]] = set()
         self._concrete_calls: set[int] = set()
@@ -436,6 +440,8 @@ class Analyzer:
             new_w = set(self._runtime_state)
             for block_id, leaf in self._discovered_stores:
                 if block_id in result.executable_blocks and block_id in reachable:
+                    if leaf not in new_w:
+                        self._runtime_state_origins[leaf] = self._store_origins[leaf]
                     new_w.add(leaf)
             new_d = dict(self._state_livein)
             deferred = DeferredRejection()
@@ -819,7 +825,7 @@ class Analyzer:
         # rounds rather than within one, where every per-round check passes on the stable graph.
         stale_leaves = sorted(
             (leaf for leaf in self._runtime_state if leaf not in first_store),
-            key=lambda leaf: (leaf.obj_id if hasattr(leaf, "obj_id") else 0, leaf.path),
+            key=lambda leaf: (source_position(self._runtime_state_origins[leaf]), leaf.path),
         )
         if stale_leaves:
             leaf = stale_leaves[0]
@@ -827,7 +833,7 @@ class Analyzer:
                 f"state attribute {'.'.join(leaf.path)!r} was discovered as runtime state on an earlier "
                 "analysis round whose store the stabilized facts leave unreachable, so its reset would be "
                 "materialized as if it were written; the result cannot be trusted",
-                self._state_origin(leaf),
+                self._runtime_state_origins[leaf],
             )
         result.runtime_state = set(self._runtime_state)
         result.state_livein = dict(self._state_livein)

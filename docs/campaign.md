@@ -30,18 +30,23 @@ accepted and emit hardware returning a different value from Python, format-depen
 in E11M52), because a dead branch arm's store promotes an attribute from a binary64-folded constant into a
 runtime slot whose reset re-materializes in the narrower carrier and a guard flips.
 
-FIVE ROUTES ARE KNOWN, each found by a different attack angle. ONE is refused (the settled-branch one). FOUR
-REMAIN OPEN AND SILENTLY MISCOMPILE: phantom environments; live-in (D) poisoning across W/D rounds; and the
-runtime-state (W) route in the spelling where a trivial `self.s = self.s` keeps the leaf stored, which defeats
-the check written for it. All five are pinned as executable witnesses in `tests/test_frontend_state.py`, the
-open ones asserting the WRONG VALUES they currently produce, so Stage 4 has concrete acceptance criteria.
+FOUR ROUTES ARE KNOWN, each found by a different attack angle. Count MECHANISMS, not witness kernels, and the
+accounting is: ONE fully refused (the settled-branch route), THREE OPEN AND SILENTLY MISCOMPILING — phantom
+environments (12.0 → 22.0); live-in (D) poisoning across W/D rounds (10.0 → 30.0); and the runtime-state (W)
+route, which its check refuses as first written but which a trivial `self.s = self.s` reopens (10.0 → 20.0).
+Counting witness kernels instead gives five, two refusing — which is why an earlier draft of this brief said
+"five known, one refused, four open" and then could name only three. All are pinned as executable witnesses in
+`tests/test_frontend_state.py`, the open ones asserting the WRONG VALUES they currently produce, so Stage 4 has
+concrete acceptance criteria.
 
 DO NOT ADD A FIFTH GATE CHECK. The post-stabilization gate grew from one check to four, three of them reactive,
 and every addition was followed by a new route through a dimension it did not model — or, twice, by an evasion
 costing one line of ordinary Python. Two narrowings I made were themselves unsound and had to be reverted.
 `tools/deferral_seam_sweep.py` is the standing check: it carries a VALUE ORACLE (without which a miscompile
-tallies as a good accept, which is how both narrowings passed a green sweep) and gates on CHANGE against the
-recorded state. Untested surfaces, named: `_unroll_seeds`, `_pending_bridge`.
+tallies as a good accept, which is how both narrowings passed a green sweep) with one entry per open route, and
+it FAILS on any outcome change to a recorded route — computing the right answer and refusing alike, since both
+mean the record no longer describes the code. It does NOT baseline the per-family accept/refuse tallies; those
+are compared by hand against the table in TODO.md. Untested surfaces, named: `_unroll_seeds`, `_pending_bridge`.
 
 This is the campaign's strongest argument for Stage 4, and a stronger one than the spike made: not "decisions
 should be made once" but "this seam emits wrong hardware and post-hoc gating provably cannot see at least one
@@ -72,7 +77,7 @@ OPERATIONAL SURVIVAL KIT (each has bitten this campaign):
   transcript; that is how the fifth route was found.
 
 DONE — do not redo: all 18 register defects (A1-G1) + the full trim program; B1 storage schema, G1 predication,
-E1-lite diagnostics; the hygiene closeout; the freeze infrastructure (35 GoldenCases, 32-kernel rejection
+E1-lite diagnostics; the hygiene closeout; the freeze infrastructure (36 GoldenCases, 32-kernel rejection
 corpus, `tests/_hirdump.py`, `test_golden`, `tools/refreeze_golden.py`); the architecture spike (MORPH);
 `freeze-1` tagged; the seam's miscompile characterization and its five pinned witnesses.
 
@@ -363,7 +368,7 @@ re-freezes in the same commit. Newly-discovered-defect protocol per §F. review-
 - R1-R5 Milestones by construct family (scalar straight-line → branches/loops/unroll → state+W/D →
   aggregates/records → arrays/linalg/ports), each gated differential-green for its example subset + frontend
   unit tests via fixture switch.
-- R6 Full-corpus differential: 35 golden cases + rejection corpus + extended fuzz A/B on the runner VMs.
+- R6 Full-corpus differential: 36 golden cases + rejection corpus + extended fuzz A/B on the runner VMs.
 - R7 Cutover: flip `holoso/_frontend/__init__.py`, DELETE `_fir` in the same commit (clean break); canonical
   gate + re-freeze; merge to dev; tag `restructure-done`. Branch abandonable at zero cost to dev until R7.
 - dev merges into the branch after every baseline-update commit; adjudication: old-frontend-wrong → baseline-
@@ -1261,8 +1266,50 @@ registry, no Py*, no callbacks, no frontend decision module, zero raises in the 
 M0 must be written to THAT property. (2) the prototype's closure walker dropped `from . import x` submodules,
 hiding 8 HIR passes (11 modules measured, 19 corrected) -- verdict unmoved, closure smaller than it looked;
 the production `tests/_importguard.py` does NOT share the gap, so M0 builds on it. (3) SC1's byte identity is
-established against spike base 4f1dd4c, NOT against the tag 35 commits later -- immaterial to a ruling that
+established against spike base 4f1dd4c, NOT against the tag 38 commits later -- immaterial to a ruling that
 SC4 and SC2 both drive to the default, but any future M7 must re-establish it against `freeze-1`. The ruling
 is therefore OVER-DETERMINED: SC4 and SC2 fire the same row independently. Recorded in
-docs/decisions/arch-ruling.md with the ledger summarized into it, because branch spike/resolved-ir (dc76fbf)
-is deleted with this step and its ledger does not survive.
+docs/decisions/arch-ruling.md, with the spike's evidence ledger preserved verbatim beside it at
+docs/decisions/spike-ledger.md.
+
+REVIEW ROUND ON THE RETAG + RULING -- NOT CLEAN, and the finding that mattered most was in the very claim the
+retag existed to fix. Both halves independently refuted "the gate refuses EXACTLY ONE route": two checks refuse,
+each with a passing witness, and the tag filed the runtime-state route under "THE OTHERS REMAIN OPEN" and then
+conceded four lines later that it is closed in the no-surviving-store spelling. TODO.md -- the source document
+-- had the qualifier "FULLY refused" that made the sentence true, and I dropped it in all three derived
+documents. RESOLUTION: count MECHANISMS (four routes, one fully refused, three open) and say so identically in
+the tag, DESIGN, TODO and the brief; the brief additionally records why the witness-kernel count of five is
+also defensible, since that discrepancy is what made the original arithmetic impossible.
+
+ONE CODE DEFECT, fixed with two fail-before regressions. The stale-runtime-state refusal -- one of the two
+checks the tag credits -- was UNLOCATED in practice: it rendered line 0, column 0, empty source line. The cause
+is structural rather than a typo: `_store_origins` is cleared at every round reset, and this check fires
+exactly when the promoting store is gone from the final round, so the lookup always fell through to the root
+placeholder. The check could never have produced a real location as written. Fixed by remembering the promoting
+store's origin when a leaf ENTERS the runtime-state set, mirroring that set's own cross-round monotonicity. The
+same three lines carried a dead tie-break (`leaf.obj_id if hasattr(leaf, "obj_id") else 0` -- StateLeaf has
+`component`/`path`, so the hasattr is always False and ties fell back to identity-hashed set iteration); it
+becomes source position, so two components sharing an attribute path report the source-earlier store. Fail-before
+observed: `assert '' == 'self.a.s = 7.0'`. Corpus-neutral -- no pin or frozen diagnostic carried the old output.
+
+THE STANDING SWEEP DID NOT MEASURE WHAT THE BRIEF CLAIMED. `_KNOWN_OPEN` held ONE of the three open routes, so
+the value oracle could not see the phantom-environment or self-assignment miscompiles at all, and a recorded
+route that started REFUSING exited 0 (the mirror case, a route that starts computing the right answer, did
+fail). Both fixed: one oracle entry per open route, each reproducing its documented divergence (10→30, 12→22,
+10→20), and any outcome change on a recorded route now fails. Verified by declaring a currently-refusing route
+open and observing exit 1. The brief's "gates on CHANGE" sentence is now true, and its overclaim about family
+tallies -- which are printed, never baselined -- is corrected rather than implemented.
+
+ALSO CORRECTED, each verified before acceptance: the ruling's "substantive half holds" for SC2 was FALSE. The
+spike emitter inserts `IntToFloat` by inspecting the type of the HIR node it just generated, with zero explicit
+RIR conversion rows -- the J6 coercions are real kind decisions, so SC2 fails substantively as well as
+literally. This carries a direct consequence for M0 that is now recorded: an import-and-raise guard CANNOT see
+that class, because inserting a conversion node reaches no banned module, so the plan-totality validator must
+require every promotion to come from an explicit plan row. The ruling also named the wrong corrupted set --
+`runtime_state` and `state_livein` are corrupted too, and the residualizer consumes all four structures, the
+last two on graphs with nothing visibly wrong. Numbers fixed: 38 commits not 35, +539 LOC under the ledger's own
+counting rule (the ledger's +358 subtracted physical lines from rule-counted terms), 36 GoldenCases not 35,
+three raw-crash modes converted not two, `_hir._const` refuses NaN rather than beyond-carrier constants, "all
+five packet refusals" rather than "every emitter-owned refusal". The spike ledger is preserved on dev because
+"the branch does not survive" was false -- dc76fbf remains reachable, and reading it is what produced three of
+these corrections.

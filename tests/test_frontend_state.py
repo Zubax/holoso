@@ -902,8 +902,52 @@ def test_runtime_state_discovered_on_a_dead_round_is_refused() -> None:
             return 10.0 if self.s > 1.0 else 20.0
 
     assert CrossRound().step(2.0, False) == 10.0
-    with pytest.raises(UnsupportedConstruct, match="earlier analysis round"):
+    with pytest.raises(UnsupportedConstruct, match="earlier analysis round") as refusal:
         holoso.synthesize(CrossRound().step, default_ops(FloatFormat(8, 23)), name="cross_round_stale")
+    # The store that promoted the leaf is the only line the user can act on, and it is gone from the stable
+    # graph by the time this check runs -- the per-round store map is empty for it, so the promotion origin has
+    # to be remembered when the leaf enters the runtime-state set or the refusal renders at line 0, column 0.
+    location = refusal.value.location
+    assert location is not None
+    assert (location.line or "").strip() == "self.s = 7.0"
+
+
+def test_stale_runtime_state_reports_the_source_earliest_store() -> None:
+    # Two components carrying the SAME attribute path both go stale, so the message text -- which names only the
+    # path -- cannot tell them apart and the reported LOCATION is the whole diagnostic. Selection must be a
+    # property of the source, not of set iteration over identity-hashed leaves.
+    class Cell:
+        def __init__(self) -> None:
+            self.s = 1 + 2**-30
+
+    class TwoCells:
+        def __init__(self) -> None:
+            self.mode = True
+            self.t = 0.0
+            self.a = Cell()
+            self.b = Cell()
+
+        def step(self, x: float, new_mode: bool) -> float:
+            if self.mode:
+                u: float = 2**53 + 1
+                q: float = 2**64
+            else:
+                u = x
+                q = x
+            self.t = u
+            span = np.array([q, x])
+            if span.shape[0] > 5:
+                self.a.s = 7.0
+                self.b.s = 9.0
+            self.mode = new_mode
+            return 10.0 if self.a.s > 1.0 else 20.0
+
+    assert TwoCells().step(2.0, False) == 10.0
+    with pytest.raises(UnsupportedConstruct, match="earlier analysis round") as refusal:
+        holoso.synthesize(TwoCells().step, default_ops(FloatFormat(8, 23)), name="two_cells_stale")
+    location = refusal.value.location
+    assert location is not None
+    assert (location.line or "").strip() == "self.a.s = 7.0"
 
 
 def test_self_assignment_defeats_the_runtime_state_check() -> None:

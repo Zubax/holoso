@@ -99,9 +99,17 @@ _LOOP = {
 # see a miscompile -- a wrong answer tallies as a good accept, which is exactly how two of them shipped. These
 # carry a reset that is inexact in the target carrier, so if a speculated arm promotes it to runtime state the
 # reset re-materializes narrower and a guard reading it flips. Each entry is (source, args, expected).
-# Routes documented as OPEN in TODO.md. They miscompile today, so the tool reports them without failing --
-# and fails if one of them starts passing, since that means the documentation is stale.
-_KNOWN_OPEN = frozenset({"live_in_poisoned_across_rounds"})
+# Routes documented as OPEN in TODO.md, one entry per open route -- an oracle carrying only some of them cannot
+# support a claim about the seam as a whole. They miscompile today, so the tool reports them without failing,
+# and fails on ANY change of outcome: computing the right answer and refusing alike mean the recorded state is
+# stale, and a record that quietly stops matching the code is how this seam's earlier claims decayed.
+_KNOWN_OPEN = frozenset(
+    {
+        "live_in_poisoned_across_rounds",
+        "phantom_environment_keeps_a_stale_gate",
+        "self_assignment_defeats_the_runtime_state_check",
+    }
+)
 
 _VALUE_ORACLE = {
     "dead_store": (
@@ -247,6 +255,76 @@ class K:
 """,
         (2.0, False),
     ),
+    # The phantom environment keeps a stale `gate` alive, so the condition settles as a runtime bool and the
+    # Python-dead arm is genuinely live to the analyzer -- no contradiction for the gate to detect.
+    "phantom_environment_keeps_a_stale_gate": (
+        """import numpy as np
+
+
+class K:
+    def __init__(self) -> None:
+        self.t = 0.0
+        self.gate = False
+        self.s = 1 + 2**-30
+
+    def helper(self, a: float, b: float) -> float:
+        self.gate = True
+        return a * b
+
+    def step(self, x: float, flag: bool, pick: bool) -> float:
+        if flag:
+            u = 1.0
+            q = 1.0
+        else:
+            u = 2**53 + 1
+            q = 2**64
+        self.t = u
+        args = np.array([q, x])
+        self.helper(*args)
+        if pick:
+            pad = 1.0
+        else:
+            pad = 2.0
+        if self.gate:
+            marker = 0.0
+        else:
+            self.s = 7.0
+            marker = 100.0
+        if self.s > 1:
+            return 10.0 + pad + marker
+        return 20.0 + pad + marker
+""",
+        (3.0, False, False),
+    ),
+    # One line of ordinary Python defeats the runtime-state rule: the self-assignment keeps a store for the leaf
+    # in the stable graph, so the check finds nothing and the dead arm's promotion goes through unchanged.
+    "self_assignment_defeats_the_runtime_state_check": (
+        """import numpy as np
+
+
+class K:
+    def __init__(self) -> None:
+        self.mode = True
+        self.t = 0.0
+        self.s = 1 + 2**-30
+
+    def step(self, x: float, new_mode: bool) -> float:
+        if self.mode:
+            u: float = 2**53 + 1
+            q: float = 2**64
+        else:
+            u = x
+            q = x
+        self.t = u
+        a = np.array([q, x])
+        if a.shape[0] > 5:
+            self.s = 7.0
+        self.s = self.s
+        self.mode = new_mode
+        return 10.0 if self.s > 1.0 else 20.0
+""",
+        (2.0, False),
+    ),
     "inert_arm_poisons_later_guard": (
         """import numpy as np
 
@@ -388,7 +466,14 @@ def main() -> int:
                 actual = float(outputs["out_0"])
             except holoso.HolosoError:
                 refused += 1
-                print(f"  oracle {label:32s} refused (safe, but proves nothing about values)")
+                if label in _KNOWN_OPEN:
+                    # Safer than the recorded miscompile, but the record now describes behavior the code no
+                    # longer has. Failing is the same rule as the FIXED arm below: any outcome change on a
+                    # documented route gets reconciled with TODO.md rather than silently absorbed.
+                    miscompiles += 1
+                    print(f"  oracle {label:32s} REFUSED but recorded as an open miscompile -- update TODO.md")
+                else:
+                    print(f"  oracle {label:32s} refused (safe, but proves nothing about values)")
                 continue
             except Exception as error:  # noqa: BLE001
                 miscompiles += 1

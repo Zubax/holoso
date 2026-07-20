@@ -404,13 +404,15 @@ inside a loop, where the back-edge puts the dead arm within the live arm's reach
 the reachability this gate exists because the analyzer got wrong. Retracting a
 stale mark instead is deliberately not attempted -- destructive environment joins mean removing an edge
 requires recomputing downstream environments, schemas, reachability, W/D discoveries, and phis. The gate is a
-narrowing, NOT a closure, and of the four routes found so far it closes exactly one. Where the phantom
+narrowing, NOT a closure. Of the four routes found so far it FULLY closes exactly one -- the settled-branch
+route, where the recorded reachability visibly contradicts the settled facts. Where the phantom
 environment keeps a stale state fact alive the condition settles as a runtime bool, so the Python-dead arm is
 genuinely live to the analyzer, no contradiction exists, and the miscompile survives. Detecting that locally is
 impossible in principle -- the analyzer cannot know a fact should have been more precise without the environment
-the phantom edge denies it. The runtime-state rule is weaker than it reads: a trivial `self.s = self.s` gives the
-retained leaf a store in the stable graph and satisfies it, so it closes only the spelling where no store
-survives at all. And the accumulator has a second half -- the live-in map is unguarded, and a live-in driven
+the phantom edge denies it. The runtime-state rule does refuse its route as first written, but only as first
+written: a trivial `self.s = self.s` gives the retained leaf a store in the stable graph and satisfies the rule,
+so the route is closed in the spelling where no store survives and open in general. And the accumulator has a
+second half -- the live-in map is unguarded, and a live-in driven
 residual by a speculated arm that a later round prunes is, at stabilization, byte-identical to what a fresh
 derivation would produce, leaving no residue for a mirrored check to find. No further checks are added for any of
 this: the gate grew from one rule to four, three of them reactive, and every addition was followed by a route

@@ -119,8 +119,11 @@ store survives, and the route is open in general -- pinned as `test_self_assignm
 
 FOUR ROUTES, FOUND BY FOUR DIFFERENT ATTACK ANGLES, EACH NEW ANGLE FINDING ONE. That is the honest prior: the
 defect density here is bounded by the attacks tried, not by the code, and no claim of soundness should be made
-about this seam. Only ONE route is fully refused (the settled-branch one); the rest REMAIN OPEN AND SILENTLY MISCOMPILE -- the phantom-environment one
-and this one. Both are pinned as tests asserting the wrong value they currently produce. Two review halves
+about this seam. Only ONE route is FULLY refused (the settled-branch one). The other three REMAIN OPEN AND
+SILENTLY MISCOMPILE: the phantom-environment one, the live-in poisoning one, and the runtime-state one, whose
+check refuses it as first written but which one line of ordinary Python reopens. All three are pinned as tests
+asserting the wrong value they currently produce, and `tools/deferral_seam_sweep.py` carries a value-oracle
+entry for each. Two review halves
 agreeing has repeatedly meant less than it appeared to, each time because they shared an attack surface: the
 within-round fuzz could not express the cross-round route at all. Named untested surfaces, for whoever comes
 next: `_unroll_seeds` and `_pending_bridge`.
@@ -137,7 +140,9 @@ the reset still rounds in the carrier. `test_phantom_environment_miscompile_is_s
 returning 12.0 in Python and 22.0 in E8M23 hardware, correct in E11M52.
 
 The gate closes the routes where the recorded reachability visibly contradicts the settled facts, which is
-where the majority of observed cases and both raw-crash modes lived. It does not close the class: on the
+where the majority of observed cases and all three raw-crash modes lived -- a bare `KeyError` out of the plan
+replay, a bare `AssertionError` (which, vanishing under `-O`, crashed the debug build where the optimized one
+explained), and a raw `RuntimeError` out of HIR emission. It does not close the class: on the
 surviving route the condition settles too, but as a RUNTIME bool, so there is no contradiction to see.
 Detecting that locally is not possible in principle -- the analyzer cannot know a fact "should" have been more
 precise without the correct environment, which is exactly what the phantom edge denies it.
