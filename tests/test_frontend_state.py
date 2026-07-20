@@ -603,9 +603,9 @@ def test_graftable_call_deferral_false_rejection_witnesses() -> None:
 def test_speculated_dead_arm_that_stores_is_refused() -> None:
     # A speculated arm the stabilized facts prove dead used to be emitted, shipping a public `state_s` port whose
     # register carried the dead arm's store as its only functional driver -- inert solely because the sequencer's
-    # selector was hard-loaded to zero. The gate refuses it instead. The refusal is scoped to arms that STORE,
-    # because that promotion is the harm; an inert dead arm still compiles (covered below). The control differs
-    # only in the two constants that arm the deferral, and must still synthesize with no such port. Nothing here
+    # selector was hard-loaded to zero. The gate refuses it instead, and unconditionally -- narrowing the rule to
+    # arms that store was tried twice and both attempts readmitted silent miscompiles (see the siblings). The
+    # control differs only in the two constants that arm the deferral, and must still synthesize. Nothing here
     # reads a deferred result, which isolates the executable-marking mechanism from the phantom-environment one
     # -- and np.array is a CONVERSION, never grafted, so this mechanism needs only a deferred call.
     class Probe:
@@ -777,6 +777,36 @@ def test_speculated_dead_arm_store_does_not_strand_the_rank_walk() -> None:
     with pytest.raises(UnsupportedConstruct) as refusal:
         holoso.synthesize(Probe().step, default_ops(FloatFormat(8, 23)), name="dead_arm_rank_walk")
     assert refusal.value.location is not None  # a diagnostic, where a bare KeyError used to escape
+
+
+def test_speculated_arm_reports_before_the_graph_asserts() -> None:
+    # The gate runs before `_validate`, whose asserts describe a graph the gate may already know is inconsistent.
+    # Three nested statically-decidable guards behind a deferred graftable call leave an unresolved call on the
+    # speculated arm, which tripped "unexpanded call survived" as a BARE AssertionError -- and, because asserts
+    # vanish under -O, the debug build crashed where the optimized build explained. Two levels do not reach it.
+    class Nested:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def step(self, x: float, flag: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2**53 + 1
+                q = 2**64
+            self.t = u
+            a = np.array([q, x])
+            _y = np.dot(a, a)  # noqa: F841 -- the graftable deferral is the trigger
+            if a.shape[0] > 5:
+                if a.size > 1:
+                    if len(a) > 3:
+                        pass
+            return x + 1.0
+
+    with pytest.raises(UnsupportedConstruct, match="never runs|prove unreachable") as refusal:
+        holoso.synthesize(Nested().step, default_ops(FloatFormat(8, 23)), name="nested_speculation")
+    assert refusal.value.location is not None  # a diagnostic, where a bare AssertionError used to escape
 
 
 def test_speculated_dead_store_inside_a_loop_is_refused() -> None:

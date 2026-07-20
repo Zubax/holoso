@@ -467,6 +467,11 @@ class Analyzer:
                     header = result.unit.blocks[header_id]
                     assert isinstance(header.terminator, StaticFor)
                     header.terminator = Jump(chain_entry, header.terminator.origin)
+                # Before _validate, whose asserts describe a graph the speculation gate may already know is
+                # inconsistent: an unresolved call left on a speculated arm trips "unexpanded call survived" as a
+                # bare AssertionError, where the gate has a located diagnostic for the same cause. Running it
+                # second also inverted the -O contract, the debug build crashing where the optimized one explained.
+                self._check_reachability_settled(result, self._executable_rank(result))
                 _validate(
                     result,
                     self._concrete_calls
@@ -778,11 +783,7 @@ class Analyzer:
         id, which the unroller hands out in reverse trip order. The replay does not mutate the graph: every call
         is already expanded, folded, or classified. Emission consumes only this plan.
         """
-        rank = {
-            block_id: position
-            for position, block_id in enumerate(executable_rpo(result.unit.entry, result.executable_edges))
-        }
-        self._check_reachability_settled(result, rank)
+        rank = self._executable_rank(result)
         first_store: dict[StateLeaf, tuple[tuple[tuple[int, int], ...], int]] = {}
         for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
             block = result.unit.blocks[block_id]
@@ -823,6 +824,12 @@ class Analyzer:
         if terminator is not None:
             return terminator.origin
         return (Origin(self._root_template.name, 0, 0, self._root_template.file),)
+
+    def _executable_rank(self, result: ResidualUnit) -> dict[BlockId, int]:
+        return {
+            block_id: position
+            for position, block_id in enumerate(executable_rpo(result.unit.entry, result.executable_edges))
+        }
 
     def _check_reachability_settled(self, result: ResidualUnit, rank: dict[BlockId, int]) -> None:
         """

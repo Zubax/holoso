@@ -84,18 +84,20 @@ miscompiles, which is why the shipped rule is unconditional.
 Two families exist because the obvious corpus could not see either regression. `loop_inner` puts the deferring
 call INSIDE the loop, where withholding an edge actually costs something; the plain `loop` family reports
 identical numbers for the producer fix and the baseline. The value oracle compares accepts against Python,
-because the accept/refuse/crash alphabet tallies a wrong answer as a good accept -- which is exactly how both
-narrowing regressions passed a green sweep.
+because the accept/refuse/crash alphabet tallies a wrong answer as a good accept -- which is exactly how the
+narrowing regressions passed a green sweep. Note a refusal proves nothing about values, so the tool says how
+many oracle kernels were refused rather than counting them as passes.
 Retracting the stale mark is not local either:
 destructive environment joins mean removing an edge requires recomputing downstream environments, schemas,
 reachability, W/D discoveries, and phis. The gate costs accepts, and the refusal is deliberately
 UNCONDITIONAL anyway: any settled branch contradicting its own recorded edges refuses, with no attempt to
 judge the speculated arm harmless. Two narrowings were tried to recover those accepts and BOTH reintroduced
-silent miscompiles. Testing only arms that store misses an inert arm which poisons the merge phi, keeping a
-DOWNSTREAM guard residual so that guard's store does the promoting. Scoping the test to the arm's exclusive
-region additionally disables the check outright inside a loop, where the back-edge puts the dead arm within
-the live arm's reach and the difference is always empty. Deciding which arm is harmless needs exactly the
-reachability this gate exists because the analyzer got wrong, so it does not try. Both witnesses are pinned.
+silent miscompiles. Testing only arms that store misses two shapes: an inert arm that poisons the merge phi so
+a DOWNSTREAM guard's store promotes, and an arm where no store exists anywhere and the phi ALONE rounds an
+inexact constant. Scoping the test to the arm's exclusive region additionally makes the check vacuous wherever
+the branch reconverges through a loop back-edge, since the dead arm is then within the live arm's reach.
+Deciding which arm is harmless needs exactly the reachability this gate exists because the analyzer got wrong,
+so it does not try. All three witnesses are pinned, and the sweep's value oracle covers them.
 
 A SILENT MISCOMPILE NEVERTHELESS REMAINS, by a route the gate structurally cannot see, and it is the most
 serious open defect in the compiler. When the phantom environment keeps a stale state fact alive, the condition

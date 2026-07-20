@@ -7,8 +7,10 @@ Every change near it has to be judged on whether it moves those counts, and pros
 or "the dead-arm family" are unfalsifiable without the corpus that produced them. This generates both families
 into real files -- exec-compiled kernels cannot lower, they raise SourceUnavailable -- and tallies outcomes.
 
-Bind a specific worktree with --tree; note PYTHONPATH does NOT override an editable install, so the tree is
-inserted at sys.path[0] before holoso is imported and the binding is asserted.
+Bind a specific worktree with --tree: it is inserted at sys.path[0] before holoso is imported and the binding
+is checked. PYTHONPATH alone is not enough, though not for the reason one might assume -- it does precede the
+editable-install finder, but the interpreter puts the script's directory (or the cwd, under -c) ahead of it, so
+running from inside another checkout silently binds that one instead.
 
     python tools/deferral_seam_sweep.py --tree .            # this checkout
     python tools/deferral_seam_sweep.py --tree /path/to/wt  # compare against another commit
@@ -63,9 +65,9 @@ _DEAD_ARM = {
     "int_state": "        if a.shape[0] > 5:\n            self.n = 1\n        return x + self.n",
     "loop": "        if a.shape[0] > 5:\n            for k in range(3):\n                self.s = float(k)\n        return x + self.s",
     "live_else": "        if a.shape[0] > 1:\n            r = 1.0\n        else:\n            r = 2.0\n        return x + r",
-    # A store AFTER the guard, on the path both arms reconverge onto. It promotes nothing the speculation is
-    # responsible for, so it must not be refused -- and a corpus without it cannot see a check that walks past
-    # the merge, which is exactly how one such over-refusal shipped.
+    # A store AFTER the guard, on the path both arms reconverge onto. The shipped rule refuses these, which is a
+    # real cost -- the store does run on the taken path regardless. Sparing them was tried and readmitted a
+    # miscompile, so they stay here to keep that cost visible rather than to assert it should be zero.
     "inert_then_store": "        if a.shape[0] > 5:\n            pass\n        self.s = x * 2.0\n        return self.s",
     "settles_true_then_store": "        if a.shape[0] > 1:\n            pass\n        self.s = x * 2.0\n        return self.s",
 }
@@ -151,6 +153,35 @@ class K:
         return 20.0
 """,
         (2.0, False, True),
+    ),
+    # No store anywhere on either arm: the merge phi ALONE carries the inexact constant, so the speculated arm
+    # rounds it without promoting anything. The store-scoped narrowing accepted this and returned 20.0.
+    "merge_phi_rounds_a_constant": (
+        """import numpy as np
+
+
+class K:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def step(self, x: float, flag: bool) -> float:
+        if flag:
+            u = 1.0
+            q = 1.0
+        else:
+            u = 2**53 + 1
+            q = 2**64
+        self.t = u
+        a = np.array([q, x])
+        if a.shape[0] > 5:
+            c = 1.0
+        else:
+            c = 1 + 2**-30
+        if c > 1.0:
+            return 10.0
+        return 20.0
+""",
+        (2.0, False),
     ),
     "inert_arm_poisons_later_guard": (
         """import numpy as np
@@ -273,6 +304,7 @@ def main() -> int:
     ops = default_ops(FloatFormat(8, 23))
     totals: dict[str, dict[str, int]] = {}
     miscompiles = 0
+    refused = 0
     with tempfile.TemporaryDirectory() as scratch:
         for label, (source, arguments) in _VALUE_ORACLE.items():
             path = pathlib.Path(scratch) / f"k_oracle_{label}.py"
@@ -281,17 +313,23 @@ def main() -> int:
             assert spec is not None and spec.loader is not None
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            expected = module.K().step(*arguments)
             try:
+                expected = module.K().step(*arguments)
                 built = holoso.synthesize(module.K().step, ops, name=path.stem)
+                # NOT run(...)[0]: when the return is value-identical to a persisted slot the exit dedups it and
+                # no out_0 exists, so index 0 is an unrelated state port and the comparison is meaningless.
+                outputs = dict(
+                    zip((port.name for port in built.output_ports), built.numerical_model.elaborate().run(*arguments))
+                )
+                actual = float(outputs["out_0"])
             except holoso.HolosoError:
-                print(f"  oracle {label:32s} refused (safe)")
+                refused += 1
+                print(f"  oracle {label:32s} refused (safe, but proves nothing about values)")
                 continue
             except Exception as error:  # noqa: BLE001
-                print(f"  oracle {label:32s} CRASH:{type(error).__name__}")
                 miscompiles += 1
+                print(f"  oracle {label:32s} CRASH:{type(error).__name__}: {str(error)[:60]}")
                 continue
-            actual = float(built.numerical_model.elaborate().run(*arguments)[0])
             verdict = "OK" if actual == expected else "*** MISCOMPILE ***"
             miscompiles += actual != expected
             print(f"  oracle {label:32s} accepted python={expected} hardware={actual}  {verdict}")
@@ -343,6 +381,10 @@ def main() -> int:
         print(f"{family:9s} ({size:3d} kernels)  {summary}")
     if miscompiles:
         print(f"{miscompiles} value oracle kernel(s) diverged from Python -- a wrong answer, not a refusal")
+    if refused:
+        # Said out loud because a refusal is not evidence of value correctness: the oracle contributes signal
+        # only where the kernel is accepted, and a gate that refuses everything would score a clean run.
+        print(f"{refused} of {len(_VALUE_ORACLE)} value oracle kernel(s) were refused, so their values are unproven")
     crashed = any(name.startswith("CRASH") for tally in totals.values() for name in tally)
     return 1 if (miscompiles or crashed) else 0
 
