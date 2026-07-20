@@ -389,7 +389,10 @@ left exactly as it is -- it is what lets the W/D fixpoint discover runtime state
 it that were built starved loops, since a `Branch` inside a loop body precedes the body's own back-edge.
 Instead a POST-STABILIZATION GATE refuses whenever recorded reachability contradicts the settled facts: a
 branch whose condition disagrees with its own recorded out-edges, a
-block marked executable that no edge chain reaches, or an execution path out of a region left unreachable. Each
+block marked executable that no edge chain reaches, an execution path out of a region left unreachable, or a
+leaf still held as runtime state whose store the stable graph no longer contains -- that last one because the
+runtime-state set accumulates across W/D rounds and a store proved unreachable later does not remove its leaf,
+leaving a slot whose reset materializes in the carrier rather than folding. Each
 becomes a located refusal rather than a wrong answer or a bare crash. The branch rule is UNCONDITIONAL: it
 makes no attempt to spare a speculated arm that looks harmless, because two such narrowings were built and
 both reintroduced silent miscompiles -- an inert arm can poison the merge phi so a DOWNSTREAM guard stays

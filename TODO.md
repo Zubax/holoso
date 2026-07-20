@@ -99,6 +99,18 @@ the branch reconverges through a loop back-edge, since the dead arm is then with
 Deciding which arm is harmless needs exactly the reachability this gate exists because the analyzer got wrong,
 so it does not try. All three witnesses are pinned, and the sweep's value oracle covers them.
 
+A THIRD ROUTE ran through the accumulated runtime-state set rather than the graph. `W` grows monotonically, so
+a leaf discovered on a round whose store a LATER round proves unreachable stays runtime state even though the
+stabilized graph is entirely correct -- and its reset then materializes in the carrier instead of folding at
+binary64. Every per-graph check passes; nothing is wrong with the final CFG. The gate now additionally requires
+each retained runtime leaf to have a store in the final executable graph.
+
+Three routes, found by three different attack angles, each new angle finding one. Treat that as the honest
+prior: the claim worth making is that every KNOWN route is refused and all five witnesses are pinned in
+`tools/deferral_seam_sweep.py`'s value oracle, NOT that the seam is sound. Two review halves agreeing has twice
+meant less than it appeared to, both times because they shared an attack surface -- the within-round fuzz could
+not express the cross-round route at all.
+
 A SILENT MISCOMPILE NEVERTHELESS REMAINS, by a route the gate structurally cannot see, and it is the most
 serious open defect in the compiler. When the phantom environment keeps a stale state fact alive, the condition
 that reads it settles as a RUNTIME bool rather than a constant, so the arm that is dead in Python is genuinely
