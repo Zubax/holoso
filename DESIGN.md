@@ -206,10 +206,12 @@ and everything else refuses by type. References join only with themselves and on
 referent is identical; a reference is fact-only in emission (never a datapath cell). Component and namespace
 attribute reads are snapshot AND admitted at most once per analysis -- the fact forms from the first read and
 is never re-formed, so neither a drifting live object nor a mutated referent can move it (a PEP 562 module
-__getattr__ runs exactly once) -- and emission consumes the same snapshot for state resets, never a live read. Aggregate joins reconcile layouts first
-(identical flavors recurse; a tuple arm meeting a list arm of equal arity degrades to the structural flavor set,
-keeping only flavor-independent behavior; ndarray dtypes promote int to float), then join leaves positionally. An int/float join promotes the integer side to float, C-style (see Integers). Folding
-is Python-exact on Knowns; runtime-typed values never fold (width rule); a Known Bool always drives edge selection.
+__getattr__ runs exactly once) -- and emission consumes the same snapshot for state resets, never a live read.
+Aggregate joins reconcile layouts first (identical flavors recurse; a tuple arm meeting a list arm of equal arity
+degrades to the structural flavor set,
+keeping only flavor-independent behavior; ndarray dtypes promote int to float), then join leaves positionally. An
+int/float join promotes the integer side to float, C-style (see Integers). Folding is Python-exact on Knowns;
+runtime-typed values never fold (width rule); a Known Bool always drives edge selection.
 Aggregate truth follows Python: tuples/lists fold by arity, arrays (and any join carrying the array flavor) reject
 as ambiguous, and a record without a truth override is truthy per object semantics. Concrete evaluation is a
 CLOSED WHITELIST, not a blacklist of hazards, and the whole admission decision is one harness (the analyzer's
@@ -236,8 +238,9 @@ one of the inert dtype-ish builtin types (a stateful component's dunder would re
 while the kernel's writes exist only as state facts), and a static fold over an oversized range -- as an
 argument, nested in one, or as a method receiver -- rejects rather than burning unbounded compile time. The
 trust boundary stays where admission drew it: an enum that redefines arithmetic or shadows its base type's
-methods folds with base-type semantics (inputs are trusted; adversarial dunder-warping is not modeled). Records also reject at their truth when a __bool__/__len__ entry exists
-(``__bool__ = None`` included), at subscript keys, at non-field attributes, at iteration, and at non-integer
+methods folds with base-type semantics (inputs are trusted; adversarial dunder-warping is not modeled). Records also
+reject at their truth when a __bool__/__len__ entry exists (``__bool__ = None`` included), at subscript keys, at
+non-field attributes, at iteration, and at non-integer
 subscripts (slices, tuple keys) of a record-carrying sequence, whose concrete fallback would rebuild real
 instances; field access and integer projection are the record consumptions. getattr is not supported (a located
 rejection with guidance): its static-name requirement makes it pure spelling redundancy over the dotted access,
@@ -321,8 +324,8 @@ Rejecting from within the subset. Analysis descends only executable edges, so a 
 taken unconditionally (or under a residual guard, which the hardware cannot signal either way): it becomes a
 synthesis error carrying the exception's own message, located at the raising line. An f-string message renders its
 interpolations from the compile-time values at the raise site (a shape, a counter); an interpolation of a runtime
-value — or one carrying a conversion or format spec — degrades the whole message to a generic raise notice. A rejection inside an inlined
-library stub is re-attributed to the user's call site under the spelling they wrote.
+value — or one carrying a conversion or format spec — degrades the whole message to a generic raise notice. A
+rejection inside an inlined library stub is re-attributed to the user's call site under the spelling they wrote.
 
 Storage typing. Variables are strongly typed for the function's lifetime under a fixed storage schema. The schema
 sees SemType kinds only: a source variable's first definition of a scalar datapath value establishes its kind (a
@@ -401,12 +404,19 @@ inside a loop, where the back-edge puts the dead arm within the live arm's reach
 the reachability this gate exists because the analyzer got wrong. Retracting a
 stale mark instead is deliberately not attempted -- destructive environment joins mean removing an edge
 requires recomputing downstream environments, schemas, reachability, W/D discoveries, and phis. The gate is a
-narrowing, NOT a closure: where the phantom environment keeps a stale state fact alive the condition settles as
-a runtime bool, so the Python-dead arm is genuinely live to the analyzer, no contradiction exists, and the
-miscompile survives. Detecting that locally is impossible in principle -- the analyzer cannot know a fact
-should have been more precise without the environment the phantom edge denies it. The residual class,
-including that surviving miscompile, is documented in TODO.md and pinned by executable witnesses in the
-frontend state tests. It is the
+narrowing, NOT a closure, and of the four routes found so far it closes exactly one. Where the phantom
+environment keeps a stale state fact alive the condition settles as a runtime bool, so the Python-dead arm is
+genuinely live to the analyzer, no contradiction exists, and the miscompile survives. Detecting that locally is
+impossible in principle -- the analyzer cannot know a fact should have been more precise without the environment
+the phantom edge denies it. The runtime-state rule is weaker than it reads: a trivial `self.s = self.s` gives the
+retained leaf a store in the stable graph and satisfies it, so it closes only the spelling where no store
+survives at all. And the accumulator has a second half -- the live-in map is unguarded, and a live-in driven
+residual by a speculated arm that a later round prunes is, at stabilization, byte-identical to what a fresh
+derivation would produce, leaving no residue for a mirrored check to find. No further checks are added for any of
+this: the gate grew from one rule to four, three of them reactive, and every addition was followed by a route
+through a dimension it did not model or by an evasion costing one line of ordinary Python. The residual class,
+including the surviving miscompiles, is documented in TODO.md and pinned by executable witnesses in the
+frontend state tests, the open ones asserting the wrong values they currently produce. It is the
 motivating case for the resolution-totality restructure, which dissolves it by residualizing as a total
 post-stabilization pass rather than grafting mid-fixpoint, and whose resolved spine must recompute reachability
 from the stable facts rather than inherit these sets. Closing it inside the fixpoint has been tried:
@@ -473,8 +483,8 @@ with a value rejects at the join, naming the conditional None) -- and validated 
 emitted value: any
 arity, flavor, or leaf-kind divergence is a rejection naming the diverging position (emission-side refusals name
 the port/leaf, not a source line). Strictness includes flavor: a container that is a tuple on one path and a list
-on another (a flavor-erased structural join) satisfies neither contract. An aggregate return flattens to one scalar output
-port per leaf in canonical order, named by the leaf's path, so the module ABI stays scalar; a leaf that is by
+on another (a flavor-erased structural join) satisfies neither contract. An aggregate return flattens to one scalar
+output port per leaf in canonical order, named by the leaf's path, so the module ABI stays scalar; a leaf that is by
 dataflow a public state live-out is deduped onto that state port exactly as a scalar return is. Contracts bind at
 the root kernel only: a callee's annotations are documentation, never a lowering directive.
 
@@ -899,8 +909,9 @@ block does not forward to a successor. A block whose boundary values are all alr
 A tail install lands at the block's work makespan, read-first at the boundary, and costs an extra terminator cycle only
 when its source is an operator result committing at the block's makespan (its own last work, or conservatively any
 operator result from outside the block); a resident source (a constant, input, state read, or phi result) or an
-earlier-committing computed source lands at the makespan and recovers cycles in every downstream block. A source register
-that a sibling install writes is always a phi's, hence resident, hence fired at the makespan -- strictly before any
+earlier-committing computed source lands at the makespan and recovers cycles in every downstream block. A source
+register that a sibling install writes is always a phi's, hence resident, hence fired at the makespan -- strictly
+before any
 sibling's write lands (same-step installs read all sources before any write lands; a pushed sibling lands later
 still) -- the invariant that keeps cross-referencing loop-carried phis (a swap) correct.
 

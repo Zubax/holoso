@@ -11,10 +11,18 @@ OPTIONS MUST PRECEDE THE SESSION ID: `codex exec resume -m ... -c ... <uuid> "<p
 id last, the prompt is not parsed and Codex falls back to stdin and dies with "stdin is not a terminal".
 Run the `review-loop` skill after every step. Sequential: one thing at a time.
 
-WHERE WE ARE. Stage 2 is closed and `freeze-1` IS TAGGED (at e1b6758). `dev` is at e1b6758; the branch
-`trial/revert-r10-withholding` carries the newer work and is at e2d3ca7. Every code commit in the stack has
-been CI-green on all five jobs; the golden corpus stayed BYTE-IDENTICAL (151/151) across all fourteen commits,
-which is what makes the baseline safe to freeze. Suite 1915/2, mypy 202, black clean.
+WHERE WE ARE. Stage 2 is closed and `freeze-1` IS RE-TAGGED on the corrected baseline, with an annotation that
+leads with the miscompiles and states the honest refused count (one). Stage 3 is CLOSED: consult X5 ruled PLAIN
+MORPH with M7 optional and gate-deferred, the ruling is recorded in `docs/decisions/arch-ruling.md`, and branch
+`spike/resolved-ir` (dc76fbf) is deleted with its ledger summarized into that record. Every code commit in the
+stack has been CI-green on all five jobs; the golden corpus stayed BYTE-IDENTICAL (151/151) throughout, which
+is what makes the baseline safe to freeze. Suite 1915/2, mypy 202, black clean.
+
+NEXT IS STAGE 4 MORPH, M0 first. M0's import ban must be written to the property SC2 actually established --
+no Fact, no registry, no `Py*`, no callbacks, no frontend decision module in the emitter's transitive closure,
+and no raise sites in the emitter itself -- and NOT to a transitive `holoso._errors` ban, which nothing that
+emits HIR can satisfy (`_hir._const` constructs `UnsupportedConstruct`). Build on `tests/_importguard.py`,
+which resolves `from . import x` correctly; the spike's own copy did not.
 
 THE FINDING THAT RESHAPED THIS STEP. The deferral x grafting seam does NOT merely produce false rejections, as
 the maintainer's plan assumed when deferring it to Stage 4. IT SILENTLY MISCOMPILES: honest numeric kernels are
@@ -40,24 +48,10 @@ should be made once" but "this seam emits wrong hardware and post-hoc gating pro
 route". Stage 4's resolved spine must RECOMPUTE reachability and typing from the stabilized facts rather than
 inherit today's executable sets and W/D accumulators.
 
-NEXT STEPS, in order:
-
-1. RE-TAG `freeze-1`. Its current annotation says the gate "refuses two" routes; the self-assignment evasion
-   (e2d3ca7) makes that false — only one is refused. Wait for CI green on e2d3ca7 (run 29740704779), advance
-   `dev` to it, then `git tag -f -a freeze-1 -F <corrected message>` and `git push -f origin freeze-1`. The
-   corrected message must lead with the miscompiles and state the honest count. Nothing depends on the tag yet.
-2. STAGE-3 RULING (X5). Codex consult on the spike diff + ledger (branch `spike/resolved-ir` @ dc76fbf, ledger
-   `docs/decisions/spike-ledger.md`). OPEN QUESTION THE BRIEF AND THE TABLE DISAGREE ON: the table awards
-   "MORPH with MANDATORY materialized spine" only when the adapter passes ALL criteria, and SC4 FAILED by 75
-   LOC (1275 vs 1200), which routes to plain MORPH with M7 gate-deferred. Counter-argument: ~330 of those LOC
-   are duplication forced by the spike's module boundary and would MOVE in a real morph. Re-reading a failed
-   criterion after seeing the result is the goalpost drift the risk register warns about — PUT IT TO CODEX, do
-   not decide it alone. A drafted prompt is in the session scratchpad as `x5-prompt.md`; rewrite if lost.
-   Record `docs/decisions/arch-ruling.md`, then delete branch `spike/resolved-ir` (SHA recorded here).
-3. STAGE 4 = MORPH (M0-M7, see "Variant MORPH" below). Every landing byte-identical vs `freeze-1` except the
-   one pre-authorized canonical-gate landing. Closing the four open miscompile routes is a FIRST-CLASS
-   acceptance criterion, not a side effect: the restructure is not done while those witnesses report wrong
-   values.
+NEXT STEPS: STAGE 4 = MORPH (M0-M7, see "Variant MORPH" below), strictly stepwise, M7 optional and last per
+the ruling. Every landing byte-identical vs `freeze-1` except the one pre-authorized canonical-gate landing.
+Closing the open miscompile routes is a FIRST-CLASS acceptance criterion, not a side effect: the restructure
+is not done while those witnesses report wrong values.
 
 OPERATIONAL SURVIVAL KIT (each has bitten this campaign):
 - NEVER `pkill`/`killall` by name pattern. `pkill -f codex` killed the maintainer's unrelated session in
@@ -1233,3 +1227,42 @@ branches pruned; an independent fresh-context doc-audit ran and confirmed the fo
 two HIGH fixes, both now applied -- DESIGN.md 373-391 caveated (the seam is a partial mitigation with open
 false-rejections + an unroll regression, not sound/complete), and this durable spike-outcome capture. dev docs
 tip is ahead of the CI-green code tip 8336387 by docs-only commits.
+
+STEP 1 OF THE CONTINUATION SESSION -- `freeze-1` RE-TAGGED, and DESIGN told the truth about what it pins. CI
+run 29740704779 came back green on all five jobs at e2d3ca7, so dev advanced to the docs tip and the tag moved
+there. The old annotation claimed the gate "refuses two" routes; the self-assignment evasion made that false
+and the corrected message states the honest count -- EXACTLY ONE route refused (the settled-branch one), the
+rest open and silently miscompiling: the phantom environment, the unguarded live-in half of the W/D
+accumulator, and the runtime-state route in the spelling a trivial `self.s = self.s` restores. The message
+leads with the miscompiles rather than with the corpus, because that is the most serious thing this baseline
+carries. Found while checking the annotation against the tree: DESIGN.md still described the residual class as
+the phantom route ALONE -- no mention of the self-assignment evasion, none of the unguarded live-in map -- so
+its "narrowing, NOT a closure" paragraph now carries the four-route accounting and the no-fifth-check rule
+explicitly. Six pre-existing over-120-column prose lines rewrapped in the same pass (the round-3 P4 had
+identified one of them; there were six). Corroboration at the tagged tree: mypy 202 clean, black clean, golden
+index 36 cases / 32 rejection modules / 151 files. NOTE for anyone re-deriving the count: the brief says five
+routes, TODO.md says four -- the difference is whether the self-assignment evasion counts as its own route or
+as a spelling of the runtime-state one. The tag states the refused count, which is one either way, and names
+each open route rather than leaning on a total.
+
+STAGE 3 CLOSED -- CONSULT X5 RETURNED AND RULED PLAIN MORPH, M7 optional and gate-deferred. It resumed the X4
+session (019f769b-48c0-7411-97e0-e3b8883b363a) against a pinned detached worktree at dc76fbf, and it ruled
+AGAINST both arguments the prompt was drafted to test: its own X4 "make the spine material" preference was an
+architectural prior, not authority to override a pre-agreed falsifier after seeing the result; and the ~330
+LOC duplication adjustment is legitimate migration-cost evidence but invalid gate arithmetic, since those
+lines stay in the production residualizer while only their `_emit.py` copies disappear, and `_emit.py` was
+never counted in SC4. So the 75-line SC4 miss stands and the default row fires. The goalpost did not move.
+THREE LEDGER CORRECTIONS came with it, each REPRODUCED BEFORE ACCEPTANCE: (1) SC2 FAILS as literally specified
+-- the emitter's transitive closure reaches `holoso._errors` through `_hir._const`, which constructs
+`UnsupportedConstruct`; the prototype's banned set enumerated frontend modules and omitted `_errors`. I
+recomputed the closure and confirmed it. The criterion as written is unsatisfiable by ANY emitter that emits
+HIR, so this is a defect in the criterion as much as in the prototype -- the substantive property (no Fact, no
+registry, no Py*, no callbacks, no frontend decision module, zero raises in the emitter itself) does hold, and
+M0 must be written to THAT property. (2) the prototype's closure walker dropped `from . import x` submodules,
+hiding 8 HIR passes (11 modules measured, 19 corrected) -- verdict unmoved, closure smaller than it looked;
+the production `tests/_importguard.py` does NOT share the gap, so M0 builds on it. (3) SC1's byte identity is
+established against spike base 4f1dd4c, NOT against the tag 35 commits later -- immaterial to a ruling that
+SC4 and SC2 both drive to the default, but any future M7 must re-establish it against `freeze-1`. The ruling
+is therefore OVER-DETERMINED: SC4 and SC2 fire the same row independently. Recorded in
+docs/decisions/arch-ruling.md with the ledger summarized into it, because branch spike/resolved-ir (dc76fbf)
+is deleted with this step and its ledger does not survive.
