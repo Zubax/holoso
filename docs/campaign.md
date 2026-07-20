@@ -1529,8 +1529,10 @@ evidence, and two of my tests were found vacuous or drift-prone and rebuilt. The
 untouched and pinned, as intended -- they are Stage 4's acceptance criteria, not this step's work.
 
 
-STAGE 4 OPENS: M0 LANDED. Two guards, both written to what the X5 ruling actually established rather than to
-the criterion the spike failed. The import guard is a RATCHET, not a ban: emission today reaches sixteen
+STAGE 4 OPENS: M0 LANDED, then substantially REBUILT by its own review round -- see the M0 round entry below;
+what follows describes the first attempt, which was measuring the wrong thing. Two guards, written to what
+the X5 ruling established rather than to the criterion the spike failed. The import guard is a RATCHET, not a ban:
+emission today reaches sixteen
 frontend decision modules, that set is recorded as DEBT, and the test fails in BOTH directions -- an addition
 is a regression, a removal must be spent in the commit that earns it. It is deliberately not a transitive
 `holoso._errors` ban, which nothing that emits HIR can satisfy (`_hir._const` constructs `UnsupportedConstruct`
@@ -1544,3 +1546,35 @@ The plan-totality validator runs BEFORE emission walks: every `PyCall` in an exe
 plan, and the failure names the block and the origin. Emission reaches that table with a bare subscript, so
 without it an analyzer bug surfaces as a `KeyError` from deep inside a walk that names neither. Verified by
 deleting a plan the analyzer did record. Corpus BYTE-IDENTICAL (151/151); 881 passed; mypy 205; black clean.
+
+
+M0 ROUND -- THE RATCHET WAS SATURATED AND THE VALIDATOR WAS TAUTOLOGICAL. The best review of the session, and
+both guards had to be rebuilt.
+
+(1) The import ratchet measured the emitter's transitive CLOSURE, which is every module under `holoso/_frontend`
+that exists -- and which the single import of `_analyze` implies entirely. I measured it: the emitter
+contributes NOTHING to its own closure beyond that one edge. So the "an addition is a regression" arm was dead
+code, proven by adding `_registry.resolve`, `_fold.admit_call` and `_opsem.static_binop` straight into the
+emitter and watching the test stay green; and the removal arm could not fire either until `_emit` stops
+importing `_analyze`, which is M7, which the ruling made optional. The meter would have read 16 through all of
+M1-M6 by construction while appearing to track progress. REBUILT on DIRECT imports: 8 today, moves one import
+at a time, and the three-import probe now fails it.
+
+(2) `verify_plan_totality` walked `executable_blocks` -- the same set, filter and key `_finalize` had just
+recorded from, with nothing in between -- so it could not fail for any state the analyzer can produce, and
+DELETING ITS CALL FROM `lower_fir` FAILED NO TEST. Rebuilt to walk EMISSION's set (`executable_rpo` over the
+executable edges, exactly what `_Emitter` iterates) and to cover `block_in`, whose bare subscripts are the
+other KeyError source and whose entries are popped during grafting. The two sets are equal on all 24 examples
+today; the check exists to notice when M1's rewrite of recording makes them differ.
+
+(3) The EmissionRejection cap counted `raise` statements, so hoisting the raises into a `_reject(...)` helper
+would have dropped it to zero with byte-identical diagnostics and nothing moved upstream -- the guard would
+have read as M5 complete while measuring a refactor. It counts CONSTRUCTIONS now (verified: 2 -> 0 under the
+old rule, 2 -> 2 under the new one).
+
+(4) Recorded rather than fixed, because the ledger read as if it were discharged: M0's SECOND obligation from
+the ruling -- every kind promotion consumed from an explicit plan row, never derived by inspecting emitted
+nodes -- is NOT implemented. Production `_emit.py` does the J6 thing in four live places, and a decision can
+also reach the emitter through the PLAN rather than an import (`CallPlan.intrinsic` hands over a live registry
+`Intrinsic` and `_emit_intrinsic` branches on its result rule), which no import guard can see. That blind spot
+is now named in the guard itself. Closing it is M2/M3 work and is OUTSTANDING.

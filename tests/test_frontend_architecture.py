@@ -13,48 +13,72 @@ from ._importguard import transitive_holoso_imports
 
 _EMITTER = "holoso._frontend._fir._emit"
 
-# The frontend decision modules the emitter reaches TODAY. The restructure exists to empty this set: emission
-# is to consume a closed typed plan surface, deciding nothing. It is therefore a RATCHET -- every entry is a
-# debt, the set may only shrink, and the test fails in both directions so that a removal is recorded in the
-# commit that earns it rather than drifting silently.
+# The frontend decision modules `_emit.py` imports DIRECTLY. The restructure empties this set: emission is to
+# consume a closed typed plan surface, deciding nothing. It is a RATCHET -- every entry is a debt, the set may
+# only shrink, and the test fails in both directions so a removal is spent in the commit that earns it.
+#
+# DIRECT imports, not the transitive closure, and the difference is the whole value of the meter. The emitter's
+# closure is every module under `holoso/_frontend` that exists, and it is implied entirely by the single import
+# of `_analyze`: measured, the emitter contributes NOTHING to its own closure beyond that one edge. So a closure
+# ratchet cannot grow -- three decision-carrying imports (`_registry.resolve`, `_fold.admit_call`,
+# `_opsem.static_binop`) added straight into the emitter leave it green -- and cannot shrink either until
+# `_emit` stops importing `_analyze`, which is M7, which the ruling made optional. It would read 16 through all
+# of M1-M6 by construction. The direct set is 8, moves one import at a time, and a new decision dependency
+# lands in it immediately.
 #
 # Deliberately NOT a ban on reaching `holoso._errors`: `_hir._const` constructs `UnsupportedConstruct` for a
 # NaN constant, so nothing that emits HIR can satisfy that, and the spike's SC2 failed on exactly this reading
-# (docs/decisions/arch-ruling.md). The debt this measures is the FRONTEND DECISION LAYER.
-_EMITTER_DECISION_DEBT = frozenset(
+# (docs/decisions/arch-ruling.md).
+#
+# KNOWN BLIND SPOT, recorded because a guard that implies more coverage than it has is worse than none: a
+# decision can reach the emitter through the PLAN rather than through an import, and one does today --
+# `CallPlan.intrinsic` hands over a live registry `Intrinsic`, and `_emit_intrinsic` branches on its result
+# rule. No import-based guard can see that. It is the J6 class from the ruling, and closing it is M2/M3 work
+# still outstanding (docs/campaign.md).
+_EMITTER_DIRECT_DEBT = frozenset(
     {
         "holoso._frontend._ast_support",
-        "holoso._frontend._fir._analysis_support",
         "holoso._frontend._fir._analyze",
-        "holoso._frontend._fir._build",
         "holoso._frontend._fir._fact",
-        "holoso._frontend._fir._fold",
         "holoso._frontend._fir._ir",
         "holoso._frontend._fir._opsem",
-        "holoso._frontend._fir._resolve",
         "holoso._frontend._fir._signature",
         "holoso._frontend._fir._value",
         "holoso._frontend._lib",
-        "holoso._frontend._lib._intrinsics",
-        "holoso._frontend._lib._linalg",
-        "holoso._frontend._lib._numpy",
-        "holoso._frontend._lib._registry",
     }
 )
 
 
-def test_emitter_decision_layer_debt_only_shrinks() -> None:
-    reached = {m for m in transitive_holoso_imports(_EMITTER) if m.startswith("holoso._frontend")}
-    added = sorted(reached - _EMITTER_DECISION_DEBT)
-    removed = sorted(_EMITTER_DECISION_DEBT - reached)
+def test_emitter_direct_decision_debt_only_shrinks() -> None:
+    imported = {m for m in _direct_imports(_EMITTER) if m.startswith("holoso._frontend")}
+    added = sorted(imported - _EMITTER_DIRECT_DEBT)
+    removed = sorted(_EMITTER_DIRECT_DEBT - imported)
     assert not added, (
-        f"emission reaches new frontend decision modules {added}; the restructure removes these dependencies, "
-        "it does not add them"
+        f"emission directly imports new frontend decision modules {added}; the restructure removes these "
+        "dependencies, it does not add them"
     )
     assert not removed, (
-        f"emission no longer reaches {removed} -- that is the point, so delete those entries from "
-        "_EMITTER_DECISION_DEBT in this same commit and let the ratchet hold the ground"
+        f"emission no longer imports {removed} -- that is the point, so delete those entries from "
+        "_EMITTER_DIRECT_DEBT in this same commit and let the ratchet hold the ground"
     )
+
+
+def _direct_imports(module: str) -> set[str]:
+    """The modules `module` itself names in an import statement, resolving relative imports against its package."""
+    path = Path(_module_source(module))
+    package = module.rpartition(".")[0]
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        match node:
+            case ast.Import(names=names):
+                found |= {alias.name for alias in names}
+            case ast.ImportFrom(module=name, level=0):
+                if name:
+                    found.add(name)
+            case ast.ImportFrom(module=name, level=level):
+                anchor = package if level == 1 else package.rsplit(".", level - 1)[0]
+                found.add(f"{anchor}.{name}" if name else anchor)
+    return found
 
 
 def test_the_ratchet_is_measured_against_real_modules() -> None:
@@ -74,16 +98,17 @@ def test_the_guard_root_fails_loudly_when_it_does_not_resolve() -> None:
 def test_emission_rejection_sites_only_shrink() -> None:
     # M5 retires EmissionRejection: every refusal moves upstream, diagnostic-identical. The count is the debt,
     # and the corpus pins the messages, so this only has to stop the number from growing.
+    #
+    # CONSTRUCTIONS, not `raise` statements: hoisting the raises into a `_reject(...)` helper would drop a
+    # raise-shaped count to zero with byte-identical diagnostics and nothing actually moved upstream, so the
+    # guard would read as M5 complete while measuring a refactor.
     source = ast.parse(Path(_module_source(_EMITTER)).read_text(encoding="utf-8"))
-    raises = [
+    built = [
         node
         for node in ast.walk(source)
-        if isinstance(node, ast.Raise)
-        and isinstance(node.exc, ast.Call)
-        and isinstance(node.exc.func, ast.Name)
-        and node.exc.func.id == "EmissionRejection"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "EmissionRejection"
     ]
-    assert len(raises) <= 42, f"emission gained refusal sites ({len(raises)} > 42); M5 moves them upstream"
+    assert len(built) <= 42, f"emission gained refusal sites ({len(built)} > 42); M5 moves them upstream"
 
 
 def _module_source(module: str) -> str:

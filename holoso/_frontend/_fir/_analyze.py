@@ -322,24 +322,31 @@ class CallPlan:
     construction: "tuple[BindingId | None, ...] | None" = None  # per-field source bindings; None = default-filled
 
 
-def verify_plan_totality(result: ResidualUnit) -> None:
+def verify_plan_totality(result: "ResidualUnit") -> None:
     """
-    Every op emission will consult a plan for HAS one, checked before the walk instead of during it.
+    Check, before emission walks, that every table emission subscripts bare is total over the blocks emission
+    will actually visit.
 
-    The restructure's whole direction is emission consuming a closed typed plan surface, so a plan that is
-    missing is an analyzer bug, not an emission accident -- but the emitter reaches its tables with a bare
-    subscript, which turns that bug into a KeyError from deep inside a walk with no indication of which op or
-    which block. Failing here names both. This is a scaffold: it grows a row per table as the tables become
-    total (docs/campaign.md, Stage 4 M0).
+    Emission reaches `call_plans` and `block_in` with a bare subscript, so a gap in either arrives as a KeyError
+    from inside a walk that names neither the op nor the block. This names both.
+
+    The block set is deliberately EMISSION's -- reverse postorder over the executable edges, exactly what
+    `_Emitter` iterates -- and not the recorder's `executable_blocks`. Deriving the check from the same set the
+    recorder used would make it agree with the recorder by construction and prove nothing; the two sets are
+    equal today on every bundled example, and this is what will notice if they stop being. Under `-O` the
+    asserts vanish and the KeyError comes back, which is the ordinary house contract for invariant checks.
     """
-    missing = [
+    walked = executable_rpo(result.unit.entry, result.executable_edges)
+    missing_env = [block_id for block_id in walked if block_id not in result.block_in]
+    assert not missing_env, f"emission walks blocks with no recorded environment: {missing_env}"
+    missing_plans = [
         (block_id, op)
-        for block_id in result.executable_blocks
+        for block_id in walked
         for op in result.unit.blocks[block_id].ops
         if isinstance(op, PyCall) and op.dst not in result.call_plans
     ]
-    assert not missing, "; ".join(
-        f"block {block_id} op {op.__class__.__name__} at {op.origin[0]} has no call plan" for block_id, op in missing
+    assert not missing_plans, "; ".join(
+        f"block {block_id} call at {op.origin[0]} has no call plan" for block_id, op in missing_plans
     )
 
 
