@@ -14,14 +14,19 @@ workflow (one thing at a time; the maintainer dropped parallel tracks to cut com
 maintainer manual review" wording in the log below is SUPERSEDED by this directive.
 
 WHERE WE ARE: Stage 2 (semantic stabilization) is landed and the FREEZE INFRASTRUCTURE is built, but `freeze-1`
-is NOT tagged. The deferral x grafting seam had TWO mechanisms, not one. The executable-marking half turned out
-to include a SILENT MISCOMPILE and two raw crashes, and is now FIXED at the producer (an unavailable value no
-longer becomes a runtime bool; only `Branch` defers, never `Jump`, so nothing starves). The phantom-environment
-half remains open -- false rejections plus one raw `RuntimeError` on a state-condition shape -- documented in
-`TODO.md` "Known defects" and pinned by executable witnesses in `tests/test_frontend_state.py`. That half is the
-class the Stage-4 resolved-IR restructure dissolves. Stage 3's architecture spike ran → verdict MORPH (SC1-SC3
-passed; SC4 missed by 75 LOC; branch `spike/resolved-ir` @ dc76fbf; ledger `docs/decisions/spike-ledger.md`).
-The Stage-3 ruling and Stage 4 are pending.
+is NOT tagged. The deferral x grafting seam admits a SILENT MISCOMPILE -- a dead branch arm gets emitted, its
+store promotes an attribute from a binary64-folded constant to a runtime slot, the reset re-materializes in the
+narrower carrier, and a guard flips. A POST-STABILIZATION GATE now refuses the routes where the contradiction
+is detectable (a settled branch disagreeing with its own edges, a marked-but-unreachable region, an execution
+path out of an unreachable region), which also converts two former raw crashes into located diagnostics. The
+fixpoint itself is UNCHANGED: every attempt to fix this inside it was measured and rejected for starving loops.
+ONE MISCOMPILE ROUTE SURVIVES and is not locally fixable -- when a phantom environment keeps a stale state fact
+alive the condition settles as a runtime bool, so the Python-dead arm is genuinely live to the analyzer and no
+contradiction exists to detect. It is pinned by `test_phantom_environment_miscompile_is_still_open` (returns
+22.0, must become 12.0) and is a FIRST-CLASS ACCEPTANCE CRITERION for Stage 4. False rejections also remain.
+All of it is documented in `TODO.md` "Known defects" and pinned by witnesses in `tests/test_frontend_state.py`.
+Stage 3's architecture spike ran → verdict MORPH (SC1-SC3 passed; SC4 missed by 75 LOC; branch
+`spike/resolved-ir` @ dc76fbf; ledger `docs/decisions/spike-ledger.md`). The Stage-3 ruling and Stage 4 pend.
 
 STEP 1-2 DONE (this session): `.nox` rebuilt; round-10 edge-withholding REVERTED, so the freeze baseline carries
 no regression. Note for anyone re-deriving the defect class: TWO of the four TODO reproducer kernels did NOT

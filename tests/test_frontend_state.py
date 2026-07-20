@@ -519,9 +519,10 @@ def test_graftable_call_deferral_false_rejection_witnesses() -> None:
     # a graftable call deferred behind a transiently-pending store violation publishes out-edges carrying its
     # not-yet-computed result, and a downstream read of that result joins to maybe-unbound. These are the residue
     # of the PHANTOM-ENVIRONMENT mechanism, the half the one-edge-deep graft retraction cannot reach; the
-    # executable-marking half is fixed (see the sibling tests above). Documented in TODO.md; the class is the one
-    # the Stage-4 restructure dissolves by residualizing after the fixpoint instead of during it. Their residue is
-    # false rejections and, in the state-condition shape below, a raw crash -- never a silently wrong value.
+    # detectable-contradiction shapes are refused by the post-stabilization gate instead (sibling tests above).
+    # Documented in TODO.md; the class is the one the Stage-4 restructure dissolves by residualizing after the
+    # fixpoint instead of during it. Their residue is false rejections -- but note the seam as a whole is NOT
+    # bounded to those: test_phantom_environment_miscompile_is_still_open pins a silently wrong value.
     #
     # The kernels live here rather than only in prose because prose transcriptions of them have silently rotted:
     # dropping the both-arms read or the wide-int feed makes a shape vanish. When the restructure lands these stop
@@ -599,15 +600,14 @@ def test_graftable_call_deferral_false_rejection_witnesses() -> None:
         assert (location.line or "").strip().startswith(blamed), label
 
 
-def test_speculated_dead_arm_is_pruned_not_emitted() -> None:
-    # A condition whose operand is still unavailable must not be read as a runtime bool: doing so opened BOTH
-    # arms, and because marks are add-only the arm the stabilized facts later prove dead stayed open and was
-    # emitted. This kernel used to ship a public `state_s` port whose register carried the dead arm's store as
-    # its only functional driver, inert solely because the sequencer's selector was hard-loaded to zero. Both
-    # spellings must now synthesize with no such port; they differ only in the two constants that arm the
-    # deferral. Nothing here reads a deferred result, which isolates the executable-marking mechanism from the
-    # phantom-unbound-environment one -- and note np.array is a CONVERSION, never grafted, so this mechanism
-    # needs only a deferred call, not a graftable one.
+def test_speculated_dead_arm_that_stores_is_refused() -> None:
+    # A speculated arm the stabilized facts prove dead used to be emitted, shipping a public `state_s` port whose
+    # register carried the dead arm's store as its only functional driver -- inert solely because the sequencer's
+    # selector was hard-loaded to zero. The gate refuses it instead. The refusal is scoped to arms that STORE,
+    # because that promotion is the harm; an inert dead arm still compiles (covered below). The control differs
+    # only in the two constants that arm the deferral, and must still synthesize with no such port. Nothing here
+    # reads a deferred result, which isolates the executable-marking mechanism from the phantom-environment one
+    # -- and np.array is a CONVERSION, never grafted, so this mechanism needs only a deferred call.
     class Probe:
         def __init__(self) -> None:
             self.t = 0.0
@@ -656,6 +656,31 @@ def test_speculated_dead_arm_is_pruned_not_emitted() -> None:
     assert refusal.value.location is not None  # located, so the implicated branch is visible
     control = holoso.synthesize(Control().step, ops, name="defer_dead_arm_ctrl")
     assert "state_s" not in [port.name for port in control.ports]  # no deferral, so the dead arm is pruned
+
+
+def test_speculated_dead_arm_without_a_store_still_compiles() -> None:
+    # The refusal above is scoped to the harm. An arm that stores nothing cannot promote an attribute to runtime
+    # state, and emitting it produces hardware byte-identical to the same kernel with the guard deleted, so
+    # refusing it would cost accepts for nothing. Both spellings must synthesize and agree with Python.
+    class Inert:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def step(self, x: float, flag: bool) -> float:
+            if flag:
+                u = 1.0
+                q = 1.0
+            else:
+                u = 2**53 + 1
+                q = 2**64
+            self.t = u
+            a = np.array([q, x])
+            if a.shape[0] > 5:  # statically false, and inert: no store on the speculated arm
+                pass
+            return x + 1.0
+
+    result = holoso.synthesize(Inert().step, default_ops(FloatFormat(8, 23)), name="defer_dead_arm_inert")
+    assert float(result.numerical_model.elaborate().run(2.0, False)[0]) == Inert().step(2.0, False)
 
 
 def test_speculated_dead_store_does_not_silently_miscompile() -> None:
@@ -784,6 +809,11 @@ def test_deferred_side_effect_branch_is_refused_not_crashed() -> None:
     # arm for it. A raw RuntimeError used to escape HIR emission here -- not a SynthesisError, not located. The
     # kernel is honest Python returning 10.0, so this refusal is still a defect (TODO.md); pinning it keeps the
     # failure a diagnostic, and when the restructure closes the class this must become synthesis.
+    #
+    # This is also the only coverage of the seam's SECOND producer of stale reachability: the condition here is
+    # a state read whose live-in join settles late, with every fact legitimately bound throughout -- no unbound
+    # operand is ever involved, so no check on a condition's operand could have caught it. That is why the gate
+    # tests the RESULT (recorded reachability against settled facts) rather than any producer.
     class Probe:
         def __init__(self) -> None:
             self.t = 0.0
@@ -811,7 +841,7 @@ def test_deferred_side_effect_branch_is_refused_not_crashed() -> None:
 
     assert Probe().step(2.0, False) == 10.0  # the kernel is well-defined Python
     ops = default_ops(FloatFormat(8, 23))
-    with pytest.raises(UnsupportedConstruct, match="edge out of a block") as refusal:
+    with pytest.raises(UnsupportedConstruct, match="path that never runs") as refusal:
         holoso.synthesize(Probe().step, ops, name="defer_side_effect_state_condition")
     assert refusal.value.location is not None  # a diagnostic, where a raw RuntimeError used to escape emission
 

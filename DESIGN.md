@@ -385,12 +385,15 @@ as a runtime bool, so BOTH arms are marked executable; because marks are add-onl
 later prove dead stays open. Emitting it is unsound rather than merely wasteful: a store on that arm promotes
 an attribute from a constant folded at binary64 into a runtime slot whose reset is materialized in the target
 carrier, so a guard reading it flips and the module silently disagrees with Python. Speculation is nonetheless
-left exactly as it is -- it is what lets the W/D fixpoint discover runtime state, and every attempt to withhold
-it starves some loop, since a `Branch` inside a loop body precedes the body's own back-edge. Instead a
-POST-STABILIZATION GATE refuses whenever recorded reachability contradicts the settled facts: a branch whose
-condition disagrees with its own recorded out-edges, a block marked executable that no edge chain reaches, or
-an edge out of a block left unexecutable. Each becomes a located refusal rather than a wrong answer or a bare
-crash, at the cost of refusing kernels whose speculated arm the analyzer cannot prove harmless. Retracting a
+left exactly as it is -- it is what lets the W/D fixpoint discover runtime state, and both attempts to withhold
+it that were built starved loops, since a `Branch` inside a loop body precedes the body's own back-edge.
+Instead a POST-STABILIZATION GATE refuses whenever recorded reachability contradicts the settled facts: a
+branch whose condition disagrees with its own recorded out-edges AND whose dead arm stores to the component, a
+block marked executable that no edge chain reaches, or an execution path out of a region left unreachable. Each
+becomes a located refusal rather than a wrong answer or a bare crash. The store condition scopes the cost to
+the harm -- an inert speculated arm emits hardware byte-identical to the same kernel with the guard deleted, so
+refusing it would buy nothing -- though the scoping stays conservative, since a store into an already-runtime
+slot promotes nothing yet is refused too. Retracting a
 stale mark instead is deliberately not attempted -- destructive environment joins mean removing an edge
 requires recomputing downstream environments, schemas, reachability, W/D discoveries, and phis. The gate is a
 narrowing, NOT a closure: where the phantom environment keeps a stale state fact alive the condition settles as

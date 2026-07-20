@@ -30,8 +30,9 @@ momentarily inexact before the fixpoint promotes it -- its result is momentarily
 continues around it. The block's terminator still publishes out-edges, so the unbound result reaches the
 successors; the graft-time retraction that unwinds those edges reaches only one edge deep, so a transitive
 successor keeps the phantom-unbound environment and a later join reports `local '...' may be unbound here` at
-an innocent line. This half is specific to GRAFTABLE calls -- linalg composites like `np.dot`/`np.matmul`, and
-inlined user callables -- because only a graft displaces the terminator whose edges are then retracted.
+an innocent line. The one-edge-deep retraction runs at a graft, but the false rejection does not need one: an
+`np.array`-only kernel, whose call is a conversion that never grafts, produces the identical rejection. Any
+deferred call reaches this.
 
 A second mechanism was fixed rather than documented, because its residue included a SILENT MISCOMPILE. A
 condition is evaluated on a fact that later becomes more precise, so BOTH arms are marked executable; marks are
@@ -43,10 +44,12 @@ for the miscompile; the second is invisible to any unbound-operand guard. A stor
 attribute from a read-only constant -- folded at binary64 -- into a runtime state slot whose reset is
 materialized in the narrower target carrier, so a guard
 reading it can flip: a kernel returning 10.0 in Python returned 20.0 in hardware, no error raised, and only in
-formats narrower than the reset value. The same staleness reached the plan replay as a bare `KeyError` (`rank`
-is built from edge-REACHABLE blocks while the replay iterates the add-only MARKED set) and HIR emission as a
-raw `RuntimeError`. Note this mechanism needed only a DEFERRED call, not a graftable one: `np.array` is a
-conversion and never grafts, yet drives the witnesses.
+carriers too narrow to hold the reset exactly (the measured flip point for that witness is E8M31). The stale
+marking also reached the plan replay as a bare `KeyError`, `rank` being built from edge-REACHABLE blocks while
+the replay iterates the add-only MARKED set. A companion defect surfaced as a raw `RuntimeError` out of HIR
+emission: there the graft's mark removal leaves the orphaned block's own out-edges standing, so a successor
+keeps a predecessor that never runs and its phi has no arm for it. This mechanism needs only a DEFERRED call,
+not a graftable one: `np.array` is a conversion and never grafts, yet drives the witnesses.
 
 The fix is a POST-STABILIZATION GATE and nothing else: the fixpoint's speculation is left exactly as it was,
 and the unsound RESULT of it is refused once the facts are stable. Three contradictions between recorded
@@ -60,12 +63,17 @@ Two more invasive fixes were built and measured, and BOTH were rejected on evide
 (the truth of an unavailable value defers, and an unbound `Branch` opens no edge) fixes the miscompile and
 prunes the dead arm properly -- the strictly better outcome where it applies -- but it starves the fixed point:
 a `Branch` inside a loop body sits BEFORE the body's trailing back-edge `Jump`, so deferring it stops the loop
-re-flowing at all, and a 72-kernel loop sweep drops from 33 accepts to 18. That is the same failure round-10's
-edge withholding produced, reached by a different route. Retracting the stale mark is not local either:
+re-flowing at all. That is the same failure round-10's edge withholding produced, reached by a different route,
+and it is why `tools/deferral_seam_sweep.py` exists: the seam cannot be judged by argument, only by moving those
+counts. Against the pre-gate baseline that sweep reports the dead-arm family going from 32 accepts with 6 raw
+crashes to 26 accepts with none, and the loop family unchanged at 21 accepts -- exact parity, which is the
+property every candidate fix has to keep. Retracting the stale mark is not local either:
 destructive environment joins mean removing an edge requires recomputing downstream environments, schemas,
-reachability, W/D discoveries, and phis. The gate costs accepts too -- the same sweep of dead-arm kernels drops
-from 32 to 22 -- but every kernel it newly refuses is one the compiler was previously compiling unsoundly, and
-it holds the loop family at exact parity with the pre-fix baseline.
+reachability, W/D discoveries, and phis. The gate costs accepts too, and the refusal is scoped to limit that:
+a speculated arm is only refused if it STORES to the component, because the promotion of an attribute to a
+runtime slot is the harm. An inert arm compiles, and emits hardware byte-identical to the same kernel with the
+guard deleted. The scoping is still conservative rather than exact -- a store into an ALREADY-runtime slot
+promotes nothing yet is refused anyway -- so some refused kernels were being compiled correctly.
 
 A SILENT MISCOMPILE NEVERTHELESS REMAINS, by a route the gate structurally cannot see, and it is the most
 serious open defect in the compiler. When the phantom environment keeps a stale state fact alive, the condition
