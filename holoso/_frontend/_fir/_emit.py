@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 from ..._errors import UnsupportedConstruct
 from ..._util import RelationalOp
-from .._ast_support import indexed_names, port_name, state_port_name
+from .._ast_support import port_name, state_port_name
 from ..._hir import (
     BoolAnd,
     BoolConst,
@@ -154,7 +154,6 @@ from ._value import (
     SemType,
     StaticBool,
     StaticFloat,
-    StaticSlice,
     StaticValue,
     admit,
     as_python,

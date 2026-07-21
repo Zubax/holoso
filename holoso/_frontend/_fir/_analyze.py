@@ -363,6 +363,14 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
         terminator = result.unit.blocks[block_id].terminator
         if isinstance(terminator, Jump) and (block_id, terminator.target) not in result.executable_edges:
             severed.append(block_id)
+        # A branch whose condition did not settle takes BOTH arms, so both edges are obligatory; one whose
+        # condition folded legitimately keeps a single arm, and is left alone. Severing an obligatory arm
+        # leaves every block walked and every table total, then dies inside emission with a phi that has no
+        # arm for a predecessor -- the same unlocated shape as the severed jump.
+        if isinstance(terminator, Branch) and not isinstance(result.binding_facts.get(terminator.cond), Known):
+            for target in (terminator.then_target, terminator.else_target):
+                if (block_id, target) not in result.executable_edges:
+                    severed.append(block_id)
     assert not severed, f"blocks whose jump edge is missing from the executable set: {severed}"
     missing_plans = [
         (block_id, op)

@@ -22,6 +22,13 @@ _EMITTER = "holoso._frontend._fir._emit"
 # It is a RATCHET: the test fails in both directions, so a symbol that leaves is spent in the commit that earns
 # it rather than drifting, and a symbol that arrives is a regression.
 #
+# TWO LIMITS, measured and stated rather than implied away. This counts IMPORT EDGES, not dependencies: an
+# import that is dead weight counts as debt, so deleting one is ordinary lint that the ratchet reads as
+# progress -- two such (`indexed_names`, `StaticSlice`) were found and removed when this was written. And it
+# is scoped to `_emit.py` alone, while the refusal counter below is package-scoped: if emission code moves to
+# a sibling module, its frontend imports leave this file and the ratchet will invite deleting entries for debt
+# that merely moved. Both fail loudly rather than silently; the hazard is in following the message blindly.
+#
 # NO CLASSIFICATION IS ASSERTED HERE. The set mixes the decision surface the restructure removes (the analyzer
 # handle, the library registry types, the fact vocabulary emission re-reasons over) with structural vocabulary
 # it plausibly keeps (FIR op and place types it walks, `executable_rpo`, port-name helpers). Only the former is
@@ -35,7 +42,6 @@ _EMITTER = "holoso._frontend._fir._emit"
 _EMITTER_FRONTEND_DEBT: dict[str, frozenset[str]] = {
     "holoso._frontend._ast_support": frozenset(
         {
-            "indexed_names",
             "port_name",
             "state_port_name",
         }
@@ -145,7 +151,6 @@ _EMITTER_FRONTEND_DEBT: dict[str, frozenset[str]] = {
             "SemType",
             "StaticBool",
             "StaticFloat",
-            "StaticSlice",
             "StaticValue",
             "admit",
             "as_python",
@@ -173,8 +178,9 @@ def test_emitter_frontend_debt_only_shrinks() -> None:
         "add them"
     )
     assert not removed, (
-        f"emission no longer imports {removed} -- that is the point, so delete those entries from "
-        "_EMITTER_FRONTEND_DEBT in this same commit and let the ratchet hold the ground"
+        f"emission no longer imports {removed} -- if the dependency is GONE that is the point, so delete those "
+        "entries here in the same commit; if it merely moved to a sibling module, or the import was dead "
+        "weight, the debt did not shrink and this ledger's scope is what needs revisiting"
     )
 
 
@@ -392,4 +398,34 @@ def test_the_plan_verifier_catches_a_severed_jump_edge() -> None:
     assert severable, "the kernel must produce a jump into a merge for this test to mean anything"
     result.executable_edges.remove(severable[0])
     with pytest.raises(AssertionError, match="jump edge is missing"):
+        verify_plan_totality(result)
+
+
+def test_the_plan_verifier_catches_a_severed_residual_branch_arm() -> None:
+    # The jump arm was not enough: a branch whose condition never settles takes BOTH arms, so severing one
+    # leaves every block walked and every table total and dies inside emission with "phi N in block M has arms
+    # for predecessors []". A branch whose condition folded keeps one arm legitimately and must not fire this.
+    from holoso._frontend._fir._analyze import Analyzer, verify_plan_totality
+    from holoso._frontend._fir._ir import Branch
+
+    class Kernel:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def step(self, x: float, flag: bool) -> float:
+            if flag:  # runtime condition, so both arms are obligatory
+                self.s = self.s + 1.0
+            return self.s + x
+
+    result = Analyzer(Kernel().step).fixpoint()
+    verify_plan_totality(result)
+
+    arms = [
+        (source, target)
+        for source, target in sorted(result.executable_edges, key=lambda e: (e[0].index, e[1].index))
+        if isinstance(result.unit.blocks[source].terminator, Branch)
+    ]
+    assert len(arms) == 2, "the kernel must keep a residual two-armed branch for this test to mean anything"
+    result.executable_edges.remove(arms[-1])
+    with pytest.raises(AssertionError, match="edge is missing"):
         verify_plan_totality(result)

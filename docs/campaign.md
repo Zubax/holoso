@@ -1691,3 +1691,27 @@ of that mutant), and it does not check that the verifier receives the result act
 owner-resolves guard's rationale claimed it was the sole catcher of a typo when the ratchet catches it first;
 and `_check_reachability_settled`'s OWN docstring still claimed whole-graph refusal, which the walked-unmarked
 sink refutes -- corrected there too, since only the downstream docstring had been fixed.
+
+
+M0 CLOSING ROUND (a second Claude half, run against 9afcaf2) -- VERDICT: NOT CLOSING, and it was right twice
+over. Its findings (1) and (2) are the two I had just fixed in 776fd67, and I verified its EXACT mutants
+against the fix: the additive bare import (`import ..._opsem as _opsem` alongside the untouched symbol import,
+then re-folding with `_opsem.static_binop`) and the attribute-spelled `@classmethod` factory both fail now.
+Independent confirmation from a reviewer that had no knowledge of the fix.
+
+THREE NEW ONES, all acted on. (a) SEVERED BRANCH ARMS still crashed unlocated: a branch whose condition never
+settles takes BOTH arms, so severing one leaves everything total and dies with "phi N in block M has arms for
+predecessors []" -- the same shape as the jump case, which I had closed while explicitly arguing branches were
+fine because folding one arm is legitimate. True for FOLDED conditions, false for residual ones; the arm now
+distinguishes them by the condition's fact. Reproduced, closed, pinned. (b) TWO OF THE 93 LEDGER SYMBOLS WERE
+DEAD IMPORTS (`indexed_names`, `StaticSlice`), so deleting them -- ordinary lint -- would have registered as
+two units of restructure progress. Removed from the emitter and the ledger. (c) The two guards CONTRADICT each
+other on scope: the refusal counter is package-scoped precisely because splitting `_emit.py` is plausible,
+while the import ledger is file-scoped, so the same split would invite deleting entries for debt that merely
+moved next door. Both limits are now written into the ledger header, and the `removed` message no longer says
+"that is the point, delete those entries" unconditionally -- it distinguishes a dependency that is gone from
+one that moved or was never live.
+
+The reviewer also swept the mirror direction (spurious edges ADDED to the executable set, all 20 non-existent
+pairs on a merge kernel) and found no silent divergence -- every case is HIR-identical or an unlocated crash --
+so the severed direction is genuinely the dangerous one.
