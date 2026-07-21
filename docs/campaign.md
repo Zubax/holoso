@@ -156,10 +156,13 @@ accordingly, because review-by-reading has a measured yield of zero here.
   refusals each found a real defect before any adoption code was written, two of which would have shipped
   silent miscompiles the compiler does not currently have. The gate is not ceremony.
 
-OPEN METHODOLOGICAL QUESTION, deliberately unresolved: whether four rounds of document revision was the right
-expenditure, or whether the producer and verifier should have been built in shadow earlier and MEASUREMENTS
-brought to the consult instead of prose. Each round found real defects, which argues it worked -- but that is
-also exactly what a productive-looking loop feels like from inside. Put to consult X6a round 4 directly.
+RESOLVED, BY MEASUREMENT: four rounds of document revision was NOT the right expenditure. The shadow
+implementation found, in one pass, that the document's central claim was false -- and that the question all
+four rounds refined was not the load-bearing one. Each round did find real defects, which is why the loop felt
+productive from inside; that feeling is not evidence. BUILD AND MEASURE EARLY, ARGUE LATE. A design gate is
+still worth having (it caught two would-be silent miscompiles before any code existed), but it should be fed
+measurements, and a question that survives two rounds unanswered is a signal to go build the thing rather than
+to revise the prose again.
 
 PACE (measured on 2026-07-21; each number is from this campaign, not a guess):
 
@@ -2308,3 +2311,53 @@ with the existing bit-faithful semantics; source-place verification applies only
 actions; the scalar non-datapath `PyStoreAttr` rejection has no owner after cutover and must be assigned one
 that preserves the located diagnostic; and state-slot registration is not plan-verifiable before emission, so
 it becomes an EXECUTOR invariant with the behavioural test as its check.
+
+
+SHADOW IMPLEMENTATION LANDED, AND IT INVERTED THE QUESTION FOUR CONSULT ROUNDS WERE ASKING. Built a shadow
+producer and an independent verifier, swept 101 analyses / 3,461 sites / 940,977 cells, and mutation-tested
+the VERIFIER itself (58 kernels, one perturbation each).
+
+THE DOCUMENT'S CENTRAL CLAIM WAS FALSE. "A recorder that stops writing produces a verifier error" is the
+sentence that justifies the whole step. Mutating a producer to emit `NoCell` where a `CopyCell` belongs --
+EXACTLY the silent-absence archetype -- was killed 0 TIMES OUT OF 58 with availability as the source check. It
+survived every kernel. What kills it 58/58 is INDEPENDENT DISPOSITION DERIVATION: computing from the target
+fact's leaves which ordinals must be copy, constant, or nothing. So the priority is the reverse of how five
+revisions presented it -- disposition is load-bearing, availability is supporting (it caught a wrong source
+place 19/58 alone, with zero false objections).
+
+THE CONSULT SPENT FOUR ROUNDS REFINING THE WRONG QUESTION. "Can source availability be independently
+reconstructed" was answered YES -- 940,977 cells, zero unsound verdicts -- and the answer turned out to matter
+far less than the asking implied. The question that mattered was disposition derivability, and no round asked
+it. This is the campaign's own recurring lesson recurring one level up: a rigorous process converged on a
+proposition adjacent to the one at issue, and its rigor is what made four rounds of it feel like progress.
+MEASUREMENT FOUND IN ONE PASS WHAT FOUR REVIEW ROUNDS DID NOT. That settles the open methodological question
+recorded above: build and measure earlier, argue later.
+
+ONE HOLE, REPRODUCIBLE. A `CONSTRUCTION`'s field-to-binding mapping lives only in `CallPlan.construction`, a
+producer record M2 absorbs. Swap two field sources and the plan has identical target, width, dispositions,
+places and in-range ordinals -- the independent verifier accepts both. Verified end to end: correct -47.0,
+swapped -25.0, Python -47.0. Revision 5's "an arbitrary in-range place must not pass" is false for
+construction. RULED: the verifier re-derives field binding from the dataclass schema and the call's
+positional/keyword structure, which is Python semantics rather than a producer decision -- reading the record
+back would make the check vacuous.
+
+TWO INPUTS THE QUESTION NEVER NAMED. `runtime_state` is required or every state-leaf source is undecidable
+(14,777 cells), because only it separates a promoted leaf from compile-time configuration. And
+"datapath-available" is NARROWER than "defined": 14,340 cells are defined as materialized constants while
+correctly holding no datapath value.
+
+A THIRD SCALAR ARM, found by BUILDING rather than reading. `LoadPlace`'s scalar arm and `_project`'s scalar arm
+skip a `Known` destination; `_install`'s MATERIALIZES it. Five revisions named only the `LoadPlace` half. The
+shadow producer mis-handled `_project` and surfaced it as 24 cell-set mismatches against the real emitter.
+
+CONFIRMED SOUND AS WRITTEN, which is worth as much as the corrections: the site set held -- every cell-writing
+site outside the plan set was a recognised COMPUTATION kind, no unmodelled kind in 3,461 sites -- and the
+`PySelect` AND/OR polarity, the all-`NoCell` projection and construction plans, the site-relative `NoCell`, and
+the fully-static-construction rule all reproduced without exception. Zero shadow-vs-emitter disagreements at
+final state. The in-range wrong permutation survived 11/58, consistent with the document's own concession that
+behavioural witnesses carry that weight.
+
+SCOPE, STATED BECAUSE A NEGATIVE RESULT NEEDS ITS SEARCH SPACE: 101 analyses over bundled examples, the routing
+suite and hand-written kernels. Aggregate-record COMPONENT STATE is UNMEASURED -- two intended probes never ran
+(integers not lowerable; record state reset unsupported). The fuzz and golden corpora were not swept, and no
+test suites were run.

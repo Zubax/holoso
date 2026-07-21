@@ -1,9 +1,10 @@
 # Routing algebra: schema for M2
 
-Status: REVISION 5. Revision 1 was NOT APPROVED (its record could not express routing at all); revision 2 was
-NOT APPROVED either (the record was fixed, but the site set was not closed, the verifier criterion was still
-revision-1 text, and the Known-versus-no-write rule was wrong). Companion to `arch-ruling.md` (which
-ordered plain MORPH) and `arch-memo.md`.
+Status: REVISION 6 -- the first revision written against MEASUREMENTS rather than argument, and the first to
+correct a claim that four rounds of design review had left standing. Revisions 1-5 were each refused: the
+record could not express routing at all, then the site set was not closed, then the predicate arms were listed
+without being decided, then contradictions remained. Companion to `arch-ruling.md` (which ordered plain MORPH)
+and `arch-memo.md`.
 
 ## What this replaces
 
@@ -213,9 +214,19 @@ And a bound is not a permutation. An in-range but WRONG permutation passes every
 the behavioural witnesses in `tests/test_frontend_routing.py` carry that weight and the verifier does not
 replace them.
 
-This also removes the silent-absence failure mode that this campaign has been bitten by repeatedly: a recorder
-that stops writing currently produces a plausible identity route, which is a wrong answer that looks like a
-default. Under a total plan it produces a verifier error.
+This was claimed to remove the silent-absence failure mode outright -- "a recorder that stops writing produces
+a verifier error" -- and A SHADOW IMPLEMENTATION MEASURED THAT CLAIM FALSE AS THE DOCUMENT ORIGINALLY MEANT IT.
+Mutating a producer to emit `NoCell` where a `CopyCell` belongs (M6: exactly the silent-absence archetype) was
+killed 0 times out of 58 kernels when the verifier's source check was AVAILABILITY. It survived every one.
+
+What actually kills it is INDEPENDENT DISPOSITION DERIVATION: the verifier computing, from the target fact's
+leaves, which ordinals must be a copy, which a constant, and which nothing -- and comparing that against the
+plan. With that check the same mutant dies 58 out of 58, along with missing plans, surplus plans, out-of-range
+ordinals and wrong targets at 58/58 each.
+
+So the priority is the reverse of how revisions 1-5 presented it. DISPOSITION IS THE LOAD-BEARING CHECK.
+Availability is supporting: it caught a wrong source place 19 times of 58 on its own and objected falsely
+zero times, which makes it worth keeping and useless alone.
 
 ## The site set
 
@@ -269,7 +280,7 @@ arms are decided as follows, with the reasoning, because listing a tension is no
 Revision 3's criterion was directionally right and incomplete. It must also require that the action count
 equals the logical width; that the DISPOSITION expected at each ordinal matches (not merely that some action
 is present); that a `ConstantCell` carries the exact target-side value, not just a legal kind; that a
-`CopyCell` source is datapath-AVAILABLE under SSA resolution rather than merely an in-bounds fact; and that the
+`CopyCell` source HOLDS A DATAPATH VALUE THIS PLAN MAY COPY -- narrower than "is defined", see below -- and that the
 source place is the SITE-DETERMINED one, since an arbitrary in-range place must not pass.
 
 That last point resolves a contradiction revision 3 contained: the `PySelect` trap said the verifier must
@@ -310,6 +321,10 @@ reject valid output or accept a missing plan.
 - `LoadPlace` is ASYMMETRIC. A scalar `Known` destination emits nothing at all, while an aggregate whose
   leaves are all `Known` emits constants for the datapath ones. A verifier modelling the two uniformly is
   wrong in one direction or the other, whichever way it picks.
+- THREE SCALAR ARMS, TWO POLICIES, and revisions 1-5 named only one of them. `LoadPlace`'s scalar arm and
+  `_project`'s scalar arm both SKIP a `Known` destination; `_install`'s scalar arm MATERIALIZES it as a
+  constant. The `_project` half is an equally silent wrong-output trap and was found only by building a shadow
+  producer, which mis-handled it and surfaced as 24 cell-set mismatches against the real emitter.
 - A fully static record construction emits NOTHING at its call site -- not even constants for its
   datapath-`Known` leaves. This is the case that makes `NoCell` site-relative rather than fact-relative.
 - The leaf-completeness policy DIVERGES between the arithmetic and routing paths. The elementwise and unary
@@ -338,13 +353,33 @@ empty-sequence repeat writes nothing and is CORRECT to do so, because its result
 `Reference` leaf inside an aggregate stored to component state cannot reach emission's unguarded path: analysis
 refuses it first with a located public rejection.
 
-### What only implementation contact can settle
+### What implementation contact settled
 
-One question is not answerable on paper, and the consult identified it as the only such question: whether
-SOURCE AVAILABILITY can be independently reconstructed from `block_in`, the final binding facts and an
-intra-block walk WITHOUT reusing the producer's own decisions. If it cannot, the verifier is not independent
-and its key-set comparison proves less than it appears to. This is built in shadow and measured -- exact site
-counts and disagreements reported -- before any cutover, not argued about further.
+The question four consult rounds converged on was whether SOURCE AVAILABILITY can be independently
+reconstructed from `block_in`, the final binding facts and an intra-block walk without reusing the producer's
+decisions. Measured: YES -- 940,977 cells swept, zero unsound verdicts, all 3,927 `CopyCell` sources resolving
+available with no false objection. And that answer turned out to matter far less than the question implied,
+because availability alone catches almost nothing (above). The consult should have been asking about
+DISPOSITION derivability. Four rounds of review refined a question that was not the load-bearing one.
+
+Two corrections to the inputs. The verifier also requires `runtime_state`, which none of the five revisions
+named: without it every state-leaf source is undecidable (14,777 cells measured), because a promoted leaf is
+unconditionally available while a non-promoted one is compile-time configuration with no cell, and only
+`runtime_state` separates them. And "datapath-available" is NARROWER than "the cell is defined": 14,340 swept
+cells are defined as materialized constants while correctly reporting no datapath value. The predicate is
+"holds a datapath value this plan may COPY", not "has a definition".
+
+ONE CASE DEFEATS AN INDEPENDENT VERIFIER, and it is the only one found. A `CONSTRUCTION`'s field-to-binding
+mapping lives solely in `CallPlan.construction`, a producer record M2 absorbs. Swapping two field sources
+yields a plan with identical target, width, dispositions, places and in-range ordinals -- the verifier accepts
+both. Measured on a two-field record: the correct plan computes -47.0 and the swapped one -25.0, against a
+Python reference of -47.0. So revision 5's "an arbitrary in-range place must not pass" is FALSE for
+construction as written.
+
+RULED: the verifier RE-DERIVES the field binding from the dataclass schema and the call's positional and
+keyword structure. That is Python's own semantics, not a producer decision, so re-deriving it is what a
+verifier is for and does not create the second routing authority M2 exists to remove -- whereas reading
+`CallPlan.construction` back would make the check vacuous by construction.
 
 ## The key
 
