@@ -64,6 +64,26 @@ def test_a_repeated_aggregate_routes_each_copy() -> None:
     assert _run(kernel, 2.0, 3.0) == [323232.0]
 
 
+def test_a_reversed_repetition_finds_its_sequence_operand() -> None:
+    # `3 * seq` is accepted as well as `seq * 3`, so the sequence is NOT always the first operand. Consult X6a
+    # rejected a routing schema that addressed cells by operand INDEX partly on this case: with a one-cell
+    # sequence a bounds check still accepts the wrong operand, so the error would have been silent. The compiler
+    # is correct here today; this pins that, because the schema that would have broken it looked plausible.
+    def kernel(x: float, y: float) -> float:
+        six = 3 * [x, y]
+        return six[0] + six[1] * 10.0 + six[2] * 100.0 + six[3] * 1000.0 + six[4] * 1e4 + six[5] * 1e5
+
+    def scalar_sequence(x: float, y: float) -> float:
+        # The one-cell case the bounds check cannot distinguish: picking the wrong operand yields the OTHER
+        # input, which is well-formed and wrong. `y` is present only to make that confusion observable.
+        return (3 * [x])[0] + (3 * [x])[1] * 10.0 + (3 * [x])[2] * 100.0 + y * 1000.0
+
+    _assert_matches_python(kernel, 2.0, 3.0)
+    assert _run(kernel, 2.0, 3.0) == [323232.0]
+    _assert_matches_python(scalar_sequence, 2.0, 7.0)
+    assert _run(scalar_sequence, 2.0, 7.0) == [7222.0]
+
+
 def test_a_built_tuple_reversed_by_index_routes_the_reversal() -> None:
     # The suite's dedicated build-and-index test spells this exact reversal and asserts only that two ports exist,
     # so dropping the reversal entirely would pass it. Here the reversal is observable.

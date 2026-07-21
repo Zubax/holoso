@@ -1996,3 +1996,43 @@ whole repetitions maps identical content onto identical content -- not a gap, an
 try to pin it. And my hand-computed expected value for the repeat kernel was wrong (232323 for 323232); the
 differential half of the same test caught it. Pinning a value AND comparing against Python is worth the
 redundancy, because the pin encodes my arithmetic and the differential encodes the language's.
+
+
+CONSULT X6A RULED: SCHEMA NOT APPROVED. M2 stays gated until the document is revised, which it now is
+(`routing-schema.md` revision 2). The ruling is the most useful thing this campaign has received in a while
+because it found a defect in a DESIGN rather than in code -- my schema would have introduced a silent
+miscompile the compiler does not currently have.
+
+THE DEFECT. Revision 1 addressed a source cell as `OperandCell(operand, ordinal)`, an index into the routing
+op's operand list. That list has no authoritative meaning: `_op_reads(PyCall)` yields the CALLEE before the
+arguments, so the conversion source is not operand 0; `PyStoreAttr` puts `src` at operand 1; `_op_reads` of a
+`LoadPlace` is EMPTY, so such a route could name nothing; the component `PyAttr` arm reads `StateLeaf` cells
+rather than any operand's; construction mixes positional and keyword sources with no numbering. The concrete
+case: `3 * seq` is accepted as well as `seq * 3`, so the sequence is not always operand 0, and with a ONE-CELL
+sequence a bounds check on the operand index still passes while reading the wrong operand. Well-formed, wrong,
+no diagnostic -- the exact failure class this campaign exists to stop adding. I verified the compiler is
+correct there today (forward, reversed, and scalar-reversed all match Python) and pinned it.
+
+RULINGS TAKEN. Key `(BlockId, op index)` in a typed `PlanSite`, no stamped `OpId` -- and one of my arguments
+for it was withdrawn as false: `id(op)` "cannot be serialized into the golden dump" is irrelevant, since the
+dump serializes the resulting Hir, not `ResidualUnit`. Cells now address by `Place` and ordinal. `NoCell` is
+MANDATORY, because `AggregateFact.leaves` admits `Reference`, which has no datapath cell -- without it the plan
+is not total and absence-ambiguity returns through the back door. `ConstantCell` carries an explicit kind, and
+analysis (not emission) must choose `ConstantCell` against `NoCell`. J6 folds INTO M2 for routing sites, and an
+expected result KIND is not enough: `FLOAT` would still leave emission inspecting the source to pick between an
+integer and a boolean promotion, so the row carries an explicit transfer action. `_conversion_calls` leaves
+routing entirely. `UnbindPlace` is excluded rather than given an empty plan -- an empty aggregate has a
+legitimate ZERO-CELL route, so conflating "not a route" with "a route with zero rows" would rebuild the very
+ambiguity being removed. One atomic commit, tests written and exercised first.
+
+AND THE RECOUNT WAS RECOUNTED. I corrected the campaign from "four clones, two re-derivations" to "three and
+five". X6a recounted and ruled FOUR and SIX, and it is right: the fourth walk is the aggregate `PyStoreAttr`
+one, not a textual clone but a stronger route walk carrying promotion and state-slot registration, and
+excluding it while counting the truncated construction loop is not a defensible boundary. Six offset
+derivations, not five, because collapsing the two `_emit_concat` branches into their method is a location count
+rather than a branch count. Three statements of this number, two of them wrong, each made confidently.
+
+X6a also falsified a claim of mine that I had ALREADY falsified myself an hour earlier by mutation testing --
+that routing coverage is corpus-only. Independent agreement on that is reassuring; making the claim twice is
+not. Also ruled: raw-byte corpus identity is necessary but NOT sufficient, because a route error is a semantic
+value miscompile and the manifest records ports and metrics, not which value drives each port.
