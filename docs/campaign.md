@@ -161,6 +161,27 @@ expenditure, or whether the producer and verifier should have been built in shad
 brought to the consult instead of prose. Each round found real defects, which argues it worked -- but that is
 also exactly what a productive-looking loop feels like from inside. Put to consult X6a round 4 directly.
 
+PACE (measured on 2026-07-21; each number is from this campaign, not a guess):
+
+- MEASURE BEFORE DESIGNING. The exhaustive emission enumeration took 188 SECONDS and was decisive; it ran
+  after THREE schema revisions built on a table compiled by inspection, and nearly every defect in those
+  revisions traces to that table. Three minutes of measurement would have collapsed ~100 minutes of serial
+  consult rounds. Run the enumeration that establishes ground truth BEFORE writing the design.
+- FAN THE REVIEW OUT, DO NOT SERIALIZE ROUNDS. Four consult rounds ran 18:06 -> 18:29 -> 18:51 -> 19:20, ~25
+  minutes each, strictly sequential -- and their findings were largely INDEPENDENT, mostly latent in revision
+  1 and simply deeper in the document than one reviewer reached per pass. One reviewer per round is the
+  bottleneck, not the review. Use a workflow with one reviewer per DIMENSION (site set, record sufficiency,
+  verifier independence, cutover risk, internal consistency, witness adequacy), each adversarially verified.
+- NEVER IDLE-WAIT ON A CONSULT. The gate blocks ADOPTION code, not shadow work. ~75 minutes went on prose
+  edits during rounds 2-4 while the shadow producer and verifier -- which round 4 then explicitly asked for --
+  could have been building in parallel. Always have implementation or measurement running under a pending
+  consult.
+- DO NOT PUSH PER COMMIT. 34 commits in one day against self-hosted runners taking 19-53 MINUTES per run
+  cannot drain; the queue just grows. 16 of those touched no compiler code at all. Batch into milestone
+  pushes.
+- THE FULL LOCAL SUITE IS 21-27 MINUTES AND IS NOT YOURS TO RUN. Targeted files take seconds and CI is
+  authoritative. This was already a maintainer directive and was still violated twice.
+
 OPERATIONAL SURVIVAL KIT (each has bitten this campaign):
 - NEVER `pkill`/`killall` by name pattern. `pkill -f codex` killed the maintainer's unrelated session in
   another project. Kill only PIDs you captured yourself.
