@@ -264,7 +264,7 @@ fields -- the decoration-vs-live forensics (the __post_init__ bytecode scan, the
 are gone, so a class mutated after decoration constructs per its declared schema.
 Field defaults are admitted lazily at the FIRST construction that
 actually omits the field (Python never observes an overridden default) and once per analysis, like attribute
-snapshots, so a mutable default cannot move a fact between fixpoint visits or into the emission replay; a
+snapshots, so a mutable default cannot move a fact between fixpoint visits or into the emission plan; a
 default outside the value domain rides as a fact-only reference leaf. Scalar numpy
 provenance is preserved end to end -- np.bool_ is a distinct variant from bool, and
 boolean-producing folds keep it (a comparison or & | ^ with a numpy operand yields np.bool_, exactly as numpy
@@ -289,7 +289,9 @@ validate its own operand shapes in ordinary Python: a `raise` behind a staticall
 Fuel bounds cover visits and blocks; exhaustion is a located rejection, never a truncated fixed point.
 
 On stabilization the analyzer finalizes its result into the emission plan: the authoritative fact per binding
-(temporaries are write-once, so one replay of the transfer records each), a typed plan per surviving call --
+(recorded at the visit that computes it and overwritten on each revisit, so the last write on a stabilized graph
+is the final one, and a store the graph no longer contains leaves with the op it was recorded against), a typed
+plan per surviving call --
 folded | cast (same-kind-vs-conversion decided at emission from the final facts) | intrinsic | aggregate
 re-flavoring conversion | record construction, keyed by the call's destination binding -- and the state leaves in
 first-store source order (the established port ABI orders ports by source text, not CFG shape; the order key is
@@ -297,7 +299,9 @@ the store's origin stack with the user call site primary, so two call sites inli
 sites rather than tying on the setter's own line, and clones of one store -- an unrolled loop's trips -- share the
 whole chain and tie-break by execution order, which is the iterable's source order). The plan carries every
 decision the analyzer owns: emission never re-derives a fold, never resolves the library registry, and never
-replays the transfer function. It is not yet the whole contract: emission still decides cast, intrinsic, power,
+replays the transfer function -- nor does finalization, which would otherwise run every concrete library fold a
+second time and read a user's objects once per phase instead of once per analysis. It is not yet the whole
+contract: emission still decides cast, intrinsic, power,
 and return-contract policy from the final facts, re-derives concat/positional/record-projection routing, and
 classifies operand kinds -- decisions the Stage-4 restructuring moves analyzer-side.
 

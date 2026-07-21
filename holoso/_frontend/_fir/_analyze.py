@@ -484,6 +484,11 @@ class Analyzer:
         # whenever an incoming fact changes, so a block that is not revisited did not change: the last write
         # is the stabilized one. This is what lets `_finalize` stop replaying the transfer, which used to run
         # every host fold a second time.
+        # Which leaf each store op writes, keyed by the OP so that a graft takes the record with the op it
+        # removes. Keyed by block instead, a store the graft moved into an unreachable continuation would stay
+        # in the store order and be snapshotted as a nonexistent attribute -- measured, it falsely rejected a
+        # kernel the replay accepted.
+        self._store_leaf_of_op: dict[int, StateLeaf] = {}
         self._visit_facts: dict[BindingId, Fact] = {}
         self._visit_call_plans: dict[BindingId, CallPlan] = {}
         self._concrete_calls: set[int] = set()
@@ -705,6 +710,12 @@ class Analyzer:
         self._block_ancestry = {}
         self._discovered_stores = set()
         self._discovered_store_origins = {}
+        self._store_leaf_of_op = {}
+        # Cleared with the rest of the round's evidence: an unroll restart re-runs the worklist, so every
+        # surviving destination is recorded again. Retained across restarts these grew quadratically on a
+        # deep inlined state chain -- 50,056 facts for 392 final destinations, 10.4 MB against 2.2 MB.
+        self._visit_facts = {}
+        self._visit_call_plans = {}
         self._store_origins = {}
         self._store_verdicts = {}
         self._unbound_store_origins = set()
@@ -917,7 +928,7 @@ class Analyzer:
 
     def _finalize(self, result: ResidualUnit) -> None:
         """
-        One replay of the transfer over the stabilized graph fills the emission plan: the authoritative fact per
+        The emission plan is assembled from evidence recorded at the visits that computed it: the authoritative fact per
         binding (temporaries are write-once, so one pass records each), a typed plan per surviving call (keyed by
         the call's destination binding, never by op identity), and state leaves in first-store SOURCE order (the
         order key is the storing op's origin with the user call site primary, so a store nested in a branch has a
@@ -925,18 +936,22 @@ class Analyzer:
         inlining one setter order by the call sites, tie-broken by the callee frames). Clones of ONE store op
         (unroll trips of a loop over components) share the whole origin chain, so equal origin keys tie-break by
         the storing block's execution rank -- trip order, the source order of the iterable -- never by raw block
-        id, which the unroller hands out in reverse trip order. The replay does not mutate the graph: every call
-        is already expanded, folded, or classified. Emission consumes only this plan.
+        id, which the unroller hands out in reverse trip order. Nothing here re-runs the transfer, which used to
+        execute every concrete library fold a second time; the walk over the stabilized ops only reads what the
+        fixpoint already recorded, which is also what keeps a store the graph no longer contains out of the
+        plan. Emission consumes only this plan.
         """
         rank = self._executable_rank(result)
         first_store: dict[StateLeaf, tuple[tuple[tuple[int, int], ...], int]] = {}
-        for (block_id, leaf), origin in self._discovered_store_origins.items():
-            if block_id not in result.executable_blocks:
-                continue
-            position = (source_position(origin), rank[block_id])
-            if leaf not in first_store or position < first_store[leaf]:
-                first_store[leaf] = position
-                result.store_origins[leaf] = origin
+        for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
+            for op in result.unit.blocks[block_id].ops:
+                leaf = self._store_leaf_of_op.get(id(op)) if isinstance(op, PyStoreAttr) else None
+                if leaf is None:
+                    continue
+                position = (source_position(op.origin), rank[block_id])
+                if leaf not in first_store or position < first_store[leaf]:
+                    first_store[leaf] = position
+                    result.store_origins[leaf] = op.origin
         for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
             for op in result.unit.blocks[block_id].ops:
                 if isinstance(op, PyCall):
@@ -1550,6 +1565,7 @@ class Analyzer:
                 here = self._discovered_store_origins.get((block.id, leaf))
                 if here is None or source_position(op.origin) < source_position(here):
                     self._discovered_store_origins[(block.id, leaf)] = op.origin
+                self._store_leaf_of_op[id(op)] = leaf
                 # The reset fixes the slot schema; a violating store carries a fixpoint-stable fact onward and
                 # the recorded verdict reports after stabilization, at this store. An Unbound value is no
                 # evidence either way, so it leaves the recorded verdict untouched.

@@ -1866,3 +1866,27 @@ every refusal. Twenty-two mutants are pinned. NEXT: M1, evidence-atomic recordin
 waiting (`_finalize`'s replay runs `admit_call` 6 times in the fixpoint and 6 MORE in finalize, so host folds
 execute twice) and a decisive acceptance criterion (that second count must reach zero), with five verifier arms
 standing in front of exactly the recorder rewrite it performs.
+
+
+M1 REVIEW -- A REAL REGRESSION, MINE, AND THE CORRECTNESS ARGUMENT WAS TOO BROAD IN A WAY I DID NOT SEE. The
+Codex half built a public-API reproducer and it disproved the claim cleanly: the argument holds for
+OVERWRITTEN destination records (facts, call plans -- keyed by destination and rewritten on each visit), but
+STORE DISCOVERY IS ADDITIVE AND WAS KEYED BY BLOCK, not tied to a surviving operation. A deferred call lets a
+suffix store execute; grafting then moves that store into a continuation the exit cannot reach while the block
+stays live; the obsolete row is never retracted. The old env-based walk never saw it, because it iterated the
+FINAL ops. Result: `self.ghost = x` entered the store order and was snapshotted as a nonexistent attribute,
+falsely rejecting a kernel the replay accepted -- reproduced by running the reviewer's own probe file, which
+was still on disk at the path it named, against both trees.
+
+Fixed by keying store records on the OP, so a graft takes the record with the op it removes, and `_finalize`
+walks the final ops exactly as the replay did without needing an environment. Pinned, fail-before observed.
+
+Worth recording precisely: this was the failure mode M1 was expected to have, and NONE OF M0'S FIVE ARMS CATCH
+IT. They check that what emission reads is present; this was a record that was present and stale. A guard
+suite built against the shapes a reviewer showed me covers those shapes.
+
+Also: the visit tables were not cleared per round, so abandoned unroll rounds accumulated -- 50,056 facts for
+392 final destinations, 10.4 MB peak against 2.2 MB. Cleared with the rest of the round's evidence now, since
+a restart re-runs the worklist and re-records every surviving destination. And DESIGN.md plus the `_finalize`
+docstring still described the replay, which the project's rules require updating in the same commit as the
+behaviour.

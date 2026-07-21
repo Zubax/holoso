@@ -689,3 +689,39 @@ def test_finalization_does_not_replay_host_folds() -> None:
 
     assert counts["fixpoint"] > 0, "the kernel must fold host calls for this test to mean anything"
     assert counts["finalize"] == 0, f"finalization replayed {counts['finalize']} host folds"
+
+
+def test_a_grafted_away_store_leaves_the_plan_with_its_op() -> None:
+    # M1 records evidence at the visit that computes it, and store discovery is ADDITIVE rather than
+    # overwritten -- so a record keyed by BLOCK outlives the op it describes. A deferred call lets a suffix
+    # store execute, grafting then moves that store into an unreachable continuation while the block stays
+    # live, and the stale row put a nonexistent attribute into the store order: measured as a false rejection
+    # of a kernel the pre-M1 replay accepted. Keying on the op is what ties the record to the graph.
+    import numpy as np
+
+    class Probe:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def hang(self, a: float, b: float) -> float:
+            while True:
+                a = a + b
+            return a
+
+        def step(self, x: float, flag: bool, invoke: bool) -> float:
+            if invoke:
+                if flag:
+                    u = 1.0
+                    q = 1.0
+                else:
+                    u = 2**53 + 1
+                    q = 2**64
+                self.t = u
+                args = np.array([q, x])
+                self.hang(*args)
+                self.ghost = x  # grafting moves this into a continuation the exit cannot reach
+            return x
+
+    built = holoso.synthesize(Probe().step, default_ops(FloatFormat(8, 23)), name="grafted_store")
+    assert "state_ghost" not in [port.name for port in built.ports]
+    assert float(built.numerical_model.elaborate().run(3.0, False, False)[0]) == 3.0
