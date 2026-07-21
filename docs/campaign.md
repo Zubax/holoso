@@ -122,6 +122,10 @@ accordingly, because review-by-reading has a measured yield of zero here.
   emits the promotion; verified afterwards, `BoolToFloat` appears in the HIR. A public witness for it already
   existed in the matrix suite. This was written into the log AS a named negative result within an hour of
   writing this very section.
+- GATE CHAINS MUST FAIL LOUDLY OR THEY DO NOT GATE. Committed and pushed a typecheck failure because the
+  gate ran as `mypy | tail -1` on its own line followed by an unconditional `git commit`: the pipeline's exit
+  status was `tail`'s, the error scrolled past, and nothing stopped the push. `set -o pipefail` is already in
+  the survival kit for exactly this and was not applied here. A gate you have to READ is not a gate.
 - HARDENING HAS BLAST RADIUS. Making `_check_branch_settled` assert on its premise was right, and it created a
   hazard in the same round, because the check ran before parameters were seeded. Noticing required reading
   what the assert now DEPENDED on -- a different question from whether the assert was correct.

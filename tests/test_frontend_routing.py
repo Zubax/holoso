@@ -390,7 +390,9 @@ def test_a_nondatapath_scalar_state_store_stays_a_located_rejection() -> None:
             self.v = 0.0
 
         def step(self, x: float) -> float:
-            self.v = "text"
+            # Deliberately ill-typed: the kernel under test is one the compiler must REFUSE, and the refusal is
+            # the assertion. mypy is told so rather than the kernel being weakened into something type-clean.
+            self.v = "text"  # type: ignore[assignment]
             return x
 
     with pytest.raises(holoso.UnsupportedConstruct) as raised:
