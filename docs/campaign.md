@@ -37,10 +37,31 @@ port ABI -- was identical throughout. That is worth more than the byte-identical
 Note for later steps: BOTH false benefits I claimed for M1 sat next to a true one, and the true one is what
 stopped me checking. Verify each half of a conjunction separately.
 
-NEXT IS M2, the routing algebra, and it is GATED: Codex consult X6a on the schema document BEFORE any adoption
-code. See the M2 bullet under "Variant MORPH" for the shape and the exact surfaces it must absorb and delete.
-The J6 obligation from the X5 ruling -- every kind promotion consumed from an explicit plan row rather than
-derived by inspecting emitted nodes -- belongs to M2/M3 and is still outstanding.
+M2 IS IN PROGRESS AND STILL GATED. `docs/decisions/routing-schema.md` is at REVISION 5; consult X6a has
+refused rounds 1-4, and every refusal caught a real defect BEFORE any adoption code existed -- two of which
+would have shipped silent miscompiles the compiler does not currently have (an operand-index address whose
+bounds check passes while reading the wrong operand, and a `NoCell` rule that would have deleted a located
+rejection and retained stale state). NO ADOPTION CODE EXISTS; do not write any until the gate clears.
+
+SETTLED AND APPROVED ON THEIR MERITS: cells address by `CellRef(Place, ordinal)`, never by operand index; the
+action vocabulary is `CopyCell | ConstantCell | NoCell` with an explicit `CellTransfer`; `NoCell` is
+SITE-RELATIVE ("this site emits no datapath definition for this ordinal"), not fact-relative; the key is a
+typed phase-local `PlanSite` of `(BlockId, op index)`; `_conversion_calls` leaves routing entirely;
+`UnbindPlace` is excluded rather than given an empty plan; projection and every `CONSTRUCTION` produce
+all-`NoCell` plans rather than no key, so `needs_cells` becomes a consequence of dispositions; J6 folds into
+M2 for routing sites only; one atomic absorb-and-delete commit with the witnesses written first. Budget: four
+inline walks, six offset derivations.
+
+NEXT ACTION IS SHADOW IMPLEMENTATION, NOT ANOTHER DOCUMENT ROUND. Round 4 ruled the remaining blockers
+document-fixable (all resolved in revision 5) and named exactly ONE question paper cannot settle: whether
+SOURCE AVAILABILITY can be independently reconstructed from `block_in`, the final binding facts and an
+intra-block walk WITHOUT reusing the producer's decisions. If it cannot, the verifier is not independent and
+its key-set comparison proves less than it looks. Build it in shadow, measure exact site counts and
+disagreements, and bring MEASUREMENTS to the consult rather than prose.
+
+The behavioural baseline is `tests/test_frontend_routing.py` (23 swap-sensitive witnesses, mutation-checked).
+Verifier-mutation tests -- missing, surplus, zero-row, wrong disposition, wrong source place, illegal transfer
+-- belong AFTER the verifier exists and are still owed.
 
 THE FINDING THAT RESHAPED THIS STEP. The deferral x grafting seam does NOT merely produce false rejections, as
 the maintainer's plan assumed when deferring it to Stage 4. IT SILENTLY MISCOMPILES: honest numeric kernels are
