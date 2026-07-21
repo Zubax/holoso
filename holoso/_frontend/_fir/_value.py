@@ -167,6 +167,38 @@ type StaticValue = (
 )
 
 
+def datapath_value(value: StaticValue) -> bool:
+    """
+    Whether a static value can become a datapath constant. A non-datapath value (a string, a range, a slice, an
+    aggregate) stays fact-only: its every use folds during analysis, so defining a cell for it would only force a
+    spurious materialization rejection.
+    """
+    return isinstance(value, (StaticBool, NpBool, MetaInt, NpInt, StaticFloat, NpFloat))
+
+
+def value_kind(value: StaticValue) -> SemType:
+    """The scalar kind a datapath constant materializes in."""
+    assert datapath_value(value)
+    if isinstance(value, (StaticBool, NpBool)):
+        return SemType.BOOL
+    return SemType.INT if isinstance(value, (MetaInt, NpInt)) else SemType.FLOAT
+
+
+def conform_value(value: StaticValue, kind: SemType) -> StaticValue:
+    """
+    A datapath constant as the TARGET side of a transfer sees it. Only the integer-into-float store edge changes
+    anything: the binary64 image is the value the slot or variable actually holds afterwards, so recording the
+    source integer beside a float kind would leave the target-side value un-derivable from the row alone. The
+    rounding is exact here because an inexact one is a storage-schema violation refused during analysis.
+    """
+    if kind is SemType.FLOAT and isinstance(value, (MetaInt, NpInt)):
+        image = float(value.value)
+        assert int(image) == value.value, "an inexact integer store edge is refused by the storage schema"
+        return NpFloat(image) if isinstance(value, NpInt) else StaticFloat(image)
+    assert value_kind(value) is kind
+    return value
+
+
 def _mro_attribute(klass: type, name: str) -> object | None:
     # MRO-dict lookup, not getattr: getattr on a class falls through to the metaclass, which never governs
     # instance semantics.

@@ -828,7 +828,7 @@ def enforce_storage_schemas(
     schemas_in: Mapping[BlockId, Mapping["Place", StorageSchema]],
     store_verdicts: Mapping[int, StoreVerdict],
     pending_bridge: Mapping[OriginStack, str],
-) -> set[int]:
+) -> None:
     """
     The one storage-schema resolution site, over the stabilized executable graph: every block's SOURCE stores
     replay against its stable entry schemas -- the environments the analysis flowed beside the facts
@@ -844,12 +844,10 @@ def enforce_storage_schemas(
     with the message only a tie-break. Runs strictly after the round stabilizes: SCCP discovers executable
     predecessors late, so a mid-flight verdict would be order-dependent. A compiler scope reset (an unchecked
     UnbindPlace: a comprehension entry, an unroll trip's target prelude) clears the binding for a fresh
-    per-execution schema, while a user ``del`` does not: variables stay strongly typed across ``del``. When no
-    store violates, the returned op ids are the local stores whose value converts int->float on the store edge:
-    the emission plan for the store-edge conversion.
+    per-execution schema, while a user ``del`` does not: variables stay strongly typed across ``del``. This is the
+    VERDICT alone; the conformed facts the store edge produces are re-derived where the route plan needs them.
     """
     violations: list[tuple[tuple[int, int], str, OriginStack]] = []
-    conversions: set[int] = set()
     surviving_origins: set[OriginStack] = set()
     order = executable_preorder(unit, executable_blocks, executable_edges)
 
@@ -879,13 +877,11 @@ def enforce_storage_schemas(
                         if message is not None:
                             violations.append(((position, index), message, op.origin))
                         continue
-                    schema, conformed, message = conform_local_store(env.get(place), place.binding.name, fact)
+                    schema, _, message = conform_local_store(env.get(place), place.binding.name, fact)
                     if schema is not None:
                         env[place] = schema
                     if message is not None:
                         violations.append(((position, index), message, op.origin))
-                    elif _scalar_sem(fact) is SemType.INT and _scalar_sem(conformed) is SemType.FLOAT:
-                        conversions.add(id(op))
     if violations:
         _, message, origin = min(violations, key=lambda item: item[0])
         raise AnalysisRejection(message, origin)
@@ -893,7 +889,6 @@ def enforce_storage_schemas(
     if stranded:
         message, origin = min(stranded, key=lambda entry: (source_position(entry[1]), entry[0]))
         raise AnalysisRejection(message, origin)
-    return conversions
 
 
 def _mro_attribute_of(klass: type, name: str) -> object | None:

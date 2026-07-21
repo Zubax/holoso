@@ -69,7 +69,17 @@ from ..._hir import (
     Select,
     Type,
 )
-from ._analyze import Analyzer, CallLowering, CallPlan, ResidualUnit, verify_plan_totality
+from ._analyze import Analyzer, ResidualUnit, verify_plan_totality
+from ._plan import (
+    CallLowering,
+    CallPlan,
+    CellTransfer,
+    ConstantCell,
+    CopyCell,
+    NoCell,
+    PlanSite,
+    verify_route_plans,
+)
 from ._fact import (
     AggregateFact,
     AggregateLayout,
@@ -93,12 +103,9 @@ from ._fact import (
     TupleLayout,
     ValueLayout,
     child_layouts,
-    child_slice,
     leaf_count,
     leaf_paths,
-    materialize_static,
     normalize_static,
-    outer_arity,
 )
 from ._signature import (
     ArrayReturn,
@@ -157,6 +164,7 @@ from ._value import (
     StaticValue,
     admit,
     as_python,
+    datapath_value,
 )
 
 _logger = logging.getLogger(__name__)
@@ -178,6 +186,18 @@ def lower_fir(kernel: object) -> Hir:
     """The front-end pipeline: build, analyze to the W/D fixed point, emit HIR from the analysis plan."""
     result = Analyzer(kernel).fixpoint()
     verify_plan_totality(result)
+    verify_route_plans(
+        result.unit,
+        result.executable_edges,
+        {block_id: env.facts for block_id, env in result.block_in.items()},
+        {block_id: env.schemas for block_id, env in result.block_in.items()},
+        result.binding_facts,
+        result.call_plans,
+        result.construction_schemas,
+        result.state_resets,
+        result.runtime_state,
+        result.route_plans,
+    )
     return _Emitter(result).emit()
 
 
@@ -629,131 +649,51 @@ class _Emitter:
             return self._builder.float_const(_carrier_float(concrete, self._origin))
         raise EmissionRejection(f"a {type(concrete).__name__} value cannot materialize in the datapath", self._origin)
 
-    def _emit_concat(
-        self, block: FirBlockId, dst: BindingId, bin_op: BinOp, lhs: BindingId, rhs: BindingId, result: AggregateFact
-    ) -> None:
-        """Sequence concat (+) and repeat (*): pure leaf routing, no HIR -- the layout work happened in analysis."""
-        if bin_op is BinOp.ADD:
-            offset = 0
-            for operand in (lhs, rhs):
-                fact = self._fact(operand)
-                assert isinstance(fact, AggregateFact)
-                self._install(block, Local(dst), offset, operand)
-                offset += len(fact.leaves)
-            assert offset == len(result.leaves)
-        else:
-            assert bin_op is BinOp.MUL
-            seq, seq_fact = next(
-                (operand, fact) for operand in (lhs, rhs) if isinstance(fact := self._fact(operand), AggregateFact)
-            )
-            assert isinstance(seq_fact, AggregateFact)
-            count = len(seq_fact.leaves)
-            for repetition in range(len(result.leaves) // count if count else 0):
-                self._install(block, Local(dst), repetition * count, seq)
+    def _route(self, block: FirBlockId, site: PlanSite) -> None:
+        """
+        Execute one route plan. Which cell feeds which, which value a constant carries, and which promotion a
+        copy applies are all decided in the plan; nothing here inspects a fact or an emitted node to re-derive
+        them. A bare subscript on the plan table on purpose: the site set is total and verified, so a miss is a
+        broken postcondition rather than a site that happens to route nothing.
 
-    def _atom_vid(self, leaf: Known) -> int:
-        """A Known leaf in its own kind (an integer leaf stays an IntConst; interning keeps duplicates free)."""
-        if isinstance(leaf.value, (MetaInt, NpInt)):
-            return self._builder.int_const(int(leaf.value.value))
-        return self._const(leaf.value)
+        A state target additionally REGISTERS every one of its slots -- an executor invariant, since a verifier
+        that runs before emission cannot prove a future executor will do it.
+        """
+        plan = self._result.route_plans[site]
+        for ordinal, action in enumerate(plan.actions):
+            match action:
+                case CopyCell(source=source, transfer=transfer):
+                    vid = self._read(block, _LeafPlace(source.place, source.ordinal))
+                    self._write(block, _LeafPlace(plan.target, ordinal), self._coerce(vid, transfer))
+                case ConstantCell(value=value, kind=kind):
+                    self._write(block, _LeafPlace(plan.target, ordinal), self._cell_const(value, kind))
+                case NoCell():
+                    pass
+            if isinstance(plan.target, StateLeaf):
+                self._state_read(plan.target, ordinal)
 
-    @staticmethod
-    def _datapath_known(leaf: Known) -> bool:
-        """
-        Whether a Known leaf is a datapath scalar. A non-datapath Known (a string, a function reference, a range)
-        stays fact-only: its every use folds at analysis, and it can never become a merge operand (a join keeps it
-        Known-same or rejects), so defining its cell would only force a spurious materialization rejection.
-        """
-        return isinstance(leaf.value, (StaticBool, NpBool, MetaInt, NpInt, StaticFloat, NpFloat))
-
-    def _emit_conversion(
-        self,
-        block: FirBlockId,
-        source: BindingId,
-        dst: BindingId,
-        result: AggregateFact,
-        route: "tuple[int, ...] | None" = None,
-    ) -> None:
-        """
-        A conversion's leaf copy: identical to :meth:`_copy_leaves` for the flavor conversions (whose result
-        leaves ARE the source facts), plus the kind coercion an array factory introduces -- a residual integer
-        leaf under a float dtype reads its source cell and promotes, exactly as the scalar materializer would.
-        A ROUTE plan (a transpose) names the source ordinal feeding each result cell; its absence is the
-        aligned identity.
-        """
-        source_fact = self._fact(source)
-        assert isinstance(source_fact, AggregateFact) and len(source_fact.leaves) == len(result.leaves)
-        for ordinal, leaf in enumerate(result.leaves):
-            source_ordinal = route[ordinal] if route is not None else ordinal
-            if isinstance(leaf, Known):
-                if self._datapath_known(leaf):
-                    self._write(block, _LeafPlace(Local(dst), ordinal), self._atom_vid(leaf))
-            elif not isinstance(leaf, Reference):
-                assert isinstance(leaf, Residual)
-                # An unchanged leaf copies as carried (the flavor-conversion identity); only a leaf the factory
-                # re-semmed coerces onto its new kind. A boolean source under a float destination is the ONE
-                # sanctioned bool crossing -- the user's explicit dtype=float IS the conversion -- scoped here
+    def _coerce(self, vid: int, transfer: CellTransfer) -> int:
+        match transfer:
+            case CellTransfer.IDENTITY:
+                return vid
+            case CellTransfer.INT_TO_FLOAT:
+                return self._builder.operation(IntToFloat(), [vid])
+            case CellTransfer.BOOL_TO_FLOAT:
+                # The ONE sanctioned bool crossing on a routing path: an explicit dtype=float IS the conversion,
                 # so the scalar materializer keeps rejecting implicit bool arithmetic everywhere else.
-                source_leaf = source_fact.leaves[source_ordinal]
-                if leaf.type is SemType.FLOAT and source_leaf == Residual(SemType.BOOL):
-                    flag = self._materialize_atom(
-                        source_leaf,
-                        lambda: self._read(block, _LeafPlace(Local(source), source_ordinal)),
-                        SemType.BOOL,
-                    )
-                    vid = self._builder.operation(BoolToFloat(), [flag])
-                else:
-                    expected = None if source_leaf == leaf else leaf.type
-                    vid = self._materialize_atom(
-                        source_leaf,
-                        lambda: self._read(block, _LeafPlace(Local(source), source_ordinal)),
-                        expected,
-                    )
-                self._write(block, _LeafPlace(Local(dst), ordinal), vid)
+                return self._builder.operation(BoolToFloat(), [vid])
 
-    def _copy_leaves(self, block: FirBlockId, source: Place, fact: AggregateFact, target: Place) -> None:
-        """
-        Define every datapath leaf of ``target``: a Known leaf as its constant, a residual leaf as the source's
-        aligned SSA cell. All-datapath-leaf definition is the invariant a later per-leaf CFG merge relies on -- a
-        phi arm must resolve on every predecessor, including one whose leaf happened to be a constant on that path.
-        """
-        for ordinal, leaf in enumerate(fact.leaves):
-            if isinstance(leaf, Known):
-                if self._datapath_known(leaf):
-                    self._write(block, _LeafPlace(target, ordinal), self._atom_vid(leaf))
-            elif not isinstance(leaf, Reference):  # a reference leaf stays fact-only, like a non-datapath Known
-                self._write(block, _LeafPlace(target, ordinal), self._read(block, _LeafPlace(source, ordinal)))
-
-    def _project(self, block: FirBlockId, source: Place, start: int, dst: BindingId) -> None:
-        """Define dst's cells from the source's cell window at [start, ...): a subscript or field projection."""
-        dst_fact = self._fact(dst)
-        if isinstance(dst_fact, AggregateFact):
-            for ordinal, leaf in enumerate(dst_fact.leaves):
-                if isinstance(leaf, Known):
-                    if self._datapath_known(leaf):
-                        self._write(block, _LeafPlace(Local(dst), ordinal), self._atom_vid(leaf))
-                elif not isinstance(leaf, Reference):
-                    vid = self._read(block, _LeafPlace(source, start + ordinal))
-                    self._write(block, _LeafPlace(Local(dst), ordinal), vid)
-        elif not isinstance(dst_fact, (Known, Reference)):
-            self._write(block, Local(dst), self._read(block, _LeafPlace(source, start)))
-
-    def _install(self, block: FirBlockId, target: Place, start: int, item: BindingId) -> None:
-        """Write item's value cells into target's cells at [start, ...): the insertion mirror of ``_project``."""
-        item_fact = self._fact(item)
-        if isinstance(item_fact, AggregateFact):
-            for ordinal, leaf in enumerate(item_fact.leaves):
-                if isinstance(leaf, Known):
-                    if self._datapath_known(leaf):
-                        self._write(block, _LeafPlace(target, start + ordinal), self._atom_vid(leaf))
-                elif not isinstance(leaf, Reference):
-                    vid = self._read(block, _LeafPlace(Local(item), ordinal))
-                    self._write(block, _LeafPlace(target, start + ordinal), vid)
-        elif isinstance(item_fact, Known):
-            if self._datapath_known(item_fact):
-                self._write(block, _LeafPlace(target, start), self._atom_vid(item_fact))
-        elif not isinstance(item_fact, Reference):
-            self._write(block, _LeafPlace(target, start), self._read(block, Local(item)))
+    def _cell_const(self, value: StaticValue, kind: SemType) -> int:
+        """A routed constant in the kind its ROW declares; the value already carries the target-side image."""
+        match kind:
+            case SemType.INT:
+                assert isinstance(value, (MetaInt, NpInt))
+                return self._builder.int_const(int(value.value))
+            case SemType.BOOL:
+                assert isinstance(value, (StaticBool, NpBool))
+                return self._builder.bool_const(bool(value.value))
+            case SemType.FLOAT:
+                return self._builder.float_const(_carrier_float(as_python(value), self._origin))
 
     def _fact(self, binding: BindingId) -> Fact:
         fact = self._result.binding_facts.get(binding)
@@ -797,8 +737,8 @@ class _Emitter:
     def _emit_block(self, fir_id: FirBlockId) -> None:
         self._builder.position_at(self._fir_to_hir[fir_id])
         block = self._result.unit.blocks[fir_id]
-        for op in block.ops:
-            self._emit_op(fir_id, op)
+        for index, op in enumerate(block.ops):
+            self._emit_op(fir_id, PlanSite(fir_id, index), op)
         match block.terminator:
             case FirJump(target=target):
                 if target in self._result.executable_blocks:
@@ -816,7 +756,7 @@ class _Emitter:
             case other:
                 raise AssertionError(f"terminator {type(other).__name__} survived analysis into emission")
 
-    def _emit_op(self, fir_id: FirBlockId, op: Op) -> None:
+    def _emit_op(self, fir_id: FirBlockId, site: PlanSite, op: Op) -> None:
         self._origin = op.origin
 
         def define(dst: BindingId, vid: int) -> None:
@@ -825,26 +765,10 @@ class _Emitter:
         match op:
             case LoadConst() | LoadRef() | UnbindPlace():
                 pass  # facts and boundness are the analyzer's; nothing materializes here
-            case LoadPlace(dst=dst, place=place):
-                fact = self._fact(dst)
-                if isinstance(fact, AggregateFact):
-                    self._copy_leaves(fir_id, place, fact, Local(dst))
-                elif not isinstance(fact, (Known, Reference)):
-                    define(dst, self._read(fir_id, place))
-            case StorePlace(place=place, src=src):
-                fact = self._fact(src)
-                if isinstance(fact, AggregateFact):
-                    self._copy_leaves(fir_id, Local(src), fact, place)
-                elif isinstance(fact, Reference) or (isinstance(fact, Known) and not self._datapath_known(fact)):
-                    pass  # a reference or non-datapath Known (a string, a range): every use folds
-                else:
-                    # The analyzer's resolution walk marked the stores whose value converts int->float on the
-                    # store edge (a runtime int into a float-schema local); the cell must carry the converted
-                    # kind the flowed facts promise, exactly as the explicit float(...) spelling would.
-                    expected = SemType.FLOAT if id(op) in self._result.store_conversions else None
-                    self._write(fir_id, place, self._materialize(fir_id, src, expected))
+            case LoadPlace() | StorePlace() | PySubscript() | PyAttr() | PyStoreAttr() | BuildTuple() | BuildList():
+                self._route(fir_id, site)
             case PyBin(dst=dst, op=bin_op, lhs=lhs, rhs=rhs):
-                self._emit_binary(fir_id, dst, bin_op, lhs, rhs)
+                self._emit_binary(fir_id, site, dst, bin_op, lhs, rhs)
             case PyUn(dst=dst, op=un_op, operand=operand):
                 self._emit_unary(fir_id, dst, un_op, operand)
             case PyCompare(dst=dst, op=rel, lhs=lhs, rhs=rhs):
@@ -878,14 +802,8 @@ class _Emitter:
                 result_fact = self._fact(dst)
                 if isinstance(result_fact, (Known, Reference)):
                     pass  # the analyzer selected a Known/reference arm or folded a boolean identity (``A or True``)
-                elif isinstance(cond_fact := self._fact(cond), Known):
-                    taken = as_python(cond_fact.value)
-                    assert isinstance(taken, bool)
-                    chosen = (rhs if taken else lhs) if mode is SelectMode.AND else (lhs if taken else rhs)
-                    if isinstance(result_fact, AggregateFact):
-                        self._copy_leaves(fir_id, Local(chosen), result_fact, Local(dst))
-                    else:
-                        define(dst, self._materialize(fir_id, chosen))
+                elif isinstance(self._fact(cond), Known):
+                    self._route(fir_id, site)  # a settled condition SELECTS an arm; the plan names which
                 else:
                     # The merged fact fixes the selection kind; each arm materializes onto it, so a mixed int/float
                     # select promotes the integer arm on its own edge exactly like a phi. An aggregate never reaches
@@ -901,109 +819,8 @@ class _Emitter:
                     then_vid = self._materialize(fir_id, then_binding, sem)
                     else_vid = self._materialize(fir_id, else_binding, sem)
                     define(dst, self._builder.operation(operator, [condition, then_vid, else_vid]))
-            case BuildTuple(dst=dst, items=items) | BuildList(dst=dst, items=items):
-                fact = self._fact(dst)
-                if isinstance(fact, AggregateFact):
-                    for index, item in enumerate(items):
-                        _, start, _ = child_slice(fact.layout, index)
-                        self._install(fir_id, Local(dst), start, item)
-            case PySubscript(dst=dst, obj=obj, index=index):
-                obj_fact = self._fact(obj)
-                dst_fact = self._fact(dst)
-                needs_cells = isinstance(dst_fact, Residual) or (
-                    isinstance(dst_fact, AggregateFact) and any(isinstance(leaf, Residual) for leaf in dst_fact.leaves)
-                )
-                if isinstance(obj_fact, AggregateFact) and needs_cells:
-                    selection = self._result.subscript_plans.get(dst)
-                    if selection is not None:
-                        # A slice window or an array gather: the analyzer's plan names the source leaf ordinal
-                        # feeding each result cell; Known result leaves materialize as their own constants.
-                        if isinstance(dst_fact, AggregateFact):
-                            assert len(selection) == len(dst_fact.leaves), "a selection misaligns its result"
-                            for ordinal, window_leaf in enumerate(dst_fact.leaves):
-                                if isinstance(window_leaf, Known):
-                                    if self._datapath_known(window_leaf):
-                                        self._write(
-                                            fir_id,
-                                            _LeafPlace(Local(dst), ordinal),
-                                            self._atom_vid(window_leaf),
-                                        )
-                                elif not isinstance(window_leaf, Reference):
-                                    vid = self._read(fir_id, _LeafPlace(Local(obj), selection[ordinal]))
-                                    self._write(fir_id, _LeafPlace(Local(dst), ordinal), vid)
-                        else:
-                            assert len(selection) == 1
-                            define(dst, self._read(fir_id, _LeafPlace(Local(obj), selection[0])))
-                    else:
-                        # A residual dst leaf without a selection plan means the analyzer projected a positional
-                        # child, so the key resolves under operator.index -- either a Known directly or an
-                        # all-Known aggregate (an __index__-able record), materialized exactly as the analyzer
-                        # materialized it.
-                        import operator as operator_module
-
-                        index_fact = self._fact(index)
-                        assert isinstance(index_fact, (Known, AggregateFact)), index_fact
-                        key = index_fact.value if isinstance(index_fact, Known) else materialize_static(index_fact)
-                        assert key is not None, index_fact
-                        position = operator_module.index(as_python(key))  # type: ignore[arg-type]
-                        width = outer_arity(obj_fact.layout)
-                        position = position + width if position < 0 else position
-                        _, start, _ = child_slice(obj_fact.layout, position)
-                        self._project(fir_id, Local(obj), start, dst)
-                # else the analyzer folded the subscript concretely: the Known facts materialize at their use sites
             case PyLen():
                 pass  # always folded by the analyzer (static shape)
-            case PyAttr(dst=dst, obj=obj, name=name):
-                dst_fact = self._fact(dst)
-                if not isinstance(dst_fact, (Known, Reference)):
-                    obj_fact = self._fact(obj)
-                    needs_cells = isinstance(dst_fact, Residual) or (
-                        isinstance(dst_fact, AggregateFact)
-                        and any(isinstance(leaf, Residual) for leaf in dst_fact.leaves)
-                    )
-                    if isinstance(obj_fact, AggregateFact) and not needs_cells:
-                        pass  # concrete navigation of an all-Known aggregate (.T, .shape, ...): every use folds
-                    elif isinstance(obj_fact, AggregateFact):
-                        # A record with residual leaves projects the named field's cell window, exactly as a
-                        # positional subscript projects a child's (the only residual-producing attribute source).
-                        layout = obj_fact.layout
-                        assert isinstance(layout, RecordLayout), layout
-                        names = [field for field, _ in layout.fields]
-                        _, start, _ = child_slice(layout, names.index(name))
-                        self._project(fir_id, Local(obj), start, dst)
-                    elif isinstance(dst_fact, AggregateFact):
-                        # An aggregate component attribute: a Known leaf is its frozen snapshot constant, and a
-                        # residual leaf is runtime aggregate state backed by its own per-cell slot.
-                        assert isinstance(obj_fact, Reference)
-                        state_root = StateLeaf(obj_fact.obj, (name,))
-                        for ordinal, leaf_fact in enumerate(dst_fact.leaves):
-                            if isinstance(leaf_fact, Known):
-                                if self._datapath_known(leaf_fact):
-                                    self._write(fir_id, _LeafPlace(Local(dst), ordinal), self._atom_vid(leaf_fact))
-                            elif not isinstance(leaf_fact, Reference):
-                                vid = self._read(fir_id, _LeafPlace(state_root, ordinal))
-                                self._write(fir_id, _LeafPlace(Local(dst), ordinal), vid)
-                    else:
-                        # Otherwise only a runtime component attribute is residual; it is backed by a state slot.
-                        assert isinstance(obj_fact, Reference)
-                        define(dst, self._read(fir_id, StateLeaf(obj_fact.obj, (name,))))
-            case PyStoreAttr(obj=obj, name=name, src=src):
-                obj_fact = self._fact(obj)
-                assert isinstance(obj_fact, Reference)
-                leaf = StateLeaf(obj_fact.obj, (name,))
-                src_fact = self._fact(src)
-                if isinstance(src_fact, AggregateFact):
-                    for ordinal, stored in enumerate(src_fact.leaves):
-                        vid = self._materialize_atom(
-                            stored,
-                            lambda: self._read(fir_id, _LeafPlace(Local(src), ordinal)),
-                            self._slot_kind(leaf, ordinal),
-                        )
-                        self._write(fir_id, _LeafPlace(leaf, ordinal), vid)
-                        self._state_read(leaf, ordinal)  # register every cell slot even if never read
-                else:
-                    self._write(fir_id, leaf, self._materialize(fir_id, src, self._slot_kind(leaf)))
-                    self._state_read(leaf)  # register the slot even if the entry live-in was never read
             case PyCall(dst=dst, args=args):
                 plan = self._result.call_plans[dst]
                 match plan.lowering:
@@ -1014,29 +831,10 @@ class _Emitter:
                     case CallLowering.INTRINSIC:
                         define(dst, self._emit_intrinsic(fir_id, plan, list(args)))
                     case CallLowering.CONVERSION:
-                        conversion_fact = self._fact(dst)
-                        if isinstance(conversion_fact, AggregateFact):
-                            route = self._result.route_plans.get(dst)
-                            self._emit_conversion(fir_id, args[0], dst, conversion_fact, route)
+                        if isinstance(self._fact(dst), AggregateFact):
+                            self._route(fir_id, site)  # a scalar conversion result carries no cells
                     case CallLowering.CONSTRUCTION:
-                        record_fact = self._fact(dst)
-                        assert isinstance(record_fact, AggregateFact) and plan.construction is not None
-                        # A fully static construction emits nothing, exactly like the folded-call era: every use
-                        # folds from the facts, and eager constants would only shift HIR node ordering.
-                        if any(isinstance(leaf, Residual) for leaf in record_fact.leaves):
-                            for index, source in enumerate(plan.construction):
-                                _, start, stop = child_slice(record_fact.layout, index)
-                                if source is not None:
-                                    source_fact = self._fact(source)
-                                    width = len(source_fact.leaves) if isinstance(source_fact, AggregateFact) else 1
-                                    assert width == stop - start, "a construction source misaligns its field window"
-                                    self._install(fir_id, Local(dst), start, source)
-                                else:  # a default-filled field: its leaves are the admitted schema constants
-                                    for ordinal in range(start, stop):
-                                        filled = record_fact.leaves[ordinal]
-                                        assert isinstance(filled, (Known, Reference)), "a default grew runtime cells"
-                                        if isinstance(filled, Known) and self._datapath_known(filled):
-                                            self._write(fir_id, _LeafPlace(Local(dst), ordinal), self._atom_vid(filled))
+                        self._route(fir_id, site)
             case _:
                 raise AssertionError(f"operation {type(op).__name__} survived analysis into emission")
 
@@ -1090,15 +888,19 @@ class _Emitter:
         assert admitted is not None
         return Known(admitted)
 
-    def _emit_binary(self, block: FirBlockId, dst: BindingId, bin_op: BinOp, lhs: BindingId, rhs: BindingId) -> None:
+    def _emit_binary(
+        self, block: FirBlockId, site: PlanSite, dst: BindingId, bin_op: BinOp, lhs: BindingId, rhs: BindingId
+    ) -> None:
         result_fact = self._fact(dst)
         if isinstance(result_fact, Known):
             return  # the analyzer folded it (a static fold, a sequence concat/repeat, a bool &/|/^ identity)
         if isinstance(result_fact, AggregateFact):
+            # Decided by the LAYOUT: an array computes elementwise, while a sequence concat or repeat is pure
+            # leaf routing that emits no HIR at all.
             if isinstance(result_fact.layout, ArrayLayout):
                 self._emit_elementwise(block, dst, bin_op, lhs, rhs, result_fact)
             else:
-                self._emit_concat(block, dst, bin_op, lhs, rhs, result_fact)
+                self._route(block, site)
             return
 
         def define(vid: int) -> None:
@@ -1364,7 +1166,7 @@ class _Emitter:
     def _exit_leaf(self, exit_block: FirBlockId, path: LeafPath, ordinal: int, leaf: AtomicFact, kind: SemType) -> int:
         """One returned leaf, coerced onto its declared contract kind exactly like a scalar return."""
         if isinstance(leaf, Known):
-            if not self._datapath_known(leaf):
+            if not datapath_value(leaf.value):
                 got_name = type(as_python(leaf.value)).__name__
                 raise EmissionRejection(
                     f"return type mismatch at leaf {_port_path(path)}: declared {kind.value}, returns a {got_name}",

@@ -150,10 +150,9 @@ Each operator declares a per-instance initiation interval; most operators have I
 The front-end is the FIR pipeline under `holoso/_frontend/_fir/`: build (AST -> FIR) -> analyze (facts + plan) ->
 emit (FIR -> HIR). The layering exists because a single-pass lowerer forces a reachability scan to run before the
 folds it must agree with -- the scan/lowering duality that plagued the previous front-end. The analyzer decides
-storage typing, call plans, selection/transpose routing, and store conversions once, over the same graph the
-emitter walks; the emitter still owns cast/intrinsic/power and return-contract policy, several positional-routing
-re-derivations, and per-operand kind classification. Closing that residual emitter-side gap is the goal of the
-restructuring campaign's Stage 4 (`docs/campaign.md`).
+storage typing, call plans, and ALL cell routing once, over the same graph the emitter walks; the emitter still
+owns cast/intrinsic/power and return-contract policy, and per-operand kind classification outside routing.
+Closing that residual emitter-side gap is the goal of the restructuring campaign's Stage 4 (`docs/campaign.md`).
 
 Name classification comes from the live code object (CPython's own; `del`-locality and PEP 709 targets correct by
 construction) with comprehension-only targets carved out via the AST; non-locals resolve closure-cell before global
@@ -302,8 +301,50 @@ decision the analyzer owns: emission never re-derives a fold, never resolves the
 replays the transfer function -- nor does finalization, which would otherwise run every concrete library fold a
 second time, and with it any host callable that is not referentially transparent. It is not yet the whole
 contract: emission still decides cast, intrinsic, power,
-and return-contract policy from the final facts, re-derives concat/positional/record-projection routing, and
-classifies operand kinds -- decisions the Stage-4 restructuring moves analyzer-side.
+and return-contract policy from the final facts, and classifies operand kinds outside routing -- decisions the
+Stage-4 restructuring moves analyzer-side.
+
+### The route plan
+
+Cell routing is a TOTAL typed plan, in `_plan.py`, keyed by a phase-local `PlanSite` of `(block, op index)` over
+the stabilized graph. Each routing site owns a `RoutePlan(target, actions)` with one action per LOGICAL leaf
+ordinal of its target: `CopyCell(CellRef(place, ordinal), transfer)`, `ConstantCell(value, kind)`, or `NoCell`.
+Cells address by PLACE and ordinal, never by operand index -- a sequence is not always operand 0 (`3 * seq` is
+legal), and a component-state source is reachable from no operand at all, so an operand-index bound can pass
+while naming the wrong value.
+
+Totality is the point: because a plan names every result cell, ABSENCE STOPS MEANING ANYTHING, which retires the
+two conventions where a missing table entry silently meant "positional projection" or "identity route". `NoCell`
+is SITE-RELATIVE -- "this site defines no cell for this ordinal" -- not a property of the fact, because the same
+datapath `Known` leaf materializes at a projection and stays fact-only inside a fully static construction. A
+site that emits nothing still owns a plan of `NoCell` rows, so the old `needs_cells` gate is now a consequence
+of dispositions rather than an independent decision. Sites that move no value (`UnbindPlace`) carry no plan at
+all; an empty aggregate's legitimate zero-cell route is a plan with zero rows, and the two must not be conflated.
+
+`CellTransfer` (identity, int-to-float, bool-to-float) makes every routing-path kind promotion an explicit row
+rather than something emission derives by inspecting the node it just emitted. The vocabulary is closed at three
+for routing only; absorbing scalar casts later would need more values immediately.
+
+Emission EXECUTES rows and derives nothing: one leaf walk stands where five copy routines, four inline routing
+walks and six offset re-derivations used to. Executing a state-target plan additionally registers every target
+slot, an executor invariant a pre-emission verifier cannot prove on its own.
+
+`verify_route_plans` runs before emission and re-derives the expected site set, target, width, per-ordinal
+disposition and expected source place from the op kinds and stabilized facts alone -- never from the analyzer's
+routing evidence, and never by reading a plan back. Key sets are compared exactly, so a surplus plan fails as
+loudly as a missing one. DISPOSITION derivation is the load-bearing check: measured, source availability alone
+catches the silent-absence archetype (a `NoCell` where a copy belongs) not at all, while independently deriving
+which ordinals must copy, which must be constant and which must be nothing catches it every time. Availability
+is kept as a supporting check, and is narrower than "the cell is defined" -- a materialized constant is defined
+and holds no datapath value a plan may copy. A construction's field-to-binding mapping is RE-DERIVED from the
+call's positional/keyword structure against the analyzer's pinned schema snapshot, since reading the recorded
+mapping back would make the check vacuous. What no structural check can reach is an in-range WRONG permutation;
+the behavioural route witnesses carry that weight.
+
+A dst-less `StorePlace` owns no destination binding fact, so producer and verifier each replay the stable
+storage-schema conformance walk to derive the post-store value, kind, transfer and width -- that walk is the
+authority, and neither side reads the other's derivation. A `ConstantCell` carries the TARGET-SIDE image, so an
+integer routed onto a float slot records the conformed float rather than leaving emission to re-derive it.
 
 Emission lowers the stabilized residual graph to HIR: executable blocks/edges only, in reverse post-order, with
 value numbering by Braun sealed-block SSA over the scalar LEAF CELLS of Places -- (root place, ordinal in the
@@ -536,8 +577,8 @@ result normalizes back exactly. Shape metadata folds structurally on runtime-lea
 `.shape`, `.size` are layout-determined and consult no element.
 Static basic indexing of arrays is a leaf SELECTION: a slice or a tuple of integers and slices over leading axes
 (an integer collapses its axis, a slice keeps its window, trailing axes stay whole, negative indices and strides
-follow Python) resolves at analysis to the source leaf ordinal feeding each result cell, recorded as a
-per-destination SUBSCRIPT PLAN the emitter consumes verbatim -- the tuple/list slice windows ride the same plan,
+follow Python) resolves at analysis to the source leaf ordinal feeding each result cell, carried into the site's
+ROUTE PLAN and executed verbatim -- tuple/list slice windows and plain positional projection ride the same rows,
 so emission never re-derives a selection. Advanced indexing refuses: a boolean anywhere in the key (numpy would
 reinterpret the whole key), an array or nested sequence as a key element, and more indices than axes are located
 rejections. Starred call arguments unpack arrays exactly like tuples/lists, and a
@@ -572,8 +613,8 @@ never acquires matrix semantics; np.array is the explicit conversion). Operands 
 decomposed array parameters alike -- the imu frame transform's products over its array ports illustrate the
 port-fed form end to end. `np.trace`/`np.outer` are stubs under
 the same gate; stub raise messages stay literal so rejections surface verbatim. `.T` and `np.transpose` are
-not stubs: transpose is a pure structural relayout -- the same leaves under the reversed shape, recorded as a
-ROUTE PLAN (source ordinal per result cell) the conversion emission consumes -- exact for every rank,
+not stubs: transpose is a pure structural relayout -- the same leaves under the reversed shape, carried as the
+conversion site's route plan rows -- exact for every rank,
 non-square shapes, and empty arrays. The stubs probe ranks through `np.ndim`, folded narrowly by the
 compiler (a numeric scalar is rank 0, an array is its layout rank, containers reject: numpy's own ndim of a
 list observes structure the fact model erases).

@@ -14,11 +14,9 @@ Everything here operates on a WORKING COPY of builder templates; templates are n
 point can rebuild from scratch each outer round.
 """
 
-import enum
 import logging
 import math
 import types
-from typing import TYPE_CHECKING
 from collections.abc import Callable, Mapping
 from dataclasses import MISSING, dataclass, field, is_dataclass, replace
 
@@ -155,6 +153,16 @@ from ._analysis_support import (
     render_interpolation,
     schema_of_fact,
 )
+from ._plan import (
+    CallLowering,
+    CallPlan,
+    FieldBindings,
+    PlanSite,
+    RouteEvidence,
+    RoutePlan,
+    SourceSelection,
+    produce_route_plans,
+)
 from ._opsem import BinOp, UnOp, static_binop, static_compare, static_truth, static_unop
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
 from ._value import (
@@ -175,9 +183,6 @@ from ._value import (
     as_python,
     same,
 )
-
-if TYPE_CHECKING:
-    from .._lib import Intrinsic
 
 _logger = logging.getLogger(__name__)
 
@@ -309,23 +314,6 @@ class _UnrollRestart(Exception):
         self.fact = fact
 
 
-class CallLowering(enum.Enum):
-    """How a PyCall surviving in the residual graph lowers; expanded calls no longer exist as calls."""
-
-    FOLDED = enum.auto()  # a concrete static fold: the destination fact is Known, nothing to emit
-    CAST = enum.auto()  # a scalar float()/int()/bool() cast; same-kind-vs-conversion is decided by the FINAL facts
-    INTRINSIC = enum.auto()  # a registered hardware intrinsic: ``intrinsic`` carries the resolved registry match
-    CONVERSION = enum.auto()  # list()/tuple() over an aggregate: the argument's leaves re-flavor onto the result
-    CONSTRUCTION = enum.auto()  # a record built structurally: argument cells install into per-field windows
-
-
-@dataclass(frozen=True, slots=True)
-class CallPlan:
-    lowering: CallLowering
-    intrinsic: "Intrinsic | None" = None  # the resolved registry match for INTRINSIC
-    construction: "tuple[BindingId | None, ...] | None" = None  # per-field source bindings; None = default-filled
-
-
 def verify_plan_totality(result: "ResidualUnit") -> None:
     """
     Read back the recorder's postcondition before emission walks: every op emission subscripts a table for has
@@ -341,9 +329,8 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
       terminator"), measured. For every other shape the gate reports first, located;
     - `block_in` coverage is already implied -- `_finalize` bare-subscripts it for every executable block --
       so this arm restates a property that would have raised earlier in the same call;
-    - `subscript_plans` and `route_plans` are read with `.get()`, where absence legitimately means positional
-      projection and identity route, so their omissions are indistinguishable from intent and are NOT checked;
-      verifying those needs the typed explicit variants M2 introduces;
+    - cell routing is NOT checked here at all any more: `route_plans` is total over a derivable site set, so
+      `verify_route_plans` re-derives that set and every row rather than reading a table back;
     - `binding_facts` is checked, but only for what reaches `result`: since M1, finalization bare-subscripts
       its own per-visit records to build that table, so a destination the recorder never wrote crashes there
       first and never reaches this arm. What this still catches is a table that loses an entry between
@@ -448,22 +435,23 @@ class ResidualUnit:
     executable_edges: set[tuple[BlockId, BlockId]]
     binding_facts: dict[BindingId, Fact] = field(default_factory=dict)
     call_plans: dict[BindingId, CallPlan] = field(default_factory=dict)
-    subscript_plans: dict[BindingId, tuple[int, ...]] = field(default_factory=dict)
-    route_plans: dict[BindingId, tuple[int, ...]] = field(default_factory=dict)
+    route_plans: dict[PlanSite, RoutePlan] = field(default_factory=dict)
+    # The pinned per-class field schemas, so the plan verifier can re-derive a construction's field binding from
+    # the schema the analysis actually used rather than from live dataclass metadata, which can disagree in time.
+    construction_schemas: dict[int, tuple[type, tuple[FieldSchema, ...]]] = field(default_factory=dict)
     store_order: list[StateLeaf] = field(default_factory=list)
     runtime_state: set[StateLeaf] = field(default_factory=set)
     state_livein: dict[StateLeaf, Fact] = field(default_factory=dict)
     state_resets: dict[StateLeaf, "StaticValue | str"] = field(default_factory=dict)
     provenance: dict[int, tuple[str, ...]] = field(default_factory=dict)
     store_origins: dict[StateLeaf, OriginStack] = field(default_factory=dict)
-    store_conversions: set[int] = field(default_factory=set)  # SOURCE store op ids converting int->float
 
 
-def _validate(result: ResidualUnit, concrete_calls: set[int]) -> None:
+def _validate(result: ResidualUnit, classified: Mapping[int, CallLowering]) -> None:
     for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
         block = result.unit.blocks[block_id]
         for op in block.ops:
-            assert not isinstance(op, PyCall) or id(op) in concrete_calls, f"{block_id}: unexpanded call survived"
+            assert not isinstance(op, PyCall) or id(op) in classified, f"{block_id}: unexpanded call survived"
         assert not isinstance(block.terminator, StaticFor), f"{block_id}: loop template survived analysis"
 
 
@@ -503,13 +491,12 @@ class Analyzer:
         self._store_leaf_of_op: dict[int, StateLeaf] = {}
         self._visit_facts: dict[BindingId, Fact] = {}
         self._visit_call_plans: dict[BindingId, CallPlan] = {}
-        self._concrete_calls: set[int] = set()
-        self._intrinsic_calls: set[int] = set()
-        self._cast_calls: set[int] = set()  # runtime float()/int()/bool() casts (identity or conversion at emission)
-        self._conversion_calls: set[int] = set()  # list()/tuple() layout conversions over aggregates
-        self._subscript_selections: dict[int, tuple[int, ...]] = {}  # op id -> source leaf ordinals
-        self._conversion_routes: dict[int, tuple[int, ...]] = {}  # op id -> permuted source ordinals (transpose)
-        self._construction_calls: dict[int, tuple[BindingId | None, ...]] = {}  # record builds: per-field sources
+        # How each surviving call lowers, decided at the visit that classifies it. Classification is never
+        # inferred from whether a route exists: an identity conversion and a zero-cell one are both conversions.
+        self._call_lowering: dict[int, CallLowering] = {}
+        # The one routing record: which source cell (or which field binding) feeds each result cell, for the
+        # sites whose selection the final facts cannot recover. Finalization turns it into the route plan.
+        self._route_evidence: dict[int, RouteEvidence] = {}
         # Schema and default snapshots, one per class per ANALYSIS (never per visit): a mutable field default
         # (an eq=False record holding a list, say) must not move a fact between fixpoint visits. Defaults are
         # admitted LAZILY at the first construction that actually omits the field (Python never observes an
@@ -620,14 +607,7 @@ class Analyzer:
                 # bare AssertionError, where the gate has a located diagnostic for the same cause. Running it
                 # second also inverted the -O contract, the debug build crashing where the optimized one explained.
                 self._check_reachability_settled(result, self._executable_rank(result))
-                _validate(
-                    result,
-                    self._concrete_calls
-                    | self._intrinsic_calls
-                    | self._cast_calls
-                    | self._conversion_calls
-                    | set(self._construction_calls),
-                )
+                _validate(result, self._call_lowering)
                 self._finalize(result)
                 return result
             self._runtime_state = new_w
@@ -640,7 +620,7 @@ class Analyzer:
         )
 
     def _check_storage_schemas(self, result: ResidualUnit) -> None:
-        result.store_conversions = enforce_storage_schemas(
+        enforce_storage_schemas(
             result.unit,
             result.executable_blocks,
             result.executable_edges,
@@ -733,13 +713,8 @@ class Analyzer:
         self._unbound_store_origins = set()
         self._store_facts = {}
         self._transfer_deferrals = {}
-        self._concrete_calls = set()
-        self._intrinsic_calls = set()
-        self._cast_calls = set()
-        self._conversion_calls = set()
-        self._subscript_selections = {}
-        self._conversion_routes = {}
-        self._construction_calls = {}
+        self._call_lowering = {}
+        self._route_evidence = {}
         self._unroll_cache = {}
 
     def _read_attribute_snapshot(
@@ -973,10 +948,6 @@ class Analyzer:
                     # missing where a raw KeyError would only name the line.
                     assert op.dst in self._visit_call_plans, f"call {op.dst} was never visited"
                     result.call_plans[op.dst] = self._visit_call_plans[op.dst]
-                    if id(op) in self._conversion_routes:
-                        result.route_plans[op.dst] = self._conversion_routes[id(op)]
-                if isinstance(op, PySubscript) and id(op) in self._subscript_selections:
-                    result.subscript_plans[op.dst] = self._subscript_selections[id(op)]
                 dst = op_dst(op)
                 if dst is not None:
                     assert dst in self._visit_facts, f"binding {dst} was never visited"
@@ -1018,6 +989,17 @@ class Analyzer:
             raw, admitted = self._walk_snapshot(leaf)
             result.state_resets[leaf] = admitted if admitted is not None else type(raw).__name__
         result.provenance = self._component_provenance()
+        result.construction_schemas = dict(self._construction_schemas)
+        # Last, because it consumes the state resets and the binding facts assembled above.
+        result.route_plans = produce_route_plans(
+            result.unit,
+            result.executable_edges,
+            {block_id: env.schemas for block_id, env in result.block_in.items()},
+            result.binding_facts,
+            result.call_plans,
+            self._route_evidence,
+            result.state_resets,
+        )
 
     def _block_origin(self, unit: FunctionUnit, block_id: BlockId) -> OriginStack:
         terminator = unit.blocks[block_id].terminator
@@ -1113,23 +1095,16 @@ class Analyzer:
         # Optimistic SCCP may reclassify a cast across revisits (int(y) is an identity while y is still integer and a
         # conversion once the other edge promotes it), so a cast plan deliberately carries no same-kind/cross-kind
         # split: emission decides from the FINAL facts, which only stabilized rounds produce.
-        if id(call) in self._conversion_calls:
-            return CallPlan(CallLowering.CONVERSION)
-        construction = self._construction_calls.get(id(call))
-        if construction is not None:
-            return CallPlan(CallLowering.CONSTRUCTION, construction=construction)
-        if id(call) in self._cast_calls:
-            return CallPlan(CallLowering.CAST)
-        if id(call) in self._intrinsic_calls:
-            from .._lib import Intrinsic, resolve
+        lowering = self._call_lowering[id(call)]
+        if lowering is not CallLowering.INTRINSIC:
+            return CallPlan(lowering)
+        from .._lib import Intrinsic, resolve
 
-            callee_fact = env.get(Local(call.callee))
-            assert isinstance(callee_fact, Reference)
-            match = resolve(callee_fact.obj)
-            assert isinstance(match, Intrinsic)
-            return CallPlan(CallLowering.INTRINSIC, match)
-        assert id(call) in self._concrete_calls, "an unclassified call survived validation"
-        return CallPlan(CallLowering.FOLDED)
+        callee_fact = env.get(Local(call.callee))
+        assert isinstance(callee_fact, Reference)
+        match = resolve(callee_fact.obj)
+        assert isinstance(match, Intrinsic)
+        return CallPlan(CallLowering.INTRINSIC, match)
 
     def _component_provenance(self) -> dict[int, tuple[str, ...]]:
         # Canonical member path per component: the shortest path from a root over the recorded sub-object edges, ties
@@ -1566,6 +1541,10 @@ class Analyzer:
                         PyCall(dst, callee, (), (), op.origin),
                     ]
                     return True
+                if isinstance(receiver_fact, AggregateFact) and isinstance(receiver_fact.layout, RecordLayout):
+                    names = [field for field, _ in receiver_fact.layout.fields]
+                    _, start, stop = child_slice(receiver_fact.layout, names.index(name))
+                    self._route_evidence[id(op)] = SourceSelection(tuple(range(start, stop)))
                 env.set(Local(dst), attr)
             case PyStoreAttr(obj=obj, name=name, src=src):
                 obj_fact = env.get(Local(obj))
@@ -2000,7 +1979,7 @@ class Analyzer:
                 for position in selected:
                     _, start, stop = child_slice(obj.layout, position)
                     ordinals.extend(range(start, stop))
-                self._subscript_selections[id(op)] = tuple(ordinals)
+                self._route_evidence[id(op)] = SourceSelection(tuple(ordinals))
                 children = tuple(obj.child(position) for position in selected)
                 return aggregate_of(children, is_list=isinstance(obj.layout, ListLayout))
             if isinstance(obj.layout, ArrayLayout) and (
@@ -2033,7 +2012,10 @@ class Analyzer:
             arity = outer_arity(obj.layout)
             if not -arity <= position < arity:
                 raise AnalysisRejection("sequence index out of range", origin)
-            return obj.child(position + arity if position < 0 else position)
+            selection = position + arity if position < 0 else position
+            _, start, stop = child_slice(obj.layout, selection)
+            self._route_evidence[id(op)] = SourceSelection(tuple(range(start, stop)))
+            return obj.child(selection)
         if isinstance(obj, Reference):
             # A live object's __getitem__ would read reset-time attribute state outside the state machinery.
             raise AnalysisRejection("subscript of an object is not supported", origin)
@@ -2106,7 +2088,7 @@ class Analyzer:
                 enumerate_coordinates(axis + 1, offset + position * strides[axis])
 
         enumerate_coordinates(0, 0)
-        self._subscript_selections[id(op)] = tuple(ordinals)
+        self._route_evidence[id(op)] = SourceSelection(tuple(ordinals))
         picked = tuple(obj.leaves[ordinal] for ordinal in ordinals)
         if not kept:  # every axis collapsed by an integer: the element itself, numpy's scalar sort
             assert len(picked) == 1
@@ -2464,7 +2446,8 @@ class Analyzer:
                     f"record class '{name}' is missing the required field '{entry.name}' here", call.origin
                 )
         env.set(Local(call.dst), record_of(klass, tuple(children)))
-        self._construction_calls[id(call)] = tuple(mapping)
+        self._call_lowering[id(call)] = CallLowering.CONSTRUCTION
+        self._route_evidence[id(call)] = FieldBindings(tuple(mapping))
 
     def _fresh_temp(self) -> BindingId:
         self._temp_serial += 1
@@ -2534,7 +2517,7 @@ class Analyzer:
                         )
                     relayout = ArrayLayout((cells,), receiver_fact.layout.dtype)
                 env.set(Local(call.dst), AggregateFact(relayout, receiver_fact.leaves))
-                self._conversion_calls.add(id(call))
+                self._call_lowering[id(call)] = CallLowering.CONVERSION
                 return False
             if call.kwargs or (method.name != "reshape" and call.args):
                 raise AnalysisRejection(
@@ -2628,7 +2611,7 @@ class Analyzer:
                     verdict = isinstance(match.operator, FloatIsFinite)
                     numpy_spelling = getattr(target, "__module__", "").startswith("numpy")
                     env.set(Local(call.dst), Known(NpBool(verdict) if numpy_spelling else StaticBool(verdict)))
-                    self._concrete_calls.add(id(call))
+                    self._call_lowering[id(call)] = CallLowering.FOLDED
                     return False
                 # The result kind follows the spelling's declared rule (see the library registry): an all-integer
                 # operand list keeps an integer-overloaded spelling integer (contained at MIR); any float operand,
@@ -2642,7 +2625,7 @@ class Analyzer:
                     all_int = all(_numeric_sem(fact) is SemType.INT for fact in argument_facts)
                     result = Residual(SemType.INT) if all_int else Residual(SemType.FLOAT)
                 env.set(Local(call.dst), result)
-                self._intrinsic_calls.add(id(call))
+                self._call_lowering[id(call)] = CallLowering.INTRINSIC
                 return False
         if not isinstance(target, (types.FunctionType, types.MethodType)) and not (
             hasattr(type(target), "__call__")
@@ -2690,8 +2673,8 @@ class Analyzer:
                         tuple(pivoted.leaves[k] for k in routes),
                     ),
                 )
-                self._conversion_calls.add(id(call))
-                self._conversion_routes[id(call)] = routes
+                self._call_lowering[id(call)] = CallLowering.CONVERSION
+                self._route_evidence[id(call)] = SourceSelection(routes)
                 return False
             if target is np.ndim and not keyword_facts and len(argument_facts) == 1:
                 # Deliberately narrow (np.ndim of a LIST would observe structure the fact model erases at
@@ -2709,7 +2692,7 @@ class Analyzer:
                 admitted_rank = admit(rank)
                 assert admitted_rank is not None
                 env.set(Local(call.dst), Known(admitted_rank))
-                self._concrete_calls.add(id(call))
+                self._call_lowering[id(call)] = CallLowering.FOLDED
                 return False
             if isinstance(target, type) and is_dataclass(target):
                 # Record construction is STRUCTURAL, never an evaluation: the layout is the class's validated
@@ -2744,7 +2727,7 @@ class Analyzer:
                     # A record never reaches here: the admission walk already refused it as an argument.
                     children = tuple(source_fact.child(i) for i in range(outer_arity(source_fact.layout)))
                     env.set(Local(call.dst), aggregate_of(children, is_list=target is list))
-                    self._conversion_calls.add(id(call))
+                    self._call_lowering[id(call)] = CallLowering.CONVERSION
                     return False
             if (
                 target is len
@@ -2758,7 +2741,7 @@ class Analyzer:
                 length = admit(outer_arity(sized.layout))
                 assert length is not None
                 env.set(Local(call.dst), Known(length))
-                self._concrete_calls.add(id(call))
+                self._call_lowering[id(call)] = CallLowering.FOLDED
                 return False
             explicit_float_dtype = (
                 len(keyword_facts) == 1
@@ -2782,7 +2765,7 @@ class Analyzer:
                     Local(call.dst),
                     self._array_factory(argument_facts[0], call.origin, force_float=explicit_float_dtype),
                 )
-                self._conversion_calls.add(id(call))
+                self._call_lowering[id(call)] = CallLowering.CONVERSION
                 return False
             concrete_args: list[StaticValue | Reference | None] = [
                 fact if isinstance(fact, Reference) else _concrete_fact(fact) for fact in argument_facts
@@ -2811,7 +2794,7 @@ class Analyzer:
                     and isinstance(cast_source, Residual)
                 ):
                     env.set(Local(call.dst), Residual(cast_target))
-                    self._cast_calls.add(id(call))
+                    self._call_lowering[id(call)] = CallLowering.CAST
                     return False
                 if is_unimplemented_library(target):
                     # A recognized math/numpy function with no fast-math hardware equivalent (erf, spacing, a ufunc):
@@ -2834,7 +2817,7 @@ class Analyzer:
                 env.set(Local(call.dst), Reference(concrete))
             else:
                 env.set(Local(call.dst), normalize_static(admitted))
-            self._concrete_calls.add(id(call))
+            self._call_lowering[id(call)] = CallLowering.FOLDED
             return False
         receiver: object | None = None
         if isinstance(target, types.MethodType):

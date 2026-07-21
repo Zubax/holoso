@@ -52,6 +52,14 @@ all-`NoCell` plans rather than no key, so `needs_cells` becomes a consequence of
 M2 for routing sites only; one atomic absorb-and-delete commit with the witnesses written first. Budget: four
 inline walks, six offset derivations.
 
+M2 IS LANDED. `holoso/_frontend/_fir/_plan.py` holds the routing vocabulary, the producer and the independent
+verifier; the five copy routines, four inline walks and six offset re-derivations are gone and ONE routing leaf
+walk remains. Verified independently in the maintainer's tree, not taken on report: corpus 151/151
+BYTE-IDENTICAL, 588 targeted tests pass, mypy clean over 208 files, black clean, and the 23 swap-sensitive
+witnesses UNCHANGED (zero-line diff). The campaign's central finding was reproduced on the shipping code: with
+disposition derivation neutered and availability left intact, the silent-absence mutant is the ONE test that
+fails out of seven. Disposition is load-bearing; availability alone is not.
+
 SHADOW IMPLEMENTATION IS DONE and its findings are in revision 6 and the log below. The spike -- a working
 shadow producer, an independent verifier, and a verifier-mutation harness -- is preserved at
 `$SCRATCH/m2-spike` (14 files, 120 kB) and is M2's implementation basis; it was built in an agent worktree that
@@ -2427,3 +2435,29 @@ retires the single biggest byte-identity risk. And the construction re-derivatio
 since `RecordLayout.klass` carries the class identity; the consult adds the condition that it must consume the
 analyzer's IMMUTABLE SCHEMA SNAPSHOT rather than live dataclass metadata, or producer and verifier can
 disagree in time.
+
+
+M2 LANDED, AND THREE THINGS CAME OUT OF CONTACT WITH THE CODE.
+
+THE VERIFIER CAUGHT A DEFECT IN ITSELF, which is the check doing exactly the work it exists for. Revision 7
+says the post-store fact governs a `StorePlace` row but never said that a LATER READ of that variable sees the
+CONFORMED cell. Advancing the environment with the source fact made the verifier reject five valid
+store-conversion kernels. The same correction applies to state slots, whose cells hold the reset-fixed kind.
+
+THE NON-MATERIALIZABLE STATE STORE IS UNREACHABLE, so the obligation I spent two review rounds assigning an
+owner to simply disappeared. Seven shapes probed, all seven refused during ANALYSIS, none at emission
+materialization. So `PyStoreAttr` is a routing site uniformly whenever its object is a `Reference`, no `NoCell`
+ever appears at a state target, and no per-site precomputed rejection was needed. The conditional predicate the
+design carried for it was complexity bought for a case that does not exist.
+
+THE EMITTER DEBT RATCHET GREW, 99 edges to 104, and was recorded rather than explained away. Routing moved INTO
+a module the emitter must import, so eight plan names arrived and five left. An import-edge meter weighs
+"executes a typed row" the same as "derives the row", which is the metric's limitation rather than a
+regression. The refusal-shape ratchet moved only on its last number (146 -> 112) with the other four flat, so
+no refusal was deleted -- corroborated by the byte-identical rejection corpus.
+
+VERIFICATION DISCIPLINE HELD AT THE HANDOFF. Two claims in the report were loose and checking found both:
+`route_plans` was reported deleted but survives as the NEW plan table (a repurposing, not a deletion), and a
+seven-line "deletion" from this log was an artifact of the agent's worktree sitting one commit behind rather
+than an edit. Neither mattered; both would have gone into the record uncorrected if the report had been taken
+at its word.
