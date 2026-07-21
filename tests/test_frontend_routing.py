@@ -186,3 +186,49 @@ def test_a_record_projection_routes_its_fields() -> None:
     # The default-filled field is the `:= const` half of the routing record, and its window is the one a
     # misplaced default would land in.
     assert _run(kernel, 1.0) == [421.0]
+
+
+def test_a_component_aggregate_read_routes_from_its_state_cells() -> None:
+    # The component-attribute arm reads `StateLeaf` cells, NOT cells of the op's operands -- which is one of the
+    # reasons a routing schema cannot address a source by operand index (consult X6a). Distinct initial values
+    # and a weighted readout make the state-cell mapping observable, and the rotation makes it observable again
+    # on the next transaction from a different starting permutation.
+    class Held:
+        def __init__(self) -> None:
+            self.v = [1.0, 2.0, 3.0]
+
+        def step(self, x: float) -> float:
+            got = self.v
+            self.v = [got[2], got[0], got[1] + x]
+            return got[0] + got[1] * 10.0 + got[2] * 100.0
+
+    reference = Held()
+    sim = holoso.synthesize(Held().step, default_ops(_FMT), name="held").numerical_model.elaborate()
+    for step in range(4):
+        drive = float(step)
+        assert [float(v) for v in sim.run(drive)][0] == pytest.approx(reference.step(drive))
+
+
+def test_a_zero_cell_source_routes_no_cells() -> None:
+    # An empty aggregate has a LEGITIMATE zero-cell route. It is why "not a route" and "a route with zero rows"
+    # must stay distinct in the M2 plan: collapsing them would rebuild the absence-versus-intent ambiguity the
+    # step exists to remove.
+    def kernel(x: float, y: float) -> float:
+        empty = ()
+        joined = empty + (x, y)
+        return joined[0] + joined[1] * 10.0
+
+    _assert_matches_python(kernel, 3.0, 4.0)
+    assert _run(kernel, 3.0, 4.0) == [43.0]
+
+
+def test_a_nonvalue_leaf_routes_to_no_cell() -> None:
+    # A `Reference` leaf deliberately has no datapath cell, so a total per-leaf plan needs a third disposition
+    # beyond "a source cell" and "a constant". Carrying one beside a real value proves the cell ordinals of the
+    # surviving leaves are not disturbed by the leaf that produces nothing.
+    def kernel(x: float, y: float) -> float:
+        carried = (x, None, y)
+        return carried[0] + carried[2] * 10.0
+
+    _assert_matches_python(kernel, 2.0, 5.0)
+    assert _run(kernel, 2.0, 5.0) == [52.0]

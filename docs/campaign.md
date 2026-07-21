@@ -2036,3 +2036,11 @@ X6a also falsified a claim of mine that I had ALREADY falsified myself an hour e
 that routing coverage is corpus-only. Independent agreement on that is reassuring; making the claim twice is
 not. Also ruled: raw-byte corpus identity is necessary but NOT sufficient, because a route error is a semantic
 value miscompile and the manifest records ports and metrics, not which value drives each port.
+
+
+BASELINE WITNESSES, written before cutover as the ruling ordered. Three more kernels in
+`tests/test_frontend_routing.py` covering the cases X6a named as missing: a component aggregate read (whose
+source cells are `StateLeaf` cells, unreachable from ANY operand index -- the case that most directly kills the
+operand-index design), a legitimate ZERO-CELL route, and a `Reference` leaf that must route to no cell at all.
+All three shapes are accepted by the compiler today; probed before writing, not assumed. Mutation-checked: under
+a rotated aligned copy the state and no-cell witnesses both fire, so they have teeth rather than merely passing.
