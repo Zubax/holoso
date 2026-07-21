@@ -52,7 +52,15 @@ all-`NoCell` plans rather than no key, so `needs_cells` becomes a consequence of
 M2 for routing sites only; one atomic absorb-and-delete commit with the witnesses written first. Budget: four
 inline walks, six offset derivations.
 
-NEXT ACTION IS SHADOW IMPLEMENTATION, NOT ANOTHER DOCUMENT ROUND. Round 4 ruled the remaining blockers
+SHADOW IMPLEMENTATION IS DONE and its findings are in revision 6 and the log below. The spike -- a working
+shadow producer, an independent verifier, and a verifier-mutation harness -- is preserved at
+`$SCRATCH/m2-spike` (14 files, 120 kB) and is M2's implementation basis; it was built in an agent worktree that
+holds no tracked changes. THE NEXT ACTION IS THE ATOMIC M2 COMMIT, whose verifier must lead with DISPOSITION
+derivation rather than availability, take `runtime_state` as an input, and re-derive construction field binding
+from the dataclass schema.
+
+SUPERSEDED, kept because the reasoning matters: the next action was previously recorded as shadow
+implementation, not another document round. Round 4 ruled the remaining blockers
 document-fixable (all resolved in revision 5) and named exactly ONE question paper cannot settle: whether
 SOURCE AVAILABILITY can be independently reconstructed from `block_in`, the final binding facts and an
 intra-block walk WITHOUT reusing the producer's decisions. If it cannot, the verifier is not independent and
