@@ -303,3 +303,31 @@ def test_lower_fir_runs_the_plan_verifier_BEFORE_emission_walks(monkeypatch: pyt
 
     emit_module.lower_fir(Kernel().step)
     assert trace == ["verify", "emit"], f"the verifier must run before emission walks, observed {trace}"
+
+
+def test_the_plan_verifier_catches_both_block_set_divergences() -> None:
+    # Recovered from a review transcript rather than reasoned about: a walked block missing from
+    # `executable_blocks`, and one missing from `block_in`, both escape `_check_reachability_settled` when the
+    # block is a SINK, because that gate catches the direction only through a block's own out-edges. Left
+    # unchecked the first reaches emission and dies with an unlocated "block N was not sealed with a
+    # terminator". M1 rewrites recording, which is exactly when these become producible, so both are pinned.
+    from holoso._frontend._fir._analyze import Analyzer, verify_plan_totality
+
+    class Kernel:
+        def step(self, x: float) -> float:
+            if False:  # a statically dead arm, so the exit is reached by one edge and is a walk sink
+                return x + 1.0
+            return x
+
+    stable = Analyzer(Kernel().step).fixpoint()
+    verify_plan_totality(stable)  # the real analysis is total
+
+    unmarked = Analyzer(Kernel().step).fixpoint()
+    unmarked.executable_blocks.discard(unmarked.unit.exit)
+    with pytest.raises(AssertionError, match="did not mark executable"):
+        verify_plan_totality(unmarked)
+
+    envless = Analyzer(Kernel().step).fixpoint()
+    envless.block_in.pop(envless.unit.exit, None)
+    with pytest.raises(AssertionError, match="no recorded environment"):
+        verify_plan_totality(envless)

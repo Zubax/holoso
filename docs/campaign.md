@@ -1642,3 +1642,14 @@ the gate catches a walked-but-unmarked block only through its own out-edges, so 
 arms, with the `call_plans` arm being what would notice. Also: the (42, 42) count is now taken over the
 PACKAGE, since `_emit.py` is ~1500 lines against a ~2000 limit and a file-scoped count would read an ordinary
 split as refusals moved upstream.
+
+
+M0 ROUND 3, CODEX HALF -- died on a provider guardrail again, and mining its transcript paid for the THIRD
+time this campaign. Its probe built an analyzer that drops the exit block's mark, and showed the state SURVIVES
+`_check_reachability_settled` (a walked-but-unmarked SINK escapes both of that gate's arms), passes
+`verify_plan_totality`, and then dies in emission with an unlocated `RuntimeError: block 2 was not sealed with
+a terminator`. So the docstring correction I had just made -- that a sink could in principle slip past, with
+the `call_plans` arm being what notices -- was right about the hole and wrong about the catch: nothing noticed.
+Reproduced here, then closed with the missing arm, and BOTH divergence shapes are now pinned as regressions
+rather than living in a transcript. A companion probe confirms the other direction (`block_in` popped for the
+same sink) was already caught, so that arm is not vacuous either. Fail-before observed on the new arm.

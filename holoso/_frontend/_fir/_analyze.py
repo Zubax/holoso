@@ -332,9 +332,9 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
 
     - the block sets do not diverge in practice. `_check_reachability_settled` runs BEFORE `_finalize` over
       the same `executable_rpo` walk and refuses a marked block the walk never reaches, and an edge leaving an
-      unmarked one; a walked-but-unmarked block is caught only through its own out-edges, so a SINK could in
-      principle slip past both arms -- the `call_plans` arm below would then be what notices. Either way the
-      gate reports first, located, rather than as an assert here;
+      unmarked one; a walked-but-unmarked SINK slips past both arms, which is why this checks that direction
+      itself -- without it such a block reaches emission and crashes unlocated ("block N was not sealed with a
+      terminator"), measured. For every other shape the gate reports first, located;
     - `block_in` coverage is already implied -- `_finalize` bare-subscripts it for every executable block --
       so this arm restates a property that would have raised earlier in the same call;
     - `subscript_plans` and `route_plans` are read with `.get()`, where absence legitimately means positional
@@ -350,6 +350,8 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
     before the change that can break it.
     """
     walked = executable_rpo(result.unit.entry, result.executable_edges)
+    unmarked = [block_id for block_id in walked if block_id not in result.executable_blocks]
+    assert not unmarked, f"emission walks blocks the analysis did not mark executable: {unmarked}"
     missing_env = [block_id for block_id in walked if block_id not in result.block_in]
     assert not missing_env, f"emission walks blocks with no recorded environment: {missing_env}"
     missing_plans = [
