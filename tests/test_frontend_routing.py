@@ -73,15 +73,16 @@ def test_a_reversed_repetition_finds_its_sequence_operand() -> None:
         six = 3 * [x, y]
         return six[0] + six[1] * 10.0 + six[2] * 100.0 + six[3] * 1000.0 + six[4] * 1e4 + six[5] * 1e5
 
-    def scalar_sequence(x: float, y: float) -> float:
-        # The one-cell case the bounds check cannot distinguish: picking the wrong operand yields the OTHER
-        # input, which is well-formed and wrong. `y` is present only to make that confusion observable.
-        return (3 * [x])[0] + (3 * [x])[1] * 10.0 + (3 * [x])[2] * 100.0 + y * 1000.0
+    def scalar_sequence(x: float) -> float:
+        # The one-cell case: here the other operand is the literal 3, not another input, so a schema that indexed
+        # operands positionally would reach a non-aggregate rather than a wrong value. Kept because it is the
+        # shape whose cell count cannot distinguish the two operands by width.
+        return (3 * [x])[0] + (3 * [x])[1] * 10.0 + (3 * [x])[2] * 100.0
 
     _assert_matches_python(kernel, 2.0, 3.0)
     assert _run(kernel, 2.0, 3.0) == [323232.0]
-    _assert_matches_python(scalar_sequence, 2.0, 7.0)
-    assert _run(scalar_sequence, 2.0, 7.0) == [7222.0]
+    _assert_matches_python(scalar_sequence, 2.0)
+    assert _run(scalar_sequence, 2.0) == [222.0]
 
 
 def test_a_built_tuple_reversed_by_index_routes_the_reversal() -> None:
@@ -232,3 +233,65 @@ def test_a_nonvalue_leaf_routes_to_no_cell() -> None:
 
     _assert_matches_python(kernel, 2.0, 5.0)
     assert _run(kernel, 2.0, 5.0) == [52.0]
+
+
+def test_a_known_condition_selection_routes_the_chosen_aggregate() -> None:
+    # A `PySelect` with a compile-time-known condition re-chooses its source during EMISSION today, which makes
+    # it a routing re-derivation the schema's first two revisions both omitted from the site set (consult X6a
+    # round 2). Two equal-width sources make the choice unobservable by width alone.
+    def kernel(a: float, b: float, c: float, d: float) -> float:
+        left = (a, b)
+        right = (c, d)
+        p = True and left
+        q = right or left
+        return p[0] + 10.0 * p[1] + 100.0 * q[0] + 1000.0 * q[1]
+
+    _assert_matches_python(kernel, 1.0, 2.0, 3.0, 4.0)
+    assert _run(kernel, 1.0, 2.0, 3.0, 4.0) == [4321.0]
+
+
+def test_a_record_built_from_reordered_keywords_routes_by_field() -> None:
+    # Construction mixes positional and keyword sources with no numbering between them, which is one of the
+    # reasons a source cannot be addressed by operand index. Here the keywords are supplied OUT of field order,
+    # so a route that followed argument order rather than field identity produces a well-formed wrong answer.
+    import dataclasses
+
+    @dataclasses.dataclass(frozen=True)
+    class Fields:
+        a: float
+        b: float
+        c: float
+
+    def kernel(x: float, y: float, z: float) -> float:
+        p = Fields(x, c=z, b=y)
+        return p.a + 10.0 * p.b + 100.0 * p.c
+
+    _assert_matches_python(kernel, 1.0, 2.0, 3.0)
+    assert _run(kernel, 1.0, 2.0, 3.0) == [321.0]
+
+
+def test_a_zero_cell_conversion_stays_a_conversion() -> None:
+    # A conversion whose route has zero rows is still a conversion. Classification must therefore not be
+    # inferred from whether a route exists -- the reason `_conversion_calls` leaves the routing type entirely.
+    def kernel(x: float) -> float:
+        empty = tuple([x][:0])
+        return x + float(len(empty))
+
+    _assert_matches_python(kernel, 5.0)
+    assert _run(kernel, 5.0) == [5.0]
+
+
+def test_a_write_only_aggregate_state_registers_every_slot() -> None:
+    # The aggregate `PyStoreAttr` walk carries state-slot registration as a side effect of routing, so a cutover
+    # that moved the route without the registration would silently drop ports. A kernel returning None makes the
+    # state slots the ONLY observable, which is what pins the side effect.
+    class WriteOnly:
+        def __init__(self) -> None:
+            self.v = [0.0, 0.0]
+
+        def step(self, x: float, y: float) -> None:
+            self.v = [x, y]
+
+    built = holoso.synthesize(WriteOnly().step, default_ops(_FMT), name="write_only")
+    assert [port.name for port in built.numerical_model.outputs] == ["state_v_0", "state_v_1"]
+    assert [float(v) for v in built.numerical_model.elaborate().run(3.0, 7.0)] == [3.0, 7.0]

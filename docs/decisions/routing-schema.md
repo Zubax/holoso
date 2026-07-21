@@ -1,7 +1,8 @@
 # Routing algebra: schema for M2
 
-Status: REVISION 2, rewritten against the X6a ruling. Revision 1 was NOT APPROVED; its record could not express
-routing at all, for the reason in "What revision 1 got wrong" below. Companion to `arch-ruling.md` (which
+Status: REVISION 3. Revision 1 was NOT APPROVED (its record could not express routing at all); revision 2 was
+NOT APPROVED either (the record was fixed, but the site set was not closed, the verifier criterion was still
+revision-1 text, and the Known-versus-no-write rule was wrong). Companion to `arch-ruling.md` (which
 ordered plain MORPH) and `arch-memo.md`.
 
 ## What this replaces
@@ -119,19 +120,32 @@ class RoutePlan:
     actions: tuple[CellAction, ...]   # index is the target's LOGICAL leaf ordinal
 ```
 
-`NoCell` is mandatory, not tidiness. `AggregateFact.leaves` admits `Reference`, which deliberately has no
-datapath cell -- an unadmitted construction default such as `None` becomes one, and that is already a supported
-black-box case. A `Reference` leaf is neither a source cell nor a `StaticValue` constant, so without `NoCell`
-the plan is not total and the absence ambiguity returns through the back door.
+`NoCell` is mandatory, not tidiness, and its meaning is SITE-RELATIVE: "this site emits no datapath definition
+for this logical target ordinal". Revision 2 defined it as "the fact is a `Reference`", which is wrong and
+would have changed emitted output. A `Reference` leaf is indeed one case -- an unadmitted construction default
+such as `None` becomes one, already a supported black-box case, and it is neither a source cell nor a
+`StaticValue` constant. But a datapath-capable `Known` is NOT always materialized: a fully static construction
+emits nothing at its call site, and all-known projections are gated the same way. Executing a `ConstantCell`
+row unconditionally would introduce dead constants and could move pre-optimization HIR allocation and order,
+which is exactly the byte-identity the corpus gates on.
 
-`ConstantCell` is not construction-default-only either: every copy, projection, gather, conversion and
-component-state path materializes `Known` datapath result leaves as constants today. Conversely a non-datapath
-`Known` deliberately produces no definition, so ANALYSIS must choose `ConstantCell` against `NoCell` and
-emission must not rediscover that choice. Its `kind` is explicit for the same reason the transfer is.
+So analysis chooses, per site and per ordinal:
+
+- `ConstantCell` when THIS SITE materializes the `Known` today;
+- `NoCell` when the `Known` stays fact-only at this site;
+- `NoCell` for a `Reference`, and for a non-datapath `Known`.
+
+Emission must not rediscover any of that. `ConstantCell.kind` is explicit for the same reason the transfer is.
 
 `CellTransfer` is J6 landing inside M2 for routing sites, per the ruling. An expected result kind alone is not
 enough: `FLOAT` would still leave the emitter inspecting the source to choose between an integer and a boolean
-promotion, which is the J6 violation restated. The vocabulary is closed at three today. This obligation extends
+promotion, which is the J6 violation restated. `_emit_conversion` may only EXECUTE the recorded transfer; it
+must retain no fact-based coercion choice of its own.
+
+The vocabulary is closed at three ONLY for M2's scope. `FLOAT_TO_INT`, the boolean/integer conversions and the
+truth conversions live in scalar casts and other non-routing lowering. If a later step absorbs scalar
+`CallLowering.CAST` into `RoutePlan`, three values stop being sufficient immediately -- recorded here so that
+step does not discover it by producing a wrong promotion. This obligation extends
 M2 past `_emit_conversion` to the aggregate `PyStoreAttr` promotion and the scalar `store_conversions` plan, or
 M2 would delete route walks while leaving a second kind authority standing beside them. Phi-arm promotion and
 return-contract promotion are NOT routing and stay in M3.
@@ -160,13 +174,40 @@ hole `verify_plan_totality` currently names in its own docstring and declines to
 > projection and identity route, so their omissions are indistinguishable from intent and are NOT checked;
 > verifying those needs the typed explicit variants M2 introduces
 
-With a total plan, the verifier gains a real arm: every routing op in the stabilized graph has a `RoutePlan`,
-its length equals the result layout's leaf count, and every `OperandCell` resolves to an in-range cell of an
-operand that exists. That arm is the acceptance criterion for M2, and it is checkable rather than asserted.
+The verifier criterion, stated precisely, because revision 2 left revision 1's text here and it referred to a
+"result layout" and to `OperandCell` -- neither of which exists for a `StorePlace` or a `PyStoreAttr`, and the
+latter not at all any more. The verifier must, independently of the producer:
+
+- derive the EXPECTED set of route sites from the op and its final facts, by the predicate in "The site set"
+  below, and compare `dict[PlanSite, RoutePlan]` key sets EXACTLY -- rejecting surplus plans as well as
+  missing ones;
+- derive the expected target `Place` per op, rather than reading it back from the plan;
+- derive the target's LOGICAL width: zero for an empty aggregate, one for a scalar, the aggregate leaf count
+  otherwise -- and for a state target, from the reset-fixed state schema rather than from the store's source;
+- resolve every source `Place` in the PRE-OP environment and bounds-check the ordinal there;
+- check every `ConstantCell` kind and every `CellTransfer` for legality against the source and target kinds.
+
+And a bound is not a permutation. An in-range but WRONG permutation passes every structural check above, so
+the behavioural witnesses in `tests/test_frontend_routing.py` carry that weight and the verifier does not
+replace them.
 
 This also removes the silent-absence failure mode that this campaign has been bitten by repeatedly: a recorder
 that stops writing currently produces a plausible identity route, which is a wrong answer that looks like a
 default. Under a total plan it produces a verifier error.
+
+## The site set
+
+Totality is meaningless without a closed set of sites to be total over, and revisions 1 and 2 both left it
+open. The table of routings above is NOT the site set: it omits `LoadPlace` in both its scalar and aggregate
+forms (the aggregate one routes through `_copy_leaves`), and it omits a `PySelect` whose condition is
+compile-time known, which RE-CHOOSES its source during emission and is therefore a seventh routing
+re-derivation -- one that is not an offset derivation and so was invisible to the offset recount.
+
+Revision 3's obligation, and the thing implementation must start from: an authoritative predicate over (op,
+final facts) that answers "does this site produce a route, and what is its target and logical width", covering
+the scalar, aggregate, zero-cell and no-emission cases alike. The verifier evaluates that predicate itself; the
+producer must not be its own authority on which sites exist, or surplus and missing plans become
+indistinguishable from a disagreement about the site set.
 
 ## The key
 
@@ -225,8 +266,8 @@ zero rows" would reintroduce exactly the absence-versus-intent ambiguity this st
 op must carry a disposition, that is an explicit `NoRoute`, not an empty plan.
 
 Delete: `_project` and `_install` collapse into the offset row; `_copy_leaves` becomes the identity row;
-`_emit_conversion` keeps only its kind-coercion duty; `_emit_concat` loses its offset arithmetic entirely. One
-leaf-walk remains where five plus three clones stand today.
+`_emit_conversion` keeps only the mechanical execution of a recorded transfer; `_emit_concat` loses its offset
+arithmetic entirely. One leaf-walk remains where five routines plus four inline walks stand today.
 
 ## Sequencing (ruled)
 

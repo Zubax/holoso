@@ -2044,3 +2044,45 @@ source cells are `StateLeaf` cells, unreachable from ANY operand index -- the ca
 operand-index design), a legitimate ZERO-CELL route, and a `Reference` leaf that must route to no cell at all.
 All three shapes are accepted by the compiler today; probed before writing, not assumed. Mutation-checked: under
 a rotated aligned copy the state and no-cell witnesses both fire, so they have teeth rather than merely passing.
+
+
+X6A ROUND 2: REVISION 2 ALSO NOT APPROVED, but the fatal defect is gone -- `CellRef(Place, ordinal)` expresses
+every current source, the three transfer values suffice for M2's scope, and one target `Place` is enough. Three
+blockers, all of which are mine and none of which the corpus would have caught:
+
+(1) THE SITE SET IS NOT CLOSED, which makes totality meaningless. My table of routings is not a site set: it
+omits `LoadPlace` in both scalar and aggregate forms, and it omits a `PySelect` whose condition is
+compile-time-known, which RE-CHOOSES its source during emission. That is a SEVENTH routing re-derivation, and
+it was invisible to my recount because it is not an offset derivation and I was counting offsets. Revision 3
+must supply an authoritative (op, final facts) predicate saying which sites produce a route, and the VERIFIER
+must evaluate it independently -- if the producer is its own authority on which sites exist, surplus and
+missing plans become indistinguishable from a disagreement about the set.
+
+(2) THE VERIFIER CRITERION WAS STILL REVISION-1 TEXT. I rewrote the record and left the criterion referring to
+a "result layout" and to `OperandCell` -- neither of which exists for a `StorePlace` or `PyStoreAttr`, and the
+latter no longer exists at all. Now specified concretely: expected target derived per op, logical width (zero
+for empty, one for scalar, leaf count otherwise; state width from the RESET-FIXED schema, not from the store's
+source), sources resolved in the PRE-OP environment, exact key-set equality including surplus.
+
+(3) THE KNOWN-VERSUS-NO-WRITE RULE WAS WRONG AND WOULD HAVE CHANGED EMITTED OUTPUT. I wrote that a
+datapath-capable `Known` always becomes a `ConstantCell`. It does not: a fully static construction emits
+NOTHING at its call site, and all-known projections are gated the same way. Executing those rows
+unconditionally would introduce dead constants and could move pre-optimization HIR allocation and order -- the
+very byte-identity the corpus gates on. `NoCell` is now SITE-RELATIVE: "this site emits no datapath definition
+for this ordinal", not "the fact is a Reference".
+
+CONFIRMED, INDEPENDENTLY: the recount is four inline walks, six offset derivations, four `child_slice` calls in
+`_emit.py` (six repo-wide). That number is now stable across two hostile recounts.
+
+AND A CORRECTION TO MY OWN TEST. I wrote that in `3 * [x]` picking the wrong operand yields the other input.
+It does not -- the other operand is the literal `3`, and `y` never participates in that route. The test caught
+the mistake it was aimed at, but its explanation was wrong; simplified to one input. Also noted for M2: the
+transfer vocabulary is closed at three ONLY within M2's scope, and absorbing scalar CAST later breaks that
+immediately.
+
+FOUR MORE BASELINE KERNELS, each specified by the consult and each probed against the compiler before being
+written rather than assumed: a Known-condition `PySelect` over two equal-width sources (4321), a record built
+from REORDERED keywords so a route following argument order rather than field identity is caught (321), a
+zero-cell conversion that must still classify as a conversion, and a write-only aggregate state store whose
+kernel returns None -- so the state slots are the only observable, pinning the slot REGISTRATION that rides
+along with the routing walk as a side effect.
