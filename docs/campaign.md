@@ -176,9 +176,15 @@ PACE (measured on 2026-07-21; each number is from this campaign, not a guess):
   edits during rounds 2-4 while the shadow producer and verifier -- which round 4 then explicitly asked for --
   could have been building in parallel. Always have implementation or measurement running under a pending
   consult.
-- DO NOT PUSH PER COMMIT. 34 commits in one day against self-hosted runners taking 19-53 MINUTES per run
-  cannot drain; the queue just grows. 16 of those touched no compiler code at all. Batch into milestone
-  pushes.
+- DO NOT PUSH PER COMMIT (maintainer directive; it wastes CI runs). 34 commits in one day against SHARED
+  self-hosted runners taking 19-53 MINUTES per run cannot drain -- the queue only grows, and the runner is not
+  yours alone. 16 of those commits touched no compiler code at all. COMMIT freely, PUSH at a milestone: a
+  completed M-step, a resolved consult, or a green gate you actually need certified. Markdown-only commits
+  fire no CI (verified: the docs-only tip produced no run), so a docs push is free and a code push is not.
+- WHEN A PUSH SUPERSEDES QUEUED RUNS, CANCEL THEM. A serialized runner will otherwise spend half an hour
+  reporting on a state you have already fixed -- exactly what happened with the pushed typecheck failure.
+  Check with `git merge-base --is-ancestor <queued-sha> <tip-sha>` before cancelling, then `gh run cancel`.
+  Only the tip's verdict decides whether the branch is green.
 - THE FULL LOCAL SUITE IS 21-27 MINUTES AND IS NOT YOURS TO RUN. Targeted files take seconds and CI is
   authoritative. This was already a maintainer directive and was still violated twice.
 
