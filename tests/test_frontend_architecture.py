@@ -222,8 +222,9 @@ def test_the_ledger_still_measures_where_emission_lives() -> None:
 
 
 def test_every_recorded_owner_is_a_real_module() -> None:
-    # The ledger deliberately records SYMBOLS as well as modules -- 91 of its names are classes and functions,
-    # which is the whole point of measuring at symbol level. What must still resolve is every OWNER key. A
+    # The ledger deliberately records SYMBOLS as well as modules -- 91 of its names are symbols (81 classes
+    # and functions, 10 type aliases), which is the whole point of measuring at symbol level. What must
+    # still resolve is every OWNER key. A
     # typo'd owner is already caught by the ratchet's `removed` arm, so this is a backstop that names the cause
     # directly rather than the sole catcher.
     unresolved = sorted(owner for owner in _EMITTER_FRONTEND_DEBT if not _module_source(owner))
@@ -250,7 +251,7 @@ def test_emission_rejection_sites_only_shrink() -> None:
     #     hid behind one while the pair still read (42, 42). Such factories are ordinary style in this codebase.
     #   - `<=` on any of them would permit 42 -> 41 -> 42 regrowth.
     # Every NAME occurrence is therefore counted too, which no rewrite of the call shape can move without
-    # moving the number. A genuine upstream move changes all three and updates them here in the same commit.
+    # moving the number. A genuine upstream move changes all five and updates them here in the same commit.
     # Counted over the PACKAGE, not `_emit.py` alone: the file is ~1500 lines against a ~2000 soft limit, so
     # splitting it is a plausible refactor, and a file-scoped count would read the move as M5 progress.
     constructed = 0
