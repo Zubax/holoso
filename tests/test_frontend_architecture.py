@@ -207,6 +207,19 @@ def test_emission_reaches_the_frontend_only_by_named_symbols() -> None:
     )
 
 
+def test_the_ledger_still_measures_where_emission_lives() -> None:
+    # The ledger reads ONE file, so a thin `_emit.py` re-exporting `lower_fir` from a sibling would drop it
+    # from 101 names to two while every decision import moved next door -- and the ratchet would invite
+    # deleting the entries. Pin that emission is still defined here; if it genuinely moves, this fails and the
+    # ledger's root has to move with it, deliberately, rather than the debt appearing to evaporate.
+    source = ast.parse(Path(_module_source(_EMITTER)).read_text(encoding="utf-8"))
+    defined = {node.name for node in ast.walk(source) if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+    assert {"lower_fir", "_Emitter"} <= defined, (
+        "lower_fir and _Emitter are no longer defined in the module the debt ledger measures; point _EMITTER "
+        "at wherever emission now lives and re-record the ledger there"
+    )
+
+
 def test_every_recorded_owner_is_a_real_module() -> None:
     # The ledger deliberately records SYMBOLS as well as modules -- 93 of its names are classes and functions,
     # which is the whole point of measuring at symbol level. What must still resolve is every OWNER key. A
@@ -263,11 +276,22 @@ def test_emission_rejection_sites_only_shrink() -> None:
         if (isinstance(node, ast.Name) and node.id == "EmissionRejection")
         or (isinstance(node, ast.Attribute) and node.attr == "EmissionRejection")
     )
-    assert (constructed, raised, named) == (42, 42, 42), (
-        f"emission constructs {constructed} refusals, raises {raised} directly and names the class {named} "
-        "times, recorded (42, 42, 42): fewer of all three is M5 progress and updates the numbers here in the "
-        "same commit; anything else means a refusal was added, or routed through a helper or factory where a "
-        "count can no longer see it"
+    # Every `raise` in the emitter, whatever it raises and whatever the class is called. This is the
+    # rename-proof and class-proof number: renaming EmissionRejection, or refusing with a different exception
+    # type, moves the three counts above to zero or leaves them flat while the refusals are all still there.
+    # It counts the emitter's asserts-as-raises too, which is intended -- M5's end state is an emitter that
+    # does not raise.
+    raises_here = sum(
+        1
+        for node in ast.walk(ast.parse(Path(_module_source(_EMITTER)).read_text(encoding="utf-8")))
+        if isinstance(node, ast.Raise)
+    )
+    assert (constructed, raised, named, raises_here) == (42, 42, 42, 48), (
+        f"emission constructs {constructed} refusals, raises {raised} directly, names the class {named} times "
+        f"and contains {raises_here} raise statements, recorded (42, 42, 42, 48). A DROP IS NOT SELF-EVIDENT "
+        "PROGRESS: hoisting refusals into a helper, renaming the class, or refusing with another type all "
+        "lower a count while every refusal stays. What proves a refusal actually moved upstream is the frozen "
+        "rejection corpus, which pins the public class and message; update these numbers only alongside it"
     )
 
 

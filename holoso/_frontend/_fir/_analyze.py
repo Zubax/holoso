@@ -345,9 +345,10 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
       production emission still does it (`docs/decisions/arch-ruling.md`, outstanding M2/M3 work).
 
     What it is FOR is M1, which rewrites recording to be evidence-atomic: a recorder that stops writing a plan
-    for a `PyCall` inside a block emission still visits is precisely the regression this catches, and it is the
-    one shape the upstream gate does not already cover. Kept deliberately as a postcondition read-back placed
-    before the change that can break it.
+    for a `PyCall` inside a block emission still visits is the regression the plan arm catches. The other arms
+    cover shapes the upstream gate provably does not -- a walked-but-unmarked sink, and a severed edge, both
+    measured to reach emission as raw crashes or, for a residual branch arm, as a silently different value.
+    Kept deliberately as a postcondition read-back placed before the change that can break it.
     """
     walked = executable_rpo(result.unit.entry, result.executable_edges)
     unmarked = [block_id for block_id in walked if block_id not in result.executable_blocks]

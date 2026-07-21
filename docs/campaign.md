@@ -1715,3 +1715,25 @@ one that moved or was never live.
 The reviewer also swept the mirror direction (spurious edges ADDED to the executable set, all 20 non-existent
 pairs on a merge kernel) and found no silent divergence -- every case is HIR-identical or an unlocated crash --
 so the severed direction is genuinely the dangerous one.
+
+
+M0 CLOSING ROUND, CODEX HALF -- reported in full this time (the ordinary-code-review framing got past the
+classifier that had cut off three previous halves). It CONVERGED with the Claude half on the severed residual
+branch arm and made it worse in the useful way: not merely an unlocated crash but a SILENT VALUE CHANGE, 4.0
+becoming 5.0 on a runtime condition -- refuting outright the paragraph I had written two commits earlier
+claiming that silent-HIR-change class was now impossible. Both its bare-import and branch mutants were already
+closed by the time it reported; I verified its exact shapes against the fixes.
+
+WHAT IT ADDED, all acted on. The refusal ratchet was still syntax-defeatable in three ways I had not covered:
+an incremental hoist into an always-raising helper keeps (42, 42, 42) while adding refusals; a refusal raised
+as `UnsupportedConstruct` instead is not counted at all; and RENAMING the class to `EmissionRefusal` reads
+(0, 0, 0) -- registering complete M5 progress while all 42 refusal paths remain. Added a fourth number: every
+`raise` in the emitter, whatever it raises and whatever the class is called, recorded at 48. Both the rename
+and the foreign-class mutants now fail. The message also stops treating a DROP as self-evident progress and
+names what actually proves a refusal moved -- the frozen rejection corpus, which pins the public class and the
+message text; the counts only force someone to look.
+
+Its module-split finding is the sharper version of the scope asymmetry the other half raised: a thin `_emit.py`
+re-exporting `lower_fir` from a sibling collapses the ledger from 101 names to two while every decision import
+merely moves next door. Guarded by pinning that `lower_fir` and `_Emitter` are still DEFINED in the measured
+module, so a genuine move fails loudly and forces the ledger's root to move with it.
