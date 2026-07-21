@@ -233,6 +233,33 @@ Use your best judgement as to which features do not need test coverage. For exam
 - white-box tests of implementation details rather than behaviors;
 - rejection of invalid inputs where an exception is raised.
 
+A passing test asserts nothing by itself. Its claim is which mutation it uniquely catches, and that is
+measurable, so measure it: apply the defect, watch the test fail, then fix and watch it pass. This works
+reliably when repairing something broken and lapses when relaxing something too strict -- a loosened guard needs
+its before-state demonstrated exactly as much as a tightened one does.
+
+### Where tests run
+
+The suite is expected GREEN at HEAD. Do not re-run it to establish a baseline, and instruct every subagent of the
+same -- an agent that is not told will build its own baseline, expensively.
+
+Heavy tests belong on the CI VMs, not on the workstation, which is shared. The full local suite costs upwards of
+twenty minutes; a targeted selection of the files a change actually touches costs seconds and is what local runs
+are for. CI is authoritative.
+
+Set `HOLOSO_IMPACT_CACHE=1` for any local cosimulation. Generation is deterministic, so the emitted Verilog is a
+sound impact oracle: a row whose Verilog, bench and support sources are byte-identical to its last recorded pass
+is skipped. It is opt-in and local-only by design -- CI never sets it, so the uncached matrix remains the
+authoritative backstop.
+
+Commit freely, push at milestones. Each push consumes a CI run on serialized self-hosted runners that take tens
+of minutes, so a push per commit produces a queue that never drains. Markdown-only commits fire no CI. If a push
+supersedes queued runs, cancel them -- confirm with `git merge-base --is-ancestor <queued> <tip>` first; only the
+tip's verdict decides whether the branch is green.
+
+Put `set -o pipefail` on any gate chain that pipes into `tail` or `head`, or the pipeline reports the exit status
+of the pager and a failing check scrolls past unnoticed. A gate you have to read is not a gate.
+
 ## Review loop
 
 After every change or milestone, or when explicitly prompted, run the multi-agent review/refine loop:
