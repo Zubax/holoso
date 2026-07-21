@@ -233,19 +233,24 @@ offset at all. Counting offsets cannot find a site that permutes nothing and mer
 Counting `_write` proves nothing else mutates the cell map. It does NOT say which sites need a key, because a
 required route can execute ZERO writes -- a zero-cell conversion, a fully static construction, an all-known
 projection. Presence of a plan and presence of a write are independent, and revision 3 conflated them. These
-arms must each be decided explicitly:
+arms are decided as follows, with the reasoning, because listing a tension is not settling it:
 
-- `PyBin`: a sequence aggregate ROUTES (concat and repeat, no HIR at all) while an array aggregate COMPUTES.
-  One op kind, two classes, decided by the layout.
-- `PySubscript` and record `PyAttr`: today a `needs_cells` gate skips them entirely. Either that gate stays and
-  they produce no key, or they produce an intentional all-`NoCell` plan. Not both.
-- `PySelect`: the condition must be `Known`, but emission ALSO bypasses the selection when the scalar result is
-  itself `Known` or `Reference`. Two conditions, not one.
-- `PyCall`: classification needs `CallPlan.lowering`. Op kind and destination fact are insufficient, because a
-  folded call can also produce an aggregate.
-- Component-state sources: the FIRST attribute access may install the `StateLeaf` fact during the op, so
-  "resolve the source in the pre-op environment" needs an explicit state-live-in and reset fallback or it will
-  fail on the very access that creates the leaf.
+- `PyBin` is decided by the LAYOUT, not the op kind. A sequence aggregate ROUTES -- concat and repeat emit no
+  HIR at all -- and takes a key. An array aggregate COMPUTES elementwise and takes none. A scalar computes.
+- `PySubscript` and record `PyAttr` produce an ALL-`NoCell` PLAN rather than no key. The `needs_cells` gate
+  then stops being an independent decision and becomes a consequence of the plan's dispositions, which is the
+  document's whole thesis applied to itself: absence must never be the carrier of meaning. It costs nothing at
+  emission, since a plan of `NoCell` rows emits exactly what the gate emits today -- nothing -- so it cannot
+  disturb HIR node order.
+- `PySelect` takes a key only when BOTH hold: the condition fact is `Known`, AND the result is neither `Known`
+  nor `Reference`. The second condition is a separate bypass in emission and revision 3 recorded only the
+  first.
+- `PyCall` is classified from `CallPlan.lowering`, never from op kind plus destination fact, because a folded
+  call can also produce an aggregate. A key exists for `CONVERSION` with an aggregate destination and for
+  `CONSTRUCTION` with at least one `Residual` leaf; `FOLDED`, `CAST` and `INTRINSIC` take none.
+- Component-state source resolution falls back explicitly: pre-op environment first, then the state live-in,
+  then the reset fact. Without the fallback the predicate fails on the FIRST attribute access, which is the
+  one that installs the leaf during the very op that reads it.
 
 ### What the verifier must check beyond the above
 
