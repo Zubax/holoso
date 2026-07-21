@@ -1719,9 +1719,13 @@ so the severed direction is genuinely the dangerous one.
 
 M0 CLOSING ROUND, CODEX HALF -- reported in full this time (the ordinary-code-review framing got past the
 classifier that had cut off three previous halves). It CONVERGED with the Claude half on the severed residual
-branch arm and made it worse in the useful way: not merely an unlocated crash but a SILENT VALUE CHANGE, 4.0
-becoming 5.0 on a runtime condition -- refuting outright the paragraph I had written two commits earlier
-claiming that silent-HIR-change class was now impossible. Both its bare-import and branch mutants were already
+branch arm. I then wrote that it had shown a SILENT VALUE CHANGE there, 4.0 becoming 5.0, refuting a paragraph
+of mine -- and THE DECIDING ROUND SHOWED THAT CREDIT WAS WRONG. Reproduced over 31 branch-arm severances
+across the example corpus: a severed residual branch arm ALWAYS crashes unlocated with a phi missing its
+predecessor, never silently. The 4.0->5.0 divergence is real but belongs to the severed merge JUMP, which the
+jump arm had already caught one commit earlier. I credited a new fix with a class it did not close; the
+correction stands here and in the code, where the docstring had the same inversion. Both its bare-import and branch
+mutants were already
 closed by the time it reported; I verified its exact shapes against the fixes.
 
 WHAT IT ADDED, all acted on. The refusal ratchet was still syntax-defeatable in three ways I had not covered:
@@ -1737,3 +1741,34 @@ Its module-split finding is the sharper version of the scope asymmetry the other
 re-exporting `lower_fir` from a sibling collapses the ledger from 101 names to two while every decision import
 merely moves next door. Guarded by pinning that `lower_fir` and `_Emitter` are still DEFINED in the measured
 module, so a genuine move fails loudly and forces the ledger's root to move with it.
+
+
+M0 DECIDING ROUND -- NOT CLOSING, both halves, and between them the most useful round of the step.
+
+THE REFUSAL COUNTER MEASURED SYNTAX SITES, NOT REFUSAL PATHS, and the tidy refactor was free. Two measured
+defeats: one more CALL to an already-raising helper adds a refusal with all four numbers unmoved (`_emit.py`
+has 21 raising functions, 10 already called from several places), and the BALANCED hoist -- add a helper,
+convert exactly one site -- leaves the numbers flat because the helper's own raise replaces the converted one,
+after which every further call is free. The sloppy hoist fired; the tidy one did not, and the tidy one is what
+a person actually writes. A fifth number now counts calls INTO raising functions, which both shapes move.
+
+I HAD THE CRASH-VS-SILENT ATTRIBUTION BACKWARDS, and had written the wrong version into this log while
+crediting my own fix. Measured over 31 branch-arm severances across the example corpus: a severed residual
+BRANCH arm ALWAYS crashes unlocated with a phi missing its predecessor, never silently. The 4.0->5.0 silent
+value change is real but belongs to the severed merge JUMP, which the jump arm had already caught a commit
+earlier. The docstring, the inline comment and the campaign paragraph all said the opposite; all three are
+corrected. Crediting a new fix with a class it did not close is the same error as claiming a guard catches
+what it cannot -- it just flatters the fix instead of the guard.
+
+CODEX'S SUGGESTED REMEDY WAS REFUTED BY MEASUREMENT, which is worth recording as its own outcome. It proposed
+requiring the SELECTED arm of a folded branch, having seen a raw `KeyError` when that edge is severed. Applied,
+it failed 44 tests: the shipped fixpoint legitimately records no edge there on ordinary kernels, an equal-arm
+ternary among them. Reverted, and the residual limit is now stated in the code -- a severed edge out of a
+FOLDED branch stays uncaught, because the obvious fix is measurably false.
+
+Also closed: `binding_facts` had no arm at all, though M1's subject is fact recording -- a dropped fact reached
+emission as a named assert deep in the walk, and is now caught before it. And the two raise counts were scoped
+to one file while the three refusal counts were package-scoped; the asymmetry is deliberate (a bare `raise` in
+`_analyze.py` is the analyzer's business, and package-scoping read 312 instead of 48) and is now stated,
+together with the fact that the ordering test pins order but not the seam as tightly as its name suggested --
+moving the call into `_Emitter.__init__` still passes.

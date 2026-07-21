@@ -340,6 +340,8 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
     - `subscript_plans` and `route_plans` are read with `.get()`, where absence legitimately means positional
       projection and identity route, so their omissions are indistinguishable from intent and are NOT checked;
       verifying those needs the typed explicit variants M2 introduces;
+    - `binding_facts` IS now checked, since M1's subject is fact recording; a gap there is a named assert
+      inside the walk rather than a raw crash, so it is the mildest of these arms;
     - the J6 obligation the ruling assigned to this function by name -- every kind promotion consumed from an
       explicit plan row rather than derived by inspecting emitted nodes -- is NOT implemented here, and
       production emission still does it (`docs/decisions/arch-ruling.md`, outstanding M2/M3 work).
@@ -364,15 +366,35 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
         terminator = result.unit.blocks[block_id].terminator
         if isinstance(terminator, Jump) and (block_id, terminator.target) not in result.executable_edges:
             severed.append(block_id)
-        # A branch whose condition did not settle takes BOTH arms, so both edges are obligatory; one whose
-        # condition folded legitimately keeps a single arm, and is left alone. Severing an obligatory arm
-        # leaves every block walked and every table total, then dies inside emission with a phi that has no
-        # arm for a predecessor -- the same unlocated shape as the severed jump.
+        # A branch whose condition did not settle takes BOTH arms, so both edges are obligatory. Severing one
+        # leaves every block walked and every table total, then dies inside emission with a phi that has no arm
+        # for a predecessor: an unlocated CRASH, not the silent divergence the jump case above produces --
+        # measured, 31 severances, none silent.
+        #
+        # A FOLDED branch is deliberately not checked, not even for the arm its condition selects. Requiring
+        # that arm looks obviously right and is WRONG against this analyzer: the shipped fixpoint legitimately
+        # records no edge for it on ordinary kernels (an equal-arm ternary among them), and the stricter rule
+        # failed 44 tests. So a severed edge out of a folded branch stays uncaught and reaches emission as a
+        # raw KeyError on the block id. Recorded rather than fixed, because the fix that suggests itself is
+        # measurably false.
         if isinstance(terminator, Branch) and not isinstance(result.binding_facts.get(terminator.cond), Known):
             for target in (terminator.then_target, terminator.else_target):
                 if (block_id, target) not in result.executable_edges:
                     severed.append(block_id)
     assert not severed, f"blocks whose jump edge is missing from the executable set: {severed}"
+    # M1's subject is fact recording, not only plans, and emission reads a fact for every destination it
+    # materializes. A missing one surfaces as a named assert deep in the walk rather than a raw crash, which is
+    # milder than the tables above -- but it is exactly what a rewritten recorder can drop, so it is checked
+    # here where the failure can name the block and the op.
+    missing_facts = [
+        (block_id, op_dst(op))
+        for block_id in walked
+        for op in result.unit.blocks[block_id].ops
+        if op_dst(op) is not None and op_dst(op) not in result.binding_facts
+    ]
+    assert not missing_facts, "; ".join(
+        f"block {block_id} defines {dst} with no recorded fact" for block_id, dst in missing_facts
+    )
     missing_plans = [
         (block_id, op)
         for block_id in walked

@@ -209,11 +209,12 @@ def test_emission_reaches_the_frontend_only_by_named_symbols() -> None:
 
 def test_the_ledger_still_measures_where_emission_lives() -> None:
     # The ledger reads ONE file, so a thin `_emit.py` re-exporting `lower_fir` from a sibling would drop it
-    # from 101 names to two while every decision import moved next door -- and the ratchet would invite
+    # from 99 names to two while every decision import moved next door -- and the ratchet would invite
     # deleting the entries. Pin that emission is still defined here; if it genuinely moves, this fails and the
     # ledger's root has to move with it, deliberately, rather than the debt appearing to evaporate.
     source = ast.parse(Path(_module_source(_EMITTER)).read_text(encoding="utf-8"))
-    defined = {node.name for node in ast.walk(source) if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+    # Module level only: `ast.walk` would accept a homonym nested inside a facade function.
+    defined = {node.name for node in source.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
     assert {"lower_fir", "_Emitter"} <= defined, (
         "lower_fir and _Emitter are no longer defined in the module the debt ledger measures; point _EMITTER "
         "at wherever emission now lives and re-record the ledger there"
@@ -221,7 +222,7 @@ def test_the_ledger_still_measures_where_emission_lives() -> None:
 
 
 def test_every_recorded_owner_is_a_real_module() -> None:
-    # The ledger deliberately records SYMBOLS as well as modules -- 93 of its names are classes and functions,
+    # The ledger deliberately records SYMBOLS as well as modules -- 91 of its names are classes and functions,
     # which is the whole point of measuring at symbol level. What must still resolve is every OWNER key. A
     # typo'd owner is already caught by the ratchet's `removed` arm, so this is a backstop that names the cause
     # directly rather than the sole catcher.
@@ -239,7 +240,7 @@ def test_emission_rejection_sites_only_shrink() -> None:
     # M5 retires EmissionRejection: every refusal moves upstream, diagnostic-identical. The count is the debt,
     # and the corpus pins the messages, so this only has to stop the number from drifting either way.
     #
-    # THREE numbers, exactly, because each alone is defeatable and a ceiling is not a ratchet:
+    # FIVE numbers, exactly, because each alone is defeatable and a ceiling is not a ratchet:
     #   - `raise` statements alone: hoisting them into a `_reject(...)` helper drops it to zero with
     #     byte-identical diagnostics and nothing moved upstream;
     #   - constructions alone: a helper that constructs internally lets a NEW refusal be added while the
@@ -279,19 +280,48 @@ def test_emission_rejection_sites_only_shrink() -> None:
     # Every `raise` in the emitter, whatever it raises and whatever the class is called. This is the
     # rename-proof and class-proof number: renaming EmissionRejection, or refusing with a different exception
     # type, moves the three counts above to zero or leaves them flat while the refusals are all still there.
-    # It counts the emitter's asserts-as-raises too, which is intended -- M5's end state is an emitter that
-    # does not raise.
-    raises_here = sum(
+    # It counts the emitter's `raise AssertionError` sites too, so converting one to a plain `assert` -- a
+    # cleanup this project's style would welcome -- fires this with a message about refusals. That is the
+    # intended trade: M5's end state is an emitter that does not raise.
+    package = [
+        ast.parse(module.read_text(encoding="utf-8"))
+        for module in sorted(Path(_module_source(_EMITTER)).parent.glob("*.py"))
+    ]
+    emitter = ast.parse(Path(_module_source(_EMITTER)).read_text(encoding="utf-8"))
+    # These last two are scoped to EMISSION'S MODULE, deliberately unlike the three above. `EmissionRejection`
+    # is emission's own exception wherever it is written, so counting it package-wide is right; a bare `raise`
+    # in `_analyze.py` is the analyzer's business and package-scoping these would measure 312 instead of 48.
+    # The cost is that moving a raising helper to a sibling reads as progress here -- which the guard pinning
+    # where `lower_fir` is defined turns into a loud failure rather than a silent one.
+    raises_here = sum(1 for node in ast.walk(emitter) if isinstance(node, ast.Raise))
+    # Counting refusal SYNTAX cannot see a refusal PATH. The emitter has 21 functions that raise and 10 of them
+    # are already called from several places, so one more call to `_carrier_float` or to any hoisted helper is
+    # a brand-new refusal with every syntax count unmoved -- measured. Worse, the TIDY hoist is free: add a
+    # helper and convert exactly one site, and the helper's own raise replaces the converted one, after which
+    # every further call is invisible. So the call sites into raising functions are counted as well, which both
+    # of those shapes do move. None of this proves a refusal moved UPSTREAM; the frozen rejection corpus does,
+    # by pinning the public class and message. These numbers only make a change impossible to miss.
+    raising = {
+        node.name
+        for node in ast.walk(emitter)
+        if isinstance(node, ast.FunctionDef) and any(isinstance(inner, ast.Raise) for inner in ast.walk(node))
+    }
+    into_raising = sum(
         1
-        for node in ast.walk(ast.parse(Path(_module_source(_EMITTER)).read_text(encoding="utf-8")))
-        if isinstance(node, ast.Raise)
+        for node in ast.walk(emitter)
+        if isinstance(node, ast.Call)
+        and (
+            (isinstance(node.func, ast.Name) and node.func.id in raising)
+            or (isinstance(node.func, ast.Attribute) and node.func.attr in raising)
+        )
     )
-    assert (constructed, raised, named, raises_here) == (42, 42, 42, 48), (
-        f"emission constructs {constructed} refusals, raises {raised} directly, names the class {named} times "
-        f"and contains {raises_here} raise statements, recorded (42, 42, 42, 48). A DROP IS NOT SELF-EVIDENT "
-        "PROGRESS: hoisting refusals into a helper, renaming the class, or refusing with another type all "
-        "lower a count while every refusal stays. What proves a refusal actually moved upstream is the frozen "
-        "rejection corpus, which pins the public class and message; update these numbers only alongside it"
+    measured = (constructed, raised, named, raises_here, into_raising)
+    assert measured == (42, 42, 42, 48, 46), (
+        f"emission's refusal shape is {measured}, recorded (42, 42, 42, 48, 46) as "
+        "(constructions, direct raises, name occurrences, raise statements, calls into raising functions). "
+        "A DROP IS NOT SELF-EVIDENT PROGRESS: hoisting into a helper, renaming the class, or refusing with "
+        "another type all lower a count while every refusal stays. What proves a refusal moved upstream is the "
+        "frozen rejection corpus, which pins the public class and message; update these only alongside it"
     )
 
 
@@ -355,9 +385,10 @@ def test_lower_fir_runs_the_plan_verifier_BEFORE_emission_walks(monkeypatch: pyt
             return self.s
 
     emit_module.lower_fir(Kernel().step)
-    # The pin is on the `lower_fir` SEAM, deliberately: moving the call inside `_Emitter.emit` would still
-    # precede the walk but would put the check downstream of the boundary M0 is guarding. What this does not
-    # check is that the verifier is handed the result actually emitted -- the stub ignores its argument.
+    # The pin is on the ORDER of the two, and on the call existing at all. It does NOT pin the seam as tightly
+    # as that reads: moving the call into `_Emitter.__init__` still passes, since construction precedes the
+    # traced `emit`. Nor does it check that the verifier is handed the result actually emitted -- the stub
+    # ignores its argument. What it does catch, measured, is the call moved after emission or deleted.
     assert trace == ["verify", "emit"], f"the verifier must run at the lower_fir seam, before emission, got {trace}"
 
 
@@ -452,4 +483,27 @@ def test_the_plan_verifier_catches_a_severed_residual_branch_arm() -> None:
     assert len(arms) == 2, "the kernel must keep a residual two-armed branch for this test to mean anything"
     result.executable_edges.remove(arms[-1])
     with pytest.raises(AssertionError, match="edge is missing"):
+        verify_plan_totality(result)
+
+
+def test_the_plan_verifier_catches_a_missing_binding_fact() -> None:
+    # M1 rewrites fact recording, so a dropped fact is exactly the regression to expect from it. Emission reads
+    # one for every destination it materializes and fails deep in the walk with a named assert; this names the
+    # block and the destination before the walk starts.
+    from holoso._frontend._fir._analyze import Analyzer, verify_plan_totality
+
+    class Kernel:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def step(self, x: float) -> float:
+            self.s = x * 2.0 + 1.0
+            return self.s
+
+    result = Analyzer(Kernel().step).fixpoint()
+    verify_plan_totality(result)
+
+    assert result.binding_facts, "the kernel must record binding facts for this test to mean anything"
+    result.binding_facts.pop(next(iter(result.binding_facts)))
+    with pytest.raises(AssertionError, match="no recorded fact"):
         verify_plan_totality(result)
