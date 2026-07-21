@@ -349,9 +349,10 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
     What it is FOR is M1, which rewrites recording to be evidence-atomic: a recorder that stops writing a plan
     for a `PyCall` inside a block emission still visits is the regression the plan arm catches. The other arms
     cover shapes the upstream gate provably does not, and they cover DIFFERENT failures. The serious ones are
-    silent: a severed merge JUMP edge was measured to emit different HIR, and a dropped parameter fact to emit
-    a differently typed input port, neither with any error. A walked-but-unmarked sink and a severed BRANCH arm
-    reach emission as raw unlocated crashes instead -- 31 severances across the example corpus, none silent.
+    silent: over the bundled corpus, 171 of 314 severed merge JUMP edges emit different HIR with no error, and
+    a dropped parameter fact emits a differently typed input port. A severed BRANCH arm is never silent across
+    196 severances, but "crash" overstates it -- 21 of them, including 16 of the 20 folded ones, come out as
+    ORDINARY LOCATED refusals, and only the rest are raw. A walked-but-unmarked sink is a raw crash.
     Kept deliberately as a postcondition read-back placed before the change that can break it.
     """
     walked = executable_rpo(result.unit.entry, result.executable_edges)
@@ -359,14 +360,17 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
     assert not unmarked, f"emission walks blocks the analysis did not mark executable: {unmarked}"
     missing_env = [block_id for block_id in walked if block_id not in result.block_in]
     assert not missing_env, f"emission walks blocks with no recorded environment: {missing_env}"
-    # Parameters are not op destinations, so the arm above cannot see them -- and emission reads their facts
-    # from the entry environment to type the module's INPUT PORTS. Dropping one was measured to pass every
+    # Parameters are not op destinations, so the binding-fact arm below cannot see them -- and emission reads
+    # their facts from the entry environment to type the module's INPUT PORTS. Dropping one was measured to pass every
     # other arm and silently change a port from bool to float: an ABI divergence with no error at all, the
     # worst class this scaffold exists to catch, and squarely in what M1 rewrites.
-    entry_facts = result.block_in[result.unit.entry].facts if result.unit.entry in result.block_in else {}
-    unfaced = [
-        param for param in result.unit.params if Local(param) not in entry_facts or param not in result.binding_facts
-    ]
+    # Scoped exactly to what emission reads: the ENTRY environment only, and not the bound `self`, which
+    # emission skips when it builds ports. Requiring `binding_facts` too, or including `self`, made the
+    # verifier refuse results emission handles perfectly well -- a guard that fires where nothing is wrong
+    # teaches its reader to edit the number.
+    entry_facts = result.block_in[result.unit.entry].facts  # the entry is walked, so `missing_env` covered it
+    ported = result.unit.params[1:] if result.unit.bound_self is not None else result.unit.params
+    unfaced = [param for param in ported if Local(param) not in entry_facts]
     assert not unfaced, f"parameters with no recorded fact for emission to type the input port: {unfaced}"
     # M1's subject is fact recording, not only plans, and emission reads a fact for every destination it
     # materializes. A missing one surfaces as a named assert deep in the walk rather than a raw crash, which is
@@ -384,7 +388,7 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
     # A block that executes hands control to its Jump target, so that edge must be recorded. Dropping one
     # whose target keeps another predecessor leaves every block still walked and every table still total, so
     # the arms above see nothing -- and emission silently produces DIFFERENT HIR, which is the worst outcome
-    # this scaffold exists to make impossible. Branches are not checked: folding one arm is legitimate.
+    # this scaffold exists to make impossible. Branch arms are checked too, per the note below.
     severed = []
     for block_id in walked:
         terminator = result.unit.blocks[block_id].terminator
@@ -395,23 +399,23 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
         # for a predecessor: an unlocated CRASH, not the silent divergence the jump case above produces --
         # measured, 31 severances, none silent.
         #
-        # A FOLDED branch is deliberately not checked, not even for the arm its condition selects. Requiring
-        # that arm looks obviously right and is WRONG against this analyzer: the shipped fixpoint legitimately
-        # records no edge for it on ordinary kernels (an equal-arm ternary among them), and the stricter rule
-        # failed 44 tests. So a severed edge out of a folded branch stays uncaught and reaches emission as a
-        # raw KeyError on the block id. Recorded rather than fixed, because the fix that suggests itself is
-        # measurably false.
+        # A FOLDED branch keeps only the arm its condition selects, and THAT arm is obligatory: severing it
+        # reaches emission as a raw KeyError on the block id. An earlier note here claimed the rule was
+        # "measurably false" because it failed 44 tests; that measurement was a bug of mine -- the condition's
+        # `value` is a StaticBool WRAPPER and so always truthy, which selected the wrong arm. Unwrapped through
+        # `as_python` the rule passes, and the hole is closed.
         if isinstance(terminator, Branch):
             condition = result.binding_facts.get(terminator.cond)
             if isinstance(condition, Known):
-                taken = bool(as_python(condition.value))
+                taken = as_python(condition.value)
+                assert isinstance(taken, bool)
                 obligatory: tuple[BlockId, ...] = (terminator.then_target if taken else terminator.else_target,)
             else:
                 obligatory = (terminator.then_target, terminator.else_target)
             for target in obligatory:
                 if (block_id, target) not in result.executable_edges:
                     severed.append(block_id)
-    assert not severed, f"blocks whose jump edge is missing from the executable set: {severed}"
+    assert not severed, f"blocks whose obligatory outgoing edge is missing from the executable set: {severed}"
     missing_plans = [
         (block_id, op)
         for block_id in walked

@@ -1797,5 +1797,35 @@ Also: a dead local re-parsing every module in the package for nothing, and the d
 commit CLAIMED to have corrected in three places and had corrected in two -- the file contradicted itself eight
 lines apart, and the surviving copy was the wrong one. Recorded limits that remain, measured and stated: a
 refusal reached through a raising helper defined in a SIBLING module is invisible to the emitter-scoped counts,
-widening an existing refusal's condition is flat, and four of the counted call sites target helpers whose only
-raise is a defensive assert, so a new call to one fires a refusal guard with nothing to satisfy it.
+widening an existing refusal's condition is flat, and two of the counted call sites target helpers with no
+path to a real refusal, so a new call to one fires a refusal guard with nothing to satisfy it.
+
+
+M0 ROUND 8 -- the folded-branch fix itself SURVIVED attack (124/124 folded severances caught across 227
+fixtures, silent on every legitimate shape probed: nested, loop-carried, unrolled, comprehension filters,
+tuple-unpack arity, early return, mixed folded/residual), and everything else the round found was mine.
+
+I FIXED TWO DEFECTS AND PINNED NEITHER. Reverting the folded-arm rule, or restoring the old fact-check order,
+left the whole suite green -- so the headline fix of the previous commit was unprotected against being undone.
+That is the project's mandatory fail-before rule, which I had applied everywhere else and skipped exactly where
+the fix was newest. Both are pinned now, each verified to fail with its fix removed.
+
+I LEFT THE DISPROVEN JUSTIFICATION SITTING ABOVE THE CODE THAT REFUTES IT. Having established that the "failed
+44 tests" measurement was my own StaticBool-wrapper bug and closed the hole, the comment six lines above the
+fix still said the hole was deliberately open and cited that number as the reason -- and a second sentence in
+the same family said branches are not checked at all. The reviewer also refuted a detail I had invented to
+support it: the "equal-arm ternary" does not exist, since the builder mints two fresh blocks at every branch
+and `then_target == else_target` occurs zero times in 227 fixpoints.
+
+THE CORPUS CENSUS REFUTED MY OWN CHARACTERISATION. I wrote that a severed branch arm reaches emission as a raw
+crash, "31 severances, none silent". Over the 24 bundled kernels there are 196 branch severances, and 21 of
+them -- including 16 of the 20 folded ones -- come out as ORDINARY LOCATED refusals rather than raw crashes.
+"None silent" holds; the count and the characterisation were inherited from a residual-only measurement and
+never re-derived when the folded arm joined the sentence. Corrected with the real figures, including the jump
+half (171 of 314 silent) which did check out.
+
+Also: the parameter arm fired on the bound `self`, which has no input port at all -- a false alarm carrying a
+false message, on a guard whose whole purpose is to be trustworthy; the `into_raising` closure reaches 44 of
+60 emitter functions, so extracting an ordinary forwarder moves it under a refusal-shaped message, and that
+cost is now named as its neighbour's already was; the closure was keyed by a name that is defined twice in
+this module, silently dropping a definition, and is conservative now; and two dead conditions went with them.

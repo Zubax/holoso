@@ -296,22 +296,34 @@ def test_emission_rejection_sites_only_shrink() -> None:
     # a brand-new refusal with every syntax count unmoved -- measured. Worse, the TIDY hoist is free: add a
     # helper and convert exactly one site, and the helper's own raise replaces the converted one, after which
     # every further call is invisible. So the call sites into raising functions are counted as well, which both
-    # of those shapes do move. None of this proves a refusal moved UPSTREAM; the frozen rejection corpus does,
+    # of those shapes do move. The cost, unlike its neighbour's, is that the closure reaches 44 of the 60
+    # emitter functions, so extracting an ordinary forwarder that adds no refusal moves it too and reports
+    # under a refusal-shaped message. None of this proves a refusal moved UPSTREAM; the frozen corpus does,
     # by pinning the public class and message. These numbers only make a change impossible to miss.
     # TRANSITIVE, and that is the whole point: computed non-transitively, hoisting a function's SOLE raise into
     # a helper drops the still-refusing host out of the set, after which every one of its call sites -- which
     # still refuse, through the helper -- contributes nothing in either direction. Measured on `_emit_cast`:
     # all five numbers flat, and 8 of the 21 raising functions can be emptied out this way one at a time.
-    bodies = {node.name: node for node in ast.walk(emitter) if isinstance(node, ast.FunctionDef)}
-    raising = {name for name, node in bodies.items() if any(isinstance(x, ast.Raise) for x in ast.walk(node))}
+    # Keyed by NAME and CONSERVATIVE on purpose: methods and module functions share this namespace and one
+    # name is defined twice (`define`), so a name-to-node dict silently drops a definition. A name counts as
+    # raising if ANY definition of it raises or reaches one, which can over-count but cannot let a refusal path
+    # go unmeasured -- the safe direction for a debt ratchet.
+    bodies: dict[str, list[ast.FunctionDef]] = {}
+    for node in ast.walk(emitter):
+        if isinstance(node, ast.FunctionDef):
+            bodies.setdefault(node.name, []).append(node)
+    raising = {
+        name for name, defs in bodies.items() if any(isinstance(x, ast.Raise) for node in defs for x in ast.walk(node))
+    }
     while True:
         callers = {
             name
-            for name, node in bodies.items()
+            for name, defs in bodies.items()
             if name not in raising
             and any(
                 (isinstance(call.func, ast.Name) and call.func.id in raising)
                 or (isinstance(call.func, ast.Attribute) and call.func.attr in raising)
+                for node in defs
                 for call in ast.walk(node)
                 if isinstance(call, ast.Call)
             )
@@ -465,14 +477,15 @@ def test_the_plan_verifier_catches_a_severed_jump_edge() -> None:
     ]
     assert severable, "the kernel must produce a jump into a merge for this test to mean anything"
     result.executable_edges.remove(severable[0])
-    with pytest.raises(AssertionError, match="jump edge is missing"):
+    with pytest.raises(AssertionError, match="obligatory outgoing edge is missing"):
         verify_plan_totality(result)
 
 
 def test_the_plan_verifier_catches_a_severed_residual_branch_arm() -> None:
     # The jump arm was not enough: a branch whose condition never settles takes BOTH arms, so severing one
     # leaves every block walked and every table total and dies inside emission with "phi N in block M has arms
-    # for predecessors []". A branch whose condition folded keeps one arm legitimately and must not fire this.
+    # for predecessors []". A FOLDED branch keeps only the arm its condition selects, which is obligatory in
+    # its own right and is covered by the sibling test below.
     from holoso._frontend._fir._analyze import Analyzer, verify_plan_totality
     from holoso._frontend._fir._ir import Branch
 
@@ -495,7 +508,7 @@ def test_the_plan_verifier_catches_a_severed_residual_branch_arm() -> None:
     ]
     assert len(arms) == 2, "the kernel must keep a residual two-armed branch for this test to mean anything"
     result.executable_edges.remove(arms[-1])
-    with pytest.raises(AssertionError, match="edge is missing"):
+    with pytest.raises(AssertionError, match="obligatory outgoing edge is missing"):
         verify_plan_totality(result)
 
 
@@ -539,4 +552,64 @@ def test_the_plan_verifier_catches_a_missing_parameter_fact() -> None:
     parameter = result.unit.params[0]
     result.block_in[result.unit.entry].facts.pop(Local(parameter))
     with pytest.raises(AssertionError, match="no recorded fact for emission to type"):
+        verify_plan_totality(result)
+
+
+def test_the_plan_verifier_catches_a_severed_folded_branch_arm() -> None:
+    # A folded branch keeps only the arm its condition selects, and that arm is obligatory: severing it reaches
+    # emission as a raw KeyError on the block id. The rule was once removed on the strength of a measurement
+    # that turned out to be a bug (the condition's `value` is a StaticBool wrapper, so an unwrapped truth test
+    # picks the wrong arm), so this pins the rule rather than trusting the note.
+    from holoso._frontend._fir._analyze import Analyzer, verify_plan_totality
+    from holoso._frontend._fir._fact import Known
+    from holoso._frontend._fir._ir import Branch
+    from holoso._frontend._fir._value import as_python
+
+    def kernel(x: float) -> float:
+        if True:
+            return x + 1.0
+        return x + 2.0
+
+    result = Analyzer(kernel).fixpoint()
+    verify_plan_totality(result)
+
+    folded = [
+        (block_id, terminator)
+        for block_id in sorted(result.executable_blocks, key=lambda item: item.index)
+        if isinstance(terminator := result.unit.blocks[block_id].terminator, Branch)
+        and isinstance(result.binding_facts.get(terminator.cond), Known)
+    ]
+    assert folded, "the kernel must fold a branch for this test to mean anything"
+    block_id, terminator = folded[0]
+    condition = result.binding_facts[terminator.cond]
+    assert isinstance(condition, Known)
+    selected = terminator.then_target if bool(as_python(condition.value)) else terminator.else_target
+    result.executable_edges.remove((block_id, selected))
+    with pytest.raises(AssertionError, match="obligatory outgoing edge is missing"):
+        verify_plan_totality(result)
+
+
+def test_a_missing_condition_fact_is_reported_as_a_missing_fact() -> None:
+    # The fact check must run BEFORE the edge loop, because that loop reads `binding_facts` to decide which
+    # arms are obligatory. Checked in the other order, dropping a folded condition's fact -- exactly the M1
+    # regression the fact arm exists to name -- reported a missing edge instead, blaming the wrong thing.
+    from holoso._frontend._fir._analyze import Analyzer, verify_plan_totality
+    from holoso._frontend._fir._fact import Known
+    from holoso._frontend._fir._ir import Branch
+
+    def kernel(x: float) -> float:
+        if True:
+            return x + 1.0
+        return x + 2.0
+
+    result = Analyzer(kernel).fixpoint()
+    conditions = [
+        terminator.cond
+        for block_id in sorted(result.executable_blocks, key=lambda item: item.index)
+        if isinstance(terminator := result.unit.blocks[block_id].terminator, Branch)
+        and isinstance(result.binding_facts.get(terminator.cond), Known)
+    ]
+    assert conditions, "the kernel must fold a branch for this test to mean anything"
+    result.binding_facts.pop(conditions[0])
+    with pytest.raises(AssertionError, match="no recorded fact"):
         verify_plan_totality(result)
