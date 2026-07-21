@@ -166,6 +166,20 @@ leaf-walk remains where five plus three clones stand today.
 
 The corpus must regenerate byte-identically. Routing determines which cell reaches which port, so an error
 here is an ABI change, and `store_order` is the part of the plan the campaign has already identified as being
-the port ABI. No test names `subscript_plans` or `route_plans`; coverage of both is corpus-level only, through
-four examples (`routed_diamond`, `ekf1`, `fsc`, `imu`). M2 should add unit-level pins on the new type before
-adopting it, not after, because the existing safety net for this exact surface is thinner than it looks.
+the port ABI. No test names `subscript_plans` or `route_plans`; coverage of both is behavioural only.
+
+The campaign says four examples exercise routing -- `routed_diamond`, `ekf1`, `fsc`, `imu` -- and this document
+repeated it. `routed_diamond` DOES NOT EXIST. It was a spike artifact at `tests/spike_golden/kernels/` on the
+branch that was deleted when Stage 3 closed, and it survives only in `spike-ledger.md`, which is a verbatim
+record of that branch rather than of this tree. So there are three, not four, plus `polar` and `signal_window`
+which the campaign's list omits. That is the second miscount found in this document's own subject matter, both
+by re-deriving rather than reading.
+
+The safety net was then measured rather than described. `tests/test_frontend_routing.py` was added first, one
+swap-sensitive kernel per routing construct, and four routing mutants were run against it and against the
+pre-existing suites: a perturbed transpose route, a rotated repeat, a swap inside each repeated unit, and a
+rotated aligned copy. Every mutant the new module caught, the example-driven matrix and aggregate tests caught
+as well -- so the net at whole-suite level was NOT as thin as the inventory implied, and the new module's value
+is localization and a per-construct invariant rather than newly closed holes. One route is inherently
+untestable and M2 should not try: `seq * n` yields identical copies, so permuting whole repetitions maps
+identical content onto identical content.

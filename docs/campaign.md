@@ -1963,3 +1963,36 @@ parameter today, so this is invisible -- and it would have made a parameter-cond
 that crashes there. Seeding now precedes the check, with a source-order pin (verified to fail with the order
 swapped) so the check's correctness no longer rests on which pass happens to run first. My hardening created
 the hazard the same round it closed another; the reviewer found it by reading what the assert now depended on.
+
+
+M2 PREPARATION, WHILE X6A RUNS. Wrote the routing schema (`docs/decisions/routing-schema.md`) and submitted it
+as the consult. The design is one TOTAL row per result cell -- `OperandCell(operand, ordinal) | ConstantCell` --
+and totality, not the row shape, is the point: because a plan names every cell, absence stops being meaningful,
+which kills the two `.get()`-means-something conventions in emission and closes the hole `verify_plan_totality`
+names in its own docstring. It also removes the failure mode this campaign keeps hitting, where a recorder that
+stops writing yields a plausible identity route -- a wrong answer that looks like a default.
+
+TWO MISCOUNTS IN THE CAMPAIGN'S OWN ACCOUNTING, found by re-deriving. `HANDOFF.md` says four inline clones in
+emission; only three match the skeleton, and `arch-memo.md` independently says three. "Two emission
+re-derivations" undercounts: three have no plan at all and five places recompute a cell offset from a layout.
+
+AND A THIRD, WHICH I PROPAGATED. The campaign says four examples exercise routing -- routed_diamond, ekf1, fsc,
+imu -- and I copied that into the schema doc. `routed_diamond` DOES NOT EXIST. It was a spike artifact under
+`tests/spike_golden/kernels/` on the branch deleted when Stage 3 closed, and survives only in the ledger, which
+is a verbatim record of that branch and not of this tree. There are three, plus `polar` and `signal_window`
+which the list omits. I asserted a safety net that had not existed for weeks.
+
+THEN MEASURED THE NET INSTEAD OF DESCRIBING IT. Added `tests/test_frontend_routing.py`, one swap-sensitive
+kernel per routing construct: distinct values per cell and a non-commutative readout, so a permutation changes
+the answer instead of producing a well-formed equal one. Ran four routing mutants against it and against the
+pre-existing suites -- a perturbed transpose route, a rotated repeat, a swap within each repeated unit, a
+rotated aligned copy. EVERY mutant the new module caught, the example-driven matrix and aggregate tests caught
+too. So the net was NOT as thin as the inventory implied, and the module's honest value is localization and a
+per-construct invariant, not newly closed holes. The docstring says so; the first draft claimed otherwise and
+was corrected before commit.
+
+Two things worth keeping. One route is inherently untestable: `seq * n` yields identical copies, so permuting
+whole repetitions maps identical content onto identical content -- not a gap, an identity, and M2 should not
+try to pin it. And my hand-computed expected value for the repeat kernel was wrong (232323 for 323232); the
+differential half of the same test caught it. Pinning a value AND comparing against Python is worth the
+redundancy, because the pin encodes my arithmetic and the differential encodes the language's.
