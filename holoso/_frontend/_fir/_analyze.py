@@ -354,6 +354,16 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
     assert not unmarked, f"emission walks blocks the analysis did not mark executable: {unmarked}"
     missing_env = [block_id for block_id in walked if block_id not in result.block_in]
     assert not missing_env, f"emission walks blocks with no recorded environment: {missing_env}"
+    # A block that executes hands control to its Jump target, so that edge must be recorded. Dropping one
+    # whose target keeps another predecessor leaves every block still walked and every table still total, so
+    # the arms above see nothing -- and emission silently produces DIFFERENT HIR, which is the worst outcome
+    # this scaffold exists to make impossible. Branches are not checked: folding one arm is legitimate.
+    severed = []
+    for block_id in walked:
+        terminator = result.unit.blocks[block_id].terminator
+        if isinstance(terminator, Jump) and (block_id, terminator.target) not in result.executable_edges:
+            severed.append(block_id)
+    assert not severed, f"blocks whose jump edge is missing from the executable set: {severed}"
     missing_plans = [
         (block_id, op)
         for block_id in walked

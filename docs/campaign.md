@@ -1653,3 +1653,16 @@ the `call_plans` arm being what notices -- was right about the hole and wrong ab
 Reproduced here, then closed with the missing arm, and BOTH divergence shapes are now pinned as regressions
 rather than living in a transcript. A companion probe confirms the other direction (`block_in` popped for the
 same sink) was already caught, so that arm is not vacuous either. Fail-before observed on the new arm.
+
+
+M0 ROUND 4, CODEX HALF -- guardrailed for the THIRD consecutive round, and mining the transcript paid AGAIN.
+It was mid-probe on a hypothesis it never got to state: drop an executable EDGE rather than a block, choosing
+one whose target keeps another predecessor. I ran it. That leaves every block walked and every table total, so
+all three block-level arms see nothing -- and emission SILENTLY EMITS DIFFERENT HIR. No crash, no diagnostic,
+different hardware, which is the exact failure mode this scaffold exists to make impossible and the same shape
+as the seam defects the whole campaign is about. Closed with a fourth arm: a walked block's Jump edge must be
+recorded (Branches are left alone, since folding one arm is legitimate). Pinned, fail-before observed.
+
+Three of the four M0 guard defects this round and last came from transcripts of reviewers that were cut off
+before they could report. The survival kit's line about recovering a guardrailed reviewer's in-flight probe has
+now paid four times, and is the single highest-yield habit in this campaign.

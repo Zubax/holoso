@@ -331,3 +331,39 @@ def test_the_plan_verifier_catches_both_block_set_divergences() -> None:
     envless.block_in.pop(envless.unit.exit, None)
     with pytest.raises(AssertionError, match="no recorded environment"):
         verify_plan_totality(envless)
+
+
+def test_the_plan_verifier_catches_a_severed_jump_edge() -> None:
+    # Recovered from a review transcript, and the worst shape of the three: dropping a jump edge whose target
+    # keeps another predecessor leaves every block walked and every table total, so the block-level arms see
+    # nothing -- and emission then produces DIFFERENT HIR with no error at all. Measured before the arm existed.
+    from holoso._frontend._fir._analyze import Analyzer, verify_plan_totality
+    from holoso._frontend._fir._ir import BlockId, Jump
+
+    class Kernel:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def step(self, x: float, flag: bool) -> float:
+            if flag:
+                y = x + 1.0
+            else:
+                y = x + 2.0
+            self.s = y
+            return y
+
+    result = Analyzer(Kernel().step).fixpoint()
+    verify_plan_totality(result)  # the real analysis is consistent
+
+    predecessors: dict[BlockId, int] = {}
+    for _, target in result.executable_edges:
+        predecessors[target] = predecessors.get(target, 0) + 1
+    severable = [
+        (source, target)
+        for source, target in sorted(result.executable_edges, key=lambda e: (e[0].index, e[1].index))
+        if isinstance(result.unit.blocks[source].terminator, Jump) and predecessors[target] > 1
+    ]
+    assert severable, "the kernel must produce a jump into a merge for this test to mean anything"
+    result.executable_edges.remove(severable[0])
+    with pytest.raises(AssertionError, match="jump edge is missing"):
+        verify_plan_totality(result)
