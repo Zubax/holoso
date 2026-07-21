@@ -198,16 +198,58 @@ default. Under a total plan it produces a verifier error.
 ## The site set
 
 Totality is meaningless without a closed set of sites to be total over, and revisions 1 and 2 both left it
-open. The table of routings above is NOT the site set: it omits `LoadPlace` in both its scalar and aggregate
-forms (the aggregate one routes through `_copy_leaves`), and it omits a `PySelect` whose condition is
-compile-time known, which RE-CHOOSES its source during emission and is therefore a seventh routing
-re-derivation -- one that is not an offset derivation and so was invisible to the offset recount.
+open. The table of routings above is NOT the site set.
 
-Revision 3's obligation, and the thing implementation must start from: an authoritative predicate over (op,
-final facts) that answers "does this site produce a route, and what is its target and logical width", covering
-the scalar, aggregate, zero-cell and no-emission cases alike. The verifier evaluates that predicate itself; the
-producer must not be its own authority on which sites exist, or surplus and missing plans become
-indistinguishable from a disagreement about the site set.
+It is closed now, and provably: `_write` is the SOLE mutator of the cell map `_definitions`, every other
+reference to it is a read, and it has thirty call sites. Anything not among those thirty cannot define a cell.
+That is the authority the verifier's predicate derives from -- not from the producer, which must never be its
+own authority on which sites exist, or a surplus plan and a missing one become indistinguishable from a
+disagreement about the set.
+
+The predicate is over (op kind, final facts) and yields a target `Place`, a logical width, and a class:
+ROUTING (cells move from an existing place), COMPUTATION (a cell is defined by fresh HIR), JOIN (phi), or
+CONTRACT (entry parameters). Only ROUTING sites carry a `RoutePlan`.
+
+Two sites revisions 1 and 2 both missed, and why they were missed. `LoadPlace` routes in BOTH forms -- the
+aggregate one through `_copy_leaves`, the scalar one directly -- and neither appears in any routing table
+today. A `PySelect` whose condition is compile-time known RE-CHOOSES its source during emission from the
+condition fact; it is a seventh routing re-derivation, and it escaped the offset recount because it derives no
+offset at all. Counting offsets cannot find a site that permutes nothing and merely picks the wrong operand.
+
+### Traps the predicate must encode, each measured
+
+These are the places where a uniform rule is wrong, and where a verifier written from the obvious model would
+either reject valid output or accept a missing plan.
+
+- `LoadPlace` is ASYMMETRIC. A scalar `Known` destination emits nothing at all, while an aggregate whose
+  leaves are all `Known` emits constants for the datapath ones. A verifier modelling the two uniformly is
+  wrong in one direction or the other, whichever way it picks.
+- A fully static record construction emits NOTHING at its call site -- not even constants for its
+  datapath-`Known` leaves. This is the case that makes `NoCell` site-relative rather than fact-relative.
+- The leaf-completeness policy DIVERGES between the arithmetic and routing paths. The elementwise and unary
+  aggregate paths skip `Known` result leaves entirely with no constant; `_copy_leaves`, `_project` and
+  `_install` materialize them. Any verifier assuming "every aggregate site defines every datapath leaf" is
+  wrong for half the sites.
+- Scalar `PyStoreAttr` has NO `Known`/`Reference` skip: a constant store does define a cell, unlike almost
+  every other scalar site.
+- A known-condition `PySelect` inverts with its mode -- `SelectMode.AND` takes the RIGHT operand when the
+  condition is true. An independent verifier must reproduce that polarity exactly or it will name the wrong
+  source and pass.
+- Routing does not mean "the same value id". A kind promotion inserts an HIR node between source and target,
+  which is why the row carries an explicit transfer rather than an equality claim.
+- Conversely, several COMPUTATION sites degrade to aliases -- a same-kind cast, an all-integer intrinsic, an
+  identity integer implementation, a unary plus -- and write the source's own value id. They are
+  indistinguishable from routing at the HIR level and must be classified by op, never by inspecting the
+  result.
+- `_write` is last-wins per (block, cell). One site deliberately overwrites another during phi construction,
+  so "a cell is written twice" is not by itself an error.
+- The exit path writes no cells at all; it only reads. Return-contract promotion is therefore NOT a routing
+  site and stays in M3, consistent with the ruling.
+
+Two shapes were checked rather than assumed, both raised as uncertainties by the enumeration. An
+empty-sequence repeat writes nothing and is CORRECT to do so, because its result is genuinely empty. A
+`Reference` leaf inside an aggregate stored to component state cannot reach emission's unguarded path: analysis
+refuses it first with a located public rejection.
 
 ## The key
 

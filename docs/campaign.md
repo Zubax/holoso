@@ -2086,3 +2086,31 @@ from REORDERED keywords so a route following argument order rather than field id
 zero-cell conversion that must still classify as a conversion, and a write-only aggregate state store whose
 kernel returns None -- so the state slots are the only observable, pinning the slot REGISTRATION that rides
 along with the routing walk as a side effect.
+
+
+THE SITE SET IS NOW CLOSED, AND PROVABLY. `_write` is the SOLE mutator of `_definitions`; every other
+reference is a read; it has thirty call sites. Anything not among those thirty cannot define a cell. That is
+the authority the verifier's predicate derives from, and it is the thing revisions 1 and 2 lacked -- both
+worked from a table of routings I wrote by inspection, which is exactly how `LoadPlace` and the known-condition
+`PySelect` went missing.
+
+WHY THE OFFSET RECOUNT COULD NOT HAVE FOUND `PySelect`: it derives no offset. It permutes nothing; it merely
+picks which source to copy from, and it re-derives that pick during emission from the condition fact. Counting
+offset derivations is structurally incapable of finding a site whose error is choosing the wrong operand.
+Three recounts agreed on four and six and all three were counting the wrong thing to find this.
+
+EIGHT TRAPS RECORDED, each a place where the obvious uniform rule is wrong. The sharpest: `LoadPlace` is
+ASYMMETRIC -- a scalar Known destination emits nothing, an aggregate of all-Known leaves emits constants -- so
+a verifier modelling them uniformly is wrong whichever way it picks. The leaf-completeness policy DIVERGES
+between the arithmetic and routing paths, so "every aggregate site defines every datapath leaf" is false for
+half the sites. A known-condition `PySelect` INVERTS with its mode (AND takes the right operand when the
+condition is true), so a verifier that reproduces the pick but not the polarity names the wrong source and
+passes. And several COMPUTATION sites degrade to aliases and write the source's own value id, making them
+indistinguishable from routing at the HIR level -- classification must be by op, never by inspecting the result.
+
+TWO UNCERTAINTIES CHECKED RATHER THAN ASSUMED, both raised by the enumeration as possible live defects. An
+empty-sequence repeat writes nothing and is CORRECT to (the result is genuinely empty). A `Reference` leaf in
+an aggregate stored to state cannot reach emission's unguarded path -- analysis refuses it first with a located
+public rejection. Neither is a defect. Worth noting that my probe initially misreported the second as a raw
+crash because it compared the exception's name instead of using isinstance, and `AnalysisRejection` subclasses
+the public `UnsupportedConstruct`.
