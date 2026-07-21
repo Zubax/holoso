@@ -1916,3 +1916,37 @@ AND THE CHANGE FIXES A LATENT HAZARD I HAD NOT NOTICED. The old replay re-evalua
 so a folded call's binding fact came from a SECOND host call while edge selection and the branch gate came from
 the FIRST. A host callable that is not referentially transparent could make the emitted constant disagree with
 the branch the analyzer actually took. Verified end to end through the public API: fold evaluations 10 -> 5.
+
+
+M1 ROUND TWO, THE OTHER HALF -- an independent differential harness (the same idea as the first half's,
+built without knowledge of it: run the pre-M1 replay beside the new finalization on every synthesis, roll
+back every analyzer mutation the shadow makes, compare store order, store origins, call plans, binding facts
+and the branch verdict) over 460 finalizations plus an 11-kernel adversarial corpus -- unroll-cloned stores
+across three components, two call sites inlining one setter, nested three-deep grafts, starred args, property
+desugaring, and the pinned deferred-call-then-graft shape. ZERO real divergences; store order, which IS the
+port ABI, identical throughout including the unroll-clone rank tie-break. Two independent harnesses, built
+from different starting points, agree. It also confirmed the pinned regression fails before the fix.
+
+AND IT CAUGHT A FALSE CLAIM I HAD WRITTEN INTO DESIGN.md. I had said finalization would otherwise "read a
+user's objects once per phase instead of once per analysis". That benefit does not exist: `_component_reads`
+is keyed by (id(owner), attribute) for the whole analysis, so the replay hit the memo and performed ZERO live
+reads. I verified it myself rather than take it on faith -- instrumented memo misses across both trees, 3 live
+attribute reads BEFORE and 3 AFTER. The fold half (10 -> 5) is real and is the whole justification; the
+object-read half was invented. This is the recurring pattern again, and it is worth naming precisely: BOTH
+false benefits I have claimed this round were adjacent to a true one, and the true one made me stop checking.
+
+FOUR MORE FINDINGS, all taken. (a) The fix's own rationale comment described the wrong mechanism: a graft
+RELOCATES the store, it does not remove it, and the record is never removed either -- what keeps it out of the
+plan is that finalization walks ops per executable block, so the record is consulted only where the op now
+lives. Load-bearing rationale, stated wrong. (b) Two new bare-KeyError surfaces now assert with a message,
+matching the file's existing preference for a named failure over a raw one. (c) `_finalize` made three passes
+where two suffice; the first two had no cross-dependency and are merged. (d) `_discovered_stores` is still
+block-keyed and additive -- the exact shape that forced op-keying above -- and is safe only INCIDENTALLY,
+because W-promotion also demands co-reachability with the exit; that is now recorded at the declaration.
+
+AND A HAZARD I INTRODUCED MYSELF, LAST ROUND. Making `_check_branch_settled` assert on its condition's fact
+was right, but the check ran BEFORE parameters were seeded into `binding_facts`. No branch condition is a
+parameter today, so this is invisible -- and it would have made a parameter-conditioned branch the one shape
+that crashes there. Seeding now precedes the check, with a source-order pin (verified to fail with the order
+swapped) so the check's correctness no longer rests on which pass happens to run first. My hardening created
+the hazard the same round it closed another; the reviewer found it by reading what the assert now depended on.

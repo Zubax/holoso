@@ -300,7 +300,7 @@ sites rather than tying on the setter's own line, and clones of one store -- an 
 whole chain and tie-break by execution order, which is the iterable's source order). The plan carries every
 decision the analyzer owns: emission never re-derives a fold, never resolves the library registry, and never
 replays the transfer function -- nor does finalization, which would otherwise run every concrete library fold a
-second time and read a user's objects once per phase instead of once per analysis. It is not yet the whole
+second time, and with it any host callable that is not referentially transparent. It is not yet the whole
 contract: emission still decides cast, intrinsic, power,
 and return-contract policy from the final facts, re-derives concat/positional/record-projection routing, and
 classifies operand kinds -- decisions the Stage-4 restructuring moves analyzer-side.

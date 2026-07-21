@@ -283,6 +283,10 @@ class _Env:
         return changed
 
 
+def _is_integer_operand(fact: Fact | None) -> bool:
+    return fact == Residual(SemType.INT) or (isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)))
+
+
 def _stub_frames(origin: OriginStack, display: str | None) -> OriginStack:
     """A registry stub's template frames rebrand to its public spelling; a user callee's pass through untouched."""
     if display is None:
@@ -403,7 +407,7 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
         #
         # A FOLDED branch keeps only the arm its condition selects, and THAT arm is obligatory: severing it
         # reaches emission as a refusal on an innocent line -- measured, a located "the function never returns
-        # on any path" rather than the raw KeyError an earlier note here claimed. An earlier note here claimed the rule was
+        # on any path" rather than the raw KeyError an earlier note here claimed. That note called the rule
         # "measurably false" because it failed 44 tests; that measurement was a bug of mine -- the condition's
         # `value` is a StaticBool WRAPPER and so always truthy, which selected the wrong arm. Unwrapped through
         # `as_python` the rule passes, and the hole is closed.
@@ -480,16 +484,22 @@ class Analyzer:
         # which is empty for it once that store stops executing.
         self._runtime_state_origins: dict[StateLeaf, OriginStack] = {}
         self._state_livein: dict[StateLeaf, Fact] = {}
+        # Still block-keyed and still additive -- the shape that made the store records above need op keys.
+        # It does not bite here, but only incidentally: W-promotion also requires the block to be co-reachable
+        # with the exit, and after a graft a block reaches the exit only through the continuation, so a
+        # relocated store is promoted exactly when the op-keyed record covers it anyway.
         self._discovered_stores: set[tuple[BlockId, StateLeaf]] = set()
         self._discovered_store_origins: dict[tuple[BlockId, StateLeaf], OriginStack] = {}
         # Recorded AT THE VISIT that computes them, overwritten each time. The fixpoint revisits a block
         # whenever an incoming fact changes, so a block that is not revisited did not change: the last write
         # is the stabilized one. This is what lets `_finalize` stop replaying the transfer, which used to run
         # every host fold a second time.
-        # Which leaf each store op writes, keyed by the OP so that a graft takes the record with the op it
-        # removes. Keyed by block instead, a store the graft moved into an unreachable continuation would stay
-        # in the store order and be snapshotted as a nonexistent attribute -- measured, it falsely rejected a
-        # kernel the replay accepted.
+        # Which leaf each store op writes, keyed by the OP, because a graft RELOCATES the store rather than
+        # destroying it: the record is never removed, and what keeps it out of the plan is that `_finalize`
+        # walks ops per executable block, so the record is consulted only where the op now lives. Keyed by
+        # block instead, a store the graft moved into an unreachable continuation would stay in the store
+        # order and be snapshotted as a nonexistent attribute -- measured, it falsely rejected a kernel the
+        # replay accepted.
         self._store_leaf_of_op: dict[int, StateLeaf] = {}
         self._visit_facts: dict[BindingId, Fact] = {}
         self._visit_call_plans: dict[BindingId, CallPlan] = {}
@@ -501,9 +511,9 @@ class Analyzer:
         self._conversion_routes: dict[int, tuple[int, ...]] = {}  # op id -> permuted source ordinals (transpose)
         self._construction_calls: dict[int, tuple[BindingId | None, ...]] = {}  # record builds: per-field sources
         # Schema and default snapshots, one per class per ANALYSIS (never per visit): a mutable field default
-        # (an eq=False record holding a list, say) must not move a fact between fixpoint visits or into the
-        # emission replay. Defaults are admitted LAZILY at the first construction that actually omits the field
-        # (Python never observes an overridden default). The pinned class reference keeps ids stable.
+        # (an eq=False record holding a list, say) must not move a fact between fixpoint visits. Defaults are
+        # admitted LAZILY at the first construction that actually omits the field (Python never observes an
+        # overridden default). The pinned class reference keeps ids stable.
         self._construction_schemas: dict[int, tuple[type, tuple[FieldSchema, ...]]] = {}
         self._default_snapshots: dict[tuple[int, str], BoundFact] = {}
         self._unroll_cache: dict[BlockId, tuple[Fact, BlockId]] = {}
@@ -947,32 +957,39 @@ class Analyzer:
         plan. Emission consumes only this plan.
         """
         rank = self._executable_rank(result)
+        blocks_in_order = sorted(result.executable_blocks, key=lambda block_id: block_id.index)
         first_store: dict[StateLeaf, tuple[tuple[tuple[int, int], ...], int]] = {}
-        for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
+        for block_id in blocks_in_order:
             for op in result.unit.blocks[block_id].ops:
                 leaf = self._store_leaf_of_op.get(id(op)) if isinstance(op, PyStoreAttr) else None
-                if leaf is None:
-                    continue
-                position = (source_position(op.origin), rank[block_id])
-                if leaf not in first_store or position < first_store[leaf]:
-                    first_store[leaf] = position
-                    result.store_origins[leaf] = op.origin
-        for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
-            for op in result.unit.blocks[block_id].ops:
+                if leaf is not None:
+                    position = (source_position(op.origin), rank[block_id])
+                    if leaf not in first_store or position < first_store[leaf]:
+                        first_store[leaf] = position
+                        result.store_origins[leaf] = op.origin
                 if isinstance(op, PyCall):
+                    # Bare subscripts on purpose, here and for the fact below: every surviving op was visited,
+                    # so a miss means the recording premise itself broke, and the assert names which record is
+                    # missing where a raw KeyError would only name the line.
+                    assert op.dst in self._visit_call_plans, f"call {op.dst} was never visited"
                     result.call_plans[op.dst] = self._visit_call_plans[op.dst]
+                    if id(op) in self._conversion_routes:
+                        result.route_plans[op.dst] = self._conversion_routes[id(op)]
                 if isinstance(op, PySubscript) and id(op) in self._subscript_selections:
                     result.subscript_plans[op.dst] = self._subscript_selections[id(op)]
-                if isinstance(op, PyCall) and id(op) in self._conversion_routes:
-                    result.route_plans[op.dst] = self._conversion_routes[id(op)]
                 dst = op_dst(op)
                 if dst is not None:
+                    assert dst in self._visit_facts, f"binding {dst} was never visited"
                     result.binding_facts[dst] = self._visit_facts[dst]
-        for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
-            self._check_branch_settled(result, block_id)
+        # Before the branch check, not after: that check bare-subscripts the condition's fact, so seeding
+        # parameters afterwards would make a parameter-conditioned branch the one shape that crashes there.
+        # No such branch exists today -- every condition is a `PyTruth` destination -- but the check's
+        # correctness should not rest on which pass happens to run first.
         entry_env = result.block_in[result.unit.entry]
         for param in result.unit.params:
             result.binding_facts.setdefault(param, entry_env.get(Local(param)))
+        for block_id in blocks_in_order:
+            self._check_branch_settled(result, block_id)
         result.store_order = sorted(first_store, key=lambda leaf: first_store[leaf])
         # A leaf enters W when a store to it is discovered, and W only ever grows: a store that a LATER round
         # proves unreachable leaves its leaf behind as runtime state anyway. That is unsound rather than merely
@@ -1418,7 +1435,8 @@ class Analyzer:
                 lhs_fact, rhs_fact = env.get(Local(lhs)), env.get(Local(rhs))
                 if _is_array_fact(lhs_fact) or _is_array_fact(rhs_fact):
                     # Trimmed (scope ruling T2, utility grounds): a mask's only onward use here is scalar extraction —
-                    # no boolean indexing, any/all, or array truth — and the machinery lowered integer arrays in float (A2).
+                    # no boolean indexing, any/all, or array truth — and the machinery lowered integer arrays in
+                    # float (A2).
                     raise AnalysisRejection(
                         "elementwise array comparison is not supported; compare the elements explicitly",
                         op.origin,
@@ -1465,7 +1483,8 @@ class Analyzer:
                 else:
                     lhs_fact, rhs_fact = env.get(Local(lhs)), env.get(Local(rhs))
                     # The merge is evaluated unconditionally for its kind-check: a non-boolean operand reached before an
-                    # absorbing constant (``float(x) or True``) is still irreconcilable and must reject, never fold away.
+                    # absorbing constant (``float(x) or True``) is still irreconcilable and must reject, never
+                    # fold away.
                     merged = join_facts(lhs_fact, rhs_fact, op.origin)
                     # A boolean identity holds even with a runtime condition: ``A or True`` is always True and
                     # ``A and False`` always False (the arm chosen when the condition is false is a decisive constant),
@@ -1835,8 +1854,8 @@ class Analyzer:
     def _fold_bitwise(self, bin_op: BinOp, lhs: Fact, rhs: Fact, origin: OriginStack) -> Fact:
         # Bit-true operators. ``&``/``|``/``^`` on two booleans is a boolean (logical) result; every other admitted form
         # is two integers. A float operand, a boolean shift, and mixed bool/int all refuse -- Python's bool-as-int
-        # promotion is not modelled in the datapath, so an explicit cast is required. A compile-time-known negative shift
-        # count refuses (Python raises); a runtime count is the hardware's documented reverse-shift deviation. A
+        # promotion is not modelled in the datapath, so an explicit cast is required. A compile-time-known negative
+        # shift count refuses (Python raises); a runtime count is the hardware's documented reverse-shift deviation. A
         # fully-static form folds Python-exact via ``static_binop``. Operand kinds are validated before any diagnostic.
         is_shift = bin_op in (BinOp.LSHIFT, BinOp.RSHIFT)
         ltype, rtype = self._operand_type(lhs, origin), self._operand_type(rhs, origin)
@@ -1942,7 +1961,7 @@ class Analyzer:
             raise AnalysisRejection("a record subscript index is not supported", origin)
         if isinstance(index, Reference):
             # A referenced key would resolve through the LIVE object's __index__ at compile time (repeatedly:
-            # per analysis visit and again at emission), reading reset-time state the kernel's
+            # once per fixpoint visit of its block), reading reset-time state the kernel's
             # writes never touch. The state machinery is the honest path: index with int(self.attr).
             raise AnalysisRejection("an object subscript index is not supported", origin)
         if isinstance(obj, AggregateFact) and isinstance(index, Known):
@@ -2276,7 +2295,7 @@ class Analyzer:
 
     def _unroll(self, unit: FunctionUnit, header: Block, loop: StaticFor, iterable: Fact) -> BlockId:
         if isinstance(iterable, Reference):
-            # A live object's __iter__/__len__ would run against reset-time state, twice (analysis + replay).
+            # A live object's __iter__/__len__ would run at compile time against reset-time state.
             raise AnalysisRejection("iteration over an object is not supported", loop.origin)
         per_trip: list[Known | Reference | int] = []
         if isinstance(iterable, AggregateFact):
@@ -2571,11 +2590,7 @@ class Analyzer:
 
             # np.sign is int-polymorphic like abs (np.sign of an integer is an integer); its float composite would
             # round subsequent integer arithmetic, and there is no integer sign yet, so an integer operand refuses.
-            if target is np.sign and any(
-                env.get(Local(arg)) == Residual(SemType.INT)
-                or (isinstance(env.get(Local(arg)), Known) and isinstance(env.get(Local(arg)).value, (MetaInt, NpInt)))  # type: ignore[union-attr]
-                for arg in call.args
-            ):
+            if target is np.sign and any(_is_integer_operand(env.get(Local(arg))) for arg in call.args):
                 raise AnalysisRejection(
                     "an integer operand to np.sign is not yet lowerable; cast to float first", call.origin
                 )

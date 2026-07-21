@@ -725,3 +725,28 @@ def test_a_grafted_away_store_leaves_the_plan_with_its_op() -> None:
     built = holoso.synthesize(Probe().step, default_ops(FloatFormat(8, 23)), name="grafted_store")
     assert "state_ghost" not in [port.name for port in built.ports]
     assert float(built.numerical_model.elaborate().run(3.0, False, False)[0]) == 3.0
+
+
+def test_finalization_seeds_parameter_facts_BEFORE_the_branch_check() -> None:
+    # `_check_branch_settled` bare-subscripts the condition's fact. No branch condition is a parameter today --
+    # every one is a `PyTruth` destination the builder assigns immediately -- so the two orderings are
+    # indistinguishable by behaviour, which is why this is a source-order pin and not a kernel: seeding the
+    # parameters after the check would make a parameter-conditioned branch the one shape that crashes there,
+    # and nothing in the suite would notice until such a branch first existed.
+    import inspect
+    import textwrap
+
+    import holoso._frontend._fir._analyze as analyze_module
+
+    finalize = ast.parse(textwrap.dedent(inspect.getsource(analyze_module.Analyzer._finalize)))
+    seeds: list[int] = []
+    checks: list[int] = []
+    for index, statement in enumerate(finalize.body[0].body):  # type: ignore[attr-defined]
+        rendered = ast.dump(statement)
+        if "'setdefault'" in rendered and "params" in rendered:
+            seeds.append(index)
+        if "_check_branch_settled" in rendered:
+            checks.append(index)
+    assert len(seeds) == 1, f"expected exactly one parameter-seeding statement in _finalize, found {len(seeds)}"
+    assert len(checks) == 1, f"expected exactly one branch-check statement in _finalize, found {len(checks)}"
+    assert seeds[0] < checks[0], "parameter facts must be seeded before the branch check bare-subscripts a fact"

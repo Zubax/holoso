@@ -211,10 +211,10 @@ structural cause, which is the whole argument for doing this at all.
    bool-arithmetic ×4, and one elementwise skeleton written three times. Not a global rejection predicate but a
    *use-specific* consumption operation — e.g. 0-d arrays reject for `len`/indexing/iteration while deliberately
    scalarizing for binary ops, comparison and casts. That missing distinction is C1.
-4. **Post-W/D residualizer.** `_finalize()` today *replays* `_transfer()` (`:606-636`), potentially repeating host
-   calls. Record evidence atomically with the fact; never residualize after an optimistic inner visit; `CallPlan` is
-   erased, not elaborated. Only then retire the 41 user-facing `EmissionRejection` sites — right endpoint, wrong first
-   move.
+4. **Post-W/D residualizer.** The replay half is DONE (Stage 4, M1): `_finalize()` reads evidence recorded at the
+   visit that computed it, so no host call runs twice. What remains is the rest of the item — never residualize
+   after an optimistic inner visit, and erase `CallPlan` rather than elaborate it — before the 41 user-facing
+   `EmissionRejection` sites can retire.
 5. **Structured origins.** `Origin` carries function/line/column only; inlining stores frames inner-to-outer while
    rendering reads `origin[0]` — that is E1, and it also lets state first-store ordering (`:615-640`) reverse ports
    when a root call inlines a callee defined later. Primary location is `origin[-1]`; keep the inner chain as context.
