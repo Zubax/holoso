@@ -940,7 +940,10 @@ class Analyzer:
 
     def _check_reachability_settled(self, result: ResidualUnit, rank: dict[BlockId, int]) -> None:
         """
-        Refuse when the recorded reachability disagrees with the stabilized facts, whole-graph and once.
+        Refuse when the recorded reachability disagrees with the stabilized facts, whole-graph and once --
+        with one measured exception: a block the walk reaches but the analysis never marked executable is seen
+        only through that block's own out-edges, so a SINK in that state passes here. `verify_plan_totality`
+        checks that direction before emission, which is where it would otherwise surface as a raw crash.
 
         Optimistic traversal explores an arm on the strength of a condition that is not yet settled -- which is
         what lets W/D discover runtime state at all -- and marks are add-only, so an arm the stable facts later

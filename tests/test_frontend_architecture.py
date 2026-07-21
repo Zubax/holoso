@@ -176,24 +176,36 @@ def test_emitter_frontend_debt_only_shrinks() -> None:
         f"emission no longer imports {removed} -- that is the point, so delete those entries from "
         "_EMITTER_FRONTEND_DEBT in this same commit and let the ratchet hold the ground"
     )
-    # `from X import Y` lands both `X` and `X.Y`, but a bare `import X` lands only `X` -- which is already an
-    # owner key, so every symbol reached through it would be invisible to the ledger. Require the accompanying
-    # symbol, which makes the bare spelling fail rather than silently reopening the module-level blind spot.
+
+
+def test_emission_reaches_the_frontend_only_by_named_symbols() -> None:
+    # The ledger above records what `from X import Y` names. A plain `import holoso._frontend...` records only
+    # the module and lets every symbol behind it -- `resolve`, `static_binop`, any analyzer internal -- arrive
+    # unseen, which is the module-level blind spot the symbol ledger exists to close.
+    #
+    # This is a BAN on the spelling, not a reconciliation of the ledger, because the previous attempt to catch
+    # it by reconciliation was dead code: it ran after an assertion that had already guaranteed its condition
+    # false, and a bare import added ALONGSIDE the symbol imports left the owner's symbols present anyway. The
+    # package is internally all-relative, so the ban costs nothing.
+    source = ast.parse(Path(_module_source(_EMITTER)).read_text(encoding="utf-8"))
     bare = sorted(
-        owner
-        for owner in _EMITTER_FRONTEND_DEBT
-        if owner in imported and not any(name.startswith(owner + ".") for name in imported)
+        alias.name
+        for node in ast.walk(source)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name.startswith("holoso._frontend")
     )
     assert not bare, (
-        f"emission imports {bare} as a bare module, which hides every symbol it then reaches; import the "
-        "symbols so the ledger can see them"
+        f"emission imports {bare} as whole modules, which hides every symbol reached through them from the "
+        "debt ledger; import the symbols by name instead"
     )
 
 
 def test_every_recorded_owner_is_a_real_module() -> None:
     # The ledger deliberately records SYMBOLS as well as modules -- 93 of its names are classes and functions,
-    # which is the whole point of measuring at symbol level. What must still resolve is every OWNER key: a
-    # typo'd owner would make its symbols unmatchable and quietly park real debt outside the ratchet.
+    # which is the whole point of measuring at symbol level. What must still resolve is every OWNER key. A
+    # typo'd owner is already caught by the ratchet's `removed` arm, so this is a backstop that names the cause
+    # directly rather than the sole catcher.
     unresolved = sorted(owner for owner in _EMITTER_FRONTEND_DEBT if not _module_source(owner))
     assert not unresolved, f"recorded owners that are not modules: {unresolved}"
 
@@ -208,14 +220,17 @@ def test_emission_rejection_sites_only_shrink() -> None:
     # M5 retires EmissionRejection: every refusal moves upstream, diagnostic-identical. The count is the debt,
     # and the corpus pins the messages, so this only has to stop the number from drifting either way.
     #
-    # BOTH numbers, and exactly, because each alone is defeatable and a ceiling is not a ratchet:
-    #   - counting `raise` statements alone: hoisting them into a `_reject(...)` helper drops it to zero with
+    # THREE numbers, exactly, because each alone is defeatable and a ceiling is not a ratchet:
+    #   - `raise` statements alone: hoisting them into a `_reject(...)` helper drops it to zero with
     #     byte-identical diagnostics and nothing moved upstream;
-    #   - counting constructions alone: a helper that constructs internally lets a NEW refusal be added while
-    #     the construction count stays put -- measured, a helper plus one added refusal reads 42 constructions
-    #     and 41 direct raises;
-    #   - `<=` on either would permit 42 -> 41 -> 42 regrowth.
-    # A genuine upstream move changes both together, and updates both here in the commit that earns it.
+    #   - constructions alone: a helper that constructs internally lets a NEW refusal be added while the
+    #     construction count stays put -- measured, 42 constructions and 41 direct raises;
+    #   - both of those together: a `@classmethod` factory changes BOTH shapes at once, since `cls(...)` is not
+    #     a Name and `raise EmissionRejection.make(...)` is a Raise of an Attribute call, so three new refusals
+    #     hid behind one while the pair still read (42, 42). Such factories are ordinary style in this codebase.
+    #   - `<=` on any of them would permit 42 -> 41 -> 42 regrowth.
+    # Every NAME occurrence is therefore counted too, which no rewrite of the call shape can move without
+    # moving the number. A genuine upstream move changes all three and updates them here in the same commit.
     # Counted over the PACKAGE, not `_emit.py` alone: the file is ~1500 lines against a ~2000 soft limit, so
     # splitting it is a plausible refactor, and a file-scoped count would read the move as M5 progress.
     constructed = 0
@@ -235,10 +250,18 @@ def test_emission_rejection_sites_only_shrink() -> None:
             and isinstance(node.exc.func, ast.Name)
             and node.exc.func.id == "EmissionRejection"
         )
-    assert (constructed, raised) == (42, 42), (
-        f"emission constructs {constructed} refusals and raises {raised} directly, recorded (42, 42): fewer of "
-        "both is M5 progress and updates the numbers here in the same commit; anything else means a refusal was "
-        "added, or routed through a helper where the count can no longer see it"
+    named = sum(
+        1
+        for module in sorted(Path(_module_source(_EMITTER)).parent.glob("*.py"))
+        for node in ast.walk(ast.parse(module.read_text(encoding="utf-8")))
+        if (isinstance(node, ast.Name) and node.id == "EmissionRejection")
+        or (isinstance(node, ast.Attribute) and node.attr == "EmissionRejection")
+    )
+    assert (constructed, raised, named) == (42, 42, 42), (
+        f"emission constructs {constructed} refusals, raises {raised} directly and names the class {named} "
+        "times, recorded (42, 42, 42): fewer of all three is M5 progress and updates the numbers here in the "
+        "same commit; anything else means a refusal was added, or routed through a helper or factory where a "
+        "count can no longer see it"
     )
 
 
@@ -302,7 +325,10 @@ def test_lower_fir_runs_the_plan_verifier_BEFORE_emission_walks(monkeypatch: pyt
             return self.s
 
     emit_module.lower_fir(Kernel().step)
-    assert trace == ["verify", "emit"], f"the verifier must run before emission walks, observed {trace}"
+    # The pin is on the `lower_fir` SEAM, deliberately: moving the call inside `_Emitter.emit` would still
+    # precede the walk but would put the check downstream of the boundary M0 is guarding. What this does not
+    # check is that the verifier is handed the result actually emitted -- the stub ignores its argument.
+    assert trace == ["verify", "emit"], f"the verifier must run at the lower_fir seam, before emission, got {trace}"
 
 
 def test_the_plan_verifier_catches_both_block_set_divergences() -> None:

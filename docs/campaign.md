@@ -1666,3 +1666,28 @@ recorded (Branches are left alone, since folding one arm is legitimate). Pinned,
 Three of the four M0 guard defects this round and last came from transcripts of reviewers that were cut off
 before they could report. The survival kit's line about recovering a guardrailed reviewer's in-flight probe has
 now paid four times, and is the single highest-yield habit in this campaign.
+
+
+M0 ROUND 4, CLAUDE HALF (it ran 7.5 hours and its worktree was removed under it; it rebuilt the tree from
+`git archive` and finished anyway). TWO substantive findings, both the recurring class.
+
+(1) THE BARE-IMPORT CHECK COULD NOT FIRE. `assert not removed` runs first and aborts, so by the time the check
+computed its condition every recorded owner was guaranteed to have symbols present -- dead code, and the mutant
+it was written for was already caught by the older arm. Worse, the hole it claimed to close SURVIVED: adding
+`import holoso._frontend._lib` ALONGSIDE the existing symbol imports and calling `holoso._frontend._lib.resolve`
+-- the exact symbol the ledger header names as its motivating example -- passed every guard. Reproduced, then
+replaced with a BAN on the spelling: `_emit.py` may not contain a plain `import holoso._frontend...` at all.
+The package is internally all-relative, so the ban costs nothing and cannot be dead.
+
+(2) THE (42, 42) RATCHET FELL TO A `@classmethod` FACTORY, which changes both shapes at once -- `cls(...)` is
+not a Name, and `raise EmissionRejection.make(...)` is a Raise of an Attribute call -- so three added refusals
+hid behind one while the pair still read (42, 42). Such factories are ordinary style in this codebase (four
+already exist). Now (42, 42, 42), the third being every occurrence of the NAME, which no rewrite of the call
+shape can move without moving the number. Verified against the reviewer's exact factory.
+
+Three minor corrections with them: the ORDER test pins the `lower_fir` SEAM rather than order-in-general (a
+call moved inside `_Emitter.emit` still precedes the walk yet fails it, and the message said something untrue
+of that mutant), and it does not check that the verifier receives the result actually emitted; the
+owner-resolves guard's rationale claimed it was the sole catcher of a typo when the ratchet catches it first;
+and `_check_reachability_settled`'s OWN docstring still claimed whole-graph refusal, which the walked-unmarked
+sink refutes -- corrected there too, since only the downstream docstring had been fixed.
