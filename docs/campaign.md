@@ -2114,3 +2114,47 @@ an aggregate stored to state cannot reach emission's unguarded path -- analysis 
 public rejection. Neither is a defect. Worth noting that my probe initially misreported the second as a raw
 crash because it compared the exception's name instead of using isinstance, and `AnalysisRejection` subclasses
 the public `UnsupportedConstruct`.
+
+
+X6A ROUND 3: NOT APPROVED, and its central point demolishes my closure argument without disputing a single
+fact in it. `_write` IS the sole mutator and thirty IS the right count -- but counting writes proves only that
+nothing ELSE mutates the cell map. It says nothing about WHICH SITES NEED A KEY, because a required route can
+execute ZERO writes: a zero-cell conversion, a fully static construction, an all-known projection. Presence of
+a plan and presence of a write are INDEPENDENT, and I conflated them. I proved a true thing that was not the
+thing in question, and the proof's rigor is exactly what made it convincing.
+
+FIVE PREDICATE ARMS STILL UNSETTLED, now written down: `PyBin` routes for a sequence aggregate and computes
+for an array one (one op kind, two classes, decided by layout); `PySubscript` and record `PyAttr` must either
+keep the `needs_cells` gate and produce no key or produce an intentional all-`NoCell` plan, not both;
+`PySelect` needs TWO conditions, since emission also bypasses when the scalar result is itself Known or
+Reference; `PyCall` classification needs `CallPlan.lowering`, because a folded call can also produce an
+aggregate; and component-state sources need an explicit state-live-in and reset fallback, because the FIRST
+attribute access may INSTALL the leaf during the op that reads it.
+
+A RULE OF MINE WOULD HAVE SUPPRESSED A REAL DIAGNOSTIC. I wrote "NoCell for References and non-datapath
+Knowns" unconditionally. Scalar `PyStoreAttr` has NO skip -- it always materializes -- so a scalar
+non-datapath Known passes storage conformance and then meets a LOCATED materialization rejection. Encoding it
+as `NoCell` would DELETE that rejection and silently retain the previous state: a silent wrong-state
+miscompile manufactured by the step whose entire purpose is removing silent-absence bugs. Now conditional on
+what current successful emission actually skips.
+
+AND I LEFT TWO CONTRADICTIONS INSIDE ONE DOCUMENT. It said all five copy routines collapse to the affine
+`pi(i) = i + k` in one section while correctly refuting that in another; only three are affine. And it said
+both dst-less copying arms route through `_copy_leaves`; `PyStoreAttr` has its own inline loop. Also a
+miscount of my own traps: nine, not eight. A trap recorded backwards is worse than one omitted, and the exit
+trap was: the exit owns no OP-SITE datapath definition, but its reads can create cached SSA definitions and
+phis, so "the exit writes no cells" is not literal.
+
+THE VERIFIER CRITERION HAD A CONTRADICTION TOO, and it is the interesting kind. My `PySelect` trap said the
+verifier must reproduce the AND/OR polarity; my criterion only checked the producer-named source for existence
+and bounds. Under that criterion a wrong equal-width arm PASSES -- the trap was recorded and then not enforced.
+The verifier now derives the expected source place or arm.
+
+THREE WITNESS GAPS CLOSED, ONE FOUND UNREACHABLE. My Known-condition `PySelect` test exercised only TRUE
+conditions for both AND and OR, so hardcoding "AND takes right, OR takes left" would have passed it; a false-OR
+case is added. A false AND is NOT behaviourally observable at all -- a falsy aggregate is an empty one, so it
+selects zero cells -- and needs a plan mutation once the verifier exists. Added a known-integer store into a
+float slot for the promotion path. And a named negative result: a routing-path BOOL_TO_FLOAT appears
+unreachable through the public API, because the analyzer refuses the mixed-kind array literal that would
+produce one; the reachable shape keeps the boolean cell AS a boolean. That bears on whether the three-value
+transfer vocabulary is right, and is being put to the consult rather than assumed.

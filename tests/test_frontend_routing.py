@@ -295,3 +295,52 @@ def test_a_write_only_aggregate_state_registers_every_slot() -> None:
     built = holoso.synthesize(WriteOnly().step, default_ops(_FMT), name="write_only")
     assert [port.name for port in built.numerical_model.outputs] == ["state_v_0", "state_v_1"]
     assert [float(v) for v in built.numerical_model.elaborate().run(3.0, 7.0)] == [3.0, 7.0]
+
+
+def test_a_known_condition_selection_routes_both_polarities() -> None:
+    # The AND/OR selection inverts with its mode: AND takes the RIGHT operand when the condition is true, OR
+    # takes the LEFT. Exercising only true conditions lets a hardcoded "AND->right, OR->left" pass, so a false
+    # condition is needed too. A false AND is not observable by value -- a falsy aggregate is an empty one, so
+    # it selects zero cells -- which is why only the false OR appears here; the false AND needs a plan mutation
+    # once M2's verifier exists.
+    def kernel(a: float, b: float, c: float, d: float) -> float:
+        left = (a, b)
+        right = (c, d)
+        q = () or right
+        r = left or right
+        return q[0] + 10.0 * q[1] + 100.0 * r[0] + 1000.0 * r[1]
+
+    _assert_matches_python(kernel, 1.0, 2.0, 3.0, 4.0)
+    assert _run(kernel, 1.0, 2.0, 3.0, 4.0) == [2143.0]
+
+
+def test_a_known_integer_stored_into_a_float_slot_is_promoted() -> None:
+    # The store-conversion promotion: an integer source reaching a slot whose reset fixes it as a float. The
+    # promotion must come from a recorded transfer rather than from emission inspecting the source, which is
+    # the J6 obligation landing inside M2 for routing sites.
+    class Promote:
+        def __init__(self) -> None:
+            self.v = 0.0
+
+        def step(self, x: float) -> float:
+            self.v = 3
+            return x + self.v
+
+    built = holoso.synthesize(Promote().step, default_ops(_FMT), name="promote")
+    assert [float(v) for v in built.numerical_model.elaborate().run(2.0)] == [5.0, 3.0]
+
+
+def test_a_reflavor_preserves_a_boolean_cell_as_boolean() -> None:
+    # A conversion carrying a runtime boolean beside a float. Worth pinning because the routing-path boolean
+    # promotion is hard to reach at all through the public API -- the analyzer refuses the mixed-kind array
+    # literal that would otherwise produce one -- so this is the shape that does exist, and its cell keeps its
+    # own kind rather than being promoted.
+    def kernel(x: float, f: bool) -> tuple[float, bool]:
+        items = list((x, f))
+        # mypy unifies the list's element type to float; Holoso tracks the two cells' kinds separately, which
+        # is the property under test, so the annotation states the truth and the checker gets the exception.
+        return items[0], items[1]  # type: ignore[return-value]
+
+    built = holoso.synthesize(kernel, default_ops(_FMT), name="reflavor_bool")
+    assert [port.name for port in built.numerical_model.outputs] == ["out_0", "out_1"]
+    assert [float(v) for v in built.numerical_model.elaborate().run(2.0, True)] == [2.0, 1.0]

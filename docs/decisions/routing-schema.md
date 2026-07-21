@@ -1,6 +1,6 @@
 # Routing algebra: schema for M2
 
-Status: REVISION 3. Revision 1 was NOT APPROVED (its record could not express routing at all); revision 2 was
+Status: REVISION 4. Revision 1 was NOT APPROVED (its record could not express routing at all); revision 2 was
 NOT APPROVED either (the record was fixed, but the site set was not closed, the verifier criterion was still
 revision-1 text, and the Known-versus-no-write rule was wrong). Companion to `arch-ruling.md` (which
 ordered plain MORPH) and `arch-memo.md`.
@@ -31,9 +31,10 @@ Two `CallLowering` variants carry routing, and they carry it inconsistently: `CO
 inline on `CallPlan.construction`, while `CONVERSION`'s sits off to the side in `route_plans` keyed by dst.
 
 Five copy routines in `_emit.py` (`_emit_concat`, `_emit_conversion`, `_copy_leaves`, `_project`, `_install`),
-of which the last three are the same relation at three fixed offsets: `_copy_leaves` is the `k = 0` case
-generalized over target places, and `_install` is `_project` with source and target exchanged. All of them
-collapse to one row shape, `pi(i) = i + k`. The identical five-line leaf-walk skeleton appears in four of the
+of which THREE are the same relation at three fixed offsets: `_copy_leaves` is the `k = 0` case generalized
+over target places, and `_install` is `_project` with source and target exchanged. Those three collapse to
+`pi(i) = i + k`; the other two do NOT, and revision 3 left the blanket affine claim standing here while
+refuting it below. The identical five-line leaf-walk skeleton appears in four of the
 five, and a second time inside `_install` for the scalar case.
 
 Three further inline clones of that skeleton: the `PySubscript` gather walk, the `PyAttr`
@@ -133,7 +134,18 @@ So analysis chooses, per site and per ordinal:
 
 - `ConstantCell` when THIS SITE materializes the `Known` today;
 - `NoCell` when the `Known` stays fact-only at this site;
-- `NoCell` for a `Reference`, and for a non-datapath `Known`.
+- `NoCell` for a `Reference` or a non-datapath `Known` ONLY where current successful emission skips it.
+
+That last qualification is load-bearing and revision 3 had it as an unconditional rule, which would have
+suppressed a real diagnostic. Scalar `PyStoreAttr` has no skip: it always materializes. A scalar non-datapath
+`Known` passes storage conformance and then meets a LOCATED materialization rejection. Encoding it as `NoCell`
+would delete that rejection and silently retain the previous state instead -- a silent wrong-state miscompile
+manufactured by the very step meant to remove silent-absence bugs. A non-materializable scalar state store
+keeps its rejection; it does not become a plan row.
+
+For the same reason the construction row above is conditional: an admitted default is a `ConstantCell` only
+when the construction site is otherwise ACTIVE. In a fully static construction, which emits nothing at all, it
+is `NoCell`.
 
 Emission must not rediscover any of that. `ConstantCell.kind` is explicit for the same reason the transfer is.
 
@@ -216,10 +228,45 @@ today. A `PySelect` whose condition is compile-time known RE-CHOOSES its source 
 condition fact; it is a seventh routing re-derivation, and it escaped the offset recount because it derives no
 offset at all. Counting offsets cannot find a site that permutes nothing and merely picks the wrong operand.
 
+### The arms the predicate must settle
+
+Counting `_write` proves nothing else mutates the cell map. It does NOT say which sites need a key, because a
+required route can execute ZERO writes -- a zero-cell conversion, a fully static construction, an all-known
+projection. Presence of a plan and presence of a write are independent, and revision 3 conflated them. These
+arms must each be decided explicitly:
+
+- `PyBin`: a sequence aggregate ROUTES (concat and repeat, no HIR at all) while an array aggregate COMPUTES.
+  One op kind, two classes, decided by the layout.
+- `PySubscript` and record `PyAttr`: today a `needs_cells` gate skips them entirely. Either that gate stays and
+  they produce no key, or they produce an intentional all-`NoCell` plan. Not both.
+- `PySelect`: the condition must be `Known`, but emission ALSO bypasses the selection when the scalar result is
+  itself `Known` or `Reference`. Two conditions, not one.
+- `PyCall`: classification needs `CallPlan.lowering`. Op kind and destination fact are insufficient, because a
+  folded call can also produce an aggregate.
+- Component-state sources: the FIRST attribute access may install the `StateLeaf` fact during the op, so
+  "resolve the source in the pre-op environment" needs an explicit state-live-in and reset fallback or it will
+  fail on the very access that creates the leaf.
+
+### What the verifier must check beyond the above
+
+Revision 3's criterion was directionally right and incomplete. It must also require that the action count
+equals the logical width; that the DISPOSITION expected at each ordinal matches (not merely that some action
+is present); that a `ConstantCell` carries the exact semantic value, not just a legal kind; that a `CopyCell`
+source is datapath-AVAILABLE under SSA resolution rather than merely an in-bounds fact; that the source place
+is the SITE-DETERMINED one, since an arbitrary in-range place must not pass; and that state-slot registration
+survives for every scalar and aggregate `PyStoreAttr` target, because emission performs it alongside every
+state write and a cutover that moved the route without it would silently drop ports.
+
+That last point resolves a contradiction revision 3 contained: the `PySelect` trap said the verifier must
+reproduce the AND/OR polarity, while the criterion only checked the producer-named source for existence and
+bounds -- under which a wrong equal-width arm passes. The verifier derives the expected source place or arm.
+Arbitrary gather and transpose permutations remain the behavioural witnesses' job, because no structural check
+can distinguish an in-range wrong permutation from a right one.
+
 ### Traps the predicate must encode, each measured
 
-These are the places where a uniform rule is wrong, and where a verifier written from the obvious model would
-either reject valid output or accept a missing plan.
+Nine places where a uniform rule is wrong, and where a verifier written from the obvious model would either
+reject valid output or accept a missing plan.
 
 - `LoadPlace` is ASYMMETRIC. A scalar `Known` destination emits nothing at all, while an aggregate whose
   leaves are all `Known` emits constants for the datapath ones. A verifier modelling the two uniformly is
@@ -237,14 +284,15 @@ either reject valid output or accept a missing plan.
   source and pass.
 - Routing does not mean "the same value id". A kind promotion inserts an HIR node between source and target,
   which is why the row carries an explicit transfer rather than an equality claim.
-- Conversely, several COMPUTATION sites degrade to aliases -- a same-kind cast, an all-integer intrinsic, an
-  identity integer implementation, a unary plus -- and write the source's own value id. They are
-  indistinguishable from routing at the HIR level and must be classified by op, never by inspecting the
-  result.
+- Conversely, SOME COMPUTATION sites degrade to aliases -- a same-kind cast, certain integer intrinsics, an
+  identity integer implementation, a unary plus -- and write the source's own value id. Not every integer
+  intrinsic does. They are indistinguishable from routing at the HIR level and must be classified by op,
+  never by inspecting the result.
 - `_write` is last-wins per (block, cell). One site deliberately overwrites another during phi construction,
   so "a cell is written twice" is not by itself an error.
-- The exit path writes no cells at all; it only reads. Return-contract promotion is therefore NOT a routing
-  site and stays in M3, consistent with the ruling.
+- The exit owns no op-site datapath definition. Stated as "the exit writes no cells" this is not literal: its
+  reads can create cached SSA definitions and phis. Return-contract promotion is NOT a routing site either way
+  and stays in M3, consistent with the ruling.
 
 Two shapes were checked rather than assumed, both raised as uncertainties by the enumeration. An
 empty-sequence repeat writes nothing and is CORRECT to do so, because its result is genuinely empty. A
@@ -254,8 +302,8 @@ refuses it first with a located public rejection.
 ## The key
 
 Not `dst`: `StorePlace`, `PyStoreAttr` and `UnbindPlace` have none (`op_dst` returns `None` for exactly those
-three), and the two emission arms that copy cells for a dst-less op both route through `_copy_leaves`. Keying
-by dst is what forces those sites to stay outside the plan today.
+three). `StorePlace` copies through `_copy_leaves`; `PyStoreAttr` does NOT -- it has its own inline loop,
+which revision 3 stated wrongly. Keying by dst is what forces both outside the plan today.
 
 Recommendation: key by `(BlockId, op index)` over the stabilized graph, assigned in `_finalize`.
 
