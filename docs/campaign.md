@@ -209,6 +209,13 @@ PACE (measured on 2026-07-21; each number is from this campaign, not a guess):
   process at a time, no `-n` workers, artifacts confined to the agent's own worktree or the session
   scratchpad. Prefer "synthesize kernels through the public API in ONE process" over "run the tests" -- the
   former is milliseconds, the latter minutes, and for most measurement questions they answer the same thing.
+- VERIFY AN AGENT WORKTREE'S BASIS BEFORE DISPATCHING WORK INTO IT. Isolated worktrees are provisioned from
+  `origin/main`, not `dev`, at least sometimes -- observed TWICE, at 9fcb6ca, 222 commits behind, where
+  `holoso/_frontend/_fir/` does not exist at all and neither does the golden corpus. The whole architecture
+  Stage 4 restructures postdates that basis, so nothing in an M-step task is even expressible there. It cost
+  one agent its entire budget. Check with `git worktree list` after dispatch and, if wrong, have the agent
+  `git fetch origin && git reset --hard origin/dev` as its first action. Corollary: anything the agent must
+  read has to be PUSHED, since it resets to `origin/dev` and cannot see local-only commits.
 - AGENT LITTER LANDS BESIDE THE REPO UNLESS FORBIDDEN. Cleaned up 120 MB of `holoso-mut*` copies and a
   `_scratch_x` in `/mnt/storage/zubax/` next to the maintainer's other projects. Say where artifacts go.
 
