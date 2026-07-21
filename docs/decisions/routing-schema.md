@@ -1,6 +1,6 @@
 # Routing algebra: schema for M2
 
-Status: REVISION 4. Revision 1 was NOT APPROVED (its record could not express routing at all); revision 2 was
+Status: REVISION 5. Revision 1 was NOT APPROVED (its record could not express routing at all); revision 2 was
 NOT APPROVED either (the record was fixed, but the site set was not closed, the verifier criterion was still
 revision-1 text, and the Known-versus-no-write rule was wrong). Companion to `arch-ruling.md` (which
 ordered plain MORPH) and `arch-memo.md`.
@@ -143,9 +143,19 @@ would delete that rejection and silently retain the previous state instead -- a 
 manufactured by the very step meant to remove silent-absence bugs. A non-materializable scalar state store
 keeps its rejection; it does not become a plan row.
 
-For the same reason the construction row above is conditional: an admitted default is a `ConstantCell` only
-when the construction site is otherwise ACTIVE. In a fully static construction, which emits nothing at all, it
-is `NoCell`.
+The construction default rule follows, and revision 4 stated it wrongly as "an admitted default is a
+`ConstantCell`". Admission covers strings, ranges, slices and records, while emission materializes only
+boolean and numeric datapath `Known`s. The rule is:
+
+- an INACTIVE (fully static) construction is `NoCell` at every ordinal;
+- active, with a datapath `Known` -> `ConstantCell`;
+- active, with a `Reference` or a non-datapath `Known` (a string default, say) -> `NoCell`;
+- active, with a residual source -> `CopyCell`.
+
+`ConstantCell.value` is the TARGET-SIDE, POST-TRANSFER value, which revision 4 left undirected. A known
+integer stored into a float slot begins as an integer `Known` and storage conformance produces a float one, so
+"the exact semantic value" is not single-valued until the direction is fixed. It is the conformed value, and
+values compare with the codebase's existing bit-faithful equality rather than Python `==`.
 
 Emission must not rediscover any of that. `ConstantCell.kind` is explicit for the same reason the transfer is.
 
@@ -246,8 +256,10 @@ arms are decided as follows, with the reasoning, because listing a tension is no
   nor `Reference`. The second condition is a separate bypass in emission and revision 3 recorded only the
   first.
 - `PyCall` is classified from `CallPlan.lowering`, never from op kind plus destination fact, because a folded
-  call can also produce an aggregate. A key exists for `CONVERSION` with an aggregate destination and for
-  `CONSTRUCTION` with at least one `Residual` leaf; `FOLDED`, `CAST` and `INTRINSIC` take none.
+  call can also produce an aggregate. A key exists for `CONVERSION` with an aggregate destination, and for
+  EVERY `CONSTRUCTION` -- a fully static one gets an all-`NoCell` plan rather than no key, for the same reason
+  projection does, and because revision 4 called it a required zero-write route in two places while granting
+  it a key only when a leaf was `Residual`. `FOLDED`, `CAST` and `INTRINSIC` take none.
 - Component-state source resolution falls back explicitly: pre-op environment first, then the state live-in,
   then the reset fact. Without the fallback the predicate fails on the FIRST attribute access, which is the
   one that installs the leaf during the very op that reads it.
@@ -256,17 +268,39 @@ arms are decided as follows, with the reasoning, because listing a tension is no
 
 Revision 3's criterion was directionally right and incomplete. It must also require that the action count
 equals the logical width; that the DISPOSITION expected at each ordinal matches (not merely that some action
-is present); that a `ConstantCell` carries the exact semantic value, not just a legal kind; that a `CopyCell`
-source is datapath-AVAILABLE under SSA resolution rather than merely an in-bounds fact; that the source place
-is the SITE-DETERMINED one, since an arbitrary in-range place must not pass; and that state-slot registration
-survives for every scalar and aggregate `PyStoreAttr` target, because emission performs it alongside every
-state write and a cutover that moved the route without it would silently drop ports.
+is present); that a `ConstantCell` carries the exact target-side value, not just a legal kind; that a
+`CopyCell` source is datapath-AVAILABLE under SSA resolution rather than merely an in-bounds fact; and that the
+source place is the SITE-DETERMINED one, since an arbitrary in-range place must not pass.
 
 That last point resolves a contradiction revision 3 contained: the `PySelect` trap said the verifier must
 reproduce the AND/OR polarity, while the criterion only checked the producer-named source for existence and
 bounds -- under which a wrong equal-width arm passes. The verifier derives the expected source place or arm.
 Arbitrary gather and transpose permutations remain the behavioural witnesses' job, because no structural check
 can distinguish an in-range wrong permutation from a right one.
+
+Source-place verification applies ONLY to REPRESENTED `CopyCell` actions. A zero-width route encodes no source
+at all -- a false aggregate `AND` selects the empty operand, so target width and action count are both zero --
+and arm identity there is semantically absent rather than merely unverified. Do not add site-level arm
+metadata to make unobservable information checkable.
+
+### Two responsibilities the plan does not carry
+
+Not everything the old emission path did belongs in a `RoutePlan`, and a cutover that assumes otherwise loses
+a diagnostic or a port silently.
+
+The scalar non-datapath `PyStoreAttr` REJECTION needs an owner. It is correctly excluded from the plan -- a
+route row would suppress it -- but the old emitter is where it lives today, so removing that path orphans it.
+It is assigned to POST-STABILIZATION PLAN PRODUCTION: the same pass that decides a site's dispositions raises
+it, because that pass already has the fact and the slot kind, and because a separate emission-time validation
+would rebuild the very second authority M2 exists to remove. The located public diagnostic must be identical,
+and shadow implementation confirms that by comparing the rendered message before cutover.
+
+STATE-SLOT REGISTRATION is not plan-verifiable, and revision 4 wrongly listed it as a verifier arm. Emission
+performs it as a side effect beside each state write, so a verifier running BEFORE emission cannot prove a
+future executor will do it. It becomes an EXECUTOR INVARIANT instead: executing a state-target plan registers
+every target ordinal. The verifier checks what it can see -- that the target is the expected state place and
+its width comes from the reset-fixed schema -- and the write-only-state behavioural witness checks the ports
+that result.
 
 ### Traps the predicate must encode, each measured
 
@@ -303,6 +337,14 @@ Two shapes were checked rather than assumed, both raised as uncertainties by the
 empty-sequence repeat writes nothing and is CORRECT to do so, because its result is genuinely empty. A
 `Reference` leaf inside an aggregate stored to component state cannot reach emission's unguarded path: analysis
 refuses it first with a located public rejection.
+
+### What only implementation contact can settle
+
+One question is not answerable on paper, and the consult identified it as the only such question: whether
+SOURCE AVAILABILITY can be independently reconstructed from `block_in`, the final binding facts and an
+intra-block walk WITHOUT reusing the producer's own decisions. If it cannot, the verifier is not independent
+and its key-set comparison proves less than it appears to. This is built in shadow and measured -- exact site
+counts and disagreements reported -- before any cutover, not argued about further.
 
 ## The key
 
