@@ -357,3 +357,43 @@ def test_an_explicit_float_dtype_promotes_a_boolean_cell() -> None:
     _assert_matches_python(kernel, 2.0, True)
     assert _run(kernel, 2.0, True) == [1.0, 2.0]
     assert _run(kernel, 2.0, False) == [0.0, 2.0]
+
+
+def test_an_active_construction_carries_a_nondatapath_default() -> None:
+    # An ADMITTED default that is not datapath-capable. It is a separate emission branch from both the datapath
+    # constant and the fully static construction, and the schema first specified it wrongly as a constant cell:
+    # admission covers strings, ranges, slices and records, while emission materializes only numeric and
+    # boolean Knowns. Here the construction is ACTIVE -- its other field is residual -- so the site emits, and
+    # the string field must still contribute no cell without disturbing the field that does.
+    import dataclasses
+
+    @dataclasses.dataclass(frozen=True)
+    class WithText:
+        gain: float
+        label: str = "unset"
+
+    def kernel(x: float) -> float:
+        built = WithText(x)
+        return built.gain * 2.0
+
+    _assert_matches_python(kernel, 3.0)
+    assert _run(kernel, 3.0) == [6.0]
+
+
+def test_a_nondatapath_scalar_state_store_stays_a_located_rejection() -> None:
+    # The rejection that must survive the M2 cutover. Scalar state stores have no skip -- they always
+    # materialize -- so encoding this leaf as "no cell" would DELETE the diagnostic and silently retain the
+    # previous state instead. The schema assigns the rejection to plan production; this pins that it stays a
+    # located public error whoever ends up raising it.
+    class Stores:
+        def __init__(self) -> None:
+            self.v = 0.0
+
+        def step(self, x: float) -> float:
+            self.v = "text"
+            return x
+
+    with pytest.raises(holoso.UnsupportedConstruct) as raised:
+        holoso.synthesize(Stores().step, default_ops(_FMT), name="nondatapath_store")
+    assert "Stores.step" in str(raised.value)  # located: the diagnostic names the kernel and its line
+    assert ":" in str(raised.value)
