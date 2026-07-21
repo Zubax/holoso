@@ -20,15 +20,22 @@ golden corpus stayed BYTE-IDENTICAL (151/151) throughout and its determinism mat
 (Counts of tests, files and commits are deliberately not quoted in prose: several went stale within a single
 session, twice inside the commit that corrected them. Run the command; CI at the tag is authoritative.)
 
-NEXT IS STAGE 4 MORPH, M0 first. M0's import ban must be written to the property SC2 actually established --
-no Fact, no registry, no `Py*`, no callbacks, no frontend decision module in the emitter's transitive closure,
-and no raise sites in the emitter itself -- and NOT to a transitive `holoso._errors` ban, which nothing that
-emits HIR can satisfy (`_hir._const` constructs `UnsupportedConstruct`, for NaN). An import-and-raise ban is
-NECESSARY BUT NOT SUFFICIENT: the spike emitter chose an `IntToFloat` promotion by inspecting the type of the
-HIR node it had just generated, which reaches no banned module and no raise, so M0's plan-totality validator
-must additionally require every kind promotion to come from an explicit plan row rather than from emitted
-nodes. Build on `tests/_importguard.py`,
-which resolves `from . import x` correctly; the spike's own copy did not.
+M0 IS DONE (nine review rounds; see the log). Its guards live in `tests/test_frontend_architecture.py` and
+`verify_plan_totality` in `_analyze.py`, and they pin 22 mutants. Two gaps are deliberately open and recorded
+in the code with measurements: refusals reached through raising helpers defined in SIBLING modules, and
+widening an existing refusal's condition. The J6 obligation from the ruling -- every kind promotion consumed
+from an explicit plan row rather than derived by inspecting emitted nodes -- is NOT implemented and is
+outstanding M2/M3 work.
+
+NEXT IS M1, evidence-atomic recording, and it starts with its defect already measured: `_finalize` replays
+`_transfer` over the stabilized graph, so host folds RUN TWICE -- `admit_call` fires 6 times in the fixpoint
+and 6 MORE in `_finalize` on a kernel with `np.array`, a subscript and `np.dot`. The acceptance criterion is
+that second count reaching ZERO. The shape: record facts/plans/routings at the fixpoint's own visit site
+(`_analyze.py` ~:1178, `expanded = self._transfer(...)`) with overwrite -- monotone facts mean the last write
+at stabilization is the final one -- so `_finalize` no longer needs a replay and keeps only the store-order
+walk, the branch-settled check and the parameter defaults. M0's five verifier arms stand in front of exactly
+this rewrite: a recorder that stops writing a plan, a fact, a parameter fact, a block environment, or an
+executable mark is what they exist to catch.
 
 THE FINDING THAT RESHAPED THIS STEP. The deferral x grafting seam does NOT merely produce false rejections, as
 the maintainer's plan assumed when deferring it to Stage 4. IT SILENTLY MISCOMPILES: honest numeric kernels are
