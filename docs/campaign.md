@@ -187,6 +187,19 @@ PACE (measured on 2026-07-21; each number is from this campaign, not a guess):
   Only the tip's verdict decides whether the branch is green.
 - THE FULL LOCAL SUITE IS 21-27 MINUTES AND IS NOT YOURS TO RUN. Targeted files take seconds and CI is
   authoritative. This was already a maintainer directive and was still violated twice.
+- EVERY AGENT PROMPT MUST SAY "THE SUITE IS GREEN AT HEAD; DO NOT RE-RUN IT" (maintainer directive; the
+  omission is the LAUNCHER's fault, not the agent's). Measured failure: a six-dimension review workflow whose
+  witness dimension was told to "mutate the compiler in your copy and see which tests fire" produced SIX
+  mutation trees beside the user's repo and 22 concurrent pytest processes, TWO of them full `pytest tests/`
+  runs with `-n 6`, driving load average to 23.5 on a machine shared with the maintainer. The prompts said
+  "copy the tree elsewhere" and "verify by execution" and never said the suite was already green. Agents
+  cannot infer a baseline they were not given, so they establish one -- expensively.
+- SPELL OUT THE AGENT BUDGET, not just the task: no `pytest tests/`, no large multi-file selections, one
+  process at a time, no `-n` workers, artifacts confined to the agent's own worktree or the session
+  scratchpad. Prefer "synthesize kernels through the public API in ONE process" over "run the tests" -- the
+  former is milliseconds, the latter minutes, and for most measurement questions they answer the same thing.
+- AGENT LITTER LANDS BESIDE THE REPO UNLESS FORBIDDEN. Cleaned up 120 MB of `holoso-mut*` copies and a
+  `_scratch_x` in `/mnt/storage/zubax/` next to the maintainer's other projects. Say where artifacts go.
 
 OPERATIONAL SURVIVAL KIT (each has bitten this campaign):
 - NEVER `pkill`/`killall` by name pattern. `pkill -f codex` killed the maintainer's unrelated session in
