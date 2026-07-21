@@ -1890,3 +1890,29 @@ Also: the visit tables were not cleared per round, so abandoned unroll rounds ac
 a restart re-runs the worklist and re-records every surviving destination. And DESIGN.md plus the `_finalize`
 docstring still described the replay, which the project's rules require updating in the same commit as the
 behaviour.
+
+
+M1 ROUND, SECOND HALF -- built a DIFFERENTIAL HARNESS (recompute the pre-M1 replay at every finalization and
+compare facts, plans, store order and branch truth) and ran it over ~1215 analyses: the frontend, state,
+control, calls, aggregates, boundary, schema, language, matrix, integers, library, golden and fuzz-regression
+suites, the full 90-kernel seam corpus, and a fuzz campaign. Coverage was real -- 154 multi-round analyses, 3
+unroll restarts, 126 with grafting (up to 90 grafts), 18 with deferrals, 133 with unrolling. ZERO divergences.
+That is the strongest evidence available that the change preserves behaviour, and it is worth more than the
+byte-identical corpus, which only covers 36 cases.
+
+THREE FINDINGS SURVIVED at the tip (its first, the unrecorded-destination-reads-a-stale-round hazard, was
+already closed by the per-round clearing added for the Codex half; the reviewer independently confirmed that
+fix is behaviour-neutral). (a) `_check_branch_settled` read the condition with `.get()`, so a broken premise
+would SILENTLY SKIP the gate -- exactly the wrong direction for a check whose own docstring records two
+narrowings that each reintroduced a silent miscompile. It asserts now. (b) `verify_plan_totality`'s docstring
+claimed its fact arm turns a missing record into a named assert; since M1, finalization bare-subscripts its own
+records first, so absence crashes there and never reaches the arm -- the arm now says what it actually covers,
+a table that loses an entry between finalization and emission. (c) An independence was given up and is now
+recorded where the trade lives: store order and the runtime-state set derive from the same recording lines, so
+the stale-leaf refusal can no longer catch a disagreement between what a round RECORDED and what the stabilized
+graph CONTAINS.
+
+AND THE CHANGE FIXES A LATENT HAZARD I HAD NOT NOTICED. The old replay re-evaluated every concrete host fold,
+so a folded call's binding fact came from a SECOND host call while edge selection and the branch gate came from
+the FIRST. A host callable that is not referentially transparent could make the emitted constant disagree with
+the branch the analyzer actually took. Verified end to end through the public API: fold evaluations 10 -> 5.

@@ -340,8 +340,10 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
     - `subscript_plans` and `route_plans` are read with `.get()`, where absence legitimately means positional
       projection and identity route, so their omissions are indistinguishable from intent and are NOT checked;
       verifying those needs the typed explicit variants M2 introduces;
-    - `binding_facts` IS now checked, since M1's subject is fact recording; a gap there is a named assert
-      inside the walk rather than a raw crash, so it is the mildest of these arms;
+    - `binding_facts` is checked, but only for what reaches `result`: since M1, finalization bare-subscripts
+      its own per-visit records to build that table, so a destination the recorder never wrote crashes there
+      first and never reaches this arm. What this still catches is a table that loses an entry between
+      finalization and emission;
     - the J6 obligation the ruling assigned to this function by name -- every kind promotion consumed from an
       explicit plan row rather than derived by inspecting emitted nodes -- is NOT implemented here, and
       production emission still does it (`docs/decisions/arch-ruling.md`, outstanding M2/M3 work).
@@ -735,7 +737,7 @@ class Analyzer:
     ) -> tuple[object, StaticValue | None]:
         """
         One live read AND one admission per (owner, attribute) per analysis: every later consultation -- W/D
-        rounds, reset facts, namespace lookups, the final-plan replay -- sees the first read's ADMITTED value,
+        rounds, reset facts, namespace lookups, plan finalization -- sees the first read's ADMITTED value,
         so neither a drifting live object nor a mutated referent (admission snapshots contents at admit time)
         can move a fact after it is first formed. The owner reference pins the id against reuse for the memo's
         lifetime. AttributeError propagates to the caller's located rejection. A 0-d ndarray refuses right here,
@@ -936,7 +938,10 @@ class Analyzer:
         inlining one setter order by the call sites, tie-broken by the callee frames). Clones of ONE store op
         (unroll trips of a loop over components) share the whole origin chain, so equal origin keys tie-break by
         the storing block's execution rank -- trip order, the source order of the iterable -- never by raw block
-        id, which the unroller hands out in reverse trip order. Nothing here re-runs the transfer, which used to
+        id, which the unroller hands out in reverse trip order. One independence is given up by not replaying:
+        the store order and the runtime-state set now derive from the same recording lines, so the stale-leaf
+        refusal can no longer catch a disagreement between what a round RECORDED and what the stabilized graph
+        CONTAINS -- only the cross-round staleness it was written for. Nothing here re-runs the transfer, which used to
         execute every concrete library fold a second time; the walk over the stabilized ops only reads what the
         fixpoint already recorded, which is also what keeps a store the graph no longer contains out of the
         plan. Emission consumes only this plan.
@@ -1070,7 +1075,12 @@ class Analyzer:
         terminator = result.unit.blocks[block_id].terminator
         if not isinstance(terminator, Branch) or terminator.then_target == terminator.else_target:
             return
-        truth = result.binding_facts.get(terminator.cond)
+        # Deliberately NOT `.get()`: a miss would leave `settled` None and skip the check silently, and the two
+        # narrowings recorded above each reintroduced a silent miscompile by sparing an arm. The premise is that
+        # a branch condition is a write-once `PyTruth` in this very block, so a miss is a broken invariant, not
+        # a case to tolerate.
+        assert terminator.cond in result.binding_facts, f"branch condition {terminator.cond} has no fact"
+        truth = result.binding_facts[terminator.cond]
         settled = static_truth(truth.value) if isinstance(truth, Known) else None
         if settled is None:
             return
@@ -1932,7 +1942,7 @@ class Analyzer:
             raise AnalysisRejection("a record subscript index is not supported", origin)
         if isinstance(index, Reference):
             # A referenced key would resolve through the LIVE object's __index__ at compile time (repeatedly:
-            # per analysis visit, in the replay, and again at emission), reading reset-time state the kernel's
+            # per analysis visit and again at emission), reading reset-time state the kernel's
             # writes never touch. The state machinery is the honest path: index with int(self.attr).
             raise AnalysisRejection("an object subscript index is not supported", origin)
         if isinstance(obj, AggregateFact) and isinstance(index, Known):
