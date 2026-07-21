@@ -300,9 +300,9 @@ def test_a_write_only_aggregate_state_registers_every_slot() -> None:
 def test_a_known_condition_selection_routes_both_polarities() -> None:
     # The AND/OR selection inverts with its mode: AND takes the RIGHT operand when the condition is true, OR
     # takes the LEFT. Exercising only true conditions lets a hardcoded "AND->right, OR->left" pass, so a false
-    # condition is needed too. A false AND is not observable by value -- a falsy aggregate is an empty one, so
-    # it selects zero cells -- which is why only the false OR appears here; the false AND needs a plan mutation
-    # once M2's verifier exists.
+    # condition is needed too. A false AND is unobservable and will STAY unobservable: a falsy aggregate is an
+    # empty one, so the route has zero cells, and a zero-width route encodes no source to compare -- arm
+    # identity there is not merely untested but semantically absent.
     def kernel(a: float, b: float, c: float, d: float) -> float:
         left = (a, b)
         right = (c, d)
@@ -315,9 +315,9 @@ def test_a_known_condition_selection_routes_both_polarities() -> None:
 
 
 def test_a_known_integer_stored_into_a_float_slot_is_promoted() -> None:
-    # The store-conversion promotion: an integer source reaching a slot whose reset fixes it as a float. The
-    # promotion must come from a recorded transfer rather than from emission inspecting the source, which is
-    # the J6 obligation landing inside M2 for routing sites.
+    # A compile-time-known integer reaching a slot whose reset fixes it as a float. This pins the TARGET-SIDE
+    # normalization -- the cell's value arrives already conformed to the slot's kind -- and NOT the runtime
+    # integer transfer, which needs a residual source and is covered in the schema suite.
     class Promote:
         def __init__(self) -> None:
             self.v = 0.0
@@ -331,10 +331,9 @@ def test_a_known_integer_stored_into_a_float_slot_is_promoted() -> None:
 
 
 def test_a_reflavor_preserves_a_boolean_cell_as_boolean() -> None:
-    # A conversion carrying a runtime boolean beside a float. Worth pinning because the routing-path boolean
-    # promotion is hard to reach at all through the public API -- the analyzer refuses the mixed-kind array
-    # literal that would otherwise produce one -- so this is the shape that does exist, and its cell keeps its
-    # own kind rather than being promoted.
+    # A conversion carrying a runtime boolean beside a float, which routes with IDENTITY: the cell keeps its own
+    # kind. This is NOT the boolean promotion -- an earlier version of this comment claimed the promotion was
+    # unreachable, on the strength of two probes that missed the route entirely (see the promotion test below).
     def kernel(x: float, f: bool) -> tuple[float, bool]:
         items = list((x, f))
         # mypy unifies the list's element type to float; Holoso tracks the two cells' kinds separately, which
@@ -344,3 +343,17 @@ def test_a_reflavor_preserves_a_boolean_cell_as_boolean() -> None:
     built = holoso.synthesize(kernel, default_ops(_FMT), name="reflavor_bool")
     assert [port.name for port in built.numerical_model.outputs] == ["out_0", "out_1"]
     assert [float(v) for v in built.numerical_model.elaborate().run(2.0, True)] == [2.0, 1.0]
+
+
+def test_an_explicit_float_dtype_promotes_a_boolean_cell() -> None:
+    # The routing-path boolean promotion, which an earlier probe of mine wrongly concluded was unreachable. The
+    # route is the EXPLICIT dtype: an array factory forced to float turns a residual boolean source into a
+    # residual float destination, and emission inserts the promotion. Reaching it needs `dtype=float`; the
+    # implicit mixed-kind literal is refused and the plain re-flavor routes with identity, which is why probing
+    # only those two produced a false negative.
+    def kernel(x: float, f: bool) -> Float64[np.ndarray, "2"]:
+        return np.array([f, x], dtype=float)
+
+    _assert_matches_python(kernel, 2.0, True)
+    assert _run(kernel, 2.0, True) == [1.0, 2.0]
+    assert _run(kernel, 2.0, False) == [0.0, 2.0]

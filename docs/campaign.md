@@ -84,6 +84,58 @@ the ruling. Every landing byte-identical vs `freeze-1` except the one pre-author
 Closing the open miscompile routes is a FIRST-CLASS acceptance criterion, not a side effect: the restructure
 is not done while those witnesses report wrong values.
 
+EVIDENCE DISCIPLINE (the campaign's most expensive lesson; every rule below is paid for, instance attached).
+The distilled form: FAVOUR EVIDENCE OVER SPECULATION. Nothing in this campaign was ever found by reading -- not
+by me, not by any reviewer. Every substantive defect was found by re-deriving a number or running an edit:
+differential harnesses, mutation testing, independent recounts, exhaustive enumeration. Budget effort
+accordingly, because review-by-reading has a measured yield of zero here.
+
+- YOUR OWN RIGOR IS A YELLOW FLAG, NOT A GREEN ONE. The more rigorous the argument, the longer its error
+  survived. The worst case was a genuine proof: `_write` IS the sole mutator of the cell map, every other
+  reference IS a read, thirty IS the count -- all true, and it answered the wrong question, because "which
+  sites write cells" is not "which sites need a plan" (a required route can execute ZERO writes). Being
+  convinced is what stopped the check. STATE THE PROPOSITION BEFORE PROVING IT, and ask whether it is the one
+  at issue.
+- VERIFY EACH HALF OF A CONJUNCTION SEPARATELY. Both false benefits claimed for M1 sat directly beside a true
+  one, and the true one is what stopped the checking. "Folds run once instead of twice" was real (6 -> 0 in
+  finalization, 10 -> 5 end to end); "reads a user's objects once per analysis instead of once per phase" was
+  invented -- measured 3 live reads before and 3 after, because the memo already guaranteed it.
+- REFINING A COUNT CANNOT FIND A CATEGORY THE COUNT DOES NOT MEASURE. The routing inventory was counted three
+  times (four/two, then three/five, then four/six). All three counted OFFSET derivations, and the site they
+  all missed -- a known-condition `PySelect` -- derives no offset at all. It permutes nothing; it picks the
+  wrong source. No refinement of that count could ever have surfaced it.
+- A PASSING TEST MAKES NO CLAIM. The claim is which mutant it uniquely kills, and that is measurable, so
+  measure it before asserting it. `tests/test_frontend_routing.py` shipped with a docstring saying it closed
+  gaps; four mutants showed the pre-existing example-driven suite caught every one. Its honest value is
+  localization, and the docstring now says so.
+- NAMING A FAILURE ARCHETYPE DOES NOT INOCULATE AGAINST REPRODUCING IT. Silent absence -- a missing record
+  that reads as a valid default -- is this campaign's whole subject, written in capitals in this brief. Two
+  FRESH instances were then designed INSIDE the step meant to eliminate it: an operand-index bounds check that
+  passes while reading the wrong operand, and a `NoCell` rule that would have deleted a located rejection and
+  silently retained stale state. Actively search your own design for the archetype; do not treat the label as
+  protection.
+- A NEGATIVE RESULT IS ONLY EVIDENCE IF ITS SEARCH SPACE IS STATED. "I could not reach X" and "X is
+  unreachable" are different claims, and the first is worthless without saying where you looked. Recorded as a
+  finding that a routing-path boolean promotion appeared unreachable through the public API, on the strength
+  of exactly two probes -- an implicit mixed-kind array literal (refused) and a `list()` re-flavor (identity).
+  The route is `np.array(..., dtype=float)`, which forces a residual boolean source to a float destination and
+  emits the promotion; verified afterwards, `BoolToFloat` appears in the HIR. A public witness for it already
+  existed in the matrix suite. This was written into the log AS a named negative result within an hour of
+  writing this very section.
+- HARDENING HAS BLAST RADIUS. Making `_check_branch_settled` assert on its premise was right, and it created a
+  hazard in the same round, because the check ran before parameters were seeded. Noticing required reading
+  what the assert now DEPENDED on -- a different question from whether the assert was correct.
+- THE FAIL-BEFORE REFLEX IS ASYMMETRIC. It fires reliably when fixing something BROKEN and lapses when fixing
+  something TOO STRICT (three lapses in M0). A loosened guard needs a before-test as much as a tightened one.
+- DESIGN-REVIEW GATES CATCH A CLASS TESTS CANNOT, because the code does not exist yet to test. Four M2
+  refusals each found a real defect before any adoption code was written, two of which would have shipped
+  silent miscompiles the compiler does not currently have. The gate is not ceremony.
+
+OPEN METHODOLOGICAL QUESTION, deliberately unresolved: whether four rounds of document revision was the right
+expenditure, or whether the producer and verifier should have been built in shadow earlier and MEASUREMENTS
+brought to the consult instead of prose. Each round found real defects, which argues it worked -- but that is
+also exactly what a productive-looking loop feels like from inside. Put to consult X6a round 4 directly.
+
 OPERATIONAL SURVIVAL KIT (each has bitten this campaign):
 - NEVER `pkill`/`killall` by name pattern. `pkill -f codex` killed the maintainer's unrelated session in
   another project. Kill only PIDs you captured yourself.
@@ -2158,3 +2210,36 @@ float slot for the promotion path. And a named negative result: a routing-path B
 unreachable through the public API, because the analyzer refuses the mixed-kind array literal that would
 produce one; the reachable shape keeps the boolean cell AS a boolean. That bears on whether the three-value
 transfer vocabulary is right, and is being put to the consult rather than assumed.
+
+
+X6A ROUND 4: NOT APPROVED, and the most constructive round yet -- it answers the process question directly.
+The remaining blockers are DOCUMENT-FIXABLE contradictions, not design failures, and exactly ONE thing
+genuinely needs implementation contact: whether source availability can be independently reconstructed from
+`block_in`, final binding facts and an intra-block walk WITHOUT reusing producer decisions. Build that in
+shadow; everything else is prose. Also approved on their merits: the all-`NoCell` projection decision (it
+faithfully replaces `needs_cells`, preserves HIR ordering, and makes plan presence semantic), the conditional
+`NoCell` rule, the affine correction, the `_copy_leaves` correction, and the counts -- thirty writes, four
+`child_slice`, nine traps.
+
+MY BOOL_TO_FLOAT NEGATIVE RESULT WAS WRONG, and it is the sharpest instance of the discipline above failing in
+practice. The transfer IS reachable and IS required: `np.array(..., dtype=float)` forces a residual boolean
+source to a float destination through the array factory, and `BoolToFloat` appears in the emitted HIR --
+verified. A public witness already existed in the matrix suite. My two probes explored a mixed-kind literal
+(intentionally refused) and a `list()` re-flavor (identity), neither of which is the route. The vocabulary has
+three live transfers, not two plus a dead one.
+
+TWO MORE OF MY OWN COMMENTS WERE WRONG and are corrected. The known-integer store test exercises TARGET-SIDE
+normalization -- the value arrives already conformed to the slot's kind -- not `CellTransfer.INT_TO_FLOAT`,
+which needs a residual source. And the promise that a future plan mutation would check the false AND is
+IMPOSSIBLE under the agreed record: a falsy aggregate selects zero cells, so the route has zero width and
+encodes no source to compare. Arm identity there is not untested, it is semantically absent.
+
+SIX BLOCKERS, all recorded for revision 5: fully static construction is called a required zero-write route in
+two places while the `CONSTRUCTION` arm grants a key only when a leaf is `Residual` (resolve toward every
+construction getting a plan, static ones all-`NoCell`); "admitted default -> `ConstantCell`" is false, since
+admission covers strings, ranges, slices and records while emission materializes only boolean/numeric datapath
+Knowns; `ConstantCell.value` has no normalization direction and must be TARGET-side post-transfer, compared
+with the existing bit-faithful semantics; source-place verification applies only to REPRESENTED `CopyCell`
+actions; the scalar non-datapath `PyStoreAttr` rejection has no owner after cutover and must be assigned one
+that preserves the located diagnostic; and state-slot registration is not plan-verifiable before emission, so
+it becomes an EXECUTOR invariant with the behavioural test as its check.
