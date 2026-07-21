@@ -9,7 +9,11 @@ from pathlib import Path
 
 import pytest
 
+import holoso
+from holoso import FloatFormat
+
 from ._importguard import direct_imports
+from ._modelref import default_ops
 
 _EMITTER = "holoso._frontend._fir._emit"
 
@@ -645,3 +649,43 @@ def test_the_parameter_arm_ignores_the_bound_receiver() -> None:
     result.block_in[result.unit.entry].facts.pop(Local(ported))
     with pytest.raises(AssertionError, match="no recorded fact for emission to type"):
         verify_plan_totality(result)
+
+
+def test_finalization_does_not_replay_host_folds() -> None:
+    # M1: `_finalize` used to replay the transfer over the stabilized graph to rebuild each environment, which
+    # ran every concrete library fold a SECOND time -- measured at 6 host folds in the fixpoint and 6 more in
+    # finalization for this kernel. Facts and plans are recorded at the visit that computes them instead, so
+    # finalization reads them. A user's objects are read once per analysis, not once per phase.
+    import numpy as np
+
+    from holoso._frontend._fir import _analyze, _fold
+
+    phase = ["fixpoint"]
+    counts = {"fixpoint": 0, "finalize": 0}
+    real_admit = _fold.admit_call
+    real_finalize = _analyze.Analyzer._finalize
+
+    def counting_admit(*args: object, **kwargs: object) -> object:
+        counts[phase[0]] += 1
+        return real_admit(*args, **kwargs)  # type: ignore[arg-type]
+
+    def traced_finalize(self: object, result: object) -> object:
+        phase[0] = "finalize"
+        return real_finalize(self, result)  # type: ignore[arg-type]
+
+    class Kernel:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def step(self, x: float) -> float:
+            span = np.array([1.0, 2.0, 3.0])
+            return x + float(span[0]) + float(np.dot(span, span))
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(_fold, "admit_call", counting_admit)
+        patch.setattr(_analyze, "admit_call", counting_admit)
+        patch.setattr(_analyze.Analyzer, "_finalize", traced_finalize)
+        holoso.synthesize(Kernel().step, default_ops(FloatFormat(8, 23)), name="no_replay")
+
+    assert counts["fixpoint"] > 0, "the kernel must fold host calls for this test to mean anything"
+    assert counts["finalize"] == 0, f"finalization replayed {counts['finalize']} host folds"

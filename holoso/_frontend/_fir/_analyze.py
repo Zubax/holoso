@@ -480,6 +480,12 @@ class Analyzer:
         self._state_livein: dict[StateLeaf, Fact] = {}
         self._discovered_stores: set[tuple[BlockId, StateLeaf]] = set()
         self._discovered_store_origins: dict[tuple[BlockId, StateLeaf], OriginStack] = {}
+        # Recorded AT THE VISIT that computes them, overwritten each time. The fixpoint revisits a block
+        # whenever an incoming fact changes, so a block that is not revisited did not change: the last write
+        # is the stabilized one. This is what lets `_finalize` stop replaying the transfer, which used to run
+        # every host fold a second time.
+        self._visit_facts: dict[BindingId, Fact] = {}
+        self._visit_call_plans: dict[BindingId, CallPlan] = {}
         self._concrete_calls: set[int] = set()
         self._intrinsic_calls: set[int] = set()
         self._cast_calls: set[int] = set()  # runtime float()/int()/bool() casts (identity or conversion at emission)
@@ -924,29 +930,26 @@ class Analyzer:
         """
         rank = self._executable_rank(result)
         first_store: dict[StateLeaf, tuple[tuple[tuple[int, int], ...], int]] = {}
+        for (block_id, leaf), origin in self._discovered_store_origins.items():
+            if block_id not in result.executable_blocks:
+                continue
+            position = (source_position(origin), rank[block_id])
+            if leaf not in first_store or position < first_store[leaf]:
+                first_store[leaf] = position
+                result.store_origins[leaf] = origin
         for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
-            block = result.unit.blocks[block_id]
-            env = result.block_in[block_id].copy()
-            for index, op in enumerate(block.ops):
-                if isinstance(op, PyStoreAttr):
-                    obj_fact = env.get(Local(op.obj))
-                    if isinstance(obj_fact, Reference):
-                        leaf = StateLeaf(obj_fact.obj, (op.name,))
-                        position = (source_position(op.origin), rank[block_id])
-                        if leaf not in first_store or position < first_store[leaf]:
-                            first_store[leaf] = position
-                            result.store_origins[leaf] = op.origin
+            for op in result.unit.blocks[block_id].ops:
                 if isinstance(op, PyCall):
-                    result.call_plans[op.dst] = self._call_plan(op, env)
-                self._transfer(result.unit, block, index, op, env)
+                    result.call_plans[op.dst] = self._visit_call_plans[op.dst]
                 if isinstance(op, PySubscript) and id(op) in self._subscript_selections:
                     result.subscript_plans[op.dst] = self._subscript_selections[id(op)]
                 if isinstance(op, PyCall) and id(op) in self._conversion_routes:
                     result.route_plans[op.dst] = self._conversion_routes[id(op)]
                 dst = op_dst(op)
                 if dst is not None:
-                    result.binding_facts[dst] = env.get(Local(dst))
-            self._check_branch_settled(result, block_id, env)
+                    result.binding_facts[dst] = self._visit_facts[dst]
+        for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
+            self._check_branch_settled(result, block_id)
         entry_env = result.block_in[result.unit.entry]
         for param in result.unit.params:
             result.binding_facts.setdefault(param, entry_env.get(Local(param)))
@@ -1035,9 +1038,12 @@ class Analyzer:
                 self._block_origin(result.unit, unreached[0]),
             )
 
-    def _check_branch_settled(self, result: ResidualUnit, block_id: BlockId, env: _Env) -> None:
+    def _check_branch_settled(self, result: ResidualUnit, block_id: BlockId) -> None:
         """
-        Companion of ``_check_reachability_settled``, run with the env the replay has carried to the terminator.
+        Companion of ``_check_reachability_settled``, run on the recorded fact of the branch's condition.
+
+        The condition is always a write-once ``PyTruth`` destination, so its recorded binding fact IS the one
+        ``_resolve_terminator`` branched on -- which is why this needs no replayed environment.
 
         Deliberately unconditional. Two narrowings were tried, each meant to spare kernels whose speculated arm
         looked harmless, and each reintroduced a silent miscompile: testing only arms that store misses an inert
@@ -1049,7 +1055,7 @@ class Analyzer:
         terminator = result.unit.blocks[block_id].terminator
         if not isinstance(terminator, Branch) or terminator.then_target == terminator.else_target:
             return
-        truth = env.get(Local(terminator.cond))
+        truth = result.binding_facts.get(terminator.cond)
         settled = static_truth(truth.value) if isinstance(truth, Known) else None
         if settled is None:
             return
@@ -1194,6 +1200,11 @@ class Analyzer:
                     self._transfer_deferrals.pop(id(op), None)
                 if expanded:
                     continue  # the graph changed under us: re-run this op slot (now a different op)
+                if isinstance(op, PyCall):
+                    self._visit_call_plans[op.dst] = self._call_plan(op, env)
+                dst = op_dst(op)
+                if dst is not None:
+                    self._visit_facts[dst] = env.get(Local(dst))
                 index += 1
             try:
                 successors = self._resolve_terminator(unit, block, env)
