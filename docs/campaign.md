@@ -2369,3 +2369,54 @@ SCOPE, STATED BECAUSE A NEGATIVE RESULT NEEDS ITS SEARCH SPACE: 101 analyses ove
 suite and hand-written kernels. Aggregate-record COMPONENT STATE is UNMEASURED -- two intended probes never ran
 (integers not lowerable; record state reset unsupported). The fuzz and golden corpora were not swept, and no
 test suites were run.
+
+
+X6A ROUND 5 REFUSED REVISION 6, and the most valuable part of the ruling is that it AUDITED THE MEASUREMENT
+rather than the prose. The atomic strategy stands; four blockers remain.
+
+MY MEASUREMENT HEADLINE WAS INFLATED. I reported "940,977 cells swept" as a coverage figure. Those are
+repeated PROGRAM-POINT OBSERVATIONS, not unique logical cells; the semantically meaningful totals are 3,461
+sites and 3,927 represented copies. I overstated the sweep by two orders of magnitude, in the same session
+whose whole lesson is evidence over speculation, and while correcting other people's counts.
+
+AND THE MEASUREMENT WAS CIRCULAR IN ONE PLACE. Producer and verifier BOTH classified "every `PyAttr`", so
+their exact-key agreement there proves only that I wrote the same rule twice. Worse, the write-based closure
+argument CANNOT distinguish the competing policies at all, because those sites write nothing -- so the site
+set is settled by fiat, not by the sweep. Also: the shadow never verified constants or transfers, cell/read
+sets erase source-to-target pairing (which is why permutations "naturally survive"), and construction
+re-derivation was never implemented in the shadow at all. "Zero disagreements" covered less than it sounded.
+
+I ALMOST CORRECTED THE DOCUMENT TOWARD AN UNVALIDATED BEHAVIOUR. The implementation agent reported that the
+document's `ConstantCell.value` rule is wrong and the spike is right, with a good argument about two constant
+paths. I verified the two paths exist and was reasoning toward the spike. The ruling caught what neither of us
+did: the spike NEVER TESTED constants or transfers, and its own `StorePlace` producer contradicts itself,
+changing the kind to float while keeping the integer value. AN UNVALIDATED BEHAVIOUR IS NOT EVIDENCE JUST
+BECAUSE IT SITS INSIDE SOMETHING VALIDATED FOR A DIFFERENT PROPERTY. That rule is now in the document.
+
+BLOCKER 4 RESTED ON A FALSE PREMISE OF MINE, verified by probe. I assigned the scalar non-datapath
+`PyStoreAttr` rejection a new owner because the emitter it lives in is being deleted. It does not live there:
+`self.v = "text"` against a float reset rejects during ANALYSIS from `_analysis_support.py:229`, never
+reaching emission. Premise withdrawn. What remains is to establish whether ANY non-datapath scalar store is
+reachable at emission, and if so to PRECOMPUTE its rejection against its `PlanSite` rather than raise it
+globally -- a global raise would reorder it ahead of an earlier diagnostic the kernel hits first. My own
+witness for this passes for a weaker reason than its name claims, and now says so.
+
+THE OTHER TWO BLOCKERS: the routing table still said admitted defaults are `ConstantCell` while the rule text
+(fixed in revision 5) says a non-datapath admitted default is `NoCell` -- I fixed the rule and not the table.
+And the site predicate needs explicit arms for `StorePlace` and `BuildTuple`/`BuildList`, with `StorePlace`'s
+width taken from the POST-STORE source fact rather than the pre-op target, since a local aggregate may legally
+change arity across a store.
+
+A HARNESS DEFECT COST AN AGENT ITS BUDGET: the implementation worktree was provisioned from `origin/main`, 222
+commits behind, where `holoso/_frontend/_fir/` DOES NOT EXIST -- the whole architecture M2 restructures
+postdates that basis. A sibling worktree was cut from `dev` correctly, so this was an outlier rather than the
+rule. The agent diagnosed it, reset its own basis, confirmed the corpus gate still reports 151/151, and
+correctly refused to land a partial absorb-and-delete. CHECK THE WORKTREE BASIS BEFORE DISPATCHING
+IMPLEMENTATION WORK.
+
+CONFIRMED BY THAT AGENT, worth keeping: a uniform ordinal-addressed executor is byte-safe, because `_write`
+and `_read` both normalize a bare `Place` to ordinal 0 -- so the executor needs no scalar special case, which
+retires the single biggest byte-identity risk. And the construction re-derivation ruling is implementable,
+since `RecordLayout.klass` carries the class identity; the consult adds the condition that it must consume the
+analyzer's IMMUTABLE SCHEMA SNAPSHOT rather than live dataclass metadata, or producer and verifier can
+disagree in time.

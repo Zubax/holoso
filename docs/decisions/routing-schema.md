@@ -1,6 +1,7 @@
 # Routing algebra: schema for M2
 
-Status: REVISION 6 -- the first revision written against MEASUREMENTS rather than argument, and the first to
+Status: REVISION 7 -- written against measurements AND against a review of what those measurements did not cover, and
+the first to
 correct a claim that four rounds of design review had left standing. Revisions 1-5 were each refused: the
 record could not express routing at all, then the site set was not closed, then the predicate arms were listed
 without being decided, then contradictions remained. Companion to `arch-ruling.md` (which ordered plain MORPH)
@@ -153,7 +154,17 @@ boolean and numeric datapath `Known`s. The rule is:
 - active, with a `Reference` or a non-datapath `Known` (a string default, say) -> `NoCell`;
 - active, with a residual source -> `CopyCell`.
 
-`ConstantCell.value` is the TARGET-SIDE, POST-TRANSFER value, which revision 4 left undirected. A known
+`ConstantCell.value` is the TARGET-SIDE, POST-TRANSFER value. This survived a challenge and is worth
+recording, because the challenge was well argued and wrong: an implementation spike stores the UNCONFORMED
+value beside a target-side kind, and reported that the document should follow it. It should not. The spike
+NEVER VERIFIED CONSTANTS OR TRANSFERS AT ALL -- its zero-disagreement result covers cell sets and source
+reads only -- and its own `StorePlace` producer contradicts itself, changing the kind to float while retaining
+the integer value. An unvalidated behaviour is not evidence just because it sits inside something that was
+validated for a different property.
+
+A dst-less `StorePlace` has no final destination binding fact, so producer and verifier must each replay the
+stable storage-schema conformance walk INDEPENDENTLY to derive the post-store target value and kind, the
+required transfer, and the logical width. That walk is the authority; neither side may read the other's. A known
 integer stored into a float slot begins as an integer `Known` and storage conformance produces a float one, so
 "the exact semantic value" is not single-valued until the direction is fixed. It is the conformed value, and
 values compare with the codebase's existing bit-faithful equality rather than Python `==`.
@@ -183,7 +194,7 @@ Every routing today is one instance of this shape:
 | concat | the source `place` switches at the split, not merely the ordinal |
 | repeat | `CellRef(seq, i % W)`, where `W` is the SOURCE LEAF WIDTH, not the repetition count |
 | `BuildTuple` / `BuildList` | each item place at its own window |
-| construction | per-field windows from several places; unadmitted defaults as `NoCell`, admitted as `ConstantCell` |
+| construction | per-field windows; defaults follow the four-way rule below -- a string default is `NoCell` |
 | component `PyAttr` | `CellRef(StateLeaf(...), i)` -- a state root, unreachable from any operand index |
 | `StorePlace`, `PyStoreAttr` | explicit `target`, since neither has a result layout |
 
@@ -258,7 +269,15 @@ arms are decided as follows, with the reasoning, because listing a tension is no
 
 - `PyBin` is decided by the LAYOUT, not the op kind. A sequence aggregate ROUTES -- concat and repeat emit no
   HIR at all -- and takes a key. An array aggregate COMPUTES elementwise and takes none. A scalar computes.
-- `PySubscript` and record `PyAttr` produce an ALL-`NoCell` PLAN rather than no key. The `needs_cells` gate
+- `PyAttr`: EVERY `PyAttr` takes a key, not only the record ones, including namespace, method and other
+  fact-only attribute accesses. Revision 6 said "record `PyAttr`" while the shadow classified all of them, and
+  the write-based closure measurement CANNOT distinguish the two policies because such sites write nothing --
+  producer and verifier simply agreed with each other. Choosing "every" makes the predicate decidable from the
+  op kind alone.
+- `StorePlace` and `BuildTuple`/`BuildList` take keys, and `StorePlace`'s logical width comes from the
+  POST-STORE source fact, NOT the pre-op target fact: a local aggregate may legally change arity across a
+  store, so reading the width from the target is wrong wherever it does.
+- `PySubscript` produces an ALL-`NoCell` PLAN rather than no key. The `needs_cells` gate
   then stops being an independent decision and becomes a consequence of the plan's dispositions, which is the
   document's whole thesis applied to itself: absence must never be the carrier of meaning. It costs nothing at
   emission, since a plan of `NoCell` rows emits exactly what the gate emits today -- nothing -- so it cannot
@@ -299,12 +318,21 @@ metadata to make unobservable information checkable.
 Not everything the old emission path did belongs in a `RoutePlan`, and a cutover that assumes otherwise loses
 a diagnostic or a port silently.
 
-The scalar non-datapath `PyStoreAttr` REJECTION needs an owner. It is correctly excluded from the plan -- a
-route row would suppress it -- but the old emitter is where it lives today, so removing that path orphans it.
-It is assigned to POST-STABILIZATION PLAN PRODUCTION: the same pass that decides a site's dispositions raises
-it, because that pass already has the fact and the slot kind, and because a separate emission-time validation
-would rebuild the very second authority M2 exists to remove. The located public diagnostic must be identical,
-and shadow implementation confirms that by comparing the rendered message before cutover.
+The scalar non-datapath `PyStoreAttr` rejection was assigned an owner on a FALSE PREMISE, and the premise is
+withdrawn. The ordinary case does not reach emission at all: storing a string into a float-reset slot rejects
+during ANALYSIS with "values of irreconcilable kinds merge here", raised from the analysis support module --
+verified by probing the public API and reading the traceback, not by reading the emitter. So removing the old
+emission path orphans nothing here, and no reassignment is needed for it.
+
+What remains is narrower and must be established rather than assumed: whether any non-datapath scalar store
+is reachable at EMISSION materialization at all. If one is, its rejection is PRECOMPUTED during plan
+production and ATTACHED TO ITS `PlanSite`, not raised globally by that pass -- raising it globally would
+reorder it ahead of an earlier diagnostic that a kernel hits first, turning a correct message into the wrong
+one. If no such case is reachable, the obligation disappears with the code.
+
+Note also that the routing witness pinning this rejection passes for a weaker reason than its name suggests:
+it asserts a generic located rejection, and the analysis-phase diagnostic satisfies it. The real coverage for
+the storage-conformance path is in the schema suite.
 
 STATE-SLOT REGISTRATION is not plan-verifiable, and revision 4 wrongly listed it as a verifier arm. Emission
 performs it as a side effect beside each state write, so a verifier running BEFORE emission cannot prove a
@@ -315,13 +343,15 @@ that result.
 
 ### Traps the predicate must encode, each measured
 
-Nine places where a uniform rule is wrong, and where a verifier written from the obvious model would either
+Ten places where a uniform rule is wrong, and where a verifier written from the obvious model would either
 reject valid output or accept a missing plan.
 
 - `LoadPlace` is ASYMMETRIC. A scalar `Known` destination emits nothing at all, while an aggregate whose
   leaves are all `Known` emits constants for the datapath ones. A verifier modelling the two uniformly is
   wrong in one direction or the other, whichever way it picks.
-- THREE SCALAR ARMS, TWO POLICIES, and revisions 1-5 named only one of them. `LoadPlace`'s scalar arm and
+- THREE HELPER SCALAR ARMS, TWO POLICIES, and revisions 1-5 named only one of them. (Direct scalar
+  `StorePlace` and `PyStoreAttr` are further materializing routing arms; the count is of the helpers.) `LoadPlace`'s
+  scalar arm and
   `_project`'s scalar arm both SKIP a `Known` destination; `_install`'s scalar arm MATERIALIZES it as a
   constant. The `_project` half is an equally silent wrong-output trap and was found only by building a shadow
   producer, which mis-handled it and surfaced as 24 cell-set mismatches against the real emitter.
@@ -357,16 +387,19 @@ refuses it first with a located public rejection.
 
 The question four consult rounds converged on was whether SOURCE AVAILABILITY can be independently
 reconstructed from `block_in`, the final binding facts and an intra-block walk without reusing the producer's
-decisions. Measured: YES -- 940,977 cells swept, zero unsound verdicts, all 3,927 `CopyCell` sources resolving
-available with no false objection. And that answer turned out to matter far less than the question implied,
+decisions. Measured: YES -- zero unsound verdicts over 3,461 sites and 3,927 represented copies, with no false
+objection. (An earlier draft quoted 940,977 "cells"; that is repeated PROGRAM-POINT OBSERVATIONS, not unique
+logical cells, and quoting it as a coverage figure overstated the sweep by two orders of magnitude.) And that answer
+turned out to matter far less than the question implied,
 because availability alone catches almost nothing (above). The consult should have been asking about
 DISPOSITION derivability. Four rounds of review refined a question that was not the load-bearing one.
 
 Two corrections to the inputs. The verifier also requires `runtime_state`, which none of the five revisions
-named: without it every state-leaf source is undecidable (14,777 cells measured), because a promoted leaf is
+named: without it every state-leaf source is undecidable (14,777 program-point observations), because a promoted leaf is
 unconditionally available while a non-promoted one is compile-time configuration with no cell, and only
 `runtime_state` separates them. And "datapath-available" is NARROWER than "the cell is defined": 14,340 swept
-cells are defined as materialized constants while correctly reporting no datapath value. The predicate is
+observations are of cells defined as materialized constants while correctly reporting no datapath value. The
+predicate is
 "holds a datapath value this plan may COPY", not "has a definition".
 
 ONE CASE DEFEATS AN INDEPENDENT VERIFIER, and it is the only one found. A `CONSTRUCTION`'s field-to-binding

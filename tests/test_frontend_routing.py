@@ -381,10 +381,11 @@ def test_an_active_construction_carries_a_nondatapath_default() -> None:
 
 
 def test_a_nondatapath_scalar_state_store_stays_a_located_rejection() -> None:
-    # The rejection that must survive the M2 cutover. Scalar state stores have no skip -- they always
-    # materialize -- so encoding this leaf as "no cell" would DELETE the diagnostic and silently retain the
-    # previous state instead. The schema assigns the rejection to plan production; this pins that it stays a
-    # located public error whoever ends up raising it.
+    # A non-datapath scalar state store must stay a located public rejection. NOTE WHAT THIS DOES NOT PIN: the
+    # rejection it actually observes comes from ANALYSIS ("values of irreconcilable kinds merge here"), not
+    # from emission materialization, so this does not exercise the emitter path the M2 cutover removes. The
+    # storage-conformance coverage proper lives in the schema suite. Kept because the located-rejection
+    # property is worth holding across the cutover, but its name promises more than it delivers.
     class Stores:
         def __init__(self) -> None:
             self.v = 0.0
