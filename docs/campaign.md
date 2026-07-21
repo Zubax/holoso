@@ -27,15 +27,20 @@ widening an existing refusal's condition. The J6 obligation from the ruling -- e
 from an explicit plan row rather than derived by inspecting emitted nodes -- is NOT implemented and is
 outstanding M2/M3 work.
 
-NEXT IS M1, evidence-atomic recording, and it starts with its defect already measured: `_finalize` replays
-`_transfer` over the stabilized graph, so host folds RUN TWICE -- `admit_call` fires 6 times in the fixpoint
-and 6 MORE in `_finalize` on a kernel with `np.array`, a subscript and `np.dot`. The acceptance criterion is
-that second count reaching ZERO. The shape: record facts/plans/routings at the fixpoint's own visit site
-(`_analyze.py` ~:1178, `expanded = self._transfer(...)`) with overwrite -- monotone facts mean the last write
-at stabilization is the final one -- so `_finalize` no longer needs a replay and keeps only the store-order
-walk, the branch-settled check and the parameter defaults. M0's five verifier arms stand in front of exactly
-this rewrite: a recorder that stops writing a plan, a fact, a parameter fact, a block environment, or an
-executable mark is what they exist to catch.
+M1 IS DONE (two review rounds). `_finalize` no longer replays `_transfer`: facts and call plans are recorded
+at the visit that computes them, and the acceptance criterion was met -- host folds in finalization 6 -> 0,
+measured end to end through the public API as 10 -> 5 total. TWO INDEPENDENT DIFFERENTIAL HARNESSES, built by
+two reviewers from different starting points, ran the old replay beside the new finalization over ~1215 and
+460 finalizations respectively (multi-round analyses, unroll restarts, grafting up to 90 deep, deferrals, a
+fuzz campaign, and an 11-kernel adversarial corpus) and found ZERO divergences. Store order -- which IS the
+port ABI -- was identical throughout. That is worth more than the byte-identical corpus, which covers 36 cases.
+Note for later steps: BOTH false benefits I claimed for M1 sat next to a true one, and the true one is what
+stopped me checking. Verify each half of a conjunction separately.
+
+NEXT IS M2, the routing algebra, and it is GATED: Codex consult X6a on the schema document BEFORE any adoption
+code. See the M2 bullet under "Variant MORPH" for the shape and the exact surfaces it must absorb and delete.
+The J6 obligation from the X5 ruling -- every kind promotion consumed from an explicit plan row rather than
+derived by inspecting emitted nodes -- belongs to M2/M3 and is still outstanding.
 
 THE FINDING THAT RESHAPED THIS STEP. The deferral x grafting seam does NOT merely produce false rejections, as
 the maintainer's plan assumed when deferring it to Stage 4. IT SILENTLY MISCOMPILES: honest numeric kernels are
@@ -89,6 +94,14 @@ OPERATIONAL SURVIVAL KIT (each has bitten this campaign):
 - Run the FULL mypy scope: `.nox/typecheck/bin/mypy` with NO args (202 files incl. tests).
 - Local run: `HOLOSO_REGALLOC_EFFORT=10 .nox/tests/bin/python -m pytest -p no:enabler -n 8 --tb=line -q
   -m "not cosim and not fuzz and not synth" <files>`; format `.nox/black/bin/python -m black -q holoso tests tools`.
+- HEAVY TESTS BELONG ON THE CI VMs, NOT HERE (maintainer directive). The full local suite costs 21-27 min a
+  run and this session burned several on changes CI would have covered. Push `HEAD:refs/heads/trial/<name>`
+  and let the self-hosted `ci-runner` jobs (core, cosim_examples, synth, synth_examples) do it; keep local
+  runs to the targeted files a change actually touches.
+- ALWAYS `HOLOSO_IMPACT_CACHE=1` for any local cosim (maintainer directive). `tests/_impact.py` digests the
+  generated Verilog plus the bench and support sources and SKIPS a row whose inputs are byte-identical to its
+  last recorded pass -- generation is deterministic, so the Verilog is a sound impact oracle. Opt-in and
+  local-only by design: CI never sets it, so the uncached matrix stays the authoritative backstop.
 - CI: push `HEAD:refs/heads/trial/<name>`, poll with single `gh api` calls every 5 min (NEVER `gh run watch`).
   md-only commits fire no CI; the previous green carries.
 - Reviewers work in PINNED DETACHED WORKTREES, never the live tree.
