@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from ._importguard import direct_imports, transitive_holoso_imports
+from ._importguard import direct_imports
 
 _EMITTER = "holoso._frontend._fir._emit"
 
@@ -176,20 +176,32 @@ def test_emitter_frontend_debt_only_shrinks() -> None:
         f"emission no longer imports {removed} -- that is the point, so delete those entries from "
         "_EMITTER_FRONTEND_DEBT in this same commit and let the ratchet hold the ground"
     )
+    # `from X import Y` lands both `X` and `X.Y`, but a bare `import X` lands only `X` -- which is already an
+    # owner key, so every symbol reached through it would be invisible to the ledger. Require the accompanying
+    # symbol, which makes the bare spelling fail rather than silently reopening the module-level blind spot.
+    bare = sorted(
+        owner
+        for owner in _EMITTER_FRONTEND_DEBT
+        if owner in imported and not any(name.startswith(owner + ".") for name in imported)
+    )
+    assert not bare, (
+        f"emission imports {bare} as a bare module, which hides every symbol it then reaches; import the "
+        "symbols so the ledger can see them"
+    )
 
 
-def test_the_ratchet_is_measured_against_real_modules() -> None:
-    # `from pkg import Name` yields `pkg.Name`, which is not a module. Counting those inflates the debt and can
-    # name a class where a module belongs, which would make the ratchet's own numbers untrustworthy.
-    reached = transitive_holoso_imports(_EMITTER)
-    unresolved = sorted(m for m in reached if not _module_source(m))
-    assert not unresolved, f"closure contains non-modules: {unresolved}"
+def test_every_recorded_owner_is_a_real_module() -> None:
+    # The ledger deliberately records SYMBOLS as well as modules -- 93 of its names are classes and functions,
+    # which is the whole point of measuring at symbol level. What must still resolve is every OWNER key: a
+    # typo'd owner would make its symbols unmatchable and quietly park real debt outside the ratchet.
+    unresolved = sorted(owner for owner in _EMITTER_FRONTEND_DEBT if not _module_source(owner))
+    assert not unresolved, f"recorded owners that are not modules: {unresolved}"
 
 
 def test_the_guard_root_fails_loudly_when_it_does_not_resolve() -> None:
-    # A typo in the root would otherwise yield an empty closure and a permanently green guard.
+    # A typo in the root would otherwise yield an empty import set and a permanently green guard.
     with pytest.raises(ValueError):
-        transitive_holoso_imports("holoso._frontend._fir._emit_that_does_not_exist")
+        direct_imports("holoso._frontend._fir._emit_that_does_not_exist")
 
 
 def test_emission_rejection_sites_only_shrink() -> None:
@@ -204,20 +216,25 @@ def test_emission_rejection_sites_only_shrink() -> None:
     #     and 41 direct raises;
     #   - `<=` on either would permit 42 -> 41 -> 42 regrowth.
     # A genuine upstream move changes both together, and updates both here in the commit that earns it.
-    source = ast.parse(Path(_module_source(_EMITTER)).read_text(encoding="utf-8"))
-    constructed = sum(
-        1
-        for node in ast.walk(source)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "EmissionRejection"
-    )
-    raised = sum(
-        1
-        for node in ast.walk(source)
-        if isinstance(node, ast.Raise)
-        and isinstance(node.exc, ast.Call)
-        and isinstance(node.exc.func, ast.Name)
-        and node.exc.func.id == "EmissionRejection"
-    )
+    # Counted over the PACKAGE, not `_emit.py` alone: the file is ~1500 lines against a ~2000 soft limit, so
+    # splitting it is a plausible refactor, and a file-scoped count would read the move as M5 progress.
+    constructed = 0
+    raised = 0
+    for module in sorted(Path(_module_source(_EMITTER)).parent.glob("*.py")):
+        source = ast.parse(module.read_text(encoding="utf-8"))
+        constructed += sum(
+            1
+            for node in ast.walk(source)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "EmissionRejection"
+        )
+        raised += sum(
+            1
+            for node in ast.walk(source)
+            if isinstance(node, ast.Raise)
+            and isinstance(node.exc, ast.Call)
+            and isinstance(node.exc.func, ast.Name)
+            and node.exc.func.id == "EmissionRejection"
+        )
     assert (constructed, raised) == (42, 42), (
         f"emission constructs {constructed} refusals and raises {raised} directly, recorded (42, 42): fewer of "
         "both is M5 progress and updates the numbers here in the same commit; anything else means a refusal was "
@@ -258,14 +275,23 @@ def test_a_missing_call_plan_is_a_verifier_error_not_a_walk_time_crash() -> None
         verify_plan_totality(result)
 
 
-def test_lower_fir_actually_runs_the_plan_verifier(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_lower_fir_runs_the_plan_verifier_BEFORE_emission_walks(monkeypatch: pytest.MonkeyPatch) -> None:
     # The verifier cannot fail for any result today (see its docstring), so nothing else in the suite would
-    # notice if the call were deleted as dead code -- and it exists precisely to be in place BEFORE M1 rewrites
-    # recording. Pin the call site itself.
+    # notice if the call were deleted -- and it exists to be in place BEFORE M1 rewrites recording. Both facts
+    # have to be pinned: an earlier version of this test asserted only that the verifier was CALLED, and moving
+    # the call after `_Emitter(...).emit()` passed it while destroying the whole point, since emission reaches
+    # `call_plans` with a bare subscript and would raise the unlocated KeyError first.
     import holoso._frontend._fir._emit as emit_module
 
-    calls: list[object] = []
-    monkeypatch.setattr(emit_module, "verify_plan_totality", calls.append)
+    trace: list[str] = []
+    monkeypatch.setattr(emit_module, "verify_plan_totality", lambda result: trace.append("verify"))
+    original_emit = emit_module._Emitter.emit
+
+    def traced_emit(self: object) -> object:
+        trace.append("emit")
+        return original_emit(self)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(emit_module._Emitter, "emit", traced_emit)
 
     class Kernel:
         def __init__(self) -> None:
@@ -276,4 +302,4 @@ def test_lower_fir_actually_runs_the_plan_verifier(monkeypatch: pytest.MonkeyPat
             return self.s
 
     emit_module.lower_fir(Kernel().step)
-    assert len(calls) == 1, "lower_fir must run the plan verifier before emission walks"
+    assert trace == ["verify", "emit"], f"the verifier must run before emission walks, observed {trace}"

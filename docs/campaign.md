@@ -1619,3 +1619,26 @@ deleting the call still failed no test, THE CALL SITE IS NOW PINNED.
 to mine a guardrailed reviewer's transcript, and this is the second time that has paid. Its probe: a helper
 that constructs internally lets a NEW refusal be added while the construction count stays at 42 (measured: 42
 constructions, 41 direct raises). Both numbers are pinned exactly now, and its mutant fails.
+
+
+M0 ROUND 3 -- THE ORDERING PIN DID NOT PIN ORDERING, which is the same defect class the two prior rounds
+found, inside the guard written this round to end it. The test replaced the verifier with a recorder and
+asserted it was CALLED; moving the call AFTER `_Emitter(...).emit()` passed all six tests while destroying the
+function's entire purpose, since emission reaches `call_plans` with a bare subscript and would raise the
+unlocated KeyError first. My assert message said "before emission walks" while measuring nothing of the sort,
+and the log recorded "THE CALL SITE IS NOW PINNED", which was false. The test now traces BOTH the verifier and
+`_Emitter.emit` and asserts the order; the reviewer's mutant fails it.
+
+The symbol ledger degraded to a module-level meter under the bare `import X` spelling: that lands only the
+owner key, which is already recorded, so every symbol reached through it was invisible -- verbatim the round-2
+defect in a different spelling. A bare frontend import with no accompanying symbol now fails. Narrow in
+practice (the package is internally all-relative) but the header had claimed the closure unqualified.
+
+Two more places where prose outran measurement, both corrected. The guard-of-the-guard still called
+`transitive_holoso_imports`, which the ratchet no longer uses, and its comment argued that counting `pkg.Name`
+entries is untrustworthy -- while the ledger deliberately counts 93 of them; it now checks what it should, that
+every recorded OWNER resolves to a real module. And the verifier's "refuses both directions" was not accurate:
+the gate catches a walked-but-unmarked block only through its own out-edges, so a sink could slip past both
+arms, with the `call_plans` arm being what would notice. Also: the (42, 42) count is now taken over the
+PACKAGE, since `_emit.py` is ~1500 lines against a ~2000 limit and a file-scoped count would read an ordinary
+split as refusals moved upstream.

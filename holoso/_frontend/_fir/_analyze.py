@@ -330,9 +330,11 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
     HONEST SCOPE, because the first two versions of this claimed more than they checked. This CANNOT FAIL for
     any `ResidualUnit` the analyzer can produce today, and it is not a general totality check:
 
-    - the block sets cannot diverge. `_check_reachability_settled` runs BEFORE `_finalize` over the same
-      `executable_rpo` walk and refuses both directions, so `set(walked) == executable_blocks` always holds on
-      exit, and were that to break it would report first, located, rather than as an assert here;
+    - the block sets do not diverge in practice. `_check_reachability_settled` runs BEFORE `_finalize` over
+      the same `executable_rpo` walk and refuses a marked block the walk never reaches, and an edge leaving an
+      unmarked one; a walked-but-unmarked block is caught only through its own out-edges, so a SINK could in
+      principle slip past both arms -- the `call_plans` arm below would then be what notices. Either way the
+      gate reports first, located, rather than as an assert here;
     - `block_in` coverage is already implied -- `_finalize` bare-subscripts it for every executable block --
       so this arm restates a property that would have raised earlier in the same call;
     - `subscript_plans` and `route_plans` are read with `.get()`, where absence legitimately means positional
