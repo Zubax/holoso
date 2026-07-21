@@ -1772,3 +1772,30 @@ to one file while the three refusal counts were package-scoped; the asymmetry is
 `_analyze.py` is the analyzer's business, and package-scoping read 312 instead of 48) and is now stated,
 together with the fact that the ordering test pins order but not the seam as tightly as its name suggested --
 moving the call into `_Emitter.__init__` still passes.
+
+
+M0 VERIFICATION ROUND -- five defects, and the sharpest is that I USED MY OWN BUG AS EVIDENCE FOR NOT FIXING A
+REAL ONE. The previous round recorded that requiring the selected arm of a FOLDED branch "failed 44 tests" and
+that "the obvious fix is measurably false", and wrote that into the code as the reason the hole stays open. The
+reviewer could not reproduce it -- zero counterexamples across 271 fixpoints -- and re-measuring shows why:
+`condition.value` is a `StaticBool` WRAPPER, always truthy, so my rule selected the wrong arm and the failures
+were mine. Unwrapped through `as_python`, 764 tests pass and the hole CLOSES. The severed folded arm is now
+caught. A faulty measurement that justifies inaction is worse than no measurement, because it forecloses the
+question; the only reason it surfaced is that a reviewer tried to re-derive a number instead of believing it.
+
+THE FIFTH NUMBER WAS DEFEATED BY THE REFACTOR IT WAS ADDED TO CATCH. `raising` was non-transitive, so hoisting
+a function's SOLE raise into a helper dropped the still-refusing host out of the set and made every one of its
+call sites invisible in both directions -- measured on `_emit_cast`, and 8 of the 21 raising functions could be
+emptied that way one tidy commit at a time. It is a transitive closure now (46 call sites become 146) and the
+hoist fails.
+
+THE VERIFIER MISATTRIBUTED ITS OWN NEW ARM. `missing_facts` was asserted AFTER the loop whose branch check
+reads `binding_facts`, so dropping the fact for a folded branch condition -- exactly the M1 regression that arm
+exists to name -- reported "blocks whose jump edge is missing" instead. Reordered; the message is now right.
+
+Also: a dead local re-parsing every module in the package for nothing, and the docstring inversion the previous
+commit CLAIMED to have corrected in three places and had corrected in two -- the file contradicted itself eight
+lines apart, and the surviving copy was the wrong one. Recorded limits that remain, measured and stated: a
+refusal reached through a raising helper defined in a SIBLING module is invisible to the emitter-scoped counts,
+widening an existing refusal's condition is flat, and four of the counted call sites target helpers whose only
+raise is a defensive assert, so a new call to one fires a refusal guard with nothing to satisfy it.

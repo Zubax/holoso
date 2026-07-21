@@ -283,10 +283,6 @@ def test_emission_rejection_sites_only_shrink() -> None:
     # It counts the emitter's `raise AssertionError` sites too, so converting one to a plain `assert` -- a
     # cleanup this project's style would welcome -- fires this with a message about refusals. That is the
     # intended trade: M5's end state is an emitter that does not raise.
-    package = [
-        ast.parse(module.read_text(encoding="utf-8"))
-        for module in sorted(Path(_module_source(_EMITTER)).parent.glob("*.py"))
-    ]
     emitter = ast.parse(Path(_module_source(_EMITTER)).read_text(encoding="utf-8"))
     # These last two are scoped to EMISSION'S MODULE, deliberately unlike the three above. `EmissionRejection`
     # is emission's own exception wherever it is written, so counting it package-wide is right; a bare `raise`
@@ -301,11 +297,27 @@ def test_emission_rejection_sites_only_shrink() -> None:
     # every further call is invisible. So the call sites into raising functions are counted as well, which both
     # of those shapes do move. None of this proves a refusal moved UPSTREAM; the frozen rejection corpus does,
     # by pinning the public class and message. These numbers only make a change impossible to miss.
-    raising = {
-        node.name
-        for node in ast.walk(emitter)
-        if isinstance(node, ast.FunctionDef) and any(isinstance(inner, ast.Raise) for inner in ast.walk(node))
-    }
+    # TRANSITIVE, and that is the whole point: computed non-transitively, hoisting a function's SOLE raise into
+    # a helper drops the still-refusing host out of the set, after which every one of its call sites -- which
+    # still refuse, through the helper -- contributes nothing in either direction. Measured on `_emit_cast`:
+    # all five numbers flat, and 8 of the 21 raising functions can be emptied out this way one at a time.
+    bodies = {node.name: node for node in ast.walk(emitter) if isinstance(node, ast.FunctionDef)}
+    raising = {name for name, node in bodies.items() if any(isinstance(x, ast.Raise) for x in ast.walk(node))}
+    while True:
+        callers = {
+            name
+            for name, node in bodies.items()
+            if name not in raising
+            and any(
+                (isinstance(call.func, ast.Name) and call.func.id in raising)
+                or (isinstance(call.func, ast.Attribute) and call.func.attr in raising)
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+            )
+        }
+        if not callers:
+            break
+        raising |= callers
     into_raising = sum(
         1
         for node in ast.walk(emitter)
@@ -316,8 +328,8 @@ def test_emission_rejection_sites_only_shrink() -> None:
         )
     )
     measured = (constructed, raised, named, raises_here, into_raising)
-    assert measured == (42, 42, 42, 48, 46), (
-        f"emission's refusal shape is {measured}, recorded (42, 42, 42, 48, 46) as "
+    assert measured == (42, 42, 42, 48, 146), (
+        f"emission's refusal shape is {measured}, recorded (42, 42, 42, 48, 146) as "
         "(constructions, direct raises, name occurrences, raise statements, calls into raising functions). "
         "A DROP IS NOT SELF-EVIDENT PROGRESS: hoisting into a helper, renaming the class, or refusing with "
         "another type all lower a count while every refusal stays. What proves a refusal moved upstream is the "
@@ -506,4 +518,24 @@ def test_the_plan_verifier_catches_a_missing_binding_fact() -> None:
     assert result.binding_facts, "the kernel must record binding facts for this test to mean anything"
     result.binding_facts.pop(next(iter(result.binding_facts)))
     with pytest.raises(AssertionError, match="no recorded fact"):
+        verify_plan_totality(result)
+
+
+def test_the_plan_verifier_catches_a_missing_parameter_fact() -> None:
+    # Recovered from a review transcript. Parameters are not op destinations, so the binding-fact arm cannot
+    # see them -- and emission types the module's INPUT PORTS from their entry-environment facts. Dropping one
+    # passed every other arm and silently emitted a float input where the kernel declares a bool: an ABI
+    # divergence with no error, which is the worst class here and squarely inside what M1 rewrites.
+    from holoso._frontend._fir._analyze import Analyzer, verify_plan_totality
+    from holoso._frontend._fir._ir import Local
+
+    def kernel(flag: bool) -> float:
+        return 1.0
+
+    result = Analyzer(kernel).fixpoint()
+    verify_plan_totality(result)
+
+    parameter = result.unit.params[0]
+    result.block_in[result.unit.entry].facts.pop(Local(parameter))
+    with pytest.raises(AssertionError, match="no recorded fact for emission to type"):
         verify_plan_totality(result)
