@@ -556,8 +556,9 @@ def test_the_plan_verifier_catches_a_missing_parameter_fact() -> None:
 
 
 def test_the_plan_verifier_catches_a_severed_folded_branch_arm() -> None:
-    # A folded branch keeps only the arm its condition selects, and that arm is obligatory: severing it reaches
-    # emission as a raw KeyError on the block id. The rule was once removed on the strength of a measurement
+    # A folded branch keeps only the arm its condition selects, and that arm is obligatory: severing it makes
+    # emission refuse an innocent line -- measured, a located "the function never returns on any path". The rule
+    # was once removed on the strength of a measurement
     # that turned out to be a bug (the condition's `value` is a StaticBool wrapper, so an unwrapped truth test
     # picks the wrong arm), so this pins the rule rather than trusting the note.
     from holoso._frontend._fir._analyze import Analyzer, verify_plan_totality
@@ -612,4 +613,35 @@ def test_a_missing_condition_fact_is_reported_as_a_missing_fact() -> None:
     assert conditions, "the kernel must fold a branch for this test to mean anything"
     result.binding_facts.pop(conditions[0])
     with pytest.raises(AssertionError, match="no recorded fact"):
+        verify_plan_totality(result)
+
+
+def test_the_parameter_arm_ignores_the_bound_receiver() -> None:
+    # The arm must be scoped to what emission actually reads: entry facts, for the parameters that become
+    # PORTS. An earlier version required `binding_facts` too and included the bound `self`, so it refused
+    # results whose emitted HIR is byte-identical -- a guard whose only value is trustworthiness, raising a
+    # false alarm with a false message. Pinned in the FALSE-POSITIVE direction, which is the one that decays
+    # quietly: nothing else in the suite notices a guard that over-refuses a state nobody constructs by hand.
+    from holoso._frontend._fir._analyze import Analyzer, verify_plan_totality
+    from holoso._frontend._fir._ir import Local
+
+    class Stateful:
+        def __init__(self) -> None:
+            self.value = 0.0
+
+        def step(self, x: float) -> float:
+            self.value = self.value + x
+            return self.value
+
+    result = Analyzer(Stateful().step).fixpoint()
+    assert result.unit.bound_self is not None
+    receiver = result.unit.params[0]
+
+    result.block_in[result.unit.entry].facts.pop(Local(receiver), None)
+    result.binding_facts.pop(receiver, None)
+    verify_plan_totality(result)  # no port is emitted for the receiver, so neither record is needed
+
+    ported = result.unit.params[1]
+    result.block_in[result.unit.entry].facts.pop(Local(ported))
+    with pytest.raises(AssertionError, match="no recorded fact for emission to type"):
         verify_plan_totality(result)

@@ -349,7 +349,7 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
     What it is FOR is M1, which rewrites recording to be evidence-atomic: a recorder that stops writing a plan
     for a `PyCall` inside a block emission still visits is the regression the plan arm catches. The other arms
     cover shapes the upstream gate provably does not, and they cover DIFFERENT failures. The serious ones are
-    silent: over the bundled corpus, 171 of 314 severed merge JUMP edges emit different HIR with no error, and
+    silent: over the bundled corpus, 171 of 314 severed JUMP edges emit different HIR with no error, and
     a dropped parameter fact emits a differently typed input port. A severed BRANCH arm is never silent across
     196 severances, but "crash" overstates it -- 21 of them, including 16 of the 20 folded ones, come out as
     ORDINARY LOCATED refusals, and only the rest are raw. A walked-but-unmarked sink is a raw crash.
@@ -400,7 +400,8 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
         # measured, 31 severances, none silent.
         #
         # A FOLDED branch keeps only the arm its condition selects, and THAT arm is obligatory: severing it
-        # reaches emission as a raw KeyError on the block id. An earlier note here claimed the rule was
+        # reaches emission as a refusal on an innocent line -- measured, a located "the function never returns
+        # on any path" rather than the raw KeyError an earlier note here claimed. An earlier note here claimed the rule was
         # "measurably false" because it failed 44 tests; that measurement was a bug of mine -- the condition's
         # `value` is a StaticBool WRAPPER and so always truthy, which selected the wrong arm. Unwrapped through
         # `as_python` the rule passes, and the hole is closed.

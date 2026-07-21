@@ -1829,3 +1829,33 @@ false message, on a guard whose whole purpose is to be trustworthy; the `into_ra
 60 emitter functions, so extracting an ordinary forwarder moves it under a refusal-shaped message, and that
 cost is now named as its neighbour's already was; the closure was keyed by a name that is defined twice in
 this module, silently dropping a definition, and is conservative now; and two dead conditions went with them.
+
+
+M0 ROUND 9 (the confirming round, framed as stop-or-continue) -- it said CONTINUE, on three narrow items, and
+was right on all three.
+
+The severed folded arm does NOT produce a raw KeyError. Measured: a LOCATED refusal, "the function never
+returns on any path", pointing at an innocent line. I asserted the crash character in both the docstring and
+the new test's rationale without measuring it -- while fixing the round-8 finding that I had done exactly that
+with the branch census. The same inherited-claim failure, committed in the act of correcting it.
+
+The jump census conflated two populations: 314 is the total jump-edge count, not the merge-target subset.
+
+AND THE FALSE-POSITIVE FIX WAS UNPINNED -- the third time in this step I fixed something and did not pin it.
+This instance is the instructive one. My fail-before reflex is reliable when the thing I am fixing is BROKEN,
+because a failing test is pulling at me; it is unreliable when the thing is TOO STRICT, because the suite is
+already green and nothing tugs. A guard needs regressions in both directions, and I reach for only one of them
+by habit. The bound-receiver test now pins the false-positive direction, verified to fail against the
+over-strict condition.
+
+M0 CLOSES HERE. Not on a clean round -- nine rounds each found something -- but on the campaign's own stop
+rule, which warns that long loops decay into hardening against ever-more-contrived shapes. The trajectory
+supports it: rounds 1-3 found guards measuring the wrong subject entirely, rounds 4-6 found defeats needing
+specific refactors, and rounds 7-9 found stale prose, unpinned fixes, and numbers never re-derived. The two
+remaining gaps are recorded in the code WITH measurements -- refusals reached through raising helpers defined
+in SIBLING modules, and widening an existing refusal's condition -- rather than hidden, and the metric's real
+authority was never these counts but the frozen rejection corpus, which pins the public class and message of
+every refusal. Twenty-two mutants are pinned. NEXT: M1, evidence-atomic recording, which has a measured defect
+waiting (`_finalize`'s replay runs `admit_call` 6 times in the fixpoint and 6 MORE in finalize, so host folds
+execute twice) and a decisive acceptance criterion (that second count must reach zero), with five verifier arms
+standing in front of exactly the recorder rewrite it performs.
