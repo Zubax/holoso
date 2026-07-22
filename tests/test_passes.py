@@ -1,5 +1,6 @@
 """Unit tests for HIR optimization and MIR selection passes."""
 
+import logging
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -44,7 +45,7 @@ from holoso._lir import build
 from holoso._mir import lower as lower_to_mir, Mir, MirFloatConst, MirFloatInput, MirFloatOutput, MirOperation
 from holoso._operators import FMulILog2Operator, FloatSignControl
 from ._importguard import forbidden_imports
-from ._modelref import build_model
+from ._modelref import build_model, default_ops
 
 FMT = FloatFormat(6, 18)
 OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
@@ -700,3 +701,56 @@ def test_reduction_minted_constants_fold_to_a_fixpoint() -> None:
     hir = optimize(lower(Primed().__call__))
     first = next(slot for slot in hir.state_slots if slot.name == "_first")
     assert isinstance(hir.nodes[first.live_out], BoolConst)
+
+
+def test_a_float_slot_reset_the_target_format_cannot_hold_is_warned_not_refused(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A carried float slot is target-width by charter, so its register holds the reset ROUNDED while host Python
+    # keeps evaluating at binary64. The two then disagree from the first transaction on, and the divergence
+    # escapes the slot -- through arithmetic, comparisons, outputs and error sidebands, in this transaction or a
+    # later one -- so it is diagnosed rather than left silent. It stays a WARNING: the rounding is the charter,
+    # and refusing it would refuse `self.y = 0.1` along with designs that ship. Diagnosed while lowering to MIR,
+    # the one place the slot's reset and the configured format are both in hand, and over the LOGICAL HIR slots,
+    # ahead of the physical alias removal that can delete the very slot the user is being warned about.
+    class InexactReset:
+        def __init__(self) -> None:
+            self.s = 1.0 + 2**-30
+
+        def step(self, x: float) -> float:
+            r = 10.0 if self.s > 1.0 else 20.0
+            self.s = x
+            return r
+
+    def warnings_for(fmt: FloatFormat) -> list[str]:
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="holoso._mir._lower"):
+            mir = lower_to_mir(optimize(lower(InexactReset().step)), default_ops(fmt))
+        # The design must still BUILD: a rejection here would take the shipped stateful designs with it, which
+        # is the whole reason this is a warning, so the produced slot is asserted rather than merely implied.
+        assert [slot.name for slot in mir.state_slots] == ["s"]
+        return [record.message for record in caplog.records if "not exactly representable" in record.message]
+
+    narrow = warnings_for(FloatFormat(8, 23))
+    assert len(narrow) == 1, f"expected exactly one warned slot, got {narrow}"
+    assert "'s'" in narrow[0], f"the warning must name the slot: {narrow[0]}"
+
+    # The same reset IS representable at binary64, so the warning is a statement about the configured format
+    # rather than about the literal, and a wide build must stay quiet.
+    assert warnings_for(FloatFormat(11, 52)) == []
+
+    # An exactly-representable reset is silent at the same narrow format, so the check is not warning on every
+    # float slot it sees.
+    class ExactReset:
+        def __init__(self) -> None:
+            self.s = 0.5
+
+        def step(self, x: float) -> float:
+            r = 10.0 if self.s > 0.25 else 20.0
+            self.s = x
+            return r
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="holoso._mir._lower"):
+        lower_to_mir(optimize(lower(ExactReset().step)), default_ops(FloatFormat(8, 23)))
+    assert [record.message for record in caplog.records if "not exactly representable" in record.message] == []

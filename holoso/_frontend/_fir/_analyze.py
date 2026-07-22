@@ -14,6 +14,7 @@ Everything here operates on a WORKING COPY of builder templates; templates are n
 point can rebuild from scratch each outer round.
 """
 
+import enum
 import logging
 import math
 import types
@@ -212,6 +213,42 @@ _MAX_VISITS = 1_000_000
 _MAX_STATE_ROUNDS = 1_000
 
 _BITWISE_OPS = frozenset({BinOp.LSHIFT, BinOp.RSHIFT, BinOp.BITAND, BinOp.BITOR, BinOp.BITXOR})
+
+
+class _Widening(enum.Enum):
+    """
+    How much of a leaf's reset the state descent has stopped trusting. A leaf escalates through these in order,
+    one step per round in which its live-in descends again, and never retreats.
+
+    ALIASED is a cheap guess at which cells actually cost rounds, not a proof: it catches the delay line, whose
+    taps share one reset, while sparing the invariant cell whose reset is its own. TOTAL is the fallback that
+    makes the bound a bound -- a guess is enough precisely because a leaf that keeps descending gets it taken
+    away, so no shape can spend more than a couple of rounds per leaf on the guess being wrong.
+    """
+
+    ALIASED = enum.auto()
+    TOTAL = enum.auto()
+
+
+def _reset_aliased_cells(leaves: tuple[AtomicFact, ...]) -> frozenset[int]:
+    """
+    The ordinals whose reset some SIBLING cell of the same leaf also holds, compared exactly as the fixed point
+    compares Knowns, so a signed-zero flip counts as a difference here for the same reason it does there.
+
+    A cell whose reset a sibling shares is one whose movement the descent cannot see: a copy from that sibling
+    lands on the value the cell already holds and reads as no change, one tap per round down a delay line. The
+    converse does NOT hold -- arithmetic can map a sibling onto a cell's own distinct reset just as invisibly
+    (`self.a[i] = self.a[i + 1] - 1.0` over ascending resets) -- so this is a heuristic for where to surrender
+    FIRST, and `_Widening.TOTAL` is what actually bounds the rounds.
+    """
+    aliased: set[int] = set()
+    for ordinal, cell in enumerate(leaves):
+        if any(other != ordinal and same_fact(cell, leaves[other]) for other in range(len(leaves))):
+            aliased.add(ordinal)
+    # Sharing is symmetric, so a lone aliased ordinal would mean the comparison is not an equivalence.
+    assert len(aliased) != 1
+    assert all(0 <= ordinal < len(leaves) for ordinal in aliased)
+    return frozenset(aliased)
 
 
 @dataclass(frozen=True, slots=True)
@@ -726,9 +763,9 @@ class Analyzer:
         # which is empty for it once that store stops executing.
         self._runtime_state_origins: dict[StateLeaf, OriginStack] = {}
         self._state_livein: dict[StateLeaf, Fact] = {}
-        # Leaves whose per-cell optimism has been withdrawn; their reset residualizes as a whole. See
-        # `_state_round` for why a leaf that keeps moving after its live-in is established belongs here.
-        self._widened_state: set[StateLeaf] = set()
+        # How much of each leaf's reset the descent has given up on. See `_state_round` for why a leaf that keeps
+        # moving after its live-in is established belongs here, and why the surrender escalates.
+        self._widened_state: dict[StateLeaf, _Widening] = {}
         # Recorded AT THE VISIT that computes them, overwritten each time. The fixpoint revisits a block
         # whenever an incoming fact changes, so a block that is not revisited did not change: the last write
         # is the stabilized one. This is what lets `_finalize` stop replaying the transfer, which used to run
@@ -876,7 +913,7 @@ class Analyzer:
         self._runtime_state = set()
         self._runtime_state_origins = {}
         self._state_livein = {}
-        self._widened_state = set()
+        self._widened_state = {}
         self._pending_bridge = {}
         self._reset_round()
 
@@ -931,15 +968,30 @@ class Analyzer:
                     new_d[leaf] = incoming
                     continue
                 joined = join_facts(previous, incoming, origin)
-                if not same_fact(joined, previous) and leaf not in self._widened_state:
+                stage = self._widened_state.get(leaf)
+                if not same_fact(joined, previous) and stage is not _Widening.TOTAL:
                     # The live-in descended AGAIN after it was established, which is the signature of a leaf
                     # carrying values forward through its own cells: each round then discovers one more
                     # transaction's worth of movement, so a copy chain of N cells costs N rounds and a long
-                    # enough one exhausts the round fuel outright. Withdraw the optimism for this leaf and take
-                    # the residualized reset's answer directly -- the fixed point it lands on is the one the
-                    # pre-per-cell analysis always reached, so nothing gets worse, only less precise.
-                    self._widened_state.add(leaf)
-                    _logger.info("state leaf '%s' kept moving; its per-cell optimism is withdrawn", ".".join(leaf.path))
+                    # enough one exhausts the round fuel outright. Surrender the optimism ONE STEP: first only
+                    # over the cells whose reset a sibling shares, which is where the cost usually sits and
+                    # which spares a cell the program never varies, then -- if the live-in descends yet again --
+                    # over the whole leaf. Escalating is what makes the first step safe to guess at: arithmetic
+                    # can hide movement into a cell with a perfectly distinct reset, and the second step takes
+                    # the guess away after one wasted round rather than one round per cell.
+                    stage = _Widening.ALIASED if stage is None else _Widening.TOTAL
+                    self._widened_state[leaf] = stage
+                    settled = self._snapshot_leaf(leaf)
+                    cells = settled.leaves if isinstance(settled, AggregateFact) else ()
+                    total = len(cells) if cells else 1
+                    given = total if stage is _Widening.TOTAL else len(_reset_aliased_cells(cells))
+                    _logger.info(
+                        "state leaf '%s' kept moving; optimism withdrawn (%s) for %d of its %d cell(s)",
+                        ".".join(leaf.path),
+                        stage.name.lower(),
+                        given,
+                        total,
+                    )
                     joined = join_facts(previous, self._state_incoming(leaf, exit_fact, origin), origin)
                 new_d[leaf] = joined
             except AnalysisRejection as error:
@@ -1127,9 +1179,16 @@ class Analyzer:
         is the same wrong value the leaf-level rule already refuses to create by counting stores, one level down.
         Promotion stays per leaf; what is now per cell is which cells the slot's live-in actually carries.
 
-        The optimism is bounded: a leaf `_state_round` has widened residualizes here instead, which is what the
-        analysis did for every leaf before the fold existed. A widened leaf therefore lands on the same fixed
-        point it always did -- less precise than the fold, never less correct.
+        The optimism is bounded in two steps, so that the cheap step can afford to be a guess. A leaf that keeps
+        descending first residualizes only the cells whose reset a SIBLING shares -- where the round cost
+        usually sits, since a delay line whose taps share one reset reveals one tap per round, and where a cell
+        the program never varies is spared. If it descends yet again the whole leaf goes, which is the answer
+        the analysis reached before the fold existed and is what actually bounds the rounds.
+
+        Residualizing is an acceleration, never a correctness device: the live-in is `join(reset, exit)` either
+        way, so exempting a cell only ever costs rounds, and pre-residualizing one only ever costs precision.
+        That is why guessing wrong is survivable -- and it does happen, since arithmetic can carry a sibling
+        onto a cell's own distinct reset as invisibly as a copy carries an equal one.
         """
         current, admitted = self._walk_snapshot(leaf)
         if admitted is None:
@@ -1138,17 +1197,25 @@ class Analyzer:
         name = ".".join(leaf.path)
         reset = normalize_static(admitted)
         self._validate_state_annotation(leaf, reset, origin)
-        widened = leaf in self._widened_state
+        stage = self._widened_state.get(leaf)
         if isinstance(reset, AggregateFact):
             self._validate_state_reset_schema(leaf, reset.layout, origin)
+            match stage:
+                case None:
+                    surrendered: frozenset[int] = frozenset()
+                case _Widening.ALIASED:
+                    surrendered = _reset_aliased_cells(reset.leaves)
+                case _Widening.TOTAL:
+                    surrendered = frozenset(range(len(reset.leaves)))
             cells: list[AtomicFact] = []
-            for cell in reset.leaves:
+            for ordinal, cell in enumerate(reset.leaves):
                 assert isinstance(cell, Known)
                 cell_sem = _residual_type(cell.value)
                 if cell_sem is None:
                     raise AnalysisRejection(f"state attribute '{name}' has an unsupported reset type", origin)
                 # A Known Bool folds exactly at any width, so widening never has anything to gain from it.
-                cells.append(Residual(cell_sem) if widened and cell_sem is not SemType.BOOL else cell)
+                give_up = ordinal in surrendered and cell_sem is not SemType.BOOL
+                cells.append(Residual(cell_sem) if give_up else cell)
             return AggregateFact(reset.layout, tuple(cells))
         if _residual_type(admitted) is None:
             raise AnalysisRejection(f"state attribute '{name}' has an unsupported reset type", origin)

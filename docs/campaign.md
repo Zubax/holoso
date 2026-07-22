@@ -3104,3 +3104,46 @@ target-inexact resets, both in one case (`ekf1_stateful_shipped-e8m36`, cells `x
 design contains no comparator at all. So a default WARNING costs one warning and no rejection, while a hard
 rejection would break that case, the shipped EKF in two formats, and its six synthesis targets. Warning is the
 ruling.
+
+
+THE WIDENING DEFECT IS CLOSED AND THE CHARTERED CASE IS NO LONGER SILENT. `WidenedInvariantCell` returns 10.0 in
+both formats and its `state_a_0` port is gone -- the cell folds to its reset with no slot. Verified here, along
+with delay lines still compiling (24 taps 0.07 s, 200 taps 0.43 s) and corpus 151/151, sweep exit 0, 466 tests,
+mypy clean over 211 files.
+
+THE KEY REALIZATION WAS THAT RESIDUALIZING IS AN ACCELERATION, NOT A CORRECTNESS DEVICE: the live-in is
+`join(reset, exit)` either way, so exempting a cell costs at most ROUNDS. That is what made a heuristic exemption
+safe, and it is the kind of fact that turns a dangerous-looking trade into a cheap one.
+
+AND ITS FIRST VERSION WAS FALSIFIED BY ITS OWN PROBER. It shipped only the reset-aliasing step, arguing a
+unique-reset cell "needs no help". An adversarial prober built the counterexample: `self.a[i] = self.a[i+1] - 1.0`
+over ASCENDING resets folds to exactly cell i's own reset, so movement is invisible despite distinct resets. That
+reopened the explosion -- 25 rounds at 24 cells, and a 1000-cell version REFUSED TO COMPILE. Hence the two-step
+surrender: aliased cells first, then the whole leaf if the live-in descends again. Round counts are unchanged at
+3 for every delay-line size.
+
+A NUMBER I PASSED ALONG DID NOT REPRODUCE. My brief quoted "1000 taps in about 3.3 s" from the earlier FIR fix;
+measured on this machine, HEAD itself is 5.9 s. I relayed a figure without re-deriving it, which is the exact
+habit this log keeps recording. The before/after on one kernel is the meaningful comparison, and it is flat.
+
+THE FOLD IS SUFFICIENT, NOT COMPLETE, and that is stated rather than glossed. An invariant cell that SHARES its
+reset with the chain triggering the widening is still carried and still diverges -- but it is now WARNED, so the
+class has moved from silent to noisy rather than from broken to fixed. The complete fix needs real per-cell
+provenance: measured, 13 of 18 FIR op classes with multi-writer merge handling, since FIR is non-SSA and has no
+phi, or a transitive route-plan closure that does not exist until after the fixpoint settles.
+
+THE RESET WARNING IS IN AT MIR LOWERING, exactly per X9: over every optimized logical float slot, with the format
+never entering the frontend and never deferred to a backend. It names the slot, the value, the format and the
+value actually carried. The ordering requirement was confirmed to BITE rather than taken structurally: a kernel
+with two aliased float slots has 2 logical HIR slots but only 1 surviving LIR register, so diagnosing later would
+have lost one entirely. Blast radius reproduced independently -- 36 cases, 35 carried float cells, exactly 2
+target-inexact, both in `ekf1_stateful_shipped-e8m36`.
+
+ONE CLASS REMAINS UNWARNED, recorded rather than papered over: when an exempt cell's inexact constant flows into
+a SIBLING slot, the divergence survives with no warning at all, because the warning keys on "is this a slot's
+reset" while the divergence condition is "does this value reach a target-width register". Widening it that far
+would cover every inexact datapath constant -- `x * 0.1` included -- which is ordinary charter behaviour and not
+what X9 ruled on. DESIGN.md claims no coverage of it.
+
+THE HARNESS DEFECT HAS A FOURTH SHAPE: a worktree at `9fcb6ca` missing both campaign tools and some 83k lines.
+Four for four, the step-zero reset is what made the task expressible.

@@ -304,8 +304,20 @@ target format -- the same wrong value the not-counting-stores rule above exists 
 That optimism is BOUNDED, because cells that start Known and only descend make each round discover one more
 transaction's worth of movement: a delay line whose taps share a reset would otherwise cost a round per tap and
 exhaust the round fuel outright. A leaf whose live-in descends again after it was established gives its
-optimism up and takes the residualized reset, landing on the fixed point the analysis reached before the fold
-existed -- less precise than the fold, never less correct, and logged where it happens.
+optimism up IN TWO STEPS. First only for the cells whose reset a SIBLING also holds, compared exactly as the
+fixed point compares Knowns: a copy from a sibling holding an equal reset lands on the value the cell already
+has and reads as no change, which is what unrolls time one tap per round down a delay line, and sparing the
+rest is what lets a cell the program never varies keep its constant instead of being forced into the target
+carrier. If the live-in descends yet again, the whole leaf goes, which is the answer the analysis reached
+before the fold existed. The second step is what makes the bound a bound, because the first is a heuristic and
+not a proof: arithmetic can carry a sibling onto a cell's own distinct reset (`self.a[i] = self.a[i + 1] - 1.0`
+over ascending resets) exactly as invisibly as a copy carries an equal one, so a guess that costs one wasted
+round per leaf is affordable while one that costs a round per cell is not. Residualizing is an acceleration and
+never a correctness device -- the live-in is `join(reset, exit)` either way, so exempting a cell costs at most
+rounds and pre-residualizing one costs only precision. The fold is therefore sufficient, not complete: an
+invariant cell that shares its reset with the chain that triggered the widening, or that survives to the total
+step, is still carried, and is reported by the representability diagnostic below rather than diverging
+silently. Logged where it happens.
 Executable Fail terminators are located rejections (data-dependent raise included) -- which is also what lets a
 library stub validate its own operand shapes in ordinary Python: a `raise` behind a statically-false shape check
 folds dead. Fuel bounds cover visits and blocks; exhaustion is a located rejection, never a truncated fixed point.
@@ -610,7 +622,17 @@ separate rule for read-only attributes, for unpromoted leaves and for invariant 
 would advertise a register the netlist does not build, and where its snapshot is inexact in the target format the
 port would carry that snapshot NARROWED while folded reads of the same cell use it exactly, so one design would
 answer the same question two ways. The consequence to know is that the state-port set depends on which cells the
-analysis proves invariant, so an edit that makes a cell vary adds a port. Reassigning
+analysis proves invariant, so an edit that makes a cell vary adds a port.
+
+A cell that GENUINELY varies is a different matter, and it is chartered rather than defective: its register is
+target-width, so a reset the configured format cannot hold reaches hardware rounded while host Python keeps
+evaluating the same program at binary64. The two diverge from the first transaction on, and not only in the slot
+-- the difference propagates through arithmetic, flips comparisons, and reaches outputs and error sidebands, in
+that transaction or a later one, so no "does the reset feed a comparison" test bounds it. Every carried float
+reset is therefore checked for exact representability while lowering to MIR, the one stage holding both the
+slot's reset and the configured format, and over the LOGICAL slots, ahead of the physical alias removal that may
+delete the slot being reported. It warns and does not refuse: the rounding IS the charter, and refusing it would
+refuse `self.y = 0.1` along with designs that ship. Reassigning
 `self` itself is rejected: attributes resolve against the fixed original instance, so a rebinding would silently
 miscompile. Component attributes must be plain values: a custom `__setattr__`/`__getattr__`/`__getattribute__`
 hook or a descriptor-backed attribute is one consolidated located refusal on both the read and the write side

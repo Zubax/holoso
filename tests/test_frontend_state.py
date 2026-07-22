@@ -1363,6 +1363,36 @@ def test_an_invariant_cell_does_not_ride_a_moving_sibling_into_the_carrier() -> 
     _assert_stream_matches_python(PartialArrayEffect, "partial_array_effect", [(1.0,), (2.0,), (3.0,)])
 
 
+def test_an_invariant_cell_survives_the_widening_its_moving_siblings_trigger() -> None:
+    # The test above pins the fold on a leaf that never widens. This one pins it on a leaf that DOES: cells 1-3
+    # form a shift chain, so the live-in descends again after settling and the leaf gives up its per-cell
+    # optimism. The withdrawal used to residualize every non-Boolean cell of the leaf, which put cell 0 -- a cell
+    # whose only store writes back the value it already holds -- into a target-width carrier where its reset
+    # `1 + 2**-30` re-materializes as exactly 1.0 and flips the guard. Wrong in E8M23, right in E11M52, silently.
+    # Only the cells whose reset a SIBLING also holds are residualized now, so cell 0's unique reset keeps it out
+    # of the carrier while the shift chain still gets the bounded answer that keeps long delay lines compiling.
+    class WidenedInvariantCell:
+        def __init__(self) -> None:
+            self.a = [1.0 + 2**-30, 0.0, 0.0, 0.0]
+
+        def step(self, x: float) -> float:
+            r = 10.0 if self.a[0] > 1.0 else 20.0
+            self.a = [self.a[0], x, self.a[1], self.a[2]]
+            return r
+
+    assert WidenedInvariantCell().step(2.0) == 10.0
+    ports = _assert_stream_matches_python(
+        WidenedInvariantCell, "widened_invariant_cell", [(2.0,), (3.0,), (-1.0,), (0.5,)]
+    )
+    # The invariant cell folds to its reset and claims no name; its moving siblings still do, so this is the
+    # per-cell rule firing rather than the whole leaf having quietly stopped promoting.
+    assert "state_a_0" not in ports
+    assert {"state_a_1", "state_a_2", "state_a_3"} <= set(ports)
+    _assert_stream_matches_python(
+        WidenedInvariantCell, "widened_invariant_cell_wide", [(2.0,), (3.0,)], fmt=FloatFormat(11, 52)
+    )
+
+
 def test_a_delay_line_settles_in_rounds_that_do_not_scale_with_its_length(caplog: pytest.LogCaptureFixture) -> None:
     # The cost of folding invariant cells, and the bound that keeps it payable. Cells start Known and only
     # descend, so a chain that copies cell i-1 into cell i discovers one more transaction's worth of movement per
@@ -1391,6 +1421,38 @@ def test_a_delay_line_settles_in_rounds_that_do_not_scale_with_its_length(caplog
 
     # The line must still BE a delay line: the fold is a precision question, never a functional one.
     simulator, reference = built.numerical_model.elaborate(), DelayLine()
+    names = [port.name for port in built.output_ports]
+    for x in [1.0, 2.0, 3.0, -4.0, 0.5]:
+        assert float(dict(zip(names, simulator.run(x)))["out_0"]) == reference.step(x)
+
+
+def test_a_chain_whose_arithmetic_hides_its_movement_still_settles(caplog: pytest.LogCaptureFixture) -> None:
+    # The test above bounds the case where cells SHARE a reset, which is the shape the first surrender step
+    # targets. This one is why that step cannot be the whole bound. Every reset here is distinct, so the
+    # aliased-cell step surrenders nothing -- yet `a[i + 1] - 1.0` folds to exactly `a[i]`'s own reset, so the
+    # descent sees no movement and advances one cell per round exactly as a uniform-reset line does. Distinct
+    # resets are not the same property as visible movement, and arithmetic is enough to break the connection.
+    # The surrender therefore ESCALATES: a leaf that keeps descending after the per-cell step gives up the whole
+    # leaf, which costs one wasted round rather than one round per cell. Without it this took 25 rounds at 24
+    # cells, and a 1000-cell version exhausted the round fuel and refused to compile.
+    cells = 24
+
+    class DecrementChain:
+        def __init__(self) -> None:
+            self._z = [float(i) for i in range(cells)]
+
+        def step(self, x: float) -> float:
+            self._z = [self._z[i + 1] - 1.0 for i in range(cells - 1)] + [x]
+            return self._z[0]
+
+    with caplog.at_level(logging.INFO, logger="holoso._frontend._fir._analyze"):
+        built = holoso.synthesize(DecrementChain().step, default_ops(FloatFormat(8, 23)), name="decrement_chain")
+    resolved = [re.search(r"resolved after (\d+) round", record.message) for record in caplog.records]
+    rounds = [int(match.group(1)) for match in resolved if match is not None]
+    assert len(rounds) == 1, f"expected exactly one settled state fixpoint, got {rounds}"
+    assert rounds[0] <= 12, f"the state descent took {rounds[0]} rounds for {cells} cells; it is scaling with length"
+
+    simulator, reference = built.numerical_model.elaborate(), DecrementChain()
     names = [port.name for port in built.output_ports]
     for x in [1.0, 2.0, 3.0, -4.0, 0.5]:
         assert float(dict(zip(names, simulator.run(x)))["out_0"]) == reference.step(x)

@@ -1,5 +1,6 @@
 """Lower optimized HIR to selected MIR."""
 
+import logging
 import math
 from dataclasses import dataclass
 
@@ -80,9 +81,11 @@ from .._operators import (
     PooledHardwareOperator,
     SelectOperator,
 )
-from .._type import BoolType as ScalarBoolType, FloatType as ScalarFloatType, ScalarType
+from .._type import BoolType as ScalarBoolType, FloatFormat, FloatType as ScalarFloatType, ScalarType
 from .._value import FloatValue
 from ._ir import Mir, MirBuilder
+
+_logger = logging.getLogger(__name__)
 
 
 def _select_hardware(semantic: Operator, hardware: HardwareOperator) -> HardwareOperator:
@@ -949,6 +952,37 @@ class _FloatLowerer:
         return True
 
 
+def _warn_inexact_float_resets(hir: Hir, fmt: FloatFormat) -> None:
+    """
+    A carried float slot is target-width by charter, so its register holds the reset ROUNDED to the configured
+    format while host Python evaluates the same program at binary64. The two then disagree from the very first
+    transaction, and the divergence is not confined to the slot: it propagates through arithmetic, flips
+    comparisons, and reaches outputs and error sidebands, in this transaction or a later one.
+
+    A warning rather than a rejection. The rounding IS the charter -- refusing it would refuse ``self.y = 0.1``
+    and, measured over the frozen corpus, the shipped EKF along with it. Gating on whether the reset feeds a
+    comparison was refuted by measurement: participation neither implies a flip nor is necessary for one.
+
+    This is the one place both halves are in hand: the frontend never learns the target format, and a backend
+    sees the slot too late and only per target. Logical HIR cells are the right granularity, so this precedes
+    LIR's removal of redundant physical aliases, which can delete the very slot a user was warned about.
+    """
+    for slot in hir.state_slots:
+        if not isinstance(slot.reset_value, FloatConst):
+            continue
+        carried = float(FloatValue.from_float(fmt, slot.reset_value.value))
+        if carried != slot.reset_value.value:
+            _logger.warning(
+                "State slot %r resets to %r, which is not exactly representable in the configured float format "
+                "%s; the hardware carries %r instead, so this design may diverge from the same program run in "
+                "Python, which evaluates at binary64.",
+                slot.name,
+                slot.reset_value.value,
+                fmt,
+                carried,
+            )
+
+
 def lower(hir: Hir, ops: OpConfig) -> Mir:
     """
     Select hardware operators from the configuration and fold semantic signs onto MIR sign controls.
@@ -956,4 +990,5 @@ def lower(hir: Hir, ops: OpConfig) -> Mir:
     Semantic sign operations are never emitted as standalone scheduled operators. Exact power-of-two scaling selects
     ``fmul_ilog2_const`` when supported by the configured float format; unsupported exponents are rejected.
     """
+    _warn_inexact_float_resets(hir, ops.float_format)
     return _LoweringContext(hir, ops).run()
