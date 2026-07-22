@@ -528,12 +528,37 @@ re-freezes in the same commit. Newly-discovered-defect protocol per §F. review-
   first-match row tables; identity comparison (unhashable shadow targets `:2161`); messages verbatim.
 - M4 Doctrine single-siting: surviving zero-dim guards, `contains_record` ×5, bool-arith ×4, elementwise
   skeleton ×3 → use-specific consumption ops (post-trim reality).
-- M5 EmissionRejection retirement (locations exist from S2.11; corpus pins public classes) — refusals move to
-  analysis/residualization, diagnostic-identical.
-- M6 Structured origins datatype migration (observable semantics already settled in S2.11) — mechanically
-  behavior-identical, last.
-- M7 (optional, gate-deferred): if the totalized tables have become a de-facto RIR, materialize the spine as a
-  small byte-gated commit with schema learned from contact — decide then with Codex, not now.
+- M5 (NEW, MANDATORY, ruled by consult X8) FRESH RESOLUTION. Rederive reachability, block environments,
+  binding and state typing, W and D from entry/reset over the stabilized fully-expanded FIR, taking NONE of
+  today's `block_in`, binding facts, executable sets, W or D as authoritative input; then regenerate the M2
+  route plans over the result and rerun their verifier. This is the step that closes the three silent
+  miscompiles, and all three witnesses should flip ATOMICALLY. It must precede refusal migration.
+- M6 (was M5) EmissionRejection retirement — refusals move into the definitive resolver, diagnostic-identical.
+- M7 (was M6) Structured origins datatype migration — mechanically behavior-identical.
+- M8 (was M7, still optional) materialize the already-correct resolved spine if still worthwhile.
+
+RENUMBERED BY CONSULT X8, which confirmed that none of the steps as originally scoped could close the routes,
+and that a MANDATORY M7 would not have sufficed either: X5's own ruling warns that materializing today's
+`ResidualUnit` preserves the corrupted `executable_edges`, `block_in`, `runtime_state` and `state_livein`, so
+the fix is fresh SEMANTIC resolution, not representation. Per-route mechanism, measured against the code: D
+begins from the previous round and only descends, and the stabilized result copies it unchanged; a deferred
+transfer leaves its destination unbound while successors still receive environments, and grafting retracts
+only DIRECT edges (its own comment admits transitive poison survives); and every reached `PyStoreAttr` becomes
+a discovered store while W starts from prior W and grows, so the stale-leaf check -- which asks only whether
+SOME store remains -- is satisfied by `self.s = self.s`.
+
+THE CAMPAIGN'S OWN WORDING WAS TOO NARROW, twice. "Recompute reachability and typing" understates it: replaying
+today's "any executable store promotes W" rule on freshly computed reachability would STILL promote the leaf,
+because the self-assignment genuinely is reachable. The missing pass must recompute STATE EFFECTS AND TYPING,
+not just edges. And "reachability is the only remaining inherited state" (mine, after M2) is wrong: the
+inherited authority includes environments, binding facts and schemas, executable sets, W, D, and
+state-transition identity.
+
+M2 MAKES THIS MATERIALLY EASIER WITHOUT SOLVING IT. Plans can now be REGENERATED after fresh resolution instead
+of repairing five copy paths and several routing fallbacks. But the M2 verifier deliberately takes
+`executable_edges`, block facts, binding facts and `runtime_state` as PREMISES -- so it will certify routing
+perfectly over a semantically poisoned graph, which is worth knowing before trusting it as evidence of
+anything beyond routing. `PlanSite` is phase-local, so changing the finalized graph requires rebuilding plans.
 
 ### Variant TRANSPLANT (branch `restructure/rebuild`; ~8 milestones)
 
