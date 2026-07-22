@@ -2461,3 +2461,22 @@ VERIFICATION DISCIPLINE HELD AT THE HANDOFF. Two claims in the report were loose
 seven-line "deletion" from this log was an artifact of the agent's worktree sitting one commit behind rather
 than an edit. Neither mattered; both would have gone into the record uncorrected if the report had been taken
 at its word.
+
+
+SEAM SWEEP AFTER M2: THE THREE ROUTES ARE UNCHANGED, exactly as recorded -- live-in poisoning (10.0 -> 30.0),
+phantom environment (12.0 -> 22.0), self-assignment against the runtime-state check (10.0 -> 20.0). M2 was
+routing, so this is expected and not a regression; the value oracle fires on all three and the sweep is green
+against its record.
+
+BUT IT SURFACES A TENSION THAT SHOULD NOT WAIT FOR M6. Stage 4's FIRST-CLASS acceptance criterion is that
+these routes close, and the mechanism named for closing them is a resolved spine that RECOMPUTES reachability
+and typing from the stabilized facts rather than inheriting today's executable sets and W/D accumulators. Read
+the remaining steps against that: M3 is typed dispatch rows, M4 is doctrine single-siting, M5 retires
+`EmissionRejection`, M6 migrates origins. NONE of them recomputes reachability. The step that would is M7 --
+materialize the spine -- and the X5 ruling made M7 OPTIONAL and gate-deferred.
+
+So on the current plan, MORPH can complete with every step green and the campaign's stated acceptance
+criterion unmet. That is a planning defect, not an implementation one, and it is better found now than after
+M6. Two candidate resolutions: M7 stops being optional and becomes the step that closes the routes, or a
+dedicated reachability-recomputation step is inserted. This needs a ruling before M5, because M5 moves
+refusals into analysis and would be shaped differently depending on which spine they land in.
