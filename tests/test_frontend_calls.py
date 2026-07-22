@@ -1469,3 +1469,27 @@ def test_component_dunder_call_context_renders_unmangled() -> None:
         lower(kernel)
     assert excinfo.value.location is not None
     assert "power(x)" in (excinfo.value.location.line or "")
+
+
+def _inner_helper(v: float) -> float:
+    return getattr(v, "real")  # type: ignore[no-any-return]  # the located rejection under test
+
+
+def _outer_helper(v: float) -> float:
+    return _inner_helper(v)
+
+
+def test_a_two_deep_expansion_locates_at_the_outermost_call_site() -> None:
+    # The rendered prefix names the PRIMARY frame -- the outermost, the line the user wrote -- and the context
+    # names the innermost. At one expansion deep those two are the only frames, so nothing separates "outermost"
+    # from "the caller"; it takes two. The frozen rejection corpus does not reach here (its deepest chain is two
+    # frames), so naming the innermost CALLER instead would move a public location with the suite green.
+    def kernel(x: float) -> float:
+        return _outer_helper(x)
+
+    with pytest.raises(UnsupportedConstruct, match=r"in _inner_helper\(\): ") as excinfo:
+        lower(kernel)
+    located = excinfo.value
+    assert located.location is not None
+    assert "_outer_helper(x)" in (located.location.line or "")  # the kernel's line, not the middle helper's
+    assert str(located).split(":")[0].endswith("kernel")

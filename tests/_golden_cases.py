@@ -45,6 +45,7 @@ from holoso import (
 )
 from holoso._backend.verilog import VerilogOutput, generate as generate_verilog
 from holoso._frontend import lower as lower_frontend
+from holoso._frontend._fir._ir import OriginStack
 from holoso._hir import optimize
 from holoso._lir import ControlPort, DataPort, Lir, build
 from holoso._mir import lower as lower_to_mir
@@ -606,7 +607,7 @@ def capture_rejection(rejection: RejectionCase) -> dict[str, Any]:
         holoso.synthesize(kernel, default_ops(REJECTION_FMT))
     except HolosoError as exc:
         location = getattr(exc, "location", None)
-        origin = getattr(exc, "origin", None) or ()
+        origin: OriginStack | None = getattr(exc, "origin", None)
         return {
             "schema": DIAG_SCHEMA,
             "case": rejection.case_id,
@@ -630,7 +631,7 @@ def capture_rejection(rejection: RejectionCase) -> dict[str, Any]:
                     "line": frame.line,
                     "column": frame.column,
                 }
-                for frame in origin
+                for frame in (origin.innermost_first if origin is not None else ())
             ],
             "precedence": rejection.precedence,
         }

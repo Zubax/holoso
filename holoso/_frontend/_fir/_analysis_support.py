@@ -78,8 +78,6 @@ from ._ir import (
     LocatedRejection,
     executable_preorder,
     OriginOrder,
-    origin_order,
-    source_position,
 )
 from ._opsem import BinOp
 from ._signature import ArrayParameter, RecordParameter, ScalarParameter
@@ -238,7 +236,7 @@ def _join_atoms(a: AtomicFact, b: AtomicFact, origin: OriginStack) -> AtomicFact
 
 def _deferral_key(error: LocatedRejection) -> tuple[str, OriginOrder]:
     """Rendered text first, so the historical selection is preserved, then the origin the text cannot show."""
-    return str(error), origin_order(error.origin)
+    return str(error), error.origin.order
 
 
 class DeferredRejection:
@@ -887,7 +885,7 @@ def enforce_storage_schemas(
         raise AnalysisRejection(message, origin)
     stranded = [(message, origin) for origin, message in pending_bridge.items() if origin not in surviving_origins]
     if stranded:
-        message, origin = min(stranded, key=lambda entry: (source_position(entry[1]), entry[0]))
+        message, origin = min(stranded, key=lambda entry: (entry[1].position, entry[0]))
         raise AnalysisRejection(message, origin)
 
 

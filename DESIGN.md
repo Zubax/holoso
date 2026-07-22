@@ -183,10 +183,16 @@ outermost iterable evaluated in the enclosing scope); lazy PyCall; raise/assert/
 short-circuit positions; nested def/class/lambda, imports, subscript stores, and variadic parameters are located
 rejections. A structural verifier and a deterministic printer close the stage.
 
-Diagnostics doctrine: every origin frame carries (function, line, column, source file), and inlining appends the
-call-site frame, so a rejection's PRIMARY location is the outermost frame -- the line the user wrote -- rendered as
-the stable `function:line:column:` message prefix; a rejection arising inside an expanded callee additionally names
-that callee (`in matmul(): ...`) while the full frame chain stays on the exception. Every front-end rejection
+Diagnostics doctrine: an origin is a structured stack -- the frame a construct is WRITTEN in, plus the call sites
+that inlined it, innermost caller first -- so it is non-empty by construction and every frame carries (function,
+line, column, source file). Inlining appends the call-site frames, so a rejection's PRIMARY location is the
+outermost frame -- the line the user wrote -- rendered as the stable `function:line:column:` message prefix; a
+rejection arising inside an expanded callee additionally names that callee (`in matmul(): ...`) while the full
+frame chain stays on the exception. Comparison is likewise typed rather than conventional: a source position is
+the frame coordinates OUTERMOST FIRST (so two expansions of one callee order by their call sites, never by the
+callee's internal lines) and is only a partial order; the total order appends the frame identities as a suffix,
+which is what a selection over an unordered set needs and what a selection with a deterministic order to inherit
+must not use. Every front-end rejection
 (build, analysis, library, emission) also populates the public `SynthesisError.location` with the primary frame's
 file, position, and source line text. Emission attributes each refusal to the op it was lowering; the settling
 step attributes state-slot refusals to the leaf's first store and return-contract refusals to the earliest
@@ -301,10 +307,13 @@ is the final one, and a store the graph no longer contains leaves with the op it
 plan per surviving call --
 folded | cast (same-kind-vs-conversion decided at emission from the final facts) | intrinsic | aggregate
 re-flavoring conversion | record construction, keyed by the call's destination binding -- and the state leaves in
-first-store source order (the established port ABI orders ports by source text, not CFG shape; the order key is
-the store's origin stack with the user call site primary, so two call sites inlining one setter order by the call
-sites rather than tying on the setter's own line, and clones of one store -- an unrolled loop's trips -- share the
-whole chain and tie-break by execution order, which is the iterable's source order). The plan carries every
+first-store source order (the established port ABI orders ports by source text, not CFG shape; the order key pairs
+the storing op's source position with the storing block's execution rank, so two call sites inlining one setter
+order by the call sites rather than tying on the setter's own line, and clones of one store -- an unrolled loop's
+trips -- share the whole chain and separate by execution order, which is the iterable's source order. The rank
+sits behind the position and ahead of frame identity, which is why this key is built on the partial position
+order rather than the total one: ordering those ties by identity would rename the state ports by filename).
+The plan carries every
 decision the analyzer owns: emission never re-derives a fold, never resolves the library registry, and never
 replays the transfer function -- nor does finalization, which would otherwise run every concrete library fold a
 second time, and with it any host callable that is not referentially transparent. It is not yet the whole

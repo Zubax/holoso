@@ -9,13 +9,27 @@ Temporaries are write-once by ANF construction; named locals rebind freely (the 
 
 import enum
 import linecache
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..._errors import SourceLocation, SynthesisError
 from ..._util import RelationalOp
 from ._opsem import BinOp, UnOp
 from ._signature import ParameterContract, ReturnContract
 from ._value import StaticValue
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class FrameCoordinates:
+    line: int
+    column: int
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class FrameIdentity:
+    """The file before the function, because two frames that share a name are told apart by where they live."""
+
+    file: str
+    function: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,28 +41,95 @@ class Origin:
     column: int
     file: str
 
+    @property
+    def coordinates(self) -> FrameCoordinates:
+        return FrameCoordinates(self.line, self.column)
 
-type OriginStack = tuple[Origin, ...]
-type OriginOrder = tuple[tuple[tuple[int, int], ...], tuple[tuple[str, str], ...]]
+    @property
+    def identity(self) -> FrameIdentity:
+        return FrameIdentity(self.file, self.function)
 
 
-def source_position(origin: OriginStack) -> tuple[tuple[int, int], ...]:
+@dataclass(frozen=True, slots=True, order=True)
+class SourcePosition:
     """
-    The source-order comparison key of an origin stack: the user call site is primary and inner frames break ties,
-    so two expansions of one callee order by their call sites, never by the callee's internal lines.
+    The source-order comparison key of an origin stack: coordinates OUTERMOST FIRST, so the user call site is
+    primary and inner frames only break ties, and two expansions of one callee order by their call sites rather
+    than by the callee's internal lines. Frame identities are deliberately absent, so this key is a PARTIAL order
+    -- two stacks that differ only in which file they name compare equal, and a caller that needs totality asks
+    for ``OriginStack.order`` instead.
     """
-    return tuple((frame.line, frame.column) for frame in reversed(origin))
+
+    frames: tuple[FrameCoordinates, ...]
 
 
-def origin_order(origin: OriginStack) -> OriginOrder:
+@dataclass(frozen=True, slots=True, order=True)
+class OriginOrder:
     """
     A TOTAL order over origin stacks, for deciding which of several equally valid diagnostics to report.
-    The COMPLETE source position leads, so the choice reads as source order and agrees with ``source_position``
+    The COMPLETE source position leads, so the choice reads as source order and agrees with ``SourcePosition``
     wherever that already decides; the frame identities are a suffix, separating only stacks that positions
     cannot tell apart -- which position alone would leave to set iteration. Interleaving the two per frame
     would let a shallow frame's filename outrank a deeper frame's line.
     """
-    return source_position(origin), tuple((frame.file, frame.function) for frame in reversed(origin))
+
+    position: SourcePosition
+    identities: tuple[FrameIdentity, ...]
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class StoreOrder:
+    """
+    The state-port ABI key: source position first, the storing block's execution rank behind it. Clones of ONE
+    store op (the trips of an unrolled loop over components) share their whole origin chain, so the rank -- trip
+    order, which is the iterable's source order -- is all that separates them. It is built on ``SourcePosition``
+    rather than ``OriginOrder`` on purpose: the rank must outrank frame identity, and ordering those ties by
+    identity instead renames the emitted state ports by filename.
+    """
+
+    position: SourcePosition
+    rank: int
+
+
+@dataclass(frozen=True, slots=True)
+class OriginStack:
+    """
+    Where a construct came from: the frame it is WRITTEN in, plus the call sites that inlined it into the root
+    function, innermost caller first. Non-empty by construction, so a diagnostic always has a frame to name.
+    """
+
+    site: Origin
+    callers: tuple[Origin, ...] = ()
+
+    @property
+    def primary(self) -> Origin:
+        """The outermost frame -- the line the user actually wrote -- which every rendered diagnostic names."""
+        return self.callers[-1] if self.callers else self.site
+
+    @property
+    def outermost_first(self) -> tuple[Origin, ...]:
+        return (*reversed(self.callers), self.site)
+
+    @property
+    def innermost_first(self) -> tuple[Origin, ...]:
+        return (self.site, *self.callers)
+
+    @property
+    def position(self) -> SourcePosition:
+        return SourcePosition(tuple(frame.coordinates for frame in self.outermost_first))
+
+    @property
+    def order(self) -> OriginOrder:
+        return OriginOrder(self.position, tuple(frame.identity for frame in self.outermost_first))
+
+    def inlined_at(self, call_site: "OriginStack") -> "OriginStack":
+        return OriginStack(self.site, (*self.callers, *call_site.innermost_first))
+
+    def rebranded(self, function: str) -> "OriginStack":
+        """A registry stub's template frames take its public spelling, so the context reads ``in matmul():``."""
+        return OriginStack(
+            replace(self.site, function=function), tuple(replace(f, function=function) for f in self.callers)
+        )
 
 
 def render_rejection(message: str, origin: OriginStack) -> str:
@@ -59,13 +140,13 @@ def render_rejection(message: str, origin: OriginStack) -> str:
     even though ``matmul_`` implements it, while a user helper's own trailing underscore survives). The full frame
     chain stays on the exception for programmatic consumers.
     """
-    primary = origin[-1]
-    context = f"in {origin[0].function}(): " if len(origin) > 1 else ""
+    primary = origin.primary
+    context = f"in {origin.site.function}(): " if origin.callers else ""
     return f"{primary.function}:{primary.line}:{primary.column}: {context}{message}"
 
 
 def primary_location(origin: OriginStack) -> SourceLocation:
-    primary = origin[-1]
+    primary = origin.primary
     text = linecache.getline(primary.file, primary.line)
     return SourceLocation(primary.file, primary.line, primary.column, text.rstrip() or None)
 

@@ -2792,3 +2792,38 @@ against the known-positive kernel it reports zero there too. The sound replaceme
 aggregate state leaves, 2 of them with an inexact reset cell at their own format (`ekf1_stateful_shipped-e8m36`,
 `x` cell 0 and `P_urt` cell 5). Whether any of their cells is invariant is UNMEASURABLE without implementing the
 change -- which is itself the argument for not attempting it as a small safe fix.
+
+
+M7 IS LANDED, BEHAVIOUR-IDENTICAL, WITH NOTHING ADJUSTED. `OriginStack` is a frozen dataclass rather than a bare
+tuple, and the two anonymous nested-tuple comparison keys are now named ordered dataclasses: `SourcePosition`
+(explicitly a PARTIAL order), `OriginOrder` (position then frame identity -- total), and `StoreOrder` (position
+then execution rank -- the state-port ABI key). The conventions that were spread across call sites became
+members: `origin[-1]` is `.primary`, `origin[0]` is `.site`, `reversed(origin)` is `.outermost_first`. Two
+latent invalid states went with them, an `OriginStack = ()` default and a `join_facts(..., ())` call.
+
+Verified in the maintainer's tree: corpus 151/151, sweep exit 0 with `_KNOWN_OPEN` empty, 530 targeted tests,
+mypy clean over 210 files, black clean, and the M2 witnesses byte-unchanged.
+
+TEN MUTATIONS, SIX KILLED EACH BY EXACTLY ONE TEST. Two of the six were UNPINNED before the step and now have
+black-box tests, including the mandated store-order ABI pin: two helpers whose CALL-SITE order is the reverse of
+their own line order, so reading positions innermost-first silently swaps two state ports. The golden corpus
+cannot reach that -- measured, the deepest frame chain in the 32-module rejection corpus is 2, with a histogram
+of 1x0, 29x1, 2x2 -- which is exactly the kind of thing the corpus reads as covering and does not.
+
+AND IT FOUND A VACUOUS TEST OF OURS, measured rather than argued.
+`test_a_store_diagnostic_names_the_first_executed_of_two_tied_stores` never exercises its comparison: probing
+the recording site shows only ONE store to the leaf is recorded before the verdict fires, so the tied-store
+branch never runs. The test's own comment -- "the wide-int prologue defers the first store's verdict, so BOTH
+stores are recorded" -- is FALSE as measured, and it was confirmed vacuous at HEAD as well, so this is not
+something M7 caused. A test whose comment asserts the mechanism it fails to reach is worse than no test,
+because it reads as coverage in exactly the place the campaign has been counting on it.
+
+THREE MUTANT SURVIVORS ARE PRE-EXISTING AND WERE DELIBERATELY NOT CLOSED: the vacuous tied-store comparison, and
+the two total-order sites this log already names as never-converted and unwitnessed. Closing them inside this
+step would have been the local-fix-in-the-seam move the campaign's own stop rule exists to prevent. They are a
+follow-up decision, not silently carried.
+
+THE WORKTREE BASIS DEFECT HAS A THIRD SHAPE. This one arrived on `origin/trial/revert-r10-withholding`, a branch
+that DELETES both mandated test files -- not `origin/main` as the previous two. So the defect is not "always
+main"; it is "not necessarily dev", and the step-zero `reset --hard origin/dev` instruction is what made the
+task expressible for the third time running.

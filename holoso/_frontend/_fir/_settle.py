@@ -46,7 +46,6 @@ from ._ir import (
     StateLeaf,
     StorePlace,
     executable_rpo,
-    source_position,
 )
 from ._signature import (
     ArrayReturn,
@@ -297,7 +296,7 @@ def _return_origin(unit: FunctionUnit, executable_blocks: set[BlockId]) -> Origi
         terminator = unit.blocks[unit.exit].terminator
         assert terminator is not None
         return terminator.origin
-    return min(stores, key=source_position)
+    return min(stores, key=lambda origin: origin.position)
 
 
 def _port_keys(path: LeafPath) -> list[int | str]:

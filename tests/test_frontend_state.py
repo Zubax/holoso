@@ -1060,6 +1060,47 @@ def test_state_port_order_follows_execution_rank_not_frame_identity() -> None:
     assert state_ports == ["state_z__s", "state_a__s"]  # beta executes first; alpha's filename sorts first
 
 
+def _store_from_an_earlier_line(owner: object, value: float) -> None:
+    owner.s = value  # type: ignore[attr-defined]
+
+
+def _store_from_a_later_line(owner: object, value: float) -> None:
+    owner.s = value  # type: ignore[attr-defined]
+
+
+def test_state_port_order_follows_the_call_site_not_the_callee_line() -> None:
+    # The store-order key compares frame coordinates OUTERMOST FIRST, so an inlined store orders by the line the
+    # user wrote and the callee's own line only breaks ties. The two helpers above are arranged so the two
+    # readings disagree: the kernel calls the later-lined one first, so comparing innermost-first would emit the
+    # ports in the opposite order. That is a silent public ABI change, which the golden corpus does not reach --
+    # its deepest rejection frame chain is two frames, and no golden case pairs inlined stores this way.
+    earlier = inspect.getsourcelines(_store_from_an_earlier_line)[1]
+    later = inspect.getsourcelines(_store_from_a_later_line)[1]
+    assert earlier < later, "the fixture only discriminates while the helpers are in this order"
+
+    class Zed:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+    class Aye:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+    class Pair:
+        def __init__(self) -> None:
+            self.z = Zed()
+            self.a = Aye()
+
+        def step(self, x: float) -> float:
+            _store_from_a_later_line(self.z, x)
+            _store_from_an_earlier_line(self.a, x)
+            return x
+
+    built = holoso.synthesize(Pair().step, default_ops(FloatFormat(8, 23)), name="callsite_ports")
+    state_ports = [port.name for port in built.ports if port.name.startswith("state_")]
+    assert state_ports == ["state_z__s", "state_a__s"]
+
+
 def test_a_store_diagnostic_names_the_first_executed_of_two_tied_stores() -> None:
     # Two stores at IDENTICAL source positions in different files, reached through one unrolled call site, tie
     # on source position and can only be separated by something outside it. The per-store selection deliberately
@@ -1100,7 +1141,7 @@ def test_a_store_diagnostic_names_the_first_executed_of_two_tied_stores() -> Non
     assert "in put():" in str(refusal.value)  # both helpers render identically; only the file separates them
     located = refusal.value
     assert isinstance(located, LocatedRejection)
-    assert located.origin[0].file.endswith("_store_beta.py")
+    assert located.origin.site.file.endswith("_store_beta.py")
 
 
 def test_a_verdict_names_the_live_store_not_the_raise_guarded_one() -> None:

@@ -62,6 +62,7 @@ from ._ir import (
     SelectMode,
     StateLeaf,
     StaticFor,
+    StoreOrder,
     StorePlace,
     StoreRole,
     Terminator,
@@ -70,7 +71,6 @@ from ._ir import (
     executable_preorder,
     executable_rpo,
     op_dst,
-    source_position,
 )
 from ._fact import (
     AggregateFact,
@@ -534,9 +534,7 @@ def _is_integer_operand(fact: Fact | None) -> bool:
 
 def _stub_frames(origin: OriginStack, display: str | None) -> OriginStack:
     """A registry stub's template frames rebrand to its public spelling; a user callee's pass through untouched."""
-    if display is None:
-        return origin
-    return tuple(replace(frame, function=display) for frame in origin)
+    return origin if display is None else origin.rebranded(display)
 
 
 class _UnrollRestart(Exception):
@@ -657,7 +655,7 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
         if isinstance(op, PyCall) and op.dst not in result.call_plans
     ]
     assert not missing_plans, "; ".join(
-        f"block {block_id} call at {op.origin[0]} has no call plan" for block_id, op in missing_plans
+        f"block {block_id} call at {op.origin.site} has no call plan" for block_id, op in missing_plans
     )
 
 
@@ -809,7 +807,7 @@ class Analyzer:
                 self._unroll_seeds[restart.origin] = restart.fact
                 self._unroll_cache = {}
                 self._restart_descent()
-                _logger.info("round %d: unroll reseeded at %s", round_index + 1, restart.origin[0])
+                _logger.info("round %d: unroll reseeded at %s", round_index + 1, restart.origin.site)
                 continue
             # The BLOCK SET, not the graph: five fact-dependent in-place op rewrites (matmul and transpose
             # canonicalization, property expansion, star-arg unpacking, array-method receiver form) mutate
@@ -852,9 +850,7 @@ class Analyzer:
             _logger.info(
                 "round %d: %d runtime leaf/leaves, %d live-in fact(s)", round_index + 1, len(new_w), len(new_d)
             )
-        raise AnalysisRejection(
-            "state fixpoint failed to stabilize", (Origin(self._root_template.name, 0, 0, self._root_template.file),)
-        )
+        raise AnalysisRejection("state fixpoint failed to stabilize", self._root_origin())
 
     def _restart_descent(self) -> None:
         """
@@ -1042,6 +1038,10 @@ class Analyzer:
         self._component_reads[key] = (owner, value, admitted)
         return value, admitted
 
+    def _root_origin(self) -> OriginStack:
+        """The unit-level fallback frame, for verdicts that no op in the resolved graph can be attributed to."""
+        return OriginStack(Origin(self._root_template.name, 0, 0, self._root_template.file))
+
     def _state_origin(self, leaf: StateLeaf) -> OriginStack:
         """
         State rejections locate at a store to the leaf: __init__ is never analyzed, so a store is the line the
@@ -1060,7 +1060,7 @@ class Analyzer:
         """
         stored = self._store_origins.get(leaf)
         recorded = stored if stored is not None else self._runtime_state_origins.get(leaf)
-        return recorded if recorded is not None else (Origin(self._root_template.name, 0, 0, self._root_template.file),)
+        return recorded if recorded is not None else self._root_origin()
 
     def _snapshot_leaf(self, leaf: StateLeaf) -> Fact:
         current, admitted = self._walk_snapshot(leaf)
@@ -1238,12 +1238,12 @@ class Analyzer:
         # inversion the gate's removal cited as its own reason for ordering reachability ahead of validation.
         assert not (result.executable_blocks - set(rank)), "an executable block is unreachable from the entry"
         blocks_in_order = sorted(result.executable_blocks, key=lambda block_id: block_id.index)
-        first_store: dict[StateLeaf, tuple[tuple[tuple[int, int], ...], int]] = {}
+        first_store: dict[StateLeaf, StoreOrder] = {}
         for block_id in blocks_in_order:
             for op in result.unit.blocks[block_id].ops:
                 leaf = self._store_leaf_of_op.get(id(op)) if isinstance(op, PyStoreAttr) else None
                 if leaf is not None:
-                    position = (source_position(op.origin), rank[block_id])
+                    position = StoreOrder(op.origin.position, rank[block_id])
                     if leaf not in first_store or position < first_store[leaf]:
                         first_store[leaf] = position
                         result.store_origins[leaf] = op.origin
@@ -1308,7 +1308,7 @@ class Analyzer:
         terminator = unit.blocks[block_id].terminator
         if terminator is not None:
             return terminator.origin
-        return (Origin(self._root_template.name, 0, 0, self._root_template.file),)
+        return self._root_origin()
 
     def _executable_rank(self, result: ResidualUnit) -> dict[BlockId, int]:
         return {
@@ -1397,7 +1397,7 @@ class Analyzer:
     # freshly instantiated root each round and lets it grow; resolution hands it the settled graph.
 
     def _walk(self, unit: FunctionUnit, param_facts: dict[str, Fact] | None = None) -> ResidualUnit:
-        origin = (Origin(unit.name, 0, 0, unit.file),)
+        origin = OriginStack(Origin(unit.name, 0, 0, unit.file))
         self._block_in = {unit.entry: _Env()}
         block_in = self._block_in
         entry_env = block_in[unit.entry]
@@ -1805,10 +1805,10 @@ class Analyzer:
                     )
                 leaf = StateLeaf(obj_fact.obj, (name,))
                 recorded = self._store_origins.get(leaf)
-                # Deliberately source_position rather than a total order over the frames: ties here are already
+                # Deliberately the position rather than a total order over the frames: ties here are already
                 # broken by the deterministic order stores are transferred in, which is execution order, and that
                 # attributes better than the lexically-first filename would.
-                if recorded is None or source_position(op.origin) < source_position(recorded):
+                if recorded is None or op.origin.position < recorded.position:
                     self._store_origins[leaf] = op.origin
                 self._store_leaf_of_op[id(op)] = leaf
                 # The reset fixes the slot schema; a violating store carries a fixpoint-stable fact onward and
@@ -2206,7 +2206,7 @@ class Analyzer:
                 "is not supported yet",
                 loop.origin,
             )
-        _logger.info("unrolling %d trip(s) at %s", trip_count, loop.origin[0])
+        _logger.info("unrolling %d trip(s) at %s", trip_count, loop.origin.site)
         chain_target = loop.exit_target
         for element_fact in reversed(per_trip):
             body_entry = self._clone_subgraph(unit, loop.body_entry, header.id, chain_target, loop)
@@ -2678,7 +2678,7 @@ class Analyzer:
             template = self._template(target)
         except BuildRejection as rejection:
             raise AnalysisRejection(
-                rejection.message, _stub_frames(rejection.origin, stub_display) + call.origin
+                rejection.message, _stub_frames(rejection.origin, stub_display).inlined_at(call.origin)
             ) from None
         if len(unit.blocks) > _MAX_BLOCKS:
             raise AnalysisRejection("expansion fuel exhausted", call.origin)
@@ -2750,7 +2750,7 @@ class Analyzer:
                 remapped = _remap_op(op, fresh, graft_place)
                 # Diagnostics point back at the user call site; a registry stub's own frames graft under the
                 # public spelling so the context reads "in matmul():", never the shadow-avoidance "matmul_".
-                remapped.origin = _stub_frames(remapped.origin, stub_display) + call.origin
+                remapped.origin = _stub_frames(remapped.origin, stub_display).inlined_at(call.origin)
                 clone.ops.append(remapped)
             assert template_block.terminator is not None
             if isinstance(template_block.terminator, UnitExit):
@@ -2759,7 +2759,7 @@ class Analyzer:
                 clone.terminator = _remap_terminator(
                     template_block.terminator, lambda b: block_map[b], fresh, graft_place
                 )
-                clone.terminator.origin = _stub_frames(clone.terminator.origin, stub_display) + call.origin
+                clone.terminator.origin = _stub_frames(clone.terminator.origin, stub_display).inlined_at(call.origin)
             unit.blocks[clone.id] = clone
             self._block_ancestry[clone.id] = ancestry + (key,)
         # The call site becomes: bind arguments -> jump into the graft; the continuation reads the return local.

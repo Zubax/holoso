@@ -235,7 +235,7 @@ def test_rejections_are_located() -> None:
 
     with pytest.raises(BuildRejection, match="nested function") as info:
         build_unit(nested)
-    assert info.value.origin[0].line > 0 and "nested" in info.value.origin[0].function
+    assert info.value.origin.site.line > 0 and "nested" in info.value.origin.site.function
 
     def subscript_store(x: float) -> float:
         table = [1.0, 2.0]

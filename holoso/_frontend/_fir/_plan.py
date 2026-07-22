@@ -47,6 +47,8 @@ from ._ir import (
     LoadPlace,
     Local,
     Op,
+    Origin,
+    OriginStack,
     Place,
     PyAttr,
     PyBin,
@@ -680,6 +682,8 @@ class _Verifier:
         plans: Mapping[PlanSite, RoutePlan],
     ) -> None:
         self._unit = unit
+        # Every rejection this verifier can provoke is caught and discarded, so the frame only has to exist.
+        self._unit_origin = OriginStack(Origin(unit.name, 0, 0, unit.file))
         self._facts_in = facts_in
         self._facts = binding_facts
         self._call_plans = call_plans
@@ -937,7 +941,7 @@ class _Verifier:
         if reset is None:
             return None
         try:
-            moved = not same_fact(join_facts(reset, exit_fact, ()), reset)
+            moved = not same_fact(join_facts(reset, exit_fact, self._unit_origin), reset)
         except AnalysisRejection:
             return None
         return "names an unpromoted state leaf whose canonical exit moves off its reset snapshot" if moved else None

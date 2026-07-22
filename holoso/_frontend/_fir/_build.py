@@ -160,7 +160,7 @@ def build_unit(fn: object, root: bool = False) -> FunctionUnit:
     if not isinstance(fndef, ast.FunctionDef):
         raise BuildRejection(
             "only plain functions can be kernels",
-            (Origin(fn.__code__.co_qualname, first_line, 0, fn.__code__.co_filename),),
+            OriginStack(Origin(fn.__code__.co_qualname, first_line, 0, fn.__code__.co_filename)),
         )
     assert fndef.name == fn.__code__.co_name, "source and code object must describe the same function"
     resolver = NameResolver(fn, comprehension_only=comprehension_only_targets(fndef))
@@ -215,7 +215,7 @@ class _Builder:
         self._comprehension_frames = 0  # running total of nested generators, bounded to keep recursion finite
         self._self_spelling: str | None = None  # the receiver parameter's runtime spelling, once known
         self._params_bound = False  # gate so the receiver's own initial binding is not mistaken for a rebinding
-        self._fn_origin: OriginStack = ()
+        self._fn_origin: OriginStack | None = None
 
     def build(self, fndef: ast.FunctionDef) -> FunctionUnit:
         origin = self._origin(fndef)
@@ -330,6 +330,7 @@ class _Builder:
         """
         name = self._resolver.runtime_spelling(name)
         if self._params_bound and name == self._self_spelling:
+            assert self._fn_origin is not None
             raise BuildRejection("reassigning the instance parameter is not supported", self._fn_origin)
         if name in self._frames[0]:
             return self._frames[0][name]
@@ -340,7 +341,7 @@ class _Builder:
 
     def _origin(self, node: ast.AST) -> OriginStack:
         line = getattr(node, "lineno", 1) + self._line_offset
-        return (Origin(self._qualname, line, getattr(node, "col_offset", 0), self._file),)
+        return OriginStack(Origin(self._qualname, line, getattr(node, "col_offset", 0), self._file))
 
     def _reject_walrus(self, node: ast.expr, position: str) -> None:
         for sub in ast.walk(node):
@@ -479,7 +480,7 @@ class _Builder:
                 # Accepted and ignored wholesale: the test is never lowered, mirroring Python under -O. Any effect the
                 # test would have had (a walrus binding, a call) is dropped with it, so an assert must be side-effect-
                 # free; a later read of a name a dropped assert would have bound is a normal unbound-name rejection.
-                _logger.info("assert at %s has no effect in Holoso and is dropped", origin[0])
+                _logger.info("assert at %s has no effect in Holoso and is dropped", origin.site)
             case ast.FunctionDef() | ast.AsyncFunctionDef() | ast.ClassDef():
                 raise BuildRejection("nested function and class definitions are not supported in kernels", origin)
             case ast.Import() | ast.ImportFrom():
@@ -655,7 +656,7 @@ class _Builder:
                 self._reject_walrus(body, "a conditional-expression arm")
                 self._reject_walrus(orelse, "a conditional-expression arm")
                 condition = self._truth(test)
-                result = BindingId(f"ifexp@{origin[0].line}", self._serial)
+                result = BindingId(f"ifexp@{origin.site.line}", self._serial)
                 self._serial += 1
                 then_block, else_block, join = self._new_block(), self._new_block(), self._new_block()
                 self._current.terminator = Branch(condition, then_block.id, else_block.id, origin)
@@ -787,7 +788,7 @@ class _Builder:
             self._comprehension_frames -= len(generators)
 
     def _comprehension_body(self, elt: ast.expr, generators: list[ast.comprehension], origin: OriginStack) -> BindingId:
-        accumulator = BindingId(f"listcomp@{origin[0].line}", self._serial)
+        accumulator = BindingId(f"listcomp@{origin.site.line}", self._serial)
         self._serial += 1
         empty = self._temp()
         self._emit(BuildList(empty, (), origin))
