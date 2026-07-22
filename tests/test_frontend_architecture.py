@@ -58,6 +58,18 @@ _EMITTER = "holoso._frontend._fir._emit"
 # `executable_rpo`, `source_position`, `datapath_value` and the ten `_fact` symbols that spelled a reset's
 # geometry and a layout's children. What arrived is four settled row types to execute. This is the first
 # ledger movement that is evidence on its own; the earlier ones needed the corpus to corroborate them.
+#
+# ONE EDGE BACK for `verify_settlement`, and it is deliberately not netted against the 18 M6 removed. What the
+# meter weighs is emission DEPENDING on a frontend decision; a verifier is the opposite -- `lower_fir` calls it
+# before emitting anything, exactly as it already calls `verify_plan_totality` and `verify_route_plans`, both of
+# which this ledger has always carried. Without it the three tables M6 settled reached the emitter on the
+# producer's word alone: measured, a reordered block order, a reordered store order, a rotated reset, a swapped
+# cell name and a dropped or swapped return row each emit DIFFERENT HIR WITH NO ERROR, on 13 to 29 corpus
+# kernels apiece.
+#
+# `StateCell` arrives for the opposite reason -- it is a decision emission STOPPED making. Whether a state cell
+# exists in hardware used to be re-derived at three emission sites from `runtime_state`, at leaf granularity;
+# the settlement now decides it per cell and emission matches on the settled row.
 _EMITTER_FRONTEND_DEBT: dict[str, frozenset[str]] = {
     "holoso._frontend._ast_support": frozenset(
         {
@@ -149,7 +161,9 @@ _EMITTER_FRONTEND_DEBT: dict[str, frozenset[str]] = {
             "ReturnsLeaves",
             "ReturnsNothing",
             "ReturnsScalar",
+            "StateCell",
             "StateSlot",
+            "verify_settlement",
         }
     ),
     "holoso._frontend._fir._value": frozenset(

@@ -1969,7 +1969,7 @@ def test_vector_state_decomposes_to_per_element_slots() -> None:
             self.v = [1.0, 2.0, 3.0]
 
         def update(self, a: float) -> None:
-            self.v = [self.v[0] + a, self.v[1], self.v[2]]
+            self.v = [self.v[0] + a, self.v[1] + a, self.v[2] + a]
 
     hir = lower(Vec().update)
     assert {s.name: cast(FloatConst, s.reset_value).value for s in hir.state_slots} == {
@@ -1978,6 +1978,26 @@ def test_vector_state_decomposes_to_per_element_slots() -> None:
         "v_2": 3.0,
     }
     assert [o.name for o in hir.outputs] == ["state_v_0", "state_v_1", "state_v_2"]
+
+
+def test_a_vector_cell_written_back_unchanged_keeps_neither_register_nor_port() -> None:
+    # The companion of the decomposition above, and the rule that decides how far it goes. Invariance is settled
+    # per CELL, so a vector whose middle elements are written back untouched carries only the element that moves.
+    # A folded cell is a frozen constant -- the same thing an attribute the kernel never writes has always been --
+    # and DESIGN.md gives a frozen constant no register and no `state_` port. Publishing one anyway would be the
+    # compiler's only frozen constant with a port, and it would advertise a register the netlist does not build;
+    # where the reset is inexact in the target format it would additionally publish that reset NARROWED, beside
+    # folded reads that use it exactly, so one design would answer the same question two ways.
+    class Partial:
+        def __init__(self) -> None:
+            self.v = [1.0, 2.0, 3.0]
+
+        def update(self, a: float) -> None:
+            self.v = [self.v[0] + a, self.v[1], self.v[2]]
+
+    hir = lower(Partial().update)
+    assert [s.name for s in hir.state_slots] == ["v_0"]
+    assert [o.name for o in hir.outputs] == ["state_v_0"]
 
 
 def test_vector_state_shape_mismatch_is_rejected() -> None:

@@ -131,7 +131,7 @@ from ._ir import (
     LocatedRejection,
 )
 from ._opsem import BinOp, UnOp
-from ._settle import ReturnsLeaves, ReturnsNothing, ReturnsScalar, StateSlot
+from ._settle import ReturnsLeaves, ReturnsNothing, ReturnsScalar, StateCell, StateSlot, verify_settlement
 from ._value import (
     MetaInt,
     NpBool,
@@ -163,6 +163,20 @@ class EmissionRejection(LocatedRejection, UnsupportedConstruct):
 def lower_fir(kernel: object) -> Hir:
     """The front-end pipeline: build, analyze to the W/D fixed point, emit HIR from the analysis plan."""
     result = Analyzer(kernel).fixpoint()
+    assert result.settled_return is not None, "the fixpoint settles the return before emission"
+    verify_settlement(
+        result.unit,
+        result.executable_edges,
+        result.binding_facts,
+        result.block_in[result.unit.exit].facts,
+        result.state_resets,
+        result.runtime_state,
+        result.state_livein,
+        result.store_order,
+        result.emission_order,
+        result.state_slots,
+        result.settled_return,
+    )
     verify_plan_totality(result)
     verify_route_plans(
         result.unit,
@@ -417,29 +431,31 @@ class _Emitter:
 
     def _live_in(self, leaf: StateLeaf, ordinal: int) -> int:
         """
-        What a state leaf carries in from the previous transaction, on a path that stores nothing into it first.
+        What a state cell carries in from the previous transaction, on a path that stores nothing into it first.
 
-        A PROMOTED leaf is backed by a slot, so that is a slot read. A leaf that W did not promote is one whose
-        canonical exit joins onto its compile-time snapshot without moving it, which is exactly the statement
-        that every transaction leaves it holding the snapshot -- so it carries the RESET CONSTANT in, and reading
-        a slot the design will never build is what used to make an unpromoted-but-read leaf crash. Materializing
-        the constant instead of promoting the leaf is what keeps `self.s = self.s` from acquiring a runtime slot
-        whose reset would re-materialize in the narrower target carrier.
+        A CARRIED cell is backed by a register, so that is a slot read. A folded one is a cell the fixed point
+        proved every transaction leaves on its snapshot, so it carries the RESET CONSTANT in, and reading a
+        register the design will never build is what used to make a folded-but-read cell crash. Materializing the
+        constant instead is what keeps `self.s = self.s` from acquiring a runtime slot whose reset would
+        re-materialize in the narrower target carrier.
         """
-        if leaf in self._result.runtime_state:
+        cell = self._cells(leaf)[ordinal]
+        if isinstance(cell, StateSlot):
             return self._state_read(leaf, ordinal)
-        return self._builder.const_node(self._leaf_reset(leaf, ordinal))
+        return self._builder.const_node(cell.reset)
 
-    def _slots(self, leaf: StateLeaf) -> list[StateSlot]:
-        slots = self._result.state_slots.get(leaf)
-        assert slots is not None, f"slots for {leaf} missing from the settled plan"
-        return slots
+    def _cells(self, leaf: StateLeaf) -> list[StateCell]:
+        cells = self._result.state_slots.get(leaf)
+        assert cells is not None, f"cells for {leaf} missing from the settled plan"
+        return cells
 
     def _slot_name(self, leaf: StateLeaf, ordinal: int = 0) -> str:
-        return self._slots(leaf)[ordinal].name
+        cell = self._cells(leaf)[ordinal]
+        assert isinstance(cell, StateSlot), f"{leaf} cell {ordinal} folded, so it has no register to name"
+        return cell.name
 
     def _state_cells(self, leaf: StateLeaf) -> int:
-        return len(self._slots(leaf))
+        return len(self._cells(leaf))
 
     def _state_read(self, leaf: StateLeaf, ordinal: int = 0) -> int:
         if (leaf, ordinal) not in self._state_reads:
@@ -462,7 +478,7 @@ class _Emitter:
         return SemType.INT if isinstance(reset, IntConst) else SemType.FLOAT
 
     def _leaf_reset(self, leaf: StateLeaf, ordinal: int = 0) -> FloatConst | BoolConst | IntConst:
-        return self._slots(leaf)[ordinal].reset
+        return self._cells(leaf)[ordinal].reset
 
     # ---------------------------------------- values and ops ----------------------------------------
 
@@ -497,7 +513,9 @@ class _Emitter:
                     self._write(block, _LeafPlace(plan.target, ordinal), self._cell_const(value, kind))
                 case NoCell():
                     pass
-            if isinstance(plan.target, StateLeaf) and plan.target in self._result.runtime_state:
+            # A store to a carried cell must register the slot even where the row wrote the cell outright, so the
+            # design still builds the register the exit writes back. A folded cell has none to register.
+            if isinstance(plan.target, StateLeaf) and isinstance(self._cells(plan.target)[ordinal], StateSlot):
                 self._state_read(plan.target, ordinal)
 
     def _coerce(self, vid: int, transfer: CellTransfer) -> int:
@@ -1047,17 +1065,19 @@ class _Emitter:
                 for ordinal, (path, kind) in enumerate(rows):
                     leaf_fact = return_fact.leaves[ordinal]
                     return_leaves.append((path, self._exit_leaf(unit.exit, path, ordinal, leaf_fact, kind)))
-        promoted = self._result.runtime_state
-        # Slots and public ports emit in first-STORE source order (matching production), not the order the RPO walk
-        # happened to touch attributes; a leaf touched only by a read still trails a leaf stored earlier. An
-        # aggregate slot expands to its cells in canonical leaf order.
-        store_order = [leaf for leaf in self._result.store_order if leaf in promoted]
-        store_order += [leaf for leaf in self._state_order if leaf in promoted and leaf not in store_order]
+        # Registers and public ports emit in first-STORE source order (matching production), not the order the RPO
+        # walk happened to touch attributes; a leaf touched only by a read still trails a leaf stored earlier. An
+        # aggregate expands to its cells in canonical leaf order, and only the CARRIED ones exist in hardware --
+        # a leaf whose cells all folded publishes nothing at all, which is how an unpromoted leaf comes out.
+        store_order = list(self._result.store_order)
+        store_order += [leaf for leaf in self._state_order if leaf not in store_order]
         public_live_outs: set[object] = set()
         for leaf in store_order:
-            for ordinal in range(self._state_cells(leaf)):
+            for ordinal, cell in enumerate(self._cells(leaf)):
+                if not isinstance(cell, StateSlot):
+                    continue
                 live_out = self._read(unit.exit, _LeafPlace(leaf, ordinal))
-                self._builder.state_slot(self._slot_name(leaf, ordinal), self._leaf_reset(leaf, ordinal), live_out)
+                self._builder.state_slot(cell.name, cell.reset, live_out)
                 if not leaf.path[-1].startswith("_"):
                     public_live_outs.add(self._exit_identity(live_out))
         if return_vid is not None and self._exit_identity(return_vid) not in public_live_outs:
@@ -1067,9 +1087,9 @@ class _Emitter:
                 self._builder.output(port_name(_port_path(path)), vid)
         for leaf in store_order:
             if not leaf.path[-1].startswith("_"):
-                for ordinal in range(self._state_cells(leaf)):
-                    self._builder.output(
-                        state_port_name(self._slot_name(leaf, ordinal)),
-                        self._read(unit.exit, _LeafPlace(leaf, ordinal)),
-                    )
+                for ordinal, cell in enumerate(self._cells(leaf)):
+                    if isinstance(cell, StateSlot):
+                        self._builder.output(
+                            state_port_name(cell.name), self._read(unit.exit, _LeafPlace(leaf, ordinal))
+                        )
         self._builder.ret()

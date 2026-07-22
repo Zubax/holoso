@@ -177,7 +177,7 @@ from ._plan import (
     produce_route_plans,
 )
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
-from ._settle import SettledReturn, StateSlot, settle_block_order, settle_return, settle_state_slots
+from ._settle import SettledReturn, StateCell, settle_block_order, settle_return, settle_state_slots
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
 from ._value import (
     MetaInt,
@@ -557,6 +557,11 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
     Read back the recorder's postcondition before emission walks: every op emission subscripts a table for has
     an entry, over the blocks emission will visit.
 
+    The blocks are `emission_order` itself rather than a fresh `executable_rpo`, so this is total over what
+    emission ACTUALLY walks; that the settled order is the right one is `verify_settlement`'s job, and it runs
+    first. Recomputing the walk here would have made both tables self-consistent while agreeing about the wrong
+    set of blocks.
+
     HONEST SCOPE, because the first two versions of this claimed more than they checked. This CANNOT FAIL for
     any `ResidualUnit` the analyzer can produce today, and it is not a general totality check:
 
@@ -586,7 +591,7 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
     ORDINARY LOCATED refusals, and only the rest are raw. A walked-but-unmarked sink is a raw crash.
     Kept deliberately as a postcondition read-back placed before the change that can break it.
     """
-    walked = executable_rpo(result.unit.entry, result.executable_edges)
+    walked = result.emission_order
     unmarked = [block_id for block_id in walked if block_id not in result.executable_blocks]
     assert not unmarked, f"emission walks blocks the analysis did not mark executable: {unmarked}"
     missing_env = [block_id for block_id in walked if block_id not in result.block_in]
@@ -685,7 +690,7 @@ class ResidualUnit:
     store_origins: dict[StateLeaf, OriginStack] = field(default_factory=dict)
     # Settled last, after everything above is final: the blocks emission walks and the slot each leaf gets.
     emission_order: list[BlockId] = field(default_factory=list)
-    state_slots: dict[StateLeaf, list[StateSlot]] = field(default_factory=dict)
+    state_slots: dict[StateLeaf, list[StateCell]] = field(default_factory=dict)
     settled_return: SettledReturn | None = None
 
 
@@ -1334,7 +1339,12 @@ class Analyzer:
         """
         result.emission_order = settle_block_order(result.unit, result.executable_edges)
         result.state_slots = settle_state_slots(
-            result.store_order, result.state_resets, result.provenance, result.store_origins
+            result.store_order,
+            result.state_resets,
+            result.provenance,
+            result.store_origins,
+            result.runtime_state,
+            result.state_livein,
         )
         result.settled_return = settle_return(
             result.unit, result.executable_blocks, result.block_in[result.unit.exit].facts

@@ -581,12 +581,22 @@ while `x = int(v) if c else v` remains a legal float phi. Only genuine variable 
 builder tags each store with its role, and conditional-expression merge sinks, comprehension accumulators, and
 the return place (validated by the return contract) are exempt.
 
-Persistent state. A synthesized method's `self` is not a port: each instance attribute the method writes on an
-executable exit-co-reachable path becomes a persistent register (a loop-carried value, the back-edge of the
-initiation loop), and each attribute it only reads is a frozen constant folded from the `__init__` snapshot. Within
-the method `self.attr` is an ordinary Place, so reads and writes interleave freely. Public attributes additionally
-drive a `state_<attr>` output port, so a method need not return anything (and a returned value that is by dataflow
-a public attribute is deduped onto that state port); underscore-prefixed attributes stay internal. Reassigning
+Persistent state. A synthesized method's `self` is not a port: a value the method can leave holding something other
+than its `__init__` snapshot becomes a persistent register (a loop-carried value, the back-edge of the initiation
+loop), and anything else is a frozen constant folded from that snapshot. Within the method `self.attr` is an
+ordinary Place, so reads and writes interleave freely. Public attributes additionally drive a `state_<attr>` output
+port, so a method need not return anything (and a returned value that is by dataflow a public attribute is deduped
+onto that state port); underscore-prefixed attributes stay internal.
+
+That register-or-constant question is settled per CELL, not per attribute, because the state fixed point decides
+invariance per cell: a vector whose middle elements are written back untouched carries only the element that moves,
+and a matrix assigned its own transpose carries only the off-diagonal pair. Frozen cells get no register and no
+port, exactly as an attribute the method never writes gets neither — one rule at one granularity rather than a
+separate rule for read-only attributes, for unpromoted leaves and for invariant cells. Publishing a frozen cell
+would advertise a register the netlist does not build, and where its snapshot is inexact in the target format the
+port would carry that snapshot NARROWED while folded reads of the same cell use it exactly, so one design would
+answer the same question two ways. The consequence to know is that the state-port set depends on which cells the
+analysis proves invariant, so an edit that makes a cell vary adds a port. Reassigning
 `self` itself is rejected: attributes resolve against the fixed original instance, so a rebinding would silently
 miscompile. Component attributes must be plain values: a custom `__setattr__`/`__getattr__`/`__getattribute__`
 hook or a descriptor-backed attribute is one consolidated located refusal on both the read and the write side

@@ -2903,3 +2903,76 @@ lines with no aggregate (`self.s = 1.0 + 2**-30`; guard on `self.s > 1.0`; then 
 against hardware 20.0, verified here. That one is the charter case -- the register cannot hold the value, and
 a rule refusing it would refuse `self.y = 0.1` -- but "charter" is a reason, not a defence, and the campaign
 should stop describing this defect class as closed when one half of it is documented rather than fixed.
+
+
+THE M6 VERIFICATION GAP IS CLOSED. `verify_settlement` in `_settle.py` stands where `verify_route_plans` stands
+for routing: it re-derives all three settled tables from sources the producer did not consult and refuses any
+disagreement. The block order goes against a plain reachability CLOSURE (deliberately not `executable_rpo` --
+re-running the producer's own walk agrees by construction and proves nothing) plus the defining property of a
+reverse postorder, that every non-entry block is preceded by one of its own predecessors. The slot table goes
+against the executable `PyStoreAttr` OPS with their origins, which fix the leaf set, the ABI order and every
+attribute name without consulting the store order the recorder wrote, and against the RESET SNAPSHOTS for cell
+count, cell coordinates and every reset constant. The return rows are enumerated by walking the CONTRACT DOWN,
+the opposite direction to `settle_return`'s walk over the exit layout, taking arity from the layout only where
+the contract genuinely leaves it free. `verify_plan_totality` now walks `emission_order` itself instead of
+recomputing RPO, so it is total over what emission actually visits.
+
+MEASUREMENT DECIDED THE DESIGN, TWICE, AND THE FIRST TIME IT KILLED MY OWN CHECK. A producer-mutation campaign
+(the three producers rebound in one process, corpus HIR dumped with and without the verifier) reported that
+REVERSING THE SLOT TABLE'S KEY ORDER emits BYTE-IDENTICAL HIR for all 36 corpus kernels. Emission takes the
+port order from `store_order` and only names and resets from the slot table, so the "the port ABI is its order"
+check I had just written was dead on arrival with respect to the ABI it named. The check moved onto
+`store_order` -- which had no independent verifier at all, in `verify_plan_totality` or anywhere else -- and
+reversing THAT is 13 kernels of silent wrong HIR, all 13 caught. Written by reading, the check would have
+shipped and read as coverage.
+
+THE FINAL TALLY: 13 mutation classes, 11 of which bite the corpus, ALL CAUGHT ON 100% OF THE KERNELS THEY BIT.
+Six guard SILENT wrong hardware and that is the number that matters -- a reordered block order (29 kernels), a
+reordered store order (13), a rotated reset (2), a swapped cell name (3), a dropped return row (15), swapped
+return rows (13). The rest crash unguarded, so the verifier only makes them located and early. Two mutations are
+honest no-ops on the corpus and are covered by committed tests instead: the slot-dict reorder above, and
+un-folding a folded cell, which the corpus cannot reach because it has NO folded cells at all. 24 verifier
+mutation tests in `tests/test_frontend_settlement.py`, each asserting on its own diagnostic fragment.
+
+THE DEAD SLOT IS DROPPED, AND THE ARGUMENT IS A MEASUREMENT RATHER THAN A PREFERENCE. Three spellings of one
+computation, E8M23: the FOLDED cell returns 10.0 matching Python; the CARRIED spelling of the same guard returns
+20.0, the known charter miscompile; the READ-ONLY spelling returns 10.0 and has never had a port. The folded cell
+behaves exactly like the read-only one -- it IS a frozen constant, and DESIGN.md gives a frozen constant no
+register and no port. Keeping its port made it the compiler's only frozen constant with one, advertising a
+register the netlist does not build and, where the snapshot is inexact in the carrier, publishing that snapshot
+NARROWED beside folded reads that use it exactly. So `state_a_0` reporting 1.0 while `out_0` reports that same
+cell as greater than 1.0 was the SYMPTOM of a category error, not a rounding question. The rule is now one rule
+at one granularity -- a port for every cell the design carries -- subsuming the separate rules for read-only
+attributes, unpromoted leaves and invariant cells. `settle_state_slots` returns `StateSlot | FoldedCell` and
+emission matches on the row instead of re-deriving hardware existence from `runtime_state` at three sites.
+
+CORPUS: ZERO CHANGE, and the scan that says so was self-checked against the known-positive kernel first, because
+this campaign already discarded one corpus scan as vacuous for reporting zero there too. No corpus kernel has a
+folded cell on a promoted leaf. The blast radius is TWO committed tests, both idiomatic and both updated with
+their reason rather than re-baselined: `test_vector_state_decomposes_to_per_element_slots` (a 3-vector whose
+middle elements were written back untouched now carries only element 0 -- the kernel was changed so all three
+elements move, PRESERVING the decomposition claim, and the folded case became its own test), and
+`test_matrix_state_transposed_under_a_shape_guard_across_transactions` (`self.P = self.P.T` leaves the DIAGONAL
+invariant, so 2 of 4 cells fold; the off-diagonal pair is still compared against Python and the diagonal is
+checked against the reference instead of against ports that no longer exist).
+
+WHAT THIS DID NOT CLOSE, stated because the campaign keeps having to correct claims of the form "the class is
+handled". The charter case is untouched and still live: a genuinely-varying slot whose reset is unrepresentable
+in the carrier still miscompiles silently in four lines with no aggregate, measured again here as python 10.0
+against hardware 20.0 in E8M23 and 10.0 in E11M52. The frontend cannot even see the target format, so no rule it
+implements could distinguish the contradictory case from the benign one -- which is also why the drop rule had to
+be the broad one rather than "drop only inexact resets".
+
+THE OVER-STRICT `Residual` LIVE-IN CHECK IS A NEGATIVE RESULT WITH A MECHANISM, not a failed search. 600 kernels
+across six batches (shape matrix, unbound-seed, deliberate violations, a 400-kernel randomized fuzz over
+width x flavor x cell-kind x store-expression x control-flow envelope, the 24 bundled examples, and 16 kernels
+that provably trigger `_widened_state`), 463 state leaves with a measured live-in: 380 of 380 WIDE promoted
+leaves carry an `AggregateFact`, zero exceptions, zero leaves ever holding `Unbound`/`MaybeUnbound` in a settled
+environment. The mechanism: `_state_incoming` always starts from `_state_reset_fact`, which wraps an aggregate
+snapshot in an `AggregateFact`; WIDENING RESIDUALIZES CELLS BUT PRESERVES THE WRAPPER (measured on all 16); and
+`join_facts` has no case that collapses an aggregate to a scalar -- a mixed join raises "values of irreconcilable
+shapes merge here" instead. So a bare-`Residual` live-in on a wide leaf is not merely unwitnessed, it is
+unconstructible. The check is left alone. Two incidental observations recorded rather than acted on: reading a
+`MaybeUnbound` state leaf is checked only for `Local`, harmless today because no seed exists; and
+`_cell_carries_its_reset`'s "the canonical exit may leave unbound" branch looks unreachable by the same argument,
+which is reasoning and not measurement.
