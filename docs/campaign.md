@@ -2744,3 +2744,51 @@ narrower carrier by an unrelated sibling.
 RECORDED BEFORE FIXING because `dev` is pushed and CI-green: CI did not catch either, since no test covers a
 restore-to-reset shape or a partially-moving aggregate. The regression tests land with the fix, not before, so
 that CI does not go red on a known-and-being-fixed defect.
+
+
+THE M5 REGRESSION IS FIXED, ON THE ROUTING SIDE RATHER THAN THE W SIDE, and that choice is what makes the
+closure structural instead of argued. W is not touched at all, so no leaf promotes that did not promote before
+and the `self.s = self.s` route cannot reopen by construction rather than by measurement. What changed is that
+emission now honours the rule the analyzer already states in its own docstring -- a leaf that is not runtime
+state READS AS ITS COMPILE-TIME SNAPSHOT -- by materializing the reset constant for an entry-reaching read of an
+unpromoted leaf, where it used to read a slot promotion had declined to build. The per-store slot registration in
+`_route` is now guarded on promotion too -- it was minting the dangling `StateRead` that became the `-O` KeyError.
+
+THE VERIFIER CHANGE TOOK TWO ATTEMPTS, AND THE SECOND REVIEWER IS WHY. The first spelling simply stopped
+objecting to a row over an unpromoted leaf and dropped W from `verify_route_plans` entirely, reasoning that a
+plan names a PLACE and a state place carries its value across the step regardless of promotion. That reasoning
+is sound and the conclusion was still wrong, because it discarded the only independent cross-check on W that
+existed: the review simulated an under-promotion by dropping a genuine accumulator from W and MEASURED the
+difference -- pre-fix a located refusal, post-fix a design that compiles clean and returns 1.0/2.0/3.0 where
+Python returns 1.0/3.0/6.0. Silent, in the seam whose whole history is silent wrong values. The check now
+RE-DERIVES W's premise instead of trusting it or vetoing on it: a row over an unpromoted leaf is legal exactly
+when that leaf's snapshot survives the canonical exit, computed from the exit facts. That accepts every
+restore-to-reset row the old check wrongly rejected AND refuses the under-promotion the relaxed one wrongly
+accepted, so it is strictly stronger than either. Pinned by a mutant that perturbs W rather than the plan --
+the first in that file to do so, and verified to fail when the re-derivation is neutralized. Gates: sweep exit 0
+with `_KNOWN_OPEN` still empty and all eight oracles OK, corpus 151/151 unchanged, mypy over 210 files, black.
+
+THE SEVERITY BOUND RECORDED ABOVE -- "an unlocated crash either way, NOT silent wrong hardware" -- DESCRIBED THE
+UNFIXED COMPILER AND DOES NOT SURVIVE THE FIX, which the review caught and which is worth stating plainly. Once
+the shape compiles, a restore-to-reset leaf whose reset is INEXACT in the target format narrows and flips a
+guard exactly as anything else does: `self.s = 1.0 + 2**-30` restored and read gives python 10.0, hardware 20.0
+in E8M23. Measured against the two other spellings of the same computation, that is the charter and not a state
+defect -- the promoted leaf and the plain local with no state at all give 20.0 too, and all three give 10.0 in
+E11M52. There is no alternative lowering: promotion narrows the slot reset identically. So the regression test
+pins the AGREEMENT of the three spellings rather than the number, since pinning 20.0 would bless one lowering's
+rounding as the specification while the invariant that actually matters is that promotion is not observable.
+
+THE PARTIALLY-MOVING AGGREGATE IS NOT FIXED, AND THE REASON IS A MEASUREMENT RATHER THAN A JUDGEMENT CALL.
+Per-cell promotion would fix it -- cell 0 would stay Known and fold at binary64 -- and the harm is sited
+precisely: `_state_reset_fact` residualizes every numeric cell of an aggregate reset per LEAF, so once any cell
+promotes, D goes all-Residual and an invariant cell's Known constant is destroyed. But PROMOTION IS
+SELF-FULFILLING, which is what makes this bigger than it looks: once the leaf promotes, D is residual, the read
+is residual, and at the fixed point EVERY cell reads as having moved. Measured directly -- the stabilized exit
+cells of `self.a = [self.a[0], x]` are (Residual, Residual) even though cell 0 is provably invariant. So the
+per-cell answer cannot be read off the stabilized facts; W would have to become the fixed point's iteration
+variable, which is the machinery M5 rebuilt, and the port ABI would change wherever a cell loses its slot. A
+first corpus scan that reported "zero partially-moving aggregates" was DISCARDED as vacuous: self-checked
+against the known-positive kernel it reports zero there too. The sound replacement: 31 corpus kernels, 5
+aggregate state leaves, 2 of them with an inexact reset cell at their own format (`ekf1_stateful_shipped-e8m36`,
+`x` cell 0 and `P_urt` cell 5). Whether any of their cells is invariant is UNMEASURABLE without implementing the
+change -- which is itself the argument for not attempting it as a small safe fix.

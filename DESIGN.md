@@ -285,7 +285,11 @@ origins re-attributed to the user call site). State: the W/D fixed point -- W ho
 that must be hardware slots, D their live-in facts. A leaf that is not runtime state reads as its compile-time
 snapshot, so it enters W exactly when the transaction can leave it holding something else: the snapshot is joined
 with what the canonical exit carries out, and the leaf promotes when that join moves it. Stores are not counted,
-so writing back what a leaf already holds promotes nothing. D starts at Known(reset) and joins executable exit
+so writing back what a leaf already holds promotes nothing. That constrains the EXIT alone, so a leaf may still be
+written and READ within the step and then restored to its reset; emission therefore resolves an unpromoted leaf's
+live-in to the reset constant rather than to a slot, which is what keeps a routing row over such a leaf meaningful
+without promoting it. Promotion is per LEAF rather than per cell, so one moving cell of an aggregate carries its
+static siblings into hardware with it. D starts at Known(reset) and joins executable exit
 live-outs, descending only. Executable Fail
 terminators are located rejections (data-dependent raise included) -- which is also what lets a library stub
 validate its own operand shapes in ordinary Python: a `raise` behind a statically-false shape check folds dead.
@@ -413,7 +417,10 @@ loudly as a missing one. DISPOSITION derivation is the load-bearing check: measu
 catches the silent-absence archetype (a `NoCell` where a copy belongs) not at all, while independently deriving
 which ordinals must copy, which must be constant and which must be nothing catches it every time. Availability
 is kept as a supporting check, and is narrower than "the cell is defined" -- a materialized constant is defined
-and holds no datapath value a plan may copy. A construction's field-to-binding mapping is RE-DERIVED from the
+and holds no datapath value a plan may copy. A source naming an UNPROMOTED state leaf re-derives W's own premise
+from the exit facts instead of trusting it, since such a row reads the reset snapshot and is sound only while
+that snapshot really does survive the canonical exit; an under-promoted leaf is therefore a located refusal
+rather than a design that silently loses its state. A construction's field-to-binding mapping is RE-DERIVED from the
 call's positional/keyword structure against the analyzer's pinned schema snapshot, since reading the recorded
 mapping back would make the check vacuous. What no structural check can reach is an in-range WRONG permutation;
 the behavioural route witnesses carry that weight.

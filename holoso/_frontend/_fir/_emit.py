@@ -411,8 +411,23 @@ class _Emitter:
 
     def _entry_value(self, place: _LeafPlace) -> int:
         if isinstance(place.root, StateLeaf):
-            return self._state_read(place.root, place.ordinal)
+            return self._live_in(place.root, place.ordinal)
         raise AssertionError(f"read of an undefined place '{place}' escaped analysis")
+
+    def _live_in(self, leaf: StateLeaf, ordinal: int) -> int:
+        """
+        What a state leaf carries in from the previous transaction, on a path that stores nothing into it first.
+
+        A PROMOTED leaf is backed by a slot, so that is a slot read. A leaf that W did not promote is one whose
+        canonical exit joins onto its compile-time snapshot without moving it, which is exactly the statement
+        that every transaction leaves it holding the snapshot -- so it carries the RESET CONSTANT in, and reading
+        a slot the design will never build is what used to make an unpromoted-but-read leaf crash. Materializing
+        the constant instead of promoting the leaf is what keeps `self.s = self.s` from acquiring a runtime slot
+        whose reset would re-materialize in the narrower target carrier.
+        """
+        if leaf in self._result.runtime_state:
+            return self._state_read(leaf, ordinal)
+        return self._builder.const_node(self._leaf_reset(leaf, ordinal))
 
     def _slots(self, leaf: StateLeaf) -> list[StateSlot]:
         slots = self._result.state_slots.get(leaf)
@@ -467,8 +482,9 @@ class _Emitter:
         them. A bare subscript on the plan table on purpose: the site set is total and verified, so a miss is a
         broken postcondition rather than a site that happens to route nothing.
 
-        A state target additionally REGISTERS every one of its slots -- an executor invariant, since a verifier
-        that runs before emission cannot prove a future executor will do it.
+        A PROMOTED state target additionally REGISTERS every one of its slots -- an executor invariant, since a
+        verifier that runs before emission cannot prove a future executor will do it. An unpromoted target builds
+        no slot, so registering one would leave a read of a slot the exit never declares.
         """
         plan = self._result.route_plans[site]
         for ordinal, action in enumerate(plan.actions):
@@ -480,7 +496,7 @@ class _Emitter:
                     self._write(block, _LeafPlace(plan.target, ordinal), self._cell_const(value, kind))
                 case NoCell():
                     pass
-            if isinstance(plan.target, StateLeaf):
+            if isinstance(plan.target, StateLeaf) and plan.target in self._result.runtime_state:
                 self._state_read(plan.target, ordinal)
 
     def _coerce(self, vid: int, transfer: CellTransfer) -> int:

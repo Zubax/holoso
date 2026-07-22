@@ -22,7 +22,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ._analysis_support import StorageSchema, conform_local_store
+from ._analysis_support import AnalysisRejection, StorageSchema, conform_local_store, join_facts, same_fact
 from ._fact import (
     AggregateFact,
     ArrayLayout,
@@ -32,6 +32,7 @@ from ._fact import (
     RecordLayout,
     Reference,
     Residual,
+    Unbound,
     child_slice,
     leaf_count,
     normalize_static,
@@ -655,9 +656,11 @@ def verify_route_plans(
 ) -> None:
     """
     Re-derive the whole route plan from the ops and the stabilized facts and refuse any disagreement, without
-    consulting the analyzer's routing evidence at any point. `runtime_state` is required rather than optional:
-    without it every state-leaf source is undecidable, because a promoted leaf is backed by a slot unconditionally
-    while a non-promoted one is compile-time configuration with no cell at all.
+    consulting the analyzer's routing evidence at any point. `runtime_state` is an input so that W itself can be
+    CHECKED rather than trusted: a row over an unpromoted leaf is legal exactly when that leaf's snapshot really
+    does survive the canonical exit, which this re-derives from the exit facts. It is deliberately not used to
+    veto such a row outright -- a state place carries its value across the step whether or not the leaf is
+    promoted -- because that veto rejects correct plans while letting an under-promoted W through silently.
     """
     _Verifier(unit, facts_in, binding_facts, call_plans, construction_schemas, state_resets, runtime_state, plans).run(
         executable_edges, schemas_in
@@ -907,10 +910,39 @@ class _Verifier:
 
     def _available(self, env: Mapping[Place, Fact], ref: CellRef) -> str | None:
         if isinstance(ref.place, StateLeaf):
-            if ref.place not in self._runtime_state:
-                return "names a state leaf that carries no runtime cell"
-            width = _state_width(self._state_resets[ref.place])
-            return None if 0 <= ref.ordinal < width else f"is outside the state slot's {width} cell(s)"
+            snapshot = self._state_resets.get(ref.place)
+            if snapshot is None:
+                return "names a state leaf with no reset snapshot"
+            width = _state_width(snapshot)
+            if not 0 <= ref.ordinal < width:
+                return f"is outside the state slot's {width} cell(s)"
+            # A promoted leaf reads its slot; an unpromoted one reads the snapshot, which is sound only because W
+            # promotes whenever the exit can move a leaf off it. That premise is W's, so re-derive it here instead
+            # of trusting it: an under-promoted leaf would otherwise route a stale constant where a carried value
+            # belongs, and emit a silently wrong design rather than a located refusal.
+            return None if ref.place in self._runtime_state else self._carries_its_snapshot(ref.place, snapshot)
+        return self._local_available(env, ref)
+
+    def _carries_its_snapshot(self, leaf: StateLeaf, snapshot: "StaticValue | str") -> str | None:
+        """
+        Whether an unpromoted leaf really does hand every transaction its reset snapshot back, re-derived from the
+        canonical exit rather than read off W. An absent or unbound exit fact leaves the snapshot standing, which
+        is what the state fixed point concludes for those cases too; a join that cannot be taken belongs to the
+        analyzer's own deferred rejection, so it is not re-reported here.
+        """
+        exit_fact = self._facts_in.get(self._unit.exit, {}).get(leaf)
+        if exit_fact is None or isinstance(exit_fact, Unbound):
+            return None
+        reset = normalize_static(snapshot) if not isinstance(snapshot, str) else None
+        if reset is None:
+            return None
+        try:
+            moved = not same_fact(join_facts(reset, exit_fact, ()), reset)
+        except AnalysisRejection:
+            return None
+        return "names an unpromoted state leaf whose canonical exit moves off its reset snapshot" if moved else None
+
+    def _local_available(self, env: Mapping[Place, Fact], ref: CellRef) -> str | None:
         fact = env.get(ref.place)
         if fact is None:
             return "names a place with no fact at this point"

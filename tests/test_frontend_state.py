@@ -52,6 +52,32 @@ def _assert_matches_python(
     return [p.name for p in built.ports]
 
 
+def _assert_stream_matches_python(
+    klass: type,
+    name: str,
+    vectors: list[tuple[float | bool, ...]],
+    fmt: FloatFormat = FloatFormat(8, 23),
+    port: str = "out_0",
+) -> list[str]:
+    """
+    The same claim over a STREAM: one Python instance and one simulator stepped in lockstep, so a divergence that
+    only appears once a transaction has already run -- state carried in wrongly, or not carried at all -- has
+    somewhere to show. A single transaction cannot distinguish those from a correct kernel.
+    """
+    assert len(vectors) >= 2, "a stream oracle needs at least two transactions to say anything a single one cannot"
+    reference = klass()
+    built = holoso.synthesize(klass().step, default_ops(fmt), name=name)
+    simulator = built.numerical_model.elaborate()
+    names = [p.name for p in built.output_ports]
+    for index, arguments in enumerate(vectors):
+        expected = reference.step(*arguments)
+        outputs = dict(zip(names, simulator.run(*arguments)))
+        assert port in outputs, f"{name}: no output named {port} among {sorted(outputs)}"
+        actual = float(outputs[port])
+        assert actual == expected, f"{name} txn{index}: hardware {actual!r} against Python {expected!r}"
+    return [p.name for p in built.ports]
+
+
 def test_dead_arm_attr_write_does_not_block_readonly_fold() -> None:
     # Regression (Codex): a write to a read-only boolean attribute inside a statically-dead `if False:` arm must not
     # mark it as assigned -- otherwise the attribute is wrongly treated as runtime and a later guard on it is not
@@ -1245,6 +1271,157 @@ def test_self_assignment_does_not_fabricate_runtime_state() -> None:
     ports = [port.name for port in built.ports]
     assert "state_s" not in ports  # the leaf the dead arm used to promote carries no slot
     assert "state_mode" in ports  # `mode` really does vary: new_mode is a runtime input
+
+
+# The three kernels below are the OTHER side of the rule the test above pins, and they are close enough to it that
+# the campaign recorded guessing between them as how this seam produced defects before. W promotes a leaf only when
+# joining its snapshot with the exit live-out MOVES it, which is what stops `self.s = self.s` from fabricating a
+# slot. But "does not move" constrains only the EXIT: a leaf can be written, READ, and then restored to its reset
+# within one step, and such a leaf is legitimately not a slot while a `PyAttr` still routes a real runtime value out
+# of it. M5 shipped with the read resolving to a state cell that promotion had declined to build, which crashed the
+# route-plan verifier in the debug build and the numerical backend under `-O`.
+#
+# The fix is on the ROUTING side, not the W side, and that choice is what keeps the self-assignment route closed: W
+# is untouched, so no leaf promotes that did not promote before. A route plan names the PLACE a cell comes from, and
+# an unpromoted leaf is a place whose live-in is its snapshot -- so the read materializes that CONSTANT. Promoting
+# the leaf instead would hand it a slot whose reset re-materializes in the narrower carrier, which is exactly the
+# miscompile the rule exists to prevent.
+
+
+def test_a_leaf_restored_to_its_reset_can_still_be_read() -> None:
+    class RestoredBranch:
+        def __init__(self) -> None:
+            self.s = 3.0
+
+        def step(self, x: float, take: bool) -> float:
+            if take:
+                self.s = x
+            observed = self.s  # a genuinely runtime read: the phi of the stored arm and the carried-in reset
+            self.s = 3.0  # restored, so the exit live-out joins onto the snapshot without moving it
+            return observed
+
+    assert (RestoredBranch().step(2.0, True), RestoredBranch().step(5.0, False)) == (2.0, 3.0)
+    ports = _assert_stream_matches_python(
+        RestoredBranch, "restored_branch", [(2.0, True), (5.0, False), (7.0, True), (1.0, False)]
+    )
+    assert "state_s" not in ports  # every transaction leaves `s` at its reset, so it is configuration, not a slot
+
+
+def test_a_leaf_restored_to_its_reset_inside_a_loop_can_still_be_read() -> None:
+    class RestoredLoop:
+        def __init__(self) -> None:
+            self.s = 3.0
+
+        def step(self, x: float) -> float:
+            run = True
+            while run:  # the unrolled body reads the leaf and stores a runtime value back into it
+                self.s = self.s + x
+                run = False
+            observed = self.s
+            self.s = 3.0
+            return observed
+
+    assert (RestoredLoop().step(2.0), RestoredLoop().step(0.5)) == (5.0, 3.5)
+    ports = _assert_stream_matches_python(RestoredLoop, "restored_loop", [(2.0,), (5.0,), (0.5,), (-3.0,)])
+    assert "state_s" not in ports
+
+
+def test_an_aggregate_leaf_restored_to_its_reset_can_still_be_read() -> None:
+    class RestoredAggregate:
+        def __init__(self) -> None:
+            self.s = [3.0, 4.0]
+
+        def step(self, x: float, take: bool) -> float:
+            if take:
+                self.s = [x, 4.0]
+            observed = self.s[0]  # the aggregate spelling routes per CELL, and cell 0 is the runtime one
+            self.s = [3.0, 4.0]
+            return observed
+
+    assert (RestoredAggregate().step(2.0, True), RestoredAggregate().step(5.0, False)) == (2.0, 3.0)
+    ports = _assert_stream_matches_python(
+        RestoredAggregate, "restored_aggregate", [(2.0, True), (5.0, False), (7.0, True), (1.0, False)]
+    )
+    assert not [name for name in ports if name.startswith("state_s")]
+
+
+def test_a_restored_leaf_and_a_promoted_sibling_coexist() -> None:
+    # The three above have NO promoted leaf at all, so none of them would notice a fix that stopped building slots
+    # for leaves that need them. This one carries both kinds at once: `r` is written, read and restored, while `v`
+    # is a genuine accumulator whose slot must survive -- and only a real slot makes `v` carry across transactions,
+    # which the stream oracle checks by construction.
+    class MixedPromotion:
+        def __init__(self) -> None:
+            self.r = 5.0
+            self.v = 0.0
+
+        def step(self, x: float, take: bool) -> float:
+            if take:
+                self.r = x
+            seen = self.r
+            self.r = 5.0
+            self.v = self.v + x
+            return seen + self.v
+
+    ports = _assert_stream_matches_python(
+        MixedPromotion, "mixed_promotion", [(2.0, True), (3.0, False), (4.0, True), (1.0, False)]
+    )
+    assert "state_r" not in ports  # restored every transaction: compile-time configuration
+    assert "state_v" in ports  # a real accumulator: the slot must still be built
+
+
+def test_promotion_status_does_not_change_the_answer_for_an_inexact_reset() -> None:
+    # An INEXACT reset merged into a runtime value narrows into the target format and can flip a guard. That is the
+    # documented fastmath charter, not a state defect: DESIGN.md rules that a folded constant rounds into the target
+    # format like any other constant, and the harm signature is reachable with no state at all. What must NOT happen
+    # is for the answer to depend on whether the leaf was PROMOTED -- an unpromoted leaf reads its snapshot as a
+    # datapath constant, a promoted one reads a slot whose reset is that same constant, and a plain local folds the
+    # constant directly. All three must agree, or the state machinery is doing something the charter does not cover.
+    #
+    # Asserting the AGREEMENT rather than the narrowed number on purpose: pinning 20.0 would bless one lowering's
+    # rounding as the specification, whereas the invariant that actually matters is that promotion is not observable.
+    inexact = 1.0 + 2.0**-30
+
+    class Restored:  # written, read, then restored: NOT promoted
+        def __init__(self) -> None:
+            self.s = inexact
+
+        def step(self, x: float, take: bool) -> float:
+            if take:
+                self.s = x
+            observed = self.s
+            self.s = 1.0 + 2.0**-30
+            return 10.0 if observed > 1.0 else 20.0
+
+    class Promoted:  # the same constant in a leaf that genuinely varies: promoted
+        def __init__(self) -> None:
+            self.s = inexact
+
+        def step(self, x: float, take: bool) -> float:
+            observed = self.s
+            if take:
+                self.s = x
+            return 10.0 if observed > 1.0 else 20.0
+
+    def local(x: float, take: bool) -> float:  # no state at all
+        s = 1.0 + 2.0**-30
+        if take:
+            s = x
+        observed = s
+        return 10.0 if observed > 1.0 else 20.0
+
+    for fmt in (FloatFormat(8, 23), FloatFormat(11, 52)):
+        answers = set()
+        for index, kernel in enumerate((Restored().step, Promoted().step, local)):
+            built = holoso.synthesize(kernel, default_ops(fmt), name=f"inexact_reset_{index}")
+            outputs = dict(zip((p.name for p in built.output_ports), built.numerical_model.elaborate().run(0.0, False)))
+            answers.add(float(outputs["out_0"]))
+        assert len(answers) == 1, f"promotion status changed the answer at E{fmt.wexp}M{fmt.wman}: {answers}"
+    # The wide format carries the constant exactly, so there the charter and Python agree and the value is pinnable.
+    assert Restored().step(0.0, False) == 10.0
+    wide = holoso.synthesize(Restored().step, default_ops(FloatFormat(11, 52)), name="inexact_reset_wide")
+    wide_outputs = dict(zip((p.name for p in wide.output_ports), wide.numerical_model.elaborate().run(0.0, False)))
+    assert float(wide_outputs["out_0"]) == 10.0
 
 
 def test_a_lossy_state_store_is_refused_where_the_seam_used_to_hide_it() -> None:

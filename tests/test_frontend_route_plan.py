@@ -174,3 +174,38 @@ def test_a_wrong_constant_value_is_caught() -> None:
     mutated = dict(result.route_plans)
     mutated[site] = _replace(result.route_plans[site], ordinal, ConstantCell(StaticFloat(99.0), original.kind))
     _mutation_is_caught(result, mutated, "not the target-side image")
+
+
+def test_an_under_promoted_state_leaf_is_caught() -> None:
+    # The one mutant here that perturbs W rather than the plan, because W is the plan's other premise: a routing
+    # row over a state leaf is sound only if the leaf is promoted OR its snapshot survives the canonical exit.
+    # Dropping a genuine accumulator from W leaves every plan row untouched and well-formed, so no structural
+    # check can see it -- yet emission would then route the reset constant where the carried value belongs and
+    # ship a design that silently loses its state. Only re-deriving W's own premise from the exit facts catches
+    # it. A verifier that took W on trust would report nothing at all here, which is how it read before.
+    class Accumulator:
+        def __init__(self) -> None:
+            self.acc = 0.0
+
+        def step(self, x: float) -> float:
+            self.acc = self.acc + x
+            return self.acc
+
+    result = _analyzed(Accumulator().step)
+    assert result.runtime_state, "the accumulator must promote, or the mutation below removes nothing"
+    starved = {leaf for leaf in result.runtime_state if leaf.path[-1] != "acc"}
+    _verify(result, result.route_plans)  # unmutated: passes
+    with pytest.raises(AssertionError) as raised:
+        verify_route_plans(
+            result.unit,
+            result.executable_edges,
+            {block_id: env.facts for block_id, env in result.block_in.items()},
+            {block_id: env.schemas for block_id, env in result.block_in.items()},
+            result.binding_facts,
+            result.call_plans,
+            result.construction_schemas,
+            result.state_resets,
+            starved,
+            result.route_plans,
+        )
+    assert "moves off its reset snapshot" in str(raised.value)

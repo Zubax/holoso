@@ -138,7 +138,6 @@ from ._analysis_support import (
     _remap_op,
     _remap_terminator,
     _residual_type,
-    _same_fact,
     _seq_side,
     _transpose_routes,
     conform_local_store,
@@ -147,6 +146,7 @@ from ._analysis_support import (
     join_facts,
     join_schemas,
     render_interpolation,
+    same_fact,
     schema_of_fact,
 )
 from ._consume import (
@@ -907,7 +907,7 @@ class Analyzer:
                     if isinstance(exit_fact, Unbound):
                         continue
                     snapshot = self._snapshot_leaf(leaf)
-                    if _same_fact(join_facts(snapshot, exit_fact, origin), snapshot):
+                    if same_fact(join_facts(snapshot, exit_fact, origin), snapshot):
                         continue
                     new_w.add(leaf)
                     self._runtime_state_origins.setdefault(leaf, origin)
@@ -2142,7 +2142,7 @@ class Analyzer:
                 cached = self._unroll_cache.get(block.id)
                 if cached is not None:
                     cached_fact, chain_entry = cached
-                    if _same_fact(iterable_fact, cached_fact):
+                    if same_fact(iterable_fact, cached_fact):
                         return [chain_entry]
                     raise _UnrollRestart(terminator.origin, join_facts(cached_fact, iterable_fact, terminator.origin))
                 chain_entry = self._unroll(unit, block, terminator, iterable_fact)

@@ -354,7 +354,7 @@ def _coreachable(
     return seen
 
 
-def _same_fact(a: Fact, b: Fact) -> bool:
+def same_fact(a: Fact, b: Fact) -> bool:
     """Fixed-point stability: Knowns compare by tagged bitwise sameness, everything else structurally."""
     if isinstance(a, Known) and isinstance(b, Known):
         return same(a.value, b.value)
