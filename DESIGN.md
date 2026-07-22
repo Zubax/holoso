@@ -294,12 +294,20 @@ with what the canonical exit carries out, and the leaf promotes when that join m
 so writing back what a leaf already holds promotes nothing. That constrains the EXIT alone, so a leaf may still be
 written and READ within the step and then restored to its reset; emission therefore resolves an unpromoted leaf's
 live-in to the reset constant rather than to a slot, which is what keeps a routing row over such a leaf meaningful
-without promoting it. Promotion is per LEAF rather than per cell, so one moving cell of an aggregate carries its
-static siblings into hardware with it. D starts at Known(reset) and joins executable exit
-live-outs, descending only. Executable Fail
-terminators are located rejections (data-dependent raise included) -- which is also what lets a library stub
-validate its own operand shapes in ordinary Python: a `raise` behind a statically-false shape check folds dead.
-Fuel bounds cover visits and blocks; exhaustion is a located rejection, never a truncated fixed point.
+without promoting it. Promotion is per LEAF, but what a promoted slot CARRIES is per cell: D starts at the reset
+with its cells as the Knowns they are and joins executable exit live-outs, descending only, so a cell the exit
+never moves stays Known and materializes as its reset constant while its moving siblings are carried. Seeding D
+with an already-residual reset instead would pre-empt the very join that decides this, making promotion
+self-fulfilling and handing a provably invariant cell a carrier whose reset re-materializes in the narrower
+target format -- the same wrong value the not-counting-stores rule above exists to prevent, one level down.
+That optimism is BOUNDED, because cells that start Known and only descend make each round discover one more
+transaction's worth of movement: a delay line whose taps share a reset would otherwise cost a round per tap and
+exhaust the round fuel outright. A leaf whose live-in descends again after it was established gives its
+optimism up and takes the residualized reset, landing on the fixed point the analysis reached before the fold
+existed -- less precise than the fold, never less correct, and logged where it happens.
+Executable Fail terminators are located rejections (data-dependent raise included) -- which is also what lets a
+library stub validate its own operand shapes in ordinary Python: a `raise` behind a statically-false shape check
+folds dead. Fuel bounds cover visits and blocks; exhaustion is a located rejection, never a truncated fixed point.
 
 On stabilization the analyzer finalizes its result into the emission plan: the authoritative fact per binding
 (recorded at the visit that computes it and overwritten on each revisit, so the last write on a stabilized graph
@@ -426,13 +434,20 @@ loudly as a missing one. DISPOSITION derivation is the load-bearing check: measu
 catches the silent-absence archetype (a `NoCell` where a copy belongs) not at all, while independently deriving
 which ordinals must copy, which must be constant and which must be nothing catches it every time. Availability
 is kept as a supporting check, and is narrower than "the cell is defined" -- a materialized constant is defined
-and holds no datapath value a plan may copy. A source naming an UNPROMOTED state leaf re-derives W's own premise
-from the exit facts instead of trusting it, since such a row reads the reset snapshot and is sound only while
-that snapshot really does survive the canonical exit; an under-promoted leaf is therefore a located refusal
-rather than a design that silently loses its state. A construction's field-to-binding mapping is RE-DERIVED from the
-call's positional/keyword structure against the analyzer's pinned schema snapshot, since reading the recorded
-mapping back would make the check vacuous. What no structural check can reach is an in-range WRONG permutation;
-the behavioural route witnesses carry that weight.
+and holds no datapath value a plan may copy. Separately, every state CELL that W and D fold to its reset rather
+than carry has that premise re-derived against D itself: the live-in must name the cell, must fold to the cell's
+own reset, and that reset must survive the canonical exit. This runs over D and not over the plan rows because
+a folded cell leaves no row to inspect -- its reads materialize as constants, so the rows that would name it are
+`ConstantCell` and the source checks never see the leaf -- and the reset snapshot is the only evidence about a
+fold that D did not itself produce: the plan's constant comes from the binding facts D yielded, so a wrong D
+gives a self-consistent wrong plan that agrees with itself everywhere. An under-promoted leaf, an over-folded
+cell, or a live-in folded to the wrong constant is therefore a located refusal rather than a design that
+silently loses its state. Per cell, not per leaf: promotion is leaf-granular, so a promoted leaf's invariant
+cells are folded while its moving siblings are carried, and a leaf-granular premise would leave every cell of a
+promoted leaf unexamined.
+A construction's field-to-binding mapping is RE-DERIVED from the call's positional/keyword structure against the
+analyzer's pinned schema snapshot, since reading the recorded mapping back would make the check vacuous. What no
+structural check can reach is an in-range WRONG permutation; the behavioural route witnesses carry that weight.
 
 A dst-less `StorePlace` owns no destination binding fact, so producer and verifier each replay the stable
 storage-schema conformance walk to derive the post-store value, kind, transfer and width -- that walk is the

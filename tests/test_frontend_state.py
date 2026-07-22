@@ -1,6 +1,7 @@
 """Frontend tests: component state -- slots, resets, stores, read-only folding, provenance, and state ports."""
 
 import dataclasses
+import logging
 import re
 import sys
 import types
@@ -1312,6 +1313,82 @@ def test_self_assignment_does_not_fabricate_runtime_state() -> None:
     ports = [port.name for port in built.ports]
     assert "state_s" not in ports  # the leaf the dead arm used to promote carries no slot
     assert "state_mode" in ports  # `mode` really does vary: new_mode is a runtime input
+
+
+def test_an_invariant_cell_does_not_ride_a_moving_sibling_into_the_carrier() -> None:
+    # The per-CELL reading of the rule the test above pins at leaf granularity. Promotion is per leaf, so one
+    # genuinely moving cell gives the whole leaf a slot; the reset used to residualize every numeric cell of that
+    # slot on the way in, which handed the INVARIANT sibling a hardware carrier nothing in the kernel asked for.
+    # Its reset then re-materialized in the narrower target format -- `1 + 2**-30` becomes exactly 1.0 in E8M23 --
+    # and flipped the guard below, silently, with the wide format still computing it right. Residualizing the reset
+    # also made the promotion self-fulfilling: the first round proves cell 0 invariant, and pre-residualizing
+    # destroys that evidence before the join that would have preserved it. The reset now carries its cells as the
+    # Knowns they are, so the join decides movement per cell and only the moving cell reaches the carrier.
+    class PartialAggregateEffect:
+        def __init__(self) -> None:
+            self.a = [1 + 2**-30, 0.0]
+
+        def step(self, x: float) -> float:
+            self.a = [self.a[0], x]  # cell 0 writes back what it already holds; only cell 1 varies
+            return 10.0 if self.a[0] > 1.0 else 20.0
+
+    assert PartialAggregateEffect().step(1.0) == 10.0
+    ports = _assert_stream_matches_python(
+        PartialAggregateEffect, "partial_aggregate_effect", [(1.0,), (2.0,), (3.0,), (-1.0,)]
+    )
+    # The leaf still promotes -- cell 1 genuinely varies -- so this is not the leaf-level rule firing by accident.
+    assert "state_a_1" in ports
+    # The wide format always computed this right, which is what made the narrow one a SILENT divergence rather
+    # than an obvious breakage; pinning both keeps a future fix from closing the narrow case by breaking the wide.
+    _assert_stream_matches_python(
+        PartialAggregateEffect, "partial_aggregate_effect_wide", [(1.0,), (2.0,)], fmt=FloatFormat(11, 52)
+    )
+
+    # The other container flavor: an ndarray reset settles through ArrayLayout with its own cell naming, and it
+    # diverged identically, so closing only the list spelling would leave the same wrong value reachable.
+    class PartialArrayEffect:
+        def __init__(self) -> None:
+            self.a = np.array([1 + 2**-30, 0.0])
+
+        def step(self, x: float) -> float:
+            self.a = np.array([self.a[0], x])
+            return 10.0 if self.a[0] > 1.0 else 20.0
+
+    assert PartialArrayEffect().step(1.0) == 10.0
+    _assert_stream_matches_python(PartialArrayEffect, "partial_array_effect", [(1.0,), (2.0,), (3.0,)])
+
+
+def test_a_delay_line_settles_in_rounds_that_do_not_scale_with_its_length(caplog: pytest.LogCaptureFixture) -> None:
+    # The cost of folding invariant cells, and the bound that keeps it payable. Cells start Known and only
+    # descend, so a chain that copies cell i-1 into cell i discovers one more transaction's worth of movement per
+    # round: with a UNIFORM reset every cell looks unmoved until the one before it moves, and the descent
+    # unrolls time one tap at a time. Unbounded, a 24-tap line took 25 rounds and a 1000-tap line -- the
+    # canonical FIR shape, which this compiler exists to build -- exhausted the round fuel outright and refused
+    # to compile at all, where counting stores had always settled it in two. The widening is what bounds it: a
+    # leaf whose live-in descends again after being established gives up its per-cell optimism and takes the
+    # residualized reset, which is exactly the answer the analysis reached before the fold existed.
+    taps = 24
+
+    class DelayLine:
+        def __init__(self) -> None:
+            self._z = [0.0] * taps
+
+        def step(self, x: float) -> float:
+            self._z = [x] + self._z[:-1]
+            return self._z[taps - 1]
+
+    with caplog.at_level(logging.INFO, logger="holoso._frontend._fir._analyze"):
+        built = holoso.synthesize(DelayLine().step, default_ops(FloatFormat(8, 23)), name="delay_line")
+    resolved = [re.search(r"resolved after (\d+) round", record.message) for record in caplog.records]
+    rounds = [int(match.group(1)) for match in resolved if match is not None]
+    assert len(rounds) == 1, f"expected exactly one settled state fixpoint, got {rounds}"
+    assert rounds[0] <= 12, f"the state descent took {rounds[0]} rounds for {taps} taps; it is scaling with length"
+
+    # The line must still BE a delay line: the fold is a precision question, never a functional one.
+    simulator, reference = built.numerical_model.elaborate(), DelayLine()
+    names = [port.name for port in built.output_ports]
+    for x in [1.0, 2.0, 3.0, -4.0, 0.5]:
+        assert float(dict(zip(names, simulator.run(x)))["out_0"]) == reference.step(x)
 
 
 # The three kernels below are the OTHER side of the rule the test above pins, and they are close enough to it that

@@ -15,12 +15,13 @@ What none of this reaches is an in-range WRONG permutation: it passes every stru
 behavioural witnesses in `test_frontend_routing.py` carry that, and this module does not replace them.
 """
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 
 import pytest
 
 from holoso._frontend._fir._analyze import Analyzer, ResidualUnit
-from holoso._frontend._fir._ir import Local, Op, executable_rpo
+from holoso._frontend._fir._fact import AggregateFact, Fact, Known, Residual, normalize_static
+from holoso._frontend._fir._ir import Local, Op, StateLeaf, executable_rpo
 from holoso._frontend._fir._plan import (
     CellAction,
     CellRef,
@@ -32,6 +33,7 @@ from holoso._frontend._fir._plan import (
     RoutePlan,
     verify_route_plans,
 )
+from holoso._frontend._fir._value import StaticFloat
 
 
 def _analyzed(fn: Callable[..., object]) -> ResidualUnit:
@@ -49,6 +51,7 @@ def _verify(result: ResidualUnit, plans: dict[PlanSite, RoutePlan]) -> None:
         result.construction_schemas,
         result.state_resets,
         result.runtime_state,
+        result.state_livein,
         plans,
     )
 
@@ -169,8 +172,6 @@ def test_a_wrong_constant_value_is_caught() -> None:
     )
     original = result.route_plans[site].actions[ordinal]
     assert isinstance(original, ConstantCell)
-    from holoso._frontend._fir._value import StaticFloat
-
     mutated = dict(result.route_plans)
     mutated[site] = _replace(result.route_plans[site], ordinal, ConstantCell(StaticFloat(99.0), original.kind))
     _mutation_is_caught(result, mutated, "not the target-side image")
@@ -206,6 +207,102 @@ def test_an_under_promoted_state_leaf_is_caught() -> None:
             result.construction_schemas,
             result.state_resets,
             starved,
+            result.state_livein,
             result.route_plans,
         )
-    assert "moves off its reset snapshot" in str(raised.value)
+    assert "canonical exit moves off it" in str(raised.value)
+
+
+class _PartialAggregate:
+    """Cell 0 invariant, cell 1 a genuine accumulator: the leaf promotes, but only cell 1 is carried."""
+
+    def __init__(self) -> None:
+        self.a = [2.5, 0.0]
+
+    def step(self, x: float) -> float:
+        self.a = [self.a[0], self.a[1] + x]
+        return self.a[1]
+
+
+def _promoted_aggregate(result: ResidualUnit, name: str) -> tuple[StateLeaf, AggregateFact]:
+    leaf = next(leaf for leaf in result.runtime_state if leaf.path[-1] == name)
+    carried = result.state_livein[leaf]
+    assert isinstance(carried, AggregateFact)
+    assert isinstance(carried.leaves[0], Known), "cell 0 must be folded, or the mutations below remove nothing"
+    assert isinstance(carried.leaves[1], Residual), "cell 1 must be carried, or there is nothing to over-fold"
+    return leaf, carried
+
+
+def _livein_mutation_is_caught(result: ResidualUnit, livein: Mapping[StateLeaf, Fact], fragment: str) -> None:
+    _verify(result, result.route_plans)  # unmutated: passes
+    with pytest.raises(AssertionError) as raised:
+        verify_route_plans(
+            result.unit,
+            result.executable_edges,
+            {block_id: env.facts for block_id, env in result.block_in.items()},
+            {block_id: env.schemas for block_id, env in result.block_in.items()},
+            result.binding_facts,
+            result.call_plans,
+            result.construction_schemas,
+            result.state_resets,
+            result.runtime_state,
+            livein,
+            result.route_plans,
+        )
+    assert fragment in str(raised.value), f"expected {fragment!r} in the diagnostic, got: {raised.value}"
+
+
+def test_an_over_folded_state_cell_is_caught() -> None:
+    # The per-CELL companion of the mutant above, and the reason the check cannot stay leaf-granular. Promotion is
+    # per leaf, so a leaf with one moving cell and one invariant cell is promoted as a whole while only the moving
+    # cell is carried -- the invariant one is folded to its reset. D says which is which. Over-folding D (claiming
+    # the MOVING cell is invariant too) leaves W, the plans and every row untouched and well-formed, so no
+    # structural check and no leaf-granular re-derivation can see it: the leaf is promoted, which is all the old
+    # check asked. Emission would then route the reset constant where the carried value belongs and ship a design
+    # that silently loses half its state.
+    class PartialAggregate:
+        def __init__(self) -> None:
+            self.a = [2.5, 0.0]
+
+        def step(self, x: float) -> float:
+            self.a = [self.a[0], self.a[1] + x]  # cell 0 invariant, cell 1 a genuine accumulator
+            return self.a[1]
+
+    result = _analyzed(PartialAggregate().step)
+    leaf = next(leaf for leaf in result.runtime_state if leaf.path[-1] == "a")
+    carried = result.state_livein[leaf]
+    assert isinstance(carried, AggregateFact)
+    assert isinstance(carried.leaves[0], Known), "cell 0 must be folded, or the mutation below removes nothing"
+    assert isinstance(carried.leaves[1], Residual), "cell 1 must be carried, or there is nothing to over-fold"
+    snapshot = result.state_resets[leaf]
+    assert not isinstance(snapshot, str)
+    reset = normalize_static(snapshot)
+    assert isinstance(reset, AggregateFact)
+    over_folded = dict(result.state_livein)
+    over_folded[leaf] = AggregateFact(carried.layout, (carried.leaves[0], reset.leaves[1]))
+    _livein_mutation_is_caught(result, over_folded, "canonical exit moves off it")
+
+
+def test_a_state_cell_folded_to_the_wrong_constant_is_caught() -> None:
+    # The fold's other half. The check above asks whether a folded cell really is invariant; this asks whether the
+    # constant it folded TO is the cell's own reset. Gating on "is it Known" alone accepts any constant at all,
+    # which would route a value the slot never holds while every structural check still agrees.
+    result = _analyzed(_PartialAggregate().step)
+    leaf, carried = _promoted_aggregate(result, "a")
+    wrong = dict(result.state_livein)
+    wrong[leaf] = AggregateFact(carried.layout, (Known(StaticFloat(777.0)), carried.leaves[1]))
+    _livein_mutation_is_caught(result, wrong, "not the cell's reset")
+
+
+def test_a_missing_or_mis_shaped_state_livein_is_caught() -> None:
+    # D is an input to the verifier, so its ABSENCE has to be an answer too. A promoted leaf with no settled
+    # live-in, and a scalar live-in standing in for an aggregate one, both used to read as "nothing to check" --
+    # and the scalar case waved the MOVING cell through, since a scalar has no ordinal 1 to disagree about.
+    result = _analyzed(_PartialAggregate().step)
+    leaf, carried = _promoted_aggregate(result, "a")
+    _livein_mutation_is_caught(result, {}, "settled no live-in for it")
+    dropped = {key: value for key, value in result.state_livein.items() if key is not leaf}
+    _livein_mutation_is_caught(result, dropped, "settled no live-in for it")
+    scalar = dict(result.state_livein)
+    scalar[leaf] = carried.leaves[0]
+    _livein_mutation_is_caught(result, scalar, "gives no value for this cell")

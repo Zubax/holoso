@@ -27,8 +27,10 @@ from ._fact import (
     AggregateFact,
     ArrayLayout,
     AtomicFact,
+    BoundFact,
     Fact,
     Known,
+    MaybeUnbound,
     RecordLayout,
     Reference,
     Residual,
@@ -247,6 +249,15 @@ def _state_width(snapshot: "StaticValue | str") -> int:
     assert not isinstance(snapshot, str), "a store to an inadmissible reset is refused during analysis"
     normalized = normalize_static(snapshot)
     return leaf_count(normalized.layout) if isinstance(normalized, AggregateFact) else 1
+
+
+def _cell_of(fact: Fact, ordinal: int) -> AtomicFact | None:
+    """The atomic fact at a leaf ordinal; None when the fact admits no per-cell view at that ordinal."""
+    if isinstance(fact, AggregateFact):
+        return fact.leaves[ordinal] if 0 <= ordinal < len(fact.leaves) else None
+    if isinstance(fact, (Known, Residual, Reference)):
+        return fact if ordinal == 0 else None
+    return None
 
 
 def _stored_image(stored: Fact, snapshot: "StaticValue | str") -> Fact:
@@ -654,19 +665,29 @@ def verify_route_plans(
     construction_schemas: Mapping[int, tuple[type, tuple[FieldSchema, ...]]],
     state_resets: Mapping[StateLeaf, "StaticValue | str"],
     runtime_state: set[StateLeaf],
+    state_livein: Mapping[StateLeaf, Fact],
     plans: Mapping[PlanSite, RoutePlan],
 ) -> None:
     """
     Re-derive the whole route plan from the ops and the stabilized facts and refuse any disagreement, without
-    consulting the analyzer's routing evidence at any point. `runtime_state` is an input so that W itself can be
-    CHECKED rather than trusted: a row over an unpromoted leaf is legal exactly when that leaf's snapshot really
-    does survive the canonical exit, which this re-derives from the exit facts. It is deliberately not used to
-    veto such a row outright -- a state place carries its value across the step whether or not the leaf is
-    promoted -- because that veto rejects correct plans while letting an under-promoted W through silently.
+    consulting the analyzer's routing evidence at any point. `runtime_state` and `state_livein` are inputs so that
+    W and D can be CHECKED rather than trusted: they say which cells the design folds to their reset instead of
+    carrying, and such a cell is legal exactly when its reset really does survive the canonical exit, which this
+    re-derives from the exit facts. They are deliberately not used to veto a row outright -- a state place carries
+    its value across the step whether or not its leaf is promoted -- because that veto rejects correct plans while
+    letting an under-promoted W or an over-folded D through silently.
     """
-    _Verifier(unit, facts_in, binding_facts, call_plans, construction_schemas, state_resets, runtime_state, plans).run(
-        executable_edges, schemas_in
-    )
+    _Verifier(
+        unit,
+        facts_in,
+        binding_facts,
+        call_plans,
+        construction_schemas,
+        state_resets,
+        runtime_state,
+        state_livein,
+        plans,
+    ).run(executable_edges, schemas_in)
 
 
 class _Verifier:
@@ -679,6 +700,7 @@ class _Verifier:
         construction_schemas: Mapping[int, tuple[type, tuple[FieldSchema, ...]]],
         state_resets: Mapping[StateLeaf, "StaticValue | str"],
         runtime_state: set[StateLeaf],
+        state_livein: Mapping[StateLeaf, Fact],
         plans: Mapping[PlanSite, RoutePlan],
     ) -> None:
         self._unit = unit
@@ -690,6 +712,7 @@ class _Verifier:
         self._schemas = construction_schemas
         self._state_resets = state_resets
         self._runtime_state = runtime_state
+        self._state_livein = state_livein
         self._plans = plans
         self._complaints: list[str] = []
 
@@ -718,7 +741,37 @@ class _Verifier:
         surplus = sorted(set(self._plans) - expected, key=str)
         for site in surplus:
             self._complaints.append(f"{site}: a plan exists where the op routes nothing")
+        self._check_state_folds()
         assert not self._complaints, "route plan verification failed:\n  " + "\n  ".join(self._complaints)
+
+    def _check_state_folds(self) -> None:
+        """
+        Re-derive, per state CELL, the premise behind every cell the fixed point folded instead of carrying.
+
+        This runs over D itself rather than over the plan rows because a folded cell leaves no row to inspect:
+        its reads materialize as constants, so the rows that would name it are `ConstantCell` and the source
+        checks never see the leaf at all. Only the reset snapshot is independent evidence about a fold -- the
+        plan's constant is re-derived from the same binding facts D produced, so a wrong D yields a
+        self-consistent wrong plan that agrees with itself everywhere.
+
+        Promotion is leaf-granular while folding is per cell, so this walks cells: a promoted leaf's invariant
+        cells are folded while its moving siblings are carried, and a leaf-granular premise would leave every
+        cell of a promoted leaf unexamined.
+        """
+        for leaf, snapshot in sorted(self._state_resets.items(), key=lambda item: item[0].path):
+            name = ".".join(leaf.path)
+            if isinstance(snapshot, str):
+                continue  # an inadmissible reset is refused during analysis, with a better-located diagnostic
+            reset = normalize_static(snapshot)
+            carried = self._state_livein.get(leaf) if leaf in self._runtime_state else reset
+            if carried is None:
+                self._complaints.append(f"state '{name}': promoted, but the fixed point settled no live-in for it")
+                continue
+            exit_fact = self._facts_in.get(self._unit.exit, {}).get(leaf)
+            for ordinal in range(_state_width(snapshot)):
+                complaint = self._cell_carries_its_reset(reset, carried, exit_fact, ordinal)
+                if complaint is not None:
+                    self._complaints.append(f"state '{name}' cell {ordinal}: {complaint}")
 
     # ---- the pre-op environment, rebuilt from the block live-ins and the final facts alone ----
 
@@ -920,31 +973,45 @@ class _Verifier:
             width = _state_width(snapshot)
             if not 0 <= ref.ordinal < width:
                 return f"is outside the state slot's {width} cell(s)"
-            # A promoted leaf reads its slot; an unpromoted one reads the snapshot, which is sound only because W
-            # promotes whenever the exit can move a leaf off it. That premise is W's, so re-derive it here instead
-            # of trusting it: an under-promoted leaf would otherwise route a stale constant where a carried value
-            # belongs, and emit a silently wrong design rather than a located refusal.
-            return None if ref.place in self._runtime_state else self._carries_its_snapshot(ref.place, snapshot)
+            # A state place carries its value across the step whether or not its leaf is promoted, so a row over
+            # one is never objectionable on availability grounds. What the fold rests on is checked once per
+            # cell, against D itself, in `_check_state_folds`.
+            return None
         return self._local_available(env, ref)
 
-    def _carries_its_snapshot(self, leaf: StateLeaf, snapshot: "StaticValue | str") -> str | None:
+    def _cell_carries_its_reset(
+        self, reset: BoundFact, carried: Fact, exit_fact: Fact | None, ordinal: int
+    ) -> str | None:
         """
-        Whether an unpromoted leaf really does hand every transaction its reset snapshot back, re-derived from the
-        canonical exit rather than read off W. An absent or unbound exit fact leaves the snapshot standing, which
-        is what the state fixed point concludes for those cases too; a join that cannot be taken belongs to the
-        analyzer's own deferred rejection, so it is not re-reported here.
+        Whether one state cell the fixed point folded really does hold its reset on every transaction. Three ways
+        a fold can be wrong, and all three answer here: the live-in may be shaped so it has no such cell at all,
+        it may name a constant that is not the reset, or the canonical exit may move the cell off the reset it
+        was folded to. An absent or unbound exit fact leaves the reset standing, which is what the state fixed
+        point concludes for those cases too; a join that cannot be taken belongs to the analyzer's own deferred
+        rejection, so it is not re-reported here.
         """
-        exit_fact = self._facts_in.get(self._unit.exit, {}).get(leaf)
+        reset_cell = _cell_of(reset, ordinal)
+        if reset_cell is None:
+            return "its own reset gives no value for this cell"
+        live_in_cell = _cell_of(carried, ordinal)
+        if live_in_cell is None:
+            return "the settled live-in gives no value for this cell"
+        if not isinstance(live_in_cell, Known):
+            return None  # carried in a slot, so whatever the exit leaves is what the next transaction reads
+        if not same_fact(live_in_cell, reset_cell):
+            return "folded to a constant that is not the cell's reset"
         if exit_fact is None or isinstance(exit_fact, Unbound):
             return None
-        reset = normalize_static(snapshot) if not isinstance(snapshot, str) else None
-        if reset is None:
-            return None
+        if isinstance(exit_fact, MaybeUnbound):
+            return "folded to its reset, which the canonical exit may leave unbound"
+        exit_cell = _cell_of(exit_fact, ordinal)
+        if exit_cell is None:
+            return "folded to its reset with no per-cell fact at the canonical exit"
         try:
-            moved = not same_fact(join_facts(reset, exit_fact, self._unit_origin), reset)
+            moved = not same_fact(join_facts(reset_cell, exit_cell, self._unit_origin), reset_cell)
         except AnalysisRejection:
             return None
-        return "names an unpromoted state leaf whose canonical exit moves off its reset snapshot" if moved else None
+        return "folded to its reset, which the canonical exit moves off it" if moved else None
 
     def _local_available(self, env: Mapping[Place, Fact], ref: CellRef) -> str | None:
         fact = env.get(ref.place)

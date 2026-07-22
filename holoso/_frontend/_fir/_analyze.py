@@ -714,6 +714,9 @@ class Analyzer:
         # which is empty for it once that store stops executing.
         self._runtime_state_origins: dict[StateLeaf, OriginStack] = {}
         self._state_livein: dict[StateLeaf, Fact] = {}
+        # Leaves whose per-cell optimism has been withdrawn; their reset residualizes as a whole. See
+        # `_state_round` for why a leaf that keeps moving after its live-in is established belongs here.
+        self._widened_state: set[StateLeaf] = set()
         # Recorded AT THE VISIT that computes them, overwritten each time. The fixpoint revisits a block
         # whenever an incoming fact changes, so a block that is not revisited did not change: the last write
         # is the stabilized one. This is what lets `_finalize` stop replaying the transfer, which used to run
@@ -861,6 +864,7 @@ class Analyzer:
         self._runtime_state = set()
         self._runtime_state_origins = {}
         self._state_livein = {}
+        self._widened_state = set()
         self._pending_bridge = {}
         self._reset_round()
 
@@ -884,7 +888,9 @@ class Analyzer:
 
         Promotion starts from EMPTY every pass and only grows within one, which is what makes it an answer about
         this graph rather than an accumulation over the rounds that built it. Growth is safe because a promoted
-        leaf reads as a residual, which can only open further arms: the pass descends and never has to retract.
+        leaf reads its live-in, which the join holds at or below its snapshot cell by cell -- a moving cell
+        descends to a residual and can only open further arms, an unmoved one stays exactly the Known the
+        snapshot already gave it. The pass descends and never has to retract.
 
         A failing join never aborts the round -- that leaf freezes at its last joinable value, holding the descent
         so the fixed point still stabilizes, and the failure re-derives every round, reported only once the pass
@@ -907,13 +913,30 @@ class Analyzer:
                         continue
                     new_w.add(leaf)
                     self._runtime_state_origins.setdefault(leaf, origin)
-                reset = self._state_reset_fact(leaf)
-                incoming = reset if isinstance(exit_fact, Unbound) else join_facts(reset, exit_fact, origin)
                 previous = new_d.get(leaf)
-                new_d[leaf] = incoming if previous is None else join_facts(previous, incoming, origin)
+                incoming = self._state_incoming(leaf, exit_fact, origin)
+                if previous is None:
+                    new_d[leaf] = incoming
+                    continue
+                joined = join_facts(previous, incoming, origin)
+                if not same_fact(joined, previous) and leaf not in self._widened_state:
+                    # The live-in descended AGAIN after it was established, which is the signature of a leaf
+                    # carrying values forward through its own cells: each round then discovers one more
+                    # transaction's worth of movement, so a copy chain of N cells costs N rounds and a long
+                    # enough one exhausts the round fuel outright. Withdraw the optimism for this leaf and take
+                    # the residualized reset's answer directly -- the fixed point it lands on is the one the
+                    # pre-per-cell analysis always reached, so nothing gets worse, only less precise.
+                    self._widened_state.add(leaf)
+                    _logger.info("state leaf '%s' kept moving; its per-cell optimism is withdrawn", ".".join(leaf.path))
+                    joined = join_facts(previous, self._state_incoming(leaf, exit_fact, origin), origin)
+                new_d[leaf] = joined
             except AnalysisRejection as error:
                 deferred.offer(error)
         return new_w, new_d, deferred
+
+    def _state_incoming(self, leaf: StateLeaf, exit_fact: Fact, origin: OriginStack) -> Fact:
+        reset = self._state_reset_fact(leaf)
+        return reset if isinstance(exit_fact, Unbound) else join_facts(reset, exit_fact, origin)
 
     def _check_storage_schemas(self, result: ResidualUnit) -> None:
         enforce_storage_schemas(
@@ -1081,6 +1104,21 @@ class Analyzer:
         return current, admitted
 
     def _state_reset_fact(self, leaf: StateLeaf) -> Fact:
+        """
+        The validated compile-time reset a leaf's slot is seeded with, carrying its cells as the KNOWNS they are.
+
+        Residualizing here would pre-empt the very join that decides movement. A cell reaches hardware -- and so
+        the narrower target carrier -- exactly when D's join moves it off this reset, so handing that join an
+        already-residual cell makes promotion self-fulfilling: the leaf-level test proves cell 0 of
+        ``self.a = [self.a[0], x]`` invariant in the first round, and a residualized reset then destroys that
+        evidence, giving a provably constant cell a slot whose reset re-materializes in the target format. That
+        is the same wrong value the leaf-level rule already refuses to create by counting stores, one level down.
+        Promotion stays per leaf; what is now per cell is which cells the slot's live-in actually carries.
+
+        The optimism is bounded: a leaf `_state_round` has widened residualizes here instead, which is what the
+        analysis did for every leaf before the fold existed. A widened leaf therefore lands on the same fixed
+        point it always did -- less precise than the fold, never less correct.
+        """
         current, admitted = self._walk_snapshot(leaf)
         if admitted is None:
             return Reference(current)
@@ -1088,6 +1126,7 @@ class Analyzer:
         name = ".".join(leaf.path)
         reset = normalize_static(admitted)
         self._validate_state_annotation(leaf, reset, origin)
+        widened = leaf in self._widened_state
         if isinstance(reset, AggregateFact):
             self._validate_state_reset_schema(leaf, reset.layout, origin)
             cells: list[AtomicFact] = []
@@ -1096,15 +1135,12 @@ class Analyzer:
                 cell_sem = _residual_type(cell.value)
                 if cell_sem is None:
                     raise AnalysisRejection(f"state attribute '{name}' has an unsupported reset type", origin)
-                # The scalar reset rule applies per cell: a Known Bool folds exactly, numerics run as residuals.
-                cells.append(cell if cell_sem is SemType.BOOL else Residual(cell_sem))
+                # A Known Bool folds exactly at any width, so widening never has anything to gain from it.
+                cells.append(Residual(cell_sem) if widened and cell_sem is not SemType.BOOL else cell)
             return AggregateFact(reset.layout, tuple(cells))
-        sem = _residual_type(admitted)
-        if sem is None:
+        if _residual_type(admitted) is None:
             raise AnalysisRejection(f"state attribute '{name}' has an unsupported reset type", origin)
-        if sem is SemType.BOOL:
-            return Known(admitted)  # a Known Bool folds exactly (no width) and keeps invariant flags folding
-        return Residual(sem)
+        return reset
 
     def _validate_state_reset_schema(self, leaf: StateLeaf, layout: AggregateLayout, origin: OriginStack) -> None:
         """

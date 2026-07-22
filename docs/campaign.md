@@ -2827,3 +2827,37 @@ THE WORKTREE BASIS DEFECT HAS A THIRD SHAPE. This one arrived on `origin/trial/r
 that DELETES both mandated test files -- not `origin/main` as the previous two. So the defect is not "always
 main"; it is "not necessarily dev", and the step-zero `reset --hard origin/dev` instruction is what made the
 task expressible for the third time running.
+
+
+THE PER-CELL AGGREGATE MISCOMPILE IS CLOSED. Promotion is now decided per CELL rather than per leaf, so an
+invariant cell folds to its own reset instead of riding a varying sibling into a narrower carrier. Verified in
+the maintainer's tree: the witness returns 10.0 where it returned 20.0, corpus 151/151, sweep exit 0 with
+`_KNOWN_OPEN` empty, 605 targeted tests, mypy clean over 210 files. TWELVE kernels that silently miscompiled at
+HEAD now match Python, and nine further defect variants closed with the same fold.
+
+THE REVIEW CAUGHT A BLOCKING REGRESSION THAT WOULD HAVE BEEN FAR WORSE THAN THE DEFECT. The optimistic descent
+UNROLLS TIME: cells start Known and only descend, so a delay line whose taps share a reset discovers one tap's
+worth of movement per round. Measured: a 24-tap line took 25 rounds, and a 1000-TAP LINE -- THE CANONICAL FIR
+THIS COMPILER EXISTS TO BUILD -- exhausted the round fuel and REFUSED TO COMPILE, on a kernel HEAD accepts in
+three seconds. Bounded by giving up optimism exactly when a leaf's live-in descends AGAIN after settling, which
+needs no magic constant and which real kernels never trigger (max 2 descent rounds across 447 analyses). Now
+24 taps in 3 rounds and 1000 taps in 3.43 s against HEAD's 3.32 s. Re-verified here at 24 and 200 taps.
+
+AND THE VERIFIER CHECK IT WROTE WAS LARGELY DEAD CODE, found while diagnosing that: a folded cell materializes
+as a `ConstantCell`, so it never reaches the source-availability path the check lived on. It now runs over D
+itself, once per cell -- the live-in must name the cell, fold to that cell's own reset, and survive the exit.
+That independence matters because the plan's constant is RE-DERIVED from the binding facts D produced, so a
+wrong D yields a SELF-CONSISTENT wrong plan, and the reset snapshot is the only outside evidence.
+
+TWO THINGS DELIBERATELY NOT CLOSED, both measured identical at HEAD and so not regressions. A folded cell keeps
+a dead slot whose narrow register contradicts its own binary64-folded reads; dropping it would change the
+state-port ABI, and keeping it is why the corpus did not churn. And the same harm is fully live whenever a slot
+GENUINELY varies and its reset is unrepresentable -- four lines, no aggregate needed -- which is the charter
+case the M5 review already identified: the register cannot hold the value, and a rule refusing it would refuse
+`self.y = 0.1`. Whether the charter SHOULD cover that is a real question with corpus-wide blast radius, and it
+is a different question from the spurious promotion this step closed.
+
+LANDED THROUGH A THREE-WAY MERGE against M7, which had landed underneath it. One conflict, and it was the
+interesting kind: M7 removed an invalid empty origin from a `join_facts` call while this step changed the same
+call from leaf facts to CELL facts. Resolved to keep both -- per-cell semantics with M7's origin -- rather than
+taking either side whole.

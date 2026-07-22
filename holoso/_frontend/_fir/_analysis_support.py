@@ -746,9 +746,11 @@ def conform_state_store(name: str, reset: Fact, stored: Fact) -> tuple[Fact, str
     violation reports after stabilization, at this store, so the fact carried onward must keep the fixed point
     stable AND free of misleading secondary rejections: an int slot receiving float (a pure numeric widening)
     carries the stored fact, whose W/D join merely descends; a failed conversion carries its store-edge image;
-    every other violation carries the residualized reset, since joining the stored fact would raise a
-    worse-located mismatch first. A non-datapath stored value (the Unbound left by a deferred producer chain
-    included) neither establishes nor violates, in the scalar and aggregate arms alike; the W/D join owns it.
+    every other violation carries the reset itself, since joining the stored fact would raise a worse-located
+    mismatch first. The reset arrives with its cells Known, which is what lets the W/D join decide per cell
+    which of a promoted leaf's cells a slot actually carries. A non-datapath stored value (the Unbound left by a
+    deferred producer chain included) neither establishes nor violates, in the scalar and aggregate arms alike; the
+    W/D join owns it.
     """
     if isinstance(reset, Reference):
         return reset, (

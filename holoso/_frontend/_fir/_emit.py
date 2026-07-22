@@ -174,6 +174,7 @@ def lower_fir(kernel: object) -> Hir:
         result.construction_schemas,
         result.state_resets,
         result.runtime_state,
+        result.state_livein,
         result.route_plans,
     )
     return _Emitter(result).emit()
