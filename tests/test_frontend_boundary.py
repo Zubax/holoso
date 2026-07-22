@@ -525,3 +525,58 @@ def test_nan_constant_is_a_located_rejection() -> None:
     location = excinfo.value.location
     assert location is not None and location.filename == __file__
     assert location.line is not None and 'return float("nan")' in location.line
+
+
+# The five return-contract refusals below moved into the definitive resolver in M6 and were found unpinned by
+# mutation testing there: breaking each at its old emission site failed no committed test. They are pinned here
+# by the public class and the message, so a later phase move is free while a lost refusal is not.
+
+
+def test_nested_scalar_contract_against_an_aggregate_leaf_is_rejected() -> None:
+    def f(a: float) -> tuple[float, float]:
+        return (a, a), a  # type: ignore[return-value]
+
+    with pytest.raises(UnsupportedConstruct, match="declared a scalar, returns an aggregate"):
+        lower(f)
+
+
+def test_record_declared_but_a_plain_tuple_returned_is_rejected() -> None:
+    @dataclasses.dataclass(frozen=True)
+    class Point:
+        x: float
+        y: float
+
+    def f(a: float) -> Point:
+        return (a, a)  # type: ignore[return-value]
+
+    with pytest.raises(UnsupportedConstruct, match="declared record 'Point', returns a different value"):
+        lower(f)
+
+
+def test_tuple_declared_but_an_array_returned_is_rejected() -> None:
+    # An ndarray of matching geometry is a different CONTAINER, not RTL plumbing: the strict flavor rule.
+    def f(a: float) -> tuple[float, float]:
+        return np.array([a, a])  # type: ignore[return-value]
+
+    with pytest.raises(UnsupportedConstruct, match="declared a tuple, returns a different container"):
+        lower(f)
+
+
+def test_array_declared_but_nothing_returned_is_rejected() -> None:
+    from jaxtyping import Float64
+
+    def f(a: float) -> Float64[np.ndarray, "2"]:
+        if a > 0.0:
+            return  # type: ignore[return-value]
+        return  # type: ignore[return-value]
+
+    with pytest.raises(UnsupportedConstruct, match="declared an array return but returns nothing"):
+        lower(f)
+
+
+def test_tuple_declared_but_nothing_returned_is_rejected() -> None:
+    def f(a: float) -> tuple[float, float]:
+        return  # type: ignore[return-value]
+
+    with pytest.raises(UnsupportedConstruct, match="declared an aggregate return but returns nothing"):
+        lower(f)

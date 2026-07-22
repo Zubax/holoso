@@ -2673,3 +2673,41 @@ assert that owns "an executable block is unreachable from the entry", so that vi
 unlocated KeyError -- and only in the debug build, since asserts vanish under `-O`. The invariant is now
 asserted where `rank` is computed. That is the same inversion the gate's removal cited as its own rationale,
 reintroduced by the commit that cited it.
+
+
+M6 IS LANDED. 26 of emission's 42 refusal sites now fire in the DEFINITIVE resolution -- a new
+`holoso/_frontend/_fir/_settle.py` invoked as the last act of the fixpoint, after `_finalize` and after every
+refusal analysis already makes. NOT in the iterative transfer, which is X8's named trap and the seam that
+miscompiled. Three tables settle (never-returns, the state slot table, the return plan) and emission executes
+them rather than re-deriving anything. The refusal ratchet moved (42,42,42,48,112) -> (16,16,16,20,84) with all
+five numbers moving together, which is the shape only a genuine upstream move makes, and the debt ledger fell
+104 -> 87 edges as `_signature` left emission entirely.
+
+THE PHASE MOVE IS INVISIBLE ON THE CLASS AXIS because `AnalysisRejection` and `EmissionRejection` share bases,
+so both render as `UnsupportedConstruct` -- checked before assuming rather than after. Verified in the
+maintainer's tree: corpus 151/151, 567 targeted tests, mypy clean over 210 files, black clean, and the SWEEP
+STILL EXIT 0 WITH `_KNOWN_OPEN` EMPTY, which was the gate that mattered most: M5's closures had to survive a
+step that moves refusals across a phase boundary.
+
+SIXTEEN SITES DID NOT MOVE, AND THAT IS A RESULT RATHER THAN UNFINISHED WORK. They read the carried KIND of a
+node emission has already built, and the carried kind genuinely differs from the fact's -- an integer crossing
+a state boundary is float-carried while its fact still reads integer -- so no resolver over final facts can
+decide them without rebuilding the SSA.
+
+FIVE REFUSALS HAD NO KILLER AT ALL, and breaking them at their OLD emission site also failed nothing, so the
+move EXPOSED a pre-existing gap rather than creating one; they are pinned now, each verified to fail under its
+break. Three more could not be killed because they look unreachable -- the two `reset of unsupported type`
+sites and the reset carrier-overflow site -- and were carried over unchanged, with the search space stated
+(twelve `admit()` verdicts, twelve kernel shapes, three batches; in every reachable case an earlier check in
+the same resolution refuses first with a different message). Converting them to asserts without proof is
+exactly the blast-radius mistake this campaign keeps recording.
+
+TWO DIAGNOSTIC-ORDER CHANGES, REPORTED RATHER THAN RE-BASELINED, and the step falsified its own first claim
+that there were none -- by running the pre-M6 tree beside the post-M6 one instead of reasoning about phase
+order. A power-chain kernel now reports the return-contract refusal where HEAD reported the operand refusal,
+and a mixed-kind tuple return now blames leaf 1 at fact level where HEAD blamed leaf 0 at emitted-kind level.
+Neither is pinned by any committed evidence, both new diagnostics are true, and the kernels refuse either way.
+No test was added to pin the new selection, because that would be re-baselining rather than verifying.
+
+Landed as a PATCH rather than a file copy: the step's worktree was based on M5 and copying wholesale would have
+reverted the two M5-review fixes and deleted the oracle-hazard annotation. Confirmed present after applying.

@@ -177,6 +177,7 @@ from ._plan import (
     produce_route_plans,
 )
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
+from ._settle import SettledReturn, StateSlot, settle_block_order, settle_return, settle_state_slots
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
 from ._value import (
     MetaInt,
@@ -684,6 +685,10 @@ class ResidualUnit:
     state_resets: dict[StateLeaf, "StaticValue | str"] = field(default_factory=dict)
     provenance: dict[int, tuple[str, ...]] = field(default_factory=dict)
     store_origins: dict[StateLeaf, OriginStack] = field(default_factory=dict)
+    # Settled last, after everything above is final: the blocks emission walks and the slot each leaf gets.
+    emission_order: list[BlockId] = field(default_factory=list)
+    state_slots: dict[StateLeaf, list[StateSlot]] = field(default_factory=dict)
+    settled_return: SettledReturn | None = None
 
 
 def _validate(result: ResidualUnit, classified: Mapping[int, CallLowering]) -> None:
@@ -838,6 +843,7 @@ class Analyzer:
                 self._reject_executable_fails(result)
                 _validate(result, self._call_lowering)
                 self._finalize(result)
+                self._settle(result)
                 return result
             self._runtime_state = new_w
             self._state_livein = new_d
@@ -1281,6 +1287,21 @@ class Analyzer:
             result.call_plans,
             self._route_evidence,
             result.state_resets,
+        )
+
+    def _settle(self, result: ResidualUnit) -> None:
+        """
+        The last act of the definitive resolution: settle what emission will walk and what slots it will build,
+        and refuse here rather than in emission whatever the settled spine will not support. Runs after
+        `_finalize` because it consumes the store order, provenance and reset snapshots assembled there, and
+        last among the refusals so that everything analysis already decides keeps reporting first.
+        """
+        result.emission_order = settle_block_order(result.unit, result.executable_edges)
+        result.state_slots = settle_state_slots(
+            result.store_order, result.state_resets, result.provenance, result.store_origins
+        )
+        result.settled_return = settle_return(
+            result.unit, result.executable_blocks, result.block_in[result.unit.exit].facts
         )
 
     def _block_origin(self, unit: FunctionUnit, block_id: BlockId) -> OriginStack:

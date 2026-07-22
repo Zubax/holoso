@@ -11,7 +11,7 @@ import pytest
 
 from holoso import UnsupportedConstruct
 from holoso._frontend._fir._analysis_support import AnalysisRejection
-from holoso._frontend._fir._emit import EmissionRejection, lower_fir
+from holoso._frontend._fir._emit import lower_fir
 from holoso._hir import optimize
 from holoso._mir import MirInterpreter, lower as lower_to_mir
 from holoso._type import FloatFormat
@@ -351,8 +351,6 @@ def test_unanchored_global_components_are_a_located_rejection() -> None:
     # Multiple stateful owners are now supported when they are MEMBERS of the synthesized component (see
     # test_hierarchical_components.py). Stateful components reached only through module globals from a plain function
     # have no member path from a root, so they are rejected as unanchored rather than silently slotted.
-    from holoso._frontend._fir._emit import EmissionRejection
-
     class Filter:
         def __init__(self, reset: float) -> None:
             self.total = reset
@@ -364,7 +362,7 @@ def test_unanchored_global_components_are_a_located_rejection() -> None:
         _b.total = _b.total + x
         return _a.total + _b.total
 
-    with pytest.raises(EmissionRejection, match="unanchored reference"):
+    with pytest.raises(UnsupportedConstruct, match="unanchored reference"):
         lower_fir(kernel)
 
 
@@ -689,7 +687,7 @@ def test_non_returning_kernel_is_a_located_rejection() -> None:
         while True:  # no break, no return
             x = x + 1.0
 
-    with pytest.raises(EmissionRejection, match="never returns"):
+    with pytest.raises(UnsupportedConstruct, match="never returns"):
         lower_fir(kernel)
 
 
@@ -705,7 +703,7 @@ def test_never_returning_inlined_helper_blames_its_call_site() -> None:
     def kernel(value: float) -> float:
         return _spin_forever(value)
 
-    with pytest.raises(EmissionRejection, match=r"in _spin_forever\(\): .*never returns") as excinfo:
+    with pytest.raises(UnsupportedConstruct, match=r"in _spin_forever\(\): .*never returns") as excinfo:
         lower_fir(kernel)
     assert excinfo.value.location is not None
     assert "_spin_forever(value)" in (excinfo.value.location.line or "")
