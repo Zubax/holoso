@@ -56,6 +56,7 @@ from holoso import (
     FMulILog2OperatorFamily,
     FMulOperator,
     OpConfig,
+    UnsupportedConstruct,
 )
 
 from ._modelref import default_tolerance, format_edge_bits, within
@@ -665,3 +666,36 @@ def test_bounded_for_loop_polynomial_matches_reference() -> None:
         want = (((1.0 * x + 1.0) * x + 1.0) * x + 1.0) * x + 1.0
         rtol, atol = default_tolerance(FMT, op_count=10, magnitude=max(1.0, abs(want)))
         assert within(got, want, rtol, atol), f"horner x={x}: {got} vs {want}"
+
+
+def test_float_floor_division_and_modulo_are_refused_at_their_use_site() -> None:
+    # `//` and `%` on a runtime float have no float lowering, and the refusal is settled over the resolved graph
+    # rather than discovered mid-emission. Both survived every committed test before this one: the pair is the
+    # entire reachable complement of {+,-,*,/} at the float lowering, measured by an exhaustive enumeration of
+    # all thirteen binary operators against all nine operand-kind pairs.
+    def floor_div(x: float, y: float) -> float:
+        return x // y
+
+    def modulo(x: float, y: float) -> float:
+        return x % y
+
+    with pytest.raises(UnsupportedConstruct, match=r"floor_div:\d+:\d+: operator // is not lowerable yet"):
+        holoso.synthesize(floor_div, _ops(), name="floor_div")
+    with pytest.raises(UnsupportedConstruct, match=r"modulo:\d+:\d+: operator % is not lowerable yet"):
+        holoso.synthesize(modulo, _ops(), name="modulo")
+
+
+def test_an_integer_power_exponent_beyond_the_chain_bound_is_refused() -> None:
+    # A compile-time exponent expands to |e|-1 chained multiplies, so it is bounded like the loop unroller: the
+    # kernel must refuse rather than hang building a 100000-deep multiply chain. The FLOAT spelling of the same
+    # exponent was already pinned; the INTEGER spelling reaches a different branch and was not.
+    def positive(x: float) -> float:
+        return x**100000
+
+    def negative(x: float) -> float:
+        return x**-100000
+
+    with pytest.raises(UnsupportedConstruct, match=r"a compile-time power exponent of 100000 is too large"):
+        holoso.synthesize(positive, _ops(), name="pow_big")
+    with pytest.raises(UnsupportedConstruct, match=r"a compile-time power exponent of -100000 is too large"):
+        holoso.synthesize(negative, _ops(), name="pow_big_neg")

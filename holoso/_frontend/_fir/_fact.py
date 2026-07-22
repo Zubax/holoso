@@ -277,6 +277,35 @@ type Fact = Unbound | BoundFact | MaybeUnbound
 _STRUCTURAL = (StaticSeq, StaticArray, StaticRecord)
 
 
+def is_bool_fact(fact: "Fact | None") -> bool:
+    match fact:
+        case Residual(type=SemType.BOOL):
+            return True
+        case Known(value=value):
+            return isinstance(value, (StaticBool, NpBool))
+        case _:
+            return False
+
+
+def datapath_sem(fact: "Fact") -> SemType:
+    """
+    The kind a fact's value takes in the datapath, TOTAL over the domain: anything neither boolean nor integral
+    lands on FLOAT, the carrier every remaining sort materializes in.
+
+    This is the kind refusals are decided on, so settlement and emission must read it from one definition; a
+    second spelling that agreed on the corpus would let the two phases disagree about which kernels refuse.
+    It is deliberately not `_analysis_support`'s partial `_scalar_sem`, which answers None for the sorts this
+    one has to place.
+    """
+    if is_bool_fact(fact):
+        return SemType.BOOL
+    if isinstance(fact, Residual) and fact.type is SemType.INT:
+        return SemType.INT
+    if isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)):
+        return SemType.INT
+    return SemType.FLOAT
+
+
 def _array_dtype(array: np.ndarray) -> ArrayDType:
     if array.dtype == np.bool_:
         return ArrayDType.BOOL

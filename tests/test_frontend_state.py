@@ -5,6 +5,7 @@ import logging
 import re
 import sys
 import types
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -1102,47 +1103,51 @@ def test_state_port_order_follows_the_call_site_not_the_callee_line() -> None:
     assert state_ports == ["state_z__s", "state_a__s"]
 
 
-def test_a_store_diagnostic_names_the_first_executed_of_two_tied_stores() -> None:
+def test_a_store_diagnostic_names_the_store_that_executes_first() -> None:
     # Two stores at IDENTICAL source positions in different files, reached through one unrolled call site, tie
-    # on source position and can only be separated by something outside it. The per-store selection deliberately
-    # keeps `source_position` and therefore first-wins in transfer order, which is execution order: the loop
-    # runs beta first, so beta is named. Ordering those ties by frame identity instead would name alpha here,
-    # purely because its filename sorts earlier -- a worse answer, and the reason that conversion was reverted.
-    # This governs the per-round store map only. The promotion pick orders a SET and so must be total, which
-    # means it does break the identical tie by filename; the same helper pair reached on the latch path names
-    # alpha. The two paths differ on purpose, and neither is a general "first-executed" guarantee.
+    # on source position and can only be separated by something outside it. What separates them is TRANSFER
+    # ORDER, which is execution order, so swapping the loop swaps the file named. Attributing by frame identity
+    # instead would name alpha in BOTH directions, purely because its filename sorts earlier -- which is what
+    # the second half of this test falsifies, and the reason that conversion was reverted.
+    #
+    # THE MECHANISM IS THE SINGLE RECORDING, NOT A TIE-BREAK, and the earlier version of this test asserted the
+    # opposite in a comment it never reached. Measured at the recording site: exactly ONE store to `s` is
+    # recorded before the verdict fires, because the store transfer calls `_state_reset_fact` for the same store
+    # it has just recorded, and an unsupported reset refuses there. A wide-int prologue was present to "defer the
+    # first store's verdict so both are recorded"; it defers nothing here and is gone.
+    #
+    # The tie-break comparison itself is UNWITNESSED, recorded here rather than papered over. It does run and it
+    # does decide -- 3 decisions per tied kernel, keeping the first-executed origin -- but nothing observes the
+    # result. Both mutants (always overwrite, never overwrite) leave every one of this file's 116 tests passing
+    # and every diagnostic in a 573-kernel corpus byte-identical. The mechanism: the per-round map is read only
+    # by `_state_origin`, whose refusing consumers are the snapshot walk and the reset validations, and all of
+    # those run from the store transfer immediately after that same store's recording -- so for any leaf the
+    # verdict is settled while exactly one store stands recorded. Searched over aggregate, int and bool resets,
+    # conditional and loop-nested stores, cross-file slot collisions, missing attributes and a `del`.
     from tests import _store_alpha, _store_beta
 
     _assert_store_helpers_tie()
 
-    class Tied:
-        def __init__(self) -> None:
-            self.mode = True
-            self.t = 0.0
-            self.s = (1.0, 2.0)  # an unsupported reset, so a store to `s` draws the verdict
+    def make(beta_first: bool) -> Callable[..., object]:
+        class Tied:
+            def __init__(self) -> None:
+                self.s = (1.0, 2.0)  # an unsupported reset, so a store to `s` draws the verdict
 
-        def step(self, x: float, flag: bool) -> float:
-            # The wide-int prologue defers the first store's verdict, so BOTH stores are recorded before the
-            # selection runs -- without it the verdict fires at the first store and the tie never arises.
-            if self.mode:
-                u: float = 2**53 + 1
-                q: float = 2**62
-            else:
-                u = x
-                q = x
-            self.t = float(u)
-            span = np.array([q, x])
-            for put in (_store_beta.put, _store_alpha.put):
-                put(self, x + span.shape[0])
-            self.mode = flag
-            return x
+            def step(self, x: float) -> float:
+                order = (_store_beta.put, _store_alpha.put) if beta_first else (_store_alpha.put, _store_beta.put)
+                for put in order:
+                    put(self, x)
+                return x
 
-    with pytest.raises(UnsupportedConstruct, match="unsupported reset type") as refusal:
-        holoso.synthesize(Tied().step, default_ops(FloatFormat(8, 23)), name="tied_stores")
-    assert "in put():" in str(refusal.value)  # both helpers render identically; only the file separates them
-    located = refusal.value
-    assert isinstance(located, LocatedRejection)
-    assert located.origin.site.file.endswith("_store_beta.py")
+        return Tied().step
+
+    for beta_first, expected in ((True, "_store_beta.py"), (False, "_store_alpha.py")):
+        with pytest.raises(UnsupportedConstruct, match="unsupported reset type") as refusal:
+            holoso.synthesize(make(beta_first), default_ops(FloatFormat(8, 23)), name="tied_stores")
+        assert "in put():" in str(refusal.value)  # both helpers render identically; only the file separates them
+        located = refusal.value
+        assert isinstance(located, LocatedRejection)
+        assert located.origin.site.file.endswith(expected)
 
 
 def test_a_verdict_names_the_live_store_not_the_raise_guarded_one() -> None:

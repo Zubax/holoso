@@ -885,6 +885,14 @@ def enforce_storage_schemas(
     if violations:
         _, message, origin = min(violations, key=lambda item: item[0])
         raise AnalysisRejection(message, origin)
+    # The stranded key is (partial position, message), so it decides everything except which FILE a
+    # same-position same-message pair names -- and that residue resolves by `pending_bridge` insertion order,
+    # which is transfer order, so the site is hash-seed stable even where the key ties. THIS IS NOT A WITNESSED
+    # CLAIM: the branch itself resisted construction. Over 573 kernels the bridge holds at most ONE entry and
+    # the stranded list is never non-empty, and eight further shapes aimed at it -- a dead-arm store, tied
+    # cross-file helper stores plain, guarded on a promoting flag, inside a zero-trip loop, and across two
+    # leaves -- all reported the in-graph violation instead. So the ordering here is unexercised rather than
+    # shown to be immaterial, which is the honest state and the reason it is written down.
     stranded = [(message, origin) for origin, message in pending_bridge.items() if origin not in surviving_origins]
     if stranded:
         message, origin = min(stranded, key=lambda entry: (entry[1].position, entry[0]))

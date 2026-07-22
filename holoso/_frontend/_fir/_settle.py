@@ -22,7 +22,10 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+import numpy as np
+
 from ..._hir import BoolConst, FloatConst, IntConst
+from ..._util import RelationalOp
 from ._analysis_support import AnalysisRejection
 from ._fact import (
     AggregateFact,
@@ -37,28 +40,42 @@ from ._fact import (
     RecordField,
     RecordLayout,
     Reference,
+    Residual,
     StructuralIndex,
     StructuralLayout,
     TupleIndex,
     TupleLayout,
     ValueLayout,
     child_layouts,
+    datapath_sem,
     leaf_paths,
     normalize_static,
 )
 from ._ir import (
     BindingId,
     BlockId,
+    Branch,
     FunctionUnit,
+    Op,
     OriginStack,
     Place,
+    PyBin,
+    PyCall,
+    PyCompare,
+    PyNot,
+    PySelect,
     PyStoreAttr,
+    PyTruth,
+    PyUn,
     ReturnPlace,
+    SelectMode,
     StateLeaf,
     StoreOrder,
     StorePlace,
     executable_rpo,
 )
+from ._opsem import BinOp
+from ._plan import CallLowering, CallPlan, ConstantCell, PlanSite, RoutePlan
 from ._signature import (
     ArrayReturn,
     ListReturn,
@@ -69,7 +86,7 @@ from ._signature import (
     VariadicTupleReturn,
     VoidReturn,
 )
-from ._value import SemType, StaticValue, as_python, datapath_value
+from ._value import MetaInt, NpFloat, NpInt, SemType, StaticFloat, StaticValue, as_python, datapath_value
 
 _logger = logging.getLogger(__name__)
 
@@ -348,10 +365,258 @@ def settle_return(unit: FunctionUnit, executable_blocks: set[BlockId], exit_fact
     return SettledReturn(ReturnsLeaves(rows), origin)
 
 
+_MAX_POWER_CHAIN = 1024
+"""A literal power expands to |exponent|-1 chained multiplies; this bounds that expansion so ``x**(10**9)``
+refuses instead of hanging, while leaving any realistic exponent (a degree-N monomial) free to expand."""
+
+_FLOAT_BINARY = (BinOp.ADD, BinOp.SUB, BinOp.MUL, BinOp.DIV)
+
+
+def settle_use_sites(
+    unit: FunctionUnit,
+    emission_order: list[BlockId],
+    executable_edges: set[tuple[BlockId, BlockId]],
+    binding_facts: dict[BindingId, Fact],
+    call_plans: Mapping[BindingId, CallPlan],
+    route_plans: Mapping[PlanSite, RoutePlan],
+) -> None:
+    """
+    Every refusal that is a function of an op and the FINAL facts of its operands, decided over the resolved
+    graph in the order emission will walk it.
+
+    These used to fire from inside emission, one materialized operand at a time. They move here as ONE group
+    rather than piecemeal because they are ORDER-COUPLED: a kernel whose earlier op materializes an
+    unrepresentable constant and whose later op raises to an unexpandable power reports the constant today, and
+    moving only the power check would silently re-attribute it. Measured on four such kernels before the move.
+
+    What decides each verdict is the op's shape plus `binding_facts`, both final here, so nothing speculative
+    and nothing from the deferral net can reach this walk -- the property that makes it a settlement rather than
+    a second transfer. The kinds operands materialize in are re-derived from the same `datapath_sem` the emitter
+    reads, so the two phases cannot disagree about which kernels refuse.
+    """
+    for block_id in emission_order:
+        block = unit.blocks[block_id]
+        for index, op in enumerate(block.ops):
+            _settle_op(op, binding_facts, call_plans, route_plans, PlanSite(block_id, index))
+        terminator = block.terminator
+        if isinstance(terminator, Branch):
+            live = [t for t in (terminator.then_target, terminator.else_target) if (block_id, t) in executable_edges]
+            if len(live) != 1:
+                _settle_materialization(binding_facts[terminator.cond], SemType.BOOL, terminator.origin)
+
+
+def _settle_op(
+    op: Op,
+    facts: dict[BindingId, Fact],
+    call_plans: Mapping[BindingId, CallPlan],
+    route_plans: Mapping[PlanSite, RoutePlan],
+    site: PlanSite,
+) -> None:
+    match op:
+        case PyBin(dst=dst, op=bin_op, lhs=lhs, rhs=rhs, origin=origin):
+            _settle_binary(facts[dst], bin_op, facts[lhs], facts[rhs], origin)
+        case PyUn(dst=dst, operand=operand, origin=origin):
+            result = facts[dst]
+            if isinstance(result, Known):
+                return
+            if isinstance(result, AggregateFact):
+                source = facts[operand]
+                assert isinstance(source, AggregateFact)
+                for ordinal, leaf in enumerate(result.leaves):
+                    if isinstance(leaf, Residual):
+                        _settle_materialization(source.leaves[ordinal], SemType.FLOAT, origin)
+                return
+            kind = SemType.INT if result == Residual(SemType.INT) else SemType.FLOAT
+            _settle_materialization(facts[operand], kind, origin)
+        case PyCompare(dst=dst, op=rel, lhs=lhs, rhs=rhs, origin=origin):
+            _settle_compare(facts[dst], rel, facts[lhs], facts[rhs], origin)
+        case PyNot(dst=dst, operand=operand, origin=origin) | PyTruth(dst=dst, operand=operand, origin=origin):
+            if not isinstance(facts[dst], Known):
+                _settle_materialization(facts[operand], None, origin)
+        case PySelect(dst=dst, mode=mode, cond=cond, lhs=lhs, rhs=rhs, origin=origin):
+            result = facts[dst]
+            if isinstance(result, (Known, Reference)) or isinstance(facts[cond], Known):
+                return  # a folded identity, or a settled condition the route plan resolves
+            assert not isinstance(result, AggregateFact)
+            _settle_materialization(facts[cond], SemType.BOOL, origin)
+            kind = datapath_sem(result)
+            then_binding, else_binding = (rhs, lhs) if mode is SelectMode.AND else (lhs, rhs)
+            _settle_materialization(facts[then_binding], kind, origin)
+            _settle_materialization(facts[else_binding], kind, origin)
+        case PyCall(dst=dst, args=args, origin=origin):
+            _settle_call(dst, list(args), facts, call_plans, origin)
+        case _:
+            pass  # every remaining op either folds entirely or materializes only through its route plan
+    _settle_route_constants(route_plans, site, op.origin)
+
+
+def _settle_binary(result: Fact, bin_op: BinOp, lhs: Fact, rhs: Fact, origin: OriginStack) -> None:
+    if isinstance(result, Known):
+        return  # the analyzer folded it
+    if isinstance(result, AggregateFact):
+        if not isinstance(result.layout, ArrayLayout):
+            return  # a sequence concat or repeat is pure routing
+        for ordinal, leaf in enumerate(result.leaves):
+            if not isinstance(leaf, Residual):
+                continue
+            for side in (lhs, rhs):
+                atom = side.leaves[ordinal] if isinstance(side, AggregateFact) else side
+                _settle_materialization(atom, SemType.FLOAT, origin)
+            _settle_float_operator(bin_op, origin)
+        return
+    if bin_op is BinOp.POW:
+        _settle_power(lhs, rhs, origin)
+        return
+    if result == Residual(SemType.INT) or result == Residual(SemType.BOOL):
+        kind = SemType.INT if result == Residual(SemType.INT) else SemType.BOOL
+        _settle_materialization(lhs, kind, origin)
+        _settle_materialization(rhs, kind, origin)
+        return
+    _settle_materialization(lhs, SemType.FLOAT, origin)
+    _settle_materialization(rhs, SemType.FLOAT, origin)
+    _settle_float_operator(bin_op, origin)
+
+
+def _settle_float_operator(bin_op: BinOp, origin: OriginStack) -> None:
+    if bin_op not in _FLOAT_BINARY:
+        raise AnalysisRejection(f"operator {bin_op.value} is not lowerable yet", origin)
+
+
+def _settle_power(base: Fact, exponent: Fact, origin: OriginStack) -> None:
+    """The multiply-chain expansion decided on the exponent, mirroring the lowering's own dispatch order."""
+    exponent_is_int = isinstance(exponent, Known) and isinstance(exponent.value, (MetaInt, NpInt))
+    power: int | None = None
+    if exponent_is_int:
+        assert isinstance(exponent, Known) and isinstance(exponent.value, (MetaInt, NpInt))
+        power = int(exponent.value.value)
+        if abs(power) > _MAX_POWER_CHAIN:
+            raise AnalysisRejection(f"a compile-time power exponent of {power} is too large to expand", origin)
+    elif isinstance(exponent, Known) and isinstance(exponent.value, (StaticFloat, NpFloat)):
+        exact = float(exponent.value.value)
+        if exact.is_integer():
+            if abs(exact) > _MAX_POWER_CHAIN:
+                raise AnalysisRejection(f"a compile-time power exponent of {exact:.0f} is too large to expand", origin)
+            power = int(exact)
+    if power is not None:
+        if exponent_is_int and datapath_sem(base) is SemType.INT and power >= 0:
+            if power != 0:
+                _settle_materialization(base, SemType.INT, origin)
+            return
+        if power != 0:
+            _settle_materialization(base, SemType.FLOAT, origin)
+        return
+    _settle_materialization(exponent, SemType.FLOAT, origin)
+    if isinstance(base, Known) and isinstance(base.value, (MetaInt, NpInt, StaticFloat, NpFloat)):
+        base_value = base.value.value
+        if base_value == 2:
+            return  # the common 2**e spelling costs one exp2 and never touches log2
+        if not base_value > 0:
+            raise AnalysisRejection("a power with a runtime exponent requires a positive base (log2 domain)", origin)
+    _settle_materialization(base, SemType.FLOAT, origin)
+
+
+def _settle_compare(result: Fact, rel: RelationalOp, lhs: Fact, rhs: Fact, origin: OriginStack) -> None:
+    if isinstance(result, Known):
+        return
+    assert not isinstance(result, AggregateFact), "elementwise comparisons reject at analysis"
+    lsem, rsem = datapath_sem(lhs), datapath_sem(rhs)
+    if lsem is SemType.BOOL or rsem is SemType.BOOL:
+        if lsem is not rsem:
+            raise AnalysisRejection("a comparison mixes a boolean and a non-boolean without a cast", origin)
+        if rel not in (RelationalOp.EQ, RelationalOp.NE):
+            raise AnalysisRejection("only == and != are defined between boolean values", origin)
+        kind = SemType.BOOL
+    else:
+        kind = SemType.INT if lsem is SemType.INT and rsem is SemType.INT else SemType.FLOAT
+    _settle_materialization(lhs, kind, origin)
+    _settle_materialization(rhs, kind, origin)
+
+
+def _settle_call(
+    dst: BindingId,
+    args: list[BindingId],
+    facts: dict[BindingId, Fact],
+    call_plans: Mapping[BindingId, CallPlan],
+    origin: OriginStack,
+) -> None:
+    from .._lib import Intrinsic, IntrinsicResultRule
+
+    plan = call_plans[dst]
+    if plan.lowering is CallLowering.CAST:
+        src, target = datapath_sem(facts[args[0]]), datapath_sem(facts[dst])
+        _settle_materialization(facts[args[0]], target if src is target else src, origin)
+        return
+    if plan.lowering is not CallLowering.INTRINSIC:
+        return  # FOLDED emits nothing; CONVERSION and CONSTRUCTION materialize only through their route plans
+    match_ = plan.intrinsic
+    assert isinstance(match_, Intrinsic)
+    all_int = all(datapath_sem(facts[arg]) is SemType.INT for arg in args)
+    if match_.result_rule is IntrinsicResultRule.ALWAYS_INT and all_int:
+        _settle_materialization(facts[args[0]], SemType.INT, origin)
+        return
+    kind = SemType.INT if match_.result_rule is IntrinsicResultRule.INT_OVERLOAD and all_int else SemType.FLOAT
+    for arg in args:
+        _settle_materialization(facts[arg], kind, origin)
+
+
+def _settle_route_constants(route_plans: Mapping[PlanSite, RoutePlan], site: PlanSite, origin: OriginStack) -> None:
+    """Every constant a route plan writes into a float cell passes the same carrier gate as a scalar operand."""
+    plan = route_plans.get(site)
+    if plan is None:
+        return
+    for action in plan.actions:
+        if isinstance(action, ConstantCell) and action.kind is SemType.FLOAT:
+            _carrier_conforms(as_python(action.value), origin)
+
+
+def _settle_materialization(fact: Fact, expected: SemType | None, origin: OriginStack) -> None:
+    """
+    One materialized operand. Only a Known value can refuse: a residual is already an emitted node, and the
+    kind coercion applied to it is the one check settlement cannot make (see `settle_return`).
+    """
+    if not isinstance(fact, Known):
+        return
+    if isinstance(fact.value, (MetaInt, NpInt)) and expected in (SemType.INT, None):
+        return  # an integer in an integer context stays an integer constant and never meets the carrier
+    concrete = as_python(fact.value)
+    if isinstance(concrete, (bool, np.bool_)):
+        return
+    if not isinstance(concrete, (int, float, np.integer, np.floating)):
+        raise AnalysisRejection(f"a {type(concrete).__name__} value cannot materialize in the datapath", origin)
+    _carrier_conforms(concrete, origin)
+
+
+def _carrier_conforms(concrete: object, origin: OriginStack) -> None:
+    """
+    A finite inexact integer (2**53 + 1) rounds into the binary64 carrier -- accepted C-style precision loss
+    under the fastmath charter. A value beyond the carrier range entirely (10**400) is a located rejection, and
+    so is a NaN, which the HIR constant domain would otherwise refuse unlocated deeper down.
+    """
+    try:
+        result = float(concrete)  # type: ignore[arg-type]
+    except OverflowError:
+        bits = int(concrete).bit_length()  # type: ignore[call-overload]  # never via str(): 4300-digit cap
+        raise AnalysisRejection(f"a {bits}-bit integer constant is beyond the binary64 carrier range", origin) from None
+    if math.isnan(result):
+        raise AnalysisRejection(
+            "Holoso cannot represent a NaN constant. Only [in]finite numbers are supported.", origin
+        )
+
+
 def _return_origin(unit: FunctionUnit, executable_blocks: set[BlockId]) -> OriginStack:
     """
     The earliest return store in source order (the implicit fall-off ``return None`` included), which is what a
     contract refusal is attributed to. The exit terminator only when no reachable path stores a return.
+
+    `SourcePosition` is a PARTIAL order, so this key can leave two candidates tied. It stays partial rather than
+    becoming `OriginOrder` because on THIS candidate set the residue is provably unobservable, which is measured
+    rather than assumed. Over 576 kernels the site sees 109 candidates and every one has a frame chain of depth
+    ONE: a callee's ``return`` never contributes a candidate, since inlining binds the call result and the root's
+    return store stays at the root's own statement. Two candidates therefore tie exactly when they share (line,
+    column), which two distinct ``return`` statements in one body cannot; the only way to mint a second op at one
+    coordinate is to CLONE the statement by unrolling or grafting, and a clone carries the identical origin.
+    Measured accordingly: ties do occur (a 3-way and a 4-way, both from unrolled returns) and in every one of
+    them all tied candidates are the SAME origin, so no choice is being made.
     """
     stores = [
         op.origin

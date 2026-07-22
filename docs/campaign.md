@@ -2976,3 +2976,85 @@ unconstructible. The check is left alone. Two incidental observations recorded r
 `MaybeUnbound` state leaf is checked only for `Local`, harmless today because no seed exists; and
 `_cell_carries_its_reset`'s "the canonical exit may leave unbound" branch looks unreachable by the same argument,
 which is reasoning and not measurement.
+
+
+M6'S UNFINISHED MOVE IS DONE: NINE OF THE SIXTEEN REFUSALS LEFT EMISSION, and the ratchet reads
+(42,42,42,48,112) -> (16,16,16,20,84) -> (5,5,5,9,73). `settle_use_sites` in `_settle.py` walks the executable
+ops in emission's own order and makes every refusal that is a function of an op plus the FINAL facts of its
+operands: the constant-carrier and NaN refusals, the non-datapath materialization, the two unlowerable
+operators, the three power bounds and the two boolean-comparison rules, plus the constants a route plan writes
+into float cells. Two more retired into proved assertions. Verified: corpus 151/151 unchanged, sweep exit 0 with
+`_KNOWN_OPEN` empty and all eight oracles OK, mypy over 211 files, black, 661 targeted tests.
+
+THE REVIEW'S COUNTS ARE CONFIRMED, AND ITS PARTITION IS NOT. Re-derived independently: FIVE sites call `type_of`
+(the three in the scalar materializer, plus the two return-kind checks) -- agrees. SEVEN are movable with no SSA
+rebuild and FOUR are fallbacks or duplicates -- agrees as a partition of the remaining eleven. What the review
+got wrong is that the seven are NOT INDEPENDENTLY MOVABLE. They are ORDER-COUPLED to each other, measured on
+four kernels (`x + 2**1024` then `** 100000`; the same with `//`; the NaN spelling; a negative-base power)
+which all report the CONSTANT today and would silently re-attribute to the operator refusal if only the
+operator check moved. That is the exact preemption the acceptance criteria forbid, and it is why the group
+moved as one. The two "duplicates" moved rather than being deleted: their twin lives in the ITERATIVE TRANSFER,
+which is X8's named trap, so deleting the definitive copy on the strength of the speculative one is backwards.
+Neutralizing the analyzer's transfer copies confirms the settlement copies catch every witness with byte-identical
+message and location -- they are shadowed, not dead.
+
+DIAGNOSTIC IDENTITY IS MEASURED, NOT ARGUED. A 573-kernel differential (the 32-kernel rejection corpus, the 36
+golden cases, 138 aimed probes, a 367-kernel state fuzz) against the pre-move tree: every rendered message,
+every location and every accepted kernel's HIR node count byte-identical, with the ONLY difference the internal
+class name, `EmissionRejection` -> `AnalysisRejection`, which both render as the public `UnsupportedConstruct`
+(checked, not assumed). Stable across five `PYTHONHASHSEED` values.
+
+THE TWO EXHAUSTIVE FALLBACKS ARE RETIRED ON AN ENUMERATION, not on a reading. 351 kernels (13 binary operators
+x 9 operand-kind pairs x 3 declared returns) plus the 9 cast pairs: the integer lowering is reached by exactly
+ten of the thirteen operators and handles all ten, and the three that never arrive each have a mechanism (POW
+dispatches to the chain expander first, MATMUL is refused by analysis as undefined for scalars, true division
+promotes to float). All nine cast pairs are reached and all nine are handled, and `SemType` is closed at three.
+
+THE FIVE THAT STAY ALL CONSUME `type_of`, AND DRIFT IS NOW MEASURED RATHER THAN CLAIMED: 117 instances over 558
+kernels of a fact reading integer beside a float-carried node, arriving through the SSA at a state boundary.
+The two return-kind checks see drift too -- 4 instances, which the review missed and an earlier corpus of mine
+also missed until it was widened, another instance of a count not seeing a category it does not measure. Theirs
+is emission's OWN constant-materialization choice, so a settlement could reproduce it, but only by mirroring
+that choice; and the message it would have to preserve says "returns float" for a kernel returning a Known
+INTEGER (`def k() -> bool: return 5`), which is a latent wrong-message defect recorded here rather than fixed,
+since fixing it is a diagnostic change and not this step's business.
+
+MUTATION-TESTED, ALL NINE, AT THEIR NEW SITES. Killed: the carrier overflow (2 tests), the NaN constant, both
+power-exponent bounds, the nonpositive base (2 tests), and -- after this step added them -- the float `//`/`%`
+refusal and the INTEGER power-exponent bound, which had NO KILLER AT ALL and join the five M6 found in the same
+state. Two survive because the analyzer's transfer twin fires first, with the backstop demonstrated above. One
+survives because it looks unreachable: the non-datapath materialization, searched over strings, ranges and
+slices in operand, truth, compare, select, cast, intrinsic, unary and branch position (11 shapes), every one
+refused earlier by "a non-numeric value reaches a runtime operation" or "the truth value of this object is not
+defined here", or folded away entirely. Stated as a failed search, NOT as unreachability, and left as a refusal
+rather than converted to an assert.
+
+THE VACUOUS TIED-STORE TEST IS FIXED, AND ITS COMMENT WAS FALSE IN A SECOND WAY. Confirmed by instrumenting the
+recording site: exactly ONE store to the leaf is recorded before the verdict fires, so the tie-break never ran
+and the "wide-int prologue defers the first store's verdict" prologue deferred nothing -- it is gone. The
+mechanism is that the store transfer calls `_state_reset_fact` for the same store it has just recorded, so an
+unsupported reset refuses with one recording standing. The test now pins what it does reach and does so
+falsifiably: the same helper pair in BOTH loop orders, asserting the named file follows execution order, which
+attribution by frame identity (alpha always, its filename sorting first) would fail. Killed by neutralizing
+`_state_origin`.
+
+AND THE COMPARISON ITSELF IS UNOBSERVABLE, which is worth more than the test was. It does run and it does decide
+-- 3 decisions per tied kernel, keeping the first-executed origin -- but BOTH mutants (always overwrite, never
+overwrite) leave all 116 tests in `test_frontend_state.py` passing and all 573 corpus diagnostics byte-identical.
+Mechanism: the per-round map is read only by `_state_origin`, whose refusing consumers are the snapshot walk and
+the reset validations, and every one of those runs from the store transfer immediately after that same store's
+recording. Left alone and written down.
+
+TASK 3 IS HALF CLOSED, AND THE HALVES DIFFER IN KIND. The RETURN-ORIGIN site now has a real WITNESS: a two-return
+kernel under a `-> None` contract reports the source-earliest return, and `min` -> `max` moves the diagnostic to
+the later line. Its partial-order residue also has a MECHANISM: over 576 kernels all 109 candidates have a frame
+chain of depth ONE, because a callee's return never becomes a candidate (inlining binds the call result), so two
+candidates tie only by sharing (line, column) -- impossible for two distinct statements and reachable only by
+CLONING one through unrolling, where every clone carries the identical origin. Measured: the ties that occur are
+3-way and 4-way from unrolled returns, and in each the tied candidates are ONE distinct origin, so the partial
+key never chooses. The STRANDED-BRIDGE site is NOT closed. Its key is (position, message), so the residue is
+only which FILE a same-position same-message pair names, and it resolves by insertion order, hence hash-seed
+stable -- but the branch resisted construction: over 573 kernels the bridge holds at most ONE entry and the
+stranded list is never non-empty, and eight further shapes aimed at it (a dead-arm store, tied cross-file helper
+stores plain, guarded on a promoting flag, in a zero-trip loop, across two leaves) all reported the in-graph
+violation instead. Recorded in the code as a failed search, explicitly not as a mechanism.

@@ -177,7 +177,14 @@ from ._plan import (
     produce_route_plans,
 )
 from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
-from ._settle import SettledReturn, StateCell, settle_block_order, settle_return, settle_state_slots
+from ._settle import (
+    SettledReturn,
+    StateCell,
+    settle_block_order,
+    settle_return,
+    settle_state_slots,
+    settle_use_sites,
+)
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
 from ._value import (
     MetaInt,
@@ -1348,6 +1355,16 @@ class Analyzer:
         )
         result.settled_return = settle_return(
             result.unit, result.executable_blocks, result.block_in[result.unit.exit].facts
+        )
+        # Last of all, so every refusal above -- which is about the SPINE rather than about one op -- keeps
+        # reporting first, exactly as it did when these fired from inside emission.
+        settle_use_sites(
+            result.unit,
+            result.emission_order,
+            result.executable_edges,
+            result.binding_facts,
+            result.call_plans,
+            result.route_plans,
         )
 
     def _block_origin(self, unit: FunctionUnit, block_id: BlockId) -> OriginStack:

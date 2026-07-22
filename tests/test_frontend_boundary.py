@@ -580,3 +580,29 @@ def test_tuple_declared_but_nothing_returned_is_rejected() -> None:
 
     with pytest.raises(UnsupportedConstruct, match="declared an aggregate return but returns nothing"):
         lower(f)
+
+
+def test_a_return_contract_refusal_names_the_source_earliest_return() -> None:
+    # `_return_origin` picks among every executable return store with a PARTIAL key (source position, no frame
+    # identities), and nothing pinned the pick. Two returns in one body are the shape that makes it observable:
+    # taking the last instead moves the diagnostic to line 4, which is what this falsifies.
+    #
+    # The key's partiality is unobservable here rather than merely unwitnessed, and the argument is a mechanism.
+    # A callee's return never becomes a candidate -- inlining binds the call result, so the root's return store
+    # stays at the root's own statement -- which is why all 109 candidates measured over 576 kernels have a
+    # frame chain of depth one. Two candidates can therefore tie only by sharing (line, column), impossible for
+    # two distinct statements and reachable only by CLONING one through unrolling or grafting, where every clone
+    # carries the identical origin. Measured: the ties that do occur are 3-way and 4-way from unrolled returns,
+    # and in each the tied candidates are one distinct origin, so the partial key never actually chooses.
+    def two_returns(c: bool, x: float) -> None:
+        if c:
+            return x  # type: ignore[return-value]
+        return x  # type: ignore[return-value]
+
+    with pytest.raises(UnsupportedConstruct, match="annotated '-> None' but returns a value") as refusal:
+        lower(two_returns)
+    location = refusal.value.location
+    assert location is not None
+    assert location.line is not None and location.line.strip().startswith("return x")
+    first, last = two_returns.__code__.co_firstlineno + 2, two_returns.__code__.co_firstlineno + 3
+    assert location.lineno == first, f"named line {location.lineno}; the later return is at {last}"

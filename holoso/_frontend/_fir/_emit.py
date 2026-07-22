@@ -95,6 +95,8 @@ from ._fact import (
     Residual,
     StructuralIndex,
     TupleIndex,
+    datapath_sem,
+    is_bool_fact,
     leaf_paths,
 )
 from ._ir import (
@@ -194,19 +196,11 @@ def lower_fir(kernel: object) -> Hir:
     return _Emitter(result).emit()
 
 
-def _carrier_float(value: object, origin: OriginStack) -> float:
+def _carrier_float(value: object) -> float:
     # A finite inexact integer (2**53 + 1) rounds into the binary64 carrier -- accepted C-style precision loss under
-    # the fastmath charter. A value beyond the carrier range entirely (10**400) is a located rejection, and so is a
-    # NaN, which the HIR constant domain would otherwise refuse unlocated deeper down.
-    try:
-        result = float(value)  # type: ignore[arg-type]
-    except OverflowError:
-        bits = int(value).bit_length()  # type: ignore[call-overload]  # never via str(): 4300-digit conversion cap
-        raise EmissionRejection(f"a {bits}-bit integer constant is beyond the binary64 carrier range", origin) from None
-    if math.isnan(result):
-        raise EmissionRejection(
-            "Holoso cannot represent a NaN constant. Only [in]finite numbers are supported.", origin
-        )
+    # the fastmath charter. Settlement has already refused every value that cannot land here at all.
+    result = float(value)  # type: ignore[arg-type]
+    assert not math.isnan(result), "settlement refuses a NaN constant before emission"
     return result
 
 
@@ -235,16 +229,6 @@ def _port_path(path: LeafPath) -> list[int | str]:
             case RecordField(name=name):
                 keys.append(name)
     return keys
-
-
-def _is_bool_fact(fact: Fact | None) -> bool:
-    match fact:
-        case Residual(type=SemType.BOOL):
-            return True
-        case Known(value=value):
-            return isinstance(value, (StaticBool, NpBool))
-        case _:
-            return False
 
 
 class _Emitter:
@@ -392,21 +376,11 @@ class _Emitter:
     @staticmethod
     def _fact_port_type(fact: Fact | None) -> Type:
         assert not isinstance(fact, AggregateFact), "an aggregate parameter must decompose before port typing"
-        if _is_bool_fact(fact):
+        if is_bool_fact(fact):
             return BoolType()
         if fact == Residual(SemType.INT) or (isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt))):
             return IntType()
         return FloatType()
-
-    @staticmethod
-    def _fact_sem(fact: Fact) -> SemType:
-        if _is_bool_fact(fact):
-            return SemType.BOOL
-        if isinstance(fact, Residual) and fact.type is SemType.INT:
-            return SemType.INT
-        if isinstance(fact, Known) and isinstance(fact.value, (MetaInt, NpInt)):
-            return SemType.INT
-        return SemType.FLOAT
 
     @contextmanager
     def _at(self, block: FirBlockId) -> Iterator[None]:
@@ -488,9 +462,10 @@ class _Emitter:
 
         if isinstance(concrete, (bool, np.bool_)):
             return self._builder.bool_const(bool(concrete))
-        if isinstance(concrete, (int, float, np.integer, np.floating)):
-            return self._builder.float_const(_carrier_float(concrete, self._origin))
-        raise EmissionRejection(f"a {type(concrete).__name__} value cannot materialize in the datapath", self._origin)
+        assert isinstance(
+            concrete, (int, float, np.integer, np.floating)
+        ), "settlement refuses a non-datapath value at the use site that would materialize it"
+        return self._builder.float_const(_carrier_float(concrete))
 
     def _route(self, block: FirBlockId, site: PlanSite) -> None:
         """
@@ -539,7 +514,7 @@ class _Emitter:
                 assert isinstance(value, (StaticBool, NpBool))
                 return self._builder.bool_const(bool(value.value))
             case SemType.FLOAT:
-                return self._builder.float_const(_carrier_float(as_python(value), self._origin))
+                return self._builder.float_const(_carrier_float(as_python(value)))
 
     def _fact(self, binding: BindingId) -> Fact:
         fact = self._result.binding_facts.get(binding)
@@ -621,12 +596,9 @@ class _Emitter:
                 compare_fact = self._fact(dst)
                 assert not isinstance(compare_fact, AggregateFact), "elementwise comparisons reject at analysis"
                 if not isinstance(compare_fact, Known):
-                    lsem, rsem = self._fact_sem(self._fact(lhs)), self._fact_sem(self._fact(rhs))
+                    lsem, rsem = datapath_sem(self._fact(lhs)), datapath_sem(self._fact(rhs))
                     if lsem is SemType.BOOL or rsem is SemType.BOOL:
-                        if lsem is not rsem:
-                            raise EmissionRejection(
-                                "a comparison mixes a boolean and a non-boolean without a cast", self._origin
-                            )
+                        assert lsem is rsem, "settlement refuses a comparison mixing a boolean and a non-boolean"
                         left = self._materialize(fir_id, lhs, SemType.BOOL)
                         right = self._materialize(fir_id, rhs, SemType.BOOL)
                         define(dst, self._bool_compare(rel, left, right))  # bool ==/!= is XNOR/XOR
@@ -658,7 +630,7 @@ class _Emitter:
                     assert not isinstance(result_fact, AggregateFact)
                     then_binding, else_binding = (rhs, lhs) if mode is SelectMode.AND else (lhs, rhs)
                     condition = self._materialize(fir_id, cond, SemType.BOOL)
-                    sem = self._fact_sem(result_fact)
+                    sem = datapath_sem(result_fact)
                     operator: Operator = (
                         BoolSelect() if sem is SemType.BOOL else IntSelect() if sem is SemType.INT else Select()
                     )
@@ -690,7 +662,7 @@ class _Emitter:
         match_ = plan.intrinsic
         assert isinstance(match_, Intrinsic)
         rule = match_.result_rule
-        all_int = all(self._fact_sem(self._fact(arg)) is SemType.INT for arg in args)
+        all_int = all(datapath_sem(self._fact(arg)) is SemType.INT for arg in args)
         if rule is IntrinsicResultRule.ALWAYS_INT and all_int:
             return self._materialize(block, args[0], SemType.INT)  # rounding an integer is the integer (identity)
         if rule is IntrinsicResultRule.ALWAYS_INT:
@@ -807,6 +779,7 @@ class _Emitter:
             self._write(block, _LeafPlace(Local(dst), ordinal), self._emit_float_binary(bin_op, left, right))
 
     def _emit_float_binary(self, bin_op: BinOp, left: int, right: int) -> int:
+        assert bin_op in (BinOp.ADD, BinOp.SUB, BinOp.MUL, BinOp.DIV), "settlement refuses every other float operator"
         match bin_op:
             case BinOp.ADD:
                 return self._builder.operation(FloatAdd(), [left, right])
@@ -814,16 +787,14 @@ class _Emitter:
                 return self._builder.operation(FloatAdd(), [left, self._builder.operation(FloatNeg(), [right])])
             case BinOp.MUL:
                 return self._builder.operation(FloatMul(), [left, right])
-            case BinOp.DIV:
-                return self._builder.operation(FloatDiv(), [left, right])
             case _:
-                raise EmissionRejection(f"operator {bin_op.value} is not lowerable yet", self._origin)
+                return self._builder.operation(FloatDiv(), [left, right])
 
     def _emit_cast(self, block: FirBlockId, arg: BindingId, dst: BindingId) -> int:
         # A runtime scalar float()/int()/bool() cast, kinded by the FINAL facts (the analyzer's optimistic revisits
         # may have seen either kind mid-flight). A same-kind cast is the identity; int<->float is truncation toward
         # zero / promotion; bool casts are a truthiness test (to bool) or a 0/1 widening (from bool).
-        src, target = self._fact_sem(self._fact(arg)), self._fact_sem(self._fact(dst))
+        src, target = datapath_sem(self._fact(arg)), datapath_sem(self._fact(dst))
         if src is target:
             return self._materialize(block, arg, target)
         match (src, target):
@@ -837,10 +808,11 @@ class _Emitter:
                 return self._builder.operation(FloatToBool(), [self._materialize(block, arg, SemType.FLOAT)])
             case (SemType.BOOL, SemType.INT):
                 return self._builder.operation(BoolToInt(), [self._materialize(block, arg, SemType.BOOL)])
-            case (SemType.INT, SemType.BOOL):
-                return self._builder.operation(IntToBool(), [self._materialize(block, arg, SemType.INT)])
             case _:
-                raise EmissionRejection(f"conversion from {src.value} to {target.value} is not supported", self._origin)
+                # `SemType` is closed at three, so the six cross-kind pairs above plus the same-kind identity
+                # cover all nine; an exhaustive enumeration reaches every one of them.
+                assert (src, target) == (SemType.INT, SemType.BOOL), f"no cast lowers {src.value} to {target.value}"
+                return self._builder.operation(IntToBool(), [self._materialize(block, arg, SemType.INT)])
 
     def _emit_int_binary(self, bin_op: BinOp, left: int, right: int) -> int:
         # Signed-integer arithmetic in the integer datapath. Floor-division and modulo are floor-coupled (one hardware
@@ -864,10 +836,14 @@ class _Emitter:
                 return self._builder.operation(IntAnd(), [left, right])
             case BinOp.BITOR:
                 return self._builder.operation(IntOr(), [left, right])
-            case BinOp.BITXOR:
-                return self._builder.operation(IntXor(), [left, right])
             case _:
-                raise EmissionRejection(f"integer operator {bin_op.value!r} is not lowerable yet", self._origin)
+                # Exhaustive over what can arrive: an exhaustive 351-kernel enumeration (13 operators x 9 operand
+                # kind pairs x 3 declared returns) reaches this lowering with exactly the ten cases above. The
+                # three that never arrive each have a mechanism -- POW dispatches to the chain expander before
+                # this call, MATMUL is refused by analysis as undefined for scalars, and true division promotes
+                # its result to float, so it is never an integer-typed result.
+                assert bin_op is BinOp.BITXOR, f"integer operator {bin_op.value!r} reached the integer lowering"
+                return self._builder.operation(IntXor(), [left, right])
 
     def _emit_power(self, block: FirBlockId, base: BindingId, exponent: BindingId) -> int:
         # A base raised to a COMPILE-TIME integer exponent expands to a multiply chain (x**3 -> x*x*x) in the base's
@@ -882,20 +858,14 @@ class _Emitter:
         if exponent_is_int:
             assert isinstance(exp_fact, Known) and isinstance(exp_fact.value, (MetaInt, NpInt))
             power = int(exp_fact.value.value)
-            if abs(power) > _MAX_POWER_CHAIN:
-                raise EmissionRejection(
-                    f"a compile-time power exponent of {power} is too large to expand", self._origin
-                )
+            assert abs(power) <= _MAX_POWER_CHAIN, "settlement bounds the compile-time exponent"
         elif isinstance(exp_fact, Known) and isinstance(exp_fact.value, (StaticFloat, NpFloat)):
             exact = float(exp_fact.value.value)
             if exact.is_integer():  # only a FRACTIONAL float exponent falls to the exp2/log2 path below
-                if abs(exact) > _MAX_POWER_CHAIN:
-                    raise EmissionRejection(
-                        f"a compile-time power exponent of {exact:.0f} is too large to expand", self._origin
-                    )
+                assert abs(exact) <= _MAX_POWER_CHAIN, "settlement bounds the compile-time exponent"
                 power = int(exact)
         if power is not None:
-            if exponent_is_int and self._fact_sem(self._fact(base)) is SemType.INT and power >= 0:
+            if exponent_is_int and datapath_sem(self._fact(base)) is SemType.INT and power >= 0:
                 if power == 0:
                     return self._builder.int_const(1)  # x**0 is the INTEGER 1 on an integer base, as in Python
                 source = self._materialize(block, base, SemType.INT)
@@ -924,10 +894,7 @@ class _Emitter:
             base_value = base_fact.value.value
             if base_value == 2:
                 return self._builder.operation(FloatExp2(), [exponent_vid])
-            if not base_value > 0:
-                raise EmissionRejection(
-                    "a power with a runtime exponent requires a positive base (log2 domain)", self._origin
-                )
+            assert base_value > 0, "settlement refuses a nonpositive Known base under a runtime exponent"
         log_base = self._builder.operation(FloatLog2(), [self._materialize(block, base, SemType.FLOAT)])
         return self._builder.operation(FloatExp2(), [self._builder.operation(FloatMul(), [exponent_vid, log_base])])
 
@@ -973,8 +940,7 @@ class _Emitter:
         return self._builder.operation(BoolNot(), [condition])
 
     def _bool_compare(self, rel: RelationalOp, left: int, right: int) -> int:
-        if rel not in (RelationalOp.EQ, RelationalOp.NE):
-            raise EmissionRejection("only == and != are defined between boolean values", self._origin)
+        assert rel in (RelationalOp.EQ, RelationalOp.NE), "settlement refuses every other relation between booleans"
         xor = self._builder.operation(BoolXor(), [left, right])
         return xor if rel is RelationalOp.NE else self._builder.operation(BoolNot(), [xor])
 

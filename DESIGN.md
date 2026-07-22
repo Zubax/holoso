@@ -194,9 +194,10 @@ callee's internal lines) and is only a partial order; the total order appends th
 which is what a selection over an unordered set needs and what a selection with a deterministic order to inherit
 must not use. Every front-end rejection
 (build, analysis, library, emission) also populates the public `SynthesisError.location` with the primary frame's
-file, position, and source line text. Emission attributes each refusal to the op it was lowering; the settling
-step attributes state-slot refusals to the leaf's first store and return-contract refusals to the earliest
-return store, both of which are properties of the resolved graph rather than of an emission cursor.
+file, position, and source line text. Emission attributes its remaining refusals to the op it was lowering; the
+settling step attributes state-slot refusals to the leaf's first store, return-contract refusals to the
+earliest return store, and use-site refusals to the op that would have materialized the operand -- all
+properties of the resolved graph rather than of an emission cursor.
 
 The analyzer is SCCP-style optimistic executable-edge abstract interpretation over the FIR with flow-sensitive
 per-edge environments (strong updates, joins only over executable in-edges). Facts: Unbound | Known(StaticValue,
@@ -325,29 +326,42 @@ The plan carries every
 decision the analyzer owns: emission never re-derives a fold, never resolves the library registry, and never
 replays the transfer function -- nor does finalization, which would otherwise run every concrete library fold a
 second time, and with it any host callable that is not referentially transparent. It is not yet the whole
-contract: emission still decides cast, intrinsic and power policy from the final facts, and classifies operand
-kinds outside routing -- decisions the Stage-4 restructuring moves analyzer-side.
+contract: emission still classifies operand kinds outside routing -- a decision the Stage-4 restructuring moves
+analyzer-side.
 
 ### Settling the emission plan
 
 The last act of the definitive resolution settles what emission will walk and what it owes, and refuses there
 rather than mid-emission whatever the resolved spine will not support. A refusal made during emission is made
-too late: the compiler has already committed, and emission's job is to execute a plan mechanically. Three
-things settle. The BLOCK ORDER is the executable reverse postorder, and a unit whose canonical exit no path
-reaches refuses, attributed to the deepest reachable terminator so a never-returning helper blames its call
-site. The STATE SLOT TABLE names every leaf's cells from component provenance and sizes them from the reset
-snapshot, refusing an unanchored component and a name collision between distinct attributes; slot names are
-claimed in first-store source order, which is also the port ABI order. The RETURN PLAN decides the declared
-contract against what the exit actually carries -- shape, arity, array geometry, container flavor, and objects
-where numbers are declared -- and yields either nothing, one scalar of a declared kind, or one row per returned
-cell carrying its typed path and its declared kind.
+too late: the compiler has already committed, and emission's job is to execute a plan mechanically. Four things
+settle. The BLOCK ORDER is the executable reverse postorder, and a unit whose canonical exit no path reaches
+refuses, attributed to the deepest reachable terminator so a never-returning helper blames its call site. The
+STATE SLOT TABLE names every leaf's cells from component provenance and sizes them from the reset snapshot,
+refusing an unanchored component and a name collision between distinct attributes; slot names are claimed in
+first-store source order, which is also the port ABI order. The RETURN PLAN decides the declared contract
+against what the exit actually carries -- shape, arity, array geometry, container flavor, and objects where
+numbers are declared -- and yields either nothing, one scalar of a declared kind, or one row per returned cell
+carrying its typed path and its declared kind.
+
+The fourth is the USE SITES: a walk over the executable ops, in the order emission will visit them, making
+every refusal that is a function of an op and the final facts of its operands. That covers the constants a use
+site would have to materialize (a value beyond the binary64 carrier, a NaN, a value with no datapath form at
+all, including the constants a route plan writes into float cells), the two binary operators with no float
+lowering, the three bounds on power expansion, and the two boolean-comparison rules. These move as ONE GROUP
+because they are order-coupled: a kernel whose earlier op materializes an unrepresentable constant and whose
+later op raises to an unexpandable power must keep reporting the constant, so moving any one of them alone
+would silently re-attribute the diagnostic. Emission consequently asserts rather than refuses at each of those
+sites, and the kinds the walk reasons about come from the same `datapath_sem` the emitter reads -- one
+definition, because two spellings that agreed on the corpus would be free to disagree about which kernels
+refuse.
 
 What deliberately does NOT settle here is any refusal that reads an already-emitted node's type. The carried
 kind can differ from the fact's -- an integer crossing a state boundary is float-carried while its fact still
-reads integer -- so operand-kind refusals and the final leg of the return-kind check stay in emission, where
-the node exists. Moving them needs emission's own typing to become a settled table, which is a separate step.
-None of this belongs in the ITERATIVE transfer: there the facts are speculative and the deferral net is live,
-which is the seam that produced silent miscompiles. It belongs after stabilization, where the facts are final.
+reads integer -- so the operand-kind refusals in the scalar materializer and the final leg of the return-kind
+check stay in emission, where the node exists. Moving them needs emission's own typing to become a settled
+table, which is a separate step. None of this belongs in the ITERATIVE transfer: there the facts are
+speculative and the deferral net is live, which is the seam that produced silent miscompiles. It belongs after
+stabilization, where the facts are final.
 
 ### Call and attribute dispatch rows
 
