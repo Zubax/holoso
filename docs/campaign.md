@@ -2626,3 +2626,50 @@ OUTSTANDING: one diagnostic REGRESSED -- the unroll-clone `Subscript` variant no
 rather than the causal store, because the violating clone's block is no longer walked. All three affected
 kernels stay refused, located and truthful. cosim/synth/fuzz were not run locally (CI's job) and the
 review-loop has not run on M5.
+
+
+M5 REVIEW, CLAUDE HALF: NO FOURTH ROUTE FOUND, and the negative result is the strongest this campaign has
+recorded. ~250 kernels through the public API, comparing `out_0` across up to four transactions AND every
+`state_*` port against the Python component's post-transaction attributes -- which closes the sweep's own
+admitted hole, that a divergence confined to a state port is not gated. Search space stated: 108 generated
+(three prologues x 18 bodies x 2 flag values) plus hand-built batteries covering user-method grafts, nested
+grafts, grafts on speculated arms, grafts inside loop bodies, property getters including side-effecting ones,
+star-arg unpacking, matmul/transpose/reshape rewrites inside the seam, early returns, aggregate/list/
+sub-component state, bool state, signed zero, self-assignment near-misses, reference-valued state,
+multi-transaction accumulators, raises on speculated arms, and while/for/nested loops with state. Zero
+structural divergences, zero crashes. Termination measured at a CONSTANT THREE ROUNDS for every shape probed
+(call chains to depth 40, nested unrolls to 6x6, loops to 32 trips, staged growth to 16). Debug and `python -O`
+transcripts byte-identical across ~250 kernels. And the honest-refusal question is settled by cross-tree
+measurement: the two lost `loop_inner` accepts genuinely miscompiled pre-M5 (9007199254740992.0 against
+Python's ...94.0 and ...96.0), so refusing them is the fix, not its cost.
+
+BUT IT FOUND SOMETHING MORE IMPORTANT THAN A FOURTH ROUTE, and it forces a correction to how this campaign has
+described its own subject for weeks. The harm signature is reachable WITHOUT THE SEAM. Verified independently:
+a nine-line kernel whose state promotes CORRECTLY (`self.s = 1 + 2**-30`; `if flag: self.s = 7.0`;
+`if self.s > 1`) returns 10.0 in Python and 20.0 in E8M23 hardware. And a kernel with NO STATE AT ALL -- a
+plain local with the same shape -- does exactly the same. No deferral, no graft, no promotion fault.
+
+THAT IS THE DOCUMENTED FASTMATH CHARTER, NOT A DEFECT, and the distinction is the whole point. DESIGN.md rules
+that a folded constant "rounds into the target format like any other constant", and that constant TRUTHINESS is
+host-precision (the H3 ruling) -- a constant's truth is the host's, not the datapath's. So the front-door case
+is charter behaviour. What made the seam a genuine defect was the SPURIOUS promotion of a leaf Python never
+varies, turning a compile-time constant into a runtime slot; that is what M5 closed, and the distinction
+between "promotion that should not have happened" and "a constant that rounds" is the one the campaign should
+have been drawing all along.
+
+THE CONSEQUENCE IS LIVE AND IS NOW RECORDED IN THE TOOL. "Wrong in E8M23, correct in E11M52" was treated as the
+seam's fingerprint; it is not seam-specific, it is the ordinary fold-at-binary64 / compute-at-target
+approximation. With `_KNOWN_OPEN` empty and every oracle kernel value-checked with nothing tolerated, the FIRST
+oracle kernel anyone adds with an inexact reset will report a miscompile and fail the sweep for charter
+behaviour. The tool now says so, with the rule: keep oracle constants exactly representable in E8M23 unless the
+inexactness is the thing under test.
+
+TWO SMALLER DEFECTS FIXED. The restart signal compares the BLOCK SET, not the graph -- five fact-dependent
+in-place op rewrites mutate ops without adding a block and never signal, each baking a decision taken under
+optimistic facts into the graph the resolved round describes. Attacked five ways inside the seam without
+producing a wrong value, so it is a bound on the claim rather than a route; the claim is now stated as "the
+block set held still" where it is made. And `_finalize` bare-subscripted `rank[block_id]` per store BEFORE the
+assert that owns "an executable block is unreachable from the entry", so that violation would surface as an
+unlocated KeyError -- and only in the debug build, since asserts vanish under `-O`. The invariant is now
+asserted where `rank` is computed. That is the same inversion the gate's removal cited as its own rationale,
+reintroduced by the commit that cited it.

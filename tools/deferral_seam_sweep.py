@@ -127,6 +127,19 @@ _LOOP = {
 # one wrong answer becoming a different wrong answer, or the kernel's own Python result drifting while the
 # divergence still "matches", both mean the record has stopped describing the code -- which is how this seam's
 # earlier claims decayed.
+# THE FINGERPRINT IS NOT SEAM-SPECIFIC, measured after M5 and recorded here because an empty _KNOWN_OPEN makes
+# it load-bearing. "Wrong in E8M23, correct in E11M52" fires on the compiler's ORDINARY approximation -- folding
+# at binary64 and computing at the target -- not on a promotion fault. A nine-line kernel with no state, no
+# deferral and no graft (`s = 1 + 2**-30; if flag: s = 7.0; if s > 1: ...`) shows the identical signature, and so
+# does one whose state promotes CORRECTLY: the reset materializes in the narrower carrier and the guard flips.
+# Both are the documented fastmath charter (DESIGN.md: a folded constant rounds into the target format like any
+# other constant; constant truthiness is host-precision, the H3 ruling), NOT defects. What made the seam a defect
+# was the SPURIOUS promotion of a leaf Python never varies, and that is what M5 closed.
+#
+# CONSEQUENCE FOR ANYONE ADDING AN ORACLE KERNEL: every kernel here is now value-checked with nothing tolerated,
+# so the first one written with an inexact reset will report a miscompile and fail this tool for charter
+# behaviour. Keep oracle constants exactly representable in E8M23 unless the inexactness IS the thing under test.
+
 _KNOWN_OPEN: dict[str, tuple[float, float]] = {}
 
 _VALUE_ORACLE = {

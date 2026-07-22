@@ -806,6 +806,13 @@ class Analyzer:
                 self._restart_descent()
                 _logger.info("round %d: unroll reseeded at %s", round_index + 1, restart.origin[0])
                 continue
+            # The BLOCK SET, not the graph: five fact-dependent in-place op rewrites (matmul and transpose
+            # canonicalization, property expansion, star-arg unpacking, array-method receiver form) mutate
+            # ops without adding a block, so they do not signal here. Each bakes a decision taken under
+            # optimistic facts into the graph the resolved round then describes. Attacked five ways inside
+            # the seam without producing a wrong value, so this is a bound on the claim rather than a known
+            # route -- but the claim is "the block set held still", and overstating it is how this seam's
+            # earlier claims decayed.
             if set(unit.blocks) != shape:
                 # Everything this round derived describes a graph that no longer exists. Note the descent is NOT
                 # restarted for a round that merely changed its facts -- only for one that changed the program.
@@ -1219,6 +1226,11 @@ class Analyzer:
         plan. Emission consumes only this plan.
         """
         rank = self._executable_rank(result)
+        # Asserted HERE as well as in `_assert_resolution_total`, because `rank` is bare-subscripted per store
+        # below: without this, a block resolution never reached would surface as an unlocated KeyError instead
+        # of the named invariant, and only in the debug build, since the assert vanishes under -O. That is the
+        # inversion the gate's removal cited as its own reason for ordering reachability ahead of validation.
+        assert not (result.executable_blocks - set(rank)), "an executable block is unreachable from the entry"
         blocks_in_order = sorted(result.executable_blocks, key=lambda block_id: block_id.index)
         first_store: dict[StateLeaf, tuple[tuple[tuple[int, int], ...], int]] = {}
         for block_id in blocks_in_order:
