@@ -2711,3 +2711,36 @@ No test was added to pin the new selection, because that would be re-baselining 
 
 Landed as a PATCH rather than a file copy: the step's worktree was based on M5 and copying wholesale would have
 reverted the two M5-review fixes and deleted the oracle-hazard annotation. Confirmed present after applying.
+
+
+M5 REGRESSION FOUND, AND IT IS LIVE ON `dev`. The Codex half of the M5 review died on the provider's
+cybersecurity guardrail before reporting -- the third time this campaign -- but its PROBE survived in the
+transcript, and the survival kit's own advice (mine the transcript of a guardrailed reviewer) paid for itself
+again. Its attack was the one I asked for and the Claude half did not run: state whose join DOES NOT MOVE.
+
+THE DEFECT. A leaf written and then RESTORED to its reset value within the same step is not promoted under
+M5's new W rule -- correctly, since the exit live-out equals the reset. But a `PyAttr` reading that attribute
+still routes from `CellRef(StateLeaf, 0)`, and the leaf has no runtime cell, so M2's verifier objects. Three
+shapes measured, all honest Python: a conditional store then restore, the same inside a while loop, and the
+aggregate spelling.
+
+  PRE-M5 (at M4): all three COMPILE AND ARE VALUE-CORRECT (3.0/2.0, 3.0/5.0, 3.0/2.0), with `state_s` present.
+  POST-M5: all three CRASH with a bare `AssertionError` out of route-plan verification.
+  POST-M5 under `python -O`: the assert is stripped and it crashes deeper, `KeyError` in the numerical
+  backend -- so an unlocated crash either way, NOT silent wrong hardware. That bounds the severity.
+
+So M5's W rule is unsound as stated: "promote only if the join moves" is necessary but not sufficient, because
+a leaf can be READ within the step while its exit value equals its reset. The fix must reconcile that with
+what the rule was written for -- refusing to promote on a bare `self.s = self.s` -- and those two are close
+enough that guessing is how this seam produced defects before.
+
+A SECOND, PRE-EXISTING WRONG VALUE from the same probe: an aggregate where one cell moves and another does not
+(`self.a = [self.a[0], x]`, cell 0 holding `1.0 + 2**-30`). The leaf promotes because cell 1 varies, and cell
+0's reset then narrows in E8M23 and flips a guard -- python 10.0, hardware 20.0, at M4 AND at M5. This is not
+the charter case cleanly: nobody asked cell 0 to be runtime state, and it is promoted only because promotion
+granularity is PER LEAF rather than PER CELL. A constant that would have stayed folded is forced into a
+narrower carrier by an unrelated sibling.
+
+RECORDED BEFORE FIXING because `dev` is pushed and CI-green: CI did not catch either, since no test covers a
+restore-to-reset shape or a partially-moving aggregate. The regression tests land with the fix, not before, so
+that CI does not go red on a known-and-being-fixed defect.
