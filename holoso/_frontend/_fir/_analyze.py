@@ -70,7 +70,6 @@ from ._ir import (
     executable_preorder,
     executable_rpo,
     op_dst,
-    origin_order,
     source_position,
 )
 from ._fact import (
@@ -127,7 +126,6 @@ from ._analysis_support import (
     _concat_seqs,
     _concrete_fact,
     _contract_structure,
-    _coreachable,
     _crossing_object,
     _identity_place,
     _is_array_fact,
@@ -203,6 +201,7 @@ _logger = logging.getLogger(__name__)
 
 _MAX_BLOCKS = 200_000
 _MAX_VISITS = 1_000_000
+_MAX_STATE_ROUNDS = 1_000
 
 _BITWISE_OPS = frozenset({BinOp.LSHIFT, BinOp.RSHIFT, BinOp.BITAND, BinOp.BITOR, BinOp.BITXOR})
 
@@ -562,11 +561,11 @@ def verify_plan_totality(result: "ResidualUnit") -> None:
     HONEST SCOPE, because the first two versions of this claimed more than they checked. This CANNOT FAIL for
     any `ResidualUnit` the analyzer can produce today, and it is not a general totality check:
 
-    - the block sets do not diverge in practice. `_check_reachability_settled` runs BEFORE `_finalize` over
-      the same `executable_rpo` walk and refuses a marked block the walk never reaches, and an edge leaving an
-      unmarked one; a walked-but-unmarked SINK slips past both arms, which is why this checks that direction
-      itself -- without it such a block reaches emission and crashes unlocated ("block N was not sealed with a
-      terminator"), measured. For every other shape the gate reports first, located;
+    - the block sets do not diverge in practice. `_assert_resolution_total` runs inside `_finalize` over the
+      same `executable_rpo` walk and asserts that no marked block goes unreached and no edge leaves an unmarked
+      one; a walked-but-unmarked SINK slips past both arms, which is why this checks that direction itself --
+      without it such a block reaches emission and crashes unlocated ("block N was not sealed with a
+      terminator"), measured;
     - `block_in` coverage is already implied -- `_finalize` bare-subscripts it for every executable block --
       so this arm restates a property that would have raised earlier in the same call;
     - cell routing is NOT checked here at all any more: `route_plans` is total over a derivable site set, so
@@ -712,12 +711,6 @@ class Analyzer:
         # which is empty for it once that store stops executing.
         self._runtime_state_origins: dict[StateLeaf, OriginStack] = {}
         self._state_livein: dict[StateLeaf, Fact] = {}
-        # Still block-keyed and still additive -- the shape that made the store records above need op keys.
-        # It does not bite here, but only incidentally: W-promotion also requires the block to be co-reachable
-        # with the exit, and after a graft a block reaches the exit only through the continuation, so a
-        # relocated store is promoted exactly when the op-keyed record covers it anyway.
-        self._discovered_stores: set[tuple[BlockId, StateLeaf]] = set()
-        self._discovered_store_origins: dict[tuple[BlockId, StateLeaf], OriginStack] = {}
         # Recorded AT THE VISIT that computes them, overwritten each time. The fixpoint revisits a block
         # whenever an incoming fact changes, so a block that is not revisited did not change: the last write
         # is the stabilized one. This is what lets `_finalize` stop replaying the transfer, which used to run
@@ -776,77 +769,66 @@ class Analyzer:
 
     def fixpoint(self, param_facts: dict[str, Fact] | None = None) -> ResidualUnit:
         """
-        The outer W/D state fixed point: W (runtime-capable leaves) accumulates store sites that are executable
-        AND graph-co-reachable with the canonical exit over executable edges; D (live-in facts) starts at
-        Known(reset) and joins executable exit live-outs, descending only. Each round rebuilds the working graph
-        from immutable templates; the final round's facts are computed under stable typing. A failing state join
-        never aborts a round: the leaf's live-in freezes at its last joinable value (holding W/D descent, so the
-        fixed point still stabilizes) and the failure re-derives each round, reporting only at stabilization --
-        ranked below every recorded store obligation, since the cascade of a violating store can provoke exactly
-        such a merge (an Unbound from a deferred producer joining a carried fact).
+        The analysis is a descent of the state fixed point -- the runtime-slot set W and the per-slot live-in
+        facts D -- over a graph that GROWS underneath it as calls graft and static loops unroll.
+
+        The two are kept honest by one rule: A DESCENT IS ONLY AN ANSWER IF THE GRAPH HELD STILL THROUGHOUT IT.
+        Whenever a round changes the graph, W, D and the store-obligation bridge are thrown away and the descent
+        restarts from the reset state over the larger graph. So the round that finally stabilizes has re-derived
+        everything -- reachability, executable edges, block environments, binding facts, storage schemas, W and D
+        -- from entry facts and reset state alone, over the graph it is describing, inheriting nothing from the
+        optimistic rounds that built that graph.
+
+        That matters because the walk MUST be optimistic to grow the graph at all: an arm is explored on a
+        condition that has not settled, which is exactly what lets a state read discover its own runtime typing.
+        Marks and promotions made under that optimism used to survive into the answer, and a leaf promoted by a
+        store on an arm the settled facts prove dead gets a hardware slot whose reset re-materializes in the
+        target carrier -- enough to flip a guard reading it, with no diagnostic. Restarting the descent is what
+        makes the optimism sound rather than merely gated: it is confined to rounds whose only product is a graph,
+        and a graph is not a claim about what executes.
+
+        Growth is monotone and bounded (a graft destroys its call site, so no site expands twice; blocks left dead
+        are never walked again), and between growths W only grows while D only descends, so this terminates.
         """
-        for round_index in range(1_000):
+        unit = self._instantiate_root()
+        self._restart_descent()
+        for round_index in range(_MAX_STATE_ROUNDS):
+            shape = set(unit.blocks)
             try:
-                result = self.analyze(param_facts)
+                result = self._walk(unit, param_facts)
             except _UnrollRestart as restart:
-                # Facts descend monotonically and seeds only join downward, so reseeding terminates within the
-                # round fuel. A restart is a mid-round event: the interrupted round's partial verdicts are
-                # discarded without reconciling the bridge, which carries into the rerun unchanged.
+                # A loop header's iterable descended past the shape already unrolled for it. Facts descend
+                # monotonically and seeds only join downward, so reseeding terminates within the round fuel. The
+                # recorded chain shapes go with the seed -- they were built for a fact that has since descended --
+                # and the rerun unrolls afresh, orphaning the superseded chains in the graph.
                 self._unroll_seeds[restart.origin] = restart.fact
-                self._reset_round()
-                _logger.info("state round %d: unroll reseeded at %s", round_index + 1, restart.origin[0])
+                self._unroll_cache = {}
+                self._restart_descent()
+                _logger.info("round %d: unroll reseeded at %s", round_index + 1, restart.origin[0])
                 continue
-            exit_env = result.block_in.get(result.unit.exit, _Env())
-            reachable = _coreachable(result.unit, result.unit.exit, result.executable_edges)
-            new_w = set(self._runtime_state)
-            # Only a store that is executable AND co-reachable with the exit promotes its leaf, so provenance is
-            # taken from those blocks alone: the per-leaf minimum over the whole round would happily blame a
-            # store standing in a block the exit cannot be reached from.
-            promoting: dict[StateLeaf, OriginStack] = {}
-            for block_id, leaf in self._discovered_stores:
-                if block_id in result.executable_blocks and block_id in reachable:
-                    origin = self._discovered_store_origins[(block_id, leaf)]
-                    earliest = promoting.get(leaf)
-                    if earliest is None or origin_order(origin) < origin_order(earliest):
-                        promoting[leaf] = origin
-            new_w |= promoting.keys()
-            for leaf, origin in promoting.items():
-                self._runtime_state_origins.setdefault(leaf, origin)
-            new_d = dict(self._state_livein)
-            deferred = DeferredRejection()
-            for leaf in new_w:
-                try:
-                    reset = self._state_reset_fact(leaf)
-                    exit_fact = exit_env.get(leaf)
-                    incoming = (
-                        reset
-                        if isinstance(exit_fact, Unbound)
-                        else join_facts(reset, exit_fact, self._state_origin(leaf))
-                    )
-                    previous = new_d.get(leaf)
-                    new_d[leaf] = (
-                        incoming if previous is None else join_facts(previous, incoming, self._state_origin(leaf))
-                    )
-                except AnalysisRejection as error:
-                    deferred.offer(error)
+            if set(unit.blocks) != shape:
+                # Everything this round derived describes a graph that no longer exists. Note the descent is NOT
+                # restarted for a round that merely changed its facts -- only for one that changed the program.
+                self._restart_descent()
+                _logger.info("round %d: graph grew to %d blocks; descent restarts", round_index + 1, len(unit.blocks))
+                continue
+            new_w, new_d, deferred = self._state_round(result)
             if new_w == self._runtime_state and new_d == self._state_livein:
-                _logger.info("state fixpoint stable after %d round(s): %d runtime leaves", round_index + 1, len(new_w))
+                _logger.info(
+                    "resolved after %d round(s): %d runtime leaf/leaves, %d live-in fact(s)",
+                    round_index + 1,
+                    len(new_w),
+                    len(new_d),
+                )
+                # Last, so every walk above saw the loop templates the unroll cache was keyed on.
+                for header_id, (_, chain_entry) in self._unroll_cache.items():
+                    header = unit.blocks[header_id]
+                    assert isinstance(header.terminator, StaticFor)
+                    header.terminator = Jump(chain_entry, header.terminator.origin)
                 self._check_storage_schemas(result)
                 deferred.raise_if_deferred()
                 self._raise_transfer_deferrals(result)
                 self._reject_executable_fails(result)
-                # The chain splice runs after the rejection walks, which rank deferrals by the identity of the
-                # ops and terminators they were recorded under; swapping a cached header's StaticFor for the
-                # Jump earlier would orphan a join-layer deferral keyed on the replaced terminator.
-                for header_id, (_, chain_entry) in self._unroll_cache.items():
-                    header = result.unit.blocks[header_id]
-                    assert isinstance(header.terminator, StaticFor)
-                    header.terminator = Jump(chain_entry, header.terminator.origin)
-                # Before _validate, whose asserts describe a graph the speculation gate may already know is
-                # inconsistent: an unresolved call left on a speculated arm trips "unexpanded call survived" as a
-                # bare AssertionError, where the gate has a located diagnostic for the same cause. Running it
-                # second also inverted the -O contract, the debug build crashing where the optimized one explained.
-                self._check_reachability_settled(result, self._executable_rank(result))
                 _validate(result, self._call_lowering)
                 self._finalize(result)
                 return result
@@ -854,10 +836,75 @@ class Analyzer:
             self._state_livein = new_d
             self._reconcile_bridge()
             self._reset_round()
-            _logger.info("state round %d: %d runtime leaves, %d live-in facts", round_index + 1, len(new_w), len(new_d))
+            _logger.info(
+                "round %d: %d runtime leaf/leaves, %d live-in fact(s)", round_index + 1, len(new_w), len(new_d)
+            )
         raise AnalysisRejection(
             "state fixpoint failed to stabilize", (Origin(self._root_template.name, 0, 0, self._root_template.file),)
         )
+
+    def _restart_descent(self) -> None:
+        """
+        Drop everything the state descent had concluded. The store-obligation bridge goes with W and D: it carries
+        violations across round boundaries, and a violation recorded over a graph that has since changed shape is
+        evidence about a program the analysis is no longer looking at.
+        """
+        self._runtime_state = set()
+        self._runtime_state_origins = {}
+        self._state_livein = {}
+        self._pending_bridge = {}
+        self._reset_round()
+
+    def _state_round(self, result: ResidualUnit) -> tuple[set[StateLeaf], dict[StateLeaf, Fact], DeferredRejection]:
+        """
+        One descent of the state fixed point: which leaves must be runtime slots (W), and what each slot carries
+        in from the previous transaction (D).
+
+        A leaf that is NOT runtime state reads as its compile-time snapshot -- the reset object, admitted and
+        folded at binary64 -- so it is runtime state exactly when a transaction can leave it holding something
+        else. That is the whole test: join the snapshot with what the canonical exit carries out, and promote when
+        the join moves it. The comparison runs THROUGH `join_facts` rather than over the two facts directly
+        because the join is what compares Knowns bitwise, so a signed-zero flip, inside an aggregate as much as at
+        the top level, reads as a change rather than as equality.
+
+        Nothing here counts stores. A store that writes back what the leaf already holds (`self.s = self.s`, or a
+        store of the reset constant) moves nothing and promotes nothing -- where counting stores hands such a leaf
+        a slot whose reset re-materializes in the narrower target carrier, which is enough to flip a guard that
+        reads it. The exit environment also settles co-reachability for free: a store in a block the exit cannot
+        be reached from never reaches it.
+
+        Promotion starts from EMPTY every pass and only grows within one, which is what makes it an answer about
+        this graph rather than an accumulation over the rounds that built it. Growth is safe because a promoted
+        leaf reads as a residual, which can only open further arms: the pass descends and never has to retract.
+
+        A failing join never aborts the round -- that leaf freezes at its last joinable value, holding the descent
+        so the fixed point still stabilizes, and the failure re-derives every round, reported only once the pass
+        settles and ranked below every recorded store obligation, since the cascade of a violating store can
+        provoke exactly such a merge (an Unbound from a deferred producer joining a carried fact).
+        """
+        exit_env = result.block_in.get(result.unit.exit, _Env())
+        new_w = set(self._runtime_state)
+        new_d = dict(self._state_livein)
+        deferred = DeferredRejection()
+        for leaf in {place for place in exit_env.facts if isinstance(place, StateLeaf)} | set(new_w):
+            exit_fact = exit_env.get(leaf)
+            origin = self._state_origin(leaf)
+            try:
+                if leaf not in new_w:
+                    if isinstance(exit_fact, Unbound):
+                        continue
+                    snapshot = self._snapshot_leaf(leaf)
+                    if _same_fact(join_facts(snapshot, exit_fact, origin), snapshot):
+                        continue
+                    new_w.add(leaf)
+                    self._runtime_state_origins.setdefault(leaf, origin)
+                reset = self._state_reset_fact(leaf)
+                incoming = reset if isinstance(exit_fact, Unbound) else join_facts(reset, exit_fact, origin)
+                previous = new_d.get(leaf)
+                new_d[leaf] = incoming if previous is None else join_facts(previous, incoming, origin)
+            except AnalysisRejection as error:
+                deferred.offer(error)
+        return new_w, new_d, deferred
 
     def _check_storage_schemas(self, result: ResidualUnit) -> None:
         enforce_storage_schemas(
@@ -939,9 +986,9 @@ class Analyzer:
         self._pending_bridge.update(violating)
 
     def _reset_round(self) -> None:
-        self._block_ancestry = {}
-        self._discovered_stores = set()
-        self._discovered_store_origins = {}
+        # `_block_ancestry` deliberately survives: it is keyed by block id over the accumulating graph and is what
+        # recursion detection reads, so dropping it would let a call site first reached on a later round graft its
+        # own ancestors again.
         self._store_leaf_of_op = {}
         # Cleared with the rest of the round's evidence: an unroll restart re-runs the worklist, so every
         # surviving destination is recorded again. Retained across restarts these grew quadratically on a
@@ -955,7 +1002,9 @@ class Analyzer:
         self._transfer_deferrals = {}
         self._call_lowering = {}
         self._route_evidence = {}
-        self._unroll_cache = {}
+        # `_unroll_cache` deliberately survives too: the chains it names are IN the accumulating graph, so a
+        # header re-reached on a later round must reuse its chain rather than build a second one. Only an unroll
+        # restart drops it, because that is exactly the event that supersedes the recorded shapes.
 
     def _read_attribute_snapshot(
         self, owner: object, name: str, origin: OriginStack
@@ -1190,37 +1239,20 @@ class Analyzer:
                 if dst is not None:
                     assert dst in self._visit_facts, f"binding {dst} was never visited"
                     result.binding_facts[dst] = self._visit_facts[dst]
-        # Before the branch check, not after: that check bare-subscripts the condition's fact, so seeding
+        # Before the settled-branch invariant, not after: it bare-subscripts the condition's fact, so seeding
         # parameters afterwards would make a parameter-conditioned branch the one shape that crashes there.
         # No such branch exists today -- every condition is a `PyTruth` destination -- but the check's
         # correctness should not rest on which pass happens to run first.
         entry_env = result.block_in[result.unit.entry]
         for param in result.unit.params:
             result.binding_facts.setdefault(param, entry_env.get(Local(param)))
-        for block_id in blocks_in_order:
-            self._check_branch_settled(result, block_id)
+        self._assert_resolution_total(result)
         result.store_order = sorted(first_store, key=lambda leaf: first_store[leaf])
-        # A leaf enters W when a store to it is discovered, and W only ever grows: a store that a LATER round
-        # proves unreachable leaves its leaf behind as runtime state anyway. That is unsound rather than merely
-        # untidy, because the slot's reset then materializes in the target carrier instead of folding at
-        # binary64, so a guard reading it can flip -- the same harm the branch rule refuses, arriving across
-        # rounds rather than within one, where every per-round check passes on the stable graph.
-        stale_leaves = sorted(
-            (leaf for leaf in self._runtime_state if leaf not in first_store),
-            # Position alone does not separate two components whose stores sit at the same line and column in
-            # different files, so the frames' identities come next. Unroll clones of ONE store over two
-            # components still tie on everything, including the path -- harmlessly, since the message names only
-            # the path and the shared origin, so either choice renders identically.
-            key=lambda leaf: (origin_order(self._runtime_state_origins[leaf]), leaf.path),
-        )
-        if stale_leaves:
-            leaf = stale_leaves[0]
-            raise AnalysisRejection(
-                f"state attribute {'.'.join(leaf.path)!r} was discovered as runtime state on an earlier "
-                "analysis round whose store the stabilized facts leave unreachable, so its reset would be "
-                "materialized as if it were written; the result cannot be trusted",
-                self._runtime_state_origins[leaf],
-            )
+        # W is derived from the resolved live-ins, and a live-in differs from its reset only if some store on an
+        # exit-reaching path changed it, so every promoted leaf necessarily has a store among the blocks walked
+        # above. Under the accumulating rule this was a user-facing refusal, because a leaf could outlive the
+        # round that discovered its store.
+        assert not (self._runtime_state - set(first_store)), "a runtime leaf has no store in the resolved graph"
         result.runtime_state = set(self._runtime_state)
         result.state_livein = dict(self._state_livein)
         for leaf in {*result.runtime_state, *result.store_order, *result.state_livein}:
@@ -1251,83 +1283,35 @@ class Analyzer:
             for position, block_id in enumerate(executable_rpo(result.unit.entry, result.executable_edges))
         }
 
-    def _check_reachability_settled(self, result: ResidualUnit, rank: dict[BlockId, int]) -> None:
+    def _assert_resolution_total(self, result: ResidualUnit) -> None:
         """
-        Refuse when the recorded reachability disagrees with the stabilized facts, whole-graph and once --
-        with one measured exception: a block the walk reaches but the analysis never marked executable is seen
-        only through that block's own out-edges, so a SINK in that state passes here. `verify_plan_totality`
-        checks that direction before emission, which is where it would otherwise surface as a raw crash.
+        The properties resolution establishes by construction, read back as invariants rather than trusted.
 
-        Optimistic traversal explores an arm on the strength of a condition that is not yet settled -- which is
-        what lets W/D discover runtime state at all -- and marks are add-only, so an arm the stable facts later
-        prove dead stays marked and is analyzed, emitted, and counted by the read-only-attribute scan. That last
-        effect is a MISCOMPILE and not merely wasted logic: a store on the dead arm promotes an attribute from a
-        constant folded at binary64 into a runtime slot whose reset is materialized in the target carrier, so a
-        guard reading it can flip. The companion per-branch check is ``_check_branch_settled``.
-
-        Retracting the stale mark is not available here -- environments are joined destructively, so removing an
-        edge would mean recomputing downstream environments, schemas, reachability, W/D discoveries, and phis --
-        and refusing the condition instead starves the outer fixed point (a measured regression). Until
-        residualization becomes a total post-stabilization pass that recomputes reachability from the stable facts
-        rather than inheriting these sets, this gate converts the unsound acceptance into an honest refusal.
+        Each was a user-facing refusal while these sets were INHERITED from optimistic rounds: marks were
+        add-only, so an arm explored on an unsettled condition stayed marked after the facts proved it dead, and
+        a graft that unmarked a block left its out-edges standing. Both shapes made the emitted logic disagree
+        with the source, and the only honest response available then was to refuse the kernel. A pass that
+        derives reachability from the settled facts cannot produce either: an edge is recorded only while its
+        source block is being walked, and a branch on a Known condition yields the taken arm alone.
         """
-        # An edge out of a block the stable facts leave unexecutable: the graft that removed the source's mark and
-        # env left its out-edges standing, so the target keeps a predecessor that never runs and its phi has no
-        # arm for it. Ordered by block index so the first report is stable across hash seeds.
-        stale = sorted(
-            (edge for edge in result.executable_edges if edge[0] not in result.executable_blocks),
-            key=lambda edge: (edge[0].index, edge[1].index),
-        )
-        if stale:
-            source, _ = stale[0]
-            raise AnalysisRejection(
-                "analysis kept an execution path out of a region the stabilized facts leave unreachable, so a "
-                "value here would be read on a path that never runs; the result cannot be trusted",
-                self._block_origin(result.unit, source),
-            )
-        unreached = sorted(
-            (block_id for block_id in result.executable_blocks if block_id not in rank), key=lambda b: b.index
-        )
-        if unreached:  # marked executable, yet no executable edge chain reaches it from the entry
-            raise AnalysisRejection(
-                "analysis explored this region speculatively and the stabilized facts leave it unreachable; "
-                "the result cannot be trusted",
-                self._block_origin(result.unit, unreached[0]),
-            )
-
-    def _check_branch_settled(self, result: ResidualUnit, block_id: BlockId) -> None:
-        """
-        Companion of ``_check_reachability_settled``, run on the recorded fact of the branch's condition.
-
-        The condition is always a write-once ``PyTruth`` destination, so its recorded binding fact IS the one
-        ``_resolve_terminator`` branched on -- which is why this needs no replayed environment.
-
-        Deliberately unconditional. Two narrowings were tried, each meant to spare kernels whose speculated arm
-        looked harmless, and each reintroduced a silent miscompile: testing only arms that store misses an inert
-        arm that poisons the merge phi, keeping a DOWNSTREAM guard residual so ITS store does the promoting, and
-        scoping that test to the arm's exclusive region silently disables it altogether inside a loop, where the
-        back-edge puts the dead arm within the live arm's reach. Judging which speculated arm is harmless needs
-        the very reachability this gate exists because the analyzer got wrong, so it does not try.
-        """
-        terminator = result.unit.blocks[block_id].terminator
-        if not isinstance(terminator, Branch) or terminator.then_target == terminator.else_target:
-            return
-        # Deliberately NOT `.get()`: a miss would leave `settled` None and skip the check silently, and the two
-        # narrowings recorded above each reintroduced a silent miscompile by sparing an arm. The premise is that
-        # a branch condition is a write-once `PyTruth` in this very block, so a miss is a broken invariant, not
-        # a case to tolerate.
-        assert terminator.cond in result.binding_facts, f"branch condition {terminator.cond} has no fact"
-        condition = result.binding_facts[terminator.cond]
-        settled = static_truth(condition.value) if isinstance(condition, Known) else None
-        if settled is None:
-            return
-        dead = terminator.else_target if settled else terminator.then_target
-        if (block_id, dead) in result.executable_edges:
-            raise AnalysisRejection(
-                "analysis explored the branch arm that the stabilized facts prove unreachable, so the emitted "
-                "logic would not match this source; simplify the condition or the value feeding it",
-                terminator.origin,
-            )
+        rank = self._executable_rank(result)
+        assert not {
+            edge for edge in result.executable_edges if edge[0] not in result.executable_blocks
+        }, "an executable edge leaves a block resolution never walked"
+        assert not (result.executable_blocks - set(rank)), "an executable block is unreachable from the entry"
+        for block_id in sorted(result.executable_blocks, key=lambda block_id: block_id.index):
+            terminator = result.unit.blocks[block_id].terminator
+            if not isinstance(terminator, Branch) or terminator.then_target == terminator.else_target:
+                continue
+            # Deliberately NOT `.get()`: the premise is that a branch condition is a write-once `PyTruth` in this
+            # very block, so a miss is a broken invariant rather than a case to tolerate.
+            assert terminator.cond in result.binding_facts, f"branch condition {terminator.cond} has no fact"
+            condition = result.binding_facts[terminator.cond]
+            settled = static_truth(condition.value) if isinstance(condition, Known) else None
+            if settled is None:
+                continue
+            dead = terminator.else_target if settled else terminator.then_target
+            assert (block_id, dead) not in result.executable_edges, f"{block_id}: a settled branch kept its dead arm"
 
     def _call_plan(self, call: PyCall, env: _Env) -> CallPlan:
         # Optimistic SCCP may reclassify a cast across revisits (int(y) is an identity while y is still integer and a
@@ -1376,10 +1360,10 @@ class Analyzer:
         self._templates[key] = (anchor, template)
         return template
 
-    # The working graph is rebuilt for every outer state round; blocks are private copies.
+    # One abstract-interpretation walk over the given graph, from the entry environment. Expansion hands it a
+    # freshly instantiated root each round and lets it grow; resolution hands it the settled graph.
 
-    def analyze(self, param_facts: dict[str, Fact] | None = None) -> ResidualUnit:
-        unit = self._instantiate_root()
+    def _walk(self, unit: FunctionUnit, param_facts: dict[str, Fact] | None = None) -> ResidualUnit:
         origin = (Origin(unit.name, 0, 0, unit.file),)
         self._block_in = {unit.entry: _Env()}
         block_in = self._block_in
@@ -1433,6 +1417,7 @@ class Analyzer:
             env = block_in[block_id].copy()
             block = unit.blocks[block_id]
             index = 0
+            incomplete = False
             while index < len(block.ops):
                 op = block.ops[index]
                 try:
@@ -1449,6 +1434,7 @@ class Analyzer:
                     if not self._violations_pending():
                         raise
                     self._transfer_deferrals[id(op)] = error
+                    incomplete = True
                     index += 1
                     continue
                 if self._transfer_deferrals:
@@ -1461,6 +1447,16 @@ class Analyzer:
                 if dst is not None:
                     self._visit_facts[dst] = env.get(Local(dst))
                 index += 1
+            if incomplete:
+                # A visit that could not complete publishes nothing. Its deferred ops left their destinations
+                # undefined, joins are destructive, and an absent place reads as unbound -- so publishing turns a
+                # successor's binding into a MaybeUnbound that no later bound value can lift, and one visit made
+                # before a predecessor had run would poison everything downstream for the rest of the round. The
+                # block re-enqueues whenever an incoming fact changes, which is exactly what clears a transient
+                # deferral, and publishes then. A deferral that never clears leaves its successors unexplored and
+                # is reported once the pass settles, which is the honest outcome: the walk could not get past it.
+                # The terminator and join arms below already apply this same rule.
+                continue
             try:
                 successors = self._resolve_terminator(unit, block, env)
             except LocatedRejection as error:
@@ -1776,15 +1772,11 @@ class Analyzer:
                     )
                 leaf = StateLeaf(obj_fact.obj, (name,))
                 recorded = self._store_origins.get(leaf)
-                # Deliberately source_position, not the total origin_order used for set-ordered selections:
-                # ties here are already broken by the deterministic order stores are transferred in, which is
-                # execution order, and that attributes better than the lexically-first filename would.
+                # Deliberately source_position rather than a total order over the frames: ties here are already
+                # broken by the deterministic order stores are transferred in, which is execution order, and that
+                # attributes better than the lexically-first filename would.
                 if recorded is None or source_position(op.origin) < source_position(recorded):
                     self._store_origins[leaf] = op.origin
-                self._discovered_stores.add((block.id, leaf))
-                here = self._discovered_store_origins.get((block.id, leaf))
-                if here is None or source_position(op.origin) < source_position(here):
-                    self._discovered_store_origins[(block.id, leaf)] = op.origin
                 self._store_leaf_of_op[id(op)] = leaf
                 # The reset fixes the slot schema; a violating store carries a fixpoint-stable fact onward and
                 # the recorded verdict reports after stabilization, at this store. An Unbound value is no
@@ -2105,8 +2097,9 @@ class Analyzer:
                 # is not: a Branch inside a loop body sits BEFORE the body's trailing back-edge Jump, so deferring
                 # it stops the loop re-flowing at all, the transiently-inexact store never sees its operand
                 # promote, and valid kernels are refused -- measured, and the same shape round-10's edge
-                # withholding regressed. Speculation is therefore left intact and the unsound RESULT of it is
-                # caught after stabilization instead, by _check_branch_settled.
+                # withholding regressed. Speculation is left intact and kept out of the answer instead: the state
+                # descent restarts whenever the graph changes, so only a round over a graph that held still is
+                # ever finalized.
                 return [then_target, else_target]
             case StaticFor():
                 iterable_fact = env.get(Local(terminator.iterable))

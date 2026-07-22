@@ -280,9 +280,12 @@ StaticFor unrolls by cloning the body per trip once the iterable is Known (an it
 the unroll — a rebind joined across a while iteration — reseeds the loop by its origin and reruns the round, so
 ordinary rebinding unrolls the joined shape instead of rejecting); calls expand on demand by grafting the
 callee template (defaults/kwargs bound, member __call__ dispatch, recursion rejected by function+receiver ancestry,
-origins re-attributed to the user call site). State: the W/D fixed point -- W accumulates executable
-exit-co-reachable store leaves (typing by reset value), D live-ins start at Known(reset) and join executable exit
-live-outs, descending only; each round rebuilds the working graph from immutable templates. Executable Fail
+origins re-attributed to the user call site). State: the W/D fixed point -- W holds the leaves
+that must be hardware slots, D their live-in facts. A leaf that is not runtime state reads as its compile-time
+snapshot, so it enters W exactly when the transaction can leave it holding something else: the snapshot is joined
+with what the canonical exit carries out, and the leaf promotes when that join moves it. Stores are not counted,
+so writing back what a leaf already holds promotes nothing. D starts at Known(reset) and joins executable exit
+live-outs, descending only. Executable Fail
 terminators are located rejections (data-dependent raise included) -- which is also what lets a library stub
 validate its own operand shapes in ordinary Python: a `raise` behind a statically-false shape check folds dead.
 Fuel bounds cover visits and blocks; exhaustion is a located rejection, never a truncated fixed point.
@@ -478,51 +481,43 @@ residual exactly as a clean revisit would -- so every surviving deferral key sta
 the only entries discarded at stabilization are those provably on paths the stable round never reached.
 A revisit graft retracts the recorded out-edges of the terminator it replaces and drops the environment of any
 successor thereby left with no in-edge, so the continuation re-establishes that env from scratch rather than
-joining a stale one. That retraction is only one edge deep, and it is a mitigation rather than a closed
-solution: a block whose graftable call deferred behind a pending violation still publishes out-edges carrying
-the call's unbound result, so a transitive successor of the graft block can retain the phantom-unbound
-environment and falsely reject an innocent downstream read. A condition computed from a pending result is read
-as a runtime bool, so BOTH arms are marked executable; because marks are add-only, the arm the stabilized facts
-later prove dead stays open. Emitting it is unsound rather than merely wasteful: a store on that arm promotes
-an attribute from a constant folded at binary64 into a runtime slot whose reset is materialized in the target
-carrier, so a guard reading it flips and the module silently disagrees with Python. Speculation is nonetheless
-left exactly as it is -- it is what lets the W/D fixpoint discover runtime state, and both attempts to withhold
-it that were built starved loops, since a `Branch` inside a loop body precedes the body's own back-edge.
-Instead a POST-STABILIZATION GATE refuses whenever recorded reachability contradicts the settled facts: a
-branch whose condition disagrees with its own recorded out-edges, a
-block marked executable that no edge chain reaches, an execution path out of a region left unreachable, or a
-leaf still held as runtime state whose store the stable graph no longer contains -- that last one because the
-runtime-state set accumulates across W/D rounds and a store proved unreachable later does not remove its leaf,
-leaving a slot whose reset materializes in the carrier rather than folding. Each
-becomes a located refusal rather than a wrong answer or a bare crash. The branch rule is UNCONDITIONAL: it
-makes no attempt to spare a speculated arm that looks harmless, because two such narrowings were built and
-both reintroduced silent miscompiles -- an inert arm can poison the merge phi so a DOWNSTREAM guard stays
-residual and ITS store promotes, and restricting the test to the arm's exclusive region disables it entirely
-inside a loop, where the back-edge puts the dead arm within the live arm's reach. Judging harmlessness needs
-the reachability this gate exists because the analyzer got wrong. Retracting a
-stale mark instead is deliberately not attempted -- destructive environment joins mean removing an edge
-requires recomputing downstream environments, schemas, reachability, W/D discoveries, and phis. The gate is a
-narrowing, NOT a closure. Of the four routes found so far it FULLY closes exactly one -- the settled-branch
-route, where the recorded reachability visibly contradicts the settled facts. Where the phantom
-environment keeps a stale state fact alive the condition settles as a runtime bool, so the Python-dead arm is
-genuinely live to the analyzer, no contradiction exists, and the miscompile survives. Detecting that locally is
-impossible in principle -- the analyzer cannot know a fact should have been more precise without the environment
-the phantom edge denies it. The runtime-state rule does refuse its route as first written, but only as first
-written: a trivial `self.s = self.s` gives the retained leaf a store in the stable graph and satisfies the rule,
-so the route is closed in the spelling where no store survives and open in general. And the accumulator has a
-second half -- the live-in map is unguarded, and a live-in driven
-residual by a speculated arm that a later round prunes is, at stabilization, byte-identical to what a fresh
-derivation would produce, leaving no residue for a mirrored check to find. No further checks are added for any of
-this: the gate grew from one rule to four, three of them reactive, and every addition was followed by a route
-through a dimension it did not model or by an evasion costing one line of ordinary Python. The residual class,
-including the surviving miscompiles, is documented in TODO.md and pinned by executable witnesses in the
-frontend state tests, the open ones asserting the wrong values they currently produce. It is the
-motivating case for the resolution-totality restructure, which dissolves it by residualizing as a total
-post-stabilization pass rather than grafting mid-fixpoint, and whose resolved spine must recompute reachability
-from the stable facts rather than inherit these sets. Closing it inside the fixpoint has been tried:
-withholding a deferred call's terminator edges removes the phantom path but starves the outer fixed point
-whenever the withheld edge is a loop body's sole successor, refusing valid kernels, so that trade was reverted
-and is guarded by an acceptance test.
+joining a stale one. A visit that could not complete publishes nothing at all: its
+deferred operations left destinations undefined, joins are destructive, and an absent place reads as unbound, so
+publishing would turn a successor's binding into a MaybeUnbound that no later bound value can lift. The block
+re-enqueues whenever an incoming fact changes -- which is what clears a transient deferral -- and publishes then;
+a deferral that never clears leaves its successors unexplored and is reported once the pass settles.
+
+Speculation itself is left exactly as it is -- it is what lets the fixed point discover runtime state at all, and
+both attempts to withhold it starved loops, since a `Branch` inside a loop body precedes the body's own
+back-edge. What changed is that speculation no longer reaches the answer. THE ANALYSIS RUNS AS A DESCENT OVER A
+GRAPH THAT GROWS UNDERNEATH IT, AND A DESCENT IS ONLY AN ANSWER IF THE GRAPH HELD STILL THROUGHOUT IT: whenever a
+round grafts a call or unrolls a loop, W, D and the store-obligation bridge are discarded and the descent
+restarts from the reset state over the larger graph. The round that finally stabilizes has therefore re-derived
+reachability, executable edges, block environments, binding facts, storage schemas, W and D from entry facts and
+reset state alone, over the graph it is describing. Every diagnostic and the whole emission plan come from that
+round. Growth is monotone and bounded -- a graft destroys its call site, so no site expands twice -- and between
+growths W only grows while D only descends, so the whole thing terminates.
+
+This is what makes the optimism sound rather than merely gated. It replaces a POST-STABILIZATION GATE that
+refused whenever recorded reachability contradicted the settled facts, and which was a narrowing rather than a
+closure: of four known routes it fully closed one. Where a phantom environment kept a stale state fact alive the
+condition settled as a runtime bool, so the Python-dead arm was genuinely live to the analyzer and no
+contradiction existed to detect -- impossible in principle, since the analyzer cannot know a fact should have
+been more precise without the environment the phantom edge denies it. Its runtime-state rule asked only whether
+SOME store survived, which a trivial `self.s = self.s` satisfies. And the live-in half was unguarded, because a
+live-in driven residual by a speculated arm that a later round prunes is, at stabilization, byte-identical to
+what a fresh derivation would produce, leaving no residue for any check to find. The gate had grown from one rule
+to four, three of them reactive, and every addition was followed by a route through a dimension it did not model
+or by an evasion costing one line of ordinary Python; the properties it used to refuse are now invariants the
+resolved pass establishes by construction, asserted rather than diagnosed.
+
+Closing the seam inside the fixpoint had also been tried: withholding a deferred call's terminator edges removes
+the phantom path but starves the outer fixed point whenever the withheld edge is a loop body's sole successor.
+The acceptance test guarding that trade turned out to be protecting a wrong answer -- its kernel stores an
+integer past 2**53 into a float slot on the first loop trip and builds an array holding 2**64, and the accept
+depended on the loop re-flowing until a merge hid both from the rules that refuse them. Reading each store on the
+path that executes it makes those refusals fire, which is the honest outcome; the kernel's previously emitted
+output disagreed with Python.
 A failing state live-in join never cuts a round short: the leaf freezes
 at its last joinable live-in and the failure reports only at stabilization, ranked below every recorded
 obligation, so each verdict -- the exactness ruling of a store-edge conversion included -- derives from the

@@ -34,6 +34,24 @@ def _multiply(a: float, b: float) -> float:
     return a * b
 
 
+def _assert_matches_python(
+    klass: type, name: str, *arguments: float | bool, fmt: FloatFormat = FloatFormat(8, 23), port: str = "out_0"
+) -> list[str]:
+    """
+    Synthesize a fresh instance's ``step`` and require the named output to equal what plain Python returns for the
+    same arguments. A fresh instance per side keeps the two from sharing mutated state. The port must be named
+    rather than taken positionally: a return that aliases a public attribute is deduped onto that attribute's
+    state port and emits no ``out_0`` at all, so position 0 is then some unrelated slot. Returns the port names,
+    so a caller can additionally pin which attributes did and did not become slots.
+    """
+    expected = klass().step(*arguments)
+    built = holoso.synthesize(klass().step, default_ops(fmt), name=name)
+    outputs = dict(zip((p.name for p in built.output_ports), built.numerical_model.elaborate().run(*arguments)))
+    assert port in outputs, f"{name}: no output named {port} among {sorted(outputs)}"
+    assert float(outputs[port]) == expected, f"{name}: hardware {float(outputs[port])!r} against Python {expected!r}"
+    return [p.name for p in built.ports]
+
+
 def test_dead_arm_attr_write_does_not_block_readonly_fold() -> None:
     # Regression (Codex): a write to a read-only boolean attribute inside a statically-dead `if False:` arm must not
     # mark it as assigned -- otherwise the attribute is wrongly treated as runtime and a later guard on it is not
@@ -474,14 +492,15 @@ def test_deferred_call_graft_retracts_stale_edges_with_branch() -> None:
     assert str(probe.value) == str(control.value)
 
 
-def test_deferred_graftable_call_does_not_starve_the_state_fixpoint() -> None:
-    # The graft-deferral seam admits false rejections (see the open-defect witnesses below and TODO.md), but a fix
-    # for them must not cost accepts that already work. Withholding a deferred graftable call's terminator edges --
-    # the round-10 attempt at closing the seam -- starved this kernel's outer state fixpoint: the withheld edge is
-    # the loop body's only successor, so the loop never re-flowed, the transiently-inexact `self.t` store never saw
-    # its operand promote to runtime float, and a valid kernel that synthesizes to real Verilog was refused with
-    # "state attribute 't' ... not exactly representable". Both spellings must keep synthesizing; the control
-    # differs only by dropping the graftable call, isolating the call as the trigger.
+def test_the_transiently_inexact_store_in_a_loop_is_not_a_valid_accept() -> None:
+    # This kernel used to be the guard against fixes that "cost accepts that already work" -- and measuring the
+    # accept it protected showed it was never valid. `first` is a plain local, so the FIRST trip really does run
+    # `self.t = 2**53 + 1` and really does build an array holding 2**64; neither is representable, and the accept
+    # depended entirely on the loop re-flowing until a merge made the operand a runtime float, which hid the
+    # integer from the exactness rule. Measured at the previous head: accepted, out_0 = 9007199254740992.0 against
+    # Python's 9007199254740994.0 -- a SILENT WRONG ANSWER on the primary output, not merely on a state port.
+    # Resolution reads the store on the trip that executes it, so both spellings now refuse at the store, located.
+    # The control differs only by dropping the graftable call, which was never the trigger.
     class Probe:
         def __init__(self) -> None:
             self.t = 0.0
@@ -510,26 +529,26 @@ def test_deferred_graftable_call_does_not_starve_the_state_fixpoint() -> None:
             return x + self.t
 
     ops = default_ops(FloatFormat(8, 23))
-    probe = holoso.synthesize(Probe().step, ops, name="graft_defer_no_starve")
-    control = holoso.synthesize(Control().step, ops, name="graft_defer_no_starve_ctrl")
-    assert len(probe.verilog_output.verilog) > 0
-    assert len(control.verilog_output.verilog) > 0
+    for label, kernel in (("graft_defer_no_starve", Probe().step), ("graft_defer_no_starve_ctrl", Control().step)):
+        with pytest.raises(UnsupportedConstruct, match="not exactly representable") as refusal:
+            holoso.synthesize(kernel, ops, name=label)
+        location = refusal.value.location
+        assert location is not None, label
+        assert (location.line or "").strip().startswith("self.t ="), label
 
 
-def test_graftable_call_deferral_false_rejection_witnesses() -> None:
-    # EXECUTABLE RECORD of an OPEN defect class -- these outcomes are documented defects, not desired behavior.
-    # Each kernel below is honest Python that a correct compiler would synthesize; the analyzer refuses it because
-    # a graftable call deferred behind a transiently-pending store violation publishes out-edges carrying its
-    # not-yet-computed result, and a downstream read of that result joins to maybe-unbound. These are the residue
-    # of the PHANTOM-ENVIRONMENT mechanism, the half the one-edge-deep graft retraction cannot reach; the
-    # detectable-contradiction shapes are refused by the post-stabilization gate instead (sibling tests above).
-    # Documented in TODO.md; the class is the one the Stage-4 restructure dissolves by residualizing after the
-    # fixpoint instead of during it. Their residue is false rejections -- but note the seam as a whole is NOT
-    # bounded to those: test_phantom_environment_miscompile_is_still_open pins a silently wrong value.
+def test_graftable_call_deferral_false_rejections_are_gone() -> None:
+    # These three were an EXECUTABLE RECORD of a false-rejection class, kept with the note that "when the
+    # restructure lands these stop rejecting -- that is the intended outcome, and this test must then flip to
+    # asserting synthesis". This is that flip. Each kernel is honest Python that the analyzer refused because a
+    # graftable call deferred behind a transiently-pending store violation published out-edges carrying its
+    # not-yet-computed result, and a downstream read of that result joined to maybe-unbound -- the residue of the
+    # PHANTOM-ENVIRONMENT mechanism that one-edge-deep graft retraction could not reach. A visit that cannot
+    # complete now publishes nothing, so the transient never escapes the block it happened in.
     #
     # The kernels live here rather than only in prose because prose transcriptions of them have silently rotted:
-    # dropping the both-arms read or the wide-int feed makes a shape vanish. When the restructure lands these stop
-    # rejecting -- that is the intended outcome, and this test must then flip to asserting synthesis.
+    # dropping the both-arms read or the wide-int feed makes a shape vanish. Both branch polarities are checked,
+    # since the shapes turn on which arm reads the deferred result.
     class BothArms:  # a single graftable call whose result is read on BOTH arms of a following branch
         def __init__(self) -> None:
             self.t = 0.0
@@ -588,29 +607,25 @@ def test_graftable_call_deferral_false_rejection_witnesses() -> None:
                 return y + 1.0
             return y + 2.0
 
-    ops = default_ops(FloatFormat(8, 23))
-    for label, kernel, blamed in (
-        ("both_arms", BothArms().step, "return y + 2.0"),
-        ("two_graftable_calls", TwoGraftableCalls().step, "return y + z + 1.0"),
-        ("starred_arguments", StarredArguments().step, "return y + 2.0"),
+    for label, klass in (
+        ("both_arms", BothArms),
+        ("two_graftable_calls", TwoGraftableCalls),
+        ("starred_arguments", StarredArguments),
     ):
-        with pytest.raises(UnsupportedConstruct, match="may be unbound here") as witness:
-            holoso.synthesize(kernel, ops, name=f"graft_defer_{label}")
-        # Pin the SITE too: a future change that rejects at a different, also-wrong line would otherwise keep
-        # this green. All three currently blame the fall-through return of the branch that reads the result.
-        location = witness.value.location
-        assert location is not None, label
-        assert (location.line or "").strip().startswith(blamed), label
+        # The flag=False arm feeds 2**64 into a dot product, so the result is ~2**128: representable in E11M52
+        # and not in E8M23, where the honest answer is an overflow to infinity. The value oracle therefore runs
+        # in the wide carrier, and the narrow one is exercised through the other arm.
+        _assert_matches_python(klass, f"graft_defer_{label}", 2.0, False, False, fmt=FloatFormat(11, 52))
+        _assert_matches_python(klass, f"graft_defer_{label}_narrow", 2.0, True, True)
 
 
-def test_speculated_dead_arm_that_stores_is_refused() -> None:
-    # A speculated arm the stabilized facts prove dead used to be emitted, shipping a public `state_s` port whose
-    # register carried the dead arm's store as its only functional driver -- inert solely because the sequencer's
-    # selector was hard-loaded to zero. The gate refuses it instead, and unconditionally -- narrowing the rule to
-    # arms that store was tried twice and both attempts readmitted silent miscompiles (see the siblings). The
-    # control differs only in the two constants that arm the deferral, and must still synthesize. Nothing here
-    # reads a deferred result, which isolates the executable-marking mechanism from the phantom-environment one
-    # -- and np.array is a CONVERSION, never grafted, so this mechanism needs only a deferred call.
+def test_speculated_dead_arm_that_stores_is_pruned() -> None:
+    # A speculated arm the stabilized facts prove dead used to be EMITTED, shipping a public `state_s` port whose
+    # register carried the dead arm's store as its only functional driver. The gate that replaced that outcome
+    # refused the kernel outright, because it could not tell a harmless speculated arm from a harmful one without
+    # the reachability the analyzer had got wrong. Resolution derives reachability from the settled facts, so the
+    # arm is simply not walked: the kernel compiles, agrees with Python, and grows no slot for `s`. The control
+    # differs only in the two constants that used to arm the deferral, and must behave identically.
     class Probe:
         def __init__(self) -> None:
             self.t = 0.0
@@ -653,19 +668,18 @@ def test_speculated_dead_arm_that_stores_is_refused() -> None:
                 r = 2.0
             return x + r + self.s
 
-    ops = default_ops(FloatFormat(8, 23))
-    with pytest.raises(UnsupportedConstruct, match="prove unreachable") as refusal:
-        holoso.synthesize(Probe().step, ops, name="defer_dead_arm")
-    assert refusal.value.location is not None  # located, so the implicated branch is visible
-    control = holoso.synthesize(Control().step, ops, name="defer_dead_arm_ctrl")
-    assert "state_s" not in [port.name for port in control.ports]  # no deferral, so the dead arm is pruned
+    probe_ports = _assert_matches_python(Probe, "defer_dead_arm", 2.0, False)
+    control_ports = _assert_matches_python(Control, "defer_dead_arm_ctrl", 2.0, False)
+    assert "state_s" not in probe_ports  # the dead arm is pruned whether or not the deferral was armed
+    assert "state_s" not in control_ports
+    assert probe_ports == control_ports
 
 
-def test_speculated_dead_arm_without_a_store_is_refused_too() -> None:
-    # The refusal is deliberately unconditional, and this kernel is why it cannot be narrowed to arms that
-    # store. An inert arm looks harmless and is not: it poisons the phi at the merge, which keeps a DOWNSTREAM
-    # guard residual so that guard's store does the promoting. Refusing here costs an accept that would have
-    # been correct; admitting it cost a silent miscompile. See TODO.md for the measured trade.
+def test_speculated_dead_arm_without_a_store_compiles_too() -> None:
+    # An inert speculated arm was refused along with the storing ones, because narrowing the gate to arms that
+    # store readmitted a miscompile: an inert arm still poisons the phi at the merge, which keeps a DOWNSTREAM
+    # guard residual so THAT guard's store does the promoting. The gate had to be unconditional and so cost this
+    # accept. Nothing needs to be judged harmless now -- the arm is not reachable, so it is not walked.
     class Inert:
         def __init__(self) -> None:
             self.t = 0.0
@@ -683,15 +697,14 @@ def test_speculated_dead_arm_without_a_store_is_refused_too() -> None:
                 pass
             return x + 1.0
 
-    with pytest.raises(UnsupportedConstruct, match="prove unreachable"):
-        holoso.synthesize(Inert().step, default_ops(FloatFormat(8, 23)), name="defer_dead_arm_inert")
+    _assert_matches_python(Inert, "defer_dead_arm_inert", 2.0, False)
 
 
-def test_store_after_an_inert_speculated_arm_is_refused_too() -> None:
-    # Also refused, and this is the cost side of the unconditional rule: the store here really does run on the
-    # taken path regardless. Scoping the check to the arm's exclusive region to spare exactly this shape was
-    # tried and silently disabled the whole check inside a loop, where the back-edge puts the dead arm within
-    # the live arm's reach and the exclusive region is always empty. The accept is not worth that.
+def test_store_after_an_inert_speculated_arm_compiles_too() -> None:
+    # The sharpest cost of the unconditional gate: the store here runs on the taken path regardless, and the
+    # kernel was refused anyway. Scoping the check to the arm's exclusive region to spare exactly this shape was
+    # tried and silently disabled the whole check inside a loop, where the back-edge puts the dead arm within the
+    # live arm's reach and the exclusive region is always empty.
     class MergeStore:
         def __init__(self) -> None:
             self.t = 0.0
@@ -711,19 +724,19 @@ def test_store_after_an_inert_speculated_arm_is_refused_too() -> None:
             self.s = x * 2.0  # on the live path, reached from both arms
             return self.s
 
-    with pytest.raises(UnsupportedConstruct, match="prove unreachable"):
-        holoso.synthesize(MergeStore().step, default_ops(FloatFormat(8, 23)), name="defer_merge_store")
+    # `return self.s` aliases a public attribute, so it is deduped onto that attribute's state port.
+    ports = _assert_matches_python(MergeStore, "defer_merge_store", 2.0, False, port="state_s")
+    assert "state_s" in ports  # this store IS on the live path, so `s` really is runtime state
 
 
 def test_speculated_dead_store_does_not_silently_miscompile() -> None:
-    # Why emitting a speculated-then-dead arm is unsound rather than merely wasteful, and the sharpest available
-    # witness for it. A store on the dead arm promotes `s` from a read-only constant -- folded at binary64, where
-    # 1 + 2**-30 is greater than 1 -- into a runtime state slot whose RESET is materialized in the E8M23 carrier,
-    # where it rounds to exactly 1.0. The guard `self.s > 1` therefore flipped, and a kernel returning 10.0 in
-    # Python returned 20.0 in hardware with no error raised. The same hazard is guarded for arms dead by
-    # `if False:` and by a static comparison; this is the third kind, dead by fold-after-marking. Note the
-    # divergence is format-dependent -- E11M52 was correct throughout -- so the assertion below must run in a
-    # carrier narrower than the reset's binary64 value.
+    # Why emitting a speculated-then-dead arm is unsound rather than merely wasteful. A store on the dead arm
+    # promoted `s` from a read-only constant -- folded at binary64, where 1 + 2**-30 is greater than 1 -- into a
+    # runtime state slot whose RESET is materialized in the E8M23 carrier, where it rounds to exactly 1.0. The
+    # guard `self.s > 1` therefore flipped, and a kernel returning 10.0 in Python returned 20.0 in hardware with
+    # no error raised. The gate converted that into a refusal; resolution makes it a correct compile. The
+    # divergence was format-dependent -- E11M52 was correct throughout -- so the narrow carrier is the one that
+    # carries the evidence.
     class Miscompiled:
         def __init__(self) -> None:
             self.t = 0.0
@@ -744,17 +757,19 @@ def test_speculated_dead_store_does_not_silently_miscompile() -> None:
                 return 10.0
             return 20.0
 
-    assert Miscompiled().step(2.0, False) == 10.0  # the Python answer the hardware contradicted with 20.0
-    with pytest.raises(UnsupportedConstruct, match="prove unreachable") as refusal:
-        holoso.synthesize(Miscompiled().step, default_ops(FloatFormat(8, 23)), name="dead_store_miscompile")
-    assert refusal.value.location is not None
+    assert Miscompiled().step(2.0, False) == 10.0  # the Python answer the hardware once contradicted with 20.0
+    ports = _assert_matches_python(Miscompiled, "dead_store_miscompile", 2.0, False)
+    assert "state_s" not in ports  # `s` stays the read-only constant it is, folded at binary64
+    # The divergence was format-dependent, so the wide carrier proves nothing on its own; it is checked to keep
+    # the two halves of the original witness together.
+    _assert_matches_python(Miscompiled, "dead_store_miscompile_wide", 2.0, False, fmt=FloatFormat(11, 52))
 
 
 def test_speculated_dead_arm_store_does_not_strand_the_rank_walk() -> None:
-    # The same speculated-arm mechanism reached the plan replay as a bare KeyError rather than a diagnostic:
-    # `rank` is built from the blocks an executable edge chain REACHES, while the replay iterates the add-only
-    # MARKED set, so a marked-but-unreachable block carrying a store indexed `rank` and died with no message,
-    # no location, and no exception type a user could act on. Two arms are needed to strand the block.
+    # The same speculated-arm mechanism once reached the plan replay as a bare KeyError: `rank` was built from the
+    # blocks an executable edge chain REACHES, while the replay iterated the add-only MARKED set, so a
+    # marked-but-unreachable block carrying a store indexed `rank` and died with no message and no location. The
+    # two sets are now derived by one walk and cannot disagree. Two arms are needed to strand the block.
     class Probe:
         def __init__(self) -> None:
             self.t = 0.0
@@ -777,16 +792,16 @@ def test_speculated_dead_arm_store_does_not_strand_the_rank_walk() -> None:
                     self.s = 8.0
             return x + self.s
 
-    with pytest.raises(UnsupportedConstruct) as refusal:
-        holoso.synthesize(Probe().step, default_ops(FloatFormat(8, 23)), name="dead_arm_rank_walk")
-    assert refusal.value.location is not None  # a diagnostic, where a bare KeyError used to escape
+    ports = _assert_matches_python(Probe, "dead_arm_rank_walk", 2.0, False)
+    assert "state_s" not in ports  # the stranded block is not walked, so neither of its stores promotes
 
 
-def test_speculated_arm_reports_before_the_graph_asserts() -> None:
-    # The gate runs before `_validate`, whose asserts describe a graph the gate may already know is inconsistent.
-    # Three nested statically-decidable guards behind a deferred graftable call leave an unresolved call on the
-    # speculated arm, which tripped "unexpanded call survived" as a BARE AssertionError -- and, because asserts
-    # vanish under -O, the debug build crashed where the optimized build explained. Two levels do not reach it.
+def test_deeply_nested_speculated_arms_leave_no_unresolved_call() -> None:
+    # Three nested statically-decidable guards behind a deferred graftable call used to leave an unresolved call
+    # standing on the speculated arm, which tripped "unexpanded call survived" as a BARE AssertionError -- and,
+    # because asserts vanish under -O, the debug build crashed where the optimized build explained. The gate was
+    # ordered ahead of that assert to convert it into a diagnostic; now no arm is left marked for the assert to
+    # trip over. Two nesting levels do not reach this shape.
     class Nested:
         def __init__(self) -> None:
             self.t = 0.0
@@ -807,16 +822,15 @@ def test_speculated_arm_reports_before_the_graph_asserts() -> None:
                         pass
             return x + 1.0
 
-    with pytest.raises(UnsupportedConstruct, match="never runs|prove unreachable") as refusal:
-        holoso.synthesize(Nested().step, default_ops(FloatFormat(8, 23)), name="nested_speculation")
-    assert refusal.value.location is not None  # a diagnostic, where a bare AssertionError used to escape
+    _assert_matches_python(Nested, "nested_speculation", 2.0, False)
 
 
-def test_speculated_dead_store_inside_a_loop_is_refused() -> None:
+def test_speculated_dead_store_inside_a_loop_is_pruned() -> None:
     # The miscompile witness with its guard moved inside a `while`. A narrowing that tested only the region
     # reachable EXCLUSIVELY through the speculated arm silently stopped checking anything here: the back-edge
     # puts the dead arm within the live arm's reach, so the difference is empty for every branch in a loop body
-    # and the kernel returned 20.0 against Python's 10.0. The check is unconditional so this cannot recur.
+    # and the kernel returned 20.0 against Python's 10.0. Reachability is now a property of the resolved walk, so
+    # a loop body is not a special case for it.
     class LoopDeadStore:
         def __init__(self) -> None:
             self.t = 0.0
@@ -840,15 +854,16 @@ def test_speculated_dead_store_inside_a_loop_is_refused() -> None:
             return 20.0
 
     assert LoopDeadStore().step(2.0, False, True) == 10.0
-    with pytest.raises(UnsupportedConstruct, match="prove unreachable"):
-        holoso.synthesize(LoopDeadStore().step, default_ops(FloatFormat(8, 23)), name="loop_dead_store")
+    ports = _assert_matches_python(LoopDeadStore, "loop_dead_store", 2.0, False, True)
+    assert "state_s" not in ports
 
 
-def test_inert_speculated_arm_poisoning_a_later_guard_is_refused() -> None:
-    # Why the refusal cannot be scoped to arms that store. NEITHER arm here stores; they only assign a local.
-    # But the merge phi over them stays residual because the branch was speculated, so the LATER guard on `g`
-    # never folds and its store is emitted -- promoting `s` to runtime state, whose reset rounds in the carrier.
-    # Narrowing the check to storing arms admitted this and returned 20.0 against Python's 10.0.
+def test_inert_speculated_arm_no_longer_poisons_a_later_guard() -> None:
+    # Why the gate could not be scoped to arms that store. NEITHER arm here stores; they only assign a local. But
+    # the merge phi over them stayed residual because the branch had been speculated, so the LATER guard on `g`
+    # never folded and its store was emitted -- promoting `s` to runtime state, whose reset rounds in the carrier.
+    # Narrowing the check to storing arms admitted this and returned 20.0 against Python's 10.0. With the merge
+    # resolved over settled facts the phi folds, so there is no residual guard and no store.
     class PhiPoison:
         def __init__(self) -> None:
             self.t = 0.0
@@ -874,16 +889,17 @@ def test_inert_speculated_arm_poisoning_a_later_guard_is_refused() -> None:
             return 20.0
 
     assert PhiPoison().step(2.0, False) == 10.0
-    with pytest.raises(UnsupportedConstruct, match="prove unreachable"):
-        holoso.synthesize(PhiPoison().step, default_ops(FloatFormat(8, 23)), name="phi_poison")
+    ports = _assert_matches_python(PhiPoison, "phi_poison", 2.0, False)
+    assert "state_s" not in ports  # `g` folds to False, so the guarded store never enters the graph
 
 
-def test_runtime_state_discovered_on_a_dead_round_is_refused() -> None:
-    # The third miscompile route, and the only one that is not visible on the final graph at all. W grows
-    # monotonically: round 1 speculates through `self.mode` being Known-True and discovers a store to `s`, round 2
-    # proves the shape guard false so that store is unreachable, and every per-round check then passes -- but `s`
-    # stays in the runtime-state set, so its reset materializes in the carrier instead of folding at binary64 and
-    # the guard flips. Accepted, no error, 20.0 against Python's 10.0, with a spurious public state_s port.
+def test_runtime_state_discovered_on_a_dead_round_does_not_survive_it() -> None:
+    # CLOSED (M5). The route that was invisible on the final graph: W grew monotonically, so round 1 speculating
+    # through `self.mode` being Known-True discovered a store to `s`, round 2 proved the shape guard false and
+    # made that store unreachable, and every per-round check then passed -- yet `s` stayed in the runtime-state
+    # set, its reset materialized in the carrier instead of folding at binary64, and the guard flipped. Accepted,
+    # no error, 20.0 against Python's 10.0, with a spurious public state_s port. W now starts empty on every
+    # descent and is rederived from state effect, so a promotion has nothing to persist through.
     class CrossRound:
         def __init__(self) -> None:
             self.mode = True
@@ -893,11 +909,11 @@ def test_runtime_state_discovered_on_a_dead_round_is_refused() -> None:
         def step(self, x: float, new_mode: bool) -> float:
             if self.mode:
                 u: float = 2**53 + 1
-                q: float = 2**64
+                q: float = 2**62
             else:
                 u = x
                 q = x
-            self.t = u
+            self.t = float(u)
             a = np.array([q, x])
             if a.shape[0] > 5:
                 self.s = 7.0
@@ -905,20 +921,14 @@ def test_runtime_state_discovered_on_a_dead_round_is_refused() -> None:
             return 10.0 if self.s > 1.0 else 20.0
 
     assert CrossRound().step(2.0, False) == 10.0
-    with pytest.raises(UnsupportedConstruct, match="earlier analysis round") as refusal:
-        holoso.synthesize(CrossRound().step, default_ops(FloatFormat(8, 23)), name="cross_round_stale")
-    # The store that promoted the leaf is the only line the user can act on, and it is gone from the stable
-    # graph by the time this check runs -- the per-round store map is empty for it, so the promotion origin has
-    # to be remembered when the leaf enters the runtime-state set or the refusal renders at line 0, column 0.
-    location = refusal.value.location
-    assert location is not None
-    assert (location.line or "").strip() == "self.s = 7.0"
+    ports = _assert_matches_python(CrossRound, "cross_round_stale", 2.0, False)
+    assert "state_s" not in ports  # the spurious public port is gone with the promotion that created it
 
 
-def test_stale_runtime_state_reports_the_source_earliest_store() -> None:
-    # Two components carrying the SAME attribute path both go stale, so the message text -- which names only the
-    # path -- cannot tell them apart and the reported LOCATION is the whole diagnostic. Selection must be a
-    # property of the source, not of set iteration over identity-hashed leaves.
+def test_two_components_sharing_an_attribute_path_both_stay_folded() -> None:
+    # Two components carrying the SAME attribute path used to go stale together, and because the message named
+    # only the path, which of them the diagnostic located was the whole content of the refusal. Neither is
+    # promoted now, so there is no diagnostic to order: both fold to their exact resets and the guard holds.
     class Cell:
         def __init__(self) -> None:
             self.s = 1 + 2**-30
@@ -933,11 +943,11 @@ def test_stale_runtime_state_reports_the_source_earliest_store() -> None:
         def step(self, x: float, new_mode: bool) -> float:
             if self.mode:
                 u: float = 2**53 + 1
-                q: float = 2**64
+                q: float = 2**62
             else:
                 u = x
                 q = x
-            self.t = u
+            self.t = float(u)
             span = np.array([q, x])
             if span.shape[0] > 5:
                 self.a.s = 7.0
@@ -946,17 +956,15 @@ def test_stale_runtime_state_reports_the_source_earliest_store() -> None:
             return 10.0 if self.a.s > 1.0 else 20.0
 
     assert TwoCells().step(2.0, False) == 10.0
-    with pytest.raises(UnsupportedConstruct, match="earlier analysis round") as refusal:
-        holoso.synthesize(TwoCells().step, default_ops(FloatFormat(8, 23)), name="two_cells_stale")
-    location = refusal.value.location
-    assert location is not None
-    assert (location.line or "").strip() == "self.a.s = 7.0"
+    ports = _assert_matches_python(TwoCells, "two_cells_stale", 2.0, False)
+    assert not [name for name in ports if name.startswith("state_a") or name.startswith("state_b")]
 
 
-def test_cross_round_state_verdicts_are_located_at_their_store() -> None:
-    # Not just the stale-leaf refusal: EVERY state verdict drawn after the promoting round has an empty
-    # per-round store map to look in, so reset diagnostics rendered at line 0 too. The promotion origin is what
-    # they all fall back on.
+def test_a_store_on_a_dead_arm_needs_no_reset_to_reconstruct() -> None:
+    # `self.s` is never initialized in __init__, so there is no reset to reconstruct -- and the store to it sits
+    # on an arm the settled facts prove dead. The old analysis reached it anyway and had to explain itself, which
+    # is how state verdicts drawn after the promoting round came to render at line 0: their per-round store map
+    # was empty. A dead arm is not walked now, so the attribute is never consulted and the kernel compiles.
     class MissingReset:
         def __init__(self) -> None:
             self.mode = True
@@ -965,22 +973,19 @@ def test_cross_round_state_verdicts_are_located_at_their_store() -> None:
         def step(self, x: float, new_mode: bool) -> float:
             if self.mode:
                 u: float = 2**53 + 1
-                q: float = 2**64
+                q: float = 2**62
             else:
                 u = x
                 q = x
-            self.t = u
+            self.t = float(u)
             span = np.array([q, x])
             if span.shape[0] > 4:
                 self.s = 7.0  # never initialized in __init__, so there is no reset to reconstruct
             self.mode = new_mode
             return x
 
-    with pytest.raises(UnsupportedConstruct, match="does not exist on the component") as refusal:
-        holoso.synthesize(MissingReset().step, default_ops(FloatFormat(8, 23)), name="missing_reset")
-    location = refusal.value.location
-    assert location is not None
-    assert (location.line or "").strip().startswith("self.s = 7.0")
+    ports = _assert_matches_python(MissingReset, "missing_reset", 2.0, False)
+    assert "state_s" not in ports
 
 
 def _assert_store_helpers_tie() -> None:
@@ -1053,11 +1058,11 @@ def test_a_store_diagnostic_names_the_first_executed_of_two_tied_stores() -> Non
             # selection runs -- without it the verdict fires at the first store and the tie never arises.
             if self.mode:
                 u: float = 2**53 + 1
-                q: float = 2**64
+                q: float = 2**62
             else:
                 u = x
                 q = x
-            self.t = u
+            self.t = float(u)
             span = np.array([q, x])
             for put in (_store_beta.put, _store_alpha.put):
                 put(self, x + span.shape[0])
@@ -1072,15 +1077,12 @@ def test_a_store_diagnostic_names_the_first_executed_of_two_tied_stores() -> Non
     assert located.origin[0].file.endswith("_store_beta.py")
 
 
-def test_a_verdict_prefers_a_raise_guarded_store_over_the_promoter() -> None:
-    # EXECUTABLE RECORD of the OTHER half of the `_state_origin` trade, NOT desired behavior. Both sources are
-    # populated here and they DISAGREE -- this is not the map-empty fallback case. The per-round store map
-    # leads, and it holds every store the round transferred, including one in a block the exit cannot be
-    # reached from -- here the store before the `raise`, which is source-earlier than the live one and takes
-    # the anchor, while the latch holds the live store. Preferring the promotion latch instead names the live
-    # store on THIS shape and a dead store on
-    # the shape the neighbouring test pins, which is why neither order is a fix and this one is not "safer".
-    # Both witnesses exist so that a future round cannot make either half worse against a green suite.
+def test_a_verdict_names_the_live_store_not_the_raise_guarded_one() -> None:
+    # This was the OTHER half of the `_state_origin` trade: the per-round store map held every store the round
+    # transferred, including one in a block the exit cannot be reached from -- here the store before the `raise`,
+    # source-earlier than the live one, which therefore took the anchor. Preferring the promotion latch instead
+    # only moved the problem to the neighbouring shape, so neither order was a fix. Both halves resolve once the
+    # map holds only stores that are actually walked: the live store is what the verdict names.
     class RaiseGuarded:
         def __init__(self) -> None:
             self.mode = True
@@ -1089,11 +1091,11 @@ def test_a_verdict_prefers_a_raise_guarded_store_over_the_promoter() -> None:
         def step(self, x: float, boom: bool) -> float:
             if self.mode:
                 u: float = 2**53 + 1
-                q: float = 2**64
+                q: float = 2**62
             else:
                 u = x
                 q = x
-            self.t = u
+            self.t = float(u)
             span = np.array([q, x])
             if boom:
                 self.zz = 3.0  # never reached past the raise, yet it is the line the message names
@@ -1106,17 +1108,15 @@ def test_a_verdict_prefers_a_raise_guarded_store_over_the_promoter() -> None:
         holoso.synthesize(RaiseGuarded().step, default_ops(FloatFormat(8, 23)), name="raise_guarded_anchor")
     location = refusal.value.location
     assert location is not None
-    assert (location.line or "").strip().startswith("self.zz = 3.0")  # the trade; the live store is self.zz = 1.0
+    assert (location.line or "").strip().startswith("self.zz = 1.0")  # the live store, not the raise-guarded one
 
 
-def test_a_mid_round_verdict_still_anchors_on_a_speculated_store() -> None:
-    # EXECUTABLE RECORD of an OPEN residual of the deferral seam, NOT desired behavior. The refusal itself is
-    # correct -- a tuple reset is genuinely unsupported -- but the LINE it names is one Python never runs.
-    # The verdict is raised before `s` has a promotion-latch entry -- here the analysis aborts before any
-    # end-of-round pass could fill one -- so the location comes from whatever stores the worklist has reached,
-    # speculated arms included, and the dead arm wins on source order. Both
-    # lookup orders behave identically here, which is why the priority is not a fix for this: measured by
-    # swapping them and re-running. Deleting the dead arm moves the anchor to `self.s = self.s`.
+def test_a_mid_round_verdict_anchors_on_a_store_that_runs() -> None:
+    # The refusal was always correct here -- a tuple reset is genuinely unsupported -- but the LINE it named was
+    # one Python never runs: the verdict was raised before `s` had a promotion-latch entry, so the location came
+    # from whatever stores the worklist had reached, speculated arms included, and the dead arm won on source
+    # order. Neither lookup order fixed it, which was measured by swapping them. The dead arm is no longer
+    # reached, so the anchor lands on the store that does run.
     class MidRound:
         def __init__(self) -> None:
             self.t = 0.0
@@ -1140,7 +1140,7 @@ def test_a_mid_round_verdict_still_anchors_on_a_speculated_store() -> None:
         holoso.synthesize(MidRound().step, default_ops(FloatFormat(8, 23)), name="mid_round_anchor")
     location = refusal.value.location
     assert location is not None
-    assert (location.line or "").strip().startswith("self.s = 7.0")  # WRONG line; must become self.s = self.s
+    assert (location.line or "").strip().startswith("self.s = self.s")
 
 
 def test_state_verdicts_do_not_anchor_on_a_store_proved_dead() -> None:
@@ -1157,11 +1157,11 @@ def test_state_verdicts_do_not_anchor_on_a_store_proved_dead() -> None:
         def step(self, x: float, new_mode: bool) -> float:
             if self.mode:
                 u: float = 2**53 + 1
-                q: float = 2**64
+                q: float = 2**62
             else:
                 u = x
                 q = x
-            self.t = u
+            self.t = float(u)
             span = np.array([q, x])
             if span.shape[0] > 5:
                 self.s = 7.0  # type: ignore[assignment]  # Python never runs this; the facts prove it dead
@@ -1176,10 +1176,10 @@ def test_state_verdicts_do_not_anchor_on_a_store_proved_dead() -> None:
     assert (location.line or "").strip() == "self.s = self.s"
 
 
-def test_stale_runtime_state_blames_a_store_that_actually_promoted() -> None:
-    # An earlier store standing in a block the exit cannot be reached from promotes nothing, so it must not be
-    # named: the leaf's provenance comes from the stores that put it in the runtime-state set, not from the
-    # source-earliest store anywhere in the round.
+def test_neither_dead_store_promotes_across_a_raise() -> None:
+    # Two dead stores to one leaf, one of them behind a `raise` in a block the exit cannot be reached from. The
+    # old rule had to decide which of them to blame for a promotion neither should have caused; neither causes
+    # one now, so `s` keeps its exact reset and the guard folds the way Python evaluates it.
     class DeadEarlier:
         def __init__(self) -> None:
             self.mode = True
@@ -1189,11 +1189,11 @@ def test_stale_runtime_state_blames_a_store_that_actually_promoted() -> None:
         def step(self, x: float, new_mode: bool) -> float:
             if self.mode:
                 u: float = 2**53 + 1
-                q: float = 2**64
+                q: float = 2**62
             else:
                 u = x
                 q = x
-            self.t = u
+            self.t = float(u)
             span = np.array([q, x])
             if span.shape[0] > 5:
                 self.s = 3.0
@@ -1203,21 +1203,62 @@ def test_stale_runtime_state_blames_a_store_that_actually_promoted() -> None:
             self.mode = new_mode
             return 10.0 if self.s > 1.0 else 20.0
 
-    with pytest.raises(UnsupportedConstruct, match="earlier analysis round") as refusal:
-        holoso.synthesize(DeadEarlier().step, default_ops(FloatFormat(8, 23)), name="dead_earlier_store")
-    location = refusal.value.location
-    assert location is not None
-    assert (location.line or "").strip() == "self.s = 7.0"
+    assert DeadEarlier().step(2.0, False) == 10.0
+    ports = _assert_matches_python(DeadEarlier, "dead_earlier_store", 2.0, False)
+    assert "state_s" not in ports
 
 
-def test_self_assignment_defeats_the_runtime_state_check() -> None:
-    # EXECUTABLE RECORD of an OPEN defect (TODO.md), NOT desired behavior. The runtime-state check requires every
-    # retained leaf to have a store in the final executable graph, which a trivial `self.s = self.s` satisfies --
-    # so the check closes only the spelling where NO store survives. Delete that one line and this kernel is
-    # correctly refused; keep it and the dead-arm store's promotion of `s` goes through and the guard flips.
-    # Pinned rather than fixed: adding a check that reasons about which stores are meaningful is the same move
-    # that has failed four times in this seam.
+def test_self_assignment_does_not_fabricate_runtime_state() -> None:
+    # CLOSED (M5, fresh resolution). Runtime state used to be discovered by COUNTING STORES: any executable store
+    # promoted its leaf, and the leaf never left the set, so a store on an arm the settled facts prove dead handed
+    # `s` a hardware slot whose reset re-materializes in the narrow carrier -- flipping the guard below. The check
+    # that was supposed to catch it asked only whether SOME store survived, which a trivial `self.s = self.s`
+    # satisfies. Resolution derives W from state EFFECT instead: `s` is runtime state only if the transaction can
+    # leave it holding something other than its snapshot, and writing back what is already there moves nothing.
+    # So the identity store promotes nothing, the dead arm is never walked, and `s` folds to its exact reset.
     class SelfAssign:
+        def __init__(self) -> None:
+            self.mode = True
+            self.t = 0.0
+            self.s = 1 + 2**-30
+
+        def step(self, x: float, new_mode: bool) -> float:
+            if self.mode:
+                u: float = 2**53 + 1
+                q: float = 2**62
+            else:
+                u = x
+                q = x
+            self.t = float(u)
+            a = np.array([q, x])
+            if a.shape[0] > 5:
+                self.s = 7.0  # Python never runs this
+            self.s = self.s  # an identity live-out: it leaves `s` exactly as it found it
+            self.mode = new_mode
+            return 10.0 if self.s > 1.0 else 20.0
+
+    expected = SelfAssign().step(2.0, False)
+    assert expected == 10.0
+    built = holoso.synthesize(SelfAssign().step, default_ops(FloatFormat(8, 23)), name="self_assign_stale")
+    outputs = dict(zip((port.name for port in built.output_ports), built.numerical_model.elaborate().run(2.0, False)))
+    assert float(outputs["out_0"]) == expected
+    ports = [port.name for port in built.ports]
+    assert "state_s" not in ports  # the leaf the dead arm used to promote carries no slot
+    assert "state_mode" in ports  # `mode` really does vary: new_mode is a runtime input
+
+
+def test_a_lossy_state_store_is_refused_where_the_seam_used_to_hide_it() -> None:
+    # The witness above as it was originally spelled, with both of its levers left raw. Each is a construct the
+    # compiler refuses on its own merits -- an integer past 2**53 stored into a float slot, and an integer past
+    # the signed 64-bit range in an array literal -- and the old analyzer swallowed both: the array call deferred,
+    # its cascade left the round walking arms with unbound values, and the merge that produced made `u` a runtime
+    # float, so the exactness rule never saw the integer it was storing. The kernel compiled and shipped a
+    # `state_t` that disagreed with Python on the very first transaction, where `mode` is still its reset True.
+    #
+    # Resolution will not walk past an operation it could not evaluate, so the descent stops with the store's
+    # obligation standing and the causal store is what reports. Both levers must stay: with either one softened
+    # the descent gets past the array, `mode` promotes to a runtime slot, both arms merge, and the store conforms.
+    class Lossy:
         def __init__(self) -> None:
             self.mode = True
             self.t = 0.0
@@ -1233,25 +1274,27 @@ def test_self_assignment_defeats_the_runtime_state_check() -> None:
             self.t = u
             a = np.array([q, x])
             if a.shape[0] > 5:
-                self.s = 7.0  # Python never runs this
-            self.s = self.s  # keeps `s` stored in the final graph, so the runtime-state check finds nothing
+                self.s = 7.0
+            self.s = self.s
             self.mode = new_mode
             return 10.0 if self.s > 1.0 else 20.0
 
-    expected = SelfAssign().step(2.0, False)
-    assert expected == 10.0
-    built = holoso.synthesize(SelfAssign().step, default_ops(FloatFormat(8, 23)), name="self_assign_stale")
-    outputs = dict(zip((port.name for port in built.output_ports), built.numerical_model.elaborate().run(2.0, False)))
-    assert float(outputs["out_0"]) == 20.0  # WRONG; must become 10.0 when the restructure lands
+    assert Lossy().step(2.0, False) == 10.0  # honest Python throughout; it is the CARRIER that cannot hold it
+    with pytest.raises(UnsupportedConstruct, match="not exactly representable") as refusal:
+        holoso.synthesize(Lossy().step, default_ops(FloatFormat(8, 23)), name="lossy_state_store")
+    location = refusal.value.location
+    assert location is not None
+    assert (location.line or "").strip().startswith("self.t = u")
 
 
-def test_live_in_poisoning_miscompile_is_still_open() -> None:
-    # EXECUTABLE RECORD of an OPEN defect (TODO.md), NOT desired behavior: a SILENT WRONG ANSWER. The W/D
-    # accumulator has two halves and only W is guarded. A round-1 speculated arm drives D[mode] down to a
-    # residual live-in; round 2 prunes that arm, so no check on the stable graph sees anything wrong, and the
-    # trailing store keeps `mode` in first_store so the runtime-state check passes too. The guard on `mode` then
-    # reads the poisoned live-in and takes a branch Python never takes. Mirroring the W check does not help:
-    # W staleness leaves a residue to detect, D staleness is byte-identical to what the final round derives.
+def test_live_in_poisoning_does_not_survive_a_pruned_arm() -> None:
+    # CLOSED (M5, fresh resolution). The W/D accumulator had two halves and only W was ever guarded. A round-1
+    # speculated arm drove D[mode] down to a residual live-in; round 2 pruned that arm, but D only ever descended
+    # and the stabilized result copied it unchanged, so nothing on the stable graph disagreed with anything. The
+    # guard on `mode` then read the poisoned live-in and took a branch Python never takes. No check could have
+    # caught it -- W staleness leaves a residue to detect, D staleness is byte-identical to what the final round
+    # derives. Resolution restarts D from the reset state over the settled graph, so a value that only a
+    # superseded round's speculation produced has nowhere to survive.
     class DPoison:
         def __init__(self) -> None:
             self.mode = True  # Python: always True -- reset True, and the only executed store writes True
@@ -1259,45 +1302,48 @@ def test_live_in_poisoning_miscompile_is_still_open() -> None:
             self.s = 1 + 2**-30  # rounds to 1.0 in E8M23, exact in E11M52
 
         def step(self, x: float, flag: bool) -> float:
-            if self.mode:  # Known(True) on round 1, so u is a Known inexact int and the array call defers
+            if self.mode:
                 u: float = 2**53 + 1
-                q: float = 2**64
+                q: float = 2**62
             else:
                 u = x
                 q = x
-            self.t = u
+            self.t = float(u)
             a = np.array([q, x])
-            if a.shape[0] > 5:  # speculated on round 1, statically false and pruned on round 2
-                self.mode = False  # its only effect is to drive D[mode] residual
+            if a.shape[0] > 5:  # statically false: the array has two elements
+                self.mode = False  # its only effect used to be driving D[mode] residual
             if self.mode:
                 r = 10.0
             else:
-                self.s = 7.0  # Python never runs this; the analyzer emits it
+                self.s = 7.0  # Python never runs this, and neither does the emitted logic now
                 r = 20.0
             if flag:
-                self.mode = True  # keeps `mode` stored, so the runtime-state check finds nothing stale
+                self.mode = True
             return r if self.s > 1.0 else 30.0
 
     expected = DPoison().step(2.0, False)
     assert expected == 10.0
-    narrow = holoso.synthesize(DPoison().step, default_ops(FloatFormat(8, 23)), name="d_poison")
-    outputs = dict(zip((port.name for port in narrow.output_ports), narrow.numerical_model.elaborate().run(2.0, False)))
-    assert float(outputs["out_0"]) == 30.0  # WRONG; must become 10.0 when the restructure lands
-    wide = holoso.synthesize(DPoison().step, default_ops(FloatFormat(11, 52)), name="d_poison_wide")
-    wide_outputs = dict(
-        zip((port.name for port in wide.output_ports), wide.numerical_model.elaborate().run(2.0, False))
-    )
-    assert float(wide_outputs["out_0"]) == expected  # correct where the reset is exact, isolating the channel
+    for fmt in (FloatFormat(8, 23), FloatFormat(11, 52)):
+        built = holoso.synthesize(DPoison().step, default_ops(fmt), name=f"d_poison_{fmt.wman}")
+        outputs = dict(
+            zip((port.name for port in built.output_ports), built.numerical_model.elaborate().run(2.0, False))
+        )
+        # The divergence was format-dependent -- correct in E11M52, wrong in E8M23 -- because the harm was the
+        # slot's reset materializing in the narrower carrier. Both carriers must now agree with Python.
+        assert float(outputs["out_0"]) == expected, fmt
+        ports = [port.name for port in built.ports]
+        assert "state_s" not in ports and "state_mode" not in ports  # both are provably invariant
 
 
-def test_phantom_environment_miscompile_is_still_open() -> None:
-    # EXECUTABLE RECORD of an OPEN defect (TODO.md), NOT desired behavior, and the most serious one left: a
-    # SILENT WRONG ANSWER. The deferred inlined helper sets `self.gate`, but the phantom environment left by the
-    # graft keeps the stale `False` alive, so `self.gate` settles as a RUNTIME bool instead of Known(True). The
-    # else arm is therefore genuinely live as far as the analyzer can tell -- there is no contradiction between
-    # recorded reachability and the settled facts, so the post-stabilization gate cannot see this one. Its
-    # `self.s = 7.0` promotes `s` to runtime state, the reset 1 + 2**-30 rounds to 1.0 in E8M23, and the guard
-    # flips. Closing this is a first-class acceptance criterion for the resolution-totality restructure.
+def test_phantom_environment_no_longer_keeps_a_stale_gate() -> None:
+    # CLOSED (M5, fresh resolution), and this was the most serious of the three: a SILENT WRONG ANSWER that no
+    # post-stabilization check could see. The deferred inlined helper sets `self.gate`, but the phantom
+    # environment left behind by the graft kept the stale `False` alive, so `self.gate` settled as a RUNTIME bool
+    # instead of Known(True). The else arm was then genuinely live as far as the analyzer could tell -- recorded
+    # reachability and settled facts did not contradict each other, which is exactly what a gate needs. Its
+    # `self.s = 7.0` promoted `s` to runtime state, the reset 1 + 2**-30 rounded to 1.0 in E8M23, and the guard
+    # flipped. Resolution rebuilds every block environment from the entry, so there is no stale environment to
+    # keep: the helper's store dominates the read, the gate reads Known(True), and the else arm is never walked.
     class OneDiamond:
         def __init__(self) -> None:
             self.t = 0.0
@@ -1335,25 +1381,26 @@ def test_phantom_environment_miscompile_is_still_open() -> None:
     expected = OneDiamond().step(*arguments)
     assert expected == 12.0  # plain Python: the helper runs, so gate is True and s keeps its exact reset
     narrow = holoso.synthesize(OneDiamond().step, default_ops(FloatFormat(8, 23)), name="phantom_miscompile")
-    assert "state_s" in [port.name for port in narrow.ports]  # the defect: the dead arm's store becomes state
-    assert float(narrow.numerical_model.elaborate().run(*arguments)[0]) == 22.0  # WRONG; must become 12.0
-    # In a carrier that represents the reset exactly the same structure is value-correct, which isolates the
-    # divergence to reset materialization rather than to the datapath.
+    ports = [port.name for port in narrow.ports]
+    assert "state_s" not in ports  # the dead arm's store no longer becomes state
+    assert "state_gate" in ports  # `gate` genuinely varies: it resets False and every transaction leaves it True
+    assert float(narrow.numerical_model.elaborate().run(*arguments)[0]) == expected
+    # The divergence was in reset materialization rather than the datapath, so the wide carrier was already
+    # value-correct; it stays correct, which keeps the channel isolated if this ever regresses.
     wide = holoso.synthesize(OneDiamond().step, default_ops(FloatFormat(11, 52)), name="phantom_miscompile_wide")
     assert float(wide.numerical_model.elaborate().run(*arguments)[0]) == expected
 
 
-def test_deferred_side_effect_branch_is_refused_not_crashed() -> None:
-    # When the deferred call has a state side effect that a following branch tests, a graft leaves the orphaned
-    # source block's out-edges standing, so the successor keeps a predecessor that never runs and its phi has no
-    # arm for it. A raw RuntimeError used to escape HIR emission here -- not a SynthesisError, not located. The
-    # kernel is honest Python returning 10.0, so this refusal is still a defect (TODO.md); pinning it keeps the
-    # failure a diagnostic, and when the restructure closes the class this must become synthesis.
+def test_deferred_side_effect_branch_now_synthesizes() -> None:
+    # When the deferred call has a state side effect that a following branch tests, a graft left the orphaned
+    # source block's out-edges standing, so the successor kept a predecessor that never runs and its phi had no
+    # arm for it. A raw RuntimeError escaped HIR emission here; the gate turned that into a located refusal, with
+    # the note that "when the restructure closes the class this must become synthesis". This is that.
     #
-    # This is also the only coverage of the seam's SECOND producer of stale reachability: the condition here is
-    # a state read whose live-in join settles late, with every fact legitimately bound throughout -- no unbound
-    # operand is ever involved, so no check on a condition's operand could have caught it. That is why the gate
-    # tests the RESULT (recorded reachability against settled facts) rather than any producer.
+    # It is also the only coverage of the seam's SECOND producer of stale reachability: the condition here is a
+    # state read whose live-in join settles late, with every fact legitimately bound throughout -- no unbound
+    # operand is ever involved, so no check on a condition's operand could have caught it. Resolution does not
+    # test any producer either; it simply never records an edge out of a block it did not walk to completion.
     class Probe:
         def __init__(self) -> None:
             self.t = 0.0
@@ -1380,10 +1427,8 @@ def test_deferred_side_effect_branch_is_refused_not_crashed() -> None:
             return z
 
     assert Probe().step(2.0, False) == 10.0  # the kernel is well-defined Python
-    ops = default_ops(FloatFormat(8, 23))
-    with pytest.raises(UnsupportedConstruct, match="path that never runs") as refusal:
-        holoso.synthesize(Probe().step, ops, name="defer_side_effect_state_condition")
-    assert refusal.value.location is not None  # a diagnostic, where a raw RuntimeError used to escape emission
+    _assert_matches_python(Probe, "defer_side_effect_state_condition", 2.0, False)
+    _assert_matches_python(Probe, "defer_side_effect_state_condition_alt", 2.0, True)
 
 
 def test_mixed_return_dedupes_public_alias_keeps_distinct_leaf() -> None:
@@ -1466,12 +1511,15 @@ def test_stateful_reset_state_is_the_instance_snapshot() -> None:
 
 
 def test_init_method_target_is_lowered_as_a_state_writer() -> None:
-    # An __init__ is just a method that assigns self attributes; the frontend lowers it, treating those attributes as
-    # the state it writes (public ones are exposed as state ports, private ones stay internal).
+    # An __init__ is just a method that assigns self attributes; the frontend lowers it, treating those attributes
+    # as the state it writes. Only `k` needs a slot: it is assigned from the __init__ PARAMETER, so the value that
+    # reaches it is a runtime input, while `y` and `_x_prev` are assigned the very constants the already-built
+    # instance is holding -- an identity write, which fabricates no state. Lowering __call__ instead, where those
+    # two genuinely change, keeps all three (test_stateful_method_state_slots_and_dedup).
     integrator = _integrator_class()(k=2**-22)
     hir = lower(integrator.__init__)
-    assert {slot.name for slot in hir.state_slots} == {"k", "y", "_x_prev"}
-    assert [o.name for o in hir.outputs] == ["state_k", "state_y"]
+    assert {slot.name for slot in hir.state_slots} == {"k"}
+    assert [o.name for o in hir.outputs] == ["state_k"]
 
 
 def test_class_object_target_is_rejected() -> None:
@@ -2136,7 +2184,11 @@ def test_an_integer_vector_state_reset_keeps_exact_per_element_slots() -> None:
             self.y = 0.0
 
         def step(self, x: float) -> float:
-            self.taps = [self.taps[0], self.taps[1], self.taps[2]]  # written, so the vector really is state
+            # A ROTATION, not a rewrite of the same elements in place: the vector has to actually change for it
+            # to be state at all. Writing the elements back where they already are is an identity live-out, which
+            # leaves the whole vector a compile-time constant and grows no slots -- see
+            # test_self_assignment_does_not_fabricate_runtime_state.
+            self.taps = [self.taps[1], self.taps[2], self.taps[0]]
             self.y = self.y + self.taps[1] * x
             return self.y
 

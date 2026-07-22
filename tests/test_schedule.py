@@ -1683,14 +1683,19 @@ def test_bool_phi_coalescing_residual_install_conflict_is_resolved() -> None:
 
 def test_state_war_backstop_allows_noop_writeback() -> None:
     # A no-op writeback (live-out is the live-in value itself) writes no new value, so the write-after-read backstop
-    # must not trip -- this previously aborted a legal build.
+    # must not trip -- this previously aborted a legal build. The writeback has to be one arm of a slot that
+    # genuinely varies: a leaf whose ONLY store writes back what it already holds is not runtime state at all and
+    # grows no slot for the backstop to see (see test_self_assignment_does_not_fabricate_runtime_state).
     class Hold:
         def __init__(self) -> None:
             self.s = 0.0
 
-        def __call__(self, x: float) -> float:
+        def __call__(self, x: float, hold: bool) -> float:
             out = self.s + x
-            self.s = self.s
+            if hold:
+                self.s = self.s
+            else:
+                self.s = x
             return out
 
     lir = build(_run(Hold().__call__), "hold", fetch_stages=3)  # must not raise AssertionError

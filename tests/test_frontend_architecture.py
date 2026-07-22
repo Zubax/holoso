@@ -441,8 +441,8 @@ def test_lower_fir_runs_the_plan_verifier_BEFORE_emission_walks(monkeypatch: pyt
 
 def test_the_plan_verifier_catches_both_block_set_divergences() -> None:
     # Recovered from a review transcript rather than reasoned about: a walked block missing from
-    # `executable_blocks`, and one missing from `block_in`, both escape `_check_reachability_settled` when the
-    # block is a SINK, because that gate catches the direction only through a block's own out-edges. Left
+    # `executable_blocks`, and one missing from `block_in`, both escape `_assert_resolution_total` when the
+    # block is a SINK, because those invariants catch the direction only through a block's own out-edges. Left
     # unchecked the first reaches emission and dies with an unlocated "block N was not sealed with a
     # terminator". M1 rewrites recording, which is exactly when these become producible, so both are pinned.
     from holoso._frontend._fir._analyze import Analyzer, verify_plan_totality
@@ -745,12 +745,12 @@ def test_a_grafted_away_store_leaves_the_plan_with_its_op() -> None:
     assert float(built.numerical_model.elaborate().run(3.0, False, False)[0]) == 3.0
 
 
-def test_finalization_seeds_parameter_facts_BEFORE_the_branch_check() -> None:
-    # `_check_branch_settled` bare-subscripts the condition's fact. No branch condition is a parameter today --
-    # every one is a `PyTruth` destination the builder assigns immediately -- so the two orderings are
+def test_finalization_seeds_parameter_facts_BEFORE_the_resolution_invariants() -> None:
+    # `_assert_resolution_total` bare-subscripts a branch condition's fact. No branch condition is a parameter
+    # today -- every one is a `PyTruth` destination the builder assigns immediately -- so the two orderings are
     # indistinguishable by behaviour, which is why this is a source-order pin and not a kernel: seeding the
-    # parameters after the check would make a parameter-conditioned branch the one shape that crashes there,
-    # and nothing in the suite would notice until such a branch first existed.
+    # parameters after the invariants would make a parameter-conditioned branch the one shape that crashes
+    # there, and nothing in the suite would notice until such a branch first existed.
     import inspect
     import textwrap
 
@@ -763,8 +763,8 @@ def test_finalization_seeds_parameter_facts_BEFORE_the_branch_check() -> None:
         rendered = ast.dump(statement)
         if "'setdefault'" in rendered and "params" in rendered:
             seeds.append(index)
-        if "_check_branch_settled" in rendered:
+        if "_assert_resolution_total" in rendered:
             checks.append(index)
     assert len(seeds) == 1, f"expected exactly one parameter-seeding statement in _finalize, found {len(seeds)}"
-    assert len(checks) == 1, f"expected exactly one branch-check statement in _finalize, found {len(checks)}"
-    assert seeds[0] < checks[0], "parameter facts must be seeded before the branch check bare-subscripts a fact"
+    assert len(checks) == 1, f"expected exactly one resolution-invariant call in _finalize, found {len(checks)}"
+    assert seeds[0] < checks[0], "parameter facts must be seeded before the invariants bare-subscript a fact"

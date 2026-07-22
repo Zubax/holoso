@@ -2572,3 +2572,57 @@ deleted, because "I could not construct a witness" is not "unreachable".
 The seam sweep is green against its record: the three routes are still open at 10.0 -> 30.0, 12.0 -> 22.0 and
 10.0 -> 20.0, and the family tallies match TODO.md exactly. M5 -- fresh resolution -- is the step that closes
 them, and is next.
+
+
+M5 IS LANDED, AND THE SEAM NO LONGER EMITS A WRONG VALUE ON ANY KNOWN ROUTE. The analyzer is now one descent
+governed by one rule: A DESCENT IS ONLY AN ANSWER IF THE GRAPH HELD STILL THROUGHOUT IT. When a round grafts a
+call or unrolls a loop, W, D and the store-obligation bridge are discarded and the descent restarts from reset
+state over the larger graph, so the round that stabilizes has re-derived reachability, executable edges, block
+environments, binding facts, storage schemas, W and D from entry facts and reset state alone.
+
+THE SPECULATION GATE IS DELETED, NOT EXTENDED. Its four rules became asserts, because fresh resolution
+establishes them by construction. No fifth check was added -- the maintainer's constraint held, and the reason
+it held is that the restructure removed the need rather than the temptation.
+
+TWO SUPPORTING CHANGES WERE FORCED BY MEASUREMENT, and both are the half X8 predicted reachability alone could
+not fix. W now comes from STATE EFFECT, not store counting: a leaf is a slot only if joining its compile-time
+snapshot with the exit live-out MOVES it, so writing back what a leaf already holds promotes nothing -- that is
+what defeats `self.s = self.s`. And a visit that cannot complete PUBLISHES NOTHING: deferred ops leave
+destinations undefined and joins are destructive, so publishing turned a successor's binding into a permanent
+MaybeUnbound. Forced publication as a deadlock fallback re-admitted the exact defect; the honest answer is that
+the deadlock IS the refusal.
+
+VERIFIED INDEPENDENTLY, AND THE VERIFICATION MATTERED, because both the witnesses and the sweep's oracle
+kernels were edited by the same step that claims to fix them. Running the ORIGINAL unsoftened kernels against
+the new compiler: phantom environment ACCEPTED AND CORRECT (12.0 = 12.0, previously 12.0 vs 22.0); live-in
+poisoning and self-assignment now REFUSED where they were accepted-and-wrong. Four oracle kernels that were
+previously refused now compile CORRECTLY. Running the SOFTENED kernels against the pre-M5 compiler: phantom
+still miscompiles at 22.0 and self-assignment at 20.0, so those two softenings preserved their routes.
+
+ONE ORACLE QUIETLY STOPPED DEMONSTRATING ITS ROUTE, and the annotation now says so in the tool. The live-in
+route needed a lossy lever that M5 refuses on its own merits, so the lever was softened to keep a value oracle
+at all -- and the softened spelling was ALREADY CORRECT before M5, so it cannot show a flip. No wrong value
+survives (the original spelling is refused), but that route's closure is STRUCTURAL rather than
+value-demonstrated. The other two have real before/after flips. A green line that measures nothing is exactly
+what this campaign's value oracle exists to prevent, so it is labelled rather than counted.
+
+TWO MORE MISCOMPILES FOUND BY THE CONVERSION, one of them by turning a passing acceptance test into a value
+check: `test_deferred_graftable_call_does_not_starve_the_state_fixpoint` asserted only that a kernel
+SYNTHESIZES, and at HEAD it synthesized `9007199254740992.0` against Python's `9007199254740994.0` -- a silent
+wrong answer on the PRIMARY OUTPUT. The test guarding against over-eager fixes was protecting a wrong answer.
+Two wrong-LINE residuals closed as well.
+
+THE CORPUS MOVED FOR THE FIRST TIME IN THE CAMPAIGN, and legitimately: one file of 151,
+`tests/golden/hir/uart_tx-e4m8.txt`. The generated VERILOG AND ABI JSON ARE BYTE-IDENTICAL -- verified, no diff
+in `golden/verilog/` or `golden/abi/` -- and the reference oracle passes, so the hardware is unchanged and only
+the HIR's internal block arrangement moved. The step's own characterization was slightly narrow (it said phi
+operand order; branch targets and op placement moved too), which the diff shows and the justification survives.
+
+ACCEPTANCE TALLIES MOVED SHARPLY THE RIGHT WAY: `dead_arm` 28 -> 54 accept (all of them), `loop` 21 -> 30 (all
+of them). `loop_inner` fell 5 -> 3, and those two lost accepts are the wide-feed kernels proved to miscompile
+at HEAD, so refusing them is the fix rather than a cost.
+
+OUTSTANDING: one diagnostic REGRESSED -- the unroll-clone `Subscript` variant now reports the shift symptom
+rather than the causal store, because the violating clone's block is no longer walked. All three affected
+kernels stay refused, located and truthful. cosim/synth/fuzz were not run locally (CI's job) and the
+review-loop has not run on M5.

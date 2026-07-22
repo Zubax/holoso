@@ -118,18 +118,16 @@ _LOOP = {
 # see a miscompile -- a wrong answer tallies as a good accept, which is exactly how two of them shipped. These
 # carry a reset that is inexact in the target carrier, so if a speculated arm promotes it to runtime state the
 # reset re-materializes narrower and a guard reading it flips. Each entry is (source, args, expected).
-# Routes documented as OPEN in TODO.md, one entry per open route -- an oracle carrying only some of them cannot
-# support a claim about the seam as a whole. Each records the WHOLE observed pair, (python, hardware): recording
-# only "diverges" would let one wrong answer become a different wrong answer, and recording only the hardware
-# side would let the kernel's own Python result drift while the divergence still "matches". They miscompile
-# today, so the tool reports them without failing, and fails on ANY change to either half of the pair -- the
-# right answer, a different wrong answer, a moved reference, or a refusal alike -- because each means the record
-# has stopped describing the code, which is how this seam's earlier claims decayed.
-_KNOWN_OPEN = {
-    "live_in_poisoned_across_rounds": (10.0, 30.0),
-    "phantom_environment_keeps_a_stale_gate": (12.0, 22.0),
-    "self_assignment_defeats_the_runtime_state_check": (10.0, 20.0),
-}
+# Routes still known to miscompile, one entry per open route, each recording the WHOLE observed pair
+# (python, hardware). EMPTY SINCE M5 -- all three routes this table carried are closed and every oracle kernel
+# below is now checked for value equality with nothing tolerated, so any divergence fails the tool outright
+# rather than being recorded. That is strictly stronger than the entries it replaces; the mechanism stays because
+# a table entry is the only honest way to keep a KNOWN wrong answer visible without either hiding it or blocking
+# the tool, and re-opening one costs one line. Recording the whole pair rather than "diverges" is deliberate:
+# one wrong answer becoming a different wrong answer, or the kernel's own Python result drifting while the
+# divergence still "matches", both mean the record has stopped describing the code -- which is how this seam's
+# earlier claims decayed.
+_KNOWN_OPEN: dict[str, tuple[float, float]] = {}
 
 _VALUE_ORACLE = {
     "dead_store": (
@@ -229,10 +227,10 @@ class K:
 
     def step(self, x: float, new_mode: bool) -> float:
         if self.mode:
-            u, q = 2**53 + 1, 2**64
+            u, q = 2**53 + 1, 2**62
         else:
             u, q = x, x
-        self.t = u
+        self.t = float(u)
         a = np.array([q, x])
         if a.shape[0] > 5:
             self.s = 7.0
@@ -242,7 +240,14 @@ class K:
         (2.0, False),
     ),
     # The other half of the W/D accumulator: a round-1 speculated arm poisons the live-in map, round 2 prunes
-    # that arm, and a trailing store keeps the leaf in first_store so the runtime-state check passes too. OPEN.
+    # that arm, and a trailing store keeps the leaf in first_store so the runtime-state check passes too.
+    # CLOSED BY M5, BUT THIS KERNEL NO LONGER DEMONSTRATES IT -- measured, and worth stating rather than
+    # letting a green line read as coverage. The route needed a lossy lever (`2**64` into an array) that M5 now
+    # refuses on its own merits, so the lever was softened to keep a VALUE oracle here at all; the softened
+    # spelling was already correct BEFORE M5, so it cannot show a flip. What was measured: the ORIGINAL
+    # spelling miscompiled at 10.0 -> 30.0 before M5 and is REFUSED after, so no wrong value survives -- but the
+    # closure is structural (no deferred path reaches the exit environment) rather than value-demonstrated. The
+    # other two routes each have a real before/after on a kernel that miscompiles pre-M5.
     "live_in_poisoned_across_rounds": (
         """import numpy as np
 
@@ -256,11 +261,11 @@ class K:
     def step(self, x: float, flag: bool) -> float:
         if self.mode:
             u: float = 2**53 + 1
-            q: float = 2**64
+            q: float = 2**62
         else:
             u = x
             q = x
-        self.t = u
+        self.t = float(u)
         a = np.array([q, x])
         if a.shape[0] > 5:
             self.mode = False
@@ -331,11 +336,11 @@ class K:
     def step(self, x: float, new_mode: bool) -> float:
         if self.mode:
             u: float = 2**53 + 1
-            q: float = 2**64
+            q: float = 2**62
         else:
             u = x
             q = x
-        self.t = u
+        self.t = float(u)
         a = np.array([q, x])
         if a.shape[0] > 5:
             self.s = 7.0

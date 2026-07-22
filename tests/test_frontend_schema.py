@@ -873,8 +873,8 @@ def test_stranded_transient_exactness_verdict_reports_when_the_loop_head_dies() 
 
 def test_violating_unroll_clone_reports_despite_a_conforming_sibling() -> None:
     # Unroll clones of one store share an origin: trip 0 conforms while trip 1 violates, and the deferred float
-    # shift leaves ``out`` unbound in round two. The conforming clone must not open a window in the deferral net
-    # for the provoked may-be-unbound rejection; the violating clone's verdict reports at stabilization.
+    # shift leaves ``out`` unbound in the following round. The conforming clone must not open a window in the
+    # deferral net for the provoked may-be-unbound rejection -- neither spelling may report THAT.
     class Ternary:
         def __init__(self) -> None:
             self.n = 0
@@ -897,13 +897,18 @@ def test_violating_unroll_clone_reports_despite_a_conforming_sibling() -> None:
                 self.n = (0, x)[v]  # type: ignore[assignment]
             return out
 
-    for kernel, store_line in (
-        (Ternary().step, "self.n = x if v == 1 else 0"),
-        (Subscript().step, "self.n = (0, x)[v]"),
-    ):
-        error = _reject(kernel, "state attribute 'n' stores an incompatible type")
-        assert error.location is not None and error.location.line is not None
-        assert store_line in error.location.line
+    # The two spellings now separate. `Ternary` reaches its second trip and the violating clone reports, which is
+    # the causal store and the better message. `Subscript` does not: the shift on trip 0 reads `self.n` as the
+    # runtime float the first trip's store made it, and a visit that cannot evaluate an operation publishes
+    # nothing, so trip 1 is never walked and only the conforming clone survives in the graph. The bridge entry
+    # then expires by the documented stranded-vs-stale rule and the shift -- itself a true, located refusal of a
+    # float operand -- is what surfaces. Both are honest; the second is a symptom where the first is the cause.
+    error = _reject(Ternary().step, "state attribute 'n' stores an incompatible type")
+    assert error.location is not None and error.location.line is not None
+    assert "self.n = x if v == 1 else 0" in error.location.line
+    error = _reject(Subscript().step, "bitwise/shift operator << requires integer operands")
+    assert error.location is not None and error.location.line is not None
+    assert "float(self.n << 1)" in error.location.line
 
 
 def test_the_surviving_violation_wins_when_a_stale_sibling_expires() -> None:
@@ -1064,10 +1069,13 @@ def test_unroll_restart_carries_the_bridge_unchanged() -> None:
                 self.total = v + (2**53 + 1)
             return x
 
-    error = _reject(Meter().step, "loop trip count is not static here")
-    assert "not exactly representable" not in str(error)
+    # The store inside the body is itself a true violation on the shape the loop settles into, and it is what
+    # reports: the descent restarts whenever the graph grows, so the round that settles has no leftover bridge
+    # entry from the transient unroll, and the store's own verdict is the standing obligation. A kernel whose
+    # only fault is the non-static trip count still reports that (the sibling test above).
+    error = _reject(Meter().step, "not exactly representable")
     assert error.location is not None and error.location.line is not None
-    assert "for v in range(m):" in error.location.line
+    assert "self.total = v + (2**53 + 1)" in error.location.line
 
 
 def test_a_conforming_visit_of_a_cut_store_op_does_not_settle_its_origin() -> None:
@@ -1095,9 +1103,11 @@ def test_a_conforming_visit_of_a_cut_store_op_does_not_settle_its_origin() -> No
             self.q = value
             return value
 
-    error = _reject(Meter().step, "runtime operation reads an aggregate or unbound value")
+    # The causal store is what reports now, not the shift it provokes downstream: `t` merges a float from one
+    # arm with an int from the other, and storing that into an int-reset slot is the fault the user must fix.
+    error = _reject(Meter().step, "state attribute 'count' stores an incompatible type")
     assert error.location is not None and error.location.line is not None
-    assert "b = float(self.count << 2)" in error.location.line
+    assert "self.count = t" in error.location.line
 
 
 def test_stranded_clone_messages_fold_earliest_first() -> None:
